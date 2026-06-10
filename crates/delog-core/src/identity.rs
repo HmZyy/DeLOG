@@ -149,6 +149,19 @@ impl IdentityRegistry {
         Some(id)
     }
 
+    /// Add or return an existing topic for a numbered log instance.
+    ///
+    /// Multi-instance topics are surfaced as `topic[N]` so each instance can
+    /// receive independent caches, styling and browser rows (PLAN.md §4.3).
+    pub fn add_topic_instance(
+        &mut self,
+        source: SourceId,
+        base_name: impl AsRef<str>,
+        instance: u32,
+    ) -> Option<TopicId> {
+        self.add_topic(source, topic_instance_name(base_name, instance))
+    }
+
     /// Add or return an existing field for `topic` and `name`.
     pub fn add_field(&mut self, topic: TopicId, name: impl Into<String>) -> Option<FieldId> {
         let topic_entry = self.topic(topic)?.clone();
@@ -258,6 +271,11 @@ fn next_id(len: usize, kind: &str) -> u32 {
     u32::try_from(len).unwrap_or_else(|_| panic!("too many {kind} IDs"))
 }
 
+/// Format a multi-instance topic name as `topic[N]`.
+pub fn topic_instance_name(base_name: impl AsRef<str>, instance: u32) -> String {
+    format!("{}[{instance}]", base_name.as_ref())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,6 +348,31 @@ mod tests {
         assert_ne!(topic_a, topic_b);
         assert_eq!(topic_a, TopicId(0));
         assert_eq!(topic_b, TopicId(1));
+    }
+
+    #[test]
+    fn multi_instance_topic_names_use_bracket_suffixes() {
+        assert_eq!(topic_instance_name("GPS", 0), "GPS[0]");
+        assert_eq!(
+            topic_instance_name("vehicle_local_position", 3),
+            "vehicle_local_position[3]"
+        );
+    }
+
+    #[test]
+    fn multi_instance_topics_register_as_distinct_topics() {
+        let mut ids = IdentityRegistry::new();
+        let source = ids.add_source("flight");
+
+        let gps0 = ids.add_topic_instance(source, "GPS", 0).unwrap();
+        let gps1 = ids.add_topic_instance(source, "GPS", 1).unwrap();
+        let gps0_again = ids.add_topic_instance(source, "GPS", 0).unwrap();
+
+        assert_eq!(gps0, TopicId(0));
+        assert_eq!(gps1, TopicId(1));
+        assert_eq!(gps0_again, gps0);
+        assert_eq!(ids.topic(gps0).unwrap().name, "GPS[0]");
+        assert_eq!(ids.topic(gps1).unwrap().name, "GPS[1]");
     }
 
     #[test]
