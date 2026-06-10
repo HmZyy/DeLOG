@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arrow::array::{Array, ArrayRef, Int64Array};
-use arrow::compute::concat;
+use arrow::compute::{concat, sort_to_indices, take};
 
 use crate::chunk::Chunk;
 use crate::diagnostics::Diag;
@@ -76,6 +76,8 @@ pub struct Ingestor<O: IngestObserver> {
     /// Latest sealed store per topic; the snapshot is rebuilt from these.
     stores: HashMap<TopicId, Arc<TopicStore>>,
     sources: HashMap<SourceId, SourceState>,
+    /// Highest timestamp seen per topic, for the cross-chunk regression check.
+    topic_max_ts: HashMap<TopicId, i64>,
     observer: O,
     chunks_sealed: u64,
     rows_ingested: u64,
@@ -88,6 +90,7 @@ impl<O: IngestObserver> Ingestor<O> {
             store: Arc::new(DataStore::new()),
             stores: HashMap::new(),
             sources: HashMap::new(),
+            topic_max_ts: HashMap::new(),
             observer,
             chunks_sealed: 0,
             rows_ingested: 0,
@@ -168,35 +171,84 @@ impl<O: IngestObserver> Ingestor<O> {
             return;
         };
         let seal_rows = source.seal_rows;
+        let source_id = batch.source;
 
-        let topic_id = match self.ensure_topic(batch.source, &batch.schema) {
+        let topic_id = match self.ensure_topic(source_id, &batch.schema) {
             Some(id) => id,
             None => return,
         };
 
-        let batch_first = batch.timestamps.value(0);
-        let batch_last = batch.timestamps.value(batch.timestamps.len() - 1);
+        let schema = batch.schema;
+
+        // Defensive within-batch sort (ING-05): parsers should hand us sorted
+        // timestamps, but a malformed log may not. Sorting is the one corrective
+        // copy we accept on this path; sorted batches pass through untouched.
+        let (timestamps, columns) = if is_sorted(&batch.timestamps) {
+            (batch.timestamps, batch.columns)
+        } else {
+            match sort_batch(&batch.timestamps, &batch.columns) {
+                Ok(sorted) => {
+                    self.observer.on_diagnostic(
+                        Diag::warning(
+                            "unsorted-batch",
+                            format!("topic {topic_id:?}: reordered an unsorted batch"),
+                        )
+                        .with_source(source_id),
+                    );
+                    sorted
+                }
+                Err(err) => {
+                    self.observer.on_diagnostic(
+                        Diag::error("batch-sort-failed", format!("topic {topic_id:?}: {err}"))
+                            .with_source(source_id),
+                    );
+                    return;
+                }
+            }
+        };
+
+        let batch_first = timestamps.value(0);
+        let batch_last = timestamps.value(timestamps.len() - 1);
+
+        // Cross-chunk regression (ING-05): a batch starting before the highest
+        // timestamp seen for this topic means the source emitted out of order.
+        // We tolerate it (chunks may overlap, §4.3) but report it.
+        if let Some(&prev_max) = self.topic_max_ts.get(&topic_id)
+            && batch_first < prev_max
+        {
+            self.observer.on_diagnostic(
+                Diag::warning(
+                    "timestamp-regression",
+                    format!(
+                        "topic {topic_id:?}: batch starts at {batch_first} µs, before previous max {prev_max} µs"
+                    ),
+                )
+                .with_source(source_id)
+                .at_time(batch_first),
+            );
+        }
+        let max_ts = self.topic_max_ts.entry(topic_id).or_insert(i64::MIN);
+        *max_ts = (*max_ts).max(batch_last);
 
         // Seal the current accumulator first if this batch would start before it
-        // ends — keeps every sealed chunk internally sorted (overlap between
-        // chunks is tolerated, §4.3; the regression diagnostic is ING-05).
-        if let Some(pending) = self.pending_mut(batch.source, topic_id)
+        // ends — keeps every sealed chunk internally sorted (§4.3).
+        if let Some(pending) = self.pending_mut(source_id, topic_id)
             && pending.last_ts.is_some_and(|last| batch_first < last)
         {
-            self.seal_topic(batch.source, topic_id);
+            self.seal_topic(source_id, topic_id);
         }
 
-        let rows = batch.rows();
-        let pending = self.pending_entry(batch.source, topic_id, &batch.schema);
-        pending.timestamps.push(batch.timestamps);
-        pending.columns.push(batch.columns);
+        let rows = timestamps.len();
+        let pending = self.pending_entry(source_id, topic_id, &schema);
+        pending.timestamps.push(timestamps);
+        pending.columns.push(columns);
         pending.rows += rows;
         pending.last_ts = Some(batch_last);
         let full = pending.rows >= seal_rows;
 
         self.rows_ingested += rows as u64;
         if full {
-            self.seal_topic(batch.source, topic_id);
+            self.seal_topic(source_id, topic_id);
         }
     }
 
@@ -343,6 +395,32 @@ impl<O: IngestObserver> Ingestor<O> {
             }
         }
     }
+}
+
+/// Whether timestamps are non-decreasing (the common, copy-free case).
+fn is_sorted(timestamps: &Int64Array) -> bool {
+    timestamps
+        .values()
+        .windows(2)
+        .all(|pair| pair[0] <= pair[1])
+}
+
+/// Stable-sort a batch by timestamp, reordering every column the same way.
+fn sort_batch(
+    timestamps: &Int64Array,
+    columns: &[ArrayRef],
+) -> Result<(Int64Array, Vec<ArrayRef>), arrow::error::ArrowError> {
+    let indices = sort_to_indices(timestamps, None, None)?;
+    let sorted_ts = take(timestamps, &indices, None)?
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .expect("take preserves Int64")
+        .clone();
+    let sorted_cols = columns
+        .iter()
+        .map(|col| take(col.as_ref(), &indices, None))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((sorted_ts, sorted_cols))
 }
 
 /// Concatenate accumulated batch arrays into one sorted timestamp array and one
@@ -545,6 +623,61 @@ mod tests {
         assert_eq!(recorder.closes.len(), 1);
         assert_eq!(recorder.closes[0].1.row_count, 2);
         assert!(recorder.diags.is_empty());
+    }
+
+    #[test]
+    fn unsorted_batch_is_reordered_and_diagnosed() {
+        let mut recorder = Recorder::default();
+        let topic_rows;
+        {
+            let mut ing = Ingestor::new(&mut recorder);
+            let store = ing.store();
+            let source = open_with(&mut ing, "live", SourceKind::Live);
+
+            // Timestamps out of order within one batch.
+            ing.process(IngestMsg::Batch(batch(source, "GPS", &[30, 10, 20])));
+            ing.process(IngestMsg::CloseSource {
+                source,
+                summary: ParseSummary::default(),
+            });
+
+            let snap = store.load();
+            let topic = snap
+                .topics
+                .iter()
+                .find(|t| t.entry.name == "GPS")
+                .unwrap()
+                .entry
+                .id;
+            let chunk = &snap.topic_store(topic).unwrap().chunks[0];
+            // Sealed chunk is sorted (Chunk::try_new would have rejected otherwise).
+            assert_eq!(chunk.t.values(), &[10, 20, 30]);
+            topic_rows = chunk.len();
+        }
+        assert_eq!(topic_rows, 3);
+        assert!(recorder.diags.iter().any(|d| d.code == "unsorted-batch"));
+    }
+
+    #[test]
+    fn cross_chunk_regression_is_diagnosed_but_tolerated() {
+        let mut recorder = Recorder::default();
+        {
+            let mut ing = Ingestor::new(&mut recorder);
+            let source = open_with(&mut ing, "live", SourceKind::Live);
+            ing.process(IngestMsg::Batch(batch(source, "GPS", &[100, 200])));
+            // Later batch starts before the previous max → regression.
+            ing.process(IngestMsg::Batch(batch(source, "GPS", &[150, 160])));
+            ing.process(IngestMsg::CloseSource {
+                source,
+                summary: ParseSummary::default(),
+            });
+        }
+        let regression = recorder
+            .diags
+            .iter()
+            .find(|d| d.code == "timestamp-regression")
+            .expect("regression diagnostic emitted");
+        assert_eq!(regression.time_us, Some(150));
     }
 
     #[test]
