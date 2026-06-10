@@ -883,8 +883,8 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **GPU-01** — `delog-render` context bootstrap from an external device/queue (egui's); no egui types
 - [x] **GPU-02** — Buffer manager ledger: STORAGE buffers, ×1.5 growth via GPU-side copy, byte totals (§9.3)
 - [x] **GPU-03** — Incremental `write_buffer` of appended span only; `gpu_full_uploads` counter (ZC-4)
-- [ ] **GPU-04** — Dynamic-offset uniform buffer for per-plot transform/style (no push constants)
-- [ ] **GPU-05** — `line_pull` pipeline + WGSL (vertex pulling, width expansion, NaN→degenerate) (§9.4)
+- [x] **GPU-04** — Dynamic-offset uniform buffer for per-plot transform/style (no push constants)
+- [x] **GPU-05** — `line_pull` pipeline + WGSL (vertex pulling, width expansion, NaN→degenerate) (§9.4)
 - [ ] **GPU-06** — Per-plot viewport/scissor inside egui main pass via paint callback
 - [ ] **GPU-07** — `scatter_pull` pipeline (quad/sample, size uniform)
 - [ ] **GPU-08** — `step_pull` stepped-mode pipeline (2 segments/sample)

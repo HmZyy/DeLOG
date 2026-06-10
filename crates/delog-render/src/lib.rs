@@ -21,7 +21,11 @@
 
 pub mod buffers;
 pub mod context;
+pub mod line;
 pub mod palette;
+pub mod uniforms;
 
 pub use buffers::BufferManager;
 pub use context::RenderContext;
+pub use line::LinePipeline;
+pub use uniforms::{PlotUniform, UniformRing};
