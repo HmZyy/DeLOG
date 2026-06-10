@@ -17,3 +17,6 @@ delog-parsers = { workspace = true }
 delog-stream = { workspace = true }
 delog-cache = { workspace = true }
 delog-render = { workspace = true }
+
+eframe = { workspace = true }
+egui = { workspace = true }
