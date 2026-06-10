@@ -803,7 +803,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **ARC-02** — CI: fmt, clippy `-D warnings`, tests, bench compile (Linux)
 - [x] **ARC-03** — `delog-app` opens an empty eframe window with the wgpu backend; dark theme applied
 - [x] **ARC-04** — `tracing` initialized; panic hook logs + flushes
-- [ ] **ARC-05** — Metrics registry in core: scoped RAII timers, gauges, 256-ring stats (§16)
+- [x] **ARC-05** — Metrics registry in core: scoped RAII timers, gauges, 256-ring stats (§16)
 - [ ] **ARC-06** — `assets/` embedding (palette consts, WGSL includes, GLB include_bytes)
 - [ ] **ARC-07** — License/about metadata; `Help ▸ About`
 
