@@ -809,7 +809,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 
 ### CORE — Data model (M1)
 
-- [ ] **CORE-01** — `SourceId/TopicId/FieldId` registries + `FieldKey` + label collision suffixing (§4.1)
+- [x] **CORE-01** — `SourceId/TopicId/FieldId` registries + `FieldKey` + label collision suffixing (§4.1)
 - [ ] **CORE-02** — Time model: i64 µs, per-source `offset_us`, effective-time helpers, global range (§4.2)
 - [ ] **CORE-03** — `TopicSchema` with dtype/unit/multiplier per field
 - [ ] **CORE-04** — `Chunk` (sorted t, Arrow cols, seal-time `ColStats`, t_min/t_max)
