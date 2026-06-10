@@ -814,7 +814,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **CORE-03** — `TopicSchema` with dtype/unit/multiplier per field
 - [x] **CORE-04** — `Chunk` (sorted t, Arrow cols, seal-time `ColStats`, t_min/t_max)
 - [x] **CORE-05** — `TopicStore` spine; append = structural-share + swap (§4.4)
-- [ ] **CORE-06** — `StoreSnapshot` + `ArcSwap` store; epoch counter; subscriber notification
+- [x] **CORE-06** — `StoreSnapshot` + `ArcSwap` store; epoch counter; subscriber notification
 - [ ] **CORE-07** — Zero-copy field accessors: `FieldView`, chunk-pruned binary search, `sample_at` with Prev/Next/Linear
 - [ ] **CORE-08** — Multi-instance topic naming `topic[N]` (§4.3)
 - [ ] **CORE-09** — Memory accounting `MemBreakdown` per field/topic/source (§4.6)

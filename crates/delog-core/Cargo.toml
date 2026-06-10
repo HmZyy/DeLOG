@@ -8,4 +8,5 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+arc-swap = { workspace = true }
 arrow = { workspace = true }
