@@ -91,6 +91,27 @@ impl FieldSchema {
     pub fn is_plottable(&self) -> bool {
         self.is_numeric() || self.dtype == DataType::Boolean
     }
+
+    /// Short, fixed display tag for this field's dtype (e.g. `"i32"`, `"f64"`,
+    /// `"str"`). Lets `delog-app` show a dtype chip without touching Arrow
+    /// types directly (§3.2).
+    pub fn dtype_label(&self) -> &'static str {
+        match self.dtype {
+            DataType::Int8 => "i8",
+            DataType::Int16 => "i16",
+            DataType::Int32 => "i32",
+            DataType::Int64 => "i64",
+            DataType::UInt8 => "u8",
+            DataType::UInt16 => "u16",
+            DataType::UInt32 => "u32",
+            DataType::UInt64 => "u64",
+            DataType::Float32 => "f32",
+            DataType::Float64 => "f64",
+            DataType::Boolean => "bool",
+            DataType::Utf8 | DataType::LargeUtf8 => "str",
+            _ => "?",
+        }
+    }
 }
 
 impl TopicSchema {
