@@ -5,6 +5,7 @@
 //! or UI.
 
 pub mod chunk;
+pub mod field_view;
 pub mod identity;
 pub mod metrics;
 pub mod schema;
