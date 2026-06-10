@@ -36,12 +36,25 @@ pub struct StoreSnapshot {
     pub epoch: u64,
 }
 
+/// A push callback invoked with the new epoch on every publish.
+pub type EpochListener = Arc<dyn Fn(u64) + Send + Sync>;
+
 /// Published data store. Readers call [`DataStore::load`] once per frame/job
 /// and hold the returned `Arc<StoreSnapshot>` without blocking the writer.
-#[derive(Debug)]
 pub struct DataStore {
     current: ArcSwap<StoreSnapshot>,
+    /// Pull subscribers (poll a channel — CORE-06).
     subscribers: Mutex<Vec<Sender<u64>>>,
+    /// Push listeners (epoch callbacks — ING-06): UI repaint, cache GC/append.
+    listeners: Mutex<Vec<EpochListener>>,
+}
+
+impl fmt::Debug for DataStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DataStore")
+            .field("epoch", &self.current_epoch())
+            .finish_non_exhaustive()
+    }
 }
 
 /// Snapshot construction failures.
@@ -192,6 +205,7 @@ impl DataStore {
         Self {
             current: ArcSwap::from_pointee(snapshot),
             subscribers: Mutex::new(Vec::new()),
+            listeners: Mutex::new(Vec::new()),
         }
     }
 
@@ -210,6 +224,17 @@ impl DataStore {
             .expect("subscriber list poisoned")
             .push(tx);
         rx
+    }
+
+    /// Register a push callback fired with the new epoch on every publish
+    /// (ING-06): the app registers `ctx.request_repaint`, the cache manager its
+    /// incremental-append/GC trigger. Callbacks run on the ingest thread and
+    /// must be cheap and non-blocking — and must not re-enter the store.
+    pub fn on_epoch(&self, listener: impl Fn(u64) + Send + Sync + 'static) {
+        self.listeners
+            .lock()
+            .expect("listener list poisoned")
+            .push(Arc::new(listener));
     }
 
     pub fn publish(
@@ -231,8 +256,19 @@ impl DataStore {
     }
 
     fn notify(&self, epoch: u64) {
-        let mut subscribers = self.subscribers.lock().expect("subscriber list poisoned");
-        subscribers.retain(|tx| tx.send(epoch).is_ok());
+        {
+            let mut subscribers = self.subscribers.lock().expect("subscriber list poisoned");
+            subscribers.retain(|tx| tx.send(epoch).is_ok());
+        }
+        // Clone the listener Arcs out, then invoke them with the lock released,
+        // so a callback can never deadlock by touching the listener list.
+        let listeners: Vec<EpochListener> = {
+            let guard = self.listeners.lock().expect("listener list poisoned");
+            guard.clone()
+        };
+        for listener in listeners {
+            listener(epoch);
+        }
     }
 }
 
@@ -431,6 +467,27 @@ mod tests {
         assert_eq!(rx.try_recv(), Ok(1));
         assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
         assert_eq!(pinned.epoch, 0);
+    }
+
+    #[test]
+    fn epoch_listeners_are_pushed_every_published_epoch() {
+        use std::sync::Mutex as StdMutex;
+
+        let (identity, _source, topic) = identity_with_topic();
+        let data_store = DataStore::new();
+
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        data_store.on_epoch(move |epoch| sink.lock().unwrap().push(epoch));
+
+        for _ in 0..3 {
+            let next =
+                StoreSnapshot::from_registry(&identity, [(topic, store_for("BARO", vec![1]))], 0)
+                    .unwrap();
+            data_store.publish(next).unwrap();
+        }
+
+        assert_eq!(*seen.lock().unwrap(), vec![1, 2, 3]);
     }
 
     #[test]
