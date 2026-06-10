@@ -9,3 +9,12 @@ rust-version.workspace = true
 
 [dependencies]
 delog-core = { workspace = true }
+arrow = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+proptest = { workspace = true }
+
+[[bench]]
+name = "cache"
+harness = false

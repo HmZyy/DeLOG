@@ -869,9 +869,9 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [ ] **CCH-02** — One-Copy builder: in-place chunk iteration, multiplier in f64→f32, NaN preserved (§8.2)
 - [ ] **CCH-03** — Async build job + "building cache…" plot state
 - [ ] **CCH-04** — Incremental append on epoch change (never rebuild)
-- [ ] **CCH-05** — Min/max pyramid (branch 64): build + incremental append (§8.4)
-- [ ] **CCH-06** — `query(a,b)` O(log n) min/max + proptest equivalence vs naive scan
-- [ ] **CCH-07** — Per-pixel-column min/max helper for decimated draw
+- [x] **CCH-05** — Min/max pyramid (branch 64): build + incremental append (§8.4)
+- [x] **CCH-06** — `query(a,b)` O(log n) min/max + proptest equivalence vs naive scan
+- [x] **CCH-07** — Per-pixel-column min/max helper for decimated draw
 - [ ] **CCH-08** — `CacheManager`: FieldId map, epoch subscription, source-removal GC
 - [ ] **CCH-09** — LRU eviction of unplotted caches over budget; plotted pinned
 - [ ] **CCH-10** — Cache/pyramid byte accounting into MemBreakdown

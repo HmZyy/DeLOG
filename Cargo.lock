@@ -885,7 +885,10 @@ dependencies = [
 name = "delog-cache"
 version = "0.1.0"
 dependencies = [
+ "arrow",
+ "criterion",
  "delog-core",
+ "proptest",
 ]
 
 [[package]]
