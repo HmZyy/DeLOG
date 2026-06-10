@@ -2,6 +2,8 @@
 
 mod about;
 mod app;
+mod browser;
+mod session;
 
 use app::DelogApp;
 

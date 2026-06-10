@@ -947,7 +947,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 
 ### BRW — Data browser (M2 base, M4 polish)
 
-- [ ] **BRW-01** — Source→Topic→Field tree with dtype/count/unit chips (§13)
+- [x] **BRW-01** — Source→Topic→Field tree with dtype/count/unit chips (§13)
 - [ ] **BRW-02** — Fuzzy search/filter over full paths
 - [ ] **BRW-03** — Natural sort
 - [ ] **BRW-04** — Plotted-field highlight (color dot + bold)
@@ -1025,6 +1025,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [ ] **UIX-08** — File-drop onto window opens logs
 - [ ] **UIX-09** — Never-block audit: every >16 ms operation is a job + progress (§19.6)
 - [ ] **UIX-10** — Manual parser-override picker dialog (pairs PAR-01)
+- [x] **UIX-11** — App data session engine: open path → sniff/detect → off-thread parse into ingestor; per-source progress + cancel token; snapshot access (the never-block load path behind UIX-02/BRW-01, §19.6)
 
 ### TST — Testing & CI (continuous)
 
