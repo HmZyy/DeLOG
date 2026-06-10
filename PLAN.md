@@ -826,7 +826,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 
 - [x] **ING-01** — `IngestSink` trait + `IngestMsg` + bounded channel (cap 256) (§5)
 - [x] **ING-02** — Ingest thread: batch→chunk sealing (64Ki file / 512-or-100ms live), stats at seal
-- [ ] **ING-03** — Backpressure policy: file-block vs live-drop + `ingest_dropped_batches` metric + diag
+- [x] **ING-03** — Backpressure policy: file-block vs live-drop + `ingest_dropped_batches` metric + diag
 - [ ] **ING-04** — Byte-based progress events; `Arc<AtomicBool>` cancel polled ≤4096 records
 - [ ] **ING-05** — Within-batch timestamp sort; cross-chunk regression diagnostic
 - [ ] **ING-06** — Epoch-change notifications to UI repaint + cache manager
