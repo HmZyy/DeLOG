@@ -10,3 +10,11 @@ rust-version.workspace = true
 [dependencies]
 arc-swap = { workspace = true }
 arrow = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+proptest = { workspace = true }
+
+[[bench]]
+name = "snapshot_swap"
+harness = false
