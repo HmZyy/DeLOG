@@ -12,6 +12,7 @@ pub mod ingest;
 pub mod ingestor;
 pub mod mem;
 pub mod metrics;
+pub mod parse_ctl;
 pub mod schema;
 pub mod snapshot;
 pub mod store;
