@@ -8,4 +8,5 @@ pub mod chunk;
 pub mod identity;
 pub mod metrics;
 pub mod schema;
+pub mod store;
 pub mod time;
