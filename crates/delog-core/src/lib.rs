@@ -9,6 +9,7 @@ pub mod diagnostics;
 pub mod field_view;
 pub mod identity;
 pub mod ingest;
+pub mod ingestor;
 pub mod mem;
 pub mod metrics;
 pub mod schema;
