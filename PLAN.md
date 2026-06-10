@@ -819,8 +819,8 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **CORE-08** — Multi-instance topic naming `topic[N]` (§4.3)
 - [x] **CORE-09** — Memory accounting `MemBreakdown` per field/topic/source (§4.6)
 - [x] **CORE-10** — Remove-source snapshot rebuild + orphan GC hooks
-- [ ] **CORE-11** — Tests: snapshot interleavings, accessor properties, time math
-- [ ] **CORE-12** — Bench: snapshot swap under append load (< 10 µs)
+- [x] **CORE-11** — Tests: snapshot interleavings, accessor properties, time math
+- [x] **CORE-12** — Bench: snapshot swap under append load (< 10 µs)
 
 ### ING — Ingestion pipeline (M2)
 
