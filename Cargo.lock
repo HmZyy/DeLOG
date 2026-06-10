@@ -901,6 +901,7 @@ dependencies = [
 name = "delog-parsers"
 version = "0.1.0"
 dependencies = [
+ "arrow",
  "delog-core",
 ]
 
