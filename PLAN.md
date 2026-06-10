@@ -805,7 +805,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **ARC-04** — `tracing` initialized; panic hook logs + flushes
 - [x] **ARC-05** — Metrics registry in core: scoped RAII timers, gauges, 256-ring stats (§16)
 - [x] **ARC-06** — `assets/` embedding (palette consts, WGSL includes, GLB include_bytes)
-- [ ] **ARC-07** — License/about metadata; `Help ▸ About`
+- [x] **ARC-07** — License/about metadata; `Help ▸ About`
 
 ### CORE — Data model (M1)
 

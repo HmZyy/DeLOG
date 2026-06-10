@@ -1,5 +1,6 @@
 //! DeLOG application shell: eframe window, widgets, docks, layouts, glue.
 
+mod about;
 mod app;
 
 use app::DelogApp;
