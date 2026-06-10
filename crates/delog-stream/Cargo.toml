@@ -1,0 +1,11 @@
+[package]
+name = "delog-stream"
+description = "Live MAVLink backends, link state machine, raw-frame recorder"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+delog-core = { workspace = true }
