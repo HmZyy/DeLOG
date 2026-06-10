@@ -116,9 +116,9 @@ mod palette_tests {
             assert_eq!(c.a, 0xff, "palette colors are opaque");
         }
         // All distinct: a duplicate would make two traces indistinguishable.
-        for i in 0..TRACE_PALETTE.len() {
-            for j in (i + 1)..TRACE_PALETTE.len() {
-                assert_ne!(TRACE_PALETTE[i], TRACE_PALETTE[j], "{i} duplicates {j}");
+        for (i, a) in TRACE_PALETTE.iter().enumerate() {
+            for b in &TRACE_PALETTE[i + 1..] {
+                assert_ne!(a, b, "duplicate palette color {a:?}");
             }
         }
     }
