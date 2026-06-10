@@ -149,6 +149,14 @@ struct TopicAccum {
     ts: Int64Builder,
     cols: Vec<ColBuilder>,
     rows: usize,
+    last_ts: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingDropout {
+    duration_ms: u16,
+    before_us: i64,
+    byte_offset: u64,
 }
 
 struct Decoder<'a> {
@@ -160,6 +168,8 @@ struct Decoder<'a> {
     topics: HashMap<String, TopicAccum>,
     start_timestamp_us: u64,
     invalid_timestamps: u64,
+    last_data_timestamp_us: Option<i64>,
+    pending_dropouts: Vec<PendingDropout>,
     row_count: u64,
     diagnostics: u64,
     time_range: Option<TimeRange>,
@@ -176,6 +186,8 @@ impl<'a> Decoder<'a> {
             topics: HashMap::new(),
             start_timestamp_us: 0,
             invalid_timestamps: 0,
+            last_data_timestamp_us: None,
+            pending_dropouts: Vec::new(),
             row_count: 0,
             diagnostics: 0,
             time_range: None,
@@ -206,6 +218,7 @@ impl<'a> Decoder<'a> {
                 b'A' => self.read_add_logged(&payload, msg_offset),
                 b'D' => self.read_data(&payload, msg_offset),
                 b'S' => {}
+                b'O' => self.read_dropout(&payload, msg_offset),
                 _ => {}
             }
 
@@ -284,6 +297,31 @@ impl<'a> Decoder<'a> {
         );
     }
 
+    fn read_dropout(&mut self, payload: &[u8], msg_offset: u64) {
+        if payload.len() < 2 {
+            self.diagnostic(
+                Diag::warning("ulog-short-dropout", "short Dropout message").at_byte(msg_offset),
+            );
+            return;
+        }
+        let duration_ms = u16::from_le_bytes([payload[0], payload[1]]);
+        let Some(before_us) = self.last_data_timestamp_us else {
+            self.diagnostic(
+                Diag::warning(
+                    "ulog-dropout",
+                    format!("dropout of {duration_ms} ms before any timestamped data"),
+                )
+                .at_byte(msg_offset),
+            );
+            return;
+        };
+        self.pending_dropouts.push(PendingDropout {
+            duration_ms,
+            before_us,
+            byte_offset: msg_offset,
+        });
+    }
+
     fn read_data(&mut self, payload: &[u8], msg_offset: u64) {
         if payload.len() < 2 {
             self.diagnostic(
@@ -329,6 +367,7 @@ impl<'a> Decoder<'a> {
         let Some(time_us) = self.valid_timestamp(time_us, &plan.topic_name, msg_offset) else {
             return;
         };
+        self.materialize_dropouts(time_us);
         if plan
             .emits
             .iter()
@@ -356,13 +395,16 @@ impl<'a> Decoder<'a> {
                     .map(|f| ColBuilder::for_kind(f.kind))
                     .collect(),
                 rows: 0,
+                last_ts: None,
             });
         accum.ts.append_value(time_us);
         for (col, field) in accum.cols.iter_mut().zip(&plan.emits) {
             col.append(field.kind, data, field.offset);
         }
         accum.rows += 1;
+        accum.last_ts = Some(time_us);
         self.row_count += 1;
+        self.last_data_timestamp_us = Some(time_us);
         self.time_range = Some(match self.time_range {
             Some(r) => r.include(time_us),
             None => TimeRange::point(time_us),
@@ -371,6 +413,49 @@ impl<'a> Decoder<'a> {
             let batch = accum.take_batch(self.source);
             self.sink.submit(batch);
         }
+    }
+
+    fn materialize_dropouts(&mut self, next_us: i64) {
+        if self.pending_dropouts.is_empty() {
+            return;
+        }
+        let pending = std::mem::take(&mut self.pending_dropouts);
+        for dropout in pending {
+            let gap_us = dropout_gap_time(dropout.before_us, next_us, dropout.duration_ms);
+            self.diagnostic(
+                Diag::warning(
+                    "ulog-dropout",
+                    format!("dropout of {} ms", dropout.duration_ms),
+                )
+                .at_byte(dropout.byte_offset)
+                .at_time(gap_us),
+            );
+            let inserted = self.append_gap_marker(gap_us);
+            if inserted > 0 {
+                self.row_count += inserted as u64;
+                self.time_range = Some(match self.time_range {
+                    Some(r) => r.include(gap_us),
+                    None => TimeRange::point(gap_us),
+                });
+            }
+        }
+    }
+
+    fn append_gap_marker(&mut self, gap_us: i64) -> usize {
+        let mut inserted = 0;
+        for accum in self.topics.values_mut() {
+            if accum.last_ts.is_none_or(|last_ts| last_ts > gap_us) {
+                continue;
+            }
+            accum.ts.append_value(gap_us);
+            for col in &mut accum.cols {
+                col.append_null();
+            }
+            accum.rows += 1;
+            accum.last_ts = Some(gap_us);
+            inserted += 1;
+        }
+        inserted
     }
 
     fn build_plan(&mut self, format_name: &str, multi_id: u8, msg_offset: u64) -> Option<Plan> {
@@ -539,6 +624,23 @@ impl ColBuilder {
                 }
                 _ => unreachable!("string builder for non-string kind"),
             },
+        }
+    }
+
+    fn append_null(&mut self) {
+        match self {
+            Self::Bool(b) => b.append_null(),
+            Self::I8(b) => b.append_null(),
+            Self::I16(b) => b.append_null(),
+            Self::I32(b) => b.append_null(),
+            Self::I64(b) => b.append_null(),
+            Self::U8(b) => b.append_null(),
+            Self::U16(b) => b.append_null(),
+            Self::U32(b) => b.append_null(),
+            Self::U64(b) => b.append_null(),
+            Self::F32(b) => b.append_null(),
+            Self::F64(b) => b.append_null(),
+            Self::Str(b) => b.append_null(),
         }
     }
 
@@ -723,6 +825,19 @@ fn array_name(name: &str, count: usize, idx: usize) -> String {
     }
 }
 
+fn dropout_gap_time(before_us: i64, next_us: i64, duration_ms: u16) -> i64 {
+    if next_us <= before_us {
+        return next_us;
+    }
+    let duration_us = i64::from(duration_ms) * 1000;
+    let candidate = next_us.saturating_sub(duration_us / 2);
+    if candidate > before_us && candidate <= next_us {
+        candidate
+    } else {
+        before_us + (next_us - before_us) / 2
+    }
+}
+
 fn c_str(bytes: &[u8]) -> String {
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     String::from_utf8_lossy(&bytes[..end]).into_owned()
@@ -755,7 +870,7 @@ fn read_8(p: &[u8], off: usize) -> [u8; 8] {
 mod tests {
     use std::io::Cursor;
 
-    use arrow::array::{Float32Array, Int16Array, StringArray};
+    use arrow::array::{Array, Float32Array, Int16Array, StringArray};
     use delog_core::ingest::SourceKind;
     use delog_core::parse_ctl::CancelToken;
 
@@ -848,6 +963,33 @@ mod tests {
         buf
     }
 
+    fn ulog_with_dropout() -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend(MAGIC);
+        buf.push(1);
+        buf.extend(0u64.to_le_bytes());
+
+        push_msg(&mut buf, b'F', b"test:uint64_t timestamp;float value;");
+        let mut sub = Vec::new();
+        sub.push(0);
+        sub.extend(1u16.to_le_bytes());
+        sub.extend(b"test");
+        push_msg(&mut buf, b'A', &sub);
+
+        for (ts, value) in [(1_000u64, 1.0f32), (3_000, 2.0)] {
+            let mut data = Vec::new();
+            data.extend(1u16.to_le_bytes());
+            data.extend(ts.to_le_bytes());
+            data.extend(value.to_le_bytes());
+            push_msg(&mut buf, b'D', &data);
+            if ts == 1_000 {
+                push_msg(&mut buf, b'O', &500u16.to_le_bytes());
+            }
+        }
+
+        buf
+    }
+
     fn parse(buf: Vec<u8>) -> (ParseSummary, Collect) {
         let mut sink = Collect::default();
         let ctl = ParseCtl::new(CancelToken::new(), SourceId(0), buf.len() as u64);
@@ -919,5 +1061,27 @@ mod tests {
             .downcast_ref::<Float32Array>()
             .unwrap();
         assert_eq!(values.values(), &[2.0]);
+    }
+
+    #[test]
+    fn dropouts_emit_diagnostics_and_insert_null_gap_rows() {
+        let (summary, sink) = parse(ulog_with_dropout());
+        assert_eq!(summary.row_count, 3);
+        assert_eq!(summary.diagnostics, 1);
+        assert!(
+            sink.diags
+                .iter()
+                .any(|diag| diag.code == "ulog-dropout" && diag.time_us == Some(2_000))
+        );
+
+        let batch = &sink.batches[0];
+        assert_eq!(batch.timestamps.values(), &[1_000, 2_000, 3_000]);
+        let values = batch.columns[0]
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .unwrap();
+        assert_eq!(values.value(0), 1.0);
+        assert!(values.is_null(1));
+        assert_eq!(values.value(2), 2.0);
     }
 }
