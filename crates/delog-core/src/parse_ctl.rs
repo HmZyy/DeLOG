@@ -1,11 +1,12 @@
 //! Per-parse control: cancellation and byte-based progress (PLAN.md §5, ING-04).
 //!
-//! A parser receives a `&mut ParseCtl` alongside its [`IngestSink`] (§6.1). It
+//! A parser receives a `&ParseCtl` alongside its [`IngestSink`] (§6.1). It
 //! polls cancellation cheaply — the `Arc<AtomicBool>` is read at most once every
 //! [`CANCEL_POLL_INTERVAL`] records, so the common path is a counter compare,
 //! not an atomic load — and reports progress as a byte fraction, throttled so a
 //! multi-GB parse emits ~100 events, not millions.
 
+use std::cell::Cell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -42,12 +43,16 @@ impl CancelToken {
 }
 
 /// Cancellation + byte-progress for one parse run.
+///
+/// The progress throttle uses interior mutability so the whole control can be
+/// passed as `&ParseCtl` (matching the parser trait, §6.1); a `ParseCtl` belongs
+/// to a single parser thread and is not shared, so a `Cell` is sufficient.
 #[derive(Debug)]
 pub struct ParseCtl {
     cancel: CancelToken,
     /// Total source bytes, or 0 when unknown (e.g. a live stream).
     total_bytes: u64,
-    last_reported: f32,
+    last_reported: Cell<f32>,
 }
 
 impl ParseCtl {
@@ -55,7 +60,7 @@ impl ParseCtl {
         Self {
             cancel,
             total_bytes,
-            last_reported: 0.0,
+            last_reported: Cell::new(0.0),
         }
     }
 
@@ -83,19 +88,15 @@ impl ParseCtl {
     /// Emit a progress event to `sink` only if the fraction advanced at least
     /// [`PROGRESS_EPSILON`] since the last report (or first reached completion),
     /// keeping the event stream sparse.
-    pub fn report_progress(
-        &mut self,
-        sink: &mut dyn IngestSink,
-        source: SourceId,
-        bytes_read: u64,
-    ) {
+    pub fn report_progress(&self, sink: &mut dyn IngestSink, source: SourceId, bytes_read: u64) {
         if self.total_bytes == 0 {
             return;
         }
         let frac = self.fraction(bytes_read);
-        let completed = frac >= 1.0 && self.last_reported < 1.0;
-        if completed || frac - self.last_reported >= PROGRESS_EPSILON {
-            self.last_reported = frac;
+        let last = self.last_reported.get();
+        let completed = frac >= 1.0 && last < 1.0;
+        if completed || frac - last >= PROGRESS_EPSILON {
+            self.last_reported.set(frac);
             sink.progress(source, frac);
         }
     }
@@ -159,7 +160,7 @@ mod tests {
 
     #[test]
     fn progress_is_throttled_to_meaningful_advances() {
-        let mut ctl = ParseCtl::new(CancelToken::new(), 10_000);
+        let ctl = ParseCtl::new(CancelToken::new(), 10_000);
         let mut sink = ProgressSink::default();
 
         // 0.5% advances are swallowed; the 1% step and completion fire.
@@ -173,7 +174,7 @@ mod tests {
 
     #[test]
     fn unknown_total_emits_no_progress() {
-        let mut ctl = ParseCtl::new(CancelToken::new(), 0);
+        let ctl = ParseCtl::new(CancelToken::new(), 0);
         let mut sink = ProgressSink::default();
         ctl.report_progress(&mut sink, SourceId(0), 999);
         assert!(sink.events.is_empty());
