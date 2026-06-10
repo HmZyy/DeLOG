@@ -10,7 +10,8 @@
 //! ING-03 — this module ships the blocking, file-parser sink.
 
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
+use std::time::Duration;
 
 use arrow::array::{ArrayRef, Int64Array};
 
@@ -35,10 +36,12 @@ pub enum SourceKind {
 /// A parsed slice of one topic: sorted `i64` µs timestamps plus original-dtype
 /// Arrow columns, moved (never copied) from the parser's builders — upholds
 /// ZC-1. The ingest thread validates and seals these into immutable chunks.
+///
+/// The topic name is the [`schema`](ParsedBatch::schema) name — multi-instance
+/// topics carry their `[N]` suffix there (§4.3), so there is exactly one name.
 #[derive(Debug, Clone)]
 pub struct ParsedBatch {
     pub source: SourceId,
-    pub topic: String,
     pub schema: Arc<TopicSchema>,
     pub timestamps: Int64Array,
     pub columns: Vec<ArrayRef>,
@@ -47,18 +50,21 @@ pub struct ParsedBatch {
 impl ParsedBatch {
     pub fn new(
         source: SourceId,
-        topic: impl Into<String>,
         schema: Arc<TopicSchema>,
         timestamps: Int64Array,
         columns: Vec<ArrayRef>,
     ) -> Self {
         Self {
             source,
-            topic: topic.into(),
             schema,
             timestamps,
             columns,
         }
+    }
+
+    /// The topic name this batch belongs to.
+    pub fn topic(&self) -> &str {
+        self.schema.name()
     }
 
     pub fn rows(&self) -> usize {
@@ -151,6 +157,28 @@ impl IngestReceiver {
     pub fn try_recv(&self) -> Option<IngestMsg> {
         self.rx.try_recv().ok()
     }
+
+    /// Block up to `timeout` for a message. [`RecvOutcome::Idle`] means the
+    /// deadline passed with nothing ready (the ingest loop uses this to flush
+    /// aged live chunks, §4.3); [`RecvOutcome::Disconnected`] means every sender
+    /// has dropped.
+    pub fn recv_timeout(&self, timeout: Duration) -> RecvOutcome {
+        match self.rx.recv_timeout(timeout) {
+            Ok(msg) => RecvOutcome::Message(msg),
+            Err(RecvTimeoutError::Timeout) => RecvOutcome::Idle,
+            Err(RecvTimeoutError::Disconnected) => RecvOutcome::Disconnected,
+        }
+    }
+}
+
+/// Result of a timed receive on the ingest channel.
+#[derive(Debug)]
+pub enum RecvOutcome {
+    Message(IngestMsg),
+    /// Timeout elapsed with no message ready.
+    Idle,
+    /// Every sender has dropped; the loop should finish.
+    Disconnected,
 }
 
 /// Blocking sink (file-parser semantics). See [`IngestSender::file_sink`].
@@ -234,7 +262,7 @@ mod tests {
         let columns: Vec<ArrayRef> = vec![Arc::new(arrow::array::Float64Array::from(vec![
             1.0, 2.0, 3.0,
         ]))];
-        ParsedBatch::new(source, "BARO", schema(), timestamps, columns)
+        ParsedBatch::new(source, schema(), timestamps, columns)
     }
 
     #[test]
