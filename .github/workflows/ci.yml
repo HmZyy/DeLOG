@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main, rework]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Pinned deps (PLAN.md §2): the lockfile is authoritative.
+  CARGO_NET_RETRY: "3"
+
+jobs:
+  check:
+    name: fmt + clippy + test + bench-compile (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system libraries (eframe/wgpu, serialport)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libwayland-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libgl1-mesa-dev libudev-dev
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: tests
+        run: cargo test --workspace --locked
+
+      - name: bench compile
+        run: cargo bench --workspace --no-run --locked
