@@ -7,7 +7,9 @@ use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
 
-use crate::identity::{FieldEntry, IdentityRegistry, SourceEntry, SourceId, TopicEntry, TopicId};
+use crate::identity::{
+    FieldEntry, FieldId, IdentityRegistry, SourceEntry, SourceId, TopicEntry, TopicId,
+};
 use crate::store::TopicStore;
 use crate::time::TimeRange;
 
@@ -139,6 +141,23 @@ impl StoreSnapshot {
 
     pub fn topic_store(&self, id: TopicId) -> Option<&Arc<TopicStore>> {
         self.topic(id)?.store.as_ref()
+    }
+
+    /// Whether `id` names a source present and not tombstoned (§4.6). Readers
+    /// (browser rows) and the cache GC use these to skip removed entities.
+    pub fn is_source_live(&self, id: SourceId) -> bool {
+        self.source(id).is_some_and(|s| !s.entry.removed)
+    }
+
+    pub fn is_topic_live(&self, id: TopicId) -> bool {
+        self.topic(id).is_some_and(|t| !t.entry.removed)
+    }
+
+    pub fn is_field_live(&self, id: FieldId) -> bool {
+        self.fields
+            .get(id.index())
+            .filter(|entry| entry.id == id)
+            .is_some_and(|entry| !entry.removed)
     }
 
     pub fn global_time_range(&self) -> Option<TimeRange> {
@@ -349,6 +368,44 @@ mod tests {
         let snapshot = StoreSnapshot::from_registry(&identity, [(topic, store)], 0).unwrap();
 
         assert_eq!(snapshot.global_time_range(), TimeRange::new(50, 150));
+    }
+
+    #[test]
+    fn removing_a_source_rebuilds_a_snapshot_without_its_data() {
+        // Two sources, each a topic. The writer flow: tombstone in the registry,
+        // drop the orphaned stores, rebuild the snapshot from what remains.
+        let mut identity = IdentityRegistry::new();
+        let keep = identity.add_source("keep");
+        let drop = identity.add_source("drop");
+        let keep_topic = identity.add_topic(keep, "BARO").unwrap();
+        identity.add_field(keep_topic, "Alt").unwrap();
+        let drop_topic = identity.add_topic(drop, "GPS").unwrap();
+        identity.add_field(drop_topic, "Lat").unwrap();
+
+        let mut stores = vec![
+            (keep_topic, store_for("BARO", vec![100, 200])),
+            (drop_topic, store_for("GPS", vec![300, 400])),
+        ];
+        let before = StoreSnapshot::from_registry(&identity, stores.clone(), 0).unwrap();
+        assert!(before.is_source_live(drop));
+        assert!(before.topic_store(drop_topic).is_some());
+
+        let removed = identity.remove_source(drop).unwrap();
+        stores.retain(|(topic, _)| !removed.topics.contains(topic));
+        let after = StoreSnapshot::from_registry(&identity, stores, 0).unwrap();
+
+        // The dropped source is tombstoned and carries no data; the survivor is
+        // intact and its IDs are unchanged.
+        assert!(!after.is_source_live(drop));
+        assert!(!after.is_topic_live(drop_topic));
+        assert!(after.topic_store(drop_topic).is_none());
+        assert!(after.is_source_live(keep));
+        assert!(after.topic_store(keep_topic).is_some());
+        assert_eq!(after.global_time_range(), TimeRange::new(100, 200));
+
+        // The orphaned field is no longer live and a view onto it fails.
+        let drop_field = removed.fields[0];
+        assert!(!after.is_field_live(drop_field));
     }
 
     #[test]
