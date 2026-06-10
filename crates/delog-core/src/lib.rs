@@ -6,4 +6,5 @@
 
 pub mod identity;
 pub mod metrics;
+pub mod schema;
 pub mod time;
