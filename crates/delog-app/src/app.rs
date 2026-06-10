@@ -2,10 +2,12 @@
 
 use crate::about;
 use crate::browser::{self, BrowserModel};
+use crate::gpu::GpuBridge;
 use crate::session::Session;
 
 pub struct DelogApp {
     session: Session,
+    gpu: GpuBridge,
     path_input: String,
     show_about: bool,
 }
@@ -15,6 +17,7 @@ impl DelogApp {
         cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
         Self {
             session: Session::new(cc.egui_ctx.clone()),
+            gpu: GpuBridge::from_creation_context(cc),
             path_input: String::new(),
             show_about: false,
         }
@@ -102,6 +105,14 @@ impl eframe::App for DelogApp {
             if model.is_empty() {
                 ui.centered_and_justified(|ui| {
                     ui.weak("Drop a flight log to begin.");
+                });
+            } else if self.gpu.is_available() {
+                let rect = ui.available_rect_before_wrap();
+                self.gpu.paint_demo_line(ui, rect);
+                ui.allocate_rect(rect, egui::Sense::hover());
+            } else {
+                ui.centered_and_justified(|ui| {
+                    ui.weak("GPU renderer unavailable.");
                 });
             }
         });

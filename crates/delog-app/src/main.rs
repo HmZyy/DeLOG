@@ -3,6 +3,7 @@
 mod about;
 mod app;
 mod browser;
+mod gpu;
 mod session;
 
 use app::DelogApp;
