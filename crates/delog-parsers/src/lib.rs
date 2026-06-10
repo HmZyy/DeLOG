@@ -6,9 +6,11 @@
 
 pub mod ardupilot;
 pub mod parser;
+pub mod ulog;
 
 pub use ardupilot::ArduPilotParser;
 pub use parser::{
     Candidate, Detection, LogParser, ParseError, ParserRegistry, ReadSeek, SNIFF_CONFIDENCE,
     SNIFF_HEAD_LEN, Sniff,
 };
+pub use ulog::ULogParser;

@@ -839,7 +839,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **PAR-04** — AP BIN: raw-value storage + unit/multiplier into schema (§6.2)
 - [x] **PAR-05** — AP BIN: instance split → `GPS[0]`/`GPS[1]`…
 - [x] **PAR-06** — AP BIN: golden fixture test (topics/rows/values table)
-- [ ] **PAR-07** — ULog: header + defs (F/I/P) + data (A/D/S) sections; nested flatten; padding skip; multi_id
+- [x] **PAR-07** — ULog: header + defs (F/I/P) + data (A/D/S) sections; nested flatten; padding skip; multi_id
 - [ ] **PAR-08** — ULog: dropouts → diagnostics + NaN gap injection (§6.3)
 - [ ] **PAR-09** — ULog: logged messages captured for auto-markers; params into source meta
 - [ ] **PAR-10** — ULog: golden fixture test
