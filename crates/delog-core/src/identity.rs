@@ -30,11 +30,16 @@ pub struct FieldKey {
 }
 
 /// Registered source identity.
+///
+/// `removed` is a tombstone: removing a source keeps its slot (so existing
+/// runtime IDs stay valid for the session — PLAN.md §4.1) but marks it gone so
+/// readers and the cache GC skip it (§4.6).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceEntry {
     pub id: SourceId,
     pub label: String,
     pub offset_us: TimestampUs,
+    pub removed: bool,
 }
 
 /// Registered topic identity.
@@ -43,6 +48,7 @@ pub struct TopicEntry {
     pub id: TopicId,
     pub source: SourceId,
     pub name: String,
+    pub removed: bool,
 }
 
 /// Registered field identity.
@@ -51,6 +57,17 @@ pub struct FieldEntry {
     pub id: FieldId,
     pub topic: TopicId,
     pub name: String,
+    pub removed: bool,
+}
+
+/// IDs orphaned by [`IdentityRegistry::remove_source`], handed to the writer so
+/// it can drop their stores and to the cache manager (CCH-08) to GC their
+/// caches (§4.6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemovedSource {
+    pub source: SourceId,
+    pub topics: Vec<TopicId>,
+    pub fields: Vec<FieldId>,
 }
 
 /// Owns the runtime identity tables and portable-key resolver.
@@ -114,6 +131,7 @@ impl IdentityRegistry {
             id,
             label,
             offset_us: 0,
+            removed: false,
         });
         id
     }
@@ -136,7 +154,7 @@ impl IdentityRegistry {
 
     /// Add or return an existing topic for `source` and `name`.
     pub fn add_topic(&mut self, source: SourceId, name: impl Into<String>) -> Option<TopicId> {
-        self.source(source)?;
+        self.live_source(source)?;
         let name = name.into();
         let key = (source, name.clone());
         if let Some(&id) = self.topic_by_source_name.get(&key) {
@@ -144,7 +162,12 @@ impl IdentityRegistry {
         }
 
         let id = TopicId(next_id(self.topics.len(), "topic"));
-        self.topics.push(TopicEntry { id, source, name });
+        self.topics.push(TopicEntry {
+            id,
+            source,
+            name,
+            removed: false,
+        });
         self.topic_by_source_name.insert(key, id);
         Some(id)
     }
@@ -164,8 +187,8 @@ impl IdentityRegistry {
 
     /// Add or return an existing field for `topic` and `name`.
     pub fn add_field(&mut self, topic: TopicId, name: impl Into<String>) -> Option<FieldId> {
-        let topic_entry = self.topic(topic)?.clone();
-        let source_entry = self.source(topic_entry.source)?.clone();
+        let topic_entry = self.live_topic(topic)?.clone();
+        let source_entry = self.live_source(topic_entry.source)?.clone();
         let name = name.into();
         let local_key = (topic, name.clone());
         if let Some(&id) = self.field_by_topic_name.get(&local_key) {
@@ -178,14 +201,86 @@ impl IdentityRegistry {
             topic: topic_entry.name,
             field: name.clone(),
         };
-        self.fields.push(FieldEntry { id, topic, name });
+        self.fields.push(FieldEntry {
+            id,
+            topic,
+            name,
+            removed: false,
+        });
         self.field_by_topic_name.insert(local_key, id);
         self.field_by_key.insert(portable_key, id);
         Some(id)
     }
 
+    /// Remove a source by tombstoning it and every topic/field it owns.
+    ///
+    /// Dense IDs are preserved (existing references stay valid for the session,
+    /// §4.1); the entries are flagged `removed` and dropped from the name/key
+    /// lookup maps so they no longer resolve and a later re-add of the same
+    /// name mints fresh IDs. Returns the orphaned IDs for the writer to drop
+    /// stores and the cache manager to GC (§4.6), or `None` if the source is
+    /// unknown or already removed.
+    pub fn remove_source(&mut self, id: SourceId) -> Option<RemovedSource> {
+        self.live_source(id)?;
+
+        let label = self.sources[id.index()].label.clone();
+        self.sources[id.index()].removed = true;
+        self.source_labels.remove(&label);
+
+        let mut topics = Vec::new();
+        let mut fields = Vec::new();
+        for topic_index in 0..self.topics.len() {
+            if self.topics[topic_index].source != id || self.topics[topic_index].removed {
+                continue;
+            }
+            let topic_id = self.topics[topic_index].id;
+            self.topics[topic_index].removed = true;
+            self.topic_by_source_name
+                .remove(&(id, self.topics[topic_index].name.clone()));
+            topics.push(topic_id);
+
+            for field_index in 0..self.fields.len() {
+                if self.fields[field_index].topic != topic_id || self.fields[field_index].removed {
+                    continue;
+                }
+                let field_id = self.fields[field_index].id;
+                self.fields[field_index].removed = true;
+                let field_name = self.fields[field_index].name.clone();
+                self.field_by_topic_name
+                    .remove(&(topic_id, field_name.clone()));
+                self.field_by_key.remove(&FieldKey {
+                    source: label.clone(),
+                    topic: self.topics[topic_index].name.clone(),
+                    field: field_name,
+                });
+                fields.push(field_id);
+            }
+        }
+
+        Some(RemovedSource {
+            source: id,
+            topics,
+            fields,
+        })
+    }
+
     pub fn source(&self, id: SourceId) -> Option<&SourceEntry> {
         self.sources.get(id.index()).filter(|entry| entry.id == id)
+    }
+
+    /// Like [`source`](Self::source) but `None` for tombstoned sources.
+    pub fn live_source(&self, id: SourceId) -> Option<&SourceEntry> {
+        self.source(id).filter(|entry| !entry.removed)
+    }
+
+    /// Like [`topic`](Self::topic) but `None` for tombstoned topics.
+    pub fn live_topic(&self, id: TopicId) -> Option<&TopicEntry> {
+        self.topic(id).filter(|entry| !entry.removed)
+    }
+
+    /// Like [`field`](Self::field) but `None` for tombstoned fields.
+    pub fn live_field(&self, id: FieldId) -> Option<&FieldEntry> {
+        self.field(id).filter(|entry| !entry.removed)
     }
 
     pub fn set_source_offset_us(
@@ -252,14 +347,15 @@ impl IdentityRegistry {
         } else {
             preferred_label
         };
-        let count = self.source_base_counts.entry(base.clone()).or_insert(0);
+        // Prefer the bare label whenever it is free — including after a remove
+        // freed it, so reopening a closed source reuses its original label.
+        if self.source_labels.insert(base.clone()) {
+            return base;
+        }
+        let count = self.source_base_counts.entry(base.clone()).or_insert(1);
         loop {
             *count += 1;
-            let candidate = if *count == 1 {
-                base.clone()
-            } else {
-                format!("{base}#{count}")
-            };
+            let candidate = format!("{base}#{count}");
             if self.source_labels.insert(candidate.clone()) {
                 return candidate;
             }
@@ -381,6 +477,74 @@ mod tests {
 
         assert_eq!(ids.add_topic(SourceId(99), "GPS"), None);
         assert_eq!(ids.add_field(TopicId(99), "Lat"), None);
+    }
+
+    #[test]
+    fn remove_source_tombstones_its_topics_and_fields_and_returns_orphans() {
+        let mut ids = IdentityRegistry::new();
+        let keep = ids.add_source("keep");
+        let drop = ids.add_source("drop");
+        let keep_topic = ids.add_topic(keep, "BARO").unwrap();
+        let keep_field = ids.add_field(keep_topic, "Alt").unwrap();
+        let drop_topic = ids.add_topic(drop, "GPS").unwrap();
+        let drop_lat = ids.add_field(drop_topic, "Lat").unwrap();
+        let drop_lon = ids.add_field(drop_topic, "Lon").unwrap();
+
+        let removed = ids.remove_source(drop).unwrap();
+        assert_eq!(removed.source, drop);
+        assert_eq!(removed.topics, vec![drop_topic]);
+        assert_eq!(removed.fields, vec![drop_lat, drop_lon]);
+
+        // Tombstones keep their slots but stop being live.
+        assert!(ids.source(drop).unwrap().removed);
+        assert!(ids.live_source(drop).is_none());
+        assert!(ids.live_topic(drop_topic).is_none());
+        assert!(ids.live_field(drop_lat).is_none());
+
+        // The surviving source is untouched and its IDs are unchanged.
+        assert_eq!(ids.live_source(keep).unwrap().id, keep);
+        assert_eq!(ids.live_field(keep_field).unwrap().name, "Alt");
+
+        // Removed portable keys no longer resolve; re-removal is a no-op.
+        assert_eq!(ids.resolve(&FieldKey::new("drop", "GPS", "Lat")), None);
+        assert_eq!(
+            ids.resolve(&FieldKey::new("keep", "BARO", "Alt")),
+            Some(keep_field)
+        );
+        assert_eq!(ids.remove_source(drop), None);
+        assert_eq!(ids.remove_source(SourceId(99)), None);
+    }
+
+    #[test]
+    fn re_adding_a_removed_name_mints_fresh_ids_and_reuses_the_label() {
+        let mut ids = IdentityRegistry::new();
+        let first = ids.add_source("flight");
+        let topic = ids.add_topic(first, "GPS").unwrap();
+        ids.add_field(topic, "Lat").unwrap();
+        ids.remove_source(first);
+
+        let second = ids.add_source("flight");
+        let new_topic = ids.add_topic(second, "GPS").unwrap();
+        let new_field = ids.add_field(new_topic, "Lat").unwrap();
+
+        assert_ne!(first, second);
+        assert_ne!(topic, new_topic);
+        assert_eq!(ids.source(second).unwrap().label, "flight");
+        assert_eq!(
+            ids.resolve(&FieldKey::new("flight", "GPS", "Lat")),
+            Some(new_field)
+        );
+    }
+
+    #[test]
+    fn cannot_add_topics_or_fields_under_a_removed_parent() {
+        let mut ids = IdentityRegistry::new();
+        let source = ids.add_source("flight");
+        let topic = ids.add_topic(source, "GPS").unwrap();
+        ids.remove_source(source);
+
+        assert_eq!(ids.add_topic(source, "NEW"), None);
+        assert_eq!(ids.add_field(topic, "Lat"), None);
     }
 
     #[test]
