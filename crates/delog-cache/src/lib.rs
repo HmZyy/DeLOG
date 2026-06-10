@@ -3,5 +3,7 @@
 //! eviction.
 
 pub mod pyramid;
+pub mod trace;
 
 pub use pyramid::{BRANCH, MinMax, MinMaxPyramid};
+pub use trace::TraceCache;

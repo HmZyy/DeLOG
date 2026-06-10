@@ -6,6 +6,11 @@
 //! aligned nodes in the middle, mathematically identical to a full scan — and
 //! per-pixel-column extents for the decimated draw path (§9.5).
 //!
+//! The y values are read from a backing buffer at `data[stride·i + offset]`, so
+//! a [`TraceCache`](crate::trace::TraceCache) can index the y-channel of its
+//! interleaved `xy` buffer directly (stride 2, offset 1) with no second
+//! allocation, upholding the 8-byte-per-sample invariant (§8.1).
+//!
 //! **NaN is a gap, not a value** (§8.2): NaN samples never contribute to a
 //! min/max, and a range with no finite sample reports `NaN`.
 
@@ -72,19 +77,28 @@ fn nan_max(a: f32, b: f32) -> f32 {
     }
 }
 
-fn block_minmax(block: &[f32]) -> MinMax {
-    block.iter().fold(MinMax::EMPTY, |acc, &y| acc.observe(y))
-}
-
 fn reduce(nodes: &[MinMax]) -> MinMax {
     nodes.iter().fold(MinMax::EMPTY, |acc, &m| acc.merge(m))
 }
 
 /// The pyramid. Levels are stored bottom-up; `levels[0]` is L0.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct MinMaxPyramid {
     levels: Vec<Vec<MinMax>>,
     n: usize,
+    stride: usize,
+    offset: usize,
+}
+
+impl Default for MinMaxPyramid {
+    fn default() -> Self {
+        Self {
+            levels: Vec::new(),
+            n: 0,
+            stride: 1,
+            offset: 0,
+        }
+    }
 }
 
 impl MinMaxPyramid {
@@ -105,20 +119,54 @@ impl MinMaxPyramid {
         self.levels.len()
     }
 
-    /// Rebuild from scratch over `ys`.
+    /// Total bytes held by the level vectors (for memory accounting, CCH-10).
+    pub fn bytes(&self) -> u64 {
+        self.levels
+            .iter()
+            .map(|l| (l.capacity() * std::mem::size_of::<MinMax>()) as u64)
+            .sum()
+    }
+
+    /// Build from a contiguous `ys` buffer (stride 1).
     pub fn build(ys: &[f32]) -> Self {
-        let mut p = Self::new();
-        p.rebuild(ys);
+        Self::build_strided(ys, 1, 0)
+    }
+
+    /// Build over the y values at `data[stride·i + offset]`.
+    pub fn build_strided(data: &[f32], stride: usize, offset: usize) -> Self {
+        let mut p = Self {
+            levels: Vec::new(),
+            n: 0,
+            stride: stride.max(1),
+            offset,
+        };
+        p.rebuild(data);
         p
     }
 
-    fn rebuild(&mut self, ys: &[f32]) {
+    fn sample_count(&self, data: &[f32]) -> usize {
+        data.len().saturating_sub(self.offset).div_ceil(self.stride)
+    }
+
+    fn y(&self, data: &[f32], i: usize) -> f32 {
+        data[self.stride * i + self.offset]
+    }
+
+    /// Min/max of samples `[lo, hi)`.
+    fn block(&self, data: &[f32], lo: usize, hi: usize) -> MinMax {
+        (lo..hi).fold(MinMax::EMPTY, |acc, i| acc.observe(self.y(data, i)))
+    }
+
+    fn rebuild(&mut self, data: &[f32]) {
         self.levels.clear();
-        self.n = ys.len();
-        if ys.is_empty() {
+        self.n = self.sample_count(data);
+        if self.n == 0 {
             return;
         }
-        let l0: Vec<MinMax> = ys.chunks(BRANCH).map(block_minmax).collect();
+        let block_count = self.n.div_ceil(BRANCH);
+        let l0: Vec<MinMax> = (0..block_count)
+            .map(|k| self.block(data, k * BRANCH, (k * BRANCH + BRANCH).min(self.n)))
+            .collect();
         self.levels.push(l0);
         while self.levels.last().unwrap().len() > 1 {
             let next: Vec<MinMax> = self
@@ -132,25 +180,28 @@ impl MinMaxPyramid {
         }
     }
 
-    /// Incrementally extend to cover the full buffer `ys` (old prefix + new
+    /// Incrementally extend to cover the full buffer `data` (old prefix + new
     /// tail) without a full rebuild (CCH-05). Only the tail block of each level
     /// is recomputed.
-    pub fn extend(&mut self, ys: &[f32]) {
+    pub fn extend(&mut self, data: &[f32]) {
         if self.levels.is_empty() {
-            self.rebuild(ys);
+            self.rebuild(data);
             return;
         }
-        if ys.len() <= self.n {
+        let new_n = self.sample_count(data);
+        if new_n <= self.n {
             return;
         }
 
         // L0: the last (possibly partial) block plus all new blocks.
         let from = self.n / BRANCH;
         self.levels[0].truncate(from);
-        for block in ys[from * BRANCH..].chunks(BRANCH) {
-            self.levels[0].push(block_minmax(block));
+        let block_count = new_n.div_ceil(BRANCH);
+        for k in from..block_count {
+            let mm = self.block(data, k * BRANCH, (k * BRANCH + BRANCH).min(new_n));
+            self.levels[0].push(mm);
         }
-        self.n = ys.len();
+        self.n = new_n;
 
         // Propagate the changed tail upward, growing the pyramid if needed.
         let mut child_from = from;
@@ -175,9 +226,9 @@ impl MinMaxPyramid {
         }
     }
 
-    /// Exact min/max over samples `[a, b)`; `ys` supplies the raw values for the
-    /// unaligned edge blocks. Returns [`MinMax::EMPTY`] for an empty range.
-    pub fn query(&self, ys: &[f32], a: usize, b: usize) -> MinMax {
+    /// Exact min/max over samples `[a, b)`; `data` is the backing buffer the
+    /// pyramid was built over (supplies raw values for the unaligned edges).
+    pub fn query(&self, data: &[f32], a: usize, b: usize) -> MinMax {
         let a = a.min(self.n);
         let b = b.min(self.n);
         if a >= b {
@@ -207,7 +258,7 @@ impl MinMaxPyramid {
                 i += span;
             } else {
                 // Unaligned edge: exact raw scan.
-                acc = acc.observe(ys[i]);
+                acc = acc.observe(self.y(data, i));
                 i += 1;
             }
         }
@@ -216,7 +267,7 @@ impl MinMaxPyramid {
 
     /// Per-pixel-column extents over `[a, b)` split into `columns` equal index
     /// ranges (CCH-07 — drives the decimated draw path, §9.5).
-    pub fn columns(&self, ys: &[f32], a: usize, b: usize, columns: usize) -> Vec<MinMax> {
+    pub fn columns(&self, data: &[f32], a: usize, b: usize, columns: usize) -> Vec<MinMax> {
         if columns == 0 || b <= a {
             return Vec::new();
         }
@@ -225,7 +276,7 @@ impl MinMaxPyramid {
             .map(|c| {
                 let lo = a + span * c / columns;
                 let hi = a + span * (c + 1) / columns;
-                self.query(ys, lo, hi)
+                self.query(data, lo, hi)
             })
             .collect()
     }
@@ -257,6 +308,17 @@ mod tests {
         let q = p.query(&ys, 10, 150);
         assert_eq!(q.min, 10.0);
         assert_eq!(q.max, 149.0);
+    }
+
+    #[test]
+    fn strided_pyramid_reads_the_y_channel_of_interleaved_xy() {
+        // xy = [x0,y0,x1,y1,...] with y = 10*i.
+        let xy: Vec<f32> = (0..100).flat_map(|i| [i as f32, 10.0 * i as f32]).collect();
+        let p = MinMaxPyramid::build_strided(&xy, 2, 1);
+        assert_eq!(p.len(), 100);
+        let q = p.query(&xy, 0, 100);
+        assert_eq!(q.min, 0.0);
+        assert_eq!(q.max, 990.0);
     }
 
     #[test]
@@ -309,7 +371,6 @@ mod tests {
             let full = MinMaxPyramid::build(&all);
 
             prop_assert_eq!(inc.len(), full.len());
-            // Spot-check several ranges agree with a full build (and the naive scan).
             let n = all.len();
             for &(a, b) in &[(0, n), (0, n / 2), (n / 3, n), (n / 4, 3 * n / 4)] {
                 if a < b {
