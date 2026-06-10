@@ -1,0 +1,11 @@
+[package]
+name = "delog-cache"
+description = "f32 render caches (the One Copy), min/max pyramid, cache manager"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+delog-core = { workspace = true }

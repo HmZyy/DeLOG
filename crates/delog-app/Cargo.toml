@@ -1,0 +1,19 @@
+[package]
+name = "delog-app"
+description = "DeLOG — drone flight log & live telemetry analyzer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "delog"
+path = "src/main.rs"
+
+[dependencies]
+delog-core = { workspace = true }
+delog-parsers = { workspace = true }
+delog-stream = { workspace = true }
+delog-cache = { workspace = true }
+delog-render = { workspace = true }

@@ -1,0 +1,12 @@
+[package]
+name = "delog-render"
+description = "Pure-wgpu renderer: pipelines, buffer manager, 2D plot pass, 3D scene"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+delog-core = { workspace = true }
+delog-cache = { workspace = true }
