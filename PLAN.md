@@ -834,11 +834,11 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 ### PAR — Parsers (M2 BIN, M6 ULog/tlog)
 
 - [x] **PAR-01** — `LogParser` trait, sniff scoring, registry, manual-override picker plumbing (§6.1)
-- [ ] **PAR-02** — Skip-and-diagnose malformed-record policy with byte offsets
-- [ ] **PAR-03** — AP BIN: FMT/FMTU/UNIT/MULT decode; full type-char table incl. fixed-point and `L`
-- [ ] **PAR-04** — AP BIN: raw-value storage + unit/multiplier into schema (§6.2)
-- [ ] **PAR-05** — AP BIN: instance split → `GPS[0]`/`GPS[1]`…
-- [ ] **PAR-06** — AP BIN: golden fixture test (topics/rows/values table)
+- [x] **PAR-02** — Skip-and-diagnose malformed-record policy with byte offsets
+- [x] **PAR-03** — AP BIN: FMT/FMTU/UNIT/MULT decode; full type-char table incl. fixed-point and `L`
+- [x] **PAR-04** — AP BIN: raw-value storage + unit/multiplier into schema (§6.2)
+- [x] **PAR-05** — AP BIN: instance split → `GPS[0]`/`GPS[1]`…
+- [x] **PAR-06** — AP BIN: golden fixture test (topics/rows/values table)
 - [ ] **PAR-07** — ULog: header + defs (F/I/P) + data (A/D/S) sections; nested flatten; padding skip; multi_id
 - [ ] **PAR-08** — ULog: dropouts → diagnostics + NaN gap injection (§6.3)
 - [ ] **PAR-09** — ULog: logged messages captured for auto-markers; params into source meta

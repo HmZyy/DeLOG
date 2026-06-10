@@ -44,24 +44,34 @@ impl CancelToken {
 
 /// Cancellation + byte-progress for one parse run.
 ///
-/// The progress throttle uses interior mutability so the whole control can be
-/// passed as `&ParseCtl` (matching the parser trait, §6.1); a `ParseCtl` belongs
-/// to a single parser thread and is not shared, so a `Cell` is sufficient.
+/// The caller opens the source (it knows the filename → label and byte size)
+/// and hands the parser this control carrying the resulting [`SourceId`]; the
+/// parser tags every batch with [`source`](Self::source). The progress throttle
+/// uses interior mutability so the whole control can be passed as `&ParseCtl`
+/// (matching the parser trait, §6.1); a `ParseCtl` belongs to a single parser
+/// thread and is not shared, so a `Cell` is sufficient.
 #[derive(Debug)]
 pub struct ParseCtl {
     cancel: CancelToken,
+    source: SourceId,
     /// Total source bytes, or 0 when unknown (e.g. a live stream).
     total_bytes: u64,
     last_reported: Cell<f32>,
 }
 
 impl ParseCtl {
-    pub fn new(cancel: CancelToken, total_bytes: u64) -> Self {
+    pub fn new(cancel: CancelToken, source: SourceId, total_bytes: u64) -> Self {
         Self {
             cancel,
+            source,
             total_bytes,
             last_reported: Cell::new(0.0),
         }
+    }
+
+    /// The source the caller opened for this parse.
+    pub fn source(&self) -> SourceId {
+        self.source
     }
 
     /// Force-read the cancellation flag. Prefer [`cancelled_at`](Self::cancelled_at)
@@ -88,7 +98,7 @@ impl ParseCtl {
     /// Emit a progress event to `sink` only if the fraction advanced at least
     /// [`PROGRESS_EPSILON`] since the last report (or first reached completion),
     /// keeping the event stream sparse.
-    pub fn report_progress(&self, sink: &mut dyn IngestSink, source: SourceId, bytes_read: u64) {
+    pub fn report_progress(&self, sink: &mut dyn IngestSink, bytes_read: u64) {
         if self.total_bytes == 0 {
             return;
         }
@@ -97,7 +107,7 @@ impl ParseCtl {
         let completed = frac >= 1.0 && last < 1.0;
         if completed || frac - last >= PROGRESS_EPSILON {
             self.last_reported.set(frac);
-            sink.progress(source, frac);
+            sink.progress(self.source, frac);
         }
     }
 }
@@ -135,7 +145,7 @@ mod tests {
     #[test]
     fn cancellation_is_only_observed_on_poll_boundaries() {
         let token = CancelToken::new();
-        let ctl = ParseCtl::new(token.clone(), 1_000);
+        let ctl = ParseCtl::new(token.clone(), SourceId(0), 1_000);
         token.cancel();
 
         // Off-boundary indices ignore the flag; the boundary observes it.
@@ -149,34 +159,34 @@ mod tests {
 
     #[test]
     fn fraction_clamps_and_handles_unknown_total() {
-        let ctl = ParseCtl::new(CancelToken::new(), 200);
+        let ctl = ParseCtl::new(CancelToken::new(), SourceId(0), 200);
         assert_eq!(ctl.fraction(0), 0.0);
         assert_eq!(ctl.fraction(100), 0.5);
         assert_eq!(ctl.fraction(500), 1.0);
 
-        let unknown = ParseCtl::new(CancelToken::new(), 0);
+        let unknown = ParseCtl::new(CancelToken::new(), SourceId(0), 0);
         assert_eq!(unknown.fraction(123), 0.0);
     }
 
     #[test]
     fn progress_is_throttled_to_meaningful_advances() {
-        let ctl = ParseCtl::new(CancelToken::new(), 10_000);
+        let ctl = ParseCtl::new(CancelToken::new(), SourceId(0), 10_000);
         let mut sink = ProgressSink::default();
 
         // 0.5% advances are swallowed; the 1% step and completion fire.
-        ctl.report_progress(&mut sink, SourceId(0), 50); // 0.5% — no event
-        ctl.report_progress(&mut sink, SourceId(0), 100); // 1.0% — event
-        ctl.report_progress(&mut sink, SourceId(0), 150); // 1.5% — no event
-        ctl.report_progress(&mut sink, SourceId(0), 10_000); // 100% — event
+        ctl.report_progress(&mut sink, 50); // 0.5% — no event
+        ctl.report_progress(&mut sink, 100); // 1.0% — event
+        ctl.report_progress(&mut sink, 150); // 1.5% — no event
+        ctl.report_progress(&mut sink, 10_000); // 100% — event
 
         assert_eq!(sink.events, vec![0.01, 1.0]);
     }
 
     #[test]
     fn unknown_total_emits_no_progress() {
-        let ctl = ParseCtl::new(CancelToken::new(), 0);
+        let ctl = ParseCtl::new(CancelToken::new(), SourceId(0), 0);
         let mut sink = ProgressSink::default();
-        ctl.report_progress(&mut sink, SourceId(0), 999);
+        ctl.report_progress(&mut sink, 999);
         assert!(sink.events.is_empty());
     }
 }
