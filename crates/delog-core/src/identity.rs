@@ -7,6 +7,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+use crate::time::{TimestampUs, effective_time_us};
+
 /// Dense source index into a snapshot/source vector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SourceId(pub u32);
@@ -32,6 +34,7 @@ pub struct FieldKey {
 pub struct SourceEntry {
     pub id: SourceId,
     pub label: String,
+    pub offset_us: TimestampUs,
 }
 
 /// Registered topic identity.
@@ -107,7 +110,11 @@ impl IdentityRegistry {
     pub fn add_source(&mut self, preferred_label: impl Into<String>) -> SourceId {
         let label = self.unique_source_label(preferred_label.into());
         let id = SourceId(next_id(self.sources.len(), "source"));
-        self.sources.push(SourceEntry { id, label });
+        self.sources.push(SourceEntry {
+            id,
+            label,
+            offset_us: 0,
+        });
         id
     }
 
@@ -166,6 +173,29 @@ impl IdentityRegistry {
 
     pub fn source(&self, id: SourceId) -> Option<&SourceEntry> {
         self.sources.get(id.index()).filter(|entry| entry.id == id)
+    }
+
+    pub fn set_source_offset_us(
+        &mut self,
+        id: SourceId,
+        offset_us: TimestampUs,
+    ) -> Option<TimestampUs> {
+        let source = self
+            .sources
+            .get_mut(id.index())
+            .filter(|entry| entry.id == id)?;
+        let old = source.offset_us;
+        source.offset_us = offset_us;
+        Some(old)
+    }
+
+    pub fn effective_source_time_us(
+        &self,
+        id: SourceId,
+        raw_us: TimestampUs,
+    ) -> Option<TimestampUs> {
+        let source = self.source(id)?;
+        effective_time_us(raw_us, source.offset_us)
     }
 
     pub fn topic(&self, id: TopicId) -> Option<&TopicEntry> {
@@ -308,5 +338,18 @@ mod tests {
 
         assert_eq!(ids.add_topic(SourceId(99), "GPS"), None);
         assert_eq!(ids.add_field(TopicId(99), "Lat"), None);
+    }
+
+    #[test]
+    fn source_offsets_default_to_zero_and_apply_to_effective_time() {
+        let mut ids = IdentityRegistry::new();
+        let source = ids.add_source("flight");
+
+        assert_eq!(ids.source(source).unwrap().offset_us, 0);
+        assert_eq!(ids.effective_source_time_us(source, 1_000), Some(1_000));
+
+        assert_eq!(ids.set_source_offset_us(source, -250), Some(0));
+        assert_eq!(ids.source(source).unwrap().offset_us, -250);
+        assert_eq!(ids.effective_source_time_us(source, 1_000), Some(750));
     }
 }
