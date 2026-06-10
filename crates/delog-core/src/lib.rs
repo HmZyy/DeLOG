@@ -5,8 +5,10 @@
 //! or UI.
 
 pub mod chunk;
+pub mod diagnostics;
 pub mod field_view;
 pub mod identity;
+pub mod ingest;
 pub mod mem;
 pub mod metrics;
 pub mod schema;
