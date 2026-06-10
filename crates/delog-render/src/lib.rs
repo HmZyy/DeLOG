@@ -19,4 +19,7 @@
 //!   registry (quad / fixed-wing / delta / marker arrive with TDV-08), with a
 //!   procedural cone as the unconditional fallback (PLAN.md §10.3).
 
+pub mod context;
 pub mod palette;
+
+pub use context::RenderContext;

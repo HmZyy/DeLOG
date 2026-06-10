@@ -41,6 +41,8 @@ eframe = { version = "0.34.3", default-features = false, features = [
 egui-wgpu = "0.34.3"
 egui_tiles = "0.15.0"
 wgpu = "29.0.3"
+bytemuck = { version = "1.23.2", features = ["derive"] }
+pollster = "0.4.0"
 
 # telemetry I/O
 mavlink = { version = "0.18.0", default-features = false, features = [

@@ -913,8 +913,11 @@ dependencies = [
 name = "delog-render"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "delog-cache",
  "delog-core",
+ "pollster",
+ "wgpu",
 ]
 
 [[package]]
