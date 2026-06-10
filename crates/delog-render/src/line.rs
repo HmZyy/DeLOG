@@ -122,10 +122,10 @@ impl LinePipeline {
 
     /// Encode one trace. `sample_count` is the number of `[x,y]` pairs resident
     /// in the storage buffer; each adjacent pair emits one six-vertex quad.
-    pub fn encode_trace<'pass>(
-        &'pass self,
-        pass: &mut wgpu::RenderPass<'pass>,
-        bind_group: &'pass wgpu::BindGroup,
+    pub fn encode_trace(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        bind_group: &wgpu::BindGroup,
         uniform_offset: u32,
         sample_count: u32,
     ) {
