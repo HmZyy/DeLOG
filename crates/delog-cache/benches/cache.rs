@@ -1,21 +1,92 @@
-//! Render-cache benches (PLAN.md §20.4, CCH-11). Expanded as the cache lands.
+//! Render-cache benches (PLAN.md §20.4, CCH-11): cache build throughput,
+//! y-range query at scale, and incremental append latency.
 
+use std::sync::Arc;
+
+use arrow::array::{ArrayRef, Float32Array, Int64Array};
+use arrow::datatypes::DataType;
 use criterion::{Criterion, criterion_group, criterion_main};
-use delog_cache::MinMaxPyramid;
+use delog_cache::{MinMaxPyramid, TraceCache};
+use delog_core::chunk::Chunk;
+use delog_core::identity::{FieldId, IdentityRegistry};
+use delog_core::schema::{FieldSchema, TopicSchema};
+use delog_core::snapshot::StoreSnapshot;
+use delog_core::store::TopicStore;
 
-fn bench_pyramid(c: &mut Criterion) {
-    let ys: Vec<f32> = (0..1_000_000).map(|i| (i as f32 * 0.001).sin()).collect();
-    let pyramid = MinMaxPyramid::build(&ys);
+const ROWS: i64 = 1_000_000;
+const CHUNK: i64 = 65_536;
+
+fn schema() -> Arc<TopicSchema> {
+    Arc::new(
+        TopicSchema::new(
+            "S",
+            [FieldSchema::new("V", DataType::Float32, Some("u"), 1.0).unwrap()],
+        )
+        .unwrap(),
+    )
+}
+
+/// A 1M-sample single-field snapshot split into 64Ki chunks.
+fn snapshot(rows: i64) -> (StoreSnapshot, FieldId) {
+    let schema = schema();
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    while start < rows {
+        let end = (start + CHUNK).min(rows);
+        let times = Int64Array::from((start..end).collect::<Vec<_>>());
+        let vals: ArrayRef = Arc::new(Float32Array::from(
+            (start..end)
+                .map(|i| (i as f32 * 0.001).sin())
+                .collect::<Vec<_>>(),
+        ));
+        chunks.push(Arc::new(
+            Chunk::try_new(times, vec![vals], &schema).unwrap(),
+        ));
+        start = end;
+    }
+    let store = Arc::new(TopicStore::from_chunks(Arc::clone(&schema), chunks).unwrap());
+
+    let mut identity = IdentityRegistry::new();
+    let source = identity.add_source("flight");
+    let topic = identity.add_topic(source, "S").unwrap();
+    let field = identity.add_field(topic, "V").unwrap();
+    (
+        StoreSnapshot::from_registry(&identity, [(topic, store)], 0).unwrap(),
+        field,
+    )
+}
+
+fn bench_cache(c: &mut Criterion) {
+    let ys: Vec<f32> = (0..ROWS).map(|i| (i as f32 * 0.001).sin()).collect();
+    let (snap, field) = snapshot(ROWS);
+    let cache = TraceCache::build(&snap, field, 0, 0).unwrap();
+
+    c.bench_function("cache_build_1M", |b| {
+        b.iter(|| TraceCache::build(&snap, field, 0, 0).unwrap());
+    });
+
+    // Mid-span y-range query over 1M samples (the auto-visible-Y hot path).
+    c.bench_function("cache_yquery_1M", |b| {
+        b.iter(|| cache.pyramid.query(&cache.xy, 100_000, 900_000));
+    });
 
     c.bench_function("pyramid_build_1M", |b| {
         b.iter(|| MinMaxPyramid::build(&ys));
     });
 
-    // A mid-span y-range query over 1M samples (the auto-visible-Y hot path).
-    c.bench_function("pyramid_yquery_1M", |b| {
-        b.iter(|| pyramid.query(&ys, 100_000, 900_000));
+    // Append one 512-row live chunk to a warm cache.
+    let (snap_small, field_s) = snapshot(ROWS - 512);
+    let (snap_full, _) = snapshot(ROWS);
+    c.bench_function("cache_append_512", |b| {
+        b.iter_batched(
+            || TraceCache::build(&snap_small, field_s, 0, 0).unwrap(),
+            |mut warm| {
+                warm.append(&snap_full, field_s);
+            },
+            criterion::BatchSize::SmallInput,
+        );
     });
 }
 
-criterion_group!(benches, bench_pyramid);
+criterion_group!(benches, bench_cache);
 criterion_main!(benches);

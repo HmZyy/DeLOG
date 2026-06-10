@@ -867,15 +867,15 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 
 - [x] **CCH-01** — `TraceCache` interleaved f32 xy + `origin_us` + high-water mark (§8.1)
 - [x] **CCH-02** — One-Copy builder: in-place chunk iteration, multiplier in f64→f32, NaN preserved (§8.2)
-- [ ] **CCH-03** — Async build job + "building cache…" plot state
+- [x] **CCH-03** — Async build job + "building cache…" plot state
 - [x] **CCH-04** — Incremental append on epoch change (never rebuild)
 - [x] **CCH-05** — Min/max pyramid (branch 64): build + incremental append (§8.4)
 - [x] **CCH-06** — `query(a,b)` O(log n) min/max + proptest equivalence vs naive scan
 - [x] **CCH-07** — Per-pixel-column min/max helper for decimated draw
-- [ ] **CCH-08** — `CacheManager`: FieldId map, epoch subscription, source-removal GC
-- [ ] **CCH-09** — LRU eviction of unplotted caches over budget; plotted pinned
-- [ ] **CCH-10** — Cache/pyramid byte accounting into MemBreakdown
-- [ ] **CCH-11** — Benches: build Msamples/s, yquery @100M, append latency
+- [x] **CCH-08** — `CacheManager`: FieldId map, epoch subscription, source-removal GC
+- [x] **CCH-09** — LRU eviction of unplotted caches over budget; plotted pinned
+- [x] **CCH-10** — Cache/pyramid byte accounting into MemBreakdown
+- [x] **CCH-11** — Benches: build Msamples/s, yquery @100M, append latency
 - [ ] **CCH-12** — _(backlog)_ split-double x or per-window rebase for >4000 s deep zoom (§8.3)
 
 ### GPU — Renderer (M3–M4, 3D pipelines M8)
