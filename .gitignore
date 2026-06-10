@@ -1,0 +1,14 @@
+build/
+.cache/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+*.user
+*.autosave
+*.swp
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
