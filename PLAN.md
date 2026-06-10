@@ -833,7 +833,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 
 ### PAR — Parsers (M2 BIN, M6 ULog/tlog)
 
-- [ ] **PAR-01** — `LogParser` trait, sniff scoring, registry, manual-override picker plumbing (§6.1)
+- [x] **PAR-01** — `LogParser` trait, sniff scoring, registry, manual-override picker plumbing (§6.1)
 - [ ] **PAR-02** — Skip-and-diagnose malformed-record policy with byte offsets
 - [ ] **PAR-03** — AP BIN: FMT/FMTU/UNIT/MULT decode; full type-char table incl. fixed-point and `L`
 - [ ] **PAR-04** — AP BIN: raw-value storage + unit/multiplier into schema (§6.2)
