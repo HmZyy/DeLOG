@@ -880,7 +880,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 
 ### GPU — Renderer (M3–M4, 3D pipelines M8)
 
-- [ ] **GPU-01** — `delog-render` context bootstrap from an external device/queue (egui's); no egui types
+- [x] **GPU-01** — `delog-render` context bootstrap from an external device/queue (egui's); no egui types
 - [ ] **GPU-02** — Buffer manager ledger: STORAGE buffers, ×1.5 growth via GPU-side copy, byte totals (§9.3)
 - [ ] **GPU-03** — Incremental `write_buffer` of appended span only; `gpu_full_uploads` counter (ZC-4)
 - [ ] **GPU-04** — Dynamic-offset uniform buffer for per-plot transform/style (no push constants)

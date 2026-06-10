@@ -10,3 +10,6 @@ rust-version.workspace = true
 [dependencies]
 delog-core = { workspace = true }
 delog-cache = { workspace = true }
+wgpu = { workspace = true }
+bytemuck = { workspace = true }
+pollster = { workspace = true }
