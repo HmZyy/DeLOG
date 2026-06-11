@@ -244,6 +244,7 @@ impl eframe::App for DelogApp {
                         origin_us: self.origin_us,
                         hover_mode: &mut self.hover_mode,
                         show_legend: &mut self.show_legend,
+                        playhead_us: snapshot.global_time_range().map(|_| self.playback.t_us),
                     };
                     let mut behavior = crate::workspace::Behavior::new(services);
                     self.workspace.tree.ui(&mut behavior, ui);
