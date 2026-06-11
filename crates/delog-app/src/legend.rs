@@ -42,7 +42,7 @@ pub fn ui(ui: &egui::Ui, plot_rect: egui::Rect, pane: &mut PlotPane, labels: &[(
                     };
                     ui.horizontal(|ui| {
                         // sRGB colour editor (matches the rendered trace).
-                        let mut color = srgb_to_color32(trace.color);
+                        let mut color = trace.color32();
                         if egui::color_picker::color_edit_button_srgba(
                             ui,
                             &mut color,
@@ -69,11 +69,6 @@ pub fn ui(ui: &egui::Ui, plot_rect: egui::Rect, pane: &mut PlotPane, labels: &[(
                 }
             });
         });
-}
-
-fn srgb_to_color32(c: [f32; 4]) -> egui::Color32 {
-    let to_u8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-    egui::Color32::from_rgba_unmultiplied(to_u8(c[0]), to_u8(c[1]), to_u8(c[2]), to_u8(c[3]))
 }
 
 fn color32_to_srgb(c: egui::Color32) -> [f32; 4] {
