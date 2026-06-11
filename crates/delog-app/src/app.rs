@@ -161,6 +161,39 @@ impl eframe::App for DelogApp {
             egui::Panel::bottom("timeline").show_inside(ui, |ui| {
                 crate::timeline::ui(ui, &mut self.playback, range, None, false);
             });
+
+            // Transport keys (§11, TLN-04) — skipped while a widget owns the
+            // keyboard (e.g. the browser filter box).
+            if !ui.ctx().egui_wants_keyboard_input() {
+                let (space, home, end, left, right) = ui.ctx().input(|i| {
+                    (
+                        i.key_pressed(egui::Key::Space),
+                        i.key_pressed(egui::Key::Home),
+                        i.key_pressed(egui::Key::End),
+                        i.key_pressed(egui::Key::ArrowLeft),
+                        i.key_pressed(egui::Key::ArrowRight),
+                    )
+                });
+                if space {
+                    self.playback.toggle();
+                }
+                if home {
+                    self.playback.jump_start(range);
+                }
+                if end {
+                    self.playback.jump_end(range);
+                }
+                if left || right {
+                    let reference = self.workspace.focused_first_field();
+                    let target = crate::timeline::step_target(
+                        &snapshot,
+                        reference,
+                        self.playback.t_us,
+                        right,
+                    );
+                    self.playback.scrub(target, range);
+                }
+            }
         }
 
         let diagnostics = self.session.diagnostics();
@@ -233,6 +266,9 @@ impl eframe::App for DelogApp {
                         for field in self.workspace.close_plot(tile_id) {
                             self.caches.unpin(field);
                         }
+                    }
+                    if let Some(tile_id) = actions.focus {
+                        self.workspace.focused = Some(tile_id);
                     }
                 });
             if let Some(fields) = dropped
