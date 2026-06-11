@@ -155,12 +155,17 @@ pub fn ui(ui: &mut egui::Ui, model: &BrowserModel) {
 }
 
 fn field_row(ui: &mut egui::Ui, field: &FieldNode) {
-    ui.horizontal(|ui| {
-        ui.label(&field.name);
-        ui.weak(field.dtype);
-        if let Some(unit) = &field.unit {
-            ui.weak(format!("[{unit}]"));
-        }
+    // The row is a drag source carrying its FieldId; the plot pane is the drop
+    // zone (PLT-13).
+    let id = egui::Id::new(("field", field.id.0));
+    ui.dnd_drag_source(id, field.id, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(&field.name);
+            ui.weak(field.dtype);
+            if let Some(unit) = &field.unit {
+                ui.weak(format!("[{unit}]"));
+            }
+        });
     });
 }
 
