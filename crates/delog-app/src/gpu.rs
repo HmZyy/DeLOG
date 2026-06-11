@@ -14,11 +14,12 @@ use std::sync::{Arc, Mutex};
 use delog_cache::{CacheManager, MinMax};
 use delog_core::identity::FieldId;
 use delog_render::{
-    BufferManager, GpuErrorHub, LinePipeline, MinMaxColPipeline, PlotUniform, RenderContext,
-    ScatterPipeline, StepPipeline, UniformRing,
+    BufferManager, GpuErrorHub, Grid3dPipeline, GridUniform, LinePipeline, MinMaxColPipeline,
+    PlotUniform, RenderContext, ScatterPipeline, Scene3dTarget, StepPipeline, UniformRing,
 };
 use eframe::{egui_wgpu, wgpu};
 
+use crate::camera::OrbitCamera;
 use crate::plot::{PlotPane, TraceMode, ViewX};
 
 /// Switch to the decimated min/max path above this many samples per pixel
@@ -59,12 +60,13 @@ impl GpuBridge {
             Arc::new(render_state.queue.clone()),
         );
         let srgb_target = render_state.target_format.is_srgb();
+        let scene = SceneResources::new(ctx.clone());
         let resources = PlotCallbackResources::new(ctx, render_state.target_format);
-        render_state
-            .renderer
-            .write()
-            .callback_resources
-            .insert(resources);
+        {
+            let mut renderer = render_state.renderer.write();
+            renderer.callback_resources.insert(resources);
+            renderer.callback_resources.insert(scene);
+        }
 
         Self {
             available: true,
@@ -252,6 +254,95 @@ impl GpuBridge {
             plot_rect,
             ScenePaintCallback { items },
         ));
+    }
+
+    /// Render the 3D scene (grid + axes for now) for `camera` into the
+    /// offscreen [`Scene3dTarget`], resolve it, and return an egui texture id
+    /// the caller composites with `ui.image`/`painter().image` (PLAN.md §9.1,
+    /// TDV-01). The offscreen pass is submitted on our own queue during
+    /// `update()`, so the texture is ready before eframe paints this frame.
+    pub fn render_scene(
+        &self,
+        frame: &eframe::Frame,
+        ui: &egui::Ui,
+        rect: egui::Rect,
+        camera: &OrbitCamera,
+    ) -> Option<egui::TextureId> {
+        if !self.available {
+            return None;
+        }
+        let render_state = frame.wgpu_render_state()?;
+        let ppp = ui.ctx().pixels_per_point();
+        let px_w = (rect.width() * ppp).round().max(1.0) as u32;
+        let px_h = (rect.height() * ppp).round().max(1.0) as u32;
+        let device = render_state.device.clone();
+        let mut renderer = render_state.renderer.write();
+
+        // Render into the offscreen target and take a handle to its resolved
+        // color view (cloning the view ends the resource borrow so the
+        // texture-registration calls below can borrow the renderer mutably).
+        let (view, resized, existing) = {
+            let res = renderer.callback_resources.get_mut::<SceneResources>()?;
+            let resized = res.target.width() != px_w || res.target.height() != px_h;
+            res.target.resize(px_w, px_h);
+
+            let vp = camera.view_proj(px_w as f32 / px_h as f32);
+            let inv = vp.inverse();
+            let fade_start = (camera.distance * 0.5).max(2.0);
+            let fade_end = (camera.distance * 8.0).clamp(40.0, 1800.0);
+            res.grid.set_uniform(
+                &res.ctx,
+                &GridUniform::new(
+                    vp.to_cols_array_2d(),
+                    inv.to_cols_array_2d(),
+                    camera.eye().to_array(),
+                    1.0,
+                    fade_start,
+                    fade_end,
+                ),
+            );
+
+            let clear = wgpu::Color {
+                r: 0.07,
+                g: 0.078,
+                b: 0.10,
+                a: 1.0,
+            };
+            let mut enc =
+                res.ctx
+                    .device()
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("delog-scene-encoder"),
+                    });
+            {
+                let mut pass = res.target.begin_pass(&mut enc, clear);
+                res.grid.draw(&mut pass);
+            }
+            res.ctx.queue().submit([enc.finish()]);
+            (res.target.resolve_view().clone(), resized, res.texture_id)
+        };
+
+        let id = match existing {
+            Some(id) => {
+                if resized {
+                    renderer.update_egui_texture_from_wgpu_texture(
+                        &device,
+                        &view,
+                        wgpu::FilterMode::Linear,
+                        id,
+                    );
+                }
+                id
+            }
+            None => renderer.register_native_texture(&device, &view, wgpu::FilterMode::Linear),
+        };
+        if existing != Some(id) {
+            renderer
+                .callback_resources
+                .get_mut::<SceneResources>()?
+                .texture_id = Some(id);
+        }
+        Some(id)
     }
 }
 
@@ -441,6 +532,35 @@ impl PlotCallbackResources {
         for field in stale {
             self.buffers.remove(field);
             self.col_buffers.remove(field);
+        }
+    }
+}
+
+/// Offscreen 3D-scene resources held in egui_wgpu's callback map (TDV-01).
+/// The grid pipeline matches the target's MSAA/format; `texture_id` is the
+/// egui handle to the resolved color, (re)pointed when the pane resizes.
+struct SceneResources {
+    ctx: RenderContext,
+    target: Scene3dTarget,
+    grid: Grid3dPipeline,
+    texture_id: Option<egui::TextureId>,
+}
+
+impl SceneResources {
+    fn new(ctx: RenderContext) -> Self {
+        // Start at 1×1; the first `render_scene` resizes to the pane.
+        let target = Scene3dTarget::new(ctx.clone(), 1, 1);
+        let grid = Grid3dPipeline::new(
+            &ctx,
+            target.color_format(),
+            target.depth_format(),
+            target.sample_count(),
+        );
+        Self {
+            ctx,
+            target,
+            grid,
+            texture_id: None,
         }
     }
 }
