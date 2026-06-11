@@ -12,7 +12,7 @@ use delog_core::identity::FieldId;
 use delog_core::snapshot::StoreSnapshot;
 
 use crate::axes;
-use crate::camera::OrbitCamera;
+use crate::camera::{CameraMode, SceneCamera};
 use crate::gpu::{self, GpuBridge, PaneView};
 use crate::hover::{self, HoverTarget};
 use crate::legend;
@@ -26,11 +26,11 @@ pub enum Pane {
     Scene3D(Scene3dPane),
 }
 
-/// State for a 3D scene pane: just the orbit camera in v1 (vehicles, cameras
-/// and trajectories arrive with later TDV items).
+/// State for a 3D scene pane: the camera (Orbit/Track/Free). Vehicles and
+/// per-vehicle trajectories arrive with later TDV items.
 #[derive(Debug, Default)]
 pub struct Scene3dPane {
-    pub camera: OrbitCamera,
+    pub camera: SceneCamera,
 }
 
 impl Default for Pane {
@@ -439,55 +439,69 @@ impl egui_tiles::Behavior<Pane> for Behavior<'_> {
 }
 
 impl Behavior<'_> {
-    /// 3D scene pane (TDV-01): orbit with a left-drag, zoom with the wheel,
-    /// double-click to reset. The scene renders offscreen and composites here
-    /// as an egui image; a middle-drag still moves the tile.
+    /// 3D scene pane (TDV-01/02). A thin top strip switches camera mode
+    /// (Orbit / Track / Free); the rest is the view. Orbit/Track: left-drag
+    /// orbits, wheel zooms. Free: left-drag looks, WASD + E/Q fly, wheel moves
+    /// forward. Double-click resets; a middle-drag moves the tile.
     fn scene_ui(
         &mut self,
         ui: &mut egui::Ui,
         tile_id: egui_tiles::TileId,
         pane: &mut Scene3dPane,
     ) -> egui_tiles::UiResponse {
-        let rect = ui.available_rect_before_wrap();
-        let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
+        let full = ui.available_rect_before_wrap();
+        let controls_h = 26.0;
+        let controls_rect =
+            egui::Rect::from_min_size(full.min, egui::vec2(full.width(), controls_h));
+        let view_rect =
+            egui::Rect::from_min_max(egui::pos2(full.left(), full.top() + controls_h), full.max);
+
+        // Camera-mode selector strip (kept out of the view rect so it never
+        // competes with camera drag).
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(controls_rect.shrink(4.0))
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            |ui| {
+                ui.label("Camera:");
+                for (mode, label) in [
+                    (CameraMode::Orbit, "Orbit"),
+                    (CameraMode::Track, "Track"),
+                    (CameraMode::Free, "Free"),
+                ] {
+                    if ui
+                        .selectable_label(pane.camera.mode == mode, label)
+                        .clicked()
+                    {
+                        pane.camera.set_mode(mode);
+                    }
+                }
+            },
+        );
+
+        let response = ui.allocate_rect(view_rect, egui::Sense::click_and_drag());
         if response.clicked() || response.drag_started() || response.secondary_clicked() {
             self.actions.focus = Some(tile_id);
         }
-
-        // Orbit on primary drag (grab-and-rotate); pitch clamped in the camera.
-        if response.dragged_by(egui::PointerButton::Primary) {
-            let d = response.drag_delta();
-            const SENS: f32 = 0.008;
-            pane.camera.orbit(-d.x * SENS, d.y * SENS);
-        }
-        // Wheel zoom while the pointer is over the pane.
-        if response.hovered() {
-            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-            if scroll != 0.0 {
-                pane.camera.zoom((0.9985_f32).powf(scroll));
-            }
-        }
-        if response.double_clicked() {
-            pane.camera = OrbitCamera::default();
-        }
+        self.handle_scene_interaction(ui, &response, pane);
 
         // 3d_frame (§16, GPU-24): CPU cost of building + encoding the scene.
         let rendered = {
             let _t = self.services.metrics.scope("3d_frame");
             self.services
                 .gpu
-                .render_scene(self.services.frame, ui, rect, &pane.camera)
+                .render_scene(self.services.frame, ui, view_rect, &pane.camera)
         };
         if let Some(tex) = rendered {
             ui.painter().image(
                 tex,
-                rect,
+                view_rect,
                 egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                 egui::Color32::WHITE,
             );
         } else {
             ui.painter().text(
-                rect.center(),
+                view_rect.center(),
                 egui::Align2::CENTER_CENTER,
                 "3D view unavailable",
                 egui::FontId::proportional(14.0),
@@ -499,6 +513,73 @@ impl Behavior<'_> {
             egui_tiles::UiResponse::DragStarted
         } else {
             egui_tiles::UiResponse::None
+        }
+    }
+
+    /// Per-mode camera interaction for the scene view (TDV-01/02).
+    fn handle_scene_interaction(
+        &self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        pane: &mut Scene3dPane,
+    ) {
+        let drag = response.dragged_by(egui::PointerButton::Primary);
+        let d = response.drag_delta();
+        let scroll = if response.hovered() {
+            ui.input(|i| i.smooth_scroll_delta.y)
+        } else {
+            0.0
+        };
+
+        // Track currently follows the world origin: there is no vehicle to
+        // bind to until TDV-09. The orbit offset is preserved, so this becomes
+        // a live vehicle-follow simply by feeding the vehicle's pose here.
+        if pane.camera.mode == CameraMode::Track {
+            pane.camera.set_track_target(glam::Vec3::ZERO);
+        }
+
+        match pane.camera.mode {
+            CameraMode::Orbit | CameraMode::Track => {
+                const SENS: f32 = 0.008;
+                if drag {
+                    pane.camera.orbit.orbit(-d.x * SENS, d.y * SENS);
+                }
+                if scroll != 0.0 {
+                    pane.camera.orbit.zoom((0.9985_f32).powf(scroll));
+                }
+                if response.double_clicked() {
+                    let mode = pane.camera.mode;
+                    pane.camera.orbit = Default::default();
+                    pane.camera.mode = mode;
+                }
+            }
+            CameraMode::Free => {
+                const LOOK: f32 = 0.005;
+                if drag {
+                    pane.camera.free.look(d.x * LOOK, -d.y * LOOK);
+                }
+                // WASD + E/Q fly, scaled by frame time; wheel nudges forward.
+                if response.hovered() {
+                    let dt = ui.input(|i| i.stable_dt).min(0.1);
+                    let speed = 14.0 * dt;
+                    let key = |k| ui.input(|i| i.key_down(k)) as i32 as f32;
+                    let fwd = key(egui::Key::W) - key(egui::Key::S);
+                    let right = key(egui::Key::D) - key(egui::Key::A);
+                    let up = key(egui::Key::E) - key(egui::Key::Q);
+                    if fwd != 0.0 || right != 0.0 || up != 0.0 {
+                        pane.camera.free.fly(fwd * speed, right * speed, up * speed);
+                        // Keep flying smooth while keys are held (§11 idle policy
+                        // only relaxes during active interaction).
+                        ui.ctx().request_repaint();
+                    }
+                    if scroll != 0.0 {
+                        pane.camera.free.fly(scroll * 0.05, 0.0, 0.0);
+                    }
+                }
+                if response.double_clicked() {
+                    pane.camera.free = Default::default();
+                }
+            }
         }
     }
 

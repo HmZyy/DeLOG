@@ -20,7 +20,7 @@ use delog_render::{
 };
 use eframe::{egui_wgpu, wgpu};
 
-use crate::camera::OrbitCamera;
+use crate::camera::SceneCamera;
 use crate::plot::{PlotPane, TraceMode, ViewX};
 
 /// Switch to the decimated min/max path above this many samples per pixel
@@ -267,7 +267,7 @@ impl GpuBridge {
         frame: &eframe::Frame,
         ui: &egui::Ui,
         rect: egui::Rect,
-        camera: &OrbitCamera,
+        camera: &SceneCamera,
     ) -> Option<egui::TextureId> {
         if !self.available {
             return None;
@@ -290,8 +290,9 @@ impl GpuBridge {
             let vp = camera.view_proj(px_w as f32 / px_h as f32);
             let vp_cols = vp.to_cols_array_2d();
             let inv = vp.inverse();
-            let fade_start = (camera.distance * 0.5).max(2.0);
-            let fade_end = (camera.distance * 8.0).clamp(40.0, 1800.0);
+            let fade_dist = camera.fade_distance();
+            let fade_start = (fade_dist * 0.5).max(2.0);
+            let fade_end = (fade_dist * 8.0).clamp(40.0, 1800.0);
             res.grid.set_uniform(
                 &res.ctx,
                 &GridUniform::new(
