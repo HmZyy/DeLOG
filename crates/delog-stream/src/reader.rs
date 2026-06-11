@@ -14,7 +14,7 @@ use std::net::{TcpStream, UdpSocket};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
 use delog_parsers::mavlink::{DecodedFrame, FrameCounters, FrameDecoder};
@@ -27,6 +27,43 @@ const READ_TIMEOUT: Duration = Duration::from_millis(200);
 /// Transport read buffer; comfortably larger than any single MAVLink frame.
 const READ_BUF: usize = 8192;
 
+/// A connected link goes `Stale` after this long without a valid frame (§7.2).
+pub const STALE_AFTER: Duration = Duration::from_secs(2);
+/// …and `Lost` after this long (§7.2).
+pub const LOST_AFTER: Duration = Duration::from_secs(10);
+
+/// Link liveness for the UI indicator (§7.2, LIV-03). `Connecting` is the state
+/// before the first valid frame; afterwards liveness is a function of the time
+/// since the last frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkState {
+    Connecting,
+    Connected,
+    Stale,
+    Lost,
+}
+
+impl LinkState {
+    /// Classify from the time since the last valid frame (`None` = none yet).
+    pub fn classify(since_last_rx: Option<Duration>) -> Self {
+        match since_last_rx {
+            None => Self::Connecting,
+            Some(d) if d >= LOST_AFTER => Self::Lost,
+            Some(d) if d >= STALE_AFTER => Self::Stale,
+            Some(_) => Self::Connected,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Connecting => "Connecting",
+            Self::Connected => "Connected",
+            Self::Stale => "Stale",
+            Self::Lost => "Lost",
+        }
+    }
+}
+
 /// Live, lock-free per-link counters (§7.2). Cloned into the reader thread and
 /// read by the UI; values are monotonic, so `Relaxed` ordering is enough.
 #[derive(Debug, Default)]
@@ -37,11 +74,18 @@ pub struct LinkCounters {
     seq_gaps: AtomicU64,
     resync_bytes: AtomicU64,
     unknown_messages: AtomicU64,
+    /// Millis (since the reader's start instant) of the last valid frame; 0
+    /// until the first frame arrives. Drives [`LinkReader::state`].
+    last_rx_millis: AtomicU64,
 }
 
 impl LinkCounters {
     fn add_rx_bytes(&self, n: u64) {
         self.rx_bytes.fetch_add(n, Ordering::Relaxed);
+    }
+
+    fn mark_rx(&self, millis: u64) {
+        self.last_rx_millis.store(millis, Ordering::Relaxed);
     }
 
     /// Mirror the decoder's absolute counters into the shared atomics.
@@ -87,6 +131,7 @@ pub struct LinkStats {
 pub struct LinkReader {
     stop: Arc<AtomicBool>,
     counters: Arc<LinkCounters>,
+    started: Instant,
     join: Option<JoinHandle<io::Result<()>>>,
 }
 
@@ -99,16 +144,18 @@ impl LinkReader {
         let transport = open(endpoint)?;
         let stop = Arc::new(AtomicBool::new(false));
         let counters = Arc::new(LinkCounters::default());
+        let started = Instant::now();
         let join = {
             let stop = Arc::clone(&stop);
             let counters = Arc::clone(&counters);
             thread::Builder::new()
                 .name(format!("link-reader {endpoint}"))
-                .spawn(move || pump(transport, &stop, &counters, &frames))?
+                .spawn(move || pump(transport, &stop, &counters, started, &frames))?
         };
         Ok(Self {
             stop,
             counters,
+            started,
             join: Some(join),
         })
     }
@@ -116,6 +163,17 @@ impl LinkReader {
     /// A live snapshot of this link's counters.
     pub fn stats(&self) -> LinkStats {
         self.counters.snapshot()
+    }
+
+    /// Current link liveness (§7.2). `Connecting` until the first valid frame,
+    /// then `Connected`/`Stale`/`Lost` by time since the last frame.
+    pub fn state(&self) -> LinkState {
+        if self.counters.rx_frames.load(Ordering::Relaxed) == 0 {
+            return LinkState::Connecting;
+        }
+        let now = self.started.elapsed().as_millis() as u64;
+        let last = self.counters.last_rx_millis.load(Ordering::Relaxed);
+        LinkState::classify(Some(Duration::from_millis(now.saturating_sub(last))))
     }
 
     /// Request the reader thread to stop (effective within [`READ_TIMEOUT`]).
@@ -150,6 +208,7 @@ fn pump(
     mut transport: Box<dyn Read + Send>,
     stop: &AtomicBool,
     counters: &LinkCounters,
+    started: Instant,
     frames: &Sender<DecodedFrame>,
 ) -> io::Result<()> {
     let mut decoder = FrameDecoder::new();
@@ -167,6 +226,7 @@ fn pump(
         counters.add_rx_bytes(n as u64);
         decoder.push(&buf[..n]);
         while let Some(frame) = decoder.next_frame() {
+            counters.mark_rx(started.elapsed().as_millis() as u64);
             if frames.send(frame).is_err() {
                 return Ok(()); // consumer gone
             }
@@ -320,7 +380,7 @@ mod tests {
         let (tx, rx) = unbounded();
         let stop = AtomicBool::new(false);
         let counters = LinkCounters::default();
-        pump(Box::new(reader), &stop, &counters, &tx).expect("pump");
+        pump(Box::new(reader), &stop, &counters, Instant::now(), &tx).expect("pump");
         drop(tx);
         (rx.try_iter().collect(), counters.snapshot())
     }
@@ -375,7 +435,27 @@ mod tests {
         let counters = LinkCounters::default();
         let reader = ChunkReader::new(vec![v2(0, &attitude(1.0))]);
         // Must return Ok rather than panic on the failed send.
-        pump(Box::new(reader), &stop, &counters, &tx).expect("clean exit");
+        pump(Box::new(reader), &stop, &counters, Instant::now(), &tx).expect("clean exit");
+    }
+
+    #[test]
+    fn link_state_classifies_by_time_since_last_frame() {
+        assert_eq!(LinkState::classify(None), LinkState::Connecting);
+        assert_eq!(
+            LinkState::classify(Some(Duration::from_millis(500))),
+            LinkState::Connected
+        );
+        assert_eq!(
+            LinkState::classify(Some(Duration::from_secs(5))),
+            LinkState::Stale
+        );
+        assert_eq!(
+            LinkState::classify(Some(Duration::from_secs(30))),
+            LinkState::Lost
+        );
+        // Boundaries are inclusive of the worse state.
+        assert_eq!(LinkState::classify(Some(STALE_AFTER)), LinkState::Stale);
+        assert_eq!(LinkState::classify(Some(LOST_AFTER)), LinkState::Lost);
     }
 
     #[test]
@@ -400,6 +480,7 @@ mod tests {
 
         let reader = LinkReader::spawn(&Endpoint::TcpClient { remote: addr }, tx).unwrap();
         let (mut conn, _) = listener.accept().unwrap();
+        assert_eq!(reader.state(), LinkState::Connecting); // no frame yet
         conn.write_all(&v2(7, &attitude(1.5))).unwrap();
         conn.flush().unwrap();
 
@@ -408,6 +489,7 @@ mod tests {
             .expect("frame over tcp");
         assert_eq!(roll_of(&frame), 1.5);
         assert!(reader.stats().rx_frames >= 1);
+        assert_eq!(reader.state(), LinkState::Connected); // a fresh frame arrived
 
         reader.join().expect("clean join"); // connection still open: stop-driven
     }

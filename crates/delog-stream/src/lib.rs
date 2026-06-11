@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 
 pub mod reader;
 
-pub use reader::{LinkCounters, LinkReader, LinkStats};
+pub use reader::{LinkCounters, LinkReader, LinkState, LinkStats};
 
 /// Configured live-link endpoint (PLAN.md §7.1, LIV-01). UDP-client and
 /// TCP-server modes were removed by decision — the GCS-side patterns are
