@@ -15,7 +15,8 @@ use delog_cache::{CacheManager, MinMax};
 use delog_core::identity::FieldId;
 use delog_render::{
     BufferManager, GpuErrorHub, Grid3dPipeline, GridUniform, LinePipeline, MinMaxColPipeline,
-    PlotUniform, RenderContext, ScatterPipeline, Scene3dTarget, StepPipeline, UniformRing,
+    PlotUniform, RenderContext, ScatterPipeline, Scene3dTarget, StepPipeline, Traj3dPipeline,
+    Traj3dUniform, UniformRing,
 };
 use eframe::{egui_wgpu, wgpu};
 
@@ -287,13 +288,14 @@ impl GpuBridge {
             res.target.resize(px_w, px_h);
 
             let vp = camera.view_proj(px_w as f32 / px_h as f32);
+            let vp_cols = vp.to_cols_array_2d();
             let inv = vp.inverse();
             let fade_start = (camera.distance * 0.5).max(2.0);
             let fade_end = (camera.distance * 8.0).clamp(40.0, 1800.0);
             res.grid.set_uniform(
                 &res.ctx,
                 &GridUniform::new(
-                    vp.to_cols_array_2d(),
+                    vp_cols,
                     inv.to_cols_array_2d(),
                     camera.eye().to_array(),
                     1.0,
@@ -301,6 +303,14 @@ impl GpuBridge {
                     fade_end,
                 ),
             );
+            // Refresh each scene line's view_proj for this frame (color is fixed).
+            for line in &res.lines {
+                res.ctx.queue().write_buffer(
+                    &line.uniform,
+                    0,
+                    bytemuck::bytes_of(&Traj3dUniform::new(vp_cols, line.color)),
+                );
+            }
 
             let clear = wgpu::Color {
                 r: 0.07,
@@ -317,6 +327,9 @@ impl GpuBridge {
             {
                 let mut pass = res.target.begin_pass(&mut enc, clear);
                 res.grid.draw(&mut pass);
+                for line in &res.lines {
+                    res.traj.draw(&mut pass, &line.bind, line.count);
+                }
             }
             res.ctx.queue().submit([enc.finish()]);
             (res.target.resolve_view().clone(), resized, res.texture_id)
@@ -539,10 +552,27 @@ impl PlotCallbackResources {
 /// Offscreen 3D-scene resources held in egui_wgpu's callback map (TDV-01).
 /// The grid pipeline matches the target's MSAA/format; `texture_id` is the
 /// egui handle to the resolved color, (re)pointed when the pane resizes.
+/// One static scene polyline (axis gizmo / demo path): its points + a uniform
+/// whose `view_proj` is rewritten each frame, with a stable bind group.
+struct SceneTraj {
+    /// Per-frame uniform (view_proj rewritten each frame).
+    uniform: wgpu::Buffer,
+    /// Holds an internal reference to the points storage buffer, keeping it
+    /// alive — the points are uploaded once and never change.
+    bind: wgpu::BindGroup,
+    count: u32,
+    color: [f32; 4],
+}
+
 struct SceneResources {
     ctx: RenderContext,
     target: Scene3dTarget,
     grid: Grid3dPipeline,
+    traj: Traj3dPipeline,
+    /// Vertical world Y-axis line (the up axis the ground grid can't draw) plus
+    /// a demo lemniscate path (TDV-11 smoke test) shown until a vehicle is
+    /// configured.
+    lines: Vec<SceneTraj>,
     texture_id: Option<egui::TextureId>,
 }
 
@@ -556,11 +586,73 @@ impl SceneResources {
             target.depth_format(),
             target.sample_count(),
         );
+        let traj = Traj3dPipeline::new(
+            &ctx,
+            target.color_format(),
+            target.depth_format(),
+            target.sample_count(),
+        );
+
+        // Vertical Y (Up) axis, green — completes the §12.3 axes gizmo.
+        let y_axis = vec![[0.0, 0.0, 0.0], [0.0, 12.0, 0.0]];
+        // Demo lemniscate (Gerono figure-8 along X) floating above the grid
+        // with a gentle altitude bob, so it reads as a 3D path.
+        let demo: Vec<[f32; 3]> = (0..=160)
+            .map(|i| {
+                let t = i as f32 / 160.0 * std::f32::consts::TAU;
+                let a = 9.0;
+                [
+                    a * t.cos(),
+                    3.0 + 1.5 * (2.0 * t).sin(),
+                    a * t.sin() * t.cos(),
+                ]
+            })
+            .collect();
+
+        let lines = vec![
+            SceneTraj::new(&ctx, &traj, &y_axis, [0.25, 0.9, 0.3, 1.0]),
+            SceneTraj::new(&ctx, &traj, &demo, [1.0, 0.6, 0.15, 1.0]),
+        ];
+
         Self {
             ctx,
             target,
             grid,
+            traj,
+            lines,
             texture_id: None,
+        }
+    }
+}
+
+impl SceneTraj {
+    fn new(
+        ctx: &RenderContext,
+        pipeline: &Traj3dPipeline,
+        pts: &[[f32; 3]],
+        color: [f32; 4],
+    ) -> Self {
+        let data: Vec<[f32; 4]> = pts.iter().map(|p| [p[0], p[1], p[2], 1.0]).collect();
+        let points = ctx.device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("delog-scene-traj-points"),
+            size: std::mem::size_of_val(data.as_slice()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        ctx.queue()
+            .write_buffer(&points, 0, bytemuck::cast_slice(&data));
+        let uniform = ctx.device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("delog-scene-traj-uniform"),
+            size: std::mem::size_of::<Traj3dUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind = pipeline.bind_group(ctx, &points, &uniform);
+        Self {
+            uniform,
+            bind,
+            count: pts.len() as u32,
+            color,
         }
     }
 }

@@ -942,7 +942,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [ ] **TDV-08** — Embedded GLBs (quad/fixed-wing/delta/marker) + custom GLB load + cone fallback
 - [ ] **TDV-09** — Per-vehicle color/path color/scale/show; multiple vehicles
 - [ ] **TDV-10** — Trajectory line + current pose marker synced to playhead
-- [ ] **TDV-11** — Rebuild on config/offset change; demo lemniscate when unconfigured
+- [~] **TDV-11** — Rebuild on config/offset change; demo lemniscate when unconfigured — demo lemniscate path (static, via `traj3d`) + the green vertical Y-axis gizmo are drawn in the scene whenever no vehicle is configured (i.e. always, until TDV-03). Animation and rebuild-on-config/offset ride with vehicle config (TDV-03/04)
 - [ ] **TDV-12** — _(later)_ slerp pose; time-windowed trail
 
 ### BRW — Data browser (M2 base, M4 polish)
