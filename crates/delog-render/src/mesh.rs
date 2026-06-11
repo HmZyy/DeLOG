@@ -1,0 +1,530 @@
+//! Vehicle mesh pipeline + GLB upload path (PLAN.md §9.2 `mesh`, §12.4, GPU-22).
+//!
+//! A small Lambert-plus-ambient pipeline draws vehicle models against the 3D
+//! scene. Meshes are static geometry, so this uses a real vertex+index buffer
+//! (the §9.4 no-vertex-buffer rule is about sample data that scales, not models).
+//!
+//! [`MeshCpu`] is decoded from a GLB ([`load_glb`]) or generated procedurally
+//! ([`MeshCpu::cone`] — the unconditional fallback so a missing/!broken asset
+//! never blanks the scene), then uploaded to a [`MeshGpu`]. Matrices arrive as
+//! raw `[[f32; 4]; 4]`, keeping the crate math-library-free (§3.2).
+
+use crate::context::RenderContext;
+use wgpu::util::DeviceExt;
+
+/// Errors decoding a GLB into a [`MeshCpu`].
+#[derive(Debug, thiserror::Error)]
+pub enum MeshError {
+    #[error("glTF decode failed: {0}")]
+    Gltf(#[from] gltf::Error),
+    #[error("GLB contains no mesh primitive")]
+    NoMesh,
+    #[error("mesh primitive has no POSITION attribute")]
+    NoPositions,
+}
+
+/// One interleaved vertex: position + normal, both world-space model units.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct Vertex {
+    pub pos: [f32; 3],
+    pub normal: [f32; 3],
+}
+
+/// CPU-side mesh: interleaved vertices + a triangle index list.
+#[derive(Clone, Debug, Default)]
+pub struct MeshCpu {
+    pub vertices: Vec<Vertex>,
+    pub indices: Vec<u32>,
+}
+
+impl MeshCpu {
+    /// Build from parallel position/normal/index arrays, computing smooth
+    /// normals when none are supplied.
+    pub fn new(
+        positions: Vec<[f32; 3]>,
+        normals: Option<Vec<[f32; 3]>>,
+        indices: Vec<u32>,
+    ) -> Self {
+        let normals = normals.unwrap_or_else(|| smooth_normals(&positions, &indices));
+        let vertices = positions
+            .into_iter()
+            .zip(normals)
+            .map(|(pos, normal)| Vertex { pos, normal })
+            .collect();
+        Self { vertices, indices }
+    }
+
+    /// A procedural cone (apex at +Y, base on the `y = 0` plane) — the
+    /// unconditional model fallback (§12.4). Flat-shaded (per-face normals).
+    pub fn cone(segments: u32, radius: f32, height: f32) -> Self {
+        let segments = segments.max(3);
+        let apex = [0.0, height, 0.0];
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        let tau = std::f32::consts::TAU;
+        for i in 0..segments {
+            let a0 = i as f32 / segments as f32 * tau;
+            let a1 = (i + 1) as f32 / segments as f32 * tau;
+            let p0 = [radius * a0.cos(), 0.0, radius * a0.sin()];
+            let p1 = [radius * a1.cos(), 0.0, radius * a1.sin()];
+            // Side facet with an outward flat normal (winding apex→p1→p0 so
+            // the normal points up-and-out, away from the cone axis).
+            let n = face_normal(apex, p1, p0);
+            let base = vertices.len() as u32;
+            vertices.push(Vertex {
+                pos: apex,
+                normal: n,
+            });
+            vertices.push(Vertex { pos: p0, normal: n });
+            vertices.push(Vertex { pos: p1, normal: n });
+            indices.extend([base, base + 1, base + 2]);
+            // Base cap triangle (center, p1, p0), facing −Y.
+            let down = [0.0, -1.0, 0.0];
+            let cap = vertices.len() as u32;
+            vertices.push(Vertex {
+                pos: [0.0, 0.0, 0.0],
+                normal: down,
+            });
+            vertices.push(Vertex {
+                pos: p1,
+                normal: down,
+            });
+            vertices.push(Vertex {
+                pos: p0,
+                normal: down,
+            });
+            indices.extend([cap, cap + 1, cap + 2]);
+        }
+        Self { vertices, indices }
+    }
+}
+
+fn face_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> [f32; 3] {
+    let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+    let n = [
+        ab[1] * ac[2] - ab[2] * ac[1],
+        ab[2] * ac[0] - ab[0] * ac[2],
+        ab[0] * ac[1] - ab[1] * ac[0],
+    ];
+    let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+    if len > 1e-12 {
+        [n[0] / len, n[1] / len, n[2] / len]
+    } else {
+        [0.0, 1.0, 0.0]
+    }
+}
+
+/// Per-vertex smooth normals: sum each triangle's face normal into its three
+/// vertices, then normalize.
+fn smooth_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
+    let mut acc = vec![[0.0f32; 3]; positions.len()];
+    for tri in indices.chunks_exact(3) {
+        let (i0, i1, i2) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+        let n = face_normal(positions[i0], positions[i1], positions[i2]);
+        for &i in &[i0, i1, i2] {
+            acc[i][0] += n[0];
+            acc[i][1] += n[1];
+            acc[i][2] += n[2];
+        }
+    }
+    for n in &mut acc {
+        let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        if len > 1e-12 {
+            *n = [n[0] / len, n[1] / len, n[2] / len];
+        } else {
+            *n = [0.0, 1.0, 0.0];
+        }
+    }
+    acc
+}
+
+/// Decode the first mesh primitive of a GLB into a [`MeshCpu`] (GPU-22). Missing
+/// normals are computed smooth; missing indices become a flat `0..n` list.
+pub fn load_glb(bytes: &[u8]) -> Result<MeshCpu, MeshError> {
+    let (doc, buffers, _images) = gltf::import_slice(bytes)?;
+    let prim = doc
+        .meshes()
+        .flat_map(|m| m.primitives())
+        .find(|p| p.mode() == gltf::mesh::Mode::Triangles)
+        .ok_or(MeshError::NoMesh)?;
+
+    let reader = prim.reader(|b| buffers.get(b.index()).map(|d| d.0.as_slice()));
+    let positions: Vec<[f32; 3]> = reader
+        .read_positions()
+        .ok_or(MeshError::NoPositions)?
+        .collect();
+    let normals: Option<Vec<[f32; 3]>> = reader.read_normals().map(|n| n.collect());
+    let indices: Vec<u32> = match reader.read_indices() {
+        Some(idx) => idx.into_u32().collect(),
+        None => (0..positions.len() as u32).collect(),
+    };
+    Ok(MeshCpu::new(positions, normals, indices))
+}
+
+/// GPU-resident mesh: vertex + index buffers and the index count to draw.
+pub struct MeshGpu {
+    vertices: wgpu::Buffer,
+    indices: wgpu::Buffer,
+    index_count: u32,
+}
+
+impl MeshGpu {
+    pub fn upload(ctx: &RenderContext, mesh: &MeshCpu) -> Self {
+        let vertices = ctx
+            .device()
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("delog-mesh-vertices"),
+                contents: bytemuck::cast_slice(&mesh.vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+        let indices = ctx
+            .device()
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("delog-mesh-indices"),
+                contents: bytemuck::cast_slice(&mesh.indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+        Self {
+            vertices,
+            indices,
+            index_count: mesh.indices.len() as u32,
+        }
+    }
+}
+
+/// Per-mesh uniform. Matrices are raw column-major arrays; `normal_mat` is the
+/// inverse-transpose of `model` (upper 3×3 used).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct MeshUniform {
+    pub view_proj: [[f32; 4]; 4],
+    pub model: [[f32; 4]; 4],
+    pub normal_mat: [[f32; 4]; 4],
+    /// Direction TO the light (world), xyz; should be normalized.
+    pub light_dir: [f32; 4],
+    pub color: [f32; 4],
+    /// x = ambient factor (0..1).
+    pub params: [f32; 4],
+}
+
+impl MeshUniform {
+    pub fn new(
+        view_proj: [[f32; 4]; 4],
+        model: [[f32; 4]; 4],
+        normal_mat: [[f32; 4]; 4],
+        light_dir: [f32; 3],
+        color: [f32; 4],
+        ambient: f32,
+    ) -> Self {
+        Self {
+            view_proj,
+            model,
+            normal_mat,
+            light_dir: [light_dir[0], light_dir[1], light_dir[2], 0.0],
+            color,
+            params: [ambient, 0.0, 0.0, 0.0],
+        }
+    }
+}
+
+/// Render pipeline + bind layout for vehicle meshes.
+pub struct MeshPipeline {
+    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+}
+
+impl MeshPipeline {
+    pub fn new(
+        ctx: &RenderContext,
+        color_format: wgpu::TextureFormat,
+        depth_format: wgpu::TextureFormat,
+        sample_count: u32,
+    ) -> Self {
+        let device = ctx.device();
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("delog-mesh.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("../../../assets/shaders/mesh.wgsl").into(),
+            ),
+        });
+
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("delog-mesh-bind-layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(
+                        std::mem::size_of::<MeshUniform>() as u64
+                    ),
+                },
+                count: None,
+            }],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("delog-mesh-pipeline-layout"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
+
+        let vertex_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Vertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x3,
+                    offset: 0,
+                    shader_location: 0,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x3,
+                    offset: 12,
+                    shader_location: 1,
+                },
+            ],
+        };
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("delog-mesh-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[vertex_layout],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                // Double-sided in v1: a winding mismatch in a user GLB should
+                // dim a face, never make the model vanish.
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: depth_format,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: sample_count,
+                ..Default::default()
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: color_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        Self {
+            pipeline,
+            bind_group_layout,
+        }
+    }
+
+    pub fn bind_group(&self, ctx: &RenderContext, uniform: &wgpu::Buffer) -> wgpu::BindGroup {
+        ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("delog-mesh-bind-group"),
+            layout: &self.bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform.as_entire_binding(),
+            }],
+        })
+    }
+
+    /// Draw an uploaded mesh with the given bind group.
+    pub fn draw(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        bind_group: &wgpu::BindGroup,
+        mesh: &MeshGpu,
+    ) {
+        if mesh.index_count == 0 {
+            return;
+        }
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, bind_group, &[]);
+        pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+        pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+        pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Scene3dTarget;
+    use glam::{Mat4, Vec3};
+
+    /// Build a minimal single-buffer GLB with a POSITION accessor + indices and
+    /// no normals — exercises the decode + smooth-normal path.
+    fn tiny_glb(positions: &[[f32; 3]], indices: &[u32]) -> Vec<u8> {
+        // BIN: indices (u32) then positions (f32 vec3).
+        let mut bin = Vec::new();
+        for &i in indices {
+            bin.extend_from_slice(&i.to_le_bytes());
+        }
+        let pos_offset = bin.len();
+        for p in positions {
+            for &c in p {
+                bin.extend_from_slice(&c.to_le_bytes());
+            }
+        }
+        while bin.len() % 4 != 0 {
+            bin.push(0);
+        }
+        let idx_len = indices.len() * 4;
+        let pos_len = positions.len() * 12;
+        let (mut mn, mut mx) = ([f32::MAX; 3], [f32::MIN; 3]);
+        for p in positions {
+            for k in 0..3 {
+                mn[k] = mn[k].min(p[k]);
+                mx[k] = mx[k].max(p[k]);
+            }
+        }
+        let json = format!(
+            r#"{{"asset":{{"version":"2.0"}},"scene":0,"scenes":[{{"nodes":[0]}}],"nodes":[{{"mesh":0}}],"meshes":[{{"primitives":[{{"attributes":{{"POSITION":1}},"indices":0,"mode":4}}]}}],"buffers":[{{"byteLength":{bl}}}],"bufferViews":[{{"buffer":0,"byteOffset":0,"byteLength":{idx_len},"target":34963}},{{"buffer":0,"byteOffset":{pos_offset},"byteLength":{pos_len},"target":34962}}],"accessors":[{{"bufferView":0,"componentType":5125,"count":{nidx},"type":"SCALAR"}},{{"bufferView":1,"componentType":5126,"count":{npos},"type":"VEC3","min":[{mn0},{mn1},{mn2}],"max":[{mx0},{mx1},{mx2}]}}]}}"#,
+            bl = bin.len(),
+            nidx = indices.len(),
+            npos = positions.len(),
+            mn0 = mn[0],
+            mn1 = mn[1],
+            mn2 = mn[2],
+            mx0 = mx[0],
+            mx1 = mx[1],
+            mx2 = mx[2],
+        );
+        let mut json_bytes = json.into_bytes();
+        while json_bytes.len() % 4 != 0 {
+            json_bytes.push(b' ');
+        }
+
+        let total = 12 + 8 + json_bytes.len() + 8 + bin.len();
+        let mut glb = Vec::with_capacity(total);
+        glb.extend_from_slice(&0x46546C67u32.to_le_bytes()); // "glTF"
+        glb.extend_from_slice(&2u32.to_le_bytes());
+        glb.extend_from_slice(&(total as u32).to_le_bytes());
+        glb.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
+        glb.extend_from_slice(&0x4E4F534Au32.to_le_bytes()); // "JSON"
+        glb.extend_from_slice(&json_bytes);
+        glb.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+        glb.extend_from_slice(&0x004E4942u32.to_le_bytes()); // "BIN\0"
+        glb.extend_from_slice(&bin);
+        glb
+    }
+
+    #[test]
+    fn cone_has_consistent_geometry_and_unit_normals() {
+        let cone = MeshCpu::cone(16, 1.0, 2.0);
+        assert_eq!(cone.indices.len(), 16 * 6); // side + cap tri per segment
+        assert_eq!(cone.vertices.len(), 16 * 6);
+        for v in &cone.vertices {
+            let n = v.normal;
+            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            assert!((len - 1.0).abs() < 1e-4, "normal not unit: {len}");
+        }
+    }
+
+    #[test]
+    fn load_glb_decodes_positions_indices_and_computes_normals() {
+        let positions = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        let indices = [0u32, 1, 2];
+        let glb = tiny_glb(&positions, &indices);
+
+        let mesh = load_glb(&glb).expect("GLB should decode");
+        assert_eq!(mesh.vertices.len(), 3);
+        assert_eq!(mesh.indices, vec![0, 1, 2]);
+        // The triangle lies in the z=0 plane → computed normal is ±Z.
+        let n = mesh.vertices[0].normal;
+        assert!(n[2].abs() > 0.99, "expected a ±Z normal, got {n:?}");
+    }
+
+    #[test]
+    fn cone_renders_shaded_with_lit_and_shadowed_facets() {
+        let Some(ctx) = RenderContext::headless() else {
+            eprintln!("no wgpu adapter — skipping mesh render test");
+            return;
+        };
+        let (w, h) = (96u32, 96u32);
+        let target = Scene3dTarget::new(ctx.clone(), w, h);
+        let pipe = MeshPipeline::new(
+            &ctx,
+            target.color_format(),
+            target.depth_format(),
+            target.sample_count(),
+        );
+        let gpu = MeshGpu::upload(&ctx, &MeshCpu::cone(24, 1.2, 2.5));
+
+        // Camera looking at the cone from the side; light from the +X/+Y/+Z
+        // front so some facets face it and others fall to ambient.
+        let proj = Mat4::perspective_rh(0.9, w as f32 / h as f32, 0.1, 100.0);
+        let view = Mat4::look_at_rh(Vec3::new(4.0, 2.5, 4.0), Vec3::new(0.0, 1.0, 0.0), Vec3::Y);
+        let model = Mat4::IDENTITY;
+        let uni_data = MeshUniform::new(
+            (proj * view).to_cols_array_2d(),
+            model.to_cols_array_2d(),
+            model.inverse().transpose().to_cols_array_2d(),
+            Vec3::new(1.0, 1.0, 1.0).normalize().to_array(),
+            [0.85, 0.85, 0.9, 1.0],
+            0.2,
+        );
+        let uni = ctx
+            .device()
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("mesh-test-uniform"),
+                contents: bytemuck::bytes_of(&uni_data),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let bind = pipe.bind_group(&ctx, &uni);
+
+        let mut enc = ctx
+            .device()
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = target.begin_pass(&mut enc, wgpu::Color::BLACK);
+            pipe.draw(&mut pass, &bind, &gpu);
+        }
+        ctx.queue().submit([enc.finish()]);
+        ctx.device()
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
+
+        let img = target.read_rgba();
+        // Non-background (lit) pixels: brighter than pure black.
+        let mut lit: Vec<u8> = Vec::new();
+        for x in 0..w {
+            for y in 0..h {
+                let g = img.pixel(x, y)[1];
+                if g > 12 {
+                    lit.push(g);
+                }
+            }
+        }
+        assert!(
+            lit.len() > 100,
+            "cone should cover a chunk of pixels, got {}",
+            lit.len()
+        );
+        let (min, max) = (*lit.iter().min().unwrap(), *lit.iter().max().unwrap());
+        // N·L shading ⇒ a real brightness range (not flat-shaded).
+        assert!(
+            max as i32 - min as i32 > 50,
+            "expected shading gradient, got min={min} max={max}"
+        );
+    }
+}
