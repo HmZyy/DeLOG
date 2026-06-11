@@ -295,15 +295,8 @@ fn matches_query(query: &str, path: &str) -> bool {
 }
 
 /// Render the browser tree with its search box (BRW-01/02). `query` and
-/// `selection` persist in app state across frames; `plotted` maps plotted
-/// fields to their trace colour for the BRW-04 highlight.
-pub fn ui(
-    ui: &mut egui::Ui,
-    model: &BrowserModel,
-    query: &mut String,
-    selection: &mut Selection,
-    plotted: &std::collections::HashMap<FieldId, egui::Color32>,
-) {
+/// `selection` persist in app state across frames.
+pub fn ui(ui: &mut egui::Ui, model: &BrowserModel, query: &mut String, selection: &mut Selection) {
     ui.heading("Data");
     ui.separator();
 
@@ -367,13 +360,7 @@ pub fn ui(
                             .open(filtering.then_some(true))
                             .show(ui, |ui| {
                                 for field in &topic.fields {
-                                    field_row(
-                                        ui,
-                                        field,
-                                        plotted.get(&field.id).copied(),
-                                        selection,
-                                        &visible,
-                                    );
+                                    field_row(ui, field, selection, &visible);
                                 }
                             });
                     }
@@ -382,13 +369,7 @@ pub fn ui(
     });
 }
 
-fn field_row(
-    ui: &mut egui::Ui,
-    field: &FieldNode,
-    trace_color: Option<egui::Color32>,
-    selection: &mut Selection,
-    visible: &[FieldId],
-) {
+fn field_row(ui: &mut egui::Ui, field: &FieldNode, selection: &mut Selection, visible: &[FieldId]) {
     // The row is a drag source carrying `Vec<FieldId>` — the multi-selection
     // when the dragged row is part of it (§10.7, BRW-05); plot panes and tile
     // edges are the drop zones (PLT-13).
@@ -396,19 +377,10 @@ fn field_row(
     let payload = selection.drag_payload(field.id, visible);
     ui.dnd_drag_source(id, payload, |ui| {
         ui.horizontal(|ui| {
-            // Plotted-field highlight (BRW-04): trace-coloured dot + bold name.
-            let name = if trace_color.is_some() {
-                egui::RichText::new(&field.name).strong()
-            } else {
-                egui::RichText::new(&field.name)
-            };
-            if let Some(color) = trace_color {
-                ui.colored_label(color, "●");
-            }
             // Click handling lives on the label so dragging stays with the
             // outer drag source.
             if ui
-                .selectable_label(selection.contains(field.id), name)
+                .selectable_label(selection.contains(field.id), &field.name)
                 .clicked()
             {
                 let modifiers = ui.input(|i| i.modifiers);

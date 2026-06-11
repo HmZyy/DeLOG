@@ -531,7 +531,6 @@ Tree: **Source → Topic → Field**, each field row showing dtype, sample count
 
 - **Fuzzy search/filter** over full paths (`gps hacc` matches `GPS[0].HAcc`).
 - **Natural sort** (`GPS[2]` before `GPS[10]`).
-- **Plotted-field highlight:** a color dot matching the trace color; bold name.
 - Multi-select (ctrl/shift) → drag to plot (§10.7).
 - Row context menu: plot in new pane / copy `FieldKey` / stats popup (§17.1) / set time offset (drag-µs widget + dialog) / remove source.
 - **Favorites**: pin fields to a top section; persisted in layouts.
@@ -950,7 +949,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **BRW-01** — Source→Topic→Field tree with dtype/count/unit chips (§13)
 - [x] **BRW-02** — Fuzzy search/filter over full paths
 - [x] **BRW-03** — Natural sort
-- [x] **BRW-04** — Plotted-field highlight (color dot + bold)
+- [x] **BRW-04** — ~~Plotted-field highlight (color dot + bold)~~ — built then removed by decision; field rows carry no plotted-state styling
 - [x] **BRW-05** — Multi-select + drag payload `Vec<FieldId>`
 - [ ] **BRW-06** — Context: plot-in-new-pane / copy key / stats popup / remove source
 - [ ] **BRW-07** — Per-source time-offset widget (drag-µs + dialog)
