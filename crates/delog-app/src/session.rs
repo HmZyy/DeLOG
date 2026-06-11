@@ -152,6 +152,12 @@ impl Session {
         self.store.load()
     }
 
+    /// The shared metrics registry (PLAN.md §16) — instrumentation reads/writes
+    /// through this; the perf dock (PRF-*) snapshots it at 4 Hz.
+    pub fn metrics(&self) -> &Arc<MetricsRegistry> {
+        &self.metrics
+    }
+
     pub fn diagnostics(&self) -> Vec<Diag> {
         self.diagnostics.lock().unwrap().clone()
     }
