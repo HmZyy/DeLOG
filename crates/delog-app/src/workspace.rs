@@ -35,6 +35,47 @@ pub enum SplitDirection {
     Vertical,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DropEdge {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+impl DropEdge {
+    fn from_pos(rect: egui::Rect, pos: egui::Pos2) -> Option<Self> {
+        if !rect.contains(pos) {
+            return None;
+        }
+
+        let edge_w = (rect.width() * 0.18).clamp(24.0, 72.0);
+        let edge_h = (rect.height() * 0.18).clamp(24.0, 72.0);
+        let distances = [
+            (Self::Left, pos.x - rect.left(), edge_w),
+            (Self::Right, rect.right() - pos.x, edge_w),
+            (Self::Top, pos.y - rect.top(), edge_h),
+            (Self::Bottom, rect.bottom() - pos.y, edge_h),
+        ];
+        distances
+            .into_iter()
+            .filter(|(_, distance, limit)| *distance <= *limit)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(edge, _, _)| edge)
+    }
+
+    fn split_direction(self) -> SplitDirection {
+        match self {
+            Self::Left | Self::Right => SplitDirection::Horizontal,
+            Self::Top | Self::Bottom => SplitDirection::Vertical,
+        }
+    }
+
+    fn insert_before(self) -> bool {
+        matches!(self, Self::Left | Self::Top)
+    }
+}
+
 pub struct Workspace {
     pub tree: TileTree,
 }
@@ -59,6 +100,29 @@ impl Workspace {
     }
 
     pub fn split_plot(&mut self, tile_id: egui_tiles::TileId, direction: SplitDirection) {
+        self.split_plot_at(tile_id, direction, false);
+    }
+
+    pub fn split_plot_with_trace(
+        &mut self,
+        tile_id: egui_tiles::TileId,
+        edge: DropEdge,
+        field: FieldId,
+    ) -> bool {
+        let Some(new_pane) =
+            self.split_plot_at(tile_id, edge.split_direction(), edge.insert_before())
+        else {
+            return false;
+        };
+        self.add_trace_to_plot(new_pane, field)
+    }
+
+    fn split_plot_at(
+        &mut self,
+        tile_id: egui_tiles::TileId,
+        direction: SplitDirection,
+        before: bool,
+    ) -> Option<egui_tiles::TileId> {
         let new_pane = self.tree.tiles.insert_pane(Pane::Plot(PlotPane::default()));
         let kind = match direction {
             SplitDirection::Horizontal => egui_tiles::ContainerKind::Horizontal,
@@ -66,19 +130,20 @@ impl Workspace {
         };
 
         if self.tree.root() == Some(tile_id) {
+            let children = ordered_pair(tile_id, new_pane, before);
             let root = self
                 .tree
                 .tiles
-                .insert_container(egui_tiles::Container::new(kind, vec![tile_id, new_pane]));
+                .insert_container(egui_tiles::Container::new(kind, children));
             self.tree.root = Some(root);
-            return;
+            return Some(new_pane);
         }
 
         if let Some(parent_id) = self.tree.tiles.parent_of(tile_id) {
             let wrap_in_new_container = {
                 let Some(egui_tiles::Tile::Container(parent)) = self.tree.tiles.get_mut(parent_id)
                 else {
-                    return;
+                    return None;
                 };
 
                 if parent.kind() == kind {
@@ -88,7 +153,7 @@ impl Workspace {
                                 .children
                                 .iter()
                                 .position(|id| *id == tile_id)
-                                .map_or(linear.children.len(), |i| i + 1);
+                                .map_or(linear.children.len(), |i| i + usize::from(!before));
                             linear.children.insert(index, new_pane);
                         }
                         egui_tiles::Container::Tabs(tabs) => {
@@ -104,10 +169,11 @@ impl Workspace {
             };
 
             if wrap_in_new_container {
+                let children = ordered_pair(tile_id, new_pane, before);
                 let replacement = self
                     .tree
                     .tiles
-                    .insert_container(egui_tiles::Container::new(kind, vec![tile_id, new_pane]));
+                    .insert_container(egui_tiles::Container::new(kind, children));
                 if let Some(egui_tiles::Tile::Container(parent)) =
                     self.tree.tiles.get_mut(parent_id)
                 {
@@ -117,7 +183,18 @@ impl Workspace {
                     }
                 }
             }
+            return Some(new_pane);
         }
+
+        None
+    }
+
+    fn add_trace_to_plot(&mut self, tile_id: egui_tiles::TileId, field: FieldId) -> bool {
+        let Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) = self.tree.tiles.get_mut(tile_id)
+        else {
+            return false;
+        };
+        pane.add_trace(field)
     }
 
     pub fn close_plot(&mut self, tile_id: egui_tiles::TileId) -> Vec<FieldId> {
@@ -156,6 +233,7 @@ impl Default for Workspace {
 #[derive(Default)]
 pub struct WorkspaceActions {
     pub split: Option<(egui_tiles::TileId, SplitDirection)>,
+    pub edge_drop: Option<(egui_tiles::TileId, DropEdge, FieldId)>,
     pub close: Option<egui_tiles::TileId>,
     pub remove_trace: Vec<FieldId>,
 }
@@ -264,10 +342,15 @@ impl Behavior<'_> {
         let (response, dropped) =
             ui.dnd_drop_zone::<FieldId, ()>(frame_style, |ui| self.plot_body(ui, tile_id, pane));
 
-        if let Some(field) = dropped
-            && pane.add_trace(*field)
-        {
-            self.services.caches.request(*field, self.services.snapshot);
+        if let Some(field) = dropped {
+            let pointer = response.response.ctx.input(|i| i.pointer.interact_pos());
+            if let Some(edge) =
+                pointer.and_then(|pos| DropEdge::from_pos(response.response.rect, pos))
+            {
+                self.actions.edge_drop = Some((tile_id, edge, *field));
+            } else if pane.add_trace(*field) {
+                self.services.caches.request(*field, self.services.snapshot);
+            }
         }
 
         if response
@@ -514,6 +597,18 @@ fn y_unit(snapshot: &StoreSnapshot, pane: &PlotPane) -> Option<String> {
     store.schema.field_by_name(&entry.name)?.unit.clone()
 }
 
+fn ordered_pair(
+    existing: egui_tiles::TileId,
+    new_pane: egui_tiles::TileId,
+    before: bool,
+) -> Vec<egui_tiles::TileId> {
+    if before {
+        vec![new_pane, existing]
+    } else {
+        vec![existing, new_pane]
+    }
+}
+
 fn fields_from_removed_tile(tile: egui_tiles::Tile<Pane>) -> Vec<FieldId> {
     match tile {
         egui_tiles::Tile::Pane(Pane::Plot(pane)) => pane.fields().collect(),
@@ -569,6 +664,41 @@ mod tests {
                 if container.kind() == egui_tiles::ContainerKind::Vertical
                     && container.num_children() == 2
         )));
+    }
+
+    #[test]
+    fn edge_drop_splits_root_and_adds_trace_to_new_pane() {
+        let mut workspace = Workspace::new();
+        let root = workspace.tree.root().unwrap();
+
+        assert!(workspace.split_plot_with_trace(root, DropEdge::Left, FieldId(7)));
+
+        let root = workspace.tree.root().unwrap();
+        let Some(egui_tiles::Tile::Container(container)) = workspace.tree.tiles.get(root) else {
+            panic!("root should be a container after edge split");
+        };
+        assert_eq!(container.kind(), egui_tiles::ContainerKind::Horizontal);
+        let children = container.children_vec();
+        let new_pane = children[0];
+        let Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) = workspace.tree.tiles.get(new_pane)
+        else {
+            panic!("left child should be the new plot pane");
+        };
+        assert_eq!(pane.fields().collect::<Vec<_>>(), vec![FieldId(7)]);
+    }
+
+    #[test]
+    fn drop_edge_prefers_the_nearest_edge_inside_the_threshold() {
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(200.0, 100.0));
+        assert_eq!(
+            DropEdge::from_pos(rect, egui::pos2(3.0, 50.0)),
+            Some(DropEdge::Left)
+        );
+        assert_eq!(
+            DropEdge::from_pos(rect, egui::pos2(197.0, 50.0)),
+            Some(DropEdge::Right)
+        );
+        assert_eq!(DropEdge::from_pos(rect, rect.center()), None);
     }
 
     #[test]

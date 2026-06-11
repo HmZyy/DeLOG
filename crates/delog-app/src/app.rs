@@ -165,6 +165,7 @@ impl eframe::App for DelogApp {
             // The central panel is a fallback drop zone: dropping a field onto
             // empty workspace space plots it in the first pane (PLT-13).
             let frame_style = egui::Frame::default();
+            let mut handled_workspace_drop = false;
             let (_, dropped) =
                 ui.dnd_drop_zone::<delog_core::identity::FieldId, ()>(frame_style, |ui| {
                     self.gpu.begin_plot_frame(frame);
@@ -184,6 +185,12 @@ impl eframe::App for DelogApp {
                     if let Some((tile_id, direction)) = actions.split {
                         self.workspace.split_plot(tile_id, direction);
                     }
+                    if let Some((tile_id, edge, field)) = actions.edge_drop
+                        && self.workspace.split_plot_with_trace(tile_id, edge, field)
+                    {
+                        handled_workspace_drop = true;
+                        self.caches.request(field, &snapshot);
+                    }
                     if let Some(tile_id) = actions.close {
                         for field in self.workspace.close_plot(tile_id) {
                             self.caches.unpin(field);
@@ -191,6 +198,7 @@ impl eframe::App for DelogApp {
                     }
                 });
             if let Some(field) = dropped
+                && !handled_workspace_drop
                 && self.workspace.add_trace_to_first_plot(*field)
             {
                 self.caches.request(*field, &snapshot);
