@@ -19,7 +19,7 @@ use delog_core::identity::FieldId;
 use delog_core::snapshot::StoreSnapshot;
 use delog_core::store::TopicStore;
 
-use crate::pyramid::MinMaxPyramid;
+use crate::pyramid::{MinMax, MinMaxPyramid};
 
 /// The f32 render cache for one field.
 #[derive(Debug)]
@@ -137,6 +137,44 @@ impl TraceCache {
 
     pub fn is_empty(&self) -> bool {
         self.xy.is_empty()
+    }
+
+    /// x (seconds, rebased to `origin_us`) of sample `i`.
+    fn x_at(&self, i: usize) -> f32 {
+        self.xy[2 * i]
+    }
+
+    /// Sample index range `[a, b)` whose x falls in `[x0, x1]` (seconds). The x
+    /// channel is sorted, so this is two binary searches.
+    pub fn index_range(&self, x0: f32, x1: f32) -> (usize, usize) {
+        let n = self.samples();
+        let a = self.partition_point(0, n, |x| x < x0); // first x >= x0
+        let b = self.partition_point(a, n, |x| x <= x1); // first x > x1
+        (a, b)
+    }
+
+    /// First index in `[lo, hi)` whose x fails `pred` (the x channel is sorted,
+    /// so `pred` is monotone-true then monotone-false).
+    fn partition_point(&self, mut lo: usize, mut hi: usize, pred: impl Fn(f32) -> bool) -> usize {
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if pred(self.x_at(mid)) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
+    }
+
+    /// Min/max y over the visible x window `[x0, x1]` (seconds) — the
+    /// AutoVisible y range (PLT-06). One sample of context is included on each
+    /// side so a line entering/leaving the window is bounded.
+    pub fn y_range(&self, x0: f32, x1: f32) -> MinMax {
+        let (a, b) = self.index_range(x0, x1);
+        let a = a.saturating_sub(1);
+        let b = (b + 1).min(self.samples());
+        self.pyramid.query(&self.xy, a, b)
     }
 
     /// CPU bytes held (xy buffer + pyramid), for `MemBreakdown` (CCH-10).
@@ -317,6 +355,31 @@ mod tests {
         let q = cache.pyramid.query(&cache.xy, 0, 3);
         assert_eq!(q.min, 1.0);
         assert_eq!(q.max, 3.0);
+    }
+
+    #[test]
+    fn index_range_and_y_range_target_the_visible_window() {
+        // t = 0,1,2,3,4 s (µs), raw alt = 0,100,200,300,400 cm → 0..4 m.
+        let (snap, field) = snapshot_with(
+            vec![0, 1_000_000, 2_000_000, 3_000_000, 4_000_000],
+            vec![Some(0), Some(100), Some(200), Some(300), Some(400)],
+            0,
+        );
+        let cache = TraceCache::build(&snap, field, 0, 0).unwrap();
+
+        // Window [1.0, 3.0] s covers samples at indices 1,2,3.
+        let (a, b) = cache.index_range(1.0, 3.0);
+        assert_eq!((a, b), (1, 4));
+
+        // y over that window, with one sample of context each side, spans the
+        // full set here → 0..4.
+        let mm = cache.y_range(1.0, 3.0);
+        assert_eq!(mm.min, 0.0);
+        assert_eq!(mm.max, 4.0);
+
+        // A tight inner window still bounds correctly.
+        let mm = cache.y_range(2.0, 2.0);
+        assert!(mm.is_finite());
     }
 
     #[test]
