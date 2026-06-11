@@ -853,7 +853,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 
 - [x] **LIV-01** — `Endpoint` config model + connection dialog (UDP server, TCP client, serial+baud) — UDP-client/TCP-server modes removed by decision
 - [x] **LIV-02** — Reader thread with owned framing: v1/v2 sync, CRC, seq-gap counters (§7.2) — `LinkReader::spawn(endpoint)` opens UDP-server/TCP-client/serial with a read timeout, pumps bytes through the shared `FrameDecoder` on its own thread, emits `DecodedFrame`s on a channel, exposes lock-free `LinkStats` + clean stop/join
-- [ ] **LIV-03** — Link state machine + UI indicator (Connecting/Connected/Stale/Lost)
+- [~] **LIV-03** — Link state machine + UI indicator (Connecting/Connected/Stale/Lost) — `LinkState::classify` + `LinkReader::state()` (Connecting→Connected→Stale@2s→Lost@10s) done and tested; the egui indicator wires in with the app live-loop integration
 - [ ] **LIV-04** — Auto-reconnect (TCP/serial) with backoff
 - [ ] **LIV-05** — Build-script extractor: `MavMessage → fields`, zero-alloc; unknown-msg once-diag
 - [ ] **LIV-06** — sysid demux → source per (link,sysid); compid instance folding
