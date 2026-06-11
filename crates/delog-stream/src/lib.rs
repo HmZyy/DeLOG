@@ -7,17 +7,15 @@
 use std::fmt;
 use std::net::SocketAddr;
 
-/// Configured live-link endpoint (PLAN.md §7.1, LIV-01).
+/// Configured live-link endpoint (PLAN.md §7.1, LIV-01). UDP-client and
+/// TCP-server modes were removed by decision — the GCS-side patterns are
+/// UDP listen, TCP connect, and serial.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Endpoint {
     /// Listen for UDP datagrams on `bind` (GCS-style).
     UdpServer { bind: SocketAddr },
-    /// Send/receive UDP datagrams to/from `remote`.
-    UdpClient { remote: SocketAddr },
     /// Connect to a TCP server.
     TcpClient { remote: SocketAddr },
-    /// Listen for one TCP client.
-    TcpServer { bind: SocketAddr },
     /// Open a serial device at `baud`.
     Serial { path: String, baud: u32 },
 }
@@ -26,9 +24,7 @@ pub enum Endpoint {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EndpointKind {
     UdpServer,
-    UdpClient,
     TcpClient,
-    TcpServer,
     Serial,
 }
 
@@ -54,29 +50,19 @@ impl Endpoint {
     pub fn kind(&self) -> EndpointKind {
         match self {
             Self::UdpServer { .. } => EndpointKind::UdpServer,
-            Self::UdpClient { .. } => EndpointKind::UdpClient,
             Self::TcpClient { .. } => EndpointKind::TcpClient,
-            Self::TcpServer { .. } => EndpointKind::TcpServer,
             Self::Serial { .. } => EndpointKind::Serial,
         }
     }
 }
 
 impl EndpointKind {
-    pub const ALL: [Self; 5] = [
-        Self::UdpServer,
-        Self::UdpClient,
-        Self::TcpClient,
-        Self::TcpServer,
-        Self::Serial,
-    ];
+    pub const ALL: [Self; 3] = [Self::UdpServer, Self::TcpClient, Self::Serial];
 
     pub const fn label(self) -> &'static str {
         match self {
             Self::UdpServer => "UDP server",
-            Self::UdpClient => "UDP client",
             Self::TcpClient => "TCP client",
-            Self::TcpServer => "TCP server",
             Self::Serial => "Serial",
         }
     }
@@ -86,9 +72,7 @@ impl fmt::Display for Endpoint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UdpServer { bind } => write!(f, "udp-server://{bind}"),
-            Self::UdpClient { remote } => write!(f, "udp-client://{remote}"),
             Self::TcpClient { remote } => write!(f, "tcp-client://{remote}"),
-            Self::TcpServer { bind } => write!(f, "tcp-server://{bind}"),
             Self::Serial { path, baud } => write!(f, "serial://{path}@{baud}"),
         }
     }
@@ -118,16 +102,7 @@ mod tests {
     #[test]
     fn endpoint_kind_labels_cover_all_modes() {
         let labels: Vec<_> = EndpointKind::ALL.iter().map(|kind| kind.label()).collect();
-        assert_eq!(
-            labels,
-            vec![
-                "UDP server",
-                "UDP client",
-                "TCP client",
-                "TCP server",
-                "Serial"
-            ]
-        );
+        assert_eq!(labels, vec!["UDP server", "TCP client", "Serial"]);
     }
 
     #[test]

@@ -320,11 +320,11 @@ CSV import (column→field mapping dialog) and the Arrow IPC fast-reload cache (
 ```rust
 pub enum Endpoint {
     UdpServer { bind: SocketAddr },        // listen (GCS-style)
-    UdpClient { remote: SocketAddr },
     TcpClient { remote: SocketAddr },
-    TcpServer { bind: SocketAddr },
     Serial    { path: String, baud: u32 },
 }
+// UDP-client and TCP-server modes were built and then removed by decision:
+// the GCS-side patterns are UDP listen, TCP connect, and serial.
 ```
 
 Each configured link runs **one reader thread**. Configurable endpoint/port/baud lives in a connection dialog; multiple simultaneous links are supported, each becoming its own source family.
@@ -850,7 +850,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 
 ### LIV — Live streaming (M7)
 
-- [x] **LIV-01** — `Endpoint` config model + connection dialog (UDP srv/cli, TCP cli/srv, serial+baud)
+- [x] **LIV-01** — `Endpoint` config model + connection dialog (UDP server, TCP client, serial+baud) — UDP-client/TCP-server modes removed by decision
 - [ ] **LIV-02** — Reader thread with owned framing: v1/v2 sync, CRC, seq-gap counters (§7.2)
 - [ ] **LIV-03** — Link state machine + UI indicator (Connecting/Connected/Stale/Lost)
 - [ ] **LIV-04** — Auto-reconnect (TCP/serial) with backoff

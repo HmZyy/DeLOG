@@ -10,6 +10,7 @@ rust-version.workspace = true
 [dependencies]
 delog-core = { workspace = true }
 arrow = { workspace = true }
+mavlink = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
