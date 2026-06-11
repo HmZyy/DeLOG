@@ -119,9 +119,16 @@ impl StepPipeline {
         })
     }
 
-    /// Encode one stepped trace. `sample_count` is the number of `[x,y]` pairs;
-    /// each adjacent pair emits two six-vertex quads.
-    pub fn encode_trace(
+    /// Bind this pipeline once for a run of traces (GPU-11).
+    pub fn bind(&self, pass: &mut wgpu::RenderPass<'_>) {
+        pass.set_pipeline(&self.pipeline);
+    }
+
+    /// Draw one stepped trace with its dynamic uniform offset; the pipeline
+    /// must already be bound via [`Self::bind`] (GPU-11). `sample_count` is
+    /// the number of `[x,y]` pairs; each adjacent pair emits two six-vertex
+    /// quads.
+    pub fn draw_trace(
         &self,
         pass: &mut wgpu::RenderPass<'_>,
         bind_group: &wgpu::BindGroup,
@@ -133,9 +140,24 @@ impl StepPipeline {
         }
 
         let vertex_count = sample_count.saturating_sub(1).saturating_mul(12);
-        pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, bind_group, &[uniform_offset]);
         pass.draw(0..vertex_count, 0..1);
+    }
+
+    /// Bind + draw a single trace (single-trace convenience; batched callers
+    /// use [`Self::bind`] once per run and [`Self::draw_trace`] per trace).
+    pub fn encode_trace(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        bind_group: &wgpu::BindGroup,
+        uniform_offset: u32,
+        sample_count: u32,
+    ) {
+        if sample_count < 2 {
+            return;
+        }
+        self.bind(pass);
+        self.draw_trace(pass, bind_group, uniform_offset, sample_count);
     }
 
     pub fn bind_group_layout(&self) -> &wgpu::BindGroupLayout {

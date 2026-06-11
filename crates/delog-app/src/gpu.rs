@@ -368,7 +368,40 @@ enum DrawKind {
     },
 }
 
+/// Which render pipeline a [`DrawKind`] uses (GPU-11 batching key).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PipelineKind {
+    Line,
+    Scatter,
+    Step,
+    Columns,
+}
+
+/// Consecutive same-pipeline runs in draw order. Each run costs exactly one
+/// `set_pipeline`; items inside it only rebind their trace bind group with a
+/// per-trace dynamic uniform offset (GPU-11). Order-preserving so trace
+/// overlap (z-order) is unchanged — a homogeneous pane is a single run.
+fn pipeline_runs(kinds: impl Iterator<Item = PipelineKind>) -> Vec<(PipelineKind, u32)> {
+    let mut runs: Vec<(PipelineKind, u32)> = Vec::new();
+    for kind in kinds {
+        match runs.last_mut() {
+            Some((last, count)) if *last == kind => *count += 1,
+            _ => runs.push((kind, 1)),
+        }
+    }
+    runs
+}
+
 impl DrawKind {
+    fn pipeline(self) -> PipelineKind {
+        match self {
+            DrawKind::Line { .. } => PipelineKind::Line,
+            DrawKind::Scatter { .. } => PipelineKind::Scatter,
+            DrawKind::Step { .. } => PipelineKind::Step,
+            DrawKind::Columns { .. } => PipelineKind::Columns,
+        }
+    }
+
     fn is_drawable(self) -> bool {
         match self {
             DrawKind::Line { samples } => samples >= 2,
@@ -548,30 +581,44 @@ impl egui_wgpu::CallbackTrait for ScenePaintCallback {
         );
         render_pass.set_scissor_rect(sx, sy, sw, sh);
 
-        for item in &self.items {
-            let offset = res.uniforms.dynamic_offset(item.slot);
-            match item.kind {
-                DrawKind::Line { samples } => {
-                    if let Some(bind) = res.line_binds.get(&item.field) {
-                        res.line.encode_trace(render_pass, bind, offset, samples);
+        // Batched encoding (GPU-11): one set_pipeline per same-pipeline run in
+        // draw order; each trace then only rebinds its bind group with its
+        // dynamic uniform offset.
+        let runs = pipeline_runs(self.items.iter().map(|i| i.kind.pipeline()));
+        let mut next = 0usize;
+        for (kind, count) in runs {
+            match kind {
+                PipelineKind::Line => res.line.bind(render_pass),
+                PipelineKind::Scatter => res.scatter.bind(render_pass),
+                PipelineKind::Step => res.step.bind(render_pass),
+                PipelineKind::Columns => res.minmax.bind(render_pass),
+            }
+            for item in &self.items[next..next + count as usize] {
+                let offset = res.uniforms.dynamic_offset(item.slot);
+                match item.kind {
+                    DrawKind::Line { samples } => {
+                        if let Some(bind) = res.line_binds.get(&item.field) {
+                            res.line.draw_trace(render_pass, bind, offset, samples);
+                        }
                     }
-                }
-                DrawKind::Scatter { samples } => {
-                    if let Some(bind) = res.scatter_binds.get(&item.field) {
-                        res.scatter.encode_trace(render_pass, bind, offset, samples);
+                    DrawKind::Scatter { samples } => {
+                        if let Some(bind) = res.scatter_binds.get(&item.field) {
+                            res.scatter.draw_trace(render_pass, bind, offset, samples);
+                        }
                     }
-                }
-                DrawKind::Step { samples } => {
-                    if let Some(bind) = res.step_binds.get(&item.field) {
-                        res.step.encode_trace(render_pass, bind, offset, samples);
+                    DrawKind::Step { samples } => {
+                        if let Some(bind) = res.step_binds.get(&item.field) {
+                            res.step.draw_trace(render_pass, bind, offset, samples);
+                        }
                     }
-                }
-                DrawKind::Columns { count } => {
-                    if let Some(bind) = res.col_binds.get(&item.field) {
-                        res.minmax.encode(render_pass, bind, offset, count);
+                    DrawKind::Columns { count } => {
+                        if let Some(bind) = res.col_binds.get(&item.field) {
+                            res.minmax.draw_trace(render_pass, bind, offset, count);
+                        }
                     }
                 }
             }
+            next += count as usize;
         }
     }
 }
@@ -689,6 +736,22 @@ mod tests {
         let (min, max) = pane_y_range(&snapshot, &mut caches, &pane, 0.123, 0.125);
         assert!((min - -1.0).abs() < 1e-4, "min = {min}");
         assert!((max - 21.0).abs() < 1e-4, "max = {max}");
+    }
+
+    #[test]
+    fn batching_groups_consecutive_items_into_one_bind_per_pipeline_run() {
+        use PipelineKind::{Columns, Line, Scatter};
+        let kinds = [
+            DrawKind::Line { samples: 10 },
+            DrawKind::Line { samples: 20 },
+            DrawKind::Scatter { samples: 5 },
+            DrawKind::Line { samples: 7 },
+            DrawKind::Columns { count: 100 },
+        ];
+        let runs = pipeline_runs(kinds.iter().map(|k| k.pipeline()));
+        // Draw order is preserved; each run = exactly one set_pipeline call.
+        assert_eq!(runs, vec![(Line, 2), (Scatter, 1), (Line, 1), (Columns, 1)]);
+        assert_eq!(pipeline_runs([].into_iter()), vec![]);
     }
 
     #[test]

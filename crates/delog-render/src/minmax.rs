@@ -125,7 +125,30 @@ impl MinMaxColPipeline {
         })
     }
 
-    /// Encode `column_count` vertical spans (six vertices each).
+    /// Bind this pipeline once for a run of traces (GPU-11).
+    pub fn bind(&self, pass: &mut wgpu::RenderPass<'_>) {
+        pass.set_pipeline(&self.pipeline);
+    }
+
+    /// Draw `column_count` vertical spans (six vertices each) with the trace's
+    /// dynamic uniform offset; the pipeline must already be bound via
+    /// [`Self::bind`] (GPU-11).
+    pub fn draw_trace(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        bind_group: &wgpu::BindGroup,
+        uniform_offset: u32,
+        column_count: u32,
+    ) {
+        if column_count == 0 {
+            return;
+        }
+        pass.set_bind_group(0, bind_group, &[uniform_offset]);
+        pass.draw(0..column_count * 6, 0..1);
+    }
+
+    /// Bind + draw `column_count` vertical spans (single-trace convenience;
+    /// batched callers use [`Self::bind`] + [`Self::draw_trace`]).
     pub fn encode(
         &self,
         pass: &mut wgpu::RenderPass<'_>,
@@ -136,9 +159,8 @@ impl MinMaxColPipeline {
         if column_count == 0 {
             return;
         }
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, bind_group, &[uniform_offset]);
-        pass.draw(0..column_count * 6, 0..1);
+        self.bind(pass);
+        self.draw_trace(pass, bind_group, uniform_offset, column_count);
     }
 
     pub fn pipeline(&self) -> &wgpu::RenderPipeline {
