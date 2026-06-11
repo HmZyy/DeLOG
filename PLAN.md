@@ -911,7 +911,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **PLT-04** — Wheel zoom @ cursor, drag pan, double-click reset-to-full
 - [ ] **PLT-05** — Lock-X-to-live with explicit unlock-on-scrub + re-lock affordance (§10.4)
 - [~] **PLT-06** — Y modes: Auto (chunk stats), AutoVisible (pyramid), Manual dialog — AutoVisible wired; Auto/Manual pending
-- [ ] **PLT-07** — Axes/ticks/labels via egui; tick step chooser (1-2-5)
+- [x] **PLT-07** — Axes/ticks/labels via egui; tick step chooser (1-2-5)
 - [ ] **PLT-08** — Legend + toggle; per-trace visibility/color/width/mode editing
 - [ ] **PLT-09** — Hover: canonical binary search, Prev/Next/Linear tooltip modes, hover circles (§10.5)
 - [ ] **PLT-10** — Playhead vertical line + value readout on all panes
