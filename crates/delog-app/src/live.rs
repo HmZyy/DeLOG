@@ -59,8 +59,8 @@ impl ConnectionDialog {
                             ui.end_row();
                         } else {
                             ui.label(match self.kind {
-                                EndpointKind::UdpServer | EndpointKind::TcpServer => "Bind",
-                                EndpointKind::UdpClient | EndpointKind::TcpClient => "Remote",
+                                EndpointKind::UdpServer => "Bind",
+                                EndpointKind::TcpClient => "Remote",
                                 EndpointKind::Serial => unreachable!(),
                             });
                             ui.text_edit_singleline(&mut self.host);
@@ -105,14 +105,8 @@ impl ConnectionDialog {
             EndpointKind::UdpServer => Ok(Endpoint::UdpServer {
                 bind: self.socket_addr()?,
             }),
-            EndpointKind::UdpClient => Ok(Endpoint::UdpClient {
-                remote: self.socket_addr()?,
-            }),
             EndpointKind::TcpClient => Ok(Endpoint::TcpClient {
                 remote: self.socket_addr()?,
-            }),
-            EndpointKind::TcpServer => Ok(Endpoint::TcpServer {
-                bind: self.socket_addr()?,
             }),
             EndpointKind::Serial => {
                 let baud = self
@@ -175,16 +169,8 @@ mod tests {
             Endpoint::UdpServer { bind: addr }
         );
         assert_eq!(
-            dialog(EndpointKind::UdpClient).endpoint().unwrap(),
-            Endpoint::UdpClient { remote: addr }
-        );
-        assert_eq!(
             dialog(EndpointKind::TcpClient).endpoint().unwrap(),
             Endpoint::TcpClient { remote: addr }
-        );
-        assert_eq!(
-            dialog(EndpointKind::TcpServer).endpoint().unwrap(),
-            Endpoint::TcpServer { bind: addr }
         );
     }
 
@@ -201,7 +187,7 @@ mod tests {
 
     #[test]
     fn reports_invalid_address_and_baud() {
-        let mut d = dialog(EndpointKind::UdpClient);
+        let mut d = dialog(EndpointKind::TcpClient);
         d.host = "localhost".to_owned();
         assert_eq!(d.endpoint().unwrap_err(), "address must be an IP literal");
 

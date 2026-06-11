@@ -47,7 +47,7 @@ pollster = "0.4.0"
 
 # telemetry I/O
 mavlink = { version = "0.18.0", default-features = false, features = [
-    "ardupilotmega",
+    "dialect-ardupilotmega",
     "std",
 ] }
 serialport = "4.9.0"
