@@ -34,6 +34,8 @@ pub struct DelogApp {
     show_about: bool,
     show_connection_dialog: bool,
     connection_dialog: ConnectionDialog,
+    /// Configured vehicles for the 3D view (TDV-03); empty until one is added.
+    vehicles: Vec<crate::vehicle::VehicleConfig>,
 }
 
 impl DelogApp {
@@ -60,6 +62,7 @@ impl DelogApp {
             show_about: false,
             show_connection_dialog: false,
             connection_dialog: ConnectionDialog::default(),
+            vehicles: Vec::new(),
         }
     }
 
@@ -362,6 +365,7 @@ impl eframe::App for DelogApp {
                         show_legend: &mut self.show_legend,
                         playhead_us: snapshot.global_time_range().map(|_| self.playback.t_us),
                         playing: self.playback.playing,
+                        vehicles: &self.vehicles,
                     };
                     let mut behavior = crate::workspace::Behavior::new(services);
                     self.workspace.tree.ui(&mut behavior, ui);

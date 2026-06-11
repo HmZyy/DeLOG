@@ -934,14 +934,14 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 
 - [x] **TDV-01** — Scene pane: grid, axes, orbit camera (pan/zoom) — `Pane::Scene3D` with an `OrbitCamera` (left-drag orbit, wheel zoom, double-click reset; pitch-clamped, unit-tested); single instance toggled show/hide by the toolbar "3D" button. Renders the grid offscreen and composites as an egui image. `glam` added to `delog-app`. Verified on RTX 4080: grid visible/infinite, orientation/orbit/zoom/color all good
 - [x] **TDV-02** — Single tracking camera + tracked-vehicle dropdown (§12.3) — _(scope changed by decision: no Orbit/Free modes)_ one `OrbitCamera` that always orbits a target tracking the selected vehicle's pose, offset preserved (unit-tested); left-drag orbits, wheel zooms, double-click resets the offset and keeps the target. Tracks the world origin until vehicles exist; the tracked-vehicle dropdown (shown only with ≥2 vehicles) lands with vehicle config (TDV-03). Simplified pane verified on RTX 4080
-- [ ] **TDV-03** — `VehicleConfig` + dialog with per-source mapping presets (§12.1)
-- [ ] **TDV-04** — PosMapping NED / Custom-with-units; trajectory build off-thread
-- [ ] **TDV-05** — GPS→NED f64 geodetic→ECEF→NED; auto/manual reference origin (§12.2)
-- [ ] **TDV-06** — OriMapping Static/Euler(deg|rad)/Quaternion; prev-sample pose at playhead
-- [ ] **TDV-07** — NED→render mapping `(E,−D,−N)` everywhere; unit toggles
-- [ ] **TDV-08** — Embedded GLBs (quad/fixed-wing/delta/marker) + custom GLB load + cone fallback
-- [ ] **TDV-09** — Per-vehicle color/path color/scale/show; multiple vehicles
-- [ ] **TDV-10** — Trajectory line + current pose marker synced to playhead
+- [~] **TDV-03** — `VehicleConfig` + dialog with per-source mapping presets (§12.1) — data model done (`VehicleConfig`/`PosMapping`/`OriMapping`/`ModelKind`+`Cone` in `vehicle.rs`); the config **dialog** (field-mapping pickers + presets) is the next commit. App holds `Vec<VehicleConfig>` (empty)
+- [~] **TDV-04** — PosMapping NED / Custom-with-units; trajectory build off-thread — NED + custom unit scale + GPS mappings resolve to render space (`position_at`, unit-tested); `build_trajectory` resamples the path. Currently built **synchronously** in `scene_ui` — moving it off-thread + cached (§19.6) is a follow-up
+- [x] **TDV-05** — GPS→NED f64 geodetic→ECEF→NED; auto/manual reference origin (§12.2) — `geo::geodetic_to_ned` (WGS84, f64) + `resolve_gps_ref` (Auto = first fix / Manual); 3 unit tests
+- [~] **TDV-06** — OriMapping Static/Euler(deg|rad)/Quaternion; prev-sample pose at playhead — `orientation_at` + `geo::euler_to_quat`/`body_to_render_rot` (unit-tested); pose read prev-sample at the playhead in the render path. Dialog to configure it lands with TDV-03
+- [x] **TDV-07** — NED→render mapping `(E,−D,−N)` everywhere; unit toggles — `geo::ned_to_render` + `ned_to_render_mat3` (proper rotation, unit-tested); `LengthUnit` toggle for custom NED
+- [x] **TDV-08** — Embedded GLBs (quad/fixed-wing/delta) + custom GLB load + cone fallback — `models::mesh_for` with `include_bytes!` GLBs; `load_glb` bakes multi-part node transforms; `MeshCpu::cone` is the unconditional fallback. Real Quad/FixedWing/DeltaWing decode verified _(no marker asset; `Cone` replaces it per decision)_
+- [~] **TDV-09** — Per-vehicle color/path color/scale/show; multiple vehicles — the scene render path draws N vehicles (mesh at pose + trajectory) honoring color/path-color/scale/show; needs the dialog to create them + the camera tracked-vehicle dropdown
+- [~] **TDV-10** — Trajectory line + current pose marker synced to playhead — render path draws each vehicle's trajectory + its mesh at the playhead pose (the mesh is the pose marker); pending vehicles to display + visual verification
 - [~] **TDV-11** — Rebuild on config/offset change; demo lemniscate when unconfigured — demo lemniscate path (static, via `traj3d`) + the green vertical Y-axis gizmo are drawn in the scene whenever no vehicle is configured (i.e. always, until TDV-03). Animation and rebuild-on-config/offset ride with vehicle config (TDV-03/04)
 - [ ] **TDV-12** — _(later)_ slerp pose; time-windowed trail
 
