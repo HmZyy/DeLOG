@@ -6,7 +6,7 @@
 //! and diagnostics flow back through an [`IngestObserver`] into shared state the
 //! UI reads; an epoch listener requests a repaint whenever data lands (ING-06).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -91,6 +91,8 @@ pub struct Session {
     loads: Loads,
     diagnostics: Diags,
     active: Vec<ActiveLoad>,
+    /// Sources already swept by the post-load quality scan (DIA-05).
+    scanned: HashSet<SourceId>,
     ctx: egui::Context,
     _ingest: JoinHandle<()>,
 }
@@ -130,6 +132,7 @@ impl Session {
             loads,
             diagnostics,
             active: Vec::new(),
+            scanned: HashSet::new(),
             ctx,
             _ingest: ingest,
         }
@@ -217,10 +220,46 @@ impl Session {
         }
     }
 
-    /// Drop bookkeeping for finished loads.
+    /// Drop bookkeeping for finished loads and kick the post-load data-quality
+    /// scan for newly finished sources (§15, DIA-05).
     pub fn prune_finished(&mut self) {
         self.active
             .retain(|a| a.handle.as_ref().is_some_and(|h| !h.is_finished()));
+
+        let done: Vec<SourceId> = self
+            .loads
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(id, state)| state.done && !self.scanned.contains(id))
+            .map(|(&id, _)| id)
+            .collect();
+        for source in done {
+            self.scanned.insert(source);
+            self.spawn_quality_scan(source);
+        }
+    }
+
+    /// Scan `source` for data-quality findings off the UI thread and push the
+    /// summarized diagnostics (DIA-05). The snapshot is an immutable Arc, so
+    /// the scan races nothing.
+    fn spawn_quality_scan(&self, source: SourceId) {
+        let snapshot = self.store.load();
+        let diagnostics = Arc::clone(&self.diagnostics);
+        let ctx = self.ctx.clone();
+        std::thread::Builder::new()
+            .name("delog-quality-scan".into())
+            .spawn(move || {
+                let findings = delog_core::quality::scan_source(&snapshot, source);
+                if findings.is_empty() {
+                    return;
+                }
+                for diag in findings {
+                    push_diag(&diagnostics, diag);
+                }
+                ctx.request_repaint();
+            })
+            .expect("spawn quality scan thread");
     }
 
     /// Test helper: join every worker so all messages have been sent.
