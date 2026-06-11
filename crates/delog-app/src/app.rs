@@ -6,6 +6,7 @@ use crate::about;
 use crate::axes;
 use crate::browser::{self, BrowserModel};
 use crate::gpu::{self, GpuBridge};
+use crate::hover;
 use crate::legend;
 use crate::plot::PlotPane;
 use crate::session::Session;
@@ -177,19 +178,26 @@ impl eframe::App for DelogApp {
                         );
                         let y_unit = Self::y_unit(&snapshot, &self.pane);
                         axes::draw(ui, plot_rect, x_range, y_range, y_unit.as_deref());
-                        self.gpu.render_pane(
+                        let pview = gpu::PaneView {
+                            rect: plot_rect,
+                            x_range,
+                            y_range,
+                        };
+                        self.gpu
+                            .render_pane(ui, frame, &mut self.caches, &self.pane, pview);
+
+                        // Hover readout: cursor line, sample circles, value tooltip.
+                        hover::draw(
                             ui,
-                            frame,
-                            &mut self.caches,
+                            pview,
+                            &response,
+                            &snapshot,
                             &self.pane,
-                            gpu::PaneView {
-                                rect: plot_rect,
-                                x_range,
-                                y_range,
-                            },
+                            self.origin_us,
+                            delog_core::field_view::SampleMode::Prev,
                         );
 
-                        // Legend overlay: visibility/colour/width edits + remove.
+                        // Legend overlay: visibility + colour edits.
                         let labels: Vec<_> = self
                             .pane
                             .traces

@@ -70,10 +70,24 @@ impl ViewX {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TraceRef {
     pub field: FieldId,
+    /// sRGB straight RGBA; the renderer converts to the target's colour space.
     pub color: [f32; 4],
     pub width_px: f32,
     /// Drawn only when visible; the legend toggles this (PLT-08).
     pub visible: bool,
+}
+
+impl TraceRef {
+    /// The trace colour as an egui `Color32` (the stored colour is sRGB).
+    pub fn color32(&self) -> egui::Color32 {
+        let u = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+        egui::Color32::from_rgba_unmultiplied(
+            u(self.color[0]),
+            u(self.color[1]),
+            u(self.color[2]),
+            u(self.color[3]),
+        )
+    }
 }
 
 /// One plot pane. M3 ships a single pane; the tile workspace is PLT-01.
