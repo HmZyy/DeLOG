@@ -844,7 +844,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **PAR-10** — ULog: golden fixture test
 - [x] **PAR-11** — tlog: µs-envelope framing over the shared MAVLink decoder (§6.4) — explicit `[8-byte BE µs][frame]` framing reusing `mavlink::frame_len`/`decode_frame`/`extract_fields`; one topic per message type, `(sysid,compid)` instance suffixing; bad-CRC frames skipped without losing envelope sync; torn tail keeps prior data
 - [x] **PAR-12** — tlog: golden fixture test (incl. v1+v2 mixed) — synthetic mixed v1/v2 log: topics/rows/values table + CRC-skip, unknown-message, truncation and desync cases
-- [ ] **PAR-13** — fuzz targets: BIN record / ULog defs+data / MAVLink framing — no panic/hang/OOM
+- [x] **PAR-13** — fuzz targets: BIN record / ULog defs+data / MAVLink framing — no panic/hang/OOM — cargo-fuzz crate in `/fuzz` (detached workspace) + stable `garbage_smoke` test covering the same property where `cargo test` runs
 - [ ] **PAR-14** — CSV import with column-mapping dialog _(M10/backlog boundary)_
 - [ ] **PAR-15** — Arrow IPC `.dlcache` reader registered as a sniffing parser (pairs IOX-08)
 - [x] **PAR-16** — Shared MAVLink layer in `delog-parsers::mavlink`: owned v1/v2 framing (sync, CRC, seq-gap/resync counters, §7.2) + serde-based field extractor (§7.3) — one code path for the tlog parser (PAR-11) and the live readers (LIV-02/05)
@@ -1034,7 +1034,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [ ] **TST-03** — Golden parser tables (BIN/ULog/tlog)
 - [x] **TST-04** — Headless golden-image render test (=GPU-13)
 - [ ] **TST-05** — Criterion suite per §20.4 with budget assertions (soft)
-- [ ] **TST-06** — Fuzz targets in CI smoke (60 s) + nightly long runs
+- [x] **TST-06** — Fuzz targets in CI smoke (60 s) + nightly long runs — `fuzz-smoke` job in `ci.yml` (60 s/target) + `fuzz-nightly.yml` cron (15 min/target, uploads crashing inputs)
 - [ ] **TST-07** — Layout migration fixture tests (=LAY-03)
 - [ ] **TST-08** — tlog record/replay round-trip test (=LIV-09)
 - [ ] **TST-09** — mac/Windows build matrix from M3
