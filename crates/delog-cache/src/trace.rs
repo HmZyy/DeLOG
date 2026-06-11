@@ -177,6 +177,29 @@ impl TraceCache {
         self.pyramid.query(&self.xy, a, b)
     }
 
+    /// Per-pixel-column `[x, min, max]` triples over `[x0, x1]` split into
+    /// `width` equal **time** columns — the decimated draw input (§9.5, GPU-09).
+    /// Each column's min/max is exact (pyramid query); an empty column reports
+    /// `NaN` (the shader skips it). Splitting by time, not index, keeps columns
+    /// aligned to screen pixels even for irregularly-sampled data.
+    pub fn minmax_columns(&self, x0: f32, x1: f32, width: usize) -> Vec<f32> {
+        let mut out = Vec::with_capacity(width * 3);
+        if width == 0 || x1 <= x0 {
+            return out;
+        }
+        let span = (x1 - x0) / width as f32;
+        for c in 0..width {
+            let cx0 = x0 + span * c as f32;
+            let cx1 = x0 + span * (c + 1) as f32;
+            let (a, b) = self.index_range(cx0, cx1);
+            let mm = self.pyramid.query(&self.xy, a, b);
+            out.push((cx0 + cx1) * 0.5);
+            out.push(mm.min);
+            out.push(mm.max);
+        }
+        out
+    }
+
     /// CPU bytes held (xy buffer + pyramid), for `MemBreakdown` (CCH-10).
     pub fn bytes(&self) -> u64 {
         (self.xy.capacity() * std::mem::size_of::<f32>()) as u64 + self.pyramid.bytes()
@@ -380,6 +403,26 @@ mod tests {
         // A tight inner window still bounds correctly.
         let mm = cache.y_range(2.0, 2.0);
         assert!(mm.is_finite());
+    }
+
+    #[test]
+    fn minmax_columns_split_by_time_into_triples() {
+        let (snap, field) = snapshot_with(
+            vec![0, 1_000_000, 2_000_000, 3_000_000, 4_000_000],
+            vec![Some(0), Some(100), Some(200), Some(300), Some(400)],
+            0,
+        );
+        let cache = TraceCache::build(&snap, field, 0, 0).unwrap();
+
+        // 4 columns over [0,4]s → 1-second columns; each holds [x, min, max].
+        let cols = cache.minmax_columns(0.0, 4.0, 4);
+        assert_eq!(cols.len(), 4 * 3);
+        // First column [0,1)s holds samples at t=0,1 → y 0..1, centre x=0.5.
+        assert_eq!(cols[0], 0.5);
+        assert_eq!(cols[1], 0.0);
+        assert_eq!(cols[2], 1.0);
+        // Monotone ramp: each column's max rises.
+        assert!(cols[5] > cols[2]);
     }
 
     #[test]

@@ -889,7 +889,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [ ] **GPU-07** — `scatter_pull` pipeline (quad/sample, size uniform)
 - [ ] **GPU-08** — `step_pull` stepped-mode pipeline (2 segments/sample)
 - [x] **GPU-09** — `minmax_col` decimated pipeline + transient ring upload (§9.5)
-- [ ] **GPU-10** — Draw-path selector: full vs decimated at samples/px > 8
+- [x] **GPU-10** — Draw-path selector: full vs decimated at samples/px > 8
 - [ ] **GPU-11** — Batched encoding: one pipeline bind, per-trace dynamic offsets
 - [ ] **GPU-12** — wgpu error scopes → diagnostics
 - [x] **GPU-13** — Headless golden-image test rig (§20.3)
