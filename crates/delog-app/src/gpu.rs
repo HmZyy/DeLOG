@@ -102,7 +102,7 @@ impl GpuBridge {
             res.ensure_uniform_capacity(pane.traces.len() as u32);
             let plot_w = viewport_px[0];
 
-            for (slot, trace) in pane.traces.iter().enumerate() {
+            for (slot, trace) in pane.visible_traces().enumerate() {
                 let Some(cache) = caches.get(trace.field) else {
                     continue;
                 };
@@ -163,7 +163,7 @@ impl GpuBridge {
 /// finite samples are in view (PLT-06 AutoVisible).
 pub fn visible_y_range(caches: &mut CacheManager, pane: &PlotPane, x0: f32, x1: f32) -> (f32, f32) {
     let mut mm = MinMax::EMPTY;
-    for trace in &pane.traces {
+    for trace in pane.visible_traces() {
         if let Some(cache) = caches.get(trace.field) {
             mm = mm.merge(cache.y_range(x0, x1));
         }
