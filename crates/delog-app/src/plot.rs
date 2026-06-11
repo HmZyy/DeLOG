@@ -110,11 +110,36 @@ impl TraceMode {
     }
 }
 
+/// Per-pane Y-axis mode (§10.2/§10.4, PLT-06).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum YMode {
+    /// Full-data range from seal-time chunk stats — stable while panning.
+    Auto,
+    /// Pyramid min/max of the visible window + 5% pad.
+    #[default]
+    AutoVisible,
+    /// User-fixed range (dialog; axis-drag later).
+    Manual { min: f32, max: f32 },
+}
+
+impl YMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto (full data)",
+            Self::AutoVisible => "Auto (visible)",
+            Self::Manual { .. } => "Manual",
+        }
+    }
+}
+
 /// One plot pane in the tiled workspace. The X view is deliberately global
 /// app state so every plot pane stays synchronized (PLT-01/03).
 #[derive(Debug, Default)]
 pub struct PlotPane {
     pub traces: Vec<TraceRef>,
+    pub y: YMode,
+    /// Manual Y-range dialog visibility (context menu "Set range…").
+    pub y_dialog: bool,
 }
 
 impl PlotPane {

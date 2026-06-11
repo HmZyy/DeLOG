@@ -12,14 +12,16 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use delog_cache::{CacheManager, MinMax};
+use delog_core::field_view::FieldView;
 use delog_core::identity::FieldId;
+use delog_core::snapshot::StoreSnapshot;
 use delog_render::{
     BufferManager, LinePipeline, MinMaxColPipeline, PlotUniform, RenderContext, ScatterPipeline,
     StepPipeline, UniformRing,
 };
 use eframe::{egui_wgpu, wgpu};
 
-use crate::plot::{PlotPane, TraceMode, ViewX};
+use crate::plot::{PlotPane, TraceMode, ViewX, YMode};
 
 /// Switch to the decimated min/max path above this many samples per pixel
 /// (§9.5, GPU-10).
@@ -236,6 +238,27 @@ impl GpuBridge {
     }
 }
 
+/// The pane's Y window per its [`YMode`] (§10.4, PLT-06).
+pub fn pane_y_range(
+    snapshot: &StoreSnapshot,
+    caches: &mut CacheManager,
+    pane: &PlotPane,
+    x0: f32,
+    x1: f32,
+) -> (f32, f32) {
+    match pane.y {
+        YMode::Auto => full_y_range(snapshot, pane),
+        YMode::AutoVisible => visible_y_range(caches, pane, x0, x1),
+        YMode::Manual { min, max } => {
+            if max > min {
+                (min, max)
+            } else {
+                (-1.0, 1.0)
+            }
+        }
+    }
+}
+
 /// Union of every visible trace's auto-Y range, padded; a sane default when no
 /// finite samples are in view (PLT-06 AutoVisible).
 pub fn visible_y_range(caches: &mut CacheManager, pane: &PlotPane, x0: f32, x1: f32) -> (f32, f32) {
@@ -248,7 +271,51 @@ pub fn visible_y_range(caches: &mut CacheManager, pane: &PlotPane, x0: f32, x1: 
     if !mm.is_finite() {
         return (-1.0, 1.0);
     }
-    let (min, max) = (mm.min, mm.max);
+    padded(mm.min, mm.max)
+}
+
+/// Full-data Y range from seal-time chunk stats × field multiplier — no sample
+/// scan, stable while panning (PLT-06 Auto). Display-space like the cache
+/// (CCH-02 applies the same multiplier).
+fn full_y_range(snapshot: &StoreSnapshot, pane: &PlotPane) -> (f32, f32) {
+    let mut range: Option<(f64, f64)> = None;
+    for trace in pane.visible_traces() {
+        let Ok(view) = FieldView::new(snapshot, trace.field) else {
+            continue;
+        };
+        let Some((raw_min, raw_max)) = view.full_range() else {
+            continue;
+        };
+        let mult = field_multiplier(snapshot, trace.field);
+        // A negative multiplier flips the bounds.
+        let (lo, hi) = (raw_min * mult, raw_max * mult);
+        let (lo, hi) = (lo.min(hi), lo.max(hi));
+        range = Some(match range {
+            Some((min, max)) => (min.min(lo), max.max(hi)),
+            None => (lo, hi),
+        });
+    }
+    match range {
+        Some((min, max)) => padded(min as f32, max as f32),
+        None => (-1.0, 1.0),
+    }
+}
+
+fn field_multiplier(snapshot: &StoreSnapshot, field: FieldId) -> f64 {
+    let Some(entry) = snapshot.fields.get(field.index()).filter(|f| f.id == field) else {
+        return 1.0;
+    };
+    let Some(store) = snapshot.topic(entry.topic).and_then(|t| t.store.as_ref()) else {
+        return 1.0;
+    };
+    store
+        .schema
+        .field_by_name(&entry.name)
+        .map_or(1.0, |fs| fs.multiplier)
+}
+
+/// 5% pad, degenerate ranges widened to ±1.
+fn padded(min: f32, max: f32) -> (f32, f32) {
     if (max - min).abs() <= f32::EPSILON {
         return (min - 1.0, max + 1.0);
     }
@@ -557,7 +624,72 @@ pub fn apply_zoom(view: &mut ViewX, cursor_frac: f32, scroll: f32) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc as StdArc;
+
+    use arrow::array::{ArrayRef, Float64Array, Int64Array};
+    use arrow::datatypes::DataType;
+    use delog_core::chunk::Chunk;
+    use delog_core::identity::IdentityRegistry;
+    use delog_core::schema::{FieldSchema, TopicSchema};
+    use delog_core::snapshot::StoreSnapshot;
+    use delog_core::store::TopicStore;
+
     use super::*;
+    use crate::plot::YMode;
+
+    /// Snapshot with one Float64 field `Alt` (multiplier 0.5), raw values
+    /// 0..40 over t = 0..400 µs.
+    fn alt_fixture() -> (StoreSnapshot, FieldId) {
+        let mut identity = IdentityRegistry::new();
+        let source = identity.add_source("flight");
+        let _ = source;
+        let topic = identity.add_topic(source, "BARO").unwrap();
+        let alt = identity.add_field(topic, "Alt").unwrap();
+        let schema = StdArc::new(
+            TopicSchema::new(
+                "BARO",
+                [FieldSchema::new("Alt", DataType::Float64, Some("m"), 0.5).unwrap()],
+            )
+            .unwrap(),
+        );
+        let cols: Vec<ArrayRef> = vec![StdArc::new(Float64Array::from(vec![0.0, 10.0, 40.0]))];
+        let chunk = StdArc::new(
+            Chunk::try_new(Int64Array::from(vec![0, 200, 400]), cols, &schema).unwrap(),
+        );
+        let store = StdArc::new(TopicStore::from_chunks(schema, [chunk]).unwrap());
+        let snapshot = StoreSnapshot::from_registry(&identity, [(topic, store)], 0).unwrap();
+        (snapshot, alt)
+    }
+
+    #[test]
+    fn manual_y_mode_returns_the_stored_range() {
+        let (snapshot, alt) = alt_fixture();
+        let mut caches = CacheManager::new();
+        let mut pane = PlotPane::default();
+        pane.add_trace(alt);
+        pane.y = YMode::Manual {
+            min: -2.0,
+            max: 3.0,
+        };
+        assert_eq!(
+            pane_y_range(&snapshot, &mut caches, &pane, 0.0, 1.0),
+            (-2.0, 3.0)
+        );
+    }
+
+    #[test]
+    fn auto_y_mode_folds_chunk_stats_with_multiplier_and_pad() {
+        let (snapshot, alt) = alt_fixture();
+        let mut caches = CacheManager::new();
+        let mut pane = PlotPane::default();
+        pane.add_trace(alt);
+        pane.y = YMode::Auto;
+        // Raw 0..40 × multiplier 0.5 = 0..20, 5% pad → (-1, 21). Independent
+        // of the visible x window.
+        let (min, max) = pane_y_range(&snapshot, &mut caches, &pane, 0.123, 0.125);
+        assert!((min - -1.0).abs() < 1e-4, "min = {min}");
+        assert!((max - 21.0).abs() < 1e-4, "max = {max}");
+    }
 
     #[test]
     fn scissor_is_viewport_clip_intersection_clamped_to_screen() {
