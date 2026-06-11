@@ -126,24 +126,6 @@ impl<'a> FieldView<'a> {
         })
     }
 
-    /// Full-data raw value range folded from seal-time chunk stats — O(chunks),
-    /// no sample scan (§10.4 Auto-Y, PLT-06; same fold ANA-01 builds on).
-    /// `None` when no chunk holds a finite value (non-numeric or all-NaN).
-    pub fn full_range(&self) -> Option<(f64, f64)> {
-        let mut range: Option<(f64, f64)> = None;
-        for chunk in self.store.chunks.iter() {
-            let stats = chunk.stats.get(self.col_index)?;
-            if stats.min.is_nan() || stats.max.is_nan() {
-                continue;
-            }
-            range = Some(match range {
-                Some((min, max)) => (min.min(stats.min), max.max(stats.max)),
-                None => (stats.min, stats.max),
-            });
-        }
-        range
-    }
-
     /// Sample this field at an effective/global timestamp.
     pub fn sample_at(
         &'a self,
@@ -477,20 +459,6 @@ mod tests {
         assert_eq!(alt.field(), fixture.alt);
         assert_eq!(alt.dtype(), &DataType::Float64);
         assert_eq!(mode.dtype(), &DataType::Utf8);
-    }
-
-    #[test]
-    fn full_range_folds_seal_time_stats_across_chunks() {
-        let fixture = fixture(0);
-        let alt = FieldView::new(&fixture.snapshot, fixture.alt).unwrap();
-        assert_eq!(alt.full_range(), Some((0.0, 40.0)));
-    }
-
-    #[test]
-    fn full_range_is_none_for_non_numeric_fields() {
-        let fixture = fixture(0);
-        let mode = FieldView::new(&fixture.snapshot, fixture.mode).unwrap();
-        assert_eq!(mode.full_range(), None);
     }
 
     #[test]
