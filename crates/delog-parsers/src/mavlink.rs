@@ -103,7 +103,7 @@ impl FrameDecoder {
                 return None;
             }
 
-            let Some(frame_len) = candidate_len(rest) else {
+            let Some(frame_len) = frame_len(rest) else {
                 // Possibly a partial frame: wait for more bytes.
                 return None;
             };
@@ -112,7 +112,7 @@ impl FrameDecoder {
             }
             let frame = &rest[..frame_len];
 
-            let Some(decoded) = check_frame(frame) else {
+            let Some(decoded) = decode_frame(frame) else {
                 // Bad CRC: not a real frame start; resync one byte ahead.
                 self.counters.crc_failures += 1;
                 self.pos += 1;
@@ -135,10 +135,13 @@ impl FrameDecoder {
     }
 }
 
-/// Total frame length implied by the header at `bytes[0]`, or `None` when
-/// not enough bytes have arrived to know it yet.
-fn candidate_len(bytes: &[u8]) -> Option<usize> {
-    match bytes[0] {
+/// Total frame length implied by the header at `bytes[0]`, or `None` when the
+/// first byte is not a frame magic or not enough bytes have arrived to know the
+/// length yet. Shared by [`FrameDecoder`] (which positions on a magic byte) and
+/// the `.tlog` parser's explicit µs-envelope framing (PAR-11): one length
+/// computation, no duplicate header math.
+pub fn frame_len(bytes: &[u8]) -> Option<usize> {
+    match *bytes.first()? {
         V1_MAGIC => {
             let len = *bytes.get(1)? as usize;
             Some(1 + V1_HEADER + len + CRC_LEN)
@@ -153,12 +156,15 @@ fn candidate_len(bytes: &[u8]) -> Option<usize> {
             };
             Some(1 + V2_HEADER + len + CRC_LEN + sig)
         }
-        _ => unreachable!("caller positions on a magic byte"),
+        _ => None,
     }
 }
 
-/// Validate the CRC of a complete candidate frame and decode its message.
-fn check_frame(frame: &[u8]) -> Option<DecodedFrame> {
+/// Validate the CRC of a complete candidate frame (its length given by
+/// [`frame_len`]) and decode its message. Returns `None` on a bad CRC or a
+/// non-frame first byte. Shared by [`FrameDecoder`] and the `.tlog` parser so
+/// CRC validation and dialect decoding live in exactly one place.
+pub fn decode_frame(frame: &[u8]) -> Option<DecodedFrame> {
     match frame[0] {
         V1_MAGIC => {
             let len = frame[1] as usize;
@@ -651,8 +657,10 @@ mod tests {
 
     #[test]
     fn extraction_expands_arrays_and_names_enums() {
-        let mut gps = GPS_STATUS_DATA::default();
-        gps.satellites_visible = 3;
+        let mut gps = GPS_STATUS_DATA {
+            satellites_visible: 3,
+            ..Default::default()
+        };
         gps.satellite_prn[2] = 17;
         let fields = extract_fields(&MavMessage::GPS_STATUS(gps));
         assert!(
