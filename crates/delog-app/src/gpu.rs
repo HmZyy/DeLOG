@@ -75,6 +75,38 @@ impl GpuBridge {
         self.available
     }
 
+    pub fn begin_plot_frame(&self, frame: &eframe::Frame) {
+        if !self.available {
+            return;
+        }
+        let Some(render_state) = frame.wgpu_render_state() else {
+            return;
+        };
+        let mut renderer = render_state.renderer.write();
+        if let Some(res) = renderer
+            .callback_resources
+            .get_mut::<PlotCallbackResources>()
+        {
+            res.next_uniform_slot = 0;
+        }
+    }
+
+    pub fn retain_plotted_buffers(&self, frame: &eframe::Frame, plotted: &[FieldId]) {
+        if !self.available {
+            return;
+        }
+        let Some(render_state) = frame.wgpu_render_state() else {
+            return;
+        };
+        let mut renderer = render_state.renderer.write();
+        if let Some(res) = renderer
+            .callback_resources
+            .get_mut::<PlotCallbackResources>()
+        {
+            res.retain_buffers(plotted);
+        }
+    }
+
     /// Upload the pane's ready trace caches into the `plot_rect`, write their
     /// uniforms for the given visible data window, and emit the paint callback.
     /// The caller supplies the X/Y ranges so the egui axes share them exactly.
@@ -111,15 +143,18 @@ impl GpuBridge {
             else {
                 return;
             };
-            res.ensure_uniform_capacity(pane.traces.len() as u32);
+            let base_slot = res.next_uniform_slot;
+            res.next_uniform_slot += pane.traces.len() as u32;
+            res.ensure_uniform_capacity(res.next_uniform_slot);
             let plot_w = viewport_px[0];
 
             for (slot, trace) in pane.visible_traces().enumerate() {
+                let slot = base_slot + slot as u32;
                 let Some(cache) = caches.get(trace.field) else {
                     continue;
                 };
                 res.uniforms.write(
-                    slot as u32,
+                    slot,
                     &PlotUniform::from_view(
                         (x0, x1),
                         (y0, y1),
@@ -150,15 +185,11 @@ impl GpuBridge {
                 if kind.is_drawable() {
                     items.push(DrawItem {
                         field: trace.field,
-                        slot: slot as u32,
+                        slot,
                         kind,
                     });
                 }
             }
-
-            // Drop GPU buffers for fields no longer plotted.
-            let plotted: Vec<FieldId> = pane.fields().collect();
-            res.retain_buffers(&plotted);
         }
 
         if items.is_empty() {
@@ -250,6 +281,7 @@ struct PlotCallbackResources {
     /// Transient `[x,min,max]` column buffers (decimated path).
     col_buffers: BufferManager,
     uniforms: UniformRing,
+    next_uniform_slot: u32,
     line_binds: HashMap<FieldId, wgpu::BindGroup>,
     col_binds: HashMap<FieldId, wgpu::BindGroup>,
 }
@@ -268,6 +300,7 @@ impl PlotCallbackResources {
             buffers,
             col_buffers,
             uniforms,
+            next_uniform_slot: 0,
             line_binds: HashMap::new(),
             col_binds: HashMap::new(),
         }
@@ -316,11 +349,10 @@ impl egui_wgpu::CallbackTrait for ScenePaintCallback {
                 buffers,
                 col_buffers,
                 uniforms,
+                next_uniform_slot: _,
                 line_binds,
                 col_binds,
             } = res;
-            line_binds.clear();
-            col_binds.clear();
             for item in &self.items {
                 match item.kind {
                     DrawKind::Line { .. } => {

@@ -90,11 +90,11 @@ impl TraceRef {
     }
 }
 
-/// One plot pane. M3 ships a single pane; the tile workspace is PLT-01.
+/// One plot pane in the tiled workspace. The X view is deliberately global
+/// app state so every plot pane stays synchronized (PLT-01/03).
 #[derive(Debug, Default)]
 pub struct PlotPane {
     pub traces: Vec<TraceRef>,
-    view: Option<ViewX>,
 }
 
 impl PlotPane {
@@ -138,26 +138,6 @@ impl PlotPane {
 
     pub fn is_empty(&self) -> bool {
         self.traces.is_empty()
-    }
-
-    /// The current X view, or `None` until initialised from the data range.
-    pub fn view(&self) -> Option<ViewX> {
-        self.view
-    }
-
-    pub fn set_view(&mut self, view: ViewX) {
-        self.view = Some(view);
-    }
-
-    /// Initialise the view to the full data range on first data (PLT-04
-    /// reset-to-full default). No-op once a view exists.
-    pub fn init_view(&mut self, range: TimeRange) {
-        self.view.get_or_insert_with(|| ViewX::from_range(range));
-    }
-
-    /// Reset the view to the full data range (double-click, PLT-04).
-    pub fn reset_view(&mut self, range: TimeRange) {
-        self.view = Some(ViewX::from_range(range));
     }
 
     pub fn fields(&self) -> impl Iterator<Item = FieldId> + '_ {
@@ -239,15 +219,8 @@ mod tests {
     }
 
     #[test]
-    fn view_initialises_once_then_resets_explicitly() {
-        let mut pane = PlotPane::default();
-        assert!(pane.view().is_none());
-        pane.init_view(TimeRange::new(0, 1000).unwrap());
-        assert_eq!(pane.view().unwrap(), ViewX::new(0, 1000));
-        // init_view is a no-op once set; reset_view replaces it.
-        pane.init_view(TimeRange::new(0, 5000).unwrap());
-        assert_eq!(pane.view().unwrap(), ViewX::new(0, 1000));
-        pane.reset_view(TimeRange::new(0, 5000).unwrap());
-        assert_eq!(pane.view().unwrap(), ViewX::new(0, 5000));
+    fn view_initialises_from_range() {
+        let view = ViewX::from_range(TimeRange::new(0, 1000).unwrap());
+        assert_eq!(view, ViewX::new(0, 1000));
     }
 }

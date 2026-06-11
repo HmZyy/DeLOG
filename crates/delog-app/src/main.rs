@@ -10,6 +10,7 @@ mod legend;
 mod live;
 mod plot;
 mod session;
+mod workspace;
 
 use app::DelogApp;
 
