@@ -921,7 +921,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 
 ### TLN — Timeline & playback (M5)
 
-- [ ] **TLN-01** — `Playback` model: play/pause, speed 0.1–16×, clamp (§11)
+- [x] **TLN-01** — `Playback` model: play/pause, speed 0.1–16×, clamp (§11)
 - [ ] **TLN-02** — Scrubber: range bar, handle, live-extent shading
 - [ ] **TLN-03** — Absolute (UTC when available) + log-relative time display
 - [ ] **TLN-04** — Jump start/end; step ±1 sample of focused reference trace (fallback 1/30 s)
