@@ -56,6 +56,9 @@ serialport = "4.9.0"
 # 3D models
 gltf = "1.4.1"
 
+# 3D math (cameras, GPS→NED, quaternions)
+glam = "0.30.10"
+
 # concurrency
 arc-swap = "1.9.1"
 crossbeam-channel = "0.5.15"
