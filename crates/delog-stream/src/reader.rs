@@ -27,6 +27,19 @@ const READ_TIMEOUT: Duration = Duration::from_millis(200);
 /// Transport read buffer; comfortably larger than any single MAVLink frame.
 const READ_BUF: usize = 8192;
 
+/// First reconnect backoff; doubles per consecutive failure (§7.2, LIV-04).
+pub const RECONNECT_INITIAL: Duration = Duration::from_millis(500);
+/// Reconnect backoff ceiling (§7.2).
+pub const RECONNECT_CAP: Duration = Duration::from_secs(8);
+
+/// Next backoff after `prev` (`None` = first wait): exponential, capped.
+fn next_backoff(prev: Option<Duration>) -> Duration {
+    match prev {
+        None => RECONNECT_INITIAL,
+        Some(d) => (d * 2).min(RECONNECT_CAP),
+    }
+}
+
 /// A connected link goes `Stale` after this long without a valid frame (§7.2).
 pub const STALE_AFTER: Duration = Duration::from_secs(2);
 /// …and `Lost` after this long (§7.2).
@@ -74,6 +87,8 @@ pub struct LinkCounters {
     seq_gaps: AtomicU64,
     resync_bytes: AtomicU64,
     unknown_messages: AtomicU64,
+    /// Transport reconnections after the initial connect (LIV-04).
+    reconnects: AtomicU64,
     /// Millis (since the reader's start instant) of the last valid frame; 0
     /// until the first frame arrives. Drives [`LinkReader::state`].
     last_rx_millis: AtomicU64,
@@ -86,6 +101,10 @@ impl LinkCounters {
 
     fn mark_rx(&self, millis: u64) {
         self.last_rx_millis.store(millis, Ordering::Relaxed);
+    }
+
+    fn mark_reconnect(&self) {
+        self.reconnects.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Mirror the decoder's absolute counters into the shared atomics.
@@ -106,6 +125,7 @@ impl LinkCounters {
             seq_gaps: self.seq_gaps.load(Ordering::Relaxed),
             resync_bytes: self.resync_bytes.load(Ordering::Relaxed),
             unknown_messages: self.unknown_messages.load(Ordering::Relaxed),
+            reconnects: self.reconnects.load(Ordering::Relaxed),
         }
     }
 }
@@ -125,6 +145,8 @@ pub struct LinkStats {
     pub resync_bytes: u64,
     /// CRC-valid frames whose message id the dialect can't decode.
     pub unknown_messages: u64,
+    /// Transport reconnections after the initial connect (LIV-04).
+    pub reconnects: u64,
 }
 
 /// A running reader thread. Dropping it requests a stop and joins.
@@ -141,7 +163,12 @@ impl LinkReader {
     /// the transport (binding/connecting) happens synchronously, so a refused
     /// connection or bind error surfaces here rather than on the thread.
     pub fn spawn(endpoint: &Endpoint, frames: Sender<DecodedFrame>) -> io::Result<Self> {
-        let transport = open(endpoint)?;
+        let first = open(endpoint)?;
+        let reconnectable = matches!(
+            endpoint.kind(),
+            crate::EndpointKind::TcpClient | crate::EndpointKind::Serial
+        );
+        let endpoint = endpoint.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let counters = Arc::new(LinkCounters::default());
         let started = Instant::now();
@@ -150,7 +177,18 @@ impl LinkReader {
             let counters = Arc::clone(&counters);
             thread::Builder::new()
                 .name(format!("link-reader {endpoint}"))
-                .spawn(move || pump(transport, &stop, &counters, started, &frames))?
+                .spawn(move || {
+                    supervise(
+                        Some(first),
+                        reconnectable,
+                        || open(&endpoint),
+                        &stop,
+                        &counters,
+                        started,
+                        &frames,
+                        |wait| interruptible_sleep(wait, &stop),
+                    )
+                })?
         };
         Ok(Self {
             stop,
@@ -200,22 +238,32 @@ impl Drop for LinkReader {
     }
 }
 
+/// Why [`pump`] returned, so the supervisor can decide whether to reconnect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PumpOutcome {
+    /// The transport ended (`read` returned `Ok(0)` / peer closed).
+    Eof,
+    /// A stop was requested.
+    Stopped,
+    /// The frame consumer dropped the channel.
+    ConsumerGone,
+}
+
 /// The owned framing loop: read transport bytes, feed the shared decoder, send
-/// each decoded frame on. Returns when the transport ends (`Ok(0)`), the
-/// consumer drops the channel, or a stop is requested; a transport IO error
-/// (other than a timeout) propagates.
+/// each decoded frame on. A transport IO error other than a timeout propagates
+/// (the supervisor treats it like `Eof` for reconnectable links).
 fn pump(
     mut transport: Box<dyn Read + Send>,
     stop: &AtomicBool,
     counters: &LinkCounters,
     started: Instant,
     frames: &Sender<DecodedFrame>,
-) -> io::Result<()> {
+) -> io::Result<PumpOutcome> {
     let mut decoder = FrameDecoder::new();
     let mut buf = [0u8; READ_BUF];
     while !stop.load(Ordering::Acquire) {
         let n = match transport.read(&mut buf) {
-            Ok(0) => break, // EOF / peer closed
+            Ok(0) => return Ok(PumpOutcome::Eof), // peer closed
             Ok(n) => n,
             // A read timeout (no data within READ_TIMEOUT) just lets us re-check
             // the stop flag.
@@ -228,12 +276,81 @@ fn pump(
         while let Some(frame) = decoder.next_frame() {
             counters.mark_rx(started.elapsed().as_millis() as u64);
             if frames.send(frame).is_err() {
-                return Ok(()); // consumer gone
+                return Ok(PumpOutcome::ConsumerGone);
             }
         }
         counters.store_frames(decoder.counters());
     }
-    Ok(())
+    Ok(PumpOutcome::Stopped)
+}
+
+/// Supervise a link: pump the connection and, for reconnectable transports,
+/// re-open it with exponential backoff (§7.2, LIV-04). The backoff resets only
+/// after a session that actually delivered frames, so a flapping link still
+/// backs off. `connect`/`backoff_sleep` are injected so the schedule is
+/// testable without real sockets or real sleeps.
+#[allow(clippy::too_many_arguments)]
+fn supervise(
+    mut first: Option<Box<dyn Read + Send>>,
+    reconnectable: bool,
+    mut connect: impl FnMut() -> io::Result<Box<dyn Read + Send>>,
+    stop: &AtomicBool,
+    counters: &LinkCounters,
+    started: Instant,
+    frames: &Sender<DecodedFrame>,
+    mut backoff_sleep: impl FnMut(Duration),
+) -> io::Result<()> {
+    let mut backoff = None;
+    loop {
+        if stop.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let transport = match first.take() {
+            Some(transport) => transport,
+            None => match connect() {
+                Ok(transport) => {
+                    counters.mark_reconnect();
+                    transport
+                }
+                Err(err) => {
+                    if !reconnectable {
+                        return Err(err);
+                    }
+                    backoff = Some(next_backoff(backoff));
+                    backoff_sleep(backoff.unwrap());
+                    continue;
+                }
+            },
+        };
+
+        let before = counters.snapshot().rx_frames;
+        let outcome = pump(transport, stop, counters, started, frames);
+        match outcome {
+            Ok(PumpOutcome::Stopped | PumpOutcome::ConsumerGone) => return Ok(()),
+            Ok(PumpOutcome::Eof) | Err(_) => {
+                if !reconnectable {
+                    return outcome.map(|_| ());
+                }
+                if counters.snapshot().rx_frames > before {
+                    backoff = None; // a productive session: start over
+                }
+                backoff = Some(next_backoff(backoff));
+                backoff_sleep(backoff.unwrap());
+            }
+        }
+    }
+}
+
+/// Sleep up to `total`, in slices, so a stop request during a reconnect wait is
+/// honored promptly rather than after the full backoff.
+fn interruptible_sleep(total: Duration, stop: &AtomicBool) {
+    let slice = Duration::from_millis(50);
+    let mut remaining = total;
+    while remaining > Duration::ZERO && !stop.load(Ordering::Acquire) {
+        let nap = remaining.min(slice);
+        thread::sleep(nap);
+        remaining = remaining.saturating_sub(nap);
+    }
 }
 
 /// A read timeout, spelled differently across platforms (`WouldBlock` on Unix,
@@ -293,9 +410,11 @@ impl Read for SerialReader {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
     use std::io::Write;
     use std::net::TcpListener;
+    use std::rc::Rc;
 
     use crossbeam_channel::unbounded;
     use mavlink::dialects::ardupilotmega::{ATTITUDE_DATA, MavMessage};
@@ -456,6 +575,108 @@ mod tests {
         // Boundaries are inclusive of the worse state.
         assert_eq!(LinkState::classify(Some(STALE_AFTER)), LinkState::Stale);
         assert_eq!(LinkState::classify(Some(LOST_AFTER)), LinkState::Lost);
+    }
+
+    #[test]
+    fn backoff_doubles_and_caps() {
+        let mut b = next_backoff(None);
+        assert_eq!(b, Duration::from_millis(500));
+        let expected = [
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+            Duration::from_secs(4),
+            Duration::from_secs(8),
+            Duration::from_secs(8), // capped
+        ];
+        for want in expected {
+            b = next_backoff(Some(b));
+            assert_eq!(b, want);
+        }
+    }
+
+    #[test]
+    fn reconnects_with_backoff_and_resets_after_a_productive_session() {
+        let stop = AtomicBool::new(false);
+        let counters = LinkCounters::default();
+        let (tx, rx) = unbounded();
+
+        // connect: fail, fail, succeed (one frame), then fail forever.
+        let attempt = Cell::new(0u32);
+        let connect = || -> io::Result<Box<dyn Read + Send>> {
+            let a = attempt.get();
+            attempt.set(a + 1);
+            if a == 2 {
+                Ok(Box::new(ChunkReader::new(vec![v2(0, &attitude(1.0))])))
+            } else {
+                Err(io::Error::new(io::ErrorKind::ConnectionRefused, "refused"))
+            }
+        };
+
+        // Record each backoff and stop once we've seen the full schedule.
+        let sleeps = Rc::new(RefCell::new(Vec::new()));
+        let sleeps_rec = Rc::clone(&sleeps);
+        let sleep = |wait: Duration| {
+            sleeps_rec.borrow_mut().push(wait);
+            if sleeps_rec.borrow().len() >= 4 {
+                stop.store(true, Ordering::Release);
+            }
+        };
+
+        supervise(
+            None,
+            true,
+            connect,
+            &stop,
+            &counters,
+            Instant::now(),
+            &tx,
+            sleep,
+        )
+        .unwrap();
+        drop(tx);
+
+        assert_eq!(rx.try_iter().count(), 1);
+        // 0.5 s, 1 s after two failures; then the productive session resets the
+        // backoff so the next wait is 0.5 s again, then 1 s.
+        assert_eq!(
+            *sleeps.borrow(),
+            vec![
+                Duration::from_millis(500),
+                Duration::from_secs(1),
+                Duration::from_millis(500),
+                Duration::from_secs(1),
+            ]
+        );
+        assert_eq!(counters.snapshot().reconnects, 1);
+    }
+
+    #[test]
+    fn non_reconnectable_link_stops_on_eof_without_reconnecting() {
+        let stop = AtomicBool::new(false);
+        let counters = LinkCounters::default();
+        let (tx, rx) = unbounded();
+        let connect = || -> io::Result<Box<dyn Read + Send>> {
+            panic!("a non-reconnectable link must not reconnect")
+        };
+        let mut sleeps = 0u32;
+        let sleep = |_: Duration| sleeps += 1;
+        let first: Box<dyn Read + Send> = Box::new(ChunkReader::new(vec![v2(0, &attitude(2.0))]));
+
+        supervise(
+            Some(first),
+            false,
+            connect,
+            &stop,
+            &counters,
+            Instant::now(),
+            &tx,
+            sleep,
+        )
+        .unwrap();
+        drop(tx);
+
+        assert_eq!(rx.try_iter().count(), 1);
+        assert_eq!(sleeps, 0);
     }
 
     #[test]
