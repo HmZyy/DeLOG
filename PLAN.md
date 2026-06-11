@@ -926,7 +926,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **TLN-03** — Absolute (UTC when available) + log-relative time display — UTC path plumbed + tested; no parser emits a UTC reference yet (BIN GPS week / ULog `time_ref_utc` land with M6)
 - [x] **TLN-04** — Jump start/end; step ±1 sample of focused reference trace (fallback 1/30 s)
 - [ ] **TLN-05** — `follow_live` tail mode, disengage-on-scrub
-- [ ] **TLN-06** — Idle-aware repaint policy: continuous only when playing/connected (§11)
+- [x] **TLN-06** — Idle-aware repaint policy: continuous only when playing/connected (§11) — "connected" half activates with M7 live links
 - [ ] **TLN-07** — Playhead drives 3D pose lookup (with M8)
 
 ### TDV — 3D view (M8)

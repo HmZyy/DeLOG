@@ -87,6 +87,15 @@ impl eframe::App for DelogApp {
             self.playback.clamp_to(range);
             let dt = ui.ctx().input(|i| i.stable_dt) as f64;
             self.playback.advance(dt, range);
+
+            // Idle-aware repaint policy (§11, TLN-06): continuous frames only
+            // while playing (later: or a link is Connected, M7). Everything
+            // else is event-driven — ingest progress, epoch changes and
+            // diagnostics each request their own repaint — so a static plot
+            // idles at 0% GPU.
+            if self.playback.playing {
+                ui.ctx().request_repaint();
+            }
         }
         self.caches.begin_frame(self.frame);
         self.caches.poll_builds();
