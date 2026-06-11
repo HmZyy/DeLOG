@@ -159,6 +159,83 @@ impl BrowserModel {
     }
 }
 
+/// How a click modifies the selection (BRW-05).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectMod {
+    /// Plain click: the field becomes the whole selection.
+    Replace,
+    /// Ctrl-click: toggle the field in/out.
+    Toggle,
+    /// Shift-click: select the visible range from the anchor to the field.
+    Range,
+}
+
+/// Multi-select state for the browser tree (§13/§10.7, BRW-05). Pure data —
+/// `visible` is the tree's current field order so ranges and payloads follow
+/// what the user sees.
+#[derive(Debug, Default)]
+pub struct Selection {
+    selected: std::collections::HashSet<FieldId>,
+    anchor: Option<FieldId>,
+}
+
+impl Selection {
+    pub fn click(&mut self, field: FieldId, modifier: SelectMod, visible: &[FieldId]) {
+        match modifier {
+            SelectMod::Replace => {
+                self.selected.clear();
+                self.selected.insert(field);
+                self.anchor = Some(field);
+            }
+            SelectMod::Toggle => {
+                if !self.selected.remove(&field) {
+                    self.selected.insert(field);
+                    self.anchor = Some(field);
+                }
+            }
+            SelectMod::Range => {
+                let anchor = self.anchor.unwrap_or(field);
+                let a = visible.iter().position(|f| *f == anchor);
+                let b = visible.iter().position(|f| *f == field);
+                self.selected.clear();
+                match (a, b) {
+                    (Some(a), Some(b)) => {
+                        let (lo, hi) = (a.min(b), a.max(b));
+                        self.selected.extend(visible[lo..=hi].iter().copied());
+                    }
+                    _ => {
+                        self.selected.insert(field);
+                    }
+                }
+                self.anchor = Some(anchor);
+            }
+        }
+    }
+
+    pub fn contains(&self, field: FieldId) -> bool {
+        self.selected.contains(&field)
+    }
+
+    /// The selection in visible (tree) order.
+    pub fn ordered(&self, visible: &[FieldId]) -> Vec<FieldId> {
+        visible
+            .iter()
+            .copied()
+            .filter(|f| self.selected.contains(f))
+            .collect()
+    }
+
+    /// The `Vec<FieldId>` drag payload (§10.7): the whole selection when the
+    /// dragged field is part of it, otherwise just the dragged field.
+    pub fn drag_payload(&self, dragged: FieldId, visible: &[FieldId]) -> Vec<FieldId> {
+        if self.selected.contains(&dragged) {
+            self.ordered(visible)
+        } else {
+            vec![dragged]
+        }
+    }
+}
+
 /// Natural order: digit runs compare numerically, text runs case-insensitively
 /// (`GPS[2]` before `GPS[10]`, §13 BRW-03).
 fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
@@ -217,13 +294,14 @@ fn matches_query(query: &str, path: &str) -> bool {
         .all(|token| path.contains(&token.to_lowercase()))
 }
 
-/// Render the browser tree with its search box (BRW-01/02). `query` persists
-/// in app state across frames; `plotted` maps plotted fields to their trace
-/// colour for the BRW-04 highlight.
+/// Render the browser tree with its search box (BRW-01/02). `query` and
+/// `selection` persist in app state across frames; `plotted` maps plotted
+/// fields to their trace colour for the BRW-04 highlight.
 pub fn ui(
     ui: &mut egui::Ui,
     model: &BrowserModel,
     query: &mut String,
+    selection: &mut Selection,
     plotted: &std::collections::HashMap<FieldId, egui::Color32>,
 ) {
     ui.heading("Data");
@@ -258,6 +336,14 @@ pub fn ui(
         return;
     }
 
+    // Visible field order, for shift-range selection and drag payloads.
+    let visible: Vec<FieldId> = model
+        .sources
+        .iter()
+        .flat_map(|s| s.topics.iter())
+        .flat_map(|t| t.fields.iter().map(|f| f.id))
+        .collect();
+
     egui::ScrollArea::vertical().show(ui, |ui| {
         for source in &model.sources {
             let header = format!("{}  ({} rows)", source.label, source.rows);
@@ -281,7 +367,13 @@ pub fn ui(
                             .open(filtering.then_some(true))
                             .show(ui, |ui| {
                                 for field in &topic.fields {
-                                    field_row(ui, field, plotted.get(&field.id).copied());
+                                    field_row(
+                                        ui,
+                                        field,
+                                        plotted.get(&field.id).copied(),
+                                        selection,
+                                        &visible,
+                                    );
                                 }
                             });
                     }
@@ -290,18 +382,44 @@ pub fn ui(
     });
 }
 
-fn field_row(ui: &mut egui::Ui, field: &FieldNode, trace_color: Option<egui::Color32>) {
-    // The row is a drag source carrying its FieldId; the plot pane is the drop
-    // zone (PLT-13).
+fn field_row(
+    ui: &mut egui::Ui,
+    field: &FieldNode,
+    trace_color: Option<egui::Color32>,
+    selection: &mut Selection,
+    visible: &[FieldId],
+) {
+    // The row is a drag source carrying `Vec<FieldId>` — the multi-selection
+    // when the dragged row is part of it (§10.7, BRW-05); plot panes and tile
+    // edges are the drop zones (PLT-13).
     let id = egui::Id::new(("field", field.id.0));
-    ui.dnd_drag_source(id, field.id, |ui| {
+    let payload = selection.drag_payload(field.id, visible);
+    ui.dnd_drag_source(id, payload, |ui| {
         ui.horizontal(|ui| {
             // Plotted-field highlight (BRW-04): trace-coloured dot + bold name.
+            let name = if trace_color.is_some() {
+                egui::RichText::new(&field.name).strong()
+            } else {
+                egui::RichText::new(&field.name)
+            };
             if let Some(color) = trace_color {
                 ui.colored_label(color, "●");
-                ui.label(egui::RichText::new(&field.name).strong());
-            } else {
-                ui.label(&field.name);
+            }
+            // Click handling lives on the label so dragging stays with the
+            // outer drag source.
+            if ui
+                .selectable_label(selection.contains(field.id), name)
+                .clicked()
+            {
+                let modifiers = ui.input(|i| i.modifiers);
+                let modifier = if modifiers.shift {
+                    SelectMod::Range
+                } else if modifiers.command {
+                    SelectMod::Toggle
+                } else {
+                    SelectMod::Replace
+                };
+                selection.click(field.id, modifier, visible);
             }
             ui.weak(field.dtype);
             if let Some(unit) = &field.unit {
@@ -380,6 +498,57 @@ mod tests {
     #[test]
     fn empty_snapshot_yields_an_empty_model() {
         assert!(BrowserModel::from_snapshot(&StoreSnapshot::empty()).is_empty());
+    }
+
+    #[test]
+    fn plain_click_replaces_selection_and_sets_the_anchor() {
+        let visible = [FieldId(1), FieldId(2), FieldId(3), FieldId(4)];
+        let mut sel = Selection::default();
+        sel.click(FieldId(2), SelectMod::Replace, &visible);
+        assert_eq!(sel.ordered(&visible), vec![FieldId(2)]);
+        sel.click(FieldId(4), SelectMod::Replace, &visible);
+        assert_eq!(sel.ordered(&visible), vec![FieldId(4)]);
+    }
+
+    #[test]
+    fn ctrl_click_toggles_membership() {
+        let visible = [FieldId(1), FieldId(2), FieldId(3)];
+        let mut sel = Selection::default();
+        sel.click(FieldId(1), SelectMod::Toggle, &visible);
+        sel.click(FieldId(3), SelectMod::Toggle, &visible);
+        assert_eq!(sel.ordered(&visible), vec![FieldId(1), FieldId(3)]);
+        sel.click(FieldId(1), SelectMod::Toggle, &visible);
+        assert_eq!(sel.ordered(&visible), vec![FieldId(3)]);
+    }
+
+    #[test]
+    fn shift_click_selects_the_range_from_the_anchor() {
+        let visible = [FieldId(1), FieldId(2), FieldId(3), FieldId(4), FieldId(5)];
+        let mut sel = Selection::default();
+        sel.click(FieldId(2), SelectMod::Replace, &visible);
+        sel.click(FieldId(4), SelectMod::Range, &visible);
+        assert_eq!(
+            sel.ordered(&visible),
+            vec![FieldId(2), FieldId(3), FieldId(4)]
+        );
+        // Range works upward from the anchor too.
+        sel.click(FieldId(1), SelectMod::Range, &visible);
+        assert_eq!(sel.ordered(&visible), vec![FieldId(1), FieldId(2)]);
+    }
+
+    #[test]
+    fn drag_payload_is_the_selection_when_dragging_a_selected_field() {
+        let visible = [FieldId(1), FieldId(2), FieldId(3)];
+        let mut sel = Selection::default();
+        sel.click(FieldId(1), SelectMod::Toggle, &visible);
+        sel.click(FieldId(3), SelectMod::Toggle, &visible);
+        // Dragging a selected field carries the whole selection (§10.7).
+        assert_eq!(
+            sel.drag_payload(FieldId(3), &visible),
+            vec![FieldId(1), FieldId(3)]
+        );
+        // Dragging an unselected field carries just that field.
+        assert_eq!(sel.drag_payload(FieldId(2), &visible), vec![FieldId(2)]);
     }
 
     #[test]
