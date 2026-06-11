@@ -948,7 +948,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 ### BRW — Data browser (M2 base, M4 polish)
 
 - [x] **BRW-01** — Source→Topic→Field tree with dtype/count/unit chips (§13)
-- [ ] **BRW-02** — Fuzzy search/filter over full paths
+- [x] **BRW-02** — Fuzzy search/filter over full paths
 - [ ] **BRW-03** — Natural sort
 - [ ] **BRW-04** — Plotted-field highlight (color dot + bold)
 - [ ] **BRW-05** — Multi-select + drag payload `Vec<FieldId>`

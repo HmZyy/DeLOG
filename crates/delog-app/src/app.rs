@@ -22,6 +22,7 @@ pub struct DelogApp {
     last_epoch: u64,
     origin_us: i64,
     path_input: String,
+    browser_query: String,
     show_about: bool,
     show_connection_dialog: bool,
     connection_dialog: ConnectionDialog,
@@ -43,6 +44,7 @@ impl DelogApp {
             last_epoch: u64::MAX,
             origin_us: 0,
             path_input: String::new(),
+            browser_query: String::new(),
             show_about: false,
             show_connection_dialog: false,
             connection_dialog: ConnectionDialog::default(),
@@ -157,7 +159,7 @@ impl eframe::App for DelogApp {
             .resizable(true)
             .default_size(280.0)
             .show_inside(ui, |ui| {
-                browser::ui(ui, &model);
+                browser::ui(ui, &model, &mut self.browser_query);
             });
 
         egui::Frame::central_panel(ui.style()).show(ui, |ui| {
