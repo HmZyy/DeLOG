@@ -1,15 +1,15 @@
 //! Vehicle configuration dialog (PLAN.md §12.1, TDV-03). Lists configured
-//! vehicles and edits a draft with per-source field-mapping pickers; an
-//! auto-detect button fills the draft from common ArduPilot/PX4/MAVLink field
-//! names. Building a [`VehicleConfig`] is where every mapping variant is
-//! constructed, so this is the consumer that retires `vehicle.rs`'s temporary
-//! dead-code allowance.
+//! vehicles (show / edit / remove) and edits a draft: pick a source, then a
+//! position topic and an orientation topic, then the per-axis columns from
+//! those topics. An auto-detect button fills the draft from common
+//! ArduPilot/PX4/MAVLink field names. Building a [`VehicleConfig`] is where
+//! every mapping variant is constructed.
 
-use delog_core::identity::{FieldId, SourceId};
+use delog_core::identity::{FieldId, SourceId, TopicId};
 use delog_core::snapshot::StoreSnapshot;
 use egui::Color32;
 
-use crate::vehicle::{GpsRef, LengthUnit, ModelKind, OriMapping, PosMapping, VehicleConfig};
+use crate::vehicle::{GpsRef, ModelKind, OriMapping, PosMapping, VehicleConfig};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PosMode {
@@ -28,11 +28,11 @@ enum OriMode {
 struct Draft {
     label: String,
     source: Option<SourceId>,
+    pos_topic: Option<TopicId>,
     pos_mode: PosMode,
     north: Option<FieldId>,
     east: Option<FieldId>,
     down: Option<FieldId>,
-    unit: LengthUnit,
     lat: Option<FieldId>,
     lon: Option<FieldId>,
     alt: Option<FieldId>,
@@ -41,6 +41,7 @@ struct Draft {
     ref_lat: f64,
     ref_lon: f64,
     ref_alt: f64,
+    ori_topic: Option<TopicId>,
     ori_mode: OriMode,
     roll: Option<FieldId>,
     pitch: Option<FieldId>,
@@ -62,11 +63,11 @@ impl Default for Draft {
         Self {
             label: "Vehicle".into(),
             source: None,
+            pos_topic: None,
             pos_mode: PosMode::Ned,
             north: None,
             east: None,
             down: None,
-            unit: LengthUnit::Meters,
             lat: None,
             lon: None,
             alt: None,
@@ -75,6 +76,7 @@ impl Default for Draft {
             ref_lat: 0.0,
             ref_lon: 0.0,
             ref_alt: 0.0,
+            ori_topic: None,
             ori_mode: OriMode::Static,
             roll: None,
             pitch: None,
@@ -94,6 +96,83 @@ impl Default for Draft {
 }
 
 impl Draft {
+    /// Load an existing config for editing (FieldIds map back to their topic).
+    fn from_config(cfg: &VehicleConfig, snapshot: &StoreSnapshot) -> Self {
+        let topic_of = |f: FieldId| field_topic(snapshot, f);
+        let mut d = Draft {
+            label: cfg.label.clone(),
+            source: Some(cfg.source),
+            model: cfg.model.clone(),
+            custom_path: match &cfg.model {
+                ModelKind::CustomGlb(p) => p.to_string_lossy().into_owned(),
+                _ => String::new(),
+            },
+            color: cfg.color,
+            path_color: cfg.path_color,
+            scale: cfg.scale,
+            ..Draft::default()
+        };
+        match &cfg.pos {
+            PosMapping::Ned { north, east, down } => {
+                d.pos_mode = PosMode::Ned;
+                d.pos_topic = topic_of(*north);
+                d.north = Some(*north);
+                d.east = Some(*east);
+                d.down = Some(*down);
+            }
+            PosMapping::Gps {
+                lat,
+                lon,
+                alt,
+                degrees,
+                reference,
+            } => {
+                d.pos_mode = PosMode::Gps;
+                d.pos_topic = topic_of(*lat);
+                d.lat = Some(*lat);
+                d.lon = Some(*lon);
+                d.alt = Some(*alt);
+                d.gps_degrees = *degrees;
+                if let GpsRef::Manual {
+                    lat_deg,
+                    lon_deg,
+                    alt_m,
+                } = reference
+                {
+                    d.gps_manual_ref = true;
+                    d.ref_lat = *lat_deg;
+                    d.ref_lon = *lon_deg;
+                    d.ref_alt = *alt_m;
+                }
+            }
+        }
+        match &cfg.ori {
+            OriMapping::Static => d.ori_mode = OriMode::Static,
+            OriMapping::Euler {
+                roll,
+                pitch,
+                yaw,
+                degrees,
+            } => {
+                d.ori_mode = OriMode::Euler;
+                d.ori_topic = topic_of(*roll);
+                d.roll = Some(*roll);
+                d.pitch = Some(*pitch);
+                d.yaw = Some(*yaw);
+                d.euler_degrees = *degrees;
+            }
+            OriMapping::Quat { w, x, y, z } => {
+                d.ori_mode = OriMode::Quat;
+                d.ori_topic = topic_of(*w);
+                d.qw = Some(*w);
+                d.qx = Some(*x);
+                d.qy = Some(*y);
+                d.qz = Some(*z);
+            }
+        }
+        d
+    }
+
     /// Build a `VehicleConfig` if the selected mapping has all its fields.
     fn build(&self) -> Option<VehicleConfig> {
         let source = self.source?;
@@ -102,7 +181,6 @@ impl Draft {
                 north: self.north?,
                 east: self.east?,
                 down: self.down?,
-                unit: self.unit,
             },
             PosMode::Gps => PosMapping::Gps {
                 lat: self.lat?,
@@ -153,75 +231,90 @@ impl Draft {
         })
     }
 
-    /// Fill field selections by matching common position/attitude field names.
-    fn autodetect(&mut self, fields: &[(FieldId, String)]) {
-        let find = |needles: &[&str]| -> Option<FieldId> {
-            fields.iter().find_map(|(id, label)| {
-                let l = label.to_ascii_lowercase();
-                needles.iter().any(|n| l.ends_with(n)).then_some(*id)
-            })
-        };
-        // GPS first (AP POS.Lat/Lng/Alt, MAVLink lat/lon/alt).
-        if let (Some(la), Some(lo), Some(al)) =
-            (find(&[".lat"]), find(&[".lng", ".lon"]), find(&[".alt"]))
-        {
-            self.pos_mode = PosMode::Gps;
-            self.lat = Some(la);
-            self.lon = Some(lo);
-            self.alt = Some(al);
-        }
-        if let (Some(r), Some(p), Some(y)) = (find(&[".roll"]), find(&[".pitch"]), find(&[".yaw"]))
-        {
-            self.ori_mode = OriMode::Euler;
-            self.roll = Some(r);
-            self.pitch = Some(p);
-            self.yaw = Some(y);
+    /// Fill topic + column selections from common position/attitude names.
+    fn autodetect(&mut self, snapshot: &StoreSnapshot, source: SourceId) {
+        for (topic, _) in source_topics(snapshot, source) {
+            let fields = topic_fields(snapshot, topic);
+            let find = |needle: &str| -> Option<FieldId> {
+                fields
+                    .iter()
+                    .find_map(|(id, n)| n.eq_ignore_ascii_case(needle).then_some(*id))
+            };
+            // GPS position (AP POS.Lat/Lng/Alt, MAVLink lat/lon/alt).
+            if let (Some(la), Some(lo), Some(al)) = (
+                find("Lat"),
+                find("Lng").or_else(|| find("Lon")),
+                find("Alt"),
+            ) {
+                self.pos_mode = PosMode::Gps;
+                self.pos_topic = Some(topic);
+                self.lat = Some(la);
+                self.lon = Some(lo);
+                self.alt = Some(al);
+            }
+            // Euler attitude (AP ATT.Roll/Pitch/Yaw).
+            if let (Some(r), Some(p), Some(y)) = (find("Roll"), find("Pitch"), find("Yaw")) {
+                self.ori_mode = OriMode::Euler;
+                self.ori_topic = Some(topic);
+                self.roll = Some(r);
+                self.pitch = Some(p);
+                self.yaw = Some(y);
+            }
         }
     }
 }
 
-/// Vehicle-config dialog state (open flag + the working draft).
+/// Dialog state: open flag, the working draft, and which vehicle is being
+/// edited (`None` = adding a new one).
 #[derive(Default)]
 pub struct VehicleDialog {
     pub open: bool,
     draft: Draft,
+    editing: Option<usize>,
 }
 
-/// All `(FieldId, "TOPIC.field")` of a source, for the field pickers.
-fn source_fields(snapshot: &StoreSnapshot, source: SourceId) -> Vec<(FieldId, String)> {
+fn field_topic(snapshot: &StoreSnapshot, field: FieldId) -> Option<TopicId> {
+    snapshot.fields.get(field.index()).map(|f| f.topic)
+}
+
+fn source_topics(snapshot: &StoreSnapshot, source: SourceId) -> Vec<(TopicId, String)> {
     let mut out = Vec::new();
     for src in snapshot.sources.iter() {
         if src.entry.id != source || src.entry.removed {
             continue;
         }
         for &topic_id in src.topics.iter() {
-            let Some(topic) = snapshot.topic(topic_id) else {
-                continue;
-            };
-            if topic.entry.removed {
-                continue;
-            }
-            for field in snapshot.fields.iter() {
-                if field.topic == topic_id && !field.removed {
-                    out.push((field.id, format!("{}.{}", topic.entry.name, field.name)));
-                }
+            if let Some(topic) = snapshot.topic(topic_id)
+                && !topic.entry.removed
+            {
+                out.push((topic_id, topic.entry.name.clone()));
             }
         }
     }
     out
 }
 
-fn field_label(fields: &[(FieldId, String)], sel: Option<FieldId>) -> &str {
+fn topic_fields(snapshot: &StoreSnapshot, topic: TopicId) -> Vec<(FieldId, String)> {
+    snapshot
+        .fields
+        .iter()
+        .filter(|f| f.topic == topic && !f.removed)
+        .map(|f| (f.id, f.name.clone()))
+        .collect()
+}
+
+fn combo_label<'a, T: PartialEq>(items: &'a [(T, String)], sel: &Option<T>) -> &'a str {
     match sel {
-        Some(id) => fields
+        Some(s) => items
             .iter()
-            .find(|(f, _)| *f == id)
+            .find(|(v, _)| v == s)
             .map(|(_, l)| l.as_str())
             .unwrap_or("—"),
         None => "—",
     }
 }
 
+/// A labelled field ComboBox restricted to one topic's columns.
 fn field_combo(
     ui: &mut egui::Ui,
     salt: &str,
@@ -232,7 +325,7 @@ fn field_combo(
     ui.horizontal(|ui| {
         ui.label(label);
         egui::ComboBox::from_id_salt(salt)
-            .selected_text(field_label(fields, *sel))
+            .selected_text(combo_label(fields, sel))
             .show_ui(ui, |ui| {
                 for (id, name) in fields {
                     ui.selectable_value(sel, Some(*id), name);
@@ -241,9 +334,7 @@ fn field_combo(
     });
 }
 
-/// Render the dialog; mutates `vehicles` when the user adds/removes one.
-/// Returns `true` when the vehicle set changed (so the caller can rebuild
-/// trajectories).
+/// Render the dialog; returns `true` when the vehicle set changed.
 pub fn show(
     ctx: &egui::Context,
     state: &mut VehicleDialog,
@@ -257,41 +348,67 @@ pub fn show(
     let mut changed = false;
     egui::Window::new("Vehicles")
         .open(&mut open)
-        .default_width(360.0)
+        .default_width(380.0)
         .show(ctx, |ui| {
-            // Existing vehicles: show toggle + remove.
             let mut remove: Option<usize> = None;
             for (i, v) in vehicles.iter_mut().enumerate() {
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut v.show, "");
                     ui.label(&v.label);
-                    ui.label(format!("({})", v.model.label()));
-                    if ui.button("✕").on_hover_text("Remove").clicked() {
+                    ui.weak(v.model.label());
+                    if ui.small_button("Edit").clicked() {
+                        state.editing = Some(i);
+                        state.draft = Draft::from_config(v, snapshot);
+                    }
+                    if ui.small_button("✕").on_hover_text("Remove").clicked() {
                         remove = Some(i);
                     }
                 });
             }
             if let Some(i) = remove {
                 vehicles.remove(i);
+                if state.editing == Some(i) {
+                    state.editing = None;
+                    state.draft = Draft::default();
+                }
                 changed = true;
             }
             ui.separator();
 
+            ui.horizontal(|ui| {
+                ui.label(if state.editing.is_some() {
+                    "Editing vehicle"
+                } else {
+                    "New vehicle"
+                });
+                if ui.small_button("Clear").clicked() {
+                    state.editing = None;
+                    state.draft = Draft::default();
+                }
+            });
             draft_editor(ui, &mut state.draft, snapshot);
 
             ui.separator();
-            let can_add = state.draft.build().is_some();
+            let can_save = state.draft.build().is_some();
+            let label = if state.editing.is_some() {
+                "Save changes"
+            } else {
+                "Add vehicle"
+            };
             ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(can_add, egui::Button::new("Add vehicle"))
-                    .clicked()
+                if ui.add_enabled(can_save, egui::Button::new(label)).clicked()
                     && let Some(cfg) = state.draft.build()
                 {
-                    vehicles.push(cfg);
+                    match state.editing {
+                        Some(i) if i < vehicles.len() => vehicles[i] = cfg,
+                        _ => vehicles.push(cfg),
+                    }
+                    state.editing = None;
+                    state.draft = Draft::default();
                     changed = true;
                 }
-                if !can_add {
-                    ui.weak("pick a source and its position fields");
+                if !can_save {
+                    ui.weak("pick a source, position topic + columns");
                 }
             });
         });
@@ -300,7 +417,6 @@ pub fn show(
 }
 
 fn draft_editor(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapshot) {
-    // Source picker.
     let sources: Vec<(SourceId, String)> = snapshot
         .sources
         .iter()
@@ -309,16 +425,25 @@ fn draft_editor(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapshot) 
         .collect();
     ui.horizontal(|ui| {
         ui.label("Source");
-        let sel_label = draft
-            .source
-            .and_then(|id| sources.iter().find(|(s, _)| *s == id))
-            .map(|(_, l)| l.as_str())
-            .unwrap_or("—");
         egui::ComboBox::from_id_salt("veh-source")
-            .selected_text(sel_label)
+            .selected_text(combo_label(&sources, &draft.source))
             .show_ui(ui, |ui| {
                 for (id, label) in &sources {
-                    ui.selectable_value(&mut draft.source, Some(*id), label);
+                    if ui
+                        .selectable_value(&mut draft.source, Some(*id), label)
+                        .clicked()
+                    {
+                        // New source ⇒ clear stale topic/column selections.
+                        *draft = Draft {
+                            source: Some(*id),
+                            label: draft.label.clone(),
+                            model: draft.model.clone(),
+                            color: draft.color,
+                            path_color: draft.path_color,
+                            scale: draft.scale,
+                            ..Draft::default()
+                        };
+                    }
                 }
             });
     });
@@ -331,52 +456,55 @@ fn draft_editor(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapshot) 
         ui.weak("Select a source to map its fields.");
         return;
     };
-    let fields = source_fields(snapshot, source);
+    let topics = source_topics(snapshot, source);
     if ui.button("Auto-detect fields").clicked() {
-        draft.autodetect(&fields);
+        draft.autodetect(snapshot, source);
     }
 
-    // Position.
+    // Position: pick a topic, then columns from it.
     ui.separator();
     ui.label("Position");
     ui.horizontal(|ui| {
         ui.selectable_value(&mut draft.pos_mode, PosMode::Ned, "NED / local");
         ui.selectable_value(&mut draft.pos_mode, PosMode::Gps, "GPS");
     });
-    match draft.pos_mode {
-        PosMode::Ned => {
-            field_combo(ui, "veh-n", "North", &mut draft.north, &fields);
-            field_combo(ui, "veh-e", "East", &mut draft.east, &fields);
-            field_combo(ui, "veh-d", "Down", &mut draft.down, &fields);
-            ui.horizontal(|ui| {
-                ui.label("Unit");
-                for (u, name) in [
-                    (LengthUnit::Meters, "m"),
-                    (LengthUnit::Centimeters, "cm"),
-                    (LengthUnit::Feet, "ft"),
-                ] {
-                    ui.selectable_value(&mut draft.unit, u, name);
+    if topic_combo(ui, "veh-pos-topic", "Topic", &mut draft.pos_topic, &topics) {
+        draft.north = None;
+        draft.east = None;
+        draft.down = None;
+        draft.lat = None;
+        draft.lon = None;
+        draft.alt = None;
+    }
+    if let Some(topic) = draft.pos_topic {
+        let cols = topic_fields(snapshot, topic);
+        match draft.pos_mode {
+            PosMode::Ned => {
+                field_combo(ui, "veh-n", "North", &mut draft.north, &cols);
+                field_combo(ui, "veh-e", "East", &mut draft.east, &cols);
+                field_combo(ui, "veh-d", "Down", &mut draft.down, &cols);
+            }
+            PosMode::Gps => {
+                field_combo(ui, "veh-lat", "Lat", &mut draft.lat, &cols);
+                field_combo(ui, "veh-lon", "Lon", &mut draft.lon, &cols);
+                field_combo(ui, "veh-alt", "Alt", &mut draft.alt, &cols);
+                ui.checkbox(&mut draft.gps_degrees, "Lat/Lon in degrees");
+                ui.checkbox(&mut draft.gps_manual_ref, "Manual reference origin");
+                if draft.gps_manual_ref {
+                    ui.horizontal(|ui| {
+                        ui.label("ref lat/lon/alt");
+                        ui.add(egui::DragValue::new(&mut draft.ref_lat).speed(0.0001));
+                        ui.add(egui::DragValue::new(&mut draft.ref_lon).speed(0.0001));
+                        ui.add(egui::DragValue::new(&mut draft.ref_alt).speed(0.1));
+                    });
                 }
-            });
-        }
-        PosMode::Gps => {
-            field_combo(ui, "veh-lat", "Lat", &mut draft.lat, &fields);
-            field_combo(ui, "veh-lon", "Lon", &mut draft.lon, &fields);
-            field_combo(ui, "veh-alt", "Alt", &mut draft.alt, &fields);
-            ui.checkbox(&mut draft.gps_degrees, "Lat/Lon in degrees");
-            ui.checkbox(&mut draft.gps_manual_ref, "Manual reference origin");
-            if draft.gps_manual_ref {
-                ui.horizontal(|ui| {
-                    ui.label("ref lat/lon/alt");
-                    ui.add(egui::DragValue::new(&mut draft.ref_lat).speed(0.0001));
-                    ui.add(egui::DragValue::new(&mut draft.ref_lon).speed(0.0001));
-                    ui.add(egui::DragValue::new(&mut draft.ref_alt).speed(0.1));
-                });
             }
         }
+    } else {
+        ui.weak("Select a position topic.");
     }
 
-    // Orientation.
+    // Orientation: pick a topic, then columns from it.
     ui.separator();
     ui.label("Orientation");
     ui.horizontal(|ui| {
@@ -384,19 +512,35 @@ fn draft_editor(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapshot) 
         ui.selectable_value(&mut draft.ori_mode, OriMode::Euler, "Euler");
         ui.selectable_value(&mut draft.ori_mode, OriMode::Quat, "Quaternion");
     });
-    match draft.ori_mode {
-        OriMode::Static => {}
-        OriMode::Euler => {
-            field_combo(ui, "veh-roll", "Roll", &mut draft.roll, &fields);
-            field_combo(ui, "veh-pitch", "Pitch", &mut draft.pitch, &fields);
-            field_combo(ui, "veh-yaw", "Yaw", &mut draft.yaw, &fields);
-            ui.checkbox(&mut draft.euler_degrees, "Angles in degrees");
+    if draft.ori_mode != OriMode::Static {
+        if topic_combo(ui, "veh-ori-topic", "Topic", &mut draft.ori_topic, &topics) {
+            draft.roll = None;
+            draft.pitch = None;
+            draft.yaw = None;
+            draft.qw = None;
+            draft.qx = None;
+            draft.qy = None;
+            draft.qz = None;
         }
-        OriMode::Quat => {
-            field_combo(ui, "veh-qw", "W", &mut draft.qw, &fields);
-            field_combo(ui, "veh-qx", "X", &mut draft.qx, &fields);
-            field_combo(ui, "veh-qy", "Y", &mut draft.qy, &fields);
-            field_combo(ui, "veh-qz", "Z", &mut draft.qz, &fields);
+        if let Some(topic) = draft.ori_topic {
+            let cols = topic_fields(snapshot, topic);
+            match draft.ori_mode {
+                OriMode::Static => {}
+                OriMode::Euler => {
+                    field_combo(ui, "veh-roll", "Roll", &mut draft.roll, &cols);
+                    field_combo(ui, "veh-pitch", "Pitch", &mut draft.pitch, &cols);
+                    field_combo(ui, "veh-yaw", "Yaw", &mut draft.yaw, &cols);
+                    ui.checkbox(&mut draft.euler_degrees, "Angles in degrees");
+                }
+                OriMode::Quat => {
+                    field_combo(ui, "veh-qw", "W", &mut draft.qw, &cols);
+                    field_combo(ui, "veh-qx", "X", &mut draft.qx, &cols);
+                    field_combo(ui, "veh-qy", "Y", &mut draft.qy, &cols);
+                    field_combo(ui, "veh-qz", "Z", &mut draft.qz, &cols);
+                }
+            }
+        } else {
+            ui.weak("Select an orientation topic.");
         }
     }
 
@@ -436,4 +580,27 @@ fn draft_editor(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapshot) 
                 .range(0.05..=50.0),
         );
     });
+}
+
+/// A topic ComboBox; returns `true` if the selection changed (so the caller
+/// can clear column selections that belonged to the previous topic).
+fn topic_combo(
+    ui: &mut egui::Ui,
+    salt: &str,
+    label: &str,
+    sel: &mut Option<TopicId>,
+    topics: &[(TopicId, String)],
+) -> bool {
+    let before = *sel;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        egui::ComboBox::from_id_salt(salt)
+            .selected_text(combo_label(topics, sel))
+            .show_ui(ui, |ui| {
+                for (id, name) in topics {
+                    ui.selectable_value(sel, Some(*id), name);
+                }
+            });
+    });
+    *sel != before
 }
