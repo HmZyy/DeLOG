@@ -188,6 +188,18 @@ impl eframe::App for DelogApp {
                 if ui.button("Stream").clicked() {
                     self.show_connection_dialog = true;
                 }
+                let scene_open = self.workspace.scene_pane_id().is_some();
+                let mut scene_button = egui::Button::new("3D");
+                if scene_open {
+                    scene_button = scene_button.fill(ui.visuals().selection.bg_fill);
+                }
+                if ui
+                    .add(scene_button)
+                    .on_hover_text("Show or hide the 3D scene view")
+                    .clicked()
+                {
+                    self.workspace.toggle_scene_pane();
+                }
                 let live_statuses = self.session.live_statuses();
                 if !live_statuses.is_empty() {
                     let lock_label = if self.playback.follow_live {

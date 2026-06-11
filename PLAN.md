@@ -894,7 +894,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **GPU-12** — wgpu error scopes → diagnostics
 - [x] **GPU-13** — Headless golden-image test rig (§20.3)
 - [~] **GPU-14** — Bench: frame encode 32×1M decimated < 3 ms — ~4.9 ms after GPU-11 batching (was ~12 ms); CPU min/max decimation alone is ~4.3 ms of that, so GPU-26 (compute reduction) is the path to full budget. Typical 1–8 traces are well under.
-- [~] **GPU-20** — 3D offscreen target (color+depth, 4×MSAA) composited as egui image (§9.1) — `Scene3dTarget` in `delog-render`: 4×MSAA color+depth resolving to a single-sample texture, `begin_pass` clears color+depth(1.0) and resolves, `resolve_view()` for egui + `read_rgba()` headless readback; golden tests prove MSAA resolve, depth rejection, edge AA. egui `ui.image` compositing of `resolve_view` rides with the scene pane (TDV-01)
+- [x] **GPU-20** — 3D offscreen target (color+depth, 4×MSAA) composited as egui image (§9.1) — `Scene3dTarget` in `delog-render`: 4×MSAA color+depth resolving to a single-sample texture, `begin_pass` clears color+depth(1.0) and resolves, `resolve_view()` for egui + `read_rgba()` headless readback; golden tests prove MSAA resolve, depth rejection, edge AA. Composited in `delog-app` via `GpuBridge::render_scene` (offscreen pass → `register/update_egui_texture_from_wgpu_texture` → `painter().image`); verified on RTX 4080 with TDV-01
 - [x] **GPU-21** — `grid3d` infinite grid + axes gizmo — `Grid3dPipeline` (full-screen triangle, per-pixel ground-plane unproject, derivative-AA lines, distance fade, true frag-depth write) drawing into the scene target; principal ground axes colored per §12.3 (X/East red, Z/South blue). Golden test drives it with a real perspective camera. Vertical Y (Up) axis line rides with the line pipeline (GPU-23). `glam` added (workspace dep) — tests-only here; production pipeline takes raw matrices
 - [ ] **GPU-22** — `mesh` pipeline (N·L+ambient) + GLB upload path
 - [ ] **GPU-23** — `traj3d` trajectory line pipeline
@@ -932,7 +932,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 
 ### TDV — 3D view (M8)
 
-- [ ] **TDV-01** — Scene pane: grid, axes, orbit camera (pan/zoom)
+- [x] **TDV-01** — Scene pane: grid, axes, orbit camera (pan/zoom) — `Pane::Scene3D` with an `OrbitCamera` (left-drag orbit, wheel zoom, double-click reset; pitch-clamped, unit-tested); single instance toggled show/hide by the toolbar "3D" button. Renders the grid offscreen and composites as an egui image. `glam` added to `delog-app`. Verified on RTX 4080: grid visible/infinite, orientation/orbit/zoom/color all good
 - [ ] **TDV-02** — Free camera; Track camera with preserved offset (§12.3)
 - [ ] **TDV-03** — `VehicleConfig` + dialog with per-source mapping presets (§12.1)
 - [ ] **TDV-04** — PosMapping NED / Custom-with-units; trajectory build off-thread
