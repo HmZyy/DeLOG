@@ -5,6 +5,7 @@
 //! to DeLOG's plot painting and emits pane-level actions for the app shell.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use delog_cache::CacheManager;
 use delog_core::identity::FieldId;
@@ -41,6 +42,15 @@ pub enum DropEdge {
     Right,
     Top,
     Bottom,
+}
+
+#[derive(Clone, Copy)]
+struct PlotDebug {
+    plot_rect: egui::Rect,
+    x_range: (f32, f32),
+    y_range: (f32, f32),
+    y_query_us: f32,
+    paint_us: f32,
 }
 
 impl DropEdge {
@@ -371,7 +381,6 @@ impl Behavior<'_> {
         );
         let response = ui.allocate_rect(outer, egui::Sense::click_and_drag());
         self.handle_plot_interaction(&response, plot_rect);
-        self.plot_context_menu(tile_id, &response, pane);
 
         if pane.is_empty() {
             ui.painter().text(
@@ -381,18 +390,23 @@ impl Behavior<'_> {
                 egui::FontId::proportional(14.0),
                 ui.visuals().weak_text_color(),
             );
+            self.plot_context_menu(tile_id, &response, pane, None);
             return;
         }
 
         let Some(view) = *self.services.view else {
+            self.plot_context_menu(tile_id, &response, pane, None);
             return;
         };
         if !self.services.gpu.is_available() || plot_rect.width() <= 8.0 {
+            self.plot_context_menu(tile_id, &response, pane, None);
             return;
         }
 
         let x_range = view.seconds(self.services.origin_us);
+        let y_start = Instant::now();
         let y_range = gpu::visible_y_range(self.services.caches, pane, x_range.0, x_range.1);
+        let y_query_us = y_start.elapsed().as_secs_f32() * 1_000_000.0;
         let y_unit = y_unit(self.services.snapshot.as_ref(), pane);
         axes::draw(ui, plot_rect, x_range, y_range, y_unit.as_deref());
         let pview = PaneView {
@@ -400,9 +414,20 @@ impl Behavior<'_> {
             x_range,
             y_range,
         };
+        let paint_start = Instant::now();
         self.services
             .gpu
             .render_pane(ui, self.services.frame, self.services.caches, pane, pview);
+        let paint_us = paint_start.elapsed().as_secs_f32() * 1_000_000.0;
+        let debug = PlotDebug {
+            plot_rect,
+            x_range,
+            y_range,
+            y_query_us,
+            paint_us,
+        };
+
+        self.plot_context_menu(tile_id, &response, pane, Some(debug));
 
         if !ui.ctx().any_popup_open() {
             hover::draw(
@@ -449,6 +474,7 @@ impl Behavior<'_> {
         tile_id: egui_tiles::TileId,
         response: &egui::Response,
         pane: &mut PlotPane,
+        debug: Option<PlotDebug>,
     ) {
         response.context_menu(|ui| {
             if ui.button("Reset view").clicked() {
@@ -549,11 +575,80 @@ impl Behavior<'_> {
             ui.checkbox(self.services.show_legend, "Show legend");
 
             ui.separator();
+            ui.menu_button("Debug", |ui| {
+                self.debug_ui(ui, pane, debug);
+            });
+
+            ui.separator();
             if ui.button("Close").clicked() {
                 self.actions.close = Some(tile_id);
                 ui.close();
             }
         });
+    }
+
+    fn debug_ui(&mut self, ui: &mut egui::Ui, pane: &PlotPane, debug: Option<PlotDebug>) {
+        ui.label(format!("traces: {}", pane.traces.len()));
+        ui.label(format!("visible traces: {}", pane.visible_traces().count()));
+
+        if let Some(debug) = debug {
+            ui.separator();
+            ui.label(format!(
+                "plot rect: {:.0} x {:.0} px",
+                debug.plot_rect.width(),
+                debug.plot_rect.height()
+            ));
+            ui.label(format!(
+                "visible x: {:.3} .. {:.3} s",
+                debug.x_range.0, debug.x_range.1
+            ));
+            ui.label(format!(
+                "visible y: {:.4} .. {:.4}",
+                debug.y_range.0, debug.y_range.1
+            ));
+            ui.label(format!("yquery: {:.1} us", debug.y_query_us));
+            ui.label(format!("paint encode: {:.1} us", debug.paint_us));
+        }
+
+        ui.separator();
+        for trace in &pane.traces {
+            let label = legend::trace_label(self.services.snapshot.as_ref(), trace.field);
+            ui.collapsing(label, |ui| {
+                ui.label(format!("field id: {}", trace.field.0));
+                ui.label(format!("mode: {}", trace.mode.label()));
+                ui.label(format!("width: {:.1} px", trace.width_px));
+                ui.label(format!("visible: {}", trace.visible));
+
+                let cache_status = if self.services.caches.is_ready(trace.field) {
+                    "ready"
+                } else if self.services.caches.is_building(trace.field) {
+                    "building"
+                } else {
+                    "missing"
+                };
+                ui.label(format!("cache: {cache_status}"));
+                ui.label(format!(
+                    "cache cpu: {}",
+                    format_bytes(self.services.caches.field_mem(trace.field).cache_cpu)
+                ));
+                ui.label(format!(
+                    "gpu: {}",
+                    format_bytes(
+                        self.services
+                            .gpu
+                            .field_gpu_bytes(self.services.frame, trace.field)
+                    )
+                ));
+
+                if let Some(cache) = self.services.caches.get(trace.field) {
+                    ui.label(format!("samples: {}", cache.samples()));
+                    if let Some(debug) = debug {
+                        let (a, b) = cache.index_range(debug.x_range.0, debug.x_range.1);
+                        ui.label(format!("visible samples: {}", b.saturating_sub(a)));
+                    }
+                }
+            });
+        }
     }
 
     fn handle_plot_interaction(&mut self, response: &egui::Response, rect: egui::Rect) {
@@ -613,6 +708,22 @@ fn fields_from_removed_tile(tile: egui_tiles::Tile<Pane>) -> Vec<FieldId> {
     match tile {
         egui_tiles::Tile::Pane(Pane::Plot(pane)) => pane.fields().collect(),
         egui_tiles::Tile::Container(_) => Vec::new(),
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+    let b = bytes as f64;
+    if b >= GIB {
+        format!("{:.2} GiB", b / GIB)
+    } else if b >= MIB {
+        format!("{:.2} MiB", b / MIB)
+    } else if b >= KIB {
+        format!("{:.1} KiB", b / KIB)
+    } else {
+        format!("{bytes} B")
     }
 }
 
