@@ -19,7 +19,7 @@ use delog_core::identity::FieldId;
 use delog_core::snapshot::StoreSnapshot;
 use delog_core::store::TopicStore;
 
-use crate::pyramid::{MinMax, MinMaxPyramid};
+use crate::pyramid::{BRANCH, MinMax, MinMaxPyramid};
 
 /// The f32 render cache for one field.
 #[derive(Debug)]
@@ -177,27 +177,103 @@ impl TraceCache {
         self.pyramid.query(&self.xy, a, b)
     }
 
-    /// Per-pixel-column `[x, min, max]` triples over `[x0, x1]` split into
+    /// Per-pixel-column `[x, min, max]` triples over `[x0, x1)` split into
     /// `width` equal **time** columns — the decimated draw input (§9.5, GPU-09).
-    /// Each column's min/max is exact (pyramid query); an empty column reports
+    /// Columns are half-open `[x0 + c·s, x0 + (c+1)·s)`; an empty column reports
     /// `NaN` (the shader skips it). Splitting by time, not index, keeps columns
     /// aligned to screen pixels even for irregularly-sampled data.
+    ///
+    /// Wide columns (≥ one pyramid node each) walk the compact L0 array —
+    /// O(visible_nodes), 64× fewer items than the samples — binning each node by
+    /// its x range; narrow columns sweep the (necessarily small) visible sample
+    /// range exactly. Both are sequential and cache-friendly.
     pub fn minmax_columns(&self, x0: f32, x1: f32, width: usize) -> Vec<f32> {
-        let mut out = Vec::with_capacity(width * 3);
         if width == 0 || x1 <= x0 {
-            return out;
+            return Vec::new();
         }
+        let (a, b) = self.index_range(x0, x1);
+        let mut mins = vec![f32::NAN; width];
+        let mut maxs = vec![f32::NAN; width];
+
+        if b.saturating_sub(a) >= width * BRANCH {
+            self.l0_columns(x0, x1, a, b, &mut mins, &mut maxs);
+        } else {
+            self.sweep_columns(x0, x1, a, b, &mut mins, &mut maxs);
+        }
+
         let span = (x1 - x0) / width as f32;
+        let mut out = Vec::with_capacity(width * 3);
         for c in 0..width {
-            let cx0 = x0 + span * c as f32;
-            let cx1 = x0 + span * (c + 1) as f32;
-            let (a, b) = self.index_range(cx0, cx1);
-            let mm = self.pyramid.query(&self.xy, a, b);
-            out.push((cx0 + cx1) * 0.5);
-            out.push(mm.min);
-            out.push(mm.max);
+            out.push(x0 + span * (c as f32 + 0.5));
+            out.push(mins[c]);
+            out.push(maxs[c]);
         }
         out
+    }
+
+    /// Exact: sweep samples `[a, b)`, bucketing each by half-open column.
+    fn sweep_columns(
+        &self,
+        x0: f32,
+        x1: f32,
+        a: usize,
+        b: usize,
+        mins: &mut [f32],
+        maxs: &mut [f32],
+    ) {
+        let width = mins.len();
+        let inv = 1.0 / (x1 - x0);
+        for i in a..b {
+            let y = self.xy[2 * i + 1];
+            if y.is_nan() {
+                continue;
+            }
+            let col = col_index(self.x_at(i), x0, inv, width);
+            if y < mins[col] || mins[col].is_nan() {
+                mins[col] = y;
+            }
+            if y > maxs[col] || maxs[col].is_nan() {
+                maxs[col] = y;
+            }
+        }
+    }
+
+    /// Fast: distribute each L0 node overlapping `[a, b)` to the column(s) its x
+    /// range covers. Conservative at column/edge boundaries (never hides a
+    /// transient, may smear it one column — fine for decimation, §9.5).
+    fn l0_columns(&self, x0: f32, x1: f32, a: usize, b: usize, mins: &mut [f32], maxs: &mut [f32]) {
+        let width = mins.len();
+        let inv = 1.0 / (x1 - x0);
+        let n = self.samples();
+        let l0 = self.pyramid.l0();
+        let first = a / BRANCH;
+        let last = (b.saturating_sub(1) / BRANCH).min(l0.len().saturating_sub(1));
+        if first > last {
+            return;
+        }
+        for (offset, node) in l0[first..=last].iter().enumerate() {
+            if !node.is_finite() {
+                continue;
+            }
+            let node_idx = first + offset;
+            let s0 = node_idx * BRANCH;
+            let s1 = ((node_idx + 1) * BRANCH).min(n) - 1;
+            let nx0 = self.x_at(s0);
+            let nx1 = self.x_at(s1);
+            if nx1 < x0 || nx0 > x1 {
+                continue;
+            }
+            let cl = col_index(nx0.max(x0), x0, inv, width);
+            let cr = col_index(nx1.min(x1), x0, inv, width);
+            for col in cl..=cr {
+                if node.min < mins[col] || mins[col].is_nan() {
+                    mins[col] = node.min;
+                }
+                if node.max > maxs[col] || maxs[col].is_nan() {
+                    maxs[col] = node.max;
+                }
+            }
+        }
     }
 
     /// CPU bytes held (xy buffer + pyramid), for `MemBreakdown` (CCH-10).
@@ -208,6 +284,13 @@ impl TraceCache {
     pub fn touch(&mut self, frame: u64) {
         self.last_used_frame = frame;
     }
+}
+
+/// Column index for `x` in a `width`-column window starting at `x0` with
+/// inverse span `inv`, clamped to `[0, width)`.
+fn col_index(x: f32, x0: f32, inv: f32, width: usize) -> usize {
+    let c = ((x - x0) * inv * width as f32) as i64;
+    c.clamp(0, width as i64 - 1) as usize
 }
 
 /// Transform `chunk[start..]` of one column into interleaved x,y f32 pairs.
@@ -414,15 +497,43 @@ mod tests {
         );
         let cache = TraceCache::build(&snap, field, 0, 0).unwrap();
 
-        // 4 columns over [0,4]s → 1-second columns; each holds [x, min, max].
+        // 4 columns over [0,4]s → 1-second half-open columns [c, c+1).
         let cols = cache.minmax_columns(0.0, 4.0, 4);
         assert_eq!(cols.len(), 4 * 3);
-        // First column [0,1)s holds samples at t=0,1 → y 0..1, centre x=0.5.
+        // Column 0 = [0,1)s holds only the sample at t=0 (y=0); centre x=0.5.
         assert_eq!(cols[0], 0.5);
         assert_eq!(cols[1], 0.0);
-        assert_eq!(cols[2], 1.0);
+        assert_eq!(cols[2], 0.0);
+        // Column 1 = [1,2)s holds t=1 → y=1.
+        assert_eq!(cols[4], 1.0);
+        // Last column [3,4) holds t=3 and the boundary t=4 → max 4.
+        assert_eq!(cols[11], 4.0);
         // Monotone ramp: each column's max rises.
         assert!(cols[5] > cols[2]);
+    }
+
+    #[test]
+    fn l0_walk_path_preserves_min_max_and_transients() {
+        // 1000 samples → with width 4 each column is ~250 samples (≥64), so the
+        // fast L0-walk path runs. y = i, plus a single spike in column 1.
+        let times: Vec<i64> = (0..1000).collect(); // µs
+        let mut alts: Vec<Option<i32>> = (0..1000).map(|i| Some(i * 100)).collect(); // y = i
+        alts[300] = Some(999_900); // y = 9999 spike, in column 1
+        let (snap, field) = snapshot_with(times, alts, 0);
+        let cache = TraceCache::build(&snap, field, 0, 0).unwrap();
+
+        let x1 = 999.0 * 1e-6;
+        let cols = cache.minmax_columns(0.0, x1, 4);
+        assert_eq!(cols.len(), 12);
+        // Column 0 starts at y=0; the last column reaches the max y≈999.
+        assert_eq!(cols[1], 0.0); // col0 min
+        assert!(cols[11] >= 990.0); // col3 max near 999
+        // The single-sample spike is NOT decimated away (§9.5).
+        assert!(
+            (cols[5] - 9999.0).abs() < 1.0,
+            "spike preserved, got {}",
+            cols[5]
+        );
     }
 
     #[test]
