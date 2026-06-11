@@ -952,7 +952,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **BRW-04** — ~~Plotted-field highlight (color dot + bold)~~ — built then removed by decision; field rows carry no plotted-state styling
 - [x] **BRW-05** — Multi-select + drag payload `Vec<FieldId>`
 - [ ] **BRW-06** — Context: plot-in-new-pane / copy key / stats popup / remove source
-- [ ] **BRW-07** — Per-source time-offset widget (drag-µs + dialog)
+- [x] **BRW-07** — Per-source time-offset widget (drag-µs + dialog)
 - [ ] **BRW-08** — Field metadata inspector
 - [ ] **BRW-09** — Favorites/pinned section (persisted)
 - [ ] **BRW-10** — Source rows: range, rows, memory; remove frees (verify via MemBreakdown)

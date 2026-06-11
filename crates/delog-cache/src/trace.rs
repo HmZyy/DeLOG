@@ -34,6 +34,9 @@ pub struct TraceCache {
     pub pyramid: MinMaxPyramid,
     /// Frame of last use, for LRU eviction (CCH-09).
     pub last_used_frame: u64,
+    /// Source offset baked into the x values; a snapshot with a different
+    /// offset makes this cache stale (BRW-07 → rebuild, not append).
+    pub offset_us: i64,
 }
 
 /// What a field resolves to in a snapshot.
@@ -91,7 +94,14 @@ impl TraceCache {
             built_rows: r.store.rows,
             pyramid,
             last_used_frame: frame,
+            offset_us: r.offset_us,
         })
+    }
+
+    /// Whether `snapshot` carries a different source offset than this cache
+    /// was built with — its x values are stale and need a rebuild (BRW-07).
+    pub fn offset_changed(&self, snapshot: &StoreSnapshot, field: FieldId) -> bool {
+        resolve(snapshot, field).is_some_and(|r| r.offset_us != self.offset_us)
     }
 
     /// Append rows that arrived since the last build/append (CCH-04). Returns
