@@ -41,3 +41,33 @@ jobs:
 
       - name: bench compile
         run: cargo bench --workspace --no-run --locked
+
+  fuzz-smoke:
+    name: fuzz smoke (60 s per target)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The fuzz crate only depends on delog-core + delog-parsers (no
+      # eframe/wgpu/serialport), so no system libraries are needed.
+      - name: Install nightly (cargo-fuzz requires the sanitizer)
+        run: |
+          rustup toolchain install nightly --profile minimal --component rust-src
+          rustup default nightly
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "fuzz -> target"
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      # PLAN.md §20.4: 60 s smoke per frame decoder. A crash, panic, OOM, or
+      # hang (libFuzzer's -timeout) fails the job — the §6.1 policy, enforced.
+      - name: fuzz BIN record
+        run: cargo fuzz run bin_record -- -max_total_time=60 -timeout=20 -rss_limit_mb=2048
+      - name: fuzz ULog defs+data
+        run: cargo fuzz run ulog_defs_data -- -max_total_time=60 -timeout=20 -rss_limit_mb=2048
+      - name: fuzz MAVLink framing
+        run: cargo fuzz run mavlink_framing -- -max_total_time=60 -timeout=20 -rss_limit_mb=2048
