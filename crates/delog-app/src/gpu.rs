@@ -9,15 +9,15 @@
 //! scissor.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use delog_cache::{CacheManager, MinMax};
 use delog_core::field_view::FieldView;
 use delog_core::identity::FieldId;
 use delog_core::snapshot::StoreSnapshot;
 use delog_render::{
-    BufferManager, LinePipeline, MinMaxColPipeline, PlotUniform, RenderContext, ScatterPipeline,
-    StepPipeline, UniformRing,
+    BufferManager, GpuErrorHub, LinePipeline, MinMaxColPipeline, PlotUniform, RenderContext,
+    ScatterPipeline, StepPipeline, UniformRing,
 };
 use eframe::{egui_wgpu, wgpu};
 
@@ -110,6 +110,22 @@ impl GpuBridge {
         }
     }
 
+    /// Resolve finished wgpu error scopes into messages for the diagnostics
+    /// hub (GPU-12). Call once per frame.
+    pub fn drain_gpu_errors(&self, frame: &eframe::Frame) -> Vec<String> {
+        if !self.available {
+            return Vec::new();
+        }
+        let Some(render_state) = frame.wgpu_render_state() else {
+            return Vec::new();
+        };
+        let renderer = render_state.renderer.read();
+        let Some(res) = renderer.callback_resources.get::<PlotCallbackResources>() else {
+            return Vec::new();
+        };
+        res.errors.lock().unwrap().drain(res.ctx.device())
+    }
+
     pub fn field_gpu_bytes(&self, frame: &eframe::Frame, field: FieldId) -> u64 {
         if !self.available {
             return 0;
@@ -163,6 +179,8 @@ impl GpuBridge {
             else {
                 return;
             };
+            // Capture buffer growth/upload + uniform-write errors (GPU-12).
+            let scope = GpuErrorHub::open(res.ctx.device());
             let base_slot = res.next_uniform_slot;
             res.next_uniform_slot += pane.traces.len() as u32;
             res.ensure_uniform_capacity(res.next_uniform_slot);
@@ -226,6 +244,7 @@ impl GpuBridge {
                     });
                 }
             }
+            res.errors.get_mut().unwrap().close(scope);
         }
 
         if items.is_empty() {
@@ -434,6 +453,10 @@ struct PlotCallbackResources {
     scatter_binds: HashMap<FieldId, wgpu::BindGroup>,
     step_binds: HashMap<FieldId, wgpu::BindGroup>,
     col_binds: HashMap<FieldId, wgpu::BindGroup>,
+    /// Error-scope results awaiting drain (GPU-12). Mutex only for the Sync
+    /// bound of `CallbackResources`; never contended (all access is on the
+    /// render thread).
+    errors: Mutex<GpuErrorHub>,
 }
 
 impl PlotCallbackResources {
@@ -459,6 +482,7 @@ impl PlotCallbackResources {
             scatter_binds: HashMap::new(),
             step_binds: HashMap::new(),
             col_binds: HashMap::new(),
+            errors: Mutex::new(GpuErrorHub::new()),
         }
     }
 
@@ -512,7 +536,10 @@ impl egui_wgpu::CallbackTrait for ScenePaintCallback {
                 scatter_binds,
                 step_binds,
                 col_binds,
+                errors,
             } = res;
+            // Capture bind-group creation errors (GPU-12).
+            let scope = GpuErrorHub::open(ctx.device());
             for item in &self.items {
                 match item.kind {
                     DrawKind::Line { .. } => {
@@ -538,6 +565,7 @@ impl egui_wgpu::CallbackTrait for ScenePaintCallback {
                     }
                 }
             }
+            errors.get_mut().unwrap().close(scope);
         }
         Vec::new()
     }

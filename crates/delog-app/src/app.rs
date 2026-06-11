@@ -88,6 +88,12 @@ impl eframe::App for DelogApp {
         }
         self.caches.evict_over_budget();
 
+        // Surface captured wgpu errors as diagnostics (GPU-12).
+        for message in self.gpu.drain_gpu_errors(frame) {
+            self.session
+                .push_diagnostic(delog_core::diagnostics::Diag::error("gpu", message));
+        }
+
         egui::Panel::top("main_menu").show_inside(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("Help", |ui| {
