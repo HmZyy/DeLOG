@@ -1015,7 +1015,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 ### UIX — UI/UX (cross-cutting; final pass M10)
 
 - [ ] **UIX-01** — Workspace-first window per §19.1; collapsible drawer/docks
-- [ ] **UIX-02** — Toolbar (open/cancel/add/remove/3D/vehicle/stream start/stop) with tooltips
+- [~] **UIX-02** — Toolbar (open/cancel/add/remove/3D/vehicle/stream start/stop) with tooltips — native open dialog (rfd, off-thread) + cancel + stream dialog button done; add/remove/3D/vehicle pending
 - [ ] **UIX-03** — Menus: File/Tools/Layout/Help (§19.2)
 - [ ] **UIX-04** — Shortcut map per §19.3 + Help ▸ shortcuts sheet
 - [ ] **UIX-05** — Dark theme, palette constants, ≥4.5:1 contrast

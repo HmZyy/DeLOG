@@ -23,7 +23,10 @@ pub struct DelogApp {
     frame: u64,
     last_epoch: u64,
     origin_us: i64,
-    path_input: String,
+    /// Paths picked in the native open dialog, sent from its worker thread
+    /// (the dialog must never block the UI thread, §19.6).
+    picked_files: std::sync::mpsc::Receiver<Vec<std::path::PathBuf>>,
+    picked_files_tx: std::sync::mpsc::Sender<Vec<std::path::PathBuf>>,
     browser_query: String,
     browser_selection: browser::Selection,
     offset_dialog: Option<(delog_core::identity::SourceId, i64)>,
@@ -36,6 +39,7 @@ pub struct DelogApp {
 impl DelogApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
+        let (picked_files_tx, picked_files) = std::sync::mpsc::channel();
         Self {
             session: Session::new(cc.egui_ctx.clone()),
             gpu: GpuBridge::from_creation_context(cc),
@@ -48,7 +52,8 @@ impl DelogApp {
             frame: 0,
             last_epoch: u64::MAX,
             origin_us: 0,
-            path_input: String::new(),
+            picked_files,
+            picked_files_tx,
             browser_query: String::new(),
             browser_selection: browser::Selection::default(),
             offset_dialog: None,
@@ -68,11 +73,42 @@ impl DelogApp {
             }
         }
     }
+
+    /// Show the native open dialog on a worker thread (UIX-02 open; §19.6
+    /// never-block) and queue the picked logs for the next frame.
+    fn spawn_open_dialog(&self, ctx: &egui::Context) {
+        let tx = self.picked_files_tx.clone();
+        let ctx = ctx.clone();
+        std::thread::Builder::new()
+            .name("delog-open-dialog".into())
+            .spawn(move || {
+                let picked = rfd::FileDialog::new()
+                    .add_filter("Flight logs", &["bin", "BIN", "ulg", "ulog", "tlog"])
+                    .add_filter("All files", &["*"])
+                    .set_title("Open flight logs")
+                    .pick_files();
+                if let Some(paths) = picked {
+                    let _ = tx.send(paths);
+                    ctx.request_repaint();
+                }
+            })
+            .expect("spawn file dialog thread");
+    }
+
+    /// Drain dialog results queued by the worker thread.
+    fn handle_picked_files(&mut self) {
+        while let Ok(paths) = self.picked_files.try_recv() {
+            for path in paths {
+                self.session.open_path(path);
+            }
+        }
+    }
 }
 
 impl eframe::App for DelogApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.handle_dropped_files(ui.ctx());
+        self.handle_picked_files();
         self.session.prune_finished();
         self.frame = self.frame.wrapping_add(1);
 
@@ -127,18 +163,12 @@ impl eframe::App for DelogApp {
                 });
 
                 ui.separator();
-                // Minimal open affordance until the toolbar + native dialog
-                // (UIX-02) land: type or paste a path, or drop a file anywhere.
-                ui.label("Open:");
-                let response = ui.add(
-                    egui::TextEdit::singleline(&mut self.path_input)
-                        .hint_text("path/to/log.BIN")
-                        .desired_width(280.0),
-                );
-                let submit = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if (ui.button("Open").clicked() || submit) && !self.path_input.trim().is_empty() {
-                    self.session.open_path(self.path_input.trim().to_owned());
-                    self.path_input.clear();
+                if ui
+                    .button("Open…")
+                    .on_hover_text("Open flight logs (or drop files anywhere)")
+                    .clicked()
+                {
+                    self.spawn_open_dialog(ui.ctx());
                 }
                 if ui.button("Stream").clicked() {
                     self.show_connection_dialog = true;

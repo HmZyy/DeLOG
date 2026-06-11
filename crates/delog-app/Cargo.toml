@@ -21,6 +21,7 @@ delog-render = { workspace = true }
 eframe = { workspace = true }
 egui = { workspace = true }
 egui_tiles = { workspace = true }
+rfd = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
