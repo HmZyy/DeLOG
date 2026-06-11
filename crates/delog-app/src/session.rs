@@ -62,13 +62,18 @@ impl IngestObserver for AppObserver {
     }
 
     fn on_diagnostic(&mut self, diag: Diag) {
-        let mut diags = self.diagnostics.lock().unwrap();
-        if diags.len() >= MAX_DIAGNOSTICS {
-            diags.remove(0);
-        }
-        diags.push(diag);
+        push_diag(&self.diagnostics, diag);
         self.ctx.request_repaint();
     }
+}
+
+/// Append to the retained diagnostics, dropping the oldest over the cap.
+fn push_diag(diags: &Diags, diag: Diag) {
+    let mut diags = diags.lock().unwrap();
+    if diags.len() >= MAX_DIAGNOSTICS {
+        diags.remove(0);
+    }
+    diags.push(diag);
 }
 
 /// A parse running on a worker thread.
@@ -137,6 +142,12 @@ impl Session {
 
     pub fn diagnostics(&self) -> Vec<Diag> {
         self.diagnostics.lock().unwrap().clone()
+    }
+
+    /// Push a diagnostic raised outside the ingest path (e.g. wgpu error
+    /// scopes, GPU-12) into the same retained list.
+    pub fn push_diagnostic(&self, diag: Diag) {
+        push_diag(&self.diagnostics, diag);
     }
 
     /// Combined progress of in-flight loads (the least-advanced one), or `None`
