@@ -153,11 +153,13 @@ impl eframe::App for DelogApp {
             });
         });
 
-        // Global timeline bar (§11, TLN-02). `any_live` stays false until
-        // live links exist (M7): the snapshot has no streaming flag yet.
+        // Global timeline bar (§11, TLN-02/03). `utc_offset_us` stays None
+        // until a parser captures a UTC reference (BIN GPS week / ULog
+        // time_ref_utc — M6); `any_live` stays false until live links exist
+        // (M7): the snapshot has no streaming flag yet.
         if let Some(range) = snapshot.global_time_range() {
             egui::Panel::bottom("timeline").show_inside(ui, |ui| {
-                crate::timeline::ui(ui, &mut self.playback, range, false);
+                crate::timeline::ui(ui, &mut self.playback, range, None, false);
             });
         }
 
