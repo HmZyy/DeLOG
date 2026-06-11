@@ -14,7 +14,7 @@ use crate::axes;
 use crate::gpu::{self, GpuBridge, PaneView};
 use crate::hover::{self, HoverTarget};
 use crate::legend;
-use crate::plot::{PlotPane, ViewX};
+use crate::plot::{PlotPane, TraceMode, ViewX};
 
 pub type TileTree = egui_tiles::Tree<Pane>;
 
@@ -420,6 +420,39 @@ impl Behavior<'_> {
                         self.actions.remove_trace.push(field);
                         ui.close();
                     }
+                }
+            });
+
+            ui.menu_button("Trace style", |ui| {
+                let entries: Vec<_> = pane
+                    .traces
+                    .iter()
+                    .map(|t| {
+                        (
+                            t.field,
+                            legend::trace_label(self.services.snapshot.as_ref(), t.field),
+                            t.color32(),
+                        )
+                    })
+                    .collect();
+                for (field, label, color) in entries {
+                    let Some(trace) = pane.trace_mut(field) else {
+                        continue;
+                    };
+                    ui.menu_button(label, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.colored_label(color, "■");
+                            ui.weak("Mode");
+                        });
+                        for mode in TraceMode::ALL {
+                            ui.radio_value(&mut trace.mode, mode, mode.label());
+                        }
+                        ui.add(
+                            egui::Slider::new(&mut trace.width_px, 1.0..=12.0)
+                                .text("Width")
+                                .suffix(" px"),
+                        );
+                    });
                 }
             });
 
