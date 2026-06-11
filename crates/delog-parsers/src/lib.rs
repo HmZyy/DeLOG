@@ -5,6 +5,7 @@
 //! output is `ParsedBatch` + diagnostics into an `IngestSink`.
 
 pub mod ardupilot;
+pub mod mavlink;
 pub mod parser;
 pub mod ulog;
 
