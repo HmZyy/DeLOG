@@ -893,7 +893,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [ ] **GPU-11** — Batched encoding: one pipeline bind, per-trace dynamic offsets
 - [ ] **GPU-12** — wgpu error scopes → diagnostics
 - [x] **GPU-13** — Headless golden-image test rig (§20.3)
-- [~] **GPU-14** — Bench: frame encode 32×1M decimated < 3 ms — bench delivered; measures ~30 ms (CPU-bound in per-column decimation, ~28 ms; GPU ~2 ms). Needs sequential L0-walk decimation or GPU-26 to meet budget
+- [~] **GPU-14** — Bench: frame encode 32×1M decimated < 3 ms — bench delivered; ~12 ms after L0-walk decimation (was ~30 ms). Still over the 3 ms budget at this extreme load; GPU-26 (compute reduction) is the path to full budget. Typical 1–8 traces are well under.
 - [ ] **GPU-20** — 3D offscreen target (color+depth, 4×MSAA) composited as egui image (§9.1)
 - [ ] **GPU-21** — `grid3d` infinite grid + axes gizmo
 - [ ] **GPU-22** — `mesh` pipeline (N·L+ambient) + GLB upload path
