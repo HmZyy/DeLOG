@@ -340,6 +340,7 @@ pub struct WorkspaceActions {
 pub struct PlotServices<'a> {
     pub frame: &'a eframe::Frame,
     pub snapshot: &'a Arc<StoreSnapshot>,
+    pub metrics: &'a delog_core::metrics::MetricsRegistry,
     pub gpu: &'a mut GpuBridge,
     pub caches: &'a mut CacheManager,
     pub view: &'a mut Option<ViewX>,
@@ -470,11 +471,14 @@ impl Behavior<'_> {
             pane.camera = OrbitCamera::default();
         }
 
-        if let Some(tex) =
+        // 3d_frame (§16, GPU-24): CPU cost of building + encoding the scene.
+        let rendered = {
+            let _t = self.services.metrics.scope("3d_frame");
             self.services
                 .gpu
                 .render_scene(self.services.frame, ui, rect, &pane.camera)
-        {
+        };
+        if let Some(tex) = rendered {
             ui.painter().image(
                 tex,
                 rect,
