@@ -108,6 +108,23 @@ impl GpuBridge {
         }
     }
 
+    pub fn field_gpu_bytes(&self, frame: &eframe::Frame, field: FieldId) -> u64 {
+        if !self.available {
+            return 0;
+        }
+        let Some(render_state) = frame.wgpu_render_state() else {
+            return 0;
+        };
+        let renderer = render_state.renderer.read();
+        let Some(res) = renderer.callback_resources.get::<PlotCallbackResources>() else {
+            return 0;
+        };
+        res.buffers
+            .field_mem(field)
+            .gpu
+            .saturating_add(res.col_buffers.field_mem(field).gpu)
+    }
+
     /// Upload the pane's ready trace caches into the `plot_rect`, write their
     /// uniforms for the given visible data window, and emit the paint callback.
     /// The caller supplies the X/Y ranges so the egui axes share them exactly.
