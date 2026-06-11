@@ -8,6 +8,7 @@ use crate::gpu::GpuBridge;
 use crate::live::ConnectionDialog;
 use crate::plot::ViewX;
 use crate::session::Session;
+use crate::timeline::Playback;
 use crate::workspace::{PlotServices, Workspace};
 
 pub struct DelogApp {
@@ -15,6 +16,7 @@ pub struct DelogApp {
     gpu: GpuBridge,
     caches: CacheManager,
     workspace: Workspace,
+    playback: Playback,
     view: Option<ViewX>,
     hover_mode: delog_core::field_view::SampleMode,
     show_legend: bool,
@@ -38,6 +40,7 @@ impl DelogApp {
             gpu: GpuBridge::from_creation_context(cc),
             caches: CacheManager::new(),
             workspace: Workspace::new(),
+            playback: Playback::default(),
             view: None,
             hover_mode: delog_core::field_view::SampleMode::Prev,
             show_legend: true,
@@ -79,6 +82,11 @@ impl eframe::App for DelogApp {
             self.origin_us = range.min_us;
             self.caches.set_origin(self.origin_us);
             self.view.get_or_insert_with(|| ViewX::from_range(range));
+
+            // Advance the playhead — the single time authority (§11, TLN-01).
+            self.playback.clamp_to(range);
+            let dt = ui.ctx().input(|i| i.stable_dt) as f64;
+            self.playback.advance(dt, range);
         }
         self.caches.begin_frame(self.frame);
         self.caches.poll_builds();
