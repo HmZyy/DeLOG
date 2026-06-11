@@ -550,8 +550,17 @@ impl Behavior<'_> {
                     };
                     ui.menu_button(label, |ui| {
                         ui.horizontal(|ui| {
-                            ui.colored_label(color, "■");
-                            ui.weak("Mode");
+                            let mut color = color;
+                            if egui::color_picker::color_edit_button_srgba(
+                                ui,
+                                &mut color,
+                                egui::color_picker::Alpha::Opaque,
+                            )
+                            .changed()
+                            {
+                                trace.color = legend::color32_to_srgb(color);
+                            }
+                            ui.weak("Color / mode");
                         });
                         for mode in TraceMode::ALL {
                             ui.radio_value(&mut trace.mode, mode, mode.label());

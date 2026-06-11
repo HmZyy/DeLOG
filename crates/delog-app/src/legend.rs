@@ -97,7 +97,7 @@ pub fn ui(
     removed
 }
 
-fn color32_to_srgb(c: egui::Color32) -> [f32; 4] {
+pub fn color32_to_srgb(c: egui::Color32) -> [f32; 4] {
     [
         c.r() as f32 / 255.0,
         c.g() as f32 / 255.0,
