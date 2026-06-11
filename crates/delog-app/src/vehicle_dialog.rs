@@ -241,17 +241,20 @@ fn field_combo(
     });
 }
 
-/// Render the dialog; mutates `vehicles` when the user adds/removes/edits.
+/// Render the dialog; mutates `vehicles` when the user adds/removes one.
+/// Returns `true` when the vehicle set changed (so the caller can rebuild
+/// trajectories).
 pub fn show(
     ctx: &egui::Context,
     state: &mut VehicleDialog,
     vehicles: &mut Vec<VehicleConfig>,
     snapshot: &StoreSnapshot,
-) {
+) -> bool {
     if !state.open {
-        return;
+        return false;
     }
     let mut open = state.open;
+    let mut changed = false;
     egui::Window::new("Vehicles")
         .open(&mut open)
         .default_width(360.0)
@@ -270,6 +273,7 @@ pub fn show(
             }
             if let Some(i) = remove {
                 vehicles.remove(i);
+                changed = true;
             }
             ui.separator();
 
@@ -284,6 +288,7 @@ pub fn show(
                     && let Some(cfg) = state.draft.build()
                 {
                     vehicles.push(cfg);
+                    changed = true;
                 }
                 if !can_add {
                     ui.weak("pick a source and its position fields");
@@ -291,6 +296,7 @@ pub fn show(
             });
         });
     state.open = open;
+    changed
 }
 
 fn draft_editor(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapshot) {
