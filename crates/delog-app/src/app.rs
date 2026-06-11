@@ -159,7 +159,12 @@ impl eframe::App for DelogApp {
             .resizable(true)
             .default_size(280.0)
             .show_inside(ui, |ui| {
-                browser::ui(ui, &model, &mut self.browser_query);
+                browser::ui(
+                    ui,
+                    &model,
+                    &mut self.browser_query,
+                    &self.workspace.trace_colors(),
+                );
             });
 
         egui::Frame::central_panel(ui.style()).show(ui, |ui| {
