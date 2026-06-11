@@ -13,10 +13,16 @@ use std::sync::Arc;
 
 use delog_cache::{CacheManager, MinMax};
 use delog_core::identity::FieldId;
-use delog_render::{BufferManager, LinePipeline, PlotUniform, RenderContext, UniformRing};
+use delog_render::{
+    BufferManager, LinePipeline, MinMaxColPipeline, PlotUniform, RenderContext, UniformRing,
+};
 use eframe::{egui_wgpu, wgpu};
 
 use crate::plot::{PlotPane, ViewX};
+
+/// Switch to the decimated min/max path above this many samples per pixel
+/// (§9.5, GPU-10).
+const DECIMATE_THRESHOLD: f32 = 8.0;
 
 /// App-owned handle to the renderer resources stored in egui_wgpu.
 #[derive(Clone, Copy, Debug)]
@@ -87,12 +93,12 @@ impl GpuBridge {
                 return;
             };
             res.ensure_uniform_capacity(pane.traces.len() as u32);
+            let plot_w = viewport_px[0];
 
             for (slot, trace) in pane.traces.iter().enumerate() {
                 let Some(cache) = caches.get(trace.field) else {
                     continue;
                 };
-                res.buffers.sync(trace.field, &cache.xy, false);
                 res.uniforms.write(
                     slot as u32,
                     &PlotUniform::from_view(
@@ -103,12 +109,30 @@ impl GpuBridge {
                         trace.color,
                     ),
                 );
-                let sample_count = res.buffers.samples(trace.field) as u32;
-                if sample_count >= 2 {
+
+                // Draw-path selector (GPU-10): decimate when the visible window
+                // packs more than ~8 samples per pixel.
+                let (a, b) = cache.index_range(x0, x1);
+                let visible = b.saturating_sub(a) as f32;
+                let kind = if plot_w >= 1.0 && visible / plot_w > DECIMATE_THRESHOLD {
+                    let width = plot_w as usize;
+                    let cols = cache.minmax_columns(x0, x1, width);
+                    res.col_buffers.sync(trace.field, &cols, true);
+                    DrawKind::Columns {
+                        count: width as u32,
+                    }
+                } else {
+                    res.buffers.sync(trace.field, &cache.xy, false);
+                    DrawKind::Line {
+                        samples: res.buffers.samples(trace.field) as u32,
+                    }
+                };
+
+                if kind.is_drawable() {
                     items.push(DrawItem {
                         field: trace.field,
                         slot: slot as u32,
-                        sample_count,
+                        kind,
                     });
                 }
             }
@@ -148,31 +172,59 @@ fn visible_y_range(caches: &mut CacheManager, pane: &PlotPane, x0: f32, x1: f32)
     (min - pad, max + pad)
 }
 
+/// How one trace is drawn this frame (GPU-10).
+#[derive(Clone, Copy)]
+enum DrawKind {
+    /// Full polyline: `samples` `[x,y]` pairs.
+    Line { samples: u32 },
+    /// Decimated: `count` per-pixel min/max columns.
+    Columns { count: u32 },
+}
+
+impl DrawKind {
+    fn is_drawable(self) -> bool {
+        match self {
+            DrawKind::Line { samples } => samples >= 2,
+            DrawKind::Columns { count } => count >= 1,
+        }
+    }
+}
+
 struct DrawItem {
     field: FieldId,
     slot: u32,
-    sample_count: u32,
+    kind: DrawKind,
 }
 
 struct PlotCallbackResources {
     ctx: RenderContext,
     line: LinePipeline,
+    minmax: MinMaxColPipeline,
+    /// Interleaved `[x,y]` trace buffers (full path).
     buffers: BufferManager,
+    /// Transient `[x,min,max]` column buffers (decimated path).
+    col_buffers: BufferManager,
     uniforms: UniformRing,
-    bind_groups: HashMap<FieldId, wgpu::BindGroup>,
+    line_binds: HashMap<FieldId, wgpu::BindGroup>,
+    col_binds: HashMap<FieldId, wgpu::BindGroup>,
 }
 
 impl PlotCallbackResources {
     fn new(ctx: RenderContext, color_format: wgpu::TextureFormat) -> Self {
         let line = LinePipeline::new(&ctx, color_format);
+        let minmax = MinMaxColPipeline::new(&ctx, color_format);
         let buffers = BufferManager::new(ctx.clone());
+        let col_buffers = BufferManager::new(ctx.clone());
         let uniforms = UniformRing::new(ctx.clone(), 8);
         Self {
             ctx,
             line,
+            minmax,
             buffers,
+            col_buffers,
             uniforms,
-            bind_groups: HashMap::new(),
+            line_binds: HashMap::new(),
+            col_binds: HashMap::new(),
         }
     }
 
@@ -187,10 +239,12 @@ impl PlotCallbackResources {
         let stale: Vec<FieldId> = self
             .buffers
             .fields()
+            .chain(self.col_buffers.fields())
             .filter(|f| !plotted.contains(f))
             .collect();
         for field in stale {
             self.buffers.remove(field);
+            self.col_buffers.remove(field);
         }
     }
 }
@@ -213,14 +267,27 @@ impl egui_wgpu::CallbackTrait for ScenePaintCallback {
             let PlotCallbackResources {
                 ctx,
                 line,
+                minmax,
                 buffers,
+                col_buffers,
                 uniforms,
-                bind_groups,
+                line_binds,
+                col_binds,
             } = res;
-            bind_groups.clear();
+            line_binds.clear();
+            col_binds.clear();
             for item in &self.items {
-                if let Some(buf) = buffers.buffer(item.field) {
-                    bind_groups.insert(item.field, line.bind_group(ctx, buf, uniforms));
+                match item.kind {
+                    DrawKind::Line { .. } => {
+                        if let Some(buf) = buffers.buffer(item.field) {
+                            line_binds.insert(item.field, line.bind_group(ctx, buf, uniforms));
+                        }
+                    }
+                    DrawKind::Columns { .. } => {
+                        if let Some(buf) = col_buffers.buffer(item.field) {
+                            col_binds.insert(item.field, minmax.bind_group(ctx, buf, uniforms));
+                        }
+                    }
                 }
             }
         }
@@ -267,13 +334,18 @@ impl egui_wgpu::CallbackTrait for ScenePaintCallback {
         render_pass.set_scissor_rect(sx, sy, sw, sh);
 
         for item in &self.items {
-            if let Some(bind) = res.bind_groups.get(&item.field) {
-                res.line.encode_trace(
-                    render_pass,
-                    bind,
-                    res.uniforms.dynamic_offset(item.slot),
-                    item.sample_count,
-                );
+            let offset = res.uniforms.dynamic_offset(item.slot);
+            match item.kind {
+                DrawKind::Line { samples } => {
+                    if let Some(bind) = res.line_binds.get(&item.field) {
+                        res.line.encode_trace(render_pass, bind, offset, samples);
+                    }
+                }
+                DrawKind::Columns { count } => {
+                    if let Some(bind) = res.col_binds.get(&item.field) {
+                        res.minmax.encode(render_pass, bind, offset, count);
+                    }
+                }
             }
         }
     }
