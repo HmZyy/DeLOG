@@ -970,7 +970,7 @@ fn read_8(p: &[u8], off: usize) -> [u8; 8] {
 mod tests {
     use std::io::Cursor;
 
-    use arrow::array::{Array, Float32Array, Int16Array, StringArray};
+    use arrow::array::{Array, Float32Array, Int16Array, Int32Array, StringArray, UInt8Array};
     use delog_core::ingest::SourceKind;
     use delog_core::parse_ctl::CancelToken;
 
@@ -1134,6 +1134,125 @@ mod tests {
         head.extend([1, 0, 0, 0]);
         assert_eq!(ULogParser.sniff(&head).score, 99);
         assert_eq!(ULogParser.sniff(b"not ulog").score, 0);
+    }
+
+    /// A self-describing log with an array-flattened topic, a two-instance
+    /// topic, padding to skip and several rows per topic (PAR-10).
+    fn golden_ulog() -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend(MAGIC);
+        buf.push(1);
+        buf.extend(0u64.to_le_bytes());
+
+        push_msg(
+            &mut buf,
+            b'F',
+            b"vehicle_attitude:uint64_t timestamp;float[4] q;uint8_t _padding0[4];",
+        );
+        push_msg(
+            &mut buf,
+            b'F',
+            b"sensor_gps:uint64_t timestamp;int32_t lat;int32_t lon;uint8_t fix;",
+        );
+
+        let mut subscribe = |multi_id: u8, msg_id: u16, name: &[u8]| {
+            let mut sub = Vec::new();
+            sub.push(multi_id);
+            sub.extend(msg_id.to_le_bytes());
+            sub.extend(name);
+            push_msg(&mut buf, b'A', &sub);
+        };
+        subscribe(0, 1, b"sensor_gps");
+        subscribe(1, 2, b"sensor_gps");
+        subscribe(0, 3, b"vehicle_attitude");
+
+        let mut gps_row = |msg_id: u16, t: u64, lat: i32, lon: i32, fix: u8| {
+            let mut data = Vec::new();
+            data.extend(msg_id.to_le_bytes());
+            data.extend(t.to_le_bytes());
+            data.extend(lat.to_le_bytes());
+            data.extend(lon.to_le_bytes());
+            data.push(fix);
+            push_msg(&mut buf, b'D', &data);
+        };
+        gps_row(1, 1_000, 473_000_000, 85_000_000, 3);
+        gps_row(2, 1_200, -330_000_000, 1_515_000_000, 5);
+        gps_row(1, 1_500, 473_000_010, 85_000_020, 4);
+
+        let mut att_row = |t: u64, q: [f32; 4]| {
+            let mut data = Vec::new();
+            data.extend(3u16.to_le_bytes());
+            data.extend(t.to_le_bytes());
+            for v in q {
+                data.extend(v.to_le_bytes());
+            }
+            data.extend([0u8; 4]); // _padding0
+            push_msg(&mut buf, b'D', &data);
+        };
+        att_row(1_000, [1.0, 0.0, 0.0, 0.5]);
+        att_row(2_000, [0.9, 0.1, 0.0, 0.6]);
+
+        buf
+    }
+
+    /// PAR-10 golden table: topics, rows and raw values for the fixture log.
+    #[test]
+    fn golden_topics_rows_and_values() {
+        let (summary, sink) = parse(golden_ulog());
+
+        // sensor_gps[0](2) + sensor_gps[1](1) + vehicle_attitude[0](2).
+        assert_eq!(summary.topic_count, 3);
+        assert_eq!(summary.row_count, 5);
+        assert_eq!(summary.diagnostics, 0);
+        assert!(sink.diags.is_empty());
+
+        let batch = |topic: &str| {
+            sink.batches
+                .iter()
+                .find(|b| b.topic() == topic)
+                .unwrap_or_else(|| panic!("no batch for topic {topic}"))
+        };
+
+        let gps0 = batch("sensor_gps[0]");
+        assert_eq!(gps0.timestamps.values(), &[1_000, 1_500]);
+        let lat = gps0.columns[0]
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        assert_eq!(lat.values(), &[473_000_000, 473_000_010]);
+        let fix = gps0.columns[2]
+            .as_any()
+            .downcast_ref::<UInt8Array>()
+            .unwrap();
+        assert_eq!(fix.values(), &[3, 4]);
+        // The timestamp drives the time axis, not a column.
+        assert!(gps0.schema.field_by_name("timestamp").is_none());
+
+        let gps1 = batch("sensor_gps[1]");
+        assert_eq!(gps1.timestamps.values(), &[1_200]);
+        let lon = gps1.columns[1]
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        assert_eq!(lon.values(), &[1_515_000_000]);
+
+        let att = batch("vehicle_attitude[0]");
+        assert_eq!(att.timestamps.values(), &[1_000, 2_000]);
+        // float[4] q flattens to q[0]..q[3]; padding is skipped.
+        for idx in 0..4 {
+            assert!(att.schema.field_by_name(&format!("q[{idx}]")).is_some());
+        }
+        assert!(att.schema.field_by_name("_padding0").is_none());
+        let q0 = att.columns[0]
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .unwrap();
+        assert_eq!(q0.values(), &[1.0, 0.9]);
+        let q3 = att.columns[3]
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .unwrap();
+        assert_eq!(q3.values(), &[0.5, 0.6]);
     }
 
     #[test]

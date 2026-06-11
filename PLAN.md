@@ -842,7 +842,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **PAR-07** — ULog: header + defs (F/I/P) + data (A/D/S) sections; nested flatten; padding skip; multi_id
 - [x] **PAR-08** — ULog: dropouts → diagnostics + NaN gap injection (§6.3)
 - [x] **PAR-09** — ULog: logged messages captured for auto-markers; params into source meta
-- [ ] **PAR-10** — ULog: golden fixture test
+- [x] **PAR-10** — ULog: golden fixture test
 - [ ] **PAR-11** — tlog: µs-envelope framing over the shared MAVLink decoder (§6.4)
 - [ ] **PAR-12** — tlog: golden fixture test (incl. v1+v2 mixed)
 - [ ] **PAR-13** — fuzz targets: BIN record / ULog defs+data / MAVLink framing — no panic/hang/OOM
