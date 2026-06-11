@@ -144,6 +144,11 @@ impl BufferManager {
         self.traces.remove(&field);
     }
 
+    /// The fields with a resident buffer.
+    pub fn fields(&self) -> impl Iterator<Item = FieldId> + '_ {
+        self.traces.keys().copied()
+    }
+
     /// Count of full re-uploads (growth or rebuild) — a regression signal (ZC-4).
     pub fn full_uploads(&self) -> u64 {
         self.full_uploads

@@ -906,18 +906,18 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 ### PLT — Plot system (M3–M4)
 
 - [ ] **PLT-01** — `egui_tiles` workspace: add/remove/split H/V/tabs/drag (§10.1)
-- [ ] **PLT-02** — `PlotPane`/`TraceRef` state; palette auto-assign
-- [ ] **PLT-03** — Shared `ViewX` µs model; all panes render from it (§10.3)
-- [ ] **PLT-04** — Wheel zoom @ cursor, drag pan, double-click reset-to-full
+- [x] **PLT-02** — `PlotPane`/`TraceRef` state; palette auto-assign
+- [x] **PLT-03** — Shared `ViewX` µs model; all panes render from it (§10.3)
+- [x] **PLT-04** — Wheel zoom @ cursor, drag pan, double-click reset-to-full
 - [ ] **PLT-05** — Lock-X-to-live with explicit unlock-on-scrub + re-lock affordance (§10.4)
-- [ ] **PLT-06** — Y modes: Auto (chunk stats), AutoVisible (pyramid), Manual dialog
+- [~] **PLT-06** — Y modes: Auto (chunk stats), AutoVisible (pyramid), Manual dialog — AutoVisible wired; Auto/Manual pending
 - [ ] **PLT-07** — Axes/ticks/labels via egui; tick step chooser (1-2-5)
 - [ ] **PLT-08** — Legend + toggle; per-trace visibility/color/width/mode editing
 - [ ] **PLT-09** — Hover: canonical binary search, Prev/Next/Linear tooltip modes, hover circles (§10.5)
 - [ ] **PLT-10** — Playhead vertical line + value readout on all panes
 - [ ] **PLT-11** — Context menu: remove/clear/mode/color/width/split/reset/legend/info (§10.6)
 - [ ] **PLT-12** — Plot debug popup: counts, visible range, GPU bytes, yquery µs, paint µs
-- [ ] **PLT-13** — Drag-drop: single + multi-field onto pane / tile edge (§10.7)
+- [~] **PLT-13** — Drag-drop: single + multi-field onto pane / tile edge (§10.7) — single-field drop wired; multi-field + tile-edge pending
 - [ ] **PLT-14** — Empty-pane state copy
 
 ### TLN — Timeline & playback (M5)
