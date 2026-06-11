@@ -17,6 +17,10 @@ pub struct Playback {
     /// Playhead in canonical effective microseconds.
     pub t_us: i64,
     pub speed: f32,
+    /// Tail-follow mode for live streams (TLN-05). When set, each frame pins
+    /// the playhead to the current global range end until a manual scrub
+    /// clears it.
+    pub follow_live: bool,
 }
 
 impl Default for Playback {
@@ -25,6 +29,7 @@ impl Default for Playback {
             playing: false,
             t_us: 0,
             speed: 1.0,
+            follow_live: false,
         }
     }
 }
@@ -41,6 +46,10 @@ impl Playback {
             (MIN_SPEED..=MAX_SPEED).contains(&self.speed),
             "speed must be set via set_speed"
         );
+        if self.follow_live {
+            self.t_us = range.max_us;
+            return;
+        }
         if !self.playing {
             return;
         }
@@ -53,6 +62,7 @@ impl Playback {
 
     /// Move the playhead directly (scrubber drag, jumps), clamped to `range`.
     pub fn scrub(&mut self, t_us: i64, range: TimeRange) {
+        self.follow_live = false;
         self.t_us = t_us.clamp(range.min_us, range.max_us);
     }
 
@@ -63,7 +73,21 @@ impl Playback {
     /// Keep the playhead inside a (possibly grown or shrunk) range without
     /// touching play state — called once per frame as data streams in.
     pub fn clamp_to(&mut self, range: TimeRange) {
-        self.t_us = self.t_us.clamp(range.min_us, range.max_us);
+        if self.follow_live {
+            self.t_us = range.max_us;
+        } else {
+            self.t_us = self.t_us.clamp(range.min_us, range.max_us);
+        }
+    }
+
+    /// Enter live-tail mode and pin immediately (TLN-05).
+    pub fn lock_to_live(&mut self, range: TimeRange) {
+        self.follow_live = true;
+        self.t_us = range.max_us;
+    }
+
+    pub fn unlock_live(&mut self) {
+        self.follow_live = false;
     }
 
     /// Jump to the start of the range (`Home`, TLN-04).
@@ -176,6 +200,14 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 /// Speed steps offered by the picker (within §11's 0.1–16× bounds).
 const SPEED_STEPS: [f32; 8] = [0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0];
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TimelineAction {
+    /// User requested explicit live-tail lock (`End` equivalent).
+    pub lock_live: bool,
+    /// User manually scrubbed or jumped away from live mode.
+    pub manual_scrub: bool,
+}
+
 /// The timeline bar: transport buttons, speed picker, the scrubber and the
 /// time display (§11, TLN-02/03). `utc_offset_us` maps canonical time to unix
 /// time when a source carries a UTC reference; `any_live` shades the tail of
@@ -186,7 +218,8 @@ pub fn ui(
     range: TimeRange,
     utc_offset_us: Option<i64>,
     any_live: bool,
-) {
+) -> TimelineAction {
+    let mut action = TimelineAction::default();
     ui.horizontal(|ui| {
         if ui
             .button("⏮")
@@ -194,6 +227,7 @@ pub fn ui(
             .clicked()
         {
             playback.jump_start(range);
+            action.manual_scrub = true;
         }
         let icon = if playback.playing { "⏸" } else { "▶" };
         if ui
@@ -203,8 +237,19 @@ pub fn ui(
         {
             playback.toggle();
         }
-        if ui.button("⏭").on_hover_text("Jump to end (End)").clicked() {
-            playback.jump_end(range);
+        let end_tip = if any_live {
+            "Lock to live tail (End)"
+        } else {
+            "Jump to end (End)"
+        };
+        if ui.button("⏭").on_hover_text(end_tip).clicked() {
+            if any_live {
+                playback.lock_to_live(range);
+                action.lock_live = true;
+            } else {
+                playback.jump_end(range);
+                action.manual_scrub = true;
+            }
         }
 
         egui::ComboBox::from_id_salt("playback_speed")
@@ -232,26 +277,31 @@ pub fn ui(
             ui.weak(format_utc(playback.t_us + offset));
         }
 
-        scrubber(ui, playback, range, any_live);
+        if scrubber(ui, playback, range, any_live) {
+            action.manual_scrub = true;
+        }
     });
+    action
 }
 
 /// Full-range bar with a draggable playhead handle (TLN-02).
-fn scrubber(ui: &mut egui::Ui, playback: &mut Playback, range: TimeRange, any_live: bool) {
+fn scrubber(ui: &mut egui::Ui, playback: &mut Playback, range: TimeRange, any_live: bool) -> bool {
     let height = 16.0;
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), height),
         egui::Sense::click_and_drag(),
     );
     if !ui.is_rect_visible(rect) {
-        return;
+        return false;
     }
 
+    let mut scrubbed = false;
     // Click or drag anywhere on the bar moves the playhead there.
     if (response.clicked() || response.dragged())
         && let Some(pos) = response.interact_pointer_pos()
     {
         playback.scrub(bar_time_at(pos.x, rect, range), range);
+        scrubbed = true;
     }
 
     let painter = ui.painter();
@@ -280,6 +330,7 @@ fn scrubber(ui: &mut egui::Ui, playback: &mut Playback, range: TimeRange, any_li
     };
     painter.vline(x, rect.y_range(), egui::Stroke::new(2.0, stroke_color));
     painter.circle_filled(egui::pos2(x, rect.center().y), 4.0, stroke_color);
+    scrubbed
 }
 
 #[cfg(test)]
@@ -348,6 +399,7 @@ mod tests {
             playing: true,
             t_us: 3_000_000,
             speed: 1.0,
+            follow_live: false,
         };
         p.jump_start(range());
         assert_eq!(p.t_us, 1_000_000);
@@ -361,6 +413,7 @@ mod tests {
             playing: true,
             t_us: 1_000_000,
             speed: 2.0,
+            follow_live: false,
         };
         p.advance(0.5, range()); // 0.5 s × 2× = 1 s
         assert_eq!(p.t_us, 2_000_000);
@@ -373,6 +426,7 @@ mod tests {
             playing: false,
             t_us: 1_500_000,
             speed: 1.0,
+            follow_live: false,
         };
         p.advance(1.0, range());
         assert_eq!(p.t_us, 1_500_000);
@@ -384,6 +438,7 @@ mod tests {
             playing: true,
             t_us: 4_900_000,
             speed: 16.0,
+            follow_live: false,
         };
         p.advance(1.0, range());
         assert_eq!(p.t_us, 5_000_000);
@@ -399,6 +454,30 @@ mod tests {
         assert_eq!(p.t_us, 5_000_000);
         p.scrub(3_000_000, range());
         assert_eq!(p.t_us, 3_000_000);
+    }
+
+    #[test]
+    fn follow_live_pins_to_range_end_as_it_grows() {
+        let mut p = Playback::default();
+        p.lock_to_live(range());
+        assert!(p.follow_live);
+        assert_eq!(p.t_us, 5_000_000);
+
+        let grown = TimeRange::new(1_000_000, 7_000_000).unwrap();
+        p.clamp_to(grown);
+        assert_eq!(p.t_us, 7_000_000);
+
+        p.advance(10.0, TimeRange::new(1_000_000, 9_000_000).unwrap());
+        assert_eq!(p.t_us, 9_000_000);
+    }
+
+    #[test]
+    fn manual_scrub_disengages_follow_live() {
+        let mut p = Playback::default();
+        p.lock_to_live(range());
+        p.scrub(2_000_000, range());
+        assert!(!p.follow_live);
+        assert_eq!(p.t_us, 2_000_000);
     }
 
     #[test]
@@ -458,6 +537,7 @@ mod tests {
             playing: true,
             t_us: 9_000_000,
             speed: 1.0,
+            follow_live: false,
         };
         p.clamp_to(range());
         assert_eq!(p.t_us, 5_000_000);
