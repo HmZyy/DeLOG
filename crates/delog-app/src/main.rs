@@ -2,6 +2,7 @@
 
 mod about;
 mod app;
+mod axes;
 mod browser;
 mod gpu;
 mod plot;
