@@ -23,6 +23,8 @@ arrow = { workspace = true }
 # production pipeline takes raw `[[f32; 4]; 4]` matrices, so render code stays
 # math-library-free.
 glam = { workspace = true }
+# Visual-verification examples encode the headless render to PNG.
+png = { workspace = true }
 
 [[bench]]
 name = "frame_encode"
