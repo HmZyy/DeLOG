@@ -851,7 +851,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 
 ### LIV — Live streaming (M7)
 
-- [ ] **LIV-01** — `Endpoint` config model + connection dialog (UDP srv/cli, TCP cli/srv, serial+baud)
+- [x] **LIV-01** — `Endpoint` config model + connection dialog (UDP srv/cli, TCP cli/srv, serial+baud)
 - [ ] **LIV-02** — Reader thread with owned framing: v1/v2 sync, CRC, seq-gap counters (§7.2)
 - [ ] **LIV-03** — Link state machine + UI indicator (Connecting/Connected/Stale/Lost)
 - [ ] **LIV-04** — Auto-reconnect (TCP/serial) with backoff
