@@ -405,7 +405,13 @@ impl Behavior<'_> {
 
         let x_range = view.seconds(self.services.origin_us);
         let y_start = Instant::now();
-        let y_range = gpu::visible_y_range(self.services.caches, pane, x_range.0, x_range.1);
+        let y_range = gpu::pane_y_range(
+            self.services.snapshot.as_ref(),
+            self.services.caches,
+            pane,
+            x_range.0,
+            x_range.1,
+        );
         let y_query_us = y_start.elapsed().as_secs_f32() * 1_000_000.0;
         let y_unit = y_unit(self.services.snapshot.as_ref(), pane);
         axes::draw(ui, plot_rect, x_range, y_range, y_unit.as_deref());
@@ -428,6 +434,7 @@ impl Behavior<'_> {
         };
 
         self.plot_context_menu(tile_id, &response, pane, Some(debug));
+        manual_y_dialog(ui, tile_id, pane);
 
         if !ui.ctx().any_popup_open() {
             hover::draw(
@@ -575,6 +582,35 @@ impl Behavior<'_> {
             });
 
             ui.separator();
+            ui.menu_button("Y axis", |ui| {
+                use crate::plot::YMode;
+                let manual = matches!(pane.y, YMode::Manual { .. });
+                if ui
+                    .radio(matches!(pane.y, YMode::Auto), YMode::Auto.label())
+                    .clicked()
+                {
+                    pane.y = YMode::Auto;
+                }
+                if ui
+                    .radio(
+                        matches!(pane.y, YMode::AutoVisible),
+                        YMode::AutoVisible.label(),
+                    )
+                    .clicked()
+                {
+                    pane.y = YMode::AutoVisible;
+                }
+                if ui.radio(manual, "Manual").clicked() && !manual {
+                    // Seed from what is on screen so switching is not a jump.
+                    let (min, max) = debug.map_or((-1.0, 1.0), |d| d.y_range);
+                    pane.y = YMode::Manual { min, max };
+                    pane.y_dialog = true;
+                }
+                if manual && ui.button("Set range…").clicked() {
+                    pane.y_dialog = true;
+                    ui.close();
+                }
+            });
             ui.menu_button("Hover mode", |ui| {
                 use delog_core::field_view::SampleMode::{Linear, Next, Prev};
                 ui.radio_value(self.services.hover_mode, Prev, "Previous");
@@ -688,6 +724,42 @@ impl Behavior<'_> {
         }
 
         *self.services.view = Some(view);
+    }
+}
+
+/// Manual Y-range editor window (§10.4 "Manual (dialog)", PLT-06).
+fn manual_y_dialog(ui: &egui::Ui, tile_id: egui_tiles::TileId, pane: &mut PlotPane) {
+    use crate::plot::YMode;
+    if !pane.y_dialog {
+        return;
+    }
+    let YMode::Manual { mut min, mut max } = pane.y else {
+        pane.y_dialog = false;
+        return;
+    };
+    let mut open = true;
+    egui::Window::new("Y range")
+        .id(egui::Id::new(("manual_y", tile_id)))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .show(ui.ctx(), |ui| {
+            let speed = ((max - min).abs() / 200.0).max(1e-3) as f64;
+            ui.horizontal(|ui| {
+                ui.label("Min");
+                ui.add(egui::DragValue::new(&mut min).speed(speed));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Max");
+                ui.add(egui::DragValue::new(&mut max).speed(speed));
+            });
+            if max <= min {
+                ui.colored_label(ui.visuals().warn_fg_color, "max must be above min");
+            }
+        });
+    pane.y = YMode::Manual { min, max };
+    if !open {
+        pane.y_dialog = false;
     }
 }
 
