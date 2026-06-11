@@ -16,7 +16,7 @@ use std::time::Duration;
 use arrow::array::{ArrayRef, Int64Array};
 
 use crate::diagnostics::Diag;
-use crate::identity::SourceId;
+use crate::identity::{SourceId, SourceMetadata};
 use crate::metrics::MetricsRegistry;
 use crate::schema::TopicSchema;
 use crate::time::TimeRange;
@@ -87,6 +87,7 @@ pub struct ParseSummary {
     pub row_count: u64,
     pub time_range: Option<TimeRange>,
     pub diagnostics: u64,
+    pub source_meta: SourceMetadata,
 }
 
 /// One message on the ingest channel (§5).

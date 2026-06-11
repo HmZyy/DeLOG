@@ -17,7 +17,7 @@ use arrow::array::{
 };
 use arrow::datatypes::DataType;
 use delog_core::diagnostics::Diag;
-use delog_core::identity::SourceId;
+use delog_core::identity::{AutoMarker, SourceId, SourceMetadata, SourceParam};
 use delog_core::ingest::{IngestSink, ParseSummary, ParsedBatch};
 use delog_core::parse_ctl::ParseCtl;
 use delog_core::schema::{FieldSchema, TopicSchema};
@@ -170,6 +170,8 @@ struct Decoder<'a> {
     invalid_timestamps: u64,
     last_data_timestamp_us: Option<i64>,
     pending_dropouts: Vec<PendingDropout>,
+    params: Vec<SourceParam>,
+    auto_markers: Vec<AutoMarker>,
     row_count: u64,
     diagnostics: u64,
     time_range: Option<TimeRange>,
@@ -188,6 +190,8 @@ impl<'a> Decoder<'a> {
             invalid_timestamps: 0,
             last_data_timestamp_us: None,
             pending_dropouts: Vec::new(),
+            params: Vec::new(),
+            auto_markers: Vec::new(),
             row_count: 0,
             diagnostics: 0,
             time_range: None,
@@ -214,9 +218,11 @@ impl<'a> Decoder<'a> {
             match ty {
                 b'B' => self.read_flag_bits(&payload, msg_offset)?,
                 b'F' => self.read_format(&payload, msg_offset),
-                b'I' | b'P' => {}
+                b'I' => {}
+                b'P' => self.read_parameter(&payload, msg_offset),
                 b'A' => self.read_add_logged(&payload, msg_offset),
                 b'D' => self.read_data(&payload, msg_offset),
+                b'L' => self.read_logged_message(&payload, msg_offset),
                 b'S' => {}
                 b'O' => self.read_dropout(&payload, msg_offset),
                 _ => {}
@@ -295,6 +301,47 @@ impl<'a> Decoder<'a> {
                 plan,
             },
         );
+    }
+
+    fn read_parameter(&mut self, payload: &[u8], msg_offset: u64) {
+        let Some((ty, name, value_bytes)) = read_keyed_value(payload) else {
+            self.diagnostic(
+                Diag::warning("ulog-bad-param", "parameter message has a malformed key")
+                    .at_byte(msg_offset),
+            );
+            return;
+        };
+        let Some(value) = metadata_value_to_string(&ty, value_bytes) else {
+            self.diagnostic(
+                Diag::warning(
+                    "ulog-bad-param",
+                    format!("parameter `{name}` has unsupported or truncated type `{ty}`"),
+                )
+                .at_byte(msg_offset),
+            );
+            return;
+        };
+        self.params.push(SourceParam { name, ty, value });
+    }
+
+    fn read_logged_message(&mut self, payload: &[u8], msg_offset: u64) {
+        if payload.len() < 9 {
+            self.diagnostic(
+                Diag::warning("ulog-short-logged", "short logged-message record")
+                    .at_byte(msg_offset),
+            );
+            return;
+        }
+        let level = payload[0];
+        let raw_time = u64::from_le_bytes(read_8(payload, 1));
+        let Some(time_us) = self.valid_timestamp(raw_time, "logged_message", msg_offset) else {
+            return;
+        };
+        self.auto_markers.push(AutoMarker {
+            time_us,
+            level,
+            text: c_str(&payload[9..]),
+        });
     }
 
     fn read_dropout(&mut self, payload: &[u8], msg_offset: u64) {
@@ -558,6 +605,10 @@ impl<'a> Decoder<'a> {
             row_count: self.row_count,
             time_range: self.time_range,
             diagnostics: self.diagnostics,
+            source_meta: SourceMetadata {
+                params: self.params.clone(),
+                auto_markers: self.auto_markers.clone(),
+            },
         }
     }
 }
@@ -838,6 +889,55 @@ fn dropout_gap_time(before_us: i64, next_us: i64, duration_ms: u16) -> i64 {
     }
 }
 
+fn read_keyed_value(payload: &[u8]) -> Option<(String, String, &[u8])> {
+    let (&key_len, rest) = payload.split_first()?;
+    let key_len = key_len as usize;
+    if rest.len() < key_len {
+        return None;
+    }
+    let key = std::str::from_utf8(&rest[..key_len]).ok()?.trim();
+    let (ty, name) = key.split_once(' ')?;
+    let name = name.trim();
+    (!ty.is_empty() && !name.is_empty())
+        .then(|| (ty.trim().to_owned(), name.to_owned(), &rest[key_len..]))
+}
+
+fn metadata_value_to_string(ty: &str, bytes: &[u8]) -> Option<String> {
+    let (base_ty, array_len) = parse_array(ty);
+    let kind = scalar_kind(&base_ty)?;
+    let count = array_len.max(1);
+    if kind == ScalarKind::Char && count > 1 {
+        return (bytes.len() >= count).then(|| c_str(&bytes[..count]));
+    }
+    let width = kind.width();
+    if bytes.len() < width * count {
+        return None;
+    }
+    let mut values = Vec::with_capacity(count);
+    for idx in 0..count {
+        values.push(scalar_value_to_string(kind, bytes, idx * width));
+    }
+    Some(values.join(","))
+}
+
+fn scalar_value_to_string(kind: ScalarKind, bytes: &[u8], off: usize) -> String {
+    match kind {
+        ScalarKind::Bool => (bytes[off] != 0).to_string(),
+        ScalarKind::I8 => (bytes[off] as i8).to_string(),
+        ScalarKind::I16 => i16::from_le_bytes(read_2(bytes, off)).to_string(),
+        ScalarKind::I32 => i32::from_le_bytes(read_4(bytes, off)).to_string(),
+        ScalarKind::I64 => i64::from_le_bytes(read_8(bytes, off)).to_string(),
+        ScalarKind::U8 => bytes[off].to_string(),
+        ScalarKind::U16 => u16::from_le_bytes(read_2(bytes, off)).to_string(),
+        ScalarKind::U32 => u32::from_le_bytes(read_4(bytes, off)).to_string(),
+        ScalarKind::U64 => u64::from_le_bytes(read_8(bytes, off)).to_string(),
+        ScalarKind::F32 => f32::from_le_bytes(read_4(bytes, off)).to_string(),
+        ScalarKind::F64 => f64::from_le_bytes(read_8(bytes, off)).to_string(),
+        ScalarKind::Char => c_str(&bytes[off..off + 1]),
+        ScalarKind::CharString(len) => c_str(&bytes[off..off + len]),
+    }
+}
+
 fn c_str(bytes: &[u8]) -> String {
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     String::from_utf8_lossy(&bytes[..end]).into_owned()
@@ -990,6 +1090,35 @@ mod tests {
         buf
     }
 
+    fn ulog_with_metadata() -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend(MAGIC);
+        buf.push(1);
+        buf.extend(0u64.to_le_bytes());
+
+        let mut param = Vec::new();
+        let key = b"float MPC_XY_CRUISE";
+        param.push(key.len() as u8);
+        param.extend(key);
+        param.extend(5.5f32.to_le_bytes());
+        push_msg(&mut buf, b'P', &param);
+
+        let mut name = Vec::new();
+        let key = b"char[8] SYS_NAME";
+        name.push(key.len() as u8);
+        name.extend(key);
+        name.extend(b"px4\0\0\0\0\0");
+        push_msg(&mut buf, b'P', &name);
+
+        let mut logged = Vec::new();
+        logged.push(6);
+        logged.extend(12_345u64.to_le_bytes());
+        logged.extend(b"armed and ready");
+        push_msg(&mut buf, b'L', &logged);
+
+        buf
+    }
+
     fn parse(buf: Vec<u8>) -> (ParseSummary, Collect) {
         let mut sink = Collect::default();
         let ctl = ParseCtl::new(CancelToken::new(), SourceId(0), buf.len() as u64);
@@ -1083,5 +1212,27 @@ mod tests {
         assert_eq!(values.value(0), 1.0);
         assert!(values.is_null(1));
         assert_eq!(values.value(2), 2.0);
+    }
+
+    #[test]
+    fn captures_params_and_logged_messages_as_source_metadata() {
+        let (summary, sink) = parse(ulog_with_metadata());
+        assert_eq!(summary.topic_count, 0);
+        assert_eq!(summary.row_count, 0);
+        assert_eq!(summary.diagnostics, 0);
+        assert!(sink.diags.is_empty());
+
+        assert_eq!(summary.source_meta.params.len(), 2);
+        assert_eq!(summary.source_meta.params[0].name, "MPC_XY_CRUISE");
+        assert_eq!(summary.source_meta.params[0].ty, "float");
+        assert_eq!(summary.source_meta.params[0].value, "5.5");
+        assert_eq!(summary.source_meta.params[1].name, "SYS_NAME");
+        assert_eq!(summary.source_meta.params[1].value, "px4");
+
+        assert_eq!(summary.source_meta.auto_markers.len(), 1);
+        let marker = &summary.source_meta.auto_markers[0];
+        assert_eq!(marker.time_us, 12_345);
+        assert_eq!(marker.level, 6);
+        assert_eq!(marker.text, "armed and ready");
     }
 }
