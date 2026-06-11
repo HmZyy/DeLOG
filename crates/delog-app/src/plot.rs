@@ -73,6 +73,7 @@ pub struct TraceRef {
     /// sRGB straight RGBA; the renderer converts to the target's colour space.
     pub color: [f32; 4],
     pub width_px: f32,
+    pub mode: TraceMode,
     /// Drawn only when visible; the legend toggles this (PLT-08).
     pub visible: bool,
 }
@@ -87,6 +88,25 @@ impl TraceRef {
             u(self.color[2]),
             u(self.color[3]),
         )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceMode {
+    Line,
+    Scatter,
+    Step,
+}
+
+impl TraceMode {
+    pub const ALL: [Self; 3] = [Self::Line, Self::Scatter, Self::Step];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Line => "Line",
+            Self::Scatter => "Scatter",
+            Self::Step => "Step",
+        }
     }
 }
 
@@ -111,6 +131,7 @@ impl PlotPane {
             field,
             color,
             width_px: 1.5,
+            mode: TraceMode::Line,
             visible: true,
         });
         true
@@ -198,6 +219,7 @@ mod tests {
         assert!(!pane.add_trace(FieldId(0))); // already plotted
         assert_eq!(pane.traces.len(), 2);
         assert_ne!(pane.traces[0].color, pane.traces[1].color);
+        assert_eq!(pane.traces[0].mode, TraceMode::Line);
     }
 
     #[test]

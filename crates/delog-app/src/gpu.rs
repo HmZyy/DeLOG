@@ -14,11 +14,12 @@ use std::sync::Arc;
 use delog_cache::{CacheManager, MinMax};
 use delog_core::identity::FieldId;
 use delog_render::{
-    BufferManager, LinePipeline, MinMaxColPipeline, PlotUniform, RenderContext, UniformRing,
+    BufferManager, LinePipeline, MinMaxColPipeline, PlotUniform, RenderContext, ScatterPipeline,
+    StepPipeline, UniformRing,
 };
 use eframe::{egui_wgpu, wgpu};
 
-use crate::plot::{PlotPane, ViewX};
+use crate::plot::{PlotPane, TraceMode, ViewX};
 
 /// Switch to the decimated min/max path above this many samples per pixel
 /// (§9.5, GPU-10).
@@ -164,21 +165,37 @@ impl GpuBridge {
                     ),
                 );
 
-                // Draw-path selector (GPU-10): decimate when the visible window
-                // packs more than ~8 samples per pixel.
-                let (a, b) = cache.index_range(x0, x1);
-                let visible = b.saturating_sub(a) as f32;
-                let kind = if plot_w >= 1.0 && visible / plot_w > DECIMATE_THRESHOLD {
-                    let width = plot_w as usize;
-                    let cols = cache.minmax_columns(x0, x1, width);
-                    res.col_buffers.sync(trace.field, &cols, true);
-                    DrawKind::Columns {
-                        count: width as u32,
+                let kind = match trace.mode {
+                    TraceMode::Line => {
+                        // Draw-path selector (GPU-10): decimate when the visible
+                        // window packs more than ~8 samples per pixel.
+                        let (a, b) = cache.index_range(x0, x1);
+                        let visible = b.saturating_sub(a) as f32;
+                        if plot_w >= 1.0 && visible / plot_w > DECIMATE_THRESHOLD {
+                            let width = plot_w as usize;
+                            let cols = cache.minmax_columns(x0, x1, width);
+                            res.col_buffers.sync(trace.field, &cols, true);
+                            DrawKind::Columns {
+                                count: width as u32,
+                            }
+                        } else {
+                            res.buffers.sync(trace.field, &cache.xy, false);
+                            DrawKind::Line {
+                                samples: res.buffers.samples(trace.field) as u32,
+                            }
+                        }
                     }
-                } else {
-                    res.buffers.sync(trace.field, &cache.xy, false);
-                    DrawKind::Line {
-                        samples: res.buffers.samples(trace.field) as u32,
+                    TraceMode::Scatter => {
+                        res.buffers.sync(trace.field, &cache.xy, false);
+                        DrawKind::Scatter {
+                            samples: res.buffers.samples(trace.field) as u32,
+                        }
+                    }
+                    TraceMode::Step => {
+                        res.buffers.sync(trace.field, &cache.xy, false);
+                        DrawKind::Step {
+                            samples: res.buffers.samples(trace.field) as u32,
+                        }
                     }
                 };
 
@@ -252,15 +269,27 @@ fn srgb_to_linear(c: f32) -> f32 {
 #[derive(Clone, Copy)]
 enum DrawKind {
     /// Full polyline: `samples` `[x,y]` pairs.
-    Line { samples: u32 },
+    Line {
+        samples: u32,
+    },
+    Scatter {
+        samples: u32,
+    },
+    Step {
+        samples: u32,
+    },
     /// Decimated: `count` per-pixel min/max columns.
-    Columns { count: u32 },
+    Columns {
+        count: u32,
+    },
 }
 
 impl DrawKind {
     fn is_drawable(self) -> bool {
         match self {
             DrawKind::Line { samples } => samples >= 2,
+            DrawKind::Scatter { samples } => samples >= 1,
+            DrawKind::Step { samples } => samples >= 2,
             DrawKind::Columns { count } => count >= 1,
         }
     }
@@ -275,6 +304,8 @@ struct DrawItem {
 struct PlotCallbackResources {
     ctx: RenderContext,
     line: LinePipeline,
+    scatter: ScatterPipeline,
+    step: StepPipeline,
     minmax: MinMaxColPipeline,
     /// Interleaved `[x,y]` trace buffers (full path).
     buffers: BufferManager,
@@ -283,12 +314,16 @@ struct PlotCallbackResources {
     uniforms: UniformRing,
     next_uniform_slot: u32,
     line_binds: HashMap<FieldId, wgpu::BindGroup>,
+    scatter_binds: HashMap<FieldId, wgpu::BindGroup>,
+    step_binds: HashMap<FieldId, wgpu::BindGroup>,
     col_binds: HashMap<FieldId, wgpu::BindGroup>,
 }
 
 impl PlotCallbackResources {
     fn new(ctx: RenderContext, color_format: wgpu::TextureFormat) -> Self {
         let line = LinePipeline::new(&ctx, color_format);
+        let scatter = ScatterPipeline::new(&ctx, color_format);
+        let step = StepPipeline::new(&ctx, color_format);
         let minmax = MinMaxColPipeline::new(&ctx, color_format);
         let buffers = BufferManager::new(ctx.clone());
         let col_buffers = BufferManager::new(ctx.clone());
@@ -296,12 +331,16 @@ impl PlotCallbackResources {
         Self {
             ctx,
             line,
+            scatter,
+            step,
             minmax,
             buffers,
             col_buffers,
             uniforms,
             next_uniform_slot: 0,
             line_binds: HashMap::new(),
+            scatter_binds: HashMap::new(),
+            step_binds: HashMap::new(),
             col_binds: HashMap::new(),
         }
     }
@@ -345,12 +384,16 @@ impl egui_wgpu::CallbackTrait for ScenePaintCallback {
             let PlotCallbackResources {
                 ctx,
                 line,
+                scatter,
+                step,
                 minmax,
                 buffers,
                 col_buffers,
                 uniforms,
                 next_uniform_slot: _,
                 line_binds,
+                scatter_binds,
+                step_binds,
                 col_binds,
             } = res;
             for item in &self.items {
@@ -358,6 +401,17 @@ impl egui_wgpu::CallbackTrait for ScenePaintCallback {
                     DrawKind::Line { .. } => {
                         if let Some(buf) = buffers.buffer(item.field) {
                             line_binds.insert(item.field, line.bind_group(ctx, buf, uniforms));
+                        }
+                    }
+                    DrawKind::Scatter { .. } => {
+                        if let Some(buf) = buffers.buffer(item.field) {
+                            scatter_binds
+                                .insert(item.field, scatter.bind_group(ctx, buf, uniforms));
+                        }
+                    }
+                    DrawKind::Step { .. } => {
+                        if let Some(buf) = buffers.buffer(item.field) {
+                            step_binds.insert(item.field, step.bind_group(ctx, buf, uniforms));
                         }
                     }
                     DrawKind::Columns { .. } => {
@@ -416,6 +470,16 @@ impl egui_wgpu::CallbackTrait for ScenePaintCallback {
                 DrawKind::Line { samples } => {
                     if let Some(bind) = res.line_binds.get(&item.field) {
                         res.line.encode_trace(render_pass, bind, offset, samples);
+                    }
+                }
+                DrawKind::Scatter { samples } => {
+                    if let Some(bind) = res.scatter_binds.get(&item.field) {
+                        res.scatter.encode_trace(render_pass, bind, offset, samples);
+                    }
+                }
+                DrawKind::Step { samples } => {
+                    if let Some(bind) = res.step_binds.get(&item.field) {
+                        res.step.encode_trace(render_pass, bind, offset, samples);
                     }
                 }
                 DrawKind::Columns { count } => {
