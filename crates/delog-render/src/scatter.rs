@@ -120,9 +120,15 @@ impl ScatterPipeline {
         })
     }
 
-    /// Encode one trace. `sample_count` is the number of `[x,y]` pairs resident
-    /// in the storage buffer; each sample emits one six-vertex quad.
-    pub fn encode_trace(
+    /// Bind this pipeline once for a run of traces (GPU-11).
+    pub fn bind(&self, pass: &mut wgpu::RenderPass<'_>) {
+        pass.set_pipeline(&self.pipeline);
+    }
+
+    /// Draw one trace with its dynamic uniform offset; the pipeline must
+    /// already be bound via [`Self::bind`] (GPU-11). `sample_count` is the
+    /// number of `[x,y]` pairs; each sample emits one six-vertex quad.
+    pub fn draw_trace(
         &self,
         pass: &mut wgpu::RenderPass<'_>,
         bind_group: &wgpu::BindGroup,
@@ -133,9 +139,24 @@ impl ScatterPipeline {
             return;
         }
 
-        pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, bind_group, &[uniform_offset]);
         pass.draw(0..sample_count.saturating_mul(6), 0..1);
+    }
+
+    /// Bind + draw a single trace (single-trace convenience; batched callers
+    /// use [`Self::bind`] once per run and [`Self::draw_trace`] per trace).
+    pub fn encode_trace(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        bind_group: &wgpu::BindGroup,
+        uniform_offset: u32,
+        sample_count: u32,
+    ) {
+        if sample_count == 0 {
+            return;
+        }
+        self.bind(pass);
+        self.draw_trace(pass, bind_group, uniform_offset, sample_count);
     }
 
     pub fn bind_group_layout(&self) -> &wgpu::BindGroupLayout {

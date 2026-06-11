@@ -890,10 +890,10 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **GPU-08** — `step_pull` stepped-mode pipeline (2 segments/sample)
 - [x] **GPU-09** — `minmax_col` decimated pipeline + transient ring upload (§9.5)
 - [x] **GPU-10** — Draw-path selector: full vs decimated at samples/px > 8
-- [ ] **GPU-11** — Batched encoding: one pipeline bind, per-trace dynamic offsets
+- [x] **GPU-11** — Batched encoding: one pipeline bind, per-trace dynamic offsets
 - [ ] **GPU-12** — wgpu error scopes → diagnostics
 - [x] **GPU-13** — Headless golden-image test rig (§20.3)
-- [~] **GPU-14** — Bench: frame encode 32×1M decimated < 3 ms — bench delivered; ~12 ms after L0-walk decimation (was ~30 ms). Still over the 3 ms budget at this extreme load; GPU-26 (compute reduction) is the path to full budget. Typical 1–8 traces are well under.
+- [~] **GPU-14** — Bench: frame encode 32×1M decimated < 3 ms — ~4.9 ms after GPU-11 batching (was ~12 ms); CPU min/max decimation alone is ~4.3 ms of that, so GPU-26 (compute reduction) is the path to full budget. Typical 1–8 traces are well under.
 - [ ] **GPU-20** — 3D offscreen target (color+depth, 4×MSAA) composited as egui image (§9.1)
 - [ ] **GPU-21** — `grid3d` infinite grid + axes gizmo
 - [ ] **GPU-22** — `mesh` pipeline (N·L+ambient) + GLB upload path
