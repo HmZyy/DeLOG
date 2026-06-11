@@ -286,6 +286,9 @@ pub struct PlotServices<'a> {
     pub origin_us: i64,
     pub hover_mode: &'a mut delog_core::field_view::SampleMode,
     pub show_legend: &'a mut bool,
+    /// Playback time for the playhead cursor; `None` before any data loads
+    /// (§11, PLT-10).
+    pub playhead_us: Option<i64>,
 }
 
 pub struct Behavior<'a> {
@@ -465,6 +468,19 @@ impl Behavior<'_> {
         };
 
         self.plot_context_menu(tile_id, &response, pane, Some(debug));
+
+        // Playhead cursor + value readout on every pane (§10.5, PLT-10).
+        if let Some(t_us) = self.services.playhead_us {
+            hover::draw_playhead(
+                ui,
+                pview,
+                self.services.snapshot.as_ref(),
+                pane,
+                self.services.origin_us,
+                t_us,
+                *self.services.hover_mode,
+            );
+        }
 
         if !ui.ctx().any_popup_open() {
             hover::draw(

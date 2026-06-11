@@ -913,7 +913,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **PLT-07** — Axes/ticks/labels via egui; tick step chooser (1-2-5)
 - [x] **PLT-08** — Legend + toggle; per-trace visibility/color/width/mode editing
 - [x] **PLT-09** — Hover: canonical binary search, Prev/Next/Linear tooltip modes, hover circles (§10.5)
-- [ ] **PLT-10** — Playhead vertical line + value readout on all panes
+- [x] **PLT-10** — Playhead vertical line + value readout on all panes
 - [x] **PLT-11** — Context menu: remove/clear/mode/color/width/split/reset/legend/info (§10.6)
 - [x] **PLT-12** — Plot debug popup: counts, visible range, GPU bytes, yquery µs, paint µs
 - [x] **PLT-13** — Drag-drop: single + multi-field onto pane / tile edge (§10.7)
