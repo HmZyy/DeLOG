@@ -377,7 +377,7 @@ impl Behavior<'_> {
             ui.painter().text(
                 outer.center(),
                 egui::Align2::CENTER_CENTER,
-                "Drag a field here to plot it",
+                "Drag a field here",
                 egui::FontId::proportional(14.0),
                 ui.visuals().weak_text_color(),
             );
