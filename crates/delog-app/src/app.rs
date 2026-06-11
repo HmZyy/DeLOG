@@ -1,13 +1,21 @@
 //! Top-level eframe application state.
 
+use delog_cache::CacheManager;
+
 use crate::about;
 use crate::browser::{self, BrowserModel};
-use crate::gpu::GpuBridge;
+use crate::gpu::{self, GpuBridge};
+use crate::plot::PlotPane;
 use crate::session::Session;
 
 pub struct DelogApp {
     session: Session,
     gpu: GpuBridge,
+    caches: CacheManager,
+    pane: PlotPane,
+    frame: u64,
+    last_epoch: u64,
+    origin_us: i64,
     path_input: String,
     show_about: bool,
 }
@@ -18,6 +26,11 @@ impl DelogApp {
         Self {
             session: Session::new(cc.egui_ctx.clone()),
             gpu: GpuBridge::from_creation_context(cc),
+            caches: CacheManager::new(),
+            pane: PlotPane::default(),
+            frame: 0,
+            last_epoch: u64::MAX,
+            origin_us: 0,
             path_input: String::new(),
             show_about: false,
         }
@@ -35,9 +48,31 @@ impl DelogApp {
 }
 
 impl eframe::App for DelogApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.handle_dropped_files(ui.ctx());
         self.session.prune_finished();
+        self.frame = self.frame.wrapping_add(1);
+
+        let snapshot = self.session.snapshot();
+
+        // Cache lifecycle: shared origin, frame recency, drain builds, and an
+        // epoch-driven incremental append + GC (§8.5).
+        if let Some(range) = snapshot.global_time_range() {
+            self.origin_us = range.min_us;
+            self.caches.set_origin(self.origin_us);
+            self.pane.init_view(range);
+        }
+        self.caches.begin_frame(self.frame);
+        self.caches.poll_builds();
+        if snapshot.epoch != self.last_epoch {
+            self.caches.on_epoch(&snapshot);
+            self.last_epoch = snapshot.epoch;
+        }
+        // Keep every plotted trace's cache requested/warm.
+        for field in self.pane.fields().collect::<Vec<_>>() {
+            self.caches.request(field, &snapshot);
+        }
+        self.caches.evict_over_budget();
 
         egui::Panel::top("main_menu").show_inside(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
@@ -91,7 +126,6 @@ impl eframe::App for DelogApp {
             });
         }
 
-        let snapshot = self.session.snapshot();
         let model = BrowserModel::from_snapshot(&snapshot);
         egui::Panel::left("data_browser")
             .resizable(true)
@@ -101,22 +135,82 @@ impl eframe::App for DelogApp {
             });
 
         egui::Frame::central_panel(ui.style()).show(ui, |ui| {
-            // Workspace-first window (PLAN.md §19.1); tiles arrive with PLT-01.
             if model.is_empty() {
                 ui.centered_and_justified(|ui| {
                     ui.weak("Drop a flight log to begin.");
                 });
-            } else if self.gpu.is_available() {
-                let rect = ui.available_rect_before_wrap();
-                self.gpu.paint_demo_line(ui, rect);
-                ui.allocate_rect(rect, egui::Sense::hover());
-            } else {
-                ui.centered_and_justified(|ui| {
-                    ui.weak("GPU renderer unavailable.");
+                return;
+            }
+
+            // The central panel is a drop zone: dragging a field from the
+            // browser onto it plots that field (PLT-13).
+            let frame_style = egui::Frame::default();
+            let (_, dropped) =
+                ui.dnd_drop_zone::<delog_core::identity::FieldId, ()>(frame_style, |ui| {
+                    let rect = ui.available_rect_before_wrap();
+                    let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
+                    self.handle_plot_interaction(&response, rect);
+
+                    if self.pane.is_empty() {
+                        ui.painter().text(
+                            rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "Drag a field here to plot it",
+                            egui::FontId::proportional(14.0),
+                            ui.visuals().weak_text_color(),
+                        );
+                    } else if self.gpu.is_available() {
+                        self.gpu.render_pane(
+                            ui,
+                            frame,
+                            rect,
+                            &mut self.caches,
+                            &self.pane,
+                            self.origin_us,
+                        );
+                    }
                 });
+            if let Some(field) = dropped
+                && self.pane.add_trace(*field)
+            {
+                self.caches.request(*field, &snapshot);
             }
         });
 
         about::window(ui.ctx(), &mut self.show_about);
+    }
+}
+
+impl DelogApp {
+    /// Pan (drag), zoom (wheel @ cursor) and reset (double-click) the X view
+    /// from pointer input over the plot rect (PLT-04).
+    fn handle_plot_interaction(&mut self, response: &egui::Response, rect: egui::Rect) {
+        let Some(mut view) = self.pane.view() else {
+            return;
+        };
+
+        if response.double_clicked() {
+            if let Some(range) = self.session.snapshot().global_time_range() {
+                self.pane.reset_view(range);
+            }
+            return;
+        }
+
+        if response.dragged() {
+            gpu::apply_pan(&mut view, response.drag_delta().x, rect.width());
+        }
+
+        if response.hovered() {
+            let scroll = response.ctx.input(|i| i.smooth_scroll_delta.y);
+            if scroll != 0.0 {
+                let cursor_frac = response
+                    .hover_pos()
+                    .map(|p| (p.x - rect.left()) / rect.width().max(1.0))
+                    .unwrap_or(0.5);
+                gpu::apply_zoom(&mut view, cursor_frac, scroll);
+            }
+        }
+
+        self.pane.set_view(view);
     }
 }

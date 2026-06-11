@@ -4,6 +4,7 @@ mod about;
 mod app;
 mod browser;
 mod gpu;
+mod plot;
 mod session;
 
 use app::DelogApp;

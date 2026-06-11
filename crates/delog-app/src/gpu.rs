@@ -1,19 +1,24 @@
-//! egui/eframe adapter for DeLOG's pure-wgpu renderer (PLAN.md GPU-06).
+//! egui/eframe adapter for DeLOG's pure-wgpu renderer (PLAN.md §9.1-§9.2,
+//! GPU-06, PLT-02/03).
 //!
-//! `delog-render` deliberately contains no egui types. This module is the thin
-//! shell boundary: it adopts eframe's `wgpu` device/queue, stores renderer
-//! resources in egui_wgpu's callback resource map, and emits paint callbacks
-//! that draw inside egui's main render pass.
+//! `delog-render` contains no egui types; this module is the thin boundary. It
+//! adopts eframe's `wgpu` device/queue, keeps the pipeline + buffer/uniform
+//! managers in egui_wgpu's callback-resource map, and each frame uploads the
+//! ready trace caches, writes per-plot uniforms, and emits one paint callback
+//! that draws every trace inside egui's main pass with a per-plot viewport +
+//! scissor.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use delog_cache::{CacheManager, MinMax};
 use delog_core::identity::FieldId;
 use delog_render::{BufferManager, LinePipeline, PlotUniform, RenderContext, UniformRing};
 use eframe::{egui_wgpu, wgpu};
 
-const DEMO_FIELD: FieldId = FieldId(u32::MAX);
+use crate::plot::{PlotPane, ViewX};
 
-/// App-owned handle to GPU resources stored in egui_wgpu callback resources.
+/// App-owned handle to the renderer resources stored in egui_wgpu.
 #[derive(Clone, Copy, Debug)]
 pub struct GpuBridge {
     available: bool,
@@ -43,88 +48,181 @@ impl GpuBridge {
         self.available
     }
 
-    /// Paint a minimal line trace in `rect`. This is a real callback path (same
-    /// pass, viewport, scissor and line pipeline) that PLT-02/03 will replace
-    /// with cache-backed traces.
-    pub fn paint_demo_line(&self, ui: &mut egui::Ui, rect: egui::Rect) {
+    /// Upload the pane's ready trace caches, write their uniforms, and emit the
+    /// paint callback. `origin_us` is the shared cache rebase origin (§8.3).
+    pub fn render_pane(
+        &self,
+        ui: &mut egui::Ui,
+        frame: &eframe::Frame,
+        rect: egui::Rect,
+        caches: &mut CacheManager,
+        pane: &PlotPane,
+        origin_us: i64,
+    ) {
         if !self.available || rect.width() < 2.0 || rect.height() < 2.0 {
             return;
         }
+        let Some(view) = pane.view() else {
+            return;
+        };
+        let Some(render_state) = frame.wgpu_render_state() else {
+            return;
+        };
 
+        let ppp = ui.ctx().pixels_per_point();
+        let viewport_px = [
+            (rect.width() * ppp).max(1.0),
+            (rect.height() * ppp).max(1.0),
+        ];
+        let (x0, x1) = view.seconds(origin_us);
+        let (y0, y1) = visible_y_range(caches, pane, x0, x1);
+
+        let mut items = Vec::new();
+        {
+            let mut renderer = render_state.renderer.write();
+            let Some(res) = renderer
+                .callback_resources
+                .get_mut::<PlotCallbackResources>()
+            else {
+                return;
+            };
+            res.ensure_uniform_capacity(pane.traces.len() as u32);
+
+            for (slot, trace) in pane.traces.iter().enumerate() {
+                let Some(cache) = caches.get(trace.field) else {
+                    continue;
+                };
+                res.buffers.sync(trace.field, &cache.xy, false);
+                res.uniforms.write(
+                    slot as u32,
+                    &PlotUniform::from_view(
+                        (x0, x1),
+                        (y0, y1),
+                        viewport_px,
+                        trace.width_px,
+                        trace.color,
+                    ),
+                );
+                let sample_count = res.buffers.samples(trace.field) as u32;
+                if sample_count >= 2 {
+                    items.push(DrawItem {
+                        field: trace.field,
+                        slot: slot as u32,
+                        sample_count,
+                    });
+                }
+            }
+
+            // Drop GPU buffers for fields no longer plotted.
+            let plotted: Vec<FieldId> = pane.fields().collect();
+            res.retain_buffers(&plotted);
+        }
+
+        if items.is_empty() {
+            return;
+        }
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
             rect,
-            PlotPaintCallback {
-                field: DEMO_FIELD,
-                uniform_slot: 0,
-                viewport_points: [rect.width(), rect.height()],
-                sample_count: DEMO_XY.len() as u32 / 2,
-            },
+            ScenePaintCallback { items },
         ));
     }
 }
 
+/// Union of every visible trace's auto-Y range, padded; a sane default when no
+/// finite samples are in view.
+fn visible_y_range(caches: &mut CacheManager, pane: &PlotPane, x0: f32, x1: f32) -> (f32, f32) {
+    let mut mm = MinMax::EMPTY;
+    for trace in &pane.traces {
+        if let Some(cache) = caches.get(trace.field) {
+            mm = mm.merge(cache.y_range(x0, x1));
+        }
+    }
+    if !mm.is_finite() {
+        return (-1.0, 1.0);
+    }
+    let (min, max) = (mm.min, mm.max);
+    if (max - min).abs() <= f32::EPSILON {
+        return (min - 1.0, max + 1.0);
+    }
+    let pad = (max - min) * 0.05;
+    (min - pad, max + pad)
+}
+
+struct DrawItem {
+    field: FieldId,
+    slot: u32,
+    sample_count: u32,
+}
+
 struct PlotCallbackResources {
+    ctx: RenderContext,
     line: LinePipeline,
     buffers: BufferManager,
     uniforms: UniformRing,
-    demo_bind_group: wgpu::BindGroup,
+    bind_groups: HashMap<FieldId, wgpu::BindGroup>,
 }
 
 impl PlotCallbackResources {
     fn new(ctx: RenderContext, color_format: wgpu::TextureFormat) -> Self {
         let line = LinePipeline::new(&ctx, color_format);
-        let mut buffers = BufferManager::new(ctx.clone());
-        buffers.sync(DEMO_FIELD, &DEMO_XY, false);
-
-        let uniforms = UniformRing::new(ctx.clone(), 1);
-        uniforms.write(
-            0,
-            &PlotUniform::new(1.0, 0.0, 1.0, 0.0, [64.0, 64.0], 2.0, [0.4, 0.85, 1.0, 1.0]),
-        );
-        let demo_bind_group = line.bind_group(&ctx, buffers.buffer(DEMO_FIELD).unwrap(), &uniforms);
-
+        let buffers = BufferManager::new(ctx.clone());
+        let uniforms = UniformRing::new(ctx.clone(), 8);
         Self {
+            ctx,
             line,
             buffers,
             uniforms,
-            demo_bind_group,
+            bind_groups: HashMap::new(),
+        }
+    }
+
+    /// Grow the uniform ring if more plots than slots are needed.
+    fn ensure_uniform_capacity(&mut self, needed: u32) {
+        if needed > self.uniforms.capacity() {
+            self.uniforms = UniformRing::new(self.ctx.clone(), needed.next_power_of_two());
+        }
+    }
+
+    fn retain_buffers(&mut self, plotted: &[FieldId]) {
+        let stale: Vec<FieldId> = self
+            .buffers
+            .fields()
+            .filter(|f| !plotted.contains(f))
+            .collect();
+        for field in stale {
+            self.buffers.remove(field);
         }
     }
 }
 
-struct PlotPaintCallback {
-    field: FieldId,
-    uniform_slot: u32,
-    viewport_points: [f32; 2],
-    sample_count: u32,
+struct ScenePaintCallback {
+    items: Vec<DrawItem>,
 }
 
-impl egui_wgpu::CallbackTrait for PlotPaintCallback {
+impl egui_wgpu::CallbackTrait for ScenePaintCallback {
     fn prepare(
         &self,
         _device: &wgpu::Device,
         _queue: &wgpu::Queue,
-        screen_descriptor: &egui_wgpu::ScreenDescriptor,
+        _screen_descriptor: &egui_wgpu::ScreenDescriptor,
         _egui_encoder: &mut wgpu::CommandEncoder,
         callback_resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
-        if let Some(resources) = callback_resources.get_mut::<PlotCallbackResources>() {
-            let pixels_per_point = screen_descriptor.pixels_per_point;
-            resources.uniforms.write(
-                self.uniform_slot,
-                &PlotUniform::new(
-                    1.0,
-                    0.0,
-                    1.0,
-                    0.0,
-                    [
-                        (self.viewport_points[0] * pixels_per_point).max(1.0),
-                        (self.viewport_points[1] * pixels_per_point).max(1.0),
-                    ],
-                    2.0,
-                    [0.4, 0.85, 1.0, 1.0],
-                ),
-            );
+        if let Some(res) = callback_resources.get_mut::<PlotCallbackResources>() {
+            // Rebuild bind groups against the (possibly grown) buffers.
+            let PlotCallbackResources {
+                ctx,
+                line,
+                buffers,
+                uniforms,
+                bind_groups,
+            } = res;
+            bind_groups.clear();
+            for item in &self.items {
+                if let Some(buf) = buffers.buffer(item.field) {
+                    bind_groups.insert(item.field, line.bind_group(ctx, buf, uniforms));
+                }
+            }
         }
         Vec::new()
     }
@@ -135,16 +233,16 @@ impl egui_wgpu::CallbackTrait for PlotPaintCallback {
         render_pass: &mut wgpu::RenderPass<'static>,
         callback_resources: &egui_wgpu::CallbackResources,
     ) {
-        let Some(resources) = callback_resources.get::<PlotCallbackResources>() else {
+        let Some(res) = callback_resources.get::<PlotCallbackResources>() else {
             return;
         };
-        if resources.buffers.buffer(self.field).is_none() {
-            return;
-        }
 
         let viewport = info.viewport_in_pixels();
+        if viewport.width_px <= 0 || viewport.height_px <= 0 {
+            return;
+        }
         let clip = info.clip_rect_in_pixels();
-        let Some((x, y, width, height)) = intersect_scissor_rect(
+        let Some((sx, sy, sw, sh)) = intersect_scissor_rect(
             (
                 viewport.left_px,
                 viewport.top_px,
@@ -157,13 +255,27 @@ impl egui_wgpu::CallbackTrait for PlotPaintCallback {
             return;
         };
 
-        render_pass.set_scissor_rect(x, y, width, height);
-        resources.line.encode_trace(
-            render_pass,
-            &resources.demo_bind_group,
-            resources.uniforms.dynamic_offset(self.uniform_slot),
-            self.sample_count,
+        // Map clip space to the plot rect; scissor to the visible intersection.
+        render_pass.set_viewport(
+            viewport.left_px.max(0) as f32,
+            viewport.top_px.max(0) as f32,
+            viewport.width_px as f32,
+            viewport.height_px as f32,
+            0.0,
+            1.0,
         );
+        render_pass.set_scissor_rect(sx, sy, sw, sh);
+
+        for item in &self.items {
+            if let Some(bind) = res.bind_groups.get(&item.field) {
+                res.line.encode_trace(
+                    render_pass,
+                    bind,
+                    res.uniforms.dynamic_offset(item.slot),
+                    item.sample_count,
+                );
+            }
+        }
     }
 }
 
@@ -191,20 +303,31 @@ fn intersect_scissor_rect(
     ))
 }
 
-const DEMO_XY: [f32; 16] = [
-    -0.92, -0.45, -0.64, 0.18, -0.38, -0.08, -0.12, 0.62, 0.16, 0.28, 0.42, 0.72, 0.68, -0.22,
-    0.92, 0.36,
-];
+/// Convert an egui drag delta and a wheel scroll into [`ViewX`] updates,
+/// mapping screen pixels to the data window. Pure so it stays unit-testable.
+pub fn apply_pan(view: &mut ViewX, drag_dx_px: f32, rect_width_px: f32) {
+    if rect_width_px <= 0.0 {
+        return;
+    }
+    let span = view.span_us() as f64;
+    let delta = -(drag_dx_px as f64 / rect_width_px as f64) * span;
+    view.pan_us(delta.round() as i64);
+}
+
+/// Zoom about the cursor. `cursor_frac` is the cursor's 0..1 position across the
+/// plot width; `scroll` is the wheel delta (positive = zoom in).
+pub fn apply_zoom(view: &mut ViewX, cursor_frac: f32, scroll: f32) {
+    if scroll == 0.0 {
+        return;
+    }
+    let focus = view.min_us + (view.span_us() as f64 * cursor_frac.clamp(0.0, 1.0) as f64) as i64;
+    let factor = (1.0015_f64).powf(-scroll as f64);
+    view.zoom_at(focus, factor);
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn demo_trace_has_xy_pairs() {
-        assert_eq!(DEMO_XY.len() % 2, 0);
-        assert!(DEMO_XY.len() >= 4);
-    }
 
     #[test]
     fn scissor_is_viewport_clip_intersection_clamped_to_screen() {
@@ -220,5 +343,23 @@ mod tests {
             intersect_scissor_rect((0, 0, 10, 10), (20, 20, 5, 5), [100, 100]),
             None
         );
+    }
+
+    #[test]
+    fn pan_maps_pixels_to_time_and_follows_the_pointer() {
+        let mut view = ViewX::new(0, 1000);
+        // Drag right by half the width → window shifts left by half the span.
+        apply_pan(&mut view, 50.0, 100.0);
+        assert_eq!((view.min_us, view.max_us), (-500, 500));
+    }
+
+    #[test]
+    fn zoom_in_shrinks_the_span_about_the_cursor() {
+        let mut view = ViewX::new(0, 1000);
+        apply_zoom(&mut view, 0.5, 200.0); // scroll up at centre
+        assert!(view.span_us() < 1000);
+        // Centre stays roughly fixed.
+        let centre = (view.min_us + view.max_us) / 2;
+        assert!((centre - 500).abs() < 50);
     }
 }
