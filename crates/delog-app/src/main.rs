@@ -4,6 +4,7 @@ mod about;
 mod app;
 mod axes;
 mod browser;
+mod camera;
 mod gpu;
 mod hover;
 mod legend;

@@ -12,6 +12,7 @@ use delog_core::identity::FieldId;
 use delog_core::snapshot::StoreSnapshot;
 
 use crate::axes;
+use crate::camera::OrbitCamera;
 use crate::gpu::{self, GpuBridge, PaneView};
 use crate::hover::{self, HoverTarget};
 use crate::legend;
@@ -22,6 +23,14 @@ pub type TileTree = egui_tiles::Tree<Pane>;
 #[derive(Debug)]
 pub enum Pane {
     Plot(PlotPane),
+    Scene3D(Scene3dPane),
+}
+
+/// State for a 3D scene pane: just the orbit camera in v1 (vehicles, cameras
+/// and trajectories arrive with later TDV items).
+#[derive(Debug, Default)]
+pub struct Scene3dPane {
+    pub camera: OrbitCamera,
 }
 
 impl Default for Pane {
@@ -150,6 +159,40 @@ impl Workspace {
             .collect()
     }
 
+    /// The tile id of the single 3D scene pane, if one is open (TDV-01).
+    pub fn scene_pane_id(&self) -> Option<egui_tiles::TileId> {
+        self.tree.tiles.iter().find_map(|(id, tile)| {
+            matches!(tile, egui_tiles::Tile::Pane(Pane::Scene3D(_))).then_some(*id)
+        })
+    }
+
+    /// Show or hide the 3D scene view (TDV-01). There is only ever one: the
+    /// toolbar button adds it next to the focused pane, or removes it.
+    pub fn toggle_scene_pane(&mut self) {
+        if let Some(id) = self.scene_pane_id() {
+            let closing_root = self.tree.root() == Some(id);
+            self.tree.remove_recursively(id);
+            if closing_root || self.tree.tiles.tiles().next().is_none() {
+                *self = Self::new();
+            }
+            return;
+        }
+        let pane = self
+            .tree
+            .tiles
+            .insert_pane(Pane::Scene3D(Scene3dPane::default()));
+        let anchor = self
+            .focused
+            .filter(|id| self.tree.tiles.get(*id).is_some())
+            .or_else(|| self.tree.root());
+        match anchor.and_then(|a| self.attach_split(a, pane, SplitDirection::Horizontal, false)) {
+            Some(_) => {}
+            // Empty tree (no root): the scene pane becomes the root.
+            None => self.tree.root = Some(pane),
+        }
+        self.focused = Some(pane);
+    }
+
     fn split_plot_at(
         &mut self,
         tile_id: egui_tiles::TileId,
@@ -157,6 +200,18 @@ impl Workspace {
         before: bool,
     ) -> Option<egui_tiles::TileId> {
         let new_pane = self.tree.tiles.insert_pane(Pane::Plot(PlotPane::default()));
+        self.attach_split(tile_id, new_pane, direction, before)
+    }
+
+    /// Place an already-inserted `new_pane` next to `tile_id`, splitting in
+    /// `direction`. Returns `new_pane` on success.
+    fn attach_split(
+        &mut self,
+        tile_id: egui_tiles::TileId,
+        new_pane: egui_tiles::TileId,
+        direction: SplitDirection,
+        before: bool,
+    ) -> Option<egui_tiles::TileId> {
         let kind = match direction {
             SplitDirection::Horizontal => egui_tiles::ContainerKind::Horizontal,
             SplitDirection::Vertical => egui_tiles::ContainerKind::Vertical,
@@ -249,14 +304,14 @@ impl Workspace {
     fn plot_panes(&self) -> impl Iterator<Item = &PlotPane> + '_ {
         self.tree.tiles.tiles().filter_map(|tile| match tile {
             egui_tiles::Tile::Pane(Pane::Plot(pane)) => Some(pane),
-            egui_tiles::Tile::Container(_) => None,
+            egui_tiles::Tile::Pane(Pane::Scene3D(_)) | egui_tiles::Tile::Container(_) => None,
         })
     }
 
     fn plot_panes_mut(&mut self) -> impl Iterator<Item = &mut PlotPane> + '_ {
         self.tree.tiles.tiles_mut().filter_map(|tile| match tile {
             egui_tiles::Tile::Pane(Pane::Plot(pane)) => Some(pane),
-            egui_tiles::Tile::Container(_) => None,
+            egui_tiles::Tile::Pane(Pane::Scene3D(_)) | egui_tiles::Tile::Container(_) => None,
         })
     }
 }
@@ -325,6 +380,7 @@ impl egui_tiles::Behavior<Pane> for Behavior<'_> {
     ) -> egui_tiles::UiResponse {
         match pane {
             Pane::Plot(pane) => self.plot_ui(ui, tile_id, pane),
+            Pane::Scene3D(pane) => self.scene_ui(ui, tile_id, pane),
         }
     }
 
@@ -332,6 +388,7 @@ impl egui_tiles::Behavior<Pane> for Behavior<'_> {
         match pane {
             Pane::Plot(pane) if pane.traces.is_empty() => "Plot".into(),
             Pane::Plot(pane) => format!("Plot ({})", pane.traces.len()).into(),
+            Pane::Scene3D(_) => "3D View".into(),
         }
     }
 
@@ -381,6 +438,66 @@ impl egui_tiles::Behavior<Pane> for Behavior<'_> {
 }
 
 impl Behavior<'_> {
+    /// 3D scene pane (TDV-01): orbit with a left-drag, zoom with the wheel,
+    /// double-click to reset. The scene renders offscreen and composites here
+    /// as an egui image; a middle-drag still moves the tile.
+    fn scene_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        tile_id: egui_tiles::TileId,
+        pane: &mut Scene3dPane,
+    ) -> egui_tiles::UiResponse {
+        let rect = ui.available_rect_before_wrap();
+        let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
+        if response.clicked() || response.drag_started() || response.secondary_clicked() {
+            self.actions.focus = Some(tile_id);
+        }
+
+        // Orbit on primary drag (grab-and-rotate); pitch clamped in the camera.
+        if response.dragged_by(egui::PointerButton::Primary) {
+            let d = response.drag_delta();
+            const SENS: f32 = 0.008;
+            pane.camera.orbit(-d.x * SENS, d.y * SENS);
+        }
+        // Wheel zoom while the pointer is over the pane.
+        if response.hovered() {
+            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+            if scroll != 0.0 {
+                pane.camera.zoom((0.9985_f32).powf(scroll));
+            }
+        }
+        if response.double_clicked() {
+            pane.camera = OrbitCamera::default();
+        }
+
+        if let Some(tex) =
+            self.services
+                .gpu
+                .render_scene(self.services.frame, ui, rect, &pane.camera)
+        {
+            ui.painter().image(
+                tex,
+                rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+        } else {
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "3D view unavailable",
+                egui::FontId::proportional(14.0),
+                ui.visuals().weak_text_color(),
+            );
+        }
+
+        if response.drag_started_by(egui::PointerButton::Middle) {
+            egui_tiles::UiResponse::DragStarted
+        } else {
+            egui_tiles::UiResponse::None
+        }
+    }
+
     fn plot_ui(
         &mut self,
         ui: &mut egui::Ui,
@@ -823,7 +940,7 @@ fn ordered_pair(
 fn fields_from_removed_tile(tile: egui_tiles::Tile<Pane>) -> Vec<FieldId> {
     match tile {
         egui_tiles::Tile::Pane(Pane::Plot(pane)) => pane.fields().collect(),
-        egui_tiles::Tile::Container(_) => Vec::new(),
+        egui_tiles::Tile::Pane(Pane::Scene3D(_)) | egui_tiles::Tile::Container(_) => Vec::new(),
     }
 }
 
@@ -852,6 +969,36 @@ mod tests {
         let workspace = Workspace::new();
         assert_eq!(workspace.plot_panes().count(), 1);
         assert!(workspace.fields().next().is_none());
+    }
+
+    #[test]
+    fn scene_pane_toggles_a_single_instance_on_and_off() {
+        fn scene_count(w: &Workspace) -> usize {
+            w.tree
+                .tiles
+                .tiles()
+                .filter(|t| matches!(t, egui_tiles::Tile::Pane(Pane::Scene3D(_))))
+                .count()
+        }
+
+        let mut workspace = Workspace::new();
+        assert!(workspace.scene_pane_id().is_none());
+
+        // Show it: one scene pane, original plot untouched.
+        workspace.toggle_scene_pane();
+        let id = workspace.scene_pane_id().expect("scene pane should exist");
+        assert_eq!(scene_count(&workspace), 1);
+        assert_eq!(workspace.plot_panes().count(), 1);
+
+        // Toggling again hides it.
+        workspace.toggle_scene_pane();
+        assert!(workspace.scene_pane_id().is_none());
+        assert_eq!(workspace.plot_panes().count(), 1);
+
+        // A fresh show reuses the single-instance path (never two) with a new id.
+        workspace.toggle_scene_pane();
+        assert_eq!(scene_count(&workspace), 1);
+        assert_ne!(workspace.scene_pane_id(), Some(id));
     }
 
     #[test]
