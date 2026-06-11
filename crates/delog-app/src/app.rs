@@ -23,6 +23,7 @@ pub struct DelogApp {
     origin_us: i64,
     path_input: String,
     browser_query: String,
+    browser_selection: browser::Selection,
     show_about: bool,
     show_connection_dialog: bool,
     connection_dialog: ConnectionDialog,
@@ -45,6 +46,7 @@ impl DelogApp {
             origin_us: 0,
             path_input: String::new(),
             browser_query: String::new(),
+            browser_selection: browser::Selection::default(),
             show_about: false,
             show_connection_dialog: false,
             connection_dialog: ConnectionDialog::default(),
@@ -163,6 +165,7 @@ impl eframe::App for DelogApp {
                     ui,
                     &model,
                     &mut self.browser_query,
+                    &mut self.browser_selection,
                     &self.workspace.trace_colors(),
                 );
             });
@@ -180,7 +183,7 @@ impl eframe::App for DelogApp {
             let frame_style = egui::Frame::default();
             let mut handled_workspace_drop = false;
             let (_, dropped) =
-                ui.dnd_drop_zone::<delog_core::identity::FieldId, ()>(frame_style, |ui| {
+                ui.dnd_drop_zone::<Vec<delog_core::identity::FieldId>, ()>(frame_style, |ui| {
                     self.gpu.begin_plot_frame(frame);
                     let services = PlotServices {
                         frame,
@@ -198,11 +201,16 @@ impl eframe::App for DelogApp {
                     if let Some((tile_id, direction)) = actions.split {
                         self.workspace.split_plot(tile_id, direction);
                     }
-                    if let Some((tile_id, edge, field)) = actions.edge_drop
-                        && self.workspace.split_plot_with_trace(tile_id, edge, field)
-                    {
-                        handled_workspace_drop = true;
-                        self.caches.request(field, &snapshot);
+                    if let Some((tile_id, edge, fields)) = actions.edge_drop {
+                        let added = self
+                            .workspace
+                            .split_plot_with_traces(tile_id, edge, &fields);
+                        if !added.is_empty() {
+                            handled_workspace_drop = true;
+                            for field in added {
+                                self.caches.request(field, &snapshot);
+                            }
+                        }
                     }
                     if let Some(tile_id) = actions.close {
                         for field in self.workspace.close_plot(tile_id) {
@@ -210,11 +218,14 @@ impl eframe::App for DelogApp {
                         }
                     }
                 });
-            if let Some(field) = dropped
+            if let Some(fields) = dropped
                 && !handled_workspace_drop
-                && self.workspace.add_trace_to_first_plot(*field)
             {
-                self.caches.request(*field, &snapshot);
+                for &field in fields.iter() {
+                    if self.workspace.add_trace_to_first_plot(field) {
+                        self.caches.request(field, &snapshot);
+                    }
+                }
             }
             let plotted: Vec<_> = self.workspace.fields().collect();
             self.gpu.retain_plotted_buffers(frame, &plotted);
