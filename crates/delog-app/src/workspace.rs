@@ -277,6 +277,9 @@ pub struct WorkspaceActions {
     pub focus: Option<egui_tiles::TileId>,
     /// Alt+hover scrub: move the playhead to this canonical time (PLT-10).
     pub scrub_to: Option<i64>,
+    /// User manually changed the shared X view (pan/zoom/reset), which unlocks
+    /// live-tail mode (PLT-05).
+    pub view_changed: bool,
 }
 
 pub struct PlotServices<'a> {
@@ -560,6 +563,7 @@ impl Behavior<'_> {
             if ui.button("Reset view").clicked() {
                 if let Some(range) = self.services.snapshot.global_time_range() {
                     *self.services.view = Some(ViewX::from_range(range));
+                    self.actions.view_changed = true;
                 }
                 ui.close();
             }
@@ -748,12 +752,15 @@ impl Behavior<'_> {
         if response.double_clicked() {
             if let Some(range) = self.services.snapshot.global_time_range() {
                 *self.services.view = Some(ViewX::from_range(range));
+                self.actions.view_changed = true;
             }
             return;
         }
 
+        let mut changed = false;
         if response.dragged() {
             gpu::apply_pan(&mut view, response.drag_delta().x, rect.width());
+            changed = true;
         }
 
         if response.hovered() {
@@ -764,9 +771,13 @@ impl Behavior<'_> {
                     .map(|p| (p.x - rect.left()) / rect.width().max(1.0))
                     .unwrap_or(0.5);
                 gpu::apply_zoom(&mut view, cursor_frac, scroll);
+                changed = true;
             }
         }
 
+        if changed {
+            self.actions.view_changed = true;
+        }
         *self.services.view = Some(view);
     }
 }
