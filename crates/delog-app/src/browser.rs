@@ -375,30 +375,77 @@ fn field_row(ui: &mut egui::Ui, field: &FieldNode, selection: &mut Selection, vi
     // edges are the drop zones (PLT-13).
     let id = egui::Id::new(("field", field.id.0));
     let payload = selection.drag_payload(field.id, visible);
-    ui.dnd_drag_source(id, payload, |ui| {
-        ui.horizontal(|ui| {
-            // Click handling lives on the label so dragging stays with the
-            // outer drag source.
-            if ui
-                .selectable_label(selection.contains(field.id), &field.name)
-                .clicked()
-            {
-                let modifiers = ui.input(|i| i.modifiers);
-                let modifier = if modifiers.shift {
-                    SelectMod::Range
-                } else if modifiers.command {
-                    SelectMod::Toggle
-                } else {
-                    SelectMod::Replace
-                };
-                selection.click(field.id, modifier, visible);
-            }
-            ui.weak(field.dtype);
-            if let Some(unit) = &field.unit {
-                ui.weak(format!("[{unit}]"));
-            }
-        });
+    let selected = selection.contains(field.id);
+
+    let response = drag_source_with_click(ui, id, payload, |ui| {
+        let fill = if selected {
+            ui.visuals().selection.bg_fill
+        } else {
+            egui::Color32::TRANSPARENT
+        };
+        egui::Frame::new()
+            .fill(fill)
+            .inner_margin(egui::Margin::symmetric(4, 1))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let name_color = if selected {
+                        ui.visuals().selection.stroke.color
+                    } else {
+                        ui.visuals().text_color()
+                    };
+                    ui.label(egui::RichText::new(&field.name).color(name_color));
+                    ui.weak(field.dtype);
+                    if let Some(unit) = &field.unit {
+                        ui.weak(format!("[{unit}]"));
+                    }
+                });
+            });
     });
+
+    if response.clicked() {
+        let modifiers = ui.input(|i| i.modifiers);
+        let modifier = if modifiers.shift {
+            SelectMod::Range
+        } else if modifiers.command {
+            SelectMod::Toggle
+        } else {
+            SelectMod::Replace
+        };
+        selection.click(field.id, modifier, visible);
+    }
+}
+
+/// `Ui::dnd_drag_source`, but the overlay senses clicks as well as drags so
+/// the whole row both selects (release without movement) and drags. egui's
+/// built-in drag source senses drag only, which fights any clickable widget
+/// rendered inside it.
+fn drag_source_with_click<Payload: std::any::Any + Send + Sync>(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    payload: Payload,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) -> egui::Response {
+    if ui.ctx().is_being_dragged(id) {
+        egui::DragAndDrop::set_payload(ui.ctx(), payload);
+
+        // Paint the row to a floating layer that follows the pointer.
+        let layer_id = egui::LayerId::new(egui::Order::Tooltip, id);
+        let response = ui
+            .scope_builder(egui::UiBuilder::new().layer_id(layer_id), add_contents)
+            .response;
+        if let Some(pointer_pos) = ui.ctx().pointer_interact_pos() {
+            let delta = pointer_pos - response.rect.center();
+            ui.ctx().transform_layer_shapes(
+                layer_id,
+                egui::emath::TSTransform::from_translation(delta),
+            );
+        }
+        response
+    } else {
+        let response = ui.scope(add_contents).response;
+        ui.interact(response.rect, id, egui::Sense::click_and_drag())
+            .on_hover_cursor(egui::CursorIcon::Grab)
+    }
 }
 
 #[cfg(test)]
