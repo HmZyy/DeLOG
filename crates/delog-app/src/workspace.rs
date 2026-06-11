@@ -13,10 +13,11 @@ use delog_core::snapshot::StoreSnapshot;
 
 use crate::axes;
 use crate::camera::OrbitCamera;
-use crate::gpu::{self, GpuBridge, PaneView};
+use crate::gpu::{self, GpuBridge, PaneView, VehicleDraw};
 use crate::hover::{self, HoverTarget};
 use crate::legend;
 use crate::plot::{PlotPane, TraceMode, ViewX};
+use crate::vehicle;
 
 pub type TileTree = egui_tiles::Tree<Pane>;
 
@@ -354,6 +355,8 @@ pub struct PlotServices<'a> {
     pub playhead_us: Option<i64>,
     /// Whether playback is running (gates the playhead value tooltip).
     pub playing: bool,
+    /// Configured vehicles for the 3D scene (TDV-03/09).
+    pub vehicles: &'a [crate::vehicle::VehicleConfig],
 }
 
 pub struct Behavior<'a> {
@@ -480,12 +483,52 @@ impl Behavior<'_> {
             };
         }
 
+        // Build per-vehicle render data from the log at the playhead (TDV-09/10).
+        // Trajectories are resampled here (caching/off-thread is TDV-04).
+        let snapshot = self.services.snapshot;
+        let playhead = self.services.playhead_us;
+        let mut trajectories: Vec<Vec<[f32; 3]>> = Vec::new();
+        let mut poses: Vec<Option<vehicle::Pose>> = Vec::new();
+        for v in self.services.vehicles {
+            if v.show {
+                trajectories.push(vehicle::build_trajectory(snapshot, v));
+                poses.push(playhead.and_then(|t| vehicle::pose_at(snapshot, v, t)));
+            } else {
+                trajectories.push(Vec::new());
+                poses.push(None);
+            }
+        }
+
+        // Track the first visible vehicle's current position (the dropdown to
+        // pick which lands with TDV-09); origin when none.
+        let tracked = poses.iter().flatten().next().map(|p| p.pos);
+        pane.camera.target = tracked.unwrap_or(glam::Vec3::ZERO);
+
+        let draws: Vec<VehicleDraw> = self
+            .services
+            .vehicles
+            .iter()
+            .enumerate()
+            .filter_map(|(i, v)| {
+                let pose = poses[i]?;
+                Some(VehicleDraw {
+                    key: v.source.0,
+                    model: &v.model,
+                    model_matrix: pose.model_matrix(v.scale).to_cols_array_2d(),
+                    normal_matrix: glam::Mat4::from_mat3(pose.rot).to_cols_array_2d(),
+                    color: color_rgba(v.color),
+                    path_color: color_rgba(v.path_color),
+                    trajectory: &trajectories[i],
+                })
+            })
+            .collect();
+
         // 3d_frame (§16, GPU-24): CPU cost of building + encoding the scene.
         let rendered = {
             let _t = self.services.metrics.scope("3d_frame");
             self.services
                 .gpu
-                .render_scene(self.services.frame, ui, rect, &pane.camera)
+                .render_scene(self.services.frame, ui, rect, &pane.camera, &draws)
         };
         if let Some(tex) = rendered {
             ui.painter().image(
@@ -948,6 +991,17 @@ fn ordered_pair(
     } else {
         vec![existing, new_pane]
     }
+}
+
+/// egui color → normalized RGBA for a render uniform.
+fn color_rgba(c: egui::Color32) -> [f32; 4] {
+    let [r, g, b, a] = c.to_array();
+    [
+        r as f32 / 255.0,
+        g as f32 / 255.0,
+        b as f32 / 255.0,
+        a as f32 / 255.0,
+    ]
 }
 
 fn fields_from_removed_tile(tile: egui_tiles::Tile<Pane>) -> Vec<FieldId> {
