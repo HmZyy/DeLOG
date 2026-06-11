@@ -153,6 +153,14 @@ impl eframe::App for DelogApp {
             });
         });
 
+        // Global timeline bar (§11, TLN-02). `any_live` stays false until
+        // live links exist (M7): the snapshot has no streaming flag yet.
+        if let Some(range) = snapshot.global_time_range() {
+            egui::Panel::bottom("timeline").show_inside(ui, |ui| {
+                crate::timeline::ui(ui, &mut self.playback, range, false);
+            });
+        }
+
         let diagnostics = self.session.diagnostics();
         if let Some(last) = diagnostics.last() {
             egui::Panel::bottom("status").show_inside(ui, |ui| {
