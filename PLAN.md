@@ -913,7 +913,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [~] **PLT-06** — Y modes: Auto (chunk stats), AutoVisible (pyramid), Manual dialog — AutoVisible wired; Auto/Manual pending
 - [x] **PLT-07** — Axes/ticks/labels via egui; tick step chooser (1-2-5)
 - [~] **PLT-08** — Legend + toggle; per-trace visibility/color/width/mode editing — visibility/colour/width done; mode editing waits on scatter/step (GPU-07/08)
-- [ ] **PLT-09** — Hover: canonical binary search, Prev/Next/Linear tooltip modes, hover circles (§10.5)
+- [~] **PLT-09** — Hover: canonical binary search, Prev/Next/Linear tooltip modes, hover circles (§10.5) — cursor line, circles, canonical value tooltip done (Prev mode); Next/Linear plumbed via SampleMode, switch UI pending (PLT-11)
 - [ ] **PLT-10** — Playhead vertical line + value readout on all panes
 - [ ] **PLT-11** — Context menu: remove/clear/mode/color/width/split/reset/legend/info (§10.6)
 - [ ] **PLT-12** — Plot debug popup: counts, visible range, GPU bytes, yquery µs, paint µs
