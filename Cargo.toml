@@ -1,12 +1,12 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/delog-core",
-    "crates/delog-parsers",
-    "crates/delog-stream",
-    "crates/delog-cache",
-    "crates/delog-render",
-    "crates/delog-app",
+  "crates/delog-core",
+  "crates/delog-parsers",
+  "crates/delog-stream",
+  "crates/delog-cache",
+  "crates/delog-render",
+  "crates/delog-app",
 ]
 
 [workspace.package]
@@ -33,10 +33,10 @@ arrow-ipc = "59.0.0"
 # GUI / GPU
 egui = "0.34.3"
 eframe = { version = "0.34.3", default-features = false, features = [
-    "wgpu",
-    "default_fonts",
-    "wayland",
-    "x11",
+  "wgpu",
+  "default_fonts",
+  "wayland",
+  "x11",
 ] }
 egui-wgpu = "0.34.3"
 egui_tiles = "0.15.0"
@@ -47,9 +47,9 @@ pollster = "0.4.0"
 
 # telemetry I/O
 mavlink = { version = "0.18.0", default-features = false, features = [
-    "dialect-ardupilotmega",
-    "serde",
-    "std",
+  "dialect-all",
+  "serde",
+  "std",
 ] }
 serialport = "4.9.0"
 
