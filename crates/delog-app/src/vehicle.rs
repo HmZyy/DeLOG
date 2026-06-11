@@ -48,24 +48,6 @@ impl ModelKind {
     }
 }
 
-/// Linear unit for a custom NED mapping; scales source values to metres.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LengthUnit {
-    Meters,
-    Centimeters,
-    Feet,
-}
-
-impl LengthUnit {
-    pub fn to_meters(self) -> f32 {
-        match self {
-            LengthUnit::Meters => 1.0,
-            LengthUnit::Centimeters => 0.01,
-            LengthUnit::Feet => 0.3048,
-        }
-    }
-}
-
 /// Reference origin for GPS→NED (§12.2).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum GpsRef {
@@ -82,12 +64,11 @@ pub enum GpsRef {
 /// How a vehicle's position is read (§12.1).
 #[derive(Clone, Debug, PartialEq)]
 pub enum PosMapping {
-    /// Already-local NED metres (`Custom` = the same with a unit scale).
+    /// Already-local NED metres.
     Ned {
         north: FieldId,
         east: FieldId,
         down: FieldId,
-        unit: LengthUnit,
     },
     /// Geodetic latitude/longitude/altitude → NED about a reference origin.
     Gps {
@@ -250,20 +231,14 @@ fn position_at(
     t_us: i64,
 ) -> Option<Vec3> {
     match pos {
-        PosMapping::Ned {
-            north,
-            east,
-            down,
-            unit,
-        } => {
+        PosMapping::Ned { north, east, down } => {
             let (nv, nm) = open(snapshot, *north)?;
             let (ev, em) = open(snapshot, *east)?;
             let (dv, dm) = open(snapshot, *down)?;
-            let s = unit.to_meters() as f64;
             let ned = Vec3::new(
-                (read_eng(&nv, nm, t_us)? * s) as f32,
-                (read_eng(&ev, em, t_us)? * s) as f32,
-                (read_eng(&dv, dm, t_us)? * s) as f32,
+                read_eng(&nv, nm, t_us)? as f32,
+                read_eng(&ev, em, t_us)? as f32,
+                read_eng(&dv, dm, t_us)? as f32,
             );
             Some(geo::ned_to_render(ned))
         }
@@ -441,7 +416,6 @@ mod tests {
                 north: fields[0],
                 east: fields[1],
                 down: fields[2],
-                unit: LengthUnit::Meters,
             },
             ori: OriMapping::Static,
             model: ModelKind::Cone,
@@ -482,17 +456,5 @@ mod tests {
             (last[2] + 100.0).abs() < 2.0,
             "end near −100 Z, got {last:?}"
         );
-    }
-
-    #[test]
-    fn unit_scale_converts_to_metres() {
-        // Centimetres: N=1000 cm → 10 m → render −Z = −10.
-        let (snap, f) = ned_snapshot(vec![0], vec![1000.0], vec![0.0], vec![0.0]);
-        let mut cfg = ned_config(f);
-        if let PosMapping::Ned { unit, .. } = &mut cfg.pos {
-            *unit = LengthUnit::Centimeters;
-        }
-        let pose = pose_at(&snap, &cfg, 0).unwrap();
-        assert!((pose.pos.z + 10.0).abs() < 1e-3, "got {}", pose.pos.z);
     }
 }
