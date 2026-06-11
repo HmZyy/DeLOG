@@ -218,8 +218,14 @@ fn matches_query(query: &str, path: &str) -> bool {
 }
 
 /// Render the browser tree with its search box (BRW-01/02). `query` persists
-/// in app state across frames.
-pub fn ui(ui: &mut egui::Ui, model: &BrowserModel, query: &mut String) {
+/// in app state across frames; `plotted` maps plotted fields to their trace
+/// colour for the BRW-04 highlight.
+pub fn ui(
+    ui: &mut egui::Ui,
+    model: &BrowserModel,
+    query: &mut String,
+    plotted: &std::collections::HashMap<FieldId, egui::Color32>,
+) {
     ui.heading("Data");
     ui.separator();
 
@@ -275,7 +281,7 @@ pub fn ui(ui: &mut egui::Ui, model: &BrowserModel, query: &mut String) {
                             .open(filtering.then_some(true))
                             .show(ui, |ui| {
                                 for field in &topic.fields {
-                                    field_row(ui, field);
+                                    field_row(ui, field, plotted.get(&field.id).copied());
                                 }
                             });
                     }
@@ -284,13 +290,19 @@ pub fn ui(ui: &mut egui::Ui, model: &BrowserModel, query: &mut String) {
     });
 }
 
-fn field_row(ui: &mut egui::Ui, field: &FieldNode) {
+fn field_row(ui: &mut egui::Ui, field: &FieldNode, trace_color: Option<egui::Color32>) {
     // The row is a drag source carrying its FieldId; the plot pane is the drop
     // zone (PLT-13).
     let id = egui::Id::new(("field", field.id.0));
     ui.dnd_drag_source(id, field.id, |ui| {
         ui.horizontal(|ui| {
-            ui.label(&field.name);
+            // Plotted-field highlight (BRW-04): trace-coloured dot + bold name.
+            if let Some(color) = trace_color {
+                ui.colored_label(color, "●");
+                ui.label(egui::RichText::new(&field.name).strong());
+            } else {
+                ui.label(&field.name);
+            }
             ui.weak(field.dtype);
             if let Some(unit) = &field.unit {
                 ui.weak(format!("[{unit}]"));

@@ -103,6 +103,18 @@ impl Workspace {
         self.plot_panes().flat_map(PlotPane::fields)
     }
 
+    /// Plotted field → trace colour, for the browser's plotted-field highlight
+    /// (BRW-04). First pane wins when a field is plotted in several panes.
+    pub fn trace_colors(&self) -> std::collections::HashMap<FieldId, egui::Color32> {
+        let mut colors = std::collections::HashMap::new();
+        for pane in self.plot_panes() {
+            for trace in &pane.traces {
+                colors.entry(trace.field).or_insert_with(|| trace.color32());
+            }
+        }
+        colors
+    }
+
     pub fn add_trace_to_first_plot(&mut self, field: FieldId) -> bool {
         self.plot_panes_mut()
             .next()
@@ -817,6 +829,29 @@ mod tests {
         let workspace = Workspace::new();
         assert_eq!(workspace.plot_panes().count(), 1);
         assert!(workspace.fields().next().is_none());
+    }
+
+    #[test]
+    fn trace_colors_maps_every_plotted_field_to_its_trace_color() {
+        let mut workspace = Workspace::new();
+        workspace.add_trace_to_first_plot(FieldId(7));
+        workspace.add_trace_to_first_plot(FieldId(9));
+
+        let colors = trace_colors_of(&workspace);
+        assert_eq!(colors.len(), 2);
+        let expected: Vec<_> = workspace
+            .plot_panes()
+            .flat_map(|p| p.traces.iter())
+            .map(|t| (t.field, t.color32()))
+            .collect();
+        for (field, color) in expected {
+            assert_eq!(colors.get(&field), Some(&color));
+        }
+        assert!(!colors.contains_key(&FieldId(1234)));
+    }
+
+    fn trace_colors_of(workspace: &Workspace) -> std::collections::HashMap<FieldId, egui::Color32> {
+        workspace.trace_colors()
     }
 
     #[test]
