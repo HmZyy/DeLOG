@@ -892,7 +892,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [ ] **GPU-10** — Draw-path selector: full vs decimated at samples/px > 8
 - [ ] **GPU-11** — Batched encoding: one pipeline bind, per-trace dynamic offsets
 - [ ] **GPU-12** — wgpu error scopes → diagnostics
-- [ ] **GPU-13** — Headless golden-image test rig (§20.3)
+- [x] **GPU-13** — Headless golden-image test rig (§20.3)
 - [ ] **GPU-14** — Bench: frame encode 32×1M decimated < 3 ms
 - [ ] **GPU-20** — 3D offscreen target (color+depth, 4×MSAA) composited as egui image (§9.1)
 - [ ] **GPU-21** — `grid3d` infinite grid + axes gizmo
@@ -1032,7 +1032,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [ ] **TST-01** — Fixture set + synthetic generators committed (§20.2)
 - [ ] **TST-02** — proptest: pyramid ≡ naive; accessor invariants
 - [ ] **TST-03** — Golden parser tables (BIN/ULog/tlog)
-- [ ] **TST-04** — Headless golden-image render test (=GPU-13)
+- [x] **TST-04** — Headless golden-image render test (=GPU-13)
 - [ ] **TST-05** — Criterion suite per §20.4 with budget assertions (soft)
 - [ ] **TST-06** — Fuzz targets in CI smoke (60 s) + nightly long runs
 - [ ] **TST-07** — Layout migration fixture tests (=LAY-03)
