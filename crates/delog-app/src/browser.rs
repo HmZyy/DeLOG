@@ -111,10 +111,64 @@ impl BrowserModel {
     pub fn is_empty(&self) -> bool {
         self.sources.is_empty()
     }
+
+    /// Filter the tree by a search query over full `source/topic.field` paths
+    /// (§13, BRW-02). A field is kept when the query matches its full path; a
+    /// match at topic or source level keeps the whole branch. Empty branches
+    /// are pruned; a blank query is the identity.
+    pub fn filtered(&self, query: &str) -> Self {
+        if query.trim().is_empty() {
+            return self.clone();
+        }
+        let mut sources = Vec::new();
+        for source in &self.sources {
+            if matches_query(query, &source.label) {
+                sources.push(source.clone());
+                continue;
+            }
+            let mut topics = Vec::new();
+            for topic in &source.topics {
+                let topic_path = format!("{}/{}", source.label, topic.name);
+                if matches_query(query, &topic_path) {
+                    topics.push(topic.clone());
+                    continue;
+                }
+                let fields: Vec<FieldNode> = topic
+                    .fields
+                    .iter()
+                    .filter(|f| matches_query(query, &format!("{topic_path}.{}", f.name)))
+                    .cloned()
+                    .collect();
+                if !fields.is_empty() {
+                    topics.push(TopicNode {
+                        fields,
+                        ..topic.clone()
+                    });
+                }
+            }
+            if !topics.is_empty() {
+                sources.push(SourceNode {
+                    topics,
+                    ..source.clone()
+                });
+            }
+        }
+        Self { sources }
+    }
 }
 
-/// Render the browser tree. Pure display — selection/drag/context come later.
-pub fn ui(ui: &mut egui::Ui, model: &BrowserModel) {
+/// Whitespace-separated query tokens each match the path case-insensitively
+/// (`gps hacc` matches `GPS[0].HAcc`, §13). Blank queries match everything.
+fn matches_query(query: &str, path: &str) -> bool {
+    let path = path.to_lowercase();
+    query
+        .split_whitespace()
+        .all(|token| path.contains(&token.to_lowercase()))
+}
+
+/// Render the browser tree with its search box (BRW-01/02). `query` persists
+/// in app state across frames.
+pub fn ui(ui: &mut egui::Ui, model: &BrowserModel, query: &mut String) {
     ui.heading("Data");
     ui.separator();
 
@@ -122,6 +176,28 @@ pub fn ui(ui: &mut egui::Ui, model: &BrowserModel) {
         ui.add_space(8.0);
         ui.weak("No logs loaded.");
         ui.weak("Drop a .BIN file here, or use File ▸ Open.");
+        return;
+    }
+
+    // Fuzzy filter over full paths (§13, BRW-02).
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::TextEdit::singleline(query)
+                .hint_text("Filter (e.g. gps hacc)")
+                .desired_width(f32::INFINITY),
+        );
+    });
+    let filtering = !query.trim().is_empty();
+    let filtered;
+    let model = if filtering {
+        filtered = model.filtered(query);
+        &filtered
+    } else {
+        model
+    };
+    if filtering && model.is_empty() {
+        ui.add_space(8.0);
+        ui.weak("Nothing matches the filter.");
         return;
     }
 
@@ -140,9 +216,12 @@ pub fn ui(ui: &mut egui::Ui, model: &BrowserModel) {
                         ));
                     }
                     for topic in &source.topics {
+                        // While filtering, surviving topics open so the
+                        // matched fields are visible immediately.
                         egui::CollapsingHeader::new(format!("{}  ({})", topic.name, topic.rows))
                             .id_salt(("topic", topic.id.0))
                             .default_open(false)
+                            .open(filtering.then_some(true))
                             .show(ui, |ui| {
                                 for field in &topic.fields {
                                     field_row(ui, field);
@@ -236,5 +315,44 @@ mod tests {
     #[test]
     fn empty_snapshot_yields_an_empty_model() {
         assert!(BrowserModel::from_snapshot(&StoreSnapshot::empty()).is_empty());
+    }
+
+    #[test]
+    fn query_tokens_match_full_paths_case_insensitively() {
+        // The §13 example: "gps hacc" matches GPS[0].HAcc.
+        assert!(matches_query("gps hacc", "flight_21/GPS[0].HAcc"));
+        assert!(matches_query("GPS", "flight_21/GPS[0].HAcc"));
+        assert!(matches_query("flight hacc", "flight_21/GPS[0].HAcc"));
+        assert!(!matches_query("baro", "flight_21/GPS[0].HAcc"));
+        // Every token must match somewhere in the path.
+        assert!(!matches_query("gps baro", "flight_21/GPS[0].HAcc"));
+        // Blank queries match everything.
+        assert!(matches_query("", "anything"));
+        assert!(matches_query("   ", "anything"));
+    }
+
+    #[test]
+    fn filtered_model_retains_matching_fields_and_prunes_empty_branches() {
+        let model = BrowserModel::from_snapshot(&snapshot());
+
+        let lat = model.filtered("gps lat");
+        assert_eq!(lat.sources.len(), 1);
+        assert_eq!(lat.sources[0].topics.len(), 1);
+        let fields: Vec<_> = lat.sources[0].topics[0]
+            .fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        assert_eq!(fields, vec!["Lat"]);
+
+        // A topic-level match keeps all its fields.
+        let gps = model.filtered("gps");
+        assert_eq!(gps.sources[0].topics[0].fields.len(), 2);
+
+        // No match prunes everything.
+        assert!(model.filtered("nonexistent").is_empty());
+
+        // Blank query is the identity.
+        assert_eq!(model.filtered(""), model);
     }
 }
