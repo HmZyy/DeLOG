@@ -448,8 +448,8 @@ WebGL2 has no storage buffers in vertex shaders; a future web build swaps vertex
 ```rust
 struct TraceRef { field: FieldId, color: Color32, width: f32,
                   mode: TraceMode /* Line|Scatter|LinePoints|Step */, visible: bool }
-struct PlotPane { traces: Vec<TraceRef>, y: YMode /* Auto | AutoVisible | Manual{min,max} */,
-                  legend: bool }
+struct PlotPane { traces: Vec<TraceRef>, legend: bool }
+// Y always auto-fits the visible window (pyramid min/max + pad) — no per-pane Y modes.
 ```
 
 Per-trace visibility / color / width / mode all live here and persist in layouts. Colors auto-assign from a 10-color colorblind-safe palette tuned for the dark theme; after exhaustion the cycle repeats with dashed widths.
@@ -461,7 +461,7 @@ Per-trace visibility / color / width / mode all live here and persist in layouts
 
 ### 10.4 Interactions
 
-Wheel = zoom about the cursor (×0.8 / ×1.25); drag = pan; double-click = reset to full global range; `End`/toolbar = **lock-to-live** (each frame sets `t1 = global_end`, keeping the span; any manual scrub unlocks it, and the toolbar button glows to invite re-lock — an explicit-state UX decision so the user is never fighting an invisible mode). Y per pane: `Auto` (full-data, from chunk stats), `AutoVisible` (pyramid query on view change + 5% pad), `Manual` (dialog; axis-drag later).
+Wheel = zoom about the cursor (×0.8 / ×1.25); drag = pan; double-click = reset to full global range; `End`/toolbar = **lock-to-live** (each frame sets `t1 = global_end`, keeping the span; any manual scrub unlocks it, and the toolbar button glows to invite re-lock — an explicit-state UX decision so the user is never fighting an invisible mode). Y per pane always auto-fits the visible window: pyramid min/max query on view change + 5% pad. (Full-data and manual Y modes were built and then deliberately removed — one predictable behavior, no per-pane mode state.)
 
 ### 10.5 Hover, cursor & tooltips
 
@@ -543,7 +543,7 @@ Tree: **Source → Topic → Field**, each field row showing dtype, sample count
 
 ### 14.1 What persists
 
-The tile tree; per-pane traces as `FieldKey` + style (color/width/mode/visible); Y modes; legend flags; `ViewX` mode (full vs locked-live); playback speed; vehicle configurations (with `FieldKey` mappings); per-source time offsets; favorites; 3D camera mode + pose; dock visibility.
+The tile tree; per-pane traces as `FieldKey` + style (color/width/mode/visible); legend flags; `ViewX` mode (full vs locked-live); playback speed; vehicle configurations (with `FieldKey` mappings); per-source time offsets; favorites; 3D camera mode + pose; dock visibility.
 
 ### 14.2 Schema & migration
 
@@ -910,7 +910,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **PLT-03** — Shared `ViewX` µs model; all panes render from it (§10.3)
 - [x] **PLT-04** — Wheel zoom @ cursor, drag pan, double-click reset-to-full
 - [ ] **PLT-05** — Lock-X-to-live with explicit unlock-on-scrub + re-lock affordance (§10.4)
-- [x] **PLT-06** — Y modes: Auto (chunk stats), AutoVisible (pyramid), Manual dialog
+- [x] **PLT-06** — Y axis auto-fits the visible window (pyramid min/max + 5% pad) — full-data/manual modes built then removed by decision; AutoVisible is the only behavior
 - [x] **PLT-07** — Axes/ticks/labels via egui; tick step chooser (1-2-5)
 - [x] **PLT-08** — Legend + toggle; per-trace visibility/color/width/mode editing
 - [x] **PLT-09** — Hover: canonical binary search, Prev/Next/Linear tooltip modes, hover circles (§10.5)
@@ -961,7 +961,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 ### LAY — Layouts & sessions (M9)
 
 - [ ] **LAY-01** — Serde schema v1 per §14.2; save/load named layouts
-- [ ] **LAY-02** — Persist: tiles, traces+styles, Y modes, legend, ViewX mode, speed, vehicles, offsets, favorites, camera, docks (§14.1)
+- [ ] **LAY-02** — Persist: tiles, traces+styles, legend, ViewX mode, speed, vehicles, offsets, favorites, camera, docks (§14.1)
 - [ ] **LAY-03** — Version field + migration chain + frozen-fixture tests (§14.2)
 - [ ] **LAY-04** — Resolver: FieldKey→FieldId; ghost traces + summary diag; auto-bind on source load (§14.3)
 - [ ] **LAY-05** — Export/import layout JSON
