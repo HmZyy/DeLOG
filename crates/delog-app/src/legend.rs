@@ -24,12 +24,19 @@ pub fn trace_label(snapshot: &StoreSnapshot, field: FieldId) -> String {
 }
 
 /// Draw the legend overlay and apply edits to `pane`. Each row is a colour
-/// editor plus a clickable label: clicking toggles the trace's visibility, and
-/// a hidden trace's label is greyed out (PLT-08).
-pub fn ui(ui: &egui::Ui, plot_rect: egui::Rect, pane: &mut PlotPane, labels: &[(FieldId, String)]) {
+/// editor plus a clickable label: clicking toggles the trace's visibility, a
+/// hidden trace's label is greyed out (PLT-08), and right-click ▸ Remove returns
+/// the field (PLT-11) so the caller can drop its cache.
+pub fn ui(
+    ui: &egui::Ui,
+    plot_rect: egui::Rect,
+    pane: &mut PlotPane,
+    labels: &[(FieldId, String)],
+) -> Option<FieldId> {
     if labels.is_empty() {
-        return;
+        return None;
     }
+    let mut removed = None;
 
     egui::Area::new(egui::Id::new("plot_legend"))
         .fixed_pos(plot_rect.left_top() + egui::vec2(8.0, 8.0))
@@ -62,13 +69,22 @@ pub fn ui(ui: &egui::Ui, plot_rect: egui::Rect, pane: &mut PlotPane, labels: &[(
                         let label_widget =
                             egui::Label::new(egui::RichText::new(label).color(text_color))
                                 .sense(egui::Sense::click());
-                        if ui.add(label_widget).clicked() {
+                        let resp = ui.add(label_widget);
+                        if resp.clicked() {
                             trace.visible = !trace.visible;
                         }
+                        resp.context_menu(|ui| {
+                            if ui.button("Remove").clicked() {
+                                removed = Some(*field);
+                                ui.close();
+                            }
+                        });
                     });
                 }
             });
         });
+
+    removed
 }
 
 fn color32_to_srgb(c: egui::Color32) -> [f32; 4] {
