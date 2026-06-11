@@ -517,7 +517,7 @@ The config dialog offers **field-mapping pickers with sane defaults** per source
 
 ### 12.3 Scene & cameras
 
-Ground grid (shader-based, distance-faded), world axes gizmo, full trajectory polyline + current pose marker per vehicle, per-vehicle color/path-color/scale/visibility. Cameras: **Orbit** (default; target = origin or selected vehicle), **Track** (follows the vehicle's position at playback time, user offset preserved), **Free** (fly; WASD+mouse). When no vehicle is configured, a demo lemniscate path animates — doubling as the render smoke test (spec's "demo path").
+Ground grid (shader-based, distance-faded), world axes gizmo, full trajectory polyline + current pose marker per vehicle, per-vehicle color/path-color/scale/visibility. **One camera, always tracking.** It orbits a target that follows the tracked vehicle's pose at playback time, with the user's orbit offset (yaw/pitch/distance) preserved — left-drag orbits, wheel zooms, double-click resets the offset (keeping the target). **Which** vehicle it tracks is chosen by a dropdown that appears in the scene pane **only when two or more vehicles are configured**; with one vehicle it tracks that vehicle and the dropdown is hidden, and with none it tracks the world origin (dropdown hidden). There are no separate Orbit/Free camera modes. When no vehicle is configured, a demo lemniscate path animates — doubling as the render smoke test (spec's "demo path").
 
 ### 12.4 Models
 
@@ -933,7 +933,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 ### TDV — 3D view (M8)
 
 - [x] **TDV-01** — Scene pane: grid, axes, orbit camera (pan/zoom) — `Pane::Scene3D` with an `OrbitCamera` (left-drag orbit, wheel zoom, double-click reset; pitch-clamped, unit-tested); single instance toggled show/hide by the toolbar "3D" button. Renders the grid offscreen and composites as an egui image. `glam` added to `delog-app`. Verified on RTX 4080: grid visible/infinite, orientation/orbit/zoom/color all good
-- [~] **TDV-02** — Free camera; Track camera with preserved offset (§12.3) — `FreeCamera` (eye + yaw/pitch; `look`/`fly`/`looking_from`) and a `SceneCamera { mode, orbit, free }` with `CameraMode` Orbit/Track/Free; mode selector strip in the scene pane. Orbit/Track: drag-orbit + wheel-zoom; Free: drag-look + WASD/E-Q fly + wheel-forward. Track preserves the orbit offset as the target moves (unit-tested), following the world origin until a vehicle binds it (TDV-09). 10 camera unit tests green; Free interaction signs pending in-app verification
+- [~] **TDV-02** — Single tracking camera + tracked-vehicle dropdown (§12.3) — _(scope changed by decision: no Orbit/Free modes)_ one `OrbitCamera` that always orbits a target tracking the selected vehicle's pose, offset preserved (unit-tested); left-drag orbits, wheel zooms, double-click resets the offset and keeps the target. Tracks the world origin until vehicles exist; the tracked-vehicle dropdown (shown only with ≥2 vehicles) lands with vehicle config (TDV-03). Pending in-app verification of the simplified pane
 - [ ] **TDV-03** — `VehicleConfig` + dialog with per-source mapping presets (§12.1)
 - [ ] **TDV-04** — PosMapping NED / Custom-with-units; trajectory build off-thread
 - [ ] **TDV-05** — GPS→NED f64 geodetic→ECEF→NED; auto/manual reference origin (§12.2)
