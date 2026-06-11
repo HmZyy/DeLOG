@@ -417,7 +417,7 @@ mod tests {
     use std::rc::Rc;
 
     use crossbeam_channel::unbounded;
-    use mavlink::dialects::ardupilotmega::{ATTITUDE_DATA, MavMessage};
+    use mavlink::dialects::all::{ATTITUDE_DATA, MavMessage};
     use mavlink::{MAVLinkV1MessageRaw, MAVLinkV2MessageRaw, MavHeader};
 
     use super::*;
