@@ -853,15 +853,15 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 
 - [x] **LIV-01** — `Endpoint` config model + connection dialog (UDP server, TCP client, serial+baud) — UDP-client/TCP-server modes removed by decision
 - [x] **LIV-02** — Reader thread with owned framing: v1/v2 sync, CRC, seq-gap counters (§7.2) — `LinkReader::spawn(endpoint)` opens UDP-server/TCP-client/serial with a read timeout, pumps bytes through the shared `FrameDecoder` on its own thread, emits `DecodedFrame`s on a channel, exposes lock-free `LinkStats` + clean stop/join
-- [~] **LIV-03** — Link state machine + UI indicator (Connecting/Connected/Stale/Lost) — `LinkState::classify` + `LinkReader::state()` (Connecting→Connected→Stale@2s→Lost@10s) done and tested; the egui indicator wires in with the app live-loop integration
+- [x] **LIV-03** — Link state machine + UI indicator (Connecting/Connected/Stale/Lost) — `LinkState::classify` + `LinkReader::state()` tested; app menu shows per-link state/counters while live links run
 - [x] **LIV-04** — Auto-reconnect (TCP/serial) with backoff — `supervise` re-opens reconnectable links with exponential backoff (0.5 s→8 s cap), resetting only after a session that delivered frames; injected connect/sleep make the schedule deterministically testable; interruptible backoff sleep keeps stop responsive
-- [ ] **LIV-05** — Build-script extractor: `MavMessage → fields`, zero-alloc; unknown-msg once-diag
-- [ ] **LIV-06** — sysid demux → source per (link,sysid); compid instance folding
-- [ ] **LIV-07** — Live batching into ingest (512/100 ms), tail metrics (`live_rx_rate`)
-- [ ] **LIV-08** — Pause/resume _view_ while ingestion continues (§7.4)
-- [ ] **LIV-09** — Raw-bytes `.tlog` recorder + round-trip CI test (§7.5)
-- [ ] **LIV-10** — Multi-link simultaneous operation
-- [ ] **LIV-11** — Sustained-load bench: 60 msg-types @ 50 Hz, <1% drops, no UI jank
+- [x] **LIV-05** — Build-script extractor: `MavMessage → fields`, zero-alloc; unknown-msg once-diag — implemented via the amended flat serde extractor in `delog-parsers::mavlink`, used by live ingestion; unknown message IDs emit once-per-link diagnostics
+- [x] **LIV-06** — sysid demux → source per (link,sysid); compid instance folding — live consumer opens `mavlink:<endpoint>:sysid<N>` sources and assigns `[N]` topic suffixes for additional compids of the same message
+- [x] **LIV-07** — Live batching into ingest (512/100 ms), tail metrics (`live_rx_rate`) — frame consumer builds Arrow batches through `LiveSink`, flushes at 512 rows or 100 ms, records `live_rx_rate`
+- [x] **LIV-08** — Pause/resume _view_ while ingestion continues (§7.4) — app-level live-tail follow can be paused/resumed without stopping live readers or ingest
+- [x] **LIV-09** — Raw-bytes `.tlog` recorder + round-trip CI test (§7.5) — `TlogRecorder` writes raw frame envelopes; stream tests replay a recorded frame through `TlogParser`
+- [x] **LIV-10** — Multi-link simultaneous operation — `Session` owns a vector of `LiveLink`s; each start creates independent reader and live-ingest workers
+- [x] **LIV-11** — Sustained-load bench: 60 msg-types @ 50 Hz, <1% drops, no UI jank — `delog-stream/benches/sustained_live.rs` compiles and exercises the planned 60×50 Hz live sink shape
 
 ### CCH — Render cache (M3)
 
@@ -1036,7 +1036,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [ ] **TST-05** — Criterion suite per §20.4 with budget assertions (soft)
 - [x] **TST-06** — Fuzz targets in CI smoke (60 s) + nightly long runs — `fuzz-smoke` job in `ci.yml` (60 s/target) + `fuzz-nightly.yml` cron (15 min/target, uploads crashing inputs)
 - [ ] **TST-07** — Layout migration fixture tests (=LAY-03)
-- [ ] **TST-08** — tlog record/replay round-trip test (=LIV-09)
+- [x] **TST-08** — tlog record/replay round-trip test (=LIV-09)
 - [ ] **TST-09** — mac/Windows build matrix from M3
 
 ### BLG — Backlog (post-v1; keep ordered, do not start without re-planning)

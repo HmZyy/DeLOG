@@ -17,6 +17,7 @@ use delog_core::diagnostics::{Diag, Severity};
 use delog_core::identity::SourceId;
 use delog_core::ingest::{IngestSender, IngestSink, ParseSummary, SourceKind, ingest_channel};
 use delog_core::ingestor::{IngestObserver, Ingestor};
+use delog_core::metrics::MetricsRegistry;
 use delog_core::parse_ctl::{CancelToken, ParseCtl};
 use delog_core::snapshot::{DataStore, StoreSnapshot};
 use delog_parsers::{
@@ -89,10 +90,12 @@ struct ActiveLoad {
 pub struct Session {
     store: Arc<DataStore>,
     sender: IngestSender,
+    metrics: Arc<MetricsRegistry>,
     registry: Arc<ParserRegistry>,
     loads: Loads,
     diagnostics: Diags,
     active: Vec<ActiveLoad>,
+    live_links: Vec<delog_stream::LiveLink>,
     /// Sources already swept by the post-load quality scan (DIA-05).
     scanned: HashSet<SourceId>,
     ctx: egui::Context,
@@ -118,6 +121,7 @@ impl Session {
         });
 
         let (sender, receiver) = ingest_channel();
+        let metrics = Arc::new(MetricsRegistry::new());
         let ingest = std::thread::Builder::new()
             .name("delog-ingest".into())
             .spawn(move || ingestor.run(receiver))
@@ -131,10 +135,12 @@ impl Session {
         Self {
             store,
             sender,
+            metrics,
             registry: Arc::new(registry),
             loads,
             diagnostics,
             active: Vec::new(),
+            live_links: Vec::new(),
             scanned: HashSet::new(),
             ctx,
             _ingest: ingest,
@@ -154,6 +160,42 @@ impl Session {
     /// scopes, GPU-12) into the same retained list.
     pub fn push_diagnostic(&self, diag: Diag) {
         push_diag(&self.diagnostics, diag);
+    }
+
+    /// Start one live MAVLink link. Multiple calls create independent links
+    /// (LIV-10); each link demuxes sysids into live sources downstream.
+    pub fn start_live(
+        &mut self,
+        endpoint: delog_stream::Endpoint,
+        recording: Option<PathBuf>,
+    ) -> Result<(), String> {
+        match delog_stream::LiveLink::spawn(
+            endpoint.clone(),
+            self.sender.clone(),
+            Arc::clone(&self.metrics),
+            recording,
+        ) {
+            Ok(link) => {
+                self.live_links.push(link);
+                self.ctx.request_repaint();
+                Ok(())
+            }
+            Err(err) => Err(format!("{endpoint}: {err}")),
+        }
+    }
+
+    pub fn live_statuses(&self) -> Vec<delog_stream::LiveLinkStatus> {
+        self.live_links.iter().map(|link| link.status()).collect()
+    }
+
+    pub fn has_live_links(&self) -> bool {
+        !self.live_links.is_empty()
+    }
+
+    pub fn has_connected_live(&self) -> bool {
+        self.live_links
+            .iter()
+            .any(|link| link.status().state == delog_stream::LinkState::Connected)
     }
 
     /// Request a per-source time-offset change (§4.2, BRW-07). Applied by the

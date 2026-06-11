@@ -12,9 +12,16 @@ delog-core = { workspace = true }
 # The shared MAVLink decoder lives in delog-parsers; delog-stream consumes it
 # (the §3.2 downward edge) so live links and the .tlog parser share one path.
 delog-parsers = { workspace = true }
+arrow = { workspace = true }
+mavlink = { workspace = true }
 serialport = { workspace = true }
 crossbeam-channel = { workspace = true }
 
 [dev-dependencies]
 # Build raw v1/v2 frames in tests without a live link.
 mavlink = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "sustained_live"
+harness = false

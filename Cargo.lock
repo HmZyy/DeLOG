@@ -958,6 +958,8 @@ dependencies = [
 name = "delog-stream"
 version = "0.1.0"
 dependencies = [
+ "arrow",
+ "criterion",
  "crossbeam-channel",
  "delog-core",
  "delog-parsers",

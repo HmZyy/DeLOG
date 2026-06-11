@@ -7,9 +7,13 @@
 use std::fmt;
 use std::net::SocketAddr;
 
+pub mod live;
 pub mod reader;
+pub mod recorder;
 
+pub use live::{LiveIngestStats, LiveLink, LiveLinkStatus, LiveStats};
 pub use reader::{LinkCounters, LinkReader, LinkState, LinkStats};
+pub use recorder::TlogRecorder;
 
 /// Configured live-link endpoint (PLAN.md §7.1, LIV-01). UDP-client and
 /// TCP-server modes were removed by decision — the GCS-side patterns are
