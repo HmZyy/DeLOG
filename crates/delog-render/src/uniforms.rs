@@ -36,6 +36,34 @@ impl PlotUniform {
             color,
         }
     }
+
+    /// Build the uniform from a visible data window. `x`/`y` are the inclusive
+    /// data ranges mapped to clip `[-1, 1]` (y increasing upward); a degenerate
+    /// range collapses to scale 0 (everything maps to the centre).
+    pub fn from_view(
+        x: (f32, f32),
+        y: (f32, f32),
+        viewport: [f32; 2],
+        width_px: f32,
+        color: [f32; 4],
+    ) -> Self {
+        let (x_scale, x_offset) = axis(x.0, x.1);
+        let (y_scale, y_offset) = axis(y.0, y.1);
+        Self::new(
+            x_scale, x_offset, y_scale, y_offset, viewport, width_px, color,
+        )
+    }
+}
+
+/// Scale/offset mapping data `[min, max]` to clip `[-1, 1]`
+/// (`clip = data * scale + offset`).
+fn axis(min: f32, max: f32) -> (f32, f32) {
+    let span = max - min;
+    if span.abs() <= f32::EPSILON {
+        return (0.0, 0.0); // degenerate window → centre
+    }
+    let scale = 2.0 / span;
+    (scale, -1.0 - min * scale)
 }
 
 const UNIFORM_SIZE: u64 = std::mem::size_of::<PlotUniform>() as u64;
@@ -164,6 +192,25 @@ mod tests {
     #[test]
     fn uniform_is_three_vec4s() {
         assert_eq!(UNIFORM_SIZE, 48);
+    }
+
+    #[test]
+    fn from_view_maps_window_corners_to_clip() {
+        let u = PlotUniform::from_view((0.0, 10.0), (-100.0, 100.0), [1.0, 1.0], 1.0, [0.0; 4]);
+        let clip = |data: f32, scale: f32, offset: f32| data * scale + offset;
+        // x: 0 → -1, 10 → +1.
+        assert!((clip(0.0, u.transform[0], u.transform[1]) + 1.0).abs() < 1e-5);
+        assert!((clip(10.0, u.transform[0], u.transform[1]) - 1.0).abs() < 1e-5);
+        // y: -100 → -1, 100 → +1, 0 → 0 (centre).
+        assert!((clip(-100.0, u.transform[2], u.transform[3]) + 1.0).abs() < 1e-5);
+        assert!((clip(100.0, u.transform[2], u.transform[3]) - 1.0).abs() < 1e-5);
+        assert!(clip(0.0, u.transform[2], u.transform[3]).abs() < 1e-5);
+    }
+
+    #[test]
+    fn from_view_handles_a_degenerate_window() {
+        let u = PlotUniform::from_view((5.0, 5.0), (5.0, 5.0), [1.0, 1.0], 1.0, [0.0; 4]);
+        assert_eq!(u.transform, [0.0, 0.0, 0.0, 0.0]);
     }
 
     #[test]

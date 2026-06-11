@@ -260,4 +260,76 @@ mod tests {
             "expected a thin red band, got {red_pixels} red pixels"
         );
     }
+
+    /// A windowed (non-identity) transform places the trace at the expected
+    /// screen position — proving `PlotUniform::from_view` on real hardware.
+    #[test]
+    fn from_view_positions_a_trace_in_the_upper_quarter() {
+        let Some(ctx) = RenderContext::headless() else {
+            return;
+        };
+        let (w, h) = (64u32, 64u32);
+        let target = OffscreenTarget::new(ctx.clone(), w, h);
+        let pipeline = LinePipeline::new(&ctx, target.format());
+
+        // Flat trace at data y = 75 with the visible window y ∈ [0, 100]:
+        // clip y = 0.5 → screen row ≈ h/4 (upper quarter), x spans the width.
+        let mut buffers = BufferManager::new(ctx.clone());
+        let field = FieldId(0);
+        buffers.sync(field, &[0.0, 75.0, 10.0, 75.0], false);
+
+        let red = [255u8, 0, 0, 255];
+        let uniforms = UniformRing::new(ctx.clone(), 1);
+        uniforms.write(
+            0,
+            &PlotUniform::from_view(
+                (0.0, 10.0),
+                (0.0, 100.0),
+                [w as f32, h as f32],
+                4.0,
+                [1.0, 0.0, 0.0, 1.0],
+            ),
+        );
+        let bind = pipeline.bind_group(&ctx, buffers.buffer(field).unwrap(), &uniforms);
+
+        let mut enc = ctx
+            .device()
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("from-view-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target.view(),
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pipeline.encode_trace(&mut pass, &bind, uniforms.dynamic_offset(0), 2);
+        }
+        ctx.queue().submit([enc.finish()]);
+        ctx.device()
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
+
+        let img = target.read_rgba();
+        let cx = w / 2;
+        assert!(
+            img.matches(cx, h / 4, red, 8),
+            "trace should sit in the upper quarter, got {:?}",
+            img.pixel(cx, h / 4)
+        );
+        assert!(
+            img.matches(cx, h / 2, [0, 0, 0, 255], 8),
+            "centre should be clear, got {:?}",
+            img.pixel(cx, h / 2)
+        );
+    }
 }
