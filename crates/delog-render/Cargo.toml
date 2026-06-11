@@ -19,6 +19,10 @@ criterion = { workspace = true }
 # Bench fixtures build TraceCaches from Arrow snapshots; production render code
 # never touches Arrow.
 arrow = { workspace = true }
+# Golden-image tests build camera matrices to drive the grid pipeline; the
+# production pipeline takes raw `[[f32; 4]; 4]` matrices, so render code stays
+# math-library-free.
+glam = { workspace = true }
 
 [[bench]]
 name = "frame_encode"

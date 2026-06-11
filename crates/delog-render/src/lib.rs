@@ -22,6 +22,7 @@
 pub mod buffers;
 pub mod context;
 pub mod errors;
+pub mod grid3d;
 pub mod line;
 pub mod minmax;
 pub mod palette;
@@ -34,6 +35,7 @@ pub mod uniforms;
 pub use buffers::BufferManager;
 pub use context::RenderContext;
 pub use errors::GpuErrorHub;
+pub use grid3d::{Grid3dPipeline, GridUniform};
 pub use line::LinePipeline;
 pub use minmax::{COLUMN_STRIDE, MinMaxColPipeline};
 pub use scatter::ScatterPipeline;
