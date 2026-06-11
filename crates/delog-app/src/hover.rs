@@ -58,81 +58,43 @@ pub fn draw(
     let to_x = |x_sec: f32| rect.left() + (x_sec - x0) / (x1 - x0) * rect.width();
     let to_y = |y: f32| rect.bottom() - (y - y0) / (y1 - y0) * rect.height();
 
-    let mut rows: Vec<(String, f64, Option<String>, egui::Color32)> = Vec::new();
-    for trace in pane.visible_traces() {
-        let Ok(fv) = FieldView::new(snapshot, trace.field) else {
-            continue;
-        };
-        let Some(sample) = fv.sample_at(cursor_us, mode) else {
-            continue;
-        };
-        let Some(raw) = sample.value.as_f64() else {
-            continue;
-        };
-        let (mult, unit) = field_meta(snapshot, trace.field);
-        let value = raw * mult;
-
-        let sx = to_x((sample.effective_time_us - origin_us) as f32 * 1e-6);
-        let sy = to_y(value as f32);
-        let color = trace.color32();
+    let rows = sampled_rows(snapshot, pane, cursor_us, mode);
+    for row in &rows {
+        let sx = to_x((row.effective_time_us - origin_us) as f32 * 1e-6);
+        let sy = to_y(row.value as f32);
         if rect.contains(egui::pos2(sx, sy)) {
-            painter.circle_stroke(egui::pos2(sx, sy), 3.5, egui::Stroke::new(1.5, color));
+            painter.circle_stroke(egui::pos2(sx, sy), 3.5, egui::Stroke::new(1.5, row.color));
         }
-        rows.push((trace_label(snapshot, trace.field), value, unit, color));
     }
 
-    if rows.is_empty() {
-        return;
-    }
-
-    egui::Area::new(target.id)
-        .order(egui::Order::Tooltip)
-        .fixed_pos(pos + egui::vec2(12.0, 12.0))
-        .show(ui.ctx(), |ui| {
-            egui::Frame::popup(ui.style()).show(ui, |ui| {
-                ui.label(egui::RichText::new(format!("t = {cursor_x_sec:.3} s")).weak());
-                for (label, value, unit, color) in &rows {
-                    ui.horizontal(|ui| {
-                        ui.colored_label(*color, "■");
-                        let unit = unit.as_deref().unwrap_or("");
-                        ui.label(format!("{label}: {} {unit}", format_value(*value)));
-                    });
-                }
-            });
-        });
+    show_tooltip(
+        ui,
+        target.id,
+        pos + egui::vec2(12.0, 12.0),
+        egui::Align2::LEFT_TOP,
+        cursor_x_sec,
+        &rows,
+    );
 }
 
-/// Playhead cursor (§10.5/§11, PLT-10): a vertical line at the playback time
-/// on every pane, with a per-trace canonical value readout stacked beside it.
-/// Same canonical sampling as hover; `mode` is the global readout mode.
-pub fn draw_playhead(
-    ui: &egui::Ui,
-    view: PaneView,
+/// One tooltip row: a trace's canonical value at the probed time.
+struct Row {
+    label: String,
+    value: f64,
+    unit: Option<String>,
+    color: egui::Color32,
+    effective_time_us: i64,
+}
+
+/// Sample every visible trace at `t_us` (canonical binary search, multiplier
+/// applied) — shared by the hover and playhead readouts.
+fn sampled_rows(
     snapshot: &StoreSnapshot,
     pane: &PlotPane,
-    origin_us: i64,
     t_us: i64,
     mode: SampleMode,
-) {
-    let rect = view.rect;
-    let (x0, x1) = view.x_range;
-    if x1 <= x0 {
-        return;
-    }
-    let t_sec = (t_us - origin_us) as f64 * 1e-6;
-    let frac = (t_sec as f32 - x0) / (x1 - x0);
-    if !(0.0..=1.0).contains(&frac) {
-        return;
-    }
-    let x = rect.left() + frac * rect.width();
-
-    let painter = ui.painter();
-    let color = ui.visuals().warn_fg_color;
-    painter.vline(x, rect.y_range(), egui::Stroke::new(1.5, color));
-
-    // Value readout: one compact row per visible trace, beside the line
-    // (flipping side near the right edge).
-    let mut rows: Vec<(String, egui::Color32)> = Vec::new();
+) -> Vec<Row> {
+    let mut rows = Vec::new();
     for trace in pane.visible_traces() {
         let Ok(fv) = FieldView::new(snapshot, trace.field) else {
             continue;
@@ -144,32 +106,96 @@ pub fn draw_playhead(
             continue;
         };
         let (mult, unit) = field_meta(snapshot, trace.field);
-        let unit = unit.as_deref().unwrap_or("");
-        rows.push((
-            format!("{} {unit}", format_value(raw * mult)),
-            trace.color32(),
-        ));
+        rows.push(Row {
+            label: trace_label(snapshot, trace.field),
+            value: raw * mult,
+            unit,
+            color: trace.color32(),
+            effective_time_us: sample.effective_time_us,
+        });
     }
+    rows
+}
+
+/// The shared value tooltip: time header + one colored `label: value unit`
+/// row per trace. Used by hover (PLT-09) and the playhead readout (PLT-10).
+fn show_tooltip(
+    ui: &egui::Ui,
+    id: egui::Id,
+    pos: egui::Pos2,
+    pivot: egui::Align2,
+    t_sec: f32,
+    rows: &[Row],
+) {
     if rows.is_empty() {
         return;
     }
+    egui::Area::new(id)
+        .order(egui::Order::Tooltip)
+        .pivot(pivot)
+        .fixed_pos(pos)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.label(egui::RichText::new(format!("t = {t_sec:.3} s")).weak());
+                for row in rows {
+                    ui.horizontal(|ui| {
+                        ui.colored_label(row.color, "■");
+                        let unit = row.unit.as_deref().unwrap_or("");
+                        ui.label(format!("{}: {} {unit}", row.label, format_value(row.value)));
+                    });
+                }
+            });
+        });
+}
 
-    let on_left = x > rect.right() - 120.0;
-    let font = egui::FontId::proportional(11.0);
-    let backdrop = ui.visuals().extreme_bg_color.gamma_multiply(0.85);
-    let mut y = rect.top() + 4.0;
-    for (text, color) in rows {
-        let galley = painter.layout_no_wrap(text, font.clone(), color);
-        let pos = if on_left {
-            egui::pos2(x - 6.0 - galley.size().x, y)
-        } else {
-            egui::pos2(x + 6.0, y)
-        };
-        let text_rect = egui::Rect::from_min_size(pos, galley.size());
-        painter.rect_filled(text_rect.expand(1.5), 2.0, backdrop);
-        painter.galley(pos, galley, color);
-        y = text_rect.bottom() + 3.0;
+/// Playhead cursor (§10.5/§11, PLT-10): a vertical line at the playback time
+/// on every pane; with `readout` set, the shared hover tooltip shows the
+/// values, anchored to the bottom of the line (flipping side near the right
+/// edge). The caller passes `readout: None` on the hovered pane — the hover
+/// tooltip is already there — and outside alt-scrub/playback.
+pub fn draw_playhead(
+    ui: &egui::Ui,
+    target: HoverTarget,
+    snapshot: &StoreSnapshot,
+    pane: &PlotPane,
+    origin_us: i64,
+    t_us: i64,
+    readout: Option<SampleMode>,
+) {
+    let view = target.view;
+    let rect = view.rect;
+    let (x0, x1) = view.x_range;
+    if x1 <= x0 {
+        return;
     }
+    let t_sec = ((t_us - origin_us) as f64 * 1e-6) as f32;
+    let frac = (t_sec - x0) / (x1 - x0);
+    if !(0.0..=1.0).contains(&frac) {
+        return;
+    }
+    let x = rect.left() + frac * rect.width();
+
+    let painter = ui.painter();
+    let color = ui.visuals().warn_fg_color;
+    painter.vline(x, rect.y_range(), egui::Stroke::new(1.5, color));
+
+    let Some(mode) = readout else {
+        return;
+    };
+    let rows = sampled_rows(snapshot, pane, t_us, mode);
+    let on_left = x > rect.right() - 160.0;
+    let (pos, pivot) = if on_left {
+        (
+            egui::pos2(x - 8.0, rect.bottom() - 4.0),
+            egui::Align2::RIGHT_BOTTOM,
+        )
+    } else {
+        (
+            egui::pos2(x + 8.0, rect.bottom() - 4.0),
+            egui::Align2::LEFT_BOTTOM,
+        )
+    };
+    show_tooltip(ui, target.id, pos, pivot, t_sec, &rows);
 }
 
 /// `(multiplier, unit)` for a field from the topic schema (core API, no Arrow).

@@ -254,6 +254,7 @@ impl eframe::App for DelogApp {
                         hover_mode: &mut self.hover_mode,
                         show_legend: &mut self.show_legend,
                         playhead_us: snapshot.global_time_range().map(|_| self.playback.t_us),
+                        playing: self.playback.playing,
                     };
                     let mut behavior = crate::workspace::Behavior::new(services);
                     self.workspace.tree.ui(&mut behavior, ui);
@@ -279,6 +280,11 @@ impl eframe::App for DelogApp {
                     }
                     if let Some(tile_id) = actions.focus {
                         self.workspace.focused = Some(tile_id);
+                    }
+                    if let Some(t_us) = actions.scrub_to
+                        && let Some(range) = snapshot.global_time_range()
+                    {
+                        self.playback.scrub(t_us, range);
                     }
                 });
             if let Some(fields) = dropped
