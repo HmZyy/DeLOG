@@ -115,6 +115,13 @@ impl CacheManager {
     /// On a new store epoch: append new rows to ready caches and GC caches whose
     /// field is no longer live (CCH-08).
     pub fn on_epoch(&mut self, snapshot: &StoreSnapshot) {
+        // A changed source offset means the cache's x values are stale: drop
+        // the slot — the per-frame `request` of plotted fields rebuilds it
+        // with the new offset (BRW-07). Appending would mix offsets.
+        self.caches.retain(|&field, slot| match slot {
+            Slot::Ready(cache) => !cache.offset_changed(snapshot, field),
+            Slot::Building => true,
+        });
         for (&field, slot) in self.caches.iter_mut() {
             if let Slot::Ready(cache) = slot {
                 cache.append(snapshot, field);
@@ -305,6 +312,24 @@ mod tests {
 
         assert!(!mgr.is_ready(field));
         assert_eq!(mgr.ready_count(), 0);
+    }
+
+    #[test]
+    fn changing_a_source_offset_invalidates_the_cache() {
+        let (mut identity, snap, source, topic, field) = snapshot(64);
+        let mut mgr = CacheManager::new();
+        mgr.request(field, &snap);
+        await_ready(&mut mgr, field);
+        assert!(mgr.is_ready(field));
+
+        // Same data, new offset (BRW-07 offset drag): the cache baked the old
+        // offset into its x values, so it must be dropped for a rebuild.
+        identity.set_source_offset_us(source, 5_000);
+        let store = Arc::clone(snap.topic_store(topic).unwrap());
+        let after = StoreSnapshot::from_registry(&identity, [(topic, store)], 1).unwrap();
+        mgr.on_epoch(&after);
+
+        assert!(!mgr.is_ready(field), "stale-offset cache must be dropped");
     }
 
     #[test]

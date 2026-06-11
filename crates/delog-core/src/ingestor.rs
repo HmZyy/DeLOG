@@ -143,6 +143,15 @@ impl<O: IngestObserver> Ingestor<O> {
                 }
                 self.observer.on_close(source, summary);
             }
+            IngestMsg::SetSourceOffset { source, offset_us } => {
+                if self
+                    .identity
+                    .set_source_offset_us(source, offset_us)
+                    .is_some_and(|old| old != offset_us)
+                {
+                    self.publish();
+                }
+            }
         }
     }
 
@@ -471,6 +480,7 @@ mod tests {
     use crate::identity::{AutoMarker, SourceMetadata, SourceParam};
     use crate::ingest::{IngestSink, ingest_channel};
     use crate::schema::FieldSchema;
+    use crate::time::TimeRange;
 
     fn schema(name: &str) -> Arc<TopicSchema> {
         Arc::new(
@@ -714,6 +724,43 @@ mod tests {
             .find(|d| d.code == "timestamp-regression")
             .expect("regression diagnostic emitted");
         assert_eq!(regression.time_us, Some(150));
+    }
+
+    #[test]
+    fn set_source_offset_updates_the_snapshot_and_bumps_the_epoch() {
+        let mut ing = Ingestor::new(NullObserver);
+        let store = ing.store();
+        let source = open(&mut ing, "flight.bin", SourceKind::File);
+        ing.process(IngestMsg::Batch(batch(source, "GPS", &[100, 200])));
+        ing.process(IngestMsg::CloseSource {
+            source,
+            summary: ParseSummary::default(),
+        });
+        let before = store.load();
+        assert_eq!(before.global_time_range(), TimeRange::new(100, 200));
+
+        ing.process(IngestMsg::SetSourceOffset {
+            source,
+            offset_us: 1_000,
+        });
+
+        let after = store.load();
+        assert!(after.epoch > before.epoch, "offset change publishes");
+        assert_eq!(after.source(source).unwrap().entry.offset_us, 1_000);
+        // Effective times shift with the offset (§4.2).
+        assert_eq!(after.global_time_range(), TimeRange::new(1_100, 1_200));
+    }
+
+    #[test]
+    fn set_source_offset_on_an_unknown_source_is_ignored() {
+        let mut ing = Ingestor::new(NullObserver);
+        let store = ing.store();
+        let before = store.load();
+        ing.process(IngestMsg::SetSourceOffset {
+            source: SourceId(7),
+            offset_us: 1_000,
+        });
+        assert_eq!(store.load().epoch, before.epoch, "no spurious publish");
     }
 
     #[test]
