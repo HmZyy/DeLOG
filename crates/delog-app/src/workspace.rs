@@ -125,18 +125,27 @@ impl Workspace {
         self.split_plot_at(tile_id, direction, false);
     }
 
-    pub fn split_plot_with_trace(
+    /// Edge drop: split at `tile_id` and plot every dragged field in the new
+    /// pane (§10.7, PLT-13). Returns the fields actually added.
+    pub fn split_plot_with_traces(
         &mut self,
         tile_id: egui_tiles::TileId,
         edge: DropEdge,
-        field: FieldId,
-    ) -> bool {
+        fields: &[FieldId],
+    ) -> Vec<FieldId> {
+        if fields.is_empty() {
+            return Vec::new();
+        }
         let Some(new_pane) =
             self.split_plot_at(tile_id, edge.split_direction(), edge.insert_before())
         else {
-            return false;
+            return Vec::new();
         };
-        self.add_trace_to_plot(new_pane, field)
+        fields
+            .iter()
+            .copied()
+            .filter(|&field| self.add_trace_to_plot(new_pane, field))
+            .collect()
     }
 
     fn split_plot_at(
@@ -255,7 +264,7 @@ impl Default for Workspace {
 #[derive(Default)]
 pub struct WorkspaceActions {
     pub split: Option<(egui_tiles::TileId, SplitDirection)>,
-    pub edge_drop: Option<(egui_tiles::TileId, DropEdge, FieldId)>,
+    pub edge_drop: Option<(egui_tiles::TileId, DropEdge, Vec<FieldId>)>,
     pub close: Option<egui_tiles::TileId>,
     pub remove_trace: Vec<FieldId>,
 }
@@ -361,17 +370,22 @@ impl Behavior<'_> {
         pane: &mut PlotPane,
     ) -> egui_tiles::UiResponse {
         let frame_style = egui::Frame::default();
-        let (response, dropped) =
-            ui.dnd_drop_zone::<FieldId, ()>(frame_style, |ui| self.plot_body(ui, tile_id, pane));
+        let (response, dropped) = ui
+            .dnd_drop_zone::<Vec<FieldId>, ()>(frame_style, |ui| self.plot_body(ui, tile_id, pane));
 
-        if let Some(field) = dropped {
+        if let Some(fields) = dropped {
             let pointer = response.response.ctx.input(|i| i.pointer.interact_pos());
             if let Some(edge) =
                 pointer.and_then(|pos| DropEdge::from_pos(response.response.rect, pos))
             {
-                self.actions.edge_drop = Some((tile_id, edge, *field));
-            } else if pane.add_trace(*field) {
-                self.services.caches.request(*field, self.services.snapshot);
+                self.actions.edge_drop = Some((tile_id, edge, (*fields).clone()));
+            } else {
+                // Multi-field drop appends every dragged trace (PLT-13).
+                for &field in fields.iter() {
+                    if pane.add_trace(field) {
+                        self.services.caches.request(field, self.services.snapshot);
+                    }
+                }
             }
         }
 
@@ -894,11 +908,15 @@ mod tests {
     }
 
     #[test]
-    fn edge_drop_splits_root_and_adds_trace_to_new_pane() {
+    fn edge_drop_splits_root_and_adds_all_dropped_traces_to_new_pane() {
         let mut workspace = Workspace::new();
         let root = workspace.tree.root().unwrap();
 
-        assert!(workspace.split_plot_with_trace(root, DropEdge::Left, FieldId(7)));
+        // Multi-field edge drop (PLT-13): every dragged field lands in the
+        // new pane.
+        let added =
+            workspace.split_plot_with_traces(root, DropEdge::Left, &[FieldId(7), FieldId(9)]);
+        assert_eq!(added, vec![FieldId(7), FieldId(9)]);
 
         let root = workspace.tree.root().unwrap();
         let Some(egui_tiles::Tile::Container(container)) = workspace.tree.tiles.get(root) else {
@@ -911,7 +929,19 @@ mod tests {
         else {
             panic!("left child should be the new plot pane");
         };
-        assert_eq!(pane.fields().collect::<Vec<_>>(), vec![FieldId(7)]);
+        assert_eq!(
+            pane.fields().collect::<Vec<_>>(),
+            vec![FieldId(7), FieldId(9)]
+        );
+
+        // An empty payload is a no-op.
+        let before = workspace.plot_panes().count();
+        assert!(
+            workspace
+                .split_plot_with_traces(new_pane, DropEdge::Right, &[])
+                .is_empty()
+        );
+        assert_eq!(workspace.plot_panes().count(), before);
     }
 
     #[test]

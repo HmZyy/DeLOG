@@ -917,7 +917,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [ ] **PLT-10** — Playhead vertical line + value readout on all panes
 - [x] **PLT-11** — Context menu: remove/clear/mode/color/width/split/reset/legend/info (§10.6)
 - [x] **PLT-12** — Plot debug popup: counts, visible range, GPU bytes, yquery µs, paint µs
-- [~] **PLT-13** — Drag-drop: single + multi-field onto pane / tile edge (§10.7) — single-field drop onto panes/workspace and tile-edge split-drop wired; multi-field pending
+- [x] **PLT-13** — Drag-drop: single + multi-field onto pane / tile edge (§10.7)
 - [x] **PLT-14** — Empty-pane state copy
 
 ### TLN — Timeline & playback (M5)
@@ -951,7 +951,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **BRW-02** — Fuzzy search/filter over full paths
 - [x] **BRW-03** — Natural sort
 - [x] **BRW-04** — Plotted-field highlight (color dot + bold)
-- [ ] **BRW-05** — Multi-select + drag payload `Vec<FieldId>`
+- [x] **BRW-05** — Multi-select + drag payload `Vec<FieldId>`
 - [ ] **BRW-06** — Context: plot-in-new-pane / copy key / stats popup / remove source
 - [ ] **BRW-07** — Per-source time-offset widget (drag-µs + dialog)
 - [ ] **BRW-08** — Field metadata inspector
