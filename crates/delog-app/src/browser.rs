@@ -73,7 +73,7 @@ impl BrowserModel {
                     });
                 }
 
-                let fields = snapshot
+                let mut fields: Vec<FieldNode> = snapshot
                     .fields
                     .iter()
                     .filter(|f| f.topic == topic_id && !f.removed)
@@ -88,6 +88,7 @@ impl BrowserModel {
                         }
                     })
                     .collect();
+                fields.sort_by(|a, b| natural_cmp(&a.name, &b.name));
 
                 topics.push(TopicNode {
                     id: topic_id,
@@ -96,6 +97,7 @@ impl BrowserModel {
                     fields,
                 });
             }
+            topics.sort_by(|a, b| natural_cmp(&a.name, &b.name));
 
             sources.push(SourceNode {
                 id: source.entry.id,
@@ -155,6 +157,55 @@ impl BrowserModel {
         }
         Self { sources }
     }
+}
+
+/// Natural order: digit runs compare numerically, text runs case-insensitively
+/// (`GPS[2]` before `GPS[10]`, §13 BRW-03).
+fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let mut a = a.chars().peekable();
+    let mut b = b.chars().peekable();
+    loop {
+        match (a.peek().copied(), b.peek().copied()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(ca), Some(cb)) => {
+                if ca.is_ascii_digit() && cb.is_ascii_digit() {
+                    let na = take_number(&mut a);
+                    let nb = take_number(&mut b);
+                    match na.cmp(&nb) {
+                        Ordering::Equal => {}
+                        other => return other,
+                    }
+                } else {
+                    let (la, lb) = (ca.to_ascii_lowercase(), cb.to_ascii_lowercase());
+                    match la.cmp(&lb) {
+                        Ordering::Equal => {
+                            a.next();
+                            b.next();
+                        }
+                        other => return other,
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Consume a digit run as a number (saturating well past any real instance id).
+fn take_number(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> u128 {
+    let mut value: u128 = 0;
+    while let Some(c) = chars.peek().copied() {
+        if !c.is_ascii_digit() {
+            break;
+        }
+        value = value
+            .saturating_mul(10)
+            .saturating_add((c as u8 - b'0') as u128);
+        chars.next();
+    }
+    value
 }
 
 /// Whitespace-separated query tokens each match the path case-insensitively
@@ -304,17 +355,101 @@ mod tests {
         assert_eq!(gps.name, "GPS");
         assert_eq!(gps.rows, 3);
 
+        // Fields sort naturally (BRW-03): Alt before Lat.
         assert_eq!(gps.fields.len(), 2);
-        assert_eq!(gps.fields[0].name, "Lat");
-        assert_eq!(gps.fields[0].dtype, "i32");
-        assert_eq!(gps.fields[0].unit.as_deref(), Some("deg"));
-        assert_eq!(gps.fields[0].count, 3);
-        assert_eq!(gps.fields[1].dtype, "f64");
+        assert_eq!(gps.fields[0].name, "Alt");
+        assert_eq!(gps.fields[0].dtype, "f64");
+        assert_eq!(gps.fields[1].name, "Lat");
+        assert_eq!(gps.fields[1].dtype, "i32");
+        assert_eq!(gps.fields[1].unit.as_deref(), Some("deg"));
+        assert_eq!(gps.fields[1].count, 3);
     }
 
     #[test]
     fn empty_snapshot_yields_an_empty_model() {
         assert!(BrowserModel::from_snapshot(&StoreSnapshot::empty()).is_empty());
+    }
+
+    #[test]
+    fn natural_cmp_orders_embedded_numbers_numerically() {
+        use std::cmp::Ordering;
+        // The §13 example: GPS[2] before GPS[10].
+        assert_eq!(natural_cmp("GPS[2]", "GPS[10]"), Ordering::Less);
+        assert_eq!(natural_cmp("GPS[10]", "GPS[2]"), Ordering::Greater);
+        assert_eq!(natural_cmp("GPS[2]", "GPS[2]"), Ordering::Equal);
+        // Case-insensitive text runs.
+        assert_eq!(natural_cmp("baro", "GPS"), Ordering::Less);
+        // Plain text still sorts lexically.
+        assert_eq!(natural_cmp("AccX", "AccY"), Ordering::Less);
+        // Numbers with different digit counts.
+        assert_eq!(natural_cmp("M9", "M10"), Ordering::Less);
+    }
+
+    #[test]
+    fn model_topics_and_fields_sort_naturally() {
+        let mut identity = IdentityRegistry::new();
+        let source = identity.add_source("flight");
+        // Insert out of order: GPS[10] registered before GPS[2].
+        let gps10 = identity.add_topic(source, "GPS[10]").unwrap();
+        let gps2 = identity.add_topic(source, "GPS[2]").unwrap();
+        identity.add_field(gps10, "Y2").unwrap();
+        identity.add_field(gps10, "Y10").unwrap();
+        identity.add_field(gps2, "A").unwrap();
+
+        let schema10 = Arc::new(
+            TopicSchema::new(
+                "GPS[10]",
+                [
+                    FieldSchema::new("Y2", DataType::Float64, None::<String>, 1.0).unwrap(),
+                    FieldSchema::new("Y10", DataType::Float64, None::<String>, 1.0).unwrap(),
+                ],
+            )
+            .unwrap(),
+        );
+        let schema2 = Arc::new(
+            TopicSchema::new(
+                "GPS[2]",
+                [FieldSchema::new("A", DataType::Float64, None::<String>, 1.0).unwrap()],
+            )
+            .unwrap(),
+        );
+        let chunk10 = Arc::new(
+            Chunk::try_new(
+                Int64Array::from(vec![0]),
+                vec![
+                    Arc::new(Float64Array::from(vec![1.0])) as ArrayRef,
+                    Arc::new(Float64Array::from(vec![2.0])) as ArrayRef,
+                ],
+                &schema10,
+            )
+            .unwrap(),
+        );
+        let chunk2 = Arc::new(
+            Chunk::try_new(
+                Int64Array::from(vec![0]),
+                vec![Arc::new(Float64Array::from(vec![1.0])) as ArrayRef],
+                &schema2,
+            )
+            .unwrap(),
+        );
+        let store10 = Arc::new(TopicStore::from_chunks(schema10, [chunk10]).unwrap());
+        let store2 = Arc::new(TopicStore::from_chunks(schema2, [chunk2]).unwrap());
+        let snapshot =
+            StoreSnapshot::from_registry(&identity, [(gps10, store10), (gps2, store2)], 0).unwrap();
+
+        let model = BrowserModel::from_snapshot(&snapshot);
+        let topics: Vec<_> = model.sources[0]
+            .topics
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
+        assert_eq!(topics, vec!["GPS[2]", "GPS[10]"]);
+        let fields: Vec<_> = model.sources[0].topics[1]
+            .fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        assert_eq!(fields, vec!["Y2", "Y10"]);
     }
 
     #[test]
