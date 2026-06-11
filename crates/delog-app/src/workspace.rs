@@ -88,6 +88,9 @@ impl DropEdge {
 
 pub struct Workspace {
     pub tree: TileTree,
+    /// Last plot pane the user clicked — the reference for `←`/`→` sample
+    /// stepping (§11, TLN-04).
+    pub focused: Option<egui_tiles::TileId>,
 }
 
 impl Workspace {
@@ -96,6 +99,17 @@ impl Workspace {
         let root = tiles.insert_pane(Pane::Plot(PlotPane::default()));
         Self {
             tree: egui_tiles::Tree::new("plot_workspace", root, tiles),
+            focused: None,
+        }
+    }
+
+    /// First trace of the focused pane — the step reference (TLN-04).
+    /// `None` when nothing is focused or the pane is gone/empty.
+    pub fn focused_first_field(&self) -> Option<FieldId> {
+        let tile_id = self.focused?;
+        match self.tree.tiles.get(tile_id) {
+            Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) => pane.traces.first().map(|t| t.field),
+            _ => None,
         }
     }
 
@@ -259,6 +273,8 @@ pub struct WorkspaceActions {
     pub edge_drop: Option<(egui_tiles::TileId, DropEdge, Vec<FieldId>)>,
     pub close: Option<egui_tiles::TileId>,
     pub remove_trace: Vec<FieldId>,
+    /// Pane the user clicked this frame (step reference, TLN-04).
+    pub focus: Option<egui_tiles::TileId>,
 }
 
 pub struct PlotServices<'a> {
@@ -398,6 +414,9 @@ impl Behavior<'_> {
             egui::pos2(outer.right() - 4.0, outer.bottom() - axes::X_GUTTER),
         );
         let response = ui.allocate_rect(outer, egui::Sense::click_and_drag());
+        if response.clicked() || response.drag_started() || response.secondary_clicked() {
+            self.actions.focus = Some(tile_id);
+        }
         self.handle_plot_interaction(&response, plot_rect);
 
         if pane.is_empty() {

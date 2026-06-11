@@ -65,6 +65,52 @@ impl Playback {
     pub fn clamp_to(&mut self, range: TimeRange) {
         self.t_us = self.t_us.clamp(range.min_us, range.max_us);
     }
+
+    /// Jump to the start of the range (`Home`, TLN-04).
+    pub fn jump_start(&mut self, range: TimeRange) {
+        self.scrub(range.min_us, range);
+    }
+
+    /// Jump to the end of the range (`End`, TLN-04).
+    pub fn jump_end(&mut self, range: TimeRange) {
+        self.scrub(range.max_us, range);
+    }
+}
+
+/// Fallback step when no plot is focused: 1/30 s (§11).
+const FALLBACK_STEP_US: i64 = 1_000_000 / 30;
+
+/// Where `←`/`→` land (TLN-04): the adjacent canonical sample of the focused
+/// plot's reference trace, or ±1/30 s without a focus. Stays put at the ends
+/// of the reference trace.
+pub fn step_target(
+    snapshot: &delog_core::snapshot::StoreSnapshot,
+    reference: Option<delog_core::identity::FieldId>,
+    t_us: i64,
+    forward: bool,
+) -> i64 {
+    use delog_core::field_view::{FieldView, SampleMode};
+
+    let Some(field) = reference else {
+        let step = if forward {
+            FALLBACK_STEP_US
+        } else {
+            -FALLBACK_STEP_US
+        };
+        return t_us.saturating_add(step);
+    };
+    let Ok(view) = FieldView::new(snapshot, field) else {
+        return t_us;
+    };
+    // Probe just past the playhead so landing exactly on a sample still
+    // steps to the adjacent one.
+    let (probe, mode) = if forward {
+        (t_us.saturating_add(1), SampleMode::Next)
+    } else {
+        (t_us.saturating_sub(1), SampleMode::Prev)
+    };
+    view.sample_at(probe, mode)
+        .map_or(t_us, |sample| sample.effective_time_us)
 }
 
 /// Where the pointer x lands on the scrubber, as canonical microseconds.
@@ -142,6 +188,13 @@ pub fn ui(
     any_live: bool,
 ) {
     ui.horizontal(|ui| {
+        if ui
+            .button("⏮")
+            .on_hover_text("Jump to start (Home)")
+            .clicked()
+        {
+            playback.jump_start(range);
+        }
         let icon = if playback.playing { "⏸" } else { "▶" };
         if ui
             .button(icon)
@@ -149,6 +202,9 @@ pub fn ui(
             .clicked()
         {
             playback.toggle();
+        }
+        if ui.button("⏭").on_hover_text("Jump to end (End)").clicked() {
+            playback.jump_end(range);
         }
 
         egui::ComboBox::from_id_salt("playback_speed")
@@ -228,10 +284,75 @@ fn scrubber(ui: &mut egui::Ui, playback: &mut Playback, range: TimeRange, any_li
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use arrow::array::{ArrayRef, Float64Array, Int64Array};
+    use arrow::datatypes::DataType;
+    use delog_core::chunk::Chunk;
+    use delog_core::identity::{FieldId, IdentityRegistry};
+    use delog_core::schema::{FieldSchema, TopicSchema};
+    use delog_core::snapshot::StoreSnapshot;
+    use delog_core::store::TopicStore;
+
     use super::*;
 
     fn range() -> TimeRange {
         TimeRange::new(1_000_000, 5_000_000).unwrap()
+    }
+
+    /// Snapshot with one field sampled at t = 1000, 2000, 3000 µs.
+    fn stepping_fixture() -> (StoreSnapshot, FieldId) {
+        let mut identity = IdentityRegistry::new();
+        let source = identity.add_source("flight");
+        let topic = identity.add_topic(source, "BARO").unwrap();
+        let alt = identity.add_field(topic, "Alt").unwrap();
+        let schema = Arc::new(
+            TopicSchema::new(
+                "BARO",
+                [FieldSchema::new("Alt", DataType::Float64, None::<String>, 1.0).unwrap()],
+            )
+            .unwrap(),
+        );
+        let cols: Vec<ArrayRef> = vec![Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0]))];
+        let chunk = Arc::new(
+            Chunk::try_new(Int64Array::from(vec![1_000, 2_000, 3_000]), cols, &schema).unwrap(),
+        );
+        let store = Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap());
+        let snapshot = StoreSnapshot::from_registry(&identity, [(topic, store)], 0).unwrap();
+        (snapshot, alt)
+    }
+
+    #[test]
+    fn step_moves_to_the_adjacent_sample_of_the_reference_trace() {
+        let (snapshot, alt) = stepping_fixture();
+        // Between samples: forward snaps to the next one.
+        assert_eq!(step_target(&snapshot, Some(alt), 1_500, true), 2_000);
+        // Exactly on a sample: forward moves to the following sample.
+        assert_eq!(step_target(&snapshot, Some(alt), 2_000, true), 3_000);
+        assert_eq!(step_target(&snapshot, Some(alt), 2_000, false), 1_000);
+        // No sample beyond the end: stay put.
+        assert_eq!(step_target(&snapshot, Some(alt), 3_000, true), 3_000);
+        assert_eq!(step_target(&snapshot, Some(alt), 1_000, false), 1_000);
+    }
+
+    #[test]
+    fn step_falls_back_to_a_thirtieth_of_a_second_without_a_focus() {
+        let (snapshot, _) = stepping_fixture();
+        assert_eq!(step_target(&snapshot, None, 1_000_000, true), 1_033_333);
+        assert_eq!(step_target(&snapshot, None, 1_000_000, false), 966_667);
+    }
+
+    #[test]
+    fn jump_moves_to_the_range_ends() {
+        let mut p = Playback {
+            playing: true,
+            t_us: 3_000_000,
+            speed: 1.0,
+        };
+        p.jump_start(range());
+        assert_eq!(p.t_us, 1_000_000);
+        p.jump_end(range());
+        assert_eq!(p.t_us, 5_000_000);
     }
 
     #[test]
