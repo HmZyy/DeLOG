@@ -842,8 +842,8 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **PAR-08** — ULog: dropouts → diagnostics + NaN gap injection (§6.3)
 - [x] **PAR-09** — ULog: logged messages captured for auto-markers; params into source meta
 - [x] **PAR-10** — ULog: golden fixture test
-- [ ] **PAR-11** — tlog: µs-envelope framing over the shared MAVLink decoder (§6.4)
-- [ ] **PAR-12** — tlog: golden fixture test (incl. v1+v2 mixed)
+- [x] **PAR-11** — tlog: µs-envelope framing over the shared MAVLink decoder (§6.4) — explicit `[8-byte BE µs][frame]` framing reusing `mavlink::frame_len`/`decode_frame`/`extract_fields`; one topic per message type, `(sysid,compid)` instance suffixing; bad-CRC frames skipped without losing envelope sync; torn tail keeps prior data
+- [x] **PAR-12** — tlog: golden fixture test (incl. v1+v2 mixed) — synthetic mixed v1/v2 log: topics/rows/values table + CRC-skip, unknown-message, truncation and desync cases
 - [ ] **PAR-13** — fuzz targets: BIN record / ULog defs+data / MAVLink framing — no panic/hang/OOM
 - [ ] **PAR-14** — CSV import with column-mapping dialog _(M10/backlog boundary)_
 - [ ] **PAR-15** — Arrow IPC `.dlcache` reader registered as a sniffing parser (pairs IOX-08)

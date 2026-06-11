@@ -19,7 +19,9 @@ use delog_core::ingest::{IngestSender, IngestSink, ParseSummary, SourceKind, ing
 use delog_core::ingestor::{IngestObserver, Ingestor};
 use delog_core::parse_ctl::{CancelToken, ParseCtl};
 use delog_core::snapshot::{DataStore, StoreSnapshot};
-use delog_parsers::{ArduPilotParser, Detection, ParserRegistry, SNIFF_HEAD_LEN, ULogParser};
+use delog_parsers::{
+    ArduPilotParser, Detection, ParserRegistry, SNIFF_HEAD_LEN, TlogParser, ULogParser,
+};
 
 /// Most recent diagnostics retained for the UI (full hub is DIA-01, M9).
 const MAX_DIAGNOSTICS: usize = 1000;
@@ -124,6 +126,7 @@ impl Session {
         let mut registry = ParserRegistry::new();
         registry.register(Arc::new(ArduPilotParser));
         registry.register(Arc::new(ULogParser));
+        registry.register(Arc::new(TlogParser));
 
         Self {
             store,
