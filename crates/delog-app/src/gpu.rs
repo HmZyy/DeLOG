@@ -24,6 +24,15 @@ use crate::plot::{PlotPane, ViewX};
 /// (§9.5, GPU-10).
 const DECIMATE_THRESHOLD: f32 = 8.0;
 
+/// The inner plot rect plus the visible data window the GPU and the egui axes
+/// share (so labels line up with the rendered lines).
+#[derive(Clone, Copy)]
+pub struct PaneView {
+    pub rect: egui::Rect,
+    pub x_range: (f32, f32),
+    pub y_range: (f32, f32),
+}
+
 /// App-owned handle to the renderer resources stored in egui_wgpu.
 #[derive(Clone, Copy, Debug)]
 pub struct GpuBridge {
@@ -54,34 +63,32 @@ impl GpuBridge {
         self.available
     }
 
-    /// Upload the pane's ready trace caches, write their uniforms, and emit the
-    /// paint callback. `origin_us` is the shared cache rebase origin (§8.3).
+    /// Upload the pane's ready trace caches into the `plot_rect`, write their
+    /// uniforms for the given visible data window, and emit the paint callback.
+    /// The caller supplies the X/Y ranges so the egui axes share them exactly.
     pub fn render_pane(
         &self,
         ui: &mut egui::Ui,
         frame: &eframe::Frame,
-        rect: egui::Rect,
         caches: &mut CacheManager,
         pane: &PlotPane,
-        origin_us: i64,
+        view: PaneView,
     ) {
-        if !self.available || rect.width() < 2.0 || rect.height() < 2.0 {
+        let plot_rect = view.rect;
+        if !self.available || plot_rect.width() < 2.0 || plot_rect.height() < 2.0 {
             return;
         }
-        let Some(view) = pane.view() else {
-            return;
-        };
         let Some(render_state) = frame.wgpu_render_state() else {
             return;
         };
 
         let ppp = ui.ctx().pixels_per_point();
         let viewport_px = [
-            (rect.width() * ppp).max(1.0),
-            (rect.height() * ppp).max(1.0),
+            (plot_rect.width() * ppp).max(1.0),
+            (plot_rect.height() * ppp).max(1.0),
         ];
-        let (x0, x1) = view.seconds(origin_us);
-        let (y0, y1) = visible_y_range(caches, pane, x0, x1);
+        let (x0, x1) = view.x_range;
+        let (y0, y1) = view.y_range;
 
         let mut items = Vec::new();
         {
@@ -146,15 +153,15 @@ impl GpuBridge {
             return;
         }
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
-            rect,
+            plot_rect,
             ScenePaintCallback { items },
         ));
     }
 }
 
 /// Union of every visible trace's auto-Y range, padded; a sane default when no
-/// finite samples are in view.
-fn visible_y_range(caches: &mut CacheManager, pane: &PlotPane, x0: f32, x1: f32) -> (f32, f32) {
+/// finite samples are in view (PLT-06 AutoVisible).
+pub fn visible_y_range(caches: &mut CacheManager, pane: &PlotPane, x0: f32, x1: f32) -> (f32, f32) {
     let mut mm = MinMax::EMPTY;
     for trace in &pane.traces {
         if let Some(cache) = caches.get(trace.field) {

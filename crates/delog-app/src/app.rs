@@ -3,6 +3,7 @@
 use delog_cache::CacheManager;
 
 use crate::about;
+use crate::axes;
 use crate::browser::{self, BrowserModel};
 use crate::gpu::{self, GpuBridge};
 use crate::plot::PlotPane;
@@ -147,26 +148,44 @@ impl eframe::App for DelogApp {
             let frame_style = egui::Frame::default();
             let (_, dropped) =
                 ui.dnd_drop_zone::<delog_core::identity::FieldId, ()>(frame_style, |ui| {
-                    let rect = ui.available_rect_before_wrap();
-                    let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
-                    self.handle_plot_interaction(&response, rect);
+                    let outer = ui.available_rect_before_wrap();
+                    // Inner plot rect, leaving gutters for axis labels (PLT-07).
+                    let plot_rect = egui::Rect::from_min_max(
+                        egui::pos2(outer.left() + axes::Y_GUTTER, outer.top() + 4.0),
+                        egui::pos2(outer.right() - 4.0, outer.bottom() - axes::X_GUTTER),
+                    );
+                    let response = ui.allocate_rect(outer, egui::Sense::click_and_drag());
+                    self.handle_plot_interaction(&response, plot_rect);
 
                     if self.pane.is_empty() {
                         ui.painter().text(
-                            rect.center(),
+                            outer.center(),
                             egui::Align2::CENTER_CENTER,
                             "Drag a field here to plot it",
                             egui::FontId::proportional(14.0),
                             ui.visuals().weak_text_color(),
                         );
-                    } else if self.gpu.is_available() {
+                    } else if self.gpu.is_available() && plot_rect.width() > 8.0 {
+                        let view = self.pane.view().unwrap_or(crate::plot::ViewX::new(0, 1));
+                        let x_range = view.seconds(self.origin_us);
+                        let y_range = gpu::visible_y_range(
+                            &mut self.caches,
+                            &self.pane,
+                            x_range.0,
+                            x_range.1,
+                        );
+                        let y_unit = Self::y_unit(&snapshot, &self.pane);
+                        axes::draw(ui, plot_rect, x_range, y_range, y_unit.as_deref());
                         self.gpu.render_pane(
                             ui,
                             frame,
-                            rect,
                             &mut self.caches,
                             &self.pane,
-                            self.origin_us,
+                            gpu::PaneView {
+                                rect: plot_rect,
+                                x_range,
+                                y_range,
+                            },
                         );
                     }
                 });
@@ -182,6 +201,18 @@ impl eframe::App for DelogApp {
 }
 
 impl DelogApp {
+    /// Unit of the pane's first trace, for the Y axis label (PLT-07). Reads the
+    /// schema through core helpers — the app never touches Arrow (§3.2).
+    fn y_unit(snapshot: &delog_core::snapshot::StoreSnapshot, pane: &PlotPane) -> Option<String> {
+        let field = pane.traces.first()?.field;
+        let entry = snapshot
+            .fields
+            .get(field.index())
+            .filter(|f| f.id == field)?;
+        let store = snapshot.topic(entry.topic)?.store.as_ref()?;
+        store.schema.field_by_name(&entry.name)?.unit.clone()
+    }
+
     /// Pan (drag), zoom (wheel @ cursor) and reset (double-click) the X view
     /// from pointer input over the plot rect (PLT-04).
     fn handle_plot_interaction(&mut self, response: &egui::Response, rect: egui::Rect) {
