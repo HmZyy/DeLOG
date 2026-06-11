@@ -77,3 +77,4 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 # testing / benchmarking
 criterion = "0.8.2"
 proptest = "1.11.0"
+png = "0.18.1"

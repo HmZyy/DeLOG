@@ -951,6 +951,7 @@ dependencies = [
  "delog-cache",
  "delog-core",
  "glam",
+ "png",
  "pollster",
  "wgpu",
 ]
