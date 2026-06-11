@@ -37,6 +37,11 @@ pub struct DelogApp {
     /// Configured vehicles for the 3D view (TDV-03); empty until one is added.
     vehicles: Vec<crate::vehicle::VehicleConfig>,
     vehicle_dialog: crate::vehicle_dialog::VehicleDialog,
+    /// Cached render-space trajectories, parallel to `vehicles`, rebuilt only
+    /// when the data epoch or vehicle set changes (TDV-04; off-thread later).
+    vehicle_trajectories: Vec<Vec<[f32; 3]>>,
+    traj_epoch: u64,
+    traj_dirty: bool,
 }
 
 impl DelogApp {
@@ -65,6 +70,9 @@ impl DelogApp {
             connection_dialog: ConnectionDialog::default(),
             vehicles: Vec::new(),
             vehicle_dialog: crate::vehicle_dialog::VehicleDialog::default(),
+            vehicle_trajectories: Vec::new(),
+            traj_epoch: u64::MAX,
+            traj_dirty: false,
         }
     }
 
@@ -160,6 +168,17 @@ impl eframe::App for DelogApp {
         if snapshot.epoch != self.last_epoch {
             self.caches.on_epoch(&snapshot);
             self.last_epoch = snapshot.epoch;
+        }
+        // Rebuild vehicle trajectories only when the data or vehicle set
+        // changed — never per-frame (TDV-04; off-thread is a follow-up).
+        if snapshot.epoch != self.traj_epoch || self.traj_dirty {
+            self.vehicle_trajectories = self
+                .vehicles
+                .iter()
+                .map(|v| crate::vehicle::build_trajectory(&snapshot, v))
+                .collect();
+            self.traj_epoch = snapshot.epoch;
+            self.traj_dirty = false;
         }
         // Keep every plotted trace's cache requested/warm.
         for field in self.workspace.fields().collect::<Vec<_>>() {
@@ -375,6 +394,7 @@ impl eframe::App for DelogApp {
                         playhead_us: snapshot.global_time_range().map(|_| self.playback.t_us),
                         playing: self.playback.playing,
                         vehicles: &self.vehicles,
+                        trajectories: &self.vehicle_trajectories,
                     };
                     let mut behavior = crate::workspace::Behavior::new(services);
                     self.workspace.tree.ui(&mut behavior, ui);
@@ -424,12 +444,14 @@ impl eframe::App for DelogApp {
         });
 
         about::window(ui.ctx(), &mut self.show_about);
-        crate::vehicle_dialog::show(
+        if crate::vehicle_dialog::show(
             ui.ctx(),
             &mut self.vehicle_dialog,
             &mut self.vehicles,
             &self.session.snapshot(),
-        );
+        ) {
+            self.traj_dirty = true;
+        }
         if let Some(endpoint) = self
             .connection_dialog
             .ui(ui.ctx(), &mut self.show_connection_dialog)
