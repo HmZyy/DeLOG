@@ -914,7 +914,9 @@ dependencies = [
 name = "delog-render"
 version = "0.1.0"
 dependencies = [
+ "arrow",
  "bytemuck",
+ "criterion",
  "delog-cache",
  "delog-core",
  "pollster",
