@@ -894,7 +894,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **GPU-12** — wgpu error scopes → diagnostics
 - [x] **GPU-13** — Headless golden-image test rig (§20.3)
 - [~] **GPU-14** — Bench: frame encode 32×1M decimated < 3 ms — ~4.9 ms after GPU-11 batching (was ~12 ms); CPU min/max decimation alone is ~4.3 ms of that, so GPU-26 (compute reduction) is the path to full budget. Typical 1–8 traces are well under.
-- [ ] **GPU-20** — 3D offscreen target (color+depth, 4×MSAA) composited as egui image (§9.1)
+- [~] **GPU-20** — 3D offscreen target (color+depth, 4×MSAA) composited as egui image (§9.1) — `Scene3dTarget` in `delog-render`: 4×MSAA color+depth resolving to a single-sample texture, `begin_pass` clears color+depth(1.0) and resolves, `resolve_view()` for egui + `read_rgba()` headless readback; golden tests prove MSAA resolve, depth rejection, edge AA. egui `ui.image` compositing of `resolve_view` rides with the scene pane (TDV-01)
 - [ ] **GPU-21** — `grid3d` infinite grid + axes gizmo
 - [ ] **GPU-22** — `mesh` pipeline (N·L+ambient) + GLB upload path
 - [ ] **GPU-23** — `traj3d` trajectory line pipeline

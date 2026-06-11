@@ -15,6 +15,74 @@ fn align_up(value: u32, alignment: u32) -> u32 {
     value.div_ceil(alignment) * alignment
 }
 
+/// Copy a single-sample RGBA8 texture to CPU and return tight RGBA bytes
+/// (blocking). Honours wgpu's 256-byte `bytes_per_row` alignment and unpads to
+/// a tight buffer. Shared by [`OffscreenTarget`] and the scene target's
+/// resolve texture (GPU-20).
+pub(crate) fn read_texture_rgba(
+    ctx: &RenderContext,
+    texture: &wgpu::Texture,
+    width: u32,
+    height: u32,
+) -> RgbaImage {
+    let padded_bpr = align_up(width * 4, COPY_ALIGN);
+    let buffer = ctx.device().create_buffer(&wgpu::BufferDescriptor {
+        label: Some("delog-readback"),
+        size: (padded_bpr * height) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+
+    let mut enc = ctx
+        .device()
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    enc.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded_bpr),
+                rows_per_image: Some(height),
+            },
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    ctx.queue().submit([enc.finish()]);
+
+    let slice = buffer.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |r| {
+        let _ = tx.send(r);
+    });
+    ctx.device()
+        .poll(wgpu::PollType::wait_indefinitely())
+        .unwrap();
+    rx.recv().unwrap().unwrap();
+
+    let data = slice.get_mapped_range();
+    let tight_bpr = (width * 4) as usize;
+    let mut pixels = Vec::with_capacity(tight_bpr * height as usize);
+    for row in 0..height as usize {
+        let start = row * padded_bpr as usize;
+        pixels.extend_from_slice(&data[start..start + tight_bpr]);
+    }
+    RgbaImage {
+        width,
+        height,
+        pixels,
+    }
+}
+
 /// A tight, row-major RGBA8 image read back from the GPU.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RgbaImage {
@@ -107,64 +175,7 @@ impl OffscreenTarget {
 
     /// Copy the texture to CPU and return tight RGBA bytes (blocking).
     pub fn read_rgba(&self) -> RgbaImage {
-        let padded_bpr = align_up(self.width * 4, COPY_ALIGN);
-        let buffer = self.ctx.device().create_buffer(&wgpu::BufferDescriptor {
-            label: Some("delog-offscreen-readback"),
-            size: (padded_bpr * self.height) as u64,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-
-        let mut enc = self
-            .ctx
-            .device()
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        enc.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &buffer,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded_bpr),
-                    rows_per_image: Some(self.height),
-                },
-            },
-            wgpu::Extent3d {
-                width: self.width,
-                height: self.height,
-                depth_or_array_layers: 1,
-            },
-        );
-        self.ctx.queue().submit([enc.finish()]);
-
-        let slice = buffer.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| {
-            let _ = tx.send(r);
-        });
-        self.ctx
-            .device()
-            .poll(wgpu::PollType::wait_indefinitely())
-            .unwrap();
-        rx.recv().unwrap().unwrap();
-
-        let data = slice.get_mapped_range();
-        let tight_bpr = (self.width * 4) as usize;
-        let mut pixels = Vec::with_capacity(tight_bpr * self.height as usize);
-        for row in 0..self.height as usize {
-            let start = row * padded_bpr as usize;
-            pixels.extend_from_slice(&data[start..start + tight_bpr]);
-        }
-        RgbaImage {
-            width: self.width,
-            height: self.height,
-            pixels,
-        }
+        read_texture_rgba(&self.ctx, &self.texture, self.width, self.height)
     }
 }
 
