@@ -24,6 +24,7 @@ pub mod context;
 pub mod line;
 pub mod minmax;
 pub mod palette;
+pub mod scatter;
 pub mod target;
 pub mod uniforms;
 
@@ -31,5 +32,6 @@ pub use buffers::BufferManager;
 pub use context::RenderContext;
 pub use line::LinePipeline;
 pub use minmax::{COLUMN_STRIDE, MinMaxColPipeline};
+pub use scatter::ScatterPipeline;
 pub use target::{OffscreenTarget, RgbaImage};
 pub use uniforms::{PlotUniform, UniformRing};
