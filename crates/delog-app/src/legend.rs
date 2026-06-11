@@ -1,16 +1,14 @@
 //! Plot legend: per-trace visibility, colour and width editing (PLAN.md §10.4,
 //! PLT-08).
 //!
-//! An overlay in the plot's top-left listing each trace with a visibility
-//! checkbox, a colour editor, its label, a width control and a remove button.
-//! Returns the field removed this frame, if any, so the caller can unpin its
-//! cache. (Plot/trace *mode* editing waits on the scatter/step pipelines,
-//! GPU-07/08.)
+//! An overlay in the plot's top-left listing each trace with a colour editor
+//! and clickable label. Right-clicking a trace opens style controls for draw
+//! mode, width and removal.
 
 use delog_core::identity::FieldId;
 use delog_core::snapshot::StoreSnapshot;
 
-use crate::plot::PlotPane;
+use crate::plot::{PlotPane, TraceMode};
 
 /// `topic.field` label for a trace, resolved through core (no Arrow in the app).
 pub fn trace_label(snapshot: &StoreSnapshot, field: FieldId) -> String {
@@ -75,6 +73,17 @@ pub fn ui(
                             trace.visible = !trace.visible;
                         }
                         resp.context_menu(|ui| {
+                            ui.menu_button("Mode", |ui| {
+                                for mode in TraceMode::ALL {
+                                    ui.radio_value(&mut trace.mode, mode, mode.label());
+                                }
+                            });
+                            ui.add(
+                                egui::Slider::new(&mut trace.width_px, 1.0..=12.0)
+                                    .text("Width")
+                                    .suffix(" px"),
+                            );
+                            ui.separator();
                             if ui.button("Remove").clicked() {
                                 removed = Some(*field);
                                 ui.close();
