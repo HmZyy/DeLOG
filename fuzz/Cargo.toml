@@ -1,0 +1,41 @@
+# cargo-fuzz crate (PAR-13). Detached from the root workspace via the empty
+# `[workspace]` table below so the pinned-stable `cargo build --workspace`
+# never tries to compile `libfuzzer-sys` (which needs nightly). Run with
+# `cargo +nightly fuzz run <target>`.
+[package]
+name = "delog-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+delog-core = { path = "../crates/delog-core" }
+delog-parsers = { path = "../crates/delog-parsers" }
+
+[[bin]]
+name = "bin_record"
+path = "fuzz_targets/bin_record.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ulog_defs_data"
+path = "fuzz_targets/ulog_defs_data.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mavlink_framing"
+path = "fuzz_targets/mavlink_framing.rs"
+test = false
+doc = false
+bench = false
+
+# Detach from the root workspace.
+[workspace]
