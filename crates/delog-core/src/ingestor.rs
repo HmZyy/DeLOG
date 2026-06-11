@@ -136,6 +136,11 @@ impl<O: IngestObserver> Ingestor<O> {
             IngestMsg::Progress { source, frac } => self.observer.on_progress(source, frac),
             IngestMsg::CloseSource { source, summary } => {
                 self.flush_source(source);
+                if !summary.source_meta.is_empty() {
+                    self.identity
+                        .set_source_metadata(source, summary.source_meta.clone());
+                    self.publish();
+                }
                 self.observer.on_close(source, summary);
             }
         }
@@ -463,6 +468,7 @@ mod tests {
     use arrow::datatypes::DataType;
 
     use super::*;
+    use crate::identity::{AutoMarker, SourceMetadata, SourceParam};
     use crate::ingest::{IngestSink, ingest_channel};
     use crate::schema::FieldSchema;
 
@@ -623,6 +629,36 @@ mod tests {
         assert_eq!(recorder.closes.len(), 1);
         assert_eq!(recorder.closes[0].1.row_count, 2);
         assert!(recorder.diags.is_empty());
+    }
+
+    #[test]
+    fn close_source_publishes_source_metadata() {
+        let mut ing = Ingestor::new(NullObserver);
+        let store = ing.store();
+        let source = open(&mut ing, "flight.ulg", SourceKind::File);
+        let meta = SourceMetadata {
+            params: vec![SourceParam {
+                name: "MPC_XY_CRUISE".to_owned(),
+                ty: "float".to_owned(),
+                value: "5.5".to_owned(),
+            }],
+            auto_markers: vec![AutoMarker {
+                time_us: 42,
+                level: 6,
+                text: "takeoff".to_owned(),
+            }],
+        };
+
+        ing.process(IngestMsg::CloseSource {
+            source,
+            summary: ParseSummary {
+                source_meta: meta.clone(),
+                ..ParseSummary::default()
+            },
+        });
+
+        let snap = store.load();
+        assert_eq!(snap.source(source).unwrap().entry.meta, meta);
     }
 
     #[test]

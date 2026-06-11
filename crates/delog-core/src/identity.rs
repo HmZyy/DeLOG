@@ -39,7 +39,30 @@ pub struct SourceEntry {
     pub id: SourceId,
     pub label: String,
     pub offset_us: TimestampUs,
+    pub meta: SourceMetadata,
     pub removed: bool,
+}
+
+/// Parser-supplied source metadata that is useful outside the canonical sample
+/// store: parameters, logged messages and later file/link facts.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SourceMetadata {
+    pub params: Vec<SourceParam>,
+    pub auto_markers: Vec<AutoMarker>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceParam {
+    pub name: String,
+    pub ty: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutoMarker {
+    pub time_us: TimestampUs,
+    pub level: u8,
+    pub text: String,
 }
 
 /// Registered topic identity.
@@ -131,6 +154,7 @@ impl IdentityRegistry {
             id,
             label,
             offset_us: 0,
+            meta: SourceMetadata::default(),
             removed: false,
         });
         id
@@ -297,6 +321,18 @@ impl IdentityRegistry {
         Some(old)
     }
 
+    pub fn set_source_metadata(
+        &mut self,
+        id: SourceId,
+        meta: SourceMetadata,
+    ) -> Option<SourceMetadata> {
+        let source = self
+            .sources
+            .get_mut(id.index())
+            .filter(|entry| entry.id == id)?;
+        Some(std::mem::replace(&mut source.meta, meta))
+    }
+
     pub fn effective_source_time_us(
         &self,
         id: SourceId,
@@ -360,6 +396,12 @@ impl IdentityRegistry {
                 return candidate;
             }
         }
+    }
+}
+
+impl SourceMetadata {
+    pub fn is_empty(&self) -> bool {
+        self.params.is_empty() && self.auto_markers.is_empty()
     }
 }
 
@@ -558,5 +600,31 @@ mod tests {
         assert_eq!(ids.set_source_offset_us(source, -250), Some(0));
         assert_eq!(ids.source(source).unwrap().offset_us, -250);
         assert_eq!(ids.effective_source_time_us(source, 1_000), Some(750));
+    }
+
+    #[test]
+    fn source_metadata_can_be_replaced() {
+        let mut ids = IdentityRegistry::new();
+        let source = ids.add_source("flight");
+        let meta = SourceMetadata {
+            params: vec![SourceParam {
+                name: "SYS_AUTOSTART".to_owned(),
+                ty: "int32_t".to_owned(),
+                value: "4001".to_owned(),
+            }],
+            auto_markers: vec![AutoMarker {
+                time_us: 1_000,
+                level: 6,
+                text: "armed".to_owned(),
+            }],
+        };
+
+        assert!(ids.source(source).unwrap().meta.is_empty());
+        assert_eq!(
+            ids.set_source_metadata(source, meta.clone()),
+            Some(SourceMetadata::default())
+        );
+        assert_eq!(ids.source(source).unwrap().meta, meta);
+        assert_eq!(ids.set_source_metadata(SourceId(99), meta), None);
     }
 }
