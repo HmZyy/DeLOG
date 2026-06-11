@@ -918,7 +918,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [~] **PLT-11** — Context menu: remove/clear/mode/color/width/split/reset/legend/info (§10.6) — remove (legend), clear, trace mode/width, reset, legend toggle, hover-mode, split H/V done; info (PLT-12) pending
 - [ ] **PLT-12** — Plot debug popup: counts, visible range, GPU bytes, yquery µs, paint µs
 - [~] **PLT-13** — Drag-drop: single + multi-field onto pane / tile edge (§10.7) — single-field drop onto panes/workspace and tile-edge split-drop wired; multi-field pending
-- [ ] **PLT-14** — Empty-pane state copy
+- [x] **PLT-14** — Empty-pane state copy
 
 ### TLN — Timeline & playback (M5)
 
