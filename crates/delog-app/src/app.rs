@@ -6,6 +6,7 @@ use crate::about;
 use crate::axes;
 use crate::browser::{self, BrowserModel};
 use crate::gpu::{self, GpuBridge};
+use crate::legend;
 use crate::plot::PlotPane;
 use crate::session::Session;
 
@@ -187,6 +188,17 @@ impl eframe::App for DelogApp {
                                 y_range,
                             },
                         );
+
+                        // Legend overlay: visibility/colour/width edits + remove.
+                        let labels: Vec<_> = self
+                            .pane
+                            .traces
+                            .iter()
+                            .map(|t| (t.field, legend::trace_label(&snapshot, t.field)))
+                            .collect();
+                        if let Some(removed) = legend::ui(ui, plot_rect, &mut self.pane, &labels) {
+                            self.caches.unpin(removed);
+                        }
                     }
                 });
             if let Some(field) = dropped

@@ -5,6 +5,7 @@ mod app;
 mod axes;
 mod browser;
 mod gpu;
+mod legend;
 mod plot;
 mod session;
 

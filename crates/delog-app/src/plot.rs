@@ -72,6 +72,8 @@ pub struct TraceRef {
     pub field: FieldId,
     pub color: [f32; 4],
     pub width_px: f32,
+    /// Drawn only when visible; the legend toggles this (PLT-08).
+    pub visible: bool,
 }
 
 /// One plot pane. M3 ships a single pane; the tile workspace is PLT-01.
@@ -93,8 +95,24 @@ impl PlotPane {
             field,
             color,
             width_px: 1.5,
+            visible: true,
         });
         true
+    }
+
+    /// Remove a plotted trace (legend ×, PLT-08/11).
+    pub fn remove_trace(&mut self, field: FieldId) {
+        self.traces.retain(|t| t.field != field);
+    }
+
+    /// Mutate one trace's style/visibility in place (legend controls).
+    pub fn trace_mut(&mut self, field: FieldId) -> Option<&mut TraceRef> {
+        self.traces.iter_mut().find(|t| t.field == field)
+    }
+
+    /// Traces drawn this frame (visible only).
+    pub fn visible_traces(&self) -> impl Iterator<Item = &TraceRef> {
+        self.traces.iter().filter(|t| t.visible)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -179,6 +197,22 @@ mod tests {
         assert!(!pane.add_trace(FieldId(0))); // already plotted
         assert_eq!(pane.traces.len(), 2);
         assert_ne!(pane.traces[0].color, pane.traces[1].color);
+    }
+
+    #[test]
+    fn traces_default_visible_and_can_be_toggled_and_removed() {
+        let mut pane = PlotPane::default();
+        pane.add_trace(FieldId(0));
+        pane.add_trace(FieldId(1));
+        assert!(pane.traces.iter().all(|t| t.visible));
+        assert_eq!(pane.visible_traces().count(), 2);
+
+        pane.trace_mut(FieldId(0)).unwrap().visible = false;
+        assert_eq!(pane.visible_traces().count(), 1);
+
+        pane.remove_trace(FieldId(0));
+        assert_eq!(pane.traces.len(), 1);
+        assert_eq!(pane.traces[0].field, FieldId(1));
     }
 
     #[test]
