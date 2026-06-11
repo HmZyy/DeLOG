@@ -275,6 +275,8 @@ pub struct WorkspaceActions {
     pub remove_trace: Vec<FieldId>,
     /// Pane the user clicked this frame (step reference, TLN-04).
     pub focus: Option<egui_tiles::TileId>,
+    /// Alt+hover scrub: move the playhead to this canonical time (PLT-10).
+    pub scrub_to: Option<i64>,
 }
 
 pub struct PlotServices<'a> {
@@ -289,6 +291,8 @@ pub struct PlotServices<'a> {
     /// Playback time for the playhead cursor; `None` before any data loads
     /// (§11, PLT-10).
     pub playhead_us: Option<i64>,
+    /// Whether playback is running (gates the playhead value tooltip).
+    pub playing: bool,
 }
 
 pub struct Behavior<'a> {
@@ -469,20 +473,43 @@ impl Behavior<'_> {
 
         self.plot_context_menu(tile_id, &response, pane, Some(debug));
 
-        // Playhead cursor + value readout on every pane (§10.5, PLT-10).
+        // Playhead cursor + value readout on every pane (§10.5, PLT-10). The
+        // hovered pane never gets the playhead tooltip — its hover tooltip is
+        // already showing — and the other panes only show it while alt-scrubbing
+        // or during playback.
         if let Some(t_us) = self.services.playhead_us {
+            let hovered = response
+                .hover_pos()
+                .is_some_and(|pos| plot_rect.contains(pos));
+            let alt = ui.input(|i| i.modifiers.alt);
+            let readout =
+                (!hovered && (alt || self.services.playing)).then_some(*self.services.hover_mode);
             hover::draw_playhead(
                 ui,
-                pview,
+                HoverTarget {
+                    id: egui::Id::new(("playhead", tile_id)),
+                    view: pview,
+                },
                 self.services.snapshot.as_ref(),
                 pane,
                 self.services.origin_us,
                 t_us,
-                *self.services.hover_mode,
+                readout,
             );
         }
 
         if !ui.ctx().any_popup_open() {
+            // Alt+hover drags the playhead along with the cursor (PLT-10).
+            if ui.input(|i| i.modifiers.alt)
+                && let Some(pos) = response.hover_pos()
+                && plot_rect.contains(pos)
+            {
+                let frac = (pos.x - plot_rect.left()) / plot_rect.width().max(1.0);
+                let t_sec = x_range.0 as f64 + frac as f64 * (x_range.1 - x_range.0) as f64;
+                self.actions.scrub_to =
+                    Some(self.services.origin_us + (t_sec * 1e6).round() as i64);
+            }
+
             hover::draw(
                 ui,
                 HoverTarget {
