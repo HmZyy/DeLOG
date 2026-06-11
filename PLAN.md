@@ -916,7 +916,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [~] **PLT-09** — Hover: canonical binary search, Prev/Next/Linear tooltip modes, hover circles (§10.5) — cursor line, circles, canonical value tooltip done (Prev mode); Next/Linear plumbed via SampleMode, switch UI pending (PLT-11)
 - [ ] **PLT-10** — Playhead vertical line + value readout on all panes
 - [~] **PLT-11** — Context menu: remove/clear/mode/color/width/split/reset/legend/info (§10.6) — remove (legend), clear, trace mode/width, reset, legend toggle, hover-mode, split H/V done; info (PLT-12) pending
-- [ ] **PLT-12** — Plot debug popup: counts, visible range, GPU bytes, yquery µs, paint µs
+- [x] **PLT-12** — Plot debug popup: counts, visible range, GPU bytes, yquery µs, paint µs
 - [~] **PLT-13** — Drag-drop: single + multi-field onto pane / tile edge (§10.7) — single-field drop onto panes/workspace and tile-edge split-drop wired; multi-field pending
 - [x] **PLT-14** — Empty-pane state copy
 
