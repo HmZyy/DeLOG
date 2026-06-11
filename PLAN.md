@@ -888,7 +888,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **GPU-06** — Per-plot viewport/scissor inside egui main pass via paint callback
 - [ ] **GPU-07** — `scatter_pull` pipeline (quad/sample, size uniform)
 - [ ] **GPU-08** — `step_pull` stepped-mode pipeline (2 segments/sample)
-- [ ] **GPU-09** — `minmax_col` decimated pipeline + transient ring upload (§9.5)
+- [x] **GPU-09** — `minmax_col` decimated pipeline + transient ring upload (§9.5)
 - [ ] **GPU-10** — Draw-path selector: full vs decimated at samples/px > 8
 - [ ] **GPU-11** — Batched encoding: one pipeline bind, per-trace dynamic offsets
 - [ ] **GPU-12** — wgpu error scopes → diagnostics
