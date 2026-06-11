@@ -26,6 +26,7 @@ pub struct DelogApp {
     path_input: String,
     browser_query: String,
     browser_selection: browser::Selection,
+    offset_dialog: Option<(delog_core::identity::SourceId, i64)>,
     show_about: bool,
     show_connection_dialog: bool,
     connection_dialog: ConnectionDialog,
@@ -50,6 +51,7 @@ impl DelogApp {
             path_input: String::new(),
             browser_query: String::new(),
             browser_selection: browser::Selection::default(),
+            offset_dialog: None,
             show_about: false,
             show_connection_dialog: false,
             connection_dialog: ConnectionDialog::default(),
@@ -221,12 +223,17 @@ impl eframe::App for DelogApp {
             .resizable(true)
             .default_size(280.0)
             .show_inside(ui, |ui| {
-                browser::ui(
+                // Offset edits go through the ingest thread (the single
+                // registry writer) and come back as a new epoch (BRW-07).
+                if let Some((source, offset_us)) = browser::ui(
                     ui,
                     &model,
                     &mut self.browser_query,
                     &mut self.browser_selection,
-                );
+                    &mut self.offset_dialog,
+                ) {
+                    self.session.set_source_offset(source, offset_us);
+                }
             });
 
         egui::Frame::central_panel(ui.style()).show(ui, |ui| {

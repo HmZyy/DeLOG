@@ -20,7 +20,10 @@ pub struct SourceNode {
     pub id: SourceId,
     pub label: String,
     pub rows: u64,
+    /// Effective time range (source offset applied, §4.2).
     pub range: Option<TimeRange>,
+    /// Per-source time offset (BRW-07).
+    pub offset_us: i64,
     pub topics: Vec<TopicNode>,
 }
 
@@ -99,11 +102,13 @@ impl BrowserModel {
             }
             topics.sort_by(|a, b| natural_cmp(&a.name, &b.name));
 
+            let offset_us = source.entry.offset_us;
             sources.push(SourceNode {
                 id: source.entry.id,
                 label: source.entry.label.clone(),
                 rows: source_rows,
-                range: source_range,
+                range: source_range.and_then(|r| r.offset(offset_us)),
+                offset_us,
                 topics,
             });
         }
@@ -294,9 +299,16 @@ fn matches_query(query: &str, path: &str) -> bool {
         .all(|token| path.contains(&token.to_lowercase()))
 }
 
-/// Render the browser tree with its search box (BRW-01/02). `query` and
-/// `selection` persist in app state across frames.
-pub fn ui(ui: &mut egui::Ui, model: &BrowserModel, query: &mut String, selection: &mut Selection) {
+/// Render the browser tree with its search box (BRW-01/02). `query`,
+/// `selection` and the offset dialog draft persist in app state across
+/// frames. Returns a requested per-source offset change, if any (BRW-07).
+pub fn ui(
+    ui: &mut egui::Ui,
+    model: &BrowserModel,
+    query: &mut String,
+    selection: &mut Selection,
+    offset_dialog: &mut Option<(SourceId, i64)>,
+) -> Option<(SourceId, i64)> {
     ui.heading("Data");
     ui.separator();
 
@@ -304,7 +316,7 @@ pub fn ui(ui: &mut egui::Ui, model: &BrowserModel, query: &mut String, selection
         ui.add_space(8.0);
         ui.weak("No logs loaded.");
         ui.weak("Drop a .BIN file here, or use File ▸ Open.");
-        return;
+        return None;
     }
 
     // Fuzzy filter over full paths (§13, BRW-02).
@@ -326,7 +338,7 @@ pub fn ui(ui: &mut egui::Ui, model: &BrowserModel, query: &mut String, selection
     if filtering && model.is_empty() {
         ui.add_space(8.0);
         ui.weak("Nothing matches the filter.");
-        return;
+        return None;
     }
 
     // Visible field order, for shift-range selection and drag payloads.
@@ -337,6 +349,7 @@ pub fn ui(ui: &mut egui::Ui, model: &BrowserModel, query: &mut String, selection
         .flat_map(|t| t.fields.iter().map(|f| f.id))
         .collect();
 
+    let mut offset_change = None;
     egui::ScrollArea::vertical().show(ui, |ui| {
         for source in &model.sources {
             let header = format!("{}  ({} rows)", source.label, source.rows);
@@ -344,13 +357,18 @@ pub fn ui(ui: &mut egui::Ui, model: &BrowserModel, query: &mut String, selection
                 .id_salt(("source", source.id.0))
                 .default_open(true)
                 .show(ui, |ui| {
-                    if let Some(range) = source.range {
-                        ui.weak(format!(
-                            "{:.3}–{:.3} s",
-                            range.min_us as f64 / 1e6,
-                            range.max_us as f64 / 1e6
-                        ));
-                    }
+                    ui.horizontal(|ui| {
+                        if let Some(range) = source.range {
+                            ui.weak(format!(
+                                "{:.3}–{:.3} s",
+                                range.min_us as f64 / 1e6,
+                                range.max_us as f64 / 1e6
+                            ));
+                        }
+                        if let Some(change) = offset_widget(ui, source, offset_dialog) {
+                            offset_change = Some(change);
+                        }
+                    });
                     for topic in &source.topics {
                         // While filtering, surviving topics open so the
                         // matched fields are visible immediately.
@@ -367,6 +385,80 @@ pub fn ui(ui: &mut egui::Ui, model: &BrowserModel, query: &mut String, selection
                 });
         }
     });
+
+    if let Some(change) = offset_dialog_window(ui, model, offset_dialog) {
+        offset_change = Some(change);
+    }
+    offset_change
+}
+
+/// Inline drag-µs offset on the source row (§13/§4.2, BRW-07): dragging
+/// shifts the source in ~1 ms steps; the ⏱ button opens the exact-µs dialog.
+fn offset_widget(
+    ui: &mut egui::Ui,
+    source: &SourceNode,
+    offset_dialog: &mut Option<(SourceId, i64)>,
+) -> Option<(SourceId, i64)> {
+    let mut change = None;
+    ui.weak("offset");
+    let mut secs = source.offset_us as f64 * 1e-6;
+    let response = ui.add(
+        egui::DragValue::new(&mut secs)
+            .speed(0.001)
+            .fixed_decimals(3)
+            .suffix(" s"),
+    );
+    if response.changed() {
+        change = Some((source.id, (secs * 1e6).round() as i64));
+    }
+    if ui
+        .small_button("⏱")
+        .on_hover_text("Set exact offset (µs)…")
+        .clicked()
+    {
+        *offset_dialog = Some((source.id, source.offset_us));
+    }
+    change
+}
+
+/// Exact-µs offset dialog (BRW-07). The draft lives in app state; Apply emits
+/// the change and the window's close button discards it.
+fn offset_dialog_window(
+    ui: &egui::Ui,
+    model: &BrowserModel,
+    offset_dialog: &mut Option<(SourceId, i64)>,
+) -> Option<(SourceId, i64)> {
+    let (source_id, mut draft_us) = (*offset_dialog)?;
+    let label = model
+        .sources
+        .iter()
+        .find(|s| s.id == source_id)
+        .map_or("(removed source)", |s| s.label.as_str());
+
+    let mut change = None;
+    let mut open = true;
+    egui::Window::new(format!("Time offset — {label}"))
+        .id(egui::Id::new(("source_offset", source_id.0)))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .show(ui.ctx(), |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Offset");
+                ui.add(egui::DragValue::new(&mut draft_us).speed(100).suffix(" µs"));
+            });
+            ui.weak(format!("= {:.6} s", draft_us as f64 * 1e-6));
+            if ui.button("Apply").clicked() {
+                change = Some((source_id, draft_us));
+            }
+        });
+
+    if change.is_some() || !open {
+        *offset_dialog = None;
+    } else {
+        *offset_dialog = Some((source_id, draft_us));
+    }
+    change
 }
 
 fn field_row(ui: &mut egui::Ui, field: &FieldNode, selection: &mut Selection, visible: &[FieldId]) {
@@ -464,6 +556,7 @@ mod tests {
     fn snapshot() -> StoreSnapshot {
         let mut identity = IdentityRegistry::new();
         let source = identity.add_source("flight_21");
+        identity.set_source_offset_us(source, -250);
         let gps = identity.add_topic(source, "GPS").unwrap();
         identity.add_field(gps, "Lat").unwrap();
         identity.add_field(gps, "Alt").unwrap();
@@ -497,7 +590,9 @@ mod tests {
         let src = &model.sources[0];
         assert_eq!(src.label, "flight_21");
         assert_eq!(src.rows, 3);
-        assert_eq!(src.range, TimeRange::new(100, 300));
+        // Effective range: raw 100..300 shifted by the -250 µs source offset.
+        assert_eq!(src.offset_us, -250);
+        assert_eq!(src.range, TimeRange::new(-150, 50));
 
         assert_eq!(src.topics.len(), 1);
         let gps = &src.topics[0];

@@ -110,6 +110,12 @@ pub enum IngestMsg {
         source: SourceId,
         summary: ParseSummary,
     },
+    /// Set a source's time offset (§4.2; the offset-drag UI, BRW-07). Routed
+    /// through the ingest thread because it is the only registry writer.
+    SetSourceOffset {
+        source: SourceId,
+        offset_us: i64,
+    },
 }
 
 /// The parser-facing handle. Every method is infallible: once the ingest thread
@@ -151,6 +157,15 @@ impl IngestSender {
             tx: self.tx.clone(),
             connected: true,
         }
+    }
+
+    /// Request a source time-offset change (BRW-07). Blocking like a file
+    /// sink: offset edits are rare UI events, never hot-path. A no-op once
+    /// the ingest thread is gone.
+    pub fn set_source_offset(&self, source: SourceId, offset_us: i64) {
+        let _ = self
+            .tx
+            .send(IngestMsg::SetSourceOffset { source, offset_us });
     }
 
     /// A non-blocking, live-decoder sink: a full channel *drops* the batch and

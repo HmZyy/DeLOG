@@ -150,6 +150,13 @@ impl Session {
         push_diag(&self.diagnostics, diag);
     }
 
+    /// Request a per-source time-offset change (§4.2, BRW-07). Applied by the
+    /// ingest thread (the single registry writer), which publishes a new
+    /// epoch; stale render caches rebuild off that.
+    pub fn set_source_offset(&self, source: SourceId, offset_us: i64) {
+        self.sender.set_source_offset(source, offset_us);
+    }
+
     /// Combined progress of in-flight loads (the least-advanced one), or `None`
     /// when nothing is loading.
     pub fn overall_progress(&self) -> Option<f32> {
