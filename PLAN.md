@@ -973,7 +973,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [ ] **DIA-02** — Dock panel: severity/origin filters, text search, clear
 - [ ] **DIA-03** — Click-to-jump playhead for time-bearing diags
 - [ ] **DIA-04** — Emitters wired: parser, stream, ingest-drop, layout-ghost, wgpu, cache
-- [ ] **DIA-05** — Async data-quality scan: regressions, dt outliers, duplicates, NaN/Inf % (§15)
+- [x] **DIA-05** — Async data-quality scan: regressions, dt outliers, duplicates, NaN/Inf % (§15)
 - [ ] **DIA-06** — Log metadata display (params, file info, link info) in browser/inspector
 - [ ] **DIA-07** — Export diagnostics JSON
 
