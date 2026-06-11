@@ -897,6 +897,7 @@ name = "delog-app"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "bytemuck",
  "delog-cache",
  "delog-core",
  "delog-parsers",
