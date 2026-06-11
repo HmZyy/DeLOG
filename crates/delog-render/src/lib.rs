@@ -25,6 +25,7 @@ pub mod line;
 pub mod minmax;
 pub mod palette;
 pub mod scatter;
+pub mod step;
 pub mod target;
 pub mod uniforms;
 
@@ -33,5 +34,6 @@ pub use context::RenderContext;
 pub use line::LinePipeline;
 pub use minmax::{COLUMN_STRIDE, MinMaxColPipeline};
 pub use scatter::ScatterPipeline;
+pub use step::StepPipeline;
 pub use target::{OffscreenTarget, RgbaImage};
 pub use uniforms::{PlotUniform, UniformRing};
