@@ -493,6 +493,7 @@ impl<'a> Decoder<'a> {
             row_count: self.row_count,
             time_range: self.time_range,
             diagnostics: self.diagnostics,
+            ..ParseSummary::default()
         }
     }
 }
