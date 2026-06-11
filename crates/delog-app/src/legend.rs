@@ -23,18 +23,13 @@ pub fn trace_label(snapshot: &StoreSnapshot, field: FieldId) -> String {
     }
 }
 
-/// Draw the legend overlay and apply edits to `pane`. Returns a field if its ×
-/// button was clicked this frame.
-pub fn ui(
-    ui: &egui::Ui,
-    plot_rect: egui::Rect,
-    pane: &mut PlotPane,
-    labels: &[(FieldId, String)],
-) -> Option<FieldId> {
+/// Draw the legend overlay and apply edits to `pane`. Each row is a colour
+/// editor plus a clickable label: clicking toggles the trace's visibility, and
+/// a hidden trace's label is greyed out (PLT-08).
+pub fn ui(ui: &egui::Ui, plot_rect: egui::Rect, pane: &mut PlotPane, labels: &[(FieldId, String)]) {
     if labels.is_empty() {
-        return None;
+        return;
     }
-    let mut removed = None;
 
     egui::Area::new(egui::Id::new("plot_legend"))
         .fixed_pos(plot_rect.left_top() + egui::vec2(8.0, 8.0))
@@ -46,41 +41,46 @@ pub fn ui(
                         continue;
                     };
                     ui.horizontal(|ui| {
-                        ui.checkbox(&mut trace.visible, "");
-
-                        let mut rgba = egui::Rgba::from_rgba_unmultiplied(
-                            trace.color[0],
-                            trace.color[1],
-                            trace.color[2],
-                            trace.color[3],
-                        );
-                        if egui::color_picker::color_edit_button_rgba(
+                        // sRGB colour editor (matches the rendered trace).
+                        let mut color = srgb_to_color32(trace.color);
+                        if egui::color_picker::color_edit_button_srgba(
                             ui,
-                            &mut rgba,
+                            &mut color,
                             egui::color_picker::Alpha::Opaque,
                         )
                         .changed()
                         {
-                            trace.color = rgba.to_rgba_unmultiplied();
+                            trace.color = color32_to_srgb(color);
                         }
 
-                        ui.label(label);
-                        ui.add(
-                            egui::DragValue::new(&mut trace.width_px)
-                                .range(0.5..=6.0)
-                                .speed(0.1)
-                                .prefix("w "),
-                        );
-                        if ui.small_button("×").clicked() {
-                            removed = Some(*field);
+                        // Clickable label; greyed when the trace is hidden.
+                        let text_color = if trace.visible {
+                            ui.visuals().text_color()
+                        } else {
+                            ui.visuals().weak_text_color()
+                        };
+                        let label_widget =
+                            egui::Label::new(egui::RichText::new(label).color(text_color))
+                                .sense(egui::Sense::click());
+                        if ui.add(label_widget).clicked() {
+                            trace.visible = !trace.visible;
                         }
                     });
                 }
             });
         });
+}
 
-    if let Some(field) = removed {
-        pane.remove_trace(field);
-    }
-    removed
+fn srgb_to_color32(c: [f32; 4]) -> egui::Color32 {
+    let to_u8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    egui::Color32::from_rgba_unmultiplied(to_u8(c[0]), to_u8(c[1]), to_u8(c[2]), to_u8(c[3]))
+}
+
+fn color32_to_srgb(c: egui::Color32) -> [f32; 4] {
+    [
+        c.r() as f32 / 255.0,
+        c.g() as f32 / 255.0,
+        c.b() as f32 / 255.0,
+        c.a() as f32 / 255.0,
+    ]
 }

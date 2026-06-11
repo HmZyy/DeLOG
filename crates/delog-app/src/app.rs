@@ -196,9 +196,7 @@ impl eframe::App for DelogApp {
                             .iter()
                             .map(|t| (t.field, legend::trace_label(&snapshot, t.field)))
                             .collect();
-                        if let Some(removed) = legend::ui(ui, plot_rect, &mut self.pane, &labels) {
-                            self.caches.unpin(removed);
-                        }
+                        legend::ui(ui, plot_rect, &mut self.pane, &labels);
                     }
                 });
             if let Some(field) = dropped

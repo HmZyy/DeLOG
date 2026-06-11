@@ -37,18 +37,27 @@ pub struct PaneView {
 #[derive(Clone, Copy, Debug)]
 pub struct GpuBridge {
     available: bool,
+    /// Whether the egui render target is an sRGB format (it gamma-encodes the
+    /// shader's linear output) vs a plain UNORM target (raw write). Trace colours
+    /// are stored in sRGB; we convert to match the target so the rendered line
+    /// matches the legend swatch.
+    srgb_target: bool,
 }
 
 impl GpuBridge {
     pub fn from_creation_context(cc: &eframe::CreationContext<'_>) -> Self {
         let Some(render_state) = &cc.wgpu_render_state else {
-            return Self { available: false };
+            return Self {
+                available: false,
+                srgb_target: false,
+            };
         };
 
         let ctx = RenderContext::new(
             Arc::new(render_state.device.clone()),
             Arc::new(render_state.queue.clone()),
         );
+        let srgb_target = render_state.target_format.is_srgb();
         let resources = PlotCallbackResources::new(ctx, render_state.target_format);
         render_state
             .renderer
@@ -56,7 +65,10 @@ impl GpuBridge {
             .callback_resources
             .insert(resources);
 
-        Self { available: true }
+        Self {
+            available: true,
+            srgb_target,
+        }
     }
 
     pub fn is_available(&self) -> bool {
@@ -113,7 +125,7 @@ impl GpuBridge {
                         (y0, y1),
                         viewport_px,
                         trace.width_px,
-                        trace.color,
+                        shader_color(trace.color, self.srgb_target),
                     ),
                 );
 
@@ -177,6 +189,32 @@ pub fn visible_y_range(caches: &mut CacheManager, pane: &PlotPane, x0: f32, x1: 
     }
     let pad = (max - min) * 0.05;
     (min - pad, max + pad)
+}
+
+/// Convert a stored sRGB colour to what the shader must output so the rendered
+/// pixel equals the sRGB colour: on an sRGB target the GPU encodes the shader's
+/// linear output, so pass linear; on a UNORM target the write is raw, so pass
+/// the sRGB values as-is (matching egui's own UI output). Keeps the trace and
+/// its legend swatch identical.
+fn shader_color(srgb: [f32; 4], srgb_target: bool) -> [f32; 4] {
+    if srgb_target {
+        [
+            srgb_to_linear(srgb[0]),
+            srgb_to_linear(srgb[1]),
+            srgb_to_linear(srgb[2]),
+            srgb[3],
+        ]
+    } else {
+        srgb
+    }
+}
+
+fn srgb_to_linear(c: f32) -> f32 {
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 /// How one trace is drawn this frame (GPU-10).

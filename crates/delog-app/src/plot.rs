@@ -90,7 +90,9 @@ impl PlotPane {
         if self.traces.iter().any(|t| t.field == field) {
             return false;
         }
-        let color = palette::trace_color(self.traces.len()).to_linear_f32();
+        // Store sRGB (what egui's colour picker and the non-sRGB target both
+        // expect); the renderer converts to the target's space.
+        let color = palette::trace_color(self.traces.len()).to_srgb_f32();
         self.traces.push(TraceRef {
             field,
             color,
@@ -98,11 +100,6 @@ impl PlotPane {
             visible: true,
         });
         true
-    }
-
-    /// Remove a plotted trace (legend ×, PLT-08/11).
-    pub fn remove_trace(&mut self, field: FieldId) {
-        self.traces.retain(|t| t.field != field);
     }
 
     /// Mutate one trace's style/visibility in place (legend controls).
@@ -200,7 +197,7 @@ mod tests {
     }
 
     #[test]
-    fn traces_default_visible_and_can_be_toggled_and_removed() {
+    fn traces_default_visible_and_toggle_via_trace_mut() {
         let mut pane = PlotPane::default();
         pane.add_trace(FieldId(0));
         pane.add_trace(FieldId(1));
@@ -209,10 +206,6 @@ mod tests {
 
         pane.trace_mut(FieldId(0)).unwrap().visible = false;
         assert_eq!(pane.visible_traces().count(), 1);
-
-        pane.remove_trace(FieldId(0));
-        assert_eq!(pane.traces.len(), 1);
-        assert_eq!(pane.traces[0].field, FieldId(1));
     }
 
     #[test]
