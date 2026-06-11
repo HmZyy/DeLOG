@@ -909,7 +909,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **PLT-02** — `PlotPane`/`TraceRef` state; palette auto-assign
 - [x] **PLT-03** — Shared `ViewX` µs model; all panes render from it (§10.3)
 - [x] **PLT-04** — Wheel zoom @ cursor, drag pan, double-click reset-to-full
-- [ ] **PLT-05** — Lock-X-to-live with explicit unlock-on-scrub + re-lock affordance (§10.4)
+- [x] **PLT-05** — Lock-X-to-live with explicit unlock-on-scrub + re-lock affordance (§10.4) — `ViewX::locked_to_tail` preserves span while pinning to `global_end`; pan/zoom/reset unlock; live toolbar button highlights when re-lock is available
 - [x] **PLT-06** — Y axis auto-fits the visible window (pyramid min/max + 5% pad) — full-data/manual modes built then removed by decision; AutoVisible is the only behavior
 - [x] **PLT-07** — Axes/ticks/labels via egui; tick step chooser (1-2-5)
 - [x] **PLT-08** — Legend + toggle; per-trace visibility/color/width/mode editing
@@ -926,7 +926,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **TLN-02** — Scrubber: range bar, handle, live-extent shading
 - [x] **TLN-03** — Absolute (UTC when available) + log-relative time display — UTC path plumbed + tested; no parser emits a UTC reference yet (BIN GPS week / ULog `time_ref_utc` land with M6)
 - [x] **TLN-04** — Jump start/end; step ±1 sample of focused reference trace (fallback 1/30 s)
-- [ ] **TLN-05** — `follow_live` tail mode, disengage-on-scrub
+- [x] **TLN-05** — `follow_live` tail mode, disengage-on-scrub — `Playback::follow_live` pins playhead to tail; timeline scrub/jump/step disengage, `End`/timeline end button re-locks for live sessions
 - [x] **TLN-06** — Idle-aware repaint policy: continuous only when playing/connected (§11) — "connected" half activates with M7 live links
 - [ ] **TLN-07** — Playhead drives 3D pose lookup (with M8)
 

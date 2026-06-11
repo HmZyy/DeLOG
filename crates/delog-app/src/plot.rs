@@ -33,6 +33,15 @@ impl ViewX {
         Self::new(range.min_us, range.max_us)
     }
 
+    /// Keep the right edge pinned to the current global/live tail while
+    /// preserving the previous span where the available range allows it
+    /// (PLT-05).
+    pub fn locked_to_tail(range: TimeRange, span_us: i64) -> Self {
+        let span_us = span_us.max(1);
+        let min_us = range.max_us.saturating_sub(span_us).max(range.min_us);
+        Self::new(min_us, range.max_us)
+    }
+
     pub fn span_us(&self) -> i64 {
         (self.max_us - self.min_us).max(1)
     }
@@ -245,5 +254,23 @@ mod tests {
     fn view_initialises_from_range() {
         let view = ViewX::from_range(TimeRange::new(0, 1000).unwrap());
         assert_eq!(view, ViewX::new(0, 1000));
+    }
+
+    #[test]
+    fn tail_lock_preserves_span_when_possible() {
+        let range = TimeRange::new(0, 10_000).unwrap();
+        assert_eq!(
+            ViewX::locked_to_tail(range, 2_000),
+            ViewX::new(8_000, 10_000)
+        );
+    }
+
+    #[test]
+    fn tail_lock_clamps_to_full_range_when_span_is_too_large() {
+        let range = TimeRange::new(1_000, 3_000).unwrap();
+        assert_eq!(
+            ViewX::locked_to_tail(range, 10_000),
+            ViewX::new(1_000, 3_000)
+        );
     }
 }

@@ -1,6 +1,7 @@
 //! Top-level eframe application state.
 
 use delog_cache::CacheManager;
+use delog_core::time::TimeRange;
 
 use crate::about;
 use crate::browser::{self, BrowserModel};
@@ -33,7 +34,6 @@ pub struct DelogApp {
     show_about: bool,
     show_connection_dialog: bool,
     connection_dialog: ConnectionDialog,
-    live_view_paused: bool,
 }
 
 impl DelogApp {
@@ -60,7 +60,6 @@ impl DelogApp {
             show_about: false,
             show_connection_dialog: false,
             connection_dialog: ConnectionDialog::default(),
-            live_view_paused: false,
         }
     }
 
@@ -103,6 +102,19 @@ impl DelogApp {
             }
         }
     }
+
+    fn lock_to_live(&mut self, range: TimeRange) {
+        self.playback.lock_to_live(range);
+        self.pin_view_to_live(range);
+    }
+
+    fn pin_view_to_live(&mut self, range: TimeRange) {
+        let span = self
+            .view
+            .map(|view| view.span_us())
+            .unwrap_or_else(|| (range.max_us - range.min_us).max(1));
+        self.view = Some(ViewX::locked_to_tail(range, span));
+    }
 }
 
 impl eframe::App for DelogApp {
@@ -122,18 +134,12 @@ impl eframe::App for DelogApp {
             self.view.get_or_insert_with(|| ViewX::from_range(range));
 
             // Advance the playhead — the single time authority (§11, TLN-01).
-            self.playback.clamp_to(range);
-            if self.session.has_live_links() && !self.live_view_paused && !self.playback.playing {
-                self.playback.jump_end(range);
-                let span = self
-                    .view
-                    .map(|view| view.span_us())
-                    .unwrap_or_else(|| (range.max_us - range.min_us).max(1));
-                let min_us = range.max_us.saturating_sub(span).max(range.min_us);
-                self.view = Some(ViewX::new(min_us, range.max_us));
-            }
             let dt = ui.ctx().input(|i| i.stable_dt) as f64;
+            self.playback.clamp_to(range);
             self.playback.advance(dt, range);
+            if self.session.has_live_links() && self.playback.follow_live {
+                self.pin_view_to_live(range);
+            }
 
             // Idle-aware repaint policy (§11, TLN-06): continuous frames only
             // while playing (later: or a link is Connected, M7). Everything
@@ -184,16 +190,23 @@ impl eframe::App for DelogApp {
                 }
                 let live_statuses = self.session.live_statuses();
                 if !live_statuses.is_empty() {
-                    if ui
-                        .button(if self.live_view_paused {
-                            "Resume view"
-                        } else {
-                            "Pause view"
-                        })
-                        .on_hover_text("Pause/resume live tail following; ingestion keeps running")
-                        .clicked()
+                    let lock_label = if self.playback.follow_live {
+                        "Live locked"
+                    } else {
+                        "Lock live"
+                    };
+                    let mut lock_button = egui::Button::new(lock_label);
+                    if !self.playback.follow_live {
+                        lock_button =
+                            lock_button.fill(ui.visuals().warn_fg_color.gamma_multiply(0.25));
+                    }
+                    let lock_response = ui
+                        .add(lock_button)
+                        .on_hover_text("Lock X view and playhead to the live tail (End)");
+                    if lock_response.clicked()
+                        && let Some(range) = snapshot.global_time_range()
                     {
-                        self.live_view_paused = !self.live_view_paused;
+                        self.lock_to_live(range);
                     }
                     for status in live_statuses {
                         ui.separator();
@@ -231,13 +244,16 @@ impl eframe::App for DelogApp {
         // (M7): the snapshot has no streaming flag yet.
         if let Some(range) = snapshot.global_time_range() {
             egui::Panel::bottom("timeline").show_inside(ui, |ui| {
-                crate::timeline::ui(
+                let action = crate::timeline::ui(
                     ui,
                     &mut self.playback,
                     range,
                     None,
                     self.session.has_live_links(),
                 );
+                if action.lock_live {
+                    self.lock_to_live(range);
+                }
             });
 
             // Transport keys (§11, TLN-04) — skipped while a widget owns the
@@ -259,11 +275,13 @@ impl eframe::App for DelogApp {
                     self.playback.jump_start(range);
                 }
                 if end {
-                    self.live_view_paused = false;
-                    self.playback.jump_end(range);
+                    if self.session.has_live_links() {
+                        self.lock_to_live(range);
+                    } else {
+                        self.playback.jump_end(range);
+                    }
                 }
                 if left || right {
-                    self.live_view_paused = true;
                     let reference = self.workspace.focused_first_field();
                     let target = crate::timeline::step_target(
                         &snapshot,
@@ -360,8 +378,10 @@ impl eframe::App for DelogApp {
                     if let Some(t_us) = actions.scrub_to
                         && let Some(range) = snapshot.global_time_range()
                     {
-                        self.live_view_paused = true;
                         self.playback.scrub(t_us, range);
+                    }
+                    if actions.view_changed {
+                        self.playback.unlock_live();
                     }
                 });
             if let Some(fields) = dropped
