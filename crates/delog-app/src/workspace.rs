@@ -357,6 +357,8 @@ pub struct PlotServices<'a> {
     pub playing: bool,
     /// Configured vehicles for the 3D scene (TDV-03/09).
     pub vehicles: &'a [crate::vehicle::VehicleConfig],
+    /// Cached render-space trajectories, parallel to `vehicles` (TDV-04).
+    pub trajectories: &'a [Vec<[f32; 3]>],
 }
 
 pub struct Behavior<'a> {
@@ -483,27 +485,27 @@ impl Behavior<'_> {
             };
         }
 
-        // Build per-vehicle render data from the log at the playhead (TDV-09/10).
-        // Trajectories are resampled here (caching/off-thread is TDV-04).
+        // Per-vehicle render data: poses are read cheaply at the playhead each
+        // frame; trajectories come from the app's epoch-cached build (TDV-04).
         let snapshot = self.services.snapshot;
         let playhead = self.services.playhead_us;
-        let mut trajectories: Vec<Vec<[f32; 3]>> = Vec::new();
-        let mut poses: Vec<Option<vehicle::Pose>> = Vec::new();
-        for v in self.services.vehicles {
-            if v.show {
-                trajectories.push(vehicle::build_trajectory(snapshot, v));
-                poses.push(playhead.and_then(|t| vehicle::pose_at(snapshot, v, t)));
-            } else {
-                trajectories.push(Vec::new());
-                poses.push(None);
-            }
-        }
+        let poses: Vec<Option<vehicle::Pose>> = self
+            .services
+            .vehicles
+            .iter()
+            .map(|v| {
+                (v.show)
+                    .then(|| playhead.and_then(|t| vehicle::pose_at(snapshot, v, t)))
+                    .flatten()
+            })
+            .collect();
 
         // Track the first visible vehicle's current position (the dropdown to
         // pick which lands with TDV-09); origin when none.
         let tracked = poses.iter().flatten().next().map(|p| p.pos);
         pane.camera.target = tracked.unwrap_or(glam::Vec3::ZERO);
 
+        let empty: Vec<[f32; 3]> = Vec::new();
         let draws: Vec<VehicleDraw> = self
             .services
             .vehicles
@@ -518,7 +520,7 @@ impl Behavior<'_> {
                     normal_matrix: glam::Mat4::from_mat3(pose.rot).to_cols_array_2d(),
                     color: color_rgba(v.color),
                     path_color: color_rgba(v.path_color),
-                    trajectory: &trajectories[i],
+                    trajectory: self.services.trajectories.get(i).unwrap_or(&empty),
                 })
             })
             .collect();
