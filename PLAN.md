@@ -933,7 +933,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 ### TDV — 3D view (M8)
 
 - [x] **TDV-01** — Scene pane: grid, axes, orbit camera (pan/zoom) — `Pane::Scene3D` with an `OrbitCamera` (left-drag orbit, wheel zoom, double-click reset; pitch-clamped, unit-tested); single instance toggled show/hide by the toolbar "3D" button. Renders the grid offscreen and composites as an egui image. `glam` added to `delog-app`. Verified on RTX 4080: grid visible/infinite, orientation/orbit/zoom/color all good
-- [ ] **TDV-02** — Free camera; Track camera with preserved offset (§12.3)
+- [~] **TDV-02** — Free camera; Track camera with preserved offset (§12.3) — `FreeCamera` (eye + yaw/pitch; `look`/`fly`/`looking_from`) and a `SceneCamera { mode, orbit, free }` with `CameraMode` Orbit/Track/Free; mode selector strip in the scene pane. Orbit/Track: drag-orbit + wheel-zoom; Free: drag-look + WASD/E-Q fly + wheel-forward. Track preserves the orbit offset as the target moves (unit-tested), following the world origin until a vehicle binds it (TDV-09). 10 camera unit tests green; Free interaction signs pending in-app verification
 - [ ] **TDV-03** — `VehicleConfig` + dialog with per-source mapping presets (§12.1)
 - [ ] **TDV-04** — PosMapping NED / Custom-with-units; trajectory build off-thread
 - [ ] **TDV-05** — GPS→NED f64 geodetic→ECEF→NED; auto/manual reference origin (§12.2)
