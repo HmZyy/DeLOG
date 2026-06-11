@@ -166,7 +166,6 @@ impl eframe::App for DelogApp {
                     &model,
                     &mut self.browser_query,
                     &mut self.browser_selection,
-                    &self.workspace.trace_colors(),
                 );
             });
 
