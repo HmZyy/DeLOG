@@ -108,13 +108,13 @@ delog/
 ```
 delog-app ──► delog-render ──► delog-cache ──► delog-core
     │              │                              ▲
-    ├──────────────┼──► delog-stream ─────────────┤
+    ├──────────────┼──► delog-stream ──► delog-parsers ──► (core)
     └──────────────┴──► delog-parsers ────────────┘
 ```
 
 1. **Data flows downward only.** `delog-core` depends on `arrow` + std only. Nothing below `app` may depend on `egui`.
 2. **`delog-render` is pure wgpu.** No egui types. **Why:** headless benchmarking and golden-image tests (§20.3) need to drive the renderer without a window; a future non-egui shell stays possible. `delog-app` adapts it through `egui_wgpu` callbacks.
-3. **Parsers and stream never see GPU or UI.** Their only output is `ParsedBatch` + diagnostics into an `IngestSink` (§5).
+3. **Parsers and stream never see GPU or UI.** Their only output is `ParsedBatch` + diagnostics into an `IngestSink` (§5). The shared MAVLink frame decoder + field extractor live in `delog-parsers::mavlink` (PAR-16; fuzzed under PAR-13) — the tlog parser wraps it (§6.4) and `delog-stream`'s reader threads consume it (§7.2–7.3), giving stream a downward edge onto parsers.
 4. **Arrow is a vocabulary type of `delog-core`'s API** (chunks expose `Int64Array`, `ArrayRef`). **Why not wrap it fully:** a total abstraction layer over Arrow would re-implement its typed accessors and cost performance and code; `delog-cache` needs raw typed access for the One Copy. The compromise: `delog-app` is _style-forbidden_ (enforced by review, not the compiler) from touching Arrow directly — it goes through core helpers (`field_stats`, `sample_at`, `slice_for_export`). If Arrow ever had to be swapped, only core + cache change.
 
 ### 3.3 End-to-end data flow (orientation walkthrough)
@@ -336,8 +336,8 @@ Each configured link runs **one reader thread**. Configurable endpoint/port/baud
 
 ### 7.3 Message → fields extraction
 
-**Decision.** A build-script-generated `extract(&MavMessage) -> SmallVec<(FieldName, ScalarValue)>` over the `ardupilotmega` dialect (superset covering AP + common PX4 traffic). Unknown/unsupported messages emit a once-per-type diagnostic and a counter.
-**Why.** The hot path must not reflect via serde_json (allocation storm at 50 Hz × dozens of messages). Codegen gives a flat match with zero allocation; arrays expand to indexed fields (`servo_raw[0]…`). sysid demultiplexing: source per `(link, sysid)`; compid folds in as an instance suffix only when more than one compid emits the same message.
+**Decision (amended).** A custom flat `serde::Serializer` over the `ardupilotmega` dialect's generated `Serialize` impls extracts `(field, Scalar)` pairs from a `&MavMessage`; per-message extraction *plans* (field names + dtypes) are built once on first sight, so the steady-state hot path appends scalars with no allocation. Unknown/unsupported messages emit a once-per-type diagnostic and a counter. _(Originally specced as build-script codegen; amended because that requires vendoring the dialect XMLs while the mavlink crate already ships `serde` derives — the custom serializer is flat, JSON-free, and two orders of magnitude less code.)_
+**Why no serde_json:** the hot path must not reflect through a self-describing format (allocation storm at 50 Hz × dozens of messages); the custom serializer visits struct fields directly. Arrays expand to indexed fields (`servo_raw[0]…`); enum fields carry their variant name as a Utf8 value (the dialect serializes them internally tagged, so the name is what's available); bitflag fields their raw bits (the serializer reports non-human-readable). sysid demultiplexing: source per `(link, sysid)`; compid folds in as an instance suffix only when more than one compid emits the same message.
 
 ### 7.4 Live semantics in the store
 
@@ -847,6 +847,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [ ] **PAR-13** — fuzz targets: BIN record / ULog defs+data / MAVLink framing — no panic/hang/OOM
 - [ ] **PAR-14** — CSV import with column-mapping dialog _(M10/backlog boundary)_
 - [ ] **PAR-15** — Arrow IPC `.dlcache` reader registered as a sniffing parser (pairs IOX-08)
+- [x] **PAR-16** — Shared MAVLink layer in `delog-parsers::mavlink`: owned v1/v2 framing (sync, CRC, seq-gap/resync counters, §7.2) + serde-based field extractor (§7.3) — one code path for the tlog parser (PAR-11) and the live readers (LIV-02/05)
 
 ### LIV — Live streaming (M7)
 

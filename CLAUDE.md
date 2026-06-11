@@ -39,11 +39,11 @@ Crates under `crates/`, with **absolute** dependency rules (§3.2):
 ```
 delog-app ──► delog-render ──► delog-cache ──► delog-core
     │              │                              ▲
-    ├──────────────┼──► delog-stream ─────────────┤
+    ├──────────────┼──► delog-stream ──► delog-parsers ──► (core)
     └──────────────┴──► delog-parsers ────────────┘
 ```
 
-- Data flows downward only. `delog-core` depends on `arrow` + std only. Nothing below `app` may depend on `egui`.
+- Data flows downward only. `delog-core` depends on `arrow` + std only. Nothing below `app` may depend on `egui`. The shared MAVLink decoder lives in `delog-parsers::mavlink`; `delog-stream` consumes it (downward edge).
 - `delog-render` is **pure wgpu** — no egui types (enables headless golden-image tests). `delog-app` adapts it through `egui_wgpu` callbacks.
 - Parsers and stream never see GPU or UI; their only output is `ParsedBatch` + diagnostics into an `IngestSink`.
 - Arrow types are vocabulary types of `delog-core`'s API, but `delog-app` must not touch Arrow directly — it goes through core helpers.
