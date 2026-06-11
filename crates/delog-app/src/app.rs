@@ -353,6 +353,7 @@ impl eframe::App for DelogApp {
                     let services = PlotServices {
                         frame,
                         snapshot: &snapshot,
+                        metrics: self.session.metrics(),
                         gpu: &mut self.gpu,
                         caches: &mut self.caches,
                         view: &mut self.view,
