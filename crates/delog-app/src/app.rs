@@ -8,6 +8,7 @@ use crate::browser::{self, BrowserModel};
 use crate::gpu::{self, GpuBridge};
 use crate::hover;
 use crate::legend;
+use crate::live::ConnectionDialog;
 use crate::plot::PlotPane;
 use crate::session::Session;
 
@@ -23,6 +24,9 @@ pub struct DelogApp {
     origin_us: i64,
     path_input: String,
     show_about: bool,
+    show_connection_dialog: bool,
+    connection_dialog: ConnectionDialog,
+    configured_endpoint: Option<delog_stream::Endpoint>,
 }
 
 impl DelogApp {
@@ -40,6 +44,9 @@ impl DelogApp {
             origin_us: 0,
             path_input: String::new(),
             show_about: false,
+            show_connection_dialog: false,
+            connection_dialog: ConnectionDialog::default(),
+            configured_endpoint: None,
         }
     }
 
@@ -103,6 +110,12 @@ impl eframe::App for DelogApp {
                 if (ui.button("Open").clicked() || submit) && !self.path_input.trim().is_empty() {
                     self.session.open_path(self.path_input.trim().to_owned());
                     self.path_input.clear();
+                }
+                if ui.button("Stream").clicked() {
+                    self.show_connection_dialog = true;
+                }
+                if let Some(endpoint) = &self.configured_endpoint {
+                    ui.weak(endpoint.to_string());
                 }
 
                 if self.session.has_active_loads() {
@@ -231,6 +244,12 @@ impl eframe::App for DelogApp {
         });
 
         about::window(ui.ctx(), &mut self.show_about);
+        if let Some(endpoint) = self
+            .connection_dialog
+            .ui(ui.ctx(), &mut self.show_connection_dialog)
+        {
+            self.configured_endpoint = Some(endpoint);
+        }
     }
 }
 

@@ -7,6 +7,7 @@ mod browser;
 mod gpu;
 mod hover;
 mod legend;
+mod live;
 mod plot;
 mod session;
 
