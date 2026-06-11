@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use ::mavlink::dialects::ardupilotmega::MavMessage;
+use ::mavlink::dialects::all::MavMessage;
 use ::mavlink::{MavlinkVersion, Message, calculate_crc};
 
 /// v1 magic / header bytes after magic / trailing CRC bytes.
@@ -548,7 +548,7 @@ impl serde::ser::SerializeStructVariant for &mut FieldSink {
 
 #[cfg(test)]
 mod tests {
-    use ::mavlink::dialects::ardupilotmega::{ATTITUDE_DATA, GPS_STATUS_DATA, HEARTBEAT_DATA};
+    use ::mavlink::dialects::all::{ATTITUDE_DATA, GPS_STATUS_DATA, HEARTBEAT_DATA};
     use ::mavlink::{MAVLinkV1MessageRaw, MAVLinkV2MessageRaw, MavHeader};
 
     use super::*;

@@ -31,7 +31,7 @@ use delog_core::parse_ctl::ParseCtl;
 use delog_core::schema::{FieldSchema, TopicSchema};
 use delog_core::time::TimeRange;
 use mavlink::Message;
-use mavlink::dialects::ardupilotmega::MavMessage;
+use mavlink::dialects::all::MavMessage;
 
 use crate::mavlink::{Scalar, decode_frame, extract_fields, frame_len};
 use crate::parser::{LogParser, ParseError, ReadSeek, Sniff};
@@ -377,7 +377,7 @@ impl<'a> Decoder<'a> {
             self.diag(
                 Diag::info(
                     "tlog-unknown-message",
-                    format!("message id {message_id} is not in the ardupilotmega dialect; skipped"),
+                    format!("message id {message_id} is not in the all dialect; skipped"),
                 )
                 .at_byte(offset),
             );
@@ -583,7 +583,7 @@ mod tests {
     use delog_core::parse_ctl::CancelToken;
 
     use crate::parser::SNIFF_CONFIDENCE;
-    use mavlink::dialects::ardupilotmega::{ATTITUDE_DATA, GPS_RAW_INT_DATA, HEARTBEAT_DATA};
+    use mavlink::dialects::all::{ATTITUDE_DATA, GPS_RAW_INT_DATA, HEARTBEAT_DATA};
     use mavlink::{MAVLinkV1MessageRaw, MAVLinkV2MessageRaw, MavHeader};
 
     use super::*;

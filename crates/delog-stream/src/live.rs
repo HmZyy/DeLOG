@@ -288,7 +288,7 @@ impl<S: IngestSink> LiveConsumer<S> {
                 self.sink.diagnostic(Diag::info(
                     "live-unknown-message",
                     format!(
-                        "{} sysid {} compid {} message id {} is not in the ardupilotmega dialect",
+                        "{} sysid {} compid {} message id {} is not in the all dialect",
                         self.endpoint, frame.system_id, frame.component_id, frame.message_id
                     ),
                 ));
@@ -617,7 +617,7 @@ mod tests {
     use delog_core::parse_ctl::{CancelToken, ParseCtl};
     use delog_parsers::{LogParser, TlogParser};
     use mavlink::MavlinkVersion;
-    use mavlink::dialects::ardupilotmega::{ATTITUDE_DATA, MavMessage};
+    use mavlink::dialects::all::{ATTITUDE_DATA, MavMessage};
     use mavlink::{MAVLinkV2MessageRaw, MavHeader};
 
     use super::*;
