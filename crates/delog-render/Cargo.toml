@@ -13,3 +13,13 @@ delog-cache = { workspace = true }
 wgpu = { workspace = true }
 bytemuck = { workspace = true }
 pollster = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+# Bench fixtures build TraceCaches from Arrow snapshots; production render code
+# never touches Arrow.
+arrow = { workspace = true }
+
+[[bench]]
+name = "frame_encode"
+harness = false
