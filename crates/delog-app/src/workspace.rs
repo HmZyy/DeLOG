@@ -159,7 +159,9 @@ impl Workspace {
         }
 
         if let Some(parent_id) = self.tree.tiles.parent_of(tile_id) {
-            let wrap_in_new_container = {
+            // `Some(index)` = the pane was removed from `parent` and must be
+            // wrapped in a new `kind` container placed back at `index`.
+            let wrap_at = {
                 let Some(egui_tiles::Tile::Container(parent)) = self.tree.tiles.get_mut(parent_id)
                 else {
                     return None;
@@ -181,13 +183,13 @@ impl Workspace {
                         }
                         egui_tiles::Container::Grid(grid) => grid.add_child(new_pane),
                     }
-                    false
+                    None
                 } else {
-                    parent.remove_child(tile_id).is_some()
+                    parent.remove_child(tile_id)
                 }
             };
 
-            if wrap_in_new_container {
+            if let Some(index) = wrap_at {
                 let children = ordered_pair(tile_id, new_pane, before);
                 let replacement = self
                     .tree
@@ -196,7 +198,9 @@ impl Workspace {
                 if let Some(egui_tiles::Tile::Container(parent)) =
                     self.tree.tiles.get_mut(parent_id)
                 {
-                    parent.add_child(replacement);
+                    // Put the wrapper back where the pane was — appending
+                    // would shuffle the pane to the end of the parent.
+                    insert_child_at(parent, index, replacement);
                     if let egui_tiles::Container::Tabs(tabs) = parent {
                         tabs.set_active(replacement);
                     }
@@ -715,6 +719,22 @@ fn y_unit(snapshot: &StoreSnapshot, pane: &PlotPane) -> Option<String> {
     store.schema.field_by_name(&entry.name)?.unit.clone()
 }
 
+/// Insert `child` at `index` in any container kind (clamped to the child
+/// count). `Container::add_child` only appends.
+fn insert_child_at(container: &mut egui_tiles::Container, index: usize, child: egui_tiles::TileId) {
+    match container {
+        egui_tiles::Container::Linear(linear) => {
+            let index = index.min(linear.children.len());
+            linear.children.insert(index, child);
+        }
+        egui_tiles::Container::Tabs(tabs) => {
+            let index = index.min(tabs.children.len());
+            tabs.children.insert(index, child);
+        }
+        egui_tiles::Container::Grid(grid) => grid.insert_at(index, child),
+    }
+}
+
 fn ordered_pair(
     existing: egui_tiles::TileId,
     new_pane: egui_tiles::TileId,
@@ -798,6 +818,38 @@ mod tests {
                 if container.kind() == egui_tiles::ContainerKind::Vertical
                     && container.num_children() == 2
         )));
+    }
+
+    #[test]
+    fn cross_direction_split_keeps_the_wrapped_pane_in_its_slot() {
+        // Root vertical: pane 1 on top, pane 2 on the bottom.
+        let mut workspace = Workspace::new();
+        let pane1 = workspace.tree.root().unwrap();
+        workspace.split_plot(pane1, SplitDirection::Vertical);
+
+        let root = workspace.tree.root().unwrap();
+        let top_children = match workspace.tree.tiles.get(root) {
+            Some(egui_tiles::Tile::Container(c)) => c.children_vec(),
+            _ => panic!("root should be a vertical container"),
+        };
+        assert_eq!(top_children[0], pane1, "pane 1 starts on top");
+
+        // Split the TOP pane horizontally: the new horizontal wrapper must
+        // stay in the top slot, not get appended to the bottom.
+        workspace.split_plot(pane1, SplitDirection::Horizontal);
+
+        let children = match workspace.tree.tiles.get(root) {
+            Some(egui_tiles::Tile::Container(c)) => c.children_vec(),
+            _ => panic!("root should still be a vertical container"),
+        };
+        assert_eq!(children.len(), 2);
+        let Some(egui_tiles::Tile::Container(wrapper)) = workspace.tree.tiles.get(children[0])
+        else {
+            panic!("the top slot should hold the new horizontal wrapper");
+        };
+        assert_eq!(wrapper.kind(), egui_tiles::ContainerKind::Horizontal);
+        assert!(wrapper.has_child(pane1), "pane 1 stays inside its wrapper");
+        assert_eq!(children[1], top_children[1], "pane 2 stays on the bottom");
     }
 
     #[test]
