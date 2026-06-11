@@ -15,10 +15,15 @@ use crate::gpu::PaneView;
 use crate::legend::trace_label;
 use crate::plot::PlotPane;
 
+pub struct HoverTarget {
+    pub id: egui::Id,
+    pub view: PaneView,
+}
+
 /// Draw the hover cursor/circles/tooltip if the pointer is over the plot.
 pub fn draw(
     ui: &egui::Ui,
-    view: PaneView,
+    target: HoverTarget,
     response: &egui::Response,
     snapshot: &StoreSnapshot,
     pane: &PlotPane,
@@ -28,6 +33,7 @@ pub fn draw(
     let Some(pos) = response.hover_pos() else {
         return;
     };
+    let view = target.view;
     let rect = view.rect;
     if !rect.contains(pos) {
         return;
@@ -79,7 +85,7 @@ pub fn draw(
         return;
     }
 
-    egui::Area::new(egui::Id::new("plot_hover"))
+    egui::Area::new(target.id)
         .order(egui::Order::Tooltip)
         .fixed_pos(pos + egui::vec2(12.0, 12.0))
         .show(ui.ctx(), |ui| {

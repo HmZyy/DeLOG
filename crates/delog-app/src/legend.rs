@@ -29,6 +29,7 @@ pub fn trace_label(snapshot: &StoreSnapshot, field: FieldId) -> String {
 /// the field (PLT-11) so the caller can drop its cache.
 pub fn ui(
     ui: &egui::Ui,
+    id: egui::Id,
     plot_rect: egui::Rect,
     pane: &mut PlotPane,
     labels: &[(FieldId, String)],
@@ -38,7 +39,7 @@ pub fn ui(
     }
     let mut removed = None;
 
-    egui::Area::new(egui::Id::new("plot_legend"))
+    egui::Area::new(id)
         .fixed_pos(plot_rect.left_top() + egui::vec2(8.0, 8.0))
         .order(egui::Order::Foreground)
         .show(ui.ctx(), |ui| {

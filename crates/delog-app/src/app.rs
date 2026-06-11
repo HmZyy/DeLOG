@@ -3,20 +3,19 @@
 use delog_cache::CacheManager;
 
 use crate::about;
-use crate::axes;
 use crate::browser::{self, BrowserModel};
-use crate::gpu::{self, GpuBridge};
-use crate::hover;
-use crate::legend;
+use crate::gpu::GpuBridge;
 use crate::live::ConnectionDialog;
-use crate::plot::PlotPane;
+use crate::plot::ViewX;
 use crate::session::Session;
+use crate::workspace::{PlotServices, Workspace};
 
 pub struct DelogApp {
     session: Session,
     gpu: GpuBridge,
     caches: CacheManager,
-    pane: PlotPane,
+    workspace: Workspace,
+    view: Option<ViewX>,
     hover_mode: delog_core::field_view::SampleMode,
     show_legend: bool,
     frame: u64,
@@ -36,7 +35,8 @@ impl DelogApp {
             session: Session::new(cc.egui_ctx.clone()),
             gpu: GpuBridge::from_creation_context(cc),
             caches: CacheManager::new(),
-            pane: PlotPane::default(),
+            workspace: Workspace::new(),
+            view: None,
             hover_mode: delog_core::field_view::SampleMode::Prev,
             show_legend: true,
             frame: 0,
@@ -74,7 +74,7 @@ impl eframe::App for DelogApp {
         if let Some(range) = snapshot.global_time_range() {
             self.origin_us = range.min_us;
             self.caches.set_origin(self.origin_us);
-            self.pane.init_view(range);
+            self.view.get_or_insert_with(|| ViewX::from_range(range));
         }
         self.caches.begin_frame(self.frame);
         self.caches.poll_builds();
@@ -83,7 +83,7 @@ impl eframe::App for DelogApp {
             self.last_epoch = snapshot.epoch;
         }
         // Keep every plotted trace's cache requested/warm.
-        for field in self.pane.fields().collect::<Vec<_>>() {
+        for field in self.workspace.fields().collect::<Vec<_>>() {
             self.caches.request(field, &snapshot);
         }
         self.caches.evict_over_budget();
@@ -162,85 +162,41 @@ impl eframe::App for DelogApp {
                 return;
             }
 
-            // The central panel is a drop zone: dragging a field from the
-            // browser onto it plots that field (PLT-13).
+            // The central panel is a fallback drop zone: dropping a field onto
+            // empty workspace space plots it in the first pane (PLT-13).
             let frame_style = egui::Frame::default();
             let (_, dropped) =
                 ui.dnd_drop_zone::<delog_core::identity::FieldId, ()>(frame_style, |ui| {
-                    let outer = ui.available_rect_before_wrap();
-                    // Inner plot rect, leaving gutters for axis labels (PLT-07).
-                    let plot_rect = egui::Rect::from_min_max(
-                        egui::pos2(outer.left() + axes::Y_GUTTER, outer.top() + 4.0),
-                        egui::pos2(outer.right() - 4.0, outer.bottom() - axes::X_GUTTER),
-                    );
-                    let response = ui.allocate_rect(outer, egui::Sense::click_and_drag());
-                    self.handle_plot_interaction(&response, plot_rect);
-                    self.plot_context_menu(&response, &snapshot);
-
-                    if self.pane.is_empty() {
-                        ui.painter().text(
-                            outer.center(),
-                            egui::Align2::CENTER_CENTER,
-                            "Drag a field here to plot it",
-                            egui::FontId::proportional(14.0),
-                            ui.visuals().weak_text_color(),
-                        );
-                    } else if self.gpu.is_available() && plot_rect.width() > 8.0 {
-                        let view = self.pane.view().unwrap_or(crate::plot::ViewX::new(0, 1));
-                        let x_range = view.seconds(self.origin_us);
-                        let y_range = gpu::visible_y_range(
-                            &mut self.caches,
-                            &self.pane,
-                            x_range.0,
-                            x_range.1,
-                        );
-                        let y_unit = Self::y_unit(&snapshot, &self.pane);
-                        axes::draw(ui, plot_rect, x_range, y_range, y_unit.as_deref());
-                        let pview = gpu::PaneView {
-                            rect: plot_rect,
-                            x_range,
-                            y_range,
-                        };
-                        self.gpu
-                            .render_pane(ui, frame, &mut self.caches, &self.pane, pview);
-
-                        // Hover readout: cursor line, sample circles, value
-                        // tooltip — suppressed while any popup/menu is open.
-                        if !ui.ctx().any_popup_open() {
-                            hover::draw(
-                                ui,
-                                pview,
-                                &response,
-                                &snapshot,
-                                &self.pane,
-                                self.origin_us,
-                                self.hover_mode,
-                            );
-                        }
-
-                        // Legend overlay: visibility + colour edits; right-click ▸
-                        // Remove drops the trace and unpins its cache.
-                        if self.show_legend {
-                            let labels: Vec<_> = self
-                                .pane
-                                .traces
-                                .iter()
-                                .map(|t| (t.field, legend::trace_label(&snapshot, t.field)))
-                                .collect();
-                            if let Some(removed) =
-                                legend::ui(ui, plot_rect, &mut self.pane, &labels)
-                            {
-                                self.pane.remove_trace(removed);
-                                self.caches.unpin(removed);
-                            }
+                    self.gpu.begin_plot_frame(frame);
+                    let services = PlotServices {
+                        frame,
+                        snapshot: &snapshot,
+                        gpu: &mut self.gpu,
+                        caches: &mut self.caches,
+                        view: &mut self.view,
+                        origin_us: self.origin_us,
+                        hover_mode: &mut self.hover_mode,
+                        show_legend: &mut self.show_legend,
+                    };
+                    let mut behavior = crate::workspace::Behavior::new(services);
+                    self.workspace.tree.ui(&mut behavior, ui);
+                    let actions = behavior.into_actions();
+                    if let Some((tile_id, direction)) = actions.split {
+                        self.workspace.split_plot(tile_id, direction);
+                    }
+                    if let Some(tile_id) = actions.close {
+                        for field in self.workspace.close_plot(tile_id) {
+                            self.caches.unpin(field);
                         }
                     }
                 });
             if let Some(field) = dropped
-                && self.pane.add_trace(*field)
+                && self.workspace.add_trace_to_first_plot(*field)
             {
                 self.caches.request(*field, &snapshot);
             }
+            let plotted: Vec<_> = self.workspace.fields().collect();
+            self.gpu.retain_plotted_buffers(frame, &plotted);
         });
 
         about::window(ui.ctx(), &mut self.show_about);
@@ -250,108 +206,5 @@ impl eframe::App for DelogApp {
         {
             self.configured_endpoint = Some(endpoint);
         }
-    }
-}
-
-impl DelogApp {
-    /// Unit of the pane's first trace, for the Y axis label (PLT-07). Reads the
-    /// schema through core helpers — the app never touches Arrow (§3.2).
-    fn y_unit(snapshot: &delog_core::snapshot::StoreSnapshot, pane: &PlotPane) -> Option<String> {
-        let field = pane.traces.first()?.field;
-        let entry = snapshot
-            .fields
-            .get(field.index())
-            .filter(|f| f.id == field)?;
-        let store = snapshot.topic(entry.topic)?.store.as_ref()?;
-        store.schema.field_by_name(&entry.name)?.unit.clone()
-    }
-
-    /// Right-click plot context menu: reset/clear/hover-mode/legend (PLT-11).
-    /// Trace mode and split/info items wait on GPU-07/08, PLT-01 and PLT-12.
-    fn plot_context_menu(
-        &mut self,
-        response: &egui::Response,
-        snapshot: &delog_core::snapshot::StoreSnapshot,
-    ) {
-        response.context_menu(|ui| {
-            if ui.button("Reset view").clicked() {
-                if let Some(range) = snapshot.global_time_range() {
-                    self.pane.reset_view(range);
-                }
-                ui.close();
-            }
-
-            // Clear ▸ All / per-trace remove (each prefixed with its colour).
-            ui.menu_button("Clear traces", |ui| {
-                if ui.button("All").clicked() {
-                    for field in self.pane.fields().collect::<Vec<_>>() {
-                        self.caches.unpin(field);
-                    }
-                    self.pane.clear();
-                    ui.close();
-                }
-                ui.separator();
-                let entries: Vec<_> = self
-                    .pane
-                    .traces
-                    .iter()
-                    .map(|t| (t.field, legend::trace_label(snapshot, t.field), t.color32()))
-                    .collect();
-                for (field, label, color) in entries {
-                    let clicked = ui
-                        .horizontal(|ui| {
-                            ui.colored_label(color, "■");
-                            ui.button(label).clicked()
-                        })
-                        .inner;
-                    if clicked {
-                        self.pane.remove_trace(field);
-                        self.caches.unpin(field);
-                        ui.close();
-                    }
-                }
-            });
-
-            ui.separator();
-            ui.menu_button("Hover mode", |ui| {
-                use delog_core::field_view::SampleMode::{Linear, Next, Prev};
-                ui.radio_value(&mut self.hover_mode, Prev, "Previous");
-                ui.radio_value(&mut self.hover_mode, Next, "Next");
-                ui.radio_value(&mut self.hover_mode, Linear, "Linear");
-            });
-            ui.checkbox(&mut self.show_legend, "Show legend");
-        });
-    }
-
-    /// Pan (drag), zoom (wheel @ cursor) and reset (double-click) the X view
-    /// from pointer input over the plot rect (PLT-04).
-    fn handle_plot_interaction(&mut self, response: &egui::Response, rect: egui::Rect) {
-        let Some(mut view) = self.pane.view() else {
-            return;
-        };
-
-        if response.double_clicked() {
-            if let Some(range) = self.session.snapshot().global_time_range() {
-                self.pane.reset_view(range);
-            }
-            return;
-        }
-
-        if response.dragged() {
-            gpu::apply_pan(&mut view, response.drag_delta().x, rect.width());
-        }
-
-        if response.hovered() {
-            let scroll = response.ctx.input(|i| i.smooth_scroll_delta.y);
-            if scroll != 0.0 {
-                let cursor_frac = response
-                    .hover_pos()
-                    .map(|p| (p.x - rect.left()) / rect.width().max(1.0))
-                    .unwrap_or(0.5);
-                gpu::apply_zoom(&mut view, cursor_frac, scroll);
-            }
-        }
-
-        self.pane.set_view(view);
     }
 }
