@@ -886,7 +886,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **GPU-04** — Dynamic-offset uniform buffer for per-plot transform/style (no push constants)
 - [x] **GPU-05** — `line_pull` pipeline + WGSL (vertex pulling, width expansion, NaN→degenerate) (§9.4)
 - [x] **GPU-06** — Per-plot viewport/scissor inside egui main pass via paint callback
-- [ ] **GPU-07** — `scatter_pull` pipeline (quad/sample, size uniform)
+- [x] **GPU-07** — `scatter_pull` pipeline (quad/sample, size uniform)
 - [ ] **GPU-08** — `step_pull` stepped-mode pipeline (2 segments/sample)
 - [x] **GPU-09** — `minmax_col` decimated pipeline + transient ring upload (§9.5)
 - [x] **GPU-10** — Draw-path selector: full vs decimated at samples/px > 8
