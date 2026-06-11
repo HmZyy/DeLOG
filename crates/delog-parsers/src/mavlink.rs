@@ -48,6 +48,9 @@ pub struct DecodedFrame {
     /// [`FrameCounters::unknown_messages`]; emit the once-per-type diag
     /// upstream).
     pub message: Option<MavMessage>,
+    /// Exact frame bytes after CRC validation. Live recording tees these into
+    /// the `.tlog` envelope so record/replay stays bit-faithful (§7.5).
+    pub raw: Vec<u8>,
 }
 
 /// Push-based MAVLink v1/v2 frame decoder. Feed arbitrary byte slices from a
@@ -182,6 +185,7 @@ pub fn decode_frame(frame: &[u8]) -> Option<DecodedFrame> {
                 sequence: frame[2],
                 message_id,
                 message: MavMessage::parse(MavlinkVersion::V1, message_id, payload).ok(),
+                raw: frame.to_vec(),
             })
         }
         V2_MAGIC => {
@@ -200,6 +204,7 @@ pub fn decode_frame(frame: &[u8]) -> Option<DecodedFrame> {
                 sequence: frame[4],
                 message_id,
                 message: MavMessage::parse(MavlinkVersion::V2, message_id, payload).ok(),
+                raw: frame.to_vec(),
             })
         }
         _ => None,
