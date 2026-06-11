@@ -140,27 +140,126 @@ fn smooth_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
     acc
 }
 
-/// Decode the first mesh primitive of a GLB into a [`MeshCpu`] (GPU-22). Missing
+/// Decode a GLB into a single [`MeshCpu`] (GPU-22): every triangle primitive in
+/// the default scene is baked into one mesh by its node's world transform, so
+/// multi-part models (e.g. a quad's arms) land in the right place. Missing
 /// normals are computed smooth; missing indices become a flat `0..n` list.
 pub fn load_glb(bytes: &[u8]) -> Result<MeshCpu, MeshError> {
     let (doc, buffers, _images) = gltf::import_slice(bytes)?;
-    let prim = doc
-        .meshes()
-        .flat_map(|m| m.primitives())
-        .find(|p| p.mode() == gltf::mesh::Mode::Triangles)
+    let scene = doc
+        .default_scene()
+        .or_else(|| doc.scenes().next())
         .ok_or(MeshError::NoMesh)?;
+    let mut out = MeshCpu::default();
+    for node in scene.nodes() {
+        add_node(&node, IDENTITY4, &buffers, &mut out);
+    }
+    if out.vertices.is_empty() {
+        return Err(MeshError::NoMesh);
+    }
+    Ok(out)
+}
 
-    let reader = prim.reader(|b| buffers.get(b.index()).map(|d| d.0.as_slice()));
-    let positions: Vec<[f32; 3]> = reader
-        .read_positions()
-        .ok_or(MeshError::NoPositions)?
-        .collect();
-    let normals: Option<Vec<[f32; 3]>> = reader.read_normals().map(|n| n.collect());
-    let indices: Vec<u32> = match reader.read_indices() {
-        Some(idx) => idx.into_u32().collect(),
-        None => (0..positions.len() as u32).collect(),
-    };
-    Ok(MeshCpu::new(positions, normals, indices))
+/// Column-major 4×4 identity.
+const IDENTITY4: [[f32; 4]; 4] = [
+    [1.0, 0.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0, 0.0],
+    [0.0, 0.0, 0.0, 1.0],
+];
+
+/// Column-major 4×4 multiply (`a * b`).
+fn mat4_mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
+    let mut m = [[0.0f32; 4]; 4];
+    for (c, col) in m.iter_mut().enumerate() {
+        for (r, cell) in col.iter_mut().enumerate() {
+            *cell = (0..4).map(|k| a[k][r] * b[c][k]).sum();
+        }
+    }
+    m
+}
+
+/// Transform a point by a column-major 4×4 (w = 1).
+fn mat4_point(m: &[[f32; 4]; 4], p: [f32; 3]) -> [f32; 3] {
+    [
+        m[0][0] * p[0] + m[1][0] * p[1] + m[2][0] * p[2] + m[3][0],
+        m[0][1] * p[0] + m[1][1] * p[1] + m[2][1] * p[2] + m[3][1],
+        m[0][2] * p[0] + m[1][2] * p[1] + m[2][2] * p[2] + m[3][2],
+    ]
+}
+
+/// Transform a direction by the upper 3×3 (no translation), renormalized later.
+fn mat4_dir(m: &[[f32; 4]; 4], v: [f32; 3]) -> [f32; 3] {
+    [
+        m[0][0] * v[0] + m[1][0] * v[1] + m[2][0] * v[2],
+        m[0][1] * v[0] + m[1][1] * v[1] + m[2][1] * v[2],
+        m[0][2] * v[0] + m[1][2] * v[1] + m[2][2] * v[2],
+    ]
+}
+
+fn add_node(
+    node: &gltf::Node,
+    parent: [[f32; 4]; 4],
+    buffers: &[gltf::buffer::Data],
+    out: &mut MeshCpu,
+) {
+    let world = mat4_mul(parent, node.transform().matrix());
+    if let Some(mesh) = node.mesh() {
+        for prim in mesh.primitives() {
+            if prim.mode() != gltf::mesh::Mode::Triangles {
+                continue;
+            }
+            let reader = prim.reader(|b| buffers.get(b.index()).map(|d| d.0.as_slice()));
+            let Some(positions) = reader.read_positions() else {
+                continue;
+            };
+            let positions: Vec<[f32; 3]> = positions.map(|p| mat4_point(&world, p)).collect();
+            let base = out.vertices.len() as u32;
+            let indices: Vec<u32> = match reader.read_indices() {
+                Some(idx) => idx.into_u32().map(|i| i + base).collect(),
+                None => (base..base + positions.len() as u32).collect(),
+            };
+            match reader.read_normals() {
+                Some(normals) => {
+                    for (pos, n) in positions.iter().zip(normals) {
+                        out.vertices.push(Vertex {
+                            pos: *pos,
+                            normal: normalize(mat4_dir(&world, n)),
+                        });
+                    }
+                }
+                None => {
+                    // No normals: push placeholders, fix up smooth below.
+                    let start = out.vertices.len();
+                    for pos in &positions {
+                        out.vertices.push(Vertex {
+                            pos: *pos,
+                            normal: [0.0, 1.0, 0.0],
+                        });
+                    }
+                    let local: Vec<[f32; 3]> = positions.clone();
+                    let local_idx: Vec<u32> = indices.iter().map(|i| i - base).collect();
+                    let sm = smooth_normals(&local, &local_idx);
+                    for (v, n) in out.vertices[start..].iter_mut().zip(sm) {
+                        v.normal = n;
+                    }
+                }
+            }
+            out.indices.extend(indices);
+        }
+    }
+    for child in node.children() {
+        add_node(&child, world, buffers, out);
+    }
+}
+
+fn normalize(n: [f32; 3]) -> [f32; 3] {
+    let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+    if len > 1e-12 {
+        [n[0] / len, n[1] / len, n[2] / len]
+    } else {
+        [0.0, 1.0, 0.0]
+    }
 }
 
 /// GPU-resident mesh: vertex + index buffers and the index count to draw.

@@ -5,13 +5,16 @@ mod app;
 mod axes;
 mod browser;
 mod camera;
+mod geo;
 mod gpu;
 mod hover;
 mod legend;
 mod live;
+mod models;
 mod plot;
 mod session;
 mod timeline;
+mod vehicle;
 mod workspace;
 
 use app::DelogApp;

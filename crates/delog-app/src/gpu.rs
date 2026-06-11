@@ -14,14 +14,32 @@ use std::sync::{Arc, Mutex};
 use delog_cache::{CacheManager, MinMax};
 use delog_core::identity::FieldId;
 use delog_render::{
-    BufferManager, GpuErrorHub, Grid3dPipeline, GridUniform, LinePipeline, MinMaxColPipeline,
-    PlotUniform, RenderContext, ScatterPipeline, Scene3dTarget, StepPipeline, Traj3dPipeline,
-    Traj3dUniform, UniformRing,
+    BufferManager, GpuErrorHub, Grid3dPipeline, GridUniform, LinePipeline, MeshGpu, MeshPipeline,
+    MeshUniform, MinMaxColPipeline, PlotUniform, RenderContext, ScatterPipeline, Scene3dTarget,
+    StepPipeline, Traj3dPipeline, Traj3dUniform, UniformRing,
 };
 use eframe::{egui_wgpu, wgpu};
 
 use crate::camera::OrbitCamera;
+use crate::models;
 use crate::plot::{PlotPane, TraceMode, ViewX};
+use crate::vehicle::ModelKind;
+
+/// Render-ready data for one vehicle this frame (TDV-09/10): its model, world
+/// transform (pose), colors, and resampled render-space trajectory. Built in
+/// `scene_ui` from a `VehicleConfig` + the snapshot + playhead.
+pub struct VehicleDraw<'a> {
+    /// Stable per-vehicle key (the source id) for GPU-buffer caching.
+    pub key: u32,
+    pub model: &'a ModelKind,
+    /// Body→render model matrix (column-major) and its normal matrix.
+    pub model_matrix: [[f32; 4]; 4],
+    pub normal_matrix: [[f32; 4]; 4],
+    pub color: [f32; 4],
+    pub path_color: [f32; 4],
+    /// Render-space `[x,y,z]` trajectory points (NaN = gap).
+    pub trajectory: &'a [[f32; 3]],
+}
 
 /// Switch to the decimated min/max path above this many samples per pixel
 /// (§9.5, GPU-10).
@@ -268,6 +286,7 @@ impl GpuBridge {
         ui: &egui::Ui,
         rect: egui::Rect,
         camera: &OrbitCamera,
+        vehicles: &[VehicleDraw],
     ) -> Option<egui::TextureId> {
         if !self.available {
             return None;
@@ -311,6 +330,7 @@ impl GpuBridge {
                     bytemuck::bytes_of(&Traj3dUniform::new(vp_cols, line.color)),
                 );
             }
+            res.prepare_vehicles(vp_cols, vehicles);
 
             let clear = wgpu::Color {
                 r: 0.07,
@@ -327,9 +347,15 @@ impl GpuBridge {
             {
                 let mut pass = res.target.begin_pass(&mut enc, clear);
                 res.grid.draw(&mut pass);
-                for line in &res.lines {
+                // The demo lemniscate (lines[1]) only shows when no vehicle is
+                // configured (§12.3); the Y-axis gizmo (lines[0]) always does.
+                for (i, line) in res.lines.iter().enumerate() {
+                    if i == 1 && !vehicles.is_empty() {
+                        continue;
+                    }
                     res.traj.draw(&mut pass, &line.bind, line.count);
                 }
+                res.draw_vehicles(&mut pass, vehicles);
             }
             res.ctx.queue().submit([enc.finish()]);
             (res.target.resolve_view().clone(), resized, res.texture_id)
@@ -564,11 +590,28 @@ struct SceneTraj {
     color: [f32; 4],
 }
 
+/// Per-vehicle GPU state (TDV-09/10), keyed by source id: a mesh uniform/bind
+/// and a growable trajectory line (points + uniform + bind).
+struct VehicleGpu {
+    mesh_uniform: wgpu::Buffer,
+    mesh_bind: wgpu::BindGroup,
+    traj_points: wgpu::Buffer,
+    traj_capacity: u32,
+    traj_count: u32,
+    traj_uniform: wgpu::Buffer,
+    traj_bind: wgpu::BindGroup,
+}
+
 struct SceneResources {
     ctx: RenderContext,
     target: Scene3dTarget,
     grid: Grid3dPipeline,
     traj: Traj3dPipeline,
+    mesh: MeshPipeline,
+    /// Decoded meshes by model kind (lazy; built on first use).
+    model_cache: HashMap<ModelKind, MeshGpu>,
+    /// Per-vehicle GPU buffers, keyed by source id.
+    vehicles: HashMap<u32, VehicleGpu>,
     /// Vertical world Y-axis line (the up axis the ground grid can't draw) plus
     /// a demo lemniscate path (TDV-11 smoke test) shown until a vehicle is
     /// configured.
@@ -587,6 +630,12 @@ impl SceneResources {
             target.sample_count(),
         );
         let traj = Traj3dPipeline::new(
+            &ctx,
+            target.color_format(),
+            target.depth_format(),
+            target.sample_count(),
+        );
+        let mesh = MeshPipeline::new(
             &ctx,
             target.color_format(),
             target.depth_format(),
@@ -619,10 +668,132 @@ impl SceneResources {
             target,
             grid,
             traj,
+            mesh,
+            model_cache: HashMap::new(),
+            vehicles: HashMap::new(),
             lines,
             texture_id: None,
         }
     }
+
+    /// Ensure a model's mesh is uploaded, returning it from the cache.
+    fn model_mesh(&mut self, kind: &ModelKind) -> &MeshGpu {
+        self.model_cache
+            .entry(kind.clone())
+            .or_insert_with(|| MeshGpu::upload(&self.ctx, &models::mesh_for(kind)))
+    }
+
+    /// Prepare GPU buffers + uniforms for the frame's vehicles (before the
+    /// pass): upload each mesh once, (re)grow trajectory buffers, write uniforms.
+    fn prepare_vehicles(&mut self, vp_cols: [[f32; 4]; 4], vehicles: &[VehicleDraw]) {
+        for v in vehicles {
+            // Upload the model mesh on first use (no-op afterwards).
+            self.model_mesh(v.model);
+
+            let pts: Vec<[f32; 4]> = v
+                .trajectory
+                .iter()
+                .map(|p| [p[0], p[1], p[2], 1.0])
+                .collect();
+            let needed = pts.len() as u32;
+            let entry = self.vehicles.entry(v.key);
+            let vg = match entry {
+                std::collections::hash_map::Entry::Occupied(o) => {
+                    let vg = o.into_mut();
+                    if needed > vg.traj_capacity {
+                        vg.traj_points = new_points_buffer(&self.ctx, needed.max(1));
+                        vg.traj_capacity = needed.max(1);
+                        vg.traj_bind =
+                            self.traj
+                                .bind_group(&self.ctx, &vg.traj_points, &vg.traj_uniform);
+                    }
+                    vg
+                }
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    let cap = needed.max(1);
+                    let mesh_uniform = new_uniform_buffer(
+                        &self.ctx,
+                        std::mem::size_of::<MeshUniform>() as u64,
+                        "delog-veh-mesh-uniform",
+                    );
+                    let mesh_bind = self.mesh.bind_group(&self.ctx, &mesh_uniform);
+                    let traj_points = new_points_buffer(&self.ctx, cap);
+                    let traj_uniform = new_uniform_buffer(
+                        &self.ctx,
+                        std::mem::size_of::<Traj3dUniform>() as u64,
+                        "delog-veh-traj-uniform",
+                    );
+                    let traj_bind = self.traj.bind_group(&self.ctx, &traj_points, &traj_uniform);
+                    slot.insert(VehicleGpu {
+                        mesh_uniform,
+                        mesh_bind,
+                        traj_points,
+                        traj_capacity: cap,
+                        traj_count: 0,
+                        traj_uniform,
+                        traj_bind,
+                    })
+                }
+            };
+
+            vg.traj_count = needed;
+            if needed > 0 {
+                self.ctx
+                    .queue()
+                    .write_buffer(&vg.traj_points, 0, bytemuck::cast_slice(&pts));
+            }
+            self.ctx.queue().write_buffer(
+                &vg.traj_uniform,
+                0,
+                bytemuck::bytes_of(&Traj3dUniform::new(vp_cols, v.path_color)),
+            );
+            self.ctx.queue().write_buffer(
+                &vg.mesh_uniform,
+                0,
+                bytemuck::bytes_of(&MeshUniform::new(
+                    vp_cols,
+                    v.model_matrix,
+                    v.normal_matrix,
+                    // Light from upper front-right; ambient keeps shadowed faces readable.
+                    glam::Vec3::new(0.4, 1.0, 0.6).normalize().to_array(),
+                    v.color,
+                    0.28,
+                )),
+            );
+        }
+    }
+
+    /// Draw the frame's vehicles inside the scene pass: trajectory line then
+    /// the posed mesh. Buffers must be prepared via [`Self::prepare_vehicles`].
+    fn draw_vehicles(&self, pass: &mut wgpu::RenderPass<'_>, vehicles: &[VehicleDraw]) {
+        for v in vehicles {
+            let Some(vg) = self.vehicles.get(&v.key) else {
+                continue;
+            };
+            self.traj.draw(pass, &vg.traj_bind, vg.traj_count);
+            if let Some(mesh) = self.model_cache.get(v.model) {
+                self.mesh.draw(pass, &vg.mesh_bind, mesh);
+            }
+        }
+    }
+}
+
+fn new_points_buffer(ctx: &RenderContext, count: u32) -> wgpu::Buffer {
+    ctx.device().create_buffer(&wgpu::BufferDescriptor {
+        label: Some("delog-veh-traj-points"),
+        size: (count as u64) * std::mem::size_of::<[f32; 4]>() as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+fn new_uniform_buffer(ctx: &RenderContext, size: u64, label: &str) -> wgpu::Buffer {
+    ctx.device().create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
 }
 
 impl SceneTraj {
