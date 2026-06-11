@@ -16,6 +16,8 @@ pub struct DelogApp {
     gpu: GpuBridge,
     caches: CacheManager,
     pane: PlotPane,
+    hover_mode: delog_core::field_view::SampleMode,
+    show_legend: bool,
     frame: u64,
     last_epoch: u64,
     origin_us: i64,
@@ -31,6 +33,8 @@ impl DelogApp {
             gpu: GpuBridge::from_creation_context(cc),
             caches: CacheManager::new(),
             pane: PlotPane::default(),
+            hover_mode: delog_core::field_view::SampleMode::Prev,
+            show_legend: true,
             frame: 0,
             last_epoch: u64::MAX,
             origin_us: 0,
@@ -158,6 +162,7 @@ impl eframe::App for DelogApp {
                     );
                     let response = ui.allocate_rect(outer, egui::Sense::click_and_drag());
                     self.handle_plot_interaction(&response, plot_rect);
+                    self.plot_context_menu(&response);
 
                     if self.pane.is_empty() {
                         ui.painter().text(
@@ -194,17 +199,25 @@ impl eframe::App for DelogApp {
                             &snapshot,
                             &self.pane,
                             self.origin_us,
-                            delog_core::field_view::SampleMode::Prev,
+                            self.hover_mode,
                         );
 
-                        // Legend overlay: visibility + colour edits.
-                        let labels: Vec<_> = self
-                            .pane
-                            .traces
-                            .iter()
-                            .map(|t| (t.field, legend::trace_label(&snapshot, t.field)))
-                            .collect();
-                        legend::ui(ui, plot_rect, &mut self.pane, &labels);
+                        // Legend overlay: visibility + colour edits; right-click ▸
+                        // Remove drops the trace and unpins its cache.
+                        if self.show_legend {
+                            let labels: Vec<_> = self
+                                .pane
+                                .traces
+                                .iter()
+                                .map(|t| (t.field, legend::trace_label(&snapshot, t.field)))
+                                .collect();
+                            if let Some(removed) =
+                                legend::ui(ui, plot_rect, &mut self.pane, &labels)
+                            {
+                                self.pane.remove_trace(removed);
+                                self.caches.unpin(removed);
+                            }
+                        }
                     }
                 });
             if let Some(field) = dropped
@@ -229,6 +242,31 @@ impl DelogApp {
             .filter(|f| f.id == field)?;
         let store = snapshot.topic(entry.topic)?.store.as_ref()?;
         store.schema.field_by_name(&entry.name)?.unit.clone()
+    }
+
+    /// Right-click plot context menu: reset/clear/hover-mode/legend (PLT-11).
+    /// Trace mode and split/info items wait on GPU-07/08, PLT-01 and PLT-12.
+    fn plot_context_menu(&mut self, response: &egui::Response) {
+        response.context_menu(|ui| {
+            if ui.button("Reset view").clicked() {
+                if let Some(range) = self.session.snapshot().global_time_range() {
+                    self.pane.reset_view(range);
+                }
+                ui.close();
+            }
+            if ui.button("Clear traces").clicked() {
+                self.pane.clear();
+                ui.close();
+            }
+            ui.separator();
+            ui.menu_button("Hover mode", |ui| {
+                use delog_core::field_view::SampleMode::{Linear, Next, Prev};
+                ui.radio_value(&mut self.hover_mode, Prev, "Previous");
+                ui.radio_value(&mut self.hover_mode, Next, "Next");
+                ui.radio_value(&mut self.hover_mode, Linear, "Linear");
+            });
+            ui.checkbox(&mut self.show_legend, "Show legend");
+        });
     }
 
     /// Pan (drag), zoom (wheel @ cursor) and reset (double-click) the X view

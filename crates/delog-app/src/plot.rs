@@ -116,6 +116,16 @@ impl PlotPane {
         true
     }
 
+    /// Remove a plotted trace (legend/context menu, PLT-11).
+    pub fn remove_trace(&mut self, field: FieldId) {
+        self.traces.retain(|t| t.field != field);
+    }
+
+    /// Remove every trace (context menu "Clear", PLT-11).
+    pub fn clear(&mut self) {
+        self.traces.clear();
+    }
+
     /// Mutate one trace's style/visibility in place (legend controls).
     pub fn trace_mut(&mut self, field: FieldId) -> Option<&mut TraceRef> {
         self.traces.iter_mut().find(|t| t.field == field)
@@ -220,6 +230,12 @@ mod tests {
 
         pane.trace_mut(FieldId(0)).unwrap().visible = false;
         assert_eq!(pane.visible_traces().count(), 1);
+
+        pane.remove_trace(FieldId(0));
+        assert_eq!(pane.traces.len(), 1);
+        assert_eq!(pane.traces[0].field, FieldId(1));
+        pane.clear();
+        assert!(pane.is_empty());
     }
 
     #[test]
