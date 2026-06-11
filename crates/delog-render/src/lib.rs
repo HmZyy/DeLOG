@@ -30,6 +30,7 @@ pub mod scatter;
 pub mod scene_target;
 pub mod step;
 pub mod target;
+pub mod traj3d;
 pub mod uniforms;
 
 pub use buffers::BufferManager;
@@ -42,4 +43,5 @@ pub use scatter::ScatterPipeline;
 pub use scene_target::{COLOR_FORMAT, DEPTH_FORMAT, SAMPLE_COUNT, Scene3dTarget};
 pub use step::StepPipeline;
 pub use target::{OffscreenTarget, RgbaImage};
+pub use traj3d::{Traj3dPipeline, Traj3dUniform};
 pub use uniforms::{PlotUniform, UniformRing};
