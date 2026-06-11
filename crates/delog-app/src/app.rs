@@ -162,7 +162,7 @@ impl eframe::App for DelogApp {
                     );
                     let response = ui.allocate_rect(outer, egui::Sense::click_and_drag());
                     self.handle_plot_interaction(&response, plot_rect);
-                    self.plot_context_menu(&response);
+                    self.plot_context_menu(&response, &snapshot);
 
                     if self.pane.is_empty() {
                         ui.painter().text(
@@ -191,16 +191,19 @@ impl eframe::App for DelogApp {
                         self.gpu
                             .render_pane(ui, frame, &mut self.caches, &self.pane, pview);
 
-                        // Hover readout: cursor line, sample circles, value tooltip.
-                        hover::draw(
-                            ui,
-                            pview,
-                            &response,
-                            &snapshot,
-                            &self.pane,
-                            self.origin_us,
-                            self.hover_mode,
-                        );
+                        // Hover readout: cursor line, sample circles, value
+                        // tooltip — suppressed while any popup/menu is open.
+                        if !ui.ctx().any_popup_open() {
+                            hover::draw(
+                                ui,
+                                pview,
+                                &response,
+                                &snapshot,
+                                &self.pane,
+                                self.origin_us,
+                                self.hover_mode,
+                            );
+                        }
 
                         // Legend overlay: visibility + colour edits; right-click ▸
                         // Remove drops the trace and unpins its cache.
@@ -246,18 +249,50 @@ impl DelogApp {
 
     /// Right-click plot context menu: reset/clear/hover-mode/legend (PLT-11).
     /// Trace mode and split/info items wait on GPU-07/08, PLT-01 and PLT-12.
-    fn plot_context_menu(&mut self, response: &egui::Response) {
+    fn plot_context_menu(
+        &mut self,
+        response: &egui::Response,
+        snapshot: &delog_core::snapshot::StoreSnapshot,
+    ) {
         response.context_menu(|ui| {
             if ui.button("Reset view").clicked() {
-                if let Some(range) = self.session.snapshot().global_time_range() {
+                if let Some(range) = snapshot.global_time_range() {
                     self.pane.reset_view(range);
                 }
                 ui.close();
             }
-            if ui.button("Clear traces").clicked() {
-                self.pane.clear();
-                ui.close();
-            }
+
+            // Clear ▸ All / per-trace remove (each prefixed with its colour).
+            ui.menu_button("Clear traces", |ui| {
+                if ui.button("All").clicked() {
+                    for field in self.pane.fields().collect::<Vec<_>>() {
+                        self.caches.unpin(field);
+                    }
+                    self.pane.clear();
+                    ui.close();
+                }
+                ui.separator();
+                let entries: Vec<_> = self
+                    .pane
+                    .traces
+                    .iter()
+                    .map(|t| (t.field, legend::trace_label(snapshot, t.field), t.color32()))
+                    .collect();
+                for (field, label, color) in entries {
+                    let clicked = ui
+                        .horizontal(|ui| {
+                            ui.colored_label(color, "■");
+                            ui.button(label).clicked()
+                        })
+                        .inner;
+                    if clicked {
+                        self.pane.remove_trace(field);
+                        self.caches.unpin(field);
+                        ui.close();
+                    }
+                }
+            });
+
             ui.separator();
             ui.menu_button("Hover mode", |ui| {
                 use delog_core::field_view::SampleMode::{Linear, Next, Prev};
