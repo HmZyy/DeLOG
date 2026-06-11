@@ -36,6 +36,7 @@ pub struct DelogApp {
     connection_dialog: ConnectionDialog,
     /// Configured vehicles for the 3D view (TDV-03); empty until one is added.
     vehicles: Vec<crate::vehicle::VehicleConfig>,
+    vehicle_dialog: crate::vehicle_dialog::VehicleDialog,
 }
 
 impl DelogApp {
@@ -63,6 +64,7 @@ impl DelogApp {
             show_connection_dialog: false,
             connection_dialog: ConnectionDialog::default(),
             vehicles: Vec::new(),
+            vehicle_dialog: crate::vehicle_dialog::VehicleDialog::default(),
         }
     }
 
@@ -202,6 +204,13 @@ impl eframe::App for DelogApp {
                     .clicked()
                 {
                     self.workspace.toggle_scene_pane();
+                }
+                if ui
+                    .button("Vehicles")
+                    .on_hover_text("Configure 3D vehicles")
+                    .clicked()
+                {
+                    self.vehicle_dialog.open = !self.vehicle_dialog.open;
                 }
                 let live_statuses = self.session.live_statuses();
                 if !live_statuses.is_empty() {
@@ -415,6 +424,12 @@ impl eframe::App for DelogApp {
         });
 
         about::window(ui.ctx(), &mut self.show_about);
+        crate::vehicle_dialog::show(
+            ui.ctx(),
+            &mut self.vehicle_dialog,
+            &mut self.vehicles,
+            &self.session.snapshot(),
+        );
         if let Some(endpoint) = self
             .connection_dialog
             .ui(ui.ctx(), &mut self.show_connection_dialog)

@@ -15,6 +15,7 @@ mod plot;
 mod session;
 mod timeline;
 mod vehicle;
+mod vehicle_dialog;
 mod workspace;
 
 use app::DelogApp;

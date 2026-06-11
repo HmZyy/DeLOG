@@ -8,11 +8,6 @@
 //! touches Arrow directly, §3.2); `sample_at` returns the raw stored value, so
 //! the schema multiplier is applied here to get engineering units.
 
-// TEMPORARY (removed in the TDV-03 vehicle-config-dialog commit): the render
-// path reads every config variant, but nothing *constructs* them until the
-// dialog lands next, so their constructors are "dead" for exactly one commit.
-#![allow(dead_code)]
-
 use std::path::PathBuf;
 
 use delog_core::field_view::{FieldView, SampleMode};
