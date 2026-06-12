@@ -218,6 +218,7 @@ pub fn ui(
     range: TimeRange,
     utc_offset_us: Option<i64>,
     any_live: bool,
+    theme: crate::theme::ThemeChoice,
 ) -> TimelineAction {
     let mut action = TimelineAction::default();
     ui.horizontal(|ui| {
@@ -225,15 +226,12 @@ pub fn ui(
         // not locked to the live tail, red = locked. While streaming it is
         // clickable to toggle the live-tail lock.
         let (dot_color, dot_tip) = if !any_live {
-            (egui::Color32::from_gray(0x80), "Not streaming")
+            (theme.neutral(), "Not streaming")
         } else if playback.follow_live {
-            (
-                egui::Color32::from_rgb(0xe0, 0x3b, 0x3b),
-                "Locked to live tail — click to unlock",
-            )
+            (theme.error(), "Locked to live tail — click to unlock")
         } else {
             (
-                egui::Color32::from_rgb(0xe6, 0x9f, 0x00),
+                theme.warning(),
                 "Live (not locked) — click to lock to the tail",
             )
         };
