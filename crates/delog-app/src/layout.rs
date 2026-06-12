@@ -302,8 +302,9 @@ pub fn list_layouts() -> Vec<String> {
     let mut names = read
         .flatten()
         .filter_map(|entry| {
-            entry
-                .path()
+            let path = entry.path();
+            (path.extension().and_then(|s| s.to_str()) == Some("json"))
+                .then_some(path)?
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .map(str::to_owned)
@@ -313,11 +314,35 @@ pub fn list_layouts() -> Vec<String> {
     names
 }
 
+pub fn delete_named(name: &str) -> Result<(), LayoutError> {
+    let path = named_layout_path(name)?;
+    fs::remove_file(path).map_err(|e| LayoutError::Io(e.to_string()))
+}
+
+pub fn duplicate_named(from: &str, to: &str) -> Result<(), LayoutError> {
+    let mut doc = import_doc(&named_layout_path(from)?)?;
+    doc.name = sanitize_name(to);
+    save_named(to, &doc)
+}
+
+pub fn rename_named(from: &str, to: &str) -> Result<(), LayoutError> {
+    let mut doc = import_doc(&named_layout_path(from)?)?;
+    doc.name = sanitize_name(to);
+    save_named(to, &doc)?;
+    let from_path = named_layout_path(from)?;
+    let to_path = named_layout_path(to)?;
+    if from_path != to_path {
+        fs::remove_file(from_path).map_err(|e| LayoutError::Io(e.to_string()))?;
+    }
+    Ok(())
+}
+
 pub fn save_named(name: &str, doc: &LayoutDoc) -> Result<(), LayoutError> {
-    let dir = layout_dir()?;
-    fs::create_dir_all(&dir).map_err(|e| LayoutError::Io(e.to_string()))?;
-    let stem = sanitize_name(name);
-    let path = dir.join(format!("{stem}.json"));
+    let path = named_layout_path(name)?;
+    let dir = path
+        .parent()
+        .ok_or_else(|| LayoutError::Io("layout path has no parent".into()))?;
+    fs::create_dir_all(dir).map_err(|e| LayoutError::Io(e.to_string()))?;
     let json = doc_json(doc)?;
     write_json_atomic(&path, &json)
 }
@@ -357,7 +382,7 @@ fn write_json_atomic(path: &Path, json: &str) -> Result<(), LayoutError> {
 }
 
 pub fn load_named(name: &str, snapshot: &StoreSnapshot) -> Result<LoadOutcome, LayoutError> {
-    let path = layout_dir()?.join(format!("{}.json", sanitize_name(name)));
+    let path = named_layout_path(name)?;
     let doc = import_doc(&path)?;
     load_doc(doc, snapshot)
 }
@@ -466,6 +491,10 @@ fn storage_dir(app_id: &str) -> Option<PathBuf> {
             .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".local/share")))
             .map(|p| p.join(app_id.to_lowercase().replace(char::is_whitespace, "")))
     }
+}
+
+fn named_layout_path(name: &str) -> Result<PathBuf, LayoutError> {
+    Ok(layout_dir()?.join(format!("{}.json", sanitize_name(name))))
 }
 
 fn workspace_doc(workspace: &Workspace, snapshot: &StoreSnapshot) -> WorkspaceLayout {
