@@ -1017,9 +1017,9 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 
 - [ ] **UIX-01** — Workspace-first window per §19.1; collapsible drawer/docks
 - [~] **UIX-02** — Toolbar (open/cancel/add/remove/3D/vehicle/stream start/stop) with tooltips — dedicated icon toolbar directly under the menu bar with tinted SVG icons (Lucide via `egui_extras` svg loader): streaming (satellite-dish, blue when a live link is active → connection dialog) and 3D-view toggle (box, blue when open); live-link status + per-link Disconnect button (`Session::stop_live`, drop stops the threads) + parse progress/cancel live alongside; vehicle config moved to a gear overlay on the 3D pane (`WorkspaceActions::open_vehicle_config`); open moved to File menu. Pending: add/remove-plot buttons
-- [~] **UIX-03** — Menus: File/Tools/Layout/Help (§19.2) — File/**Edit**/Layout/Help menu bar in place (user asked for an Edit menu in place of §19.2's Tools; Edit is an empty placeholder for now). File ▸ Open File; Layout ▸ Save / Load (submenu of saved layouts, loads in place) / Manage / Export JSON / Import JSON; Help ▸ About. Pending: File recent/import/export/quit, and the Tools/Edit contents
+- [~] **UIX-03** — Menus: File/Tools/Layout/Help (§19.2) — File/**Edit**/Layout/Help menu bar in place (user asked for an Edit menu in place of §19.2's Tools). Edit ▸ Settings opens an extensible tabbed settings dialog with a General theme selector. File ▸ Open File; Layout ▸ Save / Load (submenu of saved layouts, loads in place) / Manage / Export JSON / Import JSON; Help ▸ About. Pending: File recent/import/export/quit, and the remaining Tools/Edit contents
 - [ ] **UIX-04** — Shortcut map per §19.3 + Help ▸ shortcuts sheet
-- [ ] **UIX-05** — Dark theme, palette constants, ≥4.5:1 contrast
+- [x] **UIX-05** — Dark theme, palette constants, ≥4.5:1 contrast — Catppuccin Mocha egui visuals applied locally for egui 0.34 compatibility; app status/accent colors use theme tokens; text contrast covered by unit tests
 - [ ] **UIX-06** — High-DPI verified at 1×/1.5×/2×; min-size responsiveness
 - [ ] **UIX-07** — All §19.5 empty states implemented with real copy
 - [ ] **UIX-08** — File-drop onto window opens logs
