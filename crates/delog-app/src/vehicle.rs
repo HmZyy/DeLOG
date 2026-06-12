@@ -46,6 +46,22 @@ impl ModelKind {
             ModelKind::CustomGlb(_) => "Custom GLB",
         }
     }
+
+    /// Mesh→body correction. Meshes are authored Y-up (glTF convention); the
+    /// body frame is X-forward/Z-down, so every model gets a −90° about X
+    /// (mesh up → body up). Quad and Delta-wing are additionally authored with
+    /// the nose along mesh −Z and get a −90° about mesh-up first to bring the
+    /// nose to body +X. Values match the reference tiplot implementation
+    /// (base × per-type offset).
+    pub fn orientation_offset(&self) -> Mat3 {
+        let base = Mat3::from_rotation_x(-std::f32::consts::FRAC_PI_2);
+        match self {
+            ModelKind::Quad | ModelKind::DeltaWing => {
+                base * Mat3::from_rotation_y(-std::f32::consts::FRAC_PI_2)
+            }
+            ModelKind::FixedWing | ModelKind::Cone | ModelKind::CustomGlb(_) => base,
+        }
+    }
 }
 
 /// A fixed geodetic reference origin (degrees / metres).
@@ -93,7 +109,7 @@ pub enum PosMapping {
 /// How a vehicle's orientation is read (§12.1).
 #[derive(Clone, Debug, PartialEq)]
 pub enum OriMapping {
-    /// No rotation (model sits as authored).
+    /// Level attitude (identity body→NED rotation).
     Static,
     /// Intrinsic Z-Y-X Euler (yaw-pitch-roll), body→NED.
     Euler {
@@ -261,10 +277,11 @@ fn position_at(
     }
 }
 
-/// Render-space rotation of a vehicle at an effective time.
+/// Render-space rotation of a vehicle at an effective time. Falls back to
+/// level attitude (identity body→NED) when samples can't be read.
 fn orientation_at(snapshot: &StoreSnapshot, ori: &OriMapping, t_us: i64) -> Mat3 {
     match ori {
-        OriMapping::Static => Mat3::IDENTITY,
+        OriMapping::Static => geo::ned_to_render_mat3(),
         OriMapping::Euler {
             roll,
             pitch,
@@ -284,7 +301,7 @@ fn orientation_at(snapshot: &StoreSnapshot, ori: &OriMapping, t_us: i64) -> Mat3
                 (Some(r), Some(p), Some(y)) => {
                     geo::body_to_render_rot(geo::euler_to_quat(conv(r), conv(p), conv(y)))
                 }
-                _ => Mat3::IDENTITY,
+                _ => geo::ned_to_render_mat3(),
             }
         }
         OriMapping::Quat { w, x, y, z } => {
@@ -298,10 +315,10 @@ fn orientation_at(snapshot: &StoreSnapshot, ori: &OriMapping, t_us: i64) -> Mat3
                     if q.length_squared() > 1e-6 {
                         geo::body_to_render_rot(q.normalize())
                     } else {
-                        Mat3::IDENTITY
+                        geo::ned_to_render_mat3()
                     }
                 }
-                _ => Mat3::IDENTITY,
+                _ => geo::ned_to_render_mat3(),
             }
         }
     }
@@ -414,6 +431,62 @@ mod tests {
             color: Color32::WHITE,
             path_color: Color32::WHITE,
             scale: 1.0,
+        }
+    }
+
+    #[test]
+    fn model_orientation_offsets_map_mesh_axes_to_body_axes() {
+        // Every offset is a proper rotation mapping mesh-up (+Y) to body-up
+        // (−Z, since body Z is down) and the authored nose to body +X
+        // (forward): mesh −Z for Quad/Delta, mesh +X for the rest.
+        for kind in [
+            ModelKind::Quad,
+            ModelKind::FixedWing,
+            ModelKind::DeltaWing,
+            ModelKind::Cone,
+            ModelKind::CustomGlb("x.glb".into()),
+        ] {
+            let m = kind.orientation_offset();
+            let label = kind.label();
+            assert!((m.determinant() - 1.0).abs() < 1e-6, "{label}");
+            assert!(
+                (m * Vec3::Y - Vec3::NEG_Z).length() < 1e-6,
+                "{label}: mesh up should map to body up (−Z)"
+            );
+            let nose = match kind {
+                ModelKind::Quad | ModelKind::DeltaWing => Vec3::NEG_Z,
+                _ => Vec3::X,
+            };
+            assert!(
+                (m * nose - Vec3::X).length() < 1e-6,
+                "{label}: nose should map to body +X"
+            );
+        }
+    }
+
+    #[test]
+    fn level_attitude_renders_models_upright_facing_north() {
+        // Static orientation = level attitude. Composed with the mesh offset
+        // (as the draw path does: pose.rot × offset), mesh-up ends render-up
+        // (+Y) and the nose ends render north (−Z) for every model kind.
+        let (snap, f) = ned_snapshot(vec![0], vec![0.0], vec![0.0], vec![0.0]);
+        let pose = pose_at(&snap, &ned_config(f), 0).unwrap();
+        for kind in [ModelKind::Quad, ModelKind::FixedWing, ModelKind::Cone] {
+            let rot = pose.rot * kind.orientation_offset();
+            assert!(
+                (rot * Vec3::Y - Vec3::Y).length() < 1e-5,
+                "{}: mesh up should render up",
+                kind.label()
+            );
+            let nose = match kind {
+                ModelKind::Quad | ModelKind::DeltaWing => Vec3::NEG_Z,
+                _ => Vec3::X,
+            };
+            assert!(
+                (rot * nose - Vec3::NEG_Z).length() < 1e-5,
+                "{}: nose should render north (−Z)",
+                kind.label()
+            );
         }
     }
 
