@@ -96,6 +96,7 @@ pub struct DelogApp {
     layout_manager_dialog: LayoutManagerDialog,
     settings: AppSettings,
     settings_dialog: SettingsDialog,
+    theme_needs_apply: bool,
     pending_layout: Option<PendingLayout>,
     deferred_layout_doc: Option<LayoutDoc>,
     last_session_autosave: Instant,
@@ -119,7 +120,9 @@ pub struct DelogApp {
 
 impl DelogApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let settings = AppSettings::default();
+        let settings = crate::layout::load_session_doc()
+            .map(|doc| doc.settings)
+            .unwrap_or_default();
         settings.theme.apply(&cc.egui_ctx);
         let (picked_files_tx, picked_files) = mpsc::channel();
         let (traj_results_tx, traj_results) = mpsc::channel();
@@ -157,6 +160,7 @@ impl DelogApp {
             layout_manager_dialog: LayoutManagerDialog::default(),
             settings,
             settings_dialog: SettingsDialog::default(),
+            theme_needs_apply: false,
             pending_layout: None,
             deferred_layout_doc: None,
             last_session_autosave: Instant::now(),
@@ -417,6 +421,7 @@ impl DelogApp {
             speed: self.playback.speed as f64,
             follow_live: self.playback.follow_live,
             vehicles: &self.vehicles,
+            settings: &self.settings,
         })
     }
 
@@ -612,6 +617,10 @@ impl DelogApp {
         self.playback.follow_live = layout.follow_live;
         // Legend/tooltip visibility is restored per-pane via the workspace.
         self.vehicles = layout.vehicles;
+        if self.settings != layout.settings {
+            self.settings = layout.settings;
+            self.theme_needs_apply = true;
+        }
         self.vehicle_revision = self.vehicle_revision.wrapping_add(1);
         self.traj_dirty = true;
         for diag in layout.diagnostics {
@@ -1275,8 +1284,9 @@ impl eframe::App for DelogApp {
         about::window(ui.ctx(), &mut self.show_about);
         self.show_layout_windows(ui.ctx());
         let settings_change = self.settings_dialog.show(ui.ctx(), &mut self.settings);
-        if settings_change.theme_changed {
+        if settings_change.theme_changed || self.theme_needs_apply {
             self.settings.theme.apply(ui.ctx());
+            self.theme_needs_apply = false;
         }
         if crate::vehicle_dialog::show(
             ui.ctx(),

@@ -68,7 +68,8 @@ pub const WARNING: egui::Color32 = MOCHA.yellow;
 pub const ERROR: egui::Color32 = MOCHA.red;
 pub const NEUTRAL: egui::Color32 = MOCHA.overlay1;
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ThemeChoice {
     Light,
     Dark,
