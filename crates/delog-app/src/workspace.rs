@@ -493,10 +493,9 @@ impl Behavior<'_> {
             .services
             .vehicles
             .iter()
-            .map(|v| {
-                (v.show)
-                    .then(|| playhead.and_then(|t| vehicle::pose_at(snapshot, v, t)))
-                    .flatten()
+            .map(|v| match (v.show, playhead) {
+                (true, Some(t)) => vehicle::pose_at(snapshot, v, t),
+                _ => None,
             })
             .collect();
 
@@ -505,7 +504,6 @@ impl Behavior<'_> {
         let tracked = poses.iter().flatten().next().map(|p| p.pos);
         pane.camera.target = tracked.unwrap_or(glam::Vec3::ZERO);
 
-        let empty: Vec<[f32; 3]> = Vec::new();
         let draws: Vec<VehicleDraw> = self
             .services
             .vehicles
@@ -513,20 +511,14 @@ impl Behavior<'_> {
             .enumerate()
             .filter_map(|(i, v)| {
                 let pose = poses[i]?;
-                // Fold the model's static authored-orientation correction into
-                // the body rotation (mesh-local, so right-multiplied).
-                let pose = vehicle::Pose {
-                    rot: pose.rot * v.model.orientation_offset(),
-                    ..pose
-                };
                 Some(VehicleDraw {
                     key: v.source.0,
                     model: &v.model,
                     model_matrix: pose.model_matrix(v.scale).to_cols_array_2d(),
                     normal_matrix: glam::Mat4::from_mat3(pose.rot).to_cols_array_2d(),
-                    color: color_rgba(v.color),
-                    path_color: color_rgba(v.path_color),
-                    trajectory: self.services.trajectories.get(i).unwrap_or(&empty),
+                    color: legend::color32_to_srgb(v.color),
+                    path_color: legend::color32_to_srgb(v.path_color),
+                    trajectory: self.services.trajectories.get(i).map_or(&[], Vec::as_slice),
                 })
             })
             .collect();
@@ -999,17 +991,6 @@ fn ordered_pair(
     } else {
         vec![existing, new_pane]
     }
-}
-
-/// egui color → normalized RGBA for a render uniform.
-fn color_rgba(c: egui::Color32) -> [f32; 4] {
-    let [r, g, b, a] = c.to_array();
-    [
-        r as f32 / 255.0,
-        g as f32 / 255.0,
-        b as f32 / 255.0,
-        a as f32 / 255.0,
-    ]
 }
 
 fn fields_from_removed_tile(tile: egui_tiles::Tile<Pane>) -> Vec<FieldId> {
