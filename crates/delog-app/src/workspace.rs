@@ -1141,7 +1141,7 @@ fn scene_settings_button(ui: &mut egui::Ui, scene_rect: egui::Rect) -> bool {
                 .fit_to_exact_size(egui::vec2(18.0, 18.0))
                 .tint(ui.visuals().text_color());
             clicked = ui
-                .add(egui::Button::image(image))
+                .add_sized(egui::vec2(28.0, 24.0), egui::Button::image(image))
                 .on_hover_text("Configure 3D vehicles")
                 .clicked();
         });
