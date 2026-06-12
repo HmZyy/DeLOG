@@ -39,6 +39,22 @@ struct LoadLayoutDialog {
     selected: Option<usize>,
 }
 
+#[derive(Default)]
+struct LayoutManagerDialog {
+    open: bool,
+    layouts: Vec<String>,
+    selected: Option<usize>,
+    rename_to: String,
+    duplicate_to: String,
+}
+
+enum LayoutManagerAction {
+    Load(String),
+    Rename { from: String, to: String },
+    Duplicate { from: String, to: String },
+    Delete(String),
+}
+
 pub struct DelogApp {
     session: Session,
     gpu: GpuBridge,
@@ -65,6 +81,7 @@ pub struct DelogApp {
     show_about: bool,
     save_layout_dialog: SaveLayoutDialog,
     load_layout_dialog: LoadLayoutDialog,
+    layout_manager_dialog: LayoutManagerDialog,
     pending_layout: Option<PendingLayout>,
     last_session_autosave: Instant,
     last_session_autosave_json: Option<String>,
@@ -119,6 +136,7 @@ impl DelogApp {
                 name: "default".into(),
             },
             load_layout_dialog: LoadLayoutDialog::default(),
+            layout_manager_dialog: LayoutManagerDialog::default(),
             pending_layout: None,
             last_session_autosave: Instant::now(),
             last_session_autosave_json: None,
@@ -438,6 +456,101 @@ impl DelogApp {
         }
     }
 
+    fn open_layout_manager(&mut self) {
+        self.layout_manager_dialog.open = true;
+        self.refresh_layout_manager(None);
+    }
+
+    fn refresh_layout_manager(&mut self, preferred: Option<String>) {
+        self.layout_manager_dialog.layouts = crate::layout::list_layouts();
+        self.layout_manager_dialog.selected = preferred
+            .as_deref()
+            .and_then(|name| {
+                self.layout_manager_dialog
+                    .layouts
+                    .iter()
+                    .position(|candidate| candidate == name)
+            })
+            .or_else(|| {
+                self.layout_manager_dialog
+                    .selected
+                    .filter(|&i| i < self.layout_manager_dialog.layouts.len())
+            });
+        if let Some(i) = self.layout_manager_dialog.selected
+            && let Some(name) = self.layout_manager_dialog.layouts.get(i)
+        {
+            self.layout_manager_dialog.rename_to = name.clone();
+            self.layout_manager_dialog.duplicate_to = format!("{name}_copy");
+        } else {
+            self.layout_manager_dialog.rename_to.clear();
+            self.layout_manager_dialog.duplicate_to.clear();
+        }
+    }
+
+    fn apply_layout_manager_action(
+        &mut self,
+        action: LayoutManagerAction,
+        snapshot: &delog_core::snapshot::StoreSnapshot,
+    ) {
+        match action {
+            LayoutManagerAction::Load(name) => self.load_layout(&name, snapshot),
+            LayoutManagerAction::Rename { from, to } => {
+                let display = to.trim().to_owned();
+                match crate::layout::rename_named(&from, &display) {
+                    Ok(()) => {
+                        self.refresh_layout_manager(Some(display.clone()));
+                        self.session
+                            .push_diagnostic(delog_core::diagnostics::Diag::info(
+                                "layout-manager",
+                                format!("renamed layout `{from}` to `{display}`"),
+                            ));
+                    }
+                    Err(err) => self
+                        .session
+                        .push_diagnostic(delog_core::diagnostics::Diag::error(
+                            "layout-manager",
+                            err.to_string(),
+                        )),
+                }
+            }
+            LayoutManagerAction::Duplicate { from, to } => {
+                let display = to.trim().to_owned();
+                match crate::layout::duplicate_named(&from, &display) {
+                    Ok(()) => {
+                        self.refresh_layout_manager(Some(display.clone()));
+                        self.session
+                            .push_diagnostic(delog_core::diagnostics::Diag::info(
+                                "layout-manager",
+                                format!("duplicated layout `{from}` to `{display}`"),
+                            ));
+                    }
+                    Err(err) => self
+                        .session
+                        .push_diagnostic(delog_core::diagnostics::Diag::error(
+                            "layout-manager",
+                            err.to_string(),
+                        )),
+                }
+            }
+            LayoutManagerAction::Delete(name) => match crate::layout::delete_named(&name) {
+                Ok(()) => {
+                    self.refresh_layout_manager(None);
+                    self.session
+                        .push_diagnostic(delog_core::diagnostics::Diag::info(
+                            "layout-manager",
+                            format!("deleted layout `{name}`"),
+                        ));
+                }
+                Err(err) => self
+                    .session
+                    .push_diagnostic(delog_core::diagnostics::Diag::error(
+                        "layout-manager",
+                        err.to_string(),
+                    )),
+            },
+        }
+    }
+
     fn apply_layout(&mut self, layout: LayoutApply) {
         self.workspace = layout.workspace;
         self.view = layout.view;
@@ -512,6 +625,95 @@ impl DelogApp {
                     });
                 });
             self.load_layout_dialog.open &= open;
+        }
+
+        if self.layout_manager_dialog.open {
+            let mut open = self.layout_manager_dialog.open;
+            let mut action = None;
+            egui::Window::new("Manage Layouts")
+                .open(&mut open)
+                .default_width(520.0)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.set_min_width(180.0);
+                            if self.layout_manager_dialog.layouts.is_empty() {
+                                ui.weak("No saved layouts.");
+                            } else {
+                                for (i, name) in
+                                    self.layout_manager_dialog.layouts.iter().enumerate()
+                                {
+                                    if ui
+                                        .selectable_label(
+                                            self.layout_manager_dialog.selected == Some(i),
+                                            name,
+                                        )
+                                        .clicked()
+                                    {
+                                        self.layout_manager_dialog.selected = Some(i);
+                                        self.layout_manager_dialog.rename_to = name.clone();
+                                        self.layout_manager_dialog.duplicate_to =
+                                            format!("{name}_copy");
+                                    }
+                                }
+                            }
+                        });
+                        ui.separator();
+                        ui.vertical(|ui| {
+                            let selected = self
+                                .layout_manager_dialog
+                                .selected
+                                .and_then(|i| self.layout_manager_dialog.layouts.get(i).cloned());
+                            let Some(name) = selected else {
+                                ui.weak("Select a layout.");
+                                return;
+                            };
+
+                            ui.strong(&name);
+                            if ui.button("Load").clicked() {
+                                action = Some(LayoutManagerAction::Load(name.clone()));
+                            }
+                            ui.separator();
+                            ui.label("Rename to");
+                            ui.text_edit_singleline(&mut self.layout_manager_dialog.rename_to);
+                            let can_rename =
+                                !self.layout_manager_dialog.rename_to.trim().is_empty()
+                                    && self.layout_manager_dialog.rename_to.trim() != name;
+                            if ui
+                                .add_enabled(can_rename, egui::Button::new("Rename"))
+                                .clicked()
+                            {
+                                action = Some(LayoutManagerAction::Rename {
+                                    from: name.clone(),
+                                    to: self.layout_manager_dialog.rename_to.clone(),
+                                });
+                            }
+                            ui.separator();
+                            ui.label("Duplicate as");
+                            ui.text_edit_singleline(&mut self.layout_manager_dialog.duplicate_to);
+                            let can_duplicate =
+                                !self.layout_manager_dialog.duplicate_to.trim().is_empty();
+                            if ui
+                                .add_enabled(can_duplicate, egui::Button::new("Duplicate"))
+                                .clicked()
+                            {
+                                action = Some(LayoutManagerAction::Duplicate {
+                                    from: name.clone(),
+                                    to: self.layout_manager_dialog.duplicate_to.clone(),
+                                });
+                            }
+                            ui.separator();
+                            if ui.button("Delete").clicked() {
+                                action = Some(LayoutManagerAction::Delete(name));
+                            }
+                        });
+                    });
+                });
+            self.layout_manager_dialog.open &= open;
+            if let Some(action) = action {
+                let snapshot = self.session.snapshot();
+                self.apply_layout_manager_action(action, &snapshot);
+            }
         }
 
         if let Some(pending) = &mut self.pending_layout {
@@ -664,6 +866,10 @@ impl eframe::App for DelogApp {
                         self.load_layout_dialog.layouts = crate::layout::list_layouts();
                         self.load_layout_dialog.selected = None;
                         self.load_layout_dialog.open = true;
+                        ui.close();
+                    }
+                    if ui.button("Manage Layouts...").clicked() {
+                        self.open_layout_manager();
                         ui.close();
                     }
                     ui.separator();
