@@ -48,12 +48,25 @@ impl ModelKind {
     }
 }
 
-/// A geodetic reference origin (degrees / metres).
+/// A fixed geodetic reference origin (degrees / metres).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GeoRef {
     pub lat_deg: f64,
     pub lon_deg: f64,
     pub alt_m: f64,
+}
+
+/// The geodetic origin of a local NED frame: read from log columns, or fixed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum NedReference {
+    /// Fixed lat/lon (degrees) + altitude (m).
+    Manual(GeoRef),
+    /// Read from lat/lon/alt columns (first valid sample).
+    Fields {
+        lat: FieldId,
+        lon: FieldId,
+        alt: FieldId,
+    },
 }
 
 /// How a vehicle's position is read (§12.1).
@@ -66,7 +79,7 @@ pub enum PosMapping {
         north: FieldId,
         east: FieldId,
         down: FieldId,
-        reference: Option<GeoRef>,
+        reference: Option<NedReference>,
     },
     /// Geodetic latitude/longitude (degrees) + altitude → NED about the first
     /// valid fix (auto reference).
