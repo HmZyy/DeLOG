@@ -128,7 +128,7 @@ pub enum OriMapping {
 }
 
 /// A configured vehicle (§12.1).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct VehicleConfig {
     pub source: SourceId,
     pub label: String,
