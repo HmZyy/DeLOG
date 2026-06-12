@@ -1022,7 +1022,8 @@ impl eframe::App for DelogApp {
                     self.workspace.toggle_scene_pane();
                 }
 
-                for status in self.session.live_statuses() {
+                let mut disconnect = None;
+                for (i, status) in self.session.live_statuses().into_iter().enumerate() {
                     ui.separator();
                     ui.weak(format!(
                         "{} {} · {} frames · {} rows{}",
@@ -1032,6 +1033,16 @@ impl eframe::App for DelogApp {
                         status.ingest.rows,
                         status.recording.as_ref().map(|_| " · rec").unwrap_or("")
                     ));
+                    if ui
+                        .button("Disconnect")
+                        .on_hover_text("Stop this telemetry stream")
+                        .clicked()
+                    {
+                        disconnect = Some(i);
+                    }
+                }
+                if let Some(i) = disconnect {
+                    self.session.stop_live(i);
                 }
 
                 if self.session.has_active_loads() {
