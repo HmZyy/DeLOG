@@ -320,9 +320,10 @@ fn searchable_combo<T: PartialEq + Copy>(
         let button = ui.button(combo_label(items, sel));
         egui::Popup::from_toggle_button_response(&button)
             .id(egui::Id::new((salt, "popup")))
+            .width(170.0)
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .show(|ui| {
-                ui.set_min_width(220.0);
+                ui.set_max_width(170.0);
                 let filter_id = egui::Id::new((salt, "filter"));
                 let mut filter: String =
                     ui.memory_mut(|m| m.data.get_temp(filter_id).unwrap_or_default());
@@ -350,7 +351,8 @@ fn searchable_combo<T: PartialEq + Copy>(
     *sel != before
 }
 
-/// A field picker restricted to one topic's columns (searchable).
+/// A plain field picker restricted to one topic's columns (no search — a
+/// single topic has few columns).
 fn field_combo(
     ui: &mut egui::Ui,
     salt: &str,
@@ -358,7 +360,16 @@ fn field_combo(
     sel: &mut Option<FieldId>,
     fields: &[(FieldId, String)],
 ) {
-    searchable_combo(ui, salt, label, sel, fields);
+    ui.horizontal(|ui| {
+        ui.label(label);
+        egui::ComboBox::from_id_salt(salt)
+            .selected_text(combo_label(fields, sel))
+            .show_ui(ui, |ui| {
+                for (id, name) in fields {
+                    ui.selectable_value(sel, Some(*id), name);
+                }
+            });
+    });
 }
 
 /// Render the dialog; returns `true` when the vehicle set changed.
