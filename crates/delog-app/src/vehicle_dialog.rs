@@ -9,7 +9,7 @@ use delog_core::identity::{FieldId, SourceId, TopicId};
 use delog_core::snapshot::StoreSnapshot;
 use egui::Color32;
 
-use crate::vehicle::{GeoRef, ModelKind, OriMapping, PosMapping, VehicleConfig};
+use crate::vehicle::{GeoRef, ModelKind, NedReference, OriMapping, PosMapping, VehicleConfig};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PosMode {
@@ -38,9 +38,14 @@ struct Draft {
     alt: Option<FieldId>,
     /// Optional geodetic reference annotation for a NED/local frame.
     ned_has_ref: bool,
+    /// Reference from fixed values (true) or from columns (false).
+    ned_ref_manual: bool,
     ref_lat: f64,
     ref_lon: f64,
     ref_alt: f64,
+    ref_lat_f: Option<FieldId>,
+    ref_lon_f: Option<FieldId>,
+    ref_alt_f: Option<FieldId>,
     ori_topic: Option<TopicId>,
     ori_mode: OriMode,
     roll: Option<FieldId>,
@@ -72,9 +77,13 @@ impl Default for Draft {
             lon: None,
             alt: None,
             ned_has_ref: false,
+            ned_ref_manual: false,
             ref_lat: 0.0,
             ref_lon: 0.0,
             ref_alt: 0.0,
+            ref_lat_f: None,
+            ref_lon_f: None,
+            ref_alt_f: None,
             ori_topic: None,
             ori_mode: OriMode::Static,
             roll: None,
@@ -123,11 +132,22 @@ impl Draft {
                 d.north = Some(*north);
                 d.east = Some(*east);
                 d.down = Some(*down);
-                if let Some(r) = reference {
-                    d.ned_has_ref = true;
-                    d.ref_lat = r.lat_deg;
-                    d.ref_lon = r.lon_deg;
-                    d.ref_alt = r.alt_m;
+                match reference {
+                    None => {}
+                    Some(NedReference::Manual(r)) => {
+                        d.ned_has_ref = true;
+                        d.ned_ref_manual = true;
+                        d.ref_lat = r.lat_deg;
+                        d.ref_lon = r.lon_deg;
+                        d.ref_alt = r.alt_m;
+                    }
+                    Some(NedReference::Fields { lat, lon, alt }) => {
+                        d.ned_has_ref = true;
+                        d.ned_ref_manual = false;
+                        d.ref_lat_f = Some(*lat);
+                        d.ref_lon_f = Some(*lon);
+                        d.ref_alt_f = Some(*alt);
+                    }
                 }
             }
             PosMapping::Gps { lat, lon, alt } => {
@@ -173,11 +193,23 @@ impl Draft {
                 north: self.north?,
                 east: self.east?,
                 down: self.down?,
-                reference: self.ned_has_ref.then_some(GeoRef {
-                    lat_deg: self.ref_lat,
-                    lon_deg: self.ref_lon,
-                    alt_m: self.ref_alt,
-                }),
+                reference: if !self.ned_has_ref {
+                    None
+                } else if self.ned_ref_manual {
+                    Some(NedReference::Manual(GeoRef {
+                        lat_deg: self.ref_lat,
+                        lon_deg: self.ref_lon,
+                        alt_m: self.ref_alt,
+                    }))
+                } else {
+                    // Column reference: kept only when all three are chosen.
+                    match (self.ref_lat_f, self.ref_lon_f, self.ref_alt_f) {
+                        (Some(lat), Some(lon), Some(alt)) => {
+                            Some(NedReference::Fields { lat, lon, alt })
+                        }
+                        _ => None,
+                    }
+                },
             },
             PosMode::Gps => PosMapping::Gps {
                 lat: self.lat?,
@@ -269,7 +301,43 @@ fn combo_label<'a, T: PartialEq>(items: &'a [(T, String)], sel: &Option<T>) -> &
     }
 }
 
-/// A labelled field ComboBox restricted to one topic's columns.
+/// A labelled, **searchable** ComboBox over `(value, label)` items. The
+/// dropdown carries a text filter (persisted in egui memory) so long topic /
+/// field lists are easy to narrow. Returns `true` if the selection changed.
+fn searchable_combo<T: PartialEq + Copy>(
+    ui: &mut egui::Ui,
+    salt: &str,
+    label: &str,
+    sel: &mut Option<T>,
+    items: &[(T, String)],
+) -> bool {
+    let before = *sel;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        egui::ComboBox::from_id_salt(salt)
+            .selected_text(combo_label(items, sel))
+            .show_ui(ui, |ui| {
+                let filter_id = egui::Id::new((salt, "filter"));
+                let mut filter: String =
+                    ui.memory_mut(|m| m.data.get_temp(filter_id).unwrap_or_default());
+                ui.add(
+                    egui::TextEdit::singleline(&mut filter)
+                        .hint_text("search…")
+                        .desired_width(180.0),
+                );
+                let needle = filter.to_ascii_lowercase();
+                ui.memory_mut(|m| m.data.insert_temp(filter_id, filter));
+                for (value, name) in items {
+                    if needle.is_empty() || name.to_ascii_lowercase().contains(&needle) {
+                        ui.selectable_value(sel, Some(*value), name);
+                    }
+                }
+            });
+    });
+    *sel != before
+}
+
+/// A field picker restricted to one topic's columns (searchable).
 fn field_combo(
     ui: &mut egui::Ui,
     salt: &str,
@@ -277,16 +345,7 @@ fn field_combo(
     sel: &mut Option<FieldId>,
     fields: &[(FieldId, String)],
 ) {
-    ui.horizontal(|ui| {
-        ui.label(label);
-        egui::ComboBox::from_id_salt(salt)
-            .selected_text(combo_label(fields, sel))
-            .show_ui(ui, |ui| {
-                for (id, name) in fields {
-                    ui.selectable_value(sel, Some(*id), name);
-                }
-            });
-    });
+    searchable_combo(ui, salt, label, sel, fields);
 }
 
 /// Render the dialog; returns `true` when the vehicle set changed.
@@ -427,6 +486,9 @@ fn draft_editor(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapshot) 
         draft.lat = None;
         draft.lon = None;
         draft.alt = None;
+        draft.ref_lat_f = None;
+        draft.ref_lon_f = None;
+        draft.ref_alt_f = None;
     }
     if let Some(topic) = draft.pos_topic {
         let cols = topic_fields(snapshot, topic);
@@ -437,12 +499,19 @@ fn draft_editor(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapshot) 
                 field_combo(ui, "veh-d", "Down", &mut draft.down, &cols);
                 ui.checkbox(&mut draft.ned_has_ref, "Reference origin");
                 if draft.ned_has_ref {
-                    ui.horizontal(|ui| {
-                        ui.label("ref lat/lon/alt");
-                        ui.add(egui::DragValue::new(&mut draft.ref_lat).speed(0.0001));
-                        ui.add(egui::DragValue::new(&mut draft.ref_lon).speed(0.0001));
-                        ui.add(egui::DragValue::new(&mut draft.ref_alt).speed(0.1));
-                    });
+                    ui.checkbox(&mut draft.ned_ref_manual, "Manual (fixed values)");
+                    if draft.ned_ref_manual {
+                        ui.horizontal(|ui| {
+                            ui.label("ref lat/lon/alt");
+                            ui.add(egui::DragValue::new(&mut draft.ref_lat).speed(0.0001));
+                            ui.add(egui::DragValue::new(&mut draft.ref_lon).speed(0.0001));
+                            ui.add(egui::DragValue::new(&mut draft.ref_alt).speed(0.1));
+                        });
+                    } else {
+                        field_combo(ui, "veh-rlat", "ref Lat", &mut draft.ref_lat_f, &cols);
+                        field_combo(ui, "veh-rlon", "ref Lon", &mut draft.ref_lon_f, &cols);
+                        field_combo(ui, "veh-ralt", "ref Alt", &mut draft.ref_alt_f, &cols);
+                    }
                 }
             }
             PosMode::Gps => {
@@ -537,8 +606,8 @@ fn draft_editor(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapshot) 
     });
 }
 
-/// A topic ComboBox; returns `true` if the selection changed (so the caller
-/// can clear column selections that belonged to the previous topic).
+/// A searchable topic ComboBox; returns `true` if the selection changed (so the
+/// caller can clear column selections that belonged to the previous topic).
 fn topic_combo(
     ui: &mut egui::Ui,
     salt: &str,
@@ -546,16 +615,5 @@ fn topic_combo(
     sel: &mut Option<TopicId>,
     topics: &[(TopicId, String)],
 ) -> bool {
-    let before = *sel;
-    ui.horizontal(|ui| {
-        ui.label(label);
-        egui::ComboBox::from_id_salt(salt)
-            .selected_text(combo_label(topics, sel))
-            .show_ui(ui, |ui| {
-                for (id, name) in topics {
-                    ui.selectable_value(sel, Some(*id), name);
-                }
-            });
-    });
-    *sel != before
+    searchable_combo(ui, salt, label, sel, topics)
 }
