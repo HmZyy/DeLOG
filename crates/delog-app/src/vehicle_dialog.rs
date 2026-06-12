@@ -314,24 +314,37 @@ fn searchable_combo<T: PartialEq + Copy>(
     let before = *sel;
     ui.horizontal(|ui| {
         ui.label(label);
-        egui::ComboBox::from_id_salt(salt)
-            .selected_text(combo_label(items, sel))
-            .show_ui(ui, |ui| {
+        // A toggle button + an explicit popup: `CloseOnClickOutside` keeps the
+        // popup open while typing in the search box (a plain ComboBox closes on
+        // that click), and the scroll area shows many rows at once.
+        let button = ui.button(combo_label(items, sel));
+        egui::Popup::from_toggle_button_response(&button)
+            .id(egui::Id::new((salt, "popup")))
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                ui.set_min_width(220.0);
                 let filter_id = egui::Id::new((salt, "filter"));
                 let mut filter: String =
                     ui.memory_mut(|m| m.data.get_temp(filter_id).unwrap_or_default());
                 ui.add(
                     egui::TextEdit::singleline(&mut filter)
                         .hint_text("search…")
-                        .desired_width(180.0),
+                        .desired_width(f32::INFINITY),
                 );
                 let needle = filter.to_ascii_lowercase();
                 ui.memory_mut(|m| m.data.insert_temp(filter_id, filter));
-                for (value, name) in items {
-                    if needle.is_empty() || name.to_ascii_lowercase().contains(&needle) {
-                        ui.selectable_value(sel, Some(*value), name);
-                    }
-                }
+                egui::ScrollArea::vertical()
+                    .max_height(260.0)
+                    .show(ui, |ui| {
+                        for (value, name) in items {
+                            let shown =
+                                needle.is_empty() || name.to_ascii_lowercase().contains(&needle);
+                            if shown && ui.selectable_label(*sel == Some(*value), name).clicked() {
+                                *sel = Some(*value);
+                                ui.close();
+                            }
+                        }
+                    });
             });
     });
     *sel != before
