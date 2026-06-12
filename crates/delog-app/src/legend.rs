@@ -32,7 +32,7 @@ pub fn ui(
     pane: &mut PlotPane,
     labels: &[(FieldId, String)],
 ) -> Option<FieldId> {
-    if labels.is_empty() {
+    if labels.is_empty() && pane.ghosts.is_empty() {
         return None;
     }
     let mut removed = None;
@@ -91,10 +91,33 @@ pub fn ui(
                         });
                     });
                 }
+                for ghost in &pane.ghosts {
+                    ui.horizontal(|ui| {
+                        let mut color = ghost_color(ghost.color);
+                        let _ = egui::color_picker::color_edit_button_srgba(
+                            ui,
+                            &mut color,
+                            egui::color_picker::Alpha::Opaque,
+                        );
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{}.{} (missing)",
+                                ghost.topic, ghost.field
+                            ))
+                            .color(ui.visuals().weak_text_color()),
+                        );
+                    });
+                }
             });
         });
 
     removed
+}
+
+fn ghost_color(color: [f32; 4]) -> egui::Color32 {
+    let u = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    egui::Color32::from_rgba_unmultiplied(u(color[0]), u(color[1]), u(color[2]), u(color[3]))
+        .gamma_multiply(0.45)
 }
 
 pub fn color32_to_srgb(c: egui::Color32) -> [f32; 4] {

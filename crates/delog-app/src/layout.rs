@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::camera::OrbitCamera;
-use crate::plot::{PlotPane, TraceMode, TraceRef, ViewX};
+use crate::plot::{GhostTrace, PlotPane, TraceMode, TraceRef, ViewX};
 use crate::vehicle::{GeoRef, ModelKind, NedReference, OriMapping, PosMapping, VehicleConfig};
 use crate::workspace::{Pane, Scene3dPane, Workspace};
 
@@ -453,6 +453,7 @@ fn node_to_layout(
                 .traces
                 .iter()
                 .filter_map(|t| trace_to_layout(t, snapshot))
+                .chain(pane.ghosts.iter().map(ghost_to_layout))
                 .collect(),
         }),
         egui_tiles::Tile::Pane(Pane::Scene3D(scene)) => Some(LayoutNode::Scene3d(SceneLayout {
@@ -489,6 +490,19 @@ fn trace_to_layout(trace: &TraceRef, snapshot: &StoreSnapshot) -> Option<TraceLa
         mode: trace.mode.into(),
         visible: trace.visible,
     })
+}
+
+fn ghost_to_layout(ghost: &GhostTrace) -> TraceLayout {
+    TraceLayout {
+        field: FieldRef {
+            topic: ghost.topic.clone(),
+            field: ghost.field.clone(),
+        },
+        color: ghost.color,
+        width_px: ghost.width_px,
+        mode: ghost.mode.into(),
+        visible: ghost.visible,
+    }
 }
 
 fn vehicle_to_layout(v: &VehicleConfig, snapshot: &StoreSnapshot) -> Option<VehicleLayout> {
@@ -729,12 +743,13 @@ fn insert_node(
 ) -> Option<egui_tiles::TileId> {
     match node {
         LayoutNode::Plot { traces } => {
-            let pane = PlotPane {
-                traces: traces
-                    .iter()
-                    .filter_map(|t| trace_from_layout(t, resolver))
-                    .collect(),
-            };
+            let mut pane = PlotPane::default();
+            for trace in traces {
+                match trace_from_layout(trace, resolver) {
+                    Some(resolved) => pane.traces.push(resolved),
+                    None => pane.add_ghost(ghost_from_layout(trace)),
+                }
+            }
             Some(tiles.insert_pane(Pane::Plot(pane)))
         }
         LayoutNode::Scene3d(scene) => Some(tiles.insert_pane(Pane::Scene3D(Scene3dPane {
@@ -778,6 +793,17 @@ fn trace_from_layout(trace: &TraceLayout, resolver: &mut Resolver<'_>) -> Option
         mode: trace.mode.into(),
         visible: trace.visible,
     })
+}
+
+fn ghost_from_layout(trace: &TraceLayout) -> GhostTrace {
+    GhostTrace {
+        topic: trace.field.topic.clone(),
+        field: trace.field.field.clone(),
+        color: trace.color,
+        width_px: trace.width_px,
+        mode: trace.mode.into(),
+        visible: trace.visible,
+    }
 }
 
 fn vehicle_from_layout(v: &VehicleLayout, resolver: &mut Resolver<'_>) -> Option<VehicleConfig> {
