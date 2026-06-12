@@ -67,8 +67,6 @@ pub struct DelogApp {
     /// first loaded log replaces the placeholder by fitting to its range.
     view_fitted: bool,
     hover_mode: delog_core::field_view::SampleMode,
-    show_legend: bool,
-    show_tooltip: bool,
     frame: u64,
     last_epoch: u64,
     origin_us: i64,
@@ -132,8 +130,6 @@ impl DelogApp {
             view: None,
             view_fitted: false,
             hover_mode: delog_core::field_view::SampleMode::Prev,
-            show_legend: true,
-            show_tooltip: true,
             frame: 0,
             last_epoch: u64::MAX,
             origin_us: 0,
@@ -414,7 +410,6 @@ impl DelogApp {
             view: self.view,
             speed: self.playback.speed as f64,
             follow_live: self.playback.follow_live,
-            show_legend: self.show_legend,
             vehicles: &self.vehicles,
         })
     }
@@ -609,7 +604,7 @@ impl DelogApp {
         self.view_fitted = layout.view.is_some();
         self.playback.set_speed(layout.speed as f32);
         self.playback.follow_live = layout.follow_live;
-        self.show_legend = layout.show_legend;
+        // Legend/tooltip visibility is restored per-pane via the workspace.
         self.vehicles = layout.vehicles;
         self.vehicle_revision = self.vehicle_revision.wrapping_add(1);
         self.traj_dirty = true;
@@ -1213,8 +1208,6 @@ impl eframe::App for DelogApp {
                         view: &mut self.view,
                         origin_us: self.origin_us,
                         hover_mode: &mut self.hover_mode,
-                        show_legend: &mut self.show_legend,
-                        show_tooltip: &mut self.show_tooltip,
                         playhead_us: snapshot.global_time_range().map(|_| self.playback.t_us),
                         playing: self.playback.playing,
                         vehicles: &self.vehicles,
