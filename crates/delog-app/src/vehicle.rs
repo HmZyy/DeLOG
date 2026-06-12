@@ -141,7 +141,9 @@ pub struct VehicleConfig {
     pub scale: f32,
 }
 
-/// A vehicle pose in render space: position + rotation.
+/// A vehicle pose in render space: position + rotation. The rotation already
+/// includes the model's mesh→body correction, so it applies to mesh vertices
+/// as-is.
 #[derive(Clone, Copy, Debug)]
 pub struct Pose {
     pub pos: Vec3,
@@ -267,9 +269,8 @@ fn position_at(
             let (lav, lam) = open(snapshot, *lat)?;
             let (lov, lom) = open(snapshot, *lon)?;
             let (alv, alm) = open(snapshot, *alt)?;
-            let to_rad = 1f64.to_radians();
-            let la = read_eng(&lav, lam, t_us)? * to_rad;
-            let lo = read_eng(&lov, lom, t_us)? * to_rad;
+            let la = read_eng(&lav, lam, t_us)?.to_radians();
+            let lo = read_eng(&lov, lom, t_us)?.to_radians();
             let al = read_eng(&alv, alm, t_us)?;
             let ned = geo::geodetic_to_ned(la, lo, al, rlat, rlon, ralt).as_vec3();
             Some(geo::ned_to_render(ned))
@@ -277,9 +278,16 @@ fn position_at(
     }
 }
 
+/// Read a field's engineering value at an effective time, as f32.
+fn read_f32(snapshot: &StoreSnapshot, field: FieldId, t_us: i64) -> Option<f32> {
+    let (view, mult) = open(snapshot, field)?;
+    read_eng(&view, mult, t_us).map(|x| x as f32)
+}
+
 /// Render-space rotation of a vehicle at an effective time. Falls back to
 /// level attitude (identity body→NED) when samples can't be read.
 fn orientation_at(snapshot: &StoreSnapshot, ori: &OriMapping, t_us: i64) -> Mat3 {
+    let read = |f: FieldId| read_f32(snapshot, f, t_us);
     match ori {
         OriMapping::Static => geo::ned_to_render_mat3(),
         OriMapping::Euler {
@@ -288,10 +296,6 @@ fn orientation_at(snapshot: &StoreSnapshot, ori: &OriMapping, t_us: i64) -> Mat3
             yaw,
             degrees,
         } => {
-            let read = |f: FieldId| -> Option<f32> {
-                let (v, m) = open(snapshot, f)?;
-                read_eng(&v, m, t_us).map(|x| x as f32)
-            };
             let conv = if *degrees {
                 |d: f32| d.to_radians()
             } else {
@@ -304,32 +308,28 @@ fn orientation_at(snapshot: &StoreSnapshot, ori: &OriMapping, t_us: i64) -> Mat3
                 _ => geo::ned_to_render_mat3(),
             }
         }
-        OriMapping::Quat { w, x, y, z } => {
-            let read = |f: FieldId| -> Option<f32> {
-                let (v, m) = open(snapshot, f)?;
-                read_eng(&v, m, t_us).map(|x| x as f32)
-            };
-            match (read(*w), read(*x), read(*y), read(*z)) {
-                (Some(qw), Some(qx), Some(qy), Some(qz)) => {
-                    let q = Quat::from_xyzw(qx, qy, qz, qw);
-                    if q.length_squared() > 1e-6 {
-                        geo::body_to_render_rot(q.normalize())
-                    } else {
-                        geo::ned_to_render_mat3()
-                    }
+        OriMapping::Quat { w, x, y, z } => match (read(*w), read(*x), read(*y), read(*z)) {
+            (Some(qw), Some(qx), Some(qy), Some(qz)) => {
+                let q = Quat::from_xyzw(qx, qy, qz, qw);
+                if q.length_squared() > 1e-6 {
+                    geo::body_to_render_rot(q.normalize())
+                } else {
+                    geo::ned_to_render_mat3()
                 }
-                _ => geo::ned_to_render_mat3(),
             }
-        }
+            _ => geo::ned_to_render_mat3(),
+        },
     }
 }
 
 /// The vehicle's render-space pose at an effective playback time, or `None`
-/// when its position can't be read (e.g. before the first sample).
+/// when its position can't be read (e.g. before the first sample). The
+/// model's mesh→body correction is folded into the rotation (mesh-local, so
+/// right-multiplied).
 pub fn pose_at(snapshot: &StoreSnapshot, config: &VehicleConfig, t_us: i64) -> Option<Pose> {
     let gps_ref = gps_reference(snapshot, config);
     let pos = position_at(snapshot, &config.pos, gps_ref, t_us)?;
-    let rot = orientation_at(snapshot, &config.ori, t_us);
+    let rot = orientation_at(snapshot, &config.ori, t_us) * config.model.orientation_offset();
     Some(Pose { pos, rot })
 }
 
@@ -466,13 +466,16 @@ mod tests {
 
     #[test]
     fn level_attitude_renders_models_upright_facing_north() {
-        // Static orientation = level attitude. Composed with the mesh offset
-        // (as the draw path does: pose.rot × offset), mesh-up ends render-up
-        // (+Y) and the nose ends render north (−Z) for every model kind.
+        // Static orientation = level attitude. The pose rotation includes the
+        // mesh→body correction, so mesh-up ends render-up (+Y) and the nose
+        // ends render north (−Z) for every model kind.
         let (snap, f) = ned_snapshot(vec![0], vec![0.0], vec![0.0], vec![0.0]);
-        let pose = pose_at(&snap, &ned_config(f), 0).unwrap();
         for kind in [ModelKind::Quad, ModelKind::FixedWing, ModelKind::Cone] {
-            let rot = pose.rot * kind.orientation_offset();
+            let config = VehicleConfig {
+                model: kind.clone(),
+                ..ned_config(f)
+            };
+            let rot = pose_at(&snap, &config, 0).unwrap().rot;
             assert!(
                 (rot * Vec3::Y - Vec3::Y).length() < 1e-5,
                 "{}: mesh up should render up",
