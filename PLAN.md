@@ -984,7 +984,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [ ] **PRF-02** — Dock table: last/avg/min/max/p99/samples per metric
 - [ ] **PRF-03** — 4 Hz dock refresh decoupled from frame rate
 - [ ] **PRF-04** — GPU buffer count/bytes + CPU cache bytes + per-trace sample/visible counts
-- [ ] **PRF-05** — Idle-aware FPS/status indicator (off when event-driven)
+- [x] **PRF-05** — Idle-aware FPS/status indicator (off when event-driven) — EMA-smoothed FPS badge pinned top-right of the menu bar, green >60 / orange 30–60 / red <30; computed from the real wall-clock frame-to-frame gap so it tracks during any continuous render (playback/live/interaction), reads "idle" when gaps exceed ~5 FPS (§11)
 - [ ] **PRF-06** — F12 debug overlay
 - [ ] **PRF-07** — Export profiling snapshot JSON
 
