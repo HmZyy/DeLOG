@@ -915,7 +915,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **PLT-08** — Legend + toggle; per-trace visibility/color/width/mode editing
 - [x] **PLT-09** — Hover: canonical binary search, Prev/Next/Linear tooltip modes, hover circles (§10.5)
 - [x] **PLT-10** — Playhead vertical line + value readout on all panes
-- [x] **PLT-11** — Context menu: remove/clear/mode/color/width/split/reset/legend/info (§10.6)
+- [x] **PLT-11** — Context menu: remove/clear/mode/color/width/split/reset/legend/info (§10.6) — reworked with Lucide icons: Clear all traces / Remove trace (submenu, per-trace colour) / Edit trace (colour·mode·width submenu) · Split horizontally/vertically · Show legend + Show tooltip checkboxes + Hover mode · Plot Info (opens a per-pane window with geometry/timings + per-trace cache/GPU detail, replacing the Debug submenu) · Close. Reset view dropped from the menu (double-click still resets). Tooltip visibility now toggled via `PlotServices::show_tooltip`
 - [x] **PLT-12** — Plot debug popup: counts, visible range, GPU bytes, yquery µs, paint µs
 - [x] **PLT-13** — Drag-drop: single + multi-field onto pane / tile edge (§10.7)
 - [x] **PLT-14** — Empty-pane state copy
