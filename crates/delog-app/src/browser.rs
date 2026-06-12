@@ -309,13 +309,10 @@ pub fn ui(
     selection: &mut Selection,
     offset_dialog: &mut Option<(SourceId, i64)>,
 ) -> Option<(SourceId, i64)> {
-    ui.heading("Data");
-    ui.separator();
 
     if model.is_empty() {
         ui.add_space(8.0);
         ui.weak("No logs loaded.");
-        ui.weak("Drop a .BIN file here, or use File ▸ Open.");
         return None;
     }
 
@@ -323,7 +320,7 @@ pub fn ui(
     ui.horizontal(|ui| {
         ui.add(
             egui::TextEdit::singleline(query)
-                .hint_text("Filter (e.g. gps hacc)")
+                .hint_text("Filter...")
                 .desired_width(f32::INFINITY),
         );
     });
