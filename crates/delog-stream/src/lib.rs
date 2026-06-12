@@ -79,9 +79,9 @@ impl EndpointKind {
 impl fmt::Display for Endpoint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UdpServer { bind } => write!(f, "{bind}"),
-            Self::TcpClient { remote } => write!(f, "{remote}"),
-            Self::Serial { path, baud } => write!(f, "{path}@{baud}"),
+            Self::UdpServer { bind } => write!(f, "UDP {bind}"),
+            Self::TcpClient { remote } => write!(f, "TCP {remote}"),
+            Self::Serial { path, baud } => write!(f, "Serial {path}@{baud}"),
         }
     }
 }
@@ -117,16 +117,19 @@ mod tests {
     fn endpoint_display_is_stable_and_compact() {
         let bind = "0.0.0.0:14550".parse().unwrap();
         let remote = "127.0.0.1:14550".parse().unwrap();
-        assert_eq!(Endpoint::UdpServer { bind }.to_string(), "0.0.0.0:14550");
+        assert_eq!(
+            Endpoint::UdpServer { bind }.to_string(),
+            "UDP 0.0.0.0:14550"
+        );
         assert_eq!(
             Endpoint::TcpClient { remote }.to_string(),
-            "127.0.0.1:14550"
+            "TCP 127.0.0.1:14550"
         );
         assert_eq!(
             Endpoint::serial("/dev/ttyACM0", 115_200)
                 .unwrap()
                 .to_string(),
-            "/dev/ttyACM0@115200"
+            "Serial /dev/ttyACM0@115200"
         );
     }
 

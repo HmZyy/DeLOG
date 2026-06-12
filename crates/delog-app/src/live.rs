@@ -41,6 +41,7 @@ impl ConnectionDialog {
                     .spacing([12.0, 8.0])
                     .show(ui, |ui| {
                         ui.label("Mode");
+                        let prev_kind = self.kind;
                         egui::ComboBox::from_id_salt("live_endpoint_kind")
                             .selected_text(self.kind.label())
                             .show_ui(ui, |ui| {
@@ -48,6 +49,11 @@ impl ConnectionDialog {
                                     ui.selectable_value(&mut self.kind, kind, kind.label());
                                 }
                             });
+                        // Switching transport swaps the port to the new mode's
+                        // conventional default, unless the user customized it.
+                        if self.kind != prev_kind && self.port.trim() == default_port(prev_kind) {
+                            self.port = default_port(self.kind).to_owned();
+                        }
                         ui.end_row();
 
                         if self.kind == EndpointKind::Serial {
@@ -131,6 +137,16 @@ impl ConnectionDialog {
             .parse::<u16>()
             .map_err(|_| "port must be 0-65535".to_owned())?;
         Ok(SocketAddr::new(ip, port))
+    }
+}
+
+/// Conventional default port per transport: 14550 is the MAVLink/GCS UDP
+/// port, 5760 is ArduPilot SITL's TCP port.
+fn default_port(kind: EndpointKind) -> &'static str {
+    match kind {
+        EndpointKind::UdpServer => "14550",
+        EndpointKind::TcpClient => "5760",
+        EndpointKind::Serial => "",
     }
 }
 
