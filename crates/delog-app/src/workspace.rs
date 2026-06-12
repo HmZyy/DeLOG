@@ -361,6 +361,8 @@ pub struct WorkspaceActions {
     /// User manually changed the shared X view (pan/zoom/reset), which unlocks
     /// live-tail mode (PLT-05).
     pub view_changed: bool,
+    /// User clicked the gear on the 3D scene — open the vehicle config dialog.
+    pub open_vehicle_config: bool,
 }
 
 pub struct PlotServices<'a> {
@@ -593,6 +595,11 @@ impl Behavior<'_> {
             tracked_vehicle_picker(ui, rect, pane, self.services.vehicles);
         }
 
+        // Vehicle-config gear pinned to the scene's top-right (TDV-03).
+        if scene_settings_button(ui, rect) {
+            self.actions.open_vehicle_config = true;
+        }
+
         if response.drag_started_by(egui::PointerButton::Middle) {
             egui_tiles::UiResponse::DragStarted
         } else {
@@ -709,8 +716,8 @@ impl Behavior<'_> {
                 .hover_pos()
                 .is_some_and(|pos| plot_rect.contains(pos));
             let alt = ui.input(|i| i.modifiers.alt);
-            let readout = (self.services.playing || (alt && !hovered))
-                .then_some(*self.services.hover_mode);
+            let readout =
+                (self.services.playing || (alt && !hovered)).then_some(*self.services.hover_mode);
             hover::draw_playhead(
                 ui,
                 HoverTarget {
@@ -1119,6 +1126,26 @@ fn tracked_vehicle_picker(
                 });
             });
         });
+}
+
+/// Gear button overlaid on the scene's top-right corner. Returns true on the
+/// frame it is clicked (opens the vehicle configuration dialog, TDV-03).
+fn scene_settings_button(ui: &mut egui::Ui, scene_rect: egui::Rect) -> bool {
+    let id = ui.make_persistent_id("scene-settings");
+    let mut clicked = false;
+    egui::Area::new(id)
+        .order(egui::Order::Foreground)
+        .fixed_pos(scene_rect.right_top() + egui::vec2(-36.0, 8.0))
+        .show(ui.ctx(), |ui| {
+            let image = egui::Image::new(crate::icons::gear())
+                .fit_to_exact_size(egui::vec2(18.0, 18.0))
+                .tint(ui.visuals().text_color());
+            clicked = ui
+                .add(egui::Button::image(image))
+                .on_hover_text("Configure 3D vehicles")
+                .clicked();
+        });
+    clicked
 }
 
 fn format_bytes(bytes: u64) -> String {

@@ -8,6 +8,7 @@ mod camera;
 mod geo;
 mod gpu;
 mod hover;
+mod icons;
 mod layout;
 mod legend;
 mod live;
@@ -38,7 +39,11 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "DeLOG",
         options,
-        Box::new(|cc| Ok(Box::new(DelogApp::new(cc)))),
+        Box::new(|cc| {
+            // SVG icon loader for the toolbar/overlay icons (see `icons`).
+            egui_extras::install_image_loaders(&cc.egui_ctx);
+            Ok(Box::new(DelogApp::new(cc)))
+        }),
     )
 }
 
