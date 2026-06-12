@@ -16,6 +16,7 @@ use serde_json::Value;
 
 use crate::camera::OrbitCamera;
 use crate::plot::{GhostTrace, PlotPane, TraceMode, TraceRef, ViewX};
+use crate::settings::AppSettings;
 use crate::vehicle::{GeoRef, ModelKind, NedReference, OriMapping, PosMapping, VehicleConfig};
 use crate::workspace::{Pane, Scene3dPane, Workspace};
 
@@ -34,6 +35,8 @@ pub struct LayoutDoc {
     pub playback: PlaybackLayout,
     pub workspace: WorkspaceLayout,
     pub vehicles: Vec<VehicleLayout>,
+    #[serde(default)]
+    pub settings: AppSettings,
     #[serde(default)]
     pub favorites: Vec<FieldRef>,
     #[serde(default)]
@@ -204,6 +207,7 @@ pub struct LayoutApply {
     pub speed: f64,
     pub follow_live: bool,
     pub vehicles: Vec<VehicleConfig>,
+    pub settings: AppSettings,
     pub diagnostics: Vec<Diag>,
 }
 
@@ -249,6 +253,7 @@ pub struct CurrentLayout<'a> {
     pub speed: f64,
     pub follow_live: bool,
     pub vehicles: &'a [VehicleConfig],
+    pub settings: &'a AppSettings,
 }
 
 impl std::fmt::Display for LayoutError {
@@ -364,6 +369,13 @@ pub fn save_session_json(json: &str) -> Result<(), LayoutError> {
     write_json_atomic(&base.join("session.json"), json)
 }
 
+pub fn load_session_doc() -> Result<LayoutDoc, LayoutError> {
+    let Some(base) = storage_dir(APP_ID) else {
+        return Err(LayoutError::NoStorageDir);
+    };
+    import_doc(&base.join("session.json"))
+}
+
 pub fn doc_json(doc: &LayoutDoc) -> Result<String, LayoutError> {
     serde_json::to_string_pretty(doc).map_err(|e| LayoutError::Json(e.to_string()))
 }
@@ -446,6 +458,7 @@ pub fn current_doc(input: CurrentLayout<'_>) -> LayoutDoc {
             .iter()
             .filter_map(|v| vehicle_to_layout(v, input.snapshot))
             .collect(),
+        settings: input.settings.clone(),
         favorites: Vec::new(),
         docks: BTreeMap::new(),
     }
@@ -634,6 +647,7 @@ fn apply_doc(
         speed: doc.playback.speed,
         follow_live: doc.playback.follow_live,
         vehicles,
+        settings: doc.settings,
         diagnostics: resolver.diagnostics,
     })
 }
@@ -1128,8 +1142,49 @@ mod tests {
 
         assert_eq!(imported.delog_layout, LAYOUT_VERSION);
         assert_eq!(imported.name, "portable");
+        assert_eq!(
+            imported.settings.theme,
+            crate::theme::ThemeChoice::CatppuccinMocha
+        );
         let json = serde_json::to_string(&imported).unwrap();
         assert!(!json.contains("\"source\""));
+    }
+
+    #[test]
+    fn missing_settings_default_to_catppuccin_mocha() {
+        let doc = decode_doc(
+            r#"{
+                "delog_layout": 1,
+                "name": "old",
+                "playback": {"speed": 1.0, "follow_live": false},
+                "workspace": {
+                    "root": {
+                        "plot": {
+                            "traces": [],
+                            "show_legend": true,
+                            "show_tooltip": true
+                        }
+                    }
+                },
+                "vehicles": []
+            }"#,
+        )
+        .expect("old layout should decode");
+
+        assert_eq!(doc.settings, AppSettings::default());
+    }
+
+    #[test]
+    fn layout_json_persists_theme_settings() {
+        let mut doc = empty_doc("theme");
+        doc.settings.theme = crate::theme::ThemeChoice::Light;
+
+        let json = doc_json(&doc).expect("layout should serialize");
+        assert!(json.contains("\"settings\""));
+        assert!(json.contains("\"theme\": \"light\""));
+
+        let decoded = decode_doc(&json).expect("layout should decode");
+        assert_eq!(decoded.settings.theme, crate::theme::ThemeChoice::Light);
     }
 
     #[test]
@@ -1292,6 +1347,7 @@ mod tests {
                 },
             },
             vehicles: Vec::new(),
+            settings: AppSettings::default(),
             favorites: Vec::new(),
             docks: BTreeMap::new(),
         }
