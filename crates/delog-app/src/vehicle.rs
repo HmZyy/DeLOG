@@ -48,35 +48,32 @@ impl ModelKind {
     }
 }
 
-/// Reference origin for GPS→NED (§12.2).
+/// A geodetic reference origin (degrees / metres).
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum GpsRef {
-    /// First valid fix becomes the origin.
-    Auto,
-    /// Fixed origin in degrees / metres.
-    Manual {
-        lat_deg: f64,
-        lon_deg: f64,
-        alt_m: f64,
-    },
+pub struct GeoRef {
+    pub lat_deg: f64,
+    pub lon_deg: f64,
+    pub alt_m: f64,
 }
 
 /// How a vehicle's position is read (§12.1).
 #[derive(Clone, Debug, PartialEq)]
 pub enum PosMapping {
-    /// Already-local NED metres.
+    /// Already-local NED metres, optionally annotated with the geodetic origin
+    /// of the local frame (captured for geo-referencing; does not move a single
+    /// vehicle's local render).
     Ned {
         north: FieldId,
         east: FieldId,
         down: FieldId,
+        reference: Option<GeoRef>,
     },
-    /// Geodetic latitude/longitude/altitude → NED about a reference origin.
+    /// Geodetic latitude/longitude (degrees) + altitude → NED about the first
+    /// valid fix (auto reference).
     Gps {
         lat: FieldId,
         lon: FieldId,
         alt: FieldId,
-        degrees: bool,
-        reference: GpsRef,
     },
 }
 
@@ -176,51 +173,40 @@ fn position_topic_range(snapshot: &StoreSnapshot, pos: &PosMapping) -> Option<(i
     Some((range.min_us, range.max_us))
 }
 
-/// Resolve the GPS reference origin to `(lat_rad, lon_rad, alt_m)`.
+/// Resolve the GPS reference origin (first valid fix) to
+/// `(lat_rad, lon_rad, alt_m)`. Lat/lon are read as degrees.
 fn resolve_gps_ref(
     snapshot: &StoreSnapshot,
     lat: FieldId,
     lon: FieldId,
     alt: FieldId,
-    degrees: bool,
-    reference: GpsRef,
     range: (i64, i64),
 ) -> Option<(f64, f64, f64)> {
-    match reference {
-        GpsRef::Manual {
-            lat_deg,
-            lon_deg,
-            alt_m,
-        } => Some((lat_deg.to_radians(), lon_deg.to_radians(), alt_m)),
-        GpsRef::Auto => {
-            let (lat_v, lm) = open(snapshot, lat)?;
-            let (lon_v, om) = open(snapshot, lon)?;
-            let (alt_v, am) = open(snapshot, alt)?;
-            // First sample with a finite, non-zero fix.
-            let mut t = range.0;
-            while t <= range.1 {
-                if let (Some(la), Some(lo), Some(al)) = (
-                    lat_v
-                        .sample_at(t, SampleMode::Next)
-                        .and_then(|s| s.value.as_f64()),
-                    lon_v
-                        .sample_at(t, SampleMode::Next)
-                        .and_then(|s| s.value.as_f64()),
-                    alt_v
-                        .sample_at(t, SampleMode::Next)
-                        .and_then(|s| s.value.as_f64()),
-                ) {
-                    let (la, lo, al) = (la * lm, lo * om, al * am);
-                    if la != 0.0 || lo != 0.0 {
-                        let to_rad = if degrees { 1f64.to_radians() } else { 1.0 };
-                        return Some((la * to_rad, lo * to_rad, al));
-                    }
-                }
-                t += 1_000_000; // step 1 s looking for the first fix
+    let (lat_v, lm) = open(snapshot, lat)?;
+    let (lon_v, om) = open(snapshot, lon)?;
+    let (alt_v, am) = open(snapshot, alt)?;
+    // First sample with a finite, non-zero fix.
+    let mut t = range.0;
+    while t <= range.1 {
+        if let (Some(la), Some(lo), Some(al)) = (
+            lat_v
+                .sample_at(t, SampleMode::Next)
+                .and_then(|s| s.value.as_f64()),
+            lon_v
+                .sample_at(t, SampleMode::Next)
+                .and_then(|s| s.value.as_f64()),
+            alt_v
+                .sample_at(t, SampleMode::Next)
+                .and_then(|s| s.value.as_f64()),
+        ) {
+            let (la, lo, al) = (la * lm, lo * om, al * am);
+            if la != 0.0 || lo != 0.0 {
+                return Some((la.to_radians(), lo.to_radians(), al));
             }
-            None
         }
+        t += 1_000_000; // step 1 s looking for the first fix
     }
+    None
 }
 
 /// Render-space position of a vehicle at an effective time.
@@ -231,7 +217,12 @@ fn position_at(
     t_us: i64,
 ) -> Option<Vec3> {
     match pos {
-        PosMapping::Ned { north, east, down } => {
+        PosMapping::Ned {
+            north,
+            east,
+            down,
+            reference: _, // captured for geo-referencing; no effect on local render
+        } => {
             let (nv, nm) = open(snapshot, *north)?;
             let (ev, em) = open(snapshot, *east)?;
             let (dv, dm) = open(snapshot, *down)?;
@@ -242,18 +233,12 @@ fn position_at(
             );
             Some(geo::ned_to_render(ned))
         }
-        PosMapping::Gps {
-            lat,
-            lon,
-            alt,
-            degrees,
-            ..
-        } => {
+        PosMapping::Gps { lat, lon, alt } => {
             let (rlat, rlon, ralt) = gps_ref?;
             let (lav, lam) = open(snapshot, *lat)?;
             let (lov, lom) = open(snapshot, *lon)?;
             let (alv, alm) = open(snapshot, *alt)?;
-            let to_rad = if *degrees { 1f64.to_radians() } else { 1.0 };
+            let to_rad = 1f64.to_radians();
             let la = read_eng(&lav, lam, t_us)? * to_rad;
             let lo = read_eng(&lov, lom, t_us)? * to_rad;
             let al = read_eng(&alv, alm, t_us)?;
@@ -319,16 +304,9 @@ pub fn pose_at(snapshot: &StoreSnapshot, config: &VehicleConfig, t_us: i64) -> O
 }
 
 fn gps_reference(snapshot: &StoreSnapshot, config: &VehicleConfig) -> Option<(f64, f64, f64)> {
-    if let PosMapping::Gps {
-        lat,
-        lon,
-        alt,
-        degrees,
-        reference,
-    } = &config.pos
-    {
+    if let PosMapping::Gps { lat, lon, alt } = &config.pos {
         let range = position_topic_range(snapshot, &config.pos)?;
-        resolve_gps_ref(snapshot, *lat, *lon, *alt, *degrees, *reference, range)
+        resolve_gps_ref(snapshot, *lat, *lon, *alt, range)
     } else {
         None
     }
@@ -416,6 +394,7 @@ mod tests {
                 north: fields[0],
                 east: fields[1],
                 down: fields[2],
+                reference: None,
             },
             ori: OriMapping::Static,
             model: ModelKind::Cone,
