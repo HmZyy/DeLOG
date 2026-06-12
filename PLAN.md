@@ -1016,8 +1016,8 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 ### UIX — UI/UX (cross-cutting; final pass M10)
 
 - [ ] **UIX-01** — Workspace-first window per §19.1; collapsible drawer/docks
-- [~] **UIX-02** — Toolbar (open/cancel/add/remove/3D/vehicle/stream start/stop) with tooltips — native open dialog (rfd, off-thread) + cancel + stream dialog button done; add/remove/3D/vehicle pending
-- [ ] **UIX-03** — Menus: File/Tools/Layout/Help (§19.2)
+- [~] **UIX-02** — Toolbar (open/cancel/add/remove/3D/vehicle/stream start/stop) with tooltips — dedicated bottom icon toolbar with tinted SVG icons (Lucide via `egui_extras` svg loader): streaming (satellite-dish, blue when a live link is active → connection dialog) and 3D-view toggle (box, blue when open); live-link status + parse progress/cancel live alongside; vehicle config moved to a gear overlay on the 3D pane (`WorkspaceActions::open_vehicle_config`); open moved to File menu. Pending: add/remove-plot buttons
+- [~] **UIX-03** — Menus: File/Tools/Layout/Help (§19.2) — File/**Edit**/Layout/Help menu bar in place (user asked for an Edit menu in place of §19.2's Tools; Edit is an empty placeholder for now). File ▸ Open File; Layout ▸ Save / Load (submenu of saved layouts, loads in place) / Manage / Export JSON / Import JSON; Help ▸ About. Pending: File recent/import/export/quit, and the Tools/Edit contents
 - [ ] **UIX-04** — Shortcut map per §19.3 + Help ▸ shortcuts sheet
 - [ ] **UIX-05** — Dark theme, palette constants, ≥4.5:1 contrast
 - [ ] **UIX-06** — High-DPI verified at 1×/1.5×/2×; min-size responsiveness
@@ -1026,6 +1026,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [ ] **UIX-09** — Never-block audit: every >16 ms operation is a job + progress (§19.6)
 - [ ] **UIX-10** — Manual parser-override picker dialog (pairs PAR-01)
 - [x] **UIX-11** — App data session engine: open path → sniff/detect → off-thread parse into ingestor; per-source progress + cancel token; snapshot access (the never-block load path behind UIX-02/BRW-01, §19.6)
+- [x] **UIX-12** — Timeline live-link status dot — filled dot at the head of the timeline bar: grey when not streaming, yellow when a live link is up but the view is not locked to the tail, red when locked-to-live (§10.4); tooltip names the state. Pairs with the lock-to-live state from PLT-05
 
 ### TST — Testing & CI (continuous)
 
