@@ -461,6 +461,14 @@ impl eframe::App for DelogApp {
         self.caches.poll_builds();
         if snapshot.epoch != self.last_epoch {
             self.caches.on_epoch(&snapshot);
+            let resolved = self.workspace.resolve_ghosts(&snapshot);
+            if resolved > 0 {
+                self.session
+                    .push_diagnostic(delog_core::diagnostics::Diag::info(
+                        "layout-bind",
+                        format!("bound {resolved} layout trace(s)"),
+                    ));
+            }
             self.last_epoch = snapshot.epoch;
         }
         self.ensure_trajectory_build(ui.ctx(), &snapshot);

@@ -87,6 +87,19 @@ pub struct TraceRef {
     pub visible: bool,
 }
 
+/// A layout trace whose `topic.field` is not currently bound to a loaded
+/// source. It persists visually in the legend and can auto-bind on a later
+/// snapshot (LAY-04).
+#[derive(Debug, Clone, PartialEq)]
+pub struct GhostTrace {
+    pub topic: String,
+    pub field: String,
+    pub color: [f32; 4],
+    pub width_px: f32,
+    pub mode: TraceMode,
+    pub visible: bool,
+}
+
 impl TraceRef {
     /// The trace colour as an egui `Color32` (the stored colour is sRGB).
     pub fn color32(&self) -> egui::Color32 {
@@ -125,6 +138,7 @@ impl TraceMode {
 #[derive(Debug, Default)]
 pub struct PlotPane {
     pub traces: Vec<TraceRef>,
+    pub ghosts: Vec<GhostTrace>,
 }
 
 impl PlotPane {
@@ -152,9 +166,20 @@ impl PlotPane {
         self.traces.retain(|t| t.field != field);
     }
 
+    pub fn add_ghost(&mut self, ghost: GhostTrace) {
+        if !self
+            .ghosts
+            .iter()
+            .any(|g| g.topic == ghost.topic && g.field == ghost.field)
+        {
+            self.ghosts.push(ghost);
+        }
+    }
+
     /// Remove every trace (context menu "Clear", PLT-11).
     pub fn clear(&mut self) {
         self.traces.clear();
+        self.ghosts.clear();
     }
 
     /// Mutate one trace's style/visibility in place (legend controls).
@@ -168,7 +193,7 @@ impl PlotPane {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.traces.is_empty()
+        self.traces.is_empty() && self.ghosts.is_empty()
     }
 
     pub fn fields(&self) -> impl Iterator<Item = FieldId> + '_ {

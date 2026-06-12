@@ -16,7 +16,7 @@ use crate::camera::OrbitCamera;
 use crate::gpu::{self, GpuBridge, PaneView, VehicleDraw};
 use crate::hover::{self, HoverTarget};
 use crate::legend;
-use crate::plot::{PlotPane, TraceMode, ViewX};
+use crate::plot::{PlotPane, TraceMode, TraceRef, ViewX};
 use crate::vehicle;
 
 pub type TileTree = egui_tiles::Tree<Pane>;
@@ -126,6 +126,30 @@ impl Workspace {
 
     pub fn fields(&self) -> impl Iterator<Item = FieldId> + '_ {
         self.plot_panes().flat_map(PlotPane::fields)
+    }
+
+    pub fn resolve_ghosts(&mut self, snapshot: &StoreSnapshot) -> usize {
+        let mut resolved = 0;
+        for pane in self.plot_panes_mut() {
+            let ghosts = std::mem::take(&mut pane.ghosts);
+            for ghost in ghosts {
+                if let Some(field) = resolve_source_agnostic(snapshot, &ghost.topic, &ghost.field) {
+                    if !pane.traces.iter().any(|t| t.field == field) {
+                        pane.traces.push(TraceRef {
+                            field,
+                            color: ghost.color,
+                            width_px: ghost.width_px,
+                            mode: ghost.mode,
+                            visible: ghost.visible,
+                        });
+                        resolved += 1;
+                    }
+                } else {
+                    pane.ghosts.push(ghost);
+                }
+            }
+        }
+        resolved
     }
 
     pub fn add_trace_to_first_plot(&mut self, field: FieldId) -> bool {
@@ -393,8 +417,11 @@ impl egui_tiles::Behavior<Pane> for Behavior<'_> {
 
     fn tab_title_for_pane(&mut self, pane: &Pane) -> egui::WidgetText {
         match pane {
-            Pane::Plot(pane) if pane.traces.is_empty() => "Plot".into(),
-            Pane::Plot(pane) => format!("Plot ({})", pane.traces.len()).into(),
+            Pane::Plot(pane) if pane.is_empty() => "Plot".into(),
+            Pane::Plot(pane) => {
+                let count = pane.traces.len() + pane.ghosts.len();
+                format!("Plot ({count})").into()
+            }
             Pane::Scene3D(_) => "3D View".into(),
         }
     }
@@ -874,6 +901,7 @@ impl Behavior<'_> {
 
     fn debug_ui(&mut self, ui: &mut egui::Ui, pane: &PlotPane, debug: Option<PlotDebug>) {
         ui.label(format!("traces: {}", pane.traces.len()));
+        ui.label(format!("ghost traces: {}", pane.ghosts.len()));
         ui.label(format!("visible traces: {}", pane.visible_traces().count()));
 
         if let Some(debug) = debug {
@@ -972,6 +1000,33 @@ impl Behavior<'_> {
         }
         *self.services.view = Some(view);
     }
+}
+
+fn resolve_source_agnostic(
+    snapshot: &StoreSnapshot,
+    topic_name: &str,
+    field_name: &str,
+) -> Option<FieldId> {
+    let mut found = None;
+    for source in snapshot.sources.iter().filter(|s| !s.entry.removed) {
+        for topic_id in source.topics.iter().copied() {
+            let topic = snapshot.topic(topic_id)?;
+            if topic.entry.removed || topic.entry.name != topic_name {
+                continue;
+            }
+            for field in snapshot
+                .fields
+                .iter()
+                .filter(|f| f.topic == topic_id && !f.removed && f.name == field_name)
+            {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(field.id);
+            }
+        }
+    }
+    found
 }
 
 fn y_unit(snapshot: &StoreSnapshot, pane: &PlotPane) -> Option<String> {
@@ -1131,6 +1186,77 @@ mod tests {
 
         assert_eq!(first_visible_vehicle(&poses), Some(1));
         assert_eq!(first_visible_vehicle(&[None, None]), None);
+    }
+
+    #[test]
+    fn ghost_trace_resolves_when_matching_field_loads() {
+        let mut workspace = Workspace::new();
+        let root = workspace.tree.root().unwrap();
+        let Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) = workspace.tree.tiles.get_mut(root)
+        else {
+            panic!("root should be a plot");
+        };
+        pane.add_ghost(crate::plot::GhostTrace {
+            topic: "ATT".into(),
+            field: "Roll".into(),
+            color: [1.0, 0.0, 0.0, 1.0],
+            width_px: 2.0,
+            mode: TraceMode::Step,
+            visible: false,
+        });
+
+        let mut ids = delog_core::identity::IdentityRegistry::new();
+        let source = ids.add_source("flight");
+        let topic = ids.add_topic(source, "ATT").unwrap();
+        let field = ids.add_field(topic, "Roll").unwrap();
+        let snapshot = StoreSnapshot::from_registry(&ids, [], 0).unwrap();
+
+        assert_eq!(workspace.resolve_ghosts(&snapshot), 1);
+        let pane = match workspace.tree.tiles.get(root).unwrap() {
+            egui_tiles::Tile::Pane(Pane::Plot(pane)) => pane,
+            _ => panic!("root should remain a plot"),
+        };
+        assert!(pane.ghosts.is_empty());
+        assert_eq!(pane.traces.len(), 1);
+        assert_eq!(pane.traces[0].field, field);
+        assert_eq!(pane.traces[0].mode, TraceMode::Step);
+        assert!(!pane.traces[0].visible);
+    }
+
+    #[test]
+    fn ghost_trace_stays_missing_when_field_is_ambiguous() {
+        let mut workspace = Workspace::new();
+        let root = workspace.tree.root().unwrap();
+        let Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) = workspace.tree.tiles.get_mut(root)
+        else {
+            panic!("root should be a plot");
+        };
+        pane.add_ghost(crate::plot::GhostTrace {
+            topic: "ATT".into(),
+            field: "Roll".into(),
+            color: [0.0, 1.0, 0.0, 1.0],
+            width_px: 1.0,
+            mode: TraceMode::Line,
+            visible: true,
+        });
+
+        let mut ids = delog_core::identity::IdentityRegistry::new();
+        for source_name in ["left", "right"] {
+            let source = ids.add_source(source_name);
+            let topic = ids.add_topic(source, "ATT").unwrap();
+            ids.add_field(topic, "Roll").unwrap();
+        }
+        let snapshot = StoreSnapshot::from_registry(&ids, [], 0).unwrap();
+
+        assert_eq!(workspace.resolve_ghosts(&snapshot), 0);
+        let pane = match workspace.tree.tiles.get(root).unwrap() {
+            egui_tiles::Tile::Pane(Pane::Plot(pane)) => pane,
+            _ => panic!("root should remain a plot"),
+        };
+        assert!(pane.traces.is_empty());
+        assert_eq!(pane.ghosts.len(), 1);
+        assert_eq!(pane.ghosts[0].topic, "ATT");
+        assert_eq!(pane.ghosts[0].field, "Roll");
     }
 
     #[test]
