@@ -139,6 +139,9 @@ impl TraceMode {
 pub struct PlotPane {
     pub traces: Vec<TraceRef>,
     pub ghosts: Vec<GhostTrace>,
+    /// Whether this pane's Plot Info window is open (context menu, PLT-11).
+    /// Transient UI state — not serialized into layouts.
+    pub show_info: bool,
 }
 
 impl PlotPane {
