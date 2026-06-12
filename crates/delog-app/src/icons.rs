@@ -21,3 +21,38 @@ pub fn cube() -> ImageSource<'static> {
 pub fn gear() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/settings.svg")
 }
+
+/// Trash (clear all traces).
+pub fn trash() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/trash-2.svg")
+}
+
+/// Ban / prohibited (remove a single trace).
+pub fn ban() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/ban.svg")
+}
+
+/// Pencil (edit trace style).
+pub fn pencil() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/pencil.svg")
+}
+
+/// Two columns (split into side-by-side panes — horizontal split).
+pub fn columns() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/columns-2.svg")
+}
+
+/// Two rows (split into stacked panes — vertical split).
+pub fn rows() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/rows-2.svg")
+}
+
+/// Info (open the Plot Info window).
+pub fn info() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/info.svg")
+}
+
+/// X (close the pane).
+pub fn close() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/x.svg")
+}

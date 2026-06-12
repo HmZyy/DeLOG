@@ -375,6 +375,7 @@ pub struct PlotServices<'a> {
     pub origin_us: i64,
     pub hover_mode: &'a mut delog_core::field_view::SampleMode,
     pub show_legend: &'a mut bool,
+    pub show_tooltip: &'a mut bool,
     /// Playback time for the playhead cursor; `None` before any data loads
     /// (§11, PLT-10).
     pub playhead_us: Option<i64>,
@@ -671,16 +672,19 @@ impl Behavior<'_> {
                     .unwrap_or((0.0, 1.0));
                 axes::draw(ui, plot_rect, x_range, (0.0, 1.0), None);
             }
-            self.plot_context_menu(tile_id, &response, pane, None);
+            self.plot_context_menu(tile_id, &response, pane);
+            self.plot_info_window(ui, tile_id, pane, None);
             return tile_response;
         }
 
         let Some(view) = *self.services.view else {
-            self.plot_context_menu(tile_id, &response, pane, None);
+            self.plot_context_menu(tile_id, &response, pane);
+            self.plot_info_window(ui, tile_id, pane, None);
             return tile_response;
         };
         if !self.services.gpu.is_available() || plot_rect.width() <= 8.0 {
-            self.plot_context_menu(tile_id, &response, pane, None);
+            self.plot_context_menu(tile_id, &response, pane);
+            self.plot_info_window(ui, tile_id, pane, None);
             return tile_response;
         }
 
@@ -708,7 +712,7 @@ impl Behavior<'_> {
             paint_us,
         };
 
-        self.plot_context_menu(tile_id, &response, pane, Some(debug));
+        self.plot_context_menu(tile_id, &response, pane);
 
         // Playhead cursor + value readout on every pane (§10.5, PLT-10). During
         // playback the hover tooltip is suppressed, so every pane (including the
@@ -735,7 +739,7 @@ impl Behavior<'_> {
             );
         }
 
-        if !ui.ctx().any_popup_open() {
+        if *self.services.show_tooltip && !ui.ctx().any_popup_open() {
             // Alt+hover drags the playhead along with the cursor (PLT-10).
             if ui.input(|i| i.modifiers.alt)
                 && let Some(pos) = response.hover_pos()
@@ -786,6 +790,7 @@ impl Behavior<'_> {
             }
         }
 
+        self.plot_info_window(ui, tile_id, pane, Some(debug));
         tile_response
     }
 
@@ -794,38 +799,26 @@ impl Behavior<'_> {
         tile_id: egui_tiles::TileId,
         response: &egui::Response,
         pane: &mut PlotPane,
-        debug: Option<PlotDebug>,
     ) {
         response.context_menu(|ui| {
-            if ui.button("Reset view").clicked() {
-                if let Some(range) = self.services.snapshot.global_time_range() {
-                    *self.services.view = Some(ViewX::from_range(range));
-                    self.actions.view_changed = true;
+            // Clear all traces.
+            if ui
+                .add(egui::Button::image_and_text(
+                    menu_icon(ui, crate::icons::trash()),
+                    "Clear all traces",
+                ))
+                .clicked()
+            {
+                for field in pane.fields().collect::<Vec<_>>() {
+                    self.services.caches.unpin(field);
+                    self.actions.remove_trace.push(field);
                 }
+                pane.clear();
                 ui.close();
             }
 
-            ui.menu_button("Split", |ui| {
-                if ui.button("Horizontal").clicked() {
-                    self.actions.split = Some((tile_id, SplitDirection::Horizontal));
-                    ui.close();
-                }
-                if ui.button("Vertical").clicked() {
-                    self.actions.split = Some((tile_id, SplitDirection::Vertical));
-                    ui.close();
-                }
-            });
-
-            ui.menu_button("Clear traces", |ui| {
-                if ui.button("All").clicked() {
-                    for field in pane.fields().collect::<Vec<_>>() {
-                        self.services.caches.unpin(field);
-                        self.actions.remove_trace.push(field);
-                    }
-                    pane.clear();
-                    ui.close();
-                }
-                ui.separator();
+            // Remove trace — submenu listing each trace with its colour.
+            ui.menu_image_text_button(menu_icon(ui, crate::icons::ban()), "Remove trace", |ui| {
                 let entries: Vec<_> = pane
                     .traces
                     .iter()
@@ -837,6 +830,9 @@ impl Behavior<'_> {
                         )
                     })
                     .collect();
+                if entries.is_empty() {
+                    ui.add_enabled(false, egui::Button::new("No traces"));
+                }
                 for (field, label, color) in entries {
                     let clicked = ui
                         .horizontal(|ui| {
@@ -853,7 +849,8 @@ impl Behavior<'_> {
                 }
             });
 
-            ui.menu_button("Trace style", |ui| {
+            // Edit trace — submenu with per-trace colour / mode / width.
+            ui.menu_image_text_button(menu_icon(ui, crate::icons::pencil()), "Edit trace", |ui| {
                 let entries: Vec<_> = pane
                     .traces
                     .iter()
@@ -865,6 +862,9 @@ impl Behavior<'_> {
                         )
                     })
                     .collect();
+                if entries.is_empty() {
+                    ui.add_enabled(false, egui::Button::new("No traces"));
+                }
                 for (field, label, color) in entries {
                     let Some(trace) = pane.trace_mut(field) else {
                         continue;
@@ -896,25 +896,93 @@ impl Behavior<'_> {
             });
 
             ui.separator();
+
+            if ui
+                .add(egui::Button::image_and_text(
+                    menu_icon(ui, crate::icons::columns()),
+                    "Split horizontally",
+                ))
+                .clicked()
+            {
+                self.actions.split = Some((tile_id, SplitDirection::Horizontal));
+                ui.close();
+            }
+            if ui
+                .add(egui::Button::image_and_text(
+                    menu_icon(ui, crate::icons::rows()),
+                    "Split vertically",
+                ))
+                .clicked()
+            {
+                self.actions.split = Some((tile_id, SplitDirection::Vertical));
+                ui.close();
+            }
+
+            ui.separator();
+
+            ui.checkbox(self.services.show_legend, "Show legend");
+            ui.checkbox(self.services.show_tooltip, "Show tooltip");
             ui.menu_button("Hover mode", |ui| {
                 use delog_core::field_view::SampleMode::{Linear, Next, Prev};
                 ui.radio_value(self.services.hover_mode, Prev, "Previous");
                 ui.radio_value(self.services.hover_mode, Next, "Next");
                 ui.radio_value(self.services.hover_mode, Linear, "Linear");
             });
-            ui.checkbox(self.services.show_legend, "Show legend");
 
             ui.separator();
-            ui.menu_button("Debug", |ui| {
-                self.debug_ui(ui, pane, debug);
-            });
+
+            // Plot Info opens a separate window (rendered in plot_body).
+            if ui
+                .add(egui::Button::image_and_text(
+                    menu_icon(ui, crate::icons::info()),
+                    "Plot Info",
+                ))
+                .clicked()
+            {
+                pane.show_info = true;
+                ui.close();
+            }
 
             ui.separator();
-            if ui.button("Close").clicked() {
+
+            if ui
+                .add(egui::Button::image_and_text(
+                    menu_icon(ui, crate::icons::close()),
+                    "Close",
+                ))
+                .clicked()
+            {
                 self.actions.close = Some(tile_id);
                 ui.close();
             }
         });
+    }
+
+    /// Plot Info window (PLT-11): trace counts, last-frame geometry/timings
+    /// and per-trace cache/GPU details. Opened from the context menu; its
+    /// open state lives on the pane so it survives across frames.
+    fn plot_info_window(
+        &mut self,
+        ui: &egui::Ui,
+        tile_id: egui_tiles::TileId,
+        pane: &mut PlotPane,
+        debug: Option<PlotDebug>,
+    ) {
+        if !pane.show_info {
+            return;
+        }
+        let mut open = pane.show_info;
+        egui::Window::new("Plot Info")
+            .id(egui::Id::new(("plot-info", tile_id)))
+            .open(&mut open)
+            .resizable(true)
+            .default_width(320.0)
+            .show(ui.ctx(), |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    self.debug_ui(ui, pane, debug);
+                });
+            });
+        pane.show_info = open;
     }
 
     fn debug_ui(&mut self, ui: &mut egui::Ui, pane: &PlotPane, debug: Option<PlotDebug>) {
@@ -1149,6 +1217,14 @@ fn scene_settings_button(ui: &mut egui::Ui, scene_rect: egui::Rect) -> bool {
                 .clicked();
         });
     clicked
+}
+
+/// A 16px menu icon tinted to the current text colour (the bundled SVGs are
+/// authored white, so the tint multiply colours them).
+fn menu_icon(ui: &egui::Ui, src: egui::ImageSource<'static>) -> egui::Image<'static> {
+    egui::Image::new(src)
+        .fit_to_exact_size(egui::vec2(16.0, 16.0))
+        .tint(ui.visuals().text_color())
 }
 
 fn format_bytes(bytes: u64) -> String {
