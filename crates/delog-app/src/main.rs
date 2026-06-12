@@ -8,6 +8,7 @@ mod camera;
 mod geo;
 mod gpu;
 mod hover;
+mod layout;
 mod legend;
 mod live;
 mod models;
