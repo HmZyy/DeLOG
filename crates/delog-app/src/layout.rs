@@ -325,11 +325,34 @@ pub fn save_named(name: &str, doc: &LayoutDoc) -> Result<(), LayoutError> {
     Ok(())
 }
 
+pub fn export_doc(path: &Path, doc: &LayoutDoc) -> Result<(), LayoutError> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent).map_err(|e| LayoutError::Io(e.to_string()))?;
+    }
+    let tmp = path.with_extension(format!(
+        "{}tmp",
+        path.extension()
+            .and_then(|s| s.to_str())
+            .map(|s| format!("{s}."))
+            .unwrap_or_default()
+    ));
+    let json = serde_json::to_string_pretty(doc).map_err(|e| LayoutError::Json(e.to_string()))?;
+    fs::write(&tmp, json).map_err(|e| LayoutError::Io(e.to_string()))?;
+    fs::rename(&tmp, path).map_err(|e| LayoutError::Io(e.to_string()))?;
+    Ok(())
+}
+
 pub fn load_named(name: &str, snapshot: &StoreSnapshot) -> Result<LoadOutcome, LayoutError> {
     let path = layout_dir()?.join(format!("{}.json", sanitize_name(name)));
-    let bytes = fs::read_to_string(path).map_err(|e| LayoutError::Io(e.to_string()))?;
-    let doc = decode_doc(&bytes)?;
+    let doc = import_doc(&path)?;
     load_doc(doc, snapshot)
+}
+
+pub fn import_doc(path: &Path) -> Result<LayoutDoc, LayoutError> {
+    let bytes = fs::read_to_string(path).map_err(|e| LayoutError::Io(e.to_string()))?;
+    decode_doc(&bytes)
 }
 
 pub fn decode_doc(json: &str) -> Result<LayoutDoc, LayoutError> {
@@ -1035,23 +1058,28 @@ mod tests {
     }
 
     #[test]
+    fn export_import_doc_round_trips_through_json_file() {
+        let path = std::env::temp_dir().join(format!(
+            "delog-layout-test-{}-{}.json",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("layout")
+        ));
+        let doc = empty_doc("portable");
+
+        export_doc(&path, &doc).expect("export should write JSON");
+        let imported = import_doc(&path).expect("import should read JSON");
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(imported.delog_layout, LAYOUT_VERSION);
+        assert_eq!(imported.name, "portable");
+        let json = serde_json::to_string(&imported).unwrap();
+        assert!(!json.contains("\"source\""));
+    }
+
+    #[test]
     fn invalid_version_is_rejected() {
-        let doc = LayoutDoc {
-            delog_layout: 99,
-            name: "bad".into(),
-            view: None,
-            playback: PlaybackLayout {
-                speed: 1.0,
-                follow_live: false,
-            },
-            show_legend: true,
-            workspace: WorkspaceLayout {
-                root: LayoutNode::Plot { traces: Vec::new() },
-            },
-            vehicles: Vec::new(),
-            favorites: Vec::new(),
-            docks: BTreeMap::new(),
-        };
+        let mut doc = empty_doc("bad");
+        doc.delog_layout = 99;
         match load_doc(doc, &StoreSnapshot::empty()) {
             Err(LayoutError::UnsupportedVersion(99)) => {}
             Ok(_) => panic!("expected unsupported version, got successful load"),
@@ -1160,5 +1188,24 @@ mod tests {
             }
         }
         StoreSnapshot::from_registry(&ids, [], 0).expect("identity snapshot")
+    }
+
+    fn empty_doc(name: &str) -> LayoutDoc {
+        LayoutDoc {
+            delog_layout: LAYOUT_VERSION,
+            name: name.into(),
+            view: None,
+            playback: PlaybackLayout {
+                speed: 1.0,
+                follow_live: false,
+            },
+            show_legend: true,
+            workspace: WorkspaceLayout {
+                root: LayoutNode::Plot { traces: Vec::new() },
+            },
+            vehicles: Vec::new(),
+            favorites: Vec::new(),
+            docks: BTreeMap::new(),
+        }
     }
 }

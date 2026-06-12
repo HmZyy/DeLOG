@@ -7,7 +7,7 @@ use std::sync::mpsc;
 use crate::about;
 use crate::browser::{self, BrowserModel};
 use crate::gpu::GpuBridge;
-use crate::layout::{LayoutApply, LoadOutcome, PendingLayout};
+use crate::layout::{LayoutApply, LayoutDoc, LayoutError, LoadOutcome, PendingLayout};
 use crate::live::ConnectionDialog;
 use crate::plot::ViewX;
 use crate::session::Session;
@@ -19,6 +19,9 @@ struct TrajectoryBuildResult {
     vehicle_revision: u64,
     trajectories: Vec<Vec<[f32; 3]>>,
 }
+
+type LayoutImportResult = Result<LayoutDoc, LayoutError>;
+type LayoutExportResult = Result<std::path::PathBuf, LayoutError>;
 
 #[derive(Default)]
 struct SaveLayoutDialog {
@@ -49,6 +52,10 @@ pub struct DelogApp {
     /// (the dialog must never block the UI thread, §19.6).
     picked_files: mpsc::Receiver<Vec<std::path::PathBuf>>,
     picked_files_tx: mpsc::Sender<Vec<std::path::PathBuf>>,
+    imported_layouts: mpsc::Receiver<LayoutImportResult>,
+    imported_layouts_tx: mpsc::Sender<LayoutImportResult>,
+    exported_layouts: mpsc::Receiver<LayoutExportResult>,
+    exported_layouts_tx: mpsc::Sender<LayoutExportResult>,
     browser_query: String,
     browser_selection: browser::Selection,
     offset_dialog: Option<(delog_core::identity::SourceId, i64)>,
@@ -78,6 +85,8 @@ impl DelogApp {
         cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
         let (picked_files_tx, picked_files) = mpsc::channel();
         let (traj_results_tx, traj_results) = mpsc::channel();
+        let (imported_layouts_tx, imported_layouts) = mpsc::channel();
+        let (exported_layouts_tx, exported_layouts) = mpsc::channel();
         Self {
             session: Session::new(cc.egui_ctx.clone()),
             gpu: GpuBridge::from_creation_context(cc),
@@ -92,6 +101,10 @@ impl DelogApp {
             origin_us: 0,
             picked_files,
             picked_files_tx,
+            imported_layouts,
+            imported_layouts_tx,
+            exported_layouts,
+            exported_layouts_tx,
             browser_query: String::new(),
             browser_selection: browser::Selection::default(),
             offset_dialog: None,
@@ -153,6 +166,49 @@ impl DelogApp {
         while let Ok(paths) = self.picked_files.try_recv() {
             for path in paths {
                 self.session.open_path(path);
+            }
+        }
+    }
+
+    fn handle_layout_io_results(&mut self) {
+        let snapshot = self.session.snapshot();
+        while let Ok(result) = self.imported_layouts.try_recv() {
+            match result {
+                Ok(doc) => match crate::layout::load_doc(doc, &snapshot) {
+                    Ok(LoadOutcome::Applied(layout)) => self.apply_layout(layout),
+                    Ok(LoadOutcome::NeedsMapping(pending)) => {
+                        self.pending_layout = Some(pending);
+                    }
+                    Err(err) => self
+                        .session
+                        .push_diagnostic(delog_core::diagnostics::Diag::error(
+                            "layout-import",
+                            err.to_string(),
+                        )),
+                },
+                Err(err) => self
+                    .session
+                    .push_diagnostic(delog_core::diagnostics::Diag::error(
+                        "layout-import",
+                        err.to_string(),
+                    )),
+            }
+        }
+
+        while let Ok(result) = self.exported_layouts.try_recv() {
+            match result {
+                Ok(path) => self
+                    .session
+                    .push_diagnostic(delog_core::diagnostics::Diag::info(
+                        "layout-export",
+                        format!("exported layout to {}", path.display()),
+                    )),
+                Err(err) => self
+                    .session
+                    .push_diagnostic(delog_core::diagnostics::Diag::error(
+                        "layout-export",
+                        err.to_string(),
+                    )),
             }
         }
     }
@@ -235,14 +291,13 @@ impl DelogApp {
             .expect("spawn trajectory build thread");
     }
 
-    fn save_layout(&mut self, snapshot: &delog_core::snapshot::StoreSnapshot) {
-        let name = if self.save_layout_dialog.name.trim().is_empty() {
-            "default"
-        } else {
-            self.save_layout_dialog.name.trim()
-        };
-        let doc = crate::layout::current_doc(crate::layout::CurrentLayout {
-            name: name.to_owned(),
+    fn current_layout_doc(
+        &self,
+        name: String,
+        snapshot: &delog_core::snapshot::StoreSnapshot,
+    ) -> LayoutDoc {
+        crate::layout::current_doc(crate::layout::CurrentLayout {
+            name,
             workspace: &self.workspace,
             snapshot,
             view: self.view,
@@ -250,7 +305,16 @@ impl DelogApp {
             follow_live: self.playback.follow_live,
             show_legend: self.show_legend,
             vehicles: &self.vehicles,
-        });
+        })
+    }
+
+    fn save_layout(&mut self, snapshot: &delog_core::snapshot::StoreSnapshot) {
+        let name = if self.save_layout_dialog.name.trim().is_empty() {
+            "default"
+        } else {
+            self.save_layout_dialog.name.trim()
+        };
+        let doc = self.current_layout_doc(name.to_owned(), snapshot);
         match crate::layout::save_named(name, &doc) {
             Ok(()) => self
                 .session
@@ -265,6 +329,58 @@ impl DelogApp {
                     err.to_string(),
                 )),
         }
+    }
+
+    fn spawn_export_layout_dialog(
+        &self,
+        ctx: &egui::Context,
+        snapshot: &delog_core::snapshot::StoreSnapshot,
+    ) {
+        let name = if self.save_layout_dialog.name.trim().is_empty() {
+            "layout".to_owned()
+        } else {
+            self.save_layout_dialog.name.trim().to_owned()
+        };
+        let doc = self.current_layout_doc(name.clone(), snapshot);
+        let tx = self.exported_layouts_tx.clone();
+        let ctx = ctx.clone();
+        std::thread::Builder::new()
+            .name("delog-layout-export-dialog".into())
+            .spawn(move || {
+                let file_name = format!("{name}.json");
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("DeLOG layouts", &["json"])
+                    .add_filter("All files", &["*"])
+                    .set_title("Export layout JSON")
+                    .set_file_name(&file_name)
+                    .save_file()
+                {
+                    let result = crate::layout::export_doc(&path, &doc).map(|_| path);
+                    let _ = tx.send(result);
+                    ctx.request_repaint();
+                }
+            })
+            .expect("spawn layout export dialog thread");
+    }
+
+    fn spawn_import_layout_dialog(&self, ctx: &egui::Context) {
+        let tx = self.imported_layouts_tx.clone();
+        let ctx = ctx.clone();
+        std::thread::Builder::new()
+            .name("delog-layout-import-dialog".into())
+            .spawn(move || {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("DeLOG layouts", &["json"])
+                    .add_filter("All files", &["*"])
+                    .set_title("Import layout JSON")
+                    .pick_file()
+                {
+                    let result = crate::layout::import_doc(&path);
+                    let _ = tx.send(result);
+                    ctx.request_repaint();
+                }
+            })
+            .expect("spawn layout import dialog thread");
     }
 
     fn load_layout(&mut self, name: &str, snapshot: &delog_core::snapshot::StoreSnapshot) {
@@ -427,6 +543,7 @@ impl eframe::App for DelogApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.handle_dropped_files(ui.ctx());
         self.handle_picked_files();
+        self.handle_layout_io_results();
         self.session.prune_finished();
         self.poll_trajectory_builds();
         self.frame = self.frame.wrapping_add(1);
@@ -501,6 +618,15 @@ impl eframe::App for DelogApp {
                         self.load_layout_dialog.layouts = crate::layout::list_layouts();
                         self.load_layout_dialog.selected = None;
                         self.load_layout_dialog.open = true;
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("Export Layout JSON...").clicked() {
+                        self.spawn_export_layout_dialog(ui.ctx(), &snapshot);
+                        ui.close();
+                    }
+                    if ui.button("Import Layout JSON...").clicked() {
+                        self.spawn_import_layout_dialog(ui.ctx());
                         ui.close();
                     }
                 });
