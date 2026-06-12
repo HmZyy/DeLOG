@@ -700,17 +700,17 @@ impl Behavior<'_> {
 
         self.plot_context_menu(tile_id, &response, pane, Some(debug));
 
-        // Playhead cursor + value readout on every pane (§10.5, PLT-10). The
-        // hovered pane never gets the playhead tooltip — its hover tooltip is
-        // already showing — and the other panes only show it while alt-scrubbing
-        // or during playback.
+        // Playhead cursor + value readout on every pane (§10.5, PLT-10). During
+        // playback the hover tooltip is suppressed, so every pane (including the
+        // hovered one) shows the playhead readout. While alt-scrubbing the
+        // hovered pane keeps its hover tooltip and only the others read out.
         if let Some(t_us) = self.services.playhead_us {
             let hovered = response
                 .hover_pos()
                 .is_some_and(|pos| plot_rect.contains(pos));
             let alt = ui.input(|i| i.modifiers.alt);
-            let readout =
-                (!hovered && (alt || self.services.playing)).then_some(*self.services.hover_mode);
+            let readout = (self.services.playing || (alt && !hovered))
+                .then_some(*self.services.hover_mode);
             hover::draw_playhead(
                 ui,
                 HoverTarget {
@@ -748,6 +748,7 @@ impl Behavior<'_> {
                 pane,
                 self.services.origin_us,
                 *self.services.hover_mode,
+                !self.services.playing,
             );
         }
 
