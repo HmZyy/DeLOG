@@ -962,7 +962,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 
 - [x] **LAY-01** — Serde schema v1 per §14.2; save/load named layouts — `layout.rs` defines `delog_layout: 1` JSON, file IO under the app data `layouts/` directory, minimal Layout menu Save/Load modals, atomic temp-then-rename save, version rejection, and tests. Plot and vehicle field refs intentionally store only `topic + field` (no source) so layouts can be reused across logs; multi-source ambiguity is resolved by a load-time mapping dialog
 - [x] **LAY-02** — Persist: tiles, traces+styles, legend, ViewX mode, speed, vehicles, offsets, favorites, camera, docks (§14.1) — implemented for current surface area: workspace plot/3D tree, trace style/visibility, global legend flag, `ViewX`, playback speed/follow-live, vehicle configs, 3D camera/tracked vehicle. Source offsets are intentionally not persisted because layout field refs are source-agnostic; favorites/docks are present as empty/default schema placeholders until those UI features exist
-- [ ] **LAY-03** — Version field + migration chain + frozen-fixture tests (§14.2)
+- [x] **LAY-03** — Version field + migration chain + frozen-fixture tests (§14.2) — layout loads now decode through a raw JSON migration entrypoint (`decode_doc`/`migrate_to_current`) before deserializing v1; missing/unsupported versions are rejected explicitly. `fixtures/layouts/v1_basic.json` is a frozen source-agnostic v1 fixture, tested for decode + cross-log application against a different single-source snapshot
 - [ ] **LAY-04** — Resolver: FieldKey→FieldId; ghost traces + summary diag; auto-bind on source load (§14.3)
 - [ ] **LAY-05** — Export/import layout JSON
 - [ ] **LAY-06** — Autosave `session.json` (exit + 30 s dirty)
