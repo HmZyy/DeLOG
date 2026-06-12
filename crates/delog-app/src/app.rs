@@ -1002,9 +1002,15 @@ impl eframe::App for DelogApp {
                 } else {
                     ui.visuals().weak_text_color()
                 };
-                if icon_button(ui, crate::icons::satellite_dish(), stream_tint, streaming)
-                    .on_hover_text("Connect to a MAVLink telemetry stream")
-                    .clicked()
+                if icon_button(
+                    ui,
+                    "toolbar-stream",
+                    crate::icons::satellite_dish(),
+                    stream_tint,
+                    streaming,
+                )
+                .on_hover_text("Connect to a MAVLink telemetry stream")
+                .clicked()
                 {
                     self.show_connection_dialog = true;
                 }
@@ -1015,9 +1021,15 @@ impl eframe::App for DelogApp {
                 } else {
                     ui.visuals().weak_text_color()
                 };
-                if icon_button(ui, crate::icons::cube(), cube_tint, scene_open)
-                    .on_hover_text("Show or hide the 3D scene view")
-                    .clicked()
+                if icon_button(
+                    ui,
+                    "toolbar-3d",
+                    crate::icons::cube(),
+                    cube_tint,
+                    scene_open,
+                )
+                .on_hover_text("Show or hide the 3D scene view")
+                .clicked()
                 {
                     self.workspace.toggle_scene_pane();
                 }
@@ -1262,10 +1274,18 @@ impl eframe::App for DelogApp {
     }
 }
 
+/// Fixed footprint of a toolbar icon button. Allocating an explicit size
+/// keeps the button's rect independent of the SVG's load state, so the
+/// toolbar's height can't change between egui's layout passes (which would
+/// otherwise shift every panel below and spam "changed id between passes").
+const ICON_BUTTON_SIZE: egui::Vec2 = egui::vec2(28.0, 24.0);
+
 /// A compact toolbar icon button rendering one of the bundled SVG icons.
-/// `tint` colors the (white) glyph; `active` draws a selected background.
+/// `salt` gives the button a stable id; `tint` colors the (white) glyph;
+/// `active` draws a selected background.
 fn icon_button(
     ui: &mut egui::Ui,
+    salt: &str,
     icon: egui::ImageSource<'_>,
     tint: egui::Color32,
     active: bool,
@@ -1273,5 +1293,11 @@ fn icon_button(
     let image = egui::Image::new(icon)
         .fit_to_exact_size(egui::vec2(18.0, 18.0))
         .tint(tint);
-    ui.add(egui::Button::image(image).selected(active))
+    ui.push_id(salt, |ui| {
+        ui.add_sized(
+            ICON_BUTTON_SIZE,
+            egui::Button::image(image).selected(active),
+        )
+    })
+    .inner
 }
