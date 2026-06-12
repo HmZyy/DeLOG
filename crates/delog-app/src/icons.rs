@@ -22,9 +22,14 @@ pub fn gear() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/settings.svg")
 }
 
-/// Trash (clear all traces).
+/// Trash (clear all traces / remove vehicle).
 pub fn trash() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/trash-2.svg")
+}
+
+/// Plus (add vehicle).
+pub fn plus() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/plus.svg")
 }
 
 /// Ban / prohibited (remove a single trace).
