@@ -67,6 +67,14 @@ pub struct DelogApp {
     frame: u64,
     last_epoch: u64,
     origin_us: i64,
+    /// Exponentially-smoothed frame rate for the corner FPS indicator
+    /// (PRF-05). Only meaningful while frames are continuous; reads `None`
+    /// when the app is idle/event-driven so we don't display a misleading
+    /// rate built from a single stale frame (§11 idle policy).
+    fps_ema: Option<f32>,
+    /// Wall-clock instant of the previous frame, used to measure the real
+    /// frame-to-frame gap that feeds `fps_ema`.
+    last_frame_at: Option<Instant>,
     /// Paths picked in the native open dialog, sent from its worker thread
     /// (the dialog must never block the UI thread, §19.6).
     picked_files: mpsc::Receiver<Vec<std::path::PathBuf>>,
@@ -122,6 +130,8 @@ impl DelogApp {
             frame: 0,
             last_epoch: u64::MAX,
             origin_us: 0,
+            fps_ema: None,
+            last_frame_at: None,
             picked_files,
             picked_files_tx,
             imported_layouts,
@@ -828,6 +838,27 @@ impl eframe::App for DelogApp {
         self.poll_trajectory_builds();
         self.frame = self.frame.wrapping_add(1);
 
+        // FPS indicator (PRF-05): measure the real wall-clock gap between
+        // frames. While the app renders continuously (playback, live, or any
+        // interaction egui repaints for) the gaps are small and we show a
+        // smoothed rate. When event-driven and truly idle the next frame is
+        // far apart (§11 idle policy) — a rate from that gap is meaningless,
+        // so the corner badge reads "idle" instead.
+        let now = Instant::now();
+        if let Some(prev) = self.last_frame_at.replace(now) {
+            let gap = now.duration_since(prev).as_secs_f32();
+            // Treat gaps slower than ~5 FPS as idle, not a frame rate.
+            if (0.0..0.2).contains(&gap) && gap > 0.0 {
+                let inst = 1.0 / gap;
+                self.fps_ema = Some(match self.fps_ema {
+                    Some(prev) => prev * 0.9 + inst * 0.1,
+                    None => inst,
+                });
+            } else {
+                self.fps_ema = None;
+            }
+        }
+
         let snapshot = self.session.snapshot();
 
         // Cache lifecycle: shared origin, frame recency, drain builds, and an
@@ -994,6 +1025,26 @@ impl eframe::App for DelogApp {
                         ui.spinner();
                     }
                 }
+
+                // FPS badge pinned to the far right (PRF-05).
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    match self.fps_ema {
+                        Some(fps) => {
+                            // Green >60, orange 30..=60, red <30.
+                            let color = if fps > 60.0 {
+                                egui::Color32::from_rgb(0x3f, 0xb9, 0x50)
+                            } else if fps >= 30.0 {
+                                egui::Color32::from_rgb(0xe6, 0x9f, 0x00)
+                            } else {
+                                egui::Color32::from_rgb(0xe0, 0x3b, 0x3b)
+                            };
+                            ui.colored_label(color, format!("{fps:.0} FPS"));
+                        }
+                        None => {
+                            ui.weak("idle");
+                        }
+                    }
+                });
             });
         });
 
