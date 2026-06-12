@@ -39,7 +39,7 @@ pub fn ui(
 
     egui::Area::new(id)
         .fixed_pos(plot_rect.left_top() + egui::vec2(8.0, 8.0))
-        .order(egui::Order::Foreground)
+        .order(egui::Order::Middle)
         .show(ui.ctx(), |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 for (field, label) in labels {

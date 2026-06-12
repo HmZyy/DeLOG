@@ -957,6 +957,11 @@ impl eframe::App for DelogApp {
                         self.spawn_open_dialog(ui.ctx());
                         ui.close();
                     }
+                    ui.separator();
+                    if ui.button("Exit").clicked() {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                        ui.close();
+                    }
                 });
                 ui.menu_button("Edit", |ui| {
                     if ui.button("Settings...").clicked() {
