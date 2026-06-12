@@ -356,29 +356,34 @@ pub fn ui(
         .collect();
 
     let mut offset_change = None;
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        for source in &model.sources {
-            let header = format!("{}  ({} rows)", source.label, source.rows);
-            egui::CollapsingHeader::new(header)
-                .id_salt(("source", source.id.0))
-                .default_open(true)
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        if let Some(range) = source.range {
-                            ui.weak(format!(
-                                "{:.3}–{:.3} s",
-                                range.min_us as f64 / 1e6,
-                                range.max_us as f64 / 1e6
-                            ));
-                        }
-                        if let Some(change) = offset_widget(ui, source, offset_dialog) {
-                            offset_change = Some(change);
-                        }
-                    });
-                    for topic in &source.topics {
-                        // While filtering, surviving topics open so the
-                        // matched fields are visible immediately.
-                        egui::CollapsingHeader::new(format!("{}  ({})", topic.name, topic.rows))
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            for source in &model.sources {
+                let header = format!("{}  ({} rows)", source.label, source.rows);
+                egui::CollapsingHeader::new(header)
+                    .id_salt(("source", source.id.0))
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            if let Some(range) = source.range {
+                                ui.weak(format!(
+                                    "{:.3}–{:.3} s",
+                                    range.min_us as f64 / 1e6,
+                                    range.max_us as f64 / 1e6
+                                ));
+                            }
+                            if let Some(change) = offset_widget(ui, source, offset_dialog) {
+                                offset_change = Some(change);
+                            }
+                        });
+                        for topic in &source.topics {
+                            // While filtering, surviving topics open so the
+                            // matched fields are visible immediately.
+                            egui::CollapsingHeader::new(format!(
+                                "{}  ({})",
+                                topic.name, topic.rows
+                            ))
                             .id_salt(("topic", topic.id.0))
                             .default_open(false)
                             .open(filtering.then_some(true))
@@ -387,10 +392,10 @@ pub fn ui(
                                     field_row(ui, field, selection, &visible);
                                 }
                             });
-                    }
-                });
-        }
-    });
+                        }
+                    });
+            }
+        });
 
     if let Some(change) = offset_dialog_window(ui, model, offset_dialog) {
         offset_change = Some(change);
