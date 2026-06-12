@@ -12,6 +12,7 @@ use delog_core::identity::{FieldId, SourceId};
 use delog_core::snapshot::StoreSnapshot;
 use egui::Color32;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::camera::OrbitCamera;
 use crate::plot::{PlotPane, TraceMode, TraceRef, ViewX};
@@ -231,6 +232,7 @@ pub enum LayoutError {
     Json(String),
     UnsupportedVersion(u32),
     NoStorageDir,
+    MissingVersion,
 }
 
 pub struct CurrentLayout<'a> {
@@ -251,6 +253,7 @@ impl std::fmt::Display for LayoutError {
             Self::Json(e) => write!(f, "layout JSON error: {e}"),
             Self::UnsupportedVersion(v) => write!(f, "unsupported layout version {v}"),
             Self::NoStorageDir => write!(f, "no layout storage directory available"),
+            Self::MissingVersion => write!(f, "layout JSON is missing `delog_layout`"),
         }
     }
 }
@@ -325,9 +328,26 @@ pub fn save_named(name: &str, doc: &LayoutDoc) -> Result<(), LayoutError> {
 pub fn load_named(name: &str, snapshot: &StoreSnapshot) -> Result<LoadOutcome, LayoutError> {
     let path = layout_dir()?.join(format!("{}.json", sanitize_name(name)));
     let bytes = fs::read_to_string(path).map_err(|e| LayoutError::Io(e.to_string()))?;
-    let doc: LayoutDoc =
-        serde_json::from_str(&bytes).map_err(|e| LayoutError::Json(e.to_string()))?;
+    let doc = decode_doc(&bytes)?;
     load_doc(doc, snapshot)
+}
+
+pub fn decode_doc(json: &str) -> Result<LayoutDoc, LayoutError> {
+    let value: Value = serde_json::from_str(json).map_err(|e| LayoutError::Json(e.to_string()))?;
+    let value = migrate_to_current(value)?;
+    serde_json::from_value(value).map_err(|e| LayoutError::Json(e.to_string()))
+}
+
+fn migrate_to_current(value: Value) -> Result<Value, LayoutError> {
+    let version = value
+        .get("delog_layout")
+        .and_then(Value::as_u64)
+        .ok_or(LayoutError::MissingVersion)? as u32;
+    match version {
+        LAYOUT_VERSION => Ok(value),
+        // Future versions will add pure `migrate_vN_to_vN_plus_1` steps here.
+        other => Err(LayoutError::UnsupportedVersion(other)),
+    }
 }
 
 pub fn load_doc(doc: LayoutDoc, snapshot: &StoreSnapshot) -> Result<LoadOutcome, LayoutError> {
@@ -1014,6 +1034,36 @@ mod tests {
     }
 
     #[test]
+    fn missing_version_is_rejected_by_decoder() {
+        match decode_doc(r#"{"name":"missing"}"#) {
+            Err(LayoutError::MissingVersion) => {}
+            Ok(_) => panic!("expected missing version, got successful decode"),
+            Err(err) => panic!("expected missing version, got {err}"),
+        }
+    }
+
+    #[test]
+    fn frozen_v1_fixture_decodes_and_applies_cross_log() {
+        let doc = decode_doc(include_str!("../../../fixtures/layouts/v1_basic.json"))
+            .expect("fixture should decode");
+        assert_eq!(doc.delog_layout, LAYOUT_VERSION);
+        assert_eq!(doc.name, "v1-basic");
+
+        let snapshot = snapshot_with_topics(&[
+            ("different_log", "ATT", &["Roll", "Pitch", "Yaw"]),
+            ("different_log", "POS", &["Lat", "Lng", "Alt"]),
+        ]);
+        let outcome = load_doc(doc, &snapshot).expect("fixture should load");
+        let LoadOutcome::Applied(layout) = outcome else {
+            panic!("single-source fixture should not need mapping");
+        };
+
+        assert_eq!(layout.vehicles.len(), 1);
+        assert_eq!(layout.vehicles[0].label, "Vehicle");
+        assert_eq!(layout.diagnostics.len(), 0);
+    }
+
+    #[test]
     fn one_loaded_source_resolves_topic_field_without_source() {
         let (snapshot, field) = snapshot_with_sources(&[("flight_a", "ATT", "Roll")]);
         let mut resolver = Resolver {
@@ -1069,5 +1119,20 @@ mod tests {
             StoreSnapshot::from_registry(&ids, [], 0).expect("identity snapshot"),
             fields,
         )
+    }
+
+    fn snapshot_with_topics(entries: &[(&str, &str, &[&str])]) -> StoreSnapshot {
+        let mut ids = IdentityRegistry::new();
+        let mut sources = HashMap::new();
+        for (source, topic, fields) in entries {
+            let source_id = *sources
+                .entry(*source)
+                .or_insert_with(|| ids.add_source(*source));
+            let topic = ids.add_topic(source_id, *topic).unwrap();
+            for field in *fields {
+                ids.add_field(topic, *field).unwrap();
+            }
+        }
+        StoreSnapshot::from_registry(&ids, [], 0).expect("identity snapshot")
     }
 }
