@@ -2,6 +2,7 @@
 
 use delog_cache::CacheManager;
 use delog_core::time::TimeRange;
+use std::sync::mpsc;
 
 use crate::about;
 use crate::browser::{self, BrowserModel};
@@ -11,6 +12,12 @@ use crate::plot::ViewX;
 use crate::session::Session;
 use crate::timeline::Playback;
 use crate::workspace::{PlotServices, Workspace};
+
+struct TrajectoryBuildResult {
+    epoch: u64,
+    vehicle_revision: u64,
+    trajectories: Vec<Vec<[f32; 3]>>,
+}
 
 pub struct DelogApp {
     session: Session,
@@ -26,8 +33,8 @@ pub struct DelogApp {
     origin_us: i64,
     /// Paths picked in the native open dialog, sent from its worker thread
     /// (the dialog must never block the UI thread, §19.6).
-    picked_files: std::sync::mpsc::Receiver<Vec<std::path::PathBuf>>,
-    picked_files_tx: std::sync::mpsc::Sender<Vec<std::path::PathBuf>>,
+    picked_files: mpsc::Receiver<Vec<std::path::PathBuf>>,
+    picked_files_tx: mpsc::Sender<Vec<std::path::PathBuf>>,
     browser_query: String,
     browser_selection: browser::Selection,
     offset_dialog: Option<(delog_core::identity::SourceId, i64)>,
@@ -37,17 +44,23 @@ pub struct DelogApp {
     /// Configured vehicles for the 3D view (TDV-03); empty until one is added.
     vehicles: Vec<crate::vehicle::VehicleConfig>,
     vehicle_dialog: crate::vehicle_dialog::VehicleDialog,
-    /// Cached render-space trajectories, parallel to `vehicles`, rebuilt only
-    /// when the data epoch or vehicle set changes (TDV-04; off-thread later).
+    /// Cached render-space trajectories, parallel to `vehicles`, rebuilt on a
+    /// worker when the data epoch or vehicle set changes (TDV-04/11).
     vehicle_trajectories: Vec<Vec<[f32; 3]>>,
     traj_epoch: u64,
+    traj_vehicle_revision: u64,
+    vehicle_revision: u64,
     traj_dirty: bool,
+    traj_building: Option<(u64, u64)>,
+    traj_results: mpsc::Receiver<TrajectoryBuildResult>,
+    traj_results_tx: mpsc::Sender<TrajectoryBuildResult>,
 }
 
 impl DelogApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
-        let (picked_files_tx, picked_files) = std::sync::mpsc::channel();
+        let (picked_files_tx, picked_files) = mpsc::channel();
+        let (traj_results_tx, traj_results) = mpsc::channel();
         Self {
             session: Session::new(cc.egui_ctx.clone()),
             gpu: GpuBridge::from_creation_context(cc),
@@ -72,7 +85,12 @@ impl DelogApp {
             vehicle_dialog: crate::vehicle_dialog::VehicleDialog::default(),
             vehicle_trajectories: Vec::new(),
             traj_epoch: u64::MAX,
-            traj_dirty: false,
+            traj_vehicle_revision: u64::MAX,
+            vehicle_revision: 0,
+            traj_dirty: true,
+            traj_building: None,
+            traj_results,
+            traj_results_tx,
         }
     }
 
@@ -128,6 +146,71 @@ impl DelogApp {
             .unwrap_or_else(|| (range.max_us - range.min_us).max(1));
         self.view = Some(ViewX::locked_to_tail(range, span));
     }
+
+    fn poll_trajectory_builds(&mut self) {
+        while let Ok(result) = self.traj_results.try_recv() {
+            self.traj_building = self
+                .traj_building
+                .filter(|&(epoch, rev)| epoch != result.epoch || rev != result.vehicle_revision);
+            if result.epoch == self.traj_epoch && result.vehicle_revision == self.vehicle_revision {
+                self.vehicle_trajectories = result.trajectories;
+                self.traj_vehicle_revision = result.vehicle_revision;
+                self.traj_dirty = false;
+            }
+        }
+    }
+
+    fn ensure_trajectory_build(
+        &mut self,
+        ctx: &egui::Context,
+        snapshot: &std::sync::Arc<delog_core::snapshot::StoreSnapshot>,
+    ) {
+        let target_epoch = snapshot.epoch;
+        let target_revision = self.vehicle_revision;
+        let needs_build = self.traj_dirty
+            || self.traj_epoch != target_epoch
+            || self.traj_vehicle_revision != target_revision;
+        if !needs_build {
+            return;
+        }
+
+        self.traj_epoch = target_epoch;
+        self.traj_dirty = true;
+        if self.vehicles.is_empty() {
+            self.vehicle_trajectories.clear();
+            self.traj_vehicle_revision = target_revision;
+            self.traj_dirty = false;
+            self.traj_building = None;
+            return;
+        }
+        if self.traj_building == Some((target_epoch, target_revision)) {
+            return;
+        }
+        if self.traj_building.is_some() {
+            return;
+        }
+
+        let tx = self.traj_results_tx.clone();
+        let ctx = ctx.clone();
+        let snapshot = snapshot.clone();
+        let vehicles = self.vehicles.clone();
+        self.traj_building = Some((target_epoch, target_revision));
+        std::thread::Builder::new()
+            .name("delog-trajectory-build".into())
+            .spawn(move || {
+                let trajectories = vehicles
+                    .iter()
+                    .map(|v| crate::vehicle::build_trajectory(&snapshot, v))
+                    .collect();
+                let _ = tx.send(TrajectoryBuildResult {
+                    epoch: target_epoch,
+                    vehicle_revision: target_revision,
+                    trajectories,
+                });
+                ctx.request_repaint();
+            })
+            .expect("spawn trajectory build thread");
+    }
 }
 
 impl eframe::App for DelogApp {
@@ -135,6 +218,7 @@ impl eframe::App for DelogApp {
         self.handle_dropped_files(ui.ctx());
         self.handle_picked_files();
         self.session.prune_finished();
+        self.poll_trajectory_builds();
         self.frame = self.frame.wrapping_add(1);
 
         let snapshot = self.session.snapshot();
@@ -169,17 +253,7 @@ impl eframe::App for DelogApp {
             self.caches.on_epoch(&snapshot);
             self.last_epoch = snapshot.epoch;
         }
-        // Rebuild vehicle trajectories only when the data or vehicle set
-        // changed — never per-frame (TDV-04; off-thread is a follow-up).
-        if snapshot.epoch != self.traj_epoch || self.traj_dirty {
-            self.vehicle_trajectories = self
-                .vehicles
-                .iter()
-                .map(|v| crate::vehicle::build_trajectory(&snapshot, v))
-                .collect();
-            self.traj_epoch = snapshot.epoch;
-            self.traj_dirty = false;
-        }
+        self.ensure_trajectory_build(ui.ctx(), &snapshot);
         // Keep every plotted trace's cache requested/warm.
         for field in self.workspace.fields().collect::<Vec<_>>() {
             self.caches.request(field, &snapshot);
@@ -450,7 +524,9 @@ impl eframe::App for DelogApp {
             &mut self.vehicles,
             &self.session.snapshot(),
         ) {
+            self.vehicle_revision = self.vehicle_revision.wrapping_add(1);
             self.traj_dirty = true;
+            self.ensure_trajectory_build(ui.ctx(), &snapshot);
         }
         if let Some(endpoint) = self
             .connection_dialog
