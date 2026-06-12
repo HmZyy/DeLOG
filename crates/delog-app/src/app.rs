@@ -1,8 +1,10 @@
 //! Top-level eframe application state.
 
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
+
 use delog_cache::CacheManager;
 use delog_core::time::TimeRange;
-use std::sync::mpsc;
 
 use crate::about;
 use crate::browser::{self, BrowserModel};
@@ -22,6 +24,7 @@ struct TrajectoryBuildResult {
 
 type LayoutImportResult = Result<LayoutDoc, LayoutError>;
 type LayoutExportResult = Result<std::path::PathBuf, LayoutError>;
+const SESSION_AUTOSAVE_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Default)]
 struct SaveLayoutDialog {
@@ -63,6 +66,8 @@ pub struct DelogApp {
     save_layout_dialog: SaveLayoutDialog,
     load_layout_dialog: LoadLayoutDialog,
     pending_layout: Option<PendingLayout>,
+    last_session_autosave: Instant,
+    last_session_autosave_json: Option<String>,
     show_connection_dialog: bool,
     connection_dialog: ConnectionDialog,
     /// Configured vehicles for the 3D view (TDV-03); empty until one is added.
@@ -115,6 +120,8 @@ impl DelogApp {
             },
             load_layout_dialog: LoadLayoutDialog::default(),
             pending_layout: None,
+            last_session_autosave: Instant::now(),
+            last_session_autosave_json: None,
             show_connection_dialog: false,
             connection_dialog: ConnectionDialog::default(),
             vehicles: Vec::new(),
@@ -210,6 +217,39 @@ impl DelogApp {
                         err.to_string(),
                     )),
             }
+        }
+    }
+
+    fn autosave_session(
+        &mut self,
+        snapshot: &delog_core::snapshot::StoreSnapshot,
+        force: bool,
+    ) -> Result<bool, LayoutError> {
+        if !force && self.last_session_autosave.elapsed() < SESSION_AUTOSAVE_INTERVAL {
+            return Ok(false);
+        }
+
+        let doc = self.current_layout_doc("session".to_owned(), snapshot);
+        let json = crate::layout::doc_json(&doc)?;
+        if !force && self.last_session_autosave_json.as_deref() == Some(json.as_str()) {
+            self.last_session_autosave = Instant::now();
+            return Ok(false);
+        }
+
+        crate::layout::save_session_json(&json)?;
+        self.last_session_autosave = Instant::now();
+        self.last_session_autosave_json = Some(json);
+        Ok(true)
+    }
+
+    fn maybe_autosave_session(&mut self, snapshot: &delog_core::snapshot::StoreSnapshot) {
+        if let Err(err) = self.autosave_session(snapshot, false) {
+            self.last_session_autosave = Instant::now();
+            self.session
+                .push_diagnostic(delog_core::diagnostics::Diag::warning(
+                    "session-save",
+                    err.to_string(),
+                ));
         }
     }
 
@@ -540,6 +580,11 @@ impl DelogApp {
 }
 
 impl eframe::App for DelogApp {
+    fn on_exit(&mut self) {
+        let snapshot = self.session.snapshot();
+        let _ = self.autosave_session(&snapshot, true);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.handle_dropped_files(ui.ctx());
         self.handle_picked_files();
@@ -589,6 +634,7 @@ impl eframe::App for DelogApp {
             self.last_epoch = snapshot.epoch;
         }
         self.ensure_trajectory_build(ui.ctx(), &snapshot);
+        self.maybe_autosave_session(&snapshot);
         // Keep every plotted trace's cache requested/warm.
         for field in self.workspace.fields().collect::<Vec<_>>() {
             self.caches.request(field, &snapshot);
