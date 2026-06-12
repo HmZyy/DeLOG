@@ -13,6 +13,7 @@ use crate::layout::{LayoutApply, LayoutDoc, LayoutError, LoadOutcome, PendingLay
 use crate::live::ConnectionDialog;
 use crate::plot::ViewX;
 use crate::session::Session;
+use crate::settings::{AppSettings, SettingsDialog};
 use crate::timeline::Playback;
 use crate::workspace::{PlotServices, Workspace};
 
@@ -93,6 +94,8 @@ pub struct DelogApp {
     save_layout_dialog: SaveLayoutDialog,
     load_layout_dialog: LoadLayoutDialog,
     layout_manager_dialog: LayoutManagerDialog,
+    settings: AppSettings,
+    settings_dialog: SettingsDialog,
     pending_layout: Option<PendingLayout>,
     deferred_layout_doc: Option<LayoutDoc>,
     last_session_autosave: Instant,
@@ -116,7 +119,8 @@ pub struct DelogApp {
 
 impl DelogApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
+        let settings = AppSettings::default();
+        settings.theme.apply(&cc.egui_ctx);
         let (picked_files_tx, picked_files) = mpsc::channel();
         let (traj_results_tx, traj_results) = mpsc::channel();
         let (imported_layouts_tx, imported_layouts) = mpsc::channel();
@@ -151,6 +155,8 @@ impl DelogApp {
             },
             load_layout_dialog: LoadLayoutDialog::default(),
             layout_manager_dialog: LayoutManagerDialog::default(),
+            settings,
+            settings_dialog: SettingsDialog::default(),
             pending_layout: None,
             deferred_layout_doc: None,
             last_session_autosave: Instant::now(),
@@ -944,8 +950,10 @@ impl eframe::App for DelogApp {
                     }
                 });
                 ui.menu_button("Edit", |ui| {
-                    // Intentionally empty for now.
-                    ui.add_enabled(false, egui::Button::new("Nothing here yet"));
+                    if ui.button("Settings...").clicked() {
+                        self.settings_dialog.open();
+                        ui.close();
+                    }
                 });
                 ui.menu_button("Layout", |ui| {
                     if ui.button("Save Layout...").clicked() {
@@ -992,11 +1000,11 @@ impl eframe::App for DelogApp {
                         Some(fps) => {
                             // Green >60, orange 30..=60, red <30.
                             let color = if fps > 60.0 {
-                                egui::Color32::from_rgb(0x3f, 0xb9, 0x50)
+                                self.settings.theme.success()
                             } else if fps >= 30.0 {
-                                egui::Color32::from_rgb(0xe6, 0x9f, 0x00)
+                                self.settings.theme.warning()
                             } else {
-                                egui::Color32::from_rgb(0xe0, 0x3b, 0x3b)
+                                self.settings.theme.error()
                             };
                             ui.colored_label(color, format!("{fps:.0} FPS"));
                         }
@@ -1015,7 +1023,7 @@ impl eframe::App for DelogApp {
                 let streaming = self.session.has_live_links();
                 // Blue when a live link is active, neutral otherwise.
                 let stream_tint = if streaming {
-                    egui::Color32::from_rgb(0x3b, 0x82, 0xf6)
+                    self.settings.theme.accent()
                 } else {
                     ui.visuals().weak_text_color()
                 };
@@ -1034,7 +1042,7 @@ impl eframe::App for DelogApp {
 
                 let scene_open = self.workspace.scene_pane_id().is_some();
                 let cube_tint = if scene_open {
-                    egui::Color32::from_rgb(0x3b, 0x82, 0xf6)
+                    self.settings.theme.accent()
                 } else {
                     ui.visuals().weak_text_color()
                 };
@@ -1104,6 +1112,7 @@ impl eframe::App for DelogApp {
                     range,
                     None,
                     self.session.has_live_links(),
+                    self.settings.theme,
                 );
                 if action.lock_live {
                     self.lock_to_live(range);
@@ -1265,6 +1274,10 @@ impl eframe::App for DelogApp {
 
         about::window(ui.ctx(), &mut self.show_about);
         self.show_layout_windows(ui.ctx());
+        let settings_change = self.settings_dialog.show(ui.ctx(), &mut self.settings);
+        if settings_change.theme_changed {
+            self.settings.theme.apply(ui.ctx());
+        }
         if crate::vehicle_dialog::show(
             ui.ctx(),
             &mut self.vehicle_dialog,

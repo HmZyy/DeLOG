@@ -15,6 +15,8 @@ mod live;
 mod models;
 mod plot;
 mod session;
+mod settings;
+mod theme;
 mod timeline;
 mod vehicle;
 mod vehicle_dialog;
