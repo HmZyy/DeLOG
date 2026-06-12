@@ -20,7 +20,11 @@ pub struct HoverTarget {
     pub view: PaneView,
 }
 
-/// Draw the hover cursor/circles/tooltip if the pointer is over the plot.
+/// Draw the hover cursor/circles/tooltip if the pointer is over the plot. With
+/// `tooltip: false` the cursor line and sample circles still draw but the value
+/// tooltip is suppressed — used during playback, where the playhead readout
+/// (PLT-10) is the value source instead.
+#[allow(clippy::too_many_arguments)]
 pub fn draw(
     ui: &egui::Ui,
     target: HoverTarget,
@@ -29,6 +33,7 @@ pub fn draw(
     pane: &PlotPane,
     origin_us: i64,
     mode: SampleMode,
+    tooltip: bool,
 ) {
     let Some(pos) = response.hover_pos() else {
         return;
@@ -67,14 +72,16 @@ pub fn draw(
         }
     }
 
-    show_tooltip(
-        ui,
-        target.id,
-        pos + egui::vec2(12.0, 12.0),
-        egui::Align2::LEFT_TOP,
-        cursor_x_sec,
-        &rows,
-    );
+    if tooltip {
+        show_tooltip(
+            ui,
+            target.id,
+            pos + egui::vec2(12.0, 12.0),
+            egui::Align2::LEFT_TOP,
+            cursor_x_sec,
+            &rows,
+        );
+    }
 }
 
 /// One tooltip row: a trace's canonical value at the probed time.
