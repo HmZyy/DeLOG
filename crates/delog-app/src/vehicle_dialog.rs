@@ -9,7 +9,7 @@ use delog_core::identity::{FieldId, SourceId, TopicId};
 use delog_core::snapshot::StoreSnapshot;
 use egui::Color32;
 
-use crate::vehicle::{GpsRef, ModelKind, OriMapping, PosMapping, VehicleConfig};
+use crate::vehicle::{GeoRef, ModelKind, OriMapping, PosMapping, VehicleConfig};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PosMode {
@@ -36,8 +36,8 @@ struct Draft {
     lat: Option<FieldId>,
     lon: Option<FieldId>,
     alt: Option<FieldId>,
-    gps_degrees: bool,
-    gps_manual_ref: bool,
+    /// Optional geodetic reference annotation for a NED/local frame.
+    ned_has_ref: bool,
     ref_lat: f64,
     ref_lon: f64,
     ref_alt: f64,
@@ -71,8 +71,7 @@ impl Default for Draft {
             lat: None,
             lon: None,
             alt: None,
-            gps_degrees: true,
-            gps_manual_ref: false,
+            ned_has_ref: false,
             ref_lat: 0.0,
             ref_lon: 0.0,
             ref_alt: 0.0,
@@ -113,37 +112,30 @@ impl Draft {
             ..Draft::default()
         };
         match &cfg.pos {
-            PosMapping::Ned { north, east, down } => {
+            PosMapping::Ned {
+                north,
+                east,
+                down,
+                reference,
+            } => {
                 d.pos_mode = PosMode::Ned;
                 d.pos_topic = topic_of(*north);
                 d.north = Some(*north);
                 d.east = Some(*east);
                 d.down = Some(*down);
+                if let Some(r) = reference {
+                    d.ned_has_ref = true;
+                    d.ref_lat = r.lat_deg;
+                    d.ref_lon = r.lon_deg;
+                    d.ref_alt = r.alt_m;
+                }
             }
-            PosMapping::Gps {
-                lat,
-                lon,
-                alt,
-                degrees,
-                reference,
-            } => {
+            PosMapping::Gps { lat, lon, alt } => {
                 d.pos_mode = PosMode::Gps;
                 d.pos_topic = topic_of(*lat);
                 d.lat = Some(*lat);
                 d.lon = Some(*lon);
                 d.alt = Some(*alt);
-                d.gps_degrees = *degrees;
-                if let GpsRef::Manual {
-                    lat_deg,
-                    lon_deg,
-                    alt_m,
-                } = reference
-                {
-                    d.gps_manual_ref = true;
-                    d.ref_lat = *lat_deg;
-                    d.ref_lon = *lon_deg;
-                    d.ref_alt = *alt_m;
-                }
             }
         }
         match &cfg.ori {
@@ -181,21 +173,16 @@ impl Draft {
                 north: self.north?,
                 east: self.east?,
                 down: self.down?,
+                reference: self.ned_has_ref.then_some(GeoRef {
+                    lat_deg: self.ref_lat,
+                    lon_deg: self.ref_lon,
+                    alt_m: self.ref_alt,
+                }),
             },
             PosMode::Gps => PosMapping::Gps {
                 lat: self.lat?,
                 lon: self.lon?,
                 alt: self.alt?,
-                degrees: self.gps_degrees,
-                reference: if self.gps_manual_ref {
-                    GpsRef::Manual {
-                        lat_deg: self.ref_lat,
-                        lon_deg: self.ref_lon,
-                        alt_m: self.ref_alt,
-                    }
-                } else {
-                    GpsRef::Auto
-                },
             },
         };
         let ori = match self.ori_mode {
@@ -229,38 +216,6 @@ impl Draft {
             path_color: self.path_color,
             scale: self.scale.max(0.01),
         })
-    }
-
-    /// Fill topic + column selections from common position/attitude names.
-    fn autodetect(&mut self, snapshot: &StoreSnapshot, source: SourceId) {
-        for (topic, _) in source_topics(snapshot, source) {
-            let fields = topic_fields(snapshot, topic);
-            let find = |needle: &str| -> Option<FieldId> {
-                fields
-                    .iter()
-                    .find_map(|(id, n)| n.eq_ignore_ascii_case(needle).then_some(*id))
-            };
-            // GPS position (AP POS.Lat/Lng/Alt, MAVLink lat/lon/alt).
-            if let (Some(la), Some(lo), Some(al)) = (
-                find("Lat"),
-                find("Lng").or_else(|| find("Lon")),
-                find("Alt"),
-            ) {
-                self.pos_mode = PosMode::Gps;
-                self.pos_topic = Some(topic);
-                self.lat = Some(la);
-                self.lon = Some(lo);
-                self.alt = Some(al);
-            }
-            // Euler attitude (AP ATT.Roll/Pitch/Yaw).
-            if let (Some(r), Some(p), Some(y)) = (find("Roll"), find("Pitch"), find("Yaw")) {
-                self.ori_mode = OriMode::Euler;
-                self.ori_topic = Some(topic);
-                self.roll = Some(r);
-                self.pitch = Some(p);
-                self.yaw = Some(y);
-            }
-        }
     }
 }
 
@@ -457,9 +412,6 @@ fn draft_editor(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapshot) 
         return;
     };
     let topics = source_topics(snapshot, source);
-    if ui.button("Auto-detect fields").clicked() {
-        draft.autodetect(snapshot, source);
-    }
 
     // Position: pick a topic, then columns from it.
     ui.separator();
@@ -483,14 +435,8 @@ fn draft_editor(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapshot) 
                 field_combo(ui, "veh-n", "North", &mut draft.north, &cols);
                 field_combo(ui, "veh-e", "East", &mut draft.east, &cols);
                 field_combo(ui, "veh-d", "Down", &mut draft.down, &cols);
-            }
-            PosMode::Gps => {
-                field_combo(ui, "veh-lat", "Lat", &mut draft.lat, &cols);
-                field_combo(ui, "veh-lon", "Lon", &mut draft.lon, &cols);
-                field_combo(ui, "veh-alt", "Alt", &mut draft.alt, &cols);
-                ui.checkbox(&mut draft.gps_degrees, "Lat/Lon in degrees");
-                ui.checkbox(&mut draft.gps_manual_ref, "Manual reference origin");
-                if draft.gps_manual_ref {
+                ui.checkbox(&mut draft.ned_has_ref, "Reference origin");
+                if draft.ned_has_ref {
                     ui.horizontal(|ui| {
                         ui.label("ref lat/lon/alt");
                         ui.add(egui::DragValue::new(&mut draft.ref_lat).speed(0.0001));
@@ -498,6 +444,11 @@ fn draft_editor(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapshot) 
                         ui.add(egui::DragValue::new(&mut draft.ref_alt).speed(0.1));
                     });
                 }
+            }
+            PosMode::Gps => {
+                field_combo(ui, "veh-lat", "Lat", &mut draft.lat, &cols);
+                field_combo(ui, "veh-lon", "Lon", &mut draft.lon, &cols);
+                field_combo(ui, "veh-alt", "Alt", &mut draft.alt, &cols);
             }
         }
     } else {
@@ -530,7 +481,11 @@ fn draft_editor(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapshot) 
                     field_combo(ui, "veh-roll", "Roll", &mut draft.roll, &cols);
                     field_combo(ui, "veh-pitch", "Pitch", &mut draft.pitch, &cols);
                     field_combo(ui, "veh-yaw", "Yaw", &mut draft.yaw, &cols);
-                    ui.checkbox(&mut draft.euler_degrees, "Angles in degrees");
+                    ui.horizontal(|ui| {
+                        ui.label("Angle unit");
+                        ui.selectable_value(&mut draft.euler_degrees, true, "Degrees");
+                        ui.selectable_value(&mut draft.euler_degrees, false, "Radians");
+                    });
                 }
                 OriMode::Quat => {
                     field_combo(ui, "veh-qw", "W", &mut draft.qw, &cols);
