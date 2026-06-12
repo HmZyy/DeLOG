@@ -278,6 +278,7 @@ fn source_topics(snapshot: &StoreSnapshot, source: SourceId) -> Vec<(TopicId, St
             }
         }
     }
+    out.sort_by_key(|(_, name)| name.to_ascii_lowercase());
     out
 }
 
@@ -325,22 +326,63 @@ fn searchable_combo<T: PartialEq + Copy>(
             .show(|ui| {
                 ui.set_max_width(170.0);
                 let filter_id = egui::Id::new((salt, "filter"));
+                let highlight_id = egui::Id::new((salt, "highlight"));
                 let mut filter: String =
                     ui.memory_mut(|m| m.data.get_temp(filter_id).unwrap_or_default());
-                ui.add(
+                let response = ui.add(
                     egui::TextEdit::singleline(&mut filter)
                         .hint_text("search…")
                         .desired_width(f32::INFINITY),
                 );
+                response.request_focus();
                 let needle = filter.to_ascii_lowercase();
                 ui.memory_mut(|m| m.data.insert_temp(filter_id, filter));
+                let visible = items
+                    .iter()
+                    .filter(|(_, name)| {
+                        needle.is_empty() || name.to_ascii_lowercase().contains(&needle)
+                    })
+                    .map(|(value, name)| (*value, name.as_str()))
+                    .collect::<Vec<_>>();
+                let mut highlighted = ui
+                    .memory_mut(|m| m.data.get_temp::<usize>(highlight_id))
+                    .unwrap_or_else(|| {
+                        visible
+                            .iter()
+                            .position(|(value, _)| *sel == Some(*value))
+                            .unwrap_or(0)
+                    });
+                if !visible.is_empty() {
+                    highlighted = highlighted.min(visible.len() - 1);
+                    let move_down = ui
+                        .input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown));
+                    let move_up =
+                        ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp));
+                    let choose =
+                        ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+                    if move_down {
+                        highlighted = (highlighted + 1).min(visible.len() - 1);
+                    }
+                    if move_up {
+                        highlighted = highlighted.saturating_sub(1);
+                    }
+                    if choose {
+                        *sel = Some(visible[highlighted].0);
+                        ui.close();
+                    }
+                }
+                ui.memory_mut(|m| m.data.insert_temp(highlight_id, highlighted));
                 egui::ScrollArea::vertical()
                     .max_height(260.0)
                     .show(ui, |ui| {
-                        for (value, name) in items {
-                            let shown =
-                                needle.is_empty() || name.to_ascii_lowercase().contains(&needle);
-                            if shown && ui.selectable_label(*sel == Some(*value), name).clicked() {
+                        for (i, (value, name)) in visible.iter().enumerate() {
+                            let selected = *sel == Some(*value) || i == highlighted;
+                            let response = ui.selectable_label(selected, *name);
+                            if i == highlighted {
+                                response.scroll_to_me(Some(egui::Align::Center));
+                            }
+                            if response.clicked() {
+                                ui.memory_mut(|m| m.data.insert_temp(highlight_id, i));
                                 *sel = Some(*value);
                                 ui.close();
                             }
