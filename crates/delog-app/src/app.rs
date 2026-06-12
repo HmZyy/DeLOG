@@ -991,6 +991,67 @@ impl eframe::App for DelogApp {
             });
         });
 
+        // Icon toolbar directly under the menu bar: streaming + 3D view
+        // toggles, plus live/loading status.
+        egui::Panel::top("tool_icons").show_inside(ui, |ui| {
+            ui.horizontal(|ui| {
+                let streaming = self.session.has_live_links();
+                // Blue when a live link is active, neutral otherwise.
+                let stream_tint = if streaming {
+                    egui::Color32::from_rgb(0x3b, 0x82, 0xf6)
+                } else {
+                    ui.visuals().weak_text_color()
+                };
+                if icon_button(ui, crate::icons::satellite_dish(), stream_tint, streaming)
+                    .on_hover_text("Connect to a MAVLink telemetry stream")
+                    .clicked()
+                {
+                    self.show_connection_dialog = true;
+                }
+
+                let scene_open = self.workspace.scene_pane_id().is_some();
+                let cube_tint = if scene_open {
+                    egui::Color32::from_rgb(0x3b, 0x82, 0xf6)
+                } else {
+                    ui.visuals().weak_text_color()
+                };
+                if icon_button(ui, crate::icons::cube(), cube_tint, scene_open)
+                    .on_hover_text("Show or hide the 3D scene view")
+                    .clicked()
+                {
+                    self.workspace.toggle_scene_pane();
+                }
+
+                for status in self.session.live_statuses() {
+                    ui.separator();
+                    ui.weak(format!(
+                        "{} {} · {} frames · {} rows{}",
+                        status.state.label(),
+                        status.endpoint,
+                        status.link.rx_frames,
+                        status.ingest.rows,
+                        status.recording.as_ref().map(|_| " · rec").unwrap_or("")
+                    ));
+                }
+
+                if self.session.has_active_loads() {
+                    ui.separator();
+                    if ui.button("Cancel").clicked() {
+                        self.session.cancel_all();
+                    }
+                    ui.label(format!(
+                        "loading {}",
+                        self.session.active_labels().join(", ")
+                    ));
+                    if let Some(frac) = self.session.overall_progress() {
+                        ui.add(egui::ProgressBar::new(frac).desired_width(120.0));
+                    } else {
+                        ui.spinner();
+                    }
+                }
+            });
+        });
+
         // Global timeline bar (§11, TLN-02/03). `utc_offset_us` stays None
         // until a parser captures a UTC reference (BIN GPS week / ULog
         // time_ref_utc — M6); `any_live` stays false until live links exist
@@ -1057,66 +1118,6 @@ impl eframe::App for DelogApp {
                 }
             }
         }
-
-        // Icon toolbar: streaming + 3D view toggles, plus live/loading status.
-        egui::Panel::bottom("tool_icons").show_inside(ui, |ui| {
-            ui.horizontal(|ui| {
-                let streaming = self.session.has_live_links();
-                // Blue when a live link is active, neutral otherwise.
-                let stream_tint = if streaming {
-                    egui::Color32::from_rgb(0x3b, 0x82, 0xf6)
-                } else {
-                    ui.visuals().weak_text_color()
-                };
-                if icon_button(ui, crate::icons::satellite_dish(), stream_tint, streaming)
-                    .on_hover_text("Connect to a MAVLink telemetry stream")
-                    .clicked()
-                {
-                    self.show_connection_dialog = true;
-                }
-
-                let scene_open = self.workspace.scene_pane_id().is_some();
-                let cube_tint = if scene_open {
-                    egui::Color32::from_rgb(0x3b, 0x82, 0xf6)
-                } else {
-                    ui.visuals().weak_text_color()
-                };
-                if icon_button(ui, crate::icons::cube(), cube_tint, scene_open)
-                    .on_hover_text("Show or hide the 3D scene view")
-                    .clicked()
-                {
-                    self.workspace.toggle_scene_pane();
-                }
-
-                for status in self.session.live_statuses() {
-                    ui.separator();
-                    ui.weak(format!(
-                        "{} {} · {} frames · {} rows{}",
-                        status.state.label(),
-                        status.endpoint,
-                        status.link.rx_frames,
-                        status.ingest.rows,
-                        status.recording.as_ref().map(|_| " · rec").unwrap_or("")
-                    ));
-                }
-
-                if self.session.has_active_loads() {
-                    ui.separator();
-                    if ui.button("Cancel").clicked() {
-                        self.session.cancel_all();
-                    }
-                    ui.label(format!(
-                        "loading {}",
-                        self.session.active_labels().join(", ")
-                    ));
-                    if let Some(frac) = self.session.overall_progress() {
-                        ui.add(egui::ProgressBar::new(frac).desired_width(120.0));
-                    } else {
-                        ui.spinner();
-                    }
-                }
-            });
-        });
 
         let diagnostics = self.session.diagnostics();
         if let Some(last) = diagnostics.last() {
