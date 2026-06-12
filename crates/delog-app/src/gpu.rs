@@ -29,7 +29,7 @@ use crate::vehicle::ModelKind;
 /// transform (pose), colors, and resampled render-space trajectory. Built in
 /// `scene_ui` from a `VehicleConfig` + the snapshot + playhead.
 pub struct VehicleDraw<'a> {
-    /// Stable per-vehicle key (the source id) for GPU-buffer caching.
+    /// Stable per-frame key for one configured vehicle row.
     pub key: u32,
     pub model: &'a ModelKind,
     /// Body→render model matrix (column-major) and its normal matrix.
@@ -582,8 +582,8 @@ struct SceneTraj {
     color: [f32; 4],
 }
 
-/// Per-vehicle GPU state (TDV-09/10), keyed by source id: a mesh uniform/bind
-/// and a growable trajectory line (points + uniform + bind).
+/// Per-vehicle GPU state (TDV-09/10), keyed by configured vehicle row: a mesh
+/// uniform/bind and a growable trajectory line (points + uniform + bind).
 struct VehicleGpu {
     mesh_uniform: wgpu::Buffer,
     mesh_bind: wgpu::BindGroup,
@@ -602,7 +602,7 @@ struct SceneResources {
     mesh: MeshPipeline,
     /// Decoded meshes by model kind (lazy; built on first use).
     model_cache: HashMap<ModelKind, MeshGpu>,
-    /// Per-vehicle GPU buffers, keyed by source id.
+    /// Per-vehicle GPU buffers, keyed by configured vehicle row.
     vehicles: HashMap<u32, VehicleGpu>,
     /// Vertical world Y-axis line (the up axis the ground grid can't draw).
     axis_gizmo: SceneTraj,

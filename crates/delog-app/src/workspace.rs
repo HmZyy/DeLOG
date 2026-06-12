@@ -28,12 +28,11 @@ pub enum Pane {
 }
 
 /// State for a 3D scene pane. One tracking camera orbits the selected
-/// vehicle's pose (the world origin until a vehicle is configured, TDV-03/09).
-/// Per-vehicle trajectories and the tracked-vehicle dropdown arrive with the
-/// vehicle-config TDV items.
+/// vehicle's pose, or the world origin until a vehicle is configured.
 #[derive(Debug, Default)]
 pub struct Scene3dPane {
     pub camera: OrbitCamera,
+    pub tracked_vehicle: Option<usize>,
 }
 
 impl Default for Pane {
@@ -499,9 +498,25 @@ impl Behavior<'_> {
             })
             .collect();
 
-        // Track the first visible vehicle's current position (the dropdown to
-        // pick which lands with TDV-09); origin when none.
-        let tracked = poses.iter().flatten().next().map(|p| p.pos);
+        let vehicle_count = self.services.vehicles.len();
+        if vehicle_count == 0 {
+            pane.tracked_vehicle = None;
+        } else {
+            let fallback = first_visible_vehicle(&poses).unwrap_or(0);
+            let tracked = pane
+                .tracked_vehicle
+                .filter(|&i| i < vehicle_count)
+                .unwrap_or(fallback);
+            pane.tracked_vehicle = Some(tracked);
+        }
+
+        // Track the selected visible vehicle; if it is hidden or has no pose at
+        // the playhead, fall back to the first visible pose, then origin.
+        let tracked = pane
+            .tracked_vehicle
+            .and_then(|i| poses.get(i).and_then(|p| p.as_ref()))
+            .or_else(|| poses.iter().flatten().next())
+            .map(|p| p.pos);
         pane.camera.target = tracked.unwrap_or(glam::Vec3::ZERO);
 
         let draws: Vec<VehicleDraw> = self
@@ -512,7 +527,7 @@ impl Behavior<'_> {
             .filter_map(|(i, v)| {
                 let pose = poses[i]?;
                 Some(VehicleDraw {
-                    key: v.source.0,
+                    key: i as u32,
                     model: &v.model,
                     model_matrix: pose.model_matrix(v.scale).to_cols_array_2d(),
                     normal_matrix: glam::Mat4::from_mat3(pose.rot).to_cols_array_2d(),
@@ -545,6 +560,10 @@ impl Behavior<'_> {
                 egui::FontId::proportional(14.0),
                 ui.visuals().weak_text_color(),
             );
+        }
+
+        if vehicle_count >= 2 {
+            tracked_vehicle_picker(ui, rect, pane, self.services.vehicles);
         }
 
         if response.drag_started_by(egui::PointerButton::Middle) {
@@ -1000,6 +1019,45 @@ fn fields_from_removed_tile(tile: egui_tiles::Tile<Pane>) -> Vec<FieldId> {
     }
 }
 
+fn first_visible_vehicle(poses: &[Option<vehicle::Pose>]) -> Option<usize> {
+    poses.iter().position(Option::is_some)
+}
+
+fn tracked_vehicle_picker(
+    ui: &mut egui::Ui,
+    scene_rect: egui::Rect,
+    pane: &mut Scene3dPane,
+    vehicles: &[vehicle::VehicleConfig],
+) {
+    let id = ui.make_persistent_id("scene-tracked-vehicle");
+    egui::Area::new(id)
+        .order(egui::Order::Foreground)
+        .fixed_pos(scene_rect.min + egui::vec2(8.0, 8.0))
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.weak("Track");
+                    let selected = pane
+                        .tracked_vehicle
+                        .and_then(|i| vehicles.get(i).map(|v| v.label.as_str()))
+                        .unwrap_or("Vehicle");
+                    egui::ComboBox::from_id_salt("scene-tracked-vehicle-combo")
+                        .selected_text(selected)
+                        .show_ui(ui, |ui| {
+                            for (i, vehicle) in vehicles.iter().enumerate() {
+                                let label = if vehicle.show {
+                                    vehicle.label.clone()
+                                } else {
+                                    format!("{} (hidden)", vehicle.label)
+                                };
+                                ui.selectable_value(&mut pane.tracked_vehicle, Some(i), label);
+                            }
+                        });
+                });
+            });
+        });
+}
+
 fn format_bytes(bytes: u64) -> String {
     const KIB: f64 = 1024.0;
     const MIB: f64 = KIB * 1024.0;
@@ -1055,6 +1113,24 @@ mod tests {
         workspace.toggle_scene_pane();
         assert_eq!(scene_count(&workspace), 1);
         assert_ne!(workspace.scene_pane_id(), Some(id));
+    }
+
+    #[test]
+    fn first_visible_vehicle_skips_missing_poses() {
+        let poses = [
+            None,
+            Some(vehicle::Pose {
+                pos: glam::Vec3::X,
+                rot: glam::Mat3::IDENTITY,
+            }),
+            Some(vehicle::Pose {
+                pos: glam::Vec3::Y,
+                rot: glam::Mat3::IDENTITY,
+            }),
+        ];
+
+        assert_eq!(first_visible_vehicle(&poses), Some(1));
+        assert_eq!(first_visible_vehicle(&[None, None]), None);
     }
 
     #[test]
