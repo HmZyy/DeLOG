@@ -221,6 +221,27 @@ pub fn ui(
 ) -> TimelineAction {
     let mut action = TimelineAction::default();
     ui.horizontal(|ui| {
+        // Live-link status dot: grey = not streaming, yellow = streaming but
+        // not locked to the live tail, red = locked.
+        let (dot_color, dot_tip) = if !any_live {
+            (egui::Color32::from_gray(0x80), "Not streaming")
+        } else if playback.follow_live {
+            (
+                egui::Color32::from_rgb(0xe0, 0x3b, 0x3b),
+                "Locked to live tail",
+            )
+        } else {
+            (
+                egui::Color32::from_rgb(0xe6, 0x9f, 0x00),
+                "Live (not locked)",
+            )
+        };
+        let (dot_rect, dot_resp) =
+            ui.allocate_exact_size(egui::vec2(14.0, 16.0), egui::Sense::hover());
+        ui.painter()
+            .circle_filled(dot_rect.center(), 5.0, dot_color);
+        dot_resp.on_hover_text(dot_tip);
+
         if ui
             .button("⏮")
             .on_hover_text("Jump to start (Home)")

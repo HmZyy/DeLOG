@@ -916,115 +916,58 @@ impl eframe::App for DelogApp {
 
         egui::Panel::top("main_menu").show_inside(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
-                ui.menu_button("Help", |ui| {
-                    if ui.button("About").clicked() {
-                        self.show_about = true;
+                ui.menu_button("File", |ui| {
+                    if ui
+                        .button("Open File")
+                        .on_hover_text("Open flight logs (or drop files anywhere)")
+                        .clicked()
+                    {
+                        self.spawn_open_dialog(ui.ctx());
                         ui.close();
                     }
+                });
+                ui.menu_button("Edit", |ui| {
+                    // Intentionally empty for now.
+                    ui.add_enabled(false, egui::Button::new("Nothing here yet"));
                 });
                 ui.menu_button("Layout", |ui| {
                     if ui.button("Save Layout...").clicked() {
                         self.save_layout_dialog.open = true;
                         ui.close();
                     }
-                    if ui.button("Load Layout...").clicked() {
-                        self.load_layout_dialog.layouts = crate::layout::list_layouts();
-                        self.load_layout_dialog.selected = None;
-                        self.load_layout_dialog.open = true;
-                        ui.close();
-                    }
+                    ui.menu_button("Load Layout", |ui| {
+                        let layouts = crate::layout::list_layouts();
+                        if layouts.is_empty() {
+                            ui.add_enabled(false, egui::Button::new("No saved layouts"));
+                        } else {
+                            for name in layouts {
+                                if ui.button(&name).clicked() {
+                                    self.load_layout(&name, &snapshot);
+                                    ui.close();
+                                }
+                            }
+                        }
+                    });
                     if ui.button("Manage Layouts...").clicked() {
                         self.open_layout_manager();
                         ui.close();
                     }
                     ui.separator();
-                    if ui.button("Export Layout JSON...").clicked() {
+                    if ui.button("Export JSON...").clicked() {
                         self.spawn_export_layout_dialog(ui.ctx(), &snapshot);
                         ui.close();
                     }
-                    if ui.button("Import Layout JSON...").clicked() {
+                    if ui.button("Import JSON...").clicked() {
                         self.spawn_import_layout_dialog(ui.ctx());
                         ui.close();
                     }
                 });
-
-                ui.separator();
-                if ui
-                    .button("Open…")
-                    .on_hover_text("Open flight logs (or drop files anywhere)")
-                    .clicked()
-                {
-                    self.spawn_open_dialog(ui.ctx());
-                }
-                if ui.button("Stream").clicked() {
-                    self.show_connection_dialog = true;
-                }
-                let scene_open = self.workspace.scene_pane_id().is_some();
-                let mut scene_button = egui::Button::new("3D");
-                if scene_open {
-                    scene_button = scene_button.fill(ui.visuals().selection.bg_fill);
-                }
-                if ui
-                    .add(scene_button)
-                    .on_hover_text("Show or hide the 3D scene view")
-                    .clicked()
-                {
-                    self.workspace.toggle_scene_pane();
-                }
-                if ui
-                    .button("Vehicles")
-                    .on_hover_text("Configure 3D vehicles")
-                    .clicked()
-                {
-                    self.vehicle_dialog.open = !self.vehicle_dialog.open;
-                }
-                let live_statuses = self.session.live_statuses();
-                if !live_statuses.is_empty() {
-                    let lock_label = if self.playback.follow_live {
-                        "Live locked"
-                    } else {
-                        "Lock live"
-                    };
-                    let mut lock_button = egui::Button::new(lock_label);
-                    if !self.playback.follow_live {
-                        lock_button =
-                            lock_button.fill(ui.visuals().warn_fg_color.gamma_multiply(0.25));
+                ui.menu_button("Help", |ui| {
+                    if ui.button("About").clicked() {
+                        self.show_about = true;
+                        ui.close();
                     }
-                    let lock_response = ui
-                        .add(lock_button)
-                        .on_hover_text("Lock X view and playhead to the live tail (End)");
-                    if lock_response.clicked()
-                        && let Some(range) = snapshot.global_time_range()
-                    {
-                        self.lock_to_live(range);
-                    }
-                    for status in live_statuses {
-                        ui.separator();
-                        ui.weak(format!(
-                            "{} {} frames {} rows {}{}",
-                            status.state.label(),
-                            status.endpoint,
-                            status.link.rx_frames,
-                            status.ingest.rows,
-                            status.recording.as_ref().map(|_| " rec").unwrap_or("")
-                        ));
-                    }
-                }
-
-                if self.session.has_active_loads() {
-                    if ui.button("Cancel").clicked() {
-                        self.session.cancel_all();
-                    }
-                    ui.label(format!(
-                        "loading {}",
-                        self.session.active_labels().join(", ")
-                    ));
-                    if let Some(frac) = self.session.overall_progress() {
-                        ui.add(egui::ProgressBar::new(frac).desired_width(120.0));
-                    } else {
-                        ui.spinner();
-                    }
-                }
+                });
 
                 // FPS badge pinned to the far right (PRF-05).
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1114,6 +1057,66 @@ impl eframe::App for DelogApp {
                 }
             }
         }
+
+        // Icon toolbar: streaming + 3D view toggles, plus live/loading status.
+        egui::Panel::bottom("tool_icons").show_inside(ui, |ui| {
+            ui.horizontal(|ui| {
+                let streaming = self.session.has_live_links();
+                // Blue when a live link is active, neutral otherwise.
+                let stream_tint = if streaming {
+                    egui::Color32::from_rgb(0x3b, 0x82, 0xf6)
+                } else {
+                    ui.visuals().weak_text_color()
+                };
+                if icon_button(ui, crate::icons::satellite_dish(), stream_tint, streaming)
+                    .on_hover_text("Connect to a MAVLink telemetry stream")
+                    .clicked()
+                {
+                    self.show_connection_dialog = true;
+                }
+
+                let scene_open = self.workspace.scene_pane_id().is_some();
+                let cube_tint = if scene_open {
+                    egui::Color32::from_rgb(0x3b, 0x82, 0xf6)
+                } else {
+                    ui.visuals().weak_text_color()
+                };
+                if icon_button(ui, crate::icons::cube(), cube_tint, scene_open)
+                    .on_hover_text("Show or hide the 3D scene view")
+                    .clicked()
+                {
+                    self.workspace.toggle_scene_pane();
+                }
+
+                for status in self.session.live_statuses() {
+                    ui.separator();
+                    ui.weak(format!(
+                        "{} {} · {} frames · {} rows{}",
+                        status.state.label(),
+                        status.endpoint,
+                        status.link.rx_frames,
+                        status.ingest.rows,
+                        status.recording.as_ref().map(|_| " · rec").unwrap_or("")
+                    ));
+                }
+
+                if self.session.has_active_loads() {
+                    ui.separator();
+                    if ui.button("Cancel").clicked() {
+                        self.session.cancel_all();
+                    }
+                    ui.label(format!(
+                        "loading {}",
+                        self.session.active_labels().join(", ")
+                    ));
+                    if let Some(frac) = self.session.overall_progress() {
+                        ui.add(egui::ProgressBar::new(frac).desired_width(120.0));
+                    } else {
+                        ui.spinner();
+                    }
+                }
+            });
+        });
 
         let diagnostics = self.session.diagnostics();
         if let Some(last) = diagnostics.last() {
@@ -1207,6 +1210,9 @@ impl eframe::App for DelogApp {
                     if actions.view_changed {
                         self.playback.unlock_live();
                     }
+                    if actions.open_vehicle_config {
+                        self.vehicle_dialog.open = true;
+                    }
                 });
             if let Some(fields) = dropped
                 && !handled_workspace_drop
@@ -1242,4 +1248,18 @@ impl eframe::App for DelogApp {
                 .push_diagnostic(delog_core::diagnostics::Diag::error("live-open", err));
         }
     }
+}
+
+/// A compact toolbar icon button rendering one of the bundled SVG icons.
+/// `tint` colors the (white) glyph; `active` draws a selected background.
+fn icon_button(
+    ui: &mut egui::Ui,
+    icon: egui::ImageSource<'_>,
+    tint: egui::Color32,
+    active: bool,
+) -> egui::Response {
+    let image = egui::Image::new(icon)
+        .fit_to_exact_size(egui::vec2(18.0, 18.0))
+        .tint(tint);
+    ui.add(egui::Button::image(image).selected(active))
 }
