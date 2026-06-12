@@ -83,6 +83,7 @@ pub struct DelogApp {
     load_layout_dialog: LoadLayoutDialog,
     layout_manager_dialog: LayoutManagerDialog,
     pending_layout: Option<PendingLayout>,
+    deferred_layout_doc: Option<LayoutDoc>,
     last_session_autosave: Instant,
     last_session_autosave_json: Option<String>,
     show_connection_dialog: bool,
@@ -138,6 +139,7 @@ impl DelogApp {
             load_layout_dialog: LoadLayoutDialog::default(),
             layout_manager_dialog: LayoutManagerDialog::default(),
             pending_layout: None,
+            deferred_layout_doc: None,
             last_session_autosave: Instant::now(),
             last_session_autosave_json: None,
             show_connection_dialog: false,
@@ -199,18 +201,7 @@ impl DelogApp {
         let snapshot = self.session.snapshot();
         while let Ok(result) = self.imported_layouts.try_recv() {
             match result {
-                Ok(doc) => match crate::layout::load_doc(doc, &snapshot) {
-                    Ok(LoadOutcome::Applied(layout)) => self.apply_layout(layout),
-                    Ok(LoadOutcome::NeedsMapping(pending)) => {
-                        self.pending_layout = Some(pending);
-                    }
-                    Err(err) => self
-                        .session
-                        .push_diagnostic(delog_core::diagnostics::Diag::error(
-                            "layout-import",
-                            err.to_string(),
-                        )),
-                },
+                Ok(doc) => self.apply_layout_doc(doc, &snapshot, "layout-import"),
                 Err(err) => self
                     .session
                     .push_diagnostic(delog_core::diagnostics::Diag::error(
@@ -236,6 +227,51 @@ impl DelogApp {
                     )),
             }
         }
+    }
+
+    fn snapshot_has_fields(snapshot: &delog_core::snapshot::StoreSnapshot) -> bool {
+        snapshot.fields.iter().any(|field| !field.removed)
+    }
+
+    fn apply_layout_doc(
+        &mut self,
+        doc: LayoutDoc,
+        snapshot: &delog_core::snapshot::StoreSnapshot,
+        code: &'static str,
+    ) {
+        let should_defer = !Self::snapshot_has_fields(snapshot);
+        match crate::layout::load_doc(doc.clone(), snapshot) {
+            Ok(LoadOutcome::Applied(layout)) => {
+                self.apply_layout(layout);
+                if should_defer {
+                    self.deferred_layout_doc = Some(doc);
+                    self.session
+                        .push_diagnostic(delog_core::diagnostics::Diag::info(
+                            "layout-defer",
+                            "layout will bind when a log finishes loading",
+                        ));
+                } else {
+                    self.deferred_layout_doc = None;
+                }
+            }
+            Ok(LoadOutcome::NeedsMapping(pending)) => {
+                self.deferred_layout_doc = None;
+                self.pending_layout = Some(pending);
+            }
+            Err(err) => self
+                .session
+                .push_diagnostic(delog_core::diagnostics::Diag::error(code, err.to_string())),
+        }
+    }
+
+    fn try_apply_deferred_layout(&mut self, snapshot: &delog_core::snapshot::StoreSnapshot) {
+        if !Self::snapshot_has_fields(snapshot) {
+            return;
+        }
+        let Some(doc) = self.deferred_layout_doc.take() else {
+            return;
+        };
+        self.apply_layout_doc(doc, snapshot, "layout-bind");
     }
 
     fn autosave_session(
@@ -442,11 +478,8 @@ impl DelogApp {
     }
 
     fn load_layout(&mut self, name: &str, snapshot: &delog_core::snapshot::StoreSnapshot) {
-        match crate::layout::load_named(name, snapshot) {
-            Ok(LoadOutcome::Applied(layout)) => self.apply_layout(layout),
-            Ok(LoadOutcome::NeedsMapping(pending)) => {
-                self.pending_layout = Some(pending);
-            }
+        match crate::layout::load_named_doc(name) {
+            Ok(doc) => self.apply_layout_doc(doc, snapshot, "layout-load"),
             Err(err) => self
                 .session
                 .push_diagnostic(delog_core::diagnostics::Diag::error(
@@ -825,6 +858,7 @@ impl eframe::App for DelogApp {
         self.caches.poll_builds();
         if snapshot.epoch != self.last_epoch {
             self.caches.on_epoch(&snapshot);
+            self.try_apply_deferred_layout(&snapshot);
             let resolved = self.workspace.resolve_ghosts(&snapshot);
             if resolved > 0 {
                 self.session

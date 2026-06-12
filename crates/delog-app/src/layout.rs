@@ -381,10 +381,8 @@ fn write_json_atomic(path: &Path, json: &str) -> Result<(), LayoutError> {
     Ok(())
 }
 
-pub fn load_named(name: &str, snapshot: &StoreSnapshot) -> Result<LoadOutcome, LayoutError> {
-    let path = named_layout_path(name)?;
-    let doc = import_doc(&path)?;
-    load_doc(doc, snapshot)
+pub fn load_named_doc(name: &str) -> Result<LayoutDoc, LayoutError> {
+    import_doc(&named_layout_path(name)?)
 }
 
 pub fn import_doc(path: &Path) -> Result<LayoutDoc, LayoutError> {
@@ -1159,6 +1157,35 @@ mod tests {
     }
 
     #[test]
+    fn same_layout_populates_after_loading_before_log_schema() {
+        let doc = decode_doc(include_str!("../../../fixtures/layouts/v1_basic.json"))
+            .expect("fixture should decode");
+        let LoadOutcome::Applied(empty_layout) =
+            load_doc(doc.clone(), &StoreSnapshot::empty()).expect("empty load should apply")
+        else {
+            panic!("empty store should not need mapping");
+        };
+        assert_eq!(empty_layout.vehicles.len(), 0);
+        let (traces, ghosts) = plot_trace_counts(&empty_layout.workspace);
+        assert_eq!(traces, 0);
+        assert_eq!(ghosts, 2);
+
+        let snapshot = snapshot_with_topics(&[
+            ("later_log", "ATT", &["Roll", "Pitch", "Yaw"]),
+            ("later_log", "POS", &["Lat", "Lng", "Alt"]),
+        ]);
+        let LoadOutcome::Applied(populated) =
+            load_doc(doc, &snapshot).expect("schema load should apply")
+        else {
+            panic!("single source should not need mapping");
+        };
+        assert_eq!(populated.vehicles.len(), 1);
+        let (traces, ghosts) = plot_trace_counts(&populated.workspace);
+        assert_eq!(traces, 2);
+        assert_eq!(ghosts, 0);
+    }
+
+    #[test]
     fn one_loaded_source_resolves_topic_field_without_source() {
         let (snapshot, field) = snapshot_with_sources(&[("flight_a", "ATT", "Roll")]);
         let mut resolver = Resolver {
@@ -1248,5 +1275,19 @@ mod tests {
             favorites: Vec::new(),
             docks: BTreeMap::new(),
         }
+    }
+
+    fn plot_trace_counts(workspace: &Workspace) -> (usize, usize) {
+        workspace
+            .tree
+            .tiles
+            .tiles()
+            .filter_map(|tile| match tile {
+                egui_tiles::Tile::Pane(Pane::Plot(pane)) => {
+                    Some((pane.traces.len(), pane.ghosts.len()))
+                }
+                _ => None,
+            })
+            .fold((0, 0), |(traces, ghosts), (t, g)| (traces + t, ghosts + g))
     }
 }
