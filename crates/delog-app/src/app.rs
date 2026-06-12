@@ -1172,12 +1172,8 @@ impl eframe::App for DelogApp {
             });
 
         egui::Frame::central_panel(ui.style()).show(ui, |ui| {
-            if model.is_empty() {
-                ui.centered_and_justified(|ui| {
-                    ui.weak("Drop a flight log to begin.");
-                });
-                return;
-            }
+            // The workspace renders even before any log loads, so plots can be
+            // arranged and the 3D view opened on an empty session.
 
             // The central panel is a fallback drop zone: dropping a field onto
             // empty workspace space plots it in the first pane (PLT-13).
