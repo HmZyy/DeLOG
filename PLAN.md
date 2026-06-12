@@ -966,7 +966,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **LAY-04** — Resolver: source-agnostic `topic.field`→FieldId; ghost traces + summary diag; auto-bind on source load (§14.3) — unresolved plot traces from layouts stay visible as grey `(missing)` legend rows, preserve trace style in saved layouts, and bind automatically on later snapshot epochs when exactly one matching loaded field exists. Ambiguous multi-source matches remain ghosts instead of silently binding the wrong source, and successful auto-binds emit a `layout-bind` diagnostic
 - [x] **LAY-05** — Export/import layout JSON — Layout menu now has explicit JSON export/import actions backed by native file dialogs on worker threads. Export snapshots the current source-agnostic layout to an arbitrary `.json` path; import reads/decodes through the versioned migration path and applies against the currently loaded logs, including the existing ambiguity mapping flow
 - [x] **LAY-06** — Autosave `session.json` (exit + 30 s dirty) — app writes the current source-agnostic layout document to the app data `session.json` atomically on shutdown and every 30 seconds when the serialized session differs from the last successful autosave; periodic write errors surface as `session-save` diagnostics
-- [ ] **LAY-07** — Layout manager UI (list/rename/delete/duplicate)
+- [x] **LAY-07** — Layout manager UI (list/rename/delete/duplicate) — Layout menu now opens a manager window listing saved named layouts with load, rename, duplicate, and delete actions. Named-layout filesystem operations update the layout document name on rename/duplicate, list only `.json` layout files, and report manager diagnostics
 
 ### DIA — Diagnostics (M9, emitters earlier)
 
