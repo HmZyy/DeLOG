@@ -309,7 +309,6 @@ pub fn ui(
     selection: &mut Selection,
     offset_dialog: &mut Option<(SourceId, i64)>,
 ) -> Option<(SourceId, i64)> {
-
     if model.is_empty() {
         ui.add_space(8.0);
         ui.weak("No logs loaded.");
