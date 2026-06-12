@@ -135,13 +135,29 @@ impl TraceMode {
 /// One plot pane in the tiled workspace. The X view is deliberately global
 /// app state so every plot pane stays synchronized (PLT-01/03). The Y axis
 /// always auto-fits the visible window (pyramid min/max + pad, PLT-06).
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct PlotPane {
     pub traces: Vec<TraceRef>,
     pub ghosts: Vec<GhostTrace>,
+    /// Per-pane legend visibility (context menu, PLT-08/11). Persisted.
+    pub show_legend: bool,
+    /// Per-pane hover-tooltip visibility (context menu, PLT-11). Persisted.
+    pub show_tooltip: bool,
     /// Whether this pane's Plot Info window is open (context menu, PLT-11).
     /// Transient UI state — not serialized into layouts.
     pub show_info: bool,
+}
+
+impl Default for PlotPane {
+    fn default() -> Self {
+        Self {
+            traces: Vec::new(),
+            ghosts: Vec::new(),
+            show_legend: true,
+            show_tooltip: true,
+            show_info: false,
+        }
+    }
 }
 
 impl PlotPane {

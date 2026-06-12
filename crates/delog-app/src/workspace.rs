@@ -374,8 +374,6 @@ pub struct PlotServices<'a> {
     pub view: &'a mut Option<ViewX>,
     pub origin_us: i64,
     pub hover_mode: &'a mut delog_core::field_view::SampleMode,
-    pub show_legend: &'a mut bool,
-    pub show_tooltip: &'a mut bool,
     /// Playback time for the playhead cursor; `None` before any data loads
     /// (§11, PLT-10).
     pub playhead_us: Option<i64>,
@@ -739,7 +737,7 @@ impl Behavior<'_> {
             );
         }
 
-        if *self.services.show_tooltip && !ui.ctx().any_popup_open() {
+        if pane.show_tooltip && !ui.ctx().any_popup_open() {
             // Alt+hover drags the playhead along with the cursor (PLT-10).
             if ui.input(|i| i.modifiers.alt)
                 && let Some(pos) = response.hover_pos()
@@ -766,7 +764,7 @@ impl Behavior<'_> {
             );
         }
 
-        if *self.services.show_legend {
+        if pane.show_legend {
             let labels: Vec<_> = pane
                 .traces
                 .iter()
@@ -920,8 +918,8 @@ impl Behavior<'_> {
 
             ui.separator();
 
-            ui.checkbox(self.services.show_legend, "Show legend");
-            ui.checkbox(self.services.show_tooltip, "Show tooltip");
+            ui.checkbox(&mut pane.show_legend, "Show legend");
+            ui.checkbox(&mut pane.show_tooltip, "Show tooltip");
             ui.menu_button("Hover mode", |ui| {
                 use delog_core::field_view::SampleMode::{Linear, Next, Prev};
                 ui.radio_value(self.services.hover_mode, Prev, "Previous");
