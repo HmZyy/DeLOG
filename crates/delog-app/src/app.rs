@@ -7,6 +7,7 @@ use std::sync::mpsc;
 use crate::about;
 use crate::browser::{self, BrowserModel};
 use crate::gpu::GpuBridge;
+use crate::layout::{LayoutApply, LoadOutcome, PendingLayout};
 use crate::live::ConnectionDialog;
 use crate::plot::ViewX;
 use crate::session::Session;
@@ -17,6 +18,19 @@ struct TrajectoryBuildResult {
     epoch: u64,
     vehicle_revision: u64,
     trajectories: Vec<Vec<[f32; 3]>>,
+}
+
+#[derive(Default)]
+struct SaveLayoutDialog {
+    open: bool,
+    name: String,
+}
+
+#[derive(Default)]
+struct LoadLayoutDialog {
+    open: bool,
+    layouts: Vec<String>,
+    selected: Option<usize>,
 }
 
 pub struct DelogApp {
@@ -39,6 +53,9 @@ pub struct DelogApp {
     browser_selection: browser::Selection,
     offset_dialog: Option<(delog_core::identity::SourceId, i64)>,
     show_about: bool,
+    save_layout_dialog: SaveLayoutDialog,
+    load_layout_dialog: LoadLayoutDialog,
+    pending_layout: Option<PendingLayout>,
     show_connection_dialog: bool,
     connection_dialog: ConnectionDialog,
     /// Configured vehicles for the 3D view (TDV-03); empty until one is added.
@@ -79,6 +96,12 @@ impl DelogApp {
             browser_selection: browser::Selection::default(),
             offset_dialog: None,
             show_about: false,
+            save_layout_dialog: SaveLayoutDialog {
+                open: false,
+                name: "default".into(),
+            },
+            load_layout_dialog: LoadLayoutDialog::default(),
+            pending_layout: None,
             show_connection_dialog: false,
             connection_dialog: ConnectionDialog::default(),
             vehicles: Vec::new(),
@@ -211,6 +234,193 @@ impl DelogApp {
             })
             .expect("spawn trajectory build thread");
     }
+
+    fn save_layout(&mut self, snapshot: &delog_core::snapshot::StoreSnapshot) {
+        let name = if self.save_layout_dialog.name.trim().is_empty() {
+            "default"
+        } else {
+            self.save_layout_dialog.name.trim()
+        };
+        let doc = crate::layout::current_doc(crate::layout::CurrentLayout {
+            name: name.to_owned(),
+            workspace: &self.workspace,
+            snapshot,
+            view: self.view,
+            speed: self.playback.speed as f64,
+            follow_live: self.playback.follow_live,
+            show_legend: self.show_legend,
+            vehicles: &self.vehicles,
+        });
+        match crate::layout::save_named(name, &doc) {
+            Ok(()) => self
+                .session
+                .push_diagnostic(delog_core::diagnostics::Diag::info(
+                    "layout-save",
+                    format!("saved layout `{name}`"),
+                )),
+            Err(err) => self
+                .session
+                .push_diagnostic(delog_core::diagnostics::Diag::error(
+                    "layout-save",
+                    err.to_string(),
+                )),
+        }
+    }
+
+    fn load_layout(&mut self, name: &str, snapshot: &delog_core::snapshot::StoreSnapshot) {
+        match crate::layout::load_named(name, snapshot) {
+            Ok(LoadOutcome::Applied(layout)) => self.apply_layout(layout),
+            Ok(LoadOutcome::NeedsMapping(pending)) => {
+                self.pending_layout = Some(pending);
+            }
+            Err(err) => self
+                .session
+                .push_diagnostic(delog_core::diagnostics::Diag::error(
+                    "layout-load",
+                    err.to_string(),
+                )),
+        }
+    }
+
+    fn apply_layout(&mut self, layout: LayoutApply) {
+        self.workspace = layout.workspace;
+        self.view = layout.view;
+        self.playback.set_speed(layout.speed as f32);
+        self.playback.follow_live = layout.follow_live;
+        self.show_legend = layout.show_legend;
+        self.vehicles = layout.vehicles;
+        self.vehicle_revision = self.vehicle_revision.wrapping_add(1);
+        self.traj_dirty = true;
+        for diag in layout.diagnostics {
+            self.session.push_diagnostic(diag);
+        }
+    }
+
+    fn show_layout_windows(&mut self, ctx: &egui::Context) {
+        if self.save_layout_dialog.open {
+            let mut open = self.save_layout_dialog.open;
+            egui::Window::new("Save Layout")
+                .open(&mut open)
+                .default_width(280.0)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Name");
+                        ui.text_edit_singleline(&mut self.save_layout_dialog.name);
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.button("Save").clicked() {
+                            let snapshot = self.session.snapshot();
+                            self.save_layout(&snapshot);
+                            self.save_layout_dialog.open = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.save_layout_dialog.open = false;
+                        }
+                    });
+                });
+            self.save_layout_dialog.open &= open;
+        }
+
+        if self.load_layout_dialog.open {
+            let mut open = self.load_layout_dialog.open;
+            egui::Window::new("Load Layout")
+                .open(&mut open)
+                .default_width(320.0)
+                .show(ctx, |ui| {
+                    if self.load_layout_dialog.layouts.is_empty() {
+                        ui.weak("No saved layouts.");
+                    } else {
+                        for (i, name) in self.load_layout_dialog.layouts.iter().enumerate() {
+                            ui.selectable_value(
+                                &mut self.load_layout_dialog.selected,
+                                Some(i),
+                                name,
+                            );
+                        }
+                    }
+                    ui.horizontal(|ui| {
+                        let can_load = self.load_layout_dialog.selected.is_some();
+                        if ui
+                            .add_enabled(can_load, egui::Button::new("Load"))
+                            .clicked()
+                            && let Some(i) = self.load_layout_dialog.selected
+                            && let Some(name) = self.load_layout_dialog.layouts.get(i).cloned()
+                        {
+                            let snapshot = self.session.snapshot();
+                            self.load_layout(&name, &snapshot);
+                            self.load_layout_dialog.open = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.load_layout_dialog.open = false;
+                        }
+                    });
+                });
+            self.load_layout_dialog.open &= open;
+        }
+
+        if let Some(pending) = &mut self.pending_layout {
+            let mut apply = false;
+            let mut skip = false;
+            egui::Window::new("Map Layout Fields")
+                .collapsible(false)
+                .default_width(440.0)
+                .show(ctx, |ui| {
+                    ui.label(format!(
+                        "{} ambiguous field(s) in `{}`",
+                        pending.ambiguity_count(),
+                        pending.name
+                    ));
+                    ui.separator();
+                    for ambiguity in pending.ambiguities_mut() {
+                        ui.horizontal(|ui| {
+                            ui.label(format!(
+                                "{}.{}",
+                                ambiguity.field.topic, ambiguity.field.field
+                            ));
+                            let selected = ambiguity
+                                .candidates
+                                .get(ambiguity.selected)
+                                .map(|c| c.label.as_str())
+                                .unwrap_or("source");
+                            egui::ComboBox::from_id_salt((
+                                "layout-field-map",
+                                &ambiguity.field.topic,
+                                &ambiguity.field.field,
+                            ))
+                            .selected_text(selected)
+                            .show_ui(ui, |ui| {
+                                for (i, candidate) in ambiguity.candidates.iter().enumerate() {
+                                    ui.selectable_value(
+                                        &mut ambiguity.selected,
+                                        i,
+                                        &candidate.label,
+                                    );
+                                }
+                            });
+                        });
+                    }
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.button("Apply").clicked() {
+                            apply = true;
+                        }
+                        if ui.button("Skip unresolved").clicked() {
+                            skip = true;
+                        }
+                    });
+                });
+            if apply && let Some(pending) = self.pending_layout.take() {
+                let snapshot = self.session.snapshot();
+                let layout = pending.apply(&snapshot);
+                self.apply_layout(layout);
+            }
+            if skip && let Some(pending) = self.pending_layout.take() {
+                let snapshot = self.session.snapshot();
+                let layout = pending.apply_skipping(&snapshot);
+                self.apply_layout(layout);
+            }
+        }
+    }
 }
 
 impl eframe::App for DelogApp {
@@ -271,6 +481,18 @@ impl eframe::App for DelogApp {
                 ui.menu_button("Help", |ui| {
                     if ui.button("About").clicked() {
                         self.show_about = true;
+                        ui.close();
+                    }
+                });
+                ui.menu_button("Layout", |ui| {
+                    if ui.button("Save Layout...").clicked() {
+                        self.save_layout_dialog.open = true;
+                        ui.close();
+                    }
+                    if ui.button("Load Layout...").clicked() {
+                        self.load_layout_dialog.layouts = crate::layout::list_layouts();
+                        self.load_layout_dialog.selected = None;
+                        self.load_layout_dialog.open = true;
                         ui.close();
                     }
                 });
@@ -376,15 +598,26 @@ impl eframe::App for DelogApp {
             // Transport keys (§11, TLN-04) — skipped while a widget owns the
             // keyboard (e.g. the browser filter box).
             if !ui.ctx().egui_wants_keyboard_input() {
-                let (space, home, end, left, right) = ui.ctx().input(|i| {
-                    (
-                        i.key_pressed(egui::Key::Space),
-                        i.key_pressed(egui::Key::Home),
-                        i.key_pressed(egui::Key::End),
-                        i.key_pressed(egui::Key::ArrowLeft),
-                        i.key_pressed(egui::Key::ArrowRight),
-                    )
-                });
+                let (space, home, end, left, right, save_layout, load_layout) =
+                    ui.ctx().input(|i| {
+                        (
+                            i.key_pressed(egui::Key::Space),
+                            i.key_pressed(egui::Key::Home),
+                            i.key_pressed(egui::Key::End),
+                            i.key_pressed(egui::Key::ArrowLeft),
+                            i.key_pressed(egui::Key::ArrowRight),
+                            i.modifiers.command && i.key_pressed(egui::Key::S),
+                            i.modifiers.command && i.key_pressed(egui::Key::L),
+                        )
+                    });
+                if save_layout {
+                    self.save_layout_dialog.open = true;
+                }
+                if load_layout {
+                    self.load_layout_dialog.layouts = crate::layout::list_layouts();
+                    self.load_layout_dialog.selected = None;
+                    self.load_layout_dialog.open = true;
+                }
                 if space {
                     self.playback.toggle();
                 }
@@ -518,6 +751,7 @@ impl eframe::App for DelogApp {
         });
 
         about::window(ui.ctx(), &mut self.show_about);
+        self.show_layout_windows(ui.ctx());
         if crate::vehicle_dialog::show(
             ui.ctx(),
             &mut self.vehicle_dialog,
