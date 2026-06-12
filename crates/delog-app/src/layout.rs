@@ -1,0 +1,1073 @@
+//! Source-agnostic layout persistence (PLAN.md §14, LAY-01/02).
+//!
+//! Layouts deliberately store fields as `topic.field`, never as runtime IDs or
+//! source labels, so the same plot/vehicle setup can be reused across logs.
+
+use std::collections::{BTreeMap, HashMap};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use delog_core::diagnostics::Diag;
+use delog_core::identity::{FieldId, SourceId};
+use delog_core::snapshot::StoreSnapshot;
+use egui::Color32;
+use serde::{Deserialize, Serialize};
+
+use crate::camera::OrbitCamera;
+use crate::plot::{PlotPane, TraceMode, TraceRef, ViewX};
+use crate::vehicle::{GeoRef, ModelKind, NedReference, OriMapping, PosMapping, VehicleConfig};
+use crate::workspace::{Pane, Scene3dPane, Workspace};
+
+const APP_ID: &str = "DeLOG";
+const LAYOUT_VERSION: u32 = 1;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LayoutDoc {
+    pub delog_layout: u32,
+    pub name: String,
+    pub view: Option<ViewLayout>,
+    pub playback: PlaybackLayout,
+    pub show_legend: bool,
+    pub workspace: WorkspaceLayout,
+    pub vehicles: Vec<VehicleLayout>,
+    #[serde(default)]
+    pub favorites: Vec<FieldRef>,
+    #[serde(default)]
+    pub docks: BTreeMap<String, bool>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FieldRef {
+    pub topic: String,
+    pub field: String,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewMode {
+    Window,
+    Full,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ViewLayout {
+    pub mode: ViewMode,
+    pub min_us: i64,
+    pub max_us: i64,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct PlaybackLayout {
+    pub speed: f64,
+    pub follow_live: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WorkspaceLayout {
+    pub root: LayoutNode,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LayoutNode {
+    Plot {
+        traces: Vec<TraceLayout>,
+    },
+    Scene3d(SceneLayout),
+    Split {
+        split: SplitLayout,
+        children: Vec<LayoutNode>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SplitLayout {
+    Tabs,
+    Horizontal,
+    Vertical,
+    Grid,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TraceLayout {
+    pub field: FieldRef,
+    pub color: [f32; 4],
+    pub width_px: f32,
+    pub mode: TraceModeLayout,
+    pub visible: bool,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceModeLayout {
+    Line,
+    Scatter,
+    Step,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct SceneLayout {
+    pub camera: CameraLayout,
+    pub tracked_vehicle: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct CameraLayout {
+    pub yaw: f32,
+    pub pitch: f32,
+    pub distance: f32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VehicleLayout {
+    pub label: String,
+    pub show: bool,
+    pub model: ModelLayout,
+    pub color: [u8; 4],
+    pub path_color: [u8; 4],
+    pub scale: f32,
+    pub position: PosLayout,
+    pub orientation: OriLayout,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelLayout {
+    Quad,
+    FixedWing,
+    DeltaWing,
+    Cone,
+    CustomGlb { path: String },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PosLayout {
+    Ned {
+        north: FieldRef,
+        east: FieldRef,
+        down: FieldRef,
+        reference: Option<NedRefLayout>,
+    },
+    Gps {
+        lat: FieldRef,
+        lon: FieldRef,
+        alt: FieldRef,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NedRefLayout {
+    Manual {
+        lat_deg: f64,
+        lon_deg: f64,
+        alt_m: f64,
+    },
+    Fields {
+        lat: FieldRef,
+        lon: FieldRef,
+        alt: FieldRef,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OriLayout {
+    Static,
+    Euler {
+        roll: FieldRef,
+        pitch: FieldRef,
+        yaw: FieldRef,
+        degrees: bool,
+    },
+    Quat {
+        w: FieldRef,
+        x: FieldRef,
+        y: FieldRef,
+        z: FieldRef,
+    },
+}
+
+pub struct LayoutApply {
+    pub workspace: Workspace,
+    pub view: Option<ViewX>,
+    pub speed: f64,
+    pub follow_live: bool,
+    pub show_legend: bool,
+    pub vehicles: Vec<VehicleConfig>,
+    pub diagnostics: Vec<Diag>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PendingLayout {
+    pub name: String,
+    doc: LayoutDoc,
+    ambiguities: Vec<AmbiguousField>,
+}
+
+#[derive(Clone, Debug)]
+pub struct AmbiguousField {
+    pub field: FieldRef,
+    pub candidates: Vec<SourceChoice>,
+    pub selected: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct SourceChoice {
+    pub source: SourceId,
+    pub label: String,
+}
+
+pub enum LoadOutcome {
+    Applied(LayoutApply),
+    NeedsMapping(PendingLayout),
+}
+
+#[derive(Clone, Debug)]
+pub enum LayoutError {
+    Io(String),
+    Json(String),
+    UnsupportedVersion(u32),
+    NoStorageDir,
+}
+
+pub struct CurrentLayout<'a> {
+    pub name: String,
+    pub workspace: &'a Workspace,
+    pub snapshot: &'a StoreSnapshot,
+    pub view: Option<ViewX>,
+    pub speed: f64,
+    pub follow_live: bool,
+    pub show_legend: bool,
+    pub vehicles: &'a [VehicleConfig],
+}
+
+impl std::fmt::Display for LayoutError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(e) => write!(f, "layout IO error: {e}"),
+            Self::Json(e) => write!(f, "layout JSON error: {e}"),
+            Self::UnsupportedVersion(v) => write!(f, "unsupported layout version {v}"),
+            Self::NoStorageDir => write!(f, "no layout storage directory available"),
+        }
+    }
+}
+
+impl PendingLayout {
+    pub fn ambiguities_mut(&mut self) -> &mut [AmbiguousField] {
+        &mut self.ambiguities
+    }
+
+    pub fn ambiguity_count(&self) -> usize {
+        self.ambiguities.len()
+    }
+
+    pub fn apply(self, snapshot: &StoreSnapshot) -> LayoutApply {
+        let choices = self
+            .ambiguities
+            .iter()
+            .filter_map(|a| {
+                a.candidates
+                    .get(a.selected)
+                    .map(|c| (a.field.clone(), c.source))
+            })
+            .collect();
+        apply_doc(self.doc, snapshot, &choices, false).expect("choices resolve ambiguities")
+    }
+
+    pub fn apply_skipping(self, snapshot: &StoreSnapshot) -> LayoutApply {
+        apply_doc(self.doc, snapshot, &HashMap::new(), false).expect("skip mode cannot block")
+    }
+}
+
+pub fn layout_dir() -> Result<PathBuf, LayoutError> {
+    let Some(base) = storage_dir(APP_ID) else {
+        return Err(LayoutError::NoStorageDir);
+    };
+    Ok(base.join("layouts"))
+}
+
+pub fn list_layouts() -> Vec<String> {
+    let Ok(dir) = layout_dir() else {
+        return Vec::new();
+    };
+    let Ok(read) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut names = read
+        .flatten()
+        .filter_map(|entry| {
+            entry
+                .path()
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(str::to_owned)
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    names
+}
+
+pub fn save_named(name: &str, doc: &LayoutDoc) -> Result<(), LayoutError> {
+    let dir = layout_dir()?;
+    fs::create_dir_all(&dir).map_err(|e| LayoutError::Io(e.to_string()))?;
+    let stem = sanitize_name(name);
+    let path = dir.join(format!("{stem}.json"));
+    let tmp = dir.join(format!("{stem}.json.tmp"));
+    let json = serde_json::to_string_pretty(doc).map_err(|e| LayoutError::Json(e.to_string()))?;
+    fs::write(&tmp, json).map_err(|e| LayoutError::Io(e.to_string()))?;
+    fs::rename(&tmp, &path).map_err(|e| LayoutError::Io(e.to_string()))?;
+    Ok(())
+}
+
+pub fn load_named(name: &str, snapshot: &StoreSnapshot) -> Result<LoadOutcome, LayoutError> {
+    let path = layout_dir()?.join(format!("{}.json", sanitize_name(name)));
+    let bytes = fs::read_to_string(path).map_err(|e| LayoutError::Io(e.to_string()))?;
+    let doc: LayoutDoc =
+        serde_json::from_str(&bytes).map_err(|e| LayoutError::Json(e.to_string()))?;
+    load_doc(doc, snapshot)
+}
+
+pub fn load_doc(doc: LayoutDoc, snapshot: &StoreSnapshot) -> Result<LoadOutcome, LayoutError> {
+    if doc.delog_layout != LAYOUT_VERSION {
+        return Err(LayoutError::UnsupportedVersion(doc.delog_layout));
+    }
+    match apply_doc(doc.clone(), snapshot, &HashMap::new(), true) {
+        Ok(applied) => Ok(LoadOutcome::Applied(applied)),
+        Err(ambiguities) => Ok(LoadOutcome::NeedsMapping(PendingLayout {
+            name: doc.name.clone(),
+            doc,
+            ambiguities,
+        })),
+    }
+}
+
+pub fn current_doc(input: CurrentLayout<'_>) -> LayoutDoc {
+    LayoutDoc {
+        delog_layout: LAYOUT_VERSION,
+        name: input.name,
+        view: input.view.map(|v| ViewLayout {
+            mode: ViewMode::Window,
+            min_us: v.min_us,
+            max_us: v.max_us,
+        }),
+        playback: PlaybackLayout {
+            speed: input.speed,
+            follow_live: input.follow_live,
+        },
+        show_legend: input.show_legend,
+        workspace: workspace_doc(input.workspace, input.snapshot),
+        vehicles: input
+            .vehicles
+            .iter()
+            .filter_map(|v| vehicle_to_layout(v, input.snapshot))
+            .collect(),
+        favorites: Vec::new(),
+        docks: BTreeMap::new(),
+    }
+}
+
+fn sanitize_name(name: &str) -> String {
+    let out: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let trimmed = out.trim_matches('_');
+    if trimmed.is_empty() {
+        "default".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+fn storage_dir(app_id: &str) -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .map(|p| p.join(app_id).join("data"))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::env::var_os("HOME").map(PathBuf::from).map(|p| {
+            p.join("Library")
+                .join("Application Support")
+                .join(app_id.replace(|c: char| c.is_ascii_whitespace(), "-"))
+        })
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".local/share")))
+            .map(|p| p.join(app_id.to_lowercase().replace(char::is_whitespace, "")))
+    }
+}
+
+fn workspace_doc(workspace: &Workspace, snapshot: &StoreSnapshot) -> WorkspaceLayout {
+    let root = workspace
+        .tree
+        .root()
+        .and_then(|id| node_to_layout(workspace, snapshot, id))
+        .unwrap_or(LayoutNode::Plot { traces: Vec::new() });
+    WorkspaceLayout { root }
+}
+
+fn node_to_layout(
+    workspace: &Workspace,
+    snapshot: &StoreSnapshot,
+    tile: egui_tiles::TileId,
+) -> Option<LayoutNode> {
+    match workspace.tree.tiles.get(tile)? {
+        egui_tiles::Tile::Pane(Pane::Plot(pane)) => Some(LayoutNode::Plot {
+            traces: pane
+                .traces
+                .iter()
+                .filter_map(|t| trace_to_layout(t, snapshot))
+                .collect(),
+        }),
+        egui_tiles::Tile::Pane(Pane::Scene3D(scene)) => Some(LayoutNode::Scene3d(SceneLayout {
+            camera: CameraLayout {
+                yaw: scene.camera.yaw,
+                pitch: scene.camera.pitch,
+                distance: scene.camera.distance,
+            },
+            tracked_vehicle: scene.tracked_vehicle,
+        })),
+        egui_tiles::Tile::Container(container) => {
+            let children = container
+                .children()
+                .filter_map(|&child| node_to_layout(workspace, snapshot, child))
+                .collect();
+            Some(LayoutNode::Split {
+                split: match container.kind() {
+                    egui_tiles::ContainerKind::Tabs => SplitLayout::Tabs,
+                    egui_tiles::ContainerKind::Horizontal => SplitLayout::Horizontal,
+                    egui_tiles::ContainerKind::Vertical => SplitLayout::Vertical,
+                    egui_tiles::ContainerKind::Grid => SplitLayout::Grid,
+                },
+                children,
+            })
+        }
+    }
+}
+
+fn trace_to_layout(trace: &TraceRef, snapshot: &StoreSnapshot) -> Option<TraceLayout> {
+    Some(TraceLayout {
+        field: field_ref(snapshot, trace.field)?,
+        color: trace.color,
+        width_px: trace.width_px,
+        mode: trace.mode.into(),
+        visible: trace.visible,
+    })
+}
+
+fn vehicle_to_layout(v: &VehicleConfig, snapshot: &StoreSnapshot) -> Option<VehicleLayout> {
+    Some(VehicleLayout {
+        label: v.label.clone(),
+        show: v.show,
+        model: model_to_layout(&v.model),
+        color: color_to_rgba(v.color),
+        path_color: color_to_rgba(v.path_color),
+        scale: v.scale,
+        position: pos_to_layout(&v.pos, snapshot)?,
+        orientation: ori_to_layout(&v.ori, snapshot)?,
+    })
+}
+
+fn field_ref(snapshot: &StoreSnapshot, field: FieldId) -> Option<FieldRef> {
+    let field_entry = snapshot
+        .fields
+        .get(field.index())
+        .filter(|f| f.id == field)?;
+    let topic = snapshot.topic(field_entry.topic)?;
+    Some(FieldRef {
+        topic: topic.entry.name.clone(),
+        field: field_entry.name.clone(),
+    })
+}
+
+fn apply_doc(
+    doc: LayoutDoc,
+    snapshot: &StoreSnapshot,
+    choices: &HashMap<FieldRef, SourceId>,
+    collect_ambiguities: bool,
+) -> Result<LayoutApply, Vec<AmbiguousField>> {
+    let mut resolver = Resolver {
+        snapshot,
+        choices,
+        diagnostics: Vec::new(),
+        ambiguities: BTreeMap::new(),
+        collect_ambiguities,
+    };
+    if collect_ambiguities {
+        collect_field_refs(&doc, &mut resolver);
+        if !resolver.ambiguities.is_empty() {
+            return Err(resolver.ambiguities.into_values().collect());
+        }
+    }
+    let workspace = workspace_from_layout(&doc.workspace, &mut resolver);
+    let vehicles = doc
+        .vehicles
+        .iter()
+        .filter_map(|v| vehicle_from_layout(v, &mut resolver))
+        .collect::<Vec<_>>();
+
+    Ok(LayoutApply {
+        workspace,
+        view: doc.view.map(|v| ViewX::new(v.min_us, v.max_us)),
+        speed: doc.playback.speed,
+        follow_live: doc.playback.follow_live,
+        show_legend: doc.show_legend,
+        vehicles,
+        diagnostics: resolver.diagnostics,
+    })
+}
+
+fn collect_field_refs(doc: &LayoutDoc, resolver: &mut Resolver<'_>) {
+    collect_node_field_refs(&doc.workspace.root, resolver);
+    for vehicle in &doc.vehicles {
+        collect_pos_field_refs(&vehicle.position, resolver);
+        collect_ori_field_refs(&vehicle.orientation, resolver);
+    }
+}
+
+fn collect_node_field_refs(node: &LayoutNode, resolver: &mut Resolver<'_>) {
+    match node {
+        LayoutNode::Plot { traces } => {
+            for trace in traces {
+                let _ = resolver.resolve(&trace.field);
+            }
+        }
+        LayoutNode::Scene3d(_) => {}
+        LayoutNode::Split { children, .. } => {
+            for child in children {
+                collect_node_field_refs(child, resolver);
+            }
+        }
+    }
+}
+
+fn collect_pos_field_refs(pos: &PosLayout, resolver: &mut Resolver<'_>) {
+    match pos {
+        PosLayout::Ned {
+            north,
+            east,
+            down,
+            reference,
+        } => {
+            let _ = resolver.resolve(north);
+            let _ = resolver.resolve(east);
+            let _ = resolver.resolve(down);
+            if let Some(NedRefLayout::Fields { lat, lon, alt }) = reference {
+                let _ = resolver.resolve(lat);
+                let _ = resolver.resolve(lon);
+                let _ = resolver.resolve(alt);
+            }
+        }
+        PosLayout::Gps { lat, lon, alt } => {
+            let _ = resolver.resolve(lat);
+            let _ = resolver.resolve(lon);
+            let _ = resolver.resolve(alt);
+        }
+    }
+}
+
+fn collect_ori_field_refs(ori: &OriLayout, resolver: &mut Resolver<'_>) {
+    match ori {
+        OriLayout::Static => {}
+        OriLayout::Euler {
+            roll, pitch, yaw, ..
+        } => {
+            let _ = resolver.resolve(roll);
+            let _ = resolver.resolve(pitch);
+            let _ = resolver.resolve(yaw);
+        }
+        OriLayout::Quat { w, x, y, z } => {
+            let _ = resolver.resolve(w);
+            let _ = resolver.resolve(x);
+            let _ = resolver.resolve(y);
+            let _ = resolver.resolve(z);
+        }
+    }
+}
+
+struct Resolver<'a> {
+    snapshot: &'a StoreSnapshot,
+    choices: &'a HashMap<FieldRef, SourceId>,
+    diagnostics: Vec<Diag>,
+    ambiguities: BTreeMap<FieldRef, AmbiguousField>,
+    collect_ambiguities: bool,
+}
+
+impl Resolver<'_> {
+    fn resolve(&mut self, key: &FieldRef) -> Option<FieldId> {
+        if let Some(&source) = self.choices.get(key) {
+            return self.resolve_in_source(source, key).or_else(|| {
+                self.diagnostics.push(layout_warning(format!(
+                    "{}.{} no longer exists in selected source",
+                    key.topic, key.field
+                )));
+                None
+            });
+        }
+
+        let live_sources = self
+            .snapshot
+            .sources
+            .iter()
+            .filter(|s| !s.entry.removed)
+            .collect::<Vec<_>>();
+        if live_sources.len() == 1 {
+            let source = live_sources[0].entry.id;
+            let got = self.resolve_in_source(source, key);
+            if got.is_none() {
+                self.diagnostics.push(layout_warning(format!(
+                    "{}.{} not found in loaded source",
+                    key.topic, key.field
+                )));
+            }
+            return got;
+        }
+
+        let matches = live_sources
+            .iter()
+            .filter_map(|source| {
+                self.resolve_in_source(source.entry.id, key)
+                    .map(|field| (source.entry.id, source.entry.label.clone(), field))
+            })
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [(_, _, field)] => Some(*field),
+            [] => {
+                self.diagnostics.push(layout_warning(format!(
+                    "{}.{} not found in loaded sources",
+                    key.topic, key.field
+                )));
+                None
+            }
+            _ if self.collect_ambiguities => {
+                self.ambiguities
+                    .entry(key.clone())
+                    .or_insert_with(|| AmbiguousField {
+                        field: key.clone(),
+                        candidates: matches
+                            .iter()
+                            .map(|(source, label, _)| SourceChoice {
+                                source: *source,
+                                label: label.clone(),
+                            })
+                            .collect(),
+                        selected: 0,
+                    });
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn resolve_in_source(&self, source: SourceId, key: &FieldRef) -> Option<FieldId> {
+        for topic_id in self.snapshot.source(source)?.topics.iter().copied() {
+            let topic = self.snapshot.topic(topic_id)?;
+            if topic.entry.removed || topic.entry.name != key.topic {
+                continue;
+            }
+            let field = self
+                .snapshot
+                .fields
+                .iter()
+                .find(|f| f.topic == topic_id && !f.removed && f.name == key.field)?;
+            return Some(field.id);
+        }
+        None
+    }
+}
+
+fn workspace_from_layout(doc: &WorkspaceLayout, resolver: &mut Resolver<'_>) -> Workspace {
+    let mut tiles = egui_tiles::Tiles::default();
+    let root = insert_node(&mut tiles, &doc.root, resolver)
+        .unwrap_or_else(|| tiles.insert_pane(Pane::Plot(PlotPane::default())));
+    Workspace {
+        tree: egui_tiles::Tree::new("plot_workspace", root, tiles),
+        focused: Some(root),
+    }
+}
+
+fn insert_node(
+    tiles: &mut egui_tiles::Tiles<Pane>,
+    node: &LayoutNode,
+    resolver: &mut Resolver<'_>,
+) -> Option<egui_tiles::TileId> {
+    match node {
+        LayoutNode::Plot { traces } => {
+            let pane = PlotPane {
+                traces: traces
+                    .iter()
+                    .filter_map(|t| trace_from_layout(t, resolver))
+                    .collect(),
+            };
+            Some(tiles.insert_pane(Pane::Plot(pane)))
+        }
+        LayoutNode::Scene3d(scene) => Some(tiles.insert_pane(Pane::Scene3D(Scene3dPane {
+            camera: OrbitCamera {
+                target: glam::Vec3::ZERO,
+                yaw: scene.camera.yaw,
+                pitch: scene.camera.pitch,
+                distance: scene.camera.distance,
+            },
+            tracked_vehicle: scene.tracked_vehicle,
+        }))),
+        LayoutNode::Split { split, children } => {
+            let child_ids = children
+                .iter()
+                .filter_map(|child| insert_node(tiles, child, resolver))
+                .collect::<Vec<_>>();
+            if child_ids.is_empty() {
+                None
+            } else if child_ids.len() == 1 {
+                child_ids.first().copied()
+            } else {
+                Some(tiles.insert_container(egui_tiles::Container::new(
+                    match split {
+                        SplitLayout::Tabs => egui_tiles::ContainerKind::Tabs,
+                        SplitLayout::Horizontal => egui_tiles::ContainerKind::Horizontal,
+                        SplitLayout::Vertical => egui_tiles::ContainerKind::Vertical,
+                        SplitLayout::Grid => egui_tiles::ContainerKind::Grid,
+                    },
+                    child_ids,
+                )))
+            }
+        }
+    }
+}
+
+fn trace_from_layout(trace: &TraceLayout, resolver: &mut Resolver<'_>) -> Option<TraceRef> {
+    Some(TraceRef {
+        field: resolver.resolve(&trace.field)?,
+        color: trace.color,
+        width_px: trace.width_px,
+        mode: trace.mode.into(),
+        visible: trace.visible,
+    })
+}
+
+fn vehicle_from_layout(v: &VehicleLayout, resolver: &mut Resolver<'_>) -> Option<VehicleConfig> {
+    let source = first_resolved_source(v, resolver)?;
+    Some(VehicleConfig {
+        source,
+        label: v.label.clone(),
+        show: v.show,
+        pos: pos_from_layout(&v.position, resolver)?,
+        ori: ori_from_layout(&v.orientation, resolver)?,
+        model: model_from_layout(&v.model),
+        color: rgba_to_color(v.color),
+        path_color: rgba_to_color(v.path_color),
+        scale: v.scale.max(0.01),
+    })
+}
+
+fn first_resolved_source(v: &VehicleLayout, resolver: &mut Resolver<'_>) -> Option<SourceId> {
+    let field = first_vehicle_field(v)?;
+    let id = resolver.resolve(field)?;
+    let topic = resolver.snapshot.fields.get(id.index())?.topic;
+    Some(resolver.snapshot.topic(topic)?.entry.source)
+}
+
+fn first_vehicle_field(v: &VehicleLayout) -> Option<&FieldRef> {
+    match &v.position {
+        PosLayout::Ned { north, .. } => Some(north),
+        PosLayout::Gps { lat, .. } => Some(lat),
+    }
+}
+
+fn pos_to_layout(pos: &PosMapping, snapshot: &StoreSnapshot) -> Option<PosLayout> {
+    match pos {
+        PosMapping::Ned {
+            north,
+            east,
+            down,
+            reference,
+        } => Some(PosLayout::Ned {
+            north: field_ref(snapshot, *north)?,
+            east: field_ref(snapshot, *east)?,
+            down: field_ref(snapshot, *down)?,
+            reference: match reference {
+                None => None,
+                Some(NedReference::Manual(r)) => Some(NedRefLayout::Manual {
+                    lat_deg: r.lat_deg,
+                    lon_deg: r.lon_deg,
+                    alt_m: r.alt_m,
+                }),
+                Some(NedReference::Fields { lat, lon, alt }) => Some(NedRefLayout::Fields {
+                    lat: field_ref(snapshot, *lat)?,
+                    lon: field_ref(snapshot, *lon)?,
+                    alt: field_ref(snapshot, *alt)?,
+                }),
+            },
+        }),
+        PosMapping::Gps { lat, lon, alt } => Some(PosLayout::Gps {
+            lat: field_ref(snapshot, *lat)?,
+            lon: field_ref(snapshot, *lon)?,
+            alt: field_ref(snapshot, *alt)?,
+        }),
+    }
+}
+
+fn pos_from_layout(pos: &PosLayout, resolver: &mut Resolver<'_>) -> Option<PosMapping> {
+    match pos {
+        PosLayout::Ned {
+            north,
+            east,
+            down,
+            reference,
+        } => Some(PosMapping::Ned {
+            north: resolver.resolve(north)?,
+            east: resolver.resolve(east)?,
+            down: resolver.resolve(down)?,
+            reference: match reference {
+                None => None,
+                Some(NedRefLayout::Manual {
+                    lat_deg,
+                    lon_deg,
+                    alt_m,
+                }) => Some(NedReference::Manual(GeoRef {
+                    lat_deg: *lat_deg,
+                    lon_deg: *lon_deg,
+                    alt_m: *alt_m,
+                })),
+                Some(NedRefLayout::Fields { lat, lon, alt }) => Some(NedReference::Fields {
+                    lat: resolver.resolve(lat)?,
+                    lon: resolver.resolve(lon)?,
+                    alt: resolver.resolve(alt)?,
+                }),
+            },
+        }),
+        PosLayout::Gps { lat, lon, alt } => Some(PosMapping::Gps {
+            lat: resolver.resolve(lat)?,
+            lon: resolver.resolve(lon)?,
+            alt: resolver.resolve(alt)?,
+        }),
+    }
+}
+
+fn ori_to_layout(ori: &OriMapping, snapshot: &StoreSnapshot) -> Option<OriLayout> {
+    match ori {
+        OriMapping::Static => Some(OriLayout::Static),
+        OriMapping::Euler {
+            roll,
+            pitch,
+            yaw,
+            degrees,
+        } => Some(OriLayout::Euler {
+            roll: field_ref(snapshot, *roll)?,
+            pitch: field_ref(snapshot, *pitch)?,
+            yaw: field_ref(snapshot, *yaw)?,
+            degrees: *degrees,
+        }),
+        OriMapping::Quat { w, x, y, z } => Some(OriLayout::Quat {
+            w: field_ref(snapshot, *w)?,
+            x: field_ref(snapshot, *x)?,
+            y: field_ref(snapshot, *y)?,
+            z: field_ref(snapshot, *z)?,
+        }),
+    }
+}
+
+fn ori_from_layout(ori: &OriLayout, resolver: &mut Resolver<'_>) -> Option<OriMapping> {
+    match ori {
+        OriLayout::Static => Some(OriMapping::Static),
+        OriLayout::Euler {
+            roll,
+            pitch,
+            yaw,
+            degrees,
+        } => Some(OriMapping::Euler {
+            roll: resolver.resolve(roll)?,
+            pitch: resolver.resolve(pitch)?,
+            yaw: resolver.resolve(yaw)?,
+            degrees: *degrees,
+        }),
+        OriLayout::Quat { w, x, y, z } => Some(OriMapping::Quat {
+            w: resolver.resolve(w)?,
+            x: resolver.resolve(x)?,
+            y: resolver.resolve(y)?,
+            z: resolver.resolve(z)?,
+        }),
+    }
+}
+
+fn model_to_layout(model: &ModelKind) -> ModelLayout {
+    match model {
+        ModelKind::Quad => ModelLayout::Quad,
+        ModelKind::FixedWing => ModelLayout::FixedWing,
+        ModelKind::DeltaWing => ModelLayout::DeltaWing,
+        ModelKind::Cone => ModelLayout::Cone,
+        ModelKind::CustomGlb(path) => ModelLayout::CustomGlb {
+            path: path.to_string_lossy().into_owned(),
+        },
+    }
+}
+
+fn model_from_layout(model: &ModelLayout) -> ModelKind {
+    match model {
+        ModelLayout::Quad => ModelKind::Quad,
+        ModelLayout::FixedWing => ModelKind::FixedWing,
+        ModelLayout::DeltaWing => ModelKind::DeltaWing,
+        ModelLayout::Cone => ModelKind::Cone,
+        ModelLayout::CustomGlb { path } => ModelKind::CustomGlb(path.into()),
+    }
+}
+
+fn color_to_rgba(c: Color32) -> [u8; 4] {
+    [c.r(), c.g(), c.b(), c.a()]
+}
+
+fn rgba_to_color(c: [u8; 4]) -> Color32 {
+    Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3])
+}
+
+fn layout_warning(message: String) -> Diag {
+    Diag::warning("layout", message)
+}
+
+impl From<TraceMode> for TraceModeLayout {
+    fn from(value: TraceMode) -> Self {
+        match value {
+            TraceMode::Line => Self::Line,
+            TraceMode::Scatter => Self::Scatter,
+            TraceMode::Step => Self::Step,
+        }
+    }
+}
+
+impl From<TraceModeLayout> for TraceMode {
+    fn from(value: TraceModeLayout) -> Self {
+        match value {
+            TraceModeLayout::Line => Self::Line,
+            TraceModeLayout::Scatter => Self::Scatter,
+            TraceModeLayout::Step => Self::Step,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use delog_core::identity::IdentityRegistry;
+
+    #[test]
+    fn sanitize_layout_name_blocks_paths() {
+        assert_eq!(sanitize_name("../bad/name"), "bad_name");
+        assert_eq!(sanitize_name(""), "default");
+        assert_eq!(sanitize_name("ap-attitude_1"), "ap-attitude_1");
+    }
+
+    #[test]
+    fn plot_field_ref_has_no_source_in_json() {
+        let trace = TraceLayout {
+            field: FieldRef {
+                topic: "ATT".into(),
+                field: "Roll".into(),
+            },
+            color: [1.0, 0.0, 0.0, 1.0],
+            width_px: 1.5,
+            mode: TraceModeLayout::Line,
+            visible: true,
+        };
+        let json = serde_json::to_string(&trace).unwrap();
+        assert!(json.contains("\"topic\":\"ATT\""));
+        assert!(!json.contains("source"));
+    }
+
+    #[test]
+    fn invalid_version_is_rejected() {
+        let doc = LayoutDoc {
+            delog_layout: 99,
+            name: "bad".into(),
+            view: None,
+            playback: PlaybackLayout {
+                speed: 1.0,
+                follow_live: false,
+            },
+            show_legend: true,
+            workspace: WorkspaceLayout {
+                root: LayoutNode::Plot { traces: Vec::new() },
+            },
+            vehicles: Vec::new(),
+            favorites: Vec::new(),
+            docks: BTreeMap::new(),
+        };
+        match load_doc(doc, &StoreSnapshot::empty()) {
+            Err(LayoutError::UnsupportedVersion(99)) => {}
+            Ok(_) => panic!("expected unsupported version, got successful load"),
+            Err(err) => panic!("expected unsupported version, got {err}"),
+        }
+    }
+
+    #[test]
+    fn one_loaded_source_resolves_topic_field_without_source() {
+        let (snapshot, field) = snapshot_with_sources(&[("flight_a", "ATT", "Roll")]);
+        let mut resolver = Resolver {
+            snapshot: &snapshot,
+            choices: &HashMap::new(),
+            diagnostics: Vec::new(),
+            ambiguities: BTreeMap::new(),
+            collect_ambiguities: true,
+        };
+
+        let got = resolver.resolve(&FieldRef {
+            topic: "ATT".into(),
+            field: "Roll".into(),
+        });
+
+        assert_eq!(got, Some(field[0]));
+        assert!(resolver.ambiguities.is_empty());
+    }
+
+    #[test]
+    fn duplicate_topic_field_across_sources_is_ambiguous() {
+        let (snapshot, _) =
+            snapshot_with_sources(&[("flight_a", "ATT", "Roll"), ("flight_b", "ATT", "Roll")]);
+        let mut resolver = Resolver {
+            snapshot: &snapshot,
+            choices: &HashMap::new(),
+            diagnostics: Vec::new(),
+            ambiguities: BTreeMap::new(),
+            collect_ambiguities: true,
+        };
+
+        let got = resolver.resolve(&FieldRef {
+            topic: "ATT".into(),
+            field: "Roll".into(),
+        });
+
+        assert_eq!(got, None);
+        let ambiguity = resolver.ambiguities.values().next().unwrap();
+        assert_eq!(ambiguity.candidates.len(), 2);
+        assert_eq!(ambiguity.candidates[0].label, "flight_a");
+        assert_eq!(ambiguity.candidates[1].label, "flight_b");
+    }
+
+    fn snapshot_with_sources(entries: &[(&str, &str, &str)]) -> (StoreSnapshot, Vec<FieldId>) {
+        let mut ids = IdentityRegistry::new();
+        let mut fields = Vec::new();
+        for (source, topic, field) in entries {
+            let source = ids.add_source(*source);
+            let topic = ids.add_topic(source, *topic).unwrap();
+            fields.push(ids.add_field(topic, *field).unwrap());
+        }
+        (
+            StoreSnapshot::from_registry(&ids, [], 0).expect("identity snapshot"),
+            fields,
+        )
+    }
+}

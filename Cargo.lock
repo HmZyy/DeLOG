@@ -914,6 +914,8 @@ dependencies = [
  "egui_tiles",
  "glam",
  "rfd",
+ "serde",
+ "serde_json",
  "tracing",
  "tracing-subscriber",
 ]
