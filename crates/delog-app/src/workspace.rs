@@ -607,8 +607,10 @@ impl Behavior<'_> {
         pane: &mut PlotPane,
     ) -> egui_tiles::UiResponse {
         let frame_style = egui::Frame::default();
-        let (response, dropped) = ui
-            .dnd_drop_zone::<Vec<FieldId>, ()>(frame_style, |ui| self.plot_body(ui, tile_id, pane));
+        let mut tile_response = egui_tiles::UiResponse::None;
+        let (response, dropped) = ui.dnd_drop_zone::<Vec<FieldId>, ()>(frame_style, |ui| {
+            tile_response = self.plot_body(ui, tile_id, pane);
+        });
 
         if let Some(fields) = dropped {
             let pointer = response.response.ctx.input(|i| i.pointer.interact_pos());
@@ -626,17 +628,15 @@ impl Behavior<'_> {
             }
         }
 
-        if response
-            .response
-            .drag_started_by(egui::PointerButton::Middle)
-        {
-            egui_tiles::UiResponse::DragStarted
-        } else {
-            egui_tiles::UiResponse::None
-        }
+        tile_response
     }
 
-    fn plot_body(&mut self, ui: &mut egui::Ui, tile_id: egui_tiles::TileId, pane: &mut PlotPane) {
+    fn plot_body(
+        &mut self,
+        ui: &mut egui::Ui,
+        tile_id: egui_tiles::TileId,
+        pane: &mut PlotPane,
+    ) -> egui_tiles::UiResponse {
         let outer = ui.available_rect_before_wrap();
         let plot_rect = egui::Rect::from_min_max(
             egui::pos2(outer.left() + axes::Y_GUTTER, outer.top() + 4.0),
@@ -647,6 +647,11 @@ impl Behavior<'_> {
             self.actions.focus = Some(tile_id);
         }
         self.handle_plot_interaction(&response, plot_rect);
+        let tile_response = if response.drag_started_by(egui::PointerButton::Middle) {
+            egui_tiles::UiResponse::DragStarted
+        } else {
+            egui_tiles::UiResponse::None
+        };
 
         if pane.is_empty() {
             ui.painter().text(
@@ -657,16 +662,16 @@ impl Behavior<'_> {
                 ui.visuals().weak_text_color(),
             );
             self.plot_context_menu(tile_id, &response, pane, None);
-            return;
+            return tile_response;
         }
 
         let Some(view) = *self.services.view else {
             self.plot_context_menu(tile_id, &response, pane, None);
-            return;
+            return tile_response;
         };
         if !self.services.gpu.is_available() || plot_rect.width() <= 8.0 {
             self.plot_context_menu(tile_id, &response, pane, None);
-            return;
+            return tile_response;
         }
 
         let x_range = view.seconds(self.services.origin_us);
@@ -769,6 +774,8 @@ impl Behavior<'_> {
                 self.actions.remove_trace.push(removed);
             }
         }
+
+        tile_response
     }
 
     fn plot_context_menu(
@@ -978,7 +985,7 @@ impl Behavior<'_> {
         }
 
         let mut changed = false;
-        if response.dragged() {
+        if response.dragged_by(egui::PointerButton::Primary) {
             gpu::apply_pan(&mut view, response.drag_delta().x, rect.width());
             changed = true;
         }
