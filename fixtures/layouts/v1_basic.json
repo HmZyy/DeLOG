@@ -1,0 +1,124 @@
+{
+  "delog_layout": 1,
+  "name": "v1-basic",
+  "view": {
+    "mode": "window",
+    "min_us": 0,
+    "max_us": 45000000
+  },
+  "playback": {
+    "speed": 1.0,
+    "follow_live": false
+  },
+  "show_legend": true,
+  "workspace": {
+    "root": {
+      "split": {
+        "split": "horizontal",
+        "children": [
+          {
+            "plot": {
+              "traces": [
+                {
+                  "field": {
+                    "topic": "ATT",
+                    "field": "Roll"
+                  },
+                  "color": [
+                    0.3529,
+                    0.6667,
+                    1.0,
+                    1.0
+                  ],
+                  "width_px": 1.5,
+                  "mode": "line",
+                  "visible": true
+                },
+                {
+                  "field": {
+                    "topic": "ATT",
+                    "field": "Pitch"
+                  },
+                  "color": [
+                    1.0,
+                    0.6667,
+                    0.2353,
+                    1.0
+                  ],
+                  "width_px": 1.5,
+                  "mode": "line",
+                  "visible": true
+                }
+              ]
+            }
+          },
+          {
+            "scene3d": {
+              "camera": {
+                "yaw": 0.7853982,
+                "pitch": 0.52,
+                "distance": 30.0
+              },
+              "tracked_vehicle": 0
+            }
+          }
+        ]
+      }
+    }
+  },
+  "vehicles": [
+    {
+      "label": "Vehicle",
+      "show": true,
+      "model": "fixed_wing",
+      "color": [
+        90,
+        170,
+        255,
+        255
+      ],
+      "path_color": [
+        255,
+        170,
+        60,
+        255
+      ],
+      "scale": 1.0,
+      "position": {
+        "gps": {
+          "lat": {
+            "topic": "POS",
+            "field": "Lat"
+          },
+          "lon": {
+            "topic": "POS",
+            "field": "Lng"
+          },
+          "alt": {
+            "topic": "POS",
+            "field": "Alt"
+          }
+        }
+      },
+      "orientation": {
+        "euler": {
+          "roll": {
+            "topic": "ATT",
+            "field": "Roll"
+          },
+          "pitch": {
+            "topic": "ATT",
+            "field": "Pitch"
+          },
+          "yaw": {
+            "topic": "ATT",
+            "field": "Yaw"
+          },
+          "degrees": true
+        }
+      }
+    }
+  ],
+  "favorites": [],
+  "docks": {}
+}
