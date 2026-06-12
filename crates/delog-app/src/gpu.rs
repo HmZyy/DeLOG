@@ -41,10 +41,6 @@ pub struct VehicleDraw<'a> {
     pub trajectory: &'a [[f32; 3]],
 }
 
-/// Switch to the decimated min/max path above this many samples per pixel
-/// (§9.5, GPU-10).
-const DECIMATE_THRESHOLD: f32 = 8.0;
-
 /// The inner plot rect plus the visible data window the GPU and the egui axes
 /// share (so labels line up with the rendered lines).
 #[derive(Clone, Copy)]
@@ -172,6 +168,7 @@ impl GpuBridge {
         caches: &mut CacheManager,
         pane: &PlotPane,
         view: PaneView,
+        tuning: crate::settings::RenderTuning,
     ) {
         let plot_rect = view.rect;
         if !self.available || plot_rect.width() < 2.0 || plot_rect.height() < 2.0 {
@@ -218,18 +215,19 @@ impl GpuBridge {
                         viewport_px,
                         trace.width_px,
                         shader_color(trace.color, self.srgb_target),
-                    ),
+                    )
+                    .with_aa(tuning.line_aa_px),
                 );
 
                 let kind = match trace.mode {
                     TraceMode::Line => {
                         // Draw-path selector (GPU-10): decimate when the visible
-                        // window packs more than ~8 samples per pixel.
+                        // window packs more than `decimate_threshold` samples/px.
                         let (a, b) = cache.index_range(x0, x1);
                         let visible = b.saturating_sub(a) as f32;
-                        if plot_w >= 1.0 && visible / plot_w > DECIMATE_THRESHOLD {
+                        if plot_w >= 1.0 && visible / plot_w > tuning.decimate_threshold {
                             let width = plot_w as usize;
-                            let cols = cache.minmax_columns(x0, x1, width);
+                            let cols = cache.minmax_columns(x0, x1, width, tuning.bridge_columns);
                             res.col_buffers.sync(trace.field, &cols, true);
                             DrawKind::Columns {
                                 count: width as u32,

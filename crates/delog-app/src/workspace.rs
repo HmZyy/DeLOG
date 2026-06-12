@@ -374,6 +374,8 @@ pub struct PlotServices<'a> {
     pub view: &'a mut Option<ViewX>,
     pub origin_us: i64,
     pub hover_mode: &'a mut delog_core::field_view::SampleMode,
+    /// Live-adjustable plot draw tuning (decimation/AA), from the config.
+    pub render_tuning: crate::settings::RenderTuning,
     /// Playback time for the playhead cursor; `None` before any data loads
     /// (§11, PLT-10).
     pub playhead_us: Option<i64>,
@@ -698,9 +700,14 @@ impl Behavior<'_> {
             y_range,
         };
         let paint_start = Instant::now();
-        self.services
-            .gpu
-            .render_pane(ui, self.services.frame, self.services.caches, pane, pview);
+        self.services.gpu.render_pane(
+            ui,
+            self.services.frame,
+            self.services.caches,
+            pane,
+            pview,
+            self.services.render_tuning,
+        );
         let paint_us = paint_start.elapsed().as_secs_f32() * 1_000_000.0;
         let debug = PlotDebug {
             plot_rect,

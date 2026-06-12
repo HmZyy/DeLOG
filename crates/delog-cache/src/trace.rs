@@ -197,7 +197,7 @@ impl TraceCache {
     /// O(visible_nodes), 64× fewer items than the samples — binning each node by
     /// its x range; narrow columns sweep the (necessarily small) visible sample
     /// range exactly. Both are sequential and cache-friendly.
-    pub fn minmax_columns(&self, x0: f32, x1: f32, width: usize) -> Vec<f32> {
+    pub fn minmax_columns(&self, x0: f32, x1: f32, width: usize, bridge: bool) -> Vec<f32> {
         if width == 0 || x1 <= x0 {
             return Vec::new();
         }
@@ -209,6 +209,10 @@ impl TraceCache {
             self.l0_columns(x0, x1, a, b, &mut mins, &mut maxs);
         } else {
             self.sweep_columns(x0, x1, a, b, &mut mins, &mut maxs);
+        }
+
+        if bridge {
+            bridge_columns(&mut mins, &mut maxs);
         }
 
         let span = (x1 - x0) / width as f32;
@@ -293,6 +297,30 @@ impl TraceCache {
 
     pub fn touch(&mut self, frame: u64) {
         self.last_used_frame = frame;
+    }
+}
+
+/// Bridge gaps between adjacent decimated columns (§9.5). Per-column min/max
+/// bars are drawn disjoint by the shader, so a smooth, moderately-sloped
+/// signal — where each column's own span is smaller than the value change to
+/// its neighbour — reads as a broken/dashed line. Stretch each finite column's
+/// span just enough to meet its right neighbour's, so consecutive bars always
+/// touch. This only ever *grows* a span (a transient is never hidden, §9.5),
+/// and `NaN` (empty) columns stay gaps so real data gaps are preserved.
+fn bridge_columns(mins: &mut [f32], maxs: &mut [f32]) {
+    for c in 0..mins.len().saturating_sub(1) {
+        let (cur_min, cur_max) = (mins[c], maxs[c]);
+        let (nxt_min, nxt_max) = (mins[c + 1], maxs[c + 1]);
+        if cur_min.is_nan() || nxt_min.is_nan() {
+            continue;
+        }
+        if cur_max < nxt_min {
+            // The next column sits entirely above: raise this column to meet it.
+            maxs[c] = nxt_min;
+        } else if nxt_max < cur_min {
+            // The next column sits entirely below: lower this column to meet it.
+            mins[c] = nxt_max;
+        }
     }
 }
 
@@ -508,18 +536,23 @@ mod tests {
         let cache = TraceCache::build(&snap, field, 0, 0).unwrap();
 
         // 4 columns over [0,4]s → 1-second half-open columns [c, c+1).
-        let cols = cache.minmax_columns(0.0, 4.0, 4);
+        let cols = cache.minmax_columns(0.0, 4.0, 4, true);
         assert_eq!(cols.len(), 4 * 3);
         // Column 0 = [0,1)s holds only the sample at t=0 (y=0); centre x=0.5.
         assert_eq!(cols[0], 0.5);
-        assert_eq!(cols[1], 0.0);
-        assert_eq!(cols[2], 0.0);
+        assert_eq!(cols[1], 0.0); // col0 min
+        // col0's max is bridged up to col1's value so the bars connect (§9.5).
+        assert_eq!(cols[2], 1.0); // col0 max, bridged to col1 min
         // Column 1 = [1,2)s holds t=1 → y=1.
-        assert_eq!(cols[4], 1.0);
-        // Last column [3,4) holds t=3 and the boundary t=4 → max 4.
+        assert_eq!(cols[4], 1.0); // col1 min
+        // Last column [3,4) holds t=3 and the boundary t=4 → max 4 (unchanged).
         assert_eq!(cols[11], 4.0);
         // Monotone ramp: each column's max rises.
         assert!(cols[5] > cols[2]);
+        // Adjacent columns touch after bridging: col c's max == col c+1's min.
+        for c in 0..3 {
+            assert_eq!(cols[c * 3 + 2], cols[(c + 1) * 3 + 1], "column {c} bridges");
+        }
     }
 
     #[test]
@@ -533,7 +566,7 @@ mod tests {
         let cache = TraceCache::build(&snap, field, 0, 0).unwrap();
 
         let x1 = 999.0 * 1e-6;
-        let cols = cache.minmax_columns(0.0, x1, 4);
+        let cols = cache.minmax_columns(0.0, x1, 4, true);
         assert_eq!(cols.len(), 12);
         // Column 0 starts at y=0; the last column reaches the max y≈999.
         assert_eq!(cols[1], 0.0); // col0 min
