@@ -2,24 +2,65 @@
 
 use crate::theme::ThemeChoice;
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+fn default_decimate_threshold() -> f32 {
+    8.0
+}
+fn default_line_aa_px() -> f32 {
+    1.0
+}
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AppSettings {
     #[serde(default)]
     pub theme: ThemeChoice,
+    /// Plot rendering tuning (live-adjustable, persisted in the config).
+    #[serde(default)]
+    pub render: RenderTuning,
+}
+
+/// Knobs for the plot draw path (§9.5 decimation + line/edge AA). Lives in the
+/// config so the values can be tuned live and persist across sessions.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RenderTuning {
+    /// Switch to the decimated min/max path above this many samples per pixel.
+    #[serde(default = "default_decimate_threshold")]
+    pub decimate_threshold: f32,
+    /// Edge anti-alias feather, in pixels (0 = hard edges).
+    #[serde(default = "default_line_aa_px")]
+    pub line_aa_px: f32,
+    /// Bridge adjacent decimated columns so smooth slopes read as a connected
+    /// line instead of disjoint bars (§9.5).
+    #[serde(default = "default_true")]
+    pub bridge_columns: bool,
+}
+
+impl Default for RenderTuning {
+    fn default() -> Self {
+        Self {
+            decimate_threshold: default_decimate_threshold(),
+            line_aa_px: default_line_aa_px(),
+            bridge_columns: true,
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 enum SettingsTab {
     #[default]
     General,
+    Rendering,
 }
 
 impl SettingsTab {
-    const ALL: [Self; 1] = [Self::General];
+    const ALL: [Self; 2] = [Self::General, Self::Rendering];
 
     const fn label(self) -> &'static str {
         match self {
             Self::General => "General",
+            Self::Rendering => "Rendering",
         }
     }
 }
@@ -56,6 +97,9 @@ impl SettingsDialog {
                         match self.selected_tab {
                             SettingsTab::General => {
                                 change |= general_tab(ui, settings);
+                            }
+                            SettingsTab::Rendering => {
+                                rendering_tab(ui, settings);
                             }
                         }
                     });
@@ -110,6 +154,40 @@ fn general_tab(ui: &mut egui::Ui, settings: &mut AppSettings) -> SettingsChange 
     }
 }
 
+fn rendering_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
+    let r = &mut settings.render;
+    ui.heading("Rendering");
+    ui.add_space(8.0);
+    egui::Grid::new("settings-rendering-grid")
+        .num_columns(2)
+        .spacing(egui::vec2(16.0, 10.0))
+        .show(ui, |ui| {
+            ui.label("Decimate threshold")
+                .on_hover_text("Switch to the min/max draw path above this many samples per pixel. Lower = decimate sooner (faster); higher = keep the true line longer.");
+            ui.add(
+                egui::Slider::new(&mut r.decimate_threshold, 1.0..=64.0)
+                    .logarithmic(true)
+                    .suffix(" smp/px"),
+            );
+            ui.end_row();
+
+            ui.label("Edge anti-aliasing")
+                .on_hover_text("Width of the edge feather, in pixels. 0 = hard edges, higher = smoother but softer lines.");
+            ui.add(egui::Slider::new(&mut r.line_aa_px, 0.0..=3.0).suffix(" px"));
+            ui.end_row();
+
+            ui.label("Bridge decimated columns")
+                .on_hover_text("Connect adjacent min/max columns so smooth slopes read as a continuous line instead of disjoint bars.");
+            ui.checkbox(&mut r.bridge_columns, "");
+            ui.end_row();
+        });
+
+    ui.add_space(10.0);
+    if ui.button("Reset to defaults").clicked() {
+        settings.render = RenderTuning::default();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,6 +203,6 @@ mod tests {
             .into_iter()
             .map(SettingsTab::label)
             .collect();
-        assert_eq!(labels, ["General"]);
+        assert_eq!(labels, ["General", "Rendering"]);
     }
 }

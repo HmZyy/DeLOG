@@ -16,6 +16,11 @@ struct PlotUniform {
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) color: vec4<f32>,
+    // Fragment screen-y and the column's core top/bottom (pixels) for the
+    // top/bottom AA ramp. Left/right edges stay hard so columns tile seamlessly.
+    @location(1) y_px: f32,
+    @location(2) core_top: f32,
+    @location(3) core_bot: f32,
 };
 
 @group(0) @binding(0) var<storage, read> cols: array<f32>;
@@ -45,6 +50,9 @@ fn degenerate() -> VsOut {
     var out: VsOut;
     out.pos = vec4<f32>(0.0, 0.0, 0.0, 1.0);
     out.color = vec4<f32>(0.0);
+    out.y_px = 0.0;
+    out.core_top = 0.0;
+    out.core_bot = 0.0;
     return out;
 }
 
@@ -82,18 +90,26 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
     if (corner == 2u || corner == 3u || corner == 5u) {
         px = right;
     }
-    var py = top_y;
+    // Grow the drawn span by the feather (configurable via view.w); the core
+    // edges drive the AA ramp.
+    let aa = max(u.view.w, 0.0);
+    var py = top_y - aa;
     if (corner == 1u || corner == 4u || corner == 5u) {
-        py = bot_y;
+        py = bot_y + aa;
     }
 
     var out: VsOut;
     out.pos = vec4<f32>(screen_to_clip(vec2<f32>(px, py), viewport), 0.0, 1.0);
     out.color = u.color;
+    out.y_px = py;
+    out.core_top = top_y;
+    out.core_bot = bot_y;
     return out;
 }
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    return in.color;
+    // Top/bottom coverage ramp; left/right are hard (columns tile).
+    let cov = clamp(min(in.y_px - in.core_top, in.core_bot - in.y_px) + 0.5, 0.0, 1.0);
+    return vec4<f32>(in.color.rgb, in.color.a * cov);
 }

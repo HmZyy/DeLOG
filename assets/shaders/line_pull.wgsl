@@ -7,6 +7,10 @@ struct PlotUniform {
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) color: vec4<f32>,
+    // Signed perpendicular distance from the segment centreline, in pixels,
+    // and the line's half-width — together they drive the edge AA ramp.
+    @location(1) dist: f32,
+    @location(2) half_w: f32,
 };
 
 @group(0) @binding(0) var<storage, read> xy: array<vec2<f32>>;
@@ -42,6 +46,8 @@ fn degenerate() -> VsOut {
     var out: VsOut;
     out.pos = vec4<f32>(0.0, 0.0, 0.0, 1.0);
     out.color = vec4<f32>(0.0);
+    out.dist = 0.0;
+    out.half_w = 0.0;
     return out;
 }
 
@@ -67,25 +73,34 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
         return degenerate();
     }
 
-    let n = vec2<f32>(-delta.y, delta.x) * (width_px * 0.5 / len);
+    // Unit perpendicular, then offset to the feathered edge (half-width + AA).
+    // The AA feather (px) is configurable via the uniform (view.w).
+    let aa = max(u.view.w, 0.0);
+    let perp = vec2<f32>(-delta.y, delta.x) / len;
+    let half_w = width_px * 0.5;
+    let off_mag = half_w + aa;
 
     var base = b;
     if (corner == 0u || corner == 1u || corner == 4u) {
         base = a;
     }
 
-    var offset = -n;
+    var signed = -off_mag;
     if (corner == 1u || corner == 4u || corner == 5u) {
-        offset = n;
+        signed = off_mag;
     }
 
     var out: VsOut;
-    out.pos = vec4<f32>(screen_to_clip(base + offset, viewport), 0.0, 1.0);
+    out.pos = vec4<f32>(screen_to_clip(base + perp * signed, viewport), 0.0, 1.0);
     out.color = u.color;
+    out.dist = signed;
+    out.half_w = half_w;
     return out;
 }
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    return in.color;
+    // Coverage falls from 1 inside the core to 0 across a ~1px edge ramp.
+    let cov = clamp(in.half_w + 0.5 - abs(in.dist), 0.0, 1.0);
+    return vec4<f32>(in.color.rgb, in.color.a * cov);
 }
