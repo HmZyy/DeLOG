@@ -513,6 +513,12 @@ impl Behavior<'_> {
             .enumerate()
             .filter_map(|(i, v)| {
                 let pose = poses[i]?;
+                // Fold the model's static authored-orientation correction into
+                // the body rotation (mesh-local, so right-multiplied).
+                let pose = vehicle::Pose {
+                    rot: pose.rot * v.model.orientation_offset(),
+                    ..pose
+                };
                 Some(VehicleDraw {
                     key: v.source.0,
                     model: &v.model,
