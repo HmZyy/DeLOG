@@ -662,22 +662,15 @@ impl Behavior<'_> {
 
         if pane.is_empty() {
             // Draw a normal but empty plot frame so the pane reads as a plot
-            // even before a field is dropped. Reuse the shared data view's X
-            // range when one exists (keeps empty panes aligned with populated
-            // ones), else a neutral 0..1 placeholder.
+            // even before a field is dropped. Reuse the shared view's X range
+            // (set from data, or the empty-session placeholder) so the pane
+            // pans and zooms with the rest; else a neutral 0..1 fallback.
             if plot_rect.width() > 8.0 {
                 let x_range = (*self.services.view)
                     .map(|v| v.seconds(self.services.origin_us))
                     .unwrap_or((0.0, 1.0));
                 axes::draw(ui, plot_rect, x_range, (0.0, 1.0), None);
             }
-            ui.painter().text(
-                plot_rect.center(),
-                egui::Align2::CENTER_CENTER,
-                "Drag a field here",
-                egui::FontId::proportional(14.0),
-                ui.visuals().weak_text_color(),
-            );
             self.plot_context_menu(tile_id, &response, pane, None);
             return tile_response;
         }
