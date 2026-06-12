@@ -217,6 +217,16 @@ impl Selection {
         }
     }
 
+    /// Start a drag from `field`, updating selection the same way file
+    /// browsers do: dragging an already selected field preserves a multi-field
+    /// payload, while dragging an unselected field makes it the selection.
+    pub fn start_drag(&mut self, field: FieldId, modifier: SelectMod, visible: &[FieldId]) {
+        if modifier == SelectMod::Replace && self.selected.contains(&field) {
+            return;
+        }
+        self.click(field, modifier, visible);
+    }
+
     pub fn contains(&self, field: FieldId) -> bool {
         self.selected.contains(&field)
     }
@@ -462,6 +472,10 @@ fn field_row(ui: &mut egui::Ui, field: &FieldNode, selection: &mut Selection, vi
     // when the dragged row is part of it (§10.7, BRW-05); plot panes and tile
     // edges are the drop zones (PLT-13).
     let id = egui::Id::new(("field", field.id.0));
+    let dragging_this_field = ui.ctx().is_being_dragged(id);
+    if dragging_this_field {
+        selection.start_drag(field.id, current_select_modifier(ui), visible);
+    }
     let payload = selection.drag_payload(field.id, visible);
     let selected = selection.contains(field.id);
 
@@ -490,16 +504,23 @@ fn field_row(ui: &mut egui::Ui, field: &FieldNode, selection: &mut Selection, vi
             });
     });
 
-    if response.clicked() {
-        let modifiers = ui.input(|i| i.modifiers);
-        let modifier = if modifiers.shift {
-            SelectMod::Range
-        } else if modifiers.command {
-            SelectMod::Toggle
+    if response.clicked() || response.drag_started() {
+        if response.drag_started() {
+            selection.start_drag(field.id, current_select_modifier(ui), visible);
         } else {
-            SelectMod::Replace
-        };
-        selection.click(field.id, modifier, visible);
+            selection.click(field.id, current_select_modifier(ui), visible);
+        }
+    }
+}
+
+fn current_select_modifier(ui: &egui::Ui) -> SelectMod {
+    let modifiers = ui.input(|i| i.modifiers);
+    if modifiers.shift {
+        SelectMod::Range
+    } else if modifiers.command {
+        SelectMod::Toggle
+    } else {
+        SelectMod::Replace
     }
 }
 
@@ -659,6 +680,34 @@ mod tests {
         );
         // Dragging an unselected field carries just that field.
         assert_eq!(sel.drag_payload(FieldId(2), &visible), vec![FieldId(2)]);
+    }
+
+    #[test]
+    fn starting_plain_drag_on_unselected_field_replaces_selection() {
+        let visible = [FieldId(1), FieldId(2), FieldId(3)];
+        let mut sel = Selection::default();
+        sel.click(FieldId(1), SelectMod::Replace, &visible);
+
+        sel.start_drag(FieldId(2), SelectMod::Replace, &visible);
+
+        assert_eq!(sel.ordered(&visible), vec![FieldId(2)]);
+        assert_eq!(sel.drag_payload(FieldId(2), &visible), vec![FieldId(2)]);
+    }
+
+    #[test]
+    fn starting_plain_drag_on_selected_field_preserves_multi_selection() {
+        let visible = [FieldId(1), FieldId(2), FieldId(3)];
+        let mut sel = Selection::default();
+        sel.click(FieldId(1), SelectMod::Toggle, &visible);
+        sel.click(FieldId(3), SelectMod::Toggle, &visible);
+
+        sel.start_drag(FieldId(3), SelectMod::Replace, &visible);
+
+        assert_eq!(sel.ordered(&visible), vec![FieldId(1), FieldId(3)]);
+        assert_eq!(
+            sel.drag_payload(FieldId(3), &visible),
+            vec![FieldId(1), FieldId(3)]
+        );
     }
 
     #[test]
