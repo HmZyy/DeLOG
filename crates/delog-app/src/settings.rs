@@ -2,8 +2,9 @@
 
 use crate::theme::ThemeChoice;
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AppSettings {
+    #[serde(default)]
     pub theme: ThemeChoice,
 }
 
