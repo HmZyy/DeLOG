@@ -322,14 +322,12 @@ impl GpuBridge {
                     fade_end,
                 ),
             );
-            // Refresh each scene line's view_proj for this frame (color is fixed).
-            for line in &res.lines {
-                res.ctx.queue().write_buffer(
-                    &line.uniform,
-                    0,
-                    bytemuck::bytes_of(&Traj3dUniform::new(vp_cols, line.color)),
-                );
-            }
+            // Refresh the gizmo's view_proj for this frame (color is fixed).
+            res.ctx.queue().write_buffer(
+                &res.axis_gizmo.uniform,
+                0,
+                bytemuck::bytes_of(&Traj3dUniform::new(vp_cols, res.axis_gizmo.color)),
+            );
             res.prepare_vehicles(vp_cols, vehicles);
 
             let clear = wgpu::Color {
@@ -347,14 +345,8 @@ impl GpuBridge {
             {
                 let mut pass = res.target.begin_pass(&mut enc, clear);
                 res.grid.draw(&mut pass);
-                // The demo lemniscate (lines[1]) only shows when no vehicle is
-                // configured (§12.3); the Y-axis gizmo (lines[0]) always does.
-                for (i, line) in res.lines.iter().enumerate() {
-                    if i == 1 && !vehicles.is_empty() {
-                        continue;
-                    }
-                    res.traj.draw(&mut pass, &line.bind, line.count);
-                }
+                res.traj
+                    .draw(&mut pass, &res.axis_gizmo.bind, res.axis_gizmo.count);
                 res.draw_vehicles(&mut pass, vehicles);
             }
             res.ctx.queue().submit([enc.finish()]);
@@ -578,8 +570,8 @@ impl PlotCallbackResources {
 /// Offscreen 3D-scene resources held in egui_wgpu's callback map (TDV-01).
 /// The grid pipeline matches the target's MSAA/format; `texture_id` is the
 /// egui handle to the resolved color, (re)pointed when the pane resizes.
-/// One static scene polyline (axis gizmo / demo path): its points + a uniform
-/// whose `view_proj` is rewritten each frame, with a stable bind group.
+/// One static scene polyline (the axis gizmo): its points + a uniform whose
+/// `view_proj` is rewritten each frame, with a stable bind group.
 struct SceneTraj {
     /// Per-frame uniform (view_proj rewritten each frame).
     uniform: wgpu::Buffer,
@@ -612,10 +604,8 @@ struct SceneResources {
     model_cache: HashMap<ModelKind, MeshGpu>,
     /// Per-vehicle GPU buffers, keyed by source id.
     vehicles: HashMap<u32, VehicleGpu>,
-    /// Vertical world Y-axis line (the up axis the ground grid can't draw) plus
-    /// a demo lemniscate path (TDV-11 smoke test) shown until a vehicle is
-    /// configured.
-    lines: Vec<SceneTraj>,
+    /// Vertical world Y-axis line (the up axis the ground grid can't draw).
+    axis_gizmo: SceneTraj,
     texture_id: Option<egui::TextureId>,
 }
 
@@ -644,24 +634,7 @@ impl SceneResources {
 
         // Vertical Y (Up) axis, green — completes the §12.3 axes gizmo.
         let y_axis = vec![[0.0, 0.0, 0.0], [0.0, 12.0, 0.0]];
-        // Demo lemniscate (Gerono figure-8 along X) floating above the grid
-        // with a gentle altitude bob, so it reads as a 3D path.
-        let demo: Vec<[f32; 3]> = (0..=160)
-            .map(|i| {
-                let t = i as f32 / 160.0 * std::f32::consts::TAU;
-                let a = 9.0;
-                [
-                    a * t.cos(),
-                    3.0 + 1.5 * (2.0 * t).sin(),
-                    a * t.sin() * t.cos(),
-                ]
-            })
-            .collect();
-
-        let lines = vec![
-            SceneTraj::new(&ctx, &traj, &y_axis, [0.25, 0.9, 0.3, 1.0]),
-            SceneTraj::new(&ctx, &traj, &demo, [1.0, 0.6, 0.15, 1.0]),
-        ];
+        let axis_gizmo = SceneTraj::new(&ctx, &traj, &y_axis, [0.25, 0.9, 0.3, 1.0]);
 
         Self {
             ctx,
@@ -671,7 +644,7 @@ impl SceneResources {
             mesh,
             model_cache: HashMap::new(),
             vehicles: HashMap::new(),
-            lines,
+            axis_gizmo,
             texture_id: None,
         }
     }
@@ -686,22 +659,21 @@ impl SceneResources {
     /// Prepare GPU buffers + uniforms for the frame's vehicles (before the
     /// pass): upload each mesh once, (re)grow trajectory buffers, write uniforms.
     fn prepare_vehicles(&mut self, vp_cols: [[f32; 4]; 4], vehicles: &[VehicleDraw]) {
+        // Light from upper front-right; ambient keeps shadowed faces readable.
+        let light = glam::Vec3::new(0.4, 1.0, 0.6).normalize().to_array();
         for v in vehicles {
             // Upload the model mesh on first use (no-op afterwards).
             self.model_mesh(v.model);
 
-            let pts: Vec<[f32; 4]> = v
-                .trajectory
-                .iter()
-                .map(|p| [p[0], p[1], p[2], 1.0])
-                .collect();
+            let pts = points_to_vec4(v.trajectory);
             let needed = pts.len() as u32;
             let entry = self.vehicles.entry(v.key);
             let vg = match entry {
                 std::collections::hash_map::Entry::Occupied(o) => {
                     let vg = o.into_mut();
                     if needed > vg.traj_capacity {
-                        vg.traj_points = new_points_buffer(&self.ctx, needed.max(1));
+                        vg.traj_points =
+                            new_points_buffer(&self.ctx, needed.max(1), "delog-veh-traj-points");
                         vg.traj_capacity = needed.max(1);
                         vg.traj_bind =
                             self.traj
@@ -717,7 +689,7 @@ impl SceneResources {
                         "delog-veh-mesh-uniform",
                     );
                     let mesh_bind = self.mesh.bind_group(&self.ctx, &mesh_uniform);
-                    let traj_points = new_points_buffer(&self.ctx, cap);
+                    let traj_points = new_points_buffer(&self.ctx, cap, "delog-veh-traj-points");
                     let traj_uniform = new_uniform_buffer(
                         &self.ctx,
                         std::mem::size_of::<Traj3dUniform>() as u64,
@@ -754,8 +726,7 @@ impl SceneResources {
                     vp_cols,
                     v.model_matrix,
                     v.normal_matrix,
-                    // Light from upper front-right; ambient keeps shadowed faces readable.
-                    glam::Vec3::new(0.4, 1.0, 0.6).normalize().to_array(),
+                    light,
                     v.color,
                     0.28,
                 )),
@@ -778,13 +749,18 @@ impl SceneResources {
     }
 }
 
-fn new_points_buffer(ctx: &RenderContext, count: u32) -> wgpu::Buffer {
+fn new_points_buffer(ctx: &RenderContext, count: u32, label: &str) -> wgpu::Buffer {
     ctx.device().create_buffer(&wgpu::BufferDescriptor {
-        label: Some("delog-veh-traj-points"),
+        label: Some(label),
         size: (count as u64) * std::mem::size_of::<[f32; 4]>() as u64,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     })
+}
+
+/// Pad render-space `[x,y,z]` points to the vec4 layout the line shader reads.
+fn points_to_vec4(pts: &[[f32; 3]]) -> Vec<[f32; 4]> {
+    pts.iter().map(|p| [p[0], p[1], p[2], 1.0]).collect()
 }
 
 fn new_uniform_buffer(ctx: &RenderContext, size: u64, label: &str) -> wgpu::Buffer {
@@ -803,21 +779,15 @@ impl SceneTraj {
         pts: &[[f32; 3]],
         color: [f32; 4],
     ) -> Self {
-        let data: Vec<[f32; 4]> = pts.iter().map(|p| [p[0], p[1], p[2], 1.0]).collect();
-        let points = ctx.device().create_buffer(&wgpu::BufferDescriptor {
-            label: Some("delog-scene-traj-points"),
-            size: std::mem::size_of_val(data.as_slice()) as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let data = points_to_vec4(pts);
+        let points = new_points_buffer(ctx, data.len() as u32, "delog-scene-traj-points");
         ctx.queue()
             .write_buffer(&points, 0, bytemuck::cast_slice(&data));
-        let uniform = ctx.device().create_buffer(&wgpu::BufferDescriptor {
-            label: Some("delog-scene-traj-uniform"),
-            size: std::mem::size_of::<Traj3dUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let uniform = new_uniform_buffer(
+            ctx,
+            std::mem::size_of::<Traj3dUniform>() as u64,
+            "delog-scene-traj-uniform",
+        );
         let bind = pipeline.bind_group(ctx, &points, &uniform);
         Self {
             uniform,
