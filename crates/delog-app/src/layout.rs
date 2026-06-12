@@ -22,13 +22,16 @@ use crate::workspace::{Pane, Scene3dPane, Workspace};
 const APP_ID: &str = "DeLOG";
 const LAYOUT_VERSION: u32 = 1;
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LayoutDoc {
     pub delog_layout: u32,
     pub name: String,
     pub view: Option<ViewLayout>,
     pub playback: PlaybackLayout,
-    pub show_legend: bool,
     pub workspace: WorkspaceLayout,
     pub vehicles: Vec<VehicleLayout>,
     #[serde(default)]
@@ -73,6 +76,10 @@ pub struct WorkspaceLayout {
 pub enum LayoutNode {
     Plot {
         traces: Vec<TraceLayout>,
+        #[serde(default = "default_true")]
+        show_legend: bool,
+        #[serde(default = "default_true")]
+        show_tooltip: bool,
     },
     Scene3d(SceneLayout),
     Split {
@@ -196,7 +203,6 @@ pub struct LayoutApply {
     pub view: Option<ViewX>,
     pub speed: f64,
     pub follow_live: bool,
-    pub show_legend: bool,
     pub vehicles: Vec<VehicleConfig>,
     pub diagnostics: Vec<Diag>,
 }
@@ -242,7 +248,6 @@ pub struct CurrentLayout<'a> {
     pub view: Option<ViewX>,
     pub speed: f64,
     pub follow_live: bool,
-    pub show_legend: bool,
     pub vehicles: &'a [VehicleConfig],
 }
 
@@ -435,7 +440,6 @@ pub fn current_doc(input: CurrentLayout<'_>) -> LayoutDoc {
             speed: input.speed,
             follow_live: input.follow_live,
         },
-        show_legend: input.show_legend,
         workspace: workspace_doc(input.workspace, input.snapshot),
         vehicles: input
             .vehicles
@@ -500,7 +504,11 @@ fn workspace_doc(workspace: &Workspace, snapshot: &StoreSnapshot) -> WorkspaceLa
         .tree
         .root()
         .and_then(|id| node_to_layout(workspace, snapshot, id))
-        .unwrap_or(LayoutNode::Plot { traces: Vec::new() });
+        .unwrap_or(LayoutNode::Plot {
+            traces: Vec::new(),
+            show_legend: true,
+            show_tooltip: true,
+        });
     WorkspaceLayout { root }
 }
 
@@ -517,6 +525,8 @@ fn node_to_layout(
                 .filter_map(|t| trace_to_layout(t, snapshot))
                 .chain(pane.ghosts.iter().map(ghost_to_layout))
                 .collect(),
+            show_legend: pane.show_legend,
+            show_tooltip: pane.show_tooltip,
         }),
         egui_tiles::Tile::Pane(Pane::Scene3D(scene)) => Some(LayoutNode::Scene3d(SceneLayout {
             camera: CameraLayout {
@@ -623,7 +633,6 @@ fn apply_doc(
         view: doc.view.map(|v| ViewX::new(v.min_us, v.max_us)),
         speed: doc.playback.speed,
         follow_live: doc.playback.follow_live,
-        show_legend: doc.show_legend,
         vehicles,
         diagnostics: resolver.diagnostics,
     })
@@ -639,7 +648,7 @@ fn collect_field_refs(doc: &LayoutDoc, resolver: &mut Resolver<'_>) {
 
 fn collect_node_field_refs(node: &LayoutNode, resolver: &mut Resolver<'_>) {
     match node {
-        LayoutNode::Plot { traces } => {
+        LayoutNode::Plot { traces, .. } => {
             for trace in traces {
                 let _ = resolver.resolve(&trace.field);
             }
@@ -804,8 +813,16 @@ fn insert_node(
     resolver: &mut Resolver<'_>,
 ) -> Option<egui_tiles::TileId> {
     match node {
-        LayoutNode::Plot { traces } => {
-            let mut pane = PlotPane::default();
+        LayoutNode::Plot {
+            traces,
+            show_legend,
+            show_tooltip,
+        } => {
+            let mut pane = PlotPane {
+                show_legend: *show_legend,
+                show_tooltip: *show_tooltip,
+                ..PlotPane::default()
+            };
             for trace in traces {
                 match trace_from_layout(trace, resolver) {
                     Some(resolved) => pane.traces.push(resolved),
@@ -1267,9 +1284,12 @@ mod tests {
                 speed: 1.0,
                 follow_live: false,
             },
-            show_legend: true,
             workspace: WorkspaceLayout {
-                root: LayoutNode::Plot { traces: Vec::new() },
+                root: LayoutNode::Plot {
+                    traces: Vec::new(),
+                    show_legend: true,
+                    show_tooltip: true,
+                },
             },
             vehicles: Vec::new(),
             favorites: Vec::new(),
