@@ -62,6 +62,10 @@ pub struct DelogApp {
     workspace: Workspace,
     playback: Playback,
     view: Option<ViewX>,
+    /// Whether `view` has been fit to real data yet. Stays false while the
+    /// session is empty (the view is a pan/zoomable placeholder), so the
+    /// first loaded log replaces the placeholder by fitting to its range.
+    view_fitted: bool,
     hover_mode: delog_core::field_view::SampleMode,
     show_legend: bool,
     frame: u64,
@@ -125,6 +129,7 @@ impl DelogApp {
             workspace: Workspace::new(),
             playback: Playback::default(),
             view: None,
+            view_fitted: false,
             hover_mode: delog_core::field_view::SampleMode::Prev,
             show_legend: true,
             frame: 0,
@@ -597,6 +602,9 @@ impl DelogApp {
     fn apply_layout(&mut self, layout: LayoutApply) {
         self.workspace = layout.workspace;
         self.view = layout.view;
+        // A restored view is authoritative — don't let the data-fit refit
+        // overwrite it on the next frame.
+        self.view_fitted = layout.view.is_some();
         self.playback.set_speed(layout.speed as f32);
         self.playback.follow_live = layout.follow_live;
         self.show_legend = layout.show_legend;
@@ -866,7 +874,13 @@ impl eframe::App for DelogApp {
         if let Some(range) = snapshot.global_time_range() {
             self.origin_us = range.min_us;
             self.caches.set_origin(self.origin_us);
-            self.view.get_or_insert_with(|| ViewX::from_range(range));
+            // Fit the view to the data the first time real data appears,
+            // replacing any empty-session placeholder; afterwards the user
+            // owns the view (pan/zoom persists).
+            if !self.view_fitted {
+                self.view = Some(ViewX::from_range(range));
+                self.view_fitted = true;
+            }
 
             // Advance the playhead — the single time authority (§11, TLN-01).
             let dt = ui.ctx().input(|i| i.stable_dt) as f64;
@@ -884,6 +898,12 @@ impl eframe::App for DelogApp {
             if self.playback.playing || self.session.has_connected_live() {
                 ui.ctx().request_repaint();
             }
+        } else {
+            // Empty session: a default 0..10 s window so empty plots can be
+            // panned and zoomed before any log is loaded.
+            self.origin_us = 0;
+            self.caches.set_origin(0);
+            self.view.get_or_insert(ViewX::new(0, 10_000_000));
         }
         self.caches.begin_frame(self.frame);
         self.caches.poll_builds();
