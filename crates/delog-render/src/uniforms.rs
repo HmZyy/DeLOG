@@ -53,6 +53,13 @@ impl PlotUniform {
             x_scale, x_offset, y_scale, y_offset, viewport, width_px, color,
         )
     }
+
+    /// Set the edge anti-alias feather (pixels), stored in `view.w` and read by
+    /// the line/min-max shaders. Defaults to `0.0` (hard edges) otherwise.
+    pub fn with_aa(mut self, aa: f32) -> Self {
+        self.view[3] = aa.max(0.0);
+        self
+    }
 }
 
 /// Scale/offset mapping data `[min, max]` to clip `[-1, 1]`

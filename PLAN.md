@@ -888,8 +888,8 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **GPU-06** — Per-plot viewport/scissor inside egui main pass via paint callback
 - [x] **GPU-07** — `scatter_pull` pipeline (quad/sample, size uniform)
 - [x] **GPU-08** — `step_pull` stepped-mode pipeline (2 segments/sample)
-- [x] **GPU-09** — `minmax_col` decimated pipeline + transient ring upload (§9.5)
-- [x] **GPU-10** — Draw-path selector: full vs decimated at samples/px > 8
+- [x] **GPU-09** — `minmax_col` decimated pipeline + transient ring upload (§9.5) — `minmax_columns` now bridges adjacent columns (extends each finite span to meet its neighbour's, never shrinks, keeps NaN gaps) so smooth moderately-sloped signals read as a connected line instead of disjoint bars; the `bridge` is a config toggle. Both `line_pull` and `minmax_col` shaders do coverage-based edge AA (feather width from `PlotUniform.view.w` / `with_aa`, configurable) since the egui plot target is single-sample
+- [x] **GPU-10** — Draw-path selector: full vs decimated at samples/px > threshold — the threshold is now a live config value (`RenderTuning.decimate_threshold`, default 8) instead of a const
 - [x] **GPU-11** — Batched encoding: one pipeline bind, per-trace dynamic offsets
 - [x] **GPU-12** — wgpu error scopes → diagnostics
 - [x] **GPU-13** — Headless golden-image test rig (§20.3)
@@ -1017,7 +1017,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 
 - [ ] **UIX-01** — Workspace-first window per §19.1; collapsible drawer/docks
 - [~] **UIX-02** — Toolbar (open/cancel/add/remove/3D/vehicle/stream start/stop) with tooltips — dedicated icon toolbar directly under the menu bar with tinted SVG icons (Lucide via `egui_extras` svg loader): streaming (satellite-dish, blue when a live link is active → connection dialog) and 3D-view toggle (box, blue when open); live-link status + per-link Disconnect button (`Session::stop_live`, drop stops the threads) + parse progress/cancel live alongside; vehicle config moved to a gear overlay on the 3D pane (`WorkspaceActions::open_vehicle_config`); open moved to File menu. Pending: add/remove-plot buttons
-- [~] **UIX-03** — Menus: File/Tools/Layout/Help (§19.2) — File/**Edit**/Layout/Help menu bar in place (user asked for an Edit menu in place of §19.2's Tools). Edit ▸ Settings opens an extensible tabbed settings dialog with a General theme selector. File ▸ Open File; Layout ▸ Save / Load (submenu of saved layouts, loads in place) / Manage / Export JSON / Import JSON; Help ▸ About. Pending: File recent/import/export/quit, and the remaining Tools/Edit contents
+- [~] **UIX-03** — Menus: File/Tools/Layout/Help (§19.2) — File/**Edit**/Layout/Help menu bar in place (user asked for an Edit menu in place of §19.2's Tools). Edit ▸ Settings opens an extensible tabbed settings dialog with a General theme selector and a Rendering tab (live decimation threshold, edge-AA feather, column-bridging toggle — all persisted in the config). File ▸ Open File; Layout ▸ Save / Load (submenu of saved layouts, loads in place) / Manage / Export JSON / Import JSON; Help ▸ About. Pending: File recent/import/export/quit, and the remaining Tools/Edit contents
 - [ ] **UIX-04** — Shortcut map per §19.3 + Help ▸ shortcuts sheet
 - [x] **UIX-05** — Dark theme, palette constants, ≥4.5:1 contrast — Catppuccin Mocha egui visuals applied locally for egui 0.34 compatibility; app status/accent colors use theme tokens; text contrast covered by unit tests
 - [ ] **UIX-06** — High-DPI verified at 1×/1.5×/2×; min-size responsiveness

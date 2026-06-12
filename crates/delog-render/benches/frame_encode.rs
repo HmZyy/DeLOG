@@ -69,7 +69,7 @@ fn bench_decimate_cpu(c: &mut Criterion) {
         b.iter(|| {
             let mut total = 0usize;
             for cache in &caches {
-                let cols = cache.minmax_columns(x0, x1, WIDTH as usize);
+                let cols = cache.minmax_columns(x0, x1, WIDTH as usize, true);
                 total += cols.len();
             }
             total
@@ -99,7 +99,7 @@ fn bench_frame_encode(c: &mut Criterion) {
             let mut binds = Vec::with_capacity(TRACES);
             for (i, cache) in caches.iter().enumerate() {
                 let field = FieldId(i as u32);
-                let cols = cache.minmax_columns(x0, x1, WIDTH as usize);
+                let cols = cache.minmax_columns(x0, x1, WIDTH as usize, true);
                 col_buffers.sync(field, &cols, true);
                 uniforms.write(
                     i as u32,
