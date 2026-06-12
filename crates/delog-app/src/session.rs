@@ -194,6 +194,16 @@ impl Session {
         self.live_links.iter().map(|link| link.status()).collect()
     }
 
+    /// Disconnect the live link at `index` (matching `live_statuses` order).
+    /// Dropping the `LiveLink` stops its reader and ingest threads; samples
+    /// already ingested stay in the store.
+    pub fn stop_live(&mut self, index: usize) {
+        if index < self.live_links.len() {
+            self.live_links.remove(index);
+            self.ctx.request_repaint();
+        }
+    }
+
     pub fn has_live_links(&self) -> bool {
         !self.live_links.is_empty()
     }
