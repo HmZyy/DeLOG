@@ -39,6 +39,7 @@ eframe = { version = "0.34.3", default-features = false, features = [
   "x11",
 ] }
 egui-wgpu = "0.34.3"
+egui_extras = { version = "0.34.3", default-features = false, features = ["svg"] }
 egui_tiles = "0.15.0"
 rfd = "0.17.2"
 wgpu = "29.0.3"
