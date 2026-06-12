@@ -318,14 +318,27 @@ pub fn save_named(name: &str, doc: &LayoutDoc) -> Result<(), LayoutError> {
     fs::create_dir_all(&dir).map_err(|e| LayoutError::Io(e.to_string()))?;
     let stem = sanitize_name(name);
     let path = dir.join(format!("{stem}.json"));
-    let tmp = dir.join(format!("{stem}.json.tmp"));
-    let json = serde_json::to_string_pretty(doc).map_err(|e| LayoutError::Json(e.to_string()))?;
-    fs::write(&tmp, json).map_err(|e| LayoutError::Io(e.to_string()))?;
-    fs::rename(&tmp, &path).map_err(|e| LayoutError::Io(e.to_string()))?;
-    Ok(())
+    let json = doc_json(doc)?;
+    write_json_atomic(&path, &json)
 }
 
 pub fn export_doc(path: &Path, doc: &LayoutDoc) -> Result<(), LayoutError> {
+    let json = doc_json(doc)?;
+    write_json_atomic(path, &json)
+}
+
+pub fn save_session_json(json: &str) -> Result<(), LayoutError> {
+    let Some(base) = storage_dir(APP_ID) else {
+        return Err(LayoutError::NoStorageDir);
+    };
+    write_json_atomic(&base.join("session.json"), json)
+}
+
+pub fn doc_json(doc: &LayoutDoc) -> Result<String, LayoutError> {
+    serde_json::to_string_pretty(doc).map_err(|e| LayoutError::Json(e.to_string()))
+}
+
+fn write_json_atomic(path: &Path, json: &str) -> Result<(), LayoutError> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -338,7 +351,6 @@ pub fn export_doc(path: &Path, doc: &LayoutDoc) -> Result<(), LayoutError> {
             .map(|s| format!("{s}."))
             .unwrap_or_default()
     ));
-    let json = serde_json::to_string_pretty(doc).map_err(|e| LayoutError::Json(e.to_string()))?;
     fs::write(&tmp, json).map_err(|e| LayoutError::Io(e.to_string()))?;
     fs::rename(&tmp, path).map_err(|e| LayoutError::Io(e.to_string()))?;
     Ok(())
