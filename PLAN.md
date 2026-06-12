@@ -517,7 +517,7 @@ The config dialog offers **field-mapping pickers with sane defaults** per source
 
 ### 12.3 Scene & cameras
 
-Ground grid (shader-based, distance-faded), world axes gizmo, full trajectory polyline + current pose marker per vehicle, per-vehicle color/path-color/scale/visibility. **One camera, always tracking.** It orbits a target that follows the tracked vehicle's pose at playback time, with the user's orbit offset (yaw/pitch/distance) preserved — left-drag orbits, wheel zooms, double-click resets the offset (keeping the target). **Which** vehicle it tracks is chosen by a dropdown that appears in the scene pane **only when two or more vehicles are configured**; with one vehicle it tracks that vehicle and the dropdown is hidden, and with none it tracks the world origin (dropdown hidden). There are no separate Orbit/Free camera modes. When no vehicle is configured, a demo lemniscate path animates — doubling as the render smoke test (spec's "demo path").
+Ground grid (shader-based, distance-faded), world axes gizmo, full trajectory polyline + current pose marker per vehicle, per-vehicle color/path-color/scale/visibility. **One camera, always tracking.** It orbits a target that follows the tracked vehicle's pose at playback time, with the user's orbit offset (yaw/pitch/distance) preserved — left-drag orbits, wheel zooms, double-click resets the offset (keeping the target). **Which** vehicle it tracks is chosen by a dropdown that appears in the scene pane **only when two or more vehicles are configured**; with one vehicle it tracks that vehicle and the dropdown is hidden, and with none it tracks the world origin (dropdown hidden). There are no separate Orbit/Free camera modes. When no vehicle is configured, the scene shows just the grid and axes gizmo (no placeholder path).
 
 ### 12.4 Models
 
@@ -942,7 +942,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **TDV-08** — Embedded GLBs (quad/fixed-wing/delta) + custom GLB load + cone fallback — `models::mesh_for` with `include_bytes!` GLBs; `load_glb` bakes multi-part node transforms; `MeshCpu::cone` is the unconditional fallback. Real Quad/FixedWing/DeltaWing decode verified _(no marker asset; `Cone` replaces it per decision)_
 - [~] **TDV-09** — Per-vehicle color/path color/scale/show; multiple vehicles — the scene render path draws N vehicles (mesh at pose + trajectory) honoring color/path-color/scale/show; needs the dialog to create them + the camera tracked-vehicle dropdown
 - [~] **TDV-10** — Trajectory line + current pose marker synced to playhead — render path draws each vehicle's trajectory + its mesh at the playhead pose (the mesh is the pose marker); pending vehicles to display + visual verification
-- [~] **TDV-11** — Rebuild on config/offset change; demo lemniscate when unconfigured — demo lemniscate path (static, via `traj3d`) + the green vertical Y-axis gizmo are drawn in the scene whenever no vehicle is configured (i.e. always, until TDV-03). Animation and rebuild-on-config/offset ride with vehicle config (TDV-03/04)
+- [~] **TDV-11** — Rebuild on config/offset change — rides with vehicle config (TDV-03/04). The green vertical Y-axis gizmo is always drawn; the demo lemniscate originally specced here was removed by decision — an unconfigured scene shows only the grid + axes gizmo
 - [ ] **TDV-12** — _(later)_ slerp pose; time-windowed trail
 
 ### BRW — Data browser (M2 base, M4 polish)
