@@ -14,6 +14,15 @@ use pyo3::types::PyDict;
 
 use crate::api::Delog;
 
+/// Format a Python error with its traceback (if any) for an Error event.
+fn format_pyerr(py: Python<'_>, err: &PyErr) -> String {
+    let tb = err
+        .traceback(py)
+        .and_then(|t| t.format().ok())
+        .unwrap_or_default();
+    format!("{tb}{err}")
+}
+
 /// A command sent from the UI thread to the worker.
 pub enum ScriptCommand {
     /// Evaluate one REPL line in the persistent namespace.
@@ -135,7 +144,7 @@ fn worker_loop(
                 }
                 let snapshot = store.load();
                 let emit: crate::api::EmitBuffer = std::rc::Rc::default();
-                let run_result = Python::attach(|py| {
+                let run_result: Result<(), String> = Python::attach(|py| {
                     let g = globals.bind(py);
                     let delog = Bound::new(
                         py,
@@ -145,6 +154,7 @@ fn worker_loop(
                     g.set_item("delog", delog).unwrap();
                     let code = std::ffi::CString::new(source.as_str()).expect("NUL checked above");
                     py.run(&code, Some(g), None)
+                        .map_err(|e| format_pyerr(py, &e))
                 });
                 match run_result {
                     Ok(()) => {
@@ -161,9 +171,9 @@ fn worker_loop(
                             }
                         }
                     }
-                    Err(err) => {
+                    Err(msg) => {
                         // No partial source on failure.
-                        let _ = evt_tx.send(ScriptEvent::Error(format!("{err}")));
+                        let _ = evt_tx.send(ScriptEvent::Error(msg));
                     }
                 }
                 let _ = evt_tx.send(ScriptEvent::Done);
@@ -206,7 +216,7 @@ fn eval_line(globals: &Py<PyDict>, src: &str, evt_tx: &Sender<ScriptEvent>) {
             Err(_) => {
                 // Not an expression — run as a statement.
                 if let Err(err) = py.run(&code, Some(g), None) {
-                    let _ = evt_tx.send(ScriptEvent::Error(format!("{err}")));
+                    let _ = evt_tx.send(ScriptEvent::Error(format_pyerr(py, &err)));
                 }
             }
         }
@@ -346,6 +356,44 @@ out.add_field("v", np.array([1.0, 2.0, 3.0]), unit="m")
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert!(found, "derived source script:test not published");
+        let _ = ingest_thread;
+    }
+
+    #[test]
+    fn failing_script_emits_error_and_no_source() {
+        use delog_core::ingest::ingest_channel;
+        use delog_core::ingestor::{Ingestor, NullObserver};
+
+        let ingestor = Ingestor::new(NullObserver);
+        let write_store = ingestor.store();
+        let (sender, receiver) = ingest_channel();
+        let ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
+
+        let engine = ScriptEngine::spawn(Arc::new(DataStore::new()), sender);
+        let script = "import numpy as np\nout = delog.output(np.array([0],dtype=np.int64),'X')\nout.add_field('v', np.array([1.0]))\nraise ValueError('boom')\n";
+        engine.send(ScriptCommand::RunScript {
+            name: "bad".into(),
+            source: script.into(),
+        });
+        let mut err = None;
+        loop {
+            match engine.recv_blocking() {
+                ScriptEvent::Error(e) => err = Some(e),
+                ScriptEvent::Done => break,
+                _ => {}
+            }
+        }
+        drop(engine);
+        assert!(err.expect("error event").contains("boom"));
+        // Failure emits nothing — give the ingest thread a moment, then confirm absence.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let snap = write_store.load();
+        assert!(
+            !snap
+                .sources
+                .iter()
+                .any(|s| s.entry.label == "script:bad" && !s.entry.removed)
+        );
         let _ = ingest_thread;
     }
 }
