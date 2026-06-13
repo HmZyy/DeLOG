@@ -13,7 +13,7 @@ use crate::layout::{LayoutApply, LayoutDoc, LayoutError, LoadOutcome, PendingLay
 use crate::live::ConnectionDialog;
 use crate::plot::ViewX;
 use crate::session::Session;
-use crate::settings::{AppSettings, SettingsDialog};
+use crate::settings::{AppSettings, RenderMode, SettingsDialog};
 use crate::timeline::Playback;
 use crate::workspace::{PlotServices, Workspace};
 
@@ -908,8 +908,8 @@ impl eframe::App for DelogApp {
             // while playing (later: or a link is Connected, M7). Everything
             // else is event-driven — ingest progress, epoch changes and
             // diagnostics each request their own repaint — so a static plot
-            // idles at 0% GPU. The Continuous render mode (PRF-09) overrides
-            // this and forces a repaint every frame.
+            // idles at 0% GPU. (The Continuous render mode override is applied
+            // below, after the if/else, so it covers empty sessions too.)
             if self.playback.playing || self.session.has_connected_live() {
                 ui.ctx().request_repaint();
             }
@@ -920,7 +920,10 @@ impl eframe::App for DelogApp {
             self.caches.set_origin(0);
             self.view.get_or_insert(ViewX::new(0, 10_000_000));
         }
-        if self.settings.render_mode == crate::settings::RenderMode::Continuous {
+        // Continuous render mode (PRF-09) forces a repaint every frame,
+        // overriding the idle-aware policy above for both the data and
+        // empty-session branches.
+        if self.settings.render_mode == RenderMode::Continuous {
             ui.ctx().request_repaint();
         }
         self.caches.begin_frame(self.frame);
