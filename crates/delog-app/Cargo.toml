@@ -11,12 +11,19 @@ rust-version.workspace = true
 name = "delog"
 path = "src/main.rs"
 
+[features]
+default = []
+# Embedded-Python scripting (PLAN.md §17.3, SCR-*). OFF by default.
+scripting = ["dep:delog-script", "delog-script/python", "dep:egui_code_editor"]
+
 [dependencies]
 delog-core = { workspace = true }
 delog-parsers = { workspace = true }
 delog-stream = { workspace = true }
 delog-cache = { workspace = true }
 delog-render = { workspace = true }
+delog-script = { workspace = true, optional = true }
+egui_code_editor = { workspace = true, optional = true }
 
 bytemuck = { workspace = true }
 eframe = { workspace = true }

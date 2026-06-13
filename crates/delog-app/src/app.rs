@@ -12,6 +12,8 @@ use crate::gpu::GpuBridge;
 use crate::layout::{LayoutApply, LayoutDoc, LayoutError, LoadOutcome, PendingLayout};
 use crate::live::ConnectionDialog;
 use crate::plot::ViewX;
+#[cfg(feature = "scripting")]
+use crate::scripts;
 use crate::session::Session;
 use crate::settings::{AppSettings, RenderMode, SettingsDialog};
 use crate::timeline::Playback;
@@ -58,6 +60,8 @@ enum LayoutManagerAction {
 
 pub struct DelogApp {
     session: Session,
+    #[cfg(feature = "scripting")]
+    scripts: scripts::ScriptsPanel,
     gpu: GpuBridge,
     caches: CacheManager,
     workspace: Workspace,
@@ -129,6 +133,8 @@ impl DelogApp {
         let (exported_layouts_tx, exported_layouts) = mpsc::channel();
         Self {
             session: Session::new(cc.egui_ctx.clone()),
+            #[cfg(feature = "scripting")]
+            scripts: scripts::ScriptsPanel::default(),
             gpu: GpuBridge::from_creation_context(cc),
             caches: CacheManager::new(),
             workspace: Workspace::new(),
@@ -1002,6 +1008,20 @@ impl eframe::App for DelogApp {
                     if ui.button("Import JSON...").clicked() {
                         self.spawn_import_layout_dialog(ui.ctx());
                         ui.close();
+                    }
+                });
+                ui.menu_button("Tools", |ui| {
+                    #[cfg(feature = "scripting")]
+                    if ui.button("Scripts…").clicked() {
+                        self.scripts.open = true;
+                        ui.close();
+                    }
+                    #[cfg(not(feature = "scripting"))]
+                    {
+                        let _ = ui.add_enabled(
+                            false,
+                            egui::Button::new("Scripts (build with --features scripting)"),
+                        );
                     }
                 });
                 ui.menu_button("Help", |ui| {

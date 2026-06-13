@@ -152,6 +152,20 @@ impl Session {
         self.store.load()
     }
 
+    /// The published store, for background engines that load fresh snapshots.
+    // Wired up here ahead of the engine that consumes it (SCR-*, Task 14).
+    #[allow(dead_code)]
+    pub fn store(&self) -> Arc<DataStore> {
+        Arc::clone(&self.store)
+    }
+
+    /// A clone of the ingest sender, for engines that emit derived sources.
+    // Wired up here ahead of the engine that consumes it (SCR-*, Task 14).
+    #[allow(dead_code)]
+    pub fn ingest_sender(&self) -> IngestSender {
+        self.sender.clone()
+    }
+
     /// The shared metrics registry (PLAN.md §16) — instrumentation reads/writes
     /// through this; the perf dock (PRF-*) snapshots it at 4 Hz.
     pub fn metrics(&self) -> &Arc<MetricsRegistry> {

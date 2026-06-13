@@ -14,6 +14,8 @@ mod legend;
 mod live;
 mod models;
 mod plot;
+#[cfg(feature = "scripting")]
+mod scripts;
 mod session;
 mod settings;
 mod theme;
