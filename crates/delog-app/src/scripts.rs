@@ -186,18 +186,25 @@ impl ScriptsPanel {
             .show_inside(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("REPL:");
-                    let resp = ui.add(
-                        egui::TextEdit::singleline(&mut self.repl_input)
-                            .desired_width(f32::INFINITY),
-                    );
-                    if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        let line = std::mem::take(&mut self.repl_input);
-                        self.console.push_str(">>> ");
-                        self.console.push_str(&line);
-                        self.console.push('\n');
-                        self.engine(store.clone(), sender.clone())
-                            .send(ScriptCommand::Eval(line));
-                    }
+                    // Clear-console trash sits at the far right; the input fills
+                    // the space between it and the label.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if icon_btn(ui, crate::icons::trash(), "Clear console").clicked() {
+                            self.console.clear();
+                        }
+                        let resp = ui.add(
+                            egui::TextEdit::singleline(&mut self.repl_input)
+                                .desired_width(f32::INFINITY),
+                        );
+                        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            let line = std::mem::take(&mut self.repl_input);
+                            self.console.push_str(">>> ");
+                            self.console.push_str(&line);
+                            self.console.push('\n');
+                            self.engine(store.clone(), sender.clone())
+                                .send(ScriptCommand::Eval(line));
+                        }
+                    });
                 });
                 egui::ScrollArea::vertical()
                     .stick_to_bottom(true)
@@ -261,17 +268,13 @@ impl ScriptsPanel {
                     }
                 }
 
-                // Clear the console output.
-                if icon_btn(ui, crate::icons::trash(), "Clear console").clicked() {
-                    self.console.clear();
-                }
-
                 ui.label(&self.status);
             });
             // egui_code_editor 0.3.3 has no `with_syntax` builder; the syntax is
             // passed to `show` as a `&Syntax` argument instead.
             CodeEditor::default()
                 .id_source("script_editor")
+                .with_rows(25)
                 .with_theme(ColorTheme::GITHUB_DARK)
                 .with_numlines(true)
                 .show(ui, &mut self.editor_text, &Syntax::python());
