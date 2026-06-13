@@ -22,6 +22,8 @@ pub struct ScriptsPanel {
     status: String,
     /// Script name awaiting a delete confirmation (Tools ▸ Scripts ▸ Run ▸ Remove).
     pending_delete: Option<String>,
+    /// Whether a command is in flight (toggles the Run/Cancel button).
+    running: bool,
 }
 
 impl ScriptsPanel {
@@ -37,6 +39,7 @@ impl ScriptsPanel {
             console: String::new(),
             status: String::new(),
             pending_delete: None,
+            running: false,
         }
     }
 
@@ -72,6 +75,7 @@ impl ScriptsPanel {
             Ok(source) => {
                 self.console.push_str(&format!("# run {name}\n"));
                 self.status = format!("running {name}");
+                self.running = true;
                 self.engine(store, sender).send(ScriptCommand::RunScript {
                     name: name.to_owned(),
                     source,
@@ -100,8 +104,12 @@ impl ScriptsPanel {
                         self.console.push_str(&e);
                         self.console.push('\n');
                         self.status = "error".into();
+                        self.running = false;
                     }
-                    ScriptEvent::Done => self.status = "done".into(),
+                    ScriptEvent::Done => {
+                        self.status = "done".into();
+                        self.running = false;
+                    }
                 }
             }
         }
@@ -204,26 +212,55 @@ impl ScriptsPanel {
             });
         egui::CentralPanel::default().show_inside(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.text_edit_singleline(&mut self.current_name);
-                if ui.button("Save").clicked() && !self.current_name.is_empty() {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.current_name)
+                        .hint_text("script name")
+                        .desired_width(160.0),
+                );
+
+                // Save (icon-only; disabled until the buffer has a name).
+                let save_img = egui::Image::new(crate::icons::save())
+                    .fit_to_exact_size(egui::vec2(16.0, 16.0))
+                    .tint(ui.visuals().text_color());
+                if ui
+                    .add_enabled(!self.current_name.is_empty(), egui::Button::image(save_img))
+                    .on_hover_text("Save")
+                    .clicked()
+                {
                     match self.library.save(&self.current_name, &self.editor_text) {
                         Ok(()) => self.status = format!("saved {}", self.current_name),
                         Err(e) => self.status = format!("save failed: {e}"),
                     }
                 }
-                if ui.button("Run").clicked() && !self.current_name.is_empty() {
-                    self.console
-                        .push_str(&format!("# run {}\n", self.current_name));
-                    let name = self.current_name.clone();
-                    let source = self.editor_text.clone();
-                    self.engine(store.clone(), sender.clone())
-                        .send(ScriptCommand::RunScript { name, source });
+
+                // Run / Cancel toggle (icon-only).
+                let (icon, hover) = if self.running {
+                    (crate::icons::square(), "Cancel")
+                } else {
+                    (crate::icons::play(), "Run")
+                };
+                if icon_btn(ui, icon, hover).clicked() {
+                    if self.running {
+                        if let Some(e) = &self.engine {
+                            e.request_interrupt();
+                        }
+                    } else {
+                        // Runs the editor buffer; an unsaved buffer runs as
+                        // "scratch" so output still shows in the console.
+                        let name = if self.current_name.is_empty() {
+                            "scratch".to_owned()
+                        } else {
+                            self.current_name.clone()
+                        };
+                        self.console.push_str(&format!("# run {name}\n"));
+                        self.status = format!("running {name}");
+                        self.running = true;
+                        let source = self.editor_text.clone();
+                        self.engine(store.clone(), sender.clone())
+                            .send(ScriptCommand::RunScript { name, source });
+                    }
                 }
-                if ui.button("Cancel \u{23f9}").clicked()
-                    && let Some(e) = &self.engine
-                {
-                    e.request_interrupt();
-                }
+
                 ui.label(&self.status);
             });
             // egui_code_editor 0.3.3 has no `with_syntax` builder; the syntax is
@@ -235,4 +272,12 @@ impl ScriptsPanel {
                 .show(ui, &mut self.editor_text, &Syntax::python());
         });
     }
+}
+
+/// A compact icon-only button (16px, tinted to the text colour) with a tooltip.
+fn icon_btn(ui: &mut egui::Ui, icon: egui::ImageSource<'static>, hover: &str) -> egui::Response {
+    let image = egui::Image::new(icon)
+        .fit_to_exact_size(egui::vec2(16.0, 16.0))
+        .tint(ui.visuals().text_color());
+    ui.add(egui::Button::image(image)).on_hover_text(hover)
 }

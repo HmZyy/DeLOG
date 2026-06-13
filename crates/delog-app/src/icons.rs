@@ -42,6 +42,24 @@ pub fn pencil() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/pencil.svg")
 }
 
+/// Play (run a script). Used only by the scripting Console.
+#[cfg_attr(not(feature = "scripting"), allow(dead_code))]
+pub fn play() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/play.svg")
+}
+
+/// Square (stop / cancel a running script). Used only by the scripting Console.
+#[cfg_attr(not(feature = "scripting"), allow(dead_code))]
+pub fn square() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/square.svg")
+}
+
+/// Save (write the editor buffer to the script library). Scripting Console only.
+#[cfg_attr(not(feature = "scripting"), allow(dead_code))]
+pub fn save() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/save.svg")
+}
+
 /// Two columns (split into side-by-side panes — horizontal split).
 pub fn columns() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/columns-2.svg")
