@@ -261,6 +261,11 @@ impl ScriptsPanel {
                     }
                 }
 
+                // Clear the console output.
+                if icon_btn(ui, crate::icons::trash(), "Clear console").clicked() {
+                    self.console.clear();
+                }
+
                 ui.label(&self.status);
             });
             // egui_code_editor 0.3.3 has no `with_syntax` builder; the syntax is
