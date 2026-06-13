@@ -11,13 +11,14 @@ rust-version.workspace = true
 default = []
 # Pulls in the embedded CPython interpreter + numpy. OFF by default so
 # `cargo build --workspace` needs no Python toolchain (PLAN.md §17.3).
-python = ["dep:pyo3", "dep:numpy"]
+python = ["dep:pyo3", "dep:numpy", "dep:arrow"]
 
 [dependencies]
 delog-core = { workspace = true }
 
 pyo3 = { workspace = true, optional = true }
 numpy = { workspace = true, optional = true }
+arrow = { workspace = true, optional = true }
 
 [dev-dependencies]
 arrow = { workspace = true }
