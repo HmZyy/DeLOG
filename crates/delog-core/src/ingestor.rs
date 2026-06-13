@@ -6,13 +6,13 @@
 //! epoch-snapshot model (§4.4) correct with no locks.
 //!
 //! Sealing policy (§4.3): a file source seals at 64Ki rows; a live source seals
-//! at 512 rows *or* after [`LIVE_MAX_AGE`] of inactivity (driven by the loop's
-//! `recv_timeout`). Per-chunk [`ColStats`](crate::chunk::ColStats) are computed
-//! once, at seal, inside [`Chunk::try_new`].
+//! when its pending rows reach [`LIVE_CHUNK_ROWS`] or its per-topic pending age
+//! reaches [`LIVE_MAX_AGE`]. Per-chunk [`ColStats`](crate::chunk::ColStats) are
+//! computed once, at seal, inside [`Chunk::try_new`].
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use arrow::array::{Array, ArrayRef, Int64Array};
 use arrow::compute::{concat, sort_to_indices, take};
@@ -29,7 +29,7 @@ use crate::store::TopicStore;
 
 /// File source chunk target: 64Ki rows (§4.3).
 pub const FILE_CHUNK_ROWS: usize = 64 * 1024;
-/// Live source chunk target: 512 rows (§4.3).
+/// Live source chunk target (§4.3).
 pub const LIVE_CHUNK_ROWS: usize = 512;
 /// Live source max chunk age before a partial seal (§4.3).
 pub const LIVE_MAX_AGE: Duration = Duration::from_millis(100);
@@ -56,6 +56,7 @@ struct Pending {
     timestamps: Vec<Int64Array>,
     columns: Vec<Vec<ArrayRef>>,
     rows: usize,
+    first_buffered_at: Instant,
     /// Last timestamp accepted, to guard the cross-batch join (kept sorted).
     last_ts: Option<i64>,
 }
@@ -110,12 +111,15 @@ impl<O: IngestObserver> Ingestor<O> {
         self.rows_ingested
     }
 
-    /// Drain `rx` until every sender drops. Live chunks that go quiet for
-    /// [`LIVE_MAX_AGE`] are flushed on the idle tick.
+    /// Drain `rx` until every sender drops. The idle tick checks each live
+    /// topic's own pending age, so busy unrelated topics do not starve seals.
     pub fn run(mut self, rx: IngestReceiver) {
         loop {
             match rx.recv_timeout(LIVE_MAX_AGE) {
-                RecvOutcome::Message(msg) => self.process(msg),
+                RecvOutcome::Message(msg) => {
+                    self.process(msg);
+                    self.flush_aged_live();
+                }
                 RecvOutcome::Idle => self.flush_aged_live(),
                 RecvOutcome::Disconnected => break,
             }
@@ -307,6 +311,7 @@ impl<O: IngestObserver> Ingestor<O> {
                 timestamps: Vec::new(),
                 columns: Vec::new(),
                 rows: 0,
+                first_buffered_at: Instant::now(),
                 last_ts: None,
             })
     }
@@ -389,13 +394,19 @@ impl<O: IngestObserver> Ingestor<O> {
         }
     }
 
-    /// Flush partial chunks for live sources only (the idle-tick path).
+    /// Flush expired partial chunks for live sources only (the idle-tick path).
     fn flush_aged_live(&mut self) {
+        let now = Instant::now();
         let stale: Vec<(SourceId, TopicId)> = self
             .sources
             .iter()
             .filter(|(_, state)| state.kind == SourceKind::Live)
-            .flat_map(|(&source, state)| state.pending.keys().map(move |&topic| (source, topic)))
+            .flat_map(|(&source, state)| {
+                state.pending.iter().filter_map(move |(&topic, pending)| {
+                    (now.duration_since(pending.first_buffered_at) >= LIVE_MAX_AGE)
+                        .then_some((source, topic))
+                })
+            })
             .collect();
         for (source, topic) in stale {
             self.seal_topic(source, topic);
@@ -558,8 +569,8 @@ mod tests {
         // threshold and seals exactly one chunk.
         let mut t = 0_i64;
         while ing.chunks_sealed() == 0 {
-            let times: Vec<i64> = (t..t + 64).collect();
-            t += 64;
+            let times: Vec<i64> = (t..t + 8).collect();
+            t += 8;
             ing.process(IngestMsg::Batch(batch(source, "GPS", &times)));
         }
         assert_eq!(ing.chunks_sealed(), 1);
@@ -581,6 +592,22 @@ mod tests {
             topic_store.chunks[0].stats[0].max,
             (LIVE_CHUNK_ROWS - 1) as f64
         );
+    }
+
+    #[test]
+    fn live_age_flush_only_seals_topics_older_than_max_age() {
+        let mut ing = Ingestor::new(NullObserver);
+        let source = open(&mut ing, "live", SourceKind::Live);
+
+        ing.process(IngestMsg::Batch(batch(source, "GPS", &[1])));
+        ing.flush_aged_live();
+        assert_eq!(ing.chunks_sealed(), 0, "fresh pending rows stay pending");
+
+        for pending in ing.sources.get_mut(&source).unwrap().pending.values_mut() {
+            pending.first_buffered_at = Instant::now() - LIVE_MAX_AGE - Duration::from_millis(1);
+        }
+        ing.flush_aged_live();
+        assert_eq!(ing.chunks_sealed(), 1, "expired pending rows seal");
     }
 
     #[test]
