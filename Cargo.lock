@@ -920,9 +920,11 @@ dependencies = [
  "delog-core",
  "delog-parsers",
  "delog-render",
+ "delog-script",
  "delog-stream",
  "eframe",
  "egui",
+ "egui_code_editor",
  "egui_extras",
  "egui_tiles",
  "glam",
@@ -1169,6 +1171,15 @@ dependencies = [
  "web-time",
  "webbrowser",
  "winit",
+]
+
+[[package]]
+name = "egui_code_editor"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c44ac108a219771d2fd7a085cfe9d2030682faab1a88c26adff4f87338cd4045"
+dependencies = [
+ "egui",
 ]
 
 [[package]]
