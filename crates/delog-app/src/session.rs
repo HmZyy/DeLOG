@@ -153,15 +153,15 @@ impl Session {
     }
 
     /// The published store, for background engines that load fresh snapshots.
-    // Wired up here ahead of the engine that consumes it (SCR-*, Task 14).
-    #[allow(dead_code)]
+    /// Consumed by the scripts engine (SCR-07); dead without that feature.
+    #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
     pub fn store(&self) -> Arc<DataStore> {
         Arc::clone(&self.store)
     }
 
     /// A clone of the ingest sender, for engines that emit derived sources.
-    // Wired up here ahead of the engine that consumes it (SCR-*, Task 14).
-    #[allow(dead_code)]
+    /// Consumed by the scripts engine (SCR-07); dead without that feature.
+    #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
     pub fn ingest_sender(&self) -> IngestSender {
         self.sender.clone()
     }

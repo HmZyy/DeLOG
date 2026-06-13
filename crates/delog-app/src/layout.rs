@@ -365,6 +365,13 @@ pub fn save_session_json(json: &str) -> Result<(), LayoutError> {
     write_json_atomic(&base.join("session.json"), json)
 }
 
+/// The app config directory (where settings.json lives), if resolvable.
+/// Used by the scripts panel (SCR-07) to locate its library dir.
+#[cfg_attr(not(feature = "scripting"), allow(dead_code))]
+pub fn config_dir() -> Option<std::path::PathBuf> {
+    storage_dir(APP_ID)
+}
+
 /// Path to the app-wide settings file (LAY-08). Separate from layouts and from
 /// `session.json` so loading a layout never changes user preferences.
 fn settings_path() -> Result<PathBuf, LayoutError> {
