@@ -87,6 +87,7 @@ pub struct DelogApp {
     imported_layouts_tx: mpsc::Sender<LayoutImportResult>,
     exported_layouts: mpsc::Receiver<LayoutExportResult>,
     exported_layouts_tx: mpsc::Sender<LayoutExportResult>,
+    browser_collapsed: bool,
     browser_query: String,
     browser_selection: browser::Selection,
     offset_dialog: Option<(delog_core::identity::SourceId, i64)>,
@@ -148,6 +149,7 @@ impl DelogApp {
             imported_layouts_tx,
             exported_layouts,
             exported_layouts_tx,
+            browser_collapsed: false,
             browser_query: String::new(),
             browser_selection: browser::Selection::default(),
             offset_dialog: None,
@@ -1193,23 +1195,62 @@ impl eframe::App for DelogApp {
             });
         }
 
-        let model = BrowserModel::from_snapshot(&snapshot);
-        egui::Panel::left("data_browser")
-            .resizable(true)
-            .default_size(280.0)
-            .show_inside(ui, |ui| {
+        if self.browser_collapsed {
+            let button_size = browser::panel_toggle_button_size(ui);
+            let collapsed_left_margin = ui.spacing().item_spacing.x;
+            let collapsed_width = collapsed_left_margin + button_size.x;
+            let collapsed_frame =
+                egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::ZERO);
+            egui::Panel::left("data_browser_collapsed")
+                .resizable(false)
+                .show_separator_line(false)
+                .frame(collapsed_frame)
+                .exact_size(collapsed_width)
+                .show_inside(ui, |ui| {
+                    ui.vertical(|ui| {
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            ui.add_space(collapsed_left_margin);
+                            let icon_size = button_size - ui.spacing().button_padding * 2.0;
+                            let icon = egui::Image::new(crate::icons::panel_left_open())
+                                .fit_to_exact_size(icon_size)
+                                .tint(ui.visuals().text_color());
+                            if ui
+                                .add_sized(button_size, egui::Button::image(icon))
+                                .on_hover_text("Show data browser")
+                                .clicked()
+                            {
+                                self.browser_collapsed = false;
+                            }
+                        });
+                    });
+                });
+        } else {
+            let model = BrowserModel::from_snapshot(&snapshot);
+            let browser_panel = egui::Panel::left("data_browser_expanded").resizable(false);
+            let browser_panel = if model.is_empty() {
+                browser_panel.default_size(ui.spacing().text_edit_width)
+            } else {
+                browser_panel
+            };
+            browser_panel.show_inside(ui, |ui| {
                 // Offset edits go through the ingest thread (the single
                 // registry writer) and come back as a new epoch (BRW-07).
-                if let Some((source, offset_us)) = browser::ui(
+                let browser_response = browser::ui(
                     ui,
                     &model,
                     &mut self.browser_query,
                     &mut self.browser_selection,
                     &mut self.offset_dialog,
-                ) {
+                );
+                if browser_response.collapse_requested {
+                    self.browser_collapsed = true;
+                }
+                if let Some((source, offset_us)) = browser_response.offset_change {
                     self.session.set_source_offset(source, offset_us);
                 }
             });
+        }
 
         egui::Frame::central_panel(ui.style()).show(ui, |ui| {
             // The workspace renders even before any log loads, so plots can be
