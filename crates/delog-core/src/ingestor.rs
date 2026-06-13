@@ -158,7 +158,7 @@ impl<O: IngestObserver> Ingestor<O> {
     fn open_source(&mut self, key: &str, kind: SourceKind) -> SourceId {
         let id = self.identity.add_source(key);
         let seal_rows = match kind {
-            SourceKind::File => FILE_CHUNK_ROWS,
+            SourceKind::File | SourceKind::Derived => FILE_CHUNK_ROWS,
             SourceKind::Live => LIVE_CHUNK_ROWS,
         };
         self.sources.insert(
@@ -761,6 +761,23 @@ mod tests {
             offset_us: 1_000,
         });
         assert_eq!(store.load().epoch, before.epoch, "no spurious publish");
+    }
+
+    #[test]
+    fn derived_source_seals_at_the_file_threshold() {
+        let mut ing = Ingestor::new(NullObserver);
+        let source = open(&mut ing, "script:test", SourceKind::Derived);
+
+        // One batch below the file threshold does not seal.
+        ing.process(IngestMsg::Batch(batch(source, "DERIVED", &[1, 2, 3])));
+        assert_eq!(ing.chunks_sealed(), 0);
+
+        // Closing flushes the tail.
+        ing.process(IngestMsg::CloseSource {
+            source,
+            summary: ParseSummary::default(),
+        });
+        assert_eq!(ing.chunks_sealed(), 1);
     }
 
     #[test]
