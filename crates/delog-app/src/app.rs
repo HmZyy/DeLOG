@@ -134,7 +134,11 @@ impl DelogApp {
         Self {
             session: Session::new(cc.egui_ctx.clone()),
             #[cfg(feature = "scripting")]
-            scripts: scripts::ScriptsPanel::default(),
+            scripts: scripts::ScriptsPanel::new(
+                crate::layout::config_dir()
+                    .unwrap_or_else(|| std::path::PathBuf::from("."))
+                    .join("scripts"),
+            ),
             gpu: GpuBridge::from_creation_context(cc),
             caches: CacheManager::new(),
             workspace: Workspace::new(),
@@ -1387,6 +1391,10 @@ impl eframe::App for DelogApp {
             self.session
                 .push_diagnostic(delog_core::diagnostics::Diag::error("live-open", err));
         }
+
+        #[cfg(feature = "scripting")]
+        self.scripts
+            .ui(ui.ctx(), self.session.store(), self.session.ingest_sender());
     }
 }
 
