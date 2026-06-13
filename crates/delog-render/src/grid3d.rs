@@ -25,14 +25,18 @@ pub struct GridUniform {
     pub view_proj: [[f32; 4]; 4],
     /// Clip → world (for per-pixel ray reconstruction).
     pub inv_view_proj: [[f32; 4]; 4],
-    /// Camera world position (xyz); `w` unused.
+    /// Camera world position (xyz); `w` = LOD blend (1.0 = draw two bracketing
+    /// power-of-ten grids around `cell` and cross-fade the finer one, 0.0 = draw
+    /// `cell` as a single level).
     pub cam_pos: [f32; 4],
     /// `x` = cell size (world units), `y` = fade start distance,
-    /// `z` = fade end distance, `w` unused.
+    /// `z` = fade end distance, `w` = fog enabled (1.0 = fade with distance,
+    /// 0.0 = draw the grid crisp to the far plane).
     pub params: [f32; 4],
 }
 
 impl GridUniform {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         view_proj: [[f32; 4]; 4],
         inv_view_proj: [[f32; 4]; 4],
@@ -40,12 +44,19 @@ impl GridUniform {
         cell: f32,
         fade_start: f32,
         fade_end: f32,
+        fog: bool,
+        lod: bool,
     ) -> Self {
         Self {
             view_proj,
             inv_view_proj,
-            cam_pos: [cam_pos[0], cam_pos[1], cam_pos[2], 0.0],
-            params: [cell, fade_start, fade_end, 0.0],
+            cam_pos: [
+                cam_pos[0],
+                cam_pos[1],
+                cam_pos[2],
+                if lod { 1.0 } else { 0.0 },
+            ],
+            params: [cell, fade_start, fade_end, if fog { 1.0 } else { 0.0 }],
         }
     }
 }
@@ -215,9 +226,11 @@ mod tests {
                 view_proj.to_cols_array_2d(),
                 inv.to_cols_array_2d(),
                 eye.to_array(),
-                1.0,  // 1-unit cells
-                12.0, // fade start
-                60.0, // fade end
+                1.0,   // 1-unit cells
+                12.0,  // fade start
+                60.0,  // fade end
+                true,  // fog on
+                false, // single LOD level
             ),
         );
 
