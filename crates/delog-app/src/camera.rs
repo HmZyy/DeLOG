@@ -14,12 +14,14 @@ use glam::{Mat4, Vec3};
 /// Vertical field of view, radians.
 const FOV_Y: f32 = 0.95; // ~54°
 const NEAR: f32 = 0.05;
+#[cfg(test)]
 const FAR: f32 = 2000.0;
 
 /// Pitch is clamped just shy of the poles so the view never gimbal-flips.
 const PITCH_LIMIT: f32 = 1.5533; // ~89° in radians
 
 const MIN_DISTANCE: f32 = 0.5;
+#[cfg(test)]
 const MAX_DISTANCE: f32 = 1500.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -57,8 +59,15 @@ impl OrbitCamera {
 
     /// World → clip transform for a viewport of the given aspect (w / h).
     /// Uses the `[0, 1]` depth convention (wgpu), matching the grid shader.
+    #[cfg(test)]
     pub fn view_proj(&self, aspect: f32) -> Mat4 {
-        let proj = Mat4::perspective_rh(FOV_Y, aspect.max(1e-3), NEAR, FAR);
+        self.view_proj_with_far(aspect, FAR)
+    }
+
+    /// World → clip transform using a caller-provided far plane.
+    pub fn view_proj_with_far(&self, aspect: f32, far: f32) -> Mat4 {
+        let far = far.max(NEAR + 1.0);
+        let proj = Mat4::perspective_rh(FOV_Y, aspect.max(1e-3), NEAR, far);
         let view = Mat4::look_at_rh(self.eye(), self.target, Vec3::Y);
         proj * view
     }
@@ -72,8 +81,15 @@ impl OrbitCamera {
 
     /// Scale the orbit radius by `factor` (`<1` zooms in), clamped to a sane
     /// range so the camera can neither tunnel through the target nor fly off.
+    #[cfg(test)]
     pub fn zoom(&mut self, factor: f32) {
-        self.distance = (self.distance * factor).clamp(MIN_DISTANCE, MAX_DISTANCE);
+        self.zoom_with_max(factor, MAX_DISTANCE);
+    }
+
+    /// Scale the orbit radius with a caller-provided maximum distance.
+    pub fn zoom_with_max(&mut self, factor: f32, max_distance: f32) {
+        let max_distance = max_distance.max(MIN_DISTANCE);
+        self.distance = (self.distance * factor).clamp(MIN_DISTANCE, max_distance);
     }
 }
 
@@ -121,6 +137,13 @@ mod tests {
     }
 
     #[test]
+    fn zoom_can_use_a_custom_max_distance() {
+        let mut cam = OrbitCamera::default();
+        cam.zoom_with_max(1e9, 12_000.0);
+        assert!((cam.distance - 12_000.0).abs() < 1e-3);
+    }
+
+    #[test]
     fn target_projects_to_screen_center() {
         let cam = OrbitCamera::default();
         let p = ndc(cam.view_proj(16.0 / 9.0), cam.target);
@@ -130,6 +153,19 @@ mod tests {
         );
         // In front of the camera: clip-space depth within [0, 1].
         assert!(p.z > 0.0 && p.z < 1.0, "target depth out of range: {}", p.z);
+    }
+
+    #[test]
+    fn custom_far_plane_keeps_far_points_inside_clip_depth() {
+        let cam = OrbitCamera {
+            target: Vec3::ZERO,
+            yaw: 0.0,
+            pitch: 0.0,
+            distance: 30.0,
+        };
+        let point = Vec3::new(0.0, 0.0, -8_000.0);
+        let p = ndc(cam.view_proj_with_far(16.0 / 9.0, 10_000.0), point);
+        assert!(p.z > 0.0 && p.z < 1.0, "far point clipped: {p:?}");
     }
 
     #[test]

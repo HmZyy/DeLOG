@@ -8,8 +8,8 @@
 struct Grid {
     view_proj: mat4x4<f32>,
     inv_view_proj: mat4x4<f32>,
-    cam_pos: vec4<f32>,  // xyz world
-    params: vec4<f32>,   // x = cell size, y = fade start, z = fade end
+    cam_pos: vec4<f32>,  // xyz world, w = LOD blend on
+    params: vec4<f32>,   // x = cell size, y = fade start, z = fade end, w = fog on
 };
 
 @group(0) @binding(0) var<uniform> g: Grid;
@@ -23,6 +23,15 @@ struct VsOut {
 fn unproject(ndc: vec3<f32>) -> vec3<f32> {
     let p = g.inv_view_proj * vec4<f32>(ndc, 1.0);
     return p.xyz / p.w;
+}
+
+// Anti-aliased grid coverage for a single cell size: 1.0 on a line, 0.0 in the
+// empty space between lines, feathered to ~1 px via screen-space derivatives.
+fn grid_line(coord_xz: vec2<f32>, cell: f32) -> f32 {
+    let c = coord_xz / cell;
+    let d = fwidth(c);
+    let aa = abs(fract(c - 0.5) - 0.5) / d;
+    return 1.0 - min(min(aa.x, aa.y), 1.0);
 }
 
 @vertex
@@ -62,27 +71,38 @@ fn fs_main(in: VsOut) -> FsOut {
     }
     let world = in.near + t * dir;
 
+    // Grid coverage. With LOD blend on (cam_pos.w) the requested `cell` is a
+    // continuous value; we draw the two bracketing power-of-ten grids and fade
+    // the finer one in/out so the grid never *pops* between sizes as the camera
+    // height changes, yet every line stays anchored to world coordinates.
     let cell = g.params.x;
-    let coord = world.xz / cell;
-    let deriv = fwidth(coord);
+    var grid_alpha: f32;
+    if (g.cam_pos.w > 0.5) {
+        let level = log(max(cell, 1e-6)) / log(10.0);
+        let lo = pow(10.0, floor(level)); // finer grid
+        let hi = lo * 10.0;               // coarser grid (10× lo)
+        let blend = fract(level);         // 0 at `lo` → 1 toward `hi`
+        let a_lo = grid_line(world.xz, lo) * (1.0 - blend); // fades out as we rise
+        let a_hi = grid_line(world.xz, hi);                 // always present
+        grid_alpha = max(a_lo, a_hi);
+    } else {
+        grid_alpha = grid_line(world.xz, cell);
+    }
 
-    // Anti-aliased grid lines: distance (in pixels) to the nearest line.
-    let grid_uv = abs(fract(coord - 0.5) - 0.5) / deriv;
-    let line = min(grid_uv.x, grid_uv.y);
-    let grid_alpha = 1.0 - min(line, 1.0);
-
-    // Distance fade from the camera.
+    // Distance fade from the camera (fog). Disabled (w == 0) keeps the grid
+    // crisp all the way to the far plane.
     let dist = length(world - g.cam_pos.xyz);
-    let fade = 1.0 - smoothstep(g.params.y, g.params.z, dist);
+    let fade = select(1.0, 1.0 - smoothstep(g.params.y, g.params.z, dist), g.params.w > 0.5);
 
     // Base grid color (cool grey).
     var color = vec3<f32>(0.55, 0.58, 0.62);
 
     // Principal axes: world.z == 0 is the X (East) axis → red;
-    // world.x == 0 is the Z (South) axis → blue. Use the derivative so the
-    // axis highlight is a constant ~1.5 px wide regardless of zoom.
-    let axis_x = abs(world.z) / deriv.y; // proximity to the East axis line
-    let axis_z = abs(world.x) / deriv.x; // proximity to the South axis line
+    // world.x == 0 is the Z (South) axis → blue. Width is derived straight from
+    // the world-space derivatives so the highlight stays a constant ~1.5 px
+    // regardless of the (now variable) cell size.
+    let axis_x = abs(world.z) / fwidth(world.z); // proximity to the East axis line
+    let axis_z = abs(world.x) / fwidth(world.x); // proximity to the South axis line
     if (axis_x < 1.5) {
         color = vec3<f32>(0.90, 0.20, 0.20); // East → red
     }

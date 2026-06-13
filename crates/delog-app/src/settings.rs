@@ -27,6 +27,9 @@ pub struct AppSettings {
     /// Last valid live connection entered in the MAVLink connection dialog.
     #[serde(default)]
     pub live_connection: LiveConnectionSettings,
+    /// 3D scene render and camera tuning.
+    #[serde(default)]
+    pub scene3d: Scene3dSettings,
 }
 
 /// Knobs for the plot draw path (§9.5 decimation + line/edge AA). Lives in the
@@ -133,20 +136,133 @@ impl Default for LiveConnectionSettings {
     }
 }
 
+fn default_scene_far_clip_m() -> f32 {
+    20_000.0
+}
+fn default_scene_max_camera_distance_m() -> f32 {
+    12_000.0
+}
+fn default_scene_grid_cell_m() -> f32 {
+    1.0
+}
+fn default_scene_fog_start_m() -> f32 {
+    1_000.0
+}
+fn default_scene_fog_end_m() -> f32 {
+    20_000.0
+}
+
+fn finite_or(value: f32, fallback: f32) -> f32 {
+    if value.is_finite() { value } else { fallback }
+}
+
+/// Persisted 3D scene tuning. Distances are render-space metres. The camera
+/// always tracks the selected vehicle (falling back to the world origin when no
+/// pose is available).
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Scene3dSettings {
+    #[serde(default = "default_scene_far_clip_m")]
+    pub far_clip_m: f32,
+    #[serde(default = "default_scene_max_camera_distance_m")]
+    pub max_camera_distance_m: f32,
+    #[serde(default = "default_true")]
+    pub show_grid: bool,
+    #[serde(default = "default_true")]
+    pub show_axes: bool,
+    /// Auto-size the grid cell from the camera distance (like the plot grids).
+    /// When set, `grid_cell_m` is ignored.
+    #[serde(default = "default_true")]
+    pub grid_cell_auto: bool,
+    #[serde(default = "default_scene_grid_cell_m")]
+    pub grid_cell_m: f32,
+    /// Whether the distance fog/fade is applied to the grid at all.
+    #[serde(default = "default_true")]
+    pub fog_enabled: bool,
+    #[serde(default = "default_scene_fog_start_m")]
+    pub fog_start_m: f32,
+    #[serde(default = "default_scene_fog_end_m")]
+    pub fog_end_m: f32,
+}
+
+impl Default for Scene3dSettings {
+    fn default() -> Self {
+        Self {
+            far_clip_m: default_scene_far_clip_m(),
+            max_camera_distance_m: default_scene_max_camera_distance_m(),
+            show_grid: true,
+            show_axes: true,
+            grid_cell_auto: true,
+            grid_cell_m: default_scene_grid_cell_m(),
+            fog_enabled: true,
+            fog_start_m: default_scene_fog_start_m(),
+            fog_end_m: default_scene_fog_end_m(),
+        }
+    }
+}
+
+impl Scene3dSettings {
+    pub fn resolved_far_clip_m(self) -> f32 {
+        finite_or(self.far_clip_m, default_scene_far_clip_m()).clamp(10.0, 1_000_000.0)
+    }
+
+    pub fn resolved_max_camera_distance_m(self) -> f32 {
+        finite_or(
+            self.max_camera_distance_m,
+            default_scene_max_camera_distance_m(),
+        )
+        .clamp(0.5, self.resolved_far_clip_m().max(0.5))
+    }
+
+    pub fn resolved_grid_cell_m(self) -> f32 {
+        finite_or(self.grid_cell_m, default_scene_grid_cell_m()).clamp(0.01, 100_000.0)
+    }
+
+    /// The grid cell to render and whether the shader should cross-fade LOD
+    /// levels around it.
+    ///
+    /// In auto mode the cell is a *continuous* function of the camera's height
+    /// above the ground plane (where the grid lives) — so it does not collapse
+    /// to a shimmering fine grid when you orbit tightly around an airborne
+    /// vehicle, and it never *snaps* between sizes as the height changes. The
+    /// `true` flag tells the grid shader to draw two bracketing power-of-ten
+    /// grids and fade the finer one in/out, keeping lines anchored to world
+    /// coordinates with no popping. In fixed mode the exact `grid_cell_m` is
+    /// drawn as a single level (`false`).
+    pub fn resolved_grid(self, eye_height_m: f32) -> (f32, bool) {
+        if self.grid_cell_auto {
+            let height = finite_or(eye_height_m, 100.0).abs().max(1e-3);
+            // ~10 cells across the view; the shader handles LOD continuity.
+            (height / 10.0, true)
+        } else {
+            (self.resolved_grid_cell_m(), false)
+        }
+    }
+
+    pub fn resolved_fog_m(self) -> (f32, f32) {
+        let start = finite_or(self.fog_start_m, default_scene_fog_start_m())
+            .clamp(0.0, self.resolved_far_clip_m());
+        let end = finite_or(self.fog_end_m, default_scene_fog_end_m())
+            .clamp(start + 1.0, self.resolved_far_clip_m().max(start + 1.0));
+        (start, end)
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 enum SettingsTab {
     #[default]
     General,
     Rendering,
+    Scene3d,
 }
 
 impl SettingsTab {
-    const ALL: [Self; 2] = [Self::General, Self::Rendering];
+    const ALL: [Self; 3] = [Self::General, Self::Rendering, Self::Scene3d];
 
     const fn label(self) -> &'static str {
         match self {
             Self::General => "General",
             Self::Rendering => "Rendering",
+            Self::Scene3d => "3D View",
         }
     }
 }
@@ -186,6 +302,9 @@ impl SettingsDialog {
                             }
                             SettingsTab::Rendering => {
                                 rendering_tab(ui, settings);
+                            }
+                            SettingsTab::Scene3d => {
+                                scene3d_tab(ui, settings);
                             }
                         }
                     });
@@ -292,6 +411,83 @@ fn rendering_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
     }
 }
 
+fn scene3d_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
+    let s = &mut settings.scene3d;
+    ui.heading("3D View");
+    ui.add_space(8.0);
+    egui::Grid::new("settings-scene3d-grid")
+        .num_columns(2)
+        .spacing(egui::vec2(16.0, 10.0))
+        .show(ui, |ui| {
+            ui.label("Render distance")
+                .on_hover_text("Far clipping plane for vehicles, paths, and grid rays.");
+            ui.add(
+                egui::Slider::new(&mut s.far_clip_m, 10.0..=1_000_000.0)
+                    .logarithmic(true)
+                    .suffix(" m"),
+            );
+            ui.end_row();
+
+            ui.label("Max zoom-out")
+                .on_hover_text("Maximum orbit-camera distance from its target.");
+            ui.add(
+                egui::Slider::new(&mut s.max_camera_distance_m, 0.5..=1_000_000.0)
+                    .logarithmic(true)
+                    .suffix(" m"),
+            );
+            ui.end_row();
+
+            ui.label("Grid");
+            ui.checkbox(&mut s.show_grid, "");
+            ui.end_row();
+
+            ui.label("Axes");
+            ui.checkbox(&mut s.show_axes, "");
+            ui.end_row();
+
+            ui.label("Auto grid cell")
+                .on_hover_text("Size the grid cell from the camera height above the ground, like the plot grids. Disable to set a fixed cell size.");
+            ui.checkbox(&mut s.grid_cell_auto, "");
+            ui.end_row();
+
+            ui.label("Grid cell")
+                .on_hover_text("Fixed grid cell size. Ignored while 'Auto grid cell' is on.");
+            ui.add_enabled(
+                !s.grid_cell_auto,
+                egui::Slider::new(&mut s.grid_cell_m, 0.01..=100_000.0)
+                    .logarithmic(true)
+                    .suffix(" m"),
+            );
+            ui.end_row();
+
+            ui.label("Fog")
+                .on_hover_text("Fade the grid out with distance. Disable to draw the grid crisp all the way to the render distance.");
+            ui.checkbox(&mut s.fog_enabled, "");
+            ui.end_row();
+
+            ui.label("Fog start");
+            ui.add_enabled(
+                s.fog_enabled,
+                egui::Slider::new(&mut s.fog_start_m, 0.0..=1_000_000.0).suffix(" m"),
+            );
+            ui.end_row();
+
+            ui.label("Fog end");
+            ui.add_enabled(
+                s.fog_enabled,
+                egui::Slider::new(&mut s.fog_end_m, 1.0..=1_000_000.0)
+                    .logarithmic(true)
+                    .suffix(" m"),
+            );
+            ui.end_row();
+        });
+
+    ui.add_space(10.0);
+    if ui.button("Reset to defaults").clicked() {
+        settings.scene3d = Scene3dSettings::default();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,7 +503,7 @@ mod tests {
             .into_iter()
             .map(SettingsTab::label)
             .collect();
-        assert_eq!(labels, ["General", "Rendering"]);
+        assert_eq!(labels, ["General", "Rendering", "3D View"]);
     }
 
     #[test]
@@ -350,6 +546,83 @@ mod tests {
         assert!(json.contains("live_connection"));
         let decoded: AppSettings = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.live_connection, settings.live_connection);
+    }
+
+    #[test]
+    fn app_settings_persist_scene3d_settings() {
+        let settings = AppSettings {
+            scene3d: Scene3dSettings {
+                far_clip_m: 25_000.0,
+                max_camera_distance_m: 12_000.0,
+                show_grid: false,
+                show_axes: false,
+                grid_cell_auto: false,
+                grid_cell_m: 5.0,
+                fog_enabled: false,
+                fog_start_m: 1500.0,
+                fog_end_m: 20_000.0,
+            },
+            ..AppSettings::default()
+        };
+
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(json.contains("scene3d"));
+        let decoded: AppSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.scene3d, settings.scene3d);
+    }
+
+    #[test]
+    fn scene3d_defaults_enable_fog_and_auto_grid_cell() {
+        let s = Scene3dSettings::default();
+        assert!(s.fog_enabled);
+        assert!(s.grid_cell_auto);
+    }
+
+    #[test]
+    fn auto_grid_uses_continuous_cell_and_lod_blend() {
+        let s = Scene3dSettings {
+            grid_cell_auto: true,
+            ..Scene3dSettings::default()
+        };
+        // ~10 cells across the view, continuous (no 1-2-5 snap), LOD on.
+        let (cell, lod) = s.resolved_grid(100.0);
+        assert!(lod);
+        assert!((cell - 10.0).abs() < 1e-3);
+        // Height drives it continuously and monotonically — no discrete jumps.
+        assert!(s.resolved_grid(50.0).0 < s.resolved_grid(5_000.0).0);
+    }
+
+    #[test]
+    fn auto_grid_cell_follows_height_not_orbit_radius() {
+        // Regression: orbiting tightly around an airborne vehicle means a small
+        // orbit radius but a large height above the y=0 grid. The cell follows
+        // the height (≈100 m up → ≈10 m cells), and being continuous it does not
+        // pop between sizes as the orbit pitch nudges the height.
+        let s = Scene3dSettings::default();
+        let (cell, lod) = s.resolved_grid(101.5);
+        assert!(lod);
+        assert!((cell - 10.15).abs() < 1e-2);
+    }
+
+    #[test]
+    fn fixed_grid_cell_is_a_single_level_independent_of_height() {
+        let s = Scene3dSettings {
+            grid_cell_auto: false,
+            grid_cell_m: 5.0,
+            ..Scene3dSettings::default()
+        };
+        assert_eq!(s.resolved_grid(50.0), (5.0, false));
+        assert_eq!(s.resolved_grid(50_000.0), (5.0, false));
+    }
+
+    #[test]
+    fn old_scene3d_config_without_new_toggles_defaults_them_on() {
+        // A scene3d config written before fog_enabled / grid_cell_auto existed.
+        let json = r#"{"theme":"catppuccin_mocha","scene3d":{"far_clip_m":25000.0}}"#;
+        let s: AppSettings = serde_json::from_str(json).unwrap();
+        assert!(s.scene3d.fog_enabled);
+        assert!(s.scene3d.grid_cell_auto);
+        assert_eq!(s.scene3d.far_clip_m, 25_000.0);
     }
 
     #[test]

@@ -376,6 +376,8 @@ pub struct PlotServices<'a> {
     pub hover_mode: &'a mut delog_core::field_view::SampleMode,
     /// Live-adjustable plot draw tuning (decimation/AA), from the config.
     pub render_tuning: crate::settings::RenderTuning,
+    /// Live-adjustable 3D scene tuning, from the config.
+    pub scene3d: crate::settings::Scene3dSettings,
     /// Playback time for the playhead cursor; `None` before any data loads
     /// (§11, PLT-10).
     pub playhead_us: Option<i64>,
@@ -502,7 +504,10 @@ impl Behavior<'_> {
         if response.hovered() {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             if scroll != 0.0 {
-                pane.camera.zoom((0.9985_f32).powf(scroll));
+                pane.camera.zoom_with_max(
+                    (0.9985_f32).powf(scroll),
+                    self.services.scene3d.resolved_max_camera_distance_m(),
+                );
             }
         }
         if response.double_clicked() {
@@ -547,6 +552,8 @@ impl Behavior<'_> {
             .and_then(|i| poses.get(i).and_then(|p| p.as_ref()))
             .or_else(|| poses.iter().flatten().next())
             .map(|p| p.pos);
+        // The camera always tracks the selected vehicle, falling back to the
+        // world origin when no pose is available at the playhead.
         pane.camera.target = tracked.unwrap_or(glam::Vec3::ZERO);
 
         let draws: Vec<VehicleDraw> = self
@@ -571,9 +578,14 @@ impl Behavior<'_> {
         // 3d_frame (§16, GPU-24): CPU cost of building + encoding the scene.
         let rendered = {
             let _t = self.services.metrics.scope("3d_frame");
-            self.services
-                .gpu
-                .render_scene(self.services.frame, ui, rect, &pane.camera, &draws)
+            self.services.gpu.render_scene(
+                self.services.frame,
+                ui,
+                rect,
+                &pane.camera,
+                self.services.scene3d,
+                &draws,
+            )
         };
         if let Some(tex) = rendered {
             ui.painter().image(
