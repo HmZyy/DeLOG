@@ -1011,7 +1011,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **SCR-04** — Run-script lifecycle: emit one derived source per run + replace-on-rerun.
 - [x] **SCR-05** — REPL eval, stdout/stderr capture, traceback streaming, cooperative cancel.
 - [x] **SCR-06** — Global script library persistence (config-dir `.py` files): list/load/save/delete.
-- [~] **SCR-07** — Scripts window + Tools menu in delog-app (feature-gated). (code complete; manual GUI run pending)
+- [x] **SCR-07** — Scripts window + Tools ▸ Scripts menu (Run submenu with edit/remove; Console editor + REPL) in delog-app (feature-gated); verified by manual GUI run.
 - [x] **SCR-08** — Tests: engine, golden accel-mag script, numpy↔Arrow round-trip incl. NaN, error path, resample_prev proptest, derived-source substrate tests.
 
 `delog-app` gains a `scripting` feature (OFF by default); see CLAUDE.md build matrix. Scripting build requires a local libpython pin (gitignored .cargo/config.toml).
