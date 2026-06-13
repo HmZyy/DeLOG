@@ -85,6 +85,23 @@ impl Drop for ScriptEngine {
     }
 }
 
+/// A Python file-like object that forwards `write` to the event channel.
+#[pyclass]
+struct OutputCapture {
+    tx: Sender<ScriptEvent>,
+}
+
+#[pymethods]
+impl OutputCapture {
+    fn write(&self, data: &str) -> usize {
+        if !data.is_empty() {
+            let _ = self.tx.send(ScriptEvent::Output(data.to_string()));
+        }
+        data.len()
+    }
+    fn flush(&self) {}
+}
+
 fn worker_loop(
     store: Arc<DataStore>,
     sender: IngestSender,
@@ -95,6 +112,15 @@ fn worker_loop(
     let globals: Py<PyDict> = Python::attach(|py| PyDict::new(py).unbind());
     // Per-script-name source from the previous run, for replace-on-rerun.
     let mut prev_sources: HashMap<String, SourceId> = HashMap::new();
+
+    // Install stdout/stderr capture once, before the command loop.
+    Python::attach(|py| {
+        let sys = py.import("sys").expect("import sys");
+        let cap =
+            Bound::new(py, OutputCapture { tx: evt_tx.clone() }).expect("build OutputCapture");
+        sys.setattr("stdout", &cap).expect("set sys.stdout");
+        sys.setattr("stderr", &cap).expect("set sys.stderr");
+    });
 
     while let Ok(cmd) = cmd_rx.recv() {
         match cmd {
@@ -220,6 +246,22 @@ mod tests {
         let store = Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap());
         let snap = StoreSnapshot::from_registry(&id, [(topic, store)], 0).unwrap();
         Arc::new(DataStore::from_snapshot(snap))
+    }
+
+    #[test]
+    fn print_is_captured_as_output_events() {
+        let engine = ScriptEngine::spawn(Arc::new(DataStore::new()), dummy_sender());
+        engine.send(ScriptCommand::Eval("print('hello')".into()));
+        let mut text = String::new();
+        loop {
+            match engine.recv_blocking() {
+                ScriptEvent::Output(s) => text.push_str(&s),
+                ScriptEvent::Done => break,
+                ScriptEvent::Error(e) => panic!("{e}"),
+                ScriptEvent::Result(_) => {}
+            }
+        }
+        assert!(text.contains("hello"), "captured: {text:?}");
     }
 
     #[test]
