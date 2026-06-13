@@ -1338,6 +1338,9 @@ impl eframe::App for DelogApp {
                 if let Some((source, offset_us)) = browser_response.offset_change {
                     self.session.set_source_offset(source, offset_us);
                 }
+                if let Some(source) = browser_response.remove_source {
+                    self.session.remove_source(source);
+                }
             });
         }
 
