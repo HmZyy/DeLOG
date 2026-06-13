@@ -22,20 +22,27 @@ This is an **optional, build-time feature**. It is off by default.
 
 ## Enabling scripting
 
-Scripting embeds CPython via `pyo3` and is gated behind the `scripting` feature.
-A plain build has no Python dependency; enable the feature to get it:
+Scripting embeds CPython via `pyo3` and is the **`scripting` feature, which is on
+by default**. So a normal build already has it:
 
 ```bash
-# Run the app with scripting:
-cargo run -p delog-app --features scripting
-
-# Or build the whole workspace with it:
-cargo build --workspace --features delog-app/scripting
+cargo run -p delog-app          # scripting included
+cargo build --workspace         # scripting included
 ```
 
-The feature requires a Python 3 toolchain (interpreter + dev headers) at build
-time. If the build links the wrong `libpython` (e.g. `numpy` fails to import
-with `No module named 'math'`), pin the interpreter with a **local, gitignored**
+Because it's on by default, the default build needs a Python 3 toolchain
+(interpreter + dev headers). To build **without** Python, disable the default
+feature (Cargo features are additive, so the opt-out is `--no-default-features`,
+not a `without-scripting` feature):
+
+```bash
+cargo run   -p delog-app --no-default-features   # no scripting, no Python needed
+cargo build -p delog-app --no-default-features
+cargo build --workspace  --no-default-features
+```
+
+If the build links the wrong `libpython` (e.g. `numpy` fails to import with
+`No module named 'math'`), pin the interpreter with a **local, gitignored**
 `.cargo/config.toml` that sets `PYO3_PYTHON` to your interpreter and adds its
 libdir to the rpath. See `CLAUDE.md` → Commands.
 

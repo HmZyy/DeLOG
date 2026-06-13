@@ -12,8 +12,11 @@ name = "delog"
 path = "src/main.rs"
 
 [features]
-default = []
-# Embedded-Python scripting (PLAN.md §17.3, SCR-*). OFF by default.
+# Embedded-Python scripting (PLAN.md §17.3, SCR-*) is ON by default. Build
+# without Python via `--no-default-features` (Cargo features are additive, so a
+# literal "without-scripting" feature cannot subtract — disabling the default is
+# the opt-out).
+default = ["scripting"]
 scripting = ["dep:delog-script", "delog-script/python", "dep:egui_code_editor"]
 
 [dependencies]
