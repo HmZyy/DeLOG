@@ -1,5 +1,7 @@
 //! The `delog` Python API object and the Arrow→numpy read path (SCR-03).
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use delog_core::field_view::FieldView;
@@ -52,17 +54,68 @@ pub fn materialize_field(
     Ok((times, values))
 }
 
+/// A field accumulated for emission: name + values aligned to its topic's times.
+pub struct PendingField {
+    pub name: String,
+    pub values: Vec<f64>,
+    pub unit: Option<String>,
+}
+
+/// One derived topic the script is building. Every field shares `times`.
+pub struct PendingTopic {
+    pub name: String,
+    pub times: Vec<i64>,
+    pub fields: Vec<PendingField>,
+}
+
+impl PendingTopic {
+    pub fn new(name: String, times: Vec<i64>) -> Self {
+        Self {
+            name,
+            times,
+            fields: Vec::new(),
+        }
+    }
+
+    pub fn add_field(
+        &mut self,
+        name: String,
+        values: Vec<f64>,
+        unit: Option<String>,
+    ) -> Result<(), String> {
+        if values.len() != self.times.len() {
+            return Err(format!(
+                "field '{name}': {} values but topic '{}' has {} timestamps",
+                values.len(),
+                self.name,
+                self.times.len()
+            ));
+        }
+        self.fields.push(PendingField { name, values, unit });
+        Ok(())
+    }
+}
+
+/// Shared, single-threaded accumulator of derived topics for one run.
+pub type EmitBuffer = Rc<RefCell<Vec<PendingTopic>>>;
+
 /// The `delog` object injected into the interpreter namespace. Holds the
 /// snapshot pinned for the current run/eval. `unsendable`: it lives only on the
 /// worker thread under the GIL.
 #[pyclass(unsendable, name = "Delog")]
 pub struct Delog {
     snapshot: Arc<StoreSnapshot>,
+    emit: EmitBuffer,
 }
 
 impl Delog {
-    pub fn new(snapshot: Arc<StoreSnapshot>) -> Self {
-        Self { snapshot }
+    pub fn new(snapshot: Arc<StoreSnapshot>, emit: EmitBuffer) -> Self {
+        Self { snapshot, emit }
+    }
+
+    /// The accumulated derived topics (the run lifecycle flushes these — Task 8).
+    pub fn emit_buffer(&self) -> EmitBuffer {
+        Rc::clone(&self.emit)
     }
 
     fn resolve_path(&self, path: &str) -> Result<FieldId, String> {
@@ -147,6 +200,20 @@ impl Delog {
         let out = resample_prev(t.as_slice()?, v.as_slice()?, base_times.as_slice()?);
         Ok(out.into_pyarray(py).unbind())
     }
+
+    /// Begin a derived topic; `times_us` is shared by all its fields.
+    fn output(&self, times_us: numpy::PyReadonlyArray1<i64>, name: &str) -> PyResult<DelogOutput> {
+        let times = times_us.as_slice()?.to_vec();
+        let idx = {
+            let mut buf = self.emit.borrow_mut();
+            buf.push(PendingTopic::new(name.to_string(), times));
+            buf.len() - 1
+        };
+        Ok(DelogOutput {
+            emit: Rc::clone(&self.emit),
+            index: idx,
+        })
+    }
 }
 
 /// A field handed to Python: `.t` int64 µs numpy, `.v` float64 numpy.
@@ -158,10 +225,48 @@ pub struct DelogField {
     v: Py<PyArray1<f64>>,
 }
 
+/// Returned by `delog.output(...)`; `add_field` appends to the pending topic.
+#[pyclass(unsendable, name = "DelogOutput")]
+pub struct DelogOutput {
+    emit: EmitBuffer,
+    index: usize,
+}
+
+#[pymethods]
+impl DelogOutput {
+    #[pyo3(signature = (name, values, unit=None))]
+    fn add_field(
+        &self,
+        name: &str,
+        values: numpy::PyReadonlyArray1<f64>,
+        unit: Option<String>,
+    ) -> PyResult<()> {
+        let vals = values.as_slice()?.to_vec();
+        self.emit.borrow_mut()[self.index]
+            .add_field(name.to_string(), vals, unit)
+            .map_err(pyo3::exceptions::PyValueError::new_err)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use arrow::array::{ArrayRef, Float64Array, Int64Array};
+
+    #[test]
+    fn output_builder_collects_topics_and_fields() {
+        let mut topic = super::PendingTopic::new("Mag".into(), vec![0, 100, 200]);
+        topic
+            .add_field("x".into(), vec![1.0, 2.0, 3.0], Some("m".into()))
+            .unwrap();
+        topic
+            .add_field("y".into(), vec![4.0, 5.0, 6.0], None)
+            .unwrap();
+        // length mismatch is rejected
+        assert!(topic.add_field("bad".into(), vec![1.0], None).is_err());
+        assert_eq!(topic.fields.len(), 2);
+        assert_eq!(topic.times.len(), 3);
+    }
 
     #[test]
     fn resample_prev_picks_the_last_value_at_or_before_each_base_time() {

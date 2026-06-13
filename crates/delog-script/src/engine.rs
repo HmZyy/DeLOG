@@ -93,9 +93,12 @@ fn worker_loop(
             ScriptCommand::Shutdown => break,
             ScriptCommand::Eval(src) => {
                 let snapshot = store.load();
+                let emit: crate::api::EmitBuffer = std::rc::Rc::default();
                 Python::attach(|py| {
                     let g = globals.bind(py);
-                    let delog = Bound::new(py, Delog::new(snapshot.clone())).unwrap();
+                    let delog =
+                        Bound::new(py, Delog::new(snapshot.clone(), std::rc::Rc::clone(&emit)))
+                            .unwrap();
                     g.set_item("delog", delog).unwrap();
                 });
                 eval_line(&globals, &src, &evt_tx);
