@@ -163,6 +163,15 @@ pub enum PosLayout {
         lat: FieldRef,
         lon: FieldRef,
         alt: FieldRef,
+        /// Lat/lon stored as `degE7` integers (scale 1e-7 to degrees).
+        #[serde(default)]
+        lat_lon_dege7: bool,
+        /// Altitude stored in millimetres (scale 1e-3 to metres).
+        #[serde(default)]
+        alt_mm: bool,
+        /// Fixed vertical offset in metres (up-positive).
+        #[serde(default)]
+        alt_offset_m: f64,
     },
 }
 
@@ -725,7 +734,7 @@ fn collect_pos_field_refs(pos: &PosLayout, resolver: &mut Resolver<'_>) {
                 let _ = resolver.resolve(alt);
             }
         }
-        PosLayout::Gps { lat, lon, alt } => {
+        PosLayout::Gps { lat, lon, alt, .. } => {
             let _ = resolver.resolve(lat);
             let _ = resolver.resolve(lon);
             let _ = resolver.resolve(alt);
@@ -985,10 +994,20 @@ fn pos_to_layout(pos: &PosMapping, snapshot: &StoreSnapshot) -> Option<PosLayout
                 }),
             },
         }),
-        PosMapping::Gps { lat, lon, alt } => Some(PosLayout::Gps {
+        PosMapping::Gps {
+            lat,
+            lon,
+            alt,
+            lat_lon_dege7,
+            alt_mm,
+            alt_offset_m,
+        } => Some(PosLayout::Gps {
             lat: field_ref(snapshot, *lat)?,
             lon: field_ref(snapshot, *lon)?,
             alt: field_ref(snapshot, *alt)?,
+            lat_lon_dege7: *lat_lon_dege7,
+            alt_mm: *alt_mm,
+            alt_offset_m: *alt_offset_m,
         }),
     }
 }
@@ -1022,10 +1041,20 @@ fn pos_from_layout(pos: &PosLayout, resolver: &mut Resolver<'_>) -> Option<PosMa
                 }),
             },
         }),
-        PosLayout::Gps { lat, lon, alt } => Some(PosMapping::Gps {
+        PosLayout::Gps {
+            lat,
+            lon,
+            alt,
+            lat_lon_dege7,
+            alt_mm,
+            alt_offset_m,
+        } => Some(PosMapping::Gps {
             lat: resolver.resolve(lat)?,
             lon: resolver.resolve(lon)?,
             alt: resolver.resolve(alt)?,
+            lat_lon_dege7: *lat_lon_dege7,
+            alt_mm: *alt_mm,
+            alt_offset_m: *alt_offset_m,
         }),
     }
 }

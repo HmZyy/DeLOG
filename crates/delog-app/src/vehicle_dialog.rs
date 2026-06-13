@@ -39,6 +39,12 @@ struct Draft {
     lat: Option<FieldId>,
     lon: Option<FieldId>,
     alt: Option<FieldId>,
+    /// Interpret the lat/lon columns as `degE7` integers (×1e-7 → degrees).
+    lat_lon_dege7: bool,
+    /// Interpret the altitude column as millimetres (×1e-3 → metres).
+    alt_mm: bool,
+    /// Fixed vertical offset in metres (up-positive) for the GPS track.
+    alt_offset_m: f64,
     /// Optional geodetic reference annotation for a NED/local frame.
     ned_has_ref: bool,
     /// Reference from fixed values (true) or from columns (false).
@@ -80,6 +86,9 @@ impl Default for Draft {
             lat: None,
             lon: None,
             alt: None,
+            lat_lon_dege7: false,
+            alt_mm: false,
+            alt_offset_m: 0.0,
             ned_has_ref: false,
             ned_ref_manual: false,
             ref_lat: 0.0,
@@ -155,12 +164,22 @@ impl Draft {
                     }
                 }
             }
-            PosMapping::Gps { lat, lon, alt } => {
+            PosMapping::Gps {
+                lat,
+                lon,
+                alt,
+                lat_lon_dege7,
+                alt_mm,
+                alt_offset_m,
+            } => {
                 d.pos_mode = PosMode::Gps;
                 d.pos_topic = topic_of(*lat);
                 d.lat = Some(*lat);
                 d.lon = Some(*lon);
                 d.alt = Some(*alt);
+                d.lat_lon_dege7 = *lat_lon_dege7;
+                d.alt_mm = *alt_mm;
+                d.alt_offset_m = *alt_offset_m;
             }
         }
         match &cfg.ori {
@@ -220,6 +239,9 @@ impl Draft {
                 lat: self.lat?,
                 lon: self.lon?,
                 alt: self.alt?,
+                lat_lon_dege7: self.lat_lon_dege7,
+                alt_mm: self.alt_mm,
+                alt_offset_m: self.alt_offset_m,
             },
         };
         let ori = match self.ori_mode {
@@ -711,7 +733,20 @@ fn draft_editor(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapshot) 
                     PosMode::Gps => {
                         grid_field(ui, "veh-lat", "Latitude", &mut draft.lat, &cols);
                         grid_field(ui, "veh-lon", "Longitude", &mut draft.lon, &cols);
+                        ui.label("Lat/Lon units");
+                        ui.checkbox(&mut draft.lat_lon_dege7, "degE7");
+                        ui.end_row();
                         grid_field(ui, "veh-alt", "Altitude", &mut draft.alt, &cols);
+                        ui.label("Altitude units");
+                        ui.checkbox(&mut draft.alt_mm, "mm");
+                        ui.end_row();
+                        ui.label("Altitude offset");
+                        ui.add(
+                            egui::DragValue::new(&mut draft.alt_offset_m)
+                                .speed(1.0)
+                                .suffix(" m"),
+                        );
+                        ui.end_row();
                     }
                 }
             } else {
