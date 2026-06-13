@@ -1017,20 +1017,30 @@ impl eframe::App for DelogApp {
                 ui.menu_button("Tools", |ui| {
                     #[cfg(feature = "scripting")]
                     ui.menu_button("Scripts", |ui| {
-                        ui.menu_button("Run \u{25b6}", |ui| {
+                        ui.menu_button("Run", |ui| {
                             let names = self.scripts.script_names();
                             if names.is_empty() {
                                 ui.add_enabled(false, egui::Button::new("No saved scripts"));
                             } else {
                                 for name in names {
-                                    if ui.button(&name).clicked() {
-                                        self.scripts.run_named(
-                                            &name,
-                                            self.session.store(),
-                                            self.session.ingest_sender(),
-                                        );
-                                        ui.close();
-                                    }
+                                    ui.horizontal(|ui| {
+                                        if ui.button(&name).clicked() {
+                                            self.scripts.run_named(
+                                                &name,
+                                                self.session.store(),
+                                                self.session.ingest_sender(),
+                                            );
+                                            ui.close();
+                                        }
+                                        if ui.button("Edit").clicked() {
+                                            self.scripts.edit_named(&name);
+                                            ui.close();
+                                        }
+                                        if ui.button("Remove").clicked() {
+                                            self.scripts.request_delete(&name);
+                                            ui.close();
+                                        }
+                                    });
                                 }
                             }
                         });

@@ -20,6 +20,8 @@ pub struct ScriptsPanel {
     repl_input: String,
     console: String,
     status: String,
+    /// Script name awaiting a delete confirmation (Tools ▸ Scripts ▸ Run ▸ Remove).
+    pending_delete: Option<String>,
 }
 
 impl ScriptsPanel {
@@ -34,7 +36,26 @@ impl ScriptsPanel {
             repl_input: String::new(),
             console: String::new(),
             status: String::new(),
+            pending_delete: None,
         }
+    }
+
+    /// Load a saved script into the Console editor and open the window for editing.
+    pub fn edit_named(&mut self, name: &str) {
+        match self.library.load(name) {
+            Ok(source) => {
+                self.current_name = name.to_owned();
+                self.editor_text = source;
+                self.status = format!("editing {name}");
+                self.open = true;
+            }
+            Err(e) => self.status = format!("load failed: {e}"),
+        }
+    }
+
+    /// Stage a script for deletion; the confirmation dialog is shown by [`ui`].
+    pub fn request_delete(&mut self, name: &str) {
+        self.pending_delete = Some(name.to_owned());
     }
 
     /// Saved script names for the Tools ▸ Scripts ▸ Run submenu (read fresh from
@@ -87,6 +108,10 @@ impl ScriptsPanel {
     }
 
     pub fn ui(&mut self, ctx: &egui::Context, store: Arc<DataStore>, sender: IngestSender) {
+        // Drawn unconditionally so a Remove triggered from the menu can be
+        // confirmed even when the Console window is closed.
+        self.delete_confirm_ui(ctx);
+
         if !self.open {
             return;
         }
@@ -98,6 +123,47 @@ impl ScriptsPanel {
             .show(ctx, |ui| self.window_contents(ui, &store, &sender));
         self.open = open;
         ctx.request_repaint(); // keep draining engine events while open
+    }
+
+    /// Modal confirmation for deleting a saved script.
+    fn delete_confirm_ui(&mut self, ctx: &egui::Context) {
+        let Some(name) = self.pending_delete.clone() else {
+            return;
+        };
+        let mut keep_open = true;
+        let mut decision: Option<bool> = None; // Some(true) = delete, Some(false) = cancel
+        egui::Window::new("Delete script?")
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut keep_open)
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "Delete \u{201c}{name}\u{201d}? This cannot be undone."
+                ));
+                ui.horizontal(|ui| {
+                    if ui.button("Delete").clicked() {
+                        decision = Some(true);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        decision = Some(false);
+                    }
+                });
+            });
+        // Closing the window via its [x] is treated as cancel.
+        if !keep_open {
+            decision = decision.or(Some(false));
+        }
+        match decision {
+            Some(true) => {
+                self.status = match self.library.delete(&name) {
+                    Ok(()) => format!("deleted {name}"),
+                    Err(e) => format!("delete failed: {e}"),
+                };
+                self.pending_delete = None;
+            }
+            Some(false) => self.pending_delete = None,
+            None => {}
+        }
     }
 
     fn window_contents(
@@ -145,7 +211,7 @@ impl ScriptsPanel {
                         Err(e) => self.status = format!("save failed: {e}"),
                     }
                 }
-                if ui.button("Run \u{25b6}").clicked() && !self.current_name.is_empty() {
+                if ui.button("Run").clicked() && !self.current_name.is_empty() {
                     self.console
                         .push_str(&format!("# run {}\n", self.current_name));
                     let name = self.current_name.clone();
