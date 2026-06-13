@@ -63,7 +63,8 @@ Rejected alternatives:
   `delog-core` + `pyo3` + `numpy` (all pinned in the workspace table). The crate
   **never** depends on `egui`, `delog-cache`, `delog-render`, or `delog-stream`.
   Dependency edge is strictly downward (`app → script → core`).
-- `delog-app` gains a `scripts/` UI module, gated behind its `scripting` feature.
+- `delog-app` gains a `scripts/` UI module, gated behind its `scripting` feature;
+  that feature also pulls in `egui_code_editor` (pinned) for the editor (§8).
 
 ---
 
@@ -157,9 +158,9 @@ A new **"Scripts"** tab in the existing bottom dock, alongside Diagnostics /
 Performance (PLAN §19.1), plus a **Tools ▸ Scripts** menu entry. Layout:
 
 - **Left:** library list (the `.py` files) with new/save/delete.
-- **Center:** code editor — monospace `egui::TextEdit::multiline` with a
-  lightweight Python syntax-highlight layouter. (`egui_code_editor` is the heavier
-  alternative if richer theming is wanted later; v1 stays light.)
+- **Center:** code editor — **`egui_code_editor`** (pinned in the workspace table,
+  pulled in only under `delog-app`'s `scripting` feature) configured for Python
+  syntax highlighting, line numbers, and a dark theme matching §19.4.
 - **Bottom:** REPL console — input line + scrollback of captured
   stdout/stderr/results, with **Run / Cancel / Save** buttons and a status line
   (run state, timing, emitted source).
