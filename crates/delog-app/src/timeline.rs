@@ -294,13 +294,19 @@ pub fn ui(
             }
         }
 
-        // Fit-all view toggle: while on, the plots keep the whole time range in
+        // Fit-to-view toggle: while on, the plots keep the whole time range in
         // view (auto-zooming as data streams). Toggling off — or panning/zooming
         // a plot — restores free pan/zoom.
-        ui.toggle_value(fit_all, "⤢").on_hover_text(
-            "Fit all: keep the whole range in view (auto-zoom from start to the \
-             current/live point). Click again to pan/zoom freely.",
-        );
+        let fit_icon = egui::Image::new(crate::icons::maximize())
+            .fit_to_exact_size(egui::vec2(16.0, 16.0))
+            .tint(ui.visuals().text_color());
+        if ui
+            .add(egui::Button::image(fit_icon).selected(*fit_all))
+            .on_hover_text("Fit to view")
+            .clicked()
+        {
+            *fit_all = !*fit_all;
+        }
 
         egui::ComboBox::from_id_salt("playback_speed")
             .selected_text(format!("{}×", playback.speed))
