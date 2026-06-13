@@ -1014,8 +1014,10 @@ impl eframe::App for DelogApp {
                         ui.close();
                     }
                 });
+                // The Tools menu currently only hosts scripting, so it is hidden
+                // entirely in builds without the `scripting` feature.
+                #[cfg(feature = "scripting")]
                 ui.menu_button("Tools", |ui| {
-                    #[cfg(feature = "scripting")]
                     ui.menu_button("Scripts", |ui| {
                         ui.menu_button("Run", |ui| {
                             let names = self.scripts.script_names();
@@ -1070,18 +1072,12 @@ impl eframe::App for DelogApp {
                                 }
                             }
                         });
+                        ui.separator();
                         if ui.button("Console").clicked() {
                             self.scripts.open = true;
                             ui.close();
                         }
                     });
-                    #[cfg(not(feature = "scripting"))]
-                    {
-                        let _ = ui.add_enabled(
-                            false,
-                            egui::Button::new("Scripts (build with --features scripting)"),
-                        );
-                    }
                 });
                 ui.menu_button("Help", |ui| {
                     if ui.button("About").clicked() {
