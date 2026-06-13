@@ -9,4 +9,5 @@ pub mod library;
 #[cfg(feature = "python")]
 pub mod engine;
 
-// pub use engine::{ScriptCommand, ScriptEngine, ScriptEvent}; // filled in Task 4
+#[cfg(feature = "python")]
+pub use engine::{ScriptCommand, ScriptEngine, ScriptEvent};
