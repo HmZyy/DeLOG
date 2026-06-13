@@ -104,7 +104,26 @@ pub enum PosMapping {
         lat: FieldId,
         lon: FieldId,
         alt: FieldId,
+        /// Lat/lon are stored as degrees × 1e7 (ArduPilot `degE7` integers);
+        /// scale by 1e-7 to recover degrees before the geodetic conversion.
+        lat_lon_dege7: bool,
+        /// Altitude is stored in millimetres; scale by 1e-3 to recover metres.
+        alt_mm: bool,
+        /// Fixed vertical offset (metres, **up-positive**) added to the rendered
+        /// position — raises/lowers the whole track relative to the first fix.
+        alt_offset_m: f64,
     },
+}
+
+impl PosMapping {
+    /// Extra unit scales for a GPS mapping `(lat_lon, alt)`, applied on top of
+    /// the schema multiplier: `1e-7` for `degE7` lat/lon, `1e-3` for `mm` alt.
+    fn gps_unit_scales(lat_lon_dege7: bool, alt_mm: bool) -> (f64, f64) {
+        (
+            if lat_lon_dege7 { 1e-7 } else { 1.0 },
+            if alt_mm { 1e-3 } else { 1.0 },
+        )
+    }
 }
 
 /// How a vehicle's orientation is read (§12.1).
@@ -212,6 +231,8 @@ fn resolve_gps_ref(
     lat: FieldId,
     lon: FieldId,
     alt: FieldId,
+    ll_scale: f64,
+    alt_scale: f64,
     range: (i64, i64),
 ) -> Option<(f64, f64, f64)> {
     let (lat_v, lm) = open(snapshot, lat)?;
@@ -231,7 +252,7 @@ fn resolve_gps_ref(
                 .sample_at(t, SampleMode::Next)
                 .and_then(|s| s.value.as_f64()),
         ) {
-            let (la, lo, al) = (la * lm, lo * om, al * am);
+            let (la, lo, al) = (la * lm * ll_scale, lo * om * ll_scale, al * am * alt_scale);
             if la != 0.0 || lo != 0.0 {
                 return Some((la.to_radians(), lo.to_radians(), al));
             }
@@ -265,16 +286,24 @@ fn position_at(
             );
             Some(geo::ned_to_render(ned))
         }
-        PosMapping::Gps { lat, lon, alt } => {
+        PosMapping::Gps {
+            lat,
+            lon,
+            alt,
+            lat_lon_dege7,
+            alt_mm,
+            alt_offset_m,
+        } => {
             let (rlat, rlon, ralt) = gps_ref?;
+            let (ll_scale, alt_scale) = PosMapping::gps_unit_scales(*lat_lon_dege7, *alt_mm);
             let (lav, lam) = open(snapshot, *lat)?;
             let (lov, lom) = open(snapshot, *lon)?;
             let (alv, alm) = open(snapshot, *alt)?;
-            let la = read_eng(&lav, lam, t_us)?.to_radians();
-            let lo = read_eng(&lov, lom, t_us)?.to_radians();
-            let al = read_eng(&alv, alm, t_us)?;
+            let la = (read_eng(&lav, lam, t_us)? * ll_scale).to_radians();
+            let lo = (read_eng(&lov, lom, t_us)? * ll_scale).to_radians();
+            let al = read_eng(&alv, alm, t_us)? * alt_scale;
             let ned = geo::geodetic_to_ned(la, lo, al, rlat, rlon, ralt).as_vec3();
-            Some(geo::ned_to_render(ned))
+            Some(geo::ned_to_render(ned) + Vec3::new(0.0, *alt_offset_m as f32, 0.0))
         }
     }
 }
@@ -335,9 +364,18 @@ pub fn pose_at(snapshot: &StoreSnapshot, config: &VehicleConfig, t_us: i64) -> O
 }
 
 fn gps_reference(snapshot: &StoreSnapshot, config: &VehicleConfig) -> Option<(f64, f64, f64)> {
-    if let PosMapping::Gps { lat, lon, alt } = &config.pos {
+    if let PosMapping::Gps {
+        lat,
+        lon,
+        alt,
+        lat_lon_dege7,
+        alt_mm,
+        alt_offset_m: _,
+    } = &config.pos
+    {
+        let (ll_scale, alt_scale) = PosMapping::gps_unit_scales(*lat_lon_dege7, *alt_mm);
         let range = position_topic_range(snapshot, &config.pos)?;
-        resolve_gps_ref(snapshot, *lat, *lon, *alt, range)
+        resolve_gps_ref(snapshot, *lat, *lon, *alt, ll_scale, alt_scale, range)
     } else {
         None
     }
@@ -360,7 +398,7 @@ fn position_row_source<'a>(
         PosMapping::Ned {
             north, east, down, ..
         } => [*north, *east, *down],
-        PosMapping::Gps { lat, lon, alt } => [*lat, *lon, *alt],
+        PosMapping::Gps { lat, lon, alt, .. } => [*lat, *lon, *alt],
     };
     let entries = fields.map(|field| snapshot.fields.get(field.index()).filter(|e| e.id == field));
     let [Some(a), Some(b), Some(c)] = entries else {
@@ -414,13 +452,19 @@ fn position_from_row(
             );
             Some(geo::ned_to_render(ned))
         }
-        PosMapping::Gps { .. } => {
+        PosMapping::Gps {
+            lat_lon_dege7,
+            alt_mm,
+            alt_offset_m,
+            ..
+        } => {
             let (rlat, rlon, ralt) = gps_ref?;
-            let la = row_value(rows, chunk, 0, row)?.to_radians();
-            let lo = row_value(rows, chunk, 1, row)?.to_radians();
-            let al = row_value(rows, chunk, 2, row)?;
+            let (ll_scale, alt_scale) = PosMapping::gps_unit_scales(*lat_lon_dege7, *alt_mm);
+            let la = (row_value(rows, chunk, 0, row)? * ll_scale).to_radians();
+            let lo = (row_value(rows, chunk, 1, row)? * ll_scale).to_radians();
+            let al = row_value(rows, chunk, 2, row)? * alt_scale;
             let ned = geo::geodetic_to_ned(la, lo, al, rlat, rlon, ralt).as_vec3();
-            Some(geo::ned_to_render(ned))
+            Some(geo::ned_to_render(ned) + Vec3::new(0.0, *alt_offset_m as f32, 0.0))
         }
     }
 }
@@ -541,6 +585,123 @@ mod tests {
         let store = Arc::new(TopicStore::from_chunks(Arc::clone(&schema), [chunk]).unwrap());
         let snap = StoreSnapshot::from_registry(&id, [(topic, store)], 0).unwrap();
         (snap, [fnf, fef, fdf])
+    }
+
+    /// A source with one GPS topic carrying raw Lat/Lng/Alt columns (no schema
+    /// multiplier), so the unit interpretation is up to the vehicle config.
+    fn gps_snapshot(
+        times: Vec<i64>,
+        lat: Vec<f64>,
+        lon: Vec<f64>,
+        alt: Vec<f64>,
+    ) -> (StoreSnapshot, [FieldId; 3]) {
+        let mut id = IdentityRegistry::new();
+        let src = id.add_source("veh");
+        let topic = id.add_topic(src, "GPS").unwrap();
+        let flat = id.add_field(topic, "Lat").unwrap();
+        let flon = id.add_field(topic, "Lng").unwrap();
+        let falt = id.add_field(topic, "Alt").unwrap();
+        let schema = Arc::new(
+            TopicSchema::new(
+                "GPS",
+                [
+                    FieldSchema::new("Lat", DataType::Float64, Some("deg"), 1.0).unwrap(),
+                    FieldSchema::new("Lng", DataType::Float64, Some("deg"), 1.0).unwrap(),
+                    FieldSchema::new("Alt", DataType::Float64, Some("m"), 1.0).unwrap(),
+                ],
+            )
+            .unwrap(),
+        );
+        let cols: Vec<ArrayRef> = vec![
+            Arc::new(Float64Array::from(lat)),
+            Arc::new(Float64Array::from(lon)),
+            Arc::new(Float64Array::from(alt)),
+        ];
+        let chunk = Arc::new(Chunk::try_new(Int64Array::from(times), cols, &schema).unwrap());
+        let store = Arc::new(TopicStore::from_chunks(Arc::clone(&schema), [chunk]).unwrap());
+        let snap = StoreSnapshot::from_registry(&id, [(topic, store)], 0).unwrap();
+        (snap, [flat, flon, falt])
+    }
+
+    #[test]
+    fn gps_unit_scales_select_dege7_and_mm_factors() {
+        assert_eq!(PosMapping::gps_unit_scales(false, false), (1.0, 1.0));
+        assert_eq!(PosMapping::gps_unit_scales(true, true), (1e-7, 1e-3));
+        assert_eq!(PosMapping::gps_unit_scales(true, false), (1e-7, 1.0));
+    }
+
+    #[test]
+    fn gps_reference_applies_dege7_and_mm_unit_scales() {
+        // ArduPilot-style raw integers: lat/lon in degE7, alt in mm.
+        let (snap, [lat, lon, alt]) = gps_snapshot(
+            vec![0],
+            vec![473_977_418.0], // 47.3977418°
+            vec![85_503_580.0],  //  8.5503580°
+            vec![408_000.0],     // 408 m, stored as mm
+        );
+        let (ll, am) = PosMapping::gps_unit_scales(true, true);
+        let (rlat, rlon, ralt) = resolve_gps_ref(&snap, lat, lon, alt, ll, am, (0, 0)).unwrap();
+        assert!(
+            (rlat.to_degrees() - 47.397_741_8).abs() < 1e-6,
+            "{}",
+            rlat.to_degrees()
+        );
+        assert!(
+            (rlon.to_degrees() - 8.550_358_0).abs() < 1e-6,
+            "{}",
+            rlon.to_degrees()
+        );
+        assert!((ralt - 408.0).abs() < 1e-3, "{ralt}");
+    }
+
+    #[test]
+    fn gps_reference_without_flags_uses_raw_degrees_and_metres() {
+        let (snap, [lat, lon, alt]) =
+            gps_snapshot(vec![0], vec![47.397_741_8], vec![8.550_358_0], vec![408.0]);
+        let (ll, am) = PosMapping::gps_unit_scales(false, false);
+        let (rlat, _, ralt) = resolve_gps_ref(&snap, lat, lon, alt, ll, am, (0, 0)).unwrap();
+        assert!((rlat.to_degrees() - 47.397_741_8).abs() < 1e-6);
+        assert!((ralt - 408.0).abs() < 1e-3);
+    }
+
+    fn gps_config(fields: [FieldId; 3], alt_offset_m: f64) -> VehicleConfig {
+        VehicleConfig {
+            source: SourceId(0),
+            label: "v".into(),
+            show: true,
+            pos: PosMapping::Gps {
+                lat: fields[0],
+                lon: fields[1],
+                alt: fields[2],
+                lat_lon_dege7: false,
+                alt_mm: false,
+                alt_offset_m,
+            },
+            ori: OriMapping::Static,
+            model: ModelKind::Cone,
+            color: Color32::WHITE,
+            path_color: Color32::WHITE,
+            scale: 1.0,
+        }
+    }
+
+    #[test]
+    fn gps_alt_offset_raises_render_height_and_positive_is_up() {
+        // The first (only) fix maps to the NED/render origin; a +100 m offset
+        // must raise the rendered position straight up (render +Y), confirming
+        // altitude is up-positive and the offset is applied in metres.
+        let (snap, f) = gps_snapshot(vec![0], vec![47.0], vec![8.0], vec![400.0]);
+        let pose = pose_at(&snap, &gps_config(f, 100.0), 0).unwrap();
+        assert!(
+            pose.pos.x.abs() < 1e-3 && pose.pos.z.abs() < 1e-3,
+            "{:?}",
+            pose.pos
+        );
+        assert!(
+            (pose.pos.y - 100.0).abs() < 1e-3,
+            "up offset, got {:?}",
+            pose.pos
+        );
     }
 
     fn ned_config(fields: [FieldId; 3]) -> VehicleConfig {
