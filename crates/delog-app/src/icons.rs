@@ -42,6 +42,11 @@ pub fn pencil() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/pencil.svg")
 }
 
+/// Maximize / fit-to-view (timeline auto-zoom toggle).
+pub fn maximize() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/maximize.svg")
+}
+
 /// Play (run a script). Used only by the scripting Console.
 #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
 pub fn play() -> ImageSource<'static> {
