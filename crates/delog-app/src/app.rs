@@ -908,7 +908,8 @@ impl eframe::App for DelogApp {
             // while playing (later: or a link is Connected, M7). Everything
             // else is event-driven — ingest progress, epoch changes and
             // diagnostics each request their own repaint — so a static plot
-            // idles at 0% GPU.
+            // idles at 0% GPU. The Continuous render mode (PRF-09) overrides
+            // this and forces a repaint every frame.
             if self.playback.playing || self.session.has_connected_live() {
                 ui.ctx().request_repaint();
             }
@@ -918,6 +919,9 @@ impl eframe::App for DelogApp {
             self.origin_us = 0;
             self.caches.set_origin(0);
             self.view.get_or_insert(ViewX::new(0, 10_000_000));
+        }
+        if self.settings.render_mode == crate::settings::RenderMode::Continuous {
+            ui.ctx().request_repaint();
         }
         self.caches.begin_frame(self.frame);
         self.caches.poll_builds();
