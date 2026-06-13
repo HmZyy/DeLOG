@@ -173,6 +173,25 @@ fn general_tab(ui: &mut egui::Ui, settings: &mut AppSettings) -> SettingsChange 
                     }
                 });
             ui.end_row();
+
+            ui.label("Show FPS counter")
+                .on_hover_text("Show a frame-rate badge in the top-right corner.");
+            ui.checkbox(&mut settings.show_fps, "");
+            ui.end_row();
+
+            ui.label("Render mode")
+                .on_hover_text(
+                    "Reactive: event-driven, idles at 0% GPU when nothing changes. \
+                     Continuous: repaints every frame (smoother for debugging, higher GPU).",
+                );
+            egui::ComboBox::from_id_salt("settings-render-mode")
+                .selected_text(settings.render_mode.label())
+                .show_ui(ui, |ui| {
+                    for mode in RenderMode::ALL {
+                        ui.selectable_value(&mut settings.render_mode, mode, mode.label());
+                    }
+                });
+            ui.end_row();
         });
 
     SettingsChange {
