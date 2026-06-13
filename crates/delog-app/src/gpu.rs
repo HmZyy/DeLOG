@@ -23,6 +23,7 @@ use eframe::{egui_wgpu, wgpu};
 use crate::camera::OrbitCamera;
 use crate::models;
 use crate::plot::{PlotPane, TraceMode, ViewX};
+use crate::settings::Scene3dSettings;
 use crate::vehicle::ModelKind;
 
 /// Render-ready data for one vehicle this frame (TDV-09/10): its model, world
@@ -284,6 +285,7 @@ impl GpuBridge {
         ui: &egui::Ui,
         rect: egui::Rect,
         camera: &OrbitCamera,
+        scene3d: Scene3dSettings,
         vehicles: &[VehicleDraw],
     ) -> Option<egui::TextureId> {
         if !self.available {
@@ -304,20 +306,27 @@ impl GpuBridge {
             let resized = res.target.width() != px_w || res.target.height() != px_h;
             res.target.resize(px_w, px_h);
 
-            let vp = camera.view_proj(px_w as f32 / px_h as f32);
+            let vp =
+                camera.view_proj_with_far(px_w as f32 / px_h as f32, scene3d.resolved_far_clip_m());
             let vp_cols = vp.to_cols_array_2d();
             let inv = vp.inverse();
-            let fade_start = (camera.distance * 0.5).max(2.0);
-            let fade_end = (camera.distance * 8.0).clamp(40.0, 1800.0);
+            let (fade_start, fade_end) = scene3d.resolved_fog_m();
+            // Auto cell tracks height above the y=0 ground plane (where the grid
+            // is), so tightly orbiting an airborne vehicle does not collapse the
+            // grid to a shimmering fine mesh; the LOD flag lets the shader
+            // cross-fade levels so it never pops between sizes.
+            let (cell, lod) = scene3d.resolved_grid(camera.eye().y);
             res.grid.set_uniform(
                 &res.ctx,
                 &GridUniform::new(
                     vp_cols,
                     inv.to_cols_array_2d(),
                     camera.eye().to_array(),
-                    1.0,
+                    cell,
                     fade_start,
                     fade_end,
+                    scene3d.fog_enabled,
+                    lod,
                 ),
             );
             // Refresh the gizmo's view_proj for this frame (color is fixed).
@@ -342,9 +351,13 @@ impl GpuBridge {
                     });
             {
                 let mut pass = res.target.begin_pass(&mut enc, clear);
-                res.grid.draw(&mut pass);
-                res.traj
-                    .draw(&mut pass, &res.axis_gizmo.bind, res.axis_gizmo.count);
+                if scene3d.show_grid {
+                    res.grid.draw(&mut pass);
+                }
+                if scene3d.show_axes {
+                    res.traj
+                        .draw(&mut pass, &res.axis_gizmo.bind, res.axis_gizmo.count);
+                }
                 res.draw_vehicles(&mut pass, vehicles);
             }
             res.ctx.queue().submit([enc.finish()]);
