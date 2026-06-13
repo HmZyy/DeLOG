@@ -646,19 +646,22 @@ impl Behavior<'_> {
         pane: &mut PlotPane,
     ) -> egui_tiles::UiResponse {
         let outer = ui.available_rect_before_wrap();
-        let plot_rect = egui::Rect::from_min_max(
-            egui::pos2(outer.left() + axes::Y_GUTTER, outer.top() + 4.0),
-            egui::pos2(outer.right() - 4.0, outer.bottom() - axes::X_GUTTER),
-        );
         let response = ui.allocate_rect(outer, egui::Sense::click_and_drag());
         if response.clicked() || response.drag_started() || response.secondary_clicked() {
             self.actions.focus = Some(tile_id);
         }
-        self.handle_plot_interaction(&response, plot_rect);
         let tile_response = if response.drag_started_by(egui::PointerButton::Middle) {
             egui_tiles::UiResponse::DragStarted
         } else {
             egui_tiles::UiResponse::None
+        };
+        let make_plot_rect = |ui: &egui::Ui, y_range: (f32, f32), y_unit: Option<&str>| {
+            let plot_height = (outer.height() - axes::X_GUTTER).max(1.0);
+            let y_gutter = axes::y_gutter(ui, y_range, y_unit, plot_height);
+            egui::Rect::from_min_max(
+                egui::pos2(outer.left() + y_gutter, outer.top() + 4.0),
+                egui::pos2(outer.right() - 4.0, outer.bottom() - axes::X_GUTTER),
+            )
         };
 
         if pane.is_empty() {
@@ -666,11 +669,14 @@ impl Behavior<'_> {
             // even before a field is dropped. Reuse the shared view's X range
             // (set from data, or the empty-session placeholder) so the pane
             // pans and zooms with the rest; else a neutral 0..1 fallback.
+            let y_range = (0.0, 1.0);
+            let plot_rect = make_plot_rect(ui, y_range, None);
+            self.handle_plot_interaction(&response, plot_rect);
             if plot_rect.width() > 8.0 {
                 let x_range = (*self.services.view)
                     .map(|v| v.seconds(self.services.origin_us))
                     .unwrap_or((0.0, 1.0));
-                axes::draw(ui, plot_rect, x_range, (0.0, 1.0), None);
+                axes::draw(ui, plot_rect, x_range, y_range, None);
             }
             self.plot_context_menu(tile_id, &response, pane);
             self.plot_info_window(ui, tile_id, pane, None);
@@ -678,21 +684,36 @@ impl Behavior<'_> {
         }
 
         let Some(view) = *self.services.view else {
+            let plot_rect = make_plot_rect(ui, (0.0, 1.0), None);
+            self.handle_plot_interaction(&response, plot_rect);
             self.plot_context_menu(tile_id, &response, pane);
             self.plot_info_window(ui, tile_id, pane, None);
             return tile_response;
         };
+        let mut x_range = view.seconds(self.services.origin_us);
+        let y_start = Instant::now();
+        let mut y_range = gpu::visible_y_range(self.services.caches, pane, x_range.0, x_range.1);
+        let mut y_query_us = y_start.elapsed().as_secs_f32() * 1_000_000.0;
+        let y_unit = y_unit(self.services.snapshot.as_ref(), pane);
+        let mut plot_rect = make_plot_rect(ui, y_range, y_unit.as_deref());
+        let view_before_interaction = *self.services.view;
+        self.handle_plot_interaction(&response, plot_rect);
+        if *self.services.view != view_before_interaction
+            && let Some(view) = *self.services.view
+        {
+            x_range = view.seconds(self.services.origin_us);
+            let y_start = Instant::now();
+            y_range = gpu::visible_y_range(self.services.caches, pane, x_range.0, x_range.1);
+            y_query_us += y_start.elapsed().as_secs_f32() * 1_000_000.0;
+            plot_rect = make_plot_rect(ui, y_range, y_unit.as_deref());
+        }
+
         if !self.services.gpu.is_available() || plot_rect.width() <= 8.0 {
             self.plot_context_menu(tile_id, &response, pane);
             self.plot_info_window(ui, tile_id, pane, None);
             return tile_response;
         }
 
-        let x_range = view.seconds(self.services.origin_us);
-        let y_start = Instant::now();
-        let y_range = gpu::visible_y_range(self.services.caches, pane, x_range.0, x_range.1);
-        let y_query_us = y_start.elapsed().as_secs_f32() * 1_000_000.0;
-        let y_unit = y_unit(self.services.snapshot.as_ref(), pane);
         axes::draw(ui, plot_rect, x_range, y_range, y_unit.as_deref());
         let pview = PaneView {
             rect: plot_rect,
