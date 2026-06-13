@@ -1009,6 +1009,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [~] **SCR-02** — `delog-script` crate scaffold; `python` feature pins pyo3 + numpy.
 - [~] **SCR-03** — `delog` API: sources()/field()→numpy, resample_prev, output() builder.
 - [~] **SCR-04** — Run-script lifecycle: emit one derived source per run + replace-on-rerun.
+- [~] **SCR-05** — REPL eval, stdout/stderr capture, traceback streaming, cooperative cancel.
 
 ### IOX — Import/export (M10)
 
