@@ -21,3 +21,4 @@ numpy = { workspace = true, optional = true }
 
 [dev-dependencies]
 arrow = { workspace = true }
+proptest = { workspace = true }
