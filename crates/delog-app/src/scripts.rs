@@ -8,12 +8,13 @@ use delog_script::library::ScriptLibrary;
 use delog_script::{ScriptCommand, ScriptEngine, ScriptEvent};
 use egui_code_editor::{CodeEditor, ColorTheme, Syntax};
 
-/// All UI + engine state for the scripts window.
+/// All UI + engine state for the scripts window (the editor + REPL console). The
+/// saved-script library is surfaced through the Tools ▸ Scripts ▸ Run menu, not
+/// in this window.
 pub struct ScriptsPanel {
     pub open: bool,
     engine: Option<ScriptEngine>,
     library: ScriptLibrary,
-    names: Vec<String>,
     current_name: String,
     editor_text: String,
     repl_input: String,
@@ -24,17 +25,38 @@ pub struct ScriptsPanel {
 impl ScriptsPanel {
     pub fn new(scripts_dir: std::path::PathBuf) -> Self {
         let library = ScriptLibrary::new(scripts_dir);
-        let names = library.list().unwrap_or_default();
         Self {
             open: false,
             engine: None,
             library,
-            names,
             current_name: String::new(),
             editor_text: String::new(),
             repl_input: String::new(),
             console: String::new(),
             status: String::new(),
+        }
+    }
+
+    /// Saved script names for the Tools ▸ Scripts ▸ Run submenu (read fresh from
+    /// disk so newly-saved scripts appear without restarting).
+    pub fn script_names(&self) -> Vec<String> {
+        self.library.list().unwrap_or_default()
+    }
+
+    /// Load a saved script by name and run it through the engine (Tools ▸ Scripts
+    /// ▸ Run ▸ <name>). The editor buffer is left untouched; output buffers in the
+    /// console and the derived source appears in the data browser.
+    pub fn run_named(&mut self, name: &str, store: Arc<DataStore>, sender: IngestSender) {
+        match self.library.load(name) {
+            Ok(source) => {
+                self.console.push_str(&format!("# run {name}\n"));
+                self.status = format!("running {name}");
+                self.engine(store, sender).send(ScriptCommand::RunScript {
+                    name: name.to_owned(),
+                    source,
+                });
+            }
+            Err(e) => self.status = format!("load failed: {e}"),
         }
     }
 
@@ -84,24 +106,6 @@ impl ScriptsPanel {
         store: &Arc<DataStore>,
         sender: &IngestSender,
     ) {
-        egui::Panel::left("scripts_library").show_inside(ui, |ui| {
-            ui.heading("Library");
-            if ui.button("New").clicked() {
-                self.current_name.clear();
-                self.editor_text.clear();
-            }
-            let names = self.names.clone();
-            for name in names {
-                if ui
-                    .selectable_label(self.current_name == name, &name)
-                    .clicked()
-                    && let Ok(src) = self.library.load(&name)
-                {
-                    self.current_name = name.clone();
-                    self.editor_text = src;
-                }
-            }
-        });
         egui::Panel::bottom("scripts_repl")
             .resizable(true)
             .min_size(140.0)
@@ -137,10 +141,7 @@ impl ScriptsPanel {
                 ui.text_edit_singleline(&mut self.current_name);
                 if ui.button("Save").clicked() && !self.current_name.is_empty() {
                     match self.library.save(&self.current_name, &self.editor_text) {
-                        Ok(()) => {
-                            self.names = self.library.list().unwrap_or_default();
-                            self.status = format!("saved {}", self.current_name);
-                        }
+                        Ok(()) => self.status = format!("saved {}", self.current_name),
                         Err(e) => self.status = format!("save failed: {e}"),
                     }
                 }
