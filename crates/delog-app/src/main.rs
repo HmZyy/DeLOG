@@ -1,5 +1,10 @@
 //! DeLOG application shell: eframe window, widgets, docks, layouts, glue.
 
+// Hide the Windows console window in release builds: a default Rust binary is a
+// console subsystem app, so Windows spawns a terminal alongside the GUI. Debug
+// builds keep the console so `tracing` output stays visible during development.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod about;
 mod app;
 mod axes;
