@@ -7,6 +7,9 @@
 pub mod library;
 
 #[cfg(feature = "python")]
+pub mod api;
+
+#[cfg(feature = "python")]
 pub mod engine;
 
 #[cfg(feature = "python")]
