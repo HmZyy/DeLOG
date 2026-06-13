@@ -11,7 +11,6 @@ fn default_line_aa_px() -> f32 {
 fn default_true() -> bool {
     true
 }
-
 #[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AppSettings {
     #[serde(default)]
@@ -265,6 +264,12 @@ mod tests {
         let s: AppSettings = serde_json::from_str(json).unwrap();
         assert!(!s.show_fps);
         assert_eq!(s.render_mode, RenderMode::Reactive);
+    }
+
+    #[test]
+    fn serialized_app_settings_do_not_include_live_seal_policy() {
+        let json = serde_json::to_string(&AppSettings::default()).unwrap();
+        assert!(!json.contains("live_seal"));
     }
 
     #[test]
