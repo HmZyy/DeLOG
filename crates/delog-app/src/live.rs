@@ -4,6 +4,8 @@ use std::net::{IpAddr, SocketAddr};
 
 use delog_stream::{Endpoint, EndpointKind};
 
+use crate::settings::{LiveConnectionMode, LiveConnectionSettings};
+
 #[derive(Debug, Clone)]
 pub struct ConnectionDialog {
     kind: EndpointKind,
@@ -28,6 +30,31 @@ impl Default for ConnectionDialog {
 }
 
 impl ConnectionDialog {
+    pub fn from_settings(settings: &LiveConnectionSettings) -> Self {
+        Self {
+            kind: endpoint_kind(settings.mode),
+            host: settings.host.clone(),
+            port: settings.port.to_string(),
+            serial_path: settings.serial_path.clone(),
+            baud: settings.baud.to_string(),
+            error: None,
+        }
+    }
+
+    pub fn to_settings(&self) -> LiveConnectionSettings {
+        LiveConnectionSettings {
+            mode: live_connection_mode(self.kind),
+            host: self.host.trim().to_owned(),
+            port: self
+                .port
+                .trim()
+                .parse()
+                .unwrap_or(default_port_u16(self.kind)),
+            serial_path: self.serial_path.trim().to_owned(),
+            baud: self.baud.trim().parse().unwrap_or(115_200),
+        }
+    }
+
     pub fn ui(&mut self, ctx: &egui::Context, open: &mut bool) -> Option<Endpoint> {
         let mut out = None;
         let mut close = false;
@@ -150,6 +177,30 @@ fn default_port(kind: EndpointKind) -> &'static str {
     }
 }
 
+fn default_port_u16(kind: EndpointKind) -> u16 {
+    match kind {
+        EndpointKind::UdpServer => 14550,
+        EndpointKind::TcpClient => 5760,
+        EndpointKind::Serial => 0,
+    }
+}
+
+fn endpoint_kind(mode: LiveConnectionMode) -> EndpointKind {
+    match mode {
+        LiveConnectionMode::UdpServer => EndpointKind::UdpServer,
+        LiveConnectionMode::TcpClient => EndpointKind::TcpClient,
+        LiveConnectionMode::Serial => EndpointKind::Serial,
+    }
+}
+
+fn live_connection_mode(kind: EndpointKind) -> LiveConnectionMode {
+    match kind {
+        EndpointKind::UdpServer => LiveConnectionMode::UdpServer,
+        EndpointKind::TcpClient => LiveConnectionMode::TcpClient,
+        EndpointKind::Serial => LiveConnectionMode::Serial,
+    }
+}
+
 fn default_serial_path() -> String {
     #[cfg(windows)]
     {
@@ -210,5 +261,25 @@ mod tests {
         let mut d = dialog(EndpointKind::Serial);
         d.baud = "fast".to_owned();
         assert_eq!(d.endpoint().unwrap_err(), "baud must be a positive integer");
+    }
+
+    #[test]
+    fn restores_endpoint_from_last_live_connection_settings() {
+        let settings = crate::settings::LiveConnectionSettings {
+            mode: crate::settings::LiveConnectionMode::TcpClient,
+            host: "192.168.1.20".to_owned(),
+            port: 5760,
+            serial_path: "/dev/ttyUSB0".to_owned(),
+            baud: 921_600,
+        };
+
+        let dialog = ConnectionDialog::from_settings(&settings);
+        assert_eq!(
+            dialog.endpoint().unwrap(),
+            Endpoint::TcpClient {
+                remote: "192.168.1.20:5760".parse().unwrap()
+            }
+        );
+        assert_eq!(dialog.to_settings(), settings);
     }
 }

@@ -131,6 +131,7 @@ impl DelogApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let settings = crate::layout::load_app_settings();
         settings.theme.apply(&cc.egui_ctx);
+        let connection_dialog = ConnectionDialog::from_settings(&settings.live_connection);
         let (picked_files_tx, picked_files) = mpsc::channel();
         let (traj_results_tx, traj_results) = mpsc::channel();
         let (imported_layouts_tx, imported_layouts) = mpsc::channel();
@@ -181,7 +182,7 @@ impl DelogApp {
             last_session_autosave: Instant::now(),
             last_session_autosave_json: None,
             show_connection_dialog: false,
-            connection_dialog: ConnectionDialog::default(),
+            connection_dialog,
             vehicles: Vec::new(),
             vehicle_dialog: crate::vehicle_dialog::VehicleDialog::default(),
             vehicle_trajectories: Vec::new(),
@@ -1449,10 +1450,19 @@ impl eframe::App for DelogApp {
         if let Some(endpoint) = self
             .connection_dialog
             .ui(ui.ctx(), &mut self.show_connection_dialog)
-            && let Err(err) = self.session.start_live(endpoint, None)
         {
-            self.session
-                .push_diagnostic(delog_core::diagnostics::Diag::error("live-open", err));
+            self.settings.live_connection = self.connection_dialog.to_settings();
+            if let Err(err) = crate::layout::save_app_settings(&self.settings) {
+                self.session
+                    .push_diagnostic(delog_core::diagnostics::Diag::error(
+                        "settings-save",
+                        err.to_string(),
+                    ));
+            }
+            if let Err(err) = self.session.start_live(endpoint, None) {
+                self.session
+                    .push_diagnostic(delog_core::diagnostics::Diag::error("live-open", err));
+            }
         }
 
         #[cfg(feature = "scripting")]
