@@ -1016,10 +1016,29 @@ impl eframe::App for DelogApp {
                 });
                 ui.menu_button("Tools", |ui| {
                     #[cfg(feature = "scripting")]
-                    if ui.button("Scripts…").clicked() {
-                        self.scripts.open = true;
-                        ui.close();
-                    }
+                    ui.menu_button("Scripts", |ui| {
+                        ui.menu_button("Run \u{25b6}", |ui| {
+                            let names = self.scripts.script_names();
+                            if names.is_empty() {
+                                ui.add_enabled(false, egui::Button::new("No saved scripts"));
+                            } else {
+                                for name in names {
+                                    if ui.button(&name).clicked() {
+                                        self.scripts.run_named(
+                                            &name,
+                                            self.session.store(),
+                                            self.session.ingest_sender(),
+                                        );
+                                        ui.close();
+                                    }
+                                }
+                            }
+                        });
+                        if ui.button("Console").clicked() {
+                            self.scripts.open = true;
+                            ui.close();
+                        }
+                    });
                     #[cfg(not(feature = "scripting"))]
                     {
                         let _ = ui.add_enabled(
