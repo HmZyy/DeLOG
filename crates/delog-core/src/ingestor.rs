@@ -152,6 +152,7 @@ impl<O: IngestObserver> Ingestor<O> {
                     self.publish();
                 }
             }
+            IngestMsg::RemoveSource { source } => self.remove_source(source),
         }
     }
 
@@ -359,6 +360,21 @@ impl<O: IngestObserver> Ingestor<O> {
                     .with_source(source),
             ),
         }
+    }
+
+    /// Tombstone a source and drop every store it owned, then republish.
+    fn remove_source(&mut self, source: SourceId) {
+        // Flush any pending rows first so the seal path does not race the drop.
+        self.flush_source(source);
+        let Some(removed) = self.identity.remove_source(source) else {
+            return;
+        };
+        for topic in &removed.topics {
+            self.stores.remove(topic);
+            self.topic_max_ts.remove(topic);
+        }
+        self.sources.remove(&source);
+        self.publish();
     }
 
     /// Flush every pending topic of one source (used on `CloseSource`).
@@ -778,6 +794,34 @@ mod tests {
             summary: ParseSummary::default(),
         });
         assert_eq!(ing.chunks_sealed(), 1);
+    }
+
+    #[test]
+    fn remove_source_drops_its_stores_and_republishes() {
+        let mut ing = Ingestor::new(NullObserver);
+        let store = ing.store();
+        let source = open(&mut ing, "script:test", SourceKind::Derived);
+        ing.process(IngestMsg::Batch(batch(source, "DERIVED", &[1, 2, 3])));
+        ing.process(IngestMsg::CloseSource {
+            source,
+            summary: ParseSummary::default(),
+        });
+        let before = store.load();
+        let topic = before
+            .topics
+            .iter()
+            .find(|t| t.entry.name == "DERIVED")
+            .unwrap()
+            .entry
+            .id;
+        assert!(before.topic_store(topic).is_some());
+
+        ing.process(IngestMsg::RemoveSource { source });
+
+        let after = store.load();
+        assert!(after.epoch > before.epoch, "removal publishes a new epoch");
+        assert!(!after.is_source_live(source));
+        assert!(after.topic_store(topic).is_none());
     }
 
     #[test]
