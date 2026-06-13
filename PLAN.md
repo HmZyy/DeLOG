@@ -1011,6 +1011,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [~] **SCR-04** — Run-script lifecycle: emit one derived source per run + replace-on-rerun.
 - [~] **SCR-05** — REPL eval, stdout/stderr capture, traceback streaming, cooperative cancel.
 - [~] **SCR-06** — Global script library persistence (config-dir `.py` files): list/load/save/delete.
+- [~] **SCR-07** — Scripts window + Tools menu in delog-app (feature-gated).
 
 ### IOX — Import/export (M10)
 
