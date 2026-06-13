@@ -1031,9 +1031,16 @@ impl eframe::App for DelogApp {
                                 for name in names {
                                     ui.horizontal(|ui| {
                                         // Fixed-width name button so the trailing
-                                        // edit/remove icons line up across rows.
+                                        // edit/remove icons line up across rows; the
+                                        // trailing grow atom left-aligns the name.
                                         if ui
-                                            .add_sized([180.0, 22.0], egui::Button::new(&name))
+                                            .add_sized(
+                                                [180.0, 22.0],
+                                                egui::Button::new((
+                                                    name.as_str(),
+                                                    egui::Atom::grow(),
+                                                )),
+                                            )
                                             .clicked()
                                         {
                                             self.scripts.run_named(
