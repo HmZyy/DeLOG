@@ -15,7 +15,7 @@ jobs:
     name: fmt + clippy + test + bench-compile (Linux)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install system libraries (eframe/wgpu, serialport)
         run: |
@@ -46,14 +46,12 @@ jobs:
     name: fuzz smoke (60 s per target)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # The fuzz crate only depends on delog-core + delog-parsers (no
       # eframe/wgpu/serialport), so no system libraries are needed.
       - name: Install nightly (cargo-fuzz requires the sanitizer)
-        run: |
-          rustup toolchain install nightly --profile minimal --component rust-src
-          rustup default nightly
+        run: rustup toolchain install nightly --profile minimal --component rust-src
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -65,9 +63,14 @@ jobs:
 
       # PLAN.md §20.4: 60 s smoke per frame decoder. A crash, panic, OOM, or
       # hang (libFuzzer's -timeout) fails the job — the §6.1 policy, enforced.
+      #
+      # `+nightly` is mandatory: cargo-fuzz emits `-Zsanitizer=address`, but the
+      # root rust-toolchain.toml pins stable 1.96.0 and a toolchain file outranks
+      # `rustup default`. The `+nightly` override sets RUSTUP_TOOLCHAIN, which
+      # outranks the toolchain file and propagates into cargo-fuzz's inner build.
       - name: fuzz BIN record
-        run: cargo fuzz run bin_record -- -max_total_time=60 -timeout=20 -rss_limit_mb=2048
+        run: cargo +nightly fuzz run bin_record -- -max_total_time=60 -timeout=20 -rss_limit_mb=2048
       - name: fuzz ULog defs+data
-        run: cargo fuzz run ulog_defs_data -- -max_total_time=60 -timeout=20 -rss_limit_mb=2048
+        run: cargo +nightly fuzz run ulog_defs_data -- -max_total_time=60 -timeout=20 -rss_limit_mb=2048
       - name: fuzz MAVLink framing
-        run: cargo fuzz run mavlink_framing -- -max_total_time=60 -timeout=20 -rss_limit_mb=2048
+        run: cargo +nightly fuzz run mavlink_framing -- -max_total_time=60 -timeout=20 -rss_limit_mb=2048
