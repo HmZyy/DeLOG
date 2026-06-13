@@ -1010,6 +1010,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [~] **SCR-03** — `delog` API: sources()/field()→numpy, resample_prev, output() builder.
 - [~] **SCR-04** — Run-script lifecycle: emit one derived source per run + replace-on-rerun.
 - [~] **SCR-05** — REPL eval, stdout/stderr capture, traceback streaming, cooperative cancel.
+- [~] **SCR-06** — Global script library persistence (config-dir `.py` files): list/load/save/delete.
 
 ### IOX — Import/export (M10)
 
