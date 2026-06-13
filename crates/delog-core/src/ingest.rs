@@ -120,6 +120,11 @@ pub enum IngestMsg {
         source: SourceId,
         offset_us: i64,
     },
+    /// Remove a source: tombstone it and its topics/fields in the registry,
+    /// drop their stores, and republish a snapshot without them (§4.6, SCR-01).
+    RemoveSource {
+        source: SourceId,
+    },
 }
 
 /// The parser-facing handle. Every method is infallible: once the ingest thread
@@ -170,6 +175,12 @@ impl IngestSender {
         let _ = self
             .tx
             .send(IngestMsg::SetSourceOffset { source, offset_us });
+    }
+
+    /// Request removal of a source (§4.6, SCR-01). Blocking like a file sink;
+    /// a no-op once the ingest thread is gone.
+    pub fn remove_source(&self, source: SourceId) {
+        let _ = self.tx.send(IngestMsg::RemoveSource { source });
     }
 
     /// A non-blocking, live-decoder sink: a full channel *drops* the batch and
