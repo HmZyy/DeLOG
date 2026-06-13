@@ -179,11 +179,10 @@ fn general_tab(ui: &mut egui::Ui, settings: &mut AppSettings) -> SettingsChange 
             ui.checkbox(&mut settings.show_fps, "");
             ui.end_row();
 
-            ui.label("Render mode")
-                .on_hover_text(
-                    "Reactive: event-driven, idles at 0% GPU when nothing changes. \
+            ui.label("Render mode").on_hover_text(
+                "Reactive: event-driven, idles at 0% GPU when nothing changes. \
                      Continuous: repaints every frame (smoother for debugging, higher GPU).",
-                );
+            );
             egui::ComboBox::from_id_salt("settings-render-mode")
                 .selected_text(settings.render_mode.label())
                 .show_ui(ui, |ui| {
