@@ -1,7 +1,7 @@
 //! Vehicle configuration + pose/trajectory resolution for the 3D view
 //! (PLAN.md §12.1-§12.2, TDV-03/04/06). A [`VehicleConfig`] maps a source's
 //! fields to position and orientation; [`pose_at`] reads the pose at a playback
-//! time and [`build_trajectory`] resamples the whole path — both into render
+//! time and [`build_trajectory`] decimates the whole path — both into render
 //! space (§12.2) via [`crate::geo`].
 //!
 //! Field samples are read through `delog-core`'s [`FieldView`] (the app never
@@ -10,9 +10,10 @@
 
 use std::path::PathBuf;
 
-use delog_core::field_view::{FieldView, SampleMode};
+use delog_core::field_view::{FieldView, SampleMode, array_row_as_f64};
 use delog_core::identity::{FieldId, SourceId};
 use delog_core::snapshot::StoreSnapshot;
+use delog_core::store::TopicStore;
 use egui::Color32;
 use glam::{Mat3, Mat4, Quat, Vec3};
 
@@ -342,13 +343,132 @@ fn gps_reference(snapshot: &StoreSnapshot, config: &VehicleConfig) -> Option<(f6
     }
 }
 
-/// Maximum trajectory samples (resampled across the position range, v1).
+/// Maximum trajectory samples selected from the position rows.
 const MAX_TRAJECTORY_POINTS: usize = 4000;
 
-/// Resample a vehicle's full path into render-space points (with NaN points
-/// marking gaps, so the line shader breaks there). Off-thread work (§19.6):
-/// the caller runs this on a worker and feeds the result to the renderer.
-pub fn build_trajectory(snapshot: &StoreSnapshot, config: &VehicleConfig) -> Vec<[f32; 3]> {
+struct PositionRows<'a> {
+    store: &'a TopicStore,
+    col_indices: [usize; 3],
+    multipliers: [f64; 3],
+}
+
+fn position_row_source<'a>(
+    snapshot: &'a StoreSnapshot,
+    pos: &PosMapping,
+) -> Option<PositionRows<'a>> {
+    let fields = match pos {
+        PosMapping::Ned {
+            north, east, down, ..
+        } => [*north, *east, *down],
+        PosMapping::Gps { lat, lon, alt } => [*lat, *lon, *alt],
+    };
+    let entries = fields.map(|field| snapshot.fields.get(field.index()).filter(|e| e.id == field));
+    let [Some(a), Some(b), Some(c)] = entries else {
+        return None;
+    };
+    if a.topic != b.topic || a.topic != c.topic {
+        return None;
+    }
+
+    let store = snapshot.topic_store(a.topic)?;
+    let names = [&a.name, &b.name, &c.name];
+    let mut col_indices = [0; 3];
+    let mut multipliers = [1.0; 3];
+    for (idx, name) in names.into_iter().enumerate() {
+        let col_index = store.schema.field_index(name)?;
+        col_indices[idx] = col_index;
+        multipliers[idx] = store.schema.field(col_index)?.multiplier;
+    }
+
+    Some(PositionRows {
+        store,
+        col_indices,
+        multipliers,
+    })
+}
+
+fn row_value(
+    rows: &PositionRows<'_>,
+    chunk: &delog_core::chunk::Chunk,
+    col: usize,
+    row: usize,
+) -> Option<f64> {
+    let value =
+        array_row_as_f64(chunk.cols[rows.col_indices[col]].as_ref(), row) * rows.multipliers[col];
+    value.is_finite().then_some(value)
+}
+
+fn position_from_row(
+    pos: &PosMapping,
+    rows: &PositionRows<'_>,
+    gps_ref: Option<(f64, f64, f64)>,
+    chunk: &delog_core::chunk::Chunk,
+    row: usize,
+) -> Option<Vec3> {
+    match pos {
+        PosMapping::Ned { .. } => {
+            let ned = Vec3::new(
+                row_value(rows, chunk, 0, row)? as f32,
+                row_value(rows, chunk, 1, row)? as f32,
+                row_value(rows, chunk, 2, row)? as f32,
+            );
+            Some(geo::ned_to_render(ned))
+        }
+        PosMapping::Gps { .. } => {
+            let (rlat, rlon, ralt) = gps_ref?;
+            let la = row_value(rows, chunk, 0, row)?.to_radians();
+            let lo = row_value(rows, chunk, 1, row)?.to_radians();
+            let al = row_value(rows, chunk, 2, row)?;
+            let ned = geo::geodetic_to_ned(la, lo, al, rlat, rlon, ralt).as_vec3();
+            Some(geo::ned_to_render(ned))
+        }
+    }
+}
+
+fn selected_row_index(total_rows: usize, point_index: usize, point_count: usize) -> usize {
+    if point_count <= 1 {
+        return 0;
+    }
+    point_index * (total_rows - 1) / (point_count - 1)
+}
+
+fn build_trajectory_from_rows(
+    snapshot: &StoreSnapshot,
+    config: &VehicleConfig,
+) -> Option<Vec<[f32; 3]>> {
+    let rows = position_row_source(snapshot, &config.pos)?;
+    let total_rows = usize::try_from(rows.store.rows).ok()?;
+    if total_rows == 0 {
+        return Some(Vec::new());
+    }
+
+    let gps_ref = gps_reference(snapshot, config);
+    let point_count = total_rows.min(MAX_TRAJECTORY_POINTS);
+    let mut points = Vec::with_capacity(point_count);
+    let mut chunk_index = 0;
+    let mut chunk_start = 0;
+
+    for i in 0..point_count {
+        let target = selected_row_index(total_rows, i, point_count);
+        while let Some(chunk) = rows.store.chunks.get(chunk_index) {
+            let chunk_end = chunk_start + chunk.len();
+            if target < chunk_end {
+                let row = target - chunk_start;
+                match position_from_row(&config.pos, &rows, gps_ref, chunk, row) {
+                    Some(p) => points.push([p.x, p.y, p.z]),
+                    None => points.push([f32::NAN, f32::NAN, f32::NAN]),
+                }
+                break;
+            }
+            chunk_start = chunk_end;
+            chunk_index += 1;
+        }
+    }
+
+    Some(points)
+}
+
+fn build_trajectory_by_time(snapshot: &StoreSnapshot, config: &VehicleConfig) -> Vec<[f32; 3]> {
     let Some((t0, t1)) = position_topic_range(snapshot, &config.pos) else {
         return Vec::new();
     };
@@ -364,6 +484,14 @@ pub fn build_trajectory(snapshot: &StoreSnapshot, config: &VehicleConfig) -> Vec
         }
     }
     pts
+}
+
+/// Decimate a vehicle's full path into render-space points (with NaN points
+/// marking gaps, so the line shader breaks there). Off-thread work (§19.6):
+/// the caller runs this on a worker and feeds the result to the renderer.
+pub fn build_trajectory(snapshot: &StoreSnapshot, config: &VehicleConfig) -> Vec<[f32; 3]> {
+    build_trajectory_from_rows(snapshot, config)
+        .unwrap_or_else(|| build_trajectory_by_time(snapshot, config))
 }
 
 #[cfg(test)]
@@ -524,5 +652,23 @@ mod tests {
             (last[2] + 100.0).abs() < 2.0,
             "end near −100 Z, got {last:?}"
         );
+    }
+
+    #[test]
+    fn trajectory_uses_position_rows_without_time_resampling_duplicates() {
+        // A 10 Hz live position topic should contribute its actual rows once.
+        // Resampling at a fixed time interval duplicates Prev samples and makes
+        // long live paths increasingly expensive to rebuild as chunks accrue.
+        let (snap, f) = ned_snapshot(
+            vec![0, 100_000, 200_000],
+            vec![0.0, 10.0, 20.0],
+            vec![0.0, 0.0, 0.0],
+            vec![0.0, 0.0, 0.0],
+        );
+        let traj = build_trajectory(&snap, &ned_config(f));
+        assert_eq!(traj.len(), 3);
+        assert!((traj[0][2] - 0.0).abs() < 1e-4, "{traj:?}");
+        assert!((traj[1][2] + 10.0).abs() < 1e-4, "{traj:?}");
+        assert!((traj[2][2] + 20.0).abs() < 1e-4, "{traj:?}");
     }
 }
