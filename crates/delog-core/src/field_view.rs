@@ -100,6 +100,11 @@ impl<'a> FieldView<'a> {
         self.field
     }
 
+    /// Column index of this field inside its topic schema.
+    pub fn col_index(&self) -> usize {
+        self.col_index
+    }
+
     pub fn topic(&self) -> TopicId {
         self.topic
     }
@@ -287,6 +292,18 @@ fn upper_bound(t: &Int64Array, query: TimestampUs) -> usize {
         }
     }
     left
+}
+
+/// Read row `row` of `array` as `f64` (NaN for nulls/non-numeric), for script
+/// materialization (SCR-03). NaN gap markers in float columns are preserved.
+pub fn array_row_as_f64(array: &dyn Array, row: usize) -> f64 {
+    match value_at(array, row) {
+        SampleValue::Int(v) => v as f64,
+        SampleValue::UInt(v) => v as f64,
+        SampleValue::Float(v) => v,
+        SampleValue::Bool(b) => b as i64 as f64,
+        SampleValue::Utf8(_) | SampleValue::Null => f64::NAN,
+    }
 }
 
 fn value_at(array: &dyn Array, row: usize) -> SampleValue<'_> {
