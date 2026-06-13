@@ -1039,6 +1039,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [ ] **TST-07** — Layout migration fixture tests (=LAY-03)
 - [x] **TST-08** — tlog record/replay round-trip test (=LIV-09)
 - [ ] **TST-09** — mac/Windows build matrix from M3
+- [x] **TST-10** — Tag-triggered release workflow: builds the `delog` binary for Linux + Windows and attaches both archives to a GitHub Release (`release.yml`). Fuzz smoke fixed to run on `+nightly` (sanitizer `-Z` flags require it; the pinned-stable toolchain file outranks `rustup default`).
 
 ### BLG — Backlog (post-v1; keep ordered, do not start without re-planning)
 

@@ -20,7 +20,7 @@ jobs:
       matrix:
         target: [bin_record, ulog_defs_data, mavlink_framing]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install nightly
         run: |
