@@ -30,10 +30,17 @@ cargo bench                               # criterion benches; budgets in PLAN.m
 cargo run -p delog-app
 ```
 
+**Python scripting (PLAN.md §17.3, SCR-*) is ON by default**, so the default
+`cargo build --workspace` / `cargo run -p delog-app` above embed CPython and need
+a Python 3 toolchain (interpreter + dev headers). Build *without* Python via
+`--no-default-features` (Cargo features are additive, so the opt-out is disabling
+the default, not a `without-scripting` feature):
+
 ```bash
-# Optional Python scripting (PLAN.md §17.3, SCR-*) — OFF by default:
-cargo build --workspace --features delog-app/scripting   # full scripting build (needs Python 3.x + dev headers)
-cargo test  -p delog-script --features python            # scripting engine tests
+cargo build -p delog-app --no-default-features        # no scripting, no Python needed
+cargo run   -p delog-app --no-default-features         # run without scripting
+cargo build --workspace --no-default-features          # whole workspace, no Python
+cargo test  -p delog-script --features python          # scripting engine tests
 ```
 
 The scripting feature embeds CPython via `pyo3`. If the build/test picks the wrong
