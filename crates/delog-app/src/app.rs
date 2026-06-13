@@ -71,6 +71,10 @@ pub struct DelogApp {
     /// session is empty (the view is a pan/zoomable placeholder), so the
     /// first loaded log replaces the placeholder by fitting to its range.
     view_fitted: bool,
+    /// "Fit all" timeline toggle: when set, every frame pins the X view to the
+    /// full data range (auto-zoom from start to the current/live point), useful
+    /// while streaming. Disengaged by manual pan/zoom or toggling it off.
+    fit_view_all: bool,
     hover_mode: delog_core::field_view::SampleMode,
     frame: u64,
     last_epoch: u64,
@@ -145,6 +149,7 @@ impl DelogApp {
             playback: Playback::default(),
             view: None,
             view_fitted: false,
+            fit_view_all: false,
             hover_mode: delog_core::field_view::SampleMode::Prev,
             frame: 0,
             last_epoch: u64::MAX,
@@ -904,7 +909,10 @@ impl eframe::App for DelogApp {
             let dt = ui.ctx().input(|i| i.stable_dt) as f64;
             self.playback.clamp_to(range);
             self.playback.advance(dt, range);
-            if self.session.has_live_links() && self.playback.follow_live {
+            if self.fit_view_all {
+                // Keep the entire range in view, growing it as data streams in.
+                self.view = Some(ViewX::from_range(range));
+            } else if self.session.has_live_links() && self.playback.follow_live {
                 self.pin_view_to_live(range);
             }
 
@@ -1204,6 +1212,7 @@ impl eframe::App for DelogApp {
                 let action = crate::timeline::ui(
                     ui,
                     &mut self.playback,
+                    &mut self.fit_view_all,
                     range,
                     None,
                     self.session.has_live_links(),
@@ -1389,6 +1398,9 @@ impl eframe::App for DelogApp {
                     }
                     if actions.view_changed {
                         self.playback.unlock_live();
+                        // Manual pan/zoom drops out of fit-all (like a scrub
+                        // disengages live-follow).
+                        self.fit_view_all = false;
                     }
                     if actions.open_vehicle_config {
                         self.vehicle_dialog.open = true;

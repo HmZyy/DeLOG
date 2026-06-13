@@ -215,6 +215,7 @@ pub struct TimelineAction {
 pub fn ui(
     ui: &mut egui::Ui,
     playback: &mut Playback,
+    fit_all: &mut bool,
     range: TimeRange,
     utc_offset_us: Option<i64>,
     any_live: bool,
@@ -292,6 +293,14 @@ pub fn ui(
                 action.manual_scrub = true;
             }
         }
+
+        // Fit-all view toggle: while on, the plots keep the whole time range in
+        // view (auto-zooming as data streams). Toggling off — or panning/zooming
+        // a plot — restores free pan/zoom.
+        ui.toggle_value(fit_all, "⤢").on_hover_text(
+            "Fit all: keep the whole range in view (auto-zoom from start to the \
+             current/live point). Click again to pan/zoom freely.",
+        );
 
         egui::ComboBox::from_id_salt("playback_speed")
             .selected_text(format!("{}×", playback.speed))
