@@ -235,6 +235,14 @@ impl Session {
         self.sender.set_source_offset(source, offset_us);
     }
 
+    /// Request removal of a source (§4.6, BRW-06). Applied by the ingest thread
+    /// (the single registry writer): it tombstones the source and its
+    /// topics/fields, drops their stores, and publishes a new epoch off which
+    /// the cache manager GCs the orphaned render caches.
+    pub fn remove_source(&self, source: SourceId) {
+        self.sender.remove_source(source);
+    }
+
     /// Combined progress of in-flight loads (the least-advanced one), or `None`
     /// when nothing is loading.
     pub fn overall_progress(&self) -> Option<f32> {
