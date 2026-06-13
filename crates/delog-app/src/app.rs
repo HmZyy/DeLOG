@@ -1010,25 +1010,28 @@ impl eframe::App for DelogApp {
                     }
                 });
 
-                // FPS badge pinned to the far right (PRF-05).
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    match self.fps_ema {
-                        Some(fps) => {
-                            // Green >60, orange 30..=60, red <30.
-                            let color = if fps > 60.0 {
-                                self.settings.theme.success()
-                            } else if fps >= 30.0 {
-                                self.settings.theme.warning()
-                            } else {
-                                self.settings.theme.error()
-                            };
-                            ui.colored_label(color, format!("{fps:.0} FPS"));
+                // FPS badge pinned to the far right (PRF-05), shown only when
+                // enabled in settings (PRF-08).
+                if self.settings.show_fps {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        match self.fps_ema {
+                            Some(fps) => {
+                                // Green >60, orange 30..=60, red <30.
+                                let color = if fps > 60.0 {
+                                    self.settings.theme.success()
+                                } else if fps >= 30.0 {
+                                    self.settings.theme.warning()
+                                } else {
+                                    self.settings.theme.error()
+                                };
+                                ui.colored_label(color, format!("{fps:.0} FPS"));
+                            }
+                            None => {
+                                ui.weak("idle");
+                            }
                         }
-                        None => {
-                            ui.weak("idle");
-                        }
-                    }
-                });
+                    });
+                }
             });
         });
 
