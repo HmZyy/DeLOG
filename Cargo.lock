@@ -988,6 +988,7 @@ dependencies = [
  "arrow",
  "delog-core",
  "numpy",
+ "proptest",
  "pyo3",
 ]
 
