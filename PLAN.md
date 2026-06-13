@@ -987,6 +987,8 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **PRF-05** — Idle-aware FPS/status indicator (off when event-driven) — EMA-smoothed FPS badge pinned top-right of the menu bar, green >60 / orange 30–60 / red <30; computed from the real wall-clock frame-to-frame gap so it tracks during any continuous render (playback/live/interaction), reads "idle" when gaps exceed ~5 FPS (§11)
 - [ ] **PRF-06** — F12 debug overlay
 - [ ] **PRF-07** — Export profiling snapshot JSON
+- [x] **PRF-08** — FPS-counter visibility toggle (default off) — `AppSettings.show_fps`, surfaced in the Settings → General tab; gates the corner FPS badge (extends PRF-05)
+- [x] **PRF-09** — Reactive/Continuous render mode (default Reactive) — `AppSettings.render_mode`; `Continuous` overrides the §11 idle policy (TLN-06) to repaint every frame
 
 ### ANA — Analysis (M10)
 
