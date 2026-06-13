@@ -19,6 +19,12 @@ pub struct AppSettings {
     /// Plot rendering tuning (live-adjustable, persisted in the config).
     #[serde(default)]
     pub render: RenderTuning,
+    /// Show the corner FPS badge (PRF-08). Default off.
+    #[serde(default)]
+    pub show_fps: bool,
+    /// Frame-pacing policy (PRF-09). Default `Reactive`.
+    #[serde(default)]
+    pub render_mode: RenderMode,
 }
 
 /// Knobs for the plot draw path (§9.5 decimation + line/edge AA). Lives in the
@@ -43,6 +49,26 @@ impl Default for RenderTuning {
             decimate_threshold: default_decimate_threshold(),
             line_aa_px: default_line_aa_px(),
             bridge_columns: true,
+        }
+    }
+}
+
+/// Frame-pacing policy (PRF-09). `Reactive` is event-driven and idles at 0% GPU
+/// (§11 / TLN-06); `Continuous` repaints every frame regardless of activity.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RenderMode {
+    #[default]
+    Reactive,
+    Continuous,
+}
+
+impl RenderMode {
+    pub const ALL: [Self; 2] = [Self::Reactive, Self::Continuous];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Reactive => "Reactive",
+            Self::Continuous => "Continuous",
         }
     }
 }
@@ -204,5 +230,28 @@ mod tests {
             .map(SettingsTab::label)
             .collect();
         assert_eq!(labels, ["General", "Rendering"]);
+    }
+
+    #[test]
+    fn default_settings_hide_fps_and_render_reactively() {
+        let s = AppSettings::default();
+        assert!(!s.show_fps);
+        assert_eq!(s.render_mode, RenderMode::Reactive);
+    }
+
+    #[test]
+    fn old_config_without_new_fields_uses_defaults() {
+        // A config written before these fields existed.
+        // ThemeChoice serialises with snake_case, so CatppuccinMocha → "catppuccin_mocha".
+        let json = r#"{"theme":"catppuccin_mocha"}"#;
+        let s: AppSettings = serde_json::from_str(json).unwrap();
+        assert!(!s.show_fps);
+        assert_eq!(s.render_mode, RenderMode::Reactive);
+    }
+
+    #[test]
+    fn render_mode_labels_are_stable() {
+        let labels: Vec<_> = RenderMode::ALL.into_iter().map(RenderMode::label).collect();
+        assert_eq!(labels, ["Reactive", "Continuous"]);
     }
 }
