@@ -58,7 +58,7 @@ A single-window workspace where an engineer drops one or more flight logs (or op
 
 ### 1.3 Non-goals (v1)
 
-Parameter editing/upload, mission editing, map tiles, multi-window, dynamically-loaded plugins, packaged web build (we keep the code _compatible_ with WASM, §9.10, but do not ship it), FFT view (backlog), scripting (backlog).
+Parameter editing/upload, mission editing, map tiles, multi-window, dynamically-loaded plugins, packaged web build (we keep the code _compatible_ with WASM, §9.10, but do not ship it), FFT view (backlog), scripting (in progress — SCR-*, optional feature).
 
 ---
 
@@ -1005,13 +1005,16 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 
 ### SCR — Scripting (derived fields / Python)
 
-- [~] **SCR-01** — Derived-source substrate: `SourceKind::Derived` (file-like seal) + `IngestMsg::RemoveSource`. Shared with ANA-04 and §4.6.
-- [~] **SCR-02** — `delog-script` crate scaffold; `python` feature pins pyo3 + numpy.
-- [~] **SCR-03** — `delog` API: sources()/field()→numpy, resample_prev, output() builder.
-- [~] **SCR-04** — Run-script lifecycle: emit one derived source per run + replace-on-rerun.
-- [~] **SCR-05** — REPL eval, stdout/stderr capture, traceback streaming, cooperative cancel.
-- [~] **SCR-06** — Global script library persistence (config-dir `.py` files): list/load/save/delete.
-- [~] **SCR-07** — Scripts window + Tools menu in delog-app (feature-gated).
+- [x] **SCR-01** — Derived-source substrate: `SourceKind::Derived` (file-like seal) + `IngestMsg::RemoveSource`. Shared with ANA-04 and §4.6.
+- [x] **SCR-02** — `delog-script` crate scaffold; `python` feature pins pyo3 + numpy.
+- [x] **SCR-03** — `delog` API: sources()/field()→numpy, resample_prev, output() builder.
+- [x] **SCR-04** — Run-script lifecycle: emit one derived source per run + replace-on-rerun.
+- [x] **SCR-05** — REPL eval, stdout/stderr capture, traceback streaming, cooperative cancel.
+- [x] **SCR-06** — Global script library persistence (config-dir `.py` files): list/load/save/delete.
+- [~] **SCR-07** — Scripts window + Tools menu in delog-app (feature-gated). (code complete; manual GUI run pending)
+- [x] **SCR-08** — Tests: engine, golden accel-mag script, numpy↔Arrow round-trip incl. NaN, error path, resample_prev proptest, derived-source substrate tests.
+
+`delog-app` gains a `scripting` feature (OFF by default); see CLAUDE.md build matrix. Scripting build requires a local libpython pin (gitignored .cargo/config.toml).
 
 ### IOX — Import/export (M10)
 
@@ -1062,7 +1065,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [ ] **BLG-04** — Parameter browser + diff between sources
 - [ ] **BLG-05** — Mission viewer (3D + map)
 - [ ] **BLG-06** — Event timeline lane (auto-markers as a swimlane)
-- [ ] **BLG-07** — Python scripting for derived fields
+- [x] **BLG-07** — superseded by the SCR section (optional embedded-Python scripting).
 - [ ] **BLG-08** — Dynamic plugin parser loading
 - [ ] **BLG-09** — Multi-window
 - [ ] **BLG-10** — Remote streaming relay / collaboration sessions
