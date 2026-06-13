@@ -1,0 +1,12 @@
+//! Optional embedded-Python scripting for derived fields (PLAN.md §17.3, SCR-*).
+//!
+//! With the `python` feature off (the default) this crate carries only the
+//! feature-independent script *library* (file persistence, SCR-06); the
+//! interpreter engine lives behind `python`.
+
+pub mod library;
+
+#[cfg(feature = "python")]
+pub mod engine;
+
+// pub use engine::{ScriptCommand, ScriptEngine, ScriptEvent}; // filled in Task 4

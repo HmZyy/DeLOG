@@ -1006,6 +1006,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 ### SCR — Scripting (derived fields / Python)
 
 - [~] **SCR-01** — Derived-source substrate: `SourceKind::Derived` (file-like seal) + `IngestMsg::RemoveSource`. Shared with ANA-04 and §4.6.
+- [~] **SCR-02** — `delog-script` crate scaffold; `python` feature pins pyo3 + numpy.
 
 ### IOX — Import/export (M10)
 
