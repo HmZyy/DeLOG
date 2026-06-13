@@ -7,9 +7,25 @@ use delog_core::field_view::array_row_as_f64;
 use delog_core::identity::FieldId;
 use delog_core::snapshot::StoreSnapshot;
 
-use numpy::{IntoPyArray, PyArray1};
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
 use pyo3::prelude::*;
 use pyo3::types::PyList;
+
+/// Prev-sample resample: for each `base` time, the source value at the latest
+/// source timestamp `<= base` (NaN before the first sample). `src_t` must be
+/// sorted ascending. O(m log n) via binary search.
+pub fn resample_prev(src_t: &[i64], src_v: &[f64], base: &[i64]) -> Vec<f64> {
+    let mut out = Vec::with_capacity(base.len());
+    for &bt in base {
+        let idx = match src_t.binary_search(&bt) {
+            Ok(i) => Some(i),
+            Err(0) => None,
+            Err(i) => Some(i - 1),
+        };
+        out.push(idx.map(|i| src_v[i]).unwrap_or(f64::NAN));
+    }
+    out
+}
 
 /// Materialize a field as `(times_us: Vec<i64>, values: Vec<f64>)` by walking
 /// its chunks in time order. This concatenates chunk buffers — the One Copy for
@@ -118,6 +134,19 @@ impl Delog {
             v: v.into_pyarray(py).unbind(),
         })
     }
+
+    /// Prev-sample resample a field's values onto `base_times`.
+    fn resample_prev(
+        &self,
+        py: Python<'_>,
+        field: &DelogField,
+        base_times: numpy::PyReadonlyArray1<i64>,
+    ) -> PyResult<Py<numpy::PyArray1<f64>>> {
+        let t = field.t.bind(py).readonly();
+        let v = field.v.bind(py).readonly();
+        let out = resample_prev(t.as_slice()?, v.as_slice()?, base_times.as_slice()?);
+        Ok(out.into_pyarray(py).unbind())
+    }
 }
 
 /// A field handed to Python: `.t` int64 µs numpy, `.v` float64 numpy.
@@ -133,6 +162,41 @@ pub struct DelogField {
 mod tests {
     use super::*;
     use arrow::array::{ArrayRef, Float64Array, Int64Array};
+
+    #[test]
+    fn resample_prev_picks_the_last_value_at_or_before_each_base_time() {
+        let src_t = vec![0_i64, 100, 200];
+        let src_v = vec![10.0_f64, 20.0, 30.0];
+        let base = vec![-5_i64, 0, 50, 100, 250];
+        let out = super::resample_prev(&src_t, &src_v, &base);
+        assert!(out[0].is_nan());
+        assert_eq!(out[1], 10.0);
+        assert_eq!(out[2], 10.0);
+        assert_eq!(out[3], 20.0);
+        assert_eq!(out[4], 30.0);
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn resample_prev_matches_naive_scan(
+            src in proptest::collection::vec((0i64..1000, -1e6f64..1e6), 1..50),
+            base in proptest::collection::vec(0i64..1000, 1..50),
+        ) {
+            let mut src = src;
+            src.sort_by_key(|(t, _)| *t);
+            src.dedup_by_key(|(t, _)| *t);
+            let st: Vec<i64> = src.iter().map(|(t, _)| *t).collect();
+            let sv: Vec<f64> = src.iter().map(|(_, v)| *v).collect();
+            let got = super::resample_prev(&st, &sv, &base);
+            for (i, &bt) in base.iter().enumerate() {
+                let naive = st.iter().rposition(|&t| t <= bt).map(|idx| sv[idx]);
+                match naive {
+                    Some(v) => proptest::prop_assert_eq!(got[i], v),
+                    None => proptest::prop_assert!(got[i].is_nan()),
+                }
+            }
+        }
+    }
     use arrow::datatypes::DataType;
     use delog_core::chunk::Chunk;
     use delog_core::identity::IdentityRegistry;
