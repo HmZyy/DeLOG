@@ -190,7 +190,7 @@ pub struct TopicStore {
 **Decisions and why:**
 
 - **Original dtypes preserved** (`Int8..UInt64`, `Float32/64`, `Bool`; strings allowed but not plottable). Units and multipliers (AP FMTU, ULog metadata) live in the schema, _not_ baked into values. **Why:** the canonical layer stays lossless and byte-comparable to the log; engineering-unit conversion happens exactly once, at the One Copy (§8.2), where a multiply is free.
-- **Chunk size:** target 64Ki rows for file parsing; live ingestion seals a chunk every 512 samples _or_ 100 ms, whichever first. **Why:** 64Ki×8B ≈ 512 KB per column — scan-friendly, amortizes `Arc` overhead; the live rule bounds both append latency and spine-rebuild frequency.
+- **Chunk size:** target 64Ki rows for file parsing; live ingestion seals a topic every 512 samples _or_ when that topic's pending rows are 100 ms old, whichever first. **Why:** 64Ki×8B ≈ 512 KB per column — scan-friendly, amortizes `Arc` overhead; the live rule bounds both append latency and spine-rebuild frequency without relying on a globally idle ingest channel.
 - **Per-chunk `ColStats` at seal time.** **Why:** global field statistics become an O(chunks) fold instead of an O(rows) scan; gap/NaN diagnostics come free.
 - **Sorted within a chunk; chunks may overlap.** Parsers sort each batch; cross-chunk overlap (rare retransmits, log quirks) is tolerated and flagged as a `timestamp-regression` diagnostic rather than fixed up. **Why:** queries already prune by `t_min/t_max` and binary-search per chunk; a global re-sort would force copies and violate append-only.
 - **Multi-instance topics** (PX4 `multi_id`, AP GPS/IMU instances) are exposed as separate topics named `topic[N]`. **Why:** each instance gets its own trace cache, color and tree row — matching how an analyst thinks about "GPS 0 vs GPS 1".
@@ -341,7 +341,7 @@ Each configured link runs **one reader thread**. Configurable endpoint/port/baud
 
 ### 7.4 Live semantics in the store
 
-Live batches flow through §5 unchanged (append-only chunks, 512-sample/100 ms seal rule). The UI gains: **lock viewport to tail** (§10.4), **pause view while ingestion continues** (pause freezes `ViewX`, never the ingest thread), and incremental GPU upload (§9.3) keeps per-frame cost proportional to _new_ samples only.
+Live batches flow through §5 unchanged (append-only chunks, fixed 512-row/100 ms per-topic stream batch and core seal defaults). The UI gains: **lock viewport to tail** (§10.4), **pause view while ingestion continues** (pause freezes `ViewX`, never the ingest thread), and incremental GPU upload (§9.3) keeps per-frame cost proportional to _new_ samples only.
 
 ### 7.5 Recording
 
@@ -824,7 +824,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 ### ING — Ingestion pipeline (M2)
 
 - [x] **ING-01** — `IngestSink` trait + `IngestMsg` + bounded channel (cap 256) (§5)
-- [x] **ING-02** — Ingest thread: batch→chunk sealing (64Ki file / 512-or-100ms live), stats at seal
+- [x] **ING-02** — Ingest thread: batch→chunk sealing (64Ki file / fixed 512-row-or-100ms per-topic live defaults), stats at seal
 - [x] **ING-03** — Backpressure policy: file-block vs live-drop + `ingest_dropped_batches` metric + diag
 - [x] **ING-04** — Byte-based progress events; `Arc<AtomicBool>` cancel polled ≤4096 records
 - [x] **ING-05** — Within-batch timestamp sort; cross-chunk regression diagnostic
@@ -857,7 +857,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **LIV-04** — Auto-reconnect (TCP/serial) with backoff — `supervise` re-opens reconnectable links with exponential backoff (0.5 s→8 s cap), resetting only after a session that delivered frames; injected connect/sleep make the schedule deterministically testable; interruptible backoff sleep keeps stop responsive
 - [x] **LIV-05** — Build-script extractor: `MavMessage → fields`, zero-alloc; unknown-msg once-diag — implemented via the amended flat serde extractor in `delog-parsers::mavlink`, used by live ingestion; unknown message IDs emit once-per-link diagnostics
 - [x] **LIV-06** — sysid demux → source per (link,sysid); compid instance folding — live consumer opens `mavlink:<endpoint>:sysid<N>` sources and assigns `[N]` topic suffixes for additional compids of the same message
-- [x] **LIV-07** — Live batching into ingest (512/100 ms), tail metrics (`live_rx_rate`) — frame consumer builds Arrow batches through `LiveSink`, flushes at 512 rows or 100 ms, records `live_rx_rate`
+- [x] **LIV-07** — Live batching into ingest (fixed 512-row/100 ms live defaults), tail metrics (`live_rx_rate`) — frame consumer builds Arrow batches through `LiveSink`; both the stream batcher and ingest thread use per-topic row/age gates, and both check age during continuous traffic instead of relying on a globally idle channel; records `live_rx_rate`
 - [x] **LIV-08** — Pause/resume _view_ while ingestion continues (§7.4) — app-level live-tail follow can be paused/resumed without stopping live readers or ingest
 - [x] **LIV-09** — Raw-bytes `.tlog` recorder + round-trip CI test (§7.5) — `TlogRecorder` writes raw frame envelopes; stream tests replay a recorded frame through `TlogParser`
 - [x] **LIV-10** — Multi-link simultaneous operation — `Session` owns a vector of `LiveLink`s; each start creates independent reader and live-ingest workers

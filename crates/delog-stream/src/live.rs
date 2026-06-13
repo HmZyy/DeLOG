@@ -18,7 +18,7 @@ use crossbeam_channel::{Receiver, RecvTimeoutError, unbounded};
 use delog_core::diagnostics::Diag;
 use delog_core::identity::{SourceId, SourceMetadata};
 use delog_core::ingest::{IngestSender, IngestSink, ParseSummary, ParsedBatch, SourceKind};
-use delog_core::ingestor::LIVE_CHUNK_ROWS;
+use delog_core::ingestor::{LIVE_CHUNK_ROWS, LIVE_MAX_AGE};
 use delog_core::metrics::MetricsRegistry;
 use delog_core::schema::{FieldSchema, TopicSchema};
 use delog_core::time::TimeRange;
@@ -29,7 +29,6 @@ use crate::Endpoint;
 use crate::reader::{LinkReader, LinkState, LinkStats};
 use crate::recorder::TlogRecorder;
 
-const LIVE_BATCH_AGE: Duration = Duration::from_millis(100);
 const RX_RATE_PERIOD: Duration = Duration::from_secs(1);
 
 type TopicKey = (u8, &'static str);
@@ -65,6 +64,21 @@ pub struct LiveStats {
     pub recorder_errors: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LiveBatchPolicy {
+    max_rows: usize,
+    max_age: Duration,
+}
+
+impl Default for LiveBatchPolicy {
+    fn default() -> Self {
+        Self {
+            max_rows: LIVE_CHUNK_ROWS,
+            max_age: LIVE_MAX_AGE,
+        }
+    }
+}
+
 /// Combined status for app/UI callers.
 #[derive(Debug, Clone)]
 pub struct LiveLinkStatus {
@@ -86,11 +100,13 @@ impl LiveLink {
         let reader = LinkReader::spawn(&endpoint, tx)?;
         let stop = Arc::new(AtomicBool::new(false));
         let stats = Arc::new(LiveIngestStats::default());
+        let batch_policy = Arc::new(LiveBatchPolicy::default());
         let worker = {
             let endpoint = endpoint.clone();
             let stop = Arc::clone(&stop);
             let stats = Arc::clone(&stats);
             let recording = recording.clone();
+            let batch_policy = Arc::clone(&batch_policy);
             thread::Builder::new()
                 .name(format!("live-ingest {endpoint}"))
                 .spawn(move || {
@@ -108,7 +124,14 @@ impl LiveLink {
                         },
                         None => None,
                     };
-                    let mut consumer = LiveConsumer::new(endpoint, sink, metrics, stats, recorder);
+                    let mut consumer = LiveConsumer::with_shared_policy(
+                        endpoint,
+                        sink,
+                        metrics,
+                        stats,
+                        recorder,
+                        batch_policy,
+                    );
                     consumer.run(rx, &stop);
                 })?
         };
@@ -206,6 +229,7 @@ struct LiveConsumer<S: IngestSink> {
     metrics: Arc<MetricsRegistry>,
     stats: Arc<LiveIngestStats>,
     recorder: Option<TlogRecorder>,
+    batch_policy: Arc<LiveBatchPolicy>,
     sources: HashMap<u8, SourceState>,
     unknown_seen: HashSet<u32>,
     started: Instant,
@@ -232,12 +256,32 @@ struct Topic {
 }
 
 impl<S: IngestSink> LiveConsumer<S> {
+    #[cfg(test)]
     fn new(
         endpoint: Endpoint,
         sink: S,
         metrics: Arc<MetricsRegistry>,
         stats: Arc<LiveIngestStats>,
         recorder: Option<TlogRecorder>,
+        batch_policy: LiveBatchPolicy,
+    ) -> Self {
+        Self::with_shared_policy(
+            endpoint,
+            sink,
+            metrics,
+            stats,
+            recorder,
+            Arc::new(batch_policy),
+        )
+    }
+
+    fn with_shared_policy(
+        endpoint: Endpoint,
+        sink: S,
+        metrics: Arc<MetricsRegistry>,
+        stats: Arc<LiveIngestStats>,
+        recorder: Option<TlogRecorder>,
+        batch_policy: Arc<LiveBatchPolicy>,
     ) -> Self {
         let now = Instant::now();
         Self {
@@ -246,6 +290,7 @@ impl<S: IngestSink> LiveConsumer<S> {
             metrics,
             stats,
             recorder,
+            batch_policy,
             sources: HashMap::new(),
             unknown_seen: HashSet::new(),
             started: now,
@@ -256,7 +301,10 @@ impl<S: IngestSink> LiveConsumer<S> {
     fn run(&mut self, rx: Receiver<DecodedFrame>, stop: &AtomicBool) {
         while !stop.load(Ordering::Acquire) {
             match rx.recv_timeout(Duration::from_millis(25)) {
-                Ok(frame) => self.accept(frame),
+                Ok(frame) => {
+                    self.accept(frame);
+                    self.flush_aged();
+                }
                 Err(RecvTimeoutError::Timeout) => self.flush_aged(),
                 Err(RecvTimeoutError::Disconnected) => break,
             }
@@ -424,7 +472,7 @@ impl<S: IngestSink> LiveConsumer<S> {
         });
         self.stats.add_rows(1);
 
-        if topic.rows >= LIVE_CHUNK_ROWS {
+        if topic.rows >= self.batch_policy.max_rows.max(1) {
             let batch = topic.take_batch(source_id);
             self.stats.add_batch();
             self.sink.submit(batch);
@@ -433,10 +481,11 @@ impl<S: IngestSink> LiveConsumer<S> {
 
     fn flush_aged(&mut self) {
         let now = Instant::now();
+        let max_age = self.batch_policy.max_age;
         let mut batches = Vec::new();
         for source in self.sources.values_mut() {
             for topic in source.topics.values_mut() {
-                if topic.rows > 0 && now.duration_since(topic.last_flush) >= LIVE_BATCH_AGE {
+                if topic.rows > 0 && now.duration_since(topic.last_flush) >= max_age {
                     batches.push(topic.take_batch(source.id));
                 }
             }
@@ -718,6 +767,7 @@ mod tests {
             metrics,
             Arc::clone(&stats),
             None,
+            LiveBatchPolicy::default(),
         );
 
         consumer.accept(frame(1, 1, attitude(1.0)));
@@ -744,6 +794,75 @@ mod tests {
         assert!(opens[1].contains("sysid2"));
         assert_eq!(batches, vec!["ATTITUDE", "ATTITUDE", "ATTITUDE[1]"]);
         assert_eq!(stats.snapshot().rows, 3);
+    }
+
+    #[test]
+    fn live_consumer_flushes_when_batch_row_threshold_is_reached() {
+        let (sink, rx) = Sink::new();
+        let metrics = Arc::new(MetricsRegistry::new());
+        let stats = Arc::new(LiveIngestStats::default());
+        let mut consumer = LiveConsumer::new(
+            Endpoint::UdpServer {
+                bind: "127.0.0.1:14550".parse().unwrap(),
+            },
+            sink,
+            metrics,
+            stats,
+            None,
+            LiveBatchPolicy {
+                max_rows: 2,
+                max_age: Duration::from_secs(60),
+            },
+        );
+
+        consumer.accept(frame(1, 1, attitude(1.0)));
+        assert!(
+            !rx.try_iter().any(|msg| matches!(msg, IngestMsg::Batch(_))),
+            "one row stays buffered"
+        );
+
+        consumer.accept(frame(1, 1, attitude(2.0)));
+
+        assert!(
+            rx.try_iter()
+                .any(|msg| matches!(msg, IngestMsg::Batch(batch) if batch.rows() == 2)),
+            "row threshold emits a batch"
+        );
+    }
+
+    #[test]
+    fn live_consumer_checks_batch_age_while_frames_keep_arriving() {
+        let (sink, rx) = Sink::new();
+        let metrics = Arc::new(MetricsRegistry::new());
+        let stats = Arc::new(LiveIngestStats::default());
+        let mut consumer = LiveConsumer::new(
+            Endpoint::UdpServer {
+                bind: "127.0.0.1:14550".parse().unwrap(),
+            },
+            sink,
+            metrics,
+            stats,
+            None,
+            LiveBatchPolicy {
+                max_rows: 512,
+                max_age: Duration::ZERO,
+            },
+        );
+        let (frames_tx, frames_rx) = unbounded();
+        frames_tx.send(frame(1, 1, attitude(1.0))).unwrap();
+        frames_tx.send(frame(1, 1, attitude(2.0))).unwrap();
+        drop(frames_tx);
+
+        consumer.run(frames_rx, &AtomicBool::new(false));
+
+        let batch_rows: Vec<_> = rx
+            .try_iter()
+            .filter_map(|msg| match msg {
+                IngestMsg::Batch(batch) => Some(batch.rows()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(batch_rows, vec![1, 1]);
     }
 
     #[test]
@@ -808,6 +927,7 @@ mod tests {
             metrics,
             stats,
             None,
+            LiveBatchPolicy::default(),
         );
         consumer.accept(frame(1, 1, attitude(1.0)));
         consumer.flush_all();
