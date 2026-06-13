@@ -1022,9 +1022,20 @@ impl eframe::App for DelogApp {
                             if names.is_empty() {
                                 ui.add_enabled(false, egui::Button::new("No saved scripts"));
                             } else {
+                                let tint = ui.visuals().text_color();
+                                let icon = |src: egui::ImageSource<'static>| {
+                                    egui::Image::new(src)
+                                        .fit_to_exact_size(egui::vec2(16.0, 16.0))
+                                        .tint(tint)
+                                };
                                 for name in names {
                                     ui.horizontal(|ui| {
-                                        if ui.button(&name).clicked() {
+                                        // Fixed-width name button so the trailing
+                                        // edit/remove icons line up across rows.
+                                        if ui
+                                            .add_sized([180.0, 22.0], egui::Button::new(&name))
+                                            .clicked()
+                                        {
                                             self.scripts.run_named(
                                                 &name,
                                                 self.session.store(),
@@ -1032,11 +1043,19 @@ impl eframe::App for DelogApp {
                                             );
                                             ui.close();
                                         }
-                                        if ui.button("Edit").clicked() {
+                                        if ui
+                                            .add(egui::Button::image(icon(crate::icons::pencil())))
+                                            .on_hover_text("Edit")
+                                            .clicked()
+                                        {
                                             self.scripts.edit_named(&name);
                                             ui.close();
                                         }
-                                        if ui.button("Remove").clicked() {
+                                        if ui
+                                            .add(egui::Button::image(icon(crate::icons::trash())))
+                                            .on_hover_text("Remove")
+                                            .clicked()
+                                        {
                                             self.scripts.request_delete(&name);
                                             ui.close();
                                         }
