@@ -24,6 +24,9 @@ pub struct AppSettings {
     /// Frame-pacing policy (PRF-09). Default `Reactive`.
     #[serde(default)]
     pub render_mode: RenderMode,
+    /// Last valid live connection entered in the MAVLink connection dialog.
+    #[serde(default)]
+    pub live_connection: LiveConnectionSettings,
 }
 
 /// Knobs for the plot draw path (§9.5 decimation + line/edge AA). Lives in the
@@ -68,6 +71,64 @@ impl RenderMode {
         match self {
             Self::Reactive => "Reactive",
             Self::Continuous => "Continuous",
+        }
+    }
+}
+
+/// Transport persisted for the live MAVLink connection dialog.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveConnectionMode {
+    #[default]
+    UdpServer,
+    TcpClient,
+    Serial,
+}
+
+fn default_live_host() -> String {
+    "0.0.0.0".to_owned()
+}
+fn default_live_port() -> u16 {
+    14550
+}
+fn default_live_serial_path() -> String {
+    #[cfg(windows)]
+    {
+        "COM3".to_owned()
+    }
+    #[cfg(not(windows))]
+    {
+        "/dev/ttyACM0".to_owned()
+    }
+}
+fn default_live_baud() -> u32 {
+    115_200
+}
+
+/// Last-used values for the live connection dialog. Network modes use
+/// `host`/`port`; serial uses `serial_path`/`baud`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LiveConnectionSettings {
+    #[serde(default)]
+    pub mode: LiveConnectionMode,
+    #[serde(default = "default_live_host")]
+    pub host: String,
+    #[serde(default = "default_live_port")]
+    pub port: u16,
+    #[serde(default = "default_live_serial_path")]
+    pub serial_path: String,
+    #[serde(default = "default_live_baud")]
+    pub baud: u32,
+}
+
+impl Default for LiveConnectionSettings {
+    fn default() -> Self {
+        Self {
+            mode: LiveConnectionMode::UdpServer,
+            host: default_live_host(),
+            port: default_live_port(),
+            serial_path: default_live_serial_path(),
+            baud: default_live_baud(),
         }
     }
 }
@@ -270,6 +331,25 @@ mod tests {
     fn serialized_app_settings_do_not_include_live_seal_policy() {
         let json = serde_json::to_string(&AppSettings::default()).unwrap();
         assert!(!json.contains("live_seal"));
+    }
+
+    #[test]
+    fn app_settings_persist_last_live_connection() {
+        let settings = AppSettings {
+            live_connection: LiveConnectionSettings {
+                mode: LiveConnectionMode::TcpClient,
+                host: "192.168.1.20".to_owned(),
+                port: 5760,
+                serial_path: "/dev/ttyUSB0".to_owned(),
+                baud: 921_600,
+            },
+            ..AppSettings::default()
+        };
+
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(json.contains("live_connection"));
+        let decoded: AppSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.live_connection, settings.live_connection);
     }
 
     #[test]
