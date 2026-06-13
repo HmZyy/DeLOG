@@ -33,6 +33,8 @@ fn render(ctx: &RenderContext, w: u32, h: u32, eye: Vec3, up: Vec3) -> Vec<u8> {
             1.0,
             20.0,
             120.0,
+            true,
+            false,
         ),
     );
 
