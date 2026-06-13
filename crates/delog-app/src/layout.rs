@@ -36,8 +36,6 @@ pub struct LayoutDoc {
     pub workspace: WorkspaceLayout,
     pub vehicles: Vec<VehicleLayout>,
     #[serde(default)]
-    pub settings: AppSettings,
-    #[serde(default)]
     pub favorites: Vec<FieldRef>,
     #[serde(default)]
     pub docks: BTreeMap<String, bool>,
@@ -207,7 +205,6 @@ pub struct LayoutApply {
     pub speed: f64,
     pub follow_live: bool,
     pub vehicles: Vec<VehicleConfig>,
-    pub settings: AppSettings,
     pub diagnostics: Vec<Diag>,
 }
 
@@ -253,7 +250,6 @@ pub struct CurrentLayout<'a> {
     pub speed: f64,
     pub follow_live: bool,
     pub vehicles: &'a [VehicleConfig],
-    pub settings: &'a AppSettings,
 }
 
 impl std::fmt::Display for LayoutError {
@@ -369,11 +365,42 @@ pub fn save_session_json(json: &str) -> Result<(), LayoutError> {
     write_json_atomic(&base.join("session.json"), json)
 }
 
-pub fn load_session_doc() -> Result<LayoutDoc, LayoutError> {
+/// Path to the app-wide settings file (LAY-08). Separate from layouts and from
+/// `session.json` so loading a layout never changes user preferences.
+fn settings_path() -> Result<PathBuf, LayoutError> {
     let Some(base) = storage_dir(APP_ID) else {
         return Err(LayoutError::NoStorageDir);
     };
-    import_doc(&base.join("session.json"))
+    Ok(base.join("settings.json"))
+}
+
+/// Load app settings, falling back to defaults if the file is absent or
+/// unreadable (first run, or written by a newer version).
+pub fn load_app_settings() -> AppSettings {
+    match settings_path() {
+        Ok(path) => load_app_settings_at(&path),
+        Err(_) => AppSettings::default(),
+    }
+}
+
+/// Persist app settings to `settings.json` atomically.
+pub fn save_app_settings(settings: &AppSettings) -> Result<(), LayoutError> {
+    save_app_settings_at(&settings_path()?, settings)
+}
+
+/// Read app settings from an explicit path, defaulting on any failure.
+fn load_app_settings_at(path: &Path) -> AppSettings {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// Write app settings to an explicit path atomically.
+fn save_app_settings_at(path: &Path, settings: &AppSettings) -> Result<(), LayoutError> {
+    let json =
+        serde_json::to_string_pretty(settings).map_err(|e| LayoutError::Json(e.to_string()))?;
+    write_json_atomic(path, &json)
 }
 
 pub fn doc_json(doc: &LayoutDoc) -> Result<String, LayoutError> {
@@ -458,7 +485,6 @@ pub fn current_doc(input: CurrentLayout<'_>) -> LayoutDoc {
             .iter()
             .filter_map(|v| vehicle_to_layout(v, input.snapshot))
             .collect(),
-        settings: input.settings.clone(),
         favorites: Vec::new(),
         docks: BTreeMap::new(),
     }
@@ -647,7 +673,6 @@ fn apply_doc(
         speed: doc.playback.speed,
         follow_live: doc.playback.follow_live,
         vehicles,
-        settings: doc.settings,
         diagnostics: resolver.diagnostics,
     })
 }
@@ -1104,6 +1129,36 @@ mod tests {
     use delog_core::identity::IdentityRegistry;
 
     #[test]
+    fn app_settings_round_trip_through_settings_json() {
+        let path = std::env::temp_dir().join(format!(
+            "delog-settings-rt-{}-{}.json",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("settings")
+        ));
+        let mut settings = AppSettings::default();
+        settings.show_fps = true;
+        settings.render_mode = crate::settings::RenderMode::Continuous;
+        settings.theme = crate::theme::ThemeChoice::Light;
+
+        save_app_settings_at(&path, &settings).expect("save settings");
+        let loaded = load_app_settings_at(&path);
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(loaded, settings);
+    }
+
+    #[test]
+    fn load_app_settings_defaults_when_file_missing() {
+        let missing = std::env::temp_dir().join(format!(
+            "delog-settings-missing-{}-{}.json",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("settings")
+        ));
+        let _ = fs::remove_file(&missing); // ensure absent
+        assert_eq!(load_app_settings_at(&missing), AppSettings::default());
+    }
+
+    #[test]
     fn sanitize_layout_name_blocks_paths() {
         assert_eq!(sanitize_name("../bad/name"), "bad_name");
         assert_eq!(sanitize_name(""), "default");
@@ -1142,49 +1197,30 @@ mod tests {
 
         assert_eq!(imported.delog_layout, LAYOUT_VERSION);
         assert_eq!(imported.name, "portable");
-        assert_eq!(
-            imported.settings.theme,
-            crate::theme::ThemeChoice::CatppuccinMocha
-        );
         let json = serde_json::to_string(&imported).unwrap();
         assert!(!json.contains("\"source\""));
     }
 
     #[test]
-    fn missing_settings_default_to_catppuccin_mocha() {
+    fn legacy_layout_with_settings_key_still_decodes_ignoring_it() {
+        // Layouts written before LAY-08 embedded a `settings` object. Decoding
+        // must succeed and simply ignore the unknown key (serde default).
         let doc = decode_doc(
             r#"{
                 "delog_layout": 1,
-                "name": "old",
+                "name": "legacy",
                 "playback": {"speed": 1.0, "follow_live": false},
                 "workspace": {
                     "root": {
-                        "plot": {
-                            "traces": [],
-                            "show_legend": true,
-                            "show_tooltip": true
-                        }
+                        "plot": {"traces": [], "show_legend": true, "show_tooltip": true}
                     }
                 },
-                "vehicles": []
+                "vehicles": [],
+                "settings": {"theme": "light", "show_fps": true, "render_mode": "continuous"}
             }"#,
         )
-        .expect("old layout should decode");
-
-        assert_eq!(doc.settings, AppSettings::default());
-    }
-
-    #[test]
-    fn layout_json_persists_theme_settings() {
-        let mut doc = empty_doc("theme");
-        doc.settings.theme = crate::theme::ThemeChoice::Light;
-
-        let json = doc_json(&doc).expect("layout should serialize");
-        assert!(json.contains("\"settings\""));
-        assert!(json.contains("\"theme\": \"light\""));
-
-        let decoded = decode_doc(&json).expect("layout should decode");
-        assert_eq!(decoded.settings.theme, crate::theme::ThemeChoice::Light);
+        .expect("legacy layout with settings key should decode");
+        assert_eq!(doc.name, "legacy");
     }
 
     #[test]
@@ -1347,7 +1383,6 @@ mod tests {
                 },
             },
             vehicles: Vec::new(),
-            settings: AppSettings::default(),
             favorites: Vec::new(),
             docks: BTreeMap::new(),
         }
