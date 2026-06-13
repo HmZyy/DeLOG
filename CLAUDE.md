@@ -30,6 +30,18 @@ cargo bench                               # criterion benches; budgets in PLAN.m
 cargo run -p delog-app
 ```
 
+```bash
+# Optional Python scripting (PLAN.md §17.3, SCR-*) — OFF by default:
+cargo build --workspace --features delog-app/scripting   # full scripting build (needs Python 3.x + dev headers)
+cargo test  -p delog-script --features python            # scripting engine tests
+```
+
+The scripting feature embeds CPython via `pyo3`. If the build/test picks the wrong
+libpython (e.g. numpy fails to import with `No module named 'math'`), pin the
+interpreter with a **local, gitignored** `.cargo/config.toml` setting
+`PYO3_PYTHON` to your interpreter and adding its libdir to the rpath. This file is
+intentionally not committed (paths are machine-specific).
+
 All third-party versions are pinned in the workspace `Cargo.toml` `[workspace.dependencies]` table; crates inherit with `workspace = true`.
 
 ## Architecture (PLAN.md §3 has the full picture)
