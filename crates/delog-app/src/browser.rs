@@ -316,6 +316,8 @@ fn matches_query(query: &str, path: &str) -> bool {
 pub struct BrowserResponse {
     /// Requested per-source offset change, if any (BRW-07).
     pub offset_change: Option<(SourceId, i64)>,
+    /// The user right-clicked a source and asked to remove it (BRW-06).
+    pub remove_source: Option<SourceId>,
     /// The user asked to collapse the data browser panel.
     pub collapse_requested: bool,
 }
@@ -392,13 +394,14 @@ pub fn ui(
         .collect();
 
     let mut offset_change = None;
+    let mut remove_source = None;
     egui::ScrollArea::vertical()
         .auto_shrink([false, true])
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             for source in &model.sources {
                 let header = format!("{}  ({} rows)", source.label, source.rows);
-                egui::CollapsingHeader::new(header)
+                let collapsing = egui::CollapsingHeader::new(header)
                     .id_salt(("source", source.id.0))
                     .default_open(true)
                     .show(ui, |ui| {
@@ -431,6 +434,18 @@ pub fn ui(
                             });
                         }
                     });
+                collapsing.header_response.context_menu(|ui| {
+                    let trash = egui::Image::new(crate::icons::trash())
+                        .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
+                        .tint(ui.visuals().error_fg_color);
+                    if ui
+                        .add(egui::Button::image_and_text(trash, "Remove source"))
+                        .clicked()
+                    {
+                        remove_source = Some(source.id);
+                        ui.close();
+                    }
+                });
             }
         });
 
@@ -438,6 +453,7 @@ pub fn ui(
         offset_change = Some(change);
     }
     response.offset_change = offset_change;
+    response.remove_source = remove_source;
     response
 }
 
