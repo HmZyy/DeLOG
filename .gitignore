@@ -1,3 +1,7 @@
 /target
 *.swp
 .cache/
+
+# Local-only: machine-specific pyo3/libpython interpreter pin for the
+# optional `scripting` feature (absolute paths differ per machine).
+.cargo/config.toml
