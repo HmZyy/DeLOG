@@ -257,6 +257,14 @@ fn eval_line(globals: &Py<PyDict>, src: &str, evt_tx: &Sender<ScriptEvent>) {
 mod tests {
     use super::*;
 
+    use std::sync::Mutex;
+
+    /// Serializes tests that spawn a `ScriptEngine`: they share one process-global
+    /// embedded CPython interpreter (and its global `sys.stdout`), so they must not
+    /// run concurrently. `unwrap_or_else(into_inner)` ignores poisoning from a
+    /// panicking test so one failure doesn't cascade.
+    static ENGINE_LOCK: Mutex<()> = Mutex::new(());
+
     use arrow::array::{ArrayRef, Float64Array, Int64Array};
     use arrow::datatypes::DataType;
     use delog_core::chunk::Chunk;
@@ -290,6 +298,7 @@ mod tests {
 
     #[test]
     fn print_is_captured_as_output_events() {
+        let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let engine = ScriptEngine::spawn(Arc::new(DataStore::new()), dummy_sender());
         engine.send(ScriptCommand::Eval("print('hello')".into()));
         let mut text = String::new();
@@ -306,6 +315,7 @@ mod tests {
 
     #[test]
     fn eval_returns_a_result_event() {
+        let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let engine = ScriptEngine::spawn(Arc::new(DataStore::new()), dummy_sender());
         engine.send(ScriptCommand::Eval("1 + 1".into()));
         let mut got_result = None;
@@ -322,6 +332,7 @@ mod tests {
 
     #[test]
     fn python_can_read_a_field_via_delog() {
+        let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let store = test_store_with_baro_alt();
         let engine = ScriptEngine::spawn(store, dummy_sender());
         engine.send(ScriptCommand::Eval(
@@ -341,6 +352,7 @@ mod tests {
 
     #[test]
     fn running_a_script_emits_a_derived_source() {
+        let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use delog_core::ingest::ingest_channel;
         use delog_core::ingestor::{Ingestor, NullObserver};
 
@@ -396,6 +408,7 @@ out.add_field("v", np.array([1.0, 2.0, 3.0]), unit="m")
                 (cargo test ... interrupt_stops). request_interrupt is retained for the real app \
                 where a single interpreter runs on the worker thread."]
     fn interrupt_stops_a_long_loop_with_keyboardinterrupt() {
+        let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let engine = ScriptEngine::spawn(Arc::new(DataStore::new()), dummy_sender());
         engine.send(ScriptCommand::Eval("while True:\n    pass".into()));
         // Let the interpreter enter the loop, then interrupt.
@@ -414,6 +427,7 @@ out.add_field("v", np.array([1.0, 2.0, 3.0]), unit="m")
 
     #[test]
     fn failing_script_emits_error_and_no_source() {
+        let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use delog_core::ingest::ingest_channel;
         use delog_core::ingestor::{Ingestor, NullObserver};
 
