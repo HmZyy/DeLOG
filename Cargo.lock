@@ -985,6 +985,7 @@ dependencies = [
 name = "delog-script"
 version = "0.1.0"
 dependencies = [
+ "arrow",
  "delog-core",
  "numpy",
  "pyo3",
