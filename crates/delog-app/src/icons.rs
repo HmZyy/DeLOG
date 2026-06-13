@@ -61,3 +61,13 @@ pub fn info() -> ImageSource<'static> {
 pub fn close() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/x.svg")
 }
+
+/// Hide the left data browser panel.
+pub fn panel_left_close() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/panel-left-close.svg")
+}
+
+/// Restore the left data browser panel.
+pub fn panel_left_open() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/panel-left-open.svg")
+}

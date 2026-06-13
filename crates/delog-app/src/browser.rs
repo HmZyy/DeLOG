@@ -311,28 +311,64 @@ fn matches_query(query: &str, path: &str) -> bool {
 
 /// Render the browser tree with its search box (BRW-01/02). `query`,
 /// `selection` and the offset dialog draft persist in app state across
-/// frames. Returns a requested per-source offset change, if any (BRW-07).
+/// frames.
+#[derive(Debug, Default)]
+pub struct BrowserResponse {
+    /// Requested per-source offset change, if any (BRW-07).
+    pub offset_change: Option<(SourceId, i64)>,
+    /// The user asked to collapse the data browser panel.
+    pub collapse_requested: bool,
+}
+
+pub fn panel_toggle_button_size(ui: &egui::Ui) -> egui::Vec2 {
+    let side = ui.spacing().interact_size.y + ui.spacing().button_padding.x * 2.0;
+    egui::Vec2::splat(side)
+}
+
 pub fn ui(
     ui: &mut egui::Ui,
     model: &BrowserModel,
     query: &mut String,
     selection: &mut Selection,
     offset_dialog: &mut Option<(SourceId, i64)>,
-) -> Option<(SourceId, i64)> {
-    if model.is_empty() {
-        ui.add_space(8.0);
-        ui.weak("No logs loaded.");
-        return None;
-    }
-
+) -> BrowserResponse {
+    let mut response = BrowserResponse::default();
     // Fuzzy filter over full paths (§13, BRW-02).
+    ui.add_space(6.0);
     ui.horizontal(|ui| {
-        ui.add(
+        let button_size = panel_toggle_button_size(ui);
+        let filter_width = (ui.available_width() - button_size.x - ui.spacing().item_spacing.x)
+            .max(ui.spacing().interact_size.x);
+        ui.add_sized(
+            egui::vec2(filter_width, button_size.y),
             egui::TextEdit::singleline(query)
                 .hint_text("Filter...")
-                .desired_width(f32::INFINITY),
+                .desired_width(filter_width),
         );
+        let icon_size = button_size - ui.spacing().button_padding * 2.0;
+        let icon = egui::Image::new(crate::icons::panel_left_close())
+            .fit_to_exact_size(icon_size)
+            .tint(ui.visuals().text_color());
+        if ui
+            .add_sized(button_size, egui::Button::image(icon))
+            .on_hover_text("Hide data browser")
+            .clicked()
+        {
+            response.collapse_requested = true;
+        }
     });
+
+    if model.is_empty() {
+        ui.allocate_ui_with_layout(
+            ui.available_size(),
+            egui::Layout::centered_and_justified(egui::Direction::TopDown),
+            |ui| {
+                ui.weak("No logs loaded.");
+            },
+        );
+        return response;
+    }
+
     let filtering = !query.trim().is_empty();
     let filtered;
     let model = if filtering {
@@ -344,7 +380,7 @@ pub fn ui(
     if filtering && model.is_empty() {
         ui.add_space(8.0);
         ui.weak("Nothing matches the filter.");
-        return None;
+        return response;
     }
 
     // Visible field order, for shift-range selection and drag payloads.
@@ -359,6 +395,7 @@ pub fn ui(
     egui::ScrollArea::vertical()
         .auto_shrink([false, true])
         .show(ui, |ui| {
+            ui.set_width(ui.available_width());
             for source in &model.sources {
                 let header = format!("{}  ({} rows)", source.label, source.rows);
                 egui::CollapsingHeader::new(header)
@@ -400,7 +437,8 @@ pub fn ui(
     if let Some(change) = offset_dialog_window(ui, model, offset_dialog) {
         offset_change = Some(change);
     }
-    offset_change
+    response.offset_change = offset_change;
+    response
 }
 
 /// Inline drag-µs offset on the source row (§13/§4.2, BRW-07): dragging
