@@ -1003,6 +1003,10 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [ ] **ANA-08** — _(backlog)_ expression engine with prev-sample union-timeline alignment
 - [ ] **ANA-09** — _(backlog)_ A−B diff trace; resampling utilities as a library
 
+### SCR — Scripting (derived fields / Python)
+
+- [~] **SCR-01** — Derived-source substrate: `SourceKind::Derived` (file-like seal) + `IngestMsg::RemoveSource`. Shared with ANA-04 and §4.6.
+
 ### IOX — Import/export (M10)
 
 - [ ] **IOX-01** — CSV export: field multi-pick, full|visible range (§18)

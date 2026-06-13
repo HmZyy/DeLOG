@@ -39,6 +39,10 @@ pub enum SourceKind {
     File,
     /// A live link; must never block — full channel drops the batch (ING-03).
     Live,
+    /// A programmatically-generated source (derived fields, scripts): bounded
+    /// like a file, sealed at the file threshold, but flagged distinctly so the
+    /// UI can present it apart from opened files (PLAN.md §17.3, SCR-01).
+    Derived,
 }
 
 /// A parsed slice of one topic: sorted `i64` µs timestamps plus original-dtype
