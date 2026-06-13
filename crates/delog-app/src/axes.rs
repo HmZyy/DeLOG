@@ -8,10 +8,9 @@
 
 use std::cmp::Ordering;
 
-/// Width reserved at the left for Y tick labels.
-pub const Y_GUTTER: f32 = 56.0;
 /// Height reserved at the bottom for X tick labels.
 pub const X_GUTTER: f32 = 22.0;
+const AXIS_FONT_SIZE: f32 = 11.0;
 
 /// "Nice" tick values across `[min, max]` at a 1-2-5 × 10ᵏ step, aiming for
 /// roughly `target` ticks. Empty when the range is degenerate.
@@ -71,6 +70,36 @@ pub fn format_tick(value: f64, step: f64) -> String {
     format!("{value:.*}", decimals_for_step(step))
 }
 
+/// Width needed to paint the current Y labels without leaving a fixed gutter.
+pub fn y_gutter(ui: &egui::Ui, y_range: (f32, f32), y_unit: Option<&str>, plot_height: f32) -> f32 {
+    let (y0, y1) = (y_range.0 as f64, y_range.1 as f64);
+    let y_target = (plot_height / 48.0).round().max(2.0) as usize;
+    let y_step = step_for(y0, y1, y_target);
+    let font = egui::FontId::proportional(AXIS_FONT_SIZE);
+    let color = ui.visuals().weak_text_color();
+    let painter = ui.painter();
+    let mut label_width = nice_ticks(y0, y1, y_target)
+        .into_iter()
+        .map(|v| {
+            painter
+                .layout_no_wrap(format_tick(v, y_step), font.clone(), color)
+                .rect
+                .width()
+        })
+        .fold(0.0_f32, f32::max);
+
+    if let Some(unit) = y_unit {
+        label_width = label_width.max(
+            painter
+                .layout_no_wrap(unit.to_owned(), font, color)
+                .rect
+                .width(),
+        );
+    }
+
+    (label_width + ui.spacing().item_spacing.x).ceil()
+}
+
 /// Paint grid lines, tick marks and labels around `plot_rect` for the visible
 /// `x_range` (seconds) and `y_range` (data units). Drawn before the GPU trace
 /// callback so traces sit on top of the grid.
@@ -110,7 +139,7 @@ pub fn draw(
             egui::pos2(plot_rect.left() - 4.0, y),
             egui::Align2::RIGHT_CENTER,
             format_tick(v, y_step),
-            egui::FontId::proportional(11.0),
+            egui::FontId::proportional(AXIS_FONT_SIZE),
             label,
         );
     }
@@ -123,7 +152,7 @@ pub fn draw(
             egui::pos2(x, plot_rect.bottom() + 3.0),
             egui::Align2::CENTER_TOP,
             format_tick(v, x_step),
-            egui::FontId::proportional(11.0),
+            egui::FontId::proportional(AXIS_FONT_SIZE),
             label,
         );
     }
@@ -133,7 +162,7 @@ pub fn draw(
         egui::pos2(plot_rect.right(), plot_rect.bottom() + 3.0),
         egui::Align2::RIGHT_TOP,
         "s",
-        egui::FontId::proportional(11.0),
+        egui::FontId::proportional(AXIS_FONT_SIZE),
         label,
     );
     if let Some(unit) = y_unit {
@@ -141,7 +170,7 @@ pub fn draw(
             egui::pos2(plot_rect.left() - 4.0, plot_rect.top() - 2.0),
             egui::Align2::RIGHT_BOTTOM,
             unit,
-            egui::FontId::proportional(11.0),
+            egui::FontId::proportional(AXIS_FONT_SIZE),
             label,
         );
     }
