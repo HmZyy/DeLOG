@@ -68,9 +68,15 @@ jobs:
       # root rust-toolchain.toml pins stable 1.96.0 and a toolchain file outranks
       # `rustup default`. The `+nightly` override sets RUSTUP_TOOLCHAIN, which
       # outranks the toolchain file and propagates into cargo-fuzz's inner build.
+      #
+      # `--target x86_64-unknown-linux-gnu` is mandatory too: cargo-fuzz defaults
+      # its fuzz target to the triple it was *built for*, and taiki-e/install-action
+      # ships a musl-static binary — so it would otherwise build for musl, whose
+      # statically-linked libc is incompatible with -Zsanitizer=address. Pin the
+      # gnu host (already installed; dynamically linked).
       - name: fuzz BIN record
-        run: cargo +nightly fuzz run bin_record -- -max_total_time=60 -timeout=20 -rss_limit_mb=2048
+        run: cargo +nightly fuzz run --target x86_64-unknown-linux-gnu bin_record -- -max_total_time=60 -timeout=20 -rss_limit_mb=2048
       - name: fuzz ULog defs+data
-        run: cargo +nightly fuzz run ulog_defs_data -- -max_total_time=60 -timeout=20 -rss_limit_mb=2048
+        run: cargo +nightly fuzz run --target x86_64-unknown-linux-gnu ulog_defs_data -- -max_total_time=60 -timeout=20 -rss_limit_mb=2048
       - name: fuzz MAVLink framing
-        run: cargo +nightly fuzz run mavlink_framing -- -max_total_time=60 -timeout=20 -rss_limit_mb=2048
+        run: cargo +nightly fuzz run --target x86_64-unknown-linux-gnu mavlink_framing -- -max_total_time=60 -timeout=20 -rss_limit_mb=2048
