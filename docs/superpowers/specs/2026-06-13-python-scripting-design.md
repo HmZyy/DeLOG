@@ -119,26 +119,32 @@ Worker behavior:
 
 ```python
 delog.sources()                          # introspect: source/topic/field paths, units, dtypes
-f = delog.field("flight_42/IMU/AccX")    # -> .t (int64 µs np), .v (typed np), .unit, .dtype
+f = delog.field("flight_42/IMU/AccX")    # -> .t (int64 µs np), .v (float64 np), .unit, .dtype
 delog.resample_prev(f, base_times)       # prev-sample align onto another timeline (the ANA-08 helper)
 
-out = delog.output("MyDerived")          # derived-topic builder
-out.add_field("AccMag", times_us, values, unit="m/s^2")
+out = delog.output("MyDerived", times_us)  # derived topic; times shared by all its fields
+out.add_field("AccMag", values, unit="m/s^2")
 # fields the script builds are flushed as one `script:` source when the run completes
 ```
+
+The `times_us` array is defined **once per output topic**, mirroring the chunk
+model (one timestamp column + value columns), so every field in a topic shares a
+timeline and there is no per-field alignment ambiguity.
 
 - **Field path** is `source/topic/field` by name. A path missing in the current
   log raises a clean Python error (and a `Diag`), so library scripts degrade
   gracefully across logs.
 - **Read path (ZC note):** a field spans many chunks, so materializing one numpy
   array **concatenates them — one copy, on the worker thread, off the render hot
-  path.** Marked `// ZC-EXCEPTION: script materialization` with a counter metric,
-  consistent with how the One Copy Rule treats the render cache. The canonical
-  store is never copied for rendering by this feature.
-- **Write path:** numpy → Arrow (one copy into canonical `i64` µs + original
-  dtype) → `ParsedBatch`. Output times are explicit `int64` µs; the ingest thread
-  already sorts/validates defensively (ING-05). **NaN is preserved end to end** —
-  a gap marker in, a gap (line break) out; never interpolated away.
+  path.** Numeric values are exposed as `float64` (NaN-preserving) and times as
+  `int64`; this covers derived-field math. Exact int/bool dtype passthrough is a
+  documented v1 simplification, deferred. Marked `// ZC-EXCEPTION: script
+  materialization` with a counter metric, consistent with how the One Copy Rule
+  treats the render cache. The canonical store is never copied for rendering.
+- **Write path:** numpy → Arrow `Float64Array` (one copy) → `ParsedBatch`. Output
+  times are explicit `int64` µs; the ingest thread already sorts/validates
+  defensively (ING-05). **NaN is preserved end to end** — a gap marker in, a gap
+  (line break) out; never interpolated away.
 
 ---
 
@@ -154,8 +160,12 @@ a saved file via the editor.
 
 ## 8. UI — `SCR-07`
 
-A new **"Scripts"** tab in the existing bottom dock, alongside Diagnostics /
-Performance (PLAN §19.1), plus a **Tools ▸ Scripts** menu entry. Layout:
+A toggleable **Scripts** window (`egui::Window`, following the existing
+`vehicle_dialog` window pattern), opened from a new **Tools ▸ Scripts** menu
+entry. (The Tools menu does not exist yet; it is added here, as PLAN §19.2 already
+specs it. The bottom dock of §19.1 is also not built yet, so a window is the
+least-invasive home for v1; it can migrate into the dock when that lands.) Layout
+inside the window:
 
 - **Left:** library list (the `.py` files) with new/save/delete.
 - **Center:** code editor — **`egui_code_editor`** (pinned in the workspace table,
@@ -165,7 +175,7 @@ Performance (PLAN §19.1), plus a **Tools ▸ Scripts** menu entry. Layout:
   stdout/stderr/results, with **Run / Cancel / Save** buttons and a status line
   (run state, timing, emitted source).
 
-The entire `scripts/` module + dock tab + menu entry are
+The entire `scripts/` UI module + the Tools menu entry are
 `#[cfg(feature = "scripting")]`. The `cfg` surface is confined to the optional
 dependency and this one module's registration — no scattered `cfg`s.
 
