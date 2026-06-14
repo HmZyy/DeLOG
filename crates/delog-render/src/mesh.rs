@@ -55,21 +55,25 @@ impl MeshCpu {
         Self { vertices, indices }
     }
 
-    /// A procedural cone (apex at +Y, base on the `y = 0` plane) — the
-    /// unconditional model fallback (§12.4). Flat-shaded (per-face normals).
+    /// A procedural cone (nose at +X, base on the `x = 0` plane, so it points
+    /// body-forward once posed) — the unconditional model fallback (§12.4).
+    /// Flat-shaded (per-face normals).
     pub fn cone(segments: u32, radius: f32, height: f32) -> Self {
         let segments = segments.max(3);
-        let apex = [0.0, height, 0.0];
+        // Nose along +X so the mesh→body correction (rot_x −90°, §12.4) leaves it
+        // pointing body-forward (+X) — the same nose axis as the fixed-wing
+        // model — instead of straight up. The base ring lies in the x = 0 plane.
+        let apex = [height, 0.0, 0.0];
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
         let tau = std::f32::consts::TAU;
         for i in 0..segments {
             let a0 = i as f32 / segments as f32 * tau;
             let a1 = (i + 1) as f32 / segments as f32 * tau;
-            let p0 = [radius * a0.cos(), 0.0, radius * a0.sin()];
-            let p1 = [radius * a1.cos(), 0.0, radius * a1.sin()];
+            let p0 = [0.0, -radius * a0.cos(), radius * a0.sin()];
+            let p1 = [0.0, -radius * a1.cos(), radius * a1.sin()];
             // Side facet with an outward flat normal (winding apex→p1→p0 so
-            // the normal points up-and-out, away from the cone axis).
+            // the normal points out-and-back, away from the cone axis).
             let n = face_normal(apex, p1, p0);
             let base = vertices.len() as u32;
             vertices.push(Vertex {
@@ -79,8 +83,8 @@ impl MeshCpu {
             vertices.push(Vertex { pos: p0, normal: n });
             vertices.push(Vertex { pos: p1, normal: n });
             indices.extend([base, base + 1, base + 2]);
-            // Base cap triangle (center, p1, p0), facing −Y.
-            let down = [0.0, -1.0, 0.0];
+            // Base cap triangle (center, p1, p0), facing −X (the tail).
+            let down = [-1.0, 0.0, 0.0];
             let cap = vertices.len() as u32;
             vertices.push(Vertex {
                 pos: [0.0, 0.0, 0.0],
@@ -543,6 +547,31 @@ mod tests {
             let n = v.normal;
             let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
             assert!((len - 1.0).abs() < 1e-4, "normal not unit: {len}");
+        }
+    }
+
+    #[test]
+    fn cone_nose_points_along_plus_x() {
+        // The fallback model's nose sits on +X so the mesh→body correction
+        // (rot_x −90°, §12.4) leaves it pointing body-forward, like the
+        // fixed-wing model — not straight up (+Y).
+        let (h, r) = (2.0_f32, 1.0_f32);
+        let cone = MeshCpu::cone(16, r, h);
+        // Exactly one extreme apex vertex per segment, all at [h, 0, 0].
+        let apex = cone
+            .vertices
+            .iter()
+            .map(|v| v.pos)
+            .find(|p| p[0] > h - 1e-3);
+        assert_eq!(apex, Some([h, 0.0, 0.0]), "apex should be on +X");
+        // The whole cone lies between the tail (x = 0) and the nose (x = h):
+        // nothing reaches up the old +Y axis.
+        for v in &cone.vertices {
+            assert!(
+                (0.0..=h + 1e-4).contains(&v.pos[0]),
+                "vertex outside [tail, nose] span: {:?}",
+                v.pos
+            );
         }
     }
 
