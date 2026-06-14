@@ -2,18 +2,35 @@
 //! and serves REPL evals over channels (SCR-02..05).
 
 use std::collections::HashMap;
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, Sender, SyncSender, channel, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use delog_core::identity::SourceId;
-use delog_core::ingest::IngestSender;
+use delog_core::ingest::{IngestSender, IngestSink, ParsedBatch, SourceKind};
 use delog_core::snapshot::DataStore;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use crate::api::Delog;
-use crate::live::LiveTransformSpec;
+use crate::live::{
+    LiveBatchPy, LiveTransformBatch, LiveTransformSpec, parse_transform_result, result_to_batch,
+};
+
+/// Bound on the app→engine live-batch queue. Full = drop (non-blocking submit).
+pub const LIVE_TRANSFORM_QUEUE_CAP: usize = 128;
+
+/// Consecutive errors a live transform may raise before it is disabled.
+const LIVE_TRANSFORM_ERROR_LIMIT: u8 = 3;
+
+/// One registered live transform the worker executes on matching live batches.
+struct ActiveTransform {
+    spec: LiveTransformSpec,
+    callable: Py<PyAny>,
+    source: SourceId,
+    consecutive_errors: u8,
+    disabled: bool,
+}
 
 /// Format a Python error with its traceback (if any) for an Error event.
 fn format_pyerr(py: Python<'_>, err: &PyErr) -> String {
@@ -50,6 +67,8 @@ pub enum ScriptEvent {
 /// Handle to the worker thread. Dropping it shuts the worker down.
 pub struct ScriptEngine {
     tx: Sender<ScriptCommand>,
+    /// Bounded, non-blocking queue of raw live batches to run transforms on.
+    live_tx: SyncSender<ParsedBatch>,
     events: Receiver<ScriptEvent>,
     handle: Option<JoinHandle<()>>,
     /// The live transform specs registered by the most recent script run(s).
@@ -66,14 +85,16 @@ impl ScriptEngine {
     pub fn spawn(store: Arc<DataStore>, sender: IngestSender) -> Self {
         let (cmd_tx, cmd_rx) = channel::<ScriptCommand>();
         let (evt_tx, evt_rx) = channel::<ScriptEvent>();
+        let (live_tx, live_rx) = sync_channel::<ParsedBatch>(LIVE_TRANSFORM_QUEUE_CAP);
         let specs: Arc<Mutex<Vec<LiveTransformSpec>>> = Arc::new(Mutex::new(Vec::new()));
         let specs_worker = Arc::clone(&specs);
         let handle = std::thread::Builder::new()
             .name("delog-script".into())
-            .spawn(move || worker_loop(store, sender, cmd_rx, evt_tx, specs_worker))
+            .spawn(move || worker_loop(store, sender, cmd_rx, live_rx, evt_tx, specs_worker))
             .expect("spawn script thread");
         Self {
             tx: cmd_tx,
+            live_tx,
             events: evt_rx,
             handle: Some(handle),
             transform_specs: specs,
@@ -82,6 +103,25 @@ impl ScriptEngine {
 
     pub fn send(&self, cmd: ScriptCommand) {
         let _ = self.tx.send(cmd);
+    }
+
+    /// A cloneable sender for raw live batches (the app's live-decoder side
+    /// forwards each batch here so registered transforms can run on it).
+    pub fn live_batch_sender(&self) -> SyncSender<ParsedBatch> {
+        self.live_tx.clone()
+    }
+
+    /// Non-blocking submit of one raw live batch. Returns the batch back if the
+    /// queue is full or the worker is gone — live data is droppable (§5).
+    // The Err variant hands the (large) batch back so the caller can drop or
+    // count it; boxing would defeat the give-back-without-copy purpose.
+    #[allow(clippy::result_large_err)]
+    pub fn try_send_live_batch(&self, batch: ParsedBatch) -> Result<(), ParsedBatch> {
+        match self.live_tx.try_send(batch) {
+            Ok(()) => Ok(()),
+            Err(std::sync::mpsc::TrySendError::Full(batch)) => Err(batch),
+            Err(std::sync::mpsc::TrySendError::Disconnected(batch)) => Err(batch),
+        }
     }
 
     /// Drain any ready events without blocking (UI thread calls this per frame).
@@ -160,6 +200,7 @@ fn worker_loop(
     store: Arc<DataStore>,
     sender: IngestSender,
     cmd_rx: Receiver<ScriptCommand>,
+    live_rx: Receiver<ParsedBatch>,
     evt_tx: Sender<ScriptEvent>,
     transform_specs: Arc<Mutex<Vec<LiveTransformSpec>>>,
 ) {
@@ -167,6 +208,9 @@ fn worker_loop(
     let globals: Py<PyDict> = Python::attach(|py| PyDict::new(py).unbind());
     // Per-script-name source from the previous run, for replace-on-rerun.
     let mut prev_sources: HashMap<String, SourceId> = HashMap::new();
+    // Live transforms currently active, keyed by the registering script name. A
+    // re-run replaces that script's set (Task 6 will formalize replacement).
+    let mut active_transforms: HashMap<String, Vec<ActiveTransform>> = HashMap::new();
     // Monotonic counter for generation tracking across script runs.
     let mut run_counter: u64 = 0;
 
@@ -179,22 +223,133 @@ fn worker_loop(
         sys.setattr("stderr", &cap).expect("set sys.stderr");
     });
 
-    while let Ok(cmd) = cmd_rx.recv() {
+    // Poll both the command and live-batch channels. Commands take priority;
+    // when neither has work, sleep briefly to avoid a busy spin. The loop ends
+    // when both senders are gone (or an explicit Shutdown).
+    loop {
+        match cmd_rx.try_recv() {
+            Ok(cmd) => {
+                if handle_command(
+                    cmd,
+                    &store,
+                    &sender,
+                    &globals,
+                    &evt_tx,
+                    &transform_specs,
+                    &mut prev_sources,
+                    &mut active_transforms,
+                    &mut run_counter,
+                ) {
+                    break; // Shutdown
+                }
+                continue;
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
+
+        match live_rx.try_recv() {
+            Ok(batch) => {
+                run_live_transforms(&sender, &evt_tx, &mut active_transforms, batch);
+                let _ = evt_tx.send(ScriptEvent::Done);
+                continue;
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                // Command channel still open (checked above); keep serving it.
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+/// Run every active, matching live transform against one raw batch, emitting a
+/// derived batch per success. Transforms disable themselves after
+/// [`LIVE_TRANSFORM_ERROR_LIMIT`] consecutive errors (one Error event emitted).
+fn run_live_transforms(
+    sender: &IngestSender,
+    evt_tx: &Sender<ScriptEvent>,
+    active_transforms: &mut HashMap<String, Vec<ActiveTransform>>,
+    batch: ParsedBatch,
+) {
+    for transforms in active_transforms.values_mut() {
+        for transform in transforms.iter_mut() {
+            if transform.disabled || !transform.spec.matches(&batch) {
+                continue;
+            }
+            match run_one_transform(transform, &batch) {
+                Ok(derived) => {
+                    transform.consecutive_errors = 0;
+                    let mut sink = sender.file_sink();
+                    sink.submit(derived);
+                }
+                Err(msg) => {
+                    transform.consecutive_errors += 1;
+                    if transform.consecutive_errors >= LIVE_TRANSFORM_ERROR_LIMIT {
+                        transform.disabled = true;
+                        let _ = evt_tx.send(ScriptEvent::Error(format!(
+                            "live transform '{}' disabled after {} consecutive errors; last: {msg}",
+                            transform.spec.output_topic, LIVE_TRANSFORM_ERROR_LIMIT
+                        )));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Execute one live transform end to end: materialize, call the Python
+/// callable, parse + validate the result, and build the derived `ParsedBatch`.
+fn run_one_transform(
+    transform: &ActiveTransform,
+    batch: &ParsedBatch,
+) -> Result<ParsedBatch, String> {
+    let materialized = LiveTransformBatch::from_parsed(&transform.spec, batch)?;
+    let input_times = materialized.times.clone();
+    let result = Python::attach(|py| -> Result<crate::live::LiveTransformResult, String> {
+        let py_batch = Bound::new(py, LiveBatchPy::from_materialized(py, materialized))
+            .map_err(|e| format_pyerr(py, &e))?;
+        let ret = transform
+            .callable
+            .bind(py)
+            .call1((py_batch,))
+            .map_err(|e| format_pyerr(py, &e))?;
+        parse_transform_result(py, &transform.spec, &input_times, &ret)
+            .map_err(|e| format_pyerr(py, &e))
+    })?;
+    result_to_batch(transform.source, result)
+}
+
+/// Handle one command. Returns `true` if the worker should shut down.
+#[allow(clippy::too_many_arguments)]
+fn handle_command(
+    cmd: ScriptCommand,
+    store: &Arc<DataStore>,
+    sender: &IngestSender,
+    globals: &Py<PyDict>,
+    evt_tx: &Sender<ScriptEvent>,
+    transform_specs: &Arc<Mutex<Vec<LiveTransformSpec>>>,
+    prev_sources: &mut HashMap<String, SourceId>,
+    active_transforms: &mut HashMap<String, Vec<ActiveTransform>>,
+    run_counter: &mut u64,
+) -> bool {
+    {
         match cmd {
-            ScriptCommand::Shutdown => break,
+            ScriptCommand::Shutdown => return true,
             ScriptCommand::RunScript { name, source } => {
                 // A NUL byte can't go through CString; fail before running so a
                 // bad buffer never emits a (partial or empty) source.
                 if source.contains('\0') {
                     let _ = evt_tx.send(ScriptEvent::Error("source contains a NUL byte".into()));
                     let _ = evt_tx.send(ScriptEvent::Done);
-                    continue;
+                    return false;
                 }
                 let snapshot = store.load();
                 let emit: crate::api::EmitBuffer = std::rc::Rc::default();
                 let live: crate::api::LiveTransformBuffer = std::rc::Rc::default();
-                let generation = run_counter;
-                run_counter += 1;
+                let generation = *run_counter;
+                *run_counter += 1;
                 let run_result: Result<(), String> = Python::attach(|py| {
                     let g = globals.bind(py);
                     let delog = Bound::new(
@@ -220,6 +375,33 @@ fn worker_loop(
                             live.borrow().iter().map(|p| p.spec.clone()).collect();
                         *transform_specs.lock().unwrap() = new_specs;
 
+                        // Register this run's live transforms against a single
+                        // live-derived source, replacing this script-name's
+                        // prior set. Live-derived sources are never closed.
+                        let pending = live.borrow();
+                        if pending.is_empty() {
+                            active_transforms.remove(&name);
+                        } else {
+                            let derived_source = {
+                                let mut sink = sender.file_sink();
+                                sink.open_source(&format!("script:{name}"), SourceKind::LiveDerived)
+                            };
+                            let transforms = Python::attach(|py| {
+                                pending
+                                    .iter()
+                                    .map(|p| ActiveTransform {
+                                        spec: p.spec.clone(),
+                                        callable: p.callable.clone_ref(py),
+                                        source: derived_source,
+                                        consecutive_errors: 0,
+                                        disabled: false,
+                                    })
+                                    .collect::<Vec<_>>()
+                            });
+                            active_transforms.insert(name.clone(), transforms);
+                        }
+                        drop(pending);
+
                         let topics = emit.borrow();
                         let mut sink = sender.file_sink();
                         match crate::emit::emit_topics(&mut sink, &name, &topics) {
@@ -244,8 +426,8 @@ fn worker_loop(
                 let snapshot = store.load();
                 let emit: crate::api::EmitBuffer = std::rc::Rc::default();
                 let live: crate::api::LiveTransformBuffer = std::rc::Rc::default();
-                let generation = run_counter;
-                run_counter += 1;
+                let generation = *run_counter;
+                *run_counter += 1;
                 Python::attach(|py| {
                     let g = globals.bind(py);
                     let delog = Bound::new(
@@ -261,11 +443,12 @@ fn worker_loop(
                     .unwrap();
                     g.set_item("delog", delog).unwrap();
                 });
-                eval_line(&globals, &src, &evt_tx);
+                eval_line(globals, &src, evt_tx);
                 let _ = evt_tx.send(ScriptEvent::Done);
             }
         }
     }
+    false
 }
 
 /// Evaluate one line: try as an expression (to report its repr), else exec it.
