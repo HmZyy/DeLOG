@@ -182,6 +182,13 @@ pub fn parse_transform_result(
         ))
     })?;
 
+    if dict.is_empty() {
+        return Err(PyValueError::new_err(format!(
+            "live transform '{}' returned an empty result; expected at least one output field",
+            spec.output_topic
+        )));
+    }
+
     let expected = input_times.len();
     let mut fields = Vec::with_capacity(dict.len());
 
