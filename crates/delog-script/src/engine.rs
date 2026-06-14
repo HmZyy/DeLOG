@@ -206,10 +206,18 @@ fn worker_loop(
 ) {
     // One persistent globals dict for the whole session.
     let globals: Py<PyDict> = Python::attach(|py| PyDict::new(py).unbind());
-    // Per-script-name source from the previous run, for replace-on-rerun.
+    // Per-script-name snapshot-emit source from the previous run, for
+    // replace-on-rerun (the `emit_topics` Derived source). Kept separate from
+    // `live_sources` because one script name can drive BOTH a snapshot-emit
+    // source and a live-derived source in the same run; sharing one map would
+    // clobber.
     let mut prev_sources: HashMap<String, SourceId> = HashMap::new();
+    // Per-script-name live-derived source from the previous run (the appendable
+    // `LiveDerived` source registered transforms write into). A re-run removes
+    // the prior generation's source so only the latest stays active.
+    let mut live_sources: HashMap<String, SourceId> = HashMap::new();
     // Live transforms currently active, keyed by the registering script name. A
-    // re-run replaces that script's set (Task 6 will formalize replacement).
+    // re-run replaces that script's set.
     let mut active_transforms: HashMap<String, Vec<ActiveTransform>> = HashMap::new();
     // Monotonic counter for generation tracking across script runs.
     let mut run_counter: u64 = 0;
@@ -237,6 +245,7 @@ fn worker_loop(
                     &evt_tx,
                     &transform_specs,
                     &mut prev_sources,
+                    &mut live_sources,
                     &mut active_transforms,
                     &mut run_counter,
                 ) {
@@ -331,6 +340,7 @@ fn handle_command(
     evt_tx: &Sender<ScriptEvent>,
     transform_specs: &Arc<Mutex<Vec<LiveTransformSpec>>>,
     prev_sources: &mut HashMap<String, SourceId>,
+    live_sources: &mut HashMap<String, SourceId>,
     active_transforms: &mut HashMap<String, Vec<ActiveTransform>>,
     run_counter: &mut u64,
 ) -> bool {
@@ -377,15 +387,32 @@ fn handle_command(
 
                         // Register this run's live transforms against a single
                         // live-derived source, replacing this script-name's
-                        // prior set. Live-derived sources are never closed.
+                        // prior generation. Live-derived sources are appendable
+                        // and never `close_source`d; the prior generation is
+                        // torn down with `remove_source` (BRW-06 semantics:
+                        // tombstones the source in the published snapshot,
+                        // keeping its slot/rows valid for any reader still
+                        // viewing it). Order: remove old -> open new -> record
+                        // the new id (the new source has a fresh id, so removing
+                        // first is safe).
                         let pending = live.borrow();
                         if pending.is_empty() {
                             active_transforms.remove(&name);
+                            // A script that previously registered a live
+                            // transform and now registers none must not leave
+                            // its old live-derived source active.
+                            if let Some(prev) = live_sources.remove(&name) {
+                                sender.remove_source(prev);
+                            }
                         } else {
+                            if let Some(prev) = live_sources.remove(&name) {
+                                sender.remove_source(prev);
+                            }
                             let derived_source = {
                                 let mut sink = sender.file_sink();
                                 sink.open_source(&format!("script:{name}"), SourceKind::LiveDerived)
                             };
+                            live_sources.insert(name.clone(), derived_source);
                             let transforms = Python::attach(|py| {
                                 pending
                                     .iter()
@@ -690,6 +717,80 @@ def convert(batch):
             }
         }
         assert!(err.unwrap_or_default().contains("KeyboardInterrupt"));
+    }
+
+    #[test]
+    fn rerunning_live_transform_removes_previous_generation() {
+        let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use delog_core::ingest::ingest_channel;
+        use delog_core::ingestor::{Ingestor, NullObserver};
+
+        let ingestor = Ingestor::new(NullObserver);
+        let write_store = ingestor.store();
+        let (sender, receiver) = ingest_channel();
+        let ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
+
+        let engine = ScriptEngine::spawn(Arc::new(DataStore::new()), sender.clone());
+
+        let script = r#"
+@delog.live_transform(topic="A", fields=["v"], output_topic="B")
+def f(batch):
+    return {"x": batch.v}
+"#;
+        // Run the same live script twice. The first run opens the live-derived
+        // source labelled exactly "script:live" (it opens before the snapshot-
+        // emit source, which gets the "#2" suffix). The second run must REMOVE
+        // that first-generation live source so only the latest stays active.
+        for _ in 0..2 {
+            engine.send(ScriptCommand::RunScript {
+                name: "live".into(),
+                source: script.into(),
+            });
+            loop {
+                match engine.recv_blocking() {
+                    ScriptEvent::Done => break,
+                    ScriptEvent::Error(e) => panic!("unexpected error: {e}"),
+                    _ => {}
+                }
+            }
+        }
+
+        // Emission flows async through the ingest channel; poll until the store
+        // settles. The first generation's live-derived source (label exactly
+        // "script:live") must be tombstoned (`removed`) after the re-run.
+        let first_live_removed = |snap: &StoreSnapshot| -> bool {
+            snap.sources
+                .iter()
+                .find(|s| s.entry.label == "script:live")
+                .is_some_and(|s| s.entry.removed)
+        };
+        // Exactly one non-removed live-derived source must remain. `SourceEntry`
+        // carries no kind and the snapshot-emit path also opens a "script:live"-
+        // prefixed source, so we count both kinds and assert the steady state:
+        // one active live source + one active emit source = 2.
+        let active_script_sources = |snap: &StoreSnapshot| -> usize {
+            snap.sources
+                .iter()
+                .filter(|s| s.entry.label.starts_with("script:live") && !s.entry.removed)
+                .count()
+        };
+        let mut settled = false;
+        for _ in 0..100 {
+            let snap = write_store.load();
+            if first_live_removed(&snap) && active_script_sources(&snap) == 2 {
+                settled = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            settled,
+            "first-generation live source must be removed, leaving one active live + one active emit source"
+        );
+
+        drop(engine);
+        drop(sender);
+        let _ = ingest_thread.join();
     }
 
     #[test]
