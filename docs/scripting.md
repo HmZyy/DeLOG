@@ -113,6 +113,69 @@ Key behaviors:
 
 ---
 
+## Live transforms
+
+Everything above describes **snapshot scripts**: they run once against the data
+that exists the moment you run them. A **live transform** instead registers a
+callback that runs for *future* live batches, continuously appending derived
+fields while telemetry arrives.
+
+Register one with the `@delog.live_transform(...)` decorator:
+
+```python
+DEG_TO_RAD = 0.017453292519943295
+
+@delog.live_transform(
+    topic="NAV_CONTROLLER_OUTPUT",
+    fields=["nav_roll", "nav_pitch", "nav_bearing"],
+    output_topic="NAV_CONTROLLER_OUTPUT_RAD",
+)
+def nav_controller_rad(batch):
+    return {
+        "nav_roll_rad": (batch.nav_roll * DEG_TO_RAD, "rad"),
+        "nav_pitch_rad": (batch.nav_pitch * DEG_TO_RAD, "rad"),
+        "nav_bearing_rad": (batch.t, batch.nav_bearing * DEG_TO_RAD, "rad"),
+    }
+```
+
+- **`topic`** — the incoming topic to transform.
+- **`fields`** — the fields of that topic the callback needs. Each is exposed on
+  the `batch` object as a `float64` numpy array (e.g. `batch.nav_roll`). A batch
+  whose topic doesn't carry every requested field is skipped.
+- **`output_topic`** — the derived topic name the returned fields are published
+  under, on an appendable `script:<name>` source.
+
+**The `batch` object** has `batch.t` (the incoming `int64` microsecond
+timestamps) and one `float64` numpy array attribute per requested field.
+
+**The return value** is a `dict` mapping each output field name to one of:
+
+- `values` — a length-N array; unit unset, timestamps reuse the input batch's.
+- `(values, unit)` — same, with an explicit unit string.
+- `(times, values, unit)` — with explicit timestamps. For same-topic transforms
+  these **must equal** the input batch's timestamps (a mismatch is an error).
+
+All output arrays must have the same length as the incoming batch.
+
+Key behaviors:
+
+- **Re-running replaces.** Re-running a live script removes the previous
+  generation's `script:<name>` source and registers the new callbacks against a
+  fresh one — no duplicate live sources.
+- **Non-blocking.** Live batches are mirrored to the script engine through a
+  bounded queue; if it fills, batches are dropped (a diagnostic is logged)
+  rather than stalling live ingestion.
+- **Self-disabling on errors.** If a callback raises on three consecutive
+  batches, that transform is disabled and an error is reported to the console;
+  other transforms keep running.
+
+**Version 1 live transforms are same-topic only.** The callback sees one
+incoming topic batch at a time. It cannot join across topics, resample onto
+another timeline, or keep rolling-window state between batches — for that, use a
+snapshot script after capture.
+
+---
+
 ## API reference
 
 A single global object, **`delog`**, is injected into every script and REPL
