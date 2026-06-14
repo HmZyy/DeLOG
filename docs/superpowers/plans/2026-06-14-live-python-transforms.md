@@ -1281,3 +1281,43 @@ Spec coverage:
 Placeholder scan: no deferred-work markers or unspecified error-handling steps remain. Each task gives concrete file paths, commands, and expected results.
 
 Type consistency: `LiveTransformSpec`, `LiveTransformBatch`, `LiveTransformResult`, `SourceKind::LiveDerived`, `ScriptEngine::live_batch_sender`, and `ScriptEngine::try_send_live_batch` are introduced before later tasks reference them.
+
+---
+
+## Post-implementation status
+
+All eight tasks implemented, automated-tested, clippy-clean, and committed.
+A final whole-feature code review (verdict: APPROVE WITH FOLLOW-UPS) led to a
+fix commit addressing the substantive findings:
+
+- Distinct `ScriptEvent::LiveBatchProcessed` so live batches no longer flip the
+  console/REPL "done"/Cancel state.
+- Live sink registered only once the engine exists — no eager per-frame CPython
+  spawn / background thread on app launch.
+- Empty `Derived` source no longer published for pure live-transform scripts
+  (no more phantom `script:<name>` browser entry).
+- Empty live-transform result dicts rejected with a clear error.
+
+### Open follow-ups (non-blocking, from the final review)
+
+- **Worker busy-poll:** the engine worker polls the command + live-batch channels
+  with a 1 ms sleep. Replace with a merged select-style channel / `recv_timeout`
+  to drop idle wakeups and lower dispatch latency.
+- **Dead `generation` field:** plumbed through `LiveTransformSpec`/`Delog` but
+  never read (replacement keys on script name). Remove or wire it up.
+- **`transform_specs` Arc<Mutex>:** written every run but read only in tests
+  (`#[cfg(test)] transform_specs()`). Real execution state is `active_transforms`.
+  Consider `#[cfg(test)]`-gating the write to drop the wasted production lock.
+- **ZC-EXCEPTION counter metric:** the two new f64/numpy materialization copies
+  (`live.rs` `from_parsed`, `from_materialized`) carry the required comment but
+  not the counter metric CLAUDE.md §4.5 asks for (matches the pre-existing
+  `materialize_field` pattern; these run per live batch so a counter is useful).
+- **Emit-source label drift:** snapshot-emit source label increments each rerun
+  (`#2`→`#3`…) because the old source is removed after the new one opens. Cosmetic.
+
+### Pending manual verification (Task 8 Step 5)
+
+Requires a live MAVLink stream + GUI run (cannot be done headless):
+run `nav_controller_live_rad`, confirm `script:.../NAV_CONTROLLER_OUTPUT_RAD`
+appends live alongside the raw topic. The `golden_live_nav_transform` integration
+test covers the engine path end to end.
