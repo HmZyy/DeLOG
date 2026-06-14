@@ -1119,7 +1119,7 @@ git commit -m "script: replace live transform generations"
 - Create: `scripts/nav_controller_live_rad.py`
 - Modify: `PLAN.md`
 
-- [ ] **Step 1: Document the live transform mode**
+- [x] **Step 1: Document the live transform mode**
 
 In `docs/scripting.md`, add a section after "How scripts produce data":
 
@@ -1150,7 +1150,7 @@ topic batch at a time. It cannot join across topics, resample, or keep rolling
 window state.
 ````
 
-- [ ] **Step 2: Add the example script**
+- [x] **Step 2: Add the example script**
 
 Create `scripts/nav_controller_live_rad.py`:
 
@@ -1171,7 +1171,7 @@ def nav_controller_rad(batch):
     }
 ```
 
-- [ ] **Step 3: Update `PLAN.md` checklist**
+- [x] **Step 3: Update `PLAN.md` checklist**
 
 Add a scripting checklist item in §22 if no live-transform item exists:
 
@@ -1181,7 +1181,7 @@ Add a scripting checklist item in §22 if no live-transform item exists:
 
 If `SCR-08` already exists, mark that existing item `[x]` instead of creating a duplicate.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add docs/scripting.md scripts/nav_controller_live_rad.py PLAN.md

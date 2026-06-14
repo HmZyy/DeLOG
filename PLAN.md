@@ -1013,6 +1013,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **SCR-06** — Global script library persistence (config-dir `.py` files): list/load/save/delete.
 - [x] **SCR-07** — Scripts window + Tools ▸ Scripts menu (Run submenu with edit/remove; Console editor + REPL) in delog-app (feature-gated); verified by manual GUI run.
 - [x] **SCR-08** — Tests: engine, golden accel-mag script, numpy↔Arrow round-trip incl. NaN, error path, resample_prev proptest, derived-source substrate tests.
+- [x] **SCR-09** — Live Python same-topic transforms: `@delog.live_transform` callbacks run on incoming live batches and append to an appendable `SourceKind::LiveDerived` `script:<name>` source (remove-on-rerun, non-blocking mirror queue, self-disable after 3 consecutive errors).
 
 `delog-app` gains a `scripting` feature (OFF by default); see CLAUDE.md build matrix. Scripting build requires a local libpython pin (gitignored .cargo/config.toml).
 
