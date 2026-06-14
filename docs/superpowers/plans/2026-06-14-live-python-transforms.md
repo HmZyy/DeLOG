@@ -572,7 +572,7 @@ git commit -m "script: register live transform decorators"
 - Modify: `crates/delog-script/src/engine.rs`
 - Test: `crates/delog-script/tests/golden_live_nav_transform.rs`
 
-- [ ] **Step 1: Write the failing integration test**
+- [x] **Step 1: Write the failing integration test**
 
 Create `crates/delog-script/tests/golden_live_nav_transform.rs`:
 
@@ -704,7 +704,7 @@ fn wait_for_topic(store: &DataStore, topic: &str) -> StoreSnapshot {
 }
 ```
 
-- [ ] **Step 2: Run the test and verify it fails**
+- [x] **Step 2: Run the test and verify it fails**
 
 Run:
 
@@ -714,7 +714,7 @@ cargo test -p delog-script --features python live_transform_appends_derived_batc
 
 Expected: compile failures for `try_send_live_batch` and live execution.
 
-- [ ] **Step 3: Add Python batch object and output parser**
+- [x] **Step 3: Add Python batch object and output parser**
 
 In `crates/delog-script/src/live.rs`, add a `#[pyclass] LiveBatchPy` with `.t` and dynamic field attributes:
 
@@ -749,7 +749,7 @@ pub struct LiveTransformResult {
 
 Add `parse_transform_result(py, spec, input_times, obj) -> PyResult<LiveTransformResult>` that accepts `values`, `(values, unit)`, and `(times, values, unit)`. Validate every output has `len == input_times.len()` and explicit times equal `input_times`.
 
-- [ ] **Step 4: Add emission helper for one live result**
+- [x] **Step 4: Add emission helper for one live result**
 
 In `crates/delog-script/src/live.rs`, add:
 
@@ -775,7 +775,7 @@ pub fn result_to_batch(
 }
 ```
 
-- [ ] **Step 5: Execute transforms in the worker**
+- [x] **Step 5: Execute transforms in the worker**
 
 In `engine.rs`, store active transforms:
 
@@ -806,7 +806,7 @@ const LIVE_TRANSFORM_ERROR_LIMIT: u8 = 3;
 
 After three consecutive errors, set `disabled = true` and emit one `ScriptEvent::Error`.
 
-- [ ] **Step 6: Add live batch sender API**
+- [x] **Step 6: Add live batch sender API**
 
 In `ScriptEngine`, add a bounded channel and method:
 
@@ -828,7 +828,7 @@ pub fn try_send_live_batch(&self, batch: ParsedBatch) -> Result<(), ParsedBatch>
 
 Make the worker loop poll command and live queues so a `Done` event is emitted after each processed live batch in tests.
 
-- [ ] **Step 7: Run the integration test and verify it passes**
+- [x] **Step 7: Run the integration test and verify it passes**
 
 Run:
 
@@ -838,7 +838,7 @@ cargo test -p delog-script --features python live_transform_appends_derived_batc
 
 Expected: PASS.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add crates/delog-script/src/live.rs crates/delog-script/src/engine.rs crates/delog-script/tests/golden_live_nav_transform.rs
