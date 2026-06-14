@@ -391,7 +391,7 @@ git commit -m "script: add live transform batch types"
 - Modify: `crates/delog-script/src/engine.rs`
 - Test: `crates/delog-script/src/engine.rs`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `crates/delog-script/src/engine.rs` tests:
 
@@ -424,7 +424,7 @@ def convert(batch):
 }
 ```
 
-- [ ] **Step 2: Run the test and verify it fails**
+- [x] **Step 2: Run the test and verify it fails**
 
 Run:
 
@@ -434,7 +434,7 @@ cargo test -p delog-script --features python live_transform_decorator_registers_
 
 Expected: compile failure because `live_transform` and `transform_specs` do not exist.
 
-- [ ] **Step 3: Add registration buffers to the API**
+- [x] **Step 3: Add registration buffers to the API**
 
 In `crates/delog-script/src/api.rs`, add:
 
@@ -482,7 +482,7 @@ pub fn new(
 }
 ```
 
-- [ ] **Step 4: Implement `delog.live_transform(...)`**
+- [x] **Step 4: Implement `delog.live_transform(...)`**
 
 Add this method to `#[pymethods] impl Delog`:
 
@@ -533,7 +533,7 @@ fn live_transform(
 }
 ```
 
-- [ ] **Step 5: Store active transform metadata in the engine**
+- [x] **Step 5: Store active transform metadata in the engine**
 
 In `crates/delog-script/src/engine.rs`, add an `Arc<Mutex<Vec<LiveTransformSpec>>>` to `ScriptEngine` for test-visible specs. In `spawn`, clone it into `worker_loop`. When a script run succeeds, replace specs for that script name with the newly registered specs.
 
@@ -546,7 +546,7 @@ pub fn transform_specs(&self) -> Vec<crate::live::LiveTransformSpec> {
 }
 ```
 
-- [ ] **Step 6: Run the test and verify it passes**
+- [x] **Step 6: Run the test and verify it passes**
 
 Run:
 
@@ -556,7 +556,7 @@ cargo test -p delog-script --features python live_transform_decorator_registers_
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/delog-script/src/api.rs crates/delog-script/src/engine.rs
