@@ -23,8 +23,12 @@ use crate::context::RenderContext;
 pub struct GridUniform {
     /// World → clip.
     pub view_proj: [[f32; 4]; 4],
-    /// Clip → world (for per-pixel ray reconstruction).
-    pub inv_view_proj: [[f32; 4]; 4],
+    /// Clip → **camera-relative** world (maps a clip point to `world − cam_pos`),
+    /// used for per-pixel ray reconstruction. Camera-relative so the shader's f32
+    /// unprojection stays precise when the vehicle is far from the render origin
+    /// (otherwise the world-anchored grid crawls while zooming/following). Build
+    /// it from the rotation-only view: `(proj · view_without_translation)⁻¹`.
+    pub inv_vp_rel: [[f32; 4]; 4],
     /// Camera world position (xyz); `w` = LOD blend (1.0 = draw two bracketing
     /// power-of-ten grids around `cell` and cross-fade the finer one, 0.0 = draw
     /// `cell` as a single level).
@@ -39,7 +43,7 @@ impl GridUniform {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         view_proj: [[f32; 4]; 4],
-        inv_view_proj: [[f32; 4]; 4],
+        inv_vp_rel: [[f32; 4]; 4],
         cam_pos: [f32; 3],
         cell: f32,
         fade_start: f32,
@@ -49,7 +53,7 @@ impl GridUniform {
     ) -> Self {
         Self {
             view_proj,
-            inv_view_proj,
+            inv_vp_rel,
             cam_pos: [
                 cam_pos[0],
                 cam_pos[1],
@@ -219,7 +223,11 @@ mod tests {
         let proj = Mat4::perspective_rh(60f32.to_radians(), w as f32 / h as f32, 0.1, 200.0);
         let view = Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::Y);
         let view_proj = proj * view;
-        let inv = view_proj.inverse();
+        // The shader expects a clip → camera-relative-world inverse: build it from
+        // the rotation-only view (translation column zeroed).
+        let mut view_rot = view;
+        view_rot.w_axis = glam::Vec4::new(0.0, 0.0, 0.0, 1.0);
+        let inv = (proj * view_rot).inverse();
         grid.set_uniform(
             &ctx,
             &GridUniform::new(
