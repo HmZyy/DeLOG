@@ -2,8 +2,8 @@
 //! and serves REPL evals over channels (SCR-02..05).
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use delog_core::identity::SourceId;
@@ -13,6 +13,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use crate::api::Delog;
+use crate::live::LiveTransformSpec;
 
 /// Format a Python error with its traceback (if any) for an Error event.
 fn format_pyerr(py: Python<'_>, err: &PyErr) -> String {
@@ -51,6 +52,12 @@ pub struct ScriptEngine {
     tx: Sender<ScriptCommand>,
     events: Receiver<ScriptEvent>,
     handle: Option<JoinHandle<()>>,
+    /// The live transform specs registered by the most recent script run(s).
+    /// Shared with the worker thread so it can update on each successful run.
+    // Only read through the cfg(test) transform_specs() accessor for now; a
+    // later task will expose it to the live dispatch path.
+    #[cfg_attr(not(test), allow(dead_code))]
+    transform_specs: Arc<Mutex<Vec<LiveTransformSpec>>>,
 }
 
 impl ScriptEngine {
@@ -59,14 +66,17 @@ impl ScriptEngine {
     pub fn spawn(store: Arc<DataStore>, sender: IngestSender) -> Self {
         let (cmd_tx, cmd_rx) = channel::<ScriptCommand>();
         let (evt_tx, evt_rx) = channel::<ScriptEvent>();
+        let specs: Arc<Mutex<Vec<LiveTransformSpec>>> = Arc::new(Mutex::new(Vec::new()));
+        let specs_worker = Arc::clone(&specs);
         let handle = std::thread::Builder::new()
             .name("delog-script".into())
-            .spawn(move || worker_loop(store, sender, cmd_rx, evt_tx))
+            .spawn(move || worker_loop(store, sender, cmd_rx, evt_tx, specs_worker))
             .expect("spawn script thread");
         Self {
             tx: cmd_tx,
             events: evt_rx,
             handle: Some(handle),
+            transform_specs: specs,
         }
     }
 
@@ -113,6 +123,11 @@ impl ScriptEngine {
     pub fn recv_blocking(&self) -> ScriptEvent {
         self.events.recv().expect("worker alive")
     }
+
+    #[cfg(test)]
+    pub fn transform_specs(&self) -> Vec<crate::live::LiveTransformSpec> {
+        self.transform_specs.lock().unwrap().clone()
+    }
 }
 
 impl Drop for ScriptEngine {
@@ -146,11 +161,14 @@ fn worker_loop(
     sender: IngestSender,
     cmd_rx: Receiver<ScriptCommand>,
     evt_tx: Sender<ScriptEvent>,
+    transform_specs: Arc<Mutex<Vec<LiveTransformSpec>>>,
 ) {
     // One persistent globals dict for the whole session.
     let globals: Py<PyDict> = Python::attach(|py| PyDict::new(py).unbind());
     // Per-script-name source from the previous run, for replace-on-rerun.
     let mut prev_sources: HashMap<String, SourceId> = HashMap::new();
+    // Monotonic counter for generation tracking across script runs.
+    let mut run_counter: u64 = 0;
 
     // Install stdout/stderr capture once, before the command loop.
     Python::attach(|py| {
@@ -174,11 +192,20 @@ fn worker_loop(
                 }
                 let snapshot = store.load();
                 let emit: crate::api::EmitBuffer = std::rc::Rc::default();
+                let live: crate::api::LiveTransformBuffer = std::rc::Rc::default();
+                let generation = run_counter;
+                run_counter += 1;
                 let run_result: Result<(), String> = Python::attach(|py| {
                     let g = globals.bind(py);
                     let delog = Bound::new(
                         py,
-                        crate::api::Delog::new(snapshot.clone(), std::rc::Rc::clone(&emit)),
+                        crate::api::Delog::new(
+                            snapshot.clone(),
+                            std::rc::Rc::clone(&emit),
+                            std::rc::Rc::clone(&live),
+                            name.clone(),
+                            generation,
+                        ),
                     )
                     .unwrap();
                     g.set_item("delog", delog).unwrap();
@@ -188,6 +215,11 @@ fn worker_loop(
                 });
                 match run_result {
                     Ok(()) => {
+                        // Collect live transform specs registered during this run.
+                        let new_specs: Vec<LiveTransformSpec> =
+                            live.borrow().iter().map(|p| p.spec.clone()).collect();
+                        *transform_specs.lock().unwrap() = new_specs;
+
                         let topics = emit.borrow();
                         let mut sink = sender.file_sink();
                         match crate::emit::emit_topics(&mut sink, &name, &topics) {
@@ -211,11 +243,22 @@ fn worker_loop(
             ScriptCommand::Eval(src) => {
                 let snapshot = store.load();
                 let emit: crate::api::EmitBuffer = std::rc::Rc::default();
+                let live: crate::api::LiveTransformBuffer = std::rc::Rc::default();
+                let generation = run_counter;
+                run_counter += 1;
                 Python::attach(|py| {
                     let g = globals.bind(py);
-                    let delog =
-                        Bound::new(py, Delog::new(snapshot.clone(), std::rc::Rc::clone(&emit)))
-                            .unwrap();
+                    let delog = Bound::new(
+                        py,
+                        Delog::new(
+                            snapshot.clone(),
+                            std::rc::Rc::clone(&emit),
+                            std::rc::Rc::clone(&live),
+                            String::new(),
+                            generation,
+                        ),
+                    )
+                    .unwrap();
                     g.set_item("delog", delog).unwrap();
                 });
                 eval_line(&globals, &src, &evt_tx);
@@ -399,6 +442,47 @@ out.add_field("v", np.array([1.0, 2.0, 3.0]), unit="m")
         }
         assert!(found, "derived source script:test not published");
         let _ = ingest_thread;
+    }
+
+    #[test]
+    fn live_transform_decorator_registers_a_transform() {
+        let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use delog_core::ingest::ingest_channel;
+        use delog_core::ingestor::{Ingestor, NullObserver};
+
+        // A running ingestor is required so that file_sink().open_source() can
+        // get its reply (otherwise the worker blocks indefinitely on RunScript).
+        let ingestor = Ingestor::new(NullObserver);
+        let store = ingestor.store();
+        let (sender, receiver) = ingest_channel();
+        let _ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
+
+        let engine = ScriptEngine::spawn(store, sender);
+
+        let script = r#"
+@delog.live_transform(
+    topic="NAV_CONTROLLER_OUTPUT",
+    fields=["nav_roll", "nav_pitch"],
+    output_topic="NAV_RAD",
+)
+def convert(batch):
+    return {}
+"#;
+        engine.send(ScriptCommand::RunScript {
+            name: "nav_rad".into(),
+            source: script.into(),
+        });
+
+        loop {
+            match engine.recv_blocking() {
+                ScriptEvent::Done => break,
+                ScriptEvent::Error(e) => panic!("unexpected error: {e}"),
+                _ => {}
+            }
+        }
+        assert_eq!(engine.transform_specs().len(), 1);
+        assert_eq!(engine.transform_specs()[0].topic, "NAV_CONTROLLER_OUTPUT");
+        assert_eq!(engine.transform_specs()[0].output_topic, "NAV_RAD");
     }
 
     #[test]

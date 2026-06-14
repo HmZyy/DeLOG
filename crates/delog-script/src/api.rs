@@ -13,6 +13,17 @@ use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 
+use crate::live::LiveTransformSpec;
+
+/// A live transform registration accumulated during one script run.
+pub struct PendingLiveTransform {
+    pub spec: LiveTransformSpec,
+    pub callable: Py<PyAny>,
+}
+
+/// Shared, single-threaded accumulator of live transform registrations for one run.
+pub type LiveTransformBuffer = Rc<RefCell<Vec<PendingLiveTransform>>>;
+
 /// Prev-sample resample: for each `base` time, the source value at the latest
 /// source timestamp `<= base` (NaN before the first sample). `src_t` must be
 /// sorted ascending. O(m log n) via binary search.
@@ -106,16 +117,36 @@ pub type EmitBuffer = Rc<RefCell<Vec<PendingTopic>>>;
 pub struct Delog {
     snapshot: Arc<StoreSnapshot>,
     emit: EmitBuffer,
+    live: LiveTransformBuffer,
+    script_name: String,
+    generation: u64,
 }
 
 impl Delog {
-    pub fn new(snapshot: Arc<StoreSnapshot>, emit: EmitBuffer) -> Self {
-        Self { snapshot, emit }
+    pub fn new(
+        snapshot: Arc<StoreSnapshot>,
+        emit: EmitBuffer,
+        live: LiveTransformBuffer,
+        script_name: String,
+        generation: u64,
+    ) -> Self {
+        Self {
+            snapshot,
+            emit,
+            live,
+            script_name,
+            generation,
+        }
     }
 
     /// The accumulated derived topics (the run lifecycle flushes these — Task 8).
     pub fn emit_buffer(&self) -> EmitBuffer {
         Rc::clone(&self.emit)
+    }
+
+    /// The accumulated live transform registrations for this run.
+    pub fn live_buffer(&self) -> LiveTransformBuffer {
+        Rc::clone(&self.live)
     }
 
     fn resolve_path(&self, path: &str) -> Result<FieldId, String> {
@@ -213,6 +244,53 @@ impl Delog {
             emit: Rc::clone(&self.emit),
             index: idx,
         })
+    }
+
+    /// Decorator factory: `@delog.live_transform(topic=..., fields=[...], output_topic=...)`
+    /// returns a decorator that registers the function and returns it unchanged.
+    #[pyo3(signature = (*, topic, fields, output_topic))]
+    fn live_transform(
+        &self,
+        py: Python<'_>,
+        topic: String,
+        fields: Vec<String>,
+        output_topic: String,
+    ) -> PyResult<Py<PyAny>> {
+        let spec = LiveTransformSpec::new(
+            self.script_name.clone(),
+            self.generation,
+            topic,
+            fields,
+            output_topic,
+        )
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+
+        #[pyclass(unsendable)]
+        struct Decorator {
+            spec: LiveTransformSpec,
+            live: LiveTransformBuffer,
+        }
+
+        #[pymethods]
+        impl Decorator {
+            fn __call__(&self, py: Python<'_>, func: Py<PyAny>) -> PyResult<Py<PyAny>> {
+                self.live.borrow_mut().push(PendingLiveTransform {
+                    spec: self.spec.clone(),
+                    callable: func.clone_ref(py),
+                });
+                Ok(func)
+            }
+        }
+
+        Ok(Bound::new(
+            py,
+            Decorator {
+                spec,
+                live: Rc::clone(&self.live),
+            },
+        )?
+        .into_any()
+        .unbind())
     }
 }
 
