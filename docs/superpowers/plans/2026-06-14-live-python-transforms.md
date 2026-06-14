@@ -1195,7 +1195,7 @@ git commit -m "docs: document live Python transforms"
 **Files:**
 - All files touched by previous tasks.
 
-- [ ] **Step 1: Run formatting**
+- [x] **Step 1: Run formatting**
 
 Run:
 
@@ -1205,7 +1205,7 @@ cargo fmt --all
 
 Expected: exits 0.
 
-- [ ] **Step 2: Run focused tests**
+- [x] **Step 2: Run focused tests**
 
 Run:
 
@@ -1218,7 +1218,7 @@ cargo test -p delog-app --features scripting app_observer_mirrors_only_live_batc
 
 Expected: all PASS.
 
-- [ ] **Step 3: Run clippy**
+- [x] **Step 3: Run clippy**
 
 Run:
 
@@ -1230,7 +1230,7 @@ cargo clippy -p delog-app --features scripting -- -D warnings
 
 Expected: all clean.
 
-- [ ] **Step 4: Build the app**
+- [x] **Step 4: Build the app**
 
 Run:
 
@@ -1240,7 +1240,7 @@ cargo build -p delog-app
 
 Expected: exits 0.
 
-- [ ] **Step 5: Manual verification**
+- [!] **Step 5: Manual verification** — requires a live MAVLink stream + GUI; pending a human run (automated `golden_live_nav_transform` integration test covers the engine path).
 
 Run:
 
