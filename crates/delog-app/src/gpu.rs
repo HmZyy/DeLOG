@@ -338,7 +338,7 @@ impl GpuBridge {
                 0,
                 bytemuck::bytes_of(&Traj3dUniform::new(vp_cols, res.axis_gizmo.color)),
             );
-            res.prepare_vehicles(vp_cols, vehicles);
+            res.prepare_vehicles(vp_cols, camera.eye().to_array(), vehicles);
 
             let clear = wgpu::Color {
                 r: 0.07,
@@ -672,7 +672,12 @@ impl SceneResources {
 
     /// Prepare GPU buffers + uniforms for the frame's vehicles (before the
     /// pass): upload each mesh once, (re)grow trajectory buffers, write uniforms.
-    fn prepare_vehicles(&mut self, vp_cols: [[f32; 4]; 4], vehicles: &[VehicleDraw]) {
+    fn prepare_vehicles(
+        &mut self,
+        vp_cols: [[f32; 4]; 4],
+        cam_pos: [f32; 3],
+        vehicles: &[VehicleDraw],
+    ) {
         // Light from upper front-right; ambient keeps shadowed faces readable.
         let light = glam::Vec3::new(0.4, 1.0, 0.6).normalize().to_array();
         for v in vehicles {
@@ -742,6 +747,7 @@ impl SceneResources {
                     v.normal_matrix,
                     light,
                     v.color,
+                    cam_pos,
                     0.28,
                 )),
             );
