@@ -64,7 +64,11 @@ impl OrbitCamera {
         self.view_proj_with_far(aspect, FAR)
     }
 
-    /// World → clip transform using a caller-provided far plane.
+    /// World → clip transform using a caller-provided far plane. Production code
+    /// goes through [`Self::view_proj_and_inverse`] (which also yields the
+    /// camera-relative inverse the grid shader needs); this f32-only form is kept
+    /// for tests.
+    #[cfg(test)]
     pub fn view_proj_with_far(&self, aspect: f32, far: f32) -> Mat4 {
         let far = far.max(NEAR + 1.0);
         let proj = Mat4::perspective_rh(FOV_Y, aspect.max(1e-3), NEAR, far);
