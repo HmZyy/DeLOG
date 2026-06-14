@@ -65,6 +65,12 @@ pub fn save() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/save.svg")
 }
 
+/// Unplug (unregister the current script's live transform). Scripting Console only.
+#[cfg_attr(not(feature = "scripting"), allow(dead_code))]
+pub fn unplug() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/unplug.svg")
+}
+
 /// Two columns (split into side-by-side panes — horizontal split).
 pub fn columns() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/columns-2.svg")
