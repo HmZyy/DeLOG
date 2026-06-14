@@ -24,6 +24,10 @@ use delog_parsers::{
     ArduPilotParser, Detection, ParserRegistry, SNIFF_HEAD_LEN, TlogParser, ULogParser,
 };
 
+#[cfg(feature = "scripting")]
+type LiveScriptSink =
+    Arc<Mutex<Option<std::sync::mpsc::SyncSender<delog_core::ingest::ParsedBatch>>>>;
+
 /// Most recent diagnostics retained for the UI (full hub is DIA-01, M9).
 const MAX_DIAGNOSTICS: usize = 1000;
 
@@ -43,6 +47,8 @@ struct AppObserver {
     loads: Loads,
     diagnostics: Diags,
     ctx: egui::Context,
+    #[cfg(feature = "scripting")]
+    live_scripts: LiveScriptSink,
 }
 
 impl IngestObserver for AppObserver {
@@ -67,6 +73,31 @@ impl IngestObserver for AppObserver {
     fn on_diagnostic(&mut self, diag: Diag) {
         push_diag(&self.diagnostics, diag);
         self.ctx.request_repaint();
+    }
+
+    #[cfg(feature = "scripting")]
+    fn on_batch(&mut self, kind: SourceKind, batch: &delog_core::ingest::ParsedBatch) {
+        if kind != SourceKind::Live {
+            return;
+        }
+        let Some(tx) = self.live_scripts.lock().unwrap().clone() else {
+            return;
+        };
+        match tx.try_send(batch.clone()) {
+            Ok(()) => {}
+            Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                push_diag(
+                    &self.diagnostics,
+                    Diag::warning(
+                        "script-live-drop",
+                        "live transform queue full; dropped batch",
+                    ),
+                );
+            }
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                *self.live_scripts.lock().unwrap() = None;
+            }
+        }
     }
 }
 
@@ -99,6 +130,8 @@ pub struct Session {
     /// Sources already swept by the post-load quality scan (DIA-05).
     scanned: HashSet<SourceId>,
     ctx: egui::Context,
+    #[cfg(feature = "scripting")]
+    live_scripts: LiveScriptSink,
     _ingest: JoinHandle<()>,
 }
 
@@ -107,10 +140,14 @@ impl Session {
     pub fn new(ctx: egui::Context) -> Self {
         let loads: Loads = Arc::default();
         let diagnostics: Diags = Arc::default();
+        #[cfg(feature = "scripting")]
+        let live_scripts: LiveScriptSink = Arc::new(Mutex::new(None));
         let observer = AppObserver {
             loads: Arc::clone(&loads),
             diagnostics: Arc::clone(&diagnostics),
             ctx: ctx.clone(),
+            #[cfg(feature = "scripting")]
+            live_scripts: Arc::clone(&live_scripts),
         };
 
         let ingestor = Ingestor::new(observer);
@@ -143,6 +180,8 @@ impl Session {
             live_links: Vec::new(),
             scanned: HashSet::new(),
             ctx,
+            #[cfg(feature = "scripting")]
+            live_scripts,
             _ingest: ingest,
         }
     }
@@ -164,6 +203,16 @@ impl Session {
     #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
     pub fn ingest_sender(&self) -> IngestSender {
         self.sender.clone()
+    }
+
+    /// Wire (or unwire) the live-batch mirror into the script engine's queue.
+    /// Called once per frame from `app.rs` to keep the sink current (SCR-08).
+    #[cfg(feature = "scripting")]
+    pub fn set_live_script_sink(
+        &self,
+        sink: Option<std::sync::mpsc::SyncSender<delog_core::ingest::ParsedBatch>>,
+    ) {
+        *self.live_scripts.lock().unwrap() = sink;
     }
 
     /// The shared metrics registry (PLAN.md §16) — instrumentation reads/writes
@@ -459,6 +508,45 @@ mod tests {
     use std::io::Write;
 
     use super::*;
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn app_observer_mirrors_only_live_batches_without_blocking() {
+        use std::sync::mpsc::sync_channel;
+
+        use arrow::array::{ArrayRef, Float64Array, Int64Array};
+        use arrow::datatypes::DataType;
+        use delog_core::ingest::{ParsedBatch, SourceKind};
+        use delog_core::schema::{FieldSchema, TopicSchema};
+
+        let (tx, rx) = sync_channel(1);
+        let live_scripts = Arc::new(Mutex::new(Some(tx)));
+        let mut observer = AppObserver {
+            loads: Arc::default(),
+            diagnostics: Arc::default(),
+            ctx: egui::Context::default(),
+            live_scripts,
+        };
+        let schema = Arc::new(
+            TopicSchema::new(
+                "A",
+                [FieldSchema::new("v", DataType::Float64, None::<String>, 1.0).unwrap()],
+            )
+            .unwrap(),
+        );
+        let batch = ParsedBatch::new(
+            SourceId(0),
+            schema,
+            Int64Array::from(vec![1]),
+            vec![Arc::new(Float64Array::from(vec![2.0])) as ArrayRef],
+        );
+
+        observer.on_batch(SourceKind::File, &batch);
+        assert!(rx.try_recv().is_err(), "file batches are not mirrored");
+
+        observer.on_batch(SourceKind::Live, &batch);
+        assert!(rx.try_recv().is_ok(), "live batches are mirrored");
+    }
 
     /// Minimal self-describing DataFlash log: one TEST message, two rows.
     fn tiny_bin() -> Vec<u8> {
