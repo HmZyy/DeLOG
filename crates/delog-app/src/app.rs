@@ -1471,10 +1471,9 @@ impl eframe::App for DelogApp {
 
         #[cfg(feature = "scripting")]
         {
-            let live_sink = self
-                .scripts
-                .live_batch_sender(self.session.store(), self.session.ingest_sender());
-            self.session.set_live_script_sink(Some(live_sink));
+            if let Some(sink) = self.scripts.live_batch_sender_if_running() {
+                self.session.set_live_script_sink(Some(sink));
+            }
             self.scripts
                 .ui(ui.ctx(), self.session.store(), self.session.ingest_sender());
         }

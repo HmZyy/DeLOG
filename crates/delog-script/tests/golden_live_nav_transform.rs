@@ -69,7 +69,7 @@ def convert(batch):
         sink.open_source("live", delog_core::ingest::SourceKind::Live)
     };
     engine.try_send_live_batch(nav_batch(raw_source)).unwrap();
-    wait_done(&engine);
+    wait_live_processed(&engine);
 
     let snap = wait_for_topic(&write_store, "NAV_CONTROLLER_OUTPUT_RAD");
     let topic = snap
@@ -92,18 +92,31 @@ def convert(batch):
 }
 
 fn wait_done(engine: &ScriptEngine) {
+    wait_for(engine, ScriptEvent::Done, "ScriptEvent::Done");
+}
+
+fn wait_live_processed(engine: &ScriptEngine) {
+    wait_for(
+        engine,
+        ScriptEvent::LiveBatchProcessed,
+        "ScriptEvent::LiveBatchProcessed",
+    );
+}
+
+fn wait_for(engine: &ScriptEngine, expected: ScriptEvent, label: &str) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         for event in engine.drain_events() {
-            match event {
-                ScriptEvent::Done => return,
-                ScriptEvent::Error(err) => panic!("script error: {err}"),
-                _ => {}
+            if event == expected {
+                return;
+            }
+            if let ScriptEvent::Error(err) = event {
+                panic!("script error: {err}");
             }
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "timed out waiting for ScriptEvent::Done"
+            "timed out waiting for {label}"
         );
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
