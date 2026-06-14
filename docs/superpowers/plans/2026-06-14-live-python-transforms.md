@@ -1024,7 +1024,7 @@ git commit -m "app: route live batches to Python transforms"
 - Modify: `crates/delog-script/src/engine.rs`
 - Test: `crates/delog-script/src/engine.rs`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `engine.rs` tests:
 
@@ -1066,7 +1066,7 @@ def f(batch):
 }
 ```
 
-- [ ] **Step 2: Run the test and verify it fails**
+- [x] **Step 2: Run the test and verify it fails**
 
 Run:
 
@@ -1076,7 +1076,7 @@ cargo test -p delog-script --features python rerunning_live_transform_removes_pr
 
 Expected: FAIL because previous live-derived source is not removed.
 
-- [ ] **Step 3: Implement generation replacement**
+- [x] **Step 3: Implement generation replacement**
 
 In the worker's successful `RunScript` path:
 
@@ -1093,7 +1093,7 @@ let source = sink.open_source(&format!("script:{name}"), SourceKind::LiveDerived
 5. Attach that `source` to each `ActiveTransform`.
 6. Do not call `close_source` for live transform sources.
 
-- [ ] **Step 4: Run the test and verify it passes**
+- [x] **Step 4: Run the test and verify it passes**
 
 Run:
 
@@ -1103,7 +1103,7 @@ cargo test -p delog-script --features python rerunning_live_transform_removes_pr
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/delog-script/src/engine.rs
