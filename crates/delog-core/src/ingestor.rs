@@ -43,6 +43,7 @@ pub trait IngestObserver: Send {
     fn on_diagnostic(&mut self, _diag: Diag) {}
     fn on_progress(&mut self, _source: SourceId, _frac: f32) {}
     fn on_close(&mut self, _source: SourceId, _summary: ParseSummary) {}
+    fn on_batch(&mut self, _kind: SourceKind, _batch: &ParsedBatch) {}
 }
 
 /// An observer that drops everything.
@@ -164,7 +165,7 @@ impl<O: IngestObserver> Ingestor<O> {
         let id = self.identity.add_source(key);
         let seal_rows = match kind {
             SourceKind::File | SourceKind::Derived => FILE_CHUNK_ROWS,
-            SourceKind::Live => LIVE_CHUNK_ROWS,
+            SourceKind::Live | SourceKind::LiveDerived => LIVE_CHUNK_ROWS,
         };
         self.sources.insert(
             id,
@@ -190,7 +191,9 @@ impl<O: IngestObserver> Ingestor<O> {
             return;
         };
         let seal_rows = source.seal_rows;
+        let source_kind = source.kind;
         let source_id = batch.source;
+        self.observer.on_batch(source_kind, &batch);
 
         let topic_id = match self.ensure_topic(source_id, &batch.schema) {
             Some(id) => id,
@@ -400,7 +403,7 @@ impl<O: IngestObserver> Ingestor<O> {
         let stale: Vec<(SourceId, TopicId)> = self
             .sources
             .iter()
-            .filter(|(_, state)| state.kind == SourceKind::Live)
+            .filter(|(_, state)| matches!(state.kind, SourceKind::Live | SourceKind::LiveDerived))
             .flat_map(|(&source, state)| {
                 state.pending.iter().filter_map(move |(&topic, pending)| {
                     (now.duration_since(pending.first_buffered_at) >= LIVE_MAX_AGE)
@@ -608,6 +611,32 @@ mod tests {
         }
         ing.flush_aged_live();
         assert_eq!(ing.chunks_sealed(), 1, "expired pending rows seal");
+    }
+
+    #[test]
+    fn live_derived_source_seals_on_age_like_live() {
+        let mut ing = Ingestor::new(NullObserver);
+        let source = open_with(&mut ing, "script:live_math", SourceKind::LiveDerived);
+
+        ing.process(IngestMsg::Batch(batch(source, "NAV_RAD", &[1])));
+        ing.flush_aged_live();
+        assert_eq!(ing.chunks_sealed(), 0, "not stale yet");
+
+        std::thread::sleep(LIVE_MAX_AGE + Duration::from_millis(10));
+        ing.flush_aged_live();
+
+        assert_eq!(
+            ing.chunks_sealed(),
+            1,
+            "live-derived pending rows seal by age"
+        );
+        let snap = ing.store().load();
+        let topic = snap
+            .topics
+            .iter()
+            .find(|t| t.entry.name == "NAV_RAD")
+            .expect("derived live topic registered");
+        assert_eq!(snap.topic_store(topic.entry.id).unwrap().chunks.len(), 1);
     }
 
     #[test]
