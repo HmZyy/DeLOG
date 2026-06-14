@@ -1470,8 +1470,14 @@ impl eframe::App for DelogApp {
         }
 
         #[cfg(feature = "scripting")]
-        self.scripts
-            .ui(ui.ctx(), self.session.store(), self.session.ingest_sender());
+        {
+            let live_sink = self
+                .scripts
+                .live_batch_sender(self.session.store(), self.session.ingest_sender());
+            self.session.set_live_script_sink(Some(live_sink));
+            self.scripts
+                .ui(ui.ctx(), self.session.store(), self.session.ingest_sender());
+        }
     }
 }
 
