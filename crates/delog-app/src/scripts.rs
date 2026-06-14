@@ -252,32 +252,55 @@ impl ScriptsPanel {
                     }
                 }
 
-                // Run / Cancel toggle (icon-only).
-                let (icon, hover) = if self.running {
-                    (crate::icons::square(), "Cancel")
+                // The run name: an unsaved buffer runs as "scratch" so its
+                // output (and any live transform) is still addressable.
+                let run_name = if self.current_name.is_empty() {
+                    "scratch".to_owned()
                 } else {
-                    (crate::icons::play(), "Run")
+                    self.current_name.clone()
                 };
-                if icon_btn(ui, icon, hover).clicked() {
-                    if self.running {
-                        if let Some(e) = &self.engine {
-                            e.request_interrupt();
-                        }
-                    } else {
-                        // Runs the editor buffer; an unsaved buffer runs as
-                        // "scratch" so output still shows in the console.
-                        let name = if self.current_name.is_empty() {
-                            "scratch".to_owned()
-                        } else {
-                            self.current_name.clone()
-                        };
-                        self.console.push_str(&format!("# run {name}\n"));
-                        self.status = format!("running {name}");
-                        self.running = true;
-                        let source = self.editor_text.clone();
-                        self.engine(store.clone(), sender.clone())
-                            .send(ScriptCommand::RunScript { name, source });
+                let has_live = self
+                    .engine
+                    .as_ref()
+                    .is_some_and(|e| e.has_live_transform(&run_name));
+
+                // Start: run the editor buffer (enabled only while idle).
+                if icon_btn_enabled(ui, !self.running, crate::icons::play(), "Run").clicked() {
+                    self.console.push_str(&format!("# run {run_name}\n"));
+                    self.status = format!("running {run_name}");
+                    self.running = true;
+                    let source = self.editor_text.clone();
+                    self.engine(store.clone(), sender.clone())
+                        .send(ScriptCommand::RunScript {
+                            name: run_name.clone(),
+                            source,
+                        });
+                }
+
+                // Stop: cooperatively interrupt the running script.
+                if icon_btn_enabled(ui, self.running, crate::icons::square(), "Stop").clicked()
+                    && let Some(e) = &self.engine
+                {
+                    e.request_interrupt();
+                }
+
+                // Unregister: drop this script's live transform and remove its
+                // appendable source (enabled only when one is registered).
+                if icon_btn_enabled(
+                    ui,
+                    has_live,
+                    crate::icons::unplug(),
+                    "Unregister live transform",
+                )
+                .clicked()
+                {
+                    if let Some(e) = &self.engine {
+                        e.send(ScriptCommand::UnregisterLive {
+                            name: run_name.clone(),
+                        });
                     }
+                    self.console
+                        .push_str(&format!("# unregister live transform {run_name}\n"));
                 }
 
                 ui.label(&self.status);
@@ -296,8 +319,19 @@ impl ScriptsPanel {
 
 /// A compact icon-only button (16px, tinted to the text colour) with a tooltip.
 fn icon_btn(ui: &mut egui::Ui, icon: egui::ImageSource<'static>, hover: &str) -> egui::Response {
+    icon_btn_enabled(ui, true, icon, hover)
+}
+
+/// Like [`icon_btn`] but greys out (and ignores clicks) when `enabled` is false.
+fn icon_btn_enabled(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    icon: egui::ImageSource<'static>,
+    hover: &str,
+) -> egui::Response {
     let image = egui::Image::new(icon)
         .fit_to_exact_size(egui::vec2(16.0, 16.0))
         .tint(ui.visuals().text_color());
-    ui.add(egui::Button::image(image)).on_hover_text(hover)
+    ui.add_enabled(enabled, egui::Button::image(image))
+        .on_hover_text(hover)
 }
