@@ -304,17 +304,23 @@ pub struct MeshUniform {
     /// Direction TO the light (world), xyz; should be normalized.
     pub light_dir: [f32; 4],
     pub color: [f32; 4],
+    /// Camera world position (xyz). Used for two-sided shading: the normal is
+    /// flipped into the viewer's hemisphere so back-facing surfaces are lit
+    /// rather than collapsing to the dark ambient term.
+    pub cam_pos: [f32; 4],
     /// x = ambient factor (0..1).
     pub params: [f32; 4],
 }
 
 impl MeshUniform {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         view_proj: [[f32; 4]; 4],
         model: [[f32; 4]; 4],
         normal_mat: [[f32; 4]; 4],
         light_dir: [f32; 3],
         color: [f32; 4],
+        cam_pos: [f32; 3],
         ambient: f32,
     ) -> Self {
         Self {
@@ -323,6 +329,7 @@ impl MeshUniform {
             normal_mat,
             light_dir: [light_dir[0], light_dir[1], light_dir[2], 0.0],
             color,
+            cam_pos: [cam_pos[0], cam_pos[1], cam_pos[2], 0.0],
             params: [ambient, 0.0, 0.0, 0.0],
         }
     }
@@ -571,8 +578,9 @@ mod tests {
 
         // Camera looking at the cone from the side; light from the +X/+Y/+Z
         // front so some facets face it and others fall to ambient.
+        let eye = Vec3::new(4.0, 2.5, 4.0);
         let proj = Mat4::perspective_rh(0.9, w as f32 / h as f32, 0.1, 100.0);
-        let view = Mat4::look_at_rh(Vec3::new(4.0, 2.5, 4.0), Vec3::new(0.0, 1.0, 0.0), Vec3::Y);
+        let view = Mat4::look_at_rh(eye, Vec3::new(0.0, 1.0, 0.0), Vec3::Y);
         let model = Mat4::IDENTITY;
         let uni_data = MeshUniform::new(
             (proj * view).to_cols_array_2d(),
@@ -580,6 +588,7 @@ mod tests {
             model.inverse().transpose().to_cols_array_2d(),
             Vec3::new(1.0, 1.0, 1.0).normalize().to_array(),
             [0.85, 0.85, 0.9, 1.0],
+            eye.to_array(),
             0.2,
         );
         let uni = ctx
@@ -624,6 +633,91 @@ mod tests {
         assert!(
             max as i32 - min as i32 > 50,
             "expected shading gradient, got min={min} max={max}"
+        );
+    }
+
+    /// GPU-22: meshes render double-sided, so a back face whose authored normal
+    /// points away from the light must still be lit (two-sided shading flips the
+    /// normal toward the viewer) — otherwise it collapses to the dark ambient
+    /// term and shows up as black blotches where interpenetrating sub-meshes
+    /// z-fight. Here a single triangle is viewed from its back side with the
+    /// light on the camera's side: with two-sided shading the visible face is
+    /// bright; the old single-sided shader left it at ambient (~0.2).
+    #[test]
+    fn back_face_is_lit_not_dark() {
+        let Some(ctx) = RenderContext::headless() else {
+            eprintln!("no wgpu adapter — skipping back-face mesh test");
+            return;
+        };
+        let (w, h) = (64u32, 64u32);
+        let target = Scene3dTarget::new(ctx.clone(), w, h);
+        let pipe = MeshPipeline::new(
+            &ctx,
+            target.color_format(),
+            target.depth_format(),
+            target.sample_count(),
+        );
+
+        // Triangle in the z=0 plane, wound CCW as seen from +Z, with an explicit
+        // +Z normal (its "front"). We view it from −Z, so the visible side is the
+        // back face (front_facing == false).
+        let mesh = MeshCpu::new(
+            vec![[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [0.0, 1.0, 0.0]],
+            Some(vec![[0.0, 0.0, 1.0]; 3]),
+            vec![0, 1, 2],
+        );
+        let gpu = MeshGpu::upload(&ctx, &mesh);
+
+        let eye = Vec3::new(0.0, 0.0, -4.0);
+        let proj = Mat4::perspective_rh(0.9, w as f32 / h as f32, 0.1, 100.0);
+        let view = Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::Y);
+        let model = Mat4::IDENTITY;
+        // Light comes from −Z (the camera's side). The visible face's normal
+        // points +Z (away from the viewer), so two-sided shading flips it toward
+        // the camera, where it faces the light and is fully lit; without the flip
+        // it faces away → dark ambient only.
+        let uni_data = MeshUniform::new(
+            (proj * view).to_cols_array_2d(),
+            model.to_cols_array_2d(),
+            model.inverse().transpose().to_cols_array_2d(),
+            [0.0, 0.0, -1.0],
+            [0.8, 0.8, 0.9, 1.0],
+            eye.to_array(),
+            0.2,
+        );
+        let uni = ctx
+            .device()
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("mesh-backface-uniform"),
+                contents: bytemuck::bytes_of(&uni_data),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let bind = pipe.bind_group(&ctx, &uni);
+
+        let mut enc = ctx
+            .device()
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = target.begin_pass(&mut enc, wgpu::Color::BLACK);
+            pipe.draw(&mut pass, &bind, &gpu);
+        }
+        ctx.queue().submit([enc.finish()]);
+        ctx.device()
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
+
+        let img = target.read_rgba();
+        // The brightest covered pixel must be well above the ambient-only level
+        // (ambient 0.2 × 0.8 × 255 ≈ 41); two-sided lighting drives it toward the
+        // fully-lit ~0.8 × 255 ≈ 204.
+        let max_g = (0..w)
+            .flat_map(|x| (0..h).map(move |y| (x, y)))
+            .map(|(x, y)| img.pixel(x, y)[1])
+            .max()
+            .unwrap();
+        assert!(
+            max_g > 120,
+            "back face should be lit by two-sided shading, got max green {max_g} (ambient ≈ 41)"
         );
     }
 }
