@@ -854,7 +854,7 @@ git commit -m "script: execute same-topic live transforms"
 - Modify: `crates/delog-app/src/scripts.rs`
 - Test: `crates/delog-app/src/session.rs`
 
-- [ ] **Step 1: Write the failing unit test**
+- [x] **Step 1: Write the failing unit test**
 
 Add a test-only helper observer test in `crates/delog-app/src/session.rs` tests module:
 
@@ -897,7 +897,7 @@ fn app_observer_mirrors_only_live_batches_without_blocking() {
 }
 ```
 
-- [ ] **Step 2: Run the test and verify it fails**
+- [x] **Step 2: Run the test and verify it fails**
 
 Run:
 
@@ -907,7 +907,7 @@ cargo test -p delog-app --features scripting app_observer_mirrors_only_live_batc
 
 Expected: compile failure because `AppObserver` has no `live_scripts` field.
 
-- [ ] **Step 3: Add live script sink to session observer**
+- [x] **Step 3: Add live script sink to session observer**
 
 In `session.rs`, add:
 
@@ -932,7 +932,7 @@ live_scripts: LiveScriptSink,
 
 Initialize it in `Session::new` and pass the same `Arc` to `AppObserver`.
 
-- [ ] **Step 4: Implement non-blocking mirroring**
+- [x] **Step 4: Implement non-blocking mirroring**
 
 In `impl IngestObserver for AppObserver`, add:
 
@@ -972,7 +972,7 @@ pub fn set_live_script_sink(
 }
 ```
 
-- [ ] **Step 5: Register script engine live sink from UI**
+- [x] **Step 5: Register script engine live sink from UI**
 
 In `crates/delog-app/src/scripts.rs`, add:
 
@@ -998,7 +998,7 @@ In `crates/delog-app/src/app.rs`, before drawing scripts UI, call:
 }
 ```
 
-- [ ] **Step 6: Run tests and verify they pass**
+- [x] **Step 6: Run tests and verify they pass**
 
 Run:
 
@@ -1009,7 +1009,7 @@ cargo test -p delog-script --features python live_transform_appends_derived_batc
 
 Expected: both PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/delog-app/src/session.rs crates/delog-app/src/scripts.rs crates/delog-app/src/app.rs
