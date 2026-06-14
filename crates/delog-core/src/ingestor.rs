@@ -534,6 +534,7 @@ mod tests {
     struct Recorder {
         diags: Vec<Diag>,
         closes: Vec<(SourceId, ParseSummary)>,
+        batches: Vec<(SourceKind, String, usize)>,
     }
     impl IngestObserver for &mut Recorder {
         fn on_diagnostic(&mut self, diag: Diag) {
@@ -541,6 +542,10 @@ mod tests {
         }
         fn on_close(&mut self, source: SourceId, summary: ParseSummary) {
             self.closes.push((source, summary));
+        }
+        fn on_batch(&mut self, kind: SourceKind, batch: &ParsedBatch) {
+            self.batches
+                .push((kind, batch.topic().to_owned(), batch.rows()));
         }
     }
 
@@ -637,6 +642,28 @@ mod tests {
             .find(|t| t.entry.name == "NAV_RAD")
             .expect("derived live topic registered");
         assert_eq!(snap.topic_store(topic.entry.id).unwrap().chunks.len(), 1);
+    }
+
+    #[test]
+    fn on_batch_observer_fires_only_for_opened_non_empty_batches() {
+        let mut recorder = Recorder::default();
+        {
+            let mut ing = Ingestor::new(&mut recorder);
+            let source = open_with(&mut ing, "script:live_math", SourceKind::LiveDerived);
+
+            ing.process(IngestMsg::Batch(batch(source, "NAV_RAD", &[1, 2])));
+            ing.process(IngestMsg::Batch(batch(
+                SourceId(99),
+                "UNOPENED_NAV_RAD",
+                &[3],
+            )));
+            ing.process(IngestMsg::Batch(batch(source, "EMPTY_NAV_RAD", &[])));
+        }
+
+        assert_eq!(
+            recorder.batches,
+            vec![(SourceKind::LiveDerived, "NAV_RAD".to_owned(), 2)]
+        );
     }
 
     #[test]
