@@ -16,4 +16,7 @@ pub mod emit;
 pub mod engine;
 
 #[cfg(feature = "python")]
+pub mod live;
+
+#[cfg(feature = "python")]
 pub use engine::{ScriptCommand, ScriptEngine, ScriptEvent};
