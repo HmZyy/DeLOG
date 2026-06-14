@@ -33,7 +33,7 @@
 - Modify: `crates/delog-core/src/ingestor.rs`
 - Test: `crates/delog-core/src/ingestor.rs`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add this test to the existing `#[cfg(test)] mod tests` in `crates/delog-core/src/ingestor.rs`:
 
@@ -61,7 +61,7 @@ fn live_derived_source_seals_on_age_like_live() {
 }
 ```
 
-- [ ] **Step 2: Run the test and verify it fails**
+- [x] **Step 2: Run the test and verify it fails**
 
 Run:
 
@@ -71,7 +71,7 @@ cargo test -p delog-core live_derived_source_seals_on_age_like_live
 
 Expected: compile failure because `SourceKind::LiveDerived` does not exist.
 
-- [ ] **Step 3: Add `LiveDerived` to `SourceKind`**
+- [x] **Step 3: Add `LiveDerived` to `SourceKind`**
 
 In `crates/delog-core/src/ingest.rs`, change `SourceKind` to:
 
@@ -89,7 +89,7 @@ pub enum SourceKind {
 }
 ```
 
-- [ ] **Step 4: Seal `LiveDerived` like `Live`**
+- [x] **Step 4: Seal `LiveDerived` like `Live`**
 
 In `crates/delog-core/src/ingestor.rs`, update `open_source`:
 
@@ -106,7 +106,7 @@ Update `flush_aged_live` filter:
 .filter(|(_, state)| matches!(state.kind, SourceKind::Live | SourceKind::LiveDerived))
 ```
 
-- [ ] **Step 5: Add an observer hook for accepted batches**
+- [x] **Step 5: Add an observer hook for accepted batches**
 
 Extend `IngestObserver` in `crates/delog-core/src/ingestor.rs`:
 
@@ -135,7 +135,7 @@ let source_id = batch.source;
 self.observer.on_batch(source_kind, &batch);
 ```
 
-- [ ] **Step 6: Run the test and verify it passes**
+- [x] **Step 6: Run the test and verify it passes**
 
 Run:
 
@@ -145,7 +145,7 @@ cargo test -p delog-core live_derived_source_seals_on_age_like_live
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/delog-core/src/ingest.rs crates/delog-core/src/ingestor.rs
