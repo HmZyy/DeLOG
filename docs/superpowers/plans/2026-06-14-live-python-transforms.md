@@ -161,7 +161,7 @@ git commit -m "core: add live-derived ingest source kind"
 - Modify: `crates/delog-script/src/lib.rs`
 - Test: `crates/delog-script/src/live.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `crates/delog-script/src/live.rs` with the module header and tests first:
 
@@ -253,7 +253,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the tests and verify they fail**
+- [x] **Step 2: Run the tests and verify they fail**
 
 Run:
 
@@ -263,7 +263,7 @@ cargo test -p delog-script --features python live::
 
 Expected: compile failures for missing `LiveTransformSpec` and `LiveTransformBatch`.
 
-- [ ] **Step 3: Implement live transform types**
+- [x] **Step 3: Implement live transform types**
 
 Add above the tests in `crates/delog-script/src/live.rs`:
 
@@ -354,7 +354,7 @@ impl LiveTransformBatch {
 }
 ```
 
-- [ ] **Step 4: Export the module**
+- [x] **Step 4: Export the module**
 
 In `crates/delog-script/src/lib.rs`, add:
 
@@ -363,7 +363,7 @@ In `crates/delog-script/src/lib.rs`, add:
 pub mod live;
 ```
 
-- [ ] **Step 5: Run the tests and verify they pass**
+- [x] **Step 5: Run the tests and verify they pass**
 
 Run:
 
@@ -373,12 +373,14 @@ cargo test -p delog-script --features python live::
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/delog-script/src/live.rs crates/delog-script/src/lib.rs
 git commit -m "script: add live transform batch types"
 ```
+
+> Step 6 completed in commit `7fbfb26`.
 
 ---
 
