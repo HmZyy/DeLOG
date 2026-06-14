@@ -9,7 +9,7 @@
 //! that offset, so the view follows the vehicle rigidly. The app maps a
 //! left-drag to [`OrbitCamera::orbit`] and the wheel to [`OrbitCamera::zoom`].
 
-use glam::{Mat4, Vec3};
+use glam::{DMat4, DVec3, DVec4, Mat4, Vec3};
 
 /// Vertical field of view, radians.
 const FOV_Y: f32 = 0.95; // ~54°
@@ -70,6 +70,37 @@ impl OrbitCamera {
         let proj = Mat4::perspective_rh(FOV_Y, aspect.max(1e-3), NEAR, far);
         let view = Mat4::look_at_rh(self.eye(), self.target, Vec3::Y);
         proj * view
+    }
+
+    /// World → clip, plus a clip → **camera-relative world** inverse (mapping a
+    /// clip point to `world − eye`). Both are built and inverted in **f64**
+    /// before downcasting to the f32 GPU uniform; the grid shader adds `cam_pos`
+    /// back after the per-pixel ray/ground intersection.
+    ///
+    /// Why camera-relative: the grid is world-anchored, so the shader
+    /// reconstructs each pixel's ground position by unprojecting through this
+    /// inverse. When the camera tracks a vehicle far from the render origin, the
+    /// absolute ground point has a large magnitude (kilometres), and pushing it
+    /// through f32 unprojection arithmetic leaves *metres* of error that shift
+    /// discretely as the camera moves — the world grid visibly crawls while
+    /// zooming/following. Unprojecting **relative to the camera** keeps every f32
+    /// operand small (order of the camera's height, not its absolute position),
+    /// and the only large quantity, `eye`, is added back as a clean uniform — so
+    /// the reconstructed grid coordinate stays stable to a fraction of a
+    /// millimetre regardless of how far the vehicle has flown.
+    ///
+    /// The inverse uses the rotation-only view (translation zeroed): for the full
+    /// view `V`, `V·world = R·(world − eye)`, so `world − eye = (proj·R)⁻¹·clip`.
+    pub fn view_proj_and_inverse(&self, aspect: f32, far: f32) -> (Mat4, Mat4) {
+        let far = (far as f64).max(NEAR as f64 + 1.0);
+        let proj = DMat4::perspective_rh(FOV_Y as f64, (aspect as f64).max(1e-3), NEAR as f64, far);
+        let view = DMat4::look_at_rh(self.eye().as_dvec3(), self.target.as_dvec3(), DVec3::Y);
+        // Rotation-only view (drop the translation column) → its inverse maps
+        // clip space to world coordinates measured from the camera.
+        let mut view_rot = view;
+        view_rot.w_axis = DVec4::new(0.0, 0.0, 0.0, 1.0);
+        let inv_rel = (proj * view_rot).inverse();
+        ((proj * view).as_mat4(), inv_rel.as_mat4())
     }
 
     /// Rotate the orbit by the given yaw/pitch deltas (radians); pitch is
@@ -179,6 +210,104 @@ mod tests {
             "raising a point in world Y should move it up in NDC ({} !> {})",
             above.y,
             center.y
+        );
+    }
+
+    /// Old (absolute) reconstruction: unproject near/far through an absolute
+    /// clip→world inverse in f32 and intersect y=0. This is the pre-fix path,
+    /// kept here only as the baseline the camera-relative path must beat.
+    fn ground_hit_abs(inv: Mat4, ndc: glam::Vec2) -> glam::Vec2 {
+        let up = |z: f32| {
+            let p = inv * ndc.extend(z).extend(1.0);
+            p.truncate() / p.w
+        };
+        let (near, far) = (up(0.0), up(1.0));
+        let dir = far - near;
+        let t = -near.y / dir.y;
+        let w = near + t * dir;
+        glam::Vec2::new(w.x, w.z)
+    }
+
+    /// Camera-relative reconstruction, mirroring the fixed grid shader: `inv` is
+    /// clip→(world−cam_pos), so the hit is found in small camera-relative
+    /// coordinates and `cam_pos` is added back at the end. Done in f32, like the
+    /// GPU.
+    fn ground_hit_rel(inv: Mat4, cam_pos: Vec3, ndc: glam::Vec2) -> glam::Vec2 {
+        let up = |z: f32| {
+            let p = inv * ndc.extend(z).extend(1.0);
+            p.truncate() / p.w
+        };
+        let (near, far) = (up(0.0), up(1.0));
+        let dir = far - near;
+        let t = (-cam_pos.y - near.y) / dir.y;
+        let rel = near + t * dir;
+        glam::Vec2::new(cam_pos.x + rel.x, cam_pos.z + rel.z)
+    }
+
+    /// Regression for 3D grid jitter (GPU-21): when the camera tracks a vehicle
+    /// far from the render origin, the world-anchored grid must not crawl as the
+    /// camera follows it. The shader anchors lines to the reconstructed
+    /// `world.xz`, so the spurious frame-to-frame shift of that point (beyond the
+    /// vehicle's true motion) is the visible jitter. Camera-relative
+    /// reconstruction (what [`OrbitCamera::view_proj_and_inverse`] feeds the
+    /// shader) keeps that shift to a fraction of a millimetre; the original
+    /// absolute f32 path let it reach ~20 % of a cell, and even an f64 *absolute*
+    /// inverse still left ~0.9 m when zooming at range.
+    #[test]
+    fn following_a_distant_vehicle_does_not_jitter_the_grid() {
+        let aspect = 16.0 / 9.0;
+        let far = 20_000.0;
+        let ndc = glam::Vec2::new(0.13, -0.27); // a pixel looking at the ground
+
+        // Vehicle 3 km from the render origin; one follow step of 0.3 m.
+        let cam_a = OrbitCamera {
+            target: Vec3::new(3000.0, 80.0, -2000.0),
+            yaw: 0.7,
+            pitch: 0.52,
+            distance: 150.0,
+        };
+        let cam_b = OrbitCamera {
+            target: cam_a.target + Vec3::new(0.3, 0.0, 0.0),
+            ..cam_a
+        };
+
+        // Ground truth motion of the reconstructed point, computed in full f64.
+        let truth = |c: &OrbitCamera| {
+            let proj = DMat4::perspective_rh(FOV_Y as f64, aspect as f64, NEAR as f64, far as f64);
+            let view = DMat4::look_at_rh(c.eye().as_dvec3(), c.target.as_dvec3(), DVec3::Y);
+            let inv = (proj * view).inverse();
+            let up = |z: f64| {
+                let p = inv * glam::DVec4::new(ndc.x as f64, ndc.y as f64, z, 1.0);
+                p.truncate() / p.w
+            };
+            let (near, far_p) = (up(0.0), up(1.0));
+            let dir = far_p - near;
+            let t = -near.y / dir.y;
+            let w = near + t * dir;
+            glam::DVec2::new(w.x, w.z)
+        };
+        let true_move = truth(&cam_b) - truth(&cam_a);
+        let true_move = glam::Vec2::new(true_move.x as f32, true_move.y as f32);
+
+        // Camera-relative (the fix): reconstructed motion ≈ true motion.
+        let rel_move = ground_hit_rel(cam_b.view_proj_and_inverse(aspect, far).1, cam_b.eye(), ndc)
+            - ground_hit_rel(cam_a.view_proj_and_inverse(aspect, far).1, cam_a.eye(), ndc);
+        let rel_jitter = (rel_move - true_move).length();
+
+        // Original absolute f32 path: much larger spurious shift.
+        let abs_move = ground_hit_abs(cam_b.view_proj_with_far(aspect, far).inverse(), ndc)
+            - ground_hit_abs(cam_a.view_proj_with_far(aspect, far).inverse(), ndc);
+        let abs_jitter = (abs_move - true_move).length();
+
+        // The fix keeps jitter well under a millimetre and orders of magnitude
+        // tighter than the original absolute path.
+        assert!(
+            rel_jitter < 1e-3,
+            "camera-relative jitter should be sub-mm, got {rel_jitter} m"
+        );
+        assert!(
+            rel_jitter * 100.0 < abs_jitter,
+            "camera-relative ({rel_jitter} m) should be »100× tighter than absolute ({abs_jitter} m)"
         );
     }
 
