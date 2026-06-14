@@ -13,7 +13,7 @@ const DELTAWING_GLB: &[u8] = include_bytes!("../../../assets/models/DeltaWing.gl
 /// The procedural cone used for `ModelKind::Cone` and as the fallback when an
 /// asset fails to decode.
 pub fn cone_mesh() -> MeshCpu {
-    MeshCpu::cone(20, 0.5, 1.4)
+    MeshCpu::cone(4, 0.5, 1.4)
 }
 
 /// Decode the mesh for a model kind, falling back to the cone on any error.
