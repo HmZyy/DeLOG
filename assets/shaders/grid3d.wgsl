@@ -7,7 +7,13 @@
 
 struct Grid {
     view_proj: mat4x4<f32>,
-    inv_view_proj: mat4x4<f32>,
+    // Clip → CAMERA-RELATIVE world (maps a clip point to `world − cam_pos`).
+    // We unproject relative to the camera so every f32 operand stays small even
+    // when the vehicle is kilometres from the render origin; `cam_pos` is added
+    // back after the ground intersection. This keeps the world-anchored grid
+    // from crawling while zooming/following a distant vehicle. See
+    // `OrbitCamera::view_proj_and_inverse`.
+    inv_vp_rel: mat4x4<f32>,
     cam_pos: vec4<f32>,  // xyz world, w = LOD blend on
     params: vec4<f32>,   // x = cell size, y = fade start, z = fade end, w = fog on
 };
@@ -16,12 +22,14 @@ struct Grid {
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
+    // Near/far ray points in CAMERA-RELATIVE world space (world − cam_pos).
     @location(0) near: vec3<f32>,
     @location(1) far: vec3<f32>,
 };
 
+// Unproject a clip point to camera-relative world (world − cam_pos).
 fn unproject(ndc: vec3<f32>) -> vec3<f32> {
-    let p = g.inv_view_proj * vec4<f32>(ndc, 1.0);
+    let p = g.inv_vp_rel * vec4<f32>(ndc, 1.0);
     return p.xyz / p.w;
 }
 
@@ -58,18 +66,23 @@ struct FsOut {
 
 @fragment
 fn fs_main(in: VsOut) -> FsOut {
+    // `in.near`/`in.far` are camera-relative (world − cam_pos), so the ray and
+    // its direction are built from small f32 operands.
     let dir = in.far - in.near;
-    // Intersect the ray with the ground plane y = 0.
-    // Guard against rays parallel to the ground.
+    // Intersect the ray with the ground plane y = 0. In camera-relative space
+    // the ground sits at y = −cam_pos.y. Guard against rays parallel to it.
     if (abs(dir.y) < 1e-6) {
         discard;
     }
-    let t = -in.near.y / dir.y;
+    let t = (-g.cam_pos.y - in.near.y) / dir.y;
     if (t < 0.0 || t > 1.0) {
         // Ground hit is behind the camera or beyond the far plane.
         discard;
     }
-    let world = in.near + t * dir;
+    // Ground hit relative to the camera (small), then lift to absolute world by
+    // adding the clean `cam_pos` uniform. world.y is exactly 0 by construction.
+    let rel = in.near + t * dir;
+    let world = vec3<f32>(g.cam_pos.x + rel.x, 0.0, g.cam_pos.z + rel.z);
 
     // Grid coverage. With LOD blend on (cam_pos.w) the requested `cell` is a
     // continuous value; we draw the two bracketing power-of-ten grids and fade
@@ -90,8 +103,9 @@ fn fs_main(in: VsOut) -> FsOut {
     }
 
     // Distance fade from the camera (fog). Disabled (w == 0) keeps the grid
-    // crisp all the way to the far plane.
-    let dist = length(world - g.cam_pos.xyz);
+    // crisp all the way to the far plane. `rel` is already the hit measured from
+    // the camera, so this needs no large-magnitude subtraction.
+    let dist = length(rel);
     let fade = select(1.0, 1.0 - smoothstep(g.params.y, g.params.z, dist), g.params.w > 0.5);
 
     // Base grid color (cool grey).
