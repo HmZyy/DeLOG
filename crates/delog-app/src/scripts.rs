@@ -91,14 +91,13 @@ impl ScriptsPanel {
             .get_or_insert_with(|| ScriptEngine::spawn(store, sender))
     }
 
-    /// Return the script engine's live-batch channel sender, spawning the engine
-    /// on first call (idempotent; subsequent calls return the same engine's sender).
-    pub fn live_batch_sender(
-        &mut self,
-        store: Arc<DataStore>,
-        sender: IngestSender,
-    ) -> std::sync::mpsc::SyncSender<delog_core::ingest::ParsedBatch> {
-        self.engine(store, sender).live_batch_sender()
+    /// The live-batch sender IF the engine has already been spawned (e.g. the
+    /// user ran a script). Never spawns the interpreter: a live transform can
+    /// only be registered by running a script, which already spawns the engine.
+    pub fn live_batch_sender_if_running(
+        &self,
+    ) -> Option<std::sync::mpsc::SyncSender<delog_core::ingest::ParsedBatch>> {
+        self.engine.as_ref().map(|e| e.live_batch_sender())
     }
 
     fn drain(&mut self) {
@@ -120,6 +119,9 @@ impl ScriptsPanel {
                         self.status = "done".into();
                         self.running = false;
                     }
+                    // Live-batch processing carries no command-completion
+                    // semantics; it must not touch running/status/console.
+                    ScriptEvent::LiveBatchProcessed => {}
                 }
             }
         }

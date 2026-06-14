@@ -62,6 +62,9 @@ pub enum ScriptEvent {
     Error(String),
     /// A command finished.
     Done,
+    /// One mirrored live batch was processed by the registered transforms.
+    /// Carries no command-completion semantics; the UI ignores it.
+    LiveBatchProcessed,
 }
 
 /// Handle to the worker thread. Dropping it shuts the worker down.
@@ -260,7 +263,7 @@ fn worker_loop(
         match live_rx.try_recv() {
             Ok(batch) => {
                 run_live_transforms(&sender, &evt_tx, &mut active_transforms, batch);
-                let _ = evt_tx.send(ScriptEvent::Done);
+                let _ = evt_tx.send(ScriptEvent::LiveBatchProcessed);
                 continue;
             }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -430,15 +433,27 @@ fn handle_command(
                         drop(pending);
 
                         let topics = emit.borrow();
-                        let mut sink = sender.file_sink();
-                        match crate::emit::emit_topics(&mut sink, &name, &topics) {
-                            Ok(new_id) => {
-                                if let Some(prev) = prev_sources.insert(name.clone(), new_id) {
-                                    sender.remove_source(prev);
-                                }
+                        // A pure live-transform script emits no snapshot topics;
+                        // publishing an empty Derived source would create a
+                        // phantom `script:<name>` entry in the browser. Skip the
+                        // open, but still tear down this name's prior emit source
+                        // (a script that used to emit and now doesn't must clean
+                        // up).
+                        if topics.is_empty() {
+                            if let Some(prev) = prev_sources.remove(&name) {
+                                sender.remove_source(prev);
                             }
-                            Err(e) => {
-                                let _ = evt_tx.send(ScriptEvent::Error(e));
+                        } else {
+                            let mut sink = sender.file_sink();
+                            match crate::emit::emit_topics(&mut sink, &name, &topics) {
+                                Ok(new_id) => {
+                                    if let Some(prev) = prev_sources.insert(name.clone(), new_id) {
+                                        sender.remove_source(prev);
+                                    }
+                                }
+                                Err(e) => {
+                                    let _ = evt_tx.send(ScriptEvent::Error(e));
+                                }
                             }
                         }
                     }
@@ -560,7 +575,7 @@ mod tests {
                 ScriptEvent::Output(s) => text.push_str(&s),
                 ScriptEvent::Done => break,
                 ScriptEvent::Error(e) => panic!("{e}"),
-                ScriptEvent::Result(_) => {}
+                ScriptEvent::Result(_) | ScriptEvent::LiveBatchProcessed => {}
             }
         }
         assert!(text.contains("hello"), "captured: {text:?}");
@@ -577,7 +592,7 @@ mod tests {
                 ScriptEvent::Result(r) => got_result = Some(r),
                 ScriptEvent::Done => break,
                 ScriptEvent::Error(e) => panic!("unexpected error: {e}"),
-                ScriptEvent::Output(_) => {}
+                ScriptEvent::Output(_) | ScriptEvent::LiveBatchProcessed => {}
             }
         }
         assert_eq!(got_result.as_deref(), Some("2"));
@@ -597,7 +612,7 @@ mod tests {
                 ScriptEvent::Result(r) => result = Some(r),
                 ScriptEvent::Done => break,
                 ScriptEvent::Error(e) => panic!("{e}"),
-                ScriptEvent::Output(_) => {}
+                ScriptEvent::Output(_) | ScriptEvent::LiveBatchProcessed => {}
             }
         }
         assert_eq!(result.as_deref(), Some("1.0"));
@@ -737,10 +752,13 @@ def convert(batch):
 def f(batch):
     return {"x": batch.v}
 "#;
-        // Run the same live script twice. The first run opens the live-derived
-        // source labelled exactly "script:live" (it opens before the snapshot-
-        // emit source, which gets the "#2" suffix). The second run must REMOVE
-        // that first-generation live source so only the latest stays active.
+        // Run the same live script twice. Each run opens a live-derived source
+        // labelled exactly "script:live". A bare `open_source` does not publish
+        // a snapshot (only a batch/close/remove does), so the live-derived
+        // source becomes visible only once it is removed. The script emits no
+        // snapshot topics (pure live transform), so NO Derived emit source is
+        // published either (it would be a phantom). The second run must REMOVE
+        // the first-generation live source.
         for _ in 0..2 {
             engine.send(ScriptCommand::RunScript {
                 name: "live".into(),
@@ -764,10 +782,11 @@ def f(batch):
                 .find(|s| s.entry.label == "script:live")
                 .is_some_and(|s| s.entry.removed)
         };
-        // Exactly one non-removed live-derived source must remain. `SourceEntry`
-        // carries no kind and the snapshot-emit path also opens a "script:live"-
-        // prefixed source, so we count both kinds and assert the steady state:
-        // one active live source + one active emit source = 2.
+        // No active "script:live"-prefixed source must remain. A pure live
+        // transform publishes no Derived emit source (the phantom-source bug),
+        // and the second-generation live-derived source is not published until a
+        // batch flows into it (bare open_source doesn't publish). So once the
+        // first generation is tombstoned, zero active script:live sources exist.
         let active_script_sources = |snap: &StoreSnapshot| -> usize {
             snap.sources
                 .iter()
@@ -777,7 +796,7 @@ def f(batch):
         let mut settled = false;
         for _ in 0..100 {
             let snap = write_store.load();
-            if first_live_removed(&snap) && active_script_sources(&snap) == 2 {
+            if first_live_removed(&snap) && active_script_sources(&snap) == 0 {
                 settled = true;
                 break;
             }
@@ -785,7 +804,7 @@ def f(batch):
         }
         assert!(
             settled,
-            "first-generation live source must be removed, leaving one active live + one active emit source"
+            "first-generation live source must be removed, leaving no active phantom emit source"
         );
 
         drop(engine);
