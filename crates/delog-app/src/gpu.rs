@@ -306,10 +306,13 @@ impl GpuBridge {
             let resized = res.target.width() != px_w || res.target.height() != px_h;
             res.target.resize(px_w, px_h);
 
-            let vp =
-                camera.view_proj_with_far(px_w as f32 / px_h as f32, scene3d.resolved_far_clip_m());
+            // Build the view-projection and its inverse in f64 (downcast to f32
+            // for the GPU). Inverting in f32 is ill-conditioned once the camera
+            // tracks a vehicle far from the render origin and makes the grid crawl
+            // while zooming/following — see `OrbitCamera::view_proj_and_inverse`.
+            let (vp, inv) = camera
+                .view_proj_and_inverse(px_w as f32 / px_h as f32, scene3d.resolved_far_clip_m());
             let vp_cols = vp.to_cols_array_2d();
-            let inv = vp.inverse();
             let (fade_start, fade_end) = scene3d.resolved_fog_m();
             // Auto cell tracks height above the y=0 ground plane (where the grid
             // is), so tightly orbiting an airborne vehicle does not collapse the
