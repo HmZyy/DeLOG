@@ -91,6 +91,16 @@ impl ScriptsPanel {
             .get_or_insert_with(|| ScriptEngine::spawn(store, sender))
     }
 
+    /// Return the script engine's live-batch channel sender, spawning the engine
+    /// on first call (idempotent; subsequent calls return the same engine's sender).
+    pub fn live_batch_sender(
+        &mut self,
+        store: Arc<DataStore>,
+        sender: IngestSender,
+    ) -> std::sync::mpsc::SyncSender<delog_core::ingest::ParsedBatch> {
+        self.engine(store, sender).live_batch_sender()
+    }
+
     fn drain(&mut self) {
         if let Some(engine) = &self.engine {
             for ev in engine.drain_events() {
