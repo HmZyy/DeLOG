@@ -55,25 +55,31 @@ impl MeshCpu {
         Self { vertices, indices }
     }
 
-    /// A procedural cone (nose at +X, base on the `x = 0` plane, so it points
-    /// body-forward once posed) — the unconditional model fallback (§12.4).
-    /// Flat-shaded (per-face normals).
+    /// A procedural half-cone — the unconditional model fallback (§12.4).
+    ///
+    /// The nose is on +X and the axis runs along the x-axis; the cone is sliced
+    /// through its axis by the `y = 0` plane, keeping the upper half. After the
+    /// mesh→body correction (`rot_x −90°`) +X stays body-forward and +Y maps to
+    /// body-up, so it renders as a rounded dome on top with a flat cut on the
+    /// bottom (`−Y`), pointing the way it travels. Flat-shaded (per-face
+    /// normals); surfaces are the lateral dome, the flat bottom, and the
+    /// half-disc tail cap.
     pub fn cone(segments: u32, radius: f32, height: f32) -> Self {
         let segments = segments.max(3);
-        // Nose along +X so the mesh→body correction (rot_x −90°, §12.4) leaves it
-        // pointing body-forward (+X) — the same nose axis as the fixed-wing
-        // model — instead of straight up. The base ring lies in the x = 0 plane.
         let apex = [height, 0.0, 0.0];
+        let center = [0.0, 0.0, 0.0];
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
-        let tau = std::f32::consts::TAU;
+        let pi = std::f32::consts::PI;
+        // Upper semicircle (y ≥ 0) of the base ring, in the x = 0 plane.
+        let ring = |a: f32| [0.0, radius * a.sin(), radius * a.cos()];
         for i in 0..segments {
-            let a0 = i as f32 / segments as f32 * tau;
-            let a1 = (i + 1) as f32 / segments as f32 * tau;
-            let p0 = [0.0, -radius * a0.cos(), radius * a0.sin()];
-            let p1 = [0.0, -radius * a1.cos(), radius * a1.sin()];
-            // Side facet with an outward flat normal (winding apex→p1→p0 so
-            // the normal points out-and-back, away from the cone axis).
+            let a0 = i as f32 / segments as f32 * pi;
+            let a1 = (i + 1) as f32 / segments as f32 * pi;
+            let p0 = ring(a0);
+            let p1 = ring(a1);
+            // Lateral dome facet with an outward flat normal (winding
+            // apex→p1→p0 so the normal points nose-and-out, away from the axis).
             let n = face_normal(apex, p1, p0);
             let base = vertices.len() as u32;
             vertices.push(Vertex {
@@ -83,23 +89,40 @@ impl MeshCpu {
             vertices.push(Vertex { pos: p0, normal: n });
             vertices.push(Vertex { pos: p1, normal: n });
             indices.extend([base, base + 1, base + 2]);
-            // Base cap triangle (center, p1, p0), facing −X (the tail).
-            let down = [-1.0, 0.0, 0.0];
+            // Half-disc tail cap (center, p0, p1), facing −X.
+            let tail = [-1.0, 0.0, 0.0];
             let cap = vertices.len() as u32;
             vertices.push(Vertex {
-                pos: [0.0, 0.0, 0.0],
-                normal: down,
-            });
-            vertices.push(Vertex {
-                pos: p1,
-                normal: down,
+                pos: center,
+                normal: tail,
             });
             vertices.push(Vertex {
                 pos: p0,
-                normal: down,
+                normal: tail,
+            });
+            vertices.push(Vertex {
+                pos: p1,
+                normal: tail,
             });
             indices.extend([cap, cap + 1, cap + 2]);
         }
+        // Flat bottom: the axial cut, a single triangle from the nose to the
+        // base diameter, facing −Y (down). Winding nose→ring(0)→ring(π).
+        let down = [0.0, -1.0, 0.0];
+        let b = vertices.len() as u32;
+        vertices.push(Vertex {
+            pos: apex,
+            normal: down,
+        });
+        vertices.push(Vertex {
+            pos: ring(0.0),
+            normal: down,
+        });
+        vertices.push(Vertex {
+            pos: ring(pi),
+            normal: down,
+        });
+        indices.extend([b, b + 1, b + 2]);
         Self { vertices, indices }
     }
 }
@@ -541,8 +564,9 @@ mod tests {
     #[test]
     fn cone_has_consistent_geometry_and_unit_normals() {
         let cone = MeshCpu::cone(16, 1.0, 2.0);
-        assert_eq!(cone.indices.len(), 16 * 6); // side + cap tri per segment
-        assert_eq!(cone.vertices.len(), 16 * 6);
+        // dome + tail-cap tri per segment, plus one flat-bottom tri.
+        assert_eq!(cone.indices.len(), 16 * 6 + 3);
+        assert_eq!(cone.vertices.len(), 16 * 6 + 3);
         for v in &cone.vertices {
             let n = v.normal;
             let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
@@ -564,15 +588,30 @@ mod tests {
             .map(|v| v.pos)
             .find(|p| p[0] > h - 1e-3);
         assert_eq!(apex, Some([h, 0.0, 0.0]), "apex should be on +X");
-        // The whole cone lies between the tail (x = 0) and the nose (x = h):
-        // nothing reaches up the old +Y axis.
+        // The whole cone lies between the tail (x = 0) and the nose (x = h),
+        // and only in the upper half (y ≥ 0) — it's a half-cone whose flat cut
+        // sits on the bottom (−Y); nothing dips below the y = 0 plane.
         for v in &cone.vertices {
             assert!(
                 (0.0..=h + 1e-4).contains(&v.pos[0]),
                 "vertex outside [tail, nose] span: {:?}",
                 v.pos
             );
+            assert!(
+                v.pos[1] >= -1e-4,
+                "vertex below the flat bottom: {:?}",
+                v.pos
+            );
         }
+        // The flat-bottom triangle's far corners are the base diameter ends.
+        let near = |p: [f32; 3], q: [f32; 3]| {
+            (p[0] - q[0]).abs() < 1e-4 && (p[1] - q[1]).abs() < 1e-4 && (p[2] - q[2]).abs() < 1e-4
+        };
+        assert!(
+            cone.vertices.iter().any(|v| near(v.pos, [0.0, 0.0, r]))
+                && cone.vertices.iter().any(|v| near(v.pos, [0.0, 0.0, -r])),
+            "expected the base diameter ends on the flat bottom"
+        );
     }
 
     #[test]
