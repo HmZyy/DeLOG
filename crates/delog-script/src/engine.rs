@@ -47,6 +47,9 @@ pub enum ScriptCommand {
     Eval(String),
     /// Run a full script buffer; on success emits one `script:<name>` source.
     RunScript { name: String, source: String },
+    /// Unregister the live transforms registered under `name` and remove their
+    /// appendable `script:<name>` live-derived source.
+    UnregisterLive { name: String },
     /// Stop the worker (sender dropped also stops it).
     Shutdown,
 }
@@ -74,12 +77,11 @@ pub struct ScriptEngine {
     live_tx: SyncSender<ParsedBatch>,
     events: Receiver<ScriptEvent>,
     handle: Option<JoinHandle<()>>,
-    /// The live transform specs registered by the most recent script run(s).
-    /// Shared with the worker thread so it can update on each successful run.
-    // Only read through the cfg(test) transform_specs() accessor for now; a
-    // later task will expose it to the live dispatch path.
-    #[cfg_attr(not(test), allow(dead_code))]
-    transform_specs: Arc<Mutex<Vec<LiveTransformSpec>>>,
+    /// The live transforms currently active, keyed by registering script name
+    /// (mirrors the worker's `active_transforms`). Shared with the worker so it
+    /// stays current as scripts register/unregister; the UI reads it through
+    /// [`ScriptEngine::has_live_transform`] to enable the Unregister button.
+    active_live: Arc<Mutex<HashMap<String, Vec<LiveTransformSpec>>>>,
 }
 
 impl ScriptEngine {
@@ -89,18 +91,19 @@ impl ScriptEngine {
         let (cmd_tx, cmd_rx) = channel::<ScriptCommand>();
         let (evt_tx, evt_rx) = channel::<ScriptEvent>();
         let (live_tx, live_rx) = sync_channel::<ParsedBatch>(LIVE_TRANSFORM_QUEUE_CAP);
-        let specs: Arc<Mutex<Vec<LiveTransformSpec>>> = Arc::new(Mutex::new(Vec::new()));
-        let specs_worker = Arc::clone(&specs);
+        let active_live: Arc<Mutex<HashMap<String, Vec<LiveTransformSpec>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let active_live_worker = Arc::clone(&active_live);
         let handle = std::thread::Builder::new()
             .name("delog-script".into())
-            .spawn(move || worker_loop(store, sender, cmd_rx, live_rx, evt_tx, specs_worker))
+            .spawn(move || worker_loop(store, sender, cmd_rx, live_rx, evt_tx, active_live_worker))
             .expect("spawn script thread");
         Self {
             tx: cmd_tx,
             live_tx,
             events: evt_rx,
             handle: Some(handle),
-            transform_specs: specs,
+            active_live,
         }
     }
 
@@ -162,6 +165,12 @@ impl ScriptEngine {
         }
     }
 
+    /// Whether the script named `name` currently has a registered live
+    /// transform. The UI uses this to enable/disable the Unregister button.
+    pub fn has_live_transform(&self, name: &str) -> bool {
+        self.active_live.lock().unwrap().contains_key(name)
+    }
+
     #[cfg(test)]
     pub fn recv_blocking(&self) -> ScriptEvent {
         self.events.recv().expect("worker alive")
@@ -169,7 +178,13 @@ impl ScriptEngine {
 
     #[cfg(test)]
     pub fn transform_specs(&self) -> Vec<crate::live::LiveTransformSpec> {
-        self.transform_specs.lock().unwrap().clone()
+        self.active_live
+            .lock()
+            .unwrap()
+            .values()
+            .flatten()
+            .cloned()
+            .collect()
     }
 }
 
@@ -205,7 +220,7 @@ fn worker_loop(
     cmd_rx: Receiver<ScriptCommand>,
     live_rx: Receiver<ParsedBatch>,
     evt_tx: Sender<ScriptEvent>,
-    transform_specs: Arc<Mutex<Vec<LiveTransformSpec>>>,
+    active_live: Arc<Mutex<HashMap<String, Vec<LiveTransformSpec>>>>,
 ) {
     // One persistent globals dict for the whole session.
     let globals: Py<PyDict> = Python::attach(|py| PyDict::new(py).unbind());
@@ -246,7 +261,7 @@ fn worker_loop(
                     &sender,
                     &globals,
                     &evt_tx,
-                    &transform_specs,
+                    &active_live,
                     &mut prev_sources,
                     &mut live_sources,
                     &mut active_transforms,
@@ -341,7 +356,7 @@ fn handle_command(
     sender: &IngestSender,
     globals: &Py<PyDict>,
     evt_tx: &Sender<ScriptEvent>,
-    transform_specs: &Arc<Mutex<Vec<LiveTransformSpec>>>,
+    active_live: &Arc<Mutex<HashMap<String, Vec<LiveTransformSpec>>>>,
     prev_sources: &mut HashMap<String, SourceId>,
     live_sources: &mut HashMap<String, SourceId>,
     active_transforms: &mut HashMap<String, Vec<ActiveTransform>>,
@@ -383,11 +398,6 @@ fn handle_command(
                 });
                 match run_result {
                     Ok(()) => {
-                        // Collect live transform specs registered during this run.
-                        let new_specs: Vec<LiveTransformSpec> =
-                            live.borrow().iter().map(|p| p.spec.clone()).collect();
-                        *transform_specs.lock().unwrap() = new_specs;
-
                         // Register this run's live transforms against a single
                         // live-derived source, replacing this script-name's
                         // prior generation. Live-derived sources are appendable
@@ -401,6 +411,7 @@ fn handle_command(
                         let pending = live.borrow();
                         if pending.is_empty() {
                             active_transforms.remove(&name);
+                            active_live.lock().unwrap().remove(&name);
                             // A script that previously registered a live
                             // transform and now registers none must not leave
                             // its old live-derived source active.
@@ -429,6 +440,11 @@ fn handle_command(
                                     .collect::<Vec<_>>()
                             });
                             active_transforms.insert(name.clone(), transforms);
+                            // Mirror the active specs to the shared map so the UI
+                            // can tell this script has a live transform.
+                            let specs: Vec<LiveTransformSpec> =
+                                pending.iter().map(|p| p.spec.clone()).collect();
+                            active_live.lock().unwrap().insert(name.clone(), specs);
                         }
                         drop(pending);
 
@@ -463,6 +479,19 @@ fn handle_command(
                     }
                 }
                 let _ = evt_tx.send(ScriptEvent::Done);
+            }
+            ScriptCommand::UnregisterLive { name } => {
+                // Same teardown as the empty-rerun path: stop running the
+                // callbacks and tombstone the appendable live-derived source.
+                active_transforms.remove(&name);
+                active_live.lock().unwrap().remove(&name);
+                if let Some(prev) = live_sources.remove(&name) {
+                    sender.remove_source(prev);
+                }
+                // Console confirmation; carries no command-completion semantics.
+                let _ = evt_tx.send(ScriptEvent::Output(format!(
+                    "# unregistered live transform '{name}'\n"
+                )));
             }
             ScriptCommand::Eval(src) => {
                 let snapshot = store.load();
@@ -708,6 +737,77 @@ def convert(batch):
         assert_eq!(engine.transform_specs().len(), 1);
         assert_eq!(engine.transform_specs()[0].topic, "NAV_CONTROLLER_OUTPUT");
         assert_eq!(engine.transform_specs()[0].output_topic, "NAV_RAD");
+    }
+
+    #[test]
+    fn unregister_live_removes_the_transform_and_tombstones_its_source() {
+        let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use delog_core::ingest::ingest_channel;
+        use delog_core::ingestor::{Ingestor, NullObserver};
+
+        let ingestor = Ingestor::new(NullObserver);
+        let write_store = ingestor.store();
+        let (sender, receiver) = ingest_channel();
+        let ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
+        let engine = ScriptEngine::spawn(Arc::new(DataStore::new()), sender.clone());
+
+        let script = r#"
+@delog.live_transform(topic="A", fields=["v"], output_topic="B")
+def f(batch):
+    return {"x": batch.v}
+"#;
+        engine.send(ScriptCommand::RunScript {
+            name: "live".into(),
+            source: script.into(),
+        });
+        loop {
+            match engine.recv_blocking() {
+                ScriptEvent::Done => break,
+                ScriptEvent::Error(e) => panic!("unexpected error: {e}"),
+                _ => {}
+            }
+        }
+        assert!(
+            engine.has_live_transform("live"),
+            "the transform is registered after running the script"
+        );
+
+        // Unregister it. The worker emits an Output confirmation when done.
+        engine.send(ScriptCommand::UnregisterLive {
+            name: "live".into(),
+        });
+        loop {
+            match engine.recv_blocking() {
+                ScriptEvent::Output(s) if s.contains("unregistered") => break,
+                ScriptEvent::Error(e) => panic!("unexpected error: {e}"),
+                _ => {}
+            }
+        }
+        assert!(
+            !engine.has_live_transform("live"),
+            "the transform is gone after UnregisterLive"
+        );
+
+        // The live-derived source is tombstoned (`remove_source` publishes it).
+        let removed = |snap: &StoreSnapshot| -> bool {
+            snap.sources
+                .iter()
+                .find(|s| s.entry.label == "script:live")
+                .is_some_and(|s| s.entry.removed)
+        };
+        let mut settled = false;
+        for _ in 0..100 {
+            if removed(&write_store.load()) {
+                settled = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(settled, "the script:live source is removed on unregister");
+
+        drop(engine);
+        drop(sender);
+        let _ = ingest_thread.join();
     }
 
     #[test]
