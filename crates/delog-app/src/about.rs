@@ -1,4 +1,4 @@
-//! Application identity, license metadata and the `Help ▸ About` window
+//! Application identity, license metadata and the `Help / About` window
 //! (PLAN.md §19.2, checklist ARC-07).
 //!
 //! ARC-07 establishes only the metadata and the About entry; the full
@@ -27,7 +27,7 @@ pub struct Attribution {
 ///
 /// Hand-curated and intentionally not exhaustive — the authoritative set is the
 /// workspace `Cargo.toml`. A generated attribution file (e.g. `cargo-about`) can
-/// replace this when the full `Help ▸ licenses` view lands under UIX-03.
+/// replace this when the full `Help / licenses` view lands under UIX-03.
 pub const THIRD_PARTY: &[Attribution] = &[
     Attribution {
         name: "egui / eframe",
