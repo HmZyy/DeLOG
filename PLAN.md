@@ -976,7 +976,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **DIA-03** — Click-to-jump playhead for time-bearing diags — diagnostics dock renders time-bearing cells as clickable controls; clicking scrubs the global playback time to the diagnostic timestamp, clamped through the existing playback time-range model
 - [x] **DIA-04** — Emitters wired: parser, stream, ingest-drop, layout-ghost, wgpu, cache — session now routes ingest/parser/stream diagnostics into the hub; layout load/bind, autosave/import/export/live-open/script, data-quality scan, wgpu error scopes, and cache-empty build misses all surface through the same dock
 - [x] **DIA-05** — Async data-quality scan: regressions, dt outliers, duplicates, NaN/Inf % (§15)
-- [x] **DIA-06** — Log metadata display (params, file info, link info) in browser/inspector — source context menu opens a metadata inspector with label/kind/source id, topic and row counts, effective time range, offset, captured ULog params, and logged-message auto-marker metadata
+- [x] **DIA-06** — Log metadata display (params, file info, link info) in browser/inspector — source context menu opens a metadata inspector split into three tabs — Info (label/kind/source id, topic and row counts, effective time range, offset), Parameters (captured ULog params with a name-filter search box), and Logged Messages (logged-message auto-marker metadata)
 - [x] **DIA-07** — Export diagnostics JSON — File menu export writes a versioned JSON document with retained diagnostic records, burst counts, severity/code/message, source id+label, time and byte offset; success/failure is reported back through the diagnostics hub
 
 ### PRF — Performance dock (M9, instrumented from M0)

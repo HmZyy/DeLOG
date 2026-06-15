@@ -302,7 +302,7 @@ fn take_number(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> u128 {
 
 /// Whitespace-separated query tokens each match the path case-insensitively
 /// (`gps hacc` matches `GPS[0].HAcc`, §13). Blank queries match everything.
-fn matches_query(query: &str, path: &str) -> bool {
+pub(crate) fn matches_query(query: &str, path: &str) -> bool {
     let path = path.to_lowercase();
     query
         .split_whitespace()

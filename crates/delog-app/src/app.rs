@@ -1729,6 +1729,16 @@ fn export_severity(severity: Severity) -> &'static str {
     }
 }
 
+/// Which tab of the source metadata window is active. Persisted per source in
+/// egui temporary memory so the selection survives across frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum SourceMetaTab {
+    #[default]
+    Info,
+    Parameters,
+    LoggedMessages,
+}
+
 fn show_source_metadata_window(
     ctx: &egui::Context,
     snapshot: &delog_core::snapshot::StoreSnapshot,
@@ -1752,89 +1762,127 @@ fn show_source_metadata_window(
         .default_width(520.0)
         .default_height(420.0)
         .show(ctx, |ui| {
-            let (rows, range, topics) = source_summary(snapshot, source_id);
-            egui::Grid::new("source_metadata_summary")
-                .num_columns(2)
-                .striped(true)
-                .spacing([16.0, 4.0])
-                .show(ui, |ui| {
-                    ui.strong("Label");
-                    ui.label(source.entry.label.as_str());
-                    ui.end_row();
-                    ui.strong("Kind");
-                    ui.label(source_kind_label(source.entry.label.as_str()));
-                    ui.end_row();
-                    ui.strong("Source ID");
-                    ui.monospace(source_id.0.to_string());
-                    ui.end_row();
-                    ui.strong("Topics");
-                    ui.label(topics.to_string());
-                    ui.end_row();
-                    ui.strong("Rows");
-                    ui.label(rows.to_string());
-                    ui.end_row();
-                    ui.strong("Offset");
-                    ui.label(format!("{} us", source.entry.offset_us));
-                    ui.end_row();
-                    ui.strong("Range");
-                    ui.label(range.map(format_range).unwrap_or_else(|| "-".into()));
-                    ui.end_row();
-                });
-
+            let tab_id = egui::Id::new(("source_metadata_tab", source_id.0));
+            let mut tab = ui
+                .data(|d| d.get_temp::<SourceMetaTab>(tab_id))
+                .unwrap_or_default();
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut tab, SourceMetaTab::Info, "Info");
+                ui.selectable_value(&mut tab, SourceMetaTab::Parameters, "Parameters");
+                ui.selectable_value(&mut tab, SourceMetaTab::LoggedMessages, "Logged Messages");
+            });
+            ui.data_mut(|d| d.insert_temp(tab_id, tab));
             ui.separator();
-            ui.heading("Parameters");
-            if source.entry.meta.params.is_empty() {
-                ui.weak("No parameters captured.");
-            } else {
-                egui::ScrollArea::vertical()
-                    .id_salt(("source_params", source_id.0))
-                    .max_height(150.0)
-                    .show(ui, |ui| {
-                        egui::Grid::new("source_metadata_params")
-                            .num_columns(3)
-                            .striped(true)
-                            .spacing([12.0, 4.0])
-                            .show(ui, |ui| {
-                                ui.strong("Name");
-                                ui.strong("Type");
-                                ui.strong("Value");
-                                ui.end_row();
-                                for param in &source.entry.meta.params {
-                                    ui.monospace(param.name.as_str());
-                                    ui.label(param.ty.as_str());
-                                    ui.label(param.value.as_str());
-                                    ui.end_row();
-                                }
-                            });
-                    });
-            }
 
-            ui.separator();
-            ui.heading("Logged Messages");
-            if source.entry.meta.auto_markers.is_empty() {
-                ui.weak("No logged messages captured.");
-            } else {
-                egui::ScrollArea::vertical()
-                    .id_salt(("source_markers", source_id.0))
-                    .max_height(150.0)
-                    .show(ui, |ui| {
-                        egui::Grid::new("source_metadata_markers")
-                            .num_columns(3)
-                            .striped(true)
-                            .spacing([12.0, 4.0])
+            match tab {
+                SourceMetaTab::Info => {
+                    let (rows, range, topics) = source_summary(snapshot, source_id);
+                    egui::Grid::new("source_metadata_summary")
+                        .num_columns(2)
+                        .striped(true)
+                        .spacing([16.0, 4.0])
+                        .show(ui, |ui| {
+                            ui.strong("Label");
+                            ui.label(source.entry.label.as_str());
+                            ui.end_row();
+                            ui.strong("Kind");
+                            ui.label(source_kind_label(source.entry.label.as_str()));
+                            ui.end_row();
+                            ui.strong("Source ID");
+                            ui.monospace(source_id.0.to_string());
+                            ui.end_row();
+                            ui.strong("Topics");
+                            ui.label(topics.to_string());
+                            ui.end_row();
+                            ui.strong("Rows");
+                            ui.label(rows.to_string());
+                            ui.end_row();
+                            ui.strong("Offset");
+                            ui.label(format!("{} us", source.entry.offset_us));
+                            ui.end_row();
+                            ui.strong("Range");
+                            ui.label(range.map(format_range).unwrap_or_else(|| "-".into()));
+                            ui.end_row();
+                        });
+                }
+                SourceMetaTab::Parameters => {
+                    if source.entry.meta.params.is_empty() {
+                        ui.weak("No parameters captured.");
+                    } else {
+                        let query_id = egui::Id::new(("source_param_query", source_id.0));
+                        let mut query =
+                            ui.data(|d| d.get_temp::<String>(query_id)).unwrap_or_default();
+                        ui.add(
+                            egui::TextEdit::singleline(&mut query)
+                                .hint_text("Filter parameters...")
+                                .desired_width(f32::INFINITY),
+                        );
+                        ui.data_mut(|d| d.insert_temp(query_id, query.clone()));
+
+                        let matches: Vec<_> = source
+                            .entry
+                            .meta
+                            .params
+                            .iter()
+                            .filter(|param| crate::browser::matches_query(&query, &param.name))
+                            .collect();
+                        if matches.is_empty() {
+                            ui.weak("No parameters match the filter.");
+                        } else {
+                            egui::ScrollArea::vertical()
+                                .id_salt(("source_params", source_id.0))
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    egui::Grid::new("source_metadata_params")
+                                        .num_columns(3)
+                                        .striped(true)
+                                        .spacing([12.0, 4.0])
+                                        .show(ui, |ui| {
+                                            ui.strong("Name");
+                                            ui.strong("Type");
+                                            ui.strong("Value");
+                                            ui.end_row();
+                                            for param in matches {
+                                                ui.monospace(param.name.as_str());
+                                                ui.label(param.ty.as_str());
+                                                ui.label(param.value.as_str());
+                                                ui.end_row();
+                                            }
+                                        });
+                                });
+                        }
+                    }
+                }
+                SourceMetaTab::LoggedMessages => {
+                    if source.entry.meta.auto_markers.is_empty() {
+                        ui.weak("No logged messages captured.");
+                    } else {
+                        egui::ScrollArea::vertical()
+                            .id_salt(("source_markers", source_id.0))
+                            .auto_shrink([false, false])
                             .show(ui, |ui| {
-                                ui.strong("Time");
-                                ui.strong("Level");
-                                ui.strong("Text");
-                                ui.end_row();
-                                for marker in &source.entry.meta.auto_markers {
-                                    ui.label(format!("{:.3}s", marker.time_us as f64 / 1e6));
-                                    ui.label(marker.level.to_string());
-                                    ui.label(marker.text.as_str());
-                                    ui.end_row();
-                                }
+                                egui::Grid::new("source_metadata_markers")
+                                    .num_columns(3)
+                                    .striped(true)
+                                    .spacing([12.0, 4.0])
+                                    .show(ui, |ui| {
+                                        ui.strong("Time");
+                                        ui.strong("Level");
+                                        ui.strong("Text");
+                                        ui.end_row();
+                                        for marker in &source.entry.meta.auto_markers {
+                                            ui.label(format!(
+                                                "{:.3}s",
+                                                marker.time_us as f64 / 1e6
+                                            ));
+                                            ui.label(marker.level.to_string());
+                                            ui.label(marker.text.as_str());
+                                            ui.end_row();
+                                        }
+                                    });
                             });
-                    });
+                    }
+                }
             }
         });
 
