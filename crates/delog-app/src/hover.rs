@@ -146,13 +146,18 @@ fn show_tooltip(
                 ui.label(egui::RichText::new(format!("t = {t_sec:.3} s")).weak());
                 for row in rows {
                     ui.horizontal(|ui| {
-                        ui.colored_label(row.color, "■");
+                        color_swatch(ui, row.color);
                         let unit = row.unit.as_deref().unwrap_or("");
                         ui.label(format!("{}: {} {unit}", row.label, format_value(row.value)));
                     });
                 }
             });
         });
+}
+
+fn color_swatch(ui: &mut egui::Ui, color: egui::Color32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 2.0, color);
 }
 
 /// Playhead cursor (§10.5/§11, PLT-10): a vertical line at the playback time
