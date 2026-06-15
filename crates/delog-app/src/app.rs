@@ -14,6 +14,7 @@ use crate::diagnostics::DiagnosticsDock;
 use crate::gpu::GpuBridge;
 use crate::layout::{LayoutApply, LayoutDoc, LayoutError, LoadOutcome, PendingLayout};
 use crate::live::ConnectionDialog;
+use crate::performance::PerformanceDock;
 use crate::plot::ViewX;
 #[cfg(feature = "scripting")]
 use crate::scripts;
@@ -123,6 +124,7 @@ pub struct DelogApp {
     exported_diagnostics_tx: mpsc::Sender<DiagnosticsExportResult>,
     browser_collapsed: bool,
     diagnostics_dock: DiagnosticsDock,
+    performance_dock: PerformanceDock,
     browser_query: String,
     browser_selection: browser::Selection,
     offset_dialog: Option<(delog_core::identity::SourceId, i64)>,
@@ -196,6 +198,7 @@ impl DelogApp {
             exported_diagnostics_tx,
             browser_collapsed: false,
             diagnostics_dock: DiagnosticsDock::default(),
+            performance_dock: PerformanceDock::default(),
             browser_query: String::new(),
             browser_selection: browser::Selection::default(),
             offset_dialog: None,
@@ -1096,6 +1099,14 @@ impl eframe::App for DelogApp {
                         ui.close();
                     }
                 });
+                ui.menu_button("View", |ui| {
+                    if ui
+                        .checkbox(&mut self.performance_dock.open, "Performance")
+                        .clicked()
+                    {
+                        ui.close();
+                    }
+                });
                 ui.menu_button("Layout", |ui| {
                     if ui.button("Save Layout...").clicked() {
                         self.save_layout_dialog.open = true;
@@ -1397,6 +1408,15 @@ impl eframe::App for DelogApp {
                     {
                         self.playback.scrub(t_us, range);
                     }
+                });
+        }
+        if self.performance_dock.open {
+            let metrics = self.session.metrics().snapshot();
+            egui::Panel::bottom("performance")
+                .resizable(true)
+                .default_size(220.0)
+                .show_inside(ui, |ui| {
+                    self.performance_dock.ui(ui, &metrics);
                 });
         }
 
