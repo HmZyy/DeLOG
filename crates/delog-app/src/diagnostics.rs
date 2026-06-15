@@ -30,14 +30,14 @@ struct DisplayRecord<'a> {
 }
 
 impl DiagnosticsDock {
-    /// Render the dock and return true when the user requests clearing all
-    /// retained diagnostics.
+    /// Render the dock and return user actions requested from diagnostic rows.
     pub fn ui(
         &mut self,
         ui: &mut egui::Ui,
         records: &[DiagRecord],
         snapshot: &StoreSnapshot,
-    ) -> bool {
+    ) -> DiagnosticsAction {
+        let mut action = DiagnosticsAction::default();
         let mut clear = false;
         let origins = origins(records, snapshot);
         ui.horizontal(|ui| {
@@ -71,7 +71,8 @@ impl DiagnosticsDock {
         });
 
         if !self.open {
-            return clear;
+            action.clear = clear;
+            return action;
         }
 
         ui.separator();
@@ -141,7 +142,17 @@ impl DiagnosticsDock {
                             ui.label(row.record.count.to_string());
                             ui.label(row.origin);
                             ui.monospace(row.record.diag.code);
-                            ui.label(format_time(row.record.diag.time_us));
+                            if let Some(time_us) = row.record.diag.time_us {
+                                if ui
+                                    .button(format_time(Some(time_us)))
+                                    .on_hover_text("Jump playhead to this diagnostic")
+                                    .clicked()
+                                {
+                                    action.jump_to_time_us = Some(time_us);
+                                }
+                            } else {
+                                ui.label("-");
+                            }
                             ui.label(
                                 row.record
                                     .diag
@@ -154,8 +165,15 @@ impl DiagnosticsDock {
                         }
                     });
             });
-        clear
+        action.clear = clear;
+        action
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DiagnosticsAction {
+    pub clear: bool,
+    pub jump_to_time_us: Option<i64>,
 }
 
 fn filtered_records<'a>(
