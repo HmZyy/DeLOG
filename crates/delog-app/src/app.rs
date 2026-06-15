@@ -4,7 +4,9 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use delog_cache::CacheManager;
+use delog_core::diagnostics::{DiagRecord, Severity};
 use delog_core::time::TimeRange;
+use serde::Serialize;
 
 use crate::about;
 use crate::browser::{self, BrowserModel};
@@ -28,7 +30,28 @@ struct TrajectoryBuildResult {
 
 type LayoutImportResult = Result<LayoutDoc, LayoutError>;
 type LayoutExportResult = Result<std::path::PathBuf, LayoutError>;
+type DiagnosticsExportResult = Result<std::path::PathBuf, String>;
 const SESSION_AUTOSAVE_INTERVAL: Duration = Duration::from_secs(30);
+
+#[derive(Serialize)]
+struct DiagnosticsExportDoc {
+    delog_diagnostics: u32,
+    exported_at_unix_ms: u128,
+    records: Vec<DiagnosticsExportRecord>,
+}
+
+#[derive(Serialize)]
+struct DiagnosticsExportRecord {
+    seq: u64,
+    count: u64,
+    severity: &'static str,
+    code: &'static str,
+    source_id: Option<u32>,
+    source_label: Option<String>,
+    time_us: Option<i64>,
+    byte_offset: Option<u64>,
+    message: String,
+}
 
 #[derive(Default)]
 struct SaveLayoutDialog {
@@ -96,11 +119,14 @@ pub struct DelogApp {
     imported_layouts_tx: mpsc::Sender<LayoutImportResult>,
     exported_layouts: mpsc::Receiver<LayoutExportResult>,
     exported_layouts_tx: mpsc::Sender<LayoutExportResult>,
+    exported_diagnostics: mpsc::Receiver<DiagnosticsExportResult>,
+    exported_diagnostics_tx: mpsc::Sender<DiagnosticsExportResult>,
     browser_collapsed: bool,
     diagnostics_dock: DiagnosticsDock,
     browser_query: String,
     browser_selection: browser::Selection,
     offset_dialog: Option<(delog_core::identity::SourceId, i64)>,
+    source_metadata_dialog: Option<delog_core::identity::SourceId>,
     show_about: bool,
     save_layout_dialog: SaveLayoutDialog,
     load_layout_dialog: LoadLayoutDialog,
@@ -138,6 +164,7 @@ impl DelogApp {
         let (traj_results_tx, traj_results) = mpsc::channel();
         let (imported_layouts_tx, imported_layouts) = mpsc::channel();
         let (exported_layouts_tx, exported_layouts) = mpsc::channel();
+        let (exported_diagnostics_tx, exported_diagnostics) = mpsc::channel();
         Self {
             session: Session::new(cc.egui_ctx.clone()),
             #[cfg(feature = "scripting")]
@@ -165,11 +192,14 @@ impl DelogApp {
             imported_layouts_tx,
             exported_layouts,
             exported_layouts_tx,
+            exported_diagnostics,
+            exported_diagnostics_tx,
             browser_collapsed: false,
             diagnostics_dock: DiagnosticsDock::default(),
             browser_query: String::new(),
             browser_selection: browser::Selection::default(),
             offset_dialog: None,
+            source_metadata_dialog: None,
             show_about: false,
             save_layout_dialog: SaveLayoutDialog {
                 open: false,
@@ -266,6 +296,23 @@ impl DelogApp {
                     .push_diagnostic(delog_core::diagnostics::Diag::error(
                         "layout-export",
                         err.to_string(),
+                    )),
+            }
+        }
+
+        while let Ok(result) = self.exported_diagnostics.try_recv() {
+            match result {
+                Ok(path) => self
+                    .session
+                    .push_diagnostic(delog_core::diagnostics::Diag::info(
+                        "diagnostics-export",
+                        format!("exported diagnostics to {}", path.display()),
+                    )),
+                Err(err) => self
+                    .session
+                    .push_diagnostic(delog_core::diagnostics::Diag::error(
+                        "diagnostics-export",
+                        err,
                     )),
             }
         }
@@ -516,6 +563,36 @@ impl DelogApp {
                 }
             })
             .expect("spawn layout import dialog thread");
+    }
+
+    fn spawn_export_diagnostics_dialog(
+        &self,
+        ctx: &egui::Context,
+        records: Vec<DiagRecord>,
+        snapshot: &delog_core::snapshot::StoreSnapshot,
+    ) {
+        let doc = diagnostics_export_doc(records, snapshot);
+        let tx = self.exported_diagnostics_tx.clone();
+        let ctx = ctx.clone();
+        std::thread::Builder::new()
+            .name("delog-diagnostics-export-dialog".into())
+            .spawn(move || {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("DeLOG diagnostics", &["json"])
+                    .add_filter("All files", &["*"])
+                    .set_title("Export diagnostics JSON")
+                    .set_file_name("diagnostics.json")
+                    .save_file()
+                {
+                    let result = serde_json::to_vec_pretty(&doc)
+                        .map_err(|err| err.to_string())
+                        .and_then(|json| std::fs::write(&path, json).map_err(|err| err.to_string()))
+                        .map(|_| path);
+                    let _ = tx.send(result);
+                    ctx.request_repaint();
+                }
+            })
+            .expect("spawn diagnostics export dialog thread");
     }
 
     fn load_layout(&mut self, name: &str, snapshot: &delog_core::snapshot::StoreSnapshot) {
@@ -999,6 +1076,14 @@ impl eframe::App for DelogApp {
                         self.spawn_open_dialog(ui.ctx());
                         ui.close();
                     }
+                    if ui.button("Export Diagnostics JSON...").clicked() {
+                        self.spawn_export_diagnostics_dialog(
+                            ui.ctx(),
+                            self.session.diagnostic_records(),
+                            &snapshot,
+                        );
+                        ui.close();
+                    }
                     ui.separator();
                     if ui.button("Exit").clicked() {
                         ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
@@ -1303,8 +1388,14 @@ impl eframe::App for DelogApp {
                     28.0
                 })
                 .show_inside(ui, |ui| {
-                    if self.diagnostics_dock.ui(ui, &diagnostics, &snapshot) {
+                    let action = self.diagnostics_dock.ui(ui, &diagnostics, &snapshot);
+                    if action.clear {
                         self.session.clear_diagnostics();
+                    }
+                    if let Some(t_us) = action.jump_to_time_us
+                        && let Some(range) = snapshot.global_time_range()
+                    {
+                        self.playback.scrub(t_us, range);
                     }
                 });
         }
@@ -1366,8 +1457,12 @@ impl eframe::App for DelogApp {
                 if let Some(source) = browser_response.remove_source {
                     self.session.remove_source(source);
                 }
+                if let Some(source) = browser_response.inspect_source {
+                    self.source_metadata_dialog = Some(source);
+                }
             });
         }
+        show_source_metadata_window(ui.ctx(), &snapshot, &mut self.source_metadata_dialog);
 
         egui::Frame::central_panel(ui.style()).show(ui, |ui| {
             // The workspace renders even before any log loads, so plots can be
@@ -1502,6 +1597,256 @@ impl eframe::App for DelogApp {
             self.scripts
                 .ui(ui.ctx(), self.session.store(), self.session.ingest_sender());
         }
+    }
+}
+
+fn diagnostics_export_doc(
+    records: Vec<DiagRecord>,
+    snapshot: &delog_core::snapshot::StoreSnapshot,
+) -> DiagnosticsExportDoc {
+    let exported_at_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    let records = records
+        .into_iter()
+        .map(|record| {
+            let source_label = record
+                .diag
+                .source
+                .and_then(|source| snapshot.source(source))
+                .map(|source| source.entry.label.clone());
+            DiagnosticsExportRecord {
+                seq: record.seq,
+                count: record.count,
+                severity: export_severity(record.diag.severity),
+                code: record.diag.code,
+                source_id: record.diag.source.map(|source| source.0),
+                source_label,
+                time_us: record.diag.time_us,
+                byte_offset: record.diag.byte_offset,
+                message: record.diag.message,
+            }
+        })
+        .collect();
+    DiagnosticsExportDoc {
+        delog_diagnostics: 1,
+        exported_at_unix_ms,
+        records,
+    }
+}
+
+fn export_severity(severity: Severity) -> &'static str {
+    match severity {
+        Severity::Info => "info",
+        Severity::Warning => "warning",
+        Severity::Error => "error",
+    }
+}
+
+fn show_source_metadata_window(
+    ctx: &egui::Context,
+    snapshot: &delog_core::snapshot::StoreSnapshot,
+    selected: &mut Option<delog_core::identity::SourceId>,
+) {
+    let Some(source_id) = *selected else {
+        return;
+    };
+    let Some(source) = snapshot
+        .source(source_id)
+        .filter(|source| !source.entry.removed)
+    else {
+        *selected = None;
+        return;
+    };
+
+    let mut open = true;
+    egui::Window::new(format!("Source Metadata - {}", source.entry.label))
+        .id(egui::Id::new(("source_metadata", source_id.0)))
+        .open(&mut open)
+        .default_width(520.0)
+        .default_height(420.0)
+        .show(ctx, |ui| {
+            let (rows, range, topics) = source_summary(snapshot, source_id);
+            egui::Grid::new("source_metadata_summary")
+                .num_columns(2)
+                .striped(true)
+                .spacing([16.0, 4.0])
+                .show(ui, |ui| {
+                    ui.strong("Label");
+                    ui.label(source.entry.label.as_str());
+                    ui.end_row();
+                    ui.strong("Kind");
+                    ui.label(source_kind_label(source.entry.label.as_str()));
+                    ui.end_row();
+                    ui.strong("Source ID");
+                    ui.monospace(source_id.0.to_string());
+                    ui.end_row();
+                    ui.strong("Topics");
+                    ui.label(topics.to_string());
+                    ui.end_row();
+                    ui.strong("Rows");
+                    ui.label(rows.to_string());
+                    ui.end_row();
+                    ui.strong("Offset");
+                    ui.label(format!("{} us", source.entry.offset_us));
+                    ui.end_row();
+                    ui.strong("Range");
+                    ui.label(range.map(format_range).unwrap_or_else(|| "-".into()));
+                    ui.end_row();
+                });
+
+            ui.separator();
+            ui.heading("Parameters");
+            if source.entry.meta.params.is_empty() {
+                ui.weak("No parameters captured.");
+            } else {
+                egui::ScrollArea::vertical()
+                    .id_salt(("source_params", source_id.0))
+                    .max_height(150.0)
+                    .show(ui, |ui| {
+                        egui::Grid::new("source_metadata_params")
+                            .num_columns(3)
+                            .striped(true)
+                            .spacing([12.0, 4.0])
+                            .show(ui, |ui| {
+                                ui.strong("Name");
+                                ui.strong("Type");
+                                ui.strong("Value");
+                                ui.end_row();
+                                for param in &source.entry.meta.params {
+                                    ui.monospace(param.name.as_str());
+                                    ui.label(param.ty.as_str());
+                                    ui.label(param.value.as_str());
+                                    ui.end_row();
+                                }
+                            });
+                    });
+            }
+
+            ui.separator();
+            ui.heading("Logged Messages");
+            if source.entry.meta.auto_markers.is_empty() {
+                ui.weak("No logged messages captured.");
+            } else {
+                egui::ScrollArea::vertical()
+                    .id_salt(("source_markers", source_id.0))
+                    .max_height(150.0)
+                    .show(ui, |ui| {
+                        egui::Grid::new("source_metadata_markers")
+                            .num_columns(3)
+                            .striped(true)
+                            .spacing([12.0, 4.0])
+                            .show(ui, |ui| {
+                                ui.strong("Time");
+                                ui.strong("Level");
+                                ui.strong("Text");
+                                ui.end_row();
+                                for marker in &source.entry.meta.auto_markers {
+                                    ui.label(format!("{:.3}s", marker.time_us as f64 / 1e6));
+                                    ui.label(marker.level.to_string());
+                                    ui.label(marker.text.as_str());
+                                    ui.end_row();
+                                }
+                            });
+                    });
+            }
+        });
+
+    if !open {
+        *selected = None;
+    }
+}
+
+fn source_summary(
+    snapshot: &delog_core::snapshot::StoreSnapshot,
+    source_id: delog_core::identity::SourceId,
+) -> (u64, Option<TimeRange>, usize) {
+    let Some(source) = snapshot.source(source_id) else {
+        return (0, None, 0);
+    };
+    let mut rows = 0;
+    let mut range: Option<TimeRange> = None;
+    let mut topics = 0;
+    for &topic_id in source.topics.iter() {
+        let Some(topic) = snapshot
+            .topic(topic_id)
+            .filter(|topic| !topic.entry.removed)
+        else {
+            continue;
+        };
+        let Some(store) = topic.store.as_ref() else {
+            continue;
+        };
+        topics += 1;
+        rows += store.rows;
+        if let Some(raw_range) = store.time_range()
+            && let Some(effective) = raw_range.offset(source.entry.offset_us)
+        {
+            range = Some(match range {
+                Some(current) => current.union(effective),
+                None => effective,
+            });
+        }
+    }
+    (rows, range, topics)
+}
+
+fn format_range(range: TimeRange) -> String {
+    format!(
+        "{:.3}s - {:.3}s",
+        range.min_us as f64 / 1e6,
+        range.max_us as f64 / 1e6
+    )
+}
+
+fn source_kind_label(label: &str) -> &'static str {
+    if label.starts_with("mavlink:") {
+        "Live MAVLink"
+    } else if label.starts_with("script:") {
+        "Derived"
+    } else {
+        "File"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use delog_core::diagnostics::{Diag, DiagRecord};
+    use delog_core::identity::IdentityRegistry;
+    use delog_core::snapshot::StoreSnapshot;
+
+    use super::*;
+
+    #[test]
+    fn diagnostics_export_doc_includes_source_labels_and_counts() {
+        let mut identity = IdentityRegistry::new();
+        let source = identity.add_source("flight");
+        let snapshot = StoreSnapshot::from_registry(&identity, [], 7).unwrap();
+        let doc = diagnostics_export_doc(
+            vec![DiagRecord {
+                seq: 42,
+                diag: Diag::warning("ulog-dropout", "dropout")
+                    .with_source(source)
+                    .at_time(1_000_000)
+                    .at_byte(99),
+                count: 3,
+            }],
+            &snapshot,
+        );
+
+        let json = serde_json::to_value(&doc).unwrap();
+        let record = &json["records"][0];
+        assert_eq!(json["delog_diagnostics"], 1);
+        assert_eq!(record["seq"], 42);
+        assert_eq!(record["count"], 3);
+        assert_eq!(record["severity"], "warning");
+        assert_eq!(record["code"], "ulog-dropout");
+        assert_eq!(record["source_id"], source.0);
+        assert_eq!(record["source_label"], "flight");
+        assert_eq!(record["time_us"], 1_000_000);
+        assert_eq!(record["byte_offset"], 99);
+        assert_eq!(record["message"], "dropout");
     }
 }
 
