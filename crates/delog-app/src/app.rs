@@ -1156,6 +1156,12 @@ impl eframe::App for DelogApp {
                 });
                 ui.menu_button("View", |ui| {
                     if ui
+                        .checkbox(&mut self.diagnostics_dock.open, "Diagnostics")
+                        .clicked()
+                    {
+                        ui.close();
+                    }
+                    if ui
                         .checkbox(&mut self.performance_dock.open, "Performance")
                         .clicked()
                     {
@@ -1445,14 +1451,10 @@ impl eframe::App for DelogApp {
         }
 
         let diagnostics = self.session.diagnostic_records();
-        if !diagnostics.is_empty() || self.diagnostics_dock.open {
+        if self.diagnostics_dock.open {
             egui::Panel::bottom("diagnostics")
                 .resizable(true)
-                .default_size(if self.diagnostics_dock.open {
-                    240.0
-                } else {
-                    28.0
-                })
+                .default_size(240.0)
                 .show_inside(ui, |ui| {
                     let action = self.diagnostics_dock.ui(ui, &diagnostics, &snapshot);
                     if action.clear {
