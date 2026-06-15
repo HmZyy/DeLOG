@@ -993,9 +993,9 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 
 ### ANA — Analysis (M10)
 
-- [ ] **ANA-01** — Global field stats via ColStats fold (min/max/mean/σ/count/rate) (§17.1)
+- [x] **ANA-01** — Global field stats via ColStats fold (min/max/mean/σ/count/rate) (§17.1) — `ColStats` now records `sum_sq`; `delog_core::analysis::global_field_stats` folds sealed chunk stats for numeric/bool fields into min/max/mean/stddev/count/missing/rate without scanning sample values
 - [ ] **ANA-02** — Visible-window stats: pyramid min/max instant; rayon μ/σ on demand, memoized
-- [ ] **ANA-03** — Stats popup UI (browser + plot trace)
+- [x] **ANA-03** — Stats popup UI (browser + plot trace) — browser field context menu and plot trace context submenu both open a Field Stats window showing global stats from the core fold with units where available
 - [ ] **ANA-04** — Derived built-ins via `derived:` ingestion source: magnitude, scale+offset, deg↔rad, unwrap (§17.3)
 - [ ] **ANA-05** — Markers: manual add (`M`), bookmarks panel, timeline flags, plot verticals, persist (§17.4)
 - [ ] **ANA-06** — Auto-markers from AP MSG/EV + ULog logged messages (toggle)

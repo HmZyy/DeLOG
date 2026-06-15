@@ -363,6 +363,8 @@ pub struct WorkspaceActions {
     pub view_changed: bool,
     /// User clicked the gear on the 3D scene — open the vehicle config dialog.
     pub open_vehicle_config: bool,
+    /// User requested global stats for a plotted trace (ANA-03).
+    pub inspect_field_stats: Option<FieldId>,
 }
 
 pub struct PlotServices<'a> {
@@ -874,7 +876,7 @@ impl Behavior<'_> {
                 for (field, label, color) in entries {
                     let clicked = ui
                         .horizontal(|ui| {
-                            ui.colored_label(color, "■");
+                            color_swatch(ui, color);
                             ui.button(label).clicked()
                         })
                         .inner;
@@ -882,6 +884,36 @@ impl Behavior<'_> {
                         pane.remove_trace(field);
                         self.services.caches.unpin(field);
                         self.actions.remove_trace.push(field);
+                        ui.close();
+                    }
+                }
+            });
+
+            // Field stats — submenu listing each trace.
+            ui.menu_image_text_button(menu_icon(ui, crate::icons::info()), "Field stats", |ui| {
+                let entries: Vec<_> = pane
+                    .traces
+                    .iter()
+                    .map(|t| {
+                        (
+                            t.field,
+                            legend::trace_label(self.services.snapshot.as_ref(), t.field),
+                            t.color32(),
+                        )
+                    })
+                    .collect();
+                if entries.is_empty() {
+                    ui.add_enabled(false, egui::Button::new("No traces"));
+                }
+                for (field, label, color) in entries {
+                    let clicked = ui
+                        .horizontal(|ui| {
+                            color_swatch(ui, color);
+                            ui.button(label).clicked()
+                        })
+                        .inner;
+                    if clicked {
+                        self.actions.inspect_field_stats = Some(field);
                         ui.close();
                     }
                 }
@@ -1263,6 +1295,11 @@ fn menu_icon(ui: &egui::Ui, src: egui::ImageSource<'static>) -> egui::Image<'sta
     egui::Image::new(src)
         .fit_to_exact_size(egui::vec2(16.0, 16.0))
         .tint(ui.visuals().text_color())
+}
+
+fn color_swatch(ui: &mut egui::Ui, color: egui::Color32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 2.0, color);
 }
 
 fn format_bytes(bytes: u64) -> String {
