@@ -981,13 +981,13 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 
 ### PRF — Performance dock (M9, instrumented from M0)
 
-- [ ] **PRF-01** — All §16 timers/gauges instrumented at their call sites
+- [x] **PRF-01** — All §16 timers/gauges instrumented at their call sites — `parse_total` (parse worker, `session.rs`), `ingest_batch`/`snapshot_swap` (`Ingestor`, threaded a shared registry via `with_metrics`), `cache_build`/`cache_append`/`minmax_build` (`CacheManager`/`TraceCache`, registry via `with_metrics`), `yquery`/`plot_paint_cpu` (workspace, recorded in ms), `upload_bytes`/`gpu_full_uploads` (`BufferManager::sync` now returns `UploadStat`, recorded at the `render_pane` boundary), `gpu_encode` (plot paint callback, registry stashed in `PlotCallbackResources`), `frame_total` (top of `ui()`); `live_rx_rate`/`ingest_dropped_batches`/`3d_frame` were already wired. Memory gauges + per-trace counts surface via the dock resources/traces tabs (PRF-04)
 - [x] **PRF-02** — Dock table: last/avg/min/max/p99/samples per metric — View menu toggles a bottom Performance dock backed by `MetricsRegistry::snapshot()`, rendering metric name, last/avg/min/max/p99, sample count, and counter in a striped table
 - [x] **PRF-03** — 4 Hz dock refresh decoupled from frame rate — the Performance dock caches a `PerformanceSnapshot`, refreshes it no more than every 250 ms, and schedules reactive repaints at the same cadence only while the dock is open
 - [x] **PRF-04** — GPU buffer count/bytes + CPU cache bytes + per-trace sample/visible counts — Performance dock now shows resource totals (GPU buffer count/bytes, ready CPU cache count/bytes) and per-trace rows with total samples, visible-window samples, CPU cache bytes, and GPU bytes. The dock is split into three tabs — Resources, Traces, and Metrics
 - [x] **PRF-05** — Idle-aware FPS/status indicator (off when event-driven) — EMA-smoothed FPS badge pinned top-right of the menu bar, green >60 / orange 30–60 / red <30; computed from the real wall-clock frame-to-frame gap so it tracks during any continuous render (playback/live/interaction), reads "idle" when gaps exceed ~5 FPS (§11)
-- [ ] **PRF-06** — F12 debug overlay
-- [ ] **PRF-07** — Export profiling snapshot JSON
+- [x] **PRF-06** — F12 debug overlay — non-interactive `egui::Area` anchored top-left (clears the corner FPS badge) painting per-frame timers (`frame_total`/`plot_paint_cpu`/`gpu_encode`/`yquery`/`3d_frame`, last + avg ms) and FPS, read live from the registry. Toggled by `F12` (ungated key) or View ▸ Debug Overlay; persisted in `AppSettings.show_debug_overlay`
+- [x] **PRF-07** — Export profiling snapshot JSON — File ▸ Export Profiling JSON… writes all metric rings/gauges + resource totals + per-trace summaries to a `delog_profiling` JSON doc via an off-thread `rfd` save dialog (mirrors the diagnostics export); the doc is built on the UI thread from a shared `build_performance_snapshot` helper. Unit-tested
 - [x] **PRF-08** — FPS-counter visibility toggle (default off) — `AppSettings.show_fps`, surfaced in the Settings → General tab; gates the corner FPS badge (extends PRF-05)
 - [x] **PRF-09** — Reactive/Continuous render mode (default Reactive) — `AppSettings.render_mode`; `Continuous` overrides the §11 idle policy (TLN-06) to repaint every frame
 
@@ -1025,7 +1025,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [ ] **IOX-03** — Plot image export (screenshot 1×/2×)
 - [ ] **IOX-04** — Layout JSON export/import (=LAY-05 surfacing in File menu)
 - [x] **IOX-05** — Diagnostics export (=DIA-07)
-- [ ] **IOX-06** — Profiling export (=PRF-07)
+- [x] **IOX-06** — Profiling export (=PRF-07) — done with PRF-07
 - [ ] **IOX-07** — _(backlog)_ offscreen vector-quality plot render export
 - [ ] **IOX-08** — Arrow IPC `.dlcache` writer (background, post-parse) + mtime/size match + mmap reload (ZC-5)
 - [ ] **IOX-09** — _(backlog)_ Parquet cache option
