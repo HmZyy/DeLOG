@@ -62,6 +62,12 @@ pub struct GpuBridge {
     srgb_target: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GpuSummary {
+    pub buffer_count: usize,
+    pub gpu_bytes: u64,
+}
+
 impl GpuBridge {
     pub fn from_creation_context(cc: &eframe::CreationContext<'_>) -> Self {
         let Some(render_state) = &cc.wgpu_render_state else {
@@ -157,6 +163,26 @@ impl GpuBridge {
             .field_mem(field)
             .gpu
             .saturating_add(res.col_buffers.field_mem(field).gpu)
+    }
+
+    pub fn summary(&self, frame: &eframe::Frame) -> GpuSummary {
+        if !self.available {
+            return GpuSummary::default();
+        }
+        let Some(render_state) = frame.wgpu_render_state() else {
+            return GpuSummary::default();
+        };
+        let renderer = render_state.renderer.read();
+        let Some(res) = renderer.callback_resources.get::<PlotCallbackResources>() else {
+            return GpuSummary::default();
+        };
+        GpuSummary {
+            buffer_count: res.buffers.buffer_count() + res.col_buffers.buffer_count(),
+            gpu_bytes: res
+                .buffers
+                .total_gpu_bytes()
+                .saturating_add(res.col_buffers.total_gpu_bytes()),
+        }
     }
 
     /// Upload the pane's ready trace caches into the `plot_rect`, write their
