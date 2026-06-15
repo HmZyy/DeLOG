@@ -370,7 +370,7 @@ pub struct WorkspaceActions {
 pub struct PlotServices<'a> {
     pub frame: &'a eframe::Frame,
     pub snapshot: &'a Arc<StoreSnapshot>,
-    pub metrics: &'a delog_core::metrics::MetricsRegistry,
+    pub metrics: &'a Arc<delog_core::metrics::MetricsRegistry>,
     pub gpu: &'a mut GpuBridge,
     pub caches: &'a mut CacheManager,
     pub view: &'a mut Option<ViewX>,
@@ -742,8 +742,12 @@ impl Behavior<'_> {
             pane,
             pview,
             self.services.render_tuning,
+            self.services.metrics,
         );
         let paint_us = paint_start.elapsed().as_secs_f32() * 1_000_000.0;
+        // §16 timers (ms): auto-Y range query and the CPU paint/encode prep.
+        self.services.metrics.record("yquery", y_query_us / 1_000.0);
+        self.services.metrics.record("plot_paint_cpu", paint_us / 1_000.0);
         let debug = PlotDebug {
             plot_rect,
             x_range,

@@ -13,6 +13,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use delog_cache::TraceCache;
 use delog_core::chunk::Chunk;
 use delog_core::identity::{FieldId, IdentityRegistry};
+use delog_core::metrics::MetricsRegistry;
 use delog_core::schema::{FieldSchema, TopicSchema};
 use delog_core::snapshot::StoreSnapshot;
 use delog_core::store::TopicStore;
@@ -57,7 +58,7 @@ fn cache_of(seed: i64) -> TraceCache {
     let topic = identity.add_topic(source, "S").unwrap();
     let field = identity.add_field(topic, "V").unwrap();
     let snap = StoreSnapshot::from_registry(&identity, [(topic, store)], 0).unwrap();
-    TraceCache::build(&snap, field, 0, 0).unwrap()
+    TraceCache::build(&snap, field, 0, 0, &MetricsRegistry::new()).unwrap()
 }
 
 /// Isolate the CPU cost of decimating all 32 traces (no GPU), to see whether
