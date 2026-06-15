@@ -21,6 +21,10 @@ pub struct AppSettings {
     /// Show the corner FPS badge (PRF-08). Default off.
     #[serde(default)]
     pub show_fps: bool,
+    /// Show the F12 debug overlay of frame timings (PRF-06). Default off;
+    /// toggled by the View menu or the F12 key.
+    #[serde(default)]
+    pub show_debug_overlay: bool,
     /// Frame-pacing policy (PRF-09). Default `Reactive`.
     #[serde(default)]
     pub render_mode: RenderMode,

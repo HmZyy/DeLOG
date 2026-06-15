@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use delog_cache::{CacheManager, MinMax};
 use delog_core::identity::FieldId;
+use delog_core::metrics::MetricsRegistry;
 use delog_render::{
     BufferManager, GpuErrorHub, Grid3dPipeline, GridUniform, LinePipeline, MeshGpu, MeshPipeline,
     MeshUniform, MinMaxColPipeline, PlotUniform, RenderContext, ScatterPipeline, Scene3dTarget,
@@ -188,6 +189,7 @@ impl GpuBridge {
     /// Upload the pane's ready trace caches into the `plot_rect`, write their
     /// uniforms for the given visible data window, and emit the paint callback.
     /// The caller supplies the X/Y ranges so the egui axes share them exactly.
+    #[allow(clippy::too_many_arguments)]
     pub fn render_pane(
         &self,
         ui: &mut egui::Ui,
@@ -196,6 +198,7 @@ impl GpuBridge {
         pane: &PlotPane,
         view: PaneView,
         tuning: crate::settings::RenderTuning,
+        metrics: &Arc<MetricsRegistry>,
     ) {
         let plot_rect = view.rect;
         if !self.available || plot_rect.width() < 2.0 || plot_rect.height() < 2.0 {
@@ -214,6 +217,10 @@ impl GpuBridge {
         let (y0, y1) = view.y_range;
 
         let mut items = Vec::new();
+        // This pane's GPU uploads, accumulated inside the renderer block and
+        // recorded after it (§16 `upload_bytes`/`gpu_full_uploads`, PRF-01).
+        let mut upload_bytes = 0u64;
+        let mut full_uploads = 0u64;
         {
             let mut renderer = render_state.renderer.write();
             let Some(res) = renderer
@@ -224,6 +231,11 @@ impl GpuBridge {
             };
             // Capture buffer growth/upload + uniform-write errors (GPU-12).
             let scope = GpuErrorHub::open(res.ctx.device());
+            // Share the registry so the deferred paint callback can time
+            // `gpu_encode` (§16, PRF-01).
+            if res.metrics.is_none() {
+                res.metrics = Some(Arc::clone(metrics));
+            }
             let base_slot = res.next_uniform_slot;
             res.next_uniform_slot += pane.traces.len() as u32;
             res.ensure_uniform_capacity(res.next_uniform_slot);
@@ -255,12 +267,16 @@ impl GpuBridge {
                         if plot_w >= 1.0 && visible / plot_w > tuning.decimate_threshold {
                             let width = plot_w as usize;
                             let cols = cache.minmax_columns(x0, x1, width, tuning.bridge_columns);
-                            res.col_buffers.sync(trace.field, &cols, true);
+                            let stat = res.col_buffers.sync(trace.field, &cols, true);
+                            upload_bytes += stat.bytes;
+                            full_uploads += stat.full_upload as u64;
                             DrawKind::Columns {
                                 count: width as u32,
                             }
                         } else {
-                            res.buffers.sync(trace.field, &cache.xy, false);
+                            let stat = res.buffers.sync(trace.field, &cache.xy, false);
+                            upload_bytes += stat.bytes;
+                            full_uploads += stat.full_upload as u64;
                             DrawKind::Line {
                                 samples: res.buffers.samples(trace.field) as u32,
                             }
@@ -289,6 +305,14 @@ impl GpuBridge {
                 }
             }
             res.errors.get_mut().unwrap().close(scope);
+        }
+
+        // §16 GPU-upload gauges/counters for this pane (PRF-01).
+        if upload_bytes > 0 {
+            metrics.record("upload_bytes", upload_bytes as f32);
+        }
+        if full_uploads > 0 {
+            metrics.add("gpu_full_uploads", full_uploads);
         }
 
         if items.is_empty() {
@@ -557,6 +581,9 @@ struct PlotCallbackResources {
     /// bound of `CallbackResources`; never contended (all access is on the
     /// render thread).
     errors: Mutex<GpuErrorHub>,
+    /// Shared metrics registry, populated on the first `render_pane` so the
+    /// paint callback can time `gpu_encode` (§16, PRF-01).
+    metrics: Option<Arc<MetricsRegistry>>,
 }
 
 impl PlotCallbackResources {
@@ -583,6 +610,7 @@ impl PlotCallbackResources {
             step_binds: HashMap::new(),
             col_binds: HashMap::new(),
             errors: Mutex::new(GpuErrorHub::new()),
+            metrics: None,
         }
     }
 
@@ -874,6 +902,7 @@ impl egui_wgpu::CallbackTrait for ScenePaintCallback {
                 step_binds,
                 col_binds,
                 errors,
+                metrics: _,
             } = res;
             // Capture bind-group creation errors (GPU-12).
             let scope = GpuErrorHub::open(ctx.device());
@@ -916,6 +945,10 @@ impl egui_wgpu::CallbackTrait for ScenePaintCallback {
         let Some(res) = callback_resources.get::<PlotCallbackResources>() else {
             return;
         };
+
+        // CPU cost of recording this pane's draw commands (§16 `gpu_encode`,
+        // PRF-01); the guard drops at the end of the callback.
+        let _encode_timer = res.metrics.as_ref().map(|m| m.scope("gpu_encode"));
 
         let viewport = info.viewport_in_pixels();
         if viewport.width_px <= 0 || viewport.height_px <= 0 {

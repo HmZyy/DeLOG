@@ -32,6 +32,7 @@ struct TrajectoryBuildResult {
 type LayoutImportResult = Result<LayoutDoc, LayoutError>;
 type LayoutExportResult = Result<std::path::PathBuf, LayoutError>;
 type DiagnosticsExportResult = Result<std::path::PathBuf, String>;
+type ProfilingExportResult = Result<std::path::PathBuf, String>;
 const SESSION_AUTOSAVE_INTERVAL: Duration = Duration::from_secs(30);
 const PERFORMANCE_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -53,6 +54,92 @@ struct DiagnosticsExportRecord {
     time_us: Option<i64>,
     byte_offset: Option<u64>,
     message: String,
+}
+
+/// The profiling snapshot artifact (§16, PRF-07): all metric rings/gauges plus
+/// resource totals and per-trace summaries — the file to attach to a perf bug.
+#[derive(Serialize)]
+struct ProfilingExportDoc {
+    delog_profiling: u32,
+    exported_at_unix_ms: u128,
+    resources: ProfilingResources,
+    metrics: Vec<ProfilingMetric>,
+    traces: Vec<ProfilingTrace>,
+}
+
+#[derive(Serialize)]
+struct ProfilingResources {
+    gpu_buffer_count: usize,
+    gpu_bytes: u64,
+    cache_ready_count: usize,
+    cache_cpu_bytes: u64,
+}
+
+/// One metric's ring statistics. Timers are milliseconds; gauges carry their
+/// call-site unit (e.g. `upload_bytes` is bytes). `samples` is the lifetime
+/// sample count; `counter` the monotonic counter (0 for pure gauges/timers).
+#[derive(Serialize)]
+struct ProfilingMetric {
+    name: &'static str,
+    last: f32,
+    avg: f32,
+    min: f32,
+    max: f32,
+    p99: f32,
+    samples: u64,
+    counter: u64,
+}
+
+#[derive(Serialize)]
+struct ProfilingTrace {
+    label: String,
+    samples: Option<usize>,
+    visible_samples: Option<usize>,
+    cache_cpu_bytes: u64,
+    gpu_bytes: u64,
+}
+
+fn profiling_export_doc(
+    snapshot: &PerformanceSnapshot,
+    exported_at_unix_ms: u128,
+) -> ProfilingExportDoc {
+    let metrics = snapshot
+        .metrics
+        .iter()
+        .map(|(name, stats)| ProfilingMetric {
+            name,
+            last: stats.last,
+            avg: stats.avg,
+            min: stats.min,
+            max: stats.max,
+            p99: stats.p99,
+            samples: stats.n,
+            counter: stats.counter,
+        })
+        .collect();
+    let traces = snapshot
+        .traces
+        .iter()
+        .map(|trace| ProfilingTrace {
+            label: trace.label.clone(),
+            samples: trace.samples,
+            visible_samples: trace.visible_samples,
+            cache_cpu_bytes: trace.cache_cpu_bytes,
+            gpu_bytes: trace.gpu_bytes,
+        })
+        .collect();
+    ProfilingExportDoc {
+        delog_profiling: 1,
+        exported_at_unix_ms,
+        resources: ProfilingResources {
+            gpu_buffer_count: snapshot.resources.gpu_buffer_count,
+            gpu_bytes: snapshot.resources.gpu_bytes,
+            cache_ready_count: snapshot.resources.cache_ready_count,
+            cache_cpu_bytes: snapshot.resources.cache_cpu_bytes,
+        },
+        metrics,
+        traces,
+    }
 }
 
 #[derive(Default)]
@@ -123,6 +210,8 @@ pub struct DelogApp {
     exported_layouts_tx: mpsc::Sender<LayoutExportResult>,
     exported_diagnostics: mpsc::Receiver<DiagnosticsExportResult>,
     exported_diagnostics_tx: mpsc::Sender<DiagnosticsExportResult>,
+    exported_profiling: mpsc::Receiver<ProfilingExportResult>,
+    exported_profiling_tx: mpsc::Sender<ProfilingExportResult>,
     browser_collapsed: bool,
     diagnostics_dock: DiagnosticsDock,
     performance_dock: PerformanceDock,
@@ -171,8 +260,13 @@ impl DelogApp {
         let (imported_layouts_tx, imported_layouts) = mpsc::channel();
         let (exported_layouts_tx, exported_layouts) = mpsc::channel();
         let (exported_diagnostics_tx, exported_diagnostics) = mpsc::channel();
+        let (exported_profiling_tx, exported_profiling) = mpsc::channel();
+        let session = Session::new(cc.egui_ctx.clone());
+        // Share the registry into the cache manager so `cache_build`/
+        // `cache_append`/`minmax_build` land in the same dock (§16, PRF-01).
+        let caches = CacheManager::new().with_metrics(std::sync::Arc::clone(session.metrics()));
         Self {
-            session: Session::new(cc.egui_ctx.clone()),
+            session,
             #[cfg(feature = "scripting")]
             scripts: scripts::ScriptsPanel::new(
                 crate::layout::config_dir()
@@ -180,7 +274,7 @@ impl DelogApp {
                     .join("scripts"),
             ),
             gpu: GpuBridge::from_creation_context(cc),
-            caches: CacheManager::new(),
+            caches,
             workspace: Workspace::new(),
             playback: Playback::default(),
             view: None,
@@ -200,6 +294,8 @@ impl DelogApp {
             exported_layouts_tx,
             exported_diagnostics,
             exported_diagnostics_tx,
+            exported_profiling,
+            exported_profiling_tx,
             browser_collapsed: false,
             diagnostics_dock: DiagnosticsDock::default(),
             performance_dock: PerformanceDock::default(),
@@ -326,6 +422,23 @@ impl DelogApp {
                     )),
             }
         }
+
+        while let Ok(result) = self.exported_profiling.try_recv() {
+            match result {
+                Ok(path) => self
+                    .session
+                    .push_diagnostic(delog_core::diagnostics::Diag::info(
+                        "profiling-export",
+                        format!("exported profiling snapshot to {}", path.display()),
+                    )),
+                Err(err) => self
+                    .session
+                    .push_diagnostic(delog_core::diagnostics::Diag::error(
+                        "profiling-export",
+                        err,
+                    )),
+            }
+        }
     }
 
     fn snapshot_has_fields(snapshot: &delog_core::snapshot::StoreSnapshot) -> bool {
@@ -435,6 +548,18 @@ impl DelogApp {
             return;
         }
 
+        self.performance_snapshot = self.build_performance_snapshot(frame, snapshot);
+        self.performance_last_refresh = Some(now);
+    }
+
+    /// Assemble a fresh performance snapshot (metrics rings + resource totals +
+    /// per-trace summaries). Shared by the 4 Hz dock refresh and the profiling
+    /// export (PRF-04/PRF-07).
+    fn build_performance_snapshot(
+        &self,
+        frame: &eframe::Frame,
+        snapshot: &delog_core::snapshot::StoreSnapshot,
+    ) -> PerformanceSnapshot {
         let view = self.view;
         let traces = self
             .workspace
@@ -454,7 +579,7 @@ impl DelogApp {
             })
             .collect();
         let gpu = self.gpu.summary(frame);
-        self.performance_snapshot = PerformanceSnapshot {
+        PerformanceSnapshot {
             metrics: self.session.metrics().snapshot(),
             resources: ResourceSummary {
                 gpu_buffer_count: gpu.buffer_count,
@@ -463,8 +588,58 @@ impl DelogApp {
                 cache_cpu_bytes: self.caches.total_cache_bytes(),
             },
             traces,
-        };
-        self.performance_last_refresh = Some(now);
+        }
+    }
+
+    /// Paint the F12 debug overlay: key per-frame timings read live from the
+    /// metrics registry, anchored top-left so it clears the corner FPS badge
+    /// (PRF-06). Non-interactive; toggled by the View menu or F12.
+    fn paint_debug_overlay(&self, ctx: &egui::Context) {
+        if !self.settings.show_debug_overlay {
+            return;
+        }
+        let metrics = self.session.metrics();
+        egui::Area::new(egui::Id::new("debug_overlay"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::LEFT_TOP, egui::vec2(8.0, 8.0))
+            .interactable(false)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_min_width(190.0);
+                    ui.strong("Debug Overlay (F12)");
+                    match self.fps_ema {
+                        Some(fps) => ui.label(format!("FPS {fps:.0}")),
+                        None => ui.weak("FPS idle"),
+                    };
+                    ui.separator();
+                    egui::Grid::new("debug_overlay_grid")
+                        .num_columns(3)
+                        .spacing([10.0, 2.0])
+                        .show(ui, |ui| {
+                            ui.strong("timer");
+                            ui.strong("last");
+                            ui.strong("avg");
+                            ui.end_row();
+                            // §16 frame timers (ms). Only ones with samples show.
+                            for name in [
+                                "frame_total",
+                                "plot_paint_cpu",
+                                "gpu_encode",
+                                "yquery",
+                                "3d_frame",
+                            ] {
+                                if let Some(s) = metrics.stats(name)
+                                    && s.n > 0
+                                {
+                                    ui.monospace(name);
+                                    ui.label(format!("{:.2} ms", s.last));
+                                    ui.label(format!("{:.2} ms", s.avg));
+                                    ui.end_row();
+                                }
+                            }
+                        });
+                });
+            });
     }
 
     fn poll_trajectory_builds(&mut self) {
@@ -651,6 +826,47 @@ impl DelogApp {
                 }
             })
             .expect("spawn diagnostics export dialog thread");
+    }
+
+    /// Export the current profiling snapshot (metric rings + resources + traces)
+    /// to JSON off the UI thread (§16, PRF-07). The doc is built on the UI
+    /// thread (it needs the wgpu frame for GPU stats); only the file dialog and
+    /// write run on the worker.
+    fn spawn_export_profiling_dialog(
+        &self,
+        ctx: &egui::Context,
+        frame: &eframe::Frame,
+        snapshot: &delog_core::snapshot::StoreSnapshot,
+    ) {
+        let exported_at_unix_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis())
+            .unwrap_or(0);
+        let doc = profiling_export_doc(
+            &self.build_performance_snapshot(frame, snapshot),
+            exported_at_unix_ms,
+        );
+        let tx = self.exported_profiling_tx.clone();
+        let ctx = ctx.clone();
+        std::thread::Builder::new()
+            .name("delog-profiling-export-dialog".into())
+            .spawn(move || {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("DeLOG profiling", &["json"])
+                    .add_filter("All files", &["*"])
+                    .set_title("Export profiling snapshot JSON")
+                    .set_file_name("profiling.json")
+                    .save_file()
+                {
+                    let result = serde_json::to_vec_pretty(&doc)
+                        .map_err(|err| err.to_string())
+                        .and_then(|json| std::fs::write(&path, json).map_err(|err| err.to_string()))
+                        .map(|_| path);
+                    let _ = tx.send(result);
+                    ctx.request_repaint();
+                }
+            })
+            .expect("spawn profiling export dialog thread");
     }
 
     fn load_layout(&mut self, name: &str, snapshot: &delog_core::snapshot::StoreSnapshot) {
@@ -1001,6 +1217,8 @@ impl eframe::App for DelogApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        // Whole-frame CPU time (§16 `frame_total`); drops at function end.
+        let _frame_timer = self.session.metrics().scope("frame_total");
         self.handle_dropped_files(ui.ctx());
         self.handle_picked_files();
         self.handle_layout_io_results();
@@ -1142,6 +1360,10 @@ impl eframe::App for DelogApp {
                         );
                         ui.close();
                     }
+                    if ui.button("Export Profiling JSON...").clicked() {
+                        self.spawn_export_profiling_dialog(ui.ctx(), frame, &snapshot);
+                        ui.close();
+                    }
                     ui.separator();
                     if ui.button("Exit").clicked() {
                         ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
@@ -1163,6 +1385,12 @@ impl eframe::App for DelogApp {
                     }
                     if ui
                         .checkbox(&mut self.performance_dock.open, "Performance")
+                        .clicked()
+                    {
+                        ui.close();
+                    }
+                    if ui
+                        .checkbox(&mut self.settings.show_debug_overlay, "Debug Overlay (F12)")
                         .clicked()
                     {
                         ui.close();
@@ -1401,6 +1629,12 @@ impl eframe::App for DelogApp {
                 }
             });
 
+            // F12 toggles the debug overlay (PRF-06). Handled ungated — it is
+            // not a text key, so it works even while a widget holds focus.
+            if ui.ctx().input(|i| i.key_pressed(egui::Key::F12)) {
+                self.settings.show_debug_overlay = !self.settings.show_debug_overlay;
+            }
+
             // Transport keys (§11, TLN-04) — skipped while a widget owns the
             // keyboard (e.g. the browser filter box).
             if !ui.ctx().egui_wants_keyboard_input() {
@@ -1630,6 +1864,7 @@ impl eframe::App for DelogApp {
         });
 
         about::window(ui.ctx(), &mut self.show_about);
+        self.paint_debug_overlay(ui.ctx());
         self.show_layout_windows(ui.ctx());
         let settings_before = self.settings.clone();
         let settings_change = self.settings_dialog.show(ui.ctx(), &mut self.settings);
@@ -2087,6 +2322,54 @@ mod tests {
         assert_eq!(record["time_us"], 1_000_000);
         assert_eq!(record["byte_offset"], 99);
         assert_eq!(record["message"], "dropout");
+    }
+
+    #[test]
+    fn profiling_export_doc_carries_metrics_resources_and_traces() {
+        let metrics = delog_core::metrics::MetricsRegistry::new();
+        metrics.record("upload_bytes", 4096.0);
+        metrics.add("gpu_full_uploads", 2);
+        let snapshot = PerformanceSnapshot {
+            metrics: metrics.snapshot(),
+            resources: ResourceSummary {
+                gpu_buffer_count: 3,
+                gpu_bytes: 1024,
+                cache_ready_count: 1,
+                cache_cpu_bytes: 2048,
+            },
+            traces: vec![TraceSummary {
+                label: "GPS.alt".into(),
+                samples: Some(1000),
+                visible_samples: Some(500),
+                cache_cpu_bytes: 8000,
+                gpu_bytes: 8000,
+            }],
+        };
+
+        let doc = profiling_export_doc(&snapshot, 123);
+        let json = serde_json::to_value(&doc).unwrap();
+
+        assert_eq!(json["delog_profiling"], 1);
+        assert_eq!(json["exported_at_unix_ms"], 123);
+        assert_eq!(json["resources"]["gpu_buffer_count"], 3);
+        assert_eq!(json["resources"]["cache_cpu_bytes"], 2048);
+
+        // Metrics come through sorted by name (snapshot() guarantees it).
+        let names: Vec<&str> = json["metrics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["gpu_full_uploads", "upload_bytes"]);
+        let upload = &json["metrics"][1];
+        assert_eq!(upload["name"], "upload_bytes");
+        assert_eq!(upload["last"], 4096.0);
+        let full = &json["metrics"][0];
+        assert_eq!(full["counter"], 2);
+
+        assert_eq!(json["traces"][0]["label"], "GPS.alt");
+        assert_eq!(json["traces"][0]["visible_samples"], 500);
     }
 }
 

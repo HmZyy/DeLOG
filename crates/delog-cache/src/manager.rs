@@ -13,6 +13,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 
 use delog_core::identity::FieldId;
 use delog_core::mem::MemBreakdown;
+use delog_core::metrics::MetricsRegistry;
 use delog_core::snapshot::StoreSnapshot;
 
 use crate::trace::TraceCache;
@@ -37,6 +38,10 @@ pub struct CacheManager {
     origin_us: i64,
     built_tx: Sender<(FieldId, Option<TraceCache>)>,
     built_rx: Receiver<(FieldId, Option<TraceCache>)>,
+    /// Shared metrics registry (§16). Defaults to a private registry; the app
+    /// swaps in the shared one via [`CacheManager::with_metrics`] so the perf
+    /// dock sees `cache_build`/`cache_append`/`minmax_build`.
+    metrics: Arc<MetricsRegistry>,
 }
 
 impl CacheManager {
@@ -54,7 +59,15 @@ impl CacheManager {
             origin_us: 0,
             built_tx,
             built_rx,
+            metrics: Arc::new(MetricsRegistry::new()),
         }
+    }
+
+    /// Record cache build/append timings into the shared registry (§16,
+    /// PRF-01).
+    pub fn with_metrics(mut self, metrics: Arc<MetricsRegistry>) -> Self {
+        self.metrics = metrics;
+        self
     }
 
     /// Advance the frame counter (drives LRU recency).
@@ -82,10 +95,14 @@ impl CacheManager {
         let snap = Arc::clone(snapshot);
         let origin = self.origin_us;
         let frame = self.frame;
+        let metrics = Arc::clone(&self.metrics);
         std::thread::Builder::new()
             .name("delog-cache-build".into())
             .spawn(move || {
-                let cache = TraceCache::build(&snap, field, origin, frame);
+                let cache = {
+                    let _t = metrics.scope("cache_build");
+                    TraceCache::build(&snap, field, origin, frame, &metrics)
+                };
                 let _ = tx.send((field, cache));
             })
             .expect("spawn cache build thread");
@@ -127,9 +144,11 @@ impl CacheManager {
             Slot::Ready(cache) => !cache.offset_changed(snapshot, field),
             Slot::Building => true,
         });
+        let metrics = Arc::clone(&self.metrics);
         for (&field, slot) in self.caches.iter_mut() {
             if let Slot::Ready(cache) = slot {
-                cache.append(snapshot, field);
+                let _t = metrics.scope("cache_append");
+                cache.append(snapshot, field, &metrics);
             }
         }
         self.gc(snapshot);

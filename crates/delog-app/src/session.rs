@@ -134,7 +134,8 @@ impl Session {
             live_scripts: Arc::clone(&live_scripts),
         };
 
-        let ingestor = Ingestor::new(observer);
+        let metrics = Arc::new(MetricsRegistry::new());
+        let ingestor = Ingestor::new(observer).with_metrics(Arc::clone(&metrics));
         let store = ingestor.store();
         store.on_epoch({
             let ctx = ctx.clone();
@@ -142,7 +143,6 @@ impl Session {
         });
 
         let (sender, receiver) = ingest_channel();
-        let metrics = Arc::new(MetricsRegistry::new());
         let ingest = std::thread::Builder::new()
             .name("delog-ingest".into())
             .spawn(move || ingestor.run(receiver))
@@ -315,6 +315,7 @@ impl Session {
         let cancel = CancelToken::new();
         let sender = self.sender.clone();
         let registry = Arc::clone(&self.registry);
+        let metrics = Arc::clone(&self.metrics);
         let ctx = self.ctx.clone();
         let worker_cancel = cancel.clone();
         let worker_label = label.clone();
@@ -322,7 +323,11 @@ impl Session {
         let handle = std::thread::Builder::new()
             .name("delog-parse".into())
             .spawn(move || {
-                run_parse(&path, &worker_label, &registry, &sender, worker_cancel);
+                {
+                    // Wall-clock parse time for this file (§16 `parse_total`).
+                    let _t = metrics.scope("parse_total");
+                    run_parse(&path, &worker_label, &registry, &sender, worker_cancel);
+                }
                 ctx.request_repaint();
             })
             .expect("spawn parse thread");
