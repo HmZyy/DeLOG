@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
-use delog_core::diagnostics::{Diag, Severity};
+use delog_core::diagnostics::{Diag, DiagRecord, DiagnosticHub, Severity};
 use delog_core::identity::SourceId;
 use delog_core::ingest::{IngestSender, IngestSink, ParseSummary, SourceKind, ingest_channel};
 use delog_core::ingestor::{IngestObserver, Ingestor};
@@ -28,9 +28,6 @@ use delog_parsers::{
 type LiveScriptSink =
     Arc<Mutex<Option<std::sync::mpsc::SyncSender<delog_core::ingest::ParsedBatch>>>>;
 
-/// Most recent diagnostics retained for the UI (full hub is DIA-01, M9).
-const MAX_DIAGNOSTICS: usize = 1000;
-
 /// Per-source load progress, shared between the ingest thread and the UI.
 #[derive(Debug, Clone, Copy, Default)]
 struct LoadState {
@@ -39,13 +36,12 @@ struct LoadState {
 }
 
 type Loads = Arc<Mutex<HashMap<SourceId, LoadState>>>;
-type Diags = Arc<Mutex<Vec<Diag>>>;
 
 /// Observer that funnels ingest-side events into shared UI state and requests
 /// repaints. Lives on the ingest thread.
 struct AppObserver {
     loads: Loads,
-    diagnostics: Diags,
+    diagnostics: Arc<DiagnosticHub>,
     ctx: egui::Context,
     #[cfg(feature = "scripting")]
     live_scripts: LiveScriptSink,
@@ -71,7 +67,7 @@ impl IngestObserver for AppObserver {
     }
 
     fn on_diagnostic(&mut self, diag: Diag) {
-        push_diag(&self.diagnostics, diag);
+        self.diagnostics.emit(diag);
         self.ctx.request_repaint();
     }
 
@@ -86,28 +82,16 @@ impl IngestObserver for AppObserver {
         match tx.try_send(batch.clone()) {
             Ok(()) => {}
             Err(std::sync::mpsc::TrySendError::Full(_)) => {
-                push_diag(
-                    &self.diagnostics,
-                    Diag::warning(
-                        "script-live-drop",
-                        "live transform queue full; dropped batch",
-                    ),
-                );
+                self.diagnostics.emit(Diag::warning(
+                    "script-live-drop",
+                    "live transform queue full; dropped batch",
+                ));
             }
             Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
                 *self.live_scripts.lock().unwrap() = None;
             }
         }
     }
-}
-
-/// Append to the retained diagnostics, dropping the oldest over the cap.
-fn push_diag(diags: &Diags, diag: Diag) {
-    let mut diags = diags.lock().unwrap();
-    if diags.len() >= MAX_DIAGNOSTICS {
-        diags.remove(0);
-    }
-    diags.push(diag);
 }
 
 /// A parse running on a worker thread.
@@ -124,7 +108,7 @@ pub struct Session {
     metrics: Arc<MetricsRegistry>,
     registry: Arc<ParserRegistry>,
     loads: Loads,
-    diagnostics: Diags,
+    diagnostics: Arc<DiagnosticHub>,
     active: Vec<ActiveLoad>,
     live_links: Vec<delog_stream::LiveLink>,
     /// Sources already swept by the post-load quality scan (DIA-05).
@@ -139,7 +123,7 @@ impl Session {
     /// Spawn the ingest thread and register the built-in parsers.
     pub fn new(ctx: egui::Context) -> Self {
         let loads: Loads = Arc::default();
-        let diagnostics: Diags = Arc::default();
+        let diagnostics = Arc::new(DiagnosticHub::new());
         #[cfg(feature = "scripting")]
         let live_scripts: LiveScriptSink = Arc::new(Mutex::new(None));
         let observer = AppObserver {
@@ -221,14 +205,19 @@ impl Session {
         &self.metrics
     }
 
-    pub fn diagnostics(&self) -> Vec<Diag> {
-        self.diagnostics.lock().unwrap().clone()
+    pub fn diagnostic_records(&self) -> Vec<DiagRecord> {
+        self.diagnostics.snapshot()
+    }
+
+    pub fn clear_diagnostics(&self) {
+        self.diagnostics.clear();
     }
 
     /// Push a diagnostic raised outside the ingest path (e.g. wgpu error
     /// scopes, GPU-12) into the same retained list.
     pub fn push_diagnostic(&self, diag: Diag) {
-        push_diag(&self.diagnostics, diag);
+        self.diagnostics.emit(diag);
+        self.ctx.request_repaint();
     }
 
     /// Start one live MAVLink link. Multiple calls create independent links
@@ -387,7 +376,7 @@ impl Session {
                     return;
                 }
                 for diag in findings {
-                    push_diag(&diagnostics, diag);
+                    diagnostics.emit(diag);
                 }
                 ctx.request_repaint();
             })
@@ -612,7 +601,11 @@ mod tests {
         let mut session = Session::new(egui::Context::default());
         session.open_path(path.clone());
         session.join_workers();
-        session.wait_until(|s| s.diagnostics().iter().any(|d| d.code == "format-unknown"));
+        session.wait_until(|s| {
+            s.diagnostic_records()
+                .iter()
+                .any(|record| record.diag.code == "format-unknown")
+        });
 
         let snap = session.snapshot();
         assert!(snap.topics.iter().all(|t| t.store.is_none()));

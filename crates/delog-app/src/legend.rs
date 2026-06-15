@@ -23,7 +23,7 @@ pub fn trace_label(snapshot: &StoreSnapshot, field: FieldId) -> String {
 
 /// Draw the legend overlay and apply edits to `pane`. Each row is a colour
 /// editor plus a clickable label: clicking toggles the trace's visibility, a
-/// hidden trace's label is greyed out (PLT-08), and right-click ▸ Remove returns
+/// hidden trace's label is greyed out (PLT-08), and right-click / Remove returns
 /// the field (PLT-11) so the caller can drop its cache.
 pub fn ui(
     ui: &egui::Ui,

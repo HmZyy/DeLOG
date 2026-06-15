@@ -8,6 +8,7 @@ use delog_core::time::TimeRange;
 
 use crate::about;
 use crate::browser::{self, BrowserModel};
+use crate::diagnostics::DiagnosticsDock;
 use crate::gpu::GpuBridge;
 use crate::layout::{LayoutApply, LayoutDoc, LayoutError, LoadOutcome, PendingLayout};
 use crate::live::ConnectionDialog;
@@ -96,6 +97,7 @@ pub struct DelogApp {
     exported_layouts: mpsc::Receiver<LayoutExportResult>,
     exported_layouts_tx: mpsc::Sender<LayoutExportResult>,
     browser_collapsed: bool,
+    diagnostics_dock: DiagnosticsDock,
     browser_query: String,
     browser_selection: browser::Selection,
     offset_dialog: Option<(delog_core::identity::SourceId, i64)>,
@@ -164,6 +166,7 @@ impl DelogApp {
             exported_layouts,
             exported_layouts_tx,
             browser_collapsed: false,
+            diagnostics_dock: DiagnosticsDock::default(),
             browser_query: String::new(),
             browser_selection: browser::Selection::default(),
             offset_dialog: None,
@@ -940,7 +943,24 @@ impl eframe::App for DelogApp {
             ui.ctx().request_repaint();
         }
         self.caches.begin_frame(self.frame);
-        self.caches.poll_builds();
+        for field in self.caches.poll_builds() {
+            let label = snapshot
+                .fields
+                .get(field.index())
+                .filter(|entry| entry.id == field)
+                .map(|entry| {
+                    snapshot
+                        .topic(entry.topic)
+                        .map(|topic| format!("{}.{}", topic.entry.name, entry.name))
+                        .unwrap_or_else(|| entry.name.clone())
+                })
+                .unwrap_or_else(|| format!("field {}", field.0));
+            self.session
+                .push_diagnostic(delog_core::diagnostics::Diag::warning(
+                    "cache-empty",
+                    format!("could not build render cache for {label}"),
+                ));
+        }
         if snapshot.epoch != self.last_epoch {
             self.caches.on_epoch(&snapshot);
             self.try_apply_deferred_layout(&snapshot);
@@ -1273,15 +1293,20 @@ impl eframe::App for DelogApp {
             }
         }
 
-        let diagnostics = self.session.diagnostics();
-        if let Some(last) = diagnostics.last() {
-            egui::Panel::bottom("status").show_inside(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.weak(format!("{} notice(s)", diagnostics.len()));
-                    ui.separator();
-                    ui.label(format!("[{}] {}", last.code, last.message));
+        let diagnostics = self.session.diagnostic_records();
+        if !diagnostics.is_empty() || self.diagnostics_dock.open {
+            egui::Panel::bottom("diagnostics")
+                .resizable(true)
+                .default_size(if self.diagnostics_dock.open {
+                    240.0
+                } else {
+                    28.0
+                })
+                .show_inside(ui, |ui| {
+                    if self.diagnostics_dock.ui(ui, &diagnostics, &snapshot) {
+                        self.session.clear_diagnostics();
+                    }
                 });
-            });
         }
 
         if self.browser_collapsed {

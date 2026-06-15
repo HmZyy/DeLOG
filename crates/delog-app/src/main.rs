@@ -10,6 +10,7 @@ mod app;
 mod axes;
 mod browser;
 mod camera;
+mod diagnostics;
 mod geo;
 mod gpu;
 mod hover;
