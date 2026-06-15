@@ -41,39 +41,21 @@ impl DiagnosticsDock {
         let mut clear = false;
         let origins = origins(records, snapshot);
         ui.horizontal(|ui| {
-            let disclosure_icon = if self.open {
-                crate::icons::chevron_down()
-            } else {
-                crate::icons::chevron_right()
-            };
-            let disclosure_image = egui::Image::new(disclosure_icon)
-                .fit_to_exact_size(egui::vec2(16.0, 16.0))
-                .tint(ui.visuals().text_color());
-            if ui
-                .add(egui::Button::image_and_text(
-                    disclosure_image,
-                    "Diagnostics",
-                ))
-                .clicked()
-            {
-                self.open = !self.open;
-            }
+            ui.strong("Diagnostics");
             ui.weak(format!("{} retained", records.len()));
             if let Some(last) = records.last() {
                 ui.separator();
                 ui.label(format!("[{}] {}", last.diag.code, last.diag.message));
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Close").clicked() {
+                    self.open = false;
+                }
                 if ui.button("Clear").clicked() {
                     clear = true;
                 }
             });
         });
-
-        if !self.open {
-            action.clear = clear;
-            return action;
-        }
 
         ui.separator();
         ui.horizontal(|ui| {
