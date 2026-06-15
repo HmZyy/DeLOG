@@ -129,6 +129,7 @@ pub struct DelogApp {
     browser_selection: browser::Selection,
     offset_dialog: Option<(delog_core::identity::SourceId, i64)>,
     source_metadata_dialog: Option<delog_core::identity::SourceId>,
+    field_stats_dialog: Option<delog_core::identity::FieldId>,
     show_about: bool,
     save_layout_dialog: SaveLayoutDialog,
     load_layout_dialog: LoadLayoutDialog,
@@ -203,6 +204,7 @@ impl DelogApp {
             browser_selection: browser::Selection::default(),
             offset_dialog: None,
             source_metadata_dialog: None,
+            field_stats_dialog: None,
             show_about: false,
             save_layout_dialog: SaveLayoutDialog {
                 open: false,
@@ -1480,9 +1482,13 @@ impl eframe::App for DelogApp {
                 if let Some(source) = browser_response.inspect_source {
                     self.source_metadata_dialog = Some(source);
                 }
+                if let Some(field) = browser_response.inspect_field_stats {
+                    self.field_stats_dialog = Some(field);
+                }
             });
         }
         show_source_metadata_window(ui.ctx(), &snapshot, &mut self.source_metadata_dialog);
+        show_field_stats_window(ui.ctx(), &snapshot, &mut self.field_stats_dialog);
 
         egui::Frame::central_panel(ui.style()).show(ui, |ui| {
             // The workspace renders even before any log loads, so plots can be
@@ -1549,6 +1555,9 @@ impl eframe::App for DelogApp {
                     }
                     if actions.open_vehicle_config {
                         self.vehicle_dialog.open = true;
+                    }
+                    if let Some(field) = actions.inspect_field_stats {
+                        self.field_stats_dialog = Some(field);
                     }
                 });
             if let Some(fields) = dropped
@@ -1775,6 +1784,113 @@ fn show_source_metadata_window(
 
     if !open {
         *selected = None;
+    }
+}
+
+fn show_field_stats_window(
+    ctx: &egui::Context,
+    snapshot: &delog_core::snapshot::StoreSnapshot,
+    selected: &mut Option<delog_core::identity::FieldId>,
+) {
+    let Some(field_id) = *selected else {
+        return;
+    };
+    let Some((title, unit)) = field_label_and_unit(snapshot, field_id) else {
+        *selected = None;
+        return;
+    };
+
+    let mut open = true;
+    egui::Window::new(format!("Field Stats - {title}"))
+        .id(egui::Id::new(("field_stats", field_id.0)))
+        .open(&mut open)
+        .default_width(360.0)
+        .resizable(false)
+        .show(ctx, |ui| {
+            match delog_core::analysis::global_field_stats(snapshot, field_id) {
+                Ok(Some(stats)) => {
+                    let suffix = unit
+                        .as_ref()
+                        .map(|unit| format!(" {unit}"))
+                        .unwrap_or_default();
+                    egui::Grid::new("field_stats_grid")
+                        .num_columns(2)
+                        .striped(true)
+                        .spacing([16.0, 4.0])
+                        .show(ui, |ui| {
+                            stats_row(ui, "Min", format!("{}{suffix}", format_stat(stats.min)));
+                            stats_row(ui, "Max", format!("{}{suffix}", format_stat(stats.max)));
+                            stats_row(ui, "Mean", format!("{}{suffix}", format_stat(stats.mean)));
+                            stats_row(
+                                ui,
+                                "Std dev",
+                                format!("{}{suffix}", format_stat(stats.stddev)),
+                            );
+                            stats_row(ui, "Samples", stats.count.to_string());
+                            stats_row(ui, "Missing", stats.missing_count.to_string());
+                            stats_row(
+                                ui,
+                                "Rate",
+                                stats
+                                    .rate_hz
+                                    .map(|rate| format!("{} Hz", format_stat(rate)))
+                                    .unwrap_or_else(|| "-".into()),
+                            );
+                        });
+                }
+                Ok(None) => {
+                    ui.weak("This field is not numeric.");
+                }
+                Err(err) => {
+                    ui.colored_label(ui.visuals().error_fg_color, err.to_string());
+                }
+            }
+        });
+
+    if !open {
+        *selected = None;
+    }
+}
+
+fn stats_row(ui: &mut egui::Ui, key: &str, value: String) {
+    ui.strong(key);
+    ui.label(value);
+    ui.end_row();
+}
+
+fn field_label_and_unit(
+    snapshot: &delog_core::snapshot::StoreSnapshot,
+    field_id: delog_core::identity::FieldId,
+) -> Option<(String, Option<String>)> {
+    let field = snapshot
+        .fields
+        .get(field_id.index())
+        .filter(|field| field.id == field_id && !field.removed)?;
+    let topic = snapshot.topic(field.topic)?;
+    let source = snapshot.source(topic.entry.source)?;
+    let unit = topic
+        .store
+        .as_ref()
+        .and_then(|store| store.schema.field_by_name(&field.name))
+        .and_then(|schema| schema.unit.clone());
+    Some((
+        format!(
+            "{} / {}.{}",
+            source.entry.label, topic.entry.name, field.name
+        ),
+        unit,
+    ))
+}
+
+fn format_stat(value: f64) -> String {
+    if value.is_nan() {
+        "NaN".into()
+    } else if value.abs() >= 100.0 {
+        format!("{value:.0}")
+    } else if value.abs() >= 10.0 {
+        format!("{value:.2}")
+    } else {
+        format!("{value:.4}")
     }
 }
 
