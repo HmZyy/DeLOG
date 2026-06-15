@@ -19,6 +19,7 @@ mod layout;
 mod legend;
 mod live;
 mod models;
+mod performance;
 mod plot;
 #[cfg(feature = "scripting")]
 mod scripts;
