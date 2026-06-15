@@ -973,11 +973,11 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 
 - [x] **DIA-01** — Hub: mpsc → 10k ring; severity levels; burst dedup via count (§15) — `delog_core::diagnostics::DiagnosticHub` owns an mpsc ingress, 10k retained `DiagRecord` ring, adjacent burst coalescing by count, snapshot/clear APIs, and unit tests for dedup/ring eviction/clear
 - [x] **DIA-02** — Dock panel: severity/origin filters, text search, clear — bottom diagnostics dock in `delog-app` with retained count + latest notice header, collapse toggle, Info+/Warnings+/Errors filter, exact origin filter, text search over code/message/source/time/byte, scrollable striped grid, and Clear wired to the hub
-- [ ] **DIA-03** — Click-to-jump playhead for time-bearing diags
+- [x] **DIA-03** — Click-to-jump playhead for time-bearing diags — diagnostics dock renders time-bearing cells as clickable controls; clicking scrubs the global playback time to the diagnostic timestamp, clamped through the existing playback time-range model
 - [x] **DIA-04** — Emitters wired: parser, stream, ingest-drop, layout-ghost, wgpu, cache — session now routes ingest/parser/stream diagnostics into the hub; layout load/bind, autosave/import/export/live-open/script, data-quality scan, wgpu error scopes, and cache-empty build misses all surface through the same dock
 - [x] **DIA-05** — Async data-quality scan: regressions, dt outliers, duplicates, NaN/Inf % (§15)
-- [ ] **DIA-06** — Log metadata display (params, file info, link info) in browser/inspector
-- [ ] **DIA-07** — Export diagnostics JSON
+- [x] **DIA-06** — Log metadata display (params, file info, link info) in browser/inspector — source context menu opens a metadata inspector with label/kind/source id, topic and row counts, effective time range, offset, captured ULog params, and logged-message auto-marker metadata
+- [x] **DIA-07** — Export diagnostics JSON — File menu export writes a versioned JSON document with retained diagnostic records, burst counts, severity/code/message, source id+label, time and byte offset; success/failure is reported back through the diagnostics hub
 
 ### PRF — Performance dock (M9, instrumented from M0)
 
@@ -1024,7 +1024,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [ ] **IOX-02** — CSV resample modes: none/prev-fill/linear@dt; streamed + progress
 - [ ] **IOX-03** — Plot image export (screenshot 1×/2×)
 - [ ] **IOX-04** — Layout JSON export/import (=LAY-05 surfacing in File menu)
-- [ ] **IOX-05** — Diagnostics export (=DIA-07)
+- [x] **IOX-05** — Diagnostics export (=DIA-07)
 - [ ] **IOX-06** — Profiling export (=PRF-07)
 - [ ] **IOX-07** — _(backlog)_ offscreen vector-quality plot render export
 - [ ] **IOX-08** — Arrow IPC `.dlcache` writer (background, post-parse) + mtime/size match + mmap reload (ZC-5)

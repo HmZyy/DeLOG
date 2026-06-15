@@ -110,6 +110,11 @@ pub fn info() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/info.svg")
 }
 
+/// Clock (source time offset editor).
+pub fn clock() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/clock-3.svg")
+}
+
 /// X (close the pane).
 pub fn close() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/x.svg")
