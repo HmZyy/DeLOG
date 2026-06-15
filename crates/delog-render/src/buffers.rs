@@ -149,6 +149,10 @@ impl BufferManager {
         self.traces.keys().copied()
     }
 
+    pub fn buffer_count(&self) -> usize {
+        self.traces.len()
+    }
+
     /// Count of full re-uploads (growth or rebuild) — a regression signal (ZC-4).
     pub fn full_uploads(&self) -> u64 {
         self.full_uploads

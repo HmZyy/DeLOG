@@ -208,6 +208,23 @@ impl CacheManager {
         }
     }
 
+    pub fn field_samples(&self, field: FieldId) -> Option<usize> {
+        match self.caches.get(&field) {
+            Some(Slot::Ready(c)) => Some(c.samples()),
+            _ => None,
+        }
+    }
+
+    pub fn field_visible_samples(&self, field: FieldId, x0: f32, x1: f32) -> Option<usize> {
+        match self.caches.get(&field) {
+            Some(Slot::Ready(c)) => {
+                let (a, b) = c.index_range(x0, x1);
+                Some(b.saturating_sub(a))
+            }
+            _ => None,
+        }
+    }
+
     pub fn ready_count(&self) -> usize {
         self.caches
             .values()

@@ -14,7 +14,7 @@ use crate::diagnostics::DiagnosticsDock;
 use crate::gpu::GpuBridge;
 use crate::layout::{LayoutApply, LayoutDoc, LayoutError, LoadOutcome, PendingLayout};
 use crate::live::ConnectionDialog;
-use crate::performance::PerformanceDock;
+use crate::performance::{PerformanceDock, PerformanceSnapshot, ResourceSummary, TraceSummary};
 use crate::plot::ViewX;
 #[cfg(feature = "scripting")]
 use crate::scripts;
@@ -33,6 +33,7 @@ type LayoutImportResult = Result<LayoutDoc, LayoutError>;
 type LayoutExportResult = Result<std::path::PathBuf, LayoutError>;
 type DiagnosticsExportResult = Result<std::path::PathBuf, String>;
 const SESSION_AUTOSAVE_INTERVAL: Duration = Duration::from_secs(30);
+const PERFORMANCE_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Serialize)]
 struct DiagnosticsExportDoc {
@@ -125,6 +126,8 @@ pub struct DelogApp {
     browser_collapsed: bool,
     diagnostics_dock: DiagnosticsDock,
     performance_dock: PerformanceDock,
+    performance_snapshot: PerformanceSnapshot,
+    performance_last_refresh: Option<Instant>,
     browser_query: String,
     browser_selection: browser::Selection,
     offset_dialog: Option<(delog_core::identity::SourceId, i64)>,
@@ -200,6 +203,8 @@ impl DelogApp {
             browser_collapsed: false,
             diagnostics_dock: DiagnosticsDock::default(),
             performance_dock: PerformanceDock::default(),
+            performance_snapshot: PerformanceSnapshot::default(),
+            performance_last_refresh: None,
             browser_query: String::new(),
             browser_selection: browser::Selection::default(),
             offset_dialog: None,
@@ -412,6 +417,54 @@ impl DelogApp {
             .map(|view| view.span_us())
             .unwrap_or_else(|| (range.max_us - range.min_us).max(1));
         self.view = Some(ViewX::locked_to_tail(range, span));
+    }
+
+    fn refresh_performance_snapshot(
+        &mut self,
+        frame: &eframe::Frame,
+        snapshot: &delog_core::snapshot::StoreSnapshot,
+    ) {
+        if !self.performance_dock.open {
+            return;
+        }
+        let now = Instant::now();
+        if self
+            .performance_last_refresh
+            .is_some_and(|last| now.duration_since(last) < PERFORMANCE_REFRESH_INTERVAL)
+        {
+            return;
+        }
+
+        let view = self.view;
+        let traces = self
+            .workspace
+            .fields()
+            .map(|field| {
+                let visible_samples = view.and_then(|view| {
+                    let (x0, x1) = view.seconds(self.origin_us);
+                    self.caches.field_visible_samples(field, x0, x1)
+                });
+                TraceSummary {
+                    label: crate::legend::trace_label(snapshot, field),
+                    samples: self.caches.field_samples(field),
+                    visible_samples,
+                    cache_cpu_bytes: self.caches.field_mem(field).cache_cpu,
+                    gpu_bytes: self.gpu.field_gpu_bytes(frame, field),
+                }
+            })
+            .collect();
+        let gpu = self.gpu.summary(frame);
+        self.performance_snapshot = PerformanceSnapshot {
+            metrics: self.session.metrics().snapshot(),
+            resources: ResourceSummary {
+                gpu_buffer_count: gpu.buffer_count,
+                gpu_bytes: gpu.gpu_bytes,
+                cache_ready_count: self.caches.ready_count(),
+                cache_cpu_bytes: self.caches.total_cache_bytes(),
+            },
+            traces,
+        };
+        self.performance_last_refresh = Some(now);
     }
 
     fn poll_trajectory_builds(&mut self) {
@@ -1413,12 +1466,13 @@ impl eframe::App for DelogApp {
                 });
         }
         if self.performance_dock.open {
-            let metrics = self.session.metrics().snapshot();
+            self.refresh_performance_snapshot(frame, &snapshot);
+            ui.ctx().request_repaint_after(PERFORMANCE_REFRESH_INTERVAL);
             egui::Panel::bottom("performance")
                 .resizable(true)
                 .default_size(220.0)
                 .show_inside(ui, |ui| {
-                    self.performance_dock.ui(ui, &metrics);
+                    self.performance_dock.ui(ui, &self.performance_snapshot);
                 });
         }
 
