@@ -9,6 +9,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use delog_cache::{MinMaxPyramid, TraceCache};
 use delog_core::chunk::Chunk;
 use delog_core::identity::{FieldId, IdentityRegistry};
+use delog_core::metrics::MetricsRegistry;
 use delog_core::schema::{FieldSchema, TopicSchema};
 use delog_core::snapshot::StoreSnapshot;
 use delog_core::store::TopicStore;
@@ -57,12 +58,13 @@ fn snapshot(rows: i64) -> (StoreSnapshot, FieldId) {
 }
 
 fn bench_cache(c: &mut Criterion) {
+    let metrics = MetricsRegistry::new();
     let ys: Vec<f32> = (0..ROWS).map(|i| (i as f32 * 0.001).sin()).collect();
     let (snap, field) = snapshot(ROWS);
-    let cache = TraceCache::build(&snap, field, 0, 0).unwrap();
+    let cache = TraceCache::build(&snap, field, 0, 0, &metrics).unwrap();
 
     c.bench_function("cache_build_1M", |b| {
-        b.iter(|| TraceCache::build(&snap, field, 0, 0).unwrap());
+        b.iter(|| TraceCache::build(&snap, field, 0, 0, &metrics).unwrap());
     });
 
     // Mid-span y-range query over 1M samples (the auto-visible-Y hot path).
@@ -79,9 +81,9 @@ fn bench_cache(c: &mut Criterion) {
     let (snap_full, _) = snapshot(ROWS);
     c.bench_function("cache_append_512", |b| {
         b.iter_batched(
-            || TraceCache::build(&snap_small, field_s, 0, 0).unwrap(),
+            || TraceCache::build(&snap_small, field_s, 0, 0, &metrics).unwrap(),
             |mut warm| {
-                warm.append(&snap_full, field_s);
+                warm.append(&snap_full, field_s, &metrics);
             },
             criterion::BatchSize::SmallInput,
         );
