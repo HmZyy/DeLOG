@@ -67,16 +67,6 @@ pub fn skip_forward() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/skip-forward.svg")
 }
 
-/// Collapsible section opened state.
-pub fn chevron_down() -> ImageSource<'static> {
-    egui::include_image!("../assets/icons/chevron-down.svg")
-}
-
-/// Collapsible section closed state.
-pub fn chevron_right() -> ImageSource<'static> {
-    egui::include_image!("../assets/icons/chevron-right.svg")
-}
-
 /// Square (stop / cancel a running script). Used only by the scripting Console.
 #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
 pub fn square() -> ImageSource<'static> {
