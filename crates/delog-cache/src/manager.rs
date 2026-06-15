@@ -99,7 +99,10 @@ impl CacheManager {
 
     /// Drain finished builds into ready slots. A build that found no data
     /// removes its slot so a later request retries. Call once per frame.
-    pub fn poll_builds(&mut self) {
+    /// Returns fields whose build produced no cache so the app can surface a
+    /// cache diagnostic without adding a core diagnostic dependency here.
+    pub fn poll_builds(&mut self) -> Vec<FieldId> {
+        let mut empty = Vec::new();
         while let Ok((field, result)) = self.built_rx.try_recv() {
             match result {
                 Some(cache) => {
@@ -107,9 +110,11 @@ impl CacheManager {
                 }
                 None => {
                     self.caches.remove(&field);
+                    empty.push(field);
                 }
             }
         }
+        empty
     }
 
     /// On a new store epoch: append new rows to ready caches and GC caches whose

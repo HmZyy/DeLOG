@@ -223,6 +223,7 @@ pub fn ui(
 ) -> TimelineAction {
     let mut action = TimelineAction::default();
     ui.horizontal(|ui| {
+        let button_size = egui::vec2(28.0, 24.0);
         // Live-link status dot: grey = not streaming, yellow = streaming but
         // not locked to the live tail, red = locked. While streaming it is
         // clickable to toggle the live-tail lock.
@@ -241,7 +242,7 @@ pub fn ui(
         } else {
             egui::Sense::hover()
         };
-        let (dot_rect, mut dot_resp) = ui.allocate_exact_size(egui::vec2(14.0, 16.0), sense);
+        let (dot_rect, mut dot_resp) = ui.allocate_exact_size(button_size, sense);
         // Slightly brighten the dot on hover to read as interactive.
         let draw_color = if any_live && dot_resp.hovered() {
             dot_color.gamma_multiply(1.3)
@@ -263,17 +264,29 @@ pub fn ui(
         }
         dot_resp.on_hover_text(dot_tip);
 
+        let transport_icon = |src: egui::ImageSource<'static>, ui: &egui::Ui| {
+            egui::Image::new(src)
+                .fit_to_exact_size(egui::vec2(16.0, 16.0))
+                .tint(ui.visuals().text_color())
+        };
         if ui
-            .button("⏮")
+            .add_sized(
+                button_size,
+                egui::Button::image(transport_icon(crate::icons::skip_back(), ui)),
+            )
             .on_hover_text("Jump to start (Home)")
             .clicked()
         {
             playback.jump_start(range);
             action.manual_scrub = true;
         }
-        let icon = if playback.playing { "⏸" } else { "▶" };
+        let icon = if playback.playing {
+            crate::icons::pause()
+        } else {
+            crate::icons::play()
+        };
         if ui
-            .button(icon)
+            .add_sized(button_size, egui::Button::image(transport_icon(icon, ui)))
             .on_hover_text("Play/pause (Space)")
             .clicked()
         {
@@ -284,7 +297,14 @@ pub fn ui(
         } else {
             "Jump to end (End)"
         };
-        if ui.button("⏭").on_hover_text(end_tip).clicked() {
+        if ui
+            .add_sized(
+                button_size,
+                egui::Button::image(transport_icon(crate::icons::skip_forward(), ui)),
+            )
+            .on_hover_text(end_tip)
+            .clicked()
+        {
             if any_live {
                 playback.lock_to_live(range);
                 action.lock_live = true;
@@ -301,7 +321,10 @@ pub fn ui(
             .fit_to_exact_size(egui::vec2(16.0, 16.0))
             .tint(ui.visuals().text_color());
         if ui
-            .add(egui::Button::image(fit_icon).selected(*fit_all))
+            .add_sized(
+                button_size,
+                egui::Button::image(fit_icon).selected(*fit_all),
+            )
             .on_hover_text("Fit to view")
             .clicked()
         {
