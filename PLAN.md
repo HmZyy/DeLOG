@@ -971,10 +971,10 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 
 ### DIA — Diagnostics (M9, emitters earlier)
 
-- [ ] **DIA-01** — Hub: mpsc → 10k ring; severity levels; burst dedup via count (§15)
-- [ ] **DIA-02** — Dock panel: severity/origin filters, text search, clear
+- [x] **DIA-01** — Hub: mpsc → 10k ring; severity levels; burst dedup via count (§15) — `delog_core::diagnostics::DiagnosticHub` owns an mpsc ingress, 10k retained `DiagRecord` ring, adjacent burst coalescing by count, snapshot/clear APIs, and unit tests for dedup/ring eviction/clear
+- [x] **DIA-02** — Dock panel: severity/origin filters, text search, clear — bottom diagnostics dock in `delog-app` with retained count + latest notice header, collapse toggle, Info+/Warnings+/Errors filter, exact origin filter, text search over code/message/source/time/byte, scrollable striped grid, and Clear wired to the hub
 - [ ] **DIA-03** — Click-to-jump playhead for time-bearing diags
-- [ ] **DIA-04** — Emitters wired: parser, stream, ingest-drop, layout-ghost, wgpu, cache
+- [x] **DIA-04** — Emitters wired: parser, stream, ingest-drop, layout-ghost, wgpu, cache — session now routes ingest/parser/stream diagnostics into the hub; layout load/bind, autosave/import/export/live-open/script, data-quality scan, wgpu error scopes, and cache-empty build misses all surface through the same dock
 - [x] **DIA-05** — Async data-quality scan: regressions, dt outliers, duplicates, NaN/Inf % (§15)
 - [ ] **DIA-06** — Log metadata display (params, file info, link info) in browser/inspector
 - [ ] **DIA-07** — Export diagnostics JSON

@@ -47,10 +47,34 @@ pub fn maximize() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/maximize.svg")
 }
 
-/// Play (run a script). Used only by the scripting Console.
-#[cfg_attr(not(feature = "scripting"), allow(dead_code))]
+/// Play (transport and script run).
 pub fn play() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/play.svg")
+}
+
+/// Pause transport playback.
+pub fn pause() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/pause.svg")
+}
+
+/// Jump to the start of the timeline.
+pub fn skip_back() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/skip-back.svg")
+}
+
+/// Jump to the end of the timeline.
+pub fn skip_forward() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/skip-forward.svg")
+}
+
+/// Collapsible section opened state.
+pub fn chevron_down() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/chevron-down.svg")
+}
+
+/// Collapsible section closed state.
+pub fn chevron_right() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/chevron-right.svg")
 }
 
 /// Square (stop / cancel a running script). Used only by the scripting Console.
