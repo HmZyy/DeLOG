@@ -26,9 +26,20 @@ pub struct TraceSummary {
     pub gpu_bytes: u64,
 }
 
+/// Which section of the performance dock is shown. Held on the dock so the
+/// selection persists across frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum PerfTab {
+    #[default]
+    Resources,
+    Traces,
+    Metrics,
+}
+
 #[derive(Debug, Default)]
 pub struct PerformanceDock {
     pub open: bool,
+    tab: PerfTab,
 }
 
 impl PerformanceDock {
@@ -44,95 +55,105 @@ impl PerformanceDock {
         });
         ui.separator();
 
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.tab, PerfTab::Resources, "Resources");
+            ui.selectable_value(&mut self.tab, PerfTab::Traces, "Traces");
+            ui.selectable_value(&mut self.tab, PerfTab::Metrics, "Metrics");
+        });
+        ui.separator();
+
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.heading("Resources");
-                egui::Grid::new("performance-resources-grid")
-                    .num_columns(2)
-                    .striped(true)
-                    .spacing([14.0, 4.0])
-                    .show(ui, |ui| {
-                        summary_row(
-                            ui,
-                            "GPU buffers",
-                            snapshot.resources.gpu_buffer_count.to_string(),
-                        );
-                        summary_row(ui, "GPU bytes", format_bytes(snapshot.resources.gpu_bytes));
-                        summary_row(
-                            ui,
-                            "Ready CPU caches",
-                            snapshot.resources.cache_ready_count.to_string(),
-                        );
-                        summary_row(
-                            ui,
-                            "CPU cache bytes",
-                            format_bytes(snapshot.resources.cache_cpu_bytes),
-                        );
-                    });
-
-                ui.separator();
-                ui.heading("Traces");
-                if snapshot.traces.is_empty() {
-                    ui.weak("No plotted traces.");
-                } else {
-                    egui::Grid::new("performance-traces-grid")
-                        .num_columns(5)
+            .show(ui, |ui| match self.tab {
+                PerfTab::Resources => {
+                    egui::Grid::new("performance-resources-grid")
+                        .num_columns(2)
                         .striped(true)
                         .spacing([14.0, 4.0])
                         .show(ui, |ui| {
-                            ui.strong("Trace");
+                            summary_row(
+                                ui,
+                                "GPU buffers",
+                                snapshot.resources.gpu_buffer_count.to_string(),
+                            );
+                            summary_row(
+                                ui,
+                                "GPU bytes",
+                                format_bytes(snapshot.resources.gpu_bytes),
+                            );
+                            summary_row(
+                                ui,
+                                "Ready CPU caches",
+                                snapshot.resources.cache_ready_count.to_string(),
+                            );
+                            summary_row(
+                                ui,
+                                "CPU cache bytes",
+                                format_bytes(snapshot.resources.cache_cpu_bytes),
+                            );
+                        });
+                }
+                PerfTab::Traces => {
+                    if snapshot.traces.is_empty() {
+                        ui.weak("No plotted traces.");
+                    } else {
+                        egui::Grid::new("performance-traces-grid")
+                            .num_columns(5)
+                            .striped(true)
+                            .spacing([14.0, 4.0])
+                            .show(ui, |ui| {
+                                ui.strong("Trace");
+                                ui.strong("Samples");
+                                ui.strong("Visible");
+                                ui.strong("CPU cache");
+                                ui.strong("GPU");
+                                ui.end_row();
+
+                                for trace in &snapshot.traces {
+                                    ui.label(trace.label.as_str());
+                                    ui.label(format_optional_usize(trace.samples));
+                                    ui.label(format_optional_usize(trace.visible_samples));
+                                    ui.label(format_bytes(trace.cache_cpu_bytes));
+                                    ui.label(format_bytes(trace.gpu_bytes));
+                                    ui.end_row();
+                                }
+                            });
+                    }
+                }
+                PerfTab::Metrics => {
+                    if snapshot.metrics.is_empty() {
+                        ui.weak("No metrics recorded yet.");
+                        return;
+                    }
+
+                    egui::Grid::new("performance-metrics-grid")
+                        .num_columns(8)
+                        .striped(true)
+                        .spacing([14.0, 4.0])
+                        .show(ui, |ui| {
+                            ui.strong("Metric");
+                            ui.strong("Last");
+                            ui.strong("Avg");
+                            ui.strong("Min");
+                            ui.strong("Max");
+                            ui.strong("P99");
                             ui.strong("Samples");
-                            ui.strong("Visible");
-                            ui.strong("CPU cache");
-                            ui.strong("GPU");
+                            ui.strong("Counter");
                             ui.end_row();
 
-                            for trace in &snapshot.traces {
-                                ui.label(trace.label.as_str());
-                                ui.label(format_optional_usize(trace.samples));
-                                ui.label(format_optional_usize(trace.visible_samples));
-                                ui.label(format_bytes(trace.cache_cpu_bytes));
-                                ui.label(format_bytes(trace.gpu_bytes));
+                            for (name, stats) in &snapshot.metrics {
+                                ui.monospace(*name);
+                                ui.label(format_value(stats.last));
+                                ui.label(format_value(stats.avg));
+                                ui.label(format_value(stats.min));
+                                ui.label(format_value(stats.max));
+                                ui.label(format_value(stats.p99));
+                                ui.label(stats.n.to_string());
+                                ui.label(stats.counter.to_string());
                                 ui.end_row();
                             }
                         });
                 }
-
-                ui.separator();
-                ui.heading("Metrics");
-                if snapshot.metrics.is_empty() {
-                    ui.weak("No metrics recorded yet.");
-                    return;
-                }
-
-                egui::Grid::new("performance-metrics-grid")
-                    .num_columns(8)
-                    .striped(true)
-                    .spacing([14.0, 4.0])
-                    .show(ui, |ui| {
-                        ui.strong("Metric");
-                        ui.strong("Last");
-                        ui.strong("Avg");
-                        ui.strong("Min");
-                        ui.strong("Max");
-                        ui.strong("P99");
-                        ui.strong("Samples");
-                        ui.strong("Counter");
-                        ui.end_row();
-
-                        for (name, stats) in &snapshot.metrics {
-                            ui.monospace(*name);
-                            ui.label(format_value(stats.last));
-                            ui.label(format_value(stats.avg));
-                            ui.label(format_value(stats.min));
-                            ui.label(format_value(stats.max));
-                            ui.label(format_value(stats.p99));
-                            ui.label(stats.n.to_string());
-                            ui.label(stats.counter.to_string());
-                            ui.end_row();
-                        }
-                    });
             });
     }
 }
