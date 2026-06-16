@@ -1854,6 +1854,7 @@ impl eframe::App for DelogApp {
                         playing: self.playback.playing,
                         vehicles: &self.vehicles,
                         trajectories: &self.vehicle_trajectories,
+                        traj_generation: self.traj_vehicle_revision,
                     };
                     let mut behavior = crate::workspace::Behavior::new(services);
                     // `workspace_tree` (§16, PRF-10): the egui_tiles layout +
