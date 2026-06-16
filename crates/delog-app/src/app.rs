@@ -1507,7 +1507,7 @@ impl eframe::App for DelogApp {
                         match self.fps_ema {
                             Some(fps) => {
                                 // Green >60, orange 30..=60, red <30.
-                                let color = if fps > 60.0 {
+                                let color = if fps > 59.0 {
                                     self.settings.theme.success()
                                 } else if fps >= 30.0 {
                                     self.settings.theme.warning()
