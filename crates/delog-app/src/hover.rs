@@ -36,6 +36,7 @@ pub fn draw(
     tooltip: bool,
     show_field_name: bool,
     show_time: bool,
+    opacity: f32,
 ) {
     let Some(pos) = response.hover_pos() else {
         return;
@@ -75,6 +76,7 @@ pub fn draw(
             &rows,
             show_field_name,
             show_time,
+            opacity,
         );
     }
 }
@@ -154,6 +156,7 @@ fn show_tooltip(
     rows: &[Row],
     show_field_name: bool,
     show_time: bool,
+    opacity: f32,
 ) {
     if rows.is_empty() {
         return;
@@ -163,9 +166,11 @@ fn show_tooltip(
         .pivot(pivot)
         .fixed_pos(pos)
         .show(ui.ctx(), |ui| {
+            let base = egui::Frame::popup(ui.style());
             egui::Frame {
                 shadow: egui::Shadow::NONE,
-                ..egui::Frame::popup(ui.style())
+                fill: crate::legend::with_bg_opacity(base.fill, opacity),
+                ..base
             }
             .show(ui, |ui| {
                 if show_time {
@@ -209,6 +214,7 @@ pub fn draw_playhead(
     readout: Option<SampleMode>,
     show_field_name: bool,
     show_time: bool,
+    opacity: f32,
 ) {
     let view = target.view;
     let rect = view.rect;
@@ -253,6 +259,7 @@ pub fn draw_playhead(
         &rows,
         show_field_name,
         show_time,
+        opacity,
     );
 }
 
