@@ -108,6 +108,10 @@ pub struct Workspace {
     /// as `PlotServices::shared_y_gutter`; recomputed each frame from the panes'
     /// own gutters (PLT-07).
     pub shared_y_gutter: f32,
+    /// Legend visibility seeded into newly created panes — the global
+    /// `show_legend_default` setting, refreshed each frame by the app so splits
+    /// honour it (PLT-08). The per-pane toggle still overrides it afterwards.
+    pub default_show_legend: bool,
 }
 
 impl Workspace {
@@ -118,6 +122,7 @@ impl Workspace {
             tree: egui_tiles::Tree::new("plot_workspace", root, tiles),
             focused: None,
             shared_y_gutter: 0.0,
+            default_show_legend: true,
         }
     }
 
@@ -232,7 +237,10 @@ impl Workspace {
         direction: SplitDirection,
         before: bool,
     ) -> Option<egui_tiles::TileId> {
-        let new_pane = self.tree.tiles.insert_pane(Pane::Plot(PlotPane::default()));
+        let new_pane = self.tree.tiles.insert_pane(Pane::Plot(PlotPane {
+            show_legend: self.default_show_legend,
+            ..PlotPane::default()
+        }));
         self.attach_split(tile_id, new_pane, direction, before)
     }
 
@@ -406,6 +414,9 @@ pub struct PlotServices<'a> {
     /// Widest Y-axis gutter seen across all plot panes last frame; every pane
     /// uses at least this much left margin so stacked plots align (PLT-07).
     pub shared_y_gutter: f32,
+    /// Plot overlay display prefs: legend placement + hover readout contents
+    /// (PLT-08/09). Live-read each frame from the config.
+    pub plot_display: crate::settings::PlotDisplay,
 }
 
 pub struct Behavior<'a> {
@@ -852,6 +863,8 @@ impl Behavior<'_> {
                 self.services.origin_us,
                 t_us,
                 readout,
+                self.services.plot_display.hover_show_field_name,
+                self.services.plot_display.hover_show_time,
             );
         }
 
@@ -879,6 +892,8 @@ impl Behavior<'_> {
                 self.services.origin_us,
                 *self.services.hover_mode,
                 !self.services.playing,
+                self.services.plot_display.hover_show_field_name,
+                self.services.plot_display.hover_show_time,
             );
         }
 
@@ -897,6 +912,7 @@ impl Behavior<'_> {
                 ui,
                 egui::Id::new(("plot_legend", tile_id)),
                 plot_rect,
+                self.services.plot_display.legend_position,
                 pane,
                 &labels,
             ) {

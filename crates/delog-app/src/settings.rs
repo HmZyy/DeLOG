@@ -34,6 +34,68 @@ pub struct AppSettings {
     /// 3D scene render and camera tuning.
     #[serde(default)]
     pub scene3d: Scene3dSettings,
+    /// Plot overlay display (legend placement + hover readout contents).
+    #[serde(default)]
+    pub plot: PlotDisplay,
+}
+
+/// Where the per-pane legend overlay sits inside the plot rect (PLT-08).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LegendPosition {
+    #[default]
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl LegendPosition {
+    pub const ALL: [Self; 4] = [
+        Self::TopLeft,
+        Self::TopRight,
+        Self::BottomLeft,
+        Self::BottomRight,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::TopLeft => "Top left",
+            Self::TopRight => "Top right",
+            Self::BottomLeft => "Bottom left",
+            Self::BottomRight => "Bottom right",
+        }
+    }
+}
+
+/// Plot overlay display preferences (legend + hover readout). All live-read each
+/// frame so changes apply immediately; `show_legend_default` only seeds newly
+/// created panes (PLT-08/09).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PlotDisplay {
+    /// Corner the legend overlay anchors to.
+    #[serde(default)]
+    pub legend_position: LegendPosition,
+    /// Legend visibility for newly created panes (per-pane toggle overrides it).
+    #[serde(default = "default_true")]
+    pub show_legend_default: bool,
+    /// Show the `topic.field` name on each hover/playhead readout row.
+    #[serde(default)]
+    pub hover_show_field_name: bool,
+    /// Show the time header on the hover/playhead readout.
+    #[serde(default)]
+    pub hover_show_time: bool,
+}
+
+impl Default for PlotDisplay {
+    fn default() -> Self {
+        Self {
+            legend_position: LegendPosition::default(),
+            show_legend_default: true,
+            hover_show_field_name: false,
+            hover_show_time: false,
+        }
+    }
 }
 
 /// Knobs for the plot draw path (§9.5 decimation + line/edge AA). Lives in the
@@ -255,16 +317,18 @@ impl Scene3dSettings {
 enum SettingsTab {
     #[default]
     General,
+    Plots,
     Rendering,
     Scene3d,
 }
 
 impl SettingsTab {
-    const ALL: [Self; 3] = [Self::General, Self::Rendering, Self::Scene3d];
+    const ALL: [Self; 4] = [Self::General, Self::Plots, Self::Rendering, Self::Scene3d];
 
     const fn label(self) -> &'static str {
         match self {
             Self::General => "General",
+            Self::Plots => "Plots",
             Self::Rendering => "Rendering",
             Self::Scene3d => "3D View",
         }
@@ -303,6 +367,9 @@ impl SettingsDialog {
                         match self.selected_tab {
                             SettingsTab::General => {
                                 change |= general_tab(ui, settings);
+                            }
+                            SettingsTab::Plots => {
+                                plots_tab(ui, settings);
                             }
                             SettingsTab::Rendering => {
                                 rendering_tab(ui, settings);
@@ -378,6 +445,47 @@ fn general_tab(ui: &mut egui::Ui, settings: &mut AppSettings) -> SettingsChange 
 
     SettingsChange {
         theme_changed: settings.theme != before,
+    }
+}
+
+fn plots_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
+    let p = &mut settings.plot;
+    ui.heading("Plots");
+    ui.add_space(8.0);
+    egui::Grid::new("settings-plots-grid")
+        .num_columns(2)
+        .spacing(egui::vec2(16.0, 10.0))
+        .show(ui, |ui| {
+            ui.label("Legend position")
+                .on_hover_text("Corner the legend overlay anchors to inside each plot.");
+            egui::ComboBox::from_id_salt("settings-legend-position")
+                .selected_text(p.legend_position.label())
+                .show_ui(ui, |ui| {
+                    for pos in LegendPosition::ALL {
+                        ui.selectable_value(&mut p.legend_position, pos, pos.label());
+                    }
+                });
+            ui.end_row();
+
+            ui.label("Show legend by default")
+                .on_hover_text("Show the legend on newly created plots. Each plot's right-click menu can still toggle it.");
+            ui.checkbox(&mut p.show_legend_default, "");
+            ui.end_row();
+
+            ui.label("Hover: field name")
+                .on_hover_text("Show the topic.field name on each hover/playhead readout row.");
+            ui.checkbox(&mut p.hover_show_field_name, "");
+            ui.end_row();
+
+            ui.label("Hover: time")
+                .on_hover_text("Show the time header on the hover/playhead readout.");
+            ui.checkbox(&mut p.hover_show_time, "");
+            ui.end_row();
+        });
+
+    ui.add_space(10.0);
+    if ui.button("Reset to defaults").clicked() {
+        settings.plot = PlotDisplay::default();
     }
 }
 
@@ -507,7 +615,44 @@ mod tests {
             .into_iter()
             .map(SettingsTab::label)
             .collect();
-        assert_eq!(labels, ["General", "Rendering", "3D View"]);
+        assert_eq!(labels, ["General", "Plots", "Rendering", "3D View"]);
+    }
+
+    #[test]
+    fn plot_display_defaults_show_legend_top_left_with_minimal_hover() {
+        let p = PlotDisplay::default();
+        assert_eq!(p.legend_position, LegendPosition::TopLeft);
+        assert!(p.show_legend_default);
+        // Hover readout stays minimal by default: no field name, no time header.
+        assert!(!p.hover_show_field_name);
+        assert!(!p.hover_show_time);
+    }
+
+    #[test]
+    fn app_settings_persist_plot_display() {
+        let settings = AppSettings {
+            plot: PlotDisplay {
+                legend_position: LegendPosition::BottomRight,
+                show_legend_default: false,
+                hover_show_field_name: false,
+                hover_show_time: false,
+            },
+            ..AppSettings::default()
+        };
+
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(json.contains("legend_position"));
+        let decoded: AppSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.plot, settings.plot);
+    }
+
+    #[test]
+    fn old_config_without_plot_display_defaults_it() {
+        let json = r#"{"theme":"catppuccin_mocha"}"#;
+        let s: AppSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(s.plot.legend_position, LegendPosition::TopLeft);
+        assert!(s.plot.show_legend_default);
+        assert!(!s.plot.hover_show_time);
     }
 
     #[test]
