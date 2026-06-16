@@ -14,6 +14,12 @@ pub struct TopicStore {
     pub schema: Arc<TopicSchema>,
     pub chunks: Arc<[Arc<Chunk>]>,
     pub rows: u64,
+    /// Union of every chunk's `[t_min, t_max]`, maintained as a cached aggregate
+    /// like `rows`: O(chunks) once in `from_chunks`, O(1) per `append_chunk`.
+    /// `time_range()` reads it in O(1) — it used to rescan all chunks on every
+    /// call, and the UI calls it (via `global_time_range`/the browser tree)
+    /// several times per frame, so the scan grew with the live chunk count.
+    time_range: Option<TimeRange>,
 }
 
 /// Topic store construction/append failures.
@@ -29,6 +35,7 @@ impl TopicStore {
             schema,
             chunks: Arc::from([]),
             rows: 0,
+            time_range: None,
         }
     }
 
@@ -37,6 +44,7 @@ impl TopicStore {
         chunks: impl IntoIterator<Item = Arc<Chunk>>,
     ) -> Result<Self, TopicStoreError> {
         let mut rows = 0_u64;
+        let mut time_range: Option<TimeRange> = None;
         let chunks: Vec<_> = chunks
             .into_iter()
             .map(|chunk| {
@@ -44,6 +52,7 @@ impl TopicStore {
                 rows = rows
                     .checked_add(chunk.len() as u64)
                     .ok_or(TopicStoreError::RowCountOverflow)?;
+                time_range = Some(union_with_chunk(time_range, &chunk));
                 Ok(chunk)
             })
             .collect::<Result<_, _>>()?;
@@ -52,6 +61,7 @@ impl TopicStore {
             schema,
             chunks: Arc::from(chunks),
             rows,
+            time_range,
         })
     }
 
@@ -64,6 +74,7 @@ impl TopicStore {
             .rows
             .checked_add(chunk.len() as u64)
             .ok_or(TopicStoreError::RowCountOverflow)?;
+        let time_range = Some(union_with_chunk(self.time_range, &chunk));
         let mut chunks = Vec::with_capacity(self.chunks.len() + 1);
         chunks.extend(self.chunks.iter().cloned());
         chunks.push(chunk);
@@ -72,6 +83,7 @@ impl TopicStore {
             schema: Arc::clone(&self.schema),
             chunks: Arc::from(chunks),
             rows,
+            time_range,
         })
     }
 
@@ -83,11 +95,21 @@ impl TopicStore {
         self.rows == 0
     }
 
+    /// Union of every chunk's time range. O(1): returns the cached aggregate
+    /// maintained by `from_chunks`/`append_chunk`.
     pub fn time_range(&self) -> Option<TimeRange> {
-        self.chunks
-            .iter()
-            .map(|chunk| TimeRange::new(chunk.t_min, chunk.t_max).expect("chunk range is valid"))
-            .reduce(TimeRange::union)
+        self.time_range
+    }
+}
+
+/// Fold one chunk's `[t_min, t_max]` into a running union. Mirrors the
+/// `expect` the previous per-call scan used — a sealed chunk always has a
+/// valid range.
+fn union_with_chunk(acc: Option<TimeRange>, chunk: &Chunk) -> TimeRange {
+    let chunk_range = TimeRange::new(chunk.t_min, chunk.t_max).expect("chunk range is valid");
+    match acc {
+        Some(range) => range.union(chunk_range),
+        None => chunk_range,
     }
 }
 
