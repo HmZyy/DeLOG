@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use delog_cache::{CacheManager, MinMax};
 use delog_core::identity::FieldId;
+use delog_core::metrics::MetricsRegistry;
 use delog_render::{
     BufferManager, GpuErrorHub, Grid3dPipeline, GridUniform, LinePipeline, MeshGpu, MeshPipeline,
     MeshUniform, MinMaxColPipeline, PlotUniform, RenderContext, ScatterPipeline, Scene3dTarget,
@@ -40,6 +41,10 @@ pub struct VehicleDraw<'a> {
     pub path_color: [f32; 4],
     /// Render-space `[x,y,z]` trajectory points (NaN = gap).
     pub trajectory: &'a [[f32; 3]],
+    /// Config generation the trajectory was built at. Unchanged across pure
+    /// data-append rebuilds (so the path only grows), bumped on config/offset
+    /// change — lets the GPU upload just the new tail vs. a full re-upload.
+    pub traj_generation: u64,
 }
 
 /// The inner plot rect plus the visible data window the GPU and the egui axes
@@ -60,6 +65,12 @@ pub struct GpuBridge {
     /// are stored in sRGB; we convert to match the target so the rendered line
     /// matches the legend swatch.
     srgb_target: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GpuSummary {
+    pub buffer_count: usize,
+    pub gpu_bytes: u64,
 }
 
 impl GpuBridge {
@@ -159,9 +170,30 @@ impl GpuBridge {
             .saturating_add(res.col_buffers.field_mem(field).gpu)
     }
 
+    pub fn summary(&self, frame: &eframe::Frame) -> GpuSummary {
+        if !self.available {
+            return GpuSummary::default();
+        }
+        let Some(render_state) = frame.wgpu_render_state() else {
+            return GpuSummary::default();
+        };
+        let renderer = render_state.renderer.read();
+        let Some(res) = renderer.callback_resources.get::<PlotCallbackResources>() else {
+            return GpuSummary::default();
+        };
+        GpuSummary {
+            buffer_count: res.buffers.buffer_count() + res.col_buffers.buffer_count(),
+            gpu_bytes: res
+                .buffers
+                .total_gpu_bytes()
+                .saturating_add(res.col_buffers.total_gpu_bytes()),
+        }
+    }
+
     /// Upload the pane's ready trace caches into the `plot_rect`, write their
     /// uniforms for the given visible data window, and emit the paint callback.
     /// The caller supplies the X/Y ranges so the egui axes share them exactly.
+    #[allow(clippy::too_many_arguments)]
     pub fn render_pane(
         &self,
         ui: &mut egui::Ui,
@@ -170,6 +202,7 @@ impl GpuBridge {
         pane: &PlotPane,
         view: PaneView,
         tuning: crate::settings::RenderTuning,
+        metrics: &Arc<MetricsRegistry>,
     ) {
         let plot_rect = view.rect;
         if !self.available || plot_rect.width() < 2.0 || plot_rect.height() < 2.0 {
@@ -188,6 +221,10 @@ impl GpuBridge {
         let (y0, y1) = view.y_range;
 
         let mut items = Vec::new();
+        // This pane's GPU uploads, accumulated inside the renderer block and
+        // recorded after it (§16 `upload_bytes`/`gpu_full_uploads`, PRF-01).
+        let mut upload_bytes = 0u64;
+        let mut full_uploads = 0u64;
         {
             let mut renderer = render_state.renderer.write();
             let Some(res) = renderer
@@ -198,6 +235,11 @@ impl GpuBridge {
             };
             // Capture buffer growth/upload + uniform-write errors (GPU-12).
             let scope = GpuErrorHub::open(res.ctx.device());
+            // Share the registry so the deferred paint callback can time
+            // `gpu_encode` (§16, PRF-01).
+            if res.metrics.is_none() {
+                res.metrics = Some(Arc::clone(metrics));
+            }
             let base_slot = res.next_uniform_slot;
             res.next_uniform_slot += pane.traces.len() as u32;
             res.ensure_uniform_capacity(res.next_uniform_slot);
@@ -229,12 +271,16 @@ impl GpuBridge {
                         if plot_w >= 1.0 && visible / plot_w > tuning.decimate_threshold {
                             let width = plot_w as usize;
                             let cols = cache.minmax_columns(x0, x1, width, tuning.bridge_columns);
-                            res.col_buffers.sync(trace.field, &cols, true);
+                            let stat = res.col_buffers.sync(trace.field, &cols, true);
+                            upload_bytes += stat.bytes;
+                            full_uploads += stat.full_upload as u64;
                             DrawKind::Columns {
                                 count: width as u32,
                             }
                         } else {
-                            res.buffers.sync(trace.field, &cache.xy, false);
+                            let stat = res.buffers.sync(trace.field, &cache.xy, false);
+                            upload_bytes += stat.bytes;
+                            full_uploads += stat.full_upload as u64;
                             DrawKind::Line {
                                 samples: res.buffers.samples(trace.field) as u32,
                             }
@@ -263,6 +309,14 @@ impl GpuBridge {
                 }
             }
             res.errors.get_mut().unwrap().close(scope);
+        }
+
+        // §16 GPU-upload gauges/counters for this pane (PRF-01).
+        if upload_bytes > 0 {
+            metrics.record("upload_bytes", upload_bytes as f32);
+        }
+        if full_uploads > 0 {
+            metrics.add("gpu_full_uploads", full_uploads);
         }
 
         if items.is_empty() {
@@ -531,6 +585,9 @@ struct PlotCallbackResources {
     /// bound of `CallbackResources`; never contended (all access is on the
     /// render thread).
     errors: Mutex<GpuErrorHub>,
+    /// Shared metrics registry, populated on the first `render_pane` so the
+    /// paint callback can time `gpu_encode` (§16, PRF-01).
+    metrics: Option<Arc<MetricsRegistry>>,
 }
 
 impl PlotCallbackResources {
@@ -557,6 +614,7 @@ impl PlotCallbackResources {
             step_binds: HashMap::new(),
             col_binds: HashMap::new(),
             errors: Mutex::new(GpuErrorHub::new()),
+            metrics: None,
         }
     }
 
@@ -603,7 +661,11 @@ struct VehicleGpu {
     mesh_bind: wgpu::BindGroup,
     traj_points: wgpu::Buffer,
     traj_capacity: u32,
+    /// Points currently resident in `traj_points` (also the draw count).
     traj_count: u32,
+    /// Config generation of the resident points; a mismatch forces a full
+    /// re-upload, a match lets a longer path upload only its appended tail.
+    traj_generation: u64,
     traj_uniform: wgpu::Buffer,
     traj_bind: wgpu::BindGroup,
 }
@@ -684,24 +746,27 @@ impl SceneResources {
             // Upload the model mesh on first use (no-op afterwards).
             self.model_mesh(v.model);
 
-            let pts = points_to_vec4(v.trajectory);
-            let needed = pts.len() as u32;
+            let needed = v.trajectory.len() as u32;
+            let mut realloc = false;
             let entry = self.vehicles.entry(v.key);
             let vg = match entry {
                 std::collections::hash_map::Entry::Occupied(o) => {
                     let vg = o.into_mut();
                     if needed > vg.traj_capacity {
-                        vg.traj_points =
-                            new_points_buffer(&self.ctx, needed.max(1), "delog-veh-traj-points");
-                        vg.traj_capacity = needed.max(1);
+                        // Grow geometrically (power-of-two) so appends are
+                        // usually tail-only uploads; only a boundary reallocs.
+                        let cap = needed.next_power_of_two();
+                        vg.traj_points = new_points_buffer(&self.ctx, cap, "delog-veh-traj-points");
+                        vg.traj_capacity = cap;
                         vg.traj_bind =
                             self.traj
                                 .bind_group(&self.ctx, &vg.traj_points, &vg.traj_uniform);
+                        realloc = true;
                     }
                     vg
                 }
                 std::collections::hash_map::Entry::Vacant(slot) => {
-                    let cap = needed.max(1);
+                    let cap = needed.max(1).next_power_of_two();
                     let mesh_uniform = new_uniform_buffer(
                         &self.ctx,
                         std::mem::size_of::<MeshUniform>() as u64,
@@ -715,24 +780,41 @@ impl SceneResources {
                         "delog-veh-traj-uniform",
                     );
                     let traj_bind = self.traj.bind_group(&self.ctx, &traj_points, &traj_uniform);
+                    realloc = true;
                     slot.insert(VehicleGpu {
                         mesh_uniform,
                         mesh_bind,
                         traj_points,
                         traj_capacity: cap,
                         traj_count: 0,
+                        traj_generation: v.traj_generation,
                         traj_uniform,
                         traj_bind,
                     })
                 }
             };
 
-            vg.traj_count = needed;
-            if needed > 0 {
+            // Trajectory upload: full re-upload only when the buffer was just
+            // (re)allocated or the config generation changed; otherwise the path
+            // is append-only, so write just the new tail — and skip entirely
+            // when unchanged. Avoids re-converting/re-uploading the whole path
+            // every frame (the cost decimation used to hide).
+            let full = realloc || vg.traj_generation != v.traj_generation || needed < vg.traj_count;
+            if full && needed > 0 {
+                let pts = points_to_vec4(v.trajectory);
                 self.ctx
                     .queue()
                     .write_buffer(&vg.traj_points, 0, bytemuck::cast_slice(&pts));
+            } else if !full && needed > vg.traj_count {
+                let start = vg.traj_count as usize;
+                let tail = points_to_vec4(&v.trajectory[start..]);
+                let offset = start as u64 * std::mem::size_of::<[f32; 4]>() as u64;
+                self.ctx
+                    .queue()
+                    .write_buffer(&vg.traj_points, offset, bytemuck::cast_slice(&tail));
             }
+            vg.traj_count = needed;
+            vg.traj_generation = v.traj_generation;
             self.ctx.queue().write_buffer(
                 &vg.traj_uniform,
                 0,
@@ -848,6 +930,7 @@ impl egui_wgpu::CallbackTrait for ScenePaintCallback {
                 step_binds,
                 col_binds,
                 errors,
+                metrics: _,
             } = res;
             // Capture bind-group creation errors (GPU-12).
             let scope = GpuErrorHub::open(ctx.device());
@@ -890,6 +973,10 @@ impl egui_wgpu::CallbackTrait for ScenePaintCallback {
         let Some(res) = callback_resources.get::<PlotCallbackResources>() else {
             return;
         };
+
+        // CPU cost of recording this pane's draw commands (§16 `gpu_encode`,
+        // PRF-01); the guard drops at the end of the callback.
+        let _encode_timer = res.metrics.as_ref().map(|m| m.scope("gpu_encode"));
 
         let viewport = info.viewport_in_pixels();
         if viewport.width_px <= 0 || viewport.height_px <= 0 {

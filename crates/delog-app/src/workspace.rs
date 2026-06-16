@@ -102,6 +102,16 @@ pub struct Workspace {
     /// Last plot pane the user clicked — the reference for `←`/`→` sample
     /// stepping (§11, TLN-04).
     pub focused: Option<egui_tiles::TileId>,
+    /// Widest Y-axis gutter across all plot panes from the previous frame, so
+    /// every pane shares one left margin and the plot rects line up vertically
+    /// even when their Y ranges differ wildly (e.g. ~5000 vs ~10). Fed back in
+    /// as `PlotServices::shared_y_gutter`; recomputed each frame from the panes'
+    /// own gutters (PLT-07).
+    pub shared_y_gutter: f32,
+    /// Legend visibility seeded into newly created panes — the global
+    /// `show_legend_default` setting, refreshed each frame by the app so splits
+    /// honour it (PLT-08). The per-pane toggle still overrides it afterwards.
+    pub default_show_legend: bool,
 }
 
 impl Workspace {
@@ -111,6 +121,8 @@ impl Workspace {
         Self {
             tree: egui_tiles::Tree::new("plot_workspace", root, tiles),
             focused: None,
+            shared_y_gutter: 0.0,
+            default_show_legend: true,
         }
     }
 
@@ -225,7 +237,10 @@ impl Workspace {
         direction: SplitDirection,
         before: bool,
     ) -> Option<egui_tiles::TileId> {
-        let new_pane = self.tree.tiles.insert_pane(Pane::Plot(PlotPane::default()));
+        let new_pane = self.tree.tiles.insert_pane(Pane::Plot(PlotPane {
+            show_legend: self.default_show_legend,
+            ..PlotPane::default()
+        }));
         self.attach_split(tile_id, new_pane, direction, before)
     }
 
@@ -363,12 +378,18 @@ pub struct WorkspaceActions {
     pub view_changed: bool,
     /// User clicked the gear on the 3D scene — open the vehicle config dialog.
     pub open_vehicle_config: bool,
+    /// User requested global stats for a plotted trace (ANA-03).
+    pub inspect_field_stats: Option<FieldId>,
+    /// Widest Y-axis gutter any plot pane needed this frame; fed back into
+    /// `Workspace::shared_y_gutter` so next frame's panes share one margin and
+    /// stay vertically aligned (PLT-07).
+    pub max_y_gutter: f32,
 }
 
 pub struct PlotServices<'a> {
     pub frame: &'a eframe::Frame,
     pub snapshot: &'a Arc<StoreSnapshot>,
-    pub metrics: &'a delog_core::metrics::MetricsRegistry,
+    pub metrics: &'a Arc<delog_core::metrics::MetricsRegistry>,
     pub gpu: &'a mut GpuBridge,
     pub caches: &'a mut CacheManager,
     pub view: &'a mut Option<ViewX>,
@@ -387,6 +408,15 @@ pub struct PlotServices<'a> {
     pub vehicles: &'a [crate::vehicle::VehicleConfig],
     /// Cached render-space trajectories, parallel to `vehicles` (TDV-04).
     pub trajectories: &'a [Vec<[f32; 3]>],
+    /// Config generation the cached trajectories were built at (the vehicle
+    /// revision); lets the GPU upload only appended tail points (TDV-04).
+    pub traj_generation: u64,
+    /// Widest Y-axis gutter seen across all plot panes last frame; every pane
+    /// uses at least this much left margin so stacked plots align (PLT-07).
+    pub shared_y_gutter: f32,
+    /// Plot overlay display prefs: legend placement + hover readout contents
+    /// (PLT-08/09). Live-read each frame from the config.
+    pub plot_display: crate::settings::PlotDisplay,
 }
 
 pub struct Behavior<'a> {
@@ -523,15 +553,35 @@ impl Behavior<'_> {
         // frame; trajectories come from the app's epoch-cached build (TDV-04).
         let snapshot = self.services.snapshot;
         let playhead = self.services.playhead_us;
-        let poses: Vec<Option<vehicle::Pose>> = self
-            .services
-            .vehicles
-            .iter()
-            .map(|v| match (v.show, playhead) {
-                (true, Some(t)) => vehicle::pose_at(snapshot, v, t),
-                _ => None,
-            })
-            .collect();
+        // `pose_at` folds GPS-ref resolution and per-playhead reads together; we
+        // split them here (§16, 3D investigation) to see whether the per-frame
+        // `resolve_gps_ref` scan or the O(chunks) `sample_at` reads dominate
+        // `scene_ui`. Resolving the ref once per frame here (instead of inside
+        // each `pose_at`) is also the skeleton for caching it across frames.
+        let gps_refs: Vec<Option<(f64, f64, f64)>> = {
+            let _t = self.services.metrics.scope("scene_gpsref");
+            self.services
+                .vehicles
+                .iter()
+                .map(|v| {
+                    (v.show && playhead.is_some())
+                        .then(|| vehicle::gps_reference(snapshot, v))
+                        .flatten()
+                })
+                .collect()
+        };
+        let poses: Vec<Option<vehicle::Pose>> = {
+            let _t = self.services.metrics.scope("scene_poses");
+            self.services
+                .vehicles
+                .iter()
+                .enumerate()
+                .map(|(i, v)| match (v.show, playhead) {
+                    (true, Some(t)) => vehicle::pose_at_with_ref(snapshot, v, gps_refs[i], t),
+                    _ => None,
+                })
+                .collect()
+        };
 
         let vehicle_count = self.services.vehicles.len();
         if vehicle_count == 0 {
@@ -571,6 +621,7 @@ impl Behavior<'_> {
                     color: legend::color32_to_srgb(v.color),
                     path_color: legend::color32_to_srgb(v.path_color),
                     trajectory: self.services.trajectories.get(i).map_or(&[], Vec::as_slice),
+                    traj_generation: self.services.traj_generation,
                 })
             })
             .collect();
@@ -657,6 +708,12 @@ impl Behavior<'_> {
         tile_id: egui_tiles::TileId,
         pane: &mut PlotPane,
     ) -> egui_tiles::UiResponse {
+        // Per-pane breakdown (§16, PRF-10): `pane_total` is the whole body and
+        // drops on every return path, so `ui_workspace − Σ(pane_total)` is the
+        // egui_tiles layout/drop-zone overhead around the panes; the inner
+        // `pane_setup`/`pane_axes`/`plot_paint_cpu`/`pane_overlay` scopes split
+        // a single pane's cost. All recorded per pane (like `plot_paint_cpu`).
+        let _pane_total = self.services.metrics.scope("pane_total");
         let outer = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(outer, egui::Sense::click_and_drag());
         if response.clicked() || response.drag_started() || response.secondary_clicked() {
@@ -667,14 +724,24 @@ impl Behavior<'_> {
         } else {
             egui_tiles::UiResponse::None
         };
-        let make_plot_rect = |ui: &egui::Ui, y_range: (f32, f32), y_unit: Option<&str>| {
-            let plot_height = (outer.height() - axes::X_GUTTER).max(1.0);
-            let y_gutter = axes::y_gutter(ui, y_range, y_unit, plot_height);
-            egui::Rect::from_min_max(
-                egui::pos2(outer.left() + y_gutter, outer.top() + 4.0),
-                egui::pos2(outer.right() - 4.0, outer.bottom() - axes::X_GUTTER),
-            )
-        };
+        // Stacked plots must share one left margin, else a pane whose labels
+        // read "5000" starts further right than one reading "10" and the plots
+        // are horizontally offset. We take the widest gutter any pane needed
+        // last frame (`shared_y_gutter`) and never go below this pane's own need
+        // (so labels never clip), and report this pane's own gutter back so the
+        // shared value tracks the current set of panes (PLT-07).
+        let shared_gutter = self.services.shared_y_gutter;
+        let make_plot_rect =
+            |ui: &egui::Ui, y_range: (f32, f32), y_unit: Option<&str>| -> (egui::Rect, f32) {
+                let plot_height = (outer.height() - axes::X_GUTTER).max(1.0);
+                let own_gutter = axes::y_gutter(ui, y_range, y_unit, plot_height);
+                let gutter = shared_gutter.max(own_gutter);
+                let rect = egui::Rect::from_min_max(
+                    egui::pos2(outer.left() + gutter, outer.top() + 4.0),
+                    egui::pos2(outer.right() - 4.0, outer.bottom() - axes::X_GUTTER),
+                );
+                (rect, own_gutter)
+            };
 
         if pane.is_empty() {
             // Draw a normal but empty plot frame so the pane reads as a plot
@@ -682,7 +749,8 @@ impl Behavior<'_> {
             // (set from data, or the empty-session placeholder) so the pane
             // pans and zooms with the rest; else a neutral 0..1 fallback.
             let y_range = (0.0, 1.0);
-            let plot_rect = make_plot_rect(ui, y_range, None);
+            let (plot_rect, own_gutter) = make_plot_rect(ui, y_range, None);
+            self.actions.max_y_gutter = self.actions.max_y_gutter.max(own_gutter);
             self.handle_plot_interaction(&response, plot_rect);
             if plot_rect.width() > 8.0 {
                 let x_range = (*self.services.view)
@@ -696,18 +764,24 @@ impl Behavior<'_> {
         }
 
         let Some(view) = *self.services.view else {
-            let plot_rect = make_plot_rect(ui, (0.0, 1.0), None);
+            let (plot_rect, own_gutter) = make_plot_rect(ui, (0.0, 1.0), None);
+            self.actions.max_y_gutter = self.actions.max_y_gutter.max(own_gutter);
             self.handle_plot_interaction(&response, plot_rect);
             self.plot_context_menu(tile_id, &response, pane);
             self.plot_info_window(ui, tile_id, pane, None);
             return tile_response;
         };
+        // Geometry + interaction: X/Y ranges, the Y-gutter text layout inside
+        // `make_plot_rect`, and pan/zoom handling (`yquery` is the auto-Y query
+        // nested within). Re-runs once if interaction moved the view.
+        let pane_setup_timer = self.services.metrics.scope("pane_setup");
         let mut x_range = view.seconds(self.services.origin_us);
         let y_start = Instant::now();
         let mut y_range = gpu::visible_y_range(self.services.caches, pane, x_range.0, x_range.1);
         let mut y_query_us = y_start.elapsed().as_secs_f32() * 1_000_000.0;
         let y_unit = y_unit(self.services.snapshot.as_ref(), pane);
-        let mut plot_rect = make_plot_rect(ui, y_range, y_unit.as_deref());
+        let (mut plot_rect, own_gutter) = make_plot_rect(ui, y_range, y_unit.as_deref());
+        self.actions.max_y_gutter = self.actions.max_y_gutter.max(own_gutter);
         let view_before_interaction = *self.services.view;
         self.handle_plot_interaction(&response, plot_rect);
         if *self.services.view != view_before_interaction
@@ -717,8 +791,11 @@ impl Behavior<'_> {
             let y_start = Instant::now();
             y_range = gpu::visible_y_range(self.services.caches, pane, x_range.0, x_range.1);
             y_query_us += y_start.elapsed().as_secs_f32() * 1_000_000.0;
-            plot_rect = make_plot_rect(ui, y_range, y_unit.as_deref());
+            let (rect, own_gutter) = make_plot_rect(ui, y_range, y_unit.as_deref());
+            plot_rect = rect;
+            self.actions.max_y_gutter = self.actions.max_y_gutter.max(own_gutter);
         }
+        drop(pane_setup_timer);
 
         if !self.services.gpu.is_available() || plot_rect.width() <= 8.0 {
             self.plot_context_menu(tile_id, &response, pane);
@@ -726,7 +803,9 @@ impl Behavior<'_> {
             return tile_response;
         }
 
+        let pane_axes_timer = self.services.metrics.scope("pane_axes");
         axes::draw(ui, plot_rect, x_range, y_range, y_unit.as_deref());
+        drop(pane_axes_timer);
         let pview = PaneView {
             rect: plot_rect,
             x_range,
@@ -740,8 +819,14 @@ impl Behavior<'_> {
             pane,
             pview,
             self.services.render_tuning,
+            self.services.metrics,
         );
         let paint_us = paint_start.elapsed().as_secs_f32() * 1_000_000.0;
+        // §16 timers (ms): auto-Y range query and the CPU paint/encode prep.
+        self.services.metrics.record("yquery", y_query_us / 1_000.0);
+        self.services
+            .metrics
+            .record("plot_paint_cpu", paint_us / 1_000.0);
         let debug = PlotDebug {
             plot_rect,
             x_range,
@@ -750,6 +835,10 @@ impl Behavior<'_> {
             paint_us,
         };
 
+        // Post-paint egui widgets: context menu, playhead/hover readout,
+        // legend and the per-pane info window. All CPU-side egui, drawn over
+        // the GPU trace callback.
+        let pane_overlay_timer = self.services.metrics.scope("pane_overlay");
         self.plot_context_menu(tile_id, &response, pane);
 
         // Playhead cursor + value readout on every pane (§10.5, PLT-10). During
@@ -774,6 +863,9 @@ impl Behavior<'_> {
                 self.services.origin_us,
                 t_us,
                 readout,
+                self.services.plot_display.hover_show_field_name,
+                self.services.plot_display.hover_show_time,
+                self.services.plot_display.hover_opacity,
             );
         }
 
@@ -801,6 +893,9 @@ impl Behavior<'_> {
                 self.services.origin_us,
                 *self.services.hover_mode,
                 !self.services.playing,
+                self.services.plot_display.hover_show_field_name,
+                self.services.plot_display.hover_show_time,
+                self.services.plot_display.hover_opacity,
             );
         }
 
@@ -819,6 +914,8 @@ impl Behavior<'_> {
                 ui,
                 egui::Id::new(("plot_legend", tile_id)),
                 plot_rect,
+                self.services.plot_display.legend_position,
+                self.services.plot_display.legend_opacity,
                 pane,
                 &labels,
             ) {
@@ -829,6 +926,7 @@ impl Behavior<'_> {
         }
 
         self.plot_info_window(ui, tile_id, pane, Some(debug));
+        drop(pane_overlay_timer);
         tile_response
     }
 
@@ -874,7 +972,7 @@ impl Behavior<'_> {
                 for (field, label, color) in entries {
                     let clicked = ui
                         .horizontal(|ui| {
-                            ui.colored_label(color, "■");
+                            color_swatch(ui, color);
                             ui.button(label).clicked()
                         })
                         .inner;
@@ -882,6 +980,36 @@ impl Behavior<'_> {
                         pane.remove_trace(field);
                         self.services.caches.unpin(field);
                         self.actions.remove_trace.push(field);
+                        ui.close();
+                    }
+                }
+            });
+
+            // Field stats — submenu listing each trace.
+            ui.menu_image_text_button(menu_icon(ui, crate::icons::info()), "Field stats", |ui| {
+                let entries: Vec<_> = pane
+                    .traces
+                    .iter()
+                    .map(|t| {
+                        (
+                            t.field,
+                            legend::trace_label(self.services.snapshot.as_ref(), t.field),
+                            t.color32(),
+                        )
+                    })
+                    .collect();
+                if entries.is_empty() {
+                    ui.add_enabled(false, egui::Button::new("No traces"));
+                }
+                for (field, label, color) in entries {
+                    let clicked = ui
+                        .horizontal(|ui| {
+                            color_swatch(ui, color);
+                            ui.button(label).clicked()
+                        })
+                        .inner;
+                    if clicked {
+                        self.actions.inspect_field_stats = Some(field);
                         ui.close();
                     }
                 }
@@ -1263,6 +1391,11 @@ fn menu_icon(ui: &egui::Ui, src: egui::ImageSource<'static>) -> egui::Image<'sta
     egui::Image::new(src)
         .fit_to_exact_size(egui::vec2(16.0, 16.0))
         .tint(ui.visuals().text_color())
+}
+
+fn color_swatch(ui: &mut egui::Ui, color: egui::Color32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 2.0, color);
 }
 
 fn format_bytes(bytes: u64) -> String {

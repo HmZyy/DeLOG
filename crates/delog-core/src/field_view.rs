@@ -146,6 +146,20 @@ impl<'a> FieldView<'a> {
     }
 
     fn prev_sample(&'a self, raw_time: TimestampUs) -> Option<Sample<'a>> {
+        // Fast path: a sorted, non-overlapping spine lets us binary-search to
+        // the one chunk that can hold the predecessor — O(log chunks) instead
+        // of scanning every chunk (which dominated the 3D pose reads, PRF-11).
+        if self.store.is_monotonic() {
+            let chunks = &self.store.chunks;
+            // Rightmost chunk whose t_min <= raw_time; later chunks start after
+            // raw_time, earlier ones end before this chunk's first sample.
+            let idx = chunks
+                .partition_point(|c| c.t_min <= raw_time)
+                .checked_sub(1)?;
+            let chunk = &chunks[idx];
+            let row = upper_bound(&chunk.t, raw_time).checked_sub(1)?;
+            return self.sample_from_chunk(chunk, row);
+        }
         let mut best = None;
         for chunk in self.store.chunks.iter() {
             if chunk.t_min > raw_time {
@@ -166,6 +180,15 @@ impl<'a> FieldView<'a> {
     }
 
     fn next_sample(&'a self, raw_time: TimestampUs) -> Option<Sample<'a>> {
+        if self.store.is_monotonic() {
+            let chunks = &self.store.chunks;
+            // Leftmost chunk whose t_max >= raw_time; it holds the successor
+            // (earlier chunks end before raw_time).
+            let idx = chunks.partition_point(|c| c.t_max < raw_time);
+            let chunk = chunks.get(idx)?;
+            let row = lower_bound(&chunk.t, raw_time);
+            return self.sample_from_chunk(chunk, row);
+        }
         let mut best = None;
         for chunk in self.store.chunks.iter() {
             if chunk.t_max < raw_time {
@@ -511,6 +534,63 @@ mod tests {
                 effective_time_us: 1_300,
                 value: SampleValue::Float(30.0),
             })
+        );
+    }
+
+    #[test]
+    fn sample_at_falls_back_to_linear_scan_for_overlapping_chunks() {
+        // Out-of-order source (§4.3): chunk A spans [0, 200], chunk B spans
+        // [100, 300] — the spine overlaps, so it is not monotonic and the
+        // binary-search fast path must not engage. The predecessor of 150 lives
+        // in the *later* chunk B (t=100) and the successor in the *earlier*
+        // chunk A (t=200), which a naive bsearch would miss.
+        let mut identity = IdentityRegistry::new();
+        let source = identity.add_source("flight");
+        let topic = identity.add_topic(source, "BARO").unwrap();
+        let alt = identity.add_field(topic, "Alt").unwrap();
+        let schema = Arc::new(
+            TopicSchema::new(
+                "BARO",
+                [FieldSchema::new("Alt", DataType::Float64, Some("m"), 1.0).unwrap()],
+            )
+            .unwrap(),
+        );
+        let chunk_a = Arc::new(
+            Chunk::try_new(
+                Int64Array::from(vec![0, 200]),
+                vec![Arc::new(Float64Array::from(vec![0.0, 20.0])) as ArrayRef],
+                &schema,
+            )
+            .unwrap(),
+        );
+        let chunk_b = Arc::new(
+            Chunk::try_new(
+                Int64Array::from(vec![100, 300]),
+                vec![Arc::new(Float64Array::from(vec![10.0, 30.0])) as ArrayRef],
+                &schema,
+            )
+            .unwrap(),
+        );
+        let store = Arc::new(TopicStore::from_chunks(schema, [chunk_a, chunk_b]).unwrap());
+        assert!(!store.is_monotonic());
+        let snapshot = StoreSnapshot::from_registry(&identity, [(topic, store)], 0).unwrap();
+        let alt = FieldView::new(&snapshot, alt).unwrap();
+
+        assert_eq!(
+            alt.sample_at(150, SampleMode::Prev).map(|s| s.raw_time_us),
+            Some(100)
+        );
+        assert_eq!(
+            alt.sample_at(150, SampleMode::Next).map(|s| s.raw_time_us),
+            Some(200)
+        );
+        assert_eq!(
+            alt.sample_at(300, SampleMode::Prev).map(|s| s.raw_time_us),
+            Some(300)
+        );
+        assert_eq!(
+            alt.sample_at(0, SampleMode::Next).map(|s| s.raw_time_us),
+            Some(0)
         );
     }
 

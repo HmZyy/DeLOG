@@ -302,7 +302,7 @@ fn take_number(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> u128 {
 
 /// Whitespace-separated query tokens each match the path case-insensitively
 /// (`gps hacc` matches `GPS[0].HAcc`, §13). Blank queries match everything.
-fn matches_query(query: &str, path: &str) -> bool {
+pub(crate) fn matches_query(query: &str, path: &str) -> bool {
     let path = path.to_lowercase();
     query
         .split_whitespace()
@@ -318,6 +318,10 @@ pub struct BrowserResponse {
     pub offset_change: Option<(SourceId, i64)>,
     /// The user right-clicked a source and asked to remove it (BRW-06).
     pub remove_source: Option<SourceId>,
+    /// The user requested source metadata/params/link information (DIA-06).
+    pub inspect_source: Option<SourceId>,
+    /// The user requested global stats for a field (ANA-03).
+    pub inspect_field_stats: Option<FieldId>,
     /// The user asked to collapse the data browser panel.
     pub collapse_requested: bool,
 }
@@ -395,6 +399,8 @@ pub fn ui(
 
     let mut offset_change = None;
     let mut remove_source = None;
+    let mut inspect_source = None;
+    let mut inspect_field_stats = None;
     egui::ScrollArea::vertical()
         .auto_shrink([false, true])
         .show(ui, |ui| {
@@ -429,12 +435,24 @@ pub fn ui(
                             .open(filtering.then_some(true))
                             .show(ui, |ui| {
                                 for field in &topic.fields {
-                                    field_row(ui, field, selection, &visible);
+                                    if let Some(field) = field_row(ui, field, selection, &visible) {
+                                        inspect_field_stats = Some(field);
+                                    }
                                 }
                             });
                         }
                     });
                 collapsing.header_response.context_menu(|ui| {
+                    let info = egui::Image::new(crate::icons::info())
+                        .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
+                        .tint(ui.visuals().text_color());
+                    if ui
+                        .add(egui::Button::image_and_text(info, "Source metadata"))
+                        .clicked()
+                    {
+                        inspect_source = Some(source.id);
+                        ui.close();
+                    }
                     let trash = egui::Image::new(crate::icons::trash())
                         .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
                         .tint(ui.visuals().error_fg_color);
@@ -454,11 +472,13 @@ pub fn ui(
     }
     response.offset_change = offset_change;
     response.remove_source = remove_source;
+    response.inspect_source = inspect_source;
+    response.inspect_field_stats = inspect_field_stats;
     response
 }
 
-/// Inline drag-µs offset on the source row (§13/§4.2, BRW-07): dragging
-/// shifts the source in ~1 ms steps; the ⏱ button opens the exact-µs dialog.
+/// Inline drag-us offset on the source row (§13/§4.2, BRW-07): dragging
+/// shifts the source in ~1 ms steps; the clock button opens the exact-us dialog.
 fn offset_widget(
     ui: &mut egui::Ui,
     source: &SourceNode,
@@ -476,9 +496,12 @@ fn offset_widget(
     if response.changed() {
         change = Some((source.id, (secs * 1e6).round() as i64));
     }
+    let clock = egui::Image::new(crate::icons::clock())
+        .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
+        .tint(ui.visuals().text_color());
     if ui
-        .small_button("⏱")
-        .on_hover_text("Set exact offset (µs)…")
+        .add(egui::Button::image(clock))
+        .on_hover_text("Set exact offset (us)")
         .clicked()
     {
         *offset_dialog = Some((source.id, source.offset_us));
@@ -526,7 +549,13 @@ fn offset_dialog_window(
     change
 }
 
-fn field_row(ui: &mut egui::Ui, field: &FieldNode, selection: &mut Selection, visible: &[FieldId]) {
+fn field_row(
+    ui: &mut egui::Ui,
+    field: &FieldNode,
+    selection: &mut Selection,
+    visible: &[FieldId],
+) -> Option<FieldId> {
+    let mut inspect = None;
     // The row is a drag source carrying `Vec<FieldId>` — the multi-selection
     // when the dragged row is part of it (§10.7, BRW-05); plot panes and tile
     // edges are the drop zones (PLT-13).
@@ -570,6 +599,19 @@ fn field_row(ui: &mut egui::Ui, field: &FieldNode, selection: &mut Selection, vi
             selection.click(field.id, current_select_modifier(ui), visible);
         }
     }
+    response.context_menu(|ui| {
+        let info = egui::Image::new(crate::icons::info())
+            .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
+            .tint(ui.visuals().text_color());
+        if ui
+            .add(egui::Button::image_and_text(info, "Field stats"))
+            .clicked()
+        {
+            inspect = Some(field.id);
+            ui.close();
+        }
+    });
+    inspect
 }
 
 fn current_select_modifier(ui: &egui::Ui) -> SelectMod {

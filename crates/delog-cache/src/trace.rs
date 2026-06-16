@@ -16,6 +16,7 @@ use arrow::array::{
 use arrow::datatypes::DataType;
 
 use delog_core::identity::FieldId;
+use delog_core::metrics::MetricsRegistry;
 use delog_core::snapshot::StoreSnapshot;
 use delog_core::store::TopicStore;
 
@@ -73,6 +74,7 @@ impl TraceCache {
         field: FieldId,
         origin_us: i64,
         frame: u64,
+        metrics: &MetricsRegistry,
     ) -> Option<Self> {
         let r = resolve(snapshot, field)?;
         let mut xy = Vec::with_capacity(r.store.rows as usize * 2);
@@ -87,7 +89,10 @@ impl TraceCache {
                 0,
             );
         }
-        let pyramid = MinMaxPyramid::build_strided(&xy, 2, 1);
+        let pyramid = {
+            let _t = metrics.scope("minmax_build");
+            MinMaxPyramid::build_strided(&xy, 2, 1)
+        };
         Some(Self {
             xy,
             origin_us,
@@ -108,7 +113,12 @@ impl TraceCache {
     /// `true` if any rows were added. Uses the cache's fixed `origin_us`; a
     /// changed global origin is a rebuild, not an append (handled by the
     /// manager, §8.3).
-    pub fn append(&mut self, snapshot: &StoreSnapshot, field: FieldId) -> bool {
+    pub fn append(
+        &mut self,
+        snapshot: &StoreSnapshot,
+        field: FieldId,
+        metrics: &MetricsRegistry,
+    ) -> bool {
         let Some(r) = resolve(snapshot, field) else {
             return false;
         };
@@ -135,7 +145,10 @@ impl TraceCache {
             consumed += len;
         }
 
-        self.pyramid.extend(&self.xy);
+        {
+            let _t = metrics.scope("minmax_build");
+            self.pyramid.extend(&self.xy);
+        }
         self.built_rows = r.store.rows;
         true
     }
@@ -470,7 +483,7 @@ mod tests {
         );
         // origin = first effective time = 1_000_000 + 5_000_000.
         let origin = 6_000_000;
-        let cache = TraceCache::build(&snap, field, origin, 0).unwrap();
+        let cache = TraceCache::build(&snap, field, origin, 0, &MetricsRegistry::new()).unwrap();
 
         assert_eq!(cache.samples(), 3);
         assert_eq!(cache.built_rows, 3);
@@ -491,7 +504,7 @@ mod tests {
     #[test]
     fn null_cells_become_nan_gaps() {
         let (snap, field) = snapshot_with(vec![0, 1, 2], vec![Some(100), None, Some(300)], 0);
-        let cache = TraceCache::build(&snap, field, 0, 0).unwrap();
+        let cache = TraceCache::build(&snap, field, 0, 0, &MetricsRegistry::new()).unwrap();
         assert_eq!(cache.xy[1], 1.0);
         assert!(cache.xy[3].is_nan()); // the gap
         assert_eq!(cache.xy[5], 3.0);
@@ -509,7 +522,7 @@ mod tests {
             vec![Some(0), Some(100), Some(200), Some(300), Some(400)],
             0,
         );
-        let cache = TraceCache::build(&snap, field, 0, 0).unwrap();
+        let cache = TraceCache::build(&snap, field, 0, 0, &MetricsRegistry::new()).unwrap();
 
         // Window [1.0, 3.0] s covers samples at indices 1,2,3.
         let (a, b) = cache.index_range(1.0, 3.0);
@@ -533,7 +546,7 @@ mod tests {
             vec![Some(0), Some(100), Some(200), Some(300), Some(400)],
             0,
         );
-        let cache = TraceCache::build(&snap, field, 0, 0).unwrap();
+        let cache = TraceCache::build(&snap, field, 0, 0, &MetricsRegistry::new()).unwrap();
 
         // 4 columns over [0,4]s → 1-second half-open columns [c, c+1).
         let cols = cache.minmax_columns(0.0, 4.0, 4, true);
@@ -563,7 +576,7 @@ mod tests {
         let mut alts: Vec<Option<i32>> = (0..1000).map(|i| Some(i * 100)).collect(); // y = i
         alts[300] = Some(999_900); // y = 9999 spike, in column 1
         let (snap, field) = snapshot_with(times, alts, 0);
-        let cache = TraceCache::build(&snap, field, 0, 0).unwrap();
+        let cache = TraceCache::build(&snap, field, 0, 0, &MetricsRegistry::new()).unwrap();
 
         let x1 = 999.0 * 1e-6;
         let cols = cache.minmax_columns(0.0, x1, 4, true);
@@ -582,7 +595,7 @@ mod tests {
     #[test]
     fn append_adds_only_new_rows_and_extends_the_pyramid() {
         let (snap1, field) = snapshot_with(vec![0, 1_000_000], vec![Some(100), Some(200)], 0);
-        let mut cache = TraceCache::build(&snap1, field, 0, 0).unwrap();
+        let mut cache = TraceCache::build(&snap1, field, 0, 0, &MetricsRegistry::new()).unwrap();
         assert_eq!(cache.samples(), 2);
 
         // A later snapshot of the same field with two more rows.
@@ -593,14 +606,14 @@ mod tests {
         );
         assert_eq!(field, field2);
 
-        assert!(cache.append(&snap2, field));
+        assert!(cache.append(&snap2, field, &MetricsRegistry::new()));
         assert_eq!(cache.samples(), 4);
         assert_eq!(cache.built_rows, 4);
         assert_eq!(cache.xy[4], 2.0); // x of 3rd sample = 2 s
         assert_eq!(cache.xy[5], 0.5); // y = 50 * 0.01
 
         // No-op when nothing new.
-        assert!(!cache.append(&snap2, field));
+        assert!(!cache.append(&snap2, field, &MetricsRegistry::new()));
 
         let q = cache.pyramid.query(&cache.xy, 0, 4);
         assert_eq!(q.min, 0.5);

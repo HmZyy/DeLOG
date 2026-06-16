@@ -11,6 +11,12 @@ fn default_line_aa_px() -> f32 {
 fn default_true() -> bool {
     true
 }
+fn default_opacity() -> f32 {
+    0.85
+}
+fn default_font_size() -> f32 {
+    14.0
+}
 #[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AppSettings {
     #[serde(default)]
@@ -21,6 +27,10 @@ pub struct AppSettings {
     /// Show the corner FPS badge (PRF-08). Default off.
     #[serde(default)]
     pub show_fps: bool,
+    /// Show the F12 debug overlay of frame timings (PRF-06). Default off;
+    /// toggled by the View menu or the F12 key.
+    #[serde(default)]
+    pub show_debug_overlay: bool,
     /// Frame-pacing policy (PRF-09). Default `Reactive`.
     #[serde(default)]
     pub render_mode: RenderMode,
@@ -30,6 +40,121 @@ pub struct AppSettings {
     /// 3D scene render and camera tuning.
     #[serde(default)]
     pub scene3d: Scene3dSettings,
+    /// Plot overlay display (legend placement + hover readout contents).
+    #[serde(default)]
+    pub plot: PlotDisplay,
+    /// Optional global font override (size + family), like the egui demo.
+    #[serde(default)]
+    pub font: FontOverride,
+}
+
+/// Global font override applied through `Style::override_font_id` (UIX-13),
+/// mirroring the egui demo's font control. Disabled by default (egui's own
+/// per-text-style fonts are used).
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct FontOverride {
+    /// When off, no override is applied.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Point size used for every text style while enabled.
+    #[serde(default = "default_font_size")]
+    pub size: f32,
+    /// `true` selects the monospace family, `false` proportional.
+    #[serde(default)]
+    pub monospace: bool,
+}
+
+impl Default for FontOverride {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            size: default_font_size(),
+            monospace: false,
+        }
+    }
+}
+
+impl FontOverride {
+    /// Push (or clear) the override on every theme's style. Cheap; called each
+    /// frame so toggling it off restores the defaults immediately.
+    pub fn apply(self, ctx: &egui::Context) {
+        let font_id = self.enabled.then(|| {
+            let family = if self.monospace {
+                egui::FontFamily::Monospace
+            } else {
+                egui::FontFamily::Proportional
+            };
+            egui::FontId::new(self.size.clamp(4.0, 40.0), family)
+        });
+        ctx.all_styles_mut(|style| style.override_font_id = font_id.clone());
+    }
+}
+
+/// Where the per-pane legend overlay sits inside the plot rect (PLT-08).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LegendPosition {
+    #[default]
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl LegendPosition {
+    pub const ALL: [Self; 4] = [
+        Self::TopLeft,
+        Self::TopRight,
+        Self::BottomLeft,
+        Self::BottomRight,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::TopLeft => "Top left",
+            Self::TopRight => "Top right",
+            Self::BottomLeft => "Bottom left",
+            Self::BottomRight => "Bottom right",
+        }
+    }
+}
+
+/// Plot overlay display preferences (legend + hover readout). All live-read each
+/// frame so changes apply immediately; `show_legend_default` only seeds newly
+/// created panes (PLT-08/09).
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PlotDisplay {
+    /// Corner the legend overlay anchors to.
+    #[serde(default)]
+    pub legend_position: LegendPosition,
+    /// Legend visibility for newly created panes (per-pane toggle overrides it).
+    #[serde(default = "default_true")]
+    pub show_legend_default: bool,
+    /// Legend background opacity (1 = solid, 0 = fully transparent).
+    #[serde(default = "default_opacity")]
+    pub legend_opacity: f32,
+    /// Show the `topic.field` name on each hover/playhead readout row.
+    #[serde(default)]
+    pub hover_show_field_name: bool,
+    /// Show the time header on the hover/playhead readout.
+    #[serde(default)]
+    pub hover_show_time: bool,
+    /// Hover/playhead readout background opacity (1 = solid, 0 = transparent).
+    #[serde(default = "default_opacity")]
+    pub hover_opacity: f32,
+}
+
+impl Default for PlotDisplay {
+    fn default() -> Self {
+        Self {
+            legend_position: LegendPosition::default(),
+            show_legend_default: true,
+            legend_opacity: 1.0,
+            hover_show_field_name: false,
+            hover_show_time: false,
+            hover_opacity: 1.0,
+        }
+    }
 }
 
 /// Knobs for the plot draw path (§9.5 decimation + line/edge AA). Lives in the
@@ -251,16 +376,18 @@ impl Scene3dSettings {
 enum SettingsTab {
     #[default]
     General,
+    Plots,
     Rendering,
     Scene3d,
 }
 
 impl SettingsTab {
-    const ALL: [Self; 3] = [Self::General, Self::Rendering, Self::Scene3d];
+    const ALL: [Self; 4] = [Self::General, Self::Plots, Self::Rendering, Self::Scene3d];
 
     const fn label(self) -> &'static str {
         match self {
             Self::General => "General",
+            Self::Plots => "Plots",
             Self::Rendering => "Rendering",
             Self::Scene3d => "3D View",
         }
@@ -299,6 +426,9 @@ impl SettingsDialog {
                         match self.selected_tab {
                             SettingsTab::General => {
                                 change |= general_tab(ui, settings);
+                            }
+                            SettingsTab::Plots => {
+                                plots_tab(ui, settings);
                             }
                             SettingsTab::Rendering => {
                                 rendering_tab(ui, settings);
@@ -370,10 +500,83 @@ fn general_tab(ui: &mut egui::Ui, settings: &mut AppSettings) -> SettingsChange 
                     }
                 });
             ui.end_row();
+
+            let f = &mut settings.font;
+            ui.label("Override font")
+                .on_hover_text("Force one font (size + family) for all UI text, like the egui demo. Off uses egui's per-style fonts.");
+            ui.checkbox(&mut f.enabled, "");
+            ui.end_row();
+
+            ui.label("Font size");
+            ui.add_enabled(
+                f.enabled,
+                egui::DragValue::new(&mut f.size).range(4.0..=40.0).speed(0.25),
+            );
+            ui.end_row();
+
+            ui.label("Font family");
+            ui.add_enabled_ui(f.enabled, |ui| {
+                ui.horizontal(|ui| {
+                    ui.radio_value(&mut f.monospace, false, "Proportional");
+                    ui.radio_value(&mut f.monospace, true, "Monospace");
+                });
+            });
+            ui.end_row();
         });
 
     SettingsChange {
         theme_changed: settings.theme != before,
+    }
+}
+
+fn plots_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
+    let p = &mut settings.plot;
+    ui.heading("Plots");
+    ui.add_space(8.0);
+    egui::Grid::new("settings-plots-grid")
+        .num_columns(2)
+        .spacing(egui::vec2(16.0, 10.0))
+        .show(ui, |ui| {
+            ui.label("Legend position")
+                .on_hover_text("Corner the legend overlay anchors to inside each plot.");
+            egui::ComboBox::from_id_salt("settings-legend-position")
+                .selected_text(p.legend_position.label())
+                .show_ui(ui, |ui| {
+                    for pos in LegendPosition::ALL {
+                        ui.selectable_value(&mut p.legend_position, pos, pos.label());
+                    }
+                });
+            ui.end_row();
+
+            ui.label("Show legend by default")
+                .on_hover_text("Show the legend on newly created plots. Each plot's right-click menu can still toggle it.");
+            ui.checkbox(&mut p.show_legend_default, "");
+            ui.end_row();
+
+            ui.label("Legend background")
+                .on_hover_text("Opacity of the legend's background panel. 1 = solid, 0 = fully transparent.");
+            ui.add(egui::Slider::new(&mut p.legend_opacity, 0.0..=1.0));
+            ui.end_row();
+
+            ui.label("Hover: field name")
+                .on_hover_text("Show the topic.field name on each hover/playhead readout row.");
+            ui.checkbox(&mut p.hover_show_field_name, "");
+            ui.end_row();
+
+            ui.label("Hover: time")
+                .on_hover_text("Show the time header on the hover/playhead readout.");
+            ui.checkbox(&mut p.hover_show_time, "");
+            ui.end_row();
+
+            ui.label("Hover background")
+                .on_hover_text("Opacity of the hover/playhead readout's background panel. 1 = solid, 0 = fully transparent.");
+            ui.add(egui::Slider::new(&mut p.hover_opacity, 0.0..=1.0));
+            ui.end_row();
+        });
+
+    ui.add_space(10.0);
+    if ui.button("Reset to defaults").clicked() {
+        settings.plot = PlotDisplay::default();
     }
 }
 
@@ -503,7 +706,73 @@ mod tests {
             .into_iter()
             .map(SettingsTab::label)
             .collect();
-        assert_eq!(labels, ["General", "Rendering", "3D View"]);
+        assert_eq!(labels, ["General", "Plots", "Rendering", "3D View"]);
+    }
+
+    #[test]
+    fn plot_display_defaults_show_legend_top_left_with_minimal_hover() {
+        let p = PlotDisplay::default();
+        assert_eq!(p.legend_position, LegendPosition::TopLeft);
+        assert!(p.show_legend_default);
+        // Hover readout stays minimal by default: no field name, no time header.
+        assert!(!p.hover_show_field_name);
+        assert!(!p.hover_show_time);
+        // Backgrounds are solid by default (current look preserved).
+        assert_eq!(p.legend_opacity, 1.0);
+        assert_eq!(p.hover_opacity, 1.0);
+    }
+
+    #[test]
+    fn app_settings_persist_plot_display() {
+        let settings = AppSettings {
+            plot: PlotDisplay {
+                legend_position: LegendPosition::BottomRight,
+                show_legend_default: false,
+                legend_opacity: 0.5,
+                hover_show_field_name: false,
+                hover_show_time: false,
+                hover_opacity: 0.25,
+            },
+            ..AppSettings::default()
+        };
+
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(json.contains("legend_position"));
+        let decoded: AppSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.plot, settings.plot);
+    }
+
+    #[test]
+    fn font_override_defaults_off_proportional_14() {
+        let f = FontOverride::default();
+        assert!(!f.enabled);
+        assert!(!f.monospace);
+        assert_eq!(f.size, 14.0);
+    }
+
+    #[test]
+    fn app_settings_persist_font_override() {
+        let settings = AppSettings {
+            font: FontOverride {
+                enabled: true,
+                size: 20.0,
+                monospace: true,
+            },
+            ..AppSettings::default()
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(json.contains("\"font\""));
+        let decoded: AppSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.font, settings.font);
+    }
+
+    #[test]
+    fn old_config_without_plot_display_defaults_it() {
+        let json = r#"{"theme":"catppuccin_mocha"}"#;
+        let s: AppSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(s.plot.legend_position, LegendPosition::TopLeft);
+        assert!(s.plot.show_legend_default);
+        assert!(!s.plot.hover_show_time);
     }
 
     #[test]

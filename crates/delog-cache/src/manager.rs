@@ -13,6 +13,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 
 use delog_core::identity::FieldId;
 use delog_core::mem::MemBreakdown;
+use delog_core::metrics::MetricsRegistry;
 use delog_core::snapshot::StoreSnapshot;
 
 use crate::trace::TraceCache;
@@ -37,6 +38,10 @@ pub struct CacheManager {
     origin_us: i64,
     built_tx: Sender<(FieldId, Option<TraceCache>)>,
     built_rx: Receiver<(FieldId, Option<TraceCache>)>,
+    /// Shared metrics registry (§16). Defaults to a private registry; the app
+    /// swaps in the shared one via [`CacheManager::with_metrics`] so the perf
+    /// dock sees `cache_build`/`cache_append`/`minmax_build`.
+    metrics: Arc<MetricsRegistry>,
 }
 
 impl CacheManager {
@@ -54,7 +59,15 @@ impl CacheManager {
             origin_us: 0,
             built_tx,
             built_rx,
+            metrics: Arc::new(MetricsRegistry::new()),
         }
+    }
+
+    /// Record cache build/append timings into the shared registry (§16,
+    /// PRF-01).
+    pub fn with_metrics(mut self, metrics: Arc<MetricsRegistry>) -> Self {
+        self.metrics = metrics;
+        self
     }
 
     /// Advance the frame counter (drives LRU recency).
@@ -82,10 +95,14 @@ impl CacheManager {
         let snap = Arc::clone(snapshot);
         let origin = self.origin_us;
         let frame = self.frame;
+        let metrics = Arc::clone(&self.metrics);
         std::thread::Builder::new()
             .name("delog-cache-build".into())
             .spawn(move || {
-                let cache = TraceCache::build(&snap, field, origin, frame);
+                let cache = {
+                    let _t = metrics.scope("cache_build");
+                    TraceCache::build(&snap, field, origin, frame, &metrics)
+                };
                 let _ = tx.send((field, cache));
             })
             .expect("spawn cache build thread");
@@ -99,7 +116,10 @@ impl CacheManager {
 
     /// Drain finished builds into ready slots. A build that found no data
     /// removes its slot so a later request retries. Call once per frame.
-    pub fn poll_builds(&mut self) {
+    /// Returns fields whose build produced no cache so the app can surface a
+    /// cache diagnostic without adding a core diagnostic dependency here.
+    pub fn poll_builds(&mut self) -> Vec<FieldId> {
+        let mut empty = Vec::new();
         while let Ok((field, result)) = self.built_rx.try_recv() {
             match result {
                 Some(cache) => {
@@ -107,9 +127,11 @@ impl CacheManager {
                 }
                 None => {
                     self.caches.remove(&field);
+                    empty.push(field);
                 }
             }
         }
+        empty
     }
 
     /// On a new store epoch: append new rows to ready caches and GC caches whose
@@ -122,9 +144,11 @@ impl CacheManager {
             Slot::Ready(cache) => !cache.offset_changed(snapshot, field),
             Slot::Building => true,
         });
+        let metrics = Arc::clone(&self.metrics);
         for (&field, slot) in self.caches.iter_mut() {
             if let Slot::Ready(cache) = slot {
-                cache.append(snapshot, field);
+                let _t = metrics.scope("cache_append");
+                cache.append(snapshot, field, &metrics);
             }
         }
         self.gc(snapshot);
@@ -200,6 +224,23 @@ impl CacheManager {
         MemBreakdown {
             cache_cpu: bytes,
             ..MemBreakdown::ZERO
+        }
+    }
+
+    pub fn field_samples(&self, field: FieldId) -> Option<usize> {
+        match self.caches.get(&field) {
+            Some(Slot::Ready(c)) => Some(c.samples()),
+            _ => None,
+        }
+    }
+
+    pub fn field_visible_samples(&self, field: FieldId, x0: f32, x1: f32) -> Option<usize> {
+        match self.caches.get(&field) {
+            Some(Slot::Ready(c)) => {
+                let (a, b) = c.index_range(x0, x1);
+                Some(b.saturating_sub(a))
+            }
+            _ => None,
         }
     }
 

@@ -20,6 +20,17 @@ const F32: u64 = std::mem::size_of::<f32>() as u64;
 /// Smallest buffer allocated, in floats — avoids churn on tiny traces.
 const MIN_CAPACITY_FLOATS: u64 = 1024;
 
+/// What a single [`BufferManager::sync`] call actually uploaded — the caller
+/// feeds it into the `upload_bytes`/`gpu_full_uploads` metrics (§16, PRF-01).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UploadStat {
+    /// Bytes written to the GPU this call (0 for a no-op resync).
+    pub bytes: u64,
+    /// Whether this was a full re-upload (first alloc, grow, or rebuild) rather
+    /// than a clean tail append.
+    pub full_upload: bool,
+}
+
 /// One trace's GPU storage buffer and its fill state.
 struct TraceGpu {
     buf: wgpu::Buffer,
@@ -46,10 +57,10 @@ impl BufferManager {
     /// Mirror `xy` into `field`'s GPU buffer. Pass `rebuilt = true` when the
     /// contents changed wholesale (rebuild/rebase); otherwise only the appended
     /// tail beyond what is already resident is uploaded (ZC-4).
-    pub fn sync(&mut self, field: FieldId, xy: &[f32], rebuilt: bool) {
+    pub fn sync(&mut self, field: FieldId, xy: &[f32], rebuilt: bool) -> UploadStat {
         let needed = xy.len() as u64;
         if needed == 0 {
-            return;
+            return UploadStat::default();
         }
 
         let prev_len = self.traces.get(&field).map_or(0, |t| t.len_floats);
@@ -61,18 +72,26 @@ impl BufferManager {
         let grew = self.ensure_capacity(field, needed, preserve);
 
         let start = if full { 0 } else { prev_len };
-        if needed > start {
+        let uploaded_floats = if needed > start {
             let span = bytemuck::cast_slice(&xy[start as usize..needed as usize]);
             self.ctx
                 .queue()
                 .write_buffer(&self.traces[&field].buf, start * F32, span);
-        }
+            needed - start
+        } else {
+            0
+        };
 
         // Growth and rebuilds are the "not a clean append" events to watch.
-        if grew || (full && !is_new) {
+        let full_upload = grew || (full && !is_new);
+        if full_upload {
             self.full_uploads += 1;
         }
         self.traces.get_mut(&field).unwrap().len_floats = needed;
+        UploadStat {
+            bytes: uploaded_floats * F32,
+            full_upload,
+        }
     }
 
     /// Ensure `field`'s buffer holds at least `needed_floats`, preserving the
@@ -147,6 +166,10 @@ impl BufferManager {
     /// The fields with a resident buffer.
     pub fn fields(&self) -> impl Iterator<Item = FieldId> + '_ {
         self.traces.keys().copied()
+    }
+
+    pub fn buffer_count(&self) -> usize {
+        self.traces.len()
     }
 
     /// Count of full re-uploads (growth or rebuild) — a regression signal (ZC-4).
