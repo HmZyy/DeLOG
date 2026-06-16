@@ -142,7 +142,11 @@ fn show_tooltip(
         .pivot(pivot)
         .fixed_pos(pos)
         .show(ui.ctx(), |ui| {
-            egui::Frame::popup(ui.style()).show(ui, |ui| {
+            egui::Frame {
+                shadow: egui::Shadow::NONE,
+                ..egui::Frame::popup(ui.style())
+            }
+            .show(ui, |ui| {
                 ui.label(egui::RichText::new(format!("t = {t_sec:.3} s")).weak());
                 for row in rows {
                     ui.horizontal(|ui| {
