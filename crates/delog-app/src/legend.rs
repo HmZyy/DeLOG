@@ -41,7 +41,11 @@ pub fn ui(
         .fixed_pos(plot_rect.left_top() + egui::vec2(8.0, 8.0))
         .order(egui::Order::Middle)
         .show(ui.ctx(), |ui| {
-            egui::Frame::popup(ui.style()).show(ui, |ui| {
+            egui::Frame {
+                shadow: egui::Shadow::NONE,
+                ..egui::Frame::popup(ui.style())
+            }
+            .show(ui, |ui| {
                 for (field, label) in labels {
                     let Some(trace) = pane.trace_mut(*field) else {
                         continue;
@@ -108,7 +112,7 @@ pub fn ui(
                         );
                     });
                 }
-            });
+            })
         });
 
     removed
