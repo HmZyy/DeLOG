@@ -9,6 +9,31 @@ use delog_core::identity::FieldId;
 use delog_core::snapshot::StoreSnapshot;
 
 use crate::plot::{PlotPane, TraceMode};
+use crate::settings::LegendPosition;
+
+/// Anchor point + pivot for the legend area at `position` inside `plot_rect`,
+/// inset by 8 px from the chosen corner so it never touches the axes.
+fn legend_anchor(position: LegendPosition, plot_rect: egui::Rect) -> (egui::Pos2, egui::Align2) {
+    const INSET: f32 = 8.0;
+    match position {
+        LegendPosition::TopLeft => (
+            plot_rect.left_top() + egui::vec2(INSET, INSET),
+            egui::Align2::LEFT_TOP,
+        ),
+        LegendPosition::TopRight => (
+            plot_rect.right_top() + egui::vec2(-INSET, INSET),
+            egui::Align2::RIGHT_TOP,
+        ),
+        LegendPosition::BottomLeft => (
+            plot_rect.left_bottom() + egui::vec2(INSET, -INSET),
+            egui::Align2::LEFT_BOTTOM,
+        ),
+        LegendPosition::BottomRight => (
+            plot_rect.right_bottom() + egui::vec2(-INSET, -INSET),
+            egui::Align2::RIGHT_BOTTOM,
+        ),
+    }
+}
 
 /// `topic.field` label for a trace, resolved through core (no Arrow in the app).
 pub fn trace_label(snapshot: &StoreSnapshot, field: FieldId) -> String {
@@ -29,6 +54,7 @@ pub fn ui(
     ui: &egui::Ui,
     id: egui::Id,
     plot_rect: egui::Rect,
+    position: LegendPosition,
     pane: &mut PlotPane,
     labels: &[(FieldId, String)],
 ) -> Option<FieldId> {
@@ -37,8 +63,10 @@ pub fn ui(
     }
     let mut removed = None;
 
+    let (pos, pivot) = legend_anchor(position, plot_rect);
     egui::Area::new(id)
-        .fixed_pos(plot_rect.left_top() + egui::vec2(8.0, 8.0))
+        .fixed_pos(pos)
+        .pivot(pivot)
         .order(egui::Order::Middle)
         .show(ui.ctx(), |ui| {
             egui::Frame {
