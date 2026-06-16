@@ -4,13 +4,17 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use delog_cache::CacheManager;
+use delog_core::diagnostics::{DiagRecord, Severity};
 use delog_core::time::TimeRange;
+use serde::Serialize;
 
 use crate::about;
 use crate::browser::{self, BrowserModel};
+use crate::diagnostics::DiagnosticsDock;
 use crate::gpu::GpuBridge;
 use crate::layout::{LayoutApply, LayoutDoc, LayoutError, LoadOutcome, PendingLayout};
 use crate::live::ConnectionDialog;
+use crate::performance::{PerformanceDock, PerformanceSnapshot, ResourceSummary, TraceSummary};
 use crate::plot::ViewX;
 #[cfg(feature = "scripting")]
 use crate::scripts;
@@ -27,7 +31,116 @@ struct TrajectoryBuildResult {
 
 type LayoutImportResult = Result<LayoutDoc, LayoutError>;
 type LayoutExportResult = Result<std::path::PathBuf, LayoutError>;
+type DiagnosticsExportResult = Result<std::path::PathBuf, String>;
+type ProfilingExportResult = Result<std::path::PathBuf, String>;
 const SESSION_AUTOSAVE_INTERVAL: Duration = Duration::from_secs(30);
+const PERFORMANCE_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
+
+#[derive(Serialize)]
+struct DiagnosticsExportDoc {
+    delog_diagnostics: u32,
+    exported_at_unix_ms: u128,
+    records: Vec<DiagnosticsExportRecord>,
+}
+
+#[derive(Serialize)]
+struct DiagnosticsExportRecord {
+    seq: u64,
+    count: u64,
+    severity: &'static str,
+    code: &'static str,
+    source_id: Option<u32>,
+    source_label: Option<String>,
+    time_us: Option<i64>,
+    byte_offset: Option<u64>,
+    message: String,
+}
+
+/// The profiling snapshot artifact (§16, PRF-07): all metric rings/gauges plus
+/// resource totals and per-trace summaries — the file to attach to a perf bug.
+#[derive(Serialize)]
+struct ProfilingExportDoc {
+    delog_profiling: u32,
+    exported_at_unix_ms: u128,
+    resources: ProfilingResources,
+    metrics: Vec<ProfilingMetric>,
+    traces: Vec<ProfilingTrace>,
+}
+
+#[derive(Serialize)]
+struct ProfilingResources {
+    gpu_buffer_count: usize,
+    gpu_bytes: u64,
+    cache_ready_count: usize,
+    cache_cpu_bytes: u64,
+}
+
+/// One metric's ring statistics. Timers are milliseconds; gauges carry their
+/// call-site unit (e.g. `upload_bytes` is bytes). `samples` is the lifetime
+/// sample count; `counter` the monotonic counter (0 for pure gauges/timers).
+#[derive(Serialize)]
+struct ProfilingMetric {
+    name: &'static str,
+    last: f32,
+    avg: f32,
+    min: f32,
+    max: f32,
+    p99: f32,
+    samples: u64,
+    counter: u64,
+}
+
+#[derive(Serialize)]
+struct ProfilingTrace {
+    label: String,
+    samples: Option<usize>,
+    visible_samples: Option<usize>,
+    cache_cpu_bytes: u64,
+    gpu_bytes: u64,
+}
+
+fn profiling_export_doc(
+    snapshot: &PerformanceSnapshot,
+    exported_at_unix_ms: u128,
+) -> ProfilingExportDoc {
+    let metrics = snapshot
+        .metrics
+        .iter()
+        .map(|(name, stats)| ProfilingMetric {
+            name,
+            last: stats.last,
+            avg: stats.avg,
+            min: stats.min,
+            max: stats.max,
+            p99: stats.p99,
+            samples: stats.n,
+            counter: stats.counter,
+        })
+        .collect();
+    let traces = snapshot
+        .traces
+        .iter()
+        .map(|trace| ProfilingTrace {
+            label: trace.label.clone(),
+            samples: trace.samples,
+            visible_samples: trace.visible_samples,
+            cache_cpu_bytes: trace.cache_cpu_bytes,
+            gpu_bytes: trace.gpu_bytes,
+        })
+        .collect();
+    ProfilingExportDoc {
+        delog_profiling: 1,
+        exported_at_unix_ms,
+        resources: ProfilingResources {
+            gpu_buffer_count: snapshot.resources.gpu_buffer_count,
+            gpu_bytes: snapshot.resources.gpu_bytes,
+            cache_ready_count: snapshot.resources.cache_ready_count,
+            cache_cpu_bytes: snapshot.resources.cache_cpu_bytes,
+        },
+        metrics,
+        traces,
+    }
+}
 
 #[derive(Default)]
 struct SaveLayoutDialog {
@@ -95,10 +208,25 @@ pub struct DelogApp {
     imported_layouts_tx: mpsc::Sender<LayoutImportResult>,
     exported_layouts: mpsc::Receiver<LayoutExportResult>,
     exported_layouts_tx: mpsc::Sender<LayoutExportResult>,
+    exported_diagnostics: mpsc::Receiver<DiagnosticsExportResult>,
+    exported_diagnostics_tx: mpsc::Sender<DiagnosticsExportResult>,
+    exported_profiling: mpsc::Receiver<ProfilingExportResult>,
+    exported_profiling_tx: mpsc::Sender<ProfilingExportResult>,
     browser_collapsed: bool,
+    diagnostics_dock: DiagnosticsDock,
+    performance_dock: PerformanceDock,
+    performance_snapshot: PerformanceSnapshot,
+    performance_last_refresh: Option<Instant>,
     browser_query: String,
     browser_selection: browser::Selection,
+    /// Cached browser tree keyed by the snapshot epoch it was built from
+    /// (BRW-07: offset edits also bump the epoch), so `BrowserModel::from_snapshot`
+    /// runs once per data change instead of every frame (it is O(topics×fields)
+    /// plus a full string clone of the tree).
+    browser_model: Option<(u64, BrowserModel)>,
     offset_dialog: Option<(delog_core::identity::SourceId, i64)>,
+    source_metadata_dialog: Option<delog_core::identity::SourceId>,
+    field_stats_dialog: Option<delog_core::identity::FieldId>,
     show_about: bool,
     save_layout_dialog: SaveLayoutDialog,
     load_layout_dialog: LoadLayoutDialog,
@@ -131,13 +259,20 @@ impl DelogApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let settings = crate::layout::load_app_settings();
         settings.theme.apply(&cc.egui_ctx);
+        settings.font.apply(&cc.egui_ctx);
         let connection_dialog = ConnectionDialog::from_settings(&settings.live_connection);
         let (picked_files_tx, picked_files) = mpsc::channel();
         let (traj_results_tx, traj_results) = mpsc::channel();
         let (imported_layouts_tx, imported_layouts) = mpsc::channel();
         let (exported_layouts_tx, exported_layouts) = mpsc::channel();
+        let (exported_diagnostics_tx, exported_diagnostics) = mpsc::channel();
+        let (exported_profiling_tx, exported_profiling) = mpsc::channel();
+        let session = Session::new(cc.egui_ctx.clone());
+        // Share the registry into the cache manager so `cache_build`/
+        // `cache_append`/`minmax_build` land in the same dock (§16, PRF-01).
+        let caches = CacheManager::new().with_metrics(std::sync::Arc::clone(session.metrics()));
         Self {
-            session: Session::new(cc.egui_ctx.clone()),
+            session,
             #[cfg(feature = "scripting")]
             scripts: scripts::ScriptsPanel::new(
                 crate::layout::config_dir()
@@ -145,7 +280,7 @@ impl DelogApp {
                     .join("scripts"),
             ),
             gpu: GpuBridge::from_creation_context(cc),
-            caches: CacheManager::new(),
+            caches,
             workspace: Workspace::new(),
             playback: Playback::default(),
             view: None,
@@ -163,10 +298,21 @@ impl DelogApp {
             imported_layouts_tx,
             exported_layouts,
             exported_layouts_tx,
+            exported_diagnostics,
+            exported_diagnostics_tx,
+            exported_profiling,
+            exported_profiling_tx,
             browser_collapsed: false,
+            diagnostics_dock: DiagnosticsDock::default(),
+            performance_dock: PerformanceDock::default(),
+            performance_snapshot: PerformanceSnapshot::default(),
+            performance_last_refresh: None,
             browser_query: String::new(),
             browser_selection: browser::Selection::default(),
+            browser_model: None,
             offset_dialog: None,
+            source_metadata_dialog: None,
+            field_stats_dialog: None,
             show_about: false,
             save_layout_dialog: SaveLayoutDialog {
                 open: false,
@@ -266,6 +412,40 @@ impl DelogApp {
                     )),
             }
         }
+
+        while let Ok(result) = self.exported_diagnostics.try_recv() {
+            match result {
+                Ok(path) => self
+                    .session
+                    .push_diagnostic(delog_core::diagnostics::Diag::info(
+                        "diagnostics-export",
+                        format!("exported diagnostics to {}", path.display()),
+                    )),
+                Err(err) => self
+                    .session
+                    .push_diagnostic(delog_core::diagnostics::Diag::error(
+                        "diagnostics-export",
+                        err,
+                    )),
+            }
+        }
+
+        while let Ok(result) = self.exported_profiling.try_recv() {
+            match result {
+                Ok(path) => self
+                    .session
+                    .push_diagnostic(delog_core::diagnostics::Diag::info(
+                        "profiling-export",
+                        format!("exported profiling snapshot to {}", path.display()),
+                    )),
+                Err(err) => self
+                    .session
+                    .push_diagnostic(delog_core::diagnostics::Diag::error(
+                        "profiling-export",
+                        err,
+                    )),
+            }
+        }
     }
 
     fn snapshot_has_fields(snapshot: &delog_core::snapshot::StoreSnapshot) -> bool {
@@ -359,6 +539,116 @@ impl DelogApp {
         self.view = Some(ViewX::locked_to_tail(range, span));
     }
 
+    fn refresh_performance_snapshot(
+        &mut self,
+        frame: &eframe::Frame,
+        snapshot: &delog_core::snapshot::StoreSnapshot,
+    ) {
+        if !self.performance_dock.open {
+            return;
+        }
+        let now = Instant::now();
+        if self
+            .performance_last_refresh
+            .is_some_and(|last| now.duration_since(last) < PERFORMANCE_REFRESH_INTERVAL)
+        {
+            return;
+        }
+
+        self.performance_snapshot = self.build_performance_snapshot(frame, snapshot);
+        self.performance_last_refresh = Some(now);
+    }
+
+    /// Assemble a fresh performance snapshot (metrics rings + resource totals +
+    /// per-trace summaries). Shared by the 4 Hz dock refresh and the profiling
+    /// export (PRF-04/PRF-07).
+    fn build_performance_snapshot(
+        &self,
+        frame: &eframe::Frame,
+        snapshot: &delog_core::snapshot::StoreSnapshot,
+    ) -> PerformanceSnapshot {
+        let view = self.view;
+        let traces = self
+            .workspace
+            .fields()
+            .map(|field| {
+                let visible_samples = view.and_then(|view| {
+                    let (x0, x1) = view.seconds(self.origin_us);
+                    self.caches.field_visible_samples(field, x0, x1)
+                });
+                TraceSummary {
+                    label: crate::legend::trace_label(snapshot, field),
+                    samples: self.caches.field_samples(field),
+                    visible_samples,
+                    cache_cpu_bytes: self.caches.field_mem(field).cache_cpu,
+                    gpu_bytes: self.gpu.field_gpu_bytes(frame, field),
+                }
+            })
+            .collect();
+        let gpu = self.gpu.summary(frame);
+        PerformanceSnapshot {
+            metrics: self.session.metrics().snapshot(),
+            resources: ResourceSummary {
+                gpu_buffer_count: gpu.buffer_count,
+                gpu_bytes: gpu.gpu_bytes,
+                cache_ready_count: self.caches.ready_count(),
+                cache_cpu_bytes: self.caches.total_cache_bytes(),
+            },
+            traces,
+        }
+    }
+
+    /// Paint the F12 debug overlay: key per-frame timings read live from the
+    /// metrics registry, anchored top-left so it clears the corner FPS badge
+    /// (PRF-06). Non-interactive; toggled by the View menu or F12.
+    fn paint_debug_overlay(&self, ctx: &egui::Context) {
+        if !self.settings.show_debug_overlay {
+            return;
+        }
+        let metrics = self.session.metrics();
+        egui::Area::new(egui::Id::new("debug_overlay"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::LEFT_TOP, egui::vec2(8.0, 8.0))
+            .interactable(false)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_min_width(190.0);
+                    ui.strong("Debug Overlay (F12)");
+                    match self.fps_ema {
+                        Some(fps) => ui.label(format!("FPS {fps:.0}")),
+                        None => ui.weak("FPS idle"),
+                    };
+                    ui.separator();
+                    egui::Grid::new("debug_overlay_grid")
+                        .num_columns(3)
+                        .spacing([10.0, 2.0])
+                        .show(ui, |ui| {
+                            ui.strong("timer");
+                            ui.strong("last");
+                            ui.strong("avg");
+                            ui.end_row();
+                            // §16 frame timers (ms). Only ones with samples show.
+                            for name in [
+                                "frame_total",
+                                "plot_paint_cpu",
+                                "gpu_encode",
+                                "yquery",
+                                "3d_frame",
+                            ] {
+                                if let Some(s) = metrics.stats(name)
+                                    && s.n > 0
+                                {
+                                    ui.monospace(name);
+                                    ui.label(format!("{:.2} ms", s.last));
+                                    ui.label(format!("{:.2} ms", s.avg));
+                                    ui.end_row();
+                                }
+                            }
+                        });
+                });
+            });
+    }
+
     fn poll_trajectory_builds(&mut self) {
         while let Ok(result) = self.traj_results.try_recv() {
             self.traj_building = self
@@ -434,6 +724,7 @@ impl DelogApp {
             workspace: &self.workspace,
             snapshot,
             view: self.view,
+            fit_all: self.fit_view_all,
             speed: self.playback.speed as f64,
             follow_live: self.playback.follow_live,
             vehicles: &self.vehicles,
@@ -513,6 +804,77 @@ impl DelogApp {
                 }
             })
             .expect("spawn layout import dialog thread");
+    }
+
+    fn spawn_export_diagnostics_dialog(
+        &self,
+        ctx: &egui::Context,
+        records: Vec<DiagRecord>,
+        snapshot: &delog_core::snapshot::StoreSnapshot,
+    ) {
+        let doc = diagnostics_export_doc(records, snapshot);
+        let tx = self.exported_diagnostics_tx.clone();
+        let ctx = ctx.clone();
+        std::thread::Builder::new()
+            .name("delog-diagnostics-export-dialog".into())
+            .spawn(move || {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("DeLOG diagnostics", &["json"])
+                    .add_filter("All files", &["*"])
+                    .set_title("Export diagnostics JSON")
+                    .set_file_name("diagnostics.json")
+                    .save_file()
+                {
+                    let result = serde_json::to_vec_pretty(&doc)
+                        .map_err(|err| err.to_string())
+                        .and_then(|json| std::fs::write(&path, json).map_err(|err| err.to_string()))
+                        .map(|_| path);
+                    let _ = tx.send(result);
+                    ctx.request_repaint();
+                }
+            })
+            .expect("spawn diagnostics export dialog thread");
+    }
+
+    /// Export the current profiling snapshot (metric rings + resources + traces)
+    /// to JSON off the UI thread (§16, PRF-07). The doc is built on the UI
+    /// thread (it needs the wgpu frame for GPU stats); only the file dialog and
+    /// write run on the worker.
+    fn spawn_export_profiling_dialog(
+        &self,
+        ctx: &egui::Context,
+        frame: &eframe::Frame,
+        snapshot: &delog_core::snapshot::StoreSnapshot,
+    ) {
+        let exported_at_unix_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis())
+            .unwrap_or(0);
+        let doc = profiling_export_doc(
+            &self.build_performance_snapshot(frame, snapshot),
+            exported_at_unix_ms,
+        );
+        let tx = self.exported_profiling_tx.clone();
+        let ctx = ctx.clone();
+        std::thread::Builder::new()
+            .name("delog-profiling-export-dialog".into())
+            .spawn(move || {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("DeLOG profiling", &["json"])
+                    .add_filter("All files", &["*"])
+                    .set_title("Export profiling snapshot JSON")
+                    .set_file_name("profiling.json")
+                    .save_file()
+                {
+                    let result = serde_json::to_vec_pretty(&doc)
+                        .map_err(|err| err.to_string())
+                        .and_then(|json| std::fs::write(&path, json).map_err(|err| err.to_string()))
+                        .map(|_| path);
+                    let _ = tx.send(result);
+                    ctx.request_repaint();
+                }
+            })
+            .expect("spawn profiling export dialog thread");
     }
 
     fn load_layout(&mut self, name: &str, snapshot: &delog_core::snapshot::StoreSnapshot) {
@@ -628,6 +990,9 @@ impl DelogApp {
         // A restored view is authoritative — don't let the data-fit refit
         // overwrite it on the next frame.
         self.view_fitted = layout.view.is_some();
+        // Restore the fit-to-view toggle (LAY-09): when set, the view re-fits
+        // the data range each frame.
+        self.fit_view_all = layout.fit_all;
         self.playback.set_speed(layout.speed as f32);
         self.playback.follow_live = layout.follow_live;
         // Legend/tooltip visibility is restored per-pane via the workspace.
@@ -863,6 +1228,16 @@ impl eframe::App for DelogApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        // Whole-frame CPU time (§16 `frame_total`); drops at function end.
+        let _frame_timer = self.session.metrics().scope("frame_total");
+        // Apply the global font override before any widget is laid out so a
+        // changed size/family takes effect this frame (UIX-13).
+        self.settings.font.apply(ui.ctx());
+        // Pre-UI bookkeeping (§16, PRF-10): dropped/picked files, job pruning,
+        // cache lifecycle + epoch handling, trajectory builds and autosave —
+        // none of it inside a panel scope. `ui_prelude` captures this block so
+        // `frame_total − Σ(ui_*)` no longer hides it as an unattributed gap.
+        let ui_prelude_timer = self.session.metrics().scope("ui_prelude");
         self.handle_dropped_files(ui.ctx());
         self.handle_picked_files();
         self.handle_layout_io_results();
@@ -895,7 +1270,14 @@ impl eframe::App for DelogApp {
 
         // Cache lifecycle: shared origin, frame recency, drain builds, and an
         // epoch-driven incremental append + GC (§8.5).
-        if let Some(range) = snapshot.global_time_range() {
+        // `global_range` (§16, PRF-10): one `global_time_range()` call measured
+        // in isolation. It is O(total chunks across all topics) and called
+        // several times per frame from different sections, so this quantifies a
+        // suspected cross-cutting cost as chunks accumulate during live.
+        let global_range_timer = self.session.metrics().scope("global_range");
+        let global_range = snapshot.global_time_range();
+        drop(global_range_timer);
+        if let Some(range) = global_range {
             self.origin_us = range.min_us;
             self.caches.set_origin(self.origin_us);
             // Fit the view to the data the first time real data appears,
@@ -940,7 +1322,24 @@ impl eframe::App for DelogApp {
             ui.ctx().request_repaint();
         }
         self.caches.begin_frame(self.frame);
-        self.caches.poll_builds();
+        for field in self.caches.poll_builds() {
+            let label = snapshot
+                .fields
+                .get(field.index())
+                .filter(|entry| entry.id == field)
+                .map(|entry| {
+                    snapshot
+                        .topic(entry.topic)
+                        .map(|topic| format!("{}.{}", topic.entry.name, entry.name))
+                        .unwrap_or_else(|| entry.name.clone())
+                })
+                .unwrap_or_else(|| format!("field {}", field.0));
+            self.session
+                .push_diagnostic(delog_core::diagnostics::Diag::warning(
+                    "cache-empty",
+                    format!("could not build render cache for {label}"),
+                ));
+        }
         if snapshot.epoch != self.last_epoch {
             self.caches.on_epoch(&snapshot);
             self.try_apply_deferred_layout(&snapshot);
@@ -968,6 +1367,12 @@ impl eframe::App for DelogApp {
                 .push_diagnostic(delog_core::diagnostics::Diag::error("gpu", message));
         }
 
+        drop(ui_prelude_timer);
+
+        // Per-section UI-thread timers (§16, PRF-10): `frame_total` minus the
+        // sum of these scopes is egui's own tessellation/bookkeeping, so the
+        // breakdown attributes the frame to the panel that actually costs it.
+        let ui_menu_timer = self.session.metrics().scope("ui_menu");
         egui::Panel::top("main_menu").show_inside(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
@@ -979,6 +1384,18 @@ impl eframe::App for DelogApp {
                         self.spawn_open_dialog(ui.ctx());
                         ui.close();
                     }
+                    if ui.button("Export Diagnostics JSON...").clicked() {
+                        self.spawn_export_diagnostics_dialog(
+                            ui.ctx(),
+                            self.session.diagnostic_records(),
+                            &snapshot,
+                        );
+                        ui.close();
+                    }
+                    if ui.button("Export Profiling JSON...").clicked() {
+                        self.spawn_export_profiling_dialog(ui.ctx(), frame, &snapshot);
+                        ui.close();
+                    }
                     ui.separator();
                     if ui.button("Exit").clicked() {
                         ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
@@ -988,6 +1405,26 @@ impl eframe::App for DelogApp {
                 ui.menu_button("Edit", |ui| {
                     if ui.button("Settings...").clicked() {
                         self.settings_dialog.open();
+                        ui.close();
+                    }
+                });
+                ui.menu_button("View", |ui| {
+                    if ui
+                        .checkbox(&mut self.diagnostics_dock.open, "Diagnostics")
+                        .clicked()
+                    {
+                        ui.close();
+                    }
+                    if ui
+                        .checkbox(&mut self.performance_dock.open, "Performance")
+                        .clicked()
+                    {
+                        ui.close();
+                    }
+                    if ui
+                        .checkbox(&mut self.settings.show_debug_overlay, "Debug Overlay (F12)")
+                        .clicked()
+                    {
                         ui.close();
                     }
                 });
@@ -1102,7 +1539,7 @@ impl eframe::App for DelogApp {
                         match self.fps_ema {
                             Some(fps) => {
                                 // Green >60, orange 30..=60, red <30.
-                                let color = if fps > 60.0 {
+                                let color = if fps > 59.0 {
                                     self.settings.theme.success()
                                 } else if fps >= 30.0 {
                                     self.settings.theme.warning()
@@ -1120,8 +1557,11 @@ impl eframe::App for DelogApp {
             });
         });
 
+        drop(ui_menu_timer);
+
         // Icon toolbar directly under the menu bar: streaming + 3D view
         // toggles, plus live/loading status.
+        let ui_toolbar_timer = self.session.metrics().scope("ui_toolbar");
         egui::Panel::top("tool_icons").show_inside(ui, |ui| {
             ui.horizontal(|ui| {
                 let streaming = self.session.has_live_links();
@@ -1208,12 +1648,15 @@ impl eframe::App for DelogApp {
         // until a parser captures a UTC reference (BIN GPS week / ULog
         // time_ref_utc — M6); `any_live` stays false until live links exist
         // (M7): the snapshot has no streaming flag yet.
+        drop(ui_toolbar_timer);
         if let Some(range) = snapshot.global_time_range() {
+            let ui_timeline_timer = self.session.metrics().scope("ui_timeline");
             egui::Panel::bottom("timeline").show_inside(ui, |ui| {
                 let action = crate::timeline::ui(
                     ui,
                     &mut self.playback,
                     &mut self.fit_view_all,
+                    &mut self.view,
                     range,
                     None,
                     self.session.has_live_links(),
@@ -1222,7 +1665,21 @@ impl eframe::App for DelogApp {
                 if action.lock_live {
                     self.lock_to_live(range);
                 }
+                if action.view_changed {
+                    // Dragging the window slider is a manual view change: drop
+                    // out of fit-all and live-follow, like a pan/zoom (TLN-08).
+                    self.fit_view_all = false;
+                    self.playback.unlock_live();
+                    self.view_fitted = true;
+                }
             });
+            drop(ui_timeline_timer);
+
+            // F12 toggles the debug overlay (PRF-06). Handled ungated — it is
+            // not a text key, so it works even while a widget holds focus.
+            if ui.ctx().input(|i| i.key_pressed(egui::Key::F12)) {
+                self.settings.show_debug_overlay = !self.settings.show_debug_overlay;
+            }
 
             // Transport keys (§11, TLN-04) — skipped while a widget owns the
             // keyboard (e.g. the browser filter box).
@@ -1273,17 +1730,39 @@ impl eframe::App for DelogApp {
             }
         }
 
-        let diagnostics = self.session.diagnostics();
-        if let Some(last) = diagnostics.last() {
-            egui::Panel::bottom("status").show_inside(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.weak(format!("{} notice(s)", diagnostics.len()));
-                    ui.separator();
-                    ui.label(format!("[{}] {}", last.code, last.message));
+        let ui_diagnostics_timer = self.session.metrics().scope("ui_diagnostics");
+        let diagnostics = self.session.diagnostic_records();
+        if self.diagnostics_dock.open {
+            egui::Panel::bottom("diagnostics")
+                .resizable(true)
+                .default_size(240.0)
+                .show_inside(ui, |ui| {
+                    let action = self.diagnostics_dock.ui(ui, &diagnostics, &snapshot);
+                    if action.clear {
+                        self.session.clear_diagnostics();
+                    }
+                    if let Some(t_us) = action.jump_to_time_us
+                        && let Some(range) = snapshot.global_time_range()
+                    {
+                        self.playback.scrub(t_us, range);
+                    }
                 });
-            });
+        }
+        drop(ui_diagnostics_timer);
+        let ui_performance_timer = self.session.metrics().scope("ui_performance");
+        if self.performance_dock.open {
+            self.refresh_performance_snapshot(frame, &snapshot);
+            ui.ctx().request_repaint_after(PERFORMANCE_REFRESH_INTERVAL);
+            egui::Panel::bottom("performance")
+                .resizable(true)
+                .default_size(220.0)
+                .show_inside(ui, |ui| {
+                    self.performance_dock.ui(ui, &self.performance_snapshot);
+                });
         }
 
+        drop(ui_performance_timer);
+        let ui_browser_timer = self.session.metrics().scope("ui_browser");
         if self.browser_collapsed {
             let button_size = browser::panel_toggle_button_size(ui);
             let collapsed_left_margin = ui.spacing().item_spacing.x;
@@ -1315,7 +1794,14 @@ impl eframe::App for DelogApp {
                     });
                 });
         } else {
-            let model = BrowserModel::from_snapshot(&snapshot);
+            // Reuse the cached tree while the epoch is unchanged. Take it out of
+            // `self` so the render closure can mutably borrow other `self` fields
+            // without aliasing the model, then put it back after the panel.
+            let epoch = snapshot.epoch;
+            let model = match self.browser_model.take() {
+                Some((cached_epoch, model)) if cached_epoch == epoch => model,
+                _ => BrowserModel::from_snapshot(&snapshot),
+            };
             let browser_panel = egui::Panel::left("data_browser_expanded").resizable(false);
             let browser_panel = if model.is_empty() {
                 browser_panel.default_size(ui.spacing().text_edit_width)
@@ -1341,9 +1827,20 @@ impl eframe::App for DelogApp {
                 if let Some(source) = browser_response.remove_source {
                     self.session.remove_source(source);
                 }
+                if let Some(source) = browser_response.inspect_source {
+                    self.source_metadata_dialog = Some(source);
+                }
+                if let Some(field) = browser_response.inspect_field_stats {
+                    self.field_stats_dialog = Some(field);
+                }
             });
+            self.browser_model = Some((epoch, model));
         }
+        drop(ui_browser_timer);
+        show_source_metadata_window(ui.ctx(), &snapshot, &mut self.source_metadata_dialog);
+        show_field_stats_window(ui.ctx(), &snapshot, &mut self.field_stats_dialog);
 
+        let ui_workspace_timer = self.session.metrics().scope("ui_workspace");
         egui::Frame::central_panel(ui.style()).show(ui, |ui| {
             // The workspace renders even before any log loads, so plots can be
             // arranged and the 3D view opened on an empty session.
@@ -1352,8 +1849,14 @@ impl eframe::App for DelogApp {
             // empty workspace space plots it in the first pane (PLT-13).
             let frame_style = egui::Frame::default();
             let mut handled_workspace_drop = false;
+            // New panes (splits/edge drops) inherit the global legend default;
+            // the per-pane toggle overrides it afterwards (PLT-08).
+            self.workspace.default_show_legend = self.settings.plot.show_legend_default;
             let (_, dropped) =
                 ui.dnd_drop_zone::<Vec<delog_core::identity::FieldId>, ()>(frame_style, |ui| {
+                    // Owned metrics handle: `behavior` borrows `self` mutably
+                    // below, so we can't reach `self.session` while it lives.
+                    let tree_metrics = self.session.metrics().clone();
                     self.gpu.begin_plot_frame(frame);
                     let services = PlotServices {
                         frame,
@@ -1370,10 +1873,24 @@ impl eframe::App for DelogApp {
                         playing: self.playback.playing,
                         vehicles: &self.vehicles,
                         trajectories: &self.vehicle_trajectories,
+                        traj_generation: self.traj_vehicle_revision,
+                        shared_y_gutter: self.workspace.shared_y_gutter,
+                        plot_display: self.settings.plot,
                     };
                     let mut behavior = crate::workspace::Behavior::new(services);
+                    // `workspace_tree` (§16, PRF-10): the egui_tiles layout +
+                    // pane rendering. `workspace_tree − Σ(pane_total)` is the
+                    // egui_tiles container/tab/drag machinery; `ui_workspace −
+                    // workspace_tree` is begin/retain + action handling.
+                    let tree_timer = tree_metrics.scope("workspace_tree");
                     self.workspace.tree.ui(&mut behavior, ui);
+                    drop(tree_timer);
                     let actions = behavior.into_actions();
+                    // Share the widest pane gutter so stacked plots align next
+                    // frame (PLT-07). Converges in one frame; until then each
+                    // pane never drops below its own gutter, so labels never
+                    // clip.
+                    self.workspace.shared_y_gutter = actions.max_y_gutter;
                     if let Some((tile_id, direction)) = actions.split {
                         self.workspace.split_plot(tile_id, direction);
                     }
@@ -1410,6 +1927,9 @@ impl eframe::App for DelogApp {
                     if actions.open_vehicle_config {
                         self.vehicle_dialog.open = true;
                     }
+                    if let Some(field) = actions.inspect_field_stats {
+                        self.field_stats_dialog = Some(field);
+                    }
                 });
             if let Some(fields) = dropped
                 && !handled_workspace_drop
@@ -1423,8 +1943,13 @@ impl eframe::App for DelogApp {
             let plotted: Vec<_> = self.workspace.fields().collect();
             self.gpu.retain_plotted_buffers(frame, &plotted);
         });
+        drop(ui_workspace_timer);
 
+        // Floating windows/dialogs + overlays; drops with the function (still
+        // inside `frame_total`, after every other section).
+        let _ui_windows_timer = self.session.metrics().scope("ui_windows");
         about::window(ui.ctx(), &mut self.show_about);
+        self.paint_debug_overlay(ui.ctx());
         self.show_layout_windows(ui.ctx());
         let settings_before = self.settings.clone();
         let settings_change = self.settings_dialog.show(ui.ctx(), &mut self.settings);
@@ -1477,6 +2002,460 @@ impl eframe::App for DelogApp {
             self.scripts
                 .ui(ui.ctx(), self.session.store(), self.session.ingest_sender());
         }
+    }
+}
+
+fn diagnostics_export_doc(
+    records: Vec<DiagRecord>,
+    snapshot: &delog_core::snapshot::StoreSnapshot,
+) -> DiagnosticsExportDoc {
+    let exported_at_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    let records = records
+        .into_iter()
+        .map(|record| {
+            let source_label = record
+                .diag
+                .source
+                .and_then(|source| snapshot.source(source))
+                .map(|source| source.entry.label.clone());
+            DiagnosticsExportRecord {
+                seq: record.seq,
+                count: record.count,
+                severity: export_severity(record.diag.severity),
+                code: record.diag.code,
+                source_id: record.diag.source.map(|source| source.0),
+                source_label,
+                time_us: record.diag.time_us,
+                byte_offset: record.diag.byte_offset,
+                message: record.diag.message,
+            }
+        })
+        .collect();
+    DiagnosticsExportDoc {
+        delog_diagnostics: 1,
+        exported_at_unix_ms,
+        records,
+    }
+}
+
+fn export_severity(severity: Severity) -> &'static str {
+    match severity {
+        Severity::Info => "info",
+        Severity::Warning => "warning",
+        Severity::Error => "error",
+    }
+}
+
+/// Which tab of the source metadata window is active. Persisted per source in
+/// egui temporary memory so the selection survives across frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum SourceMetaTab {
+    #[default]
+    Info,
+    Parameters,
+    LoggedMessages,
+}
+
+fn show_source_metadata_window(
+    ctx: &egui::Context,
+    snapshot: &delog_core::snapshot::StoreSnapshot,
+    selected: &mut Option<delog_core::identity::SourceId>,
+) {
+    let Some(source_id) = *selected else {
+        return;
+    };
+    let Some(source) = snapshot
+        .source(source_id)
+        .filter(|source| !source.entry.removed)
+    else {
+        *selected = None;
+        return;
+    };
+
+    let mut open = true;
+    egui::Window::new(format!("Source Metadata - {}", source.entry.label))
+        .id(egui::Id::new(("source_metadata", source_id.0)))
+        .open(&mut open)
+        .default_width(520.0)
+        .default_height(420.0)
+        .show(ctx, |ui| {
+            let tab_id = egui::Id::new(("source_metadata_tab", source_id.0));
+            let mut tab = ui
+                .data(|d| d.get_temp::<SourceMetaTab>(tab_id))
+                .unwrap_or_default();
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut tab, SourceMetaTab::Info, "Info");
+                ui.selectable_value(&mut tab, SourceMetaTab::Parameters, "Parameters");
+                ui.selectable_value(&mut tab, SourceMetaTab::LoggedMessages, "Logged Messages");
+            });
+            ui.data_mut(|d| d.insert_temp(tab_id, tab));
+            ui.separator();
+
+            match tab {
+                SourceMetaTab::Info => {
+                    let (rows, range, topics) = source_summary(snapshot, source_id);
+                    egui::Grid::new("source_metadata_summary")
+                        .num_columns(2)
+                        .striped(true)
+                        .spacing([16.0, 4.0])
+                        .show(ui, |ui| {
+                            ui.strong("Label");
+                            ui.label(source.entry.label.as_str());
+                            ui.end_row();
+                            ui.strong("Kind");
+                            ui.label(source_kind_label(source.entry.label.as_str()));
+                            ui.end_row();
+                            ui.strong("Source ID");
+                            ui.monospace(source_id.0.to_string());
+                            ui.end_row();
+                            ui.strong("Topics");
+                            ui.label(topics.to_string());
+                            ui.end_row();
+                            ui.strong("Rows");
+                            ui.label(rows.to_string());
+                            ui.end_row();
+                            ui.strong("Offset");
+                            ui.label(format!("{} us", source.entry.offset_us));
+                            ui.end_row();
+                            ui.strong("Range");
+                            ui.label(range.map(format_range).unwrap_or_else(|| "-".into()));
+                            ui.end_row();
+                        });
+                }
+                SourceMetaTab::Parameters => {
+                    if source.entry.meta.params.is_empty() {
+                        ui.weak("No parameters captured.");
+                    } else {
+                        let query_id = egui::Id::new(("source_param_query", source_id.0));
+                        let mut query = ui
+                            .data(|d| d.get_temp::<String>(query_id))
+                            .unwrap_or_default();
+                        ui.add(
+                            egui::TextEdit::singleline(&mut query)
+                                .hint_text("Filter parameters...")
+                                .desired_width(f32::INFINITY),
+                        );
+                        ui.data_mut(|d| d.insert_temp(query_id, query.clone()));
+
+                        let matches: Vec<_> = source
+                            .entry
+                            .meta
+                            .params
+                            .iter()
+                            .filter(|param| crate::browser::matches_query(&query, &param.name))
+                            .collect();
+                        if matches.is_empty() {
+                            ui.weak("No parameters match the filter.");
+                        } else {
+                            egui::ScrollArea::vertical()
+                                .id_salt(("source_params", source_id.0))
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    egui::Grid::new("source_metadata_params")
+                                        .num_columns(3)
+                                        .striped(true)
+                                        .spacing([12.0, 4.0])
+                                        .show(ui, |ui| {
+                                            ui.strong("Name");
+                                            ui.strong("Type");
+                                            ui.strong("Value");
+                                            ui.end_row();
+                                            for param in matches {
+                                                ui.monospace(param.name.as_str());
+                                                ui.label(param.ty.as_str());
+                                                ui.label(param.value.as_str());
+                                                ui.end_row();
+                                            }
+                                        });
+                                });
+                        }
+                    }
+                }
+                SourceMetaTab::LoggedMessages => {
+                    if source.entry.meta.auto_markers.is_empty() {
+                        ui.weak("No logged messages captured.");
+                    } else {
+                        egui::ScrollArea::vertical()
+                            .id_salt(("source_markers", source_id.0))
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                egui::Grid::new("source_metadata_markers")
+                                    .num_columns(3)
+                                    .striped(true)
+                                    .spacing([12.0, 4.0])
+                                    .show(ui, |ui| {
+                                        ui.strong("Time");
+                                        ui.strong("Level");
+                                        ui.strong("Text");
+                                        ui.end_row();
+                                        for marker in &source.entry.meta.auto_markers {
+                                            ui.label(format!(
+                                                "{:.3}s",
+                                                marker.time_us as f64 / 1e6
+                                            ));
+                                            ui.label(marker.level.to_string());
+                                            ui.label(marker.text.as_str());
+                                            ui.end_row();
+                                        }
+                                    });
+                            });
+                    }
+                }
+            }
+        });
+
+    if !open {
+        *selected = None;
+    }
+}
+
+fn show_field_stats_window(
+    ctx: &egui::Context,
+    snapshot: &delog_core::snapshot::StoreSnapshot,
+    selected: &mut Option<delog_core::identity::FieldId>,
+) {
+    let Some(field_id) = *selected else {
+        return;
+    };
+    let Some((title, unit)) = field_label_and_unit(snapshot, field_id) else {
+        *selected = None;
+        return;
+    };
+
+    let mut open = true;
+    egui::Window::new(format!("Field Stats - {title}"))
+        .id(egui::Id::new(("field_stats", field_id.0)))
+        .open(&mut open)
+        .default_width(360.0)
+        .resizable(false)
+        .show(ctx, |ui| {
+            match delog_core::analysis::global_field_stats(snapshot, field_id) {
+                Ok(Some(stats)) => {
+                    let suffix = unit
+                        .as_ref()
+                        .map(|unit| format!(" {unit}"))
+                        .unwrap_or_default();
+                    egui::Grid::new("field_stats_grid")
+                        .num_columns(2)
+                        .striped(true)
+                        .spacing([16.0, 4.0])
+                        .show(ui, |ui| {
+                            stats_row(ui, "Min", format!("{}{suffix}", format_stat(stats.min)));
+                            stats_row(ui, "Max", format!("{}{suffix}", format_stat(stats.max)));
+                            stats_row(ui, "Mean", format!("{}{suffix}", format_stat(stats.mean)));
+                            stats_row(
+                                ui,
+                                "Std dev",
+                                format!("{}{suffix}", format_stat(stats.stddev)),
+                            );
+                            stats_row(ui, "Samples", stats.count.to_string());
+                            stats_row(ui, "Missing", stats.missing_count.to_string());
+                            stats_row(
+                                ui,
+                                "Rate",
+                                stats
+                                    .rate_hz
+                                    .map(|rate| format!("{} Hz", format_stat(rate)))
+                                    .unwrap_or_else(|| "-".into()),
+                            );
+                        });
+                }
+                Ok(None) => {
+                    ui.weak("This field is not numeric.");
+                }
+                Err(err) => {
+                    ui.colored_label(ui.visuals().error_fg_color, err.to_string());
+                }
+            }
+        });
+
+    if !open {
+        *selected = None;
+    }
+}
+
+fn stats_row(ui: &mut egui::Ui, key: &str, value: String) {
+    ui.strong(key);
+    ui.label(value);
+    ui.end_row();
+}
+
+fn field_label_and_unit(
+    snapshot: &delog_core::snapshot::StoreSnapshot,
+    field_id: delog_core::identity::FieldId,
+) -> Option<(String, Option<String>)> {
+    let field = snapshot
+        .fields
+        .get(field_id.index())
+        .filter(|field| field.id == field_id && !field.removed)?;
+    let topic = snapshot.topic(field.topic)?;
+    let source = snapshot.source(topic.entry.source)?;
+    let unit = topic
+        .store
+        .as_ref()
+        .and_then(|store| store.schema.field_by_name(&field.name))
+        .and_then(|schema| schema.unit.clone());
+    Some((
+        format!(
+            "{} / {}.{}",
+            source.entry.label, topic.entry.name, field.name
+        ),
+        unit,
+    ))
+}
+
+fn format_stat(value: f64) -> String {
+    if value.is_nan() {
+        "NaN".into()
+    } else if value.abs() >= 100.0 {
+        format!("{value:.0}")
+    } else if value.abs() >= 10.0 {
+        format!("{value:.2}")
+    } else {
+        format!("{value:.4}")
+    }
+}
+
+fn source_summary(
+    snapshot: &delog_core::snapshot::StoreSnapshot,
+    source_id: delog_core::identity::SourceId,
+) -> (u64, Option<TimeRange>, usize) {
+    let Some(source) = snapshot.source(source_id) else {
+        return (0, None, 0);
+    };
+    let mut rows = 0;
+    let mut range: Option<TimeRange> = None;
+    let mut topics = 0;
+    for &topic_id in source.topics.iter() {
+        let Some(topic) = snapshot
+            .topic(topic_id)
+            .filter(|topic| !topic.entry.removed)
+        else {
+            continue;
+        };
+        let Some(store) = topic.store.as_ref() else {
+            continue;
+        };
+        topics += 1;
+        rows += store.rows;
+        if let Some(raw_range) = store.time_range()
+            && let Some(effective) = raw_range.offset(source.entry.offset_us)
+        {
+            range = Some(match range {
+                Some(current) => current.union(effective),
+                None => effective,
+            });
+        }
+    }
+    (rows, range, topics)
+}
+
+fn format_range(range: TimeRange) -> String {
+    format!(
+        "{:.3}s - {:.3}s",
+        range.min_us as f64 / 1e6,
+        range.max_us as f64 / 1e6
+    )
+}
+
+fn source_kind_label(label: &str) -> &'static str {
+    if label.starts_with("mavlink:") {
+        "Live MAVLink"
+    } else if label.starts_with("script:") {
+        "Derived"
+    } else {
+        "File"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use delog_core::diagnostics::{Diag, DiagRecord};
+    use delog_core::identity::IdentityRegistry;
+    use delog_core::snapshot::StoreSnapshot;
+
+    use super::*;
+
+    #[test]
+    fn diagnostics_export_doc_includes_source_labels_and_counts() {
+        let mut identity = IdentityRegistry::new();
+        let source = identity.add_source("flight");
+        let snapshot = StoreSnapshot::from_registry(&identity, [], 7).unwrap();
+        let doc = diagnostics_export_doc(
+            vec![DiagRecord {
+                seq: 42,
+                diag: Diag::warning("ulog-dropout", "dropout")
+                    .with_source(source)
+                    .at_time(1_000_000)
+                    .at_byte(99),
+                count: 3,
+            }],
+            &snapshot,
+        );
+
+        let json = serde_json::to_value(&doc).unwrap();
+        let record = &json["records"][0];
+        assert_eq!(json["delog_diagnostics"], 1);
+        assert_eq!(record["seq"], 42);
+        assert_eq!(record["count"], 3);
+        assert_eq!(record["severity"], "warning");
+        assert_eq!(record["code"], "ulog-dropout");
+        assert_eq!(record["source_id"], source.0);
+        assert_eq!(record["source_label"], "flight");
+        assert_eq!(record["time_us"], 1_000_000);
+        assert_eq!(record["byte_offset"], 99);
+        assert_eq!(record["message"], "dropout");
+    }
+
+    #[test]
+    fn profiling_export_doc_carries_metrics_resources_and_traces() {
+        let metrics = delog_core::metrics::MetricsRegistry::new();
+        metrics.record("upload_bytes", 4096.0);
+        metrics.add("gpu_full_uploads", 2);
+        let snapshot = PerformanceSnapshot {
+            metrics: metrics.snapshot(),
+            resources: ResourceSummary {
+                gpu_buffer_count: 3,
+                gpu_bytes: 1024,
+                cache_ready_count: 1,
+                cache_cpu_bytes: 2048,
+            },
+            traces: vec![TraceSummary {
+                label: "GPS.alt".into(),
+                samples: Some(1000),
+                visible_samples: Some(500),
+                cache_cpu_bytes: 8000,
+                gpu_bytes: 8000,
+            }],
+        };
+
+        let doc = profiling_export_doc(&snapshot, 123);
+        let json = serde_json::to_value(&doc).unwrap();
+
+        assert_eq!(json["delog_profiling"], 1);
+        assert_eq!(json["exported_at_unix_ms"], 123);
+        assert_eq!(json["resources"]["gpu_buffer_count"], 3);
+        assert_eq!(json["resources"]["cache_cpu_bytes"], 2048);
+
+        // Metrics come through sorted by name (snapshot() guarantees it).
+        let names: Vec<&str> = json["metrics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["gpu_full_uploads", "upload_bytes"]);
+        let upload = &json["metrics"][1];
+        assert_eq!(upload["name"], "upload_bytes");
+        assert_eq!(upload["last"], 4096.0);
+        let full = &json["metrics"][0];
+        assert_eq!(full["counter"], 2);
+
+        assert_eq!(json["traces"][0]["label"], "GPS.alt");
+        assert_eq!(json["traces"][0]["visible_samples"], 500);
     }
 }
 

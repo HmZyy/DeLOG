@@ -10,6 +10,7 @@ mod app;
 mod axes;
 mod browser;
 mod camera;
+mod diagnostics;
 mod geo;
 mod gpu;
 mod hover;
@@ -18,6 +19,7 @@ mod layout;
 mod legend;
 mod live;
 mod models;
+mod performance;
 mod plot;
 #[cfg(feature = "scripting")]
 mod scripts;

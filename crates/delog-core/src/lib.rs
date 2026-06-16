@@ -4,6 +4,7 @@
 //! Dependency rule (PLAN.md §3.2): nothing here may know about parsers, GPU,
 //! or UI.
 
+pub mod analysis;
 pub mod chunk;
 pub mod diagnostics;
 pub mod field_view;

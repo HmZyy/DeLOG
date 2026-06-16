@@ -18,6 +18,7 @@ pub struct ColStats {
     pub min: f64,
     pub max: f64,
     pub sum: f64,
+    pub sum_sq: f64,
     pub nan_count: u64,
 }
 
@@ -100,6 +101,7 @@ impl ColStats {
             min: f64::NAN,
             max: f64::NAN,
             sum: 0.0,
+            sum_sq: 0.0,
             nan_count: 0,
         }
     }
@@ -117,6 +119,7 @@ impl ColStats {
             self.max = value;
         }
         self.sum += value;
+        self.sum_sq += value * value;
     }
 
     fn count_missing(&mut self) {
@@ -347,16 +350,19 @@ mod tests {
                 min: 10.0,
                 max: 30.0,
                 sum: 60.0,
+                sum_sq: 1400.0,
                 nan_count: 0,
             }
         );
         assert_eq!(chunk.stats[1].min, 1.5);
         assert_eq!(chunk.stats[1].max, 1.5);
         assert_eq!(chunk.stats[1].sum, 1.5);
+        assert_eq!(chunk.stats[1].sum_sq, 2.25);
         assert_eq!(chunk.stats[1].nan_count, 2);
         assert!(chunk.stats[2].min.is_nan());
         assert!(chunk.stats[2].max.is_nan());
         assert_eq!(chunk.stats[2].sum, 0.0);
+        assert_eq!(chunk.stats[2].sum_sq, 0.0);
         assert_eq!(chunk.stats[2].nan_count, 1);
     }
 

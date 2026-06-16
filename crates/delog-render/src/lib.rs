@@ -34,7 +34,7 @@ pub mod target;
 pub mod traj3d;
 pub mod uniforms;
 
-pub use buffers::BufferManager;
+pub use buffers::{BufferManager, UploadStat};
 pub use context::RenderContext;
 pub use errors::GpuErrorHub;
 pub use grid3d::{Grid3dPipeline, GridUniform};

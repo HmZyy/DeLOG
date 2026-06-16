@@ -34,6 +34,11 @@ pub struct StoreSnapshot {
     pub topics: Arc<[TopicSnapshot]>,
     pub fields: Arc<[FieldEntry]>,
     pub epoch: u64,
+    /// Offset-applied union of every topic's time range, computed once when the
+    /// snapshot is built. `global_time_range()` reads this in O(1); computing it
+    /// lazily was O(total chunks across all topics) and the UI calls it several
+    /// times per frame, so it dominated frame time as live chunks accumulated.
+    global_range: Option<TimeRange>,
 }
 
 /// A push callback invoked with the new epoch on every publish.
@@ -132,12 +137,15 @@ impl StoreSnapshot {
             .map(|(entry, store)| TopicSnapshot { entry, store })
             .collect();
 
-        Ok(Self {
+        let mut snapshot = Self {
             sources: Arc::from(sources),
             topics: Arc::from(topics),
             fields: Arc::from(identity.fields().to_vec()),
             epoch,
-        })
+            global_range: None,
+        };
+        snapshot.global_range = snapshot.compute_global_range();
+        Ok(snapshot)
     }
 
     pub fn source(&self, id: SourceId) -> Option<&SourceSnapshot> {
@@ -173,7 +181,15 @@ impl StoreSnapshot {
             .is_some_and(|entry| !entry.removed)
     }
 
+    /// Offset-applied union of every topic's time range. O(1): returns the
+    /// value computed once at construction by [`Self::compute_global_range`].
     pub fn global_time_range(&self) -> Option<TimeRange> {
+        self.global_range
+    }
+
+    /// The O(total chunks) scan behind [`Self::global_time_range`], run once
+    /// when the snapshot is built.
+    fn compute_global_range(&self) -> Option<TimeRange> {
         let mut out: Option<TimeRange> = None;
         for topic in self.topics.iter() {
             let Some(store) = topic.store.as_ref() else {
