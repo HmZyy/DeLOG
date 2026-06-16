@@ -1219,6 +1219,11 @@ impl eframe::App for DelogApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         // Whole-frame CPU time (§16 `frame_total`); drops at function end.
         let _frame_timer = self.session.metrics().scope("frame_total");
+        // Pre-UI bookkeeping (§16, PRF-10): dropped/picked files, job pruning,
+        // cache lifecycle + epoch handling, trajectory builds and autosave —
+        // none of it inside a panel scope. `ui_prelude` captures this block so
+        // `frame_total − Σ(ui_*)` no longer hides it as an unattributed gap.
+        let ui_prelude_timer = self.session.metrics().scope("ui_prelude");
         self.handle_dropped_files(ui.ctx());
         self.handle_picked_files();
         self.handle_layout_io_results();
@@ -1340,6 +1345,8 @@ impl eframe::App for DelogApp {
             self.session
                 .push_diagnostic(delog_core::diagnostics::Diag::error("gpu", message));
         }
+
+        drop(ui_prelude_timer);
 
         // Per-section UI-thread timers (§16, PRF-10): `frame_total` minus the
         // sum of these scopes is egui's own tessellation/bookkeeping, so the
