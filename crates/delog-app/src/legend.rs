@@ -11,6 +11,14 @@ use delog_core::snapshot::StoreSnapshot;
 use crate::plot::{PlotPane, TraceMode};
 use crate::settings::LegendPosition;
 
+/// Scale a background colour's alpha by `opacity` (1 = unchanged, 0 = fully
+/// transparent), keeping its RGB. Shared look for the legend and hover panels.
+pub fn with_bg_opacity(color: egui::Color32, opacity: f32) -> egui::Color32 {
+    let [r, g, b, a] = color.to_srgba_unmultiplied();
+    let a = (a as f32 * opacity.clamp(0.0, 1.0)).round() as u8;
+    egui::Color32::from_rgba_unmultiplied(r, g, b, a)
+}
+
 /// Anchor point + pivot for the legend area at `position` inside `plot_rect`,
 /// inset by 8 px from the chosen corner so it never touches the axes.
 fn legend_anchor(position: LegendPosition, plot_rect: egui::Rect) -> (egui::Pos2, egui::Align2) {
@@ -55,6 +63,7 @@ pub fn ui(
     id: egui::Id,
     plot_rect: egui::Rect,
     position: LegendPosition,
+    opacity: f32,
     pane: &mut PlotPane,
     labels: &[(FieldId, String)],
 ) -> Option<FieldId> {
@@ -69,9 +78,11 @@ pub fn ui(
         .pivot(pivot)
         .order(egui::Order::Middle)
         .show(ui.ctx(), |ui| {
+            let base = egui::Frame::popup(ui.style());
             egui::Frame {
                 shadow: egui::Shadow::NONE,
-                ..egui::Frame::popup(ui.style())
+                fill: with_bg_opacity(base.fill, opacity),
+                ..base
             }
             .show(ui, |ui| {
                 for (field, label) in labels {

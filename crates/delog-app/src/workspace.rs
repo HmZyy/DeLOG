@@ -865,6 +865,7 @@ impl Behavior<'_> {
                 readout,
                 self.services.plot_display.hover_show_field_name,
                 self.services.plot_display.hover_show_time,
+                self.services.plot_display.hover_opacity,
             );
         }
 
@@ -894,6 +895,7 @@ impl Behavior<'_> {
                 !self.services.playing,
                 self.services.plot_display.hover_show_field_name,
                 self.services.plot_display.hover_show_time,
+                self.services.plot_display.hover_opacity,
             );
         }
 
@@ -913,6 +915,7 @@ impl Behavior<'_> {
                 egui::Id::new(("plot_legend", tile_id)),
                 plot_rect,
                 self.services.plot_display.legend_position,
+                self.services.plot_display.legend_opacity,
                 pane,
                 &labels,
             ) {

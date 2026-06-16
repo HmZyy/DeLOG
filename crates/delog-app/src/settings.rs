@@ -11,6 +11,9 @@ fn default_line_aa_px() -> f32 {
 fn default_true() -> bool {
     true
 }
+fn default_opacity() -> f32 {
+    0.85
+}
 #[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AppSettings {
     #[serde(default)]
@@ -71,7 +74,7 @@ impl LegendPosition {
 /// Plot overlay display preferences (legend + hover readout). All live-read each
 /// frame so changes apply immediately; `show_legend_default` only seeds newly
 /// created panes (PLT-08/09).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PlotDisplay {
     /// Corner the legend overlay anchors to.
     #[serde(default)]
@@ -79,12 +82,18 @@ pub struct PlotDisplay {
     /// Legend visibility for newly created panes (per-pane toggle overrides it).
     #[serde(default = "default_true")]
     pub show_legend_default: bool,
+    /// Legend background opacity (1 = solid, 0 = fully transparent).
+    #[serde(default = "default_opacity")]
+    pub legend_opacity: f32,
     /// Show the `topic.field` name on each hover/playhead readout row.
     #[serde(default)]
     pub hover_show_field_name: bool,
     /// Show the time header on the hover/playhead readout.
     #[serde(default)]
     pub hover_show_time: bool,
+    /// Hover/playhead readout background opacity (1 = solid, 0 = transparent).
+    #[serde(default = "default_opacity")]
+    pub hover_opacity: f32,
 }
 
 impl Default for PlotDisplay {
@@ -92,8 +101,10 @@ impl Default for PlotDisplay {
         Self {
             legend_position: LegendPosition::default(),
             show_legend_default: true,
+            legend_opacity: 1.0,
             hover_show_field_name: false,
             hover_show_time: false,
+            hover_opacity: 1.0,
         }
     }
 }
@@ -472,6 +483,11 @@ fn plots_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
             ui.checkbox(&mut p.show_legend_default, "");
             ui.end_row();
 
+            ui.label("Legend background")
+                .on_hover_text("Opacity of the legend's background panel. 1 = solid, 0 = fully transparent.");
+            ui.add(egui::Slider::new(&mut p.legend_opacity, 0.0..=1.0));
+            ui.end_row();
+
             ui.label("Hover: field name")
                 .on_hover_text("Show the topic.field name on each hover/playhead readout row.");
             ui.checkbox(&mut p.hover_show_field_name, "");
@@ -480,6 +496,11 @@ fn plots_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
             ui.label("Hover: time")
                 .on_hover_text("Show the time header on the hover/playhead readout.");
             ui.checkbox(&mut p.hover_show_time, "");
+            ui.end_row();
+
+            ui.label("Hover background")
+                .on_hover_text("Opacity of the hover/playhead readout's background panel. 1 = solid, 0 = fully transparent.");
+            ui.add(egui::Slider::new(&mut p.hover_opacity, 0.0..=1.0));
             ui.end_row();
         });
 
@@ -626,6 +647,9 @@ mod tests {
         // Hover readout stays minimal by default: no field name, no time header.
         assert!(!p.hover_show_field_name);
         assert!(!p.hover_show_time);
+        // Backgrounds are solid by default (current look preserved).
+        assert_eq!(p.legend_opacity, 1.0);
+        assert_eq!(p.hover_opacity, 1.0);
     }
 
     #[test]
@@ -634,8 +658,10 @@ mod tests {
             plot: PlotDisplay {
                 legend_position: LegendPosition::BottomRight,
                 show_legend_default: false,
+                legend_opacity: 0.5,
                 hover_show_field_name: false,
                 hover_show_time: false,
+                hover_opacity: 0.25,
             },
             ..AppSettings::default()
         };
