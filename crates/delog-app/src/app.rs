@@ -1341,6 +1341,10 @@ impl eframe::App for DelogApp {
                 .push_diagnostic(delog_core::diagnostics::Diag::error("gpu", message));
         }
 
+        // Per-section UI-thread timers (§16, PRF-10): `frame_total` minus the
+        // sum of these scopes is egui's own tessellation/bookkeeping, so the
+        // breakdown attributes the frame to the panel that actually costs it.
+        let ui_menu_timer = self.session.metrics().scope("ui_menu");
         egui::Panel::top("main_menu").show_inside(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
@@ -1525,8 +1529,11 @@ impl eframe::App for DelogApp {
             });
         });
 
+        drop(ui_menu_timer);
+
         // Icon toolbar directly under the menu bar: streaming + 3D view
         // toggles, plus live/loading status.
+        let ui_toolbar_timer = self.session.metrics().scope("ui_toolbar");
         egui::Panel::top("tool_icons").show_inside(ui, |ui| {
             ui.horizontal(|ui| {
                 let streaming = self.session.has_live_links();
@@ -1613,7 +1620,9 @@ impl eframe::App for DelogApp {
         // until a parser captures a UTC reference (BIN GPS week / ULog
         // time_ref_utc — M6); `any_live` stays false until live links exist
         // (M7): the snapshot has no streaming flag yet.
+        drop(ui_toolbar_timer);
         if let Some(range) = snapshot.global_time_range() {
+            let ui_timeline_timer = self.session.metrics().scope("ui_timeline");
             egui::Panel::bottom("timeline").show_inside(ui, |ui| {
                 let action = crate::timeline::ui(
                     ui,
@@ -1628,6 +1637,7 @@ impl eframe::App for DelogApp {
                     self.lock_to_live(range);
                 }
             });
+            drop(ui_timeline_timer);
 
             // F12 toggles the debug overlay (PRF-06). Handled ungated — it is
             // not a text key, so it works even while a widget holds focus.
@@ -1684,6 +1694,7 @@ impl eframe::App for DelogApp {
             }
         }
 
+        let ui_diagnostics_timer = self.session.metrics().scope("ui_diagnostics");
         let diagnostics = self.session.diagnostic_records();
         if self.diagnostics_dock.open {
             egui::Panel::bottom("diagnostics")
@@ -1701,6 +1712,8 @@ impl eframe::App for DelogApp {
                     }
                 });
         }
+        drop(ui_diagnostics_timer);
+        let ui_performance_timer = self.session.metrics().scope("ui_performance");
         if self.performance_dock.open {
             self.refresh_performance_snapshot(frame, &snapshot);
             ui.ctx().request_repaint_after(PERFORMANCE_REFRESH_INTERVAL);
@@ -1712,6 +1725,8 @@ impl eframe::App for DelogApp {
                 });
         }
 
+        drop(ui_performance_timer);
+        let ui_browser_timer = self.session.metrics().scope("ui_browser");
         if self.browser_collapsed {
             let button_size = browser::panel_toggle_button_size(ui);
             let collapsed_left_margin = ui.spacing().item_spacing.x;
@@ -1777,9 +1792,11 @@ impl eframe::App for DelogApp {
                 }
             });
         }
+        drop(ui_browser_timer);
         show_source_metadata_window(ui.ctx(), &snapshot, &mut self.source_metadata_dialog);
         show_field_stats_window(ui.ctx(), &snapshot, &mut self.field_stats_dialog);
 
+        let ui_workspace_timer = self.session.metrics().scope("ui_workspace");
         egui::Frame::central_panel(ui.style()).show(ui, |ui| {
             // The workspace renders even before any log loads, so plots can be
             // arranged and the 3D view opened on an empty session.
@@ -1862,7 +1879,11 @@ impl eframe::App for DelogApp {
             let plotted: Vec<_> = self.workspace.fields().collect();
             self.gpu.retain_plotted_buffers(frame, &plotted);
         });
+        drop(ui_workspace_timer);
 
+        // Floating windows/dialogs + overlays; drops with the function (still
+        // inside `frame_total`, after every other section).
+        let _ui_windows_timer = self.session.metrics().scope("ui_windows");
         about::window(ui.ctx(), &mut self.show_about);
         self.paint_debug_overlay(ui.ctx());
         self.show_layout_windows(ui.ctx());
@@ -2045,8 +2066,9 @@ fn show_source_metadata_window(
                         ui.weak("No parameters captured.");
                     } else {
                         let query_id = egui::Id::new(("source_param_query", source_id.0));
-                        let mut query =
-                            ui.data(|d| d.get_temp::<String>(query_id)).unwrap_or_default();
+                        let mut query = ui
+                            .data(|d| d.get_temp::<String>(query_id))
+                            .unwrap_or_default();
                         ui.add(
                             egui::TextEdit::singleline(&mut query)
                                 .hint_text("Filter parameters...")

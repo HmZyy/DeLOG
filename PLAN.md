@@ -588,7 +588,7 @@ struct Diag { wall: SystemTime, severity: Info|Warning|Error,
 struct MetricRing { last: f32, min: f32, max: f32, avg: f32, p99: f32, n: u64 } // ring of 256
 ```
 
-**Instrumented from the start** (cheap atomics; the dock merely _reads_): `parse_total`, `ingest_batch`, `snapshot_swap`, `cache_build`, `cache_append`, `minmax_build`, `yquery`, `plot_paint_cpu`, `gpu_encode`, `3d_frame`, `upload_bytes`, `gpu_full_uploads`, `live_rx_rate`, `ingest_dropped_batches`, `frame_total`, plus the memory gauges of §4.6 and per-trace sample/visible counts.
+**Instrumented from the start** (cheap atomics; the dock merely _reads_): `parse_total`, `ingest_batch`, `snapshot_swap`, `cache_build`, `cache_append`, `minmax_build`, `yquery`, `plot_paint_cpu`, `gpu_encode`, `3d_frame`, `upload_bytes`, `gpu_full_uploads`, `live_rx_rate`, `ingest_dropped_batches`, `frame_total`, the per-section UI breakdown `ui_menu`/`ui_toolbar`/`ui_timeline`/`ui_diagnostics`/`ui_performance`/`ui_browser`/`ui_workspace`/`ui_windows` (PRF-10; these partition `frame_total` on the UI thread), plus the memory gauges of §4.6 and per-trace sample/visible counts.
 
 Dock: metrics table (last/avg/min/max/samples per spec) + GPU buffer count/bytes + CPU cache bytes; **refreshes at 4 Hz** regardless of frame rate (spec: throttled). Optional FPS/status indicator obeys the §11 idle policy. Debug overlay toggle paints frame timings in-corner. **Export profiling snapshot** writes all rings + gauges to JSON — the artifact to attach to a perf bug.
 
@@ -990,6 +990,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **PRF-07** — Export profiling snapshot JSON — File ▸ Export Profiling JSON… writes all metric rings/gauges + resource totals + per-trace summaries to a `delog_profiling` JSON doc via an off-thread `rfd` save dialog (mirrors the diagnostics export); the doc is built on the UI thread from a shared `build_performance_snapshot` helper. Unit-tested
 - [x] **PRF-08** — FPS-counter visibility toggle (default off) — `AppSettings.show_fps`, surfaced in the Settings → General tab; gates the corner FPS badge (extends PRF-05)
 - [x] **PRF-09** — Reactive/Continuous render mode (default Reactive) — `AppSettings.render_mode`; `Continuous` overrides the §11 idle policy (TLN-06) to repaint every frame
+- [x] **PRF-10** — Per-section `frame_total` breakdown — RAII scope timers in `DelogApp::ui` partition the UI thread into `ui_menu`/`ui_toolbar`/`ui_timeline`/`ui_diagnostics`/`ui_performance`/`ui_browser`/`ui_workspace`/`ui_windows`. The existing `plot_paint_cpu`/`yquery`/`3d_frame`/`gpu_encode` timers nest inside `ui_workspace`, so `ui_workspace − Σ(plot_paint_cpu)` isolates egui's plot-widget overhead (axes/ticks/legend) from the trace geometry; `frame_total − Σ(ui_*)` is egui tessellation/bookkeeping outside the section closures. Surfaces automatically in the Performance dock Metrics tab and the profiling JSON export (no extra wiring)
 
 ### ANA — Analysis (M10)
 
