@@ -659,6 +659,12 @@ impl Behavior<'_> {
         tile_id: egui_tiles::TileId,
         pane: &mut PlotPane,
     ) -> egui_tiles::UiResponse {
+        // Per-pane breakdown (§16, PRF-10): `pane_total` is the whole body and
+        // drops on every return path, so `ui_workspace − Σ(pane_total)` is the
+        // egui_tiles layout/drop-zone overhead around the panes; the inner
+        // `pane_setup`/`pane_axes`/`plot_paint_cpu`/`pane_overlay` scopes split
+        // a single pane's cost. All recorded per pane (like `plot_paint_cpu`).
+        let _pane_total = self.services.metrics.scope("pane_total");
         let outer = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(outer, egui::Sense::click_and_drag());
         if response.clicked() || response.drag_started() || response.secondary_clicked() {
@@ -704,6 +710,10 @@ impl Behavior<'_> {
             self.plot_info_window(ui, tile_id, pane, None);
             return tile_response;
         };
+        // Geometry + interaction: X/Y ranges, the Y-gutter text layout inside
+        // `make_plot_rect`, and pan/zoom handling (`yquery` is the auto-Y query
+        // nested within). Re-runs once if interaction moved the view.
+        let pane_setup_timer = self.services.metrics.scope("pane_setup");
         let mut x_range = view.seconds(self.services.origin_us);
         let y_start = Instant::now();
         let mut y_range = gpu::visible_y_range(self.services.caches, pane, x_range.0, x_range.1);
@@ -721,6 +731,7 @@ impl Behavior<'_> {
             y_query_us += y_start.elapsed().as_secs_f32() * 1_000_000.0;
             plot_rect = make_plot_rect(ui, y_range, y_unit.as_deref());
         }
+        drop(pane_setup_timer);
 
         if !self.services.gpu.is_available() || plot_rect.width() <= 8.0 {
             self.plot_context_menu(tile_id, &response, pane);
@@ -728,7 +739,9 @@ impl Behavior<'_> {
             return tile_response;
         }
 
+        let pane_axes_timer = self.services.metrics.scope("pane_axes");
         axes::draw(ui, plot_rect, x_range, y_range, y_unit.as_deref());
+        drop(pane_axes_timer);
         let pview = PaneView {
             rect: plot_rect,
             x_range,
@@ -756,6 +769,10 @@ impl Behavior<'_> {
             paint_us,
         };
 
+        // Post-paint egui widgets: context menu, playhead/hover readout,
+        // legend and the per-pane info window. All CPU-side egui, drawn over
+        // the GPU trace callback.
+        let pane_overlay_timer = self.services.metrics.scope("pane_overlay");
         self.plot_context_menu(tile_id, &response, pane);
 
         // Playhead cursor + value readout on every pane (§10.5, PLT-10). During
@@ -835,6 +852,7 @@ impl Behavior<'_> {
         }
 
         self.plot_info_window(ui, tile_id, pane, Some(debug));
+        drop(pane_overlay_timer);
         tile_response
     }
 
