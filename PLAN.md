@@ -588,7 +588,7 @@ struct Diag { wall: SystemTime, severity: Info|Warning|Error,
 struct MetricRing { last: f32, min: f32, max: f32, avg: f32, p99: f32, n: u64 } // ring of 256
 ```
 
-**Instrumented from the start** (cheap atomics; the dock merely _reads_): `parse_total`, `ingest_batch`, `snapshot_swap`, `cache_build`, `cache_append`, `minmax_build`, `yquery`, `plot_paint_cpu`, `gpu_encode`, `3d_frame`, `upload_bytes`, `gpu_full_uploads`, `live_rx_rate`, `ingest_dropped_batches`, `frame_total`, the per-section UI breakdown `ui_prelude`/`ui_menu`/`ui_toolbar`/`ui_timeline`/`ui_diagnostics`/`ui_performance`/`ui_browser`/`ui_workspace`/`ui_windows` (PRF-10; these partition `frame_total` on the UI thread), the per-pane sub-breakdown `pane_total`/`pane_setup`/`pane_axes`/`pane_overlay` (PRF-10; `plot_paint_cpu` is the fourth child, so they partition `pane_total`), plus the memory gauges of §4.6 and per-trace sample/visible counts.
+**Instrumented from the start** (cheap atomics; the dock merely _reads_): `parse_total`, `ingest_batch`, `snapshot_swap`, `cache_build`, `cache_append`, `minmax_build`, `yquery`, `plot_paint_cpu`, `gpu_encode`, `3d_frame`, `upload_bytes`, `gpu_full_uploads`, `live_rx_rate`, `ingest_dropped_batches`, `frame_total`, the per-section UI breakdown `ui_prelude`/`ui_menu`/`ui_toolbar`/`ui_timeline`/`ui_diagnostics`/`ui_performance`/`ui_browser`/`ui_workspace`/`ui_windows` (PRF-10; these partition `frame_total` on the UI thread), the per-pane sub-breakdown `pane_total`/`pane_setup`/`pane_axes`/`pane_overlay` (PRF-10; `plot_paint_cpu` is the fourth child, so they partition `pane_total`), the probes `global_range` (one `global_time_range()` call — O(total chunks)) and `workspace_tree` (egui_tiles layout + panes), plus the memory gauges of §4.6 and per-trace sample/visible counts.
 
 Dock: metrics table (last/avg/min/max/samples per spec) + GPU buffer count/bytes + CPU cache bytes; **refreshes at 4 Hz** regardless of frame rate (spec: throttled). Optional FPS/status indicator obeys the §11 idle policy. Debug overlay toggle paints frame timings in-corner. **Export profiling snapshot** writes all rings + gauges to JSON — the artifact to attach to a perf bug.
 
@@ -956,6 +956,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **BRW-07** — Per-source time-offset widget (drag-µs + dialog)
 - [ ] **BRW-08** — Field metadata inspector
 - [ ] **BRW-09** — Favorites/pinned section (persisted)
+- [x] **BRW-10** — Cache the browser tree by snapshot epoch — `BrowserModel::from_snapshot` (O(topics×fields) plus a full string-clone of the tree) ran every frame; now held as `Option<(epoch, BrowserModel)>` in `DelogApp` and rebuilt only when the snapshot epoch changes (offset edits bump it per BRW-07). Eliminates the per-frame rebuild for idle/paused sessions; during live the epoch churns on every ingest, so the broader fix is caching the global time range on the snapshot so `from_snapshot` stops being O(chunks) via `TopicStore::time_range`
 - [ ] **BRW-10** — Source rows: range, rows, memory; remove frees (verify via MemBreakdown)
 
 ### LAY — Layouts & sessions (M9)
