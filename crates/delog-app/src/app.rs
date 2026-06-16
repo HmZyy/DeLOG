@@ -259,6 +259,7 @@ impl DelogApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let settings = crate::layout::load_app_settings();
         settings.theme.apply(&cc.egui_ctx);
+        settings.font.apply(&cc.egui_ctx);
         let connection_dialog = ConnectionDialog::from_settings(&settings.live_connection);
         let (picked_files_tx, picked_files) = mpsc::channel();
         let (traj_results_tx, traj_results) = mpsc::channel();
@@ -723,6 +724,7 @@ impl DelogApp {
             workspace: &self.workspace,
             snapshot,
             view: self.view,
+            fit_all: self.fit_view_all,
             speed: self.playback.speed as f64,
             follow_live: self.playback.follow_live,
             vehicles: &self.vehicles,
@@ -988,6 +990,9 @@ impl DelogApp {
         // A restored view is authoritative — don't let the data-fit refit
         // overwrite it on the next frame.
         self.view_fitted = layout.view.is_some();
+        // Restore the fit-to-view toggle (LAY-09): when set, the view re-fits
+        // the data range each frame.
+        self.fit_view_all = layout.fit_all;
         self.playback.set_speed(layout.speed as f32);
         self.playback.follow_live = layout.follow_live;
         // Legend/tooltip visibility is restored per-pane via the workspace.
@@ -1225,6 +1230,9 @@ impl eframe::App for DelogApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         // Whole-frame CPU time (§16 `frame_total`); drops at function end.
         let _frame_timer = self.session.metrics().scope("frame_total");
+        // Apply the global font override before any widget is laid out so a
+        // changed size/family takes effect this frame (UIX-13).
+        self.settings.font.apply(ui.ctx());
         // Pre-UI bookkeeping (§16, PRF-10): dropped/picked files, job pruning,
         // cache lifecycle + epoch handling, trajectory builds and autosave —
         // none of it inside a panel scope. `ui_prelude` captures this block so
@@ -1648,6 +1656,7 @@ impl eframe::App for DelogApp {
                     ui,
                     &mut self.playback,
                     &mut self.fit_view_all,
+                    &mut self.view,
                     range,
                     None,
                     self.session.has_live_links(),
@@ -1655,6 +1664,13 @@ impl eframe::App for DelogApp {
                 );
                 if action.lock_live {
                     self.lock_to_live(range);
+                }
+                if action.view_changed {
+                    // Dragging the window slider is a manual view change: drop
+                    // out of fit-all and live-follow, like a pan/zoom (TLN-08).
+                    self.fit_view_all = false;
+                    self.playback.unlock_live();
+                    self.view_fitted = true;
                 }
             });
             drop(ui_timeline_timer);
