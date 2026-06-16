@@ -20,10 +20,10 @@ use arrow::compute::{concat, sort_to_indices, take};
 use crate::chunk::Chunk;
 use crate::diagnostics::Diag;
 use crate::identity::{IdentityRegistry, SourceId, TopicId};
-use crate::metrics::MetricsRegistry;
 use crate::ingest::{
     IngestMsg, IngestReceiver, ParseSummary, ParsedBatch, RecvOutcome, SourceKind,
 };
+use crate::metrics::MetricsRegistry;
 use crate::schema::TopicSchema;
 use crate::snapshot::{DataStore, StoreSnapshot};
 use crate::store::TopicStore;

@@ -102,6 +102,12 @@ pub struct Workspace {
     /// Last plot pane the user clicked — the reference for `←`/`→` sample
     /// stepping (§11, TLN-04).
     pub focused: Option<egui_tiles::TileId>,
+    /// Widest Y-axis gutter across all plot panes from the previous frame, so
+    /// every pane shares one left margin and the plot rects line up vertically
+    /// even when their Y ranges differ wildly (e.g. ~5000 vs ~10). Fed back in
+    /// as `PlotServices::shared_y_gutter`; recomputed each frame from the panes'
+    /// own gutters (PLT-07).
+    pub shared_y_gutter: f32,
 }
 
 impl Workspace {
@@ -111,6 +117,7 @@ impl Workspace {
         Self {
             tree: egui_tiles::Tree::new("plot_workspace", root, tiles),
             focused: None,
+            shared_y_gutter: 0.0,
         }
     }
 
@@ -365,6 +372,10 @@ pub struct WorkspaceActions {
     pub open_vehicle_config: bool,
     /// User requested global stats for a plotted trace (ANA-03).
     pub inspect_field_stats: Option<FieldId>,
+    /// Widest Y-axis gutter any plot pane needed this frame; fed back into
+    /// `Workspace::shared_y_gutter` so next frame's panes share one margin and
+    /// stay vertically aligned (PLT-07).
+    pub max_y_gutter: f32,
 }
 
 pub struct PlotServices<'a> {
@@ -392,6 +403,9 @@ pub struct PlotServices<'a> {
     /// Config generation the cached trajectories were built at (the vehicle
     /// revision); lets the GPU upload only appended tail points (TDV-04).
     pub traj_generation: u64,
+    /// Widest Y-axis gutter seen across all plot panes last frame; every pane
+    /// uses at least this much left margin so stacked plots align (PLT-07).
+    pub shared_y_gutter: f32,
 }
 
 pub struct Behavior<'a> {
@@ -699,14 +713,24 @@ impl Behavior<'_> {
         } else {
             egui_tiles::UiResponse::None
         };
-        let make_plot_rect = |ui: &egui::Ui, y_range: (f32, f32), y_unit: Option<&str>| {
-            let plot_height = (outer.height() - axes::X_GUTTER).max(1.0);
-            let y_gutter = axes::y_gutter(ui, y_range, y_unit, plot_height);
-            egui::Rect::from_min_max(
-                egui::pos2(outer.left() + y_gutter, outer.top() + 4.0),
-                egui::pos2(outer.right() - 4.0, outer.bottom() - axes::X_GUTTER),
-            )
-        };
+        // Stacked plots must share one left margin, else a pane whose labels
+        // read "5000" starts further right than one reading "10" and the plots
+        // are horizontally offset. We take the widest gutter any pane needed
+        // last frame (`shared_y_gutter`) and never go below this pane's own need
+        // (so labels never clip), and report this pane's own gutter back so the
+        // shared value tracks the current set of panes (PLT-07).
+        let shared_gutter = self.services.shared_y_gutter;
+        let make_plot_rect =
+            |ui: &egui::Ui, y_range: (f32, f32), y_unit: Option<&str>| -> (egui::Rect, f32) {
+                let plot_height = (outer.height() - axes::X_GUTTER).max(1.0);
+                let own_gutter = axes::y_gutter(ui, y_range, y_unit, plot_height);
+                let gutter = shared_gutter.max(own_gutter);
+                let rect = egui::Rect::from_min_max(
+                    egui::pos2(outer.left() + gutter, outer.top() + 4.0),
+                    egui::pos2(outer.right() - 4.0, outer.bottom() - axes::X_GUTTER),
+                );
+                (rect, own_gutter)
+            };
 
         if pane.is_empty() {
             // Draw a normal but empty plot frame so the pane reads as a plot
@@ -714,7 +738,8 @@ impl Behavior<'_> {
             // (set from data, or the empty-session placeholder) so the pane
             // pans and zooms with the rest; else a neutral 0..1 fallback.
             let y_range = (0.0, 1.0);
-            let plot_rect = make_plot_rect(ui, y_range, None);
+            let (plot_rect, own_gutter) = make_plot_rect(ui, y_range, None);
+            self.actions.max_y_gutter = self.actions.max_y_gutter.max(own_gutter);
             self.handle_plot_interaction(&response, plot_rect);
             if plot_rect.width() > 8.0 {
                 let x_range = (*self.services.view)
@@ -728,7 +753,8 @@ impl Behavior<'_> {
         }
 
         let Some(view) = *self.services.view else {
-            let plot_rect = make_plot_rect(ui, (0.0, 1.0), None);
+            let (plot_rect, own_gutter) = make_plot_rect(ui, (0.0, 1.0), None);
+            self.actions.max_y_gutter = self.actions.max_y_gutter.max(own_gutter);
             self.handle_plot_interaction(&response, plot_rect);
             self.plot_context_menu(tile_id, &response, pane);
             self.plot_info_window(ui, tile_id, pane, None);
@@ -743,7 +769,8 @@ impl Behavior<'_> {
         let mut y_range = gpu::visible_y_range(self.services.caches, pane, x_range.0, x_range.1);
         let mut y_query_us = y_start.elapsed().as_secs_f32() * 1_000_000.0;
         let y_unit = y_unit(self.services.snapshot.as_ref(), pane);
-        let mut plot_rect = make_plot_rect(ui, y_range, y_unit.as_deref());
+        let (mut plot_rect, own_gutter) = make_plot_rect(ui, y_range, y_unit.as_deref());
+        self.actions.max_y_gutter = self.actions.max_y_gutter.max(own_gutter);
         let view_before_interaction = *self.services.view;
         self.handle_plot_interaction(&response, plot_rect);
         if *self.services.view != view_before_interaction
@@ -753,7 +780,9 @@ impl Behavior<'_> {
             let y_start = Instant::now();
             y_range = gpu::visible_y_range(self.services.caches, pane, x_range.0, x_range.1);
             y_query_us += y_start.elapsed().as_secs_f32() * 1_000_000.0;
-            plot_rect = make_plot_rect(ui, y_range, y_unit.as_deref());
+            let (rect, own_gutter) = make_plot_rect(ui, y_range, y_unit.as_deref());
+            plot_rect = rect;
+            self.actions.max_y_gutter = self.actions.max_y_gutter.max(own_gutter);
         }
         drop(pane_setup_timer);
 

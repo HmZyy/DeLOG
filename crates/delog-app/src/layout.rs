@@ -859,6 +859,7 @@ fn workspace_from_layout(doc: &WorkspaceLayout, resolver: &mut Resolver<'_>) -> 
     Workspace {
         tree: egui_tiles::Tree::new("plot_workspace", root, tiles),
         focused: Some(root),
+        shared_y_gutter: 0.0,
     }
 }
 

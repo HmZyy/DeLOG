@@ -1855,6 +1855,7 @@ impl eframe::App for DelogApp {
                         vehicles: &self.vehicles,
                         trajectories: &self.vehicle_trajectories,
                         traj_generation: self.traj_vehicle_revision,
+                        shared_y_gutter: self.workspace.shared_y_gutter,
                     };
                     let mut behavior = crate::workspace::Behavior::new(services);
                     // `workspace_tree` (§16, PRF-10): the egui_tiles layout +
@@ -1865,6 +1866,11 @@ impl eframe::App for DelogApp {
                     self.workspace.tree.ui(&mut behavior, ui);
                     drop(tree_timer);
                     let actions = behavior.into_actions();
+                    // Share the widest pane gutter so stacked plots align next
+                    // frame (PLT-07). Converges in one frame; until then each
+                    // pane never drops below its own gutter, so labels never
+                    // clip.
+                    self.workspace.shared_y_gutter = actions.max_y_gutter;
                     if let Some((tile_id, direction)) = actions.split {
                         self.workspace.split_plot(tile_id, direction);
                     }
