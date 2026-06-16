@@ -1,7 +1,7 @@
 //! Vehicle configuration + pose/trajectory resolution for the 3D view
 //! (PLAN.md §12.1-§12.2, TDV-03/04/06). A [`VehicleConfig`] maps a source's
-//! fields to position and orientation; [`pose_at`] reads the pose at a playback
-//! time and [`build_trajectory`] decimates the whole path — both into render
+//! fields to position and orientation; [`pose_at_with_ref`] reads the pose at a
+//! playback time and [`build_trajectory`] decimates the whole path — both into render
 //! space (§12.2) via [`crate::geo`].
 //!
 //! Field samples are read through `delog-core`'s [`FieldView`] (the app never
@@ -356,14 +356,34 @@ fn orientation_at(snapshot: &StoreSnapshot, ori: &OriMapping, t_us: i64) -> Mat3
 /// when its position can't be read (e.g. before the first sample). The
 /// model's mesh→body correction is folded into the rotation (mesh-local, so
 /// right-multiplied).
+/// Resolve the GPS reference and read the pose in one call. Production code
+/// hoists the (stable) reference out of the per-frame loop and calls
+/// [`pose_at_with_ref`]; this convenience wrapper is kept for tests.
+#[cfg(test)]
 pub fn pose_at(snapshot: &StoreSnapshot, config: &VehicleConfig, t_us: i64) -> Option<Pose> {
     let gps_ref = gps_reference(snapshot, config);
+    pose_at_with_ref(snapshot, config, gps_ref, t_us)
+}
+
+/// Like [`pose_at`] but with the GPS reference supplied by the caller, so the
+/// (stable) reference can be resolved once and reused across frames instead of
+/// re-scanning for the first fix on every call. `gps_ref` is ignored for
+/// NED-mapped vehicles.
+pub(crate) fn pose_at_with_ref(
+    snapshot: &StoreSnapshot,
+    config: &VehicleConfig,
+    gps_ref: Option<(f64, f64, f64)>,
+    t_us: i64,
+) -> Option<Pose> {
     let pos = position_at(snapshot, &config.pos, gps_ref, t_us)?;
     let rot = orientation_at(snapshot, &config.ori, t_us) * config.model.orientation_offset();
     Some(Pose { pos, rot })
 }
 
-fn gps_reference(snapshot: &StoreSnapshot, config: &VehicleConfig) -> Option<(f64, f64, f64)> {
+pub(crate) fn gps_reference(
+    snapshot: &StoreSnapshot,
+    config: &VehicleConfig,
+) -> Option<(f64, f64, f64)> {
     if let PosMapping::Gps {
         lat,
         lon,

@@ -525,15 +525,35 @@ impl Behavior<'_> {
         // frame; trajectories come from the app's epoch-cached build (TDV-04).
         let snapshot = self.services.snapshot;
         let playhead = self.services.playhead_us;
-        let poses: Vec<Option<vehicle::Pose>> = self
-            .services
-            .vehicles
-            .iter()
-            .map(|v| match (v.show, playhead) {
-                (true, Some(t)) => vehicle::pose_at(snapshot, v, t),
-                _ => None,
-            })
-            .collect();
+        // `pose_at` folds GPS-ref resolution and per-playhead reads together; we
+        // split them here (§16, 3D investigation) to see whether the per-frame
+        // `resolve_gps_ref` scan or the O(chunks) `sample_at` reads dominate
+        // `scene_ui`. Resolving the ref once per frame here (instead of inside
+        // each `pose_at`) is also the skeleton for caching it across frames.
+        let gps_refs: Vec<Option<(f64, f64, f64)>> = {
+            let _t = self.services.metrics.scope("scene_gpsref");
+            self.services
+                .vehicles
+                .iter()
+                .map(|v| {
+                    (v.show && playhead.is_some())
+                        .then(|| vehicle::gps_reference(snapshot, v))
+                        .flatten()
+                })
+                .collect()
+        };
+        let poses: Vec<Option<vehicle::Pose>> = {
+            let _t = self.services.metrics.scope("scene_poses");
+            self.services
+                .vehicles
+                .iter()
+                .enumerate()
+                .map(|(i, v)| match (v.show, playhead) {
+                    (true, Some(t)) => vehicle::pose_at_with_ref(snapshot, v, gps_refs[i], t),
+                    _ => None,
+                })
+                .collect()
+        };
 
         let vehicle_count = self.services.vehicles.len();
         if vehicle_count == 0 {
@@ -760,7 +780,9 @@ impl Behavior<'_> {
         let paint_us = paint_start.elapsed().as_secs_f32() * 1_000_000.0;
         // §16 timers (ms): auto-Y range query and the CPU paint/encode prep.
         self.services.metrics.record("yquery", y_query_us / 1_000.0);
-        self.services.metrics.record("plot_paint_cpu", paint_us / 1_000.0);
+        self.services
+            .metrics
+            .record("plot_paint_cpu", paint_us / 1_000.0);
         let debug = PlotDebug {
             plot_rect,
             x_range,
