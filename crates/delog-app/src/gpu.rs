@@ -41,6 +41,10 @@ pub struct VehicleDraw<'a> {
     pub path_color: [f32; 4],
     /// Render-space `[x,y,z]` trajectory points (NaN = gap).
     pub trajectory: &'a [[f32; 3]],
+    /// Config generation the trajectory was built at. Unchanged across pure
+    /// data-append rebuilds (so the path only grows), bumped on config/offset
+    /// change — lets the GPU upload just the new tail vs. a full re-upload.
+    pub traj_generation: u64,
 }
 
 /// The inner plot rect plus the visible data window the GPU and the egui axes
@@ -657,7 +661,11 @@ struct VehicleGpu {
     mesh_bind: wgpu::BindGroup,
     traj_points: wgpu::Buffer,
     traj_capacity: u32,
+    /// Points currently resident in `traj_points` (also the draw count).
     traj_count: u32,
+    /// Config generation of the resident points; a mismatch forces a full
+    /// re-upload, a match lets a longer path upload only its appended tail.
+    traj_generation: u64,
     traj_uniform: wgpu::Buffer,
     traj_bind: wgpu::BindGroup,
 }
@@ -738,24 +746,28 @@ impl SceneResources {
             // Upload the model mesh on first use (no-op afterwards).
             self.model_mesh(v.model);
 
-            let pts = points_to_vec4(v.trajectory);
-            let needed = pts.len() as u32;
+            let needed = v.trajectory.len() as u32;
+            let mut realloc = false;
             let entry = self.vehicles.entry(v.key);
             let vg = match entry {
                 std::collections::hash_map::Entry::Occupied(o) => {
                     let vg = o.into_mut();
                     if needed > vg.traj_capacity {
+                        // Grow geometrically (power-of-two) so appends are
+                        // usually tail-only uploads; only a boundary reallocs.
+                        let cap = needed.next_power_of_two();
                         vg.traj_points =
-                            new_points_buffer(&self.ctx, needed.max(1), "delog-veh-traj-points");
-                        vg.traj_capacity = needed.max(1);
+                            new_points_buffer(&self.ctx, cap, "delog-veh-traj-points");
+                        vg.traj_capacity = cap;
                         vg.traj_bind =
                             self.traj
                                 .bind_group(&self.ctx, &vg.traj_points, &vg.traj_uniform);
+                        realloc = true;
                     }
                     vg
                 }
                 std::collections::hash_map::Entry::Vacant(slot) => {
-                    let cap = needed.max(1);
+                    let cap = needed.max(1).next_power_of_two();
                     let mesh_uniform = new_uniform_buffer(
                         &self.ctx,
                         std::mem::size_of::<MeshUniform>() as u64,
@@ -769,24 +781,42 @@ impl SceneResources {
                         "delog-veh-traj-uniform",
                     );
                     let traj_bind = self.traj.bind_group(&self.ctx, &traj_points, &traj_uniform);
+                    realloc = true;
                     slot.insert(VehicleGpu {
                         mesh_uniform,
                         mesh_bind,
                         traj_points,
                         traj_capacity: cap,
                         traj_count: 0,
+                        traj_generation: v.traj_generation,
                         traj_uniform,
                         traj_bind,
                     })
                 }
             };
 
-            vg.traj_count = needed;
-            if needed > 0 {
+            // Trajectory upload: full re-upload only when the buffer was just
+            // (re)allocated or the config generation changed; otherwise the path
+            // is append-only, so write just the new tail — and skip entirely
+            // when unchanged. Avoids re-converting/re-uploading the whole path
+            // every frame (the cost decimation used to hide).
+            let full =
+                realloc || vg.traj_generation != v.traj_generation || needed < vg.traj_count;
+            if full && needed > 0 {
+                let pts = points_to_vec4(v.trajectory);
                 self.ctx
                     .queue()
                     .write_buffer(&vg.traj_points, 0, bytemuck::cast_slice(&pts));
+            } else if !full && needed > vg.traj_count {
+                let start = vg.traj_count as usize;
+                let tail = points_to_vec4(&v.trajectory[start..]);
+                let offset = start as u64 * std::mem::size_of::<[f32; 4]>() as u64;
+                self.ctx
+                    .queue()
+                    .write_buffer(&vg.traj_points, offset, bytemuck::cast_slice(&tail));
             }
+            vg.traj_count = needed;
+            vg.traj_generation = v.traj_generation;
             self.ctx.queue().write_buffer(
                 &vg.traj_uniform,
                 0,

@@ -389,6 +389,9 @@ pub struct PlotServices<'a> {
     pub vehicles: &'a [crate::vehicle::VehicleConfig],
     /// Cached render-space trajectories, parallel to `vehicles` (TDV-04).
     pub trajectories: &'a [Vec<[f32; 3]>],
+    /// Config generation the cached trajectories were built at (the vehicle
+    /// revision); lets the GPU upload only appended tail points (TDV-04).
+    pub traj_generation: u64,
 }
 
 pub struct Behavior<'a> {
@@ -593,6 +596,7 @@ impl Behavior<'_> {
                     color: legend::color32_to_srgb(v.color),
                     path_color: legend::color32_to_srgb(v.path_color),
                     trajectory: self.services.trajectories.get(i).map_or(&[], Vec::as_slice),
+                    traj_generation: self.services.traj_generation,
                 })
             })
             .collect();
