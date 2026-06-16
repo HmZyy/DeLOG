@@ -9,6 +9,39 @@ use delog_core::identity::FieldId;
 use delog_core::snapshot::StoreSnapshot;
 
 use crate::plot::{PlotPane, TraceMode};
+use crate::settings::LegendPosition;
+
+/// Scale a background colour's alpha by `opacity` (1 = unchanged, 0 = fully
+/// transparent), keeping its RGB. Shared look for the legend and hover panels.
+pub fn with_bg_opacity(color: egui::Color32, opacity: f32) -> egui::Color32 {
+    let [r, g, b, a] = color.to_srgba_unmultiplied();
+    let a = (a as f32 * opacity.clamp(0.0, 1.0)).round() as u8;
+    egui::Color32::from_rgba_unmultiplied(r, g, b, a)
+}
+
+/// Anchor point + pivot for the legend area at `position` inside `plot_rect`,
+/// inset by 8 px from the chosen corner so it never touches the axes.
+fn legend_anchor(position: LegendPosition, plot_rect: egui::Rect) -> (egui::Pos2, egui::Align2) {
+    const INSET: f32 = 8.0;
+    match position {
+        LegendPosition::TopLeft => (
+            plot_rect.left_top() + egui::vec2(INSET, INSET),
+            egui::Align2::LEFT_TOP,
+        ),
+        LegendPosition::TopRight => (
+            plot_rect.right_top() + egui::vec2(-INSET, INSET),
+            egui::Align2::RIGHT_TOP,
+        ),
+        LegendPosition::BottomLeft => (
+            plot_rect.left_bottom() + egui::vec2(INSET, -INSET),
+            egui::Align2::LEFT_BOTTOM,
+        ),
+        LegendPosition::BottomRight => (
+            plot_rect.right_bottom() + egui::vec2(-INSET, -INSET),
+            egui::Align2::RIGHT_BOTTOM,
+        ),
+    }
+}
 
 /// `topic.field` label for a trace, resolved through core (no Arrow in the app).
 pub fn trace_label(snapshot: &StoreSnapshot, field: FieldId) -> String {
@@ -23,12 +56,14 @@ pub fn trace_label(snapshot: &StoreSnapshot, field: FieldId) -> String {
 
 /// Draw the legend overlay and apply edits to `pane`. Each row is a colour
 /// editor plus a clickable label: clicking toggles the trace's visibility, a
-/// hidden trace's label is greyed out (PLT-08), and right-click ▸ Remove returns
+/// hidden trace's label is greyed out (PLT-08), and right-click / Remove returns
 /// the field (PLT-11) so the caller can drop its cache.
 pub fn ui(
     ui: &egui::Ui,
     id: egui::Id,
     plot_rect: egui::Rect,
+    position: LegendPosition,
+    opacity: f32,
     pane: &mut PlotPane,
     labels: &[(FieldId, String)],
 ) -> Option<FieldId> {
@@ -37,11 +72,19 @@ pub fn ui(
     }
     let mut removed = None;
 
+    let (pos, pivot) = legend_anchor(position, plot_rect);
     egui::Area::new(id)
-        .fixed_pos(plot_rect.left_top() + egui::vec2(8.0, 8.0))
+        .fixed_pos(pos)
+        .pivot(pivot)
         .order(egui::Order::Middle)
         .show(ui.ctx(), |ui| {
-            egui::Frame::popup(ui.style()).show(ui, |ui| {
+            let base = egui::Frame::popup(ui.style());
+            egui::Frame {
+                shadow: egui::Shadow::NONE,
+                fill: with_bg_opacity(base.fill, opacity),
+                ..base
+            }
+            .show(ui, |ui| {
                 for (field, label) in labels {
                     let Some(trace) = pane.trace_mut(*field) else {
                         continue;
@@ -108,7 +151,7 @@ pub fn ui(
                         );
                     });
                 }
-            });
+            })
         });
 
     removed

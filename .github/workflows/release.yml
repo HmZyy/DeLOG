@@ -1,9 +1,5 @@
 name: Release
 
-# Cut a release by pushing a version tag:
-#   git tag v0.1.0 && git push origin v0.1.0
-# Builds the `delog` binary for Linux + Windows, then publishes a GitHub
-# Release with both archives attached.
 on:
   push:
     tags: ["v*"]

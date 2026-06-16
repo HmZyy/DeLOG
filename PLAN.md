@@ -588,7 +588,7 @@ struct Diag { wall: SystemTime, severity: Info|Warning|Error,
 struct MetricRing { last: f32, min: f32, max: f32, avg: f32, p99: f32, n: u64 } // ring of 256
 ```
 
-**Instrumented from the start** (cheap atomics; the dock merely _reads_): `parse_total`, `ingest_batch`, `snapshot_swap`, `cache_build`, `cache_append`, `minmax_build`, `yquery`, `plot_paint_cpu`, `gpu_encode`, `3d_frame`, `upload_bytes`, `gpu_full_uploads`, `live_rx_rate`, `ingest_dropped_batches`, `frame_total`, plus the memory gauges of §4.6 and per-trace sample/visible counts.
+**Instrumented from the start** (cheap atomics; the dock merely _reads_): `parse_total`, `ingest_batch`, `snapshot_swap`, `cache_build`, `cache_append`, `minmax_build`, `yquery`, `plot_paint_cpu`, `gpu_encode`, `3d_frame`, `upload_bytes`, `gpu_full_uploads`, `live_rx_rate`, `ingest_dropped_batches`, `frame_total`, the per-section UI breakdown `ui_prelude`/`ui_menu`/`ui_toolbar`/`ui_timeline`/`ui_diagnostics`/`ui_performance`/`ui_browser`/`ui_workspace`/`ui_windows` (PRF-10; these partition `frame_total` on the UI thread), the per-pane sub-breakdown `pane_total`/`pane_setup`/`pane_axes`/`pane_overlay` (PRF-10; `plot_paint_cpu` is the fourth child, so they partition `pane_total`), the probes `global_range` (one `global_time_range()` call — O(total chunks)), `workspace_tree` (egui_tiles layout + panes), and `scene_gpsref`/`scene_poses` (3D per-frame GPS-ref resolution vs playhead pose reads, both via the O(chunks) `sample_at`), plus the memory gauges of §4.6 and per-trace sample/visible counts.
 
 Dock: metrics table (last/avg/min/max/samples per spec) + GPU buffer count/bytes + CPU cache bytes; **refreshes at 4 Hz** regardless of frame rate (spec: throttled). Optional FPS/status indicator obeys the §11 idle policy. Debug overlay toggle paints frame timings in-corner. **Export profiling snapshot** writes all rings + gauges to JSON — the artifact to attach to a perf bug.
 
@@ -929,6 +929,8 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **TLN-05** — `follow_live` tail mode, disengage-on-scrub — `Playback::follow_live` pins playhead to tail; timeline scrub/jump/step disengage, `End`/timeline end button re-locks for live sessions
 - [x] **TLN-06** — Idle-aware repaint policy: continuous only when playing/connected (§11) — "connected" half activates with M7 live links
 - [x] **TLN-07** — Playhead drives 3D pose lookup (with M8) — the workspace passes `playback.t_us` into the scene pane; `scene_ui` resolves each visible vehicle with `vehicle::pose_at(snapshot, vehicle, playhead)` and keeps the tracked camera target synced to that pose. Verified in-app while scrubbing a real ArduPilot loop log
+- [x] **TLN-08** — Visible-window range slider: a two-ended range slider (`timeline::window_slider`) directly under the playhead scrubber that sets the global X view; dragging an end moves that bound (clamped to a min window), dragging the band pans the window. The two sliders are stacked in a vertical sharing the row width, and the transport buttons are doubled in height (28×48) so they sit centered between them. Dragging emits `TimelineAction::view_changed`, which disengages fit-all/live-follow like a manual pan/zoom. Mapping reuses the unit-tested `bar_time_at`/`bar_x_at`
+- [x] **TLN-09** — Playback speed as a `DragValue` (0.1–100×, ×suffix) replacing the fixed-step combo; `MAX_SPEED` raised to 100, value still funneled through `Playback::set_speed` for clamping
 
 ### TDV — 3D view (M8)
 
@@ -944,6 +946,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **TDV-10** — Trajectory line + current pose marker synced to playhead — render path draws each vehicle's trajectory + its mesh at the playhead pose (the mesh is the pose marker); in-app verified on a real ArduPilot log with playhead scrubbing, camera tracking, and no demo lemniscate visible
 - [x] **TDV-11** — Rebuild on config/offset change — rides with vehicle config (TDV-03/04). Vehicle edits bump a vehicle revision; source-offset/data changes bump the snapshot epoch; trajectory worker results are accepted only when both keys still match, so stale builds cannot overwrite newer config/offset state. The green vertical Y-axis gizmo is always drawn; the demo lemniscate originally specced here was removed by decision — an unconfigured scene shows only the grid + axes gizmo
 - [ ] **TDV-12** — _(later)_ slerp pose; time-windowed trail
+- [x] **TDV-13** — Full-resolution trajectory + incremental GPU upload — `build_trajectory_from_rows` previously decimated to 4000 points spread evenly across the row range, which both threw away resolution and made every vertex's source row shift as the live path grew (visible jiggle). Now it emits **every** position row in stored order (one O(rows) pass), so the path is append-only and never reorders. The GPU upload (`GpuBridge::prepare_vehicles`) no longer re-converts and re-uploads the whole path every frame: per-vehicle it tracks the resident point count + config generation, grows the points buffer geometrically (power-of-two), and uploads only the appended **tail** when the path grew — full re-upload only on (re)alloc or a config/offset-generation change (carried via `VehicleDraw.traj_generation` = the vehicle revision), and nothing at all when unchanged. Result: full-resolution paths with negligible per-frame 3D cost; showing all points also removes the jiggle by construction (vertices never move). Build stays a full O(rows) rebuild per epoch off-thread — fine for live flights; an incremental build is a future option for multi-million-point logs
 
 ### BRW — Data browser (M2 base, M4 polish)
 
@@ -956,6 +959,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **BRW-07** — Per-source time-offset widget (drag-µs + dialog)
 - [ ] **BRW-08** — Field metadata inspector
 - [ ] **BRW-09** — Favorites/pinned section (persisted)
+- [x] **BRW-10** — Cache the browser tree by snapshot epoch — `BrowserModel::from_snapshot` (O(topics×fields) plus a full string-clone of the tree) ran every frame; now held as `Option<(epoch, BrowserModel)>` in `DelogApp` and rebuilt only when the snapshot epoch changes (offset edits bump it per BRW-07). Eliminates the per-frame rebuild for idle/paused sessions; during live the epoch churns on every ingest, so the broader fix is caching the global time range on the snapshot so `from_snapshot` stops being O(chunks) via `TopicStore::time_range`
 - [ ] **BRW-10** — Source rows: range, rows, memory; remove frees (verify via MemBreakdown)
 
 ### LAY — Layouts & sessions (M9)
@@ -968,34 +972,38 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **LAY-06** — Autosave `session.json` (exit + 30 s dirty) — app writes the current source-agnostic layout document to the app data `session.json` atomically on shutdown and every 30 seconds when the serialized session differs from the last successful autosave; periodic write errors surface as `session-save` diagnostics; app settings/theme are persisted separately (LAY-08), not in session.json
 - [x] **LAY-07** — Layout manager UI (list/rename/delete/duplicate) — Layout menu now opens a manager window listing saved named layouts with load, rename, duplicate, and delete actions. Named-layout filesystem operations update the layout document name on rename/duplicate, list only `.json` layout files, and report manager diagnostics
 - [x] **LAY-08** — App settings (theme, render tuning, 3D view tuning — render distance, max zoom-out, grid/axes toggles, auto/fixed grid cell, fog enable + start/end; camera always follows the selected vehicle — `show_fps`, `render_mode`, last live connection) persisted in their own `settings.json`, separate from layouts and `session.json`; loading any layout (named/imported/session) never mutates app settings. `AppSettings` removed from `LayoutDoc`/`LayoutApply`/`CurrentLayout`; legacy layout JSON with a `settings` key still decodes (the key is ignored)
+- [x] **LAY-09** — Persist the fit-to-view toggle in layouts: `CurrentLayout.fit_all` writes `ViewLayout.mode = Full` (else `Window`); `LayoutApply.fit_all` is read back from `Full` and restored into `DelogApp.fit_view_all`, so loading a `Full` layout re-engages the auto-fit. Round-trip unit-tested via `load_doc`
 
 ### DIA — Diagnostics (M9, emitters earlier)
 
-- [ ] **DIA-01** — Hub: mpsc → 10k ring; severity levels; burst dedup via count (§15)
-- [ ] **DIA-02** — Dock panel: severity/origin filters, text search, clear
-- [ ] **DIA-03** — Click-to-jump playhead for time-bearing diags
-- [ ] **DIA-04** — Emitters wired: parser, stream, ingest-drop, layout-ghost, wgpu, cache
+- [x] **DIA-01** — Hub: mpsc → 10k ring; severity levels; burst dedup via count (§15) — `delog_core::diagnostics::DiagnosticHub` owns an mpsc ingress, 10k retained `DiagRecord` ring, adjacent burst coalescing by count, snapshot/clear APIs, and unit tests for dedup/ring eviction/clear
+- [x] **DIA-02** — Dock panel: severity/origin filters, text search, clear — bottom diagnostics dock in `delog-app` with retained count + latest notice header, collapse toggle, Info+/Warnings+/Errors filter, exact origin filter, text search over code/message/source/time/byte, scrollable striped grid, and Clear wired to the hub
+- [x] **DIA-03** — Click-to-jump playhead for time-bearing diags — diagnostics dock renders time-bearing cells as clickable controls; clicking scrubs the global playback time to the diagnostic timestamp, clamped through the existing playback time-range model
+- [x] **DIA-04** — Emitters wired: parser, stream, ingest-drop, layout-ghost, wgpu, cache — session now routes ingest/parser/stream diagnostics into the hub; layout load/bind, autosave/import/export/live-open/script, data-quality scan, wgpu error scopes, and cache-empty build misses all surface through the same dock
 - [x] **DIA-05** — Async data-quality scan: regressions, dt outliers, duplicates, NaN/Inf % (§15)
-- [ ] **DIA-06** — Log metadata display (params, file info, link info) in browser/inspector
-- [ ] **DIA-07** — Export diagnostics JSON
+- [x] **DIA-06** — Log metadata display (params, file info, link info) in browser/inspector — source context menu opens a metadata inspector split into three tabs — Info (label/kind/source id, topic and row counts, effective time range, offset), Parameters (captured ULog params with a name-filter search box), and Logged Messages (logged-message auto-marker metadata)
+- [x] **DIA-07** — Export diagnostics JSON — File menu export writes a versioned JSON document with retained diagnostic records, burst counts, severity/code/message, source id+label, time and byte offset; success/failure is reported back through the diagnostics hub
 
 ### PRF — Performance dock (M9, instrumented from M0)
 
-- [ ] **PRF-01** — All §16 timers/gauges instrumented at their call sites
-- [ ] **PRF-02** — Dock table: last/avg/min/max/p99/samples per metric
-- [ ] **PRF-03** — 4 Hz dock refresh decoupled from frame rate
-- [ ] **PRF-04** — GPU buffer count/bytes + CPU cache bytes + per-trace sample/visible counts
+- [x] **PRF-01** — All §16 timers/gauges instrumented at their call sites — `parse_total` (parse worker, `session.rs`), `ingest_batch`/`snapshot_swap` (`Ingestor`, threaded a shared registry via `with_metrics`), `cache_build`/`cache_append`/`minmax_build` (`CacheManager`/`TraceCache`, registry via `with_metrics`), `yquery`/`plot_paint_cpu` (workspace, recorded in ms), `upload_bytes`/`gpu_full_uploads` (`BufferManager::sync` now returns `UploadStat`, recorded at the `render_pane` boundary), `gpu_encode` (plot paint callback, registry stashed in `PlotCallbackResources`), `frame_total` (top of `ui()`); `live_rx_rate`/`ingest_dropped_batches`/`3d_frame` were already wired. Memory gauges + per-trace counts surface via the dock resources/traces tabs (PRF-04)
+- [x] **PRF-02** — Dock table: last/avg/min/max/p99/samples per metric — View menu toggles a bottom Performance dock backed by `MetricsRegistry::snapshot()`, rendering metric name, last/avg/min/max/p99, sample count, and counter in a striped table
+- [x] **PRF-03** — 4 Hz dock refresh decoupled from frame rate — the Performance dock caches a `PerformanceSnapshot`, refreshes it no more than every 250 ms, and schedules reactive repaints at the same cadence only while the dock is open
+- [x] **PRF-04** — GPU buffer count/bytes + CPU cache bytes + per-trace sample/visible counts — Performance dock now shows resource totals (GPU buffer count/bytes, ready CPU cache count/bytes) and per-trace rows with total samples, visible-window samples, CPU cache bytes, and GPU bytes. The dock is split into three tabs — Resources, Traces, and Metrics
 - [x] **PRF-05** — Idle-aware FPS/status indicator (off when event-driven) — EMA-smoothed FPS badge pinned top-right of the menu bar, green >60 / orange 30–60 / red <30; computed from the real wall-clock frame-to-frame gap so it tracks during any continuous render (playback/live/interaction), reads "idle" when gaps exceed ~5 FPS (§11)
-- [ ] **PRF-06** — F12 debug overlay
-- [ ] **PRF-07** — Export profiling snapshot JSON
+- [x] **PRF-06** — F12 debug overlay — non-interactive `egui::Area` anchored top-left (clears the corner FPS badge) painting per-frame timers (`frame_total`/`plot_paint_cpu`/`gpu_encode`/`yquery`/`3d_frame`, last + avg ms) and FPS, read live from the registry. Toggled by `F12` (ungated key) or View ▸ Debug Overlay; persisted in `AppSettings.show_debug_overlay`
+- [x] **PRF-07** — Export profiling snapshot JSON — File ▸ Export Profiling JSON… writes all metric rings/gauges + resource totals + per-trace summaries to a `delog_profiling` JSON doc via an off-thread `rfd` save dialog (mirrors the diagnostics export); the doc is built on the UI thread from a shared `build_performance_snapshot` helper. Unit-tested
 - [x] **PRF-08** — FPS-counter visibility toggle (default off) — `AppSettings.show_fps`, surfaced in the Settings → General tab; gates the corner FPS badge (extends PRF-05)
 - [x] **PRF-09** — Reactive/Continuous render mode (default Reactive) — `AppSettings.render_mode`; `Continuous` overrides the §11 idle policy (TLN-06) to repaint every frame
+- [x] **PRF-10** — Per-section `frame_total` breakdown — RAII scope timers in `DelogApp::ui` partition the UI thread into `ui_prelude` (pre-panel bookkeeping: file/job handling, cache lifecycle, trajectory builds, autosave) + `ui_menu`/`ui_toolbar`/`ui_timeline`/`ui_diagnostics`/`ui_performance`/`ui_browser`/`ui_workspace`/`ui_windows`. A second level inside `Behavior::plot_body` splits one pane into `pane_setup` (X/Y ranges + Y-gutter layout + interaction), `pane_axes` (`axes::draw`), `plot_paint_cpu` (the GPU prep, pre-existing) and `pane_overlay` (context menu, playhead/hover readout, legend, info window); `pane_total` wraps the whole body, so `ui_workspace − Σ(pane_total)` is the egui_tiles layout/drop-zone overhead. `frame_total − Σ(ui_*)` is egui tessellation outside the section closures. Surfaces automatically in the Performance dock Metrics tab and the profiling JSON export (no extra wiring)
+- [x] **PRF-11** — Make per-frame time-range reads O(1) — `TopicStore::time_range()` rescanned every chunk on each call, and the UI calls it ~6×/frame via `StoreSnapshot::global_time_range()` plus once per topic in the browser tree; on a long live session (no chunk coalescing) this O(total chunks) work dominated `frame_total`. Fix is two cached aggregates: (1) `TopicStore` caches its chunk-union `time_range` like `rows` — O(chunks) once in `from_chunks`, O(1) per `append_chunk`, O(1) to read — so the browser tree and everything else stop rescanning; (2) `StoreSnapshot` caches the offset-applied global union, computed once in `from_registry` (offsets are fixed per epoch, and with (1) this is now O(topics)), so `global_time_range()` is an O(1) accessor. Profiling probe `global_range` (PRF-10) measures it
+- [x] **PRF-12** — O(log) `FieldView::sample_at` over the chunk spine — `prev_sample`/`next_sample` scanned every chunk; the 3D playhead pose reads (`scene_poses`, ~6 reads/frame, O(chunks)) dominated `frame_total` once a high-rate live session accumulated chunks. `TopicStore` now caches a `monotonic` flag (spine sorted + non-overlapping, maintained O(1) per `append_chunk` like `rows`/`time_range`); when set, `sample_at` binary-searches the spine (`partition_point`) to the single chunk holding the predecessor/successor, falling back to the linear scan for the rare out-of-order/overlapping case (§4.3). Property test `prev_and_next_match_a_naive_scan` exercises the fast path; a new unit test pins the overlapping fallback. Also speeds hover/scripting reads. Profiling probe `scene_poses` (PRF-10) measures it
 
 ### ANA — Analysis (M10)
 
-- [ ] **ANA-01** — Global field stats via ColStats fold (min/max/mean/σ/count/rate) (§17.1)
+- [x] **ANA-01** — Global field stats via ColStats fold (min/max/mean/σ/count/rate) (§17.1) — `ColStats` now records `sum_sq`; `delog_core::analysis::global_field_stats` folds sealed chunk stats for numeric/bool fields into min/max/mean/stddev/count/missing/rate without scanning sample values
 - [ ] **ANA-02** — Visible-window stats: pyramid min/max instant; rayon μ/σ on demand, memoized
-- [ ] **ANA-03** — Stats popup UI (browser + plot trace)
+- [x] **ANA-03** — Stats popup UI (browser + plot trace) — browser field context menu and plot trace context submenu both open a Field Stats window showing global stats from the core fold with units where available
 - [ ] **ANA-04** — Derived built-ins via `derived:` ingestion source: magnitude, scale+offset, deg↔rad, unwrap (§17.3)
 - [ ] **ANA-05** — Markers: manual add (`M`), bookmarks panel, timeline flags, plot verticals, persist (§17.4)
 - [ ] **ANA-06** — Auto-markers from AP MSG/EV + ULog logged messages (toggle)
@@ -1024,8 +1032,8 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [ ] **IOX-02** — CSV resample modes: none/prev-fill/linear@dt; streamed + progress
 - [ ] **IOX-03** — Plot image export (screenshot 1×/2×)
 - [ ] **IOX-04** — Layout JSON export/import (=LAY-05 surfacing in File menu)
-- [ ] **IOX-05** — Diagnostics export (=DIA-07)
-- [ ] **IOX-06** — Profiling export (=PRF-07)
+- [x] **IOX-05** — Diagnostics export (=DIA-07)
+- [x] **IOX-06** — Profiling export (=PRF-07) — done with PRF-07
 - [ ] **IOX-07** — _(backlog)_ offscreen vector-quality plot render export
 - [ ] **IOX-08** — Arrow IPC `.dlcache` writer (background, post-parse) + mtime/size match + mmap reload (ZC-5)
 - [ ] **IOX-09** — _(backlog)_ Parquet cache option
@@ -1045,6 +1053,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [ ] **UIX-10** — Manual parser-override picker dialog (pairs PAR-01)
 - [x] **UIX-11** — App data session engine: open path → sniff/detect → off-thread parse into ingestor; per-source progress + cancel token; snapshot access (the never-block load path behind UIX-02/BRW-01, §19.6)
 - [x] **UIX-12** — Timeline live-link status dot — filled dot at the head of the timeline bar: grey when not streaming, yellow when a live link is up but the view is not locked to the tail, red when locked-to-live (§10.4); tooltip names the state. Pairs with the lock-to-live state from PLT-05
+- [x] **UIX-13** — Settings ▸ General font override (like the egui demo): `FontOverride` { enabled, size, monospace } with a checkbox, a size `DragValue` (4–40) and a Proportional/Monospace radio (both disabled until enabled); applied each frame via `ctx.all_styles_mut(|s| s.override_font_id = …)` and persisted in `settings.json`. Default off. Round-trip + default unit-tested
 
 ### TST — Testing & CI (continuous)
 
