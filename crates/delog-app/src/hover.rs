@@ -60,17 +60,8 @@ pub fn draw(
     let cursor_x_sec = x0 + (pos.x - rect.left()) / rect.width() * (x1 - x0);
     let cursor_us = origin_us + (cursor_x_sec as f64 * 1e6) as i64;
 
-    let to_x = |x_sec: f32| rect.left() + (x_sec - x0) / (x1 - x0) * rect.width();
-    let to_y = |y: f32| rect.bottom() - (y - y0) / (y1 - y0) * rect.height();
-
     let rows = sampled_rows(snapshot, pane, cursor_us, mode);
-    for row in &rows {
-        let sx = to_x((row.effective_time_us - origin_us) as f32 * 1e-6);
-        let sy = to_y(row.value as f32);
-        if rect.contains(egui::pos2(sx, sy)) {
-            painter.circle_stroke(egui::pos2(sx, sy), 3.5, egui::Stroke::new(1.5, row.color));
-        }
-    }
+    draw_sample_circles(ui, view, origin_us, &rows);
 
     if tooltip {
         show_tooltip(
@@ -81,6 +72,29 @@ pub fn draw(
             cursor_x_sec,
             &rows,
         );
+    }
+}
+
+/// Mark each visible trace with a small circle at its sampled point, mapping
+/// the canonical sample time + value into screen space. Shared by the hover
+/// readout (PLT-09) and the playhead readout (PLT-10) so the non-hovered panes
+/// show where the cursor/playhead intersects each line, not just a value.
+fn draw_sample_circles(ui: &egui::Ui, view: PaneView, origin_us: i64, rows: &[Row]) {
+    let rect = view.rect;
+    let (x0, x1) = view.x_range;
+    let (y0, y1) = view.y_range;
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    let to_x = |x_sec: f32| rect.left() + (x_sec - x0) / (x1 - x0) * rect.width();
+    let to_y = |y: f32| rect.bottom() - (y - y0) / (y1 - y0) * rect.height();
+    let painter = ui.painter();
+    for row in rows {
+        let sx = to_x((row.effective_time_us - origin_us) as f32 * 1e-6);
+        let sy = to_y(row.value as f32);
+        if rect.contains(egui::pos2(sx, sy)) {
+            painter.circle_stroke(egui::pos2(sx, sy), 3.5, egui::Stroke::new(1.5, row.color));
+        }
     }
 }
 
@@ -165,10 +179,11 @@ fn color_swatch(ui: &mut egui::Ui, color: egui::Color32) {
 }
 
 /// Playhead cursor (§10.5/§11, PLT-10): a vertical line at the playback time
-/// on every pane; with `readout` set, the shared hover tooltip shows the
-/// values, anchored to the bottom of the line (flipping side near the right
-/// edge). The caller passes `readout: None` on the hovered pane — the hover
-/// tooltip is already there — and outside alt-scrub/playback.
+/// on every pane; with `readout` set, a circle marks each trace's sample at the
+/// playhead and the shared hover tooltip shows the values, anchored to the
+/// bottom of the line (flipping side near the right edge). The caller passes
+/// `readout: None` on the hovered pane — the hover readout already draws there —
+/// and outside alt-scrub/playback.
 pub fn draw_playhead(
     ui: &egui::Ui,
     target: HoverTarget,
@@ -199,6 +214,7 @@ pub fn draw_playhead(
         return;
     };
     let rows = sampled_rows(snapshot, pane, t_us, mode);
+    draw_sample_circles(ui, view, origin_us, &rows);
     let on_left = x > rect.right() - 160.0;
     let (pos, pivot) = if on_left {
         (
