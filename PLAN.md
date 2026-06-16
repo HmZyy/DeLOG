@@ -929,6 +929,8 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **TLN-05** — `follow_live` tail mode, disengage-on-scrub — `Playback::follow_live` pins playhead to tail; timeline scrub/jump/step disengage, `End`/timeline end button re-locks for live sessions
 - [x] **TLN-06** — Idle-aware repaint policy: continuous only when playing/connected (§11) — "connected" half activates with M7 live links
 - [x] **TLN-07** — Playhead drives 3D pose lookup (with M8) — the workspace passes `playback.t_us` into the scene pane; `scene_ui` resolves each visible vehicle with `vehicle::pose_at(snapshot, vehicle, playhead)` and keeps the tracked camera target synced to that pose. Verified in-app while scrubbing a real ArduPilot loop log
+- [x] **TLN-08** — Visible-window range slider: a two-ended range slider (`timeline::window_slider`) directly under the playhead scrubber that sets the global X view; dragging an end moves that bound (clamped to a min window), dragging the band pans the window. The two sliders are stacked in a vertical sharing the row width, and the transport buttons are doubled in height (28×48) so they sit centered between them. Dragging emits `TimelineAction::view_changed`, which disengages fit-all/live-follow like a manual pan/zoom. Mapping reuses the unit-tested `bar_time_at`/`bar_x_at`
+- [x] **TLN-09** — Playback speed as a `DragValue` (0.1–100×, ×suffix) replacing the fixed-step combo; `MAX_SPEED` raised to 100, value still funneled through `Playback::set_speed` for clamping
 
 ### TDV — 3D view (M8)
 
@@ -970,6 +972,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **LAY-06** — Autosave `session.json` (exit + 30 s dirty) — app writes the current source-agnostic layout document to the app data `session.json` atomically on shutdown and every 30 seconds when the serialized session differs from the last successful autosave; periodic write errors surface as `session-save` diagnostics; app settings/theme are persisted separately (LAY-08), not in session.json
 - [x] **LAY-07** — Layout manager UI (list/rename/delete/duplicate) — Layout menu now opens a manager window listing saved named layouts with load, rename, duplicate, and delete actions. Named-layout filesystem operations update the layout document name on rename/duplicate, list only `.json` layout files, and report manager diagnostics
 - [x] **LAY-08** — App settings (theme, render tuning, 3D view tuning — render distance, max zoom-out, grid/axes toggles, auto/fixed grid cell, fog enable + start/end; camera always follows the selected vehicle — `show_fps`, `render_mode`, last live connection) persisted in their own `settings.json`, separate from layouts and `session.json`; loading any layout (named/imported/session) never mutates app settings. `AppSettings` removed from `LayoutDoc`/`LayoutApply`/`CurrentLayout`; legacy layout JSON with a `settings` key still decodes (the key is ignored)
+- [x] **LAY-09** — Persist the fit-to-view toggle in layouts: `CurrentLayout.fit_all` writes `ViewLayout.mode = Full` (else `Window`); `LayoutApply.fit_all` is read back from `Full` and restored into `DelogApp.fit_view_all`, so loading a `Full` layout re-engages the auto-fit. Round-trip unit-tested via `load_doc`
 
 ### DIA — Diagnostics (M9, emitters earlier)
 
@@ -1050,6 +1053,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [ ] **UIX-10** — Manual parser-override picker dialog (pairs PAR-01)
 - [x] **UIX-11** — App data session engine: open path → sniff/detect → off-thread parse into ingestor; per-source progress + cancel token; snapshot access (the never-block load path behind UIX-02/BRW-01, §19.6)
 - [x] **UIX-12** — Timeline live-link status dot — filled dot at the head of the timeline bar: grey when not streaming, yellow when a live link is up but the view is not locked to the tail, red when locked-to-live (§10.4); tooltip names the state. Pairs with the lock-to-live state from PLT-05
+- [x] **UIX-13** — Settings ▸ General font override (like the egui demo): `FontOverride` { enabled, size, monospace } with a checkbox, a size `DragValue` (4–40) and a Proportional/Monospace radio (both disabled until enabled); applied each frame via `ctx.all_styles_mut(|s| s.override_font_id = …)` and persisted in `settings.json`. Default off. Round-trip + default unit-tested
 
 ### TST — Testing & CI (continuous)
 

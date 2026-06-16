@@ -14,6 +14,9 @@ fn default_true() -> bool {
 fn default_opacity() -> f32 {
     0.85
 }
+fn default_font_size() -> f32 {
+    14.0
+}
 #[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AppSettings {
     #[serde(default)]
@@ -40,6 +43,51 @@ pub struct AppSettings {
     /// Plot overlay display (legend placement + hover readout contents).
     #[serde(default)]
     pub plot: PlotDisplay,
+    /// Optional global font override (size + family), like the egui demo.
+    #[serde(default)]
+    pub font: FontOverride,
+}
+
+/// Global font override applied through `Style::override_font_id` (UIX-13),
+/// mirroring the egui demo's font control. Disabled by default (egui's own
+/// per-text-style fonts are used).
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct FontOverride {
+    /// When off, no override is applied.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Point size used for every text style while enabled.
+    #[serde(default = "default_font_size")]
+    pub size: f32,
+    /// `true` selects the monospace family, `false` proportional.
+    #[serde(default)]
+    pub monospace: bool,
+}
+
+impl Default for FontOverride {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            size: default_font_size(),
+            monospace: false,
+        }
+    }
+}
+
+impl FontOverride {
+    /// Push (or clear) the override on every theme's style. Cheap; called each
+    /// frame so toggling it off restores the defaults immediately.
+    pub fn apply(self, ctx: &egui::Context) {
+        let font_id = self.enabled.then(|| {
+            let family = if self.monospace {
+                egui::FontFamily::Monospace
+            } else {
+                egui::FontFamily::Proportional
+            };
+            egui::FontId::new(self.size.clamp(4.0, 40.0), family)
+        });
+        ctx.all_styles_mut(|style| style.override_font_id = font_id.clone());
+    }
 }
 
 /// Where the per-pane legend overlay sits inside the plot rect (PLT-08).
@@ -452,6 +500,28 @@ fn general_tab(ui: &mut egui::Ui, settings: &mut AppSettings) -> SettingsChange 
                     }
                 });
             ui.end_row();
+
+            let f = &mut settings.font;
+            ui.label("Override font")
+                .on_hover_text("Force one font (size + family) for all UI text, like the egui demo. Off uses egui's per-style fonts.");
+            ui.checkbox(&mut f.enabled, "");
+            ui.end_row();
+
+            ui.label("Font size");
+            ui.add_enabled(
+                f.enabled,
+                egui::DragValue::new(&mut f.size).range(4.0..=40.0).speed(0.25),
+            );
+            ui.end_row();
+
+            ui.label("Font family");
+            ui.add_enabled_ui(f.enabled, |ui| {
+                ui.horizontal(|ui| {
+                    ui.radio_value(&mut f.monospace, false, "Proportional");
+                    ui.radio_value(&mut f.monospace, true, "Monospace");
+                });
+            });
+            ui.end_row();
         });
 
     SettingsChange {
@@ -670,6 +740,30 @@ mod tests {
         assert!(json.contains("legend_position"));
         let decoded: AppSettings = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.plot, settings.plot);
+    }
+
+    #[test]
+    fn font_override_defaults_off_proportional_14() {
+        let f = FontOverride::default();
+        assert!(!f.enabled);
+        assert!(!f.monospace);
+        assert_eq!(f.size, 14.0);
+    }
+
+    #[test]
+    fn app_settings_persist_font_override() {
+        let settings = AppSettings {
+            font: FontOverride {
+                enabled: true,
+                size: 20.0,
+                monospace: true,
+            },
+            ..AppSettings::default()
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(json.contains("\"font\""));
+        let decoded: AppSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.font, settings.font);
     }
 
     #[test]

@@ -211,6 +211,9 @@ pub enum OriLayout {
 pub struct LayoutApply {
     pub workspace: Workspace,
     pub view: Option<ViewX>,
+    /// Restored fit-to-view toggle (`ViewMode::Full`), so the view re-fits the
+    /// data range as it would after pressing the timeline fit button (LAY-09).
+    pub fit_all: bool,
     pub speed: f64,
     pub follow_live: bool,
     pub vehicles: Vec<VehicleConfig>,
@@ -256,6 +259,9 @@ pub struct CurrentLayout<'a> {
     pub workspace: &'a Workspace,
     pub snapshot: &'a StoreSnapshot,
     pub view: Option<ViewX>,
+    /// Whether the fit-to-view toggle is engaged — persisted as
+    /// `ViewMode::Full` (LAY-09).
+    pub fit_all: bool,
     pub speed: f64,
     pub follow_live: bool,
     pub vehicles: &'a [VehicleConfig],
@@ -487,7 +493,11 @@ pub fn current_doc(input: CurrentLayout<'_>) -> LayoutDoc {
         delog_layout: LAYOUT_VERSION,
         name: input.name,
         view: input.view.map(|v| ViewLayout {
-            mode: ViewMode::Window,
+            mode: if input.fit_all {
+                ViewMode::Full
+            } else {
+                ViewMode::Window
+            },
             min_us: v.min_us,
             max_us: v.max_us,
         }),
@@ -686,6 +696,7 @@ fn apply_doc(
     Ok(LayoutApply {
         workspace,
         view: doc.view.map(|v| ViewX::new(v.min_us, v.max_us)),
+        fit_all: doc.view.is_some_and(|v| matches!(v.mode, ViewMode::Full)),
         speed: doc.playback.speed,
         follow_live: doc.playback.follow_live,
         vehicles,
@@ -1402,6 +1413,37 @@ mod tests {
             }
         }
         StoreSnapshot::from_registry(&ids, [], 0).expect("identity snapshot")
+    }
+
+    #[test]
+    fn fit_to_view_persists_as_full_mode_and_restores_fit_all() {
+        // ViewMode::Full in the saved view restores the fit-all toggle (LAY-09).
+        let mut doc = empty_doc("fit");
+        doc.view = Some(ViewLayout {
+            mode: ViewMode::Full,
+            min_us: 0,
+            max_us: 10,
+        });
+        let LoadOutcome::Applied(layout) =
+            load_doc(doc, &StoreSnapshot::empty()).expect("should apply")
+        else {
+            panic!("no sources → no mapping");
+        };
+        assert!(layout.fit_all);
+
+        // A normal windowed view does not engage fit-all.
+        let mut doc = empty_doc("win");
+        doc.view = Some(ViewLayout {
+            mode: ViewMode::Window,
+            min_us: 0,
+            max_us: 10,
+        });
+        let LoadOutcome::Applied(layout) =
+            load_doc(doc, &StoreSnapshot::empty()).expect("should apply")
+        else {
+            panic!("no sources → no mapping");
+        };
+        assert!(!layout.fit_all);
     }
 
     fn empty_doc(name: &str) -> LayoutDoc {

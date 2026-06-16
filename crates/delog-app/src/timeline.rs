@@ -6,9 +6,11 @@
 
 use delog_core::time::TimeRange;
 
-/// Playback speed bounds (§11).
+use crate::plot::ViewX;
+
+/// Playback speed bounds (§11; TLN-09 widened the upper bound to 100×).
 pub const MIN_SPEED: f32 = 0.1;
-pub const MAX_SPEED: f32 = 16.0;
+pub const MAX_SPEED: f32 = 100.0;
 
 /// Play/pause state, playhead position and speed (§11, TLN-01).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -197,33 +199,38 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (y, m, d)
 }
 
-/// Speed steps offered by the picker (within §11's 0.1–16× bounds).
-const SPEED_STEPS: [f32; 8] = [0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0];
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TimelineAction {
     /// User requested explicit live-tail lock (`End` equivalent).
     pub lock_live: bool,
     /// User manually scrubbed or jumped away from live mode.
     pub manual_scrub: bool,
+    /// User dragged the visible-window range slider, changing the X view
+    /// (TLN-08) — treated like a manual pan/zoom (disengages fit-all/live).
+    pub view_changed: bool,
 }
 
 /// The timeline bar: transport buttons, speed picker, the scrubber and the
 /// time display (§11, TLN-02/03). `utc_offset_us` maps canonical time to unix
 /// time when a source carries a UTC reference; `any_live` shades the tail of
 /// the bar to mark a still growing extent (live links, M7).
+#[allow(clippy::too_many_arguments)]
 pub fn ui(
     ui: &mut egui::Ui,
     playback: &mut Playback,
     fit_all: &mut bool,
+    view: &mut Option<ViewX>,
     range: TimeRange,
     utc_offset_us: Option<i64>,
     any_live: bool,
     theme: crate::theme::ThemeChoice,
 ) -> TimelineAction {
     let mut action = TimelineAction::default();
+    ui.add_space(6.0);
     ui.horizontal(|ui| {
-        let button_size = egui::vec2(28.0, 24.0);
+        // Square transport buttons, tall enough to sit centered between the two
+        // stacked sliders on the right (TLN-08).
+        let button_size = egui::vec2(40.0, 40.0);
         // Live-link status dot: grey = not streaming, yellow = streaming but
         // not locked to the live tail, red = locked. While streaming it is
         // clickable to toggle the live-tail lock.
@@ -331,19 +338,21 @@ pub fn ui(
             *fit_all = !*fit_all;
         }
 
-        egui::ComboBox::from_id_salt("playback_speed")
-            .selected_text(format!("{}×", playback.speed))
-            .width(56.0)
-            .show_ui(ui, |ui| {
-                for step in SPEED_STEPS {
-                    if ui
-                        .selectable_label(playback.speed == step, format!("{step}×"))
-                        .clicked()
-                    {
-                        playback.set_speed(step);
-                    }
-                }
-            });
+        // Playback speed as a free drag value within the spec bounds (TLN-09).
+        let mut speed = playback.speed;
+        if ui
+            .add(
+                egui::DragValue::new(&mut speed)
+                    .range(MIN_SPEED as f64..=MAX_SPEED as f64)
+                    .speed(0.05)
+                    .max_decimals(2)
+                    .suffix("×"),
+            )
+            .on_hover_text("Playback speed (0.1–100×)")
+            .changed()
+        {
+            playback.set_speed(speed);
+        }
 
         // Log-relative position / total, plus absolute UTC when the source
         // carries a reference (TLN-03).
@@ -356,10 +365,21 @@ pub fn ui(
             ui.weak(format_utc(playback.t_us + offset));
         }
 
-        if scrubber(ui, playback, range, any_live) {
-            action.manual_scrub = true;
-        }
+        // Two stacked sliders sharing the remaining width: the playhead scrubber
+        // on top and the visible-window range slider directly beneath it (TLN-08).
+        ui.vertical(|ui| {
+            if scrubber(ui, playback, range, any_live) {
+                action.manual_scrub = true;
+            }
+            ui.add_space(6.0);
+            if let Some(v) = view.as_mut()
+                && window_slider(ui, v, range)
+            {
+                action.view_changed = true;
+            }
+        });
     });
+    ui.add_space(6.0);
     action
 }
 
@@ -410,6 +430,101 @@ fn scrubber(ui: &mut egui::Ui, playback: &mut Playback, range: TimeRange, any_li
     painter.vline(x, rect.y_range(), egui::Stroke::new(2.0, stroke_color));
     painter.circle_filled(egui::pos2(x, rect.center().y), 4.0, stroke_color);
     scrubbed
+}
+
+/// Two-ended range slider over the full data range that sets the visible X
+/// window (the global view, TLN-08). Dragging an end moves that bound; dragging
+/// the band between them pans the window. Returns whether the view changed.
+fn window_slider(ui: &mut egui::Ui, view: &mut ViewX, range: TimeRange) -> bool {
+    let height = 16.0;
+    let (rect, _resp) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), height),
+        egui::Sense::hover(),
+    );
+    if !ui.is_rect_visible(rect) {
+        return false;
+    }
+
+    let span = (range.max_us - range.min_us).max(1);
+    // Keep at least ~8 px of window so both handles stay grabbable.
+    let min_span_us = (span as f64 * (8.0 / rect.width().max(1.0)) as f64) as i64 + 1;
+
+    // Clamp the incoming view to the data range for a sane display.
+    view.min_us = view.min_us.clamp(range.min_us, range.max_us);
+    view.max_us = view
+        .max_us
+        .clamp(view.min_us + 1, range.max_us.max(view.min_us + 1));
+
+    let hw = 5.0;
+    let lo_rect = egui::Rect::from_center_size(
+        egui::pos2(bar_x_at(view.min_us, rect, range), rect.center().y),
+        egui::vec2(hw * 2.0, height),
+    );
+    let hi_rect = egui::Rect::from_center_size(
+        egui::pos2(bar_x_at(view.max_us, rect, range), rect.center().y),
+        egui::vec2(hw * 2.0, height),
+    );
+    let mid_rect = egui::Rect::from_min_max(
+        egui::pos2(lo_rect.right().min(hi_rect.left()), rect.top()),
+        egui::pos2(hi_rect.left().max(lo_rect.right()), rect.bottom()),
+    );
+
+    let id = ui.id();
+    let lo_resp = ui.interact(lo_rect, id.with("win_lo"), egui::Sense::drag());
+    let hi_resp = ui.interact(hi_rect, id.with("win_hi"), egui::Sense::drag());
+    let mid_resp = ui.interact(mid_rect, id.with("win_mid"), egui::Sense::drag());
+
+    let mut changed = false;
+    if lo_resp.dragged()
+        && let Some(p) = lo_resp.interact_pointer_pos()
+    {
+        let t = bar_time_at(p.x, rect, range).min(view.max_us - min_span_us);
+        view.min_us = t.clamp(range.min_us, range.max_us);
+        changed = true;
+    }
+    if hi_resp.dragged()
+        && let Some(p) = hi_resp.interact_pointer_pos()
+    {
+        let t = bar_time_at(p.x, rect, range).max(view.min_us + min_span_us);
+        view.max_us = t.clamp(range.min_us, range.max_us);
+        changed = true;
+    }
+    if mid_resp.dragged() {
+        let dx = mid_resp.drag_delta().x;
+        if dx != 0.0 {
+            let win = view.max_us - view.min_us;
+            let delta = (dx as f64 / rect.width().max(1.0) as f64 * span as f64).round() as i64;
+            let lo = (view.min_us + delta).clamp(range.min_us, range.max_us - win);
+            view.min_us = lo;
+            view.max_us = lo + win;
+            changed = true;
+        }
+    }
+
+    // Draw: full track, the selected window band, two handle knobs.
+    let painter = ui.painter();
+    let visuals = ui.visuals();
+    let bar = egui::Rect::from_center_size(rect.center(), egui::vec2(rect.width(), 6.0));
+    painter.rect_filled(bar, 3.0, visuals.extreme_bg_color);
+    let band = egui::Rect::from_min_max(
+        egui::pos2(bar_x_at(view.min_us, rect, range), bar.top()),
+        egui::pos2(bar_x_at(view.max_us, rect, range), bar.bottom()),
+    );
+    painter.rect_filled(band, 3.0, visuals.selection.bg_fill);
+    let handle = |t_us: i64, active: bool| {
+        let c = if active {
+            visuals.strong_text_color()
+        } else {
+            visuals.text_color()
+        };
+        let x = bar_x_at(t_us, rect, range);
+        painter.vline(x, rect.y_range(), egui::Stroke::new(2.0, c));
+        painter.circle_filled(egui::pos2(x, rect.center().y), 4.0, c);
+    };
+    handle(view.min_us, lo_resp.hovered() || lo_resp.dragged());
+    handle(view.max_us, hi_resp.hovered() || hi_resp.dragged());
+
+    changed
 }
 
 #[cfg(test)]
