@@ -9,7 +9,7 @@ use delog_script::{ScriptCommand, ScriptEngine, ScriptEvent};
 use egui_code_editor::{CodeEditor, ColorTheme, Syntax};
 
 /// All UI + engine state for the scripts window (the editor + REPL console). The
-/// saved-script library is surfaced through the Tools ▸ Scripts ▸ Run menu, not
+/// saved-script library is surfaced through the Tools / Scripts / Run menu, not
 /// in this window.
 pub struct ScriptsPanel {
     pub open: bool,
@@ -20,7 +20,7 @@ pub struct ScriptsPanel {
     repl_input: String,
     console: String,
     status: String,
-    /// Script name awaiting a delete confirmation (Tools ▸ Scripts ▸ Run ▸ Remove).
+    /// Script name awaiting a delete confirmation (Tools / Scripts / Run / Remove).
     pending_delete: Option<String>,
     /// Whether a command is in flight (toggles the Run/Cancel button).
     running: bool,
@@ -61,14 +61,14 @@ impl ScriptsPanel {
         self.pending_delete = Some(name.to_owned());
     }
 
-    /// Saved script names for the Tools ▸ Scripts ▸ Run submenu (read fresh from
+    /// Saved script names for the Tools / Scripts / Run submenu (read fresh from
     /// disk so newly-saved scripts appear without restarting).
     pub fn script_names(&self) -> Vec<String> {
         self.library.list().unwrap_or_default()
     }
 
-    /// Load a saved script by name and run it through the engine (Tools ▸ Scripts
-    /// ▸ Run ▸ <name>). The editor buffer is left untouched; output buffers in the
+    /// Load a saved script by name and run it through the engine (Tools / Scripts
+    /// / Run / <name>). The editor buffer is left untouched; output buffers in the
     /// console and the derived source appears in the data browser.
     pub fn run_named(&mut self, name: &str, store: Arc<DataStore>, sender: IngestSender) {
         match self.library.load(name) {

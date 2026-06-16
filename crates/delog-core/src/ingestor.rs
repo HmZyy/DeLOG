@@ -23,6 +23,7 @@ use crate::identity::{IdentityRegistry, SourceId, TopicId};
 use crate::ingest::{
     IngestMsg, IngestReceiver, ParseSummary, ParsedBatch, RecvOutcome, SourceKind,
 };
+use crate::metrics::MetricsRegistry;
 use crate::schema::TopicSchema;
 use crate::snapshot::{DataStore, StoreSnapshot};
 use crate::store::TopicStore;
@@ -83,6 +84,10 @@ pub struct Ingestor<O: IngestObserver> {
     observer: O,
     chunks_sealed: u64,
     rows_ingested: u64,
+    /// Shared metrics registry (§16). Defaults to a private registry; the app
+    /// swaps in the shared one via [`Ingestor::with_metrics`] so the perf dock
+    /// sees `ingest_batch`/`snapshot_swap`.
+    metrics: Arc<MetricsRegistry>,
 }
 
 impl<O: IngestObserver> Ingestor<O> {
@@ -96,7 +101,15 @@ impl<O: IngestObserver> Ingestor<O> {
             observer,
             chunks_sealed: 0,
             rows_ingested: 0,
+            metrics: Arc::new(MetricsRegistry::new()),
         }
+    }
+
+    /// Record `ingest_batch`/`snapshot_swap` timings into the shared registry
+    /// (§16, PRF-01).
+    pub fn with_metrics(mut self, metrics: Arc<MetricsRegistry>) -> Self {
+        self.metrics = metrics;
+        self
     }
 
     /// The published store readers load from.
@@ -183,6 +196,7 @@ impl<O: IngestObserver> Ingestor<O> {
         if batch.rows() == 0 {
             return;
         }
+        let _ingest_timer = self.metrics.scope("ingest_batch");
         let Some(source) = self.sources.get(&batch.source) else {
             self.observer.on_diagnostic(Diag::warning(
                 "batch-unknown-source",
@@ -425,6 +439,7 @@ impl<O: IngestObserver> Ingestor<O> {
 
     /// Rebuild and publish the snapshot from the registry and current stores.
     fn publish(&self) {
+        let _swap_timer = self.metrics.scope("snapshot_swap");
         let topic_stores = self
             .stores
             .iter()

@@ -1,7 +1,7 @@
 //! Vehicle configuration + pose/trajectory resolution for the 3D view
 //! (PLAN.md §12.1-§12.2, TDV-03/04/06). A [`VehicleConfig`] maps a source's
-//! fields to position and orientation; [`pose_at`] reads the pose at a playback
-//! time and [`build_trajectory`] decimates the whole path — both into render
+//! fields to position and orientation; [`pose_at_with_ref`] reads the pose at a
+//! playback time and [`build_trajectory`] builds the whole path — both into render
 //! space (§12.2) via [`crate::geo`].
 //!
 //! Field samples are read through `delog-core`'s [`FieldView`] (the app never
@@ -356,14 +356,34 @@ fn orientation_at(snapshot: &StoreSnapshot, ori: &OriMapping, t_us: i64) -> Mat3
 /// when its position can't be read (e.g. before the first sample). The
 /// model's mesh→body correction is folded into the rotation (mesh-local, so
 /// right-multiplied).
+/// Resolve the GPS reference and read the pose in one call. Production code
+/// hoists the (stable) reference out of the per-frame loop and calls
+/// [`pose_at_with_ref`]; this convenience wrapper is kept for tests.
+#[cfg(test)]
 pub fn pose_at(snapshot: &StoreSnapshot, config: &VehicleConfig, t_us: i64) -> Option<Pose> {
     let gps_ref = gps_reference(snapshot, config);
+    pose_at_with_ref(snapshot, config, gps_ref, t_us)
+}
+
+/// Like [`pose_at`] but with the GPS reference supplied by the caller, so the
+/// (stable) reference can be resolved once and reused across frames instead of
+/// re-scanning for the first fix on every call. `gps_ref` is ignored for
+/// NED-mapped vehicles.
+pub(crate) fn pose_at_with_ref(
+    snapshot: &StoreSnapshot,
+    config: &VehicleConfig,
+    gps_ref: Option<(f64, f64, f64)>,
+    t_us: i64,
+) -> Option<Pose> {
     let pos = position_at(snapshot, &config.pos, gps_ref, t_us)?;
     let rot = orientation_at(snapshot, &config.ori, t_us) * config.model.orientation_offset();
     Some(Pose { pos, rot })
 }
 
-fn gps_reference(snapshot: &StoreSnapshot, config: &VehicleConfig) -> Option<(f64, f64, f64)> {
+pub(crate) fn gps_reference(
+    snapshot: &StoreSnapshot,
+    config: &VehicleConfig,
+) -> Option<(f64, f64, f64)> {
     if let PosMapping::Gps {
         lat,
         lon,
@@ -469,13 +489,6 @@ fn position_from_row(
     }
 }
 
-fn selected_row_index(total_rows: usize, point_index: usize, point_count: usize) -> usize {
-    if point_count <= 1 {
-        return 0;
-    }
-    point_index * (total_rows - 1) / (point_count - 1)
-}
-
 fn build_trajectory_from_rows(
     snapshot: &StoreSnapshot,
     config: &VehicleConfig,
@@ -487,25 +500,19 @@ fn build_trajectory_from_rows(
     }
 
     let gps_ref = gps_reference(snapshot, config);
-    let point_count = total_rows.min(MAX_TRAJECTORY_POINTS);
-    let mut points = Vec::with_capacity(point_count);
-    let mut chunk_index = 0;
-    let mut chunk_start = 0;
-
-    for i in 0..point_count {
-        let target = selected_row_index(total_rows, i, point_count);
-        while let Some(chunk) = rows.store.chunks.get(chunk_index) {
-            let chunk_end = chunk_start + chunk.len();
-            if target < chunk_end {
-                let row = target - chunk_start;
-                match position_from_row(&config.pos, &rows, gps_ref, chunk, row) {
-                    Some(p) => points.push([p.x, p.y, p.z]),
-                    None => points.push([f32::NAN, f32::NAN, f32::NAN]),
-                }
-                break;
+    // Full-resolution path: every position row, in stored (append) order. The
+    // build is one O(rows) pass over the chunks; the path is append-only, so the
+    // GPU upload only writes the new tail each rebuild (see
+    // `GpuBridge::sync_vehicle_trajectory`) and the line shader handles the full
+    // vertex count. No decimation means vertices never move between rebuilds —
+    // the source of the old jiggle.
+    let mut points = Vec::with_capacity(total_rows);
+    for chunk in rows.store.chunks.iter() {
+        for row in 0..chunk.len() {
+            match position_from_row(&config.pos, &rows, gps_ref, chunk, row) {
+                Some(p) => points.push([p.x, p.y, p.z]),
+                None => points.push([f32::NAN, f32::NAN, f32::NAN]),
             }
-            chunk_start = chunk_end;
-            chunk_index += 1;
         }
     }
 
