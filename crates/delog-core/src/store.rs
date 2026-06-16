@@ -20,6 +20,13 @@ pub struct TopicStore {
     /// call, and the UI calls it (via `global_time_range`/the browser tree)
     /// several times per frame, so the scan grew with the live chunk count.
     time_range: Option<TimeRange>,
+    /// Whether the chunk spine is sorted and non-overlapping in time
+    /// (`chunks[i].t_max <= chunks[i+1].t_min`). True for the common in-order
+    /// (live/file) case; an out-of-order source clears it (§4.3 tolerates
+    /// overlap). `FieldView::sample_at` binary-searches the spine when this
+    /// holds and falls back to a linear scan otherwise. Maintained O(1) per
+    /// `append_chunk` like `rows`/`time_range`.
+    monotonic: bool,
 }
 
 /// Topic store construction/append failures.
@@ -36,6 +43,7 @@ impl TopicStore {
             chunks: Arc::from([]),
             rows: 0,
             time_range: None,
+            monotonic: true,
         }
     }
 
@@ -45,6 +53,8 @@ impl TopicStore {
     ) -> Result<Self, TopicStoreError> {
         let mut rows = 0_u64;
         let mut time_range: Option<TimeRange> = None;
+        let mut monotonic = true;
+        let mut prev_t_max: Option<i64> = None;
         let chunks: Vec<_> = chunks
             .into_iter()
             .map(|chunk| {
@@ -52,6 +62,10 @@ impl TopicStore {
                 rows = rows
                     .checked_add(chunk.len() as u64)
                     .ok_or(TopicStoreError::RowCountOverflow)?;
+                if prev_t_max.is_some_and(|pmax| chunk.t_min < pmax) {
+                    monotonic = false;
+                }
+                prev_t_max = Some(chunk.t_max);
                 time_range = Some(union_with_chunk(time_range, &chunk));
                 Ok(chunk)
             })
@@ -62,6 +76,7 @@ impl TopicStore {
             chunks: Arc::from(chunks),
             rows,
             time_range,
+            monotonic,
         })
     }
 
@@ -75,6 +90,11 @@ impl TopicStore {
             .checked_add(chunk.len() as u64)
             .ok_or(TopicStoreError::RowCountOverflow)?;
         let time_range = Some(union_with_chunk(self.time_range, &chunk));
+        let monotonic = self.monotonic
+            && self
+                .chunks
+                .last()
+                .is_none_or(|last| last.t_max <= chunk.t_min);
         let mut chunks = Vec::with_capacity(self.chunks.len() + 1);
         chunks.extend(self.chunks.iter().cloned());
         chunks.push(chunk);
@@ -84,6 +104,7 @@ impl TopicStore {
             chunks: Arc::from(chunks),
             rows,
             time_range,
+            monotonic,
         })
     }
 
@@ -99,6 +120,12 @@ impl TopicStore {
     /// maintained by `from_chunks`/`append_chunk`.
     pub fn time_range(&self) -> Option<TimeRange> {
         self.time_range
+    }
+
+    /// Whether the chunk spine is sorted and non-overlapping in time, so a
+    /// time query can binary-search the chunks instead of scanning them all.
+    pub fn is_monotonic(&self) -> bool {
+        self.monotonic
     }
 }
 
@@ -170,6 +197,7 @@ mod tests {
         assert_eq!(store.chunk_count(), 0);
         assert!(store.is_empty());
         assert_eq!(store.time_range(), None);
+        assert!(store.is_monotonic());
     }
 
     #[test]
@@ -190,6 +218,48 @@ mod tests {
         assert!(Arc::ptr_eq(&first, &two.chunks[0]));
         assert!(Arc::ptr_eq(&second, &two.chunks[1]));
         assert_eq!(two.time_range(), TimeRange::new(50, 300));
+        // `second` starts (50) before `first` ends (200): the spine overlaps,
+        // so the appended store is no longer monotonic.
+        assert!(one.is_monotonic());
+        assert!(!two.is_monotonic());
+    }
+
+    #[test]
+    fn monotonic_flag_tracks_chunk_ordering() {
+        // In-order, non-overlapping chunks stay monotonic.
+        let store = TopicStore::from_chunks(
+            schema(),
+            [
+                chunk(vec![0, 1, 2], vec![1.0, 2.0, 3.0]),
+                chunk(vec![10], vec![4.0]),
+            ],
+        )
+        .unwrap();
+        assert!(store.is_monotonic());
+        // Appending a still-later chunk keeps it monotonic; an out-of-order one clears it.
+        assert!(
+            store
+                .append_chunk(chunk(vec![20], vec![5.0]))
+                .unwrap()
+                .is_monotonic()
+        );
+        assert!(
+            !store
+                .append_chunk(chunk(vec![5], vec![6.0]))
+                .unwrap()
+                .is_monotonic()
+        );
+
+        // Overlapping inputs to from_chunks are detected too.
+        let overlapping = TopicStore::from_chunks(
+            schema(),
+            [
+                chunk(vec![0, 100], vec![1.0, 2.0]),
+                chunk(vec![50], vec![3.0]),
+            ],
+        )
+        .unwrap();
+        assert!(!overlapping.is_monotonic());
     }
 
     #[test]
