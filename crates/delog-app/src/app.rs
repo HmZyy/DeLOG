@@ -219,6 +219,11 @@ pub struct DelogApp {
     performance_last_refresh: Option<Instant>,
     browser_query: String,
     browser_selection: browser::Selection,
+    /// Cached browser tree keyed by the snapshot epoch it was built from
+    /// (BRW-07: offset edits also bump the epoch), so `BrowserModel::from_snapshot`
+    /// runs once per data change instead of every frame (it is O(topics×fields)
+    /// plus a full string clone of the tree).
+    browser_model: Option<(u64, BrowserModel)>,
     offset_dialog: Option<(delog_core::identity::SourceId, i64)>,
     source_metadata_dialog: Option<delog_core::identity::SourceId>,
     field_stats_dialog: Option<delog_core::identity::FieldId>,
@@ -303,6 +308,7 @@ impl DelogApp {
             performance_last_refresh: None,
             browser_query: String::new(),
             browser_selection: browser::Selection::default(),
+            browser_model: None,
             offset_dialog: None,
             source_metadata_dialog: None,
             field_stats_dialog: None,
@@ -1256,7 +1262,14 @@ impl eframe::App for DelogApp {
 
         // Cache lifecycle: shared origin, frame recency, drain builds, and an
         // epoch-driven incremental append + GC (§8.5).
-        if let Some(range) = snapshot.global_time_range() {
+        // `global_range` (§16, PRF-10): one `global_time_range()` call measured
+        // in isolation. It is O(total chunks across all topics) and called
+        // several times per frame from different sections, so this quantifies a
+        // suspected cross-cutting cost as chunks accumulate during live.
+        let global_range_timer = self.session.metrics().scope("global_range");
+        let global_range = snapshot.global_time_range();
+        drop(global_range_timer);
+        if let Some(range) = global_range {
             self.origin_us = range.min_us;
             self.caches.set_origin(self.origin_us);
             // Fit the view to the data the first time real data appears,
@@ -1765,7 +1778,14 @@ impl eframe::App for DelogApp {
                     });
                 });
         } else {
-            let model = BrowserModel::from_snapshot(&snapshot);
+            // Reuse the cached tree while the epoch is unchanged. Take it out of
+            // `self` so the render closure can mutably borrow other `self` fields
+            // without aliasing the model, then put it back after the panel.
+            let epoch = snapshot.epoch;
+            let model = match self.browser_model.take() {
+                Some((cached_epoch, model)) if cached_epoch == epoch => model,
+                _ => BrowserModel::from_snapshot(&snapshot),
+            };
             let browser_panel = egui::Panel::left("data_browser_expanded").resizable(false);
             let browser_panel = if model.is_empty() {
                 browser_panel.default_size(ui.spacing().text_edit_width)
@@ -1798,6 +1818,7 @@ impl eframe::App for DelogApp {
                     self.field_stats_dialog = Some(field);
                 }
             });
+            self.browser_model = Some((epoch, model));
         }
         drop(ui_browser_timer);
         show_source_metadata_window(ui.ctx(), &snapshot, &mut self.source_metadata_dialog);
@@ -1814,6 +1835,9 @@ impl eframe::App for DelogApp {
             let mut handled_workspace_drop = false;
             let (_, dropped) =
                 ui.dnd_drop_zone::<Vec<delog_core::identity::FieldId>, ()>(frame_style, |ui| {
+                    // Owned metrics handle: `behavior` borrows `self` mutably
+                    // below, so we can't reach `self.session` while it lives.
+                    let tree_metrics = self.session.metrics().clone();
                     self.gpu.begin_plot_frame(frame);
                     let services = PlotServices {
                         frame,
@@ -1832,7 +1856,13 @@ impl eframe::App for DelogApp {
                         trajectories: &self.vehicle_trajectories,
                     };
                     let mut behavior = crate::workspace::Behavior::new(services);
+                    // `workspace_tree` (§16, PRF-10): the egui_tiles layout +
+                    // pane rendering. `workspace_tree − Σ(pane_total)` is the
+                    // egui_tiles container/tab/drag machinery; `ui_workspace −
+                    // workspace_tree` is begin/retain + action handling.
+                    let tree_timer = tree_metrics.scope("workspace_tree");
                     self.workspace.tree.ui(&mut behavior, ui);
+                    drop(tree_timer);
                     let actions = behavior.into_actions();
                     if let Some((tile_id, direction)) = actions.split {
                         self.workspace.split_plot(tile_id, direction);
