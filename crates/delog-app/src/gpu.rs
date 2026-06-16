@@ -756,8 +756,7 @@ impl SceneResources {
                         // Grow geometrically (power-of-two) so appends are
                         // usually tail-only uploads; only a boundary reallocs.
                         let cap = needed.next_power_of_two();
-                        vg.traj_points =
-                            new_points_buffer(&self.ctx, cap, "delog-veh-traj-points");
+                        vg.traj_points = new_points_buffer(&self.ctx, cap, "delog-veh-traj-points");
                         vg.traj_capacity = cap;
                         vg.traj_bind =
                             self.traj
@@ -800,8 +799,7 @@ impl SceneResources {
             // is append-only, so write just the new tail — and skip entirely
             // when unchanged. Avoids re-converting/re-uploading the whole path
             // every frame (the cost decimation used to hide).
-            let full =
-                realloc || vg.traj_generation != v.traj_generation || needed < vg.traj_count;
+            let full = realloc || vg.traj_generation != v.traj_generation || needed < vg.traj_count;
             if full && needed > 0 {
                 let pts = points_to_vec4(v.trajectory);
                 self.ctx
