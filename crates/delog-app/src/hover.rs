@@ -34,6 +34,8 @@ pub fn draw(
     origin_us: i64,
     mode: SampleMode,
     tooltip: bool,
+    show_field_name: bool,
+    show_time: bool,
 ) {
     let Some(pos) = response.hover_pos() else {
         return;
@@ -71,6 +73,8 @@ pub fn draw(
             egui::Align2::LEFT_TOP,
             cursor_x_sec,
             &rows,
+            show_field_name,
+            show_time,
         );
     }
 }
@@ -140,6 +144,7 @@ fn sampled_rows(
 
 /// The shared value tooltip: time header + one colored `label: value unit`
 /// row per trace. Used by hover (PLT-09) and the playhead readout (PLT-10).
+#[allow(clippy::too_many_arguments)]
 fn show_tooltip(
     ui: &egui::Ui,
     id: egui::Id,
@@ -147,6 +152,8 @@ fn show_tooltip(
     pivot: egui::Align2,
     t_sec: f32,
     rows: &[Row],
+    show_field_name: bool,
+    show_time: bool,
 ) {
     if rows.is_empty() {
         return;
@@ -161,12 +168,19 @@ fn show_tooltip(
                 ..egui::Frame::popup(ui.style())
             }
             .show(ui, |ui| {
-                ui.label(egui::RichText::new(format!("t = {t_sec:.3} s")).weak());
+                if show_time {
+                    ui.label(egui::RichText::new(format!("t = {t_sec:.3} s")).weak());
+                }
                 for row in rows {
                     ui.horizontal(|ui| {
                         color_swatch(ui, row.color);
                         let unit = row.unit.as_deref().unwrap_or("");
-                        ui.label(format!("{}: {} {unit}", row.label, format_value(row.value)));
+                        let value = format_value(row.value);
+                        if show_field_name {
+                            ui.label(format!("{}: {value} {unit}", row.label));
+                        } else {
+                            ui.label(format!("{value} {unit}"));
+                        }
                     });
                 }
             });
@@ -184,6 +198,7 @@ fn color_swatch(ui: &mut egui::Ui, color: egui::Color32) {
 /// bottom of the line (flipping side near the right edge). The caller passes
 /// `readout: None` on the hovered pane — the hover readout already draws there —
 /// and outside alt-scrub/playback.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_playhead(
     ui: &egui::Ui,
     target: HoverTarget,
@@ -192,6 +207,8 @@ pub fn draw_playhead(
     origin_us: i64,
     t_us: i64,
     readout: Option<SampleMode>,
+    show_field_name: bool,
+    show_time: bool,
 ) {
     let view = target.view;
     let rect = view.rect;
@@ -227,7 +244,16 @@ pub fn draw_playhead(
             egui::Align2::LEFT_BOTTOM,
         )
     };
-    show_tooltip(ui, target.id, pos, pivot, t_sec, &rows);
+    show_tooltip(
+        ui,
+        target.id,
+        pos,
+        pivot,
+        t_sec,
+        &rows,
+        show_field_name,
+        show_time,
+    );
 }
 
 /// `(multiplier, unit)` for a field from the topic schema (core API, no Arrow).
