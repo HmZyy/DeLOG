@@ -892,9 +892,17 @@ impl Behavior<'_> {
             crate::settings::MarkerDeltaReadout::Hover => (&no_deltas, &marker_deltas),
         };
 
-        // Manual session markers: faint labelled verticals under the playhead
-        // and cursor (§17.4, ANA-05).
-        hover::draw_session_markers(ui, pview, self.services.origin_us, self.services.markers);
+        // Manual session markers: labelled verticals under the playhead and
+        // cursor; line opacity/width/label are user settings (§17.4, ANA-05).
+        hover::draw_session_markers(
+            ui,
+            pview,
+            self.services.origin_us,
+            self.services.markers,
+            self.services.plot_display.marker_line_opacity,
+            self.services.plot_display.marker_line_width,
+            self.services.plot_display.marker_show_label,
+        );
 
         // Playhead cursor + value readout on every pane (§10.5, PLT-10). During
         // playback the hover tooltip is suppressed, so every pane (including the
