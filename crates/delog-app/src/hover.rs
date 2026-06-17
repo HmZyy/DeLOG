@@ -387,14 +387,16 @@ fn format_delta(
 }
 
 /// Shade each inter-marker region on a plot (§17.4, ANA-05): from each marker
-/// to the next one (or the right edge for the last) using that marker's colour
-/// at `opacity`. Markers are sorted by time here. Meant to be drawn *behind* the
-/// traces so it reads as a background band.
+/// to the next one — and for the last marker, to `data_end_us` (the log's last
+/// timestamp, not the pane edge, so it doesn't extend past the data) — using
+/// that marker's colour at `opacity`. Markers are sorted by time here. Meant to
+/// be drawn *behind* the traces so it reads as a background band.
 pub fn draw_marker_regions(
     ui: &egui::Ui,
     view: PaneView,
     origin_us: i64,
     markers: &[crate::markers::Marker],
+    data_end_us: i64,
     opacity: f32,
 ) {
     let rect = view.rect;
@@ -412,7 +414,10 @@ pub fn draw_marker_regions(
     let painter = ui.painter();
     for (i, m) in sorted.iter().enumerate() {
         let start = to_x(m.t_us);
-        let end = sorted.get(i + 1).map_or(rect.right(), |n| to_x(n.t_us));
+        // Last region ends at the log's final timestamp, not the pane edge.
+        let end = sorted
+            .get(i + 1)
+            .map_or_else(|| to_x(data_end_us), |n| to_x(n.t_us));
         let a = start.clamp(rect.left(), rect.right());
         let b = end.clamp(rect.left(), rect.right());
         if b <= a {
