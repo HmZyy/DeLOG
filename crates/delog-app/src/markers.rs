@@ -88,10 +88,6 @@ impl Markers {
     pub fn as_slice(&self) -> &[Marker] {
         &self.items
     }
-
-    pub fn is_empty(&self) -> bool {
-        self.items.is_empty()
-    }
 }
 
 /// Bottom dock listing the session's markers (§17.4, ANA-05): per row a colour
@@ -115,14 +111,17 @@ impl MarkersDock {
         });
         ui.separator();
 
-        if markers.is_empty() {
-            ui.weak("No markers - press M to add one at the playhead.");
-            return None;
-        }
         let mut jump = None;
         let mut to_remove = None;
         let ids: Vec<u64> = markers.by_time().iter().map(|m| m.id).collect();
+        // Always render the scroll region (even when empty) so the panel is
+        // resizable in both states — an early return here left the empty dock
+        // unresizable.
         egui::ScrollArea::vertical().show(ui, |ui| {
+            if ids.is_empty() {
+                ui.weak("No markers - press M to add one at the playhead.");
+                return;
+            }
             for id in ids {
                 let Some(m) = markers.get_mut(id) else {
                     continue;
