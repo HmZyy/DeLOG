@@ -220,6 +220,7 @@ pub struct DelogApp {
     browser_collapsed: bool,
     diagnostics_dock: DiagnosticsDock,
     performance_dock: PerformanceDock,
+    markers_dock: crate::markers::MarkersDock,
     performance_snapshot: PerformanceSnapshot,
     performance_last_refresh: Option<Instant>,
     browser_query: String,
@@ -312,6 +313,7 @@ impl DelogApp {
             browser_collapsed: false,
             diagnostics_dock: DiagnosticsDock::default(),
             performance_dock: PerformanceDock::default(),
+            markers_dock: crate::markers::MarkersDock::default(),
             performance_snapshot: PerformanceSnapshot::default(),
             performance_last_refresh: None,
             browser_query: String::new(),
@@ -1447,6 +1449,12 @@ impl eframe::App for DelogApp {
                         ui.close();
                     }
                     if ui
+                        .checkbox(&mut self.markers_dock.open, "Markers")
+                        .clicked()
+                    {
+                        ui.close();
+                    }
+                    if ui
                         .checkbox(&mut self.settings.show_debug_overlay, "Debug Overlay (F12)")
                         .clicked()
                     {
@@ -1792,6 +1800,19 @@ impl eframe::App for DelogApp {
         }
 
         drop(ui_performance_timer);
+        if self.markers_dock.open {
+            egui::Panel::bottom("markers")
+                .resizable(true)
+                .default_size(200.0)
+                .show_inside(ui, |ui| {
+                    ui.heading("Markers");
+                    if let Some(t_us) = self.markers_dock.ui(ui, &mut self.markers, self.origin_us)
+                        && let Some(range) = snapshot.global_time_range()
+                    {
+                        self.playback.scrub(t_us, range);
+                    }
+                });
+        }
         let ui_browser_timer = self.session.metrics().scope("ui_browser");
         if self.browser_collapsed {
             let button_size = browser::panel_toggle_button_size(ui);
