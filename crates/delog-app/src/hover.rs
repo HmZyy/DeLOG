@@ -7,6 +7,8 @@
 //! independent of the f32 render cache (§4.5). A circle marks each trace's
 //! sample; a tooltip lists the values.
 
+use std::collections::HashMap;
+
 use delog_core::field_view::{FieldView, SampleMode};
 use delog_core::identity::FieldId;
 use delog_core::snapshot::StoreSnapshot;
@@ -263,6 +265,110 @@ pub fn draw_playhead(
     );
 }
 
+/// Measurement marker (delta cursor, §10.8, ANA-10): a second vertical at
+/// `marker_us`, painted dashed in a distinct accent so it never reads as the
+/// playhead, with a ΔT readout (`marker − playhead`) anchored at the top of the
+/// line. The per-trace ΔY is shown in the legend via [`marker_deltas`].
+pub fn draw_marker(
+    ui: &egui::Ui,
+    view: PaneView,
+    origin_us: i64,
+    marker_us: i64,
+    playhead_us: i64,
+) {
+    let rect = view.rect;
+    let (x0, x1) = view.x_range;
+    if x1 <= x0 {
+        return;
+    }
+    let t_sec = ((marker_us - origin_us) as f64 * 1e-6) as f32;
+    let frac = (t_sec - x0) / (x1 - x0);
+    if !(0.0..=1.0).contains(&frac) {
+        return;
+    }
+    let x = rect.left() + frac * rect.width();
+
+    let color = ui.visuals().hyperlink_color;
+    let dashes = egui::Shape::dashed_line(
+        &[egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+        egui::Stroke::new(1.5, color),
+        6.0,
+        4.0,
+    );
+    ui.painter().extend(dashes);
+
+    // ΔT vs the playhead, anchored at the top of the line (the playhead readout
+    // anchors at the bottom, so the two never collide). Flip side near the edge.
+    let dt_sec = (marker_us - playhead_us) as f64 * 1e-6;
+    let text = format!("Δt {dt_sec:+.3} s");
+    let on_left = x > rect.right() - 80.0;
+    let (anchor, align) = if on_left {
+        (
+            egui::pos2(x - 4.0, rect.top() + 2.0),
+            egui::Align2::RIGHT_TOP,
+        )
+    } else {
+        (
+            egui::pos2(x + 4.0, rect.top() + 2.0),
+            egui::Align2::LEFT_TOP,
+        )
+    };
+    ui.painter()
+        .text(anchor, align, text, egui::FontId::proportional(11.0), color);
+}
+
+/// Per-trace ΔY between the marker and the playhead for the legend (§10.8,
+/// ANA-10): `value(marker) − value(playhead)` sampled with the active hover
+/// interpolation `mode`, the field multiplier and unit applied. Either endpoint
+/// missing or non-finite (NaN is a gap, §8.2) yields "—". Keyed by `FieldId`.
+pub fn marker_deltas(
+    snapshot: &StoreSnapshot,
+    pane: &PlotPane,
+    marker_us: i64,
+    playhead_us: i64,
+    mode: SampleMode,
+) -> HashMap<FieldId, String> {
+    let mut out = HashMap::new();
+    for trace in &pane.traces {
+        let Ok(fv) = FieldView::new(snapshot, trace.field) else {
+            continue;
+        };
+        let at_marker = fv.sample_at(marker_us, mode).and_then(|s| s.value.as_f64());
+        let at_playhead = fv
+            .sample_at(playhead_us, mode)
+            .and_then(|s| s.value.as_f64());
+        let (mult, unit) = field_meta(snapshot, trace.field);
+        out.insert(
+            trace.field,
+            format_delta(at_marker, at_playhead, mult, unit.as_deref()),
+        );
+    }
+    out
+}
+
+/// Format one trace's ΔY for the legend: `(marker − playhead) × multiplier`
+/// with the optional unit, or "—" when either endpoint is missing or non-finite
+/// (NaN is a gap, never interpolated across — §8.2, ANA-10).
+fn format_delta(
+    marker: Option<f64>,
+    playhead: Option<f64>,
+    mult: f64,
+    unit: Option<&str>,
+) -> String {
+    match (marker, playhead) {
+        (Some(m), Some(p)) if m.is_finite() && p.is_finite() => {
+            let d = (m - p) * mult;
+            let body = format_value(d);
+            let signed = if d > 0.0 { format!("+{body}") } else { body };
+            match unit {
+                Some(u) if !u.is_empty() => format!("{signed} {u}"),
+                _ => signed,
+            }
+        }
+        _ => "—".to_string(),
+    }
+}
+
 /// `(multiplier, unit)` for a field from the topic schema (core API, no Arrow).
 fn field_meta(snapshot: &StoreSnapshot, field: FieldId) -> (f64, Option<String>) {
     let Some(entry) = snapshot.fields.get(field.index()).filter(|f| f.id == field) else {
@@ -284,5 +390,36 @@ fn format_value(v: f64) -> String {
         format!("{v:.3e}")
     } else {
         format!("{v:.4}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_delta;
+
+    #[test]
+    fn delta_applies_multiplier_and_signs_positive() {
+        // (12.0 − 8.0) × 0.5 = +2.0, with the unit appended.
+        assert_eq!(
+            format_delta(Some(12.0), Some(8.0), 0.5, Some("m")),
+            "+2.0000 m"
+        );
+    }
+
+    #[test]
+    fn delta_negative_keeps_minus_and_no_unit_when_blank() {
+        assert_eq!(format_delta(Some(1.0), Some(4.0), 1.0, None), "-3.0000");
+        assert_eq!(format_delta(Some(1.0), Some(4.0), 1.0, Some("")), "-3.0000");
+    }
+
+    #[test]
+    fn delta_is_dash_when_either_endpoint_missing_or_non_finite() {
+        assert_eq!(format_delta(None, Some(1.0), 1.0, Some("m")), "—");
+        assert_eq!(format_delta(Some(1.0), None, 1.0, Some("m")), "—");
+        assert_eq!(format_delta(Some(f64::NAN), Some(1.0), 1.0, Some("m")), "—");
+        assert_eq!(
+            format_delta(Some(1.0), Some(f64::INFINITY), 1.0, Some("m")),
+            "—"
+        );
     }
 }
