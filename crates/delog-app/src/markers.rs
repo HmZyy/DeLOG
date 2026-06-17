@@ -104,6 +104,17 @@ pub struct MarkersDock {
 
 impl MarkersDock {
     pub fn ui(&mut self, ui: &mut egui::Ui, markers: &mut Markers, origin_us: i64) -> Option<i64> {
+        ui.horizontal(|ui| {
+            ui.strong("Markers");
+            ui.weak(format!("{} marker(s)", markers.as_slice().len()));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Close").clicked() {
+                    self.open = false;
+                }
+            });
+        });
+        ui.separator();
+
         if markers.is_empty() {
             ui.weak("No markers - press M to add one at the playhead.");
             return None;
