@@ -34,8 +34,10 @@ pub fn field_is_string(snapshot: &StoreSnapshot, field: FieldId) -> bool {
 /// Draw every visible string trace as text annotations and apply vertical
 /// drags. `offsets` carries per-label manual y-fractions; only dragged labels
 /// are stored.
+#[allow(clippy::too_many_arguments)]
 pub fn draw(
     ui: &egui::Ui,
+    response: &egui::Response,
     view: PaneView,
     origin_us: i64,
     snapshot: &StoreSnapshot,
@@ -69,6 +71,18 @@ pub fn draw(
             .iter()
             .any(|t| t.field == *field && field_is_string(snapshot, *field))
     });
+
+    // Label dragging is handled through the pane's own response (not per-label
+    // interact widgets) so horizontal drags still pan and the wheel still zooms
+    // the pane — labels only take the *vertical* component (PLT-15). The grabbed
+    // label persists across frames in egui temp memory.
+    let drag_key = ui.id().with("text_label_drag");
+    let mut grabbed: Option<(FieldId, i64)> = ui
+        .memory_mut(|m| m.data.get_temp::<Option<(FieldId, i64)>>(drag_key))
+        .flatten();
+    let drag_started = response.drag_started_by(egui::PointerButton::Primary);
+    let dragging = response.dragged_by(egui::PointerButton::Primary);
+    let press_pos = response.interact_pointer_pos();
 
     for trace in traces.iter().filter(|t| t.visible) {
         if !field_is_string(snapshot, trace.field) {
@@ -119,16 +133,20 @@ pub fn draw(
             let text_pos = egui::pos2(x + 3.0, y);
             ui.painter().galley(text_pos, galley, color);
 
-            // Vertical drag to reposition (x stays locked to the timestamp).
+            // Grab this label if a drag began on it; then track its vertical
+            // movement. The pane response still pans (x) / zooms in parallel —
+            // labels are x-locked and only consume the vertical delta.
             let label_rect =
                 egui::Rect::from_min_size(text_pos, egui::vec2(width, row_frac * rect.height()));
-            let resp = ui.interact(
-                label_rect,
-                ui.id().with(("text_label", trace.field.0, t_us)),
-                egui::Sense::drag(),
-            );
-            if resp.dragged() {
-                let new = (y_frac + resp.drag_delta().y / rect.height()).clamp(0.0, 1.0);
+            if drag_started
+                && grabbed.is_none()
+                && press_pos.is_some_and(|p| label_rect.contains(p))
+            {
+                grabbed = Some((trace.field, t_us));
+                ui.memory_mut(|m| m.data.insert_temp(drag_key, grabbed));
+            }
+            if dragging && grabbed == Some((trace.field, t_us)) {
+                let new = (y_frac + response.drag_delta().y / rect.height()).clamp(0.0, 1.0);
                 offsets.insert((trace.field, t_us), new);
             }
         }
@@ -142,6 +160,10 @@ pub fn draw(
                 ui.visuals().weak_text_color(),
             );
         }
+    }
+
+    if response.drag_stopped() {
+        ui.memory_mut(|m| m.data.insert_temp::<Option<(FieldId, i64)>>(drag_key, None));
     }
 }
 
