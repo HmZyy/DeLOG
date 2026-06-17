@@ -929,6 +929,7 @@ impl Behavior<'_> {
         // timestamp, draggable vertically (PLT-15).
         crate::text_overlay::draw(
             ui,
+            &response,
             pview,
             self.services.origin_us,
             self.services.snapshot.as_ref(),
