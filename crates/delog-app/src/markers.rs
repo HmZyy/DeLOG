@@ -3,6 +3,8 @@
 //! cursor (a single transient delta cursor) — these are multiple, labelled,
 //! navigable, and persisted with the session.
 
+use std::collections::HashSet;
+
 /// One bookmark at a canonical time. `id` is a stable identity so the dock and
 /// timeline can address a marker for edit/delete/drag even as the time-sorted
 /// display order shifts.
@@ -96,24 +98,71 @@ impl Markers {
 #[derive(Default)]
 pub struct MarkersDock {
     pub open: bool,
+    /// Ids of rows ticked for bulk delete (transient UI selection, ANA-05).
+    selected: HashSet<u64>,
 }
 
 impl MarkersDock {
     pub fn ui(&mut self, ui: &mut egui::Ui, markers: &mut Markers, origin_us: i64) -> Option<i64> {
+        let ids: Vec<u64> = markers.by_time().iter().map(|m| m.id).collect();
+        // Drop selections for markers deleted elsewhere.
+        self.selected.retain(|id| ids.contains(id));
+        let selected_count = ids.iter().filter(|id| self.selected.contains(id)).count();
+        let all_selected = !ids.is_empty() && selected_count == ids.len();
+        let any_selected = selected_count > 0;
+
+        let mut delete_selected = false;
         ui.horizontal(|ui| {
+            // Tristate select-all: checked when every row is ticked, a dash when
+            // only some are, empty when none. Clicking selects all unless all are
+            // already selected (then it clears).
+            let mut master = all_selected;
+            let resp = ui
+                .add_enabled(!ids.is_empty(), egui::Checkbox::new(&mut master, ""))
+                .on_hover_text("Select all / none");
+            if resp.clicked() {
+                if all_selected {
+                    self.selected.clear();
+                } else {
+                    self.selected = ids.iter().copied().collect();
+                }
+            }
+            if any_selected && !all_selected {
+                // Indeterminate dash painted across the (empty) checkbox box.
+                let iw = ui.spacing().icon_width;
+                ui.painter().hline(
+                    egui::Rangef::new(resp.rect.left() + iw * 0.3, resp.rect.left() + iw * 0.7),
+                    resp.rect.center().y,
+                    egui::Stroke::new(2.0, ui.visuals().text_color()),
+                );
+            }
             ui.strong("Markers");
-            ui.weak(format!("{} marker(s)", markers.as_slice().len()));
+            ui.weak(format!("{} marker(s)", ids.len()));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Close").clicked() {
                     self.open = false;
+                }
+                if ui
+                    .add_enabled(
+                        any_selected,
+                        egui::Button::new(format!("Delete selected ({selected_count})")),
+                    )
+                    .clicked()
+                {
+                    delete_selected = true;
                 }
             });
         });
         ui.separator();
 
+        if delete_selected {
+            for id in self.selected.drain() {
+                markers.remove(id);
+            }
+        }
+
         let mut jump = None;
         let mut to_remove = None;
-        let ids: Vec<u64> = markers.by_time().iter().map(|m| m.id).collect();
         // Always render the scroll region (even when empty), and let it fill
         // the panel height. egui stores the panel size from its content rect,
         // so a content-shrinking scroll area makes the dock snap back to
@@ -122,15 +171,25 @@ impl MarkersDock {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                if ids.is_empty() {
+                let row_ids: Vec<u64> = markers.by_time().iter().map(|m| m.id).collect();
+                if row_ids.is_empty() {
                     ui.weak("No markers - press M to add one at the playhead.");
                     return;
                 }
-                for id in ids {
+                for id in row_ids {
+                    let selected = &mut self.selected;
                     let Some(m) = markers.get_mut(id) else {
                         continue;
                     };
                     ui.horizontal(|ui| {
+                        let mut sel = selected.contains(&id);
+                        if ui.checkbox(&mut sel, "").changed() {
+                            if sel {
+                                selected.insert(id);
+                            } else {
+                                selected.remove(&id);
+                            }
+                        }
                         let mut color = m.color32();
                         if egui::color_picker::color_edit_button_srgba(
                             ui,
@@ -178,6 +237,7 @@ impl MarkersDock {
             });
         if let Some(id) = to_remove {
             markers.remove(id);
+            self.selected.remove(&id);
         }
         jump
     }
