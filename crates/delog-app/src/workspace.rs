@@ -845,13 +845,17 @@ impl Behavior<'_> {
             y_range,
         };
         // Inter-marker region shading, painted behind the traces (§17.4,
-        // ANA-05) so it reads as a background band.
-        if self.services.plot_display.marker_shade_regions {
+        // ANA-05) so it reads as a background band. The last region stops at the
+        // log's final timestamp rather than the pane edge.
+        if self.services.plot_display.marker_shade_regions
+            && let Some(range) = self.services.snapshot.global_time_range()
+        {
             hover::draw_marker_regions(
                 ui,
                 pview,
                 self.services.origin_us,
                 self.services.markers,
+                range.max_us,
                 self.services.plot_display.marker_shade_opacity,
             );
         }
