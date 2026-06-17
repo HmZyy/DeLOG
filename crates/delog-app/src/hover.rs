@@ -193,11 +193,12 @@ fn show_tooltip(
                         } else {
                             ui.label(format!("{value} {unit}"));
                         }
-                        // Marker ΔY for this trace, when routed to the readout
-                        // (ANA-10); absent when shown in the legend instead.
+                        // Measuring-marker value delta for this trace, when
+                        // routed to the readout (ANA-10); absent when shown in
+                        // the legend instead.
                         if let Some(delta) = deltas.get(&row.field) {
                             ui.label(
-                                egui::RichText::new(format!("Δ {delta}"))
+                                egui::RichText::new(format!("d {delta}"))
                                     .color(ui.visuals().hyperlink_color)
                                     .weak(),
                             );
@@ -316,7 +317,7 @@ pub fn draw_marker(
     // ΔT vs the playhead, anchored at the top of the line (the playhead readout
     // anchors at the bottom, so the two never collide). Flip side near the edge.
     let dt_sec = (marker_us - playhead_us) as f64 * 1e-6;
-    let text = format!("Δt {dt_sec:+.3} s");
+    let text = format!("dt {dt_sec:+.3} s");
     let on_left = x > rect.right() - 80.0;
     let (anchor, align) = if on_left {
         (
@@ -336,7 +337,7 @@ pub fn draw_marker(
 /// Per-trace ΔY between the marker and the playhead for the legend (§10.8,
 /// ANA-10): `value(marker) − value(playhead)` sampled with the active hover
 /// interpolation `mode`, the field multiplier and unit applied. Either endpoint
-/// missing or non-finite (NaN is a gap, §8.2) yields "—". Keyed by `FieldId`.
+/// missing or non-finite (NaN is a gap, §8.2) yields "n/a". Keyed by `FieldId`.
 pub fn marker_deltas(
     snapshot: &StoreSnapshot,
     pane: &PlotPane,
@@ -363,7 +364,7 @@ pub fn marker_deltas(
 }
 
 /// Format one trace's ΔY for the legend: `(marker − playhead) × multiplier`
-/// with the optional unit, or "—" when either endpoint is missing or non-finite
+/// with the optional unit, or "n/a" when either endpoint is missing or non-finite
 /// (NaN is a gap, never interpolated across — §8.2, ANA-10).
 fn format_delta(
     marker: Option<f64>,
@@ -381,7 +382,7 @@ fn format_delta(
                 _ => signed,
             }
         }
-        _ => "—".to_string(),
+        _ => "n/a".to_string(),
     }
 }
 
@@ -467,13 +468,16 @@ mod tests {
     }
 
     #[test]
-    fn delta_is_dash_when_either_endpoint_missing_or_non_finite() {
-        assert_eq!(format_delta(None, Some(1.0), 1.0, Some("m")), "—");
-        assert_eq!(format_delta(Some(1.0), None, 1.0, Some("m")), "—");
-        assert_eq!(format_delta(Some(f64::NAN), Some(1.0), 1.0, Some("m")), "—");
+    fn delta_is_na_when_either_endpoint_missing_or_non_finite() {
+        assert_eq!(format_delta(None, Some(1.0), 1.0, Some("m")), "n/a");
+        assert_eq!(format_delta(Some(1.0), None, 1.0, Some("m")), "n/a");
+        assert_eq!(
+            format_delta(Some(f64::NAN), Some(1.0), 1.0, Some("m")),
+            "n/a"
+        );
         assert_eq!(
             format_delta(Some(1.0), Some(f64::INFINITY), 1.0, Some("m")),
-            "—"
+            "n/a"
         );
     }
 }

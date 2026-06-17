@@ -1167,7 +1167,7 @@ impl Behavior<'_> {
                 if ui
                     .add(egui::Button::image_and_text(
                         menu_icon(ui, crate::icons::ban()),
-                        "Remove marker",
+                        "Remove measuring marker",
                     ))
                     .clicked()
                 {
@@ -1180,7 +1180,7 @@ impl Behavior<'_> {
                     playhead.is_some(),
                     egui::Button::image_and_text(
                         menu_icon(ui, crate::icons::ruler()),
-                        "Add marker",
+                        "Add measuring marker",
                     ),
                 )
                 .clicked()
