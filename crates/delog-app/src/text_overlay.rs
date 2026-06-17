@@ -53,6 +53,7 @@ pub fn draw(
     snapshot: &StoreSnapshot,
     traces: &[TraceRef],
     offsets: &mut HashMap<(FieldId, i64), f32>,
+    filters: &HashMap<FieldId, String>,
     style: TextLabelStyle,
 ) {
     let rect = view.rect;
@@ -101,7 +102,8 @@ pub fn draw(
         let Ok(fv) = FieldView::new(snapshot, trace.field) else {
             continue;
         };
-        let mut samples = fv.string_samples_in_range(range, style.cap.saturating_add(1));
+        let filter = filters.get(&trace.field).map(String::as_str);
+        let mut samples = fv.string_samples_in_range(range, style.cap.saturating_add(1), filter);
         let truncated = samples.len() > style.cap;
         samples.truncate(style.cap);
         samples.sort_by_key(|(t, _)| *t);
