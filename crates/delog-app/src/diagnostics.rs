@@ -98,7 +98,6 @@ impl DiagnosticsDock {
         ui.add_space(4.0);
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
-            .max_height(180.0)
             .show(ui, |ui| {
                 if filtered.is_empty() {
                     ui.weak("No diagnostics match the current filters.");
