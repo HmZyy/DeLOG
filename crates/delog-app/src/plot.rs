@@ -6,6 +6,8 @@
 //! `app.rs` converts pointer input into these calls. `PlotPane` holds the
 //! plotted [`TraceRef`]s with palette-assigned colours (PLT-02).
 
+use std::collections::HashMap;
+
 use delog_core::identity::FieldId;
 use delog_core::time::TimeRange;
 use delog_render::palette;
@@ -153,6 +155,10 @@ pub struct PlotPane {
     /// Whether the marker line is currently being dragged. Transient UI state —
     /// not serialized into layouts.
     pub marker_drag: bool,
+    /// Manual vertical positions for text-annotation labels (PLT-15), keyed by
+    /// `(field, sample t_us)`; value is a y-fraction (0 = top .. 1 = bottom).
+    /// Only manually-dragged labels are stored; the rest auto-pack. Persisted.
+    pub text_offsets: HashMap<(FieldId, i64), f32>,
 }
 
 impl Default for PlotPane {
@@ -165,6 +171,7 @@ impl Default for PlotPane {
             show_info: false,
             marker_us: None,
             marker_drag: false,
+            text_offsets: HashMap::new(),
         }
     }
 }

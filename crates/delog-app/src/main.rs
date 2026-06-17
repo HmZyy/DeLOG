@@ -27,6 +27,7 @@ mod plot;
 mod scripts;
 mod session;
 mod settings;
+mod text_overlay;
 mod theme;
 mod timeline;
 mod vehicle;
