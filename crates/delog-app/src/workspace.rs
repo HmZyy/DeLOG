@@ -422,6 +422,8 @@ pub struct PlotServices<'a> {
     /// Plot overlay display prefs: legend placement + hover readout contents
     /// (PLT-08/09). Live-read each frame from the config.
     pub plot_display: crate::settings::PlotDisplay,
+    /// Manual session markers, drawn as faint verticals on every pane (ANA-05).
+    pub markers: &'a [crate::markers::Marker],
 }
 
 pub struct Behavior<'a> {
@@ -889,6 +891,10 @@ impl Behavior<'_> {
             crate::settings::MarkerDeltaReadout::Legend => (&marker_deltas, &no_deltas),
             crate::settings::MarkerDeltaReadout::Hover => (&no_deltas, &marker_deltas),
         };
+
+        // Manual session markers: faint labelled verticals under the playhead
+        // and cursor (§17.4, ANA-05).
+        hover::draw_session_markers(ui, pview, self.services.origin_us, self.services.markers);
 
         // Playhead cursor + value readout on every pane (§10.5, PLT-10). During
         // playback the hover tooltip is suppressed, so every pane (including the

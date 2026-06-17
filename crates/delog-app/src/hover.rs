@@ -385,6 +385,44 @@ fn format_delta(
     }
 }
 
+/// Manual session markers (§17.4, ANA-05): a faint full-height vertical in each
+/// marker's colour on every plot pane, with the label at the top. Read-only;
+/// distinct from the amber playhead and the ANA-10 dashed delta cursor.
+pub fn draw_session_markers(
+    ui: &egui::Ui,
+    view: PaneView,
+    origin_us: i64,
+    markers: &[crate::markers::Marker],
+) {
+    let rect = view.rect;
+    let (x0, x1) = view.x_range;
+    if x1 <= x0 {
+        return;
+    }
+    let painter = ui.painter();
+    for m in markers {
+        let t_sec = ((m.t_us - origin_us) as f64 * 1e-6) as f32;
+        let frac = (t_sec - x0) / (x1 - x0);
+        if !(0.0..=1.0).contains(&frac) {
+            continue;
+        }
+        let x = rect.left() + frac * rect.width();
+        let color = m.color32();
+        painter.vline(
+            x,
+            rect.y_range(),
+            egui::Stroke::new(1.0, color.gamma_multiply(0.4)),
+        );
+        painter.text(
+            egui::pos2(x + 3.0, rect.top() + 2.0),
+            egui::Align2::LEFT_TOP,
+            &m.label,
+            egui::FontId::proportional(11.0),
+            color,
+        );
+    }
+}
+
 /// `(multiplier, unit)` for a field from the topic schema (core API, no Arrow).
 fn field_meta(snapshot: &StoreSnapshot, field: FieldId) -> (f64, Option<String>) {
     let Some(entry) = snapshot.fields.get(field.index()).filter(|f| f.id == field) else {
