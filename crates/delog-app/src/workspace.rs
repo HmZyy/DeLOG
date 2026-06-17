@@ -925,6 +925,17 @@ impl Behavior<'_> {
             self.services.plot_display.marker_show_label,
         );
 
+        // Text-annotation traces: string fields drawn as labels at each sample's
+        // timestamp, draggable vertically (PLT-15).
+        crate::text_overlay::draw(
+            ui,
+            pview,
+            self.services.origin_us,
+            self.services.snapshot.as_ref(),
+            &pane.traces,
+            &mut pane.text_offsets,
+        );
+
         // Playhead cursor + value readout on every pane (§10.5, PLT-10). During
         // playback the hover tooltip is suppressed, so every pane (including the
         // hovered one) shows the playhead readout. While alt-scrubbing the

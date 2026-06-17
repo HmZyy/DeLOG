@@ -13,7 +13,7 @@ use crate::chunk::Chunk;
 use crate::identity::{FieldId, TopicId};
 use crate::snapshot::StoreSnapshot;
 use crate::store::TopicStore;
-use crate::time::{TimeRange, TimestampUs, raw_time_us};
+use crate::time::{TimeRange, TimestampUs, effective_time_us, raw_time_us};
 
 /// How [`FieldView::sample_at`] chooses a value around the query time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,6 +129,44 @@ impl<'a> FieldView<'a> {
             ranges_overlap(range, TimeRange::new(chunk.t_min, chunk.t_max)?)
                 .then_some(chunk.as_ref())
         })
+    }
+
+    /// Owned `(effective_time, string)` for every Utf8 sample whose effective
+    /// time falls within `range`, up to `max` entries (PLT-15 text annotations).
+    /// Non-string samples are skipped. Returns owned strings so callers need no
+    /// Arrow access and hold no borrow of the snapshot.
+    pub fn string_samples_in_range(
+        &self,
+        range: TimeRange,
+        max: usize,
+    ) -> Vec<(TimestampUs, String)> {
+        let mut out = Vec::new();
+        for chunk in self.store.chunks.iter() {
+            // Skip chunks whose effective span can't overlap the range.
+            let lo = effective_time_us(chunk.t_min, self.source_offset_us);
+            let hi = effective_time_us(chunk.t_max, self.source_offset_us);
+            if let (Some(lo), Some(hi)) = (lo, hi)
+                && (hi < range.min_us || lo > range.max_us)
+            {
+                continue;
+            }
+            let col = chunk.cols[self.col_index].as_ref();
+            for row in 0..chunk.len() {
+                let Some(eff) = effective_time_us(chunk.t.value(row), self.source_offset_us) else {
+                    continue;
+                };
+                if eff < range.min_us || eff > range.max_us {
+                    continue;
+                }
+                if let SampleValue::Utf8(s) = value_at(col, row) {
+                    out.push((eff, s.to_string()));
+                    if out.len() >= max {
+                        return out;
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// Sample this field at an effective/global timestamp.

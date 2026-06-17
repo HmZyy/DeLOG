@@ -90,6 +90,9 @@ pub enum LayoutNode {
         /// Measurement marker time, if placed (§10.8, ANA-10).
         #[serde(default)]
         marker_us: Option<i64>,
+        /// Manual vertical positions for text-annotation labels (§10, PLT-15).
+        #[serde(default)]
+        text_offsets: Vec<TextOffsetLayout>,
     },
     Scene3d(SceneLayout),
     Split {
@@ -131,6 +134,15 @@ pub struct MarkerLayout {
     pub label: String,
     pub color: [f32; 4],
     pub note: String,
+}
+
+/// A manually-positioned text-annotation label (§10, PLT-15): which field +
+/// sample time, and its y-fraction (0 = top .. 1 = bottom) in the pane.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TextOffsetLayout {
+    pub field: FieldRef,
+    pub t_us: i64,
+    pub y_frac: f32,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -602,6 +614,7 @@ fn workspace_doc(workspace: &Workspace, snapshot: &StoreSnapshot) -> WorkspaceLa
             show_legend: true,
             show_tooltip: true,
             marker_us: None,
+            text_offsets: Vec::new(),
         });
     WorkspaceLayout { root }
 }
@@ -622,6 +635,17 @@ fn node_to_layout(
             show_legend: pane.show_legend,
             show_tooltip: pane.show_tooltip,
             marker_us: pane.marker_us,
+            text_offsets: pane
+                .text_offsets
+                .iter()
+                .filter_map(|(&(field, t_us), &y_frac)| {
+                    field_ref(snapshot, field).map(|field| TextOffsetLayout {
+                        field,
+                        t_us,
+                        y_frac,
+                    })
+                })
+                .collect(),
         }),
         egui_tiles::Tile::Pane(Pane::Scene3D(scene)) => Some(LayoutNode::Scene3d(SceneLayout {
             camera: CameraLayout {
@@ -918,6 +942,7 @@ fn insert_node(
             show_legend,
             show_tooltip,
             marker_us,
+            text_offsets,
         } => {
             let mut pane = PlotPane {
                 show_legend: *show_legend,
@@ -929,6 +954,12 @@ fn insert_node(
                 match trace_from_layout(trace, resolver) {
                     Some(resolved) => pane.traces.push(resolved),
                     None => pane.add_ghost(ghost_from_layout(trace)),
+                }
+            }
+            for offset in text_offsets {
+                if let Some(field) = resolver.resolve(&offset.field) {
+                    pane.text_offsets
+                        .insert((field, offset.t_us), offset.y_frac);
                 }
             }
             Some(tiles.insert_pane(Pane::Plot(pane)))
@@ -1544,6 +1575,7 @@ mod tests {
                     show_legend: true,
                     show_tooltip: true,
                     marker_us: None,
+                    text_offsets: Vec::new(),
                 },
             },
             vehicles: Vec::new(),
@@ -1552,6 +1584,52 @@ mod tests {
             favorites: Vec::new(),
             docks: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn text_offsets_round_trip_through_layout() {
+        let snapshot = snapshot_with_topics(&[("log", "MSG", &["Message"])]);
+        let mut doc = empty_doc("text");
+        let field = FieldRef {
+            topic: "MSG".into(),
+            field: "Message".into(),
+        };
+        doc.workspace.root = LayoutNode::Plot {
+            traces: vec![TraceLayout {
+                field: field.clone(),
+                color: [1.0, 1.0, 1.0, 1.0],
+                width_px: 1.5,
+                mode: TraceModeLayout::Line,
+                visible: true,
+            }],
+            show_legend: true,
+            show_tooltip: true,
+            marker_us: None,
+            text_offsets: vec![TextOffsetLayout {
+                field,
+                t_us: 5_000,
+                y_frac: 0.25,
+            }],
+        };
+
+        let decoded = decode_doc(&doc_json(&doc).unwrap()).expect("decode");
+        let LoadOutcome::Applied(layout) = load_doc(decoded, &snapshot).expect("apply") else {
+            panic!("single source should not need mapping");
+        };
+        let pane = layout
+            .workspace
+            .tree
+            .tiles
+            .tiles()
+            .find_map(|tile| match tile {
+                egui_tiles::Tile::Pane(Pane::Plot(pane)) => Some(pane),
+                _ => None,
+            })
+            .expect("a plot pane");
+        assert_eq!(pane.text_offsets.len(), 1);
+        let (&(_, t_us), &y_frac) = pane.text_offsets.iter().next().unwrap();
+        assert_eq!(t_us, 5_000);
+        assert_eq!(y_frac, 0.25);
     }
 
     fn plot_trace_counts(workspace: &Workspace) -> (usize, usize) {
