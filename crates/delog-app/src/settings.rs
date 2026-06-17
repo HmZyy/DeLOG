@@ -26,6 +26,12 @@ fn default_text_label_cap() -> usize {
 fn default_text_label_spacing() -> f32 {
     4.0
 }
+fn default_text_line_width() -> f32 {
+    1.0
+}
+fn default_text_line_opacity() -> f32 {
+    0.3
+}
 fn default_font_size() -> f32 {
     14.0
 }
@@ -235,6 +241,14 @@ pub struct PlotDisplay {
     /// (PLT-15).
     #[serde(default = "default_text_label_spacing")]
     pub text_label_spacing: f32,
+    /// Width of the timestamp connector line under each text-annotation label,
+    /// in px (PLT-15).
+    #[serde(default = "default_text_line_width")]
+    pub text_line_width: f32,
+    /// Opacity of the timestamp connector line (1 = solid, 0 = transparent)
+    /// (PLT-15).
+    #[serde(default = "default_text_line_opacity")]
+    pub text_line_opacity: f32,
 }
 
 impl Default for PlotDisplay {
@@ -256,6 +270,8 @@ impl Default for PlotDisplay {
             text_label_cap: default_text_label_cap(),
             text_labels_bottom_up: true,
             text_label_spacing: default_text_label_spacing(),
+            text_line_width: default_text_line_width(),
+            text_line_opacity: default_text_line_opacity(),
         }
     }
 }
@@ -728,7 +744,7 @@ fn plots_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
             ui.add(egui::Slider::new(&mut p.text_label_cap, 16..=8192).logarithmic(true));
             ui.end_row();
 
-            ui.label("Message stacking")
+            ui.label("Text stacking")
                 .on_hover_text("Stack text-annotation labels from the bottom of the plot upward, or from the top down.");
             egui::ComboBox::from_id_salt("settings-text-stacking")
                 .selected_text(if p.text_labels_bottom_up {
@@ -742,9 +758,19 @@ fn plots_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
                 });
             ui.end_row();
 
-            ui.label("Message spacing")
+            ui.label("Text spacing")
                 .on_hover_text("Default vertical spacing between stacked text-annotation rows.");
             ui.add(egui::Slider::new(&mut p.text_label_spacing, 0.0..=40.0).suffix(" px"));
+            ui.end_row();
+
+            ui.label("Text line width")
+                .on_hover_text("Width of the timestamp connector line under each text-annotation label.");
+            ui.add(egui::Slider::new(&mut p.text_line_width, 0.0..=6.0).suffix(" px"));
+            ui.end_row();
+
+            ui.label("Text line opacity")
+                .on_hover_text("Opacity of the timestamp connector line. 1 = solid, 0 = fully transparent.");
+            ui.add(egui::Slider::new(&mut p.text_line_opacity, 0.0..=1.0));
             ui.end_row();
         });
 
@@ -916,6 +942,8 @@ mod tests {
                 text_label_cap: 1024,
                 text_labels_bottom_up: false,
                 text_label_spacing: 8.0,
+                text_line_width: 2.0,
+                text_line_opacity: 0.5,
             },
             ..AppSettings::default()
         };

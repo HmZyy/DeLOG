@@ -60,8 +60,7 @@ impl GenerateMarkersDialog {
                 title,
                 rows: Vec::new(),
                 error: Some(format!(
-                    "{n}+ distinct values - too many to generate markers (limit {MAX_DISTINCT}). \
-                     Pick a discrete field such as flight mode."
+                    "{n}+ distinct values - too many to generate markers (limit {MAX_DISTINCT})."
                 )),
             },
             Err(TransitionsError::FieldView(_)) => Self {
