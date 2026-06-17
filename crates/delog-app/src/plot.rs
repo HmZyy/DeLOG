@@ -159,6 +159,9 @@ pub struct PlotPane {
     /// `(field, sample t_us)`; value is a y-fraction (0 = top .. 1 = bottom).
     /// Only manually-dragged labels are stored; the rest auto-pack. Persisted.
     pub text_offsets: HashMap<(FieldId, i64), f32>,
+    /// Per-string-trace "contains" filter (PLT-15): only message labels
+    /// containing this text are drawn. Empty/absent = show all. Persisted.
+    pub text_filters: HashMap<FieldId, String>,
 }
 
 impl Default for PlotPane {
@@ -172,6 +175,7 @@ impl Default for PlotPane {
             marker_us: None,
             marker_drag: false,
             text_offsets: HashMap::new(),
+            text_filters: HashMap::new(),
         }
     }
 }
