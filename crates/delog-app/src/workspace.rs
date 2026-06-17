@@ -395,6 +395,10 @@ pub struct PlotServices<'a> {
     pub view: &'a mut Option<ViewX>,
     pub origin_us: i64,
     pub hover_mode: &'a mut delog_core::field_view::SampleMode,
+    /// Whether Alt+hover snaps the playhead to the nearest data point (off by
+    /// default). When set, the playhead holds a sample until the cursor crosses
+    /// to the next one.
+    pub snap_playhead: &'a mut bool,
     /// Shared measurement-marker time, used when `marker_scope` is Global
     /// (ANA-10). Per-pane markers live on the pane instead.
     pub marker_us: &'a mut Option<i64>,
@@ -945,15 +949,23 @@ impl Behavior<'_> {
         }
 
         if pane.show_tooltip && !ui.ctx().any_popup_open() {
-            // Alt+hover drags the playhead along with the cursor (PLT-10).
+            // Alt+hover drags the playhead along with the cursor (PLT-10). With
+            // snap enabled it lands on the nearest data point instead, so the
+            // playhead holds a sample until the cursor crosses to the next one.
             if ui.input(|i| i.modifiers.alt)
                 && let Some(pos) = response.hover_pos()
                 && plot_rect.contains(pos)
             {
                 let frac = (pos.x - plot_rect.left()) / plot_rect.width().max(1.0);
                 let t_sec = x_range.0 as f64 + frac as f64 * (x_range.1 - x_range.0) as f64;
-                self.actions.scrub_to =
-                    Some(self.services.origin_us + (t_sec * 1e6).round() as i64);
+                let cursor_us = self.services.origin_us + (t_sec * 1e6).round() as i64;
+                let target = if *self.services.snap_playhead {
+                    hover::nearest_sample_us(self.services.snapshot.as_ref(), pane, cursor_us)
+                        .unwrap_or(cursor_us)
+                } else {
+                    cursor_us
+                };
+                self.actions.scrub_to = Some(target);
             }
 
             hover::draw(
@@ -1177,6 +1189,11 @@ impl Behavior<'_> {
                 ui.radio_value(self.services.hover_mode, Next, "Next");
                 ui.radio_value(self.services.hover_mode, Linear, "Linear");
             });
+            ui.checkbox(self.services.snap_playhead, "Snap")
+                .on_hover_text(
+                    "Alt+hover snaps the playhead to the nearest data point instead of moving \
+                     continuously.",
+                );
 
             ui.separator();
 
