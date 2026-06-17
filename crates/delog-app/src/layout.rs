@@ -38,6 +38,9 @@ pub struct LayoutDoc {
     /// Shared (Global-scope) measurement-marker time, if placed (§10.8, ANA-10).
     #[serde(default)]
     pub marker_us: Option<i64>,
+    /// Manual markers / bookmarks for this session (§17.4, ANA-05).
+    #[serde(default)]
+    pub markers: Vec<MarkerLayout>,
     #[serde(default)]
     pub favorites: Vec<FieldRef>,
     #[serde(default)]
@@ -119,6 +122,15 @@ pub enum TraceModeLayout {
     Line,
     Scatter,
     Step,
+}
+
+/// A manual marker / bookmark for this session (§17.4, ANA-05).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MarkerLayout {
+    pub t_us: i64,
+    pub label: String,
+    pub color: [f32; 4],
+    pub note: String,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -224,6 +236,8 @@ pub struct LayoutApply {
     pub follow_live: bool,
     /// Restored shared (Global-scope) marker time (§10.8, ANA-10).
     pub marker_us: Option<i64>,
+    /// Restored manual markers / bookmarks (§17.4, ANA-05).
+    pub markers: Vec<MarkerLayout>,
     pub vehicles: Vec<VehicleConfig>,
     pub diagnostics: Vec<Diag>,
 }
@@ -274,6 +288,8 @@ pub struct CurrentLayout<'a> {
     pub follow_live: bool,
     /// Shared (Global-scope) marker time to persist (§10.8, ANA-10).
     pub marker_us: Option<i64>,
+    /// Manual markers / bookmarks to persist (§17.4, ANA-05).
+    pub markers: Vec<MarkerLayout>,
     pub vehicles: &'a [VehicleConfig],
 }
 
@@ -522,6 +538,7 @@ pub fn current_doc(input: CurrentLayout<'_>) -> LayoutDoc {
             .filter_map(|v| vehicle_to_layout(v, input.snapshot))
             .collect(),
         marker_us: input.marker_us,
+        markers: input.markers,
         favorites: Vec::new(),
         docks: BTreeMap::new(),
     }
@@ -713,6 +730,7 @@ fn apply_doc(
         speed: doc.playback.speed,
         follow_live: doc.playback.follow_live,
         marker_us: doc.marker_us,
+        markers: doc.markers,
         vehicles,
         diagnostics: resolver.diagnostics,
     })
@@ -1307,6 +1325,37 @@ mod tests {
     }
 
     #[test]
+    fn manual_markers_round_trip_through_json_and_apply() {
+        let mut doc = empty_doc("markers");
+        doc.markers = vec![
+            MarkerLayout {
+                t_us: 1_000,
+                label: "Takeoff".into(),
+                color: [1.0, 0.0, 0.0, 1.0],
+                note: "rotate".into(),
+            },
+            MarkerLayout {
+                t_us: 9_000,
+                label: "Land".into(),
+                color: [0.0, 1.0, 0.0, 1.0],
+                note: String::new(),
+            },
+        ];
+
+        let decoded = decode_doc(&doc_json(&doc).unwrap()).expect("decode");
+        assert_eq!(decoded.markers.len(), 2);
+        assert_eq!(decoded.markers[0].label, "Takeoff");
+
+        let LoadOutcome::Applied(layout) =
+            load_doc(decoded, &StoreSnapshot::empty()).expect("apply")
+        else {
+            panic!("no sources → no mapping");
+        };
+        assert_eq!(layout.markers.len(), 2);
+        assert_eq!(layout.markers[1].t_us, 9_000);
+    }
+
+    #[test]
     fn invalid_version_is_rejected() {
         let mut doc = empty_doc("bad");
         doc.delog_layout = 99;
@@ -1499,6 +1548,7 @@ mod tests {
             },
             vehicles: Vec::new(),
             marker_us: None,
+            markers: Vec::new(),
             favorites: Vec::new(),
             docks: BTreeMap::new(),
         }
