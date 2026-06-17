@@ -469,11 +469,30 @@ Hover runs a per-trace binary search on **canonical** timestamps (per-chunk `t` 
 
 ### 10.6 Plot context menu & debug
 
-Context menu: remove trace / clear / mode / color / width-point-size / split H / split V / reset view / toggle legend / _plot info…_ — the latter opens the per-plot debug popup: trace count, samples total & visible, GPU bytes, last y-query µs, last paint-callback µs (spec's "plot info/debug window").
+Context menu: remove trace / clear / mode / color / width-point-size / split H / split V / reset view / toggle legend / **add ↔ remove measurement marker** (§10.8) / _plot info…_ — the latter opens the per-plot debug popup: trace count, samples total & visible, GPU bytes, last y-query µs, last paint-callback µs (spec's "plot info/debug window").
 
 ### 10.7 Drag & drop
 
 The browser's drag payload is `Vec<FieldId>` (multi-select drops N traces at once). Drop targets: a plot (append), a tile-tree edge (new split with the traces), the 3D pane (rejected with a hint toast unless it is a position-mappable topic — convenience wiring for §12).
+
+### 10.8 Measurement marker (delta cursor)
+
+A second vertical line in a plot pane that, paired with the playhead (§11), reads out the **time delta** between the two and the **per-trace value delta** across them — an oscilloscope-style measurement cursor.
+
+```rust
+struct MarkerCursor { t_us: i64 }   // canonical µs, like every other time (no float)
+// per-pane state on PlotPane:
+marker: Option<MarkerCursor>
+```
+
+- **Per-pane and local** (decision). Each plot pane owns its own `Option<MarkerCursor>`; there is no shared/global marker. **Why:** a measurement is about the traces _in front of you_; forcing one global cursor across unrelated panes adds coupling for no payoff, and the playhead already provides the one global time authority the deltas reference.
+- **Distinct from §17.4 session markers/bookmarks** — those are global, labeled, persisted-and-listed in a bookmarks panel and used for navigation. This is a transient per-pane measurement tool: no label, not in the bookmarks panel, not click-to-jump.
+- **Add/remove via the context menu (toggle).** When the pane has no marker the menu shows **Add marker**, which drops it at the **current playhead time** (`playback.t_us`); when one exists the same slot shows **Remove marker**. Once placed the line is draggable along X (sets `t_us`, clamped to the global range); dragging it does **not** move the playhead.
+- **Rendered like the playhead but visually distinct** — an egui-painted vertical (same overlay layer as the playhead per §10.1) in a separate, fixed accent color (theme-driven, dashed) so the two lines never read as the same cursor.
+- **ΔT readout** anchored at the marker line: `Δt = marker.t_us − playback.t_us`, formatted in the timeline's units (s/ms), sign preserved.
+- **Per-trace ΔY in the legend.** For each trace in the pane, sample its value at the marker time and at the playhead time using the **same prev-sample/next/linear interpolation mode as hover** (§10.5), then show `Δ = v(marker) − v(playhead)` next to that trace's current value in the legend/readout — original dtype and unit string preserved. Reads go through the O(log) `FieldView::sample_at` spine walk (PRF-12), so cost is a couple of lookups per trace per frame and only while a marker exists.
+- **NaN is a gap, not a number** (invariant §8.2): if either endpoint sample is NaN the trace's ΔY renders as `—`, never interpolated across the gap; ΔT is unaffected.
+- **Persisted per-pane in the layout JSON** (§14) so a saved workspace restores its markers.
 
 ---
 
@@ -1010,6 +1029,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [ ] **ANA-07** — Gap/dropout/reset detection surfaced (links DIA-05)
 - [ ] **ANA-08** — _(backlog)_ expression engine with prev-sample union-timeline alignment
 - [ ] **ANA-09** — _(backlog)_ A−B diff trace; resampling utilities as a library
+- [x] **ANA-10** — Measurement marker (delta cursor): per-pane `marker_us: Option<i64>` on `PlotPane` (transient `marker_drag`); context-menu **Add marker** (drops at the playhead time, enabled only when a playhead exists) ↔ **Remove marker** toggle with a ruler icon. `hover::draw_marker` paints a dashed accent vertical (`hyperlink_color`, distinct from the amber playhead) with a `Δt …s` label anchored at the line top; `hover::marker_deltas` samples each trace at the marker and the playhead via `FieldView::sample_at` (the active hover interp mode) and `format_delta` renders `(marker − playhead) × mult` with unit — non-finite/missing endpoint → `—` (NaN gap, §8.2). The legend shows each trace's `Δ …` after its label. `handle_marker_drag` grabs the line within 6 px and sets `marker_us` from the pointer (clamped to the global range), taking priority over pan. Persisted per-pane as `LayoutNode::Plot.marker_us` (`#[serde(default)]`). `format_delta` unit-tested (sign/multiplier/unit/NaN/∞); clippy-clean. GUI visuals (line/label/legend Δ/drag) pending a manual in-app run (§10.8)
 
 ### SCR — Scripting (derived fields / Python)
 

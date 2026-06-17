@@ -81,6 +81,9 @@ pub enum LayoutNode {
         show_legend: bool,
         #[serde(default = "default_true")]
         show_tooltip: bool,
+        /// Measurement marker time, if placed (§10.8, ANA-10).
+        #[serde(default)]
+        marker_us: Option<i64>,
     },
     Scene3d(SceneLayout),
     Split {
@@ -573,6 +576,7 @@ fn workspace_doc(workspace: &Workspace, snapshot: &StoreSnapshot) -> WorkspaceLa
             traces: Vec::new(),
             show_legend: true,
             show_tooltip: true,
+            marker_us: None,
         });
     WorkspaceLayout { root }
 }
@@ -592,6 +596,7 @@ fn node_to_layout(
                 .collect(),
             show_legend: pane.show_legend,
             show_tooltip: pane.show_tooltip,
+            marker_us: pane.marker_us,
         }),
         egui_tiles::Tile::Pane(Pane::Scene3D(scene)) => Some(LayoutNode::Scene3d(SceneLayout {
             camera: CameraLayout {
@@ -885,10 +890,12 @@ fn insert_node(
             traces,
             show_legend,
             show_tooltip,
+            marker_us,
         } => {
             let mut pane = PlotPane {
                 show_legend: *show_legend,
                 show_tooltip: *show_tooltip,
+                marker_us: *marker_us,
                 ..PlotPane::default()
             };
             for trace in traces {
@@ -1460,6 +1467,7 @@ mod tests {
                     traces: Vec::new(),
                     show_legend: true,
                     show_tooltip: true,
+                    marker_us: None,
                 },
             },
             vehicles: Vec::new(),
