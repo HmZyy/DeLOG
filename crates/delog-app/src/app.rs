@@ -8,7 +8,6 @@ use delog_core::diagnostics::{DiagRecord, Severity};
 use delog_core::time::TimeRange;
 use serde::Serialize;
 
-use crate::about;
 use crate::browser::{self, BrowserModel};
 use crate::diagnostics::DiagnosticsDock;
 use crate::gpu::GpuBridge;
@@ -189,6 +188,13 @@ pub struct DelogApp {
     /// while streaming. Disengaged by manual pan/zoom or toggling it off.
     fit_view_all: bool,
     hover_mode: delog_core::field_view::SampleMode,
+    /// Shared measurement-marker time when the marker scope is Global (ANA-10);
+    /// `None` when no global marker is placed. Per-pane markers live on the pane.
+    marker_us: Option<i64>,
+    /// Manual markers / bookmarks (§17.4, ANA-05).
+    markers: crate::markers::Markers,
+    /// Whether Alt+hover snaps the playhead to the nearest data point (PLT-10).
+    snap_playhead: bool,
     frame: u64,
     last_epoch: u64,
     origin_us: i64,
@@ -215,6 +221,7 @@ pub struct DelogApp {
     browser_collapsed: bool,
     diagnostics_dock: DiagnosticsDock,
     performance_dock: PerformanceDock,
+    markers_dock: crate::markers::MarkersDock,
     performance_snapshot: PerformanceSnapshot,
     performance_last_refresh: Option<Instant>,
     browser_query: String,
@@ -227,7 +234,7 @@ pub struct DelogApp {
     offset_dialog: Option<(delog_core::identity::SourceId, i64)>,
     source_metadata_dialog: Option<delog_core::identity::SourceId>,
     field_stats_dialog: Option<delog_core::identity::FieldId>,
-    show_about: bool,
+    generate_markers_dialog: Option<crate::generate_markers::GenerateMarkersDialog>,
     save_layout_dialog: SaveLayoutDialog,
     load_layout_dialog: LoadLayoutDialog,
     layout_manager_dialog: LayoutManagerDialog,
@@ -287,6 +294,9 @@ impl DelogApp {
             view_fitted: false,
             fit_view_all: false,
             hover_mode: delog_core::field_view::SampleMode::Prev,
+            marker_us: None,
+            markers: crate::markers::Markers::new(),
+            snap_playhead: false,
             frame: 0,
             last_epoch: u64::MAX,
             origin_us: 0,
@@ -305,6 +315,7 @@ impl DelogApp {
             browser_collapsed: false,
             diagnostics_dock: DiagnosticsDock::default(),
             performance_dock: PerformanceDock::default(),
+            markers_dock: crate::markers::MarkersDock::default(),
             performance_snapshot: PerformanceSnapshot::default(),
             performance_last_refresh: None,
             browser_query: String::new(),
@@ -313,7 +324,7 @@ impl DelogApp {
             offset_dialog: None,
             source_metadata_dialog: None,
             field_stats_dialog: None,
-            show_about: false,
+            generate_markers_dialog: None,
             save_layout_dialog: SaveLayoutDialog {
                 open: false,
                 name: "default".into(),
@@ -727,6 +738,18 @@ impl DelogApp {
             fit_all: self.fit_view_all,
             speed: self.playback.speed as f64,
             follow_live: self.playback.follow_live,
+            marker_us: self.marker_us,
+            markers: self
+                .markers
+                .as_slice()
+                .iter()
+                .map(|m| crate::layout::MarkerLayout {
+                    t_us: m.t_us,
+                    label: m.label.clone(),
+                    color: m.color,
+                    note: m.note.clone(),
+                })
+                .collect(),
             vehicles: &self.vehicles,
         })
     }
@@ -995,6 +1018,12 @@ impl DelogApp {
         self.fit_view_all = layout.fit_all;
         self.playback.set_speed(layout.speed as f32);
         self.playback.follow_live = layout.follow_live;
+        self.marker_us = layout.marker_us;
+        let mut markers = crate::markers::Markers::new();
+        for m in layout.markers {
+            markers.push_loaded(m.t_us, m.label, m.color, m.note);
+        }
+        self.markers = markers;
         // Legend/tooltip visibility is restored per-pane via the workspace.
         self.vehicles = layout.vehicles;
         self.vehicle_revision = self.vehicle_revision.wrapping_add(1);
@@ -1422,6 +1451,12 @@ impl eframe::App for DelogApp {
                         ui.close();
                     }
                     if ui
+                        .checkbox(&mut self.markers_dock.open, "Markers")
+                        .clicked()
+                    {
+                        ui.close();
+                    }
+                    if ui
                         .checkbox(&mut self.settings.show_debug_overlay, "Debug Overlay (F12)")
                         .clicked()
                     {
@@ -1525,13 +1560,6 @@ impl eframe::App for DelogApp {
                         }
                     });
                 });
-                ui.menu_button("Help", |ui| {
-                    if ui.button("About").clicked() {
-                        self.show_about = true;
-                        ui.close();
-                    }
-                });
-
                 // FPS badge pinned to the far right (PRF-05), shown only when
                 // enabled in settings (PRF-08).
                 if self.settings.show_fps {
@@ -1661,6 +1689,7 @@ impl eframe::App for DelogApp {
                     None,
                     self.session.has_live_links(),
                     self.settings.theme,
+                    &self.markers,
                 );
                 if action.lock_live {
                     self.lock_to_live(range);
@@ -1671,6 +1700,28 @@ impl eframe::App for DelogApp {
                     self.fit_view_all = false;
                     self.playback.unlock_live();
                     self.view_fitted = true;
+                }
+                // Manual-marker flag interactions (§17.4, ANA-05).
+                if let Some(t_us) = action.marker_jump {
+                    self.playback.scrub(t_us, range);
+                }
+                if let Some((id, t_us)) = action.marker_move
+                    && let Some(m) = self.markers.get_mut(id)
+                {
+                    m.t_us = t_us.clamp(range.min_us, range.max_us);
+                }
+                if let Some(id) = action.marker_delete {
+                    self.markers.remove(id);
+                }
+                if let Some((id, edit)) = action.marker_edit
+                    && let Some(m) = self.markers.get_mut(id)
+                {
+                    if let Some(label) = edit.label {
+                        m.label = label;
+                    }
+                    if let Some(color) = edit.color {
+                        m.color = color;
+                    }
                 }
             });
             drop(ui_timeline_timer);
@@ -1684,7 +1735,7 @@ impl eframe::App for DelogApp {
             // Transport keys (§11, TLN-04) — skipped while a widget owns the
             // keyboard (e.g. the browser filter box).
             if !ui.ctx().egui_wants_keyboard_input() {
-                let (space, home, end, left, right, save_layout, load_layout) =
+                let (space, home, end, left, right, save_layout, load_layout, add_marker) =
                     ui.ctx().input(|i| {
                         (
                             i.key_pressed(egui::Key::Space),
@@ -1694,6 +1745,7 @@ impl eframe::App for DelogApp {
                             i.key_pressed(egui::Key::ArrowRight),
                             i.modifiers.command && i.key_pressed(egui::Key::S),
                             i.modifiers.command && i.key_pressed(egui::Key::L),
+                            i.key_pressed(egui::Key::M),
                         )
                     });
                 if save_layout {
@@ -1726,6 +1778,10 @@ impl eframe::App for DelogApp {
                         right,
                     );
                     self.playback.scrub(target, range);
+                }
+                if add_marker {
+                    // Drop a manual marker at the playhead (§17.4, ANA-05).
+                    self.markers.add_at(self.playback.t_us);
                 }
             }
         }
@@ -1762,6 +1818,18 @@ impl eframe::App for DelogApp {
         }
 
         drop(ui_performance_timer);
+        if self.markers_dock.open {
+            egui::Panel::bottom("markers")
+                .resizable(true)
+                .default_size(200.0)
+                .show_inside(ui, |ui| {
+                    if let Some(t_us) = self.markers_dock.ui(ui, &mut self.markers, self.origin_us)
+                        && let Some(range) = snapshot.global_time_range()
+                    {
+                        self.playback.scrub(t_us, range);
+                    }
+                });
+        }
         let ui_browser_timer = self.session.metrics().scope("ui_browser");
         if self.browser_collapsed {
             let button_size = browser::panel_toggle_button_size(ui);
@@ -1833,12 +1901,25 @@ impl eframe::App for DelogApp {
                 if let Some(field) = browser_response.inspect_field_stats {
                     self.field_stats_dialog = Some(field);
                 }
+                if let Some(field) = browser_response.generate_markers {
+                    let title = crate::legend::trace_label(&snapshot, field);
+                    self.generate_markers_dialog =
+                        Some(crate::generate_markers::GenerateMarkersDialog::open(
+                            &snapshot, field, title,
+                        ));
+                }
             });
             self.browser_model = Some((epoch, model));
         }
         drop(ui_browser_timer);
         show_source_metadata_window(ui.ctx(), &snapshot, &mut self.source_metadata_dialog);
         show_field_stats_window(ui.ctx(), &snapshot, &mut self.field_stats_dialog);
+        for (t_us, name, color) in crate::generate_markers::generate_markers_window(
+            ui.ctx(),
+            &mut self.generate_markers_dialog,
+        ) {
+            self.markers.push_loaded(t_us, name, color, String::new());
+        }
 
         let ui_workspace_timer = self.session.metrics().scope("ui_workspace");
         egui::Frame::central_panel(ui.style()).show(ui, |ui| {
@@ -1867,6 +1948,9 @@ impl eframe::App for DelogApp {
                         view: &mut self.view,
                         origin_us: self.origin_us,
                         hover_mode: &mut self.hover_mode,
+                        snap_playhead: &mut self.snap_playhead,
+                        marker_us: &mut self.marker_us,
+                        marker_scope: self.settings.plot.marker_scope,
                         render_tuning: self.settings.render,
                         scene3d: self.settings.scene3d,
                         playhead_us: snapshot.global_time_range().map(|_| self.playback.t_us),
@@ -1876,6 +1960,7 @@ impl eframe::App for DelogApp {
                         traj_generation: self.traj_vehicle_revision,
                         shared_y_gutter: self.workspace.shared_y_gutter,
                         plot_display: self.settings.plot,
+                        markers: self.markers.as_slice(),
                     };
                     let mut behavior = crate::workspace::Behavior::new(services);
                     // `workspace_tree` (§16, PRF-10): the egui_tiles layout +
@@ -1948,7 +2033,6 @@ impl eframe::App for DelogApp {
         // Floating windows/dialogs + overlays; drops with the function (still
         // inside `frame_total`, after every other section).
         let _ui_windows_timer = self.session.metrics().scope("ui_windows");
-        about::window(ui.ctx(), &mut self.show_about);
         self.paint_debug_overlay(ui.ctx());
         self.show_layout_windows(ui.ctx());
         let settings_before = self.settings.clone();

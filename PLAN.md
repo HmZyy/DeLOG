@@ -469,11 +469,30 @@ Hover runs a per-trace binary search on **canonical** timestamps (per-chunk `t` 
 
 ### 10.6 Plot context menu & debug
 
-Context menu: remove trace / clear / mode / color / width-point-size / split H / split V / reset view / toggle legend / _plot info…_ — the latter opens the per-plot debug popup: trace count, samples total & visible, GPU bytes, last y-query µs, last paint-callback µs (spec's "plot info/debug window").
+Context menu: remove trace / clear / mode / color / width-point-size / split H / split V / reset view / toggle legend / **add ↔ remove measurement marker** (§10.8) / _plot info…_ — the latter opens the per-plot debug popup: trace count, samples total & visible, GPU bytes, last y-query µs, last paint-callback µs (spec's "plot info/debug window").
 
 ### 10.7 Drag & drop
 
 The browser's drag payload is `Vec<FieldId>` (multi-select drops N traces at once). Drop targets: a plot (append), a tile-tree edge (new split with the traces), the 3D pane (rejected with a hint toast unless it is a position-mappable topic — convenience wiring for §12).
+
+### 10.8 Measurement marker (delta cursor)
+
+A second vertical line in a plot pane that, paired with the playhead (§11), reads out the **time delta** between the two and the **per-trace value delta** across them — an oscilloscope-style measurement cursor.
+
+```rust
+struct MarkerCursor { t_us: i64 }   // canonical µs, like every other time (no float)
+// per-pane state on PlotPane:
+marker: Option<MarkerCursor>
+```
+
+- **Scope is a setting: Global (default) or Per-pane.** A `marker_scope` plot-display setting chooses whether the marker is **one shared time across every pane** (the default — held in app state next to the playhead, so placing/dragging/ctrl-hover on any pane moves the single marker everywhere) or **independent per pane** (each pane owns its own `Option<i64>`). **Why default Global:** a marker is most often used to line up the same instant across stacked plots, mirroring the playhead's single-time-authority model; Per-pane stays available for independent measurements.
+- **Distinct from §17.4 session markers/bookmarks** — those are labeled, persisted-and-listed in a bookmarks panel and used for navigation. This is a transient measurement tool: no label, not in the bookmarks panel, not click-to-jump.
+- **Add/remove via the context menu (toggle).** When there is no marker the menu shows **Add marker**, which drops it at the **current playhead time** (`playback.t_us`); when one exists the same slot shows **Remove marker** (both honor the scope — Global writes the shared slot, Per-pane the pane's). Once placed the line is draggable along X (sets the time, clamped to the global range), and **Ctrl+hover** scrubs an existing marker to the cursor (mirroring Alt+hover for the playhead); neither moves the playhead.
+- **Rendered like the playhead but visually distinct** — an egui-painted vertical (same overlay layer as the playhead per §10.1) in a separate, fixed accent color (theme-driven, dashed) so the two lines never read as the same cursor.
+- **ΔT readout** anchored at the marker line: `Δt = marker.t_us − playback.t_us`, formatted in the timeline's units (s/ms), sign preserved.
+- **Per-trace ΔY, routed by a setting.** For each trace in the pane, sample its value at the marker time and at the playhead time using the **same prev-sample/next/linear interpolation mode as hover** (§10.5), then show `Δ = v(marker) − v(playhead)` — original dtype and unit string preserved. A `marker_delta_readout` plot-display setting (default **Legend**) chooses where it appears: next to each trace's name in the **legend**, or on each row of the **hover/playhead value readout**. Reads go through the O(log) `FieldView::sample_at` spine walk (PRF-12), so cost is a couple of lookups per trace per frame and only while a marker exists.
+- **NaN is a gap, not a number** (invariant §8.2): if either endpoint sample is NaN the trace's ΔY renders as `—`, never interpolated across the gap; ΔT is unaffected.
+- **Persisted in the layout JSON** (§14): the shared marker as a top-level `marker_us`, per-pane markers on each `Plot` node, so a saved workspace restores them.
 
 ---
 
@@ -612,6 +631,8 @@ Falls out of the architecture: multiple sources + per-source offsets + the share
 ### 17.4 Events, markers, bookmarks
 
 `Marker { t_us, label, color, note }` — manual add at the playhead (`M`), listed in a bookmarks panel (click-to-jump), drawn as flags on the timeline and faint verticals on plots. **Auto-markers** (toggleable) from AP `MSG`/`EV` and ULog logged messages. Persisted in the session. Gap/reset detection (§15) can optionally shade affected plot regions (backlog polish).
+
+**Generate markers from field values (ANA-11).** A field's right-click menu (browser rows + plot trace submenu, next to _Field stats_) offers **Generate markers** for **discrete** fields (int/uint/bool/string; a ≤64 distinct-value cap, floats excluded). A `delog-core` scan (`analysis::field_value_transitions`, Arrow stays in core per §3.2) groups the field's transition times by distinct value — one transition each time the value changes _into_ a new one (first non-null sample counts; null is a gap, not a value). A popup lists every value with an include checkbox, an editable name (default `Value <v>`) and a color swatch; generating appends an ANA-05 marker at every transition for each included value. **Same value → same color** (deterministic FNV-1a of the value label into the trace palette), so e.g. mode `Auto` is always the same colour across regenerations and logs — and with §17.4 region shading this yields coloured mode bands. Re-running appends (manual cleanup); enum-name autofill (AP/PX4 mode names, needs parser capture) is backlog.
 
 ---
 
@@ -919,6 +940,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **PLT-12** — Plot debug popup: counts, visible range, GPU bytes, yquery µs, paint µs
 - [x] **PLT-13** — Drag-drop: single + multi-field onto pane / tile edge (§10.7)
 - [x] **PLT-14** — Empty-pane state copy
+- [x] **PLT-15** — Text-annotation traces (string fields in plots): a string field added to a pane (e.g. AP `MSG`, param-change text) renders as text labels at each sample's timestamp x, overlaid in screen space (no GPU line, no Y contribution — the all-NaN cache already keeps it out of the line path + auto-Y). Faint full-height timestamp line per label; greedy top-down row packing so labels don't collide; each label drag-able vertically only (x locked) to declutter, with per-label y-fraction persisted in the layout (`LayoutNode::Plot.text_offsets`, keyed by topic.field + `t_us`). `text_overlay` module reads samples via `FieldView`. Settings (Plots tab): label cap (default 512), stack direction (bottom-up default vs top-down), row spacing px. Each string trace gets a per-trace case-insensitive "contains" **filter box in the legend** (`PlotPane.text_filters`, applied in `FieldView::string_samples_in_range` so the cap counts matches; persisted as `LayoutNode::Plot.text_filters`). Vertical label drag is routed through the pane response so pan/zoom still pass through. Coexists with numeric traces; appears in the legend. Design: `docs/superpowers/specs/2026-06-17-plt-15-text-annotation-traces-design.md`
 
 ### TLN — Timeline & playback (M5)
 
@@ -1005,11 +1027,13 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [ ] **ANA-02** — Visible-window stats: pyramid min/max instant; rayon μ/σ on demand, memoized
 - [x] **ANA-03** — Stats popup UI (browser + plot trace) — browser field context menu and plot trace context submenu both open a Field Stats window showing global stats from the core fold with units where available
 - [ ] **ANA-04** — Derived built-ins via `derived:` ingestion source: magnitude, scale+offset, deg↔rad, unwrap (§17.3)
-- [ ] **ANA-05** — Markers: manual add (`M`), bookmarks panel, timeline flags, plot verticals, persist (§17.4)
+- [x] **ANA-05** — Markers: manual add (`M`), bookmarks panel, timeline flags, plot verticals, persist (§17.4) — `markers.rs` holds `Marker {id,t_us,label,color,note}` + a `Markers` collection (stable ids, palette colours, `Marker N` labels, time-sorted `by_time`); `M` drops one at the playhead (`app.rs` keymap). `MarkersDock` (bottom panel, View ▸ Markers) lists rows with editable colour/label/note + jump/delete. Timeline `scrubber` draws a flag per marker with click-to-jump, drag-to-move (egui temp drag state, disambiguated from playhead scrub), hover tooltip, and a right-click rename/recolour/delete menu via extended `TimelineAction` (`marker_jump`/`marker_move`/`marker_delete`/`marker_edit`+`MarkerEdit`). `hover::draw_session_markers` paints a faint (0.4α) labelled vertical per marker on every pane via a new `PlotServices.markers` slice. Persisted as `LayoutDoc.markers: Vec<MarkerLayout>` (session autosave + named layouts), distinct from the ANA-10 `marker_us`. Unit tests: `Markers` ops + `fmt_rel` + layout round-trip; clippy-clean, 138 app tests pass. GUI visuals/drag pending a manual in-app run. Design+plan in `docs/superpowers/{specs,plans}/2026-06-17-ana-05-*`
 - [ ] **ANA-06** — Auto-markers from AP MSG/EV + ULog logged messages (toggle)
 - [ ] **ANA-07** — Gap/dropout/reset detection surfaced (links DIA-05)
 - [ ] **ANA-08** — _(backlog)_ expression engine with prev-sample union-timeline alignment
 - [ ] **ANA-09** — _(backlog)_ A−B diff trace; resampling utilities as a library
+- [x] **ANA-10** — Measurement marker (delta cursor): per-pane `marker_us: Option<i64>` on `PlotPane` (transient `marker_drag`); context-menu **Add marker** (drops at the playhead time, enabled only when a playhead exists) ↔ **Remove marker** toggle with a ruler icon. `hover::draw_marker` paints a dashed accent vertical (`hyperlink_color`, distinct from the amber playhead) with a `Δt …s` label anchored at the line top; `hover::marker_deltas` samples each trace at the marker and the playhead via `FieldView::sample_at` (the active hover interp mode) and `format_delta` renders `(marker − playhead) × mult` with unit — non-finite/missing endpoint → `—` (NaN gap, §8.2). A `PlotDisplay::marker_delta_readout` setting (Plots tab combo, default `Legend`) routes the `Δ …` to either the legend (after each trace label) or the hover/playhead value readout (extra span per row, keyed by `FieldId`). A `PlotDisplay::marker_scope` setting (default `Global`) chooses a single shared marker (app-level `marker_us`, persisted as top-level `LayoutDoc.marker_us`) vs per-pane markers; `Behavior::marker_us`/`set_marker_us` read/write the right slot. `handle_marker_drag` grabs the line within 6 px and sets the marker from the pointer (clamped to the global range), taking priority over pan; **Ctrl+hover** scrubs an existing marker to the cursor. Persisted per-pane as `LayoutNode::Plot.marker_us` (`#[serde(default)]`). `format_delta` unit-tested (sign/multiplier/unit/NaN/∞); clippy-clean. GUI visuals (line/label/legend Δ/drag) pending a manual in-app run (§10.8)
+- [x] **ANA-11** — Generate markers from field values (§17.4): field right-click **Generate markers** (browser rows gated by dtype label + plot trace submenu gated by `FieldSchema::is_discrete`, both next to Field stats; int/uint/bool/string only). `delog-core::analysis::field_value_transitions(snapshot, field, 64)` walks samples in effective-time order (sorts when the spine is non-monotonic) and groups transition times by distinct value (transition = change into a value, first non-null counts, null is a gap; first-seen order; `TooManyValues` past the cap). Popup `generate_markers::GenerateMarkersDialog` (egui::Window per `FieldId`) lists each value with include checkbox + editable name (default `Value <v>`) + colour swatch and a "Generate N markers" button; generate appends ANA-05 markers (`Markers::push_loaded`) at every transition for each included value. Stable colour per value via FNV-1a(label) → trace palette. Re-run appends. Unit tests: core run-start/null/cap, `value_color` stability; clippy-clean, 139 app + core analysis tests pass. Enum-name autofill = backlog. GUI pending a manual run. Design: `docs/superpowers/specs/2026-06-17-ana-11-generate-markers-design.md`
 
 ### SCR — Scripting (derived fields / Python)
 
