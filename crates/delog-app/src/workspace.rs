@@ -838,6 +838,17 @@ impl Behavior<'_> {
             x_range,
             y_range,
         };
+        // Inter-marker region shading, painted behind the traces (§17.4,
+        // ANA-05) so it reads as a background band.
+        if self.services.plot_display.marker_shade_regions {
+            hover::draw_marker_regions(
+                ui,
+                pview,
+                self.services.origin_us,
+                self.services.markers,
+                self.services.plot_display.marker_shade_opacity,
+            );
+        }
         let paint_start = Instant::now();
         self.services.gpu.render_pane(
             ui,
