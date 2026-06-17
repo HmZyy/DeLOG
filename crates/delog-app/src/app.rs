@@ -1952,6 +1952,7 @@ impl eframe::App for DelogApp {
                         traj_generation: self.traj_vehicle_revision,
                         shared_y_gutter: self.workspace.shared_y_gutter,
                         plot_display: self.settings.plot,
+                        markers: self.markers.as_slice(),
                     };
                     let mut behavior = crate::workspace::Behavior::new(services);
                     // `workspace_tree` (§16, PRF-10): the egui_tiles layout +
