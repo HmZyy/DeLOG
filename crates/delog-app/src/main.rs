@@ -18,6 +18,7 @@ mod icons;
 mod layout;
 mod legend;
 mod live;
+mod markers;
 mod models;
 mod performance;
 mod plot;
