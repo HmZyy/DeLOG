@@ -122,11 +122,12 @@ pub fn ui(
                             trace.visible = !trace.visible;
                         }
 
-                        // Per-trace ΔY against the marker, weak so it reads as a
-                        // secondary annotation next to the trace name (ANA-10).
+                        // Per-trace measuring-marker value delta, weak so it
+                        // reads as a secondary annotation next to the trace name
+                        // (ANA-10).
                         if let Some(delta) = deltas.get(field) {
                             ui.label(
-                                egui::RichText::new(format!("Δ {delta}"))
+                                egui::RichText::new(format!("d {delta}"))
                                     .color(ui.visuals().hyperlink_color)
                                     .weak(),
                             );
