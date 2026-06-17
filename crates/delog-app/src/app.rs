@@ -2025,13 +2025,6 @@ impl eframe::App for DelogApp {
                     if let Some(field) = actions.inspect_field_stats {
                         self.field_stats_dialog = Some(field);
                     }
-                    if let Some(field) = actions.generate_markers {
-                        let title = crate::legend::trace_label(&snapshot, field);
-                        self.generate_markers_dialog =
-                            Some(crate::generate_markers::GenerateMarkersDialog::open(
-                                &snapshot, field, title,
-                            ));
-                    }
                 });
             if let Some(fields) = dropped
                 && !handled_workspace_drop

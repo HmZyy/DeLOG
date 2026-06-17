@@ -25,6 +25,10 @@ pub struct TextLabelStyle {
     pub bottom_up: bool,
     /// Vertical spacing between stacked rows, in px.
     pub spacing_px: f32,
+    /// Timestamp connector line width, in px.
+    pub line_width: f32,
+    /// Timestamp connector line opacity (0..=1).
+    pub line_opacity: f32,
 }
 
 /// Whether `field`'s dtype is a string (text-annotation trace, PLT-15).
@@ -141,11 +145,15 @@ pub fn draw(
                 .clamp(0.0, 1.0);
             let y = rect.top() + y_frac * rect.height();
 
-            // Faint full-height line marking the exact timestamp.
+            // Full-height line marking the exact timestamp (width/opacity from
+            // settings).
             ui.painter().vline(
                 x,
                 rect.y_range(),
-                egui::Stroke::new(1.0, color.gamma_multiply(0.3)),
+                egui::Stroke::new(
+                    style.line_width,
+                    color.gamma_multiply(style.line_opacity.clamp(0.0, 1.0)),
+                ),
             );
             let text_pos = egui::pos2(x + 3.0, y);
             ui.painter().galley(text_pos, galley, color);
