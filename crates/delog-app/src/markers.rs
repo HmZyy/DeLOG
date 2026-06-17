@@ -89,13 +89,79 @@ impl Markers {
         &self.items
     }
 
-    pub fn len(&self) -> usize {
-        self.items.len()
-    }
-
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
+}
+
+/// Bottom dock listing the session's markers (§17.4, ANA-05): per row a colour
+/// swatch, relative time, editable label + note, and jump / delete controls.
+/// Returns a jump target time when a row's jump button is clicked.
+#[derive(Default)]
+pub struct MarkersDock {
+    pub open: bool,
+}
+
+impl MarkersDock {
+    pub fn ui(&mut self, ui: &mut egui::Ui, markers: &mut Markers, origin_us: i64) -> Option<i64> {
+        if markers.is_empty() {
+            ui.weak("No markers — press M to add one at the playhead.");
+            return None;
+        }
+        let mut jump = None;
+        let mut to_remove = None;
+        let ids: Vec<u64> = markers.by_time().iter().map(|m| m.id).collect();
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for id in ids {
+                let Some(m) = markers.get_mut(id) else {
+                    continue;
+                };
+                ui.horizontal(|ui| {
+                    let mut color = m.color32();
+                    if egui::color_picker::color_edit_button_srgba(
+                        ui,
+                        &mut color,
+                        egui::color_picker::Alpha::Opaque,
+                    )
+                    .changed()
+                    {
+                        m.color = crate::legend::color32_to_srgb(color);
+                    }
+                    ui.monospace(fmt_rel(m.t_us, origin_us));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut m.label)
+                            .desired_width(140.0)
+                            .hint_text("label"),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut m.note)
+                            .desired_width(180.0)
+                            .hint_text("note"),
+                    );
+                    if ui.button("⤓").on_hover_text("Jump to marker").clicked() {
+                        jump = Some(m.t_us);
+                    }
+                    if ui.button("✕").on_hover_text("Delete marker").clicked() {
+                        to_remove = Some(id);
+                    }
+                });
+            }
+        });
+        if let Some(id) = to_remove {
+            markers.remove(id);
+        }
+        jump
+    }
+}
+
+/// Format a canonical time relative to the log origin as `m:ss.cc`.
+fn fmt_rel(t_us: i64, origin_us: i64) -> String {
+    let secs = (t_us - origin_us) as f64 * 1e-6;
+    let sign = if secs < 0.0 { "-" } else { "" };
+    let s = secs.abs();
+    let m = (s / 60.0).floor() as i64;
+    let rem = s - (m as f64) * 60.0;
+    format!("{sign}{m}:{rem:05.2}")
 }
 
 #[cfg(test)]
@@ -129,7 +195,7 @@ mod tests {
         let a = m.add_at(10);
         m.add_at(20);
         m.remove(a);
-        assert_eq!(m.len(), 1);
+        assert_eq!(m.as_slice().len(), 1);
         // Next add keeps counting up — no reuse of "Marker 1".
         m.add_at(30);
         let labels: Vec<&str> = m.by_time().iter().map(|x| x.label.as_str()).collect();
@@ -143,5 +209,12 @@ mod tests {
         m.get_mut(id).unwrap().label = "Takeoff".to_string();
         assert_eq!(m.as_slice()[0].label, "Takeoff");
         assert!(m.get_mut(999).is_none());
+    }
+
+    #[test]
+    fn fmt_rel_formats_minutes_seconds_centis() {
+        assert_eq!(super::fmt_rel(3_210_000, 0), "0:03.21");
+        assert_eq!(super::fmt_rel(62_000_000, 0), "1:02.00");
+        assert_eq!(super::fmt_rel(0, 1_000_000), "-0:01.00");
     }
 }
