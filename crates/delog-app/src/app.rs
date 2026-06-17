@@ -8,7 +8,6 @@ use delog_core::diagnostics::{DiagRecord, Severity};
 use delog_core::time::TimeRange;
 use serde::Serialize;
 
-use crate::about;
 use crate::browser::{self, BrowserModel};
 use crate::diagnostics::DiagnosticsDock;
 use crate::gpu::GpuBridge;
@@ -236,7 +235,6 @@ pub struct DelogApp {
     source_metadata_dialog: Option<delog_core::identity::SourceId>,
     field_stats_dialog: Option<delog_core::identity::FieldId>,
     generate_markers_dialog: Option<crate::generate_markers::GenerateMarkersDialog>,
-    show_about: bool,
     save_layout_dialog: SaveLayoutDialog,
     load_layout_dialog: LoadLayoutDialog,
     layout_manager_dialog: LayoutManagerDialog,
@@ -327,7 +325,6 @@ impl DelogApp {
             source_metadata_dialog: None,
             field_stats_dialog: None,
             generate_markers_dialog: None,
-            show_about: false,
             save_layout_dialog: SaveLayoutDialog {
                 open: false,
                 name: "default".into(),
@@ -1563,13 +1560,6 @@ impl eframe::App for DelogApp {
                         }
                     });
                 });
-                ui.menu_button("Help", |ui| {
-                    if ui.button("About").clicked() {
-                        self.show_about = true;
-                        ui.close();
-                    }
-                });
-
                 // FPS badge pinned to the far right (PRF-05), shown only when
                 // enabled in settings (PRF-08).
                 if self.settings.show_fps {
@@ -2043,7 +2033,6 @@ impl eframe::App for DelogApp {
         // Floating windows/dialogs + overlays; drops with the function (still
         // inside `frame_total`, after every other section).
         let _ui_windows_timer = self.session.metrics().scope("ui_windows");
-        about::window(ui.ctx(), &mut self.show_about);
         self.paint_debug_overlay(ui.ctx());
         self.show_layout_windows(ui.ctx());
         let settings_before = self.settings.clone();
