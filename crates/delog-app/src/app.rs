@@ -194,6 +194,8 @@ pub struct DelogApp {
     marker_us: Option<i64>,
     /// Manual markers / bookmarks (§17.4, ANA-05).
     markers: crate::markers::Markers,
+    /// Whether Alt+hover snaps the playhead to the nearest data point (PLT-10).
+    snap_playhead: bool,
     frame: u64,
     last_epoch: u64,
     origin_us: i64,
@@ -295,6 +297,7 @@ impl DelogApp {
             hover_mode: delog_core::field_view::SampleMode::Prev,
             marker_us: None,
             markers: crate::markers::Markers::new(),
+            snap_playhead: false,
             frame: 0,
             last_epoch: u64::MAX,
             origin_us: 0,
@@ -1940,6 +1943,7 @@ impl eframe::App for DelogApp {
                         view: &mut self.view,
                         origin_us: self.origin_us,
                         hover_mode: &mut self.hover_mode,
+                        snap_playhead: &mut self.snap_playhead,
                         marker_us: &mut self.marker_us,
                         marker_scope: self.settings.plot.marker_scope,
                         render_tuning: self.settings.render,
