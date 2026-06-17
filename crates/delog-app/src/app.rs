@@ -235,6 +235,7 @@ pub struct DelogApp {
     offset_dialog: Option<(delog_core::identity::SourceId, i64)>,
     source_metadata_dialog: Option<delog_core::identity::SourceId>,
     field_stats_dialog: Option<delog_core::identity::FieldId>,
+    generate_markers_dialog: Option<crate::generate_markers::GenerateMarkersDialog>,
     show_about: bool,
     save_layout_dialog: SaveLayoutDialog,
     load_layout_dialog: LoadLayoutDialog,
@@ -325,6 +326,7 @@ impl DelogApp {
             offset_dialog: None,
             source_metadata_dialog: None,
             field_stats_dialog: None,
+            generate_markers_dialog: None,
             show_about: false,
             save_layout_dialog: SaveLayoutDialog {
                 open: false,
@@ -1909,12 +1911,25 @@ impl eframe::App for DelogApp {
                 if let Some(field) = browser_response.inspect_field_stats {
                     self.field_stats_dialog = Some(field);
                 }
+                if let Some(field) = browser_response.generate_markers {
+                    let title = crate::legend::trace_label(&snapshot, field);
+                    self.generate_markers_dialog =
+                        Some(crate::generate_markers::GenerateMarkersDialog::open(
+                            &snapshot, field, title,
+                        ));
+                }
             });
             self.browser_model = Some((epoch, model));
         }
         drop(ui_browser_timer);
         show_source_metadata_window(ui.ctx(), &snapshot, &mut self.source_metadata_dialog);
         show_field_stats_window(ui.ctx(), &snapshot, &mut self.field_stats_dialog);
+        for (t_us, name, color) in crate::generate_markers::generate_markers_window(
+            ui.ctx(),
+            &mut self.generate_markers_dialog,
+        ) {
+            self.markers.push_loaded(t_us, name, color, String::new());
+        }
 
         let ui_workspace_timer = self.session.metrics().scope("ui_workspace");
         egui::Frame::central_panel(ui.style()).show(ui, |ui| {
@@ -2009,6 +2024,13 @@ impl eframe::App for DelogApp {
                     }
                     if let Some(field) = actions.inspect_field_stats {
                         self.field_stats_dialog = Some(field);
+                    }
+                    if let Some(field) = actions.generate_markers {
+                        let title = crate::legend::trace_label(&snapshot, field);
+                        self.generate_markers_dialog =
+                            Some(crate::generate_markers::GenerateMarkersDialog::open(
+                                &snapshot, field, title,
+                            ));
                     }
                 });
             if let Some(fields) = dropped

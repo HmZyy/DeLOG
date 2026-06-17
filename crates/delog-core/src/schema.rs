@@ -92,6 +92,26 @@ impl FieldSchema {
         self.is_numeric() || self.dtype == DataType::Boolean
     }
 
+    /// Discrete enough to enumerate distinct values from (int/uint/bool/string;
+    /// floats excluded) — gates "Generate markers" (ANA-11). Lets `delog-app`
+    /// decide without touching Arrow types directly (§3.2).
+    pub fn is_discrete(&self) -> bool {
+        matches!(
+            self.dtype,
+            DataType::Int8
+                | DataType::Int16
+                | DataType::Int32
+                | DataType::Int64
+                | DataType::UInt8
+                | DataType::UInt16
+                | DataType::UInt32
+                | DataType::UInt64
+                | DataType::Boolean
+                | DataType::Utf8
+                | DataType::LargeUtf8
+        )
+    }
+
     /// Short, fixed display tag for this field's dtype (e.g. `"i32"`, `"f64"`,
     /// `"str"`). Lets `delog-app` show a dtype chip without touching Arrow
     /// types directly (§3.2).
