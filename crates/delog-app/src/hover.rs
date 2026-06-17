@@ -386,6 +386,47 @@ fn format_delta(
     }
 }
 
+/// Shade each inter-marker region on a plot (§17.4, ANA-05): from each marker
+/// to the next one (or the right edge for the last) using that marker's colour
+/// at `opacity`. Markers are sorted by time here. Meant to be drawn *behind* the
+/// traces so it reads as a background band.
+pub fn draw_marker_regions(
+    ui: &egui::Ui,
+    view: PaneView,
+    origin_us: i64,
+    markers: &[crate::markers::Marker],
+    opacity: f32,
+) {
+    let rect = view.rect;
+    let (x0, x1) = view.x_range;
+    if x1 <= x0 || markers.is_empty() {
+        return;
+    }
+    let mut sorted: Vec<&crate::markers::Marker> = markers.iter().collect();
+    sorted.sort_by_key(|m| m.t_us);
+    let to_x = |t_us: i64| {
+        let t_sec = ((t_us - origin_us) as f64 * 1e-6) as f32;
+        rect.left() + (t_sec - x0) / (x1 - x0) * rect.width()
+    };
+    let opacity = opacity.clamp(0.0, 1.0);
+    let painter = ui.painter();
+    for (i, m) in sorted.iter().enumerate() {
+        let start = to_x(m.t_us);
+        let end = sorted.get(i + 1).map_or(rect.right(), |n| to_x(n.t_us));
+        let a = start.clamp(rect.left(), rect.right());
+        let b = end.clamp(rect.left(), rect.right());
+        if b <= a {
+            continue;
+        }
+        let fill = m.color32().gamma_multiply(opacity);
+        painter.rect_filled(
+            egui::Rect::from_min_max(egui::pos2(a, rect.top()), egui::pos2(b, rect.bottom())),
+            0.0,
+            fill,
+        );
+    }
+}
+
 /// Manual session markers (§17.4, ANA-05): a full-height vertical in each
 /// marker's colour on every plot pane, with the label at the top. Read-only;
 /// distinct from the amber playhead and the ANA-10 dashed delta cursor. The
