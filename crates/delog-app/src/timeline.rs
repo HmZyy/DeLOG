@@ -199,7 +199,7 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (y, m, d)
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct TimelineAction {
     /// User requested explicit live-tail lock (`End` equivalent).
     pub lock_live: bool,
@@ -208,6 +208,21 @@ pub struct TimelineAction {
     /// User dragged the visible-window range slider, changing the X view
     /// (TLN-08) — treated like a manual pan/zoom (disengages fit-all/live).
     pub view_changed: bool,
+    /// Click a timeline flag → scrub the playhead here (§17.4, ANA-05).
+    pub marker_jump: Option<i64>,
+    /// Drag a flag → set that marker's time (ANA-05).
+    pub marker_move: Option<(u64, i64)>,
+    /// Right-click → delete that marker (ANA-05).
+    pub marker_delete: Option<u64>,
+    /// Right-click → rename/recolour that marker (ANA-05).
+    pub marker_edit: Option<(u64, MarkerEdit)>,
+}
+
+/// A rename/recolour edit reported from a timeline flag's context menu (ANA-05).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MarkerEdit {
+    pub label: Option<String>,
+    pub color: Option<[f32; 4]>,
 }
 
 /// The timeline bar: transport buttons, speed picker, the scrubber and the
@@ -224,6 +239,7 @@ pub fn ui(
     utc_offset_us: Option<i64>,
     any_live: bool,
     theme: crate::theme::ThemeChoice,
+    markers: &crate::markers::Markers,
 ) -> TimelineAction {
     let mut action = TimelineAction::default();
     ui.add_space(6.0);
@@ -368,7 +384,7 @@ pub fn ui(
         // Two stacked sliders sharing the remaining width: the playhead scrubber
         // on top and the visible-window range slider directly beneath it (TLN-08).
         ui.vertical(|ui| {
-            if scrubber(ui, playback, range, any_live) {
+            if scrubber(ui, playback, range, any_live, markers, &mut action) {
                 action.manual_scrub = true;
             }
             ui.add_space(6.0);
@@ -383,8 +399,18 @@ pub fn ui(
     action
 }
 
-/// Full-range bar with a draggable playhead handle (TLN-02).
-fn scrubber(ui: &mut egui::Ui, playback: &mut Playback, range: TimeRange, any_live: bool) -> bool {
+/// Full-range bar with a draggable playhead handle (TLN-02) and manual-marker
+/// flags (§17.4, ANA-05). A drag that begins on a flag moves that marker; a
+/// click on a flag jumps to it; right-click edits/deletes; drags/clicks
+/// elsewhere scrub the playhead. Marker interactions are reported via `action`.
+fn scrubber(
+    ui: &mut egui::Ui,
+    playback: &mut Playback,
+    range: TimeRange,
+    any_live: bool,
+    markers: &crate::markers::Markers,
+    action: &mut TimelineAction,
+) -> bool {
     let height = 16.0;
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), height),
@@ -394,17 +420,62 @@ fn scrubber(ui: &mut egui::Ui, playback: &mut Playback, range: TimeRange, any_li
         return false;
     }
 
+    // Nearest flag to a screen x, within the hit radius.
+    let hit_radius = 6.0;
+    let nearest_flag = |x: f32| -> Option<u64> {
+        markers
+            .by_time()
+            .iter()
+            .map(|m| (m.id, (bar_x_at(m.t_us, rect, range) - x).abs()))
+            .filter(|(_, d)| *d <= hit_radius)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(id, _)| id)
+    };
+
+    // Which marker (if any) is being dragged, tracked across frames.
+    let drag_key = ui.id().with("marker_drag");
+    let mut dragging: Option<u64> = ui
+        .memory_mut(|m| m.data.get_temp::<Option<u64>>(drag_key))
+        .flatten();
+    if response.drag_started() {
+        dragging = response
+            .interact_pointer_pos()
+            .and_then(|p| nearest_flag(p.x));
+        ui.memory_mut(|m| m.data.insert_temp(drag_key, dragging));
+    }
+
     let mut scrubbed = false;
-    // Click or drag anywhere on the bar moves the playhead there.
-    if (response.clicked() || response.dragged())
-        && let Some(pos) = response.interact_pointer_pos()
+    if let Some(id) = dragging {
+        // Move the grabbed marker; the playhead stays put.
+        if let Some(p) = response.interact_pointer_pos() {
+            action.marker_move = Some((id, bar_time_at(p.x, rect, range)));
+        }
+        if response.drag_stopped() {
+            ui.memory_mut(|m| m.data.insert_temp::<Option<u64>>(drag_key, None));
+        }
+    } else if response.clicked() {
+        if let Some(p) = response.interact_pointer_pos() {
+            match nearest_flag(p.x) {
+                Some(id) => {
+                    if let Some(m) = markers.by_time().into_iter().find(|m| m.id == id) {
+                        action.marker_jump = Some(m.t_us);
+                    }
+                }
+                None => {
+                    playback.scrub(bar_time_at(p.x, rect, range), range);
+                    scrubbed = true;
+                }
+            }
+        }
+    } else if response.dragged()
+        && let Some(p) = response.interact_pointer_pos()
     {
-        playback.scrub(bar_time_at(pos.x, rect, range), range);
+        playback.scrub(bar_time_at(p.x, rect, range), range);
         scrubbed = true;
     }
 
+    let visuals = ui.visuals().clone();
     let painter = ui.painter();
-    let visuals = ui.visuals();
     let bar = egui::Rect::from_center_size(rect.center(), egui::vec2(rect.width(), 6.0));
     painter.rect_filled(bar, 3.0, visuals.extreme_bg_color);
 
@@ -429,6 +500,79 @@ fn scrubber(ui: &mut egui::Ui, playback: &mut Playback, range: TimeRange, any_li
     };
     painter.vline(x, rect.y_range(), egui::Stroke::new(2.0, stroke_color));
     painter.circle_filled(egui::pos2(x, rect.center().y), 4.0, stroke_color);
+
+    // Marker flags: a thin stem plus a downward triangle in the marker colour.
+    for m in markers.by_time() {
+        let fx = bar_x_at(m.t_us, rect, range);
+        let color = m.color32();
+        painter.vline(fx, rect.y_range(), egui::Stroke::new(1.0, color));
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                egui::pos2(fx - 4.0, rect.top()),
+                egui::pos2(fx + 4.0, rect.top()),
+                egui::pos2(fx, rect.top() + 6.0),
+            ],
+            color,
+            egui::Stroke::NONE,
+        ));
+    }
+
+    // Per-flag hover tooltip + right-click context menu.
+    for m in markers.by_time() {
+        let fx = bar_x_at(m.t_us, rect, range);
+        let flag_rect = egui::Rect::from_min_max(
+            egui::pos2(fx - hit_radius, rect.top()),
+            egui::pos2(fx + hit_radius, rect.bottom()),
+        );
+        let tip = if m.note.is_empty() {
+            m.label.clone()
+        } else {
+            format!("{}\n{}", m.label, m.note)
+        };
+        let fr = ui
+            .interact(
+                flag_rect,
+                ui.id().with(("flag", m.id)),
+                egui::Sense::click(),
+            )
+            .on_hover_text(tip);
+        fr.context_menu(|ui| {
+            let mut label = m.label.clone();
+            if ui
+                .add(egui::TextEdit::singleline(&mut label).hint_text("label"))
+                .changed()
+            {
+                action.marker_edit = Some((
+                    m.id,
+                    MarkerEdit {
+                        label: Some(label),
+                        color: None,
+                    },
+                ));
+            }
+            let mut color = m.color32();
+            if egui::color_picker::color_edit_button_srgba(
+                ui,
+                &mut color,
+                egui::color_picker::Alpha::Opaque,
+            )
+            .changed()
+            {
+                action.marker_edit = Some((
+                    m.id,
+                    MarkerEdit {
+                        label: None,
+                        color: Some(crate::legend::color32_to_srgb(color)),
+                    },
+                ));
+            }
+            if ui.button("Delete").clicked() {
+                action.marker_delete = Some(m.id);
+                ui.close();
+            }
+        });
+    }
+
     scrubbed
 }
 
