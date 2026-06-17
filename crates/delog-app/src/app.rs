@@ -189,6 +189,9 @@ pub struct DelogApp {
     /// while streaming. Disengaged by manual pan/zoom or toggling it off.
     fit_view_all: bool,
     hover_mode: delog_core::field_view::SampleMode,
+    /// Shared measurement-marker time when the marker scope is Global (ANA-10);
+    /// `None` when no global marker is placed. Per-pane markers live on the pane.
+    marker_us: Option<i64>,
     frame: u64,
     last_epoch: u64,
     origin_us: i64,
@@ -287,6 +290,7 @@ impl DelogApp {
             view_fitted: false,
             fit_view_all: false,
             hover_mode: delog_core::field_view::SampleMode::Prev,
+            marker_us: None,
             frame: 0,
             last_epoch: u64::MAX,
             origin_us: 0,
@@ -727,6 +731,7 @@ impl DelogApp {
             fit_all: self.fit_view_all,
             speed: self.playback.speed as f64,
             follow_live: self.playback.follow_live,
+            marker_us: self.marker_us,
             vehicles: &self.vehicles,
         })
     }
@@ -995,6 +1000,7 @@ impl DelogApp {
         self.fit_view_all = layout.fit_all;
         self.playback.set_speed(layout.speed as f32);
         self.playback.follow_live = layout.follow_live;
+        self.marker_us = layout.marker_us;
         // Legend/tooltip visibility is restored per-pane via the workspace.
         self.vehicles = layout.vehicles;
         self.vehicle_revision = self.vehicle_revision.wrapping_add(1);
@@ -1867,6 +1873,8 @@ impl eframe::App for DelogApp {
                         view: &mut self.view,
                         origin_us: self.origin_us,
                         hover_mode: &mut self.hover_mode,
+                        marker_us: &mut self.marker_us,
+                        marker_scope: self.settings.plot.marker_scope,
                         render_tuning: self.settings.render,
                         scene3d: self.settings.scene3d,
                         playhead_us: snapshot.global_time_range().map(|_| self.playback.t_us),

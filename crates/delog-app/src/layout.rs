@@ -35,6 +35,9 @@ pub struct LayoutDoc {
     pub playback: PlaybackLayout,
     pub workspace: WorkspaceLayout,
     pub vehicles: Vec<VehicleLayout>,
+    /// Shared (Global-scope) measurement-marker time, if placed (§10.8, ANA-10).
+    #[serde(default)]
+    pub marker_us: Option<i64>,
     #[serde(default)]
     pub favorites: Vec<FieldRef>,
     #[serde(default)]
@@ -219,6 +222,8 @@ pub struct LayoutApply {
     pub fit_all: bool,
     pub speed: f64,
     pub follow_live: bool,
+    /// Restored shared (Global-scope) marker time (§10.8, ANA-10).
+    pub marker_us: Option<i64>,
     pub vehicles: Vec<VehicleConfig>,
     pub diagnostics: Vec<Diag>,
 }
@@ -267,6 +272,8 @@ pub struct CurrentLayout<'a> {
     pub fit_all: bool,
     pub speed: f64,
     pub follow_live: bool,
+    /// Shared (Global-scope) marker time to persist (§10.8, ANA-10).
+    pub marker_us: Option<i64>,
     pub vehicles: &'a [VehicleConfig],
 }
 
@@ -514,6 +521,7 @@ pub fn current_doc(input: CurrentLayout<'_>) -> LayoutDoc {
             .iter()
             .filter_map(|v| vehicle_to_layout(v, input.snapshot))
             .collect(),
+        marker_us: input.marker_us,
         favorites: Vec::new(),
         docks: BTreeMap::new(),
     }
@@ -704,6 +712,7 @@ fn apply_doc(
         fit_all: doc.view.is_some_and(|v| matches!(v.mode, ViewMode::Full)),
         speed: doc.playback.speed,
         follow_live: doc.playback.follow_live,
+        marker_us: doc.marker_us,
         vehicles,
         diagnostics: resolver.diagnostics,
     })
@@ -1280,6 +1289,24 @@ mod tests {
     }
 
     #[test]
+    fn global_marker_us_round_trips_through_json_and_apply() {
+        // The shared (Global-scope) marker persists in the layout doc and is
+        // handed back through LayoutApply on load (ANA-10).
+        let mut doc = empty_doc("marker");
+        doc.marker_us = Some(123_456);
+
+        let decoded = decode_doc(&doc_json(&doc).unwrap()).expect("decode");
+        assert_eq!(decoded.marker_us, Some(123_456));
+
+        let LoadOutcome::Applied(layout) =
+            load_doc(decoded, &StoreSnapshot::empty()).expect("apply")
+        else {
+            panic!("no sources → no mapping");
+        };
+        assert_eq!(layout.marker_us, Some(123_456));
+    }
+
+    #[test]
     fn invalid_version_is_rejected() {
         let mut doc = empty_doc("bad");
         doc.delog_layout = 99;
@@ -1471,6 +1498,7 @@ mod tests {
                 },
             },
             vehicles: Vec::new(),
+            marker_us: None,
             favorites: Vec::new(),
             docks: BTreeMap::new(),
         }
