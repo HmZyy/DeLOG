@@ -105,9 +105,14 @@ pub fn clock() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/clock-3.svg")
 }
 
-/// Ruler (add a measurement marker / delta cursor, ANA-10).
+/// Ruler (add a measuring marker / delta cursor, ANA-10).
 pub fn ruler() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/ruler.svg")
+}
+
+/// Crosshair (jump the playhead to a marker, ANA-05).
+pub fn crosshair() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/crosshair.svg")
 }
 
 /// X (close the pane).

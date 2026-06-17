@@ -627,8 +627,8 @@ fn plots_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
             ui.add(egui::Slider::new(&mut p.hover_opacity, 0.0..=1.0));
             ui.end_row();
 
-            ui.label("Marker scope")
-                .on_hover_text("Whether the measurement marker is one shared time across all plot panes (like the playhead) or independent per pane.");
+            ui.label("Measuring marker scope")
+                .on_hover_text("Whether the measuring marker is one shared time across all plot panes (like the playhead) or independent per pane.");
             egui::ComboBox::from_id_salt("settings-marker-scope")
                 .selected_text(p.marker_scope.label())
                 .show_ui(ui, |ui| {
@@ -638,8 +638,8 @@ fn plots_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
                 });
             ui.end_row();
 
-            ui.label("Marker Δ readout")
-                .on_hover_text("Where the measurement marker's per-trace ΔY is shown: in the legend next to each trace, or on the hover/playhead value readout.");
+            ui.label("Measuring marker readout")
+                .on_hover_text("Where the measuring marker's per-trace value delta is shown: in the legend next to each trace, or on the hover/playhead value readout.");
             egui::ComboBox::from_id_salt("settings-marker-delta-readout")
                 .selected_text(p.marker_delta_readout.label())
                 .show_ui(ui, |ui| {
