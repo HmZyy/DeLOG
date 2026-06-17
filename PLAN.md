@@ -940,6 +940,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **PLT-12** — Plot debug popup: counts, visible range, GPU bytes, yquery µs, paint µs
 - [x] **PLT-13** — Drag-drop: single + multi-field onto pane / tile edge (§10.7)
 - [x] **PLT-14** — Empty-pane state copy
+- [~] **PLT-15** — Text-annotation traces (string fields in plots): a string field added to a pane (e.g. AP `MSG`, param-change text) renders as text labels at each sample's timestamp x, overlaid in screen space (no GPU line, no Y contribution — the all-NaN cache already keeps it out of the line path + auto-Y). Faint full-height timestamp line per label; greedy top-down row packing so labels don't collide; each label drag-able vertically only (x locked) to declutter, with per-label y-fraction persisted in the layout (`LayoutNode::Plot.text_offsets`, keyed by topic.field + `t_us`). `text_overlay` module reads samples via `FieldView`; ~256-label cap. Coexists with numeric traces; appears in the legend. Design: `docs/superpowers/specs/2026-06-17-plt-15-text-annotation-traces-design.md`
 
 ### TLN — Timeline & playback (M5)
 
