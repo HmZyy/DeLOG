@@ -72,11 +72,15 @@ pub fn ui(
     pane: &mut PlotPane,
     labels: &[(FieldId, String)],
     deltas: &HashMap<FieldId, String>,
+    snapshot: &StoreSnapshot,
 ) -> Option<FieldId> {
     if labels.is_empty() && pane.ghosts.is_empty() {
         return None;
     }
     let mut removed = None;
+    // Per-string-trace text filters edited this frame; applied after the Area
+    // closure releases its borrow of `pane` (PLT-15).
+    let mut filter_edits: Vec<(FieldId, String)> = Vec::new();
 
     let (pos, pivot) = legend_anchor(position, plot_rect);
     egui::Area::new(id)
@@ -92,6 +96,14 @@ pub fn ui(
             }
             .show(ui, |ui| {
                 for (field, label) in labels {
+                    // String traces are text-annotation traces (PLT-15) and get
+                    // a per-trace "contains" filter box.
+                    let is_text = crate::text_overlay::field_is_string(snapshot, *field);
+                    let mut filter = if is_text {
+                        pane.text_filters.get(field).cloned().unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
                     let Some(trace) = pane.trace_mut(*field) else {
                         continue;
                     };
@@ -132,6 +144,21 @@ pub fn ui(
                                     .weak(),
                             );
                         }
+
+                        // Per-trace text-annotation filter (PLT-15): only labels
+                        // containing this text are drawn (case-insensitive).
+                        if is_text
+                            && ui
+                                .add(
+                                    egui::TextEdit::singleline(&mut filter)
+                                        .hint_text("filter…")
+                                        .desired_width(90.0),
+                                )
+                                .on_hover_text("Show only messages containing this text")
+                                .changed()
+                        {
+                            filter_edits.push((*field, filter.clone()));
+                        }
                         resp.context_menu(|ui| {
                             ui.menu_button("Mode", |ui| {
                                 for mode in TraceMode::ALL {
@@ -170,6 +197,14 @@ pub fn ui(
                 }
             })
         });
+
+    for (field, filter) in filter_edits {
+        if filter.trim().is_empty() {
+            pane.text_filters.remove(&field);
+        } else {
+            pane.text_filters.insert(field, filter);
+        }
+    }
 
     removed
 }

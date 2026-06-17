@@ -935,6 +935,7 @@ impl Behavior<'_> {
             self.services.snapshot.as_ref(),
             &pane.traces,
             &mut pane.text_offsets,
+            &pane.text_filters,
             crate::text_overlay::TextLabelStyle {
                 cap: self.services.plot_display.text_label_cap,
                 bottom_up: self.services.plot_display.text_labels_bottom_up,
@@ -1030,6 +1031,7 @@ impl Behavior<'_> {
                 pane,
                 &labels,
                 legend_deltas,
+                self.services.snapshot.as_ref(),
             ) {
                 pane.remove_trace(removed);
                 self.services.caches.unpin(removed);
