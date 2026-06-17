@@ -17,6 +17,9 @@ fn default_opacity() -> f32 {
 fn default_marker_line_width() -> f32 {
     1.5
 }
+fn default_marker_shade_opacity() -> f32 {
+    0.12
+}
 fn default_font_size() -> f32 {
     14.0
 }
@@ -207,6 +210,13 @@ pub struct PlotDisplay {
     /// Draw each manual session marker's label at the top of its line (ANA-05).
     #[serde(default = "default_true")]
     pub marker_show_label: bool,
+    /// Shade each plot region from one marker to the next (or the end) with that
+    /// marker's colour (§17.4, ANA-05).
+    #[serde(default)]
+    pub marker_shade_regions: bool,
+    /// Opacity of the inter-marker region shading (1 = solid, 0 = transparent).
+    #[serde(default = "default_marker_shade_opacity")]
+    pub marker_shade_opacity: f32,
 }
 
 impl Default for PlotDisplay {
@@ -223,6 +233,8 @@ impl Default for PlotDisplay {
             marker_line_opacity: default_opacity(),
             marker_line_width: default_marker_line_width(),
             marker_show_label: true,
+            marker_shade_regions: false,
+            marker_shade_opacity: default_marker_shade_opacity(),
         }
     }
 }
@@ -679,6 +691,16 @@ fn plots_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
                 .on_hover_text("Draw each manual session marker's label at the top of its line on plots.");
             ui.checkbox(&mut p.marker_show_label, "");
             ui.end_row();
+
+            ui.label("Shade between markers")
+                .on_hover_text("Fill each plot region from one marker to the next (or the end) with that marker's colour.");
+            ui.checkbox(&mut p.marker_shade_regions, "");
+            ui.end_row();
+
+            ui.label("Marker shade opacity")
+                .on_hover_text("Opacity of the inter-marker region shading. 1 = solid, 0 = fully transparent.");
+            ui.add(egui::Slider::new(&mut p.marker_shade_opacity, 0.0..=1.0));
+            ui.end_row();
         });
 
     ui.add_space(10.0);
@@ -844,6 +866,8 @@ mod tests {
                 marker_line_opacity: 0.5,
                 marker_line_width: 2.0,
                 marker_show_label: false,
+                marker_shade_regions: true,
+                marker_shade_opacity: 0.2,
             },
             ..AppSettings::default()
         };
