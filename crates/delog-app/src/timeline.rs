@@ -593,11 +593,11 @@ fn window_slider(ui: &mut egui::Ui, view: &mut ViewX, range: TimeRange) -> bool 
     // Keep at least ~8 px of window so both handles stay grabbable.
     let min_span_us = (span as f64 * (8.0 / rect.width().max(1.0)) as f64) as i64 + 1;
 
-    // Clamp the incoming view to the data range for a sane display.
-    view.min_us = view.min_us.clamp(range.min_us, range.max_us);
-    view.max_us = view
-        .max_us
-        .clamp(view.min_us + 1, range.max_us.max(view.min_us + 1));
+    // The view may legitimately extend beyond the data range (pan/zoom is not
+    // limited, TLN-08). We do NOT clamp it here; instead the handles ride the
+    // bar edges (via `bar_x_at`'s clamp) and grey out when out of range.
+    let lo_in_range = (range.min_us..=range.max_us).contains(&view.min_us);
+    let hi_in_range = (range.min_us..=range.max_us).contains(&view.max_us);
 
     let hw = 5.0;
     let lo_rect = egui::Rect::from_center_size(
@@ -636,11 +636,12 @@ fn window_slider(ui: &mut egui::Ui, view: &mut ViewX, range: TimeRange) -> bool 
     if mid_resp.dragged() {
         let dx = mid_resp.drag_delta().x;
         if dx != 0.0 {
+            // Pan the window by the dragged delta without clamping to the data
+            // range — the window may move past either end (TLN-08).
             let win = view.max_us - view.min_us;
             let delta = (dx as f64 / rect.width().max(1.0) as f64 * span as f64).round() as i64;
-            let lo = (view.min_us + delta).clamp(range.min_us, range.max_us - win);
-            view.min_us = lo;
-            view.max_us = lo + win;
+            view.min_us = view.min_us.saturating_add(delta);
+            view.max_us = view.min_us + win;
             changed = true;
         }
     }
@@ -655,8 +656,11 @@ fn window_slider(ui: &mut egui::Ui, view: &mut ViewX, range: TimeRange) -> bool 
         egui::pos2(bar_x_at(view.max_us, rect, range), bar.bottom()),
     );
     painter.rect_filled(band, 3.0, visuals.selection.bg_fill);
-    let handle = |t_us: i64, active: bool| {
-        let c = if active {
+    let handle = |t_us: i64, active: bool, in_range: bool| {
+        // Out-of-range ends sit at a clamped bar edge and read as disabled.
+        let c = if !in_range {
+            visuals.weak_text_color()
+        } else if active {
             visuals.strong_text_color()
         } else {
             visuals.text_color()
@@ -665,8 +669,16 @@ fn window_slider(ui: &mut egui::Ui, view: &mut ViewX, range: TimeRange) -> bool 
         painter.vline(x, rect.y_range(), egui::Stroke::new(2.0, c));
         painter.circle_filled(egui::pos2(x, rect.center().y), 4.0, c);
     };
-    handle(view.min_us, lo_resp.hovered() || lo_resp.dragged());
-    handle(view.max_us, hi_resp.hovered() || hi_resp.dragged());
+    handle(
+        view.min_us,
+        lo_resp.hovered() || lo_resp.dragged(),
+        lo_in_range,
+    );
+    handle(
+        view.max_us,
+        hi_resp.hovered() || hi_resp.dragged(),
+        hi_in_range,
+    );
 
     changed
 }
