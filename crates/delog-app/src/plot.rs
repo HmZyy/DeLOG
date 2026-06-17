@@ -146,6 +146,13 @@ pub struct PlotPane {
     /// Whether this pane's Plot Info window is open (context menu, PLT-11).
     /// Transient UI state — not serialized into layouts.
     pub show_info: bool,
+    /// Measurement marker (delta cursor, ANA-10): a second vertical at this
+    /// canonical time, paired with the playhead to read out ΔT + per-trace ΔY.
+    /// `None` when no marker is placed. Persisted per-pane (§10.8).
+    pub marker_us: Option<i64>,
+    /// Whether the marker line is currently being dragged. Transient UI state —
+    /// not serialized into layouts.
+    pub marker_drag: bool,
 }
 
 impl Default for PlotPane {
@@ -156,6 +163,8 @@ impl Default for PlotPane {
             show_legend: true,
             show_tooltip: true,
             show_info: false,
+            marker_us: None,
+            marker_drag: false,
         }
     }
 }

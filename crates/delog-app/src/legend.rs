@@ -5,6 +5,8 @@
 //! and clickable label. Right-clicking a trace opens style controls for draw
 //! mode, width and removal.
 
+use std::collections::HashMap;
+
 use delog_core::identity::FieldId;
 use delog_core::snapshot::StoreSnapshot;
 
@@ -57,7 +59,10 @@ pub fn trace_label(snapshot: &StoreSnapshot, field: FieldId) -> String {
 /// Draw the legend overlay and apply edits to `pane`. Each row is a colour
 /// editor plus a clickable label: clicking toggles the trace's visibility, a
 /// hidden trace's label is greyed out (PLT-08), and right-click / Remove returns
-/// the field (PLT-11) so the caller can drop its cache.
+/// the field (PLT-11) so the caller can drop its cache. When a measurement
+/// marker is placed, `deltas` carries the per-trace ΔY string shown after the
+/// label (§10.8, ANA-10); an empty map shows none.
+#[allow(clippy::too_many_arguments)]
 pub fn ui(
     ui: &egui::Ui,
     id: egui::Id,
@@ -66,6 +71,7 @@ pub fn ui(
     opacity: f32,
     pane: &mut PlotPane,
     labels: &[(FieldId, String)],
+    deltas: &HashMap<FieldId, String>,
 ) -> Option<FieldId> {
     if labels.is_empty() && pane.ghosts.is_empty() {
         return None;
@@ -114,6 +120,16 @@ pub fn ui(
                         let resp = ui.add(label_widget);
                         if resp.clicked() {
                             trace.visible = !trace.visible;
+                        }
+
+                        // Per-trace ΔY against the marker, weak so it reads as a
+                        // secondary annotation next to the trace name (ANA-10).
+                        if let Some(delta) = deltas.get(field) {
+                            ui.label(
+                                egui::RichText::new(format!("Δ {delta}"))
+                                    .color(ui.visuals().hyperlink_color)
+                                    .weak(),
+                            );
                         }
                         resp.context_menu(|ui| {
                             ui.menu_button("Mode", |ui| {

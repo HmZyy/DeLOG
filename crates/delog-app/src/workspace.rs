@@ -783,7 +783,12 @@ impl Behavior<'_> {
         let (mut plot_rect, own_gutter) = make_plot_rect(ui, y_range, y_unit.as_deref());
         self.actions.max_y_gutter = self.actions.max_y_gutter.max(own_gutter);
         let view_before_interaction = *self.services.view;
-        self.handle_plot_interaction(&response, plot_rect);
+        // Dragging the measurement marker line takes priority over panning so a
+        // grab near the marker moves it instead of scrolling the view (ANA-10).
+        let marker_active = self.handle_marker_drag(&response, plot_rect, x_range, pane);
+        if !marker_active {
+            self.handle_plot_interaction(&response, plot_rect);
+        }
         if *self.services.view != view_before_interaction
             && let Some(view) = *self.services.view
         {
@@ -869,6 +874,23 @@ impl Behavior<'_> {
             );
         }
 
+        // Measurement marker (delta cursor, §10.8, ANA-10): a dashed second
+        // vertical with a ΔT readout vs the playhead; the per-trace ΔY computed
+        // here is shown in the legend below. Both need a playhead to reference.
+        let marker_deltas = match (pane.marker_us, self.services.playhead_us) {
+            (Some(marker_us), Some(playhead)) => {
+                hover::draw_marker(ui, pview, self.services.origin_us, marker_us, playhead);
+                hover::marker_deltas(
+                    self.services.snapshot.as_ref(),
+                    pane,
+                    marker_us,
+                    playhead,
+                    *self.services.hover_mode,
+                )
+            }
+            _ => std::collections::HashMap::new(),
+        };
+
         if pane.show_tooltip && !ui.ctx().any_popup_open() {
             // Alt+hover drags the playhead along with the cursor (PLT-10).
             if ui.input(|i| i.modifiers.alt)
@@ -918,6 +940,7 @@ impl Behavior<'_> {
                 self.services.plot_display.legend_opacity,
                 pane,
                 &labels,
+                &marker_deltas,
             ) {
                 pane.remove_trace(removed);
                 self.services.caches.unpin(removed);
@@ -936,6 +959,9 @@ impl Behavior<'_> {
         response: &egui::Response,
         pane: &mut PlotPane,
     ) {
+        // The measurement marker drops at the current playhead time (§10.8); a
+        // marker is only meaningful once there is a playhead to measure against.
+        let playhead = self.services.playhead_us;
         response.context_menu(|ui| {
             // Clear all traces.
             if ui
@@ -1097,6 +1123,34 @@ impl Behavior<'_> {
 
             ui.separator();
 
+            // Measurement marker (delta cursor, §10.8, ANA-10): the same slot
+            // toggles between dropping a marker at the playhead and removing it.
+            if pane.marker_us.is_some() {
+                if ui
+                    .add(egui::Button::image_and_text(
+                        menu_icon(ui, crate::icons::ban()),
+                        "Remove marker",
+                    ))
+                    .clicked()
+                {
+                    pane.marker_us = None;
+                    pane.marker_drag = false;
+                    ui.close();
+                }
+            } else if ui
+                .add_enabled(
+                    playhead.is_some(),
+                    egui::Button::image_and_text(
+                        menu_icon(ui, crate::icons::ruler()),
+                        "Add marker",
+                    ),
+                )
+                .clicked()
+            {
+                pane.marker_us = playhead;
+                ui.close();
+            }
+
             // Plot Info opens a separate window (rendered in plot_body).
             if ui
                 .add(egui::Button::image_and_text(
@@ -1251,6 +1305,55 @@ impl Behavior<'_> {
             self.actions.view_changed = true;
         }
         *self.services.view = Some(view);
+    }
+
+    /// Drag the measurement marker line along X (§10.8, ANA-10). A primary drag
+    /// that starts within a few pixels of the marker grabs it; subsequent drag
+    /// frames set `marker_us` from the pointer (clamped to the global range).
+    /// Returns whether the drag was consumed, so the caller skips panning.
+    fn handle_marker_drag(
+        &mut self,
+        response: &egui::Response,
+        rect: egui::Rect,
+        x_range: (f32, f32),
+        pane: &mut PlotPane,
+    ) -> bool {
+        let Some(marker_us) = pane.marker_us else {
+            return false;
+        };
+        let (x0, x1) = x_range;
+        if x1 <= x0 || rect.width() <= 0.0 {
+            return false;
+        }
+        let origin = self.services.origin_us;
+        let marker_sec = ((marker_us - origin) as f64 * 1e-6) as f32;
+        let marker_x = rect.left() + (marker_sec - x0) / (x1 - x0) * rect.width();
+
+        if response.drag_started_by(egui::PointerButton::Primary) {
+            pane.marker_drag = response
+                .interact_pointer_pos()
+                .is_some_and(|p| rect.contains(p) && (p.x - marker_x).abs() <= 6.0);
+        }
+        if response.drag_stopped() {
+            let was = pane.marker_drag;
+            pane.marker_drag = false;
+            if was {
+                return true; // consume the release frame so it never pans
+            }
+        }
+        if pane.marker_drag {
+            if let Some(p) = response.interact_pointer_pos() {
+                let frac = ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+                let t_sec = x0 as f64 + frac as f64 * (x1 - x0) as f64;
+                let mut t_us = origin + (t_sec * 1e6).round() as i64;
+                if let Some(range) = self.services.snapshot.global_time_range() {
+                    t_us = t_us.clamp(range.min_us, range.max_us);
+                }
+                pane.marker_us = Some(t_us);
+            }
+            return true;
+        }
+        false
     }
 }
 

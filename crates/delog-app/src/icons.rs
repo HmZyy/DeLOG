@@ -105,6 +105,11 @@ pub fn clock() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/clock-3.svg")
 }
 
+/// Ruler (add a measurement marker / delta cursor, ANA-10).
+pub fn ruler() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/ruler.svg")
+}
+
 /// X (close the pane).
 pub fn close() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/x.svg")
