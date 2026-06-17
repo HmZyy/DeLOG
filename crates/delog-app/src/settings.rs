@@ -119,6 +119,30 @@ impl LegendPosition {
     }
 }
 
+/// Whether the measurement marker is one shared time across all panes or
+/// independent per pane (ANA-10).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MarkerScope {
+    /// One marker time shared by every plot pane (the default), like the
+    /// playhead — placing/dragging on any pane moves the single marker.
+    #[default]
+    Global,
+    /// Each pane keeps its own independent marker.
+    PerPane,
+}
+
+impl MarkerScope {
+    pub const ALL: [Self; 2] = [Self::Global, Self::PerPane];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Global => "Global (shared)",
+            Self::PerPane => "Per-pane",
+        }
+    }
+}
+
 /// Where the measurement marker's per-trace ΔY is shown (ANA-10).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -167,6 +191,9 @@ pub struct PlotDisplay {
     /// Where the measurement marker's per-trace ΔY is shown (ANA-10).
     #[serde(default)]
     pub marker_delta_readout: MarkerDeltaReadout,
+    /// Whether the marker is shared across all panes or per-pane (ANA-10).
+    #[serde(default)]
+    pub marker_scope: MarkerScope,
 }
 
 impl Default for PlotDisplay {
@@ -179,6 +206,7 @@ impl Default for PlotDisplay {
             hover_show_time: false,
             hover_opacity: 1.0,
             marker_delta_readout: MarkerDeltaReadout::default(),
+            marker_scope: MarkerScope::default(),
         }
     }
 }
@@ -599,6 +627,17 @@ fn plots_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
             ui.add(egui::Slider::new(&mut p.hover_opacity, 0.0..=1.0));
             ui.end_row();
 
+            ui.label("Marker scope")
+                .on_hover_text("Whether the measurement marker is one shared time across all plot panes (like the playhead) or independent per pane.");
+            egui::ComboBox::from_id_salt("settings-marker-scope")
+                .selected_text(p.marker_scope.label())
+                .show_ui(ui, |ui| {
+                    for s in MarkerScope::ALL {
+                        ui.selectable_value(&mut p.marker_scope, s, s.label());
+                    }
+                });
+            ui.end_row();
+
             ui.label("Marker Δ readout")
                 .on_hover_text("Where the measurement marker's per-trace ΔY is shown: in the legend next to each trace, or on the hover/playhead value readout.");
             egui::ComboBox::from_id_salt("settings-marker-delta-readout")
@@ -770,6 +809,7 @@ mod tests {
                 hover_show_time: false,
                 hover_opacity: 0.25,
                 marker_delta_readout: MarkerDeltaReadout::Hover,
+                marker_scope: MarkerScope::PerPane,
             },
             ..AppSettings::default()
         };
