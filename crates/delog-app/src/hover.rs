@@ -7,6 +7,8 @@
 //! independent of the f32 render cache (§4.5). A circle marks each trace's
 //! sample; a tooltip lists the values.
 
+use std::collections::HashMap;
+
 use delog_core::field_view::{FieldView, SampleMode};
 use delog_core::identity::FieldId;
 use delog_core::snapshot::StoreSnapshot;
@@ -34,6 +36,7 @@ pub fn draw(
     origin_us: i64,
     mode: SampleMode,
     tooltip: bool,
+    deltas: &HashMap<FieldId, String>,
     show_field_name: bool,
     show_time: bool,
     opacity: f32,
@@ -74,6 +77,7 @@ pub fn draw(
             egui::Align2::LEFT_TOP,
             cursor_x_sec,
             &rows,
+            deltas,
             show_field_name,
             show_time,
             opacity,
@@ -106,6 +110,7 @@ fn draw_sample_circles(ui: &egui::Ui, view: PaneView, origin_us: i64, rows: &[Ro
 
 /// One tooltip row: a trace's canonical value at the probed time.
 struct Row {
+    field: FieldId,
     label: String,
     value: f64,
     unit: Option<String>,
@@ -134,6 +139,7 @@ fn sampled_rows(
         };
         let (mult, unit) = field_meta(snapshot, trace.field);
         rows.push(Row {
+            field: trace.field,
             label: trace_label(snapshot, trace.field),
             value: raw * mult,
             unit,
@@ -154,6 +160,7 @@ fn show_tooltip(
     pivot: egui::Align2,
     t_sec: f32,
     rows: &[Row],
+    deltas: &HashMap<FieldId, String>,
     show_field_name: bool,
     show_time: bool,
     opacity: f32,
@@ -186,6 +193,16 @@ fn show_tooltip(
                         } else {
                             ui.label(format!("{value} {unit}"));
                         }
+                        // Measuring-marker value delta for this trace, when
+                        // routed to the readout (ANA-10); absent when shown in
+                        // the legend instead.
+                        if let Some(delta) = deltas.get(&row.field) {
+                            ui.label(
+                                egui::RichText::new(format!("d {delta}"))
+                                    .color(ui.visuals().hyperlink_color)
+                                    .weak(),
+                            );
+                        }
                     });
                 }
             });
@@ -212,6 +229,7 @@ pub fn draw_playhead(
     origin_us: i64,
     t_us: i64,
     readout: Option<SampleMode>,
+    deltas: &HashMap<FieldId, String>,
     show_field_name: bool,
     show_time: bool,
     opacity: f32,
@@ -257,10 +275,227 @@ pub fn draw_playhead(
         pivot,
         t_sec,
         &rows,
+        deltas,
         show_field_name,
         show_time,
         opacity,
     );
+}
+
+/// Measurement marker (delta cursor, §10.8, ANA-10): a second vertical at
+/// `marker_us`, painted dashed in a distinct accent so it never reads as the
+/// playhead, with a ΔT readout (`marker − playhead`) anchored at the top of the
+/// line. The per-trace ΔY is shown in the legend via [`marker_deltas`].
+pub fn draw_marker(
+    ui: &egui::Ui,
+    view: PaneView,
+    origin_us: i64,
+    marker_us: i64,
+    playhead_us: i64,
+) {
+    let rect = view.rect;
+    let (x0, x1) = view.x_range;
+    if x1 <= x0 {
+        return;
+    }
+    let t_sec = ((marker_us - origin_us) as f64 * 1e-6) as f32;
+    let frac = (t_sec - x0) / (x1 - x0);
+    if !(0.0..=1.0).contains(&frac) {
+        return;
+    }
+    let x = rect.left() + frac * rect.width();
+
+    let color = ui.visuals().hyperlink_color;
+    let dashes = egui::Shape::dashed_line(
+        &[egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+        egui::Stroke::new(1.5, color),
+        6.0,
+        4.0,
+    );
+    ui.painter().extend(dashes);
+
+    // ΔT vs the playhead, anchored at the top of the line (the playhead readout
+    // anchors at the bottom, so the two never collide). Flip side near the edge.
+    let dt_sec = (marker_us - playhead_us) as f64 * 1e-6;
+    let text = format!("dt {dt_sec:+.3} s");
+    let on_left = x > rect.right() - 80.0;
+    let (anchor, align) = if on_left {
+        (
+            egui::pos2(x - 4.0, rect.top() + 2.0),
+            egui::Align2::RIGHT_TOP,
+        )
+    } else {
+        (
+            egui::pos2(x + 4.0, rect.top() + 2.0),
+            egui::Align2::LEFT_TOP,
+        )
+    };
+    ui.painter()
+        .text(anchor, align, text, egui::FontId::proportional(11.0), color);
+}
+
+/// Per-trace ΔY between the marker and the playhead for the legend (§10.8,
+/// ANA-10): `value(marker) − value(playhead)` sampled with the active hover
+/// interpolation `mode`, the field multiplier and unit applied. Either endpoint
+/// missing or non-finite (NaN is a gap, §8.2) yields "n/a". Keyed by `FieldId`.
+pub fn marker_deltas(
+    snapshot: &StoreSnapshot,
+    pane: &PlotPane,
+    marker_us: i64,
+    playhead_us: i64,
+    mode: SampleMode,
+) -> HashMap<FieldId, String> {
+    let mut out = HashMap::new();
+    for trace in &pane.traces {
+        let Ok(fv) = FieldView::new(snapshot, trace.field) else {
+            continue;
+        };
+        let at_marker = fv.sample_at(marker_us, mode).and_then(|s| s.value.as_f64());
+        let at_playhead = fv
+            .sample_at(playhead_us, mode)
+            .and_then(|s| s.value.as_f64());
+        let (mult, unit) = field_meta(snapshot, trace.field);
+        out.insert(
+            trace.field,
+            format_delta(at_marker, at_playhead, mult, unit.as_deref()),
+        );
+    }
+    out
+}
+
+/// Format one trace's ΔY for the legend: `(marker − playhead) × multiplier`
+/// with the optional unit, or "n/a" when either endpoint is missing or non-finite
+/// (NaN is a gap, never interpolated across — §8.2, ANA-10).
+fn format_delta(
+    marker: Option<f64>,
+    playhead: Option<f64>,
+    mult: f64,
+    unit: Option<&str>,
+) -> String {
+    match (marker, playhead) {
+        (Some(m), Some(p)) if m.is_finite() && p.is_finite() => {
+            let d = (m - p) * mult;
+            let body = format_value(d);
+            let signed = if d > 0.0 { format!("+{body}") } else { body };
+            match unit {
+                Some(u) if !u.is_empty() => format!("{signed} {u}"),
+                _ => signed,
+            }
+        }
+        _ => "n/a".to_string(),
+    }
+}
+
+/// Shade each inter-marker region on a plot (§17.4, ANA-05): from each marker
+/// to the next one — and for the last marker, to `data_end_us` (the log's last
+/// timestamp, not the pane edge, so it doesn't extend past the data) — using
+/// that marker's colour at `opacity`. Markers are sorted by time here. Meant to
+/// be drawn *behind* the traces so it reads as a background band.
+pub fn draw_marker_regions(
+    ui: &egui::Ui,
+    view: PaneView,
+    origin_us: i64,
+    markers: &[crate::markers::Marker],
+    data_end_us: i64,
+    opacity: f32,
+) {
+    let rect = view.rect;
+    let (x0, x1) = view.x_range;
+    if x1 <= x0 || markers.is_empty() {
+        return;
+    }
+    let mut sorted: Vec<&crate::markers::Marker> = markers.iter().collect();
+    sorted.sort_by_key(|m| m.t_us);
+    let to_x = |t_us: i64| {
+        let t_sec = ((t_us - origin_us) as f64 * 1e-6) as f32;
+        rect.left() + (t_sec - x0) / (x1 - x0) * rect.width()
+    };
+    let opacity = opacity.clamp(0.0, 1.0);
+    let painter = ui.painter();
+    for (i, m) in sorted.iter().enumerate() {
+        let start = to_x(m.t_us);
+        // Last region ends at the log's final timestamp, not the pane edge.
+        let end = sorted
+            .get(i + 1)
+            .map_or_else(|| to_x(data_end_us), |n| to_x(n.t_us));
+        let a = start.clamp(rect.left(), rect.right());
+        let b = end.clamp(rect.left(), rect.right());
+        if b <= a {
+            continue;
+        }
+        let fill = m.color32().gamma_multiply(opacity);
+        painter.rect_filled(
+            egui::Rect::from_min_max(egui::pos2(a, rect.top()), egui::pos2(b, rect.bottom())),
+            0.0,
+            fill,
+        );
+    }
+}
+
+/// Manual session markers (§17.4, ANA-05): a full-height vertical in each
+/// marker's colour on every plot pane, with the label at the top. Read-only;
+/// distinct from the amber playhead and the ANA-10 dashed delta cursor. The
+/// line opacity, width and label visibility are user settings (PlotDisplay).
+pub fn draw_session_markers(
+    ui: &egui::Ui,
+    view: PaneView,
+    origin_us: i64,
+    markers: &[crate::markers::Marker],
+    opacity: f32,
+    width: f32,
+    show_label: bool,
+) {
+    let rect = view.rect;
+    let (x0, x1) = view.x_range;
+    if x1 <= x0 {
+        return;
+    }
+    let painter = ui.painter();
+    for m in markers {
+        let t_sec = ((m.t_us - origin_us) as f64 * 1e-6) as f32;
+        let frac = (t_sec - x0) / (x1 - x0);
+        if !(0.0..=1.0).contains(&frac) {
+            continue;
+        }
+        let x = rect.left() + frac * rect.width();
+        let color = m.color32();
+        painter.vline(
+            x,
+            rect.y_range(),
+            egui::Stroke::new(width, color.gamma_multiply(opacity.clamp(0.0, 1.0))),
+        );
+        if !show_label {
+            continue;
+        }
+        painter.text(
+            egui::pos2(x + 3.0, rect.top() + 2.0),
+            egui::Align2::LEFT_TOP,
+            &m.label,
+            egui::FontId::proportional(11.0),
+            color,
+        );
+    }
+}
+
+/// The visible-trace sample time nearest `t_us` across `pane` (snap, PLT-10):
+/// probes the previous and next sample of each visible trace and returns the
+/// closest. `None` if the pane has no sampled visible traces.
+pub fn nearest_sample_us(snapshot: &StoreSnapshot, pane: &PlotPane, t_us: i64) -> Option<i64> {
+    let mut best: Option<i64> = None;
+    for trace in pane.visible_traces() {
+        let Ok(fv) = FieldView::new(snapshot, trace.field) else {
+            continue;
+        };
+        for mode in [SampleMode::Prev, SampleMode::Next] {
+            if let Some(sample) = fv.sample_at(t_us, mode) {
+                let cand = sample.effective_time_us;
+                if best.is_none_or(|b| (cand - t_us).abs() < (b - t_us).abs()) {
+                    best = Some(cand);
+                }
+            }
+        }
+    }
+    best
 }
 
 /// `(multiplier, unit)` for a field from the topic schema (core API, no Arrow).
@@ -284,5 +519,39 @@ fn format_value(v: f64) -> String {
         format!("{v:.3e}")
     } else {
         format!("{v:.4}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_delta;
+
+    #[test]
+    fn delta_applies_multiplier_and_signs_positive() {
+        // (12.0 − 8.0) × 0.5 = +2.0, with the unit appended.
+        assert_eq!(
+            format_delta(Some(12.0), Some(8.0), 0.5, Some("m")),
+            "+2.0000 m"
+        );
+    }
+
+    #[test]
+    fn delta_negative_keeps_minus_and_no_unit_when_blank() {
+        assert_eq!(format_delta(Some(1.0), Some(4.0), 1.0, None), "-3.0000");
+        assert_eq!(format_delta(Some(1.0), Some(4.0), 1.0, Some("")), "-3.0000");
+    }
+
+    #[test]
+    fn delta_is_na_when_either_endpoint_missing_or_non_finite() {
+        assert_eq!(format_delta(None, Some(1.0), 1.0, Some("m")), "n/a");
+        assert_eq!(format_delta(Some(1.0), None, 1.0, Some("m")), "n/a");
+        assert_eq!(
+            format_delta(Some(f64::NAN), Some(1.0), 1.0, Some("m")),
+            "n/a"
+        );
+        assert_eq!(
+            format_delta(Some(1.0), Some(f64::INFINITY), 1.0, Some("m")),
+            "n/a"
+        );
     }
 }
