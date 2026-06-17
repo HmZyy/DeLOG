@@ -119,6 +119,28 @@ impl LegendPosition {
     }
 }
 
+/// Where the measurement marker's per-trace ΔY is shown (ANA-10).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MarkerDeltaReadout {
+    /// Next to each trace's name in the legend (the default).
+    #[default]
+    Legend,
+    /// On each row of the hover/playhead value readout.
+    Hover,
+}
+
+impl MarkerDeltaReadout {
+    pub const ALL: [Self; 2] = [Self::Legend, Self::Hover];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Legend => "Legend",
+            Self::Hover => "Hover readout",
+        }
+    }
+}
+
 /// Plot overlay display preferences (legend + hover readout). All live-read each
 /// frame so changes apply immediately; `show_legend_default` only seeds newly
 /// created panes (PLT-08/09).
@@ -142,6 +164,9 @@ pub struct PlotDisplay {
     /// Hover/playhead readout background opacity (1 = solid, 0 = transparent).
     #[serde(default = "default_opacity")]
     pub hover_opacity: f32,
+    /// Where the measurement marker's per-trace ΔY is shown (ANA-10).
+    #[serde(default)]
+    pub marker_delta_readout: MarkerDeltaReadout,
 }
 
 impl Default for PlotDisplay {
@@ -153,6 +178,7 @@ impl Default for PlotDisplay {
             hover_show_field_name: false,
             hover_show_time: false,
             hover_opacity: 1.0,
+            marker_delta_readout: MarkerDeltaReadout::default(),
         }
     }
 }
@@ -572,6 +598,17 @@ fn plots_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
                 .on_hover_text("Opacity of the hover/playhead readout's background panel. 1 = solid, 0 = fully transparent.");
             ui.add(egui::Slider::new(&mut p.hover_opacity, 0.0..=1.0));
             ui.end_row();
+
+            ui.label("Marker Δ readout")
+                .on_hover_text("Where the measurement marker's per-trace ΔY is shown: in the legend next to each trace, or on the hover/playhead value readout.");
+            egui::ComboBox::from_id_salt("settings-marker-delta-readout")
+                .selected_text(p.marker_delta_readout.label())
+                .show_ui(ui, |ui| {
+                    for r in MarkerDeltaReadout::ALL {
+                        ui.selectable_value(&mut p.marker_delta_readout, r, r.label());
+                    }
+                });
+            ui.end_row();
         });
 
     ui.add_space(10.0);
@@ -732,6 +769,7 @@ mod tests {
                 hover_show_field_name: false,
                 hover_show_time: false,
                 hover_opacity: 0.25,
+                marker_delta_readout: MarkerDeltaReadout::Hover,
             },
             ..AppSettings::default()
         };
