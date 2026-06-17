@@ -5,7 +5,6 @@
 // builds keep the console so `tracing` output stays visible during development.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod about;
 mod app;
 mod axes;
 mod browser;
