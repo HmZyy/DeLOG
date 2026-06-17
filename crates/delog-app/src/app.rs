@@ -192,6 +192,8 @@ pub struct DelogApp {
     /// Shared measurement-marker time when the marker scope is Global (ANA-10);
     /// `None` when no global marker is placed. Per-pane markers live on the pane.
     marker_us: Option<i64>,
+    /// Manual markers / bookmarks (§17.4, ANA-05).
+    markers: crate::markers::Markers,
     frame: u64,
     last_epoch: u64,
     origin_us: i64,
@@ -291,6 +293,7 @@ impl DelogApp {
             fit_view_all: false,
             hover_mode: delog_core::field_view::SampleMode::Prev,
             marker_us: None,
+            markers: crate::markers::Markers::new(),
             frame: 0,
             last_epoch: u64::MAX,
             origin_us: 0,
@@ -732,6 +735,17 @@ impl DelogApp {
             speed: self.playback.speed as f64,
             follow_live: self.playback.follow_live,
             marker_us: self.marker_us,
+            markers: self
+                .markers
+                .as_slice()
+                .iter()
+                .map(|m| crate::layout::MarkerLayout {
+                    t_us: m.t_us,
+                    label: m.label.clone(),
+                    color: m.color,
+                    note: m.note.clone(),
+                })
+                .collect(),
             vehicles: &self.vehicles,
         })
     }
@@ -1001,6 +1015,11 @@ impl DelogApp {
         self.playback.set_speed(layout.speed as f32);
         self.playback.follow_live = layout.follow_live;
         self.marker_us = layout.marker_us;
+        let mut markers = crate::markers::Markers::new();
+        for m in layout.markers {
+            markers.push_loaded(m.t_us, m.label, m.color, m.note);
+        }
+        self.markers = markers;
         // Legend/tooltip visibility is restored per-pane via the workspace.
         self.vehicles = layout.vehicles;
         self.vehicle_revision = self.vehicle_revision.wrapping_add(1);
@@ -1690,7 +1709,7 @@ impl eframe::App for DelogApp {
             // Transport keys (§11, TLN-04) — skipped while a widget owns the
             // keyboard (e.g. the browser filter box).
             if !ui.ctx().egui_wants_keyboard_input() {
-                let (space, home, end, left, right, save_layout, load_layout) =
+                let (space, home, end, left, right, save_layout, load_layout, add_marker) =
                     ui.ctx().input(|i| {
                         (
                             i.key_pressed(egui::Key::Space),
@@ -1700,6 +1719,7 @@ impl eframe::App for DelogApp {
                             i.key_pressed(egui::Key::ArrowRight),
                             i.modifiers.command && i.key_pressed(egui::Key::S),
                             i.modifiers.command && i.key_pressed(egui::Key::L),
+                            i.key_pressed(egui::Key::M),
                         )
                     });
                 if save_layout {
@@ -1732,6 +1752,10 @@ impl eframe::App for DelogApp {
                         right,
                     );
                     self.playback.scrub(target, range);
+                }
+                if add_marker {
+                    // Drop a manual marker at the playhead (§17.4, ANA-05).
+                    self.markers.add_at(self.playback.t_us);
                 }
             }
         }
