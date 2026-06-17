@@ -329,7 +329,7 @@ pub fn array_row_as_f64(array: &dyn Array, row: usize) -> f64 {
     }
 }
 
-fn value_at(array: &dyn Array, row: usize) -> SampleValue<'_> {
+pub(crate) fn value_at(array: &dyn Array, row: usize) -> SampleValue<'_> {
     if array.is_null(row) {
         return SampleValue::Null;
     }
