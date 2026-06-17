@@ -105,7 +105,7 @@ pub struct MarkersDock {
 impl MarkersDock {
     pub fn ui(&mut self, ui: &mut egui::Ui, markers: &mut Markers, origin_us: i64) -> Option<i64> {
         if markers.is_empty() {
-            ui.weak("No markers — press M to add one at the playhead.");
+            ui.weak("No markers - press M to add one at the playhead.");
             return None;
         }
         let mut jump = None;
@@ -138,10 +138,25 @@ impl MarkersDock {
                             .desired_width(180.0)
                             .hint_text("note"),
                     );
-                    if ui.button("⤓").on_hover_text("Jump to marker").clicked() {
+                    let icon_size = egui::Vec2::splat(ui.spacing().icon_width);
+                    let jump_icon = egui::Image::new(crate::icons::crosshair())
+                        .fit_to_exact_size(icon_size)
+                        .tint(ui.visuals().text_color());
+                    if ui
+                        .add(egui::Button::image(jump_icon))
+                        .on_hover_text("Jump to marker")
+                        .clicked()
+                    {
                         jump = Some(m.t_us);
                     }
-                    if ui.button("✕").on_hover_text("Delete marker").clicked() {
+                    let delete_icon = egui::Image::new(crate::icons::trash())
+                        .fit_to_exact_size(icon_size)
+                        .tint(ui.visuals().text_color());
+                    if ui
+                        .add(egui::Button::image(delete_icon))
+                        .on_hover_text("Delete marker")
+                        .clicked()
+                    {
                         to_remove = Some(id);
                     }
                 });
