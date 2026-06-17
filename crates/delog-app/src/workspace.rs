@@ -380,8 +380,6 @@ pub struct WorkspaceActions {
     pub open_vehicle_config: bool,
     /// User requested global stats for a plotted trace (ANA-03).
     pub inspect_field_stats: Option<FieldId>,
-    /// User requested marker generation from a discrete trace's values (ANA-11).
-    pub generate_markers: Option<FieldId>,
     /// Widest Y-axis gutter any plot pane needed this frame; fed back into
     /// `Workspace::shared_y_gutter` so next frame's panes share one margin and
     /// stay vertically aligned (PLT-07).
@@ -940,6 +938,8 @@ impl Behavior<'_> {
                 cap: self.services.plot_display.text_label_cap,
                 bottom_up: self.services.plot_display.text_labels_bottom_up,
                 spacing_px: self.services.plot_display.text_label_spacing,
+                line_width: self.services.plot_display.text_line_width,
+                line_opacity: self.services.plot_display.text_line_opacity,
             },
         );
 
@@ -1134,41 +1134,6 @@ impl Behavior<'_> {
                     }
                 }
             });
-
-            // Generate markers — submenu listing the discrete traces (ANA-11).
-            ui.menu_image_text_button(
-                menu_icon(ui, crate::icons::ruler()),
-                "Generate markers",
-                |ui| {
-                    let entries: Vec<_> = pane
-                        .traces
-                        .iter()
-                        .filter(|t| field_is_discrete(self.services.snapshot.as_ref(), t.field))
-                        .map(|t| {
-                            (
-                                t.field,
-                                legend::trace_label(self.services.snapshot.as_ref(), t.field),
-                                t.color32(),
-                            )
-                        })
-                        .collect();
-                    if entries.is_empty() {
-                        ui.add_enabled(false, egui::Button::new("No discrete traces"));
-                    }
-                    for (field, label, color) in entries {
-                        let clicked = ui
-                            .horizontal(|ui| {
-                                color_swatch(ui, color);
-                                ui.button(label).clicked()
-                            })
-                            .inner;
-                        if clicked {
-                            self.actions.generate_markers = Some(field);
-                            ui.close();
-                        }
-                    }
-                },
-            );
 
             // Edit trace — submenu with per-trace colour / mode / width.
             ui.menu_image_text_button(menu_icon(ui, crate::icons::pencil()), "Edit trace", |ui| {
@@ -1544,21 +1509,6 @@ fn y_unit(snapshot: &StoreSnapshot, pane: &PlotPane) -> Option<String> {
         .filter(|f| f.id == field)?;
     let store = snapshot.topic(entry.topic)?.store.as_ref()?;
     store.schema.field_by_name(&entry.name)?.unit.clone()
-}
-
-/// Whether a field is discrete enough to generate markers from its distinct
-/// values — gates the plot "Generate markers" submenu (ANA-11).
-fn field_is_discrete(snapshot: &StoreSnapshot, field: FieldId) -> bool {
-    let Some(entry) = snapshot.fields.get(field.index()).filter(|f| f.id == field) else {
-        return false;
-    };
-    let Some(store) = snapshot.topic(entry.topic).and_then(|t| t.store.as_ref()) else {
-        return false;
-    };
-    store
-        .schema
-        .field_by_name(&entry.name)
-        .is_some_and(|fs| fs.is_discrete())
 }
 
 /// Insert `child` at `index` in any container kind (clamped to the child
