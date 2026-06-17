@@ -1828,7 +1828,6 @@ impl eframe::App for DelogApp {
                 .resizable(true)
                 .default_size(200.0)
                 .show_inside(ui, |ui| {
-                    ui.heading("Markers");
                     if let Some(t_us) = self.markers_dock.ui(ui, &mut self.markers, self.origin_us)
                         && let Some(range) = snapshot.global_time_range()
                     {
