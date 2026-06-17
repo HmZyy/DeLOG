@@ -472,6 +472,27 @@ pub fn draw_session_markers(
     }
 }
 
+/// The visible-trace sample time nearest `t_us` across `pane` (snap, PLT-10):
+/// probes the previous and next sample of each visible trace and returns the
+/// closest. `None` if the pane has no sampled visible traces.
+pub fn nearest_sample_us(snapshot: &StoreSnapshot, pane: &PlotPane, t_us: i64) -> Option<i64> {
+    let mut best: Option<i64> = None;
+    for trace in pane.visible_traces() {
+        let Ok(fv) = FieldView::new(snapshot, trace.field) else {
+            continue;
+        };
+        for mode in [SampleMode::Prev, SampleMode::Next] {
+            if let Some(sample) = fv.sample_at(t_us, mode) {
+                let cand = sample.effective_time_us;
+                if best.is_none_or(|b| (cand - t_us).abs() < (b - t_us).abs()) {
+                    best = Some(cand);
+                }
+            }
+        }
+    }
+    best
+}
+
 /// `(multiplier, unit)` for a field from the topic schema (core API, no Arrow).
 fn field_meta(snapshot: &StoreSnapshot, field: FieldId) -> (f64, Option<String>) {
     let Some(entry) = snapshot.fields.get(field.index()).filter(|f| f.id == field) else {
