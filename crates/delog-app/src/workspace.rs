@@ -395,6 +395,11 @@ pub struct PlotServices<'a> {
     pub view: &'a mut Option<ViewX>,
     pub origin_us: i64,
     pub hover_mode: &'a mut delog_core::field_view::SampleMode,
+    /// Shared measurement-marker time, used when `marker_scope` is Global
+    /// (ANA-10). Per-pane markers live on the pane instead.
+    pub marker_us: &'a mut Option<i64>,
+    /// Whether the marker is shared across panes or per-pane (ANA-10).
+    pub marker_scope: crate::settings::MarkerScope,
     /// Live-adjustable plot draw tuning (decimation/AA), from the config.
     pub render_tuning: crate::settings::RenderTuning,
     /// Live-adjustable 3D scene tuning, from the config.
@@ -789,6 +794,21 @@ impl Behavior<'_> {
         if !marker_active {
             self.handle_plot_interaction(&response, plot_rect);
         }
+        // Ctrl+hover scrubs an existing marker to the cursor (ANA-10), mirroring
+        // Alt+hover for the playhead — no precise grab on the line needed.
+        if self.marker_us(pane).is_some()
+            && ui.input(|i| i.modifiers.ctrl)
+            && let Some(pos) = response.hover_pos()
+            && plot_rect.contains(pos)
+        {
+            let frac = ((pos.x - plot_rect.left()) / plot_rect.width().max(1.0)).clamp(0.0, 1.0);
+            let t_sec = x_range.0 as f64 + frac as f64 * (x_range.1 - x_range.0) as f64;
+            let mut t_us = self.services.origin_us + (t_sec * 1e6).round() as i64;
+            if let Some(range) = self.services.snapshot.global_time_range() {
+                t_us = t_us.clamp(range.min_us, range.max_us);
+            }
+            self.set_marker_us(pane, Some(t_us));
+        }
         if *self.services.view != view_before_interaction
             && let Some(view) = *self.services.view
         {
@@ -850,7 +870,7 @@ impl Behavior<'_> {
         // vertical with a ΔT readout vs the playhead. The per-trace ΔY computed
         // here is routed to either the legend or the value readout per the
         // `marker_delta_readout` setting. Both need a playhead to reference.
-        let marker_deltas = match (pane.marker_us, self.services.playhead_us) {
+        let marker_deltas = match (self.marker_us(pane), self.services.playhead_us) {
             (Some(marker_us), Some(playhead)) => {
                 hover::draw_marker(ui, pview, self.services.origin_us, marker_us, playhead);
                 hover::marker_deltas(
@@ -970,7 +990,10 @@ impl Behavior<'_> {
     ) {
         // The measurement marker drops at the current playhead time (§10.8); a
         // marker is only meaningful once there is a playhead to measure against.
+        // `has_marker` honors the Global/Per-pane scope so the toggle label and
+        // the slot it writes agree (ANA-10).
         let playhead = self.services.playhead_us;
+        let has_marker = self.marker_us(pane).is_some();
         response.context_menu(|ui| {
             // Clear all traces.
             if ui
@@ -1134,7 +1157,7 @@ impl Behavior<'_> {
 
             // Measurement marker (delta cursor, §10.8, ANA-10): the same slot
             // toggles between dropping a marker at the playhead and removing it.
-            if pane.marker_us.is_some() {
+            if has_marker {
                 if ui
                     .add(egui::Button::image_and_text(
                         menu_icon(ui, crate::icons::ban()),
@@ -1142,7 +1165,7 @@ impl Behavior<'_> {
                     ))
                     .clicked()
                 {
-                    pane.marker_us = None;
+                    self.set_marker_us(pane, None);
                     pane.marker_drag = false;
                     ui.close();
                 }
@@ -1156,7 +1179,7 @@ impl Behavior<'_> {
                 )
                 .clicked()
             {
-                pane.marker_us = playhead;
+                self.set_marker_us(pane, playhead);
                 ui.close();
             }
 
@@ -1320,6 +1343,24 @@ impl Behavior<'_> {
     /// that starts within a few pixels of the marker grabs it; subsequent drag
     /// frames set `marker_us` from the pointer (clamped to the global range).
     /// Returns whether the drag was consumed, so the caller skips panning.
+    /// The pane's effective marker time: the shared one in Global scope, or the
+    /// pane's own in Per-pane scope (ANA-10).
+    fn marker_us(&self, pane: &PlotPane) -> Option<i64> {
+        match self.services.marker_scope {
+            crate::settings::MarkerScope::Global => *self.services.marker_us,
+            crate::settings::MarkerScope::PerPane => pane.marker_us,
+        }
+    }
+
+    /// Set or clear the effective marker, writing to the shared or per-pane slot
+    /// per the scope setting (ANA-10).
+    fn set_marker_us(&mut self, pane: &mut PlotPane, value: Option<i64>) {
+        match self.services.marker_scope {
+            crate::settings::MarkerScope::Global => *self.services.marker_us = value,
+            crate::settings::MarkerScope::PerPane => pane.marker_us = value,
+        }
+    }
+
     fn handle_marker_drag(
         &mut self,
         response: &egui::Response,
@@ -1327,7 +1368,7 @@ impl Behavior<'_> {
         x_range: (f32, f32),
         pane: &mut PlotPane,
     ) -> bool {
-        let Some(marker_us) = pane.marker_us else {
+        let Some(marker_us) = self.marker_us(pane) else {
             return false;
         };
         let (x0, x1) = x_range;
@@ -1358,7 +1399,7 @@ impl Behavior<'_> {
                 if let Some(range) = self.services.snapshot.global_time_range() {
                     t_us = t_us.clamp(range.min_us, range.max_us);
                 }
-                pane.marker_us = Some(t_us);
+                self.set_marker_us(pane, Some(t_us));
             }
             return true;
         }
