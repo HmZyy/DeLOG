@@ -17,6 +17,16 @@ const FONT_SIZE: f32 = 11.0;
 /// Horizontal gap (px) required between two labels sharing a row.
 const ROW_GAP: f32 = 6.0;
 
+/// Layout style for text-annotation labels (PLT-15), from `PlotDisplay`.
+pub struct TextLabelStyle {
+    /// Max labels per string trace in the visible window.
+    pub cap: usize,
+    /// Stack rows from the bottom up (vs top down).
+    pub bottom_up: bool,
+    /// Vertical spacing between stacked rows, in px.
+    pub spacing_px: f32,
+}
+
 /// Whether `field`'s dtype is a string (text-annotation trace, PLT-15).
 pub fn field_is_string(snapshot: &StoreSnapshot, field: FieldId) -> bool {
     let Some(entry) = snapshot.fields.get(field.index()).filter(|f| f.id == field) else {
@@ -43,7 +53,7 @@ pub fn draw(
     snapshot: &StoreSnapshot,
     traces: &[TraceRef],
     offsets: &mut HashMap<(FieldId, i64), f32>,
-    max_labels: usize,
+    style: TextLabelStyle,
 ) {
     let rect = view.rect;
     let (x0, x1) = view.x_range;
@@ -61,9 +71,9 @@ pub fn draw(
         rect.left() + (t_sec - x0) / (x1 - x0) * rect.width()
     };
     let font = egui::FontId::proportional(FONT_SIZE);
-    let row_frac =
-        (ui.text_style_height(&egui::TextStyle::Small).max(FONT_SIZE) + 2.0) / rect.height();
-    let top_frac = 4.0 / rect.height();
+    let text_h = ui.text_style_height(&egui::TextStyle::Small).max(FONT_SIZE);
+    let row_frac = (text_h + style.spacing_px.max(0.0)) / rect.height();
+    let margin_frac = 4.0 / rect.height();
 
     // Prune offsets whose field is no longer a string trace in this pane.
     offsets.retain(|(field, _), _| {
@@ -91,9 +101,9 @@ pub fn draw(
         let Ok(fv) = FieldView::new(snapshot, trace.field) else {
             continue;
         };
-        let mut samples = fv.string_samples_in_range(range, max_labels.saturating_add(1));
-        let truncated = samples.len() > max_labels;
-        samples.truncate(max_labels);
+        let mut samples = fv.string_samples_in_range(range, style.cap.saturating_add(1));
+        let truncated = samples.len() > style.cap;
+        samples.truncate(style.cap);
         samples.sort_by_key(|(t, _)| *t);
 
         let color = trace.color32();
@@ -115,7 +125,12 @@ pub fn draw(
                     row_right.len() - 1
                 });
             row_right[row] = x + width;
-            let auto_frac = top_frac + row as f32 * row_frac;
+            // Row 0 nearest the chosen edge; later rows stack toward the centre.
+            let auto_frac = if style.bottom_up {
+                1.0 - margin_frac - (row as f32 + 1.0) * row_frac
+            } else {
+                margin_frac + row as f32 * row_frac
+            };
 
             let y_frac = offsets
                 .get(&(trace.field, t_us))
@@ -155,7 +170,7 @@ pub fn draw(
             ui.painter().text(
                 rect.right_top() + egui::vec2(-4.0, 4.0),
                 egui::Align2::RIGHT_TOP,
-                format!("+ more (showing {max_labels})"),
+                format!("+ more (showing {})", style.cap),
                 font.clone(),
                 ui.visuals().weak_text_color(),
             );

@@ -23,6 +23,9 @@ fn default_marker_shade_opacity() -> f32 {
 fn default_text_label_cap() -> usize {
     512
 }
+fn default_text_label_spacing() -> f32 {
+    4.0
+}
 fn default_font_size() -> f32 {
     14.0
 }
@@ -224,6 +227,14 @@ pub struct PlotDisplay {
     /// (PLT-15); bounds per-frame cost on high-rate string fields.
     #[serde(default = "default_text_label_cap")]
     pub text_label_cap: usize,
+    /// Stack text-annotation labels from the bottom up (default) vs top down
+    /// (PLT-15).
+    #[serde(default = "default_true")]
+    pub text_labels_bottom_up: bool,
+    /// Default vertical spacing between stacked text-annotation rows, in px
+    /// (PLT-15).
+    #[serde(default = "default_text_label_spacing")]
+    pub text_label_spacing: f32,
 }
 
 impl Default for PlotDisplay {
@@ -243,6 +254,8 @@ impl Default for PlotDisplay {
             marker_shade_regions: false,
             marker_shade_opacity: default_marker_shade_opacity(),
             text_label_cap: default_text_label_cap(),
+            text_labels_bottom_up: true,
+            text_label_spacing: default_text_label_spacing(),
         }
     }
 }
@@ -714,6 +727,25 @@ fn plots_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
                 .on_hover_text("Max text-annotation labels drawn per string trace in the visible window (PLT-15). Higher shows more at once but costs more per frame on high-rate fields.");
             ui.add(egui::Slider::new(&mut p.text_label_cap, 16..=8192).logarithmic(true));
             ui.end_row();
+
+            ui.label("Message stacking")
+                .on_hover_text("Stack text-annotation labels from the bottom of the plot upward, or from the top down.");
+            egui::ComboBox::from_id_salt("settings-text-stacking")
+                .selected_text(if p.text_labels_bottom_up {
+                    "Bottom to top"
+                } else {
+                    "Top to bottom"
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut p.text_labels_bottom_up, true, "Bottom to top");
+                    ui.selectable_value(&mut p.text_labels_bottom_up, false, "Top to bottom");
+                });
+            ui.end_row();
+
+            ui.label("Message spacing")
+                .on_hover_text("Default vertical spacing between stacked text-annotation rows.");
+            ui.add(egui::Slider::new(&mut p.text_label_spacing, 0.0..=40.0).suffix(" px"));
+            ui.end_row();
         });
 
     ui.add_space(10.0);
@@ -882,6 +914,8 @@ mod tests {
                 marker_shade_regions: true,
                 marker_shade_opacity: 0.2,
                 text_label_cap: 1024,
+                text_labels_bottom_up: false,
+                text_label_spacing: 8.0,
             },
             ..AppSettings::default()
         };
