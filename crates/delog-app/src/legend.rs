@@ -5,6 +5,8 @@
 //! and clickable label. Right-clicking a trace opens style controls for draw
 //! mode, width and removal.
 
+use std::collections::HashMap;
+
 use delog_core::identity::FieldId;
 use delog_core::snapshot::StoreSnapshot;
 
@@ -57,7 +59,10 @@ pub fn trace_label(snapshot: &StoreSnapshot, field: FieldId) -> String {
 /// Draw the legend overlay and apply edits to `pane`. Each row is a colour
 /// editor plus a clickable label: clicking toggles the trace's visibility, a
 /// hidden trace's label is greyed out (PLT-08), and right-click / Remove returns
-/// the field (PLT-11) so the caller can drop its cache.
+/// the field (PLT-11) so the caller can drop its cache. When a measurement
+/// marker is placed, `deltas` carries the per-trace ΔY string shown after the
+/// label (§10.8, ANA-10); an empty map shows none.
+#[allow(clippy::too_many_arguments)]
 pub fn ui(
     ui: &egui::Ui,
     id: egui::Id,
@@ -66,11 +71,16 @@ pub fn ui(
     opacity: f32,
     pane: &mut PlotPane,
     labels: &[(FieldId, String)],
+    deltas: &HashMap<FieldId, String>,
+    snapshot: &StoreSnapshot,
 ) -> Option<FieldId> {
     if labels.is_empty() && pane.ghosts.is_empty() {
         return None;
     }
     let mut removed = None;
+    // Per-string-trace text filters edited this frame; applied after the Area
+    // closure releases its borrow of `pane` (PLT-15).
+    let mut filter_edits: Vec<(FieldId, String)> = Vec::new();
 
     let (pos, pivot) = legend_anchor(position, plot_rect);
     egui::Area::new(id)
@@ -86,6 +96,14 @@ pub fn ui(
             }
             .show(ui, |ui| {
                 for (field, label) in labels {
+                    // String traces are text-annotation traces (PLT-15) and get
+                    // a per-trace "contains" filter box.
+                    let is_text = crate::text_overlay::field_is_string(snapshot, *field);
+                    let mut filter = if is_text {
+                        pane.text_filters.get(field).cloned().unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
                     let Some(trace) = pane.trace_mut(*field) else {
                         continue;
                     };
@@ -114,6 +132,32 @@ pub fn ui(
                         let resp = ui.add(label_widget);
                         if resp.clicked() {
                             trace.visible = !trace.visible;
+                        }
+
+                        // Per-trace measuring-marker value delta, weak so it
+                        // reads as a secondary annotation next to the trace name
+                        // (ANA-10).
+                        if let Some(delta) = deltas.get(field) {
+                            ui.label(
+                                egui::RichText::new(format!("d {delta}"))
+                                    .color(ui.visuals().hyperlink_color)
+                                    .weak(),
+                            );
+                        }
+
+                        // Per-trace text-annotation filter (PLT-15): only labels
+                        // containing this text are drawn (case-insensitive).
+                        if is_text
+                            && ui
+                                .add(
+                                    egui::TextEdit::singleline(&mut filter)
+                                        .hint_text("filter…")
+                                        .desired_width(90.0),
+                                )
+                                .on_hover_text("Show only messages containing this text")
+                                .changed()
+                        {
+                            filter_edits.push((*field, filter.clone()));
                         }
                         resp.context_menu(|ui| {
                             ui.menu_button("Mode", |ui| {
@@ -153,6 +197,14 @@ pub fn ui(
                 }
             })
         });
+
+    for (field, filter) in filter_edits {
+        if filter.trim().is_empty() {
+            pane.text_filters.remove(&field);
+        } else {
+            pane.text_filters.insert(field, filter);
+        }
+    }
 
     removed
 }

@@ -322,8 +322,25 @@ pub struct BrowserResponse {
     pub inspect_source: Option<SourceId>,
     /// The user requested global stats for a field (ANA-03).
     pub inspect_field_stats: Option<FieldId>,
+    /// The user asked to generate markers from a discrete field's values (ANA-11).
+    pub generate_markers: Option<FieldId>,
     /// The user asked to collapse the data browser panel.
     pub collapse_requested: bool,
+}
+
+/// A context-menu action from a field row.
+enum FieldRowAction {
+    InspectStats(FieldId),
+    GenerateMarkers(FieldId),
+}
+
+/// Whether a field's dtype label is discrete enough to generate markers from
+/// its distinct values (int/uint/bool/string; floats excluded) (ANA-11).
+fn is_discrete_dtype(label: &str) -> bool {
+    matches!(
+        label,
+        "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "bool" | "str"
+    )
 }
 
 pub fn panel_toggle_button_size(ui: &egui::Ui) -> egui::Vec2 {
@@ -401,6 +418,7 @@ pub fn ui(
     let mut remove_source = None;
     let mut inspect_source = None;
     let mut inspect_field_stats = None;
+    let mut generate_markers = None;
     egui::ScrollArea::vertical()
         .auto_shrink([false, true])
         .show(ui, |ui| {
@@ -435,8 +453,14 @@ pub fn ui(
                             .open(filtering.then_some(true))
                             .show(ui, |ui| {
                                 for field in &topic.fields {
-                                    if let Some(field) = field_row(ui, field, selection, &visible) {
-                                        inspect_field_stats = Some(field);
+                                    match field_row(ui, field, selection, &visible) {
+                                        Some(FieldRowAction::InspectStats(f)) => {
+                                            inspect_field_stats = Some(f);
+                                        }
+                                        Some(FieldRowAction::GenerateMarkers(f)) => {
+                                            generate_markers = Some(f);
+                                        }
+                                        None => {}
                                     }
                                 }
                             });
@@ -474,6 +498,7 @@ pub fn ui(
     response.remove_source = remove_source;
     response.inspect_source = inspect_source;
     response.inspect_field_stats = inspect_field_stats;
+    response.generate_markers = generate_markers;
     response
 }
 
@@ -554,8 +579,8 @@ fn field_row(
     field: &FieldNode,
     selection: &mut Selection,
     visible: &[FieldId],
-) -> Option<FieldId> {
-    let mut inspect = None;
+) -> Option<FieldRowAction> {
+    let mut action = None;
     // The row is a drag source carrying `Vec<FieldId>` — the multi-selection
     // when the dragged row is part of it (§10.7, BRW-05); plot panes and tile
     // edges are the drop zones (PLT-13).
@@ -607,11 +632,23 @@ fn field_row(
             .add(egui::Button::image_and_text(info, "Field stats"))
             .clicked()
         {
-            inspect = Some(field.id);
+            action = Some(FieldRowAction::InspectStats(field.id));
             ui.close();
         }
+        if is_discrete_dtype(field.dtype) {
+            let ruler = egui::Image::new(crate::icons::ruler())
+                .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
+                .tint(ui.visuals().text_color());
+            if ui
+                .add(egui::Button::image_and_text(ruler, "Generate markers"))
+                .clicked()
+            {
+                action = Some(FieldRowAction::GenerateMarkers(field.id));
+                ui.close();
+            }
+        }
     });
-    inspect
+    action
 }
 
 fn current_select_modifier(ui: &egui::Ui) -> SelectMod {

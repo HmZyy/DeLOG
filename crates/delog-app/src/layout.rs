@@ -35,6 +35,12 @@ pub struct LayoutDoc {
     pub playback: PlaybackLayout,
     pub workspace: WorkspaceLayout,
     pub vehicles: Vec<VehicleLayout>,
+    /// Shared (Global-scope) measurement-marker time, if placed (§10.8, ANA-10).
+    #[serde(default)]
+    pub marker_us: Option<i64>,
+    /// Manual markers / bookmarks for this session (§17.4, ANA-05).
+    #[serde(default)]
+    pub markers: Vec<MarkerLayout>,
     #[serde(default)]
     pub favorites: Vec<FieldRef>,
     #[serde(default)]
@@ -81,6 +87,15 @@ pub enum LayoutNode {
         show_legend: bool,
         #[serde(default = "default_true")]
         show_tooltip: bool,
+        /// Measurement marker time, if placed (§10.8, ANA-10).
+        #[serde(default)]
+        marker_us: Option<i64>,
+        /// Manual vertical positions for text-annotation labels (§10, PLT-15).
+        #[serde(default)]
+        text_offsets: Vec<TextOffsetLayout>,
+        /// Per-string-trace text-annotation filters (§10, PLT-15).
+        #[serde(default)]
+        text_filters: Vec<TextFilterLayout>,
     },
     Scene3d(SceneLayout),
     Split {
@@ -113,6 +128,31 @@ pub enum TraceModeLayout {
     Line,
     Scatter,
     Step,
+}
+
+/// A manual marker / bookmark for this session (§17.4, ANA-05).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MarkerLayout {
+    pub t_us: i64,
+    pub label: String,
+    pub color: [f32; 4],
+    pub note: String,
+}
+
+/// A manually-positioned text-annotation label (§10, PLT-15): which field +
+/// sample time, and its y-fraction (0 = top .. 1 = bottom) in the pane.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TextOffsetLayout {
+    pub field: FieldRef,
+    pub t_us: i64,
+    pub y_frac: f32,
+}
+
+/// A per-string-trace text-annotation "contains" filter (§10, PLT-15).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TextFilterLayout {
+    pub field: FieldRef,
+    pub filter: String,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -216,6 +256,10 @@ pub struct LayoutApply {
     pub fit_all: bool,
     pub speed: f64,
     pub follow_live: bool,
+    /// Restored shared (Global-scope) marker time (§10.8, ANA-10).
+    pub marker_us: Option<i64>,
+    /// Restored manual markers / bookmarks (§17.4, ANA-05).
+    pub markers: Vec<MarkerLayout>,
     pub vehicles: Vec<VehicleConfig>,
     pub diagnostics: Vec<Diag>,
 }
@@ -264,6 +308,10 @@ pub struct CurrentLayout<'a> {
     pub fit_all: bool,
     pub speed: f64,
     pub follow_live: bool,
+    /// Shared (Global-scope) marker time to persist (§10.8, ANA-10).
+    pub marker_us: Option<i64>,
+    /// Manual markers / bookmarks to persist (§17.4, ANA-05).
+    pub markers: Vec<MarkerLayout>,
     pub vehicles: &'a [VehicleConfig],
 }
 
@@ -511,6 +559,8 @@ pub fn current_doc(input: CurrentLayout<'_>) -> LayoutDoc {
             .iter()
             .filter_map(|v| vehicle_to_layout(v, input.snapshot))
             .collect(),
+        marker_us: input.marker_us,
+        markers: input.markers,
         favorites: Vec::new(),
         docks: BTreeMap::new(),
     }
@@ -573,6 +623,9 @@ fn workspace_doc(workspace: &Workspace, snapshot: &StoreSnapshot) -> WorkspaceLa
             traces: Vec::new(),
             show_legend: true,
             show_tooltip: true,
+            marker_us: None,
+            text_offsets: Vec::new(),
+            text_filters: Vec::new(),
         });
     WorkspaceLayout { root }
 }
@@ -592,6 +645,29 @@ fn node_to_layout(
                 .collect(),
             show_legend: pane.show_legend,
             show_tooltip: pane.show_tooltip,
+            marker_us: pane.marker_us,
+            text_offsets: pane
+                .text_offsets
+                .iter()
+                .filter_map(|(&(field, t_us), &y_frac)| {
+                    field_ref(snapshot, field).map(|field| TextOffsetLayout {
+                        field,
+                        t_us,
+                        y_frac,
+                    })
+                })
+                .collect(),
+            text_filters: pane
+                .text_filters
+                .iter()
+                .filter(|(_, filter)| !filter.trim().is_empty())
+                .filter_map(|(&field, filter)| {
+                    field_ref(snapshot, field).map(|field| TextFilterLayout {
+                        field,
+                        filter: filter.clone(),
+                    })
+                })
+                .collect(),
         }),
         egui_tiles::Tile::Pane(Pane::Scene3D(scene)) => Some(LayoutNode::Scene3d(SceneLayout {
             camera: CameraLayout {
@@ -699,6 +775,8 @@ fn apply_doc(
         fit_all: doc.view.is_some_and(|v| matches!(v.mode, ViewMode::Full)),
         speed: doc.playback.speed,
         follow_live: doc.playback.follow_live,
+        marker_us: doc.marker_us,
+        markers: doc.markers,
         vehicles,
         diagnostics: resolver.diagnostics,
     })
@@ -885,16 +963,31 @@ fn insert_node(
             traces,
             show_legend,
             show_tooltip,
+            marker_us,
+            text_offsets,
+            text_filters,
         } => {
             let mut pane = PlotPane {
                 show_legend: *show_legend,
                 show_tooltip: *show_tooltip,
+                marker_us: *marker_us,
                 ..PlotPane::default()
             };
             for trace in traces {
                 match trace_from_layout(trace, resolver) {
                     Some(resolved) => pane.traces.push(resolved),
                     None => pane.add_ghost(ghost_from_layout(trace)),
+                }
+            }
+            for offset in text_offsets {
+                if let Some(field) = resolver.resolve(&offset.field) {
+                    pane.text_offsets
+                        .insert((field, offset.t_us), offset.y_frac);
+                }
+            }
+            for tf in text_filters {
+                if let Some(field) = resolver.resolve(&tf.field) {
+                    pane.text_filters.insert(field, tf.filter.clone());
                 }
             }
             Some(tiles.insert_pane(Pane::Plot(pane)))
@@ -1273,6 +1366,55 @@ mod tests {
     }
 
     #[test]
+    fn global_marker_us_round_trips_through_json_and_apply() {
+        // The shared (Global-scope) marker persists in the layout doc and is
+        // handed back through LayoutApply on load (ANA-10).
+        let mut doc = empty_doc("marker");
+        doc.marker_us = Some(123_456);
+
+        let decoded = decode_doc(&doc_json(&doc).unwrap()).expect("decode");
+        assert_eq!(decoded.marker_us, Some(123_456));
+
+        let LoadOutcome::Applied(layout) =
+            load_doc(decoded, &StoreSnapshot::empty()).expect("apply")
+        else {
+            panic!("no sources → no mapping");
+        };
+        assert_eq!(layout.marker_us, Some(123_456));
+    }
+
+    #[test]
+    fn manual_markers_round_trip_through_json_and_apply() {
+        let mut doc = empty_doc("markers");
+        doc.markers = vec![
+            MarkerLayout {
+                t_us: 1_000,
+                label: "Takeoff".into(),
+                color: [1.0, 0.0, 0.0, 1.0],
+                note: "rotate".into(),
+            },
+            MarkerLayout {
+                t_us: 9_000,
+                label: "Land".into(),
+                color: [0.0, 1.0, 0.0, 1.0],
+                note: String::new(),
+            },
+        ];
+
+        let decoded = decode_doc(&doc_json(&doc).unwrap()).expect("decode");
+        assert_eq!(decoded.markers.len(), 2);
+        assert_eq!(decoded.markers[0].label, "Takeoff");
+
+        let LoadOutcome::Applied(layout) =
+            load_doc(decoded, &StoreSnapshot::empty()).expect("apply")
+        else {
+            panic!("no sources → no mapping");
+        };
+        assert_eq!(layout.markers.len(), 2);
+        assert_eq!(layout.markers[1].t_us, 9_000);
+    }
+
+    #[test]
     fn invalid_version_is_rejected() {
         let mut doc = empty_doc("bad");
         doc.delog_layout = 99;
@@ -1460,12 +1602,71 @@ mod tests {
                     traces: Vec::new(),
                     show_legend: true,
                     show_tooltip: true,
+                    marker_us: None,
+                    text_offsets: Vec::new(),
+                    text_filters: Vec::new(),
                 },
             },
             vehicles: Vec::new(),
+            marker_us: None,
+            markers: Vec::new(),
             favorites: Vec::new(),
             docks: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn text_offsets_round_trip_through_layout() {
+        let snapshot = snapshot_with_topics(&[("log", "MSG", &["Message"])]);
+        let mut doc = empty_doc("text");
+        let field = FieldRef {
+            topic: "MSG".into(),
+            field: "Message".into(),
+        };
+        doc.workspace.root = LayoutNode::Plot {
+            traces: vec![TraceLayout {
+                field: field.clone(),
+                color: [1.0, 1.0, 1.0, 1.0],
+                width_px: 1.5,
+                mode: TraceModeLayout::Line,
+                visible: true,
+            }],
+            show_legend: true,
+            show_tooltip: true,
+            marker_us: None,
+            text_offsets: vec![TextOffsetLayout {
+                field: field.clone(),
+                t_us: 5_000,
+                y_frac: 0.25,
+            }],
+            text_filters: vec![TextFilterLayout {
+                field,
+                filter: "mission".into(),
+            }],
+        };
+
+        let decoded = decode_doc(&doc_json(&doc).unwrap()).expect("decode");
+        let LoadOutcome::Applied(layout) = load_doc(decoded, &snapshot).expect("apply") else {
+            panic!("single source should not need mapping");
+        };
+        let pane = layout
+            .workspace
+            .tree
+            .tiles
+            .tiles()
+            .find_map(|tile| match tile {
+                egui_tiles::Tile::Pane(Pane::Plot(pane)) => Some(pane),
+                _ => None,
+            })
+            .expect("a plot pane");
+        assert_eq!(pane.text_offsets.len(), 1);
+        let (&(_, t_us), &y_frac) = pane.text_offsets.iter().next().unwrap();
+        assert_eq!(t_us, 5_000);
+        assert_eq!(y_frac, 0.25);
+        assert_eq!(
+            pane.text_filters.values().next().map(String::as_str),
+            Some("mission")
+        );
     }
 
     fn plot_trace_counts(workspace: &Workspace) -> (usize, usize) {

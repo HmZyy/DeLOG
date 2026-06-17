@@ -6,6 +6,8 @@
 //! `app.rs` converts pointer input into these calls. `PlotPane` holds the
 //! plotted [`TraceRef`]s with palette-assigned colours (PLT-02).
 
+use std::collections::HashMap;
+
 use delog_core::identity::FieldId;
 use delog_core::time::TimeRange;
 use delog_render::palette;
@@ -146,6 +148,20 @@ pub struct PlotPane {
     /// Whether this pane's Plot Info window is open (context menu, PLT-11).
     /// Transient UI state — not serialized into layouts.
     pub show_info: bool,
+    /// Measurement marker (delta cursor, ANA-10): a second vertical at this
+    /// canonical time, paired with the playhead to read out ΔT + per-trace ΔY.
+    /// `None` when no marker is placed. Persisted per-pane (§10.8).
+    pub marker_us: Option<i64>,
+    /// Whether the marker line is currently being dragged. Transient UI state —
+    /// not serialized into layouts.
+    pub marker_drag: bool,
+    /// Manual vertical positions for text-annotation labels (PLT-15), keyed by
+    /// `(field, sample t_us)`; value is a y-fraction (0 = top .. 1 = bottom).
+    /// Only manually-dragged labels are stored; the rest auto-pack. Persisted.
+    pub text_offsets: HashMap<(FieldId, i64), f32>,
+    /// Per-string-trace "contains" filter (PLT-15): only message labels
+    /// containing this text are drawn. Empty/absent = show all. Persisted.
+    pub text_filters: HashMap<FieldId, String>,
 }
 
 impl Default for PlotPane {
@@ -156,6 +172,10 @@ impl Default for PlotPane {
             show_legend: true,
             show_tooltip: true,
             show_info: false,
+            marker_us: None,
+            marker_drag: false,
+            text_offsets: HashMap::new(),
+            text_filters: HashMap::new(),
         }
     }
 }

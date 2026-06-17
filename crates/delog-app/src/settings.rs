@@ -14,6 +14,24 @@ fn default_true() -> bool {
 fn default_opacity() -> f32 {
     0.85
 }
+fn default_marker_line_width() -> f32 {
+    1.5
+}
+fn default_marker_shade_opacity() -> f32 {
+    0.12
+}
+fn default_text_label_cap() -> usize {
+    512
+}
+fn default_text_label_spacing() -> f32 {
+    4.0
+}
+fn default_text_line_width() -> f32 {
+    1.0
+}
+fn default_text_line_opacity() -> f32 {
+    0.3
+}
 fn default_font_size() -> f32 {
     14.0
 }
@@ -119,6 +137,52 @@ impl LegendPosition {
     }
 }
 
+/// Whether the measurement marker is one shared time across all panes or
+/// independent per pane (ANA-10).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MarkerScope {
+    /// One marker time shared by every plot pane (the default), like the
+    /// playhead — placing/dragging on any pane moves the single marker.
+    #[default]
+    Global,
+    /// Each pane keeps its own independent marker.
+    PerPane,
+}
+
+impl MarkerScope {
+    pub const ALL: [Self; 2] = [Self::Global, Self::PerPane];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Global => "Global (shared)",
+            Self::PerPane => "Per-pane",
+        }
+    }
+}
+
+/// Where the measurement marker's per-trace ΔY is shown (ANA-10).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MarkerDeltaReadout {
+    /// Next to each trace's name in the legend (the default).
+    #[default]
+    Legend,
+    /// On each row of the hover/playhead value readout.
+    Hover,
+}
+
+impl MarkerDeltaReadout {
+    pub const ALL: [Self; 2] = [Self::Legend, Self::Hover];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Legend => "Legend",
+            Self::Hover => "Hover readout",
+        }
+    }
+}
+
 /// Plot overlay display preferences (legend + hover readout). All live-read each
 /// frame so changes apply immediately; `show_legend_default` only seeds newly
 /// created panes (PLT-08/09).
@@ -142,6 +206,49 @@ pub struct PlotDisplay {
     /// Hover/playhead readout background opacity (1 = solid, 0 = transparent).
     #[serde(default = "default_opacity")]
     pub hover_opacity: f32,
+    /// Where the measurement marker's per-trace ΔY is shown (ANA-10).
+    #[serde(default)]
+    pub marker_delta_readout: MarkerDeltaReadout,
+    /// Whether the marker is shared across all panes or per-pane (ANA-10).
+    #[serde(default)]
+    pub marker_scope: MarkerScope,
+    /// Opacity of the manual session-marker verticals on plots (1 = solid,
+    /// 0 = transparent) (§17.4, ANA-05).
+    #[serde(default = "default_opacity")]
+    pub marker_line_opacity: f32,
+    /// Width of the manual session-marker verticals on plots, in pixels (ANA-05).
+    #[serde(default = "default_marker_line_width")]
+    pub marker_line_width: f32,
+    /// Draw each manual session marker's label at the top of its line (ANA-05).
+    #[serde(default = "default_true")]
+    pub marker_show_label: bool,
+    /// Shade each plot region from one marker to the next (or the end) with that
+    /// marker's colour (§17.4, ANA-05).
+    #[serde(default)]
+    pub marker_shade_regions: bool,
+    /// Opacity of the inter-marker region shading (1 = solid, 0 = transparent).
+    #[serde(default = "default_marker_shade_opacity")]
+    pub marker_shade_opacity: f32,
+    /// Max text-annotation labels drawn per string trace in the visible window
+    /// (PLT-15); bounds per-frame cost on high-rate string fields.
+    #[serde(default = "default_text_label_cap")]
+    pub text_label_cap: usize,
+    /// Stack text-annotation labels from the bottom up (default) vs top down
+    /// (PLT-15).
+    #[serde(default = "default_true")]
+    pub text_labels_bottom_up: bool,
+    /// Default vertical spacing between stacked text-annotation rows, in px
+    /// (PLT-15).
+    #[serde(default = "default_text_label_spacing")]
+    pub text_label_spacing: f32,
+    /// Width of the timestamp connector line under each text-annotation label,
+    /// in px (PLT-15).
+    #[serde(default = "default_text_line_width")]
+    pub text_line_width: f32,
+    /// Opacity of the timestamp connector line (1 = solid, 0 = transparent)
+    /// (PLT-15).
+    #[serde(default = "default_text_line_opacity")]
+    pub text_line_opacity: f32,
 }
 
 impl Default for PlotDisplay {
@@ -153,6 +260,18 @@ impl Default for PlotDisplay {
             hover_show_field_name: false,
             hover_show_time: false,
             hover_opacity: 1.0,
+            marker_delta_readout: MarkerDeltaReadout::default(),
+            marker_scope: MarkerScope::default(),
+            marker_line_opacity: default_opacity(),
+            marker_line_width: default_marker_line_width(),
+            marker_show_label: true,
+            marker_shade_regions: false,
+            marker_shade_opacity: default_marker_shade_opacity(),
+            text_label_cap: default_text_label_cap(),
+            text_labels_bottom_up: true,
+            text_label_spacing: default_text_label_spacing(),
+            text_line_width: default_text_line_width(),
+            text_line_opacity: default_text_line_opacity(),
         }
     }
 }
@@ -572,6 +691,87 @@ fn plots_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
                 .on_hover_text("Opacity of the hover/playhead readout's background panel. 1 = solid, 0 = fully transparent.");
             ui.add(egui::Slider::new(&mut p.hover_opacity, 0.0..=1.0));
             ui.end_row();
+
+            ui.label("Measuring marker scope")
+                .on_hover_text("Whether the measuring marker is one shared time across all plot panes (like the playhead) or independent per pane.");
+            egui::ComboBox::from_id_salt("settings-marker-scope")
+                .selected_text(p.marker_scope.label())
+                .show_ui(ui, |ui| {
+                    for s in MarkerScope::ALL {
+                        ui.selectable_value(&mut p.marker_scope, s, s.label());
+                    }
+                });
+            ui.end_row();
+
+            ui.label("Measuring marker readout")
+                .on_hover_text("Where the measuring marker's per-trace value delta is shown: in the legend next to each trace, or on the hover/playhead value readout.");
+            egui::ComboBox::from_id_salt("settings-marker-delta-readout")
+                .selected_text(p.marker_delta_readout.label())
+                .show_ui(ui, |ui| {
+                    for r in MarkerDeltaReadout::ALL {
+                        ui.selectable_value(&mut p.marker_delta_readout, r, r.label());
+                    }
+                });
+            ui.end_row();
+
+            ui.label("Marker line opacity")
+                .on_hover_text("Opacity of the manual session-marker vertical lines on plots. 1 = solid, 0 = fully transparent.");
+            ui.add(egui::Slider::new(&mut p.marker_line_opacity, 0.0..=1.0));
+            ui.end_row();
+
+            ui.label("Marker line width")
+                .on_hover_text("Width of the manual session-marker vertical lines on plots.");
+            ui.add(egui::Slider::new(&mut p.marker_line_width, 0.5..=6.0).suffix(" px"));
+            ui.end_row();
+
+            ui.label("Marker labels")
+                .on_hover_text("Draw each manual session marker's label at the top of its line on plots.");
+            ui.checkbox(&mut p.marker_show_label, "");
+            ui.end_row();
+
+            ui.label("Shade between markers")
+                .on_hover_text("Fill each plot region from one marker to the next (or the end) with that marker's colour.");
+            ui.checkbox(&mut p.marker_shade_regions, "");
+            ui.end_row();
+
+            ui.label("Marker shade opacity")
+                .on_hover_text("Opacity of the inter-marker region shading. 1 = solid, 0 = fully transparent.");
+            ui.add(egui::Slider::new(&mut p.marker_shade_opacity, 0.0..=1.0));
+            ui.end_row();
+
+            ui.label("Text label cap")
+                .on_hover_text("Max text-annotation labels drawn per string trace in the visible window (PLT-15). Higher shows more at once but costs more per frame on high-rate fields.");
+            ui.add(egui::Slider::new(&mut p.text_label_cap, 16..=8192).logarithmic(true));
+            ui.end_row();
+
+            ui.label("Text stacking")
+                .on_hover_text("Stack text-annotation labels from the bottom of the plot upward, or from the top down.");
+            egui::ComboBox::from_id_salt("settings-text-stacking")
+                .selected_text(if p.text_labels_bottom_up {
+                    "Bottom to top"
+                } else {
+                    "Top to bottom"
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut p.text_labels_bottom_up, true, "Bottom to top");
+                    ui.selectable_value(&mut p.text_labels_bottom_up, false, "Top to bottom");
+                });
+            ui.end_row();
+
+            ui.label("Text spacing")
+                .on_hover_text("Default vertical spacing between stacked text-annotation rows.");
+            ui.add(egui::Slider::new(&mut p.text_label_spacing, 0.0..=40.0).suffix(" px"));
+            ui.end_row();
+
+            ui.label("Text line width")
+                .on_hover_text("Width of the timestamp connector line under each text-annotation label.");
+            ui.add(egui::Slider::new(&mut p.text_line_width, 0.0..=6.0).suffix(" px"));
+            ui.end_row();
+
+            ui.label("Text line opacity")
+                .on_hover_text("Opacity of the timestamp connector line. 1 = solid, 0 = fully transparent.");
+            ui.add(egui::Slider::new(&mut p.text_line_opacity, 0.0..=1.0));
+            ui.end_row();
         });
 
     ui.add_space(10.0);
@@ -732,6 +932,18 @@ mod tests {
                 hover_show_field_name: false,
                 hover_show_time: false,
                 hover_opacity: 0.25,
+                marker_delta_readout: MarkerDeltaReadout::Hover,
+                marker_scope: MarkerScope::PerPane,
+                marker_line_opacity: 0.5,
+                marker_line_width: 2.0,
+                marker_show_label: false,
+                marker_shade_regions: true,
+                marker_shade_opacity: 0.2,
+                text_label_cap: 1024,
+                text_labels_bottom_up: false,
+                text_label_spacing: 8.0,
+                text_line_width: 2.0,
+                text_line_opacity: 0.5,
             },
             ..AppSettings::default()
         };

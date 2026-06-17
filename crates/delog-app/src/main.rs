@@ -5,12 +5,12 @@
 // builds keep the console so `tracing` output stays visible during development.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod about;
 mod app;
 mod axes;
 mod browser;
 mod camera;
 mod diagnostics;
+mod generate_markers;
 mod geo;
 mod gpu;
 mod hover;
@@ -18,6 +18,7 @@ mod icons;
 mod layout;
 mod legend;
 mod live;
+mod markers;
 mod models;
 mod performance;
 mod plot;
@@ -25,6 +26,7 @@ mod plot;
 mod scripts;
 mod session;
 mod settings;
+mod text_overlay;
 mod theme;
 mod timeline;
 mod vehicle;

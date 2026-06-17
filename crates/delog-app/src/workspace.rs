@@ -395,6 +395,15 @@ pub struct PlotServices<'a> {
     pub view: &'a mut Option<ViewX>,
     pub origin_us: i64,
     pub hover_mode: &'a mut delog_core::field_view::SampleMode,
+    /// Whether Alt+hover snaps the playhead to the nearest data point (off by
+    /// default). When set, the playhead holds a sample until the cursor crosses
+    /// to the next one.
+    pub snap_playhead: &'a mut bool,
+    /// Shared measurement-marker time, used when `marker_scope` is Global
+    /// (ANA-10). Per-pane markers live on the pane instead.
+    pub marker_us: &'a mut Option<i64>,
+    /// Whether the marker is shared across panes or per-pane (ANA-10).
+    pub marker_scope: crate::settings::MarkerScope,
     /// Live-adjustable plot draw tuning (decimation/AA), from the config.
     pub render_tuning: crate::settings::RenderTuning,
     /// Live-adjustable 3D scene tuning, from the config.
@@ -417,6 +426,8 @@ pub struct PlotServices<'a> {
     /// Plot overlay display prefs: legend placement + hover readout contents
     /// (PLT-08/09). Live-read each frame from the config.
     pub plot_display: crate::settings::PlotDisplay,
+    /// Manual session markers, drawn as faint verticals on every pane (ANA-05).
+    pub markers: &'a [crate::markers::Marker],
 }
 
 pub struct Behavior<'a> {
@@ -783,7 +794,27 @@ impl Behavior<'_> {
         let (mut plot_rect, own_gutter) = make_plot_rect(ui, y_range, y_unit.as_deref());
         self.actions.max_y_gutter = self.actions.max_y_gutter.max(own_gutter);
         let view_before_interaction = *self.services.view;
-        self.handle_plot_interaction(&response, plot_rect);
+        // Dragging the measurement marker line takes priority over panning so a
+        // grab near the marker moves it instead of scrolling the view (ANA-10).
+        let marker_active = self.handle_marker_drag(&response, plot_rect, x_range, pane);
+        if !marker_active {
+            self.handle_plot_interaction(&response, plot_rect);
+        }
+        // Ctrl+hover scrubs an existing marker to the cursor (ANA-10), mirroring
+        // Alt+hover for the playhead — no precise grab on the line needed.
+        if self.marker_us(pane).is_some()
+            && ui.input(|i| i.modifiers.ctrl)
+            && let Some(pos) = response.hover_pos()
+            && plot_rect.contains(pos)
+        {
+            let frac = ((pos.x - plot_rect.left()) / plot_rect.width().max(1.0)).clamp(0.0, 1.0);
+            let t_sec = x_range.0 as f64 + frac as f64 * (x_range.1 - x_range.0) as f64;
+            let mut t_us = self.services.origin_us + (t_sec * 1e6).round() as i64;
+            if let Some(range) = self.services.snapshot.global_time_range() {
+                t_us = t_us.clamp(range.min_us, range.max_us);
+            }
+            self.set_marker_us(pane, Some(t_us));
+        }
         if *self.services.view != view_before_interaction
             && let Some(view) = *self.services.view
         {
@@ -811,6 +842,21 @@ impl Behavior<'_> {
             x_range,
             y_range,
         };
+        // Inter-marker region shading, painted behind the traces (§17.4,
+        // ANA-05) so it reads as a background band. The last region stops at the
+        // log's final timestamp rather than the pane edge.
+        if self.services.plot_display.marker_shade_regions
+            && let Some(range) = self.services.snapshot.global_time_range()
+        {
+            hover::draw_marker_regions(
+                ui,
+                pview,
+                self.services.origin_us,
+                self.services.markers,
+                range.max_us,
+                self.services.plot_display.marker_shade_opacity,
+            );
+        }
         let paint_start = Instant::now();
         self.services.gpu.render_pane(
             ui,
@@ -841,6 +887,62 @@ impl Behavior<'_> {
         let pane_overlay_timer = self.services.metrics.scope("pane_overlay");
         self.plot_context_menu(tile_id, &response, pane);
 
+        // Measurement marker (delta cursor, §10.8, ANA-10): a dashed second
+        // vertical with a ΔT readout vs the playhead. The per-trace ΔY computed
+        // here is routed to either the legend or the value readout per the
+        // `marker_delta_readout` setting. Both need a playhead to reference.
+        let marker_deltas = match (self.marker_us(pane), self.services.playhead_us) {
+            (Some(marker_us), Some(playhead)) => {
+                hover::draw_marker(ui, pview, self.services.origin_us, marker_us, playhead);
+                hover::marker_deltas(
+                    self.services.snapshot.as_ref(),
+                    pane,
+                    marker_us,
+                    playhead,
+                    *self.services.hover_mode,
+                )
+            }
+            _ => std::collections::HashMap::new(),
+        };
+        let no_deltas = std::collections::HashMap::new();
+        let (legend_deltas, readout_deltas) = match self.services.plot_display.marker_delta_readout
+        {
+            crate::settings::MarkerDeltaReadout::Legend => (&marker_deltas, &no_deltas),
+            crate::settings::MarkerDeltaReadout::Hover => (&no_deltas, &marker_deltas),
+        };
+
+        // Manual session markers: labelled verticals under the playhead and
+        // cursor; line opacity/width/label are user settings (§17.4, ANA-05).
+        hover::draw_session_markers(
+            ui,
+            pview,
+            self.services.origin_us,
+            self.services.markers,
+            self.services.plot_display.marker_line_opacity,
+            self.services.plot_display.marker_line_width,
+            self.services.plot_display.marker_show_label,
+        );
+
+        // Text-annotation traces: string fields drawn as labels at each sample's
+        // timestamp, draggable vertically (PLT-15).
+        crate::text_overlay::draw(
+            ui,
+            &response,
+            pview,
+            self.services.origin_us,
+            self.services.snapshot.as_ref(),
+            &pane.traces,
+            &mut pane.text_offsets,
+            &pane.text_filters,
+            crate::text_overlay::TextLabelStyle {
+                cap: self.services.plot_display.text_label_cap,
+                bottom_up: self.services.plot_display.text_labels_bottom_up,
+                spacing_px: self.services.plot_display.text_label_spacing,
+                line_width: self.services.plot_display.text_line_width,
+                line_opacity: self.services.plot_display.text_line_opacity,
+            },
+        );
+
         // Playhead cursor + value readout on every pane (§10.5, PLT-10). During
         // playback the hover tooltip is suppressed, so every pane (including the
         // hovered one) shows the playhead readout. While alt-scrubbing the
@@ -863,6 +965,7 @@ impl Behavior<'_> {
                 self.services.origin_us,
                 t_us,
                 readout,
+                readout_deltas,
                 self.services.plot_display.hover_show_field_name,
                 self.services.plot_display.hover_show_time,
                 self.services.plot_display.hover_opacity,
@@ -870,15 +973,23 @@ impl Behavior<'_> {
         }
 
         if pane.show_tooltip && !ui.ctx().any_popup_open() {
-            // Alt+hover drags the playhead along with the cursor (PLT-10).
+            // Alt+hover drags the playhead along with the cursor (PLT-10). With
+            // snap enabled it lands on the nearest data point instead, so the
+            // playhead holds a sample until the cursor crosses to the next one.
             if ui.input(|i| i.modifiers.alt)
                 && let Some(pos) = response.hover_pos()
                 && plot_rect.contains(pos)
             {
                 let frac = (pos.x - plot_rect.left()) / plot_rect.width().max(1.0);
                 let t_sec = x_range.0 as f64 + frac as f64 * (x_range.1 - x_range.0) as f64;
-                self.actions.scrub_to =
-                    Some(self.services.origin_us + (t_sec * 1e6).round() as i64);
+                let cursor_us = self.services.origin_us + (t_sec * 1e6).round() as i64;
+                let target = if *self.services.snap_playhead {
+                    hover::nearest_sample_us(self.services.snapshot.as_ref(), pane, cursor_us)
+                        .unwrap_or(cursor_us)
+                } else {
+                    cursor_us
+                };
+                self.actions.scrub_to = Some(target);
             }
 
             hover::draw(
@@ -893,6 +1004,7 @@ impl Behavior<'_> {
                 self.services.origin_us,
                 *self.services.hover_mode,
                 !self.services.playing,
+                readout_deltas,
                 self.services.plot_display.hover_show_field_name,
                 self.services.plot_display.hover_show_time,
                 self.services.plot_display.hover_opacity,
@@ -918,6 +1030,8 @@ impl Behavior<'_> {
                 self.services.plot_display.legend_opacity,
                 pane,
                 &labels,
+                legend_deltas,
+                self.services.snapshot.as_ref(),
             ) {
                 pane.remove_trace(removed);
                 self.services.caches.unpin(removed);
@@ -936,6 +1050,12 @@ impl Behavior<'_> {
         response: &egui::Response,
         pane: &mut PlotPane,
     ) {
+        // The measurement marker drops at the current playhead time (§10.8); a
+        // marker is only meaningful once there is a playhead to measure against.
+        // `has_marker` honors the Global/Per-pane scope so the toggle label and
+        // the slot it writes agree (ANA-10).
+        let playhead = self.services.playhead_us;
+        let has_marker = self.marker_us(pane).is_some();
         response.context_menu(|ui| {
             // Clear all traces.
             if ui
@@ -1094,8 +1214,41 @@ impl Behavior<'_> {
                 ui.radio_value(self.services.hover_mode, Next, "Next");
                 ui.radio_value(self.services.hover_mode, Linear, "Linear");
             });
+            ui.checkbox(self.services.snap_playhead, "Snap")
+                .on_hover_text(
+                    "Alt+hover snaps the playhead to the nearest data point instead of moving \
+                     continuously.",
+                );
 
             ui.separator();
+
+            // Measurement marker (delta cursor, §10.8, ANA-10): the same slot
+            // toggles between dropping a marker at the playhead and removing it.
+            if has_marker {
+                if ui
+                    .add(egui::Button::image_and_text(
+                        menu_icon(ui, crate::icons::ban()),
+                        "Remove measuring marker",
+                    ))
+                    .clicked()
+                {
+                    self.set_marker_us(pane, None);
+                    pane.marker_drag = false;
+                    ui.close();
+                }
+            } else if ui
+                .add_enabled(
+                    playhead.is_some(),
+                    egui::Button::image_and_text(
+                        menu_icon(ui, crate::icons::ruler()),
+                        "Add measuring marker",
+                    ),
+                )
+                .clicked()
+            {
+                self.set_marker_us(pane, playhead);
+                ui.close();
+            }
 
             // Plot Info opens a separate window (rendered in plot_body).
             if ui
@@ -1251,6 +1404,73 @@ impl Behavior<'_> {
             self.actions.view_changed = true;
         }
         *self.services.view = Some(view);
+    }
+
+    /// Drag the measurement marker line along X (§10.8, ANA-10). A primary drag
+    /// that starts within a few pixels of the marker grabs it; subsequent drag
+    /// frames set `marker_us` from the pointer (clamped to the global range).
+    /// Returns whether the drag was consumed, so the caller skips panning.
+    /// The pane's effective marker time: the shared one in Global scope, or the
+    /// pane's own in Per-pane scope (ANA-10).
+    fn marker_us(&self, pane: &PlotPane) -> Option<i64> {
+        match self.services.marker_scope {
+            crate::settings::MarkerScope::Global => *self.services.marker_us,
+            crate::settings::MarkerScope::PerPane => pane.marker_us,
+        }
+    }
+
+    /// Set or clear the effective marker, writing to the shared or per-pane slot
+    /// per the scope setting (ANA-10).
+    fn set_marker_us(&mut self, pane: &mut PlotPane, value: Option<i64>) {
+        match self.services.marker_scope {
+            crate::settings::MarkerScope::Global => *self.services.marker_us = value,
+            crate::settings::MarkerScope::PerPane => pane.marker_us = value,
+        }
+    }
+
+    fn handle_marker_drag(
+        &mut self,
+        response: &egui::Response,
+        rect: egui::Rect,
+        x_range: (f32, f32),
+        pane: &mut PlotPane,
+    ) -> bool {
+        let Some(marker_us) = self.marker_us(pane) else {
+            return false;
+        };
+        let (x0, x1) = x_range;
+        if x1 <= x0 || rect.width() <= 0.0 {
+            return false;
+        }
+        let origin = self.services.origin_us;
+        let marker_sec = ((marker_us - origin) as f64 * 1e-6) as f32;
+        let marker_x = rect.left() + (marker_sec - x0) / (x1 - x0) * rect.width();
+
+        if response.drag_started_by(egui::PointerButton::Primary) {
+            pane.marker_drag = response
+                .interact_pointer_pos()
+                .is_some_and(|p| rect.contains(p) && (p.x - marker_x).abs() <= 6.0);
+        }
+        if response.drag_stopped() {
+            let was = pane.marker_drag;
+            pane.marker_drag = false;
+            if was {
+                return true; // consume the release frame so it never pans
+            }
+        }
+        if pane.marker_drag {
+            if let Some(p) = response.interact_pointer_pos() {
+                let frac = ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+                let t_sec = x0 as f64 + frac as f64 * (x1 - x0) as f64;
+                let mut t_us = origin + (t_sec * 1e6).round() as i64;
+                if let Some(range) = self.services.snapshot.global_time_range() {
+                    t_us = t_us.clamp(range.min_us, range.max_us);
+                }
+                self.set_marker_us(pane, Some(t_us));
+            }
+            return true;
+        }
+        false
     }
 }
 
