@@ -1694,6 +1694,7 @@ impl eframe::App for DelogApp {
                     None,
                     self.session.has_live_links(),
                     self.settings.theme,
+                    &self.markers,
                 );
                 if action.lock_live {
                     self.lock_to_live(range);
@@ -1704,6 +1705,28 @@ impl eframe::App for DelogApp {
                     self.fit_view_all = false;
                     self.playback.unlock_live();
                     self.view_fitted = true;
+                }
+                // Manual-marker flag interactions (§17.4, ANA-05).
+                if let Some(t_us) = action.marker_jump {
+                    self.playback.scrub(t_us, range);
+                }
+                if let Some((id, t_us)) = action.marker_move
+                    && let Some(m) = self.markers.get_mut(id)
+                {
+                    m.t_us = t_us.clamp(range.min_us, range.max_us);
+                }
+                if let Some(id) = action.marker_delete {
+                    self.markers.remove(id);
+                }
+                if let Some((id, edit)) = action.marker_edit
+                    && let Some(m) = self.markers.get_mut(id)
+                {
+                    if let Some(label) = edit.label {
+                        m.label = label;
+                    }
+                    if let Some(color) = edit.color {
+                        m.color = color;
+                    }
                 }
             });
             drop(ui_timeline_timer);
