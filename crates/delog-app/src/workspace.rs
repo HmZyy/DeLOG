@@ -935,7 +935,11 @@ impl Behavior<'_> {
             self.services.snapshot.as_ref(),
             &pane.traces,
             &mut pane.text_offsets,
-            self.services.plot_display.text_label_cap,
+            crate::text_overlay::TextLabelStyle {
+                cap: self.services.plot_display.text_label_cap,
+                bottom_up: self.services.plot_display.text_labels_bottom_up,
+                spacing_px: self.services.plot_display.text_label_spacing,
+            },
         );
 
         // Playhead cursor + value readout on every pane (§10.5, PLT-10). During
