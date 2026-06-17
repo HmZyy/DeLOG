@@ -114,64 +114,68 @@ impl MarkersDock {
         let mut jump = None;
         let mut to_remove = None;
         let ids: Vec<u64> = markers.by_time().iter().map(|m| m.id).collect();
-        // Always render the scroll region (even when empty) so the panel is
-        // resizable in both states — an early return here left the empty dock
-        // unresizable.
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            if ids.is_empty() {
-                ui.weak("No markers - press M to add one at the playhead.");
-                return;
-            }
-            for id in ids {
-                let Some(m) = markers.get_mut(id) else {
-                    continue;
-                };
-                ui.horizontal(|ui| {
-                    let mut color = m.color32();
-                    if egui::color_picker::color_edit_button_srgba(
-                        ui,
-                        &mut color,
-                        egui::color_picker::Alpha::Opaque,
-                    )
-                    .changed()
-                    {
-                        m.color = crate::legend::color32_to_srgb(color);
-                    }
-                    ui.monospace(fmt_rel(m.t_us, origin_us));
-                    ui.add(
-                        egui::TextEdit::singleline(&mut m.label)
-                            .desired_width(140.0)
-                            .hint_text("label"),
-                    );
-                    ui.add(
-                        egui::TextEdit::singleline(&mut m.note)
-                            .desired_width(180.0)
-                            .hint_text("note"),
-                    );
-                    let icon_size = egui::Vec2::splat(ui.spacing().icon_width);
-                    let jump_icon = egui::Image::new(crate::icons::crosshair())
-                        .fit_to_exact_size(icon_size)
-                        .tint(ui.visuals().text_color());
-                    if ui
-                        .add(egui::Button::image(jump_icon))
-                        .on_hover_text("Jump to marker")
-                        .clicked()
-                    {
-                        jump = Some(m.t_us);
-                    }
-                    let delete_icon = egui::Image::new(crate::icons::trash())
-                        .fit_to_exact_size(icon_size)
-                        .tint(ui.visuals().text_color());
-                    if ui
-                        .add(egui::Button::image(delete_icon))
-                        .on_hover_text("Delete marker")
-                        .clicked()
-                    {
-                        to_remove = Some(id);
-                    }
-                });
-            }
-        });
+        // Always render the scroll region (even when empty), and let it fill
+        // the panel height. egui stores the panel size from its content rect,
+        // so a content-shrinking scroll area makes the dock snap back to
+        // content height after a resize; `auto_shrink([false, false])` fills the
+        // dragged height so the resize sticks (matching the performance dock).
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if ids.is_empty() {
+                    ui.weak("No markers - press M to add one at the playhead.");
+                    return;
+                }
+                for id in ids {
+                    let Some(m) = markers.get_mut(id) else {
+                        continue;
+                    };
+                    ui.horizontal(|ui| {
+                        let mut color = m.color32();
+                        if egui::color_picker::color_edit_button_srgba(
+                            ui,
+                            &mut color,
+                            egui::color_picker::Alpha::Opaque,
+                        )
+                        .changed()
+                        {
+                            m.color = crate::legend::color32_to_srgb(color);
+                        }
+                        ui.monospace(fmt_rel(m.t_us, origin_us));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut m.label)
+                                .desired_width(140.0)
+                                .hint_text("label"),
+                        );
+                        ui.add(
+                            egui::TextEdit::singleline(&mut m.note)
+                                .desired_width(180.0)
+                                .hint_text("note"),
+                        );
+                        let icon_size = egui::Vec2::splat(ui.spacing().icon_width);
+                        let jump_icon = egui::Image::new(crate::icons::crosshair())
+                            .fit_to_exact_size(icon_size)
+                            .tint(ui.visuals().text_color());
+                        if ui
+                            .add(egui::Button::image(jump_icon))
+                            .on_hover_text("Jump to marker")
+                            .clicked()
+                        {
+                            jump = Some(m.t_us);
+                        }
+                        let delete_icon = egui::Image::new(crate::icons::trash())
+                            .fit_to_exact_size(icon_size)
+                            .tint(ui.visuals().text_color());
+                        if ui
+                            .add(egui::Button::image(delete_icon))
+                            .on_hover_text("Delete marker")
+                            .clicked()
+                        {
+                            to_remove = Some(id);
+                        }
+                    });
+                }
+            });
         if let Some(id) = to_remove {
             markers.remove(id);
         }
