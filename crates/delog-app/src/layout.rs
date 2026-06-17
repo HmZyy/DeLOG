@@ -93,6 +93,9 @@ pub enum LayoutNode {
         /// Manual vertical positions for text-annotation labels (§10, PLT-15).
         #[serde(default)]
         text_offsets: Vec<TextOffsetLayout>,
+        /// Per-string-trace text-annotation filters (§10, PLT-15).
+        #[serde(default)]
+        text_filters: Vec<TextFilterLayout>,
     },
     Scene3d(SceneLayout),
     Split {
@@ -143,6 +146,13 @@ pub struct TextOffsetLayout {
     pub field: FieldRef,
     pub t_us: i64,
     pub y_frac: f32,
+}
+
+/// A per-string-trace text-annotation "contains" filter (§10, PLT-15).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TextFilterLayout {
+    pub field: FieldRef,
+    pub filter: String,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -615,6 +625,7 @@ fn workspace_doc(workspace: &Workspace, snapshot: &StoreSnapshot) -> WorkspaceLa
             show_tooltip: true,
             marker_us: None,
             text_offsets: Vec::new(),
+            text_filters: Vec::new(),
         });
     WorkspaceLayout { root }
 }
@@ -643,6 +654,17 @@ fn node_to_layout(
                         field,
                         t_us,
                         y_frac,
+                    })
+                })
+                .collect(),
+            text_filters: pane
+                .text_filters
+                .iter()
+                .filter(|(_, filter)| !filter.trim().is_empty())
+                .filter_map(|(&field, filter)| {
+                    field_ref(snapshot, field).map(|field| TextFilterLayout {
+                        field,
+                        filter: filter.clone(),
                     })
                 })
                 .collect(),
@@ -943,6 +965,7 @@ fn insert_node(
             show_tooltip,
             marker_us,
             text_offsets,
+            text_filters,
         } => {
             let mut pane = PlotPane {
                 show_legend: *show_legend,
@@ -960,6 +983,11 @@ fn insert_node(
                 if let Some(field) = resolver.resolve(&offset.field) {
                     pane.text_offsets
                         .insert((field, offset.t_us), offset.y_frac);
+                }
+            }
+            for tf in text_filters {
+                if let Some(field) = resolver.resolve(&tf.field) {
+                    pane.text_filters.insert(field, tf.filter.clone());
                 }
             }
             Some(tiles.insert_pane(Pane::Plot(pane)))
@@ -1576,6 +1604,7 @@ mod tests {
                     show_tooltip: true,
                     marker_us: None,
                     text_offsets: Vec::new(),
+                    text_filters: Vec::new(),
                 },
             },
             vehicles: Vec::new(),
@@ -1606,9 +1635,13 @@ mod tests {
             show_tooltip: true,
             marker_us: None,
             text_offsets: vec![TextOffsetLayout {
-                field,
+                field: field.clone(),
                 t_us: 5_000,
                 y_frac: 0.25,
+            }],
+            text_filters: vec![TextFilterLayout {
+                field,
+                filter: "mission".into(),
             }],
         };
 
@@ -1630,6 +1663,10 @@ mod tests {
         let (&(_, t_us), &y_frac) = pane.text_offsets.iter().next().unwrap();
         assert_eq!(t_us, 5_000);
         assert_eq!(y_frac, 0.25);
+        assert_eq!(
+            pane.text_filters.values().next().map(String::as_str),
+            Some("mission")
+        );
     }
 
     fn plot_trace_counts(workspace: &Workspace) -> (usize, usize) {
