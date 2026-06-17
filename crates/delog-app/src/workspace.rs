@@ -934,6 +934,7 @@ impl Behavior<'_> {
             self.services.snapshot.as_ref(),
             &pane.traces,
             &mut pane.text_offsets,
+            self.services.plot_display.text_label_cap,
         );
 
         // Playhead cursor + value readout on every pane (§10.5, PLT-10). During

@@ -13,9 +13,6 @@ use delog_core::time::TimeRange;
 use crate::gpu::PaneView;
 use crate::plot::TraceRef;
 
-/// Cap on labels drawn per string trace in the visible window — keeps dense
-/// fields from flooding the pane (and the per-frame cost bounded).
-const MAX_LABELS: usize = 256;
 const FONT_SIZE: f32 = 11.0;
 /// Horizontal gap (px) required between two labels sharing a row.
 const ROW_GAP: f32 = 6.0;
@@ -44,6 +41,7 @@ pub fn draw(
     snapshot: &StoreSnapshot,
     traces: &[TraceRef],
     offsets: &mut HashMap<(FieldId, i64), f32>,
+    max_labels: usize,
 ) {
     let rect = view.rect;
     let (x0, x1) = view.x_range;
@@ -79,9 +77,9 @@ pub fn draw(
         let Ok(fv) = FieldView::new(snapshot, trace.field) else {
             continue;
         };
-        let mut samples = fv.string_samples_in_range(range, MAX_LABELS + 1);
-        let truncated = samples.len() > MAX_LABELS;
-        samples.truncate(MAX_LABELS);
+        let mut samples = fv.string_samples_in_range(range, max_labels.saturating_add(1));
+        let truncated = samples.len() > max_labels;
+        samples.truncate(max_labels);
         samples.sort_by_key(|(t, _)| *t);
 
         let color = trace.color32();
@@ -139,7 +137,7 @@ pub fn draw(
             ui.painter().text(
                 rect.right_top() + egui::vec2(-4.0, 4.0),
                 egui::Align2::RIGHT_TOP,
-                format!("+ more (showing {MAX_LABELS})"),
+                format!("+ more (showing {max_labels})"),
                 font.clone(),
                 ui.visuals().weak_text_color(),
             );
