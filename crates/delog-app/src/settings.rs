@@ -20,6 +20,9 @@ fn default_marker_line_width() -> f32 {
 fn default_marker_shade_opacity() -> f32 {
     0.12
 }
+fn default_text_label_cap() -> usize {
+    512
+}
 fn default_font_size() -> f32 {
     14.0
 }
@@ -217,6 +220,10 @@ pub struct PlotDisplay {
     /// Opacity of the inter-marker region shading (1 = solid, 0 = transparent).
     #[serde(default = "default_marker_shade_opacity")]
     pub marker_shade_opacity: f32,
+    /// Max text-annotation labels drawn per string trace in the visible window
+    /// (PLT-15); bounds per-frame cost on high-rate string fields.
+    #[serde(default = "default_text_label_cap")]
+    pub text_label_cap: usize,
 }
 
 impl Default for PlotDisplay {
@@ -235,6 +242,7 @@ impl Default for PlotDisplay {
             marker_show_label: true,
             marker_shade_regions: false,
             marker_shade_opacity: default_marker_shade_opacity(),
+            text_label_cap: default_text_label_cap(),
         }
     }
 }
@@ -701,6 +709,11 @@ fn plots_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
                 .on_hover_text("Opacity of the inter-marker region shading. 1 = solid, 0 = fully transparent.");
             ui.add(egui::Slider::new(&mut p.marker_shade_opacity, 0.0..=1.0));
             ui.end_row();
+
+            ui.label("Text label cap")
+                .on_hover_text("Max text-annotation labels drawn per string trace in the visible window (PLT-15). Higher shows more at once but costs more per frame on high-rate fields.");
+            ui.add(egui::Slider::new(&mut p.text_label_cap, 16..=8192).logarithmic(true));
+            ui.end_row();
         });
 
     ui.add_space(10.0);
@@ -868,6 +881,7 @@ mod tests {
                 marker_show_label: false,
                 marker_shade_regions: true,
                 marker_shade_opacity: 0.2,
+                text_label_cap: 1024,
             },
             ..AppSettings::default()
         };
