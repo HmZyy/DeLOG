@@ -846,6 +846,30 @@ impl Behavior<'_> {
         let pane_overlay_timer = self.services.metrics.scope("pane_overlay");
         self.plot_context_menu(tile_id, &response, pane);
 
+        // Measurement marker (delta cursor, §10.8, ANA-10): a dashed second
+        // vertical with a ΔT readout vs the playhead. The per-trace ΔY computed
+        // here is routed to either the legend or the value readout per the
+        // `marker_delta_readout` setting. Both need a playhead to reference.
+        let marker_deltas = match (pane.marker_us, self.services.playhead_us) {
+            (Some(marker_us), Some(playhead)) => {
+                hover::draw_marker(ui, pview, self.services.origin_us, marker_us, playhead);
+                hover::marker_deltas(
+                    self.services.snapshot.as_ref(),
+                    pane,
+                    marker_us,
+                    playhead,
+                    *self.services.hover_mode,
+                )
+            }
+            _ => std::collections::HashMap::new(),
+        };
+        let no_deltas = std::collections::HashMap::new();
+        let (legend_deltas, readout_deltas) = match self.services.plot_display.marker_delta_readout
+        {
+            crate::settings::MarkerDeltaReadout::Legend => (&marker_deltas, &no_deltas),
+            crate::settings::MarkerDeltaReadout::Hover => (&no_deltas, &marker_deltas),
+        };
+
         // Playhead cursor + value readout on every pane (§10.5, PLT-10). During
         // playback the hover tooltip is suppressed, so every pane (including the
         // hovered one) shows the playhead readout. While alt-scrubbing the
@@ -868,28 +892,12 @@ impl Behavior<'_> {
                 self.services.origin_us,
                 t_us,
                 readout,
+                readout_deltas,
                 self.services.plot_display.hover_show_field_name,
                 self.services.plot_display.hover_show_time,
                 self.services.plot_display.hover_opacity,
             );
         }
-
-        // Measurement marker (delta cursor, §10.8, ANA-10): a dashed second
-        // vertical with a ΔT readout vs the playhead; the per-trace ΔY computed
-        // here is shown in the legend below. Both need a playhead to reference.
-        let marker_deltas = match (pane.marker_us, self.services.playhead_us) {
-            (Some(marker_us), Some(playhead)) => {
-                hover::draw_marker(ui, pview, self.services.origin_us, marker_us, playhead);
-                hover::marker_deltas(
-                    self.services.snapshot.as_ref(),
-                    pane,
-                    marker_us,
-                    playhead,
-                    *self.services.hover_mode,
-                )
-            }
-            _ => std::collections::HashMap::new(),
-        };
 
         if pane.show_tooltip && !ui.ctx().any_popup_open() {
             // Alt+hover drags the playhead along with the cursor (PLT-10).
@@ -915,6 +923,7 @@ impl Behavior<'_> {
                 self.services.origin_us,
                 *self.services.hover_mode,
                 !self.services.playing,
+                readout_deltas,
                 self.services.plot_display.hover_show_field_name,
                 self.services.plot_display.hover_show_time,
                 self.services.plot_display.hover_opacity,
@@ -940,7 +949,7 @@ impl Behavior<'_> {
                 self.services.plot_display.legend_opacity,
                 pane,
                 &labels,
-                &marker_deltas,
+                legend_deltas,
             ) {
                 pane.remove_trace(removed);
                 self.services.caches.unpin(removed);

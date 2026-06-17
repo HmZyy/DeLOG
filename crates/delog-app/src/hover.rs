@@ -36,6 +36,7 @@ pub fn draw(
     origin_us: i64,
     mode: SampleMode,
     tooltip: bool,
+    deltas: &HashMap<FieldId, String>,
     show_field_name: bool,
     show_time: bool,
     opacity: f32,
@@ -76,6 +77,7 @@ pub fn draw(
             egui::Align2::LEFT_TOP,
             cursor_x_sec,
             &rows,
+            deltas,
             show_field_name,
             show_time,
             opacity,
@@ -108,6 +110,7 @@ fn draw_sample_circles(ui: &egui::Ui, view: PaneView, origin_us: i64, rows: &[Ro
 
 /// One tooltip row: a trace's canonical value at the probed time.
 struct Row {
+    field: FieldId,
     label: String,
     value: f64,
     unit: Option<String>,
@@ -136,6 +139,7 @@ fn sampled_rows(
         };
         let (mult, unit) = field_meta(snapshot, trace.field);
         rows.push(Row {
+            field: trace.field,
             label: trace_label(snapshot, trace.field),
             value: raw * mult,
             unit,
@@ -156,6 +160,7 @@ fn show_tooltip(
     pivot: egui::Align2,
     t_sec: f32,
     rows: &[Row],
+    deltas: &HashMap<FieldId, String>,
     show_field_name: bool,
     show_time: bool,
     opacity: f32,
@@ -188,6 +193,15 @@ fn show_tooltip(
                         } else {
                             ui.label(format!("{value} {unit}"));
                         }
+                        // Marker ΔY for this trace, when routed to the readout
+                        // (ANA-10); absent when shown in the legend instead.
+                        if let Some(delta) = deltas.get(&row.field) {
+                            ui.label(
+                                egui::RichText::new(format!("Δ {delta}"))
+                                    .color(ui.visuals().hyperlink_color)
+                                    .weak(),
+                            );
+                        }
                     });
                 }
             });
@@ -214,6 +228,7 @@ pub fn draw_playhead(
     origin_us: i64,
     t_us: i64,
     readout: Option<SampleMode>,
+    deltas: &HashMap<FieldId, String>,
     show_field_name: bool,
     show_time: bool,
     opacity: f32,
@@ -259,6 +274,7 @@ pub fn draw_playhead(
         pivot,
         t_sec,
         &rows,
+        deltas,
         show_field_name,
         show_time,
         opacity,
