@@ -14,6 +14,9 @@ fn default_true() -> bool {
 fn default_opacity() -> f32 {
     0.85
 }
+fn default_marker_line_width() -> f32 {
+    1.5
+}
 fn default_font_size() -> f32 {
     14.0
 }
@@ -194,6 +197,16 @@ pub struct PlotDisplay {
     /// Whether the marker is shared across all panes or per-pane (ANA-10).
     #[serde(default)]
     pub marker_scope: MarkerScope,
+    /// Opacity of the manual session-marker verticals on plots (1 = solid,
+    /// 0 = transparent) (§17.4, ANA-05).
+    #[serde(default = "default_opacity")]
+    pub marker_line_opacity: f32,
+    /// Width of the manual session-marker verticals on plots, in pixels (ANA-05).
+    #[serde(default = "default_marker_line_width")]
+    pub marker_line_width: f32,
+    /// Draw each manual session marker's label at the top of its line (ANA-05).
+    #[serde(default = "default_true")]
+    pub marker_show_label: bool,
 }
 
 impl Default for PlotDisplay {
@@ -207,6 +220,9 @@ impl Default for PlotDisplay {
             hover_opacity: 1.0,
             marker_delta_readout: MarkerDeltaReadout::default(),
             marker_scope: MarkerScope::default(),
+            marker_line_opacity: default_opacity(),
+            marker_line_width: default_marker_line_width(),
+            marker_show_label: true,
         }
     }
 }
@@ -648,6 +664,21 @@ fn plots_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
                     }
                 });
             ui.end_row();
+
+            ui.label("Marker line opacity")
+                .on_hover_text("Opacity of the manual session-marker vertical lines on plots. 1 = solid, 0 = fully transparent.");
+            ui.add(egui::Slider::new(&mut p.marker_line_opacity, 0.0..=1.0));
+            ui.end_row();
+
+            ui.label("Marker line width")
+                .on_hover_text("Width of the manual session-marker vertical lines on plots.");
+            ui.add(egui::Slider::new(&mut p.marker_line_width, 0.5..=6.0).suffix(" px"));
+            ui.end_row();
+
+            ui.label("Marker labels")
+                .on_hover_text("Draw each manual session marker's label at the top of its line on plots.");
+            ui.checkbox(&mut p.marker_show_label, "");
+            ui.end_row();
         });
 
     ui.add_space(10.0);
@@ -810,6 +841,9 @@ mod tests {
                 hover_opacity: 0.25,
                 marker_delta_readout: MarkerDeltaReadout::Hover,
                 marker_scope: MarkerScope::PerPane,
+                marker_line_opacity: 0.5,
+                marker_line_width: 2.0,
+                marker_show_label: false,
             },
             ..AppSettings::default()
         };

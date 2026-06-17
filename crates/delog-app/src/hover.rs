@@ -386,14 +386,18 @@ fn format_delta(
     }
 }
 
-/// Manual session markers (§17.4, ANA-05): a faint full-height vertical in each
+/// Manual session markers (§17.4, ANA-05): a full-height vertical in each
 /// marker's colour on every plot pane, with the label at the top. Read-only;
-/// distinct from the amber playhead and the ANA-10 dashed delta cursor.
+/// distinct from the amber playhead and the ANA-10 dashed delta cursor. The
+/// line opacity, width and label visibility are user settings (PlotDisplay).
 pub fn draw_session_markers(
     ui: &egui::Ui,
     view: PaneView,
     origin_us: i64,
     markers: &[crate::markers::Marker],
+    opacity: f32,
+    width: f32,
+    show_label: bool,
 ) {
     let rect = view.rect;
     let (x0, x1) = view.x_range;
@@ -412,8 +416,11 @@ pub fn draw_session_markers(
         painter.vline(
             x,
             rect.y_range(),
-            egui::Stroke::new(1.0, color.gamma_multiply(0.4)),
+            egui::Stroke::new(width, color.gamma_multiply(opacity.clamp(0.0, 1.0))),
         );
+        if !show_label {
+            continue;
+        }
         painter.text(
             egui::pos2(x + 3.0, rect.top() + 2.0),
             egui::Align2::LEFT_TOP,
