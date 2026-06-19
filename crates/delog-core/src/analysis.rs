@@ -7,7 +7,7 @@ use arrow::datatypes::DataType;
 use crate::field_view::{FieldViewError, SampleValue, value_at};
 use crate::identity::FieldId;
 use crate::snapshot::StoreSnapshot;
-use crate::time::effective_time_us;
+use crate::time::{effective_time_us, raw_time_us};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GlobalFieldStats {
@@ -18,6 +18,197 @@ pub struct GlobalFieldStats {
     pub count: u64,
     pub missing_count: u64,
     pub rate_hz: Option<f64>,
+}
+
+pub type FieldStats = GlobalFieldStats;
+
+#[derive(Debug, Clone, Copy)]
+struct StatsAccumulator {
+    min: f64,
+    max: f64,
+    sum: f64,
+    sum_sq: f64,
+    count: u64,
+    missing_count: u64,
+    first_us: Option<i64>,
+    last_us: Option<i64>,
+}
+
+impl StatsAccumulator {
+    fn empty() -> Self {
+        Self {
+            min: f64::NAN,
+            max: f64::NAN,
+            sum: 0.0,
+            sum_sq: 0.0,
+            count: 0,
+            missing_count: 0,
+            first_us: None,
+            last_us: None,
+        }
+    }
+
+    fn observe(&mut self, value: SampleValue<'_>, t_us: i64) {
+        let value = match value {
+            SampleValue::Int(v) => v as f64,
+            SampleValue::UInt(v) => v as f64,
+            SampleValue::Float(v) => v,
+            SampleValue::Bool(v) => u8::from(v) as f64,
+            SampleValue::Null => {
+                self.missing_count += 1;
+                return;
+            }
+            SampleValue::Utf8(_) => return,
+        };
+        if value.is_nan() {
+            self.missing_count += 1;
+            return;
+        }
+        self.min = if self.min.is_nan() {
+            value
+        } else {
+            self.min.min(value)
+        };
+        self.max = if self.max.is_nan() {
+            value
+        } else {
+            self.max.max(value)
+        };
+        self.sum += value;
+        self.sum_sq += value * value;
+        self.count += 1;
+        self.first_us = Some(self.first_us.map_or(t_us, |first| first.min(t_us)));
+        self.last_us = Some(self.last_us.map_or(t_us, |last| last.max(t_us)));
+    }
+
+    fn fold_chunk(&mut self, stats: &crate::chunk::ColStats, len: usize, first: i64, last: i64) {
+        let count = len as u64 - stats.nan_count;
+        if count > 0 {
+            self.min = if self.min.is_nan() {
+                stats.min
+            } else {
+                self.min.min(stats.min)
+            };
+            self.max = if self.max.is_nan() {
+                stats.max
+            } else {
+                self.max.max(stats.max)
+            };
+            self.sum += stats.sum;
+            self.sum_sq += stats.sum_sq;
+            self.count += count;
+            self.first_us = Some(self.first_us.map_or(first, |v| v.min(first)));
+            self.last_us = Some(self.last_us.map_or(last, |v| v.max(last)));
+        }
+        self.missing_count += stats.nan_count;
+    }
+}
+
+fn finish_stats(acc: StatsAccumulator, multiplier: f64) -> FieldStats {
+    if acc.count == 0 {
+        return FieldStats {
+            min: f64::NAN,
+            max: f64::NAN,
+            mean: f64::NAN,
+            stddev: f64::NAN,
+            count: 0,
+            missing_count: acc.missing_count,
+            rate_hz: None,
+        };
+    }
+    let mean = acc.sum / acc.count as f64;
+    let variance = (acc.sum_sq / acc.count as f64 - mean * mean).max(0.0);
+    let (scaled_min, scaled_max) = (acc.min * multiplier, acc.max * multiplier);
+    let rate_hz = match (acc.first_us, acc.last_us) {
+        (Some(first), Some(last)) if last > first => {
+            Some(acc.count as f64 / ((last - first) as f64 / 1e6))
+        }
+        _ => None,
+    };
+    FieldStats {
+        min: scaled_min.min(scaled_max),
+        max: scaled_min.max(scaled_max),
+        mean: mean * multiplier,
+        stddev: variance.sqrt() * multiplier.abs(),
+        count: acc.count,
+        missing_count: acc.missing_count,
+        rate_hz,
+    }
+}
+
+/// Exact numeric statistics for samples in the inclusive effective-time window.
+/// Fully covered chunks reuse their seal-time statistics; partial chunks read
+/// Arrow values in place, upholding ZC-2.
+pub fn visible_field_stats(
+    snapshot: &StoreSnapshot,
+    field: FieldId,
+    t0_us: i64,
+    t1_us: i64,
+) -> Result<Option<FieldStats>, FieldViewError> {
+    let field_entry = snapshot
+        .fields
+        .get(field.index())
+        .filter(|entry| entry.id == field)
+        .ok_or(FieldViewError::InvalidFieldId(field))?;
+    let topic = snapshot
+        .topic(field_entry.topic)
+        .ok_or(FieldViewError::MissingTopic(field_entry.topic))?;
+    let source = snapshot
+        .source(topic.entry.source)
+        .ok_or(FieldViewError::MissingSource)?;
+    let store = topic
+        .store
+        .as_deref()
+        .ok_or(FieldViewError::MissingTopicStore(topic.entry.id))?;
+    let col_index = store.schema.field_index(&field_entry.name).ok_or_else(|| {
+        FieldViewError::FieldMissingFromSchema {
+            topic: topic.entry.id,
+            field: field_entry.name.clone(),
+        }
+    })?;
+    let schema = &store.schema.fields()[col_index];
+    if !is_numeric(&schema.dtype) {
+        return Ok(None);
+    }
+    let (t0_us, t1_us) = if t0_us <= t1_us {
+        (t0_us, t1_us)
+    } else {
+        (t1_us, t0_us)
+    };
+    let Some(raw_lo) = raw_time_us(t0_us, source.entry.offset_us) else {
+        return Ok(Some(finish_stats(
+            StatsAccumulator::empty(),
+            schema.multiplier,
+        )));
+    };
+    let Some(raw_hi) = raw_time_us(t1_us, source.entry.offset_us) else {
+        return Ok(Some(finish_stats(
+            StatsAccumulator::empty(),
+            schema.multiplier,
+        )));
+    };
+    let mut acc = StatsAccumulator::empty();
+    for chunk in store.chunks.iter() {
+        if chunk.t_max < raw_lo || chunk.t_min > raw_hi {
+            continue;
+        }
+        if raw_lo <= chunk.t_min && chunk.t_max <= raw_hi {
+            let first = effective_time_us(chunk.t_min, source.entry.offset_us).unwrap_or(t0_us);
+            let last = effective_time_us(chunk.t_max, source.entry.offset_us).unwrap_or(t1_us);
+            acc.fold_chunk(&chunk.stats[col_index], chunk.len(), first, last);
+            continue;
+        }
+        let start = chunk.t.values().partition_point(|&t| t < raw_lo);
+        let end = chunk.t.values().partition_point(|&t| t <= raw_hi);
+        let col = chunk.cols[col_index].as_ref();
+        for row in start..end {
+            let Some(t_us) = effective_time_us(chunk.t.value(row), source.entry.offset_us) else {
+                continue;
+            };
+            acc.observe(value_at(col, row), t_us);
+        }
+    }
+    Ok(Some(finish_stats(acc, schema.multiplier)))
 }
 
 /// Fold seal-time [`crate::chunk::ColStats`] for a field. Returns `Ok(None)`
@@ -44,8 +235,8 @@ pub fn global_field_stats(
             field: field_entry.name.clone(),
         }
     })?;
-    let dtype = &store.schema.fields()[col_index].dtype;
-    if !is_numeric(dtype) {
+    let field_schema = &store.schema.fields()[col_index];
+    if !is_numeric(&field_schema.dtype) {
         return Ok(None);
     }
 
@@ -99,11 +290,12 @@ pub fn global_field_stats(
         }
         _ => None,
     };
+    let (scaled_min, scaled_max) = (min * field_schema.multiplier, max * field_schema.multiplier);
     Ok(Some(GlobalFieldStats {
-        min,
-        max,
-        mean,
-        stddev: variance.sqrt(),
+        min: scaled_min.min(scaled_max),
+        max: scaled_min.max(scaled_max),
+        mean: mean * field_schema.multiplier,
+        stddev: variance.sqrt() * field_schema.multiplier.abs(),
         count,
         missing_count,
         rate_hz,
@@ -255,6 +447,7 @@ mod tests {
     use std::sync::Arc;
 
     use arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray};
+    use proptest::prelude::*;
 
     use super::*;
     use crate::chunk::Chunk;
@@ -271,7 +464,7 @@ mod tests {
         let schema = Arc::new(
             TopicSchema::new(
                 "A",
-                [FieldSchema::new("v", DataType::Float64, None::<String>, 1.0).unwrap()],
+                [FieldSchema::new("v", DataType::Float64, None::<String>, 0.5).unwrap()],
             )
             .unwrap(),
         );
@@ -287,13 +480,63 @@ mod tests {
         let snapshot = StoreSnapshot::from_registry(&identity, [(topic, store)], 0).unwrap();
 
         let stats = global_field_stats(&snapshot, value).unwrap().unwrap();
-        assert_eq!(stats.min, 1.0);
-        assert_eq!(stats.max, 2.0);
-        assert_eq!(stats.mean, 1.5);
-        assert_eq!(stats.stddev, 0.5);
+        assert_eq!(stats.min, 0.5);
+        assert_eq!(stats.max, 1.0);
+        assert_eq!(stats.mean, 0.75);
+        assert_eq!(stats.stddev, 0.25);
         assert_eq!(stats.count, 2);
         assert_eq!(stats.missing_count, 1);
         assert_eq!(stats.rate_hz, Some(1.0));
+    }
+
+    #[test]
+    fn visible_stats_include_window_endpoints_and_apply_multiplier() {
+        let mut identity = IdentityRegistry::new();
+        let source = identity.add_source("flight");
+        identity.set_source_offset_us(source, 100).unwrap();
+        let topic = identity.add_topic(source, "A").unwrap();
+        let value = identity.add_field(topic, "v").unwrap();
+        let schema = Arc::new(
+            TopicSchema::new(
+                "A",
+                [FieldSchema::new("v", DataType::Float64, Some("m"), -2.0).unwrap()],
+            )
+            .unwrap(),
+        );
+        let chunk = Arc::new(
+            Chunk::try_new(
+                Int64Array::from(vec![0, 10, 20, 30, 40]),
+                vec![Arc::new(Float64Array::from(vec![
+                    Some(1.0),
+                    Some(2.0),
+                    Some(f64::NAN),
+                    None,
+                    Some(4.0),
+                ])) as ArrayRef],
+                &schema,
+            )
+            .unwrap(),
+        );
+        let store = Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap());
+        let snapshot = StoreSnapshot::from_registry(&identity, [(topic, store)], 7).unwrap();
+
+        let stats = visible_field_stats(&snapshot, value, 110, 130)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stats.min, -4.0);
+        assert_eq!(stats.max, -4.0);
+        assert_eq!(stats.mean, -4.0);
+        assert_eq!(stats.stddev, 0.0);
+        assert_eq!(stats.count, 1);
+        assert_eq!(stats.missing_count, 2);
+        assert_eq!(stats.rate_hz, None);
+
+        let empty = visible_field_stats(&snapshot, value, 1_000, 2_000)
+            .unwrap()
+            .unwrap();
+        assert_eq!(empty.count, 0);
+        assert_eq!(empty.missing_count, 0);
+        assert!(empty.min.is_nan());
     }
 
     /// Build a single-`Int64`-field snapshot ("M.mode") from times + values.
@@ -383,5 +626,40 @@ mod tests {
         let snapshot = StoreSnapshot::from_registry(&identity, [(topic, store)], 0).unwrap();
 
         assert!(global_field_stats(&snapshot, text).unwrap().is_none());
+    }
+
+    proptest! {
+        #[test]
+        fn visible_stats_matches_naive_scan(
+            values in prop::collection::vec(-1_000_i64..=1_000, 1..128),
+            a in 0_usize..128,
+            b in 0_usize..128,
+        ) {
+            let times: Vec<i64> = (0..values.len()).map(|i| i as i64 * 10).collect();
+            let vals = values.iter().copied().map(Some).collect();
+            let (snapshot, field) = int_field_snapshot(&times, vals);
+            let lo = a.min(b).min(values.len() - 1);
+            let hi = a.max(b).min(values.len() - 1);
+            let expected = &values[lo..=hi];
+            let stats = visible_field_stats(&snapshot, field, times[lo], times[hi])
+                .unwrap()
+                .unwrap();
+            let sum: f64 = expected.iter().map(|&v| v as f64).sum();
+            let mean = sum / expected.len() as f64;
+            let variance = expected
+                .iter()
+                .map(|&v| {
+                    let d = v as f64 - mean;
+                    d * d
+                })
+                .sum::<f64>()
+                / expected.len() as f64;
+
+            prop_assert_eq!(stats.count, expected.len() as u64);
+            prop_assert_eq!(stats.min, *expected.iter().min().unwrap() as f64);
+            prop_assert_eq!(stats.max, *expected.iter().max().unwrap() as f64);
+            prop_assert!((stats.mean - mean).abs() < 1e-9);
+            prop_assert!((stats.stddev - variance.sqrt()).abs() < 1e-7);
+        }
     }
 }

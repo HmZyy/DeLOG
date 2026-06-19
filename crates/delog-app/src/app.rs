@@ -1,6 +1,6 @@
 //! Top-level eframe application state.
 
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use delog_cache::CacheManager;
@@ -10,6 +10,7 @@ use serde::Serialize;
 
 use crate::browser::{self, BrowserModel};
 use crate::diagnostics::DiagnosticsDock;
+use crate::field_stats::{FieldStatsController, StatsRequestKey, StatsTab};
 use crate::gpu::GpuBridge;
 use crate::layout::{LayoutApply, LayoutDoc, LayoutError, LoadOutcome, PendingLayout};
 use crate::live::ConnectionDialog;
@@ -233,7 +234,7 @@ pub struct DelogApp {
     browser_model: Option<(u64, BrowserModel)>,
     offset_dialog: Option<(delog_core::identity::SourceId, i64)>,
     source_metadata_dialog: Option<delog_core::identity::SourceId>,
-    field_stats_dialog: Option<delog_core::identity::FieldId>,
+    field_stats: FieldStatsController,
     generate_markers_dialog: Option<crate::generate_markers::GenerateMarkersDialog>,
     save_layout_dialog: SaveLayoutDialog,
     load_layout_dialog: LoadLayoutDialog,
@@ -323,7 +324,7 @@ impl DelogApp {
             browser_model: None,
             offset_dialog: None,
             source_metadata_dialog: None,
-            field_stats_dialog: None,
+            field_stats: FieldStatsController::default(),
             generate_markers_dialog: None,
             save_layout_dialog: SaveLayoutDialog {
                 open: false,
@@ -1899,7 +1900,7 @@ impl eframe::App for DelogApp {
                     self.source_metadata_dialog = Some(source);
                 }
                 if let Some(field) = browser_response.inspect_field_stats {
-                    self.field_stats_dialog = Some(field);
+                    self.field_stats.open(field);
                 }
                 if let Some(field) = browser_response.generate_markers {
                     let title = crate::legend::trace_label(&snapshot, field);
@@ -1913,7 +1914,13 @@ impl eframe::App for DelogApp {
         }
         drop(ui_browser_timer);
         show_source_metadata_window(ui.ctx(), &snapshot, &mut self.source_metadata_dialog);
-        show_field_stats_window(ui.ctx(), &snapshot, &mut self.field_stats_dialog);
+        show_field_stats_window(
+            ui.ctx(),
+            &snapshot,
+            self.view,
+            &mut self.caches,
+            &mut self.field_stats,
+        );
         for (t_us, name, color) in crate::generate_markers::generate_markers_window(
             ui.ctx(),
             &mut self.generate_markers_dialog,
@@ -2013,7 +2020,7 @@ impl eframe::App for DelogApp {
                         self.vehicle_dialog.open = true;
                     }
                     if let Some(field) = actions.inspect_field_stats {
-                        self.field_stats_dialog = Some(field);
+                        self.field_stats.open(field);
                     }
                 });
             if let Some(fields) = dropped
@@ -2298,67 +2305,183 @@ fn show_source_metadata_window(
 
 fn show_field_stats_window(
     ctx: &egui::Context,
-    snapshot: &delog_core::snapshot::StoreSnapshot,
-    selected: &mut Option<delog_core::identity::FieldId>,
+    snapshot: &Arc<delog_core::snapshot::StoreSnapshot>,
+    view: Option<ViewX>,
+    caches: &mut CacheManager,
+    controller: &mut FieldStatsController,
 ) {
-    let Some(field_id) = *selected else {
+    let Some(field_id) = controller.selected() else {
         return;
     };
     let Some((title, unit)) = field_label_and_unit(snapshot, field_id) else {
-        *selected = None;
+        controller.close();
         return;
     };
 
+    let now = Instant::now();
+    if controller.tab() == StatsTab::Visible
+        && let Some(view) = view
+    {
+        controller.request(
+            StatsRequestKey::new(field_id, snapshot.epoch, view.min_us, view.max_us),
+            Arc::clone(snapshot),
+            now,
+        );
+    }
+    controller.poll(now);
+
+    let provisional = view.and_then(|view| {
+        let cache = caches.get(field_id)?;
+        let (x0, x1) = view.seconds(cache.origin_us);
+        let (a, b) = cache.index_range(x0, x1);
+        let mm = cache.pyramid.query(&cache.xy, a, b);
+        mm.is_finite()
+            .then_some((f64::from(mm.min), f64::from(mm.max)))
+    });
+    let tab = controller.tab();
+    let current = controller.result().copied();
+    let displayed = current.or_else(|| controller.stale_result().copied());
+    let updating = controller.is_updating();
+    if updating {
+        ctx.request_repaint_after(Duration::from_millis(100));
+    }
+    let error = controller.error().map(str::to_owned);
+    let suffix = unit
+        .as_ref()
+        .map(|unit| format!(" {unit}"))
+        .unwrap_or_default();
+
     let mut open = true;
-    egui::Window::new(format!("Field Stats - {title}"))
+    egui::Window::new(field_stats_window_title(&title))
         .id(egui::Id::new(("field_stats", field_id.0)))
         .open(&mut open)
         .default_width(360.0)
         .resizable(false)
         .show(ctx, |ui| {
-            match delog_core::analysis::global_field_stats(snapshot, field_id) {
-                Ok(Some(stats)) => {
-                    let suffix = unit
-                        .as_ref()
-                        .map(|unit| format!(" {unit}"))
-                        .unwrap_or_default();
-                    egui::Grid::new("field_stats_grid")
-                        .num_columns(2)
-                        .striped(true)
-                        .spacing([16.0, 4.0])
-                        .show(ui, |ui| {
-                            stats_row(ui, "Min", format!("{}{suffix}", format_stat(stats.min)));
-                            stats_row(ui, "Max", format!("{}{suffix}", format_stat(stats.max)));
-                            stats_row(ui, "Mean", format!("{}{suffix}", format_stat(stats.mean)));
-                            stats_row(
-                                ui,
-                                "Std dev",
-                                format!("{}{suffix}", format_stat(stats.stddev)),
-                            );
-                            stats_row(ui, "Samples", stats.count.to_string());
-                            stats_row(ui, "Missing", stats.missing_count.to_string());
-                            stats_row(
-                                ui,
-                                "Rate",
-                                stats
-                                    .rate_hz
-                                    .map(|rate| format!("{} Hz", format_stat(rate)))
-                                    .unwrap_or_else(|| "-".into()),
-                            );
-                        });
+            ui.horizontal(|ui| {
+                if ui
+                    .selectable_label(tab == StatsTab::Visible, "Visible window")
+                    .clicked()
+                {
+                    controller.set_tab(StatsTab::Visible);
                 }
-                Ok(None) => {
-                    ui.weak("This field is not numeric.");
+                if ui
+                    .selectable_label(tab == StatsTab::Global, "Global")
+                    .clicked()
+                {
+                    controller.set_tab(StatsTab::Global);
                 }
-                Err(err) => {
-                    ui.colored_label(ui.visuals().error_fg_color, err.to_string());
+            });
+            ui.separator();
+
+            if tab == StatsTab::Visible {
+                if let Some(view) = view {
+                    ui.horizontal(|ui| {
+                        ui.weak(format!(
+                            "{} to {}",
+                            format_time_us(view.min_us),
+                            format_time_us(view.max_us)
+                        ));
+                        if updating {
+                            ui.label(
+                                egui::RichText::new("Updating...")
+                                    .color(ui.visuals().hyperlink_color),
+                            );
+                        }
+                    });
+                }
+                if let Some(error) = error.as_deref() {
+                    if error == "This field is not numeric." {
+                        ui.weak(error);
+                    } else {
+                        ui.colored_label(ui.visuals().error_fg_color, error);
+                    }
+                } else {
+                    ui.add_enabled_ui(!updating || displayed.is_none(), |ui| {
+                        stats_grid(
+                            ui,
+                            "visible_field_stats_grid",
+                            displayed,
+                            provisional,
+                            &suffix,
+                        );
+                    });
+                }
+            } else {
+                match delog_core::analysis::global_field_stats(snapshot, field_id) {
+                    Ok(Some(stats)) => {
+                        stats_grid(ui, "global_field_stats_grid", Some(stats), None, &suffix)
+                    }
+                    Ok(None) => {
+                        ui.weak("This field is not numeric.");
+                    }
+                    Err(err) => {
+                        ui.colored_label(ui.visuals().error_fg_color, err.to_string());
+                    }
                 }
             }
         });
 
     if !open {
-        *selected = None;
+        controller.close();
     }
+}
+
+fn stats_grid(
+    ui: &mut egui::Ui,
+    id: &'static str,
+    stats: Option<delog_core::analysis::FieldStats>,
+    provisional: Option<(f64, f64)>,
+    suffix: &str,
+) {
+    let min = stats.map(|s| s.min).or(provisional.map(|p| p.0));
+    let max = stats.map(|s| s.max).or(provisional.map(|p| p.1));
+    egui::Grid::new(id)
+        .num_columns(2)
+        .striped(true)
+        .spacing([16.0, 4.0])
+        .show(ui, |ui| {
+            stats_row(ui, "Min", stat_with_unit(min, suffix));
+            stats_row(ui, "Max", stat_with_unit(max, suffix));
+            stats_row(ui, "Mean", stat_with_unit(stats.map(|s| s.mean), suffix));
+            stats_row(
+                ui,
+                "Std dev",
+                stat_with_unit(stats.map(|s| s.stddev), suffix),
+            );
+            stats_row(
+                ui,
+                "Samples",
+                stats.map_or_else(|| "-".into(), |s| s.count.to_string()),
+            );
+            stats_row(
+                ui,
+                "Missing",
+                stats.map_or_else(|| "-".into(), |s| s.missing_count.to_string()),
+            );
+            stats_row(
+                ui,
+                "Rate",
+                stats
+                    .and_then(|s| s.rate_hz)
+                    .map(|rate| format!("{} Hz", format_stat(rate)))
+                    .unwrap_or_else(|| "-".into()),
+            );
+        });
+}
+
+fn field_stats_window_title(field_label: &str) -> String {
+    field_label.to_owned()
+}
+
+fn stat_with_unit(value: Option<f64>, suffix: &str) -> String {
+    value
+        .map(|value| format!("{}{suffix}", format_stat(value)))
+        .unwrap_or_else(|| "-".into())
+}
+
+fn format_time_us(value: i64) -> String {
+    format!("{:.3} s", value as f64 / 1e6)
 }
 
 fn stats_row(ui: &mut egui::Ui, key: &str, value: String) {
@@ -2393,7 +2516,7 @@ fn field_label_and_unit(
 
 fn format_stat(value: f64) -> String {
     if value.is_nan() {
-        "NaN".into()
+        "-".into()
     } else if value.abs() >= 100.0 {
         format!("{value:.0}")
     } else if value.abs() >= 10.0 {
@@ -2455,6 +2578,34 @@ fn source_kind_label(label: &str) -> &'static str {
     }
 }
 
+/// Fixed footprint of a toolbar icon button. Allocating an explicit size
+/// keeps the button's rect independent of the SVG's load state, so the
+/// toolbar's height can't change between egui's layout passes (which would
+/// otherwise shift every panel below and spam "changed id between passes").
+const ICON_BUTTON_SIZE: egui::Vec2 = egui::vec2(28.0, 24.0);
+
+/// A compact toolbar icon button rendering one of the bundled SVG icons.
+/// `salt` gives the button a stable id; `tint` colors the (white) glyph;
+/// `active` draws a selected background.
+fn icon_button(
+    ui: &mut egui::Ui,
+    salt: &str,
+    icon: egui::ImageSource<'_>,
+    tint: egui::Color32,
+    active: bool,
+) -> egui::Response {
+    let image = egui::Image::new(icon)
+        .fit_to_exact_size(egui::vec2(18.0, 18.0))
+        .tint(tint);
+    ui.push_id(salt, |ui| {
+        ui.add_sized(
+            ICON_BUTTON_SIZE,
+            egui::Button::image(image).selected(active),
+        )
+    })
+    .inner
+}
+
 #[cfg(test)]
 mod tests {
     use delog_core::diagnostics::{Diag, DiagRecord};
@@ -2462,6 +2613,19 @@ mod tests {
     use delog_core::snapshot::StoreSnapshot;
 
     use super::*;
+
+    #[test]
+    fn empty_stat_formats_as_a_dash() {
+        assert_eq!(format_stat(f64::NAN), "-");
+    }
+
+    #[test]
+    fn stats_window_title_is_only_the_field_label() {
+        assert_eq!(
+            field_stats_window_title("flight / ATT.Roll"),
+            "flight / ATT.Roll"
+        );
+    }
 
     #[test]
     fn diagnostics_export_doc_includes_source_labels_and_counts() {
@@ -2541,32 +2705,4 @@ mod tests {
         assert_eq!(json["traces"][0]["label"], "GPS.alt");
         assert_eq!(json["traces"][0]["visible_samples"], 500);
     }
-}
-
-/// Fixed footprint of a toolbar icon button. Allocating an explicit size
-/// keeps the button's rect independent of the SVG's load state, so the
-/// toolbar's height can't change between egui's layout passes (which would
-/// otherwise shift every panel below and spam "changed id between passes").
-const ICON_BUTTON_SIZE: egui::Vec2 = egui::vec2(28.0, 24.0);
-
-/// A compact toolbar icon button rendering one of the bundled SVG icons.
-/// `salt` gives the button a stable id; `tint` colors the (white) glyph;
-/// `active` draws a selected background.
-fn icon_button(
-    ui: &mut egui::Ui,
-    salt: &str,
-    icon: egui::ImageSource<'_>,
-    tint: egui::Color32,
-    active: bool,
-) -> egui::Response {
-    let image = egui::Image::new(icon)
-        .fit_to_exact_size(egui::vec2(18.0, 18.0))
-        .tint(tint);
-    ui.push_id(salt, |ui| {
-        ui.add_sized(
-            ICON_BUTTON_SIZE,
-            egui::Button::image(image).selected(active),
-        )
-    })
-    .inner
 }
