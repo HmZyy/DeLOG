@@ -30,11 +30,12 @@ Each `egui::Window` builder will explicitly include:
 
 ```rust
 .collapsible(false)
-.default_pos(ctx.screen_rect().center())
+.default_pos(ctx.content_rect().center())
 .pivot(egui::Align2::CENTER_CENTER)
 ```
 
-`default_pos` supplies only the initial position. The center pivot makes that
+`default_pos` supplies only the initial position. `content_rect()` is egui
+0.34's non-deprecated safe viewport rectangle. The center pivot makes that
 position refer to the window's center rather than its top-left corner. Egui's
 persistent window state then controls subsequent frames, preserving dragging
 and remembered positions. Existing IDs, open state, sizes, resizability, and

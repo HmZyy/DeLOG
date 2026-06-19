@@ -463,6 +463,9 @@ pub fn show(
     let mut open = state.open;
     egui::Window::new("Vehicles")
         .open(&mut open)
+        .collapsible(false)
+        .default_pos(ctx.content_rect().center())
+        .pivot(egui::Align2::CENTER_CENTER)
         .default_width(360.0)
         .show(ctx, |ui| {
             if ui

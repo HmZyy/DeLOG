@@ -1078,7 +1078,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **UIX-11** — App data session engine: open path → sniff/detect → off-thread parse into ingestor; per-source progress + cancel token; snapshot access (the never-block load path behind UIX-02/BRW-01, §19.6)
 - [x] **UIX-12** — Timeline live-link status dot — filled dot at the head of the timeline bar: grey when not streaming, yellow when a live link is up but the view is not locked to the tail, red when locked-to-live (§10.4); tooltip names the state. Pairs with the lock-to-live state from PLT-05
 - [x] **UIX-13** — Settings ▸ General font override (like the egui demo): `FontOverride` { enabled, size, monospace } with a checkbox, a size `DragValue` (4–40) and a Proportional/Monospace radio (both disabled until enabled); applied each frame via `ctx.all_styles_mut(|s| s.override_font_id = …)` and persisted in `settings.json`. Default off. Round-trip + default unit-tested
-- [ ] **UIX-14** — All floating `egui::Window` popups are non-collapsible and default to the center of the viewport on first spawn while remaining freely draggable
+- [x] **UIX-14** — All floating `egui::Window` popups are non-collapsible and default to the center of the viewport on first spawn while remaining freely draggable; enforced by `popup_policy` regression coverage
 
 ### TST — Testing & CI (continuous)
 

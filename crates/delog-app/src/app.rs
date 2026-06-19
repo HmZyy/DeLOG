@@ -1039,6 +1039,9 @@ impl DelogApp {
             let mut open = self.save_layout_dialog.open;
             egui::Window::new("Save Layout")
                 .open(&mut open)
+                .collapsible(false)
+                .default_pos(ctx.content_rect().center())
+                .pivot(egui::Align2::CENTER_CENTER)
                 .default_width(280.0)
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
@@ -1063,6 +1066,9 @@ impl DelogApp {
             let mut open = self.load_layout_dialog.open;
             egui::Window::new("Load Layout")
                 .open(&mut open)
+                .collapsible(false)
+                .default_pos(ctx.content_rect().center())
+                .pivot(egui::Align2::CENTER_CENTER)
                 .default_width(320.0)
                 .show(ctx, |ui| {
                     if self.load_layout_dialog.layouts.is_empty() {
@@ -1101,6 +1107,9 @@ impl DelogApp {
             let mut action = None;
             egui::Window::new("Manage Layouts")
                 .open(&mut open)
+                .collapsible(false)
+                .default_pos(ctx.content_rect().center())
+                .pivot(egui::Align2::CENTER_CENTER)
                 .default_width(520.0)
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
@@ -1190,6 +1199,8 @@ impl DelogApp {
             let mut skip = false;
             egui::Window::new("Map Layout Fields")
                 .collapsible(false)
+                .default_pos(ctx.content_rect().center())
+                .pivot(egui::Align2::CENTER_CENTER)
                 .default_width(440.0)
                 .show(ctx, |ui| {
                     ui.label(format!(
@@ -2170,6 +2181,9 @@ fn show_source_metadata_window(
     egui::Window::new(format!("Source Metadata - {}", source.entry.label))
         .id(egui::Id::new(("source_metadata", source_id.0)))
         .open(&mut open)
+        .collapsible(false)
+        .default_pos(ctx.content_rect().center())
+        .pivot(egui::Align2::CENTER_CENTER)
         .default_width(520.0)
         .default_height(420.0)
         .show(ctx, |ui| {
@@ -2355,6 +2369,9 @@ fn show_field_stats_window(
     egui::Window::new(field_stats_window_title(&title))
         .id(egui::Id::new(("field_stats", field_id.0)))
         .open(&mut open)
+        .collapsible(false)
+        .default_pos(ctx.content_rect().center())
+        .pivot(egui::Align2::CENTER_CENTER)
         .default_width(360.0)
         .resizable(false)
         .show(ctx, |ui| {

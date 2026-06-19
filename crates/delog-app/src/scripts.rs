@@ -139,6 +139,9 @@ impl ScriptsPanel {
         let mut open = self.open;
         egui::Window::new("Scripts")
             .open(&mut open)
+            .collapsible(false)
+            .default_pos(ctx.content_rect().center())
+            .pivot(egui::Align2::CENTER_CENTER)
             .default_size([720.0, 480.0])
             .show(ctx, |ui| self.window_contents(ui, &store, &sender));
         self.open = open;
@@ -154,6 +157,8 @@ impl ScriptsPanel {
         let mut decision: Option<bool> = None; // Some(true) = delete, Some(false) = cancel
         egui::Window::new("Delete script?")
             .collapsible(false)
+            .default_pos(ctx.content_rect().center())
+            .pivot(egui::Align2::CENTER_CENTER)
             .resizable(false)
             .open(&mut keep_open)
             .show(ctx, |ui| {
