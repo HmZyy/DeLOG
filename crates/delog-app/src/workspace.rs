@@ -1294,6 +1294,9 @@ impl Behavior<'_> {
         egui::Window::new("Plot Info")
             .id(egui::Id::new(("plot-info", tile_id)))
             .open(&mut open)
+            .collapsible(false)
+            .default_pos(ui.ctx().content_rect().center())
+            .pivot(egui::Align2::CENTER_CENTER)
             .resizable(true)
             .default_width(320.0)
             .show(ui.ctx(), |ui| {

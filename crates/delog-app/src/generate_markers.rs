@@ -103,6 +103,9 @@ pub fn generate_markers_window(
     egui::Window::new(format!("Generate markers - {}", d.title))
         .id(egui::Id::new(("generate_markers", d.field.0)))
         .open(&mut open)
+        .collapsible(false)
+        .default_pos(ctx.content_rect().center())
+        .pivot(egui::Align2::CENTER_CENTER)
         .resizable(true)
         .default_width(440.0)
         .show(ctx, |ui| {

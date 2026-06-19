@@ -533,6 +533,9 @@ impl SettingsDialog {
         let mut change = SettingsChange::default();
         egui::Window::new("Settings")
             .open(&mut open)
+            .collapsible(false)
+            .default_pos(ctx.content_rect().center())
+            .pivot(egui::Align2::CENTER_CENTER)
             .default_width(520.0)
             .default_height(340.0)
             .resizable(true)
