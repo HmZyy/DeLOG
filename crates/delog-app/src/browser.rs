@@ -554,6 +554,8 @@ fn offset_dialog_window(
         .id(egui::Id::new(("source_offset", source_id.0)))
         .open(&mut open)
         .collapsible(false)
+        .default_pos(ui.ctx().content_rect().center())
+        .pivot(egui::Align2::CENTER_CENTER)
         .resizable(false)
         .show(ui.ctx(), |ui| {
             ui.horizontal(|ui| {
