@@ -1419,12 +1419,12 @@ impl eframe::App for DelogApp {
                 ui.menu_button("File", |ui| {
                     if ui
                         .button("Open File")
-                        .on_hover_text("Open flight logs (or drop files anywhere)")
                         .clicked()
                     {
                         self.spawn_open_dialog(ui.ctx());
                         ui.close();
                     }
+                    ui.separator();
                     if ui.button("Export Diagnostics JSON...").clicked() {
                         self.spawn_export_diagnostics_dialog(
                             ui.ctx(),
