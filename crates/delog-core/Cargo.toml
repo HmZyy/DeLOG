@@ -18,3 +18,7 @@ proptest = { workspace = true }
 [[bench]]
 name = "snapshot_swap"
 harness = false
+
+[[bench]]
+name = "visible_stats"
+harness = false
