@@ -10,6 +10,7 @@ mod axes;
 mod browser;
 mod camera;
 mod diagnostics;
+mod field_stats;
 mod generate_markers;
 mod geo;
 mod gpu;
