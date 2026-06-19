@@ -17,6 +17,8 @@ use crate::gpu::PaneView;
 use crate::legend::trace_label;
 use crate::plot::PlotPane;
 
+const READOUT_ORDER: egui::Order = egui::Order::Background;
+
 pub struct HoverTarget {
     pub id: egui::Id,
     pub view: PaneView,
@@ -169,7 +171,7 @@ fn show_tooltip(
         return;
     }
     egui::Area::new(id)
-        .order(egui::Order::Tooltip)
+        .order(READOUT_ORDER)
         .pivot(pivot)
         .fixed_pos(pos)
         .show(ui.ctx(), |ui| {
