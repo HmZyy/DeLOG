@@ -61,6 +61,8 @@ impl ConnectionDialog {
         egui::Window::new("MAVLink Connection")
             .open(open)
             .collapsible(false)
+            .default_pos(ctx.content_rect().center())
+            .pivot(egui::Align2::CENTER_CENTER)
             .resizable(false)
             .show(ctx, |ui| {
                 egui::Grid::new("live_endpoint_grid")
