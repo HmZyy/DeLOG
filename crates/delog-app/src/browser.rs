@@ -41,6 +41,7 @@ pub struct FieldNode {
     pub name: String,
     pub dtype: &'static str,
     pub unit: Option<String>,
+    pub description: Option<String>,
     pub count: u64,
 }
 
@@ -87,6 +88,7 @@ impl BrowserModel {
                             name: f.name.clone(),
                             dtype: schema.map(|s| s.dtype_label()).unwrap_or("?"),
                             unit: schema.and_then(|s| s.unit.clone()),
+                            description: schema.and_then(|s| s.description.clone()),
                             count: rows,
                         }
                     })
@@ -618,6 +620,11 @@ fn field_row(
                 });
             });
     });
+    let response = if let Some(description) = &field.description {
+        response.on_hover_text(description)
+    } else {
+        response
+    };
 
     if response.clicked() || response.drag_started() {
         if response.drag_started() {
@@ -722,7 +729,9 @@ mod tests {
             TopicSchema::new(
                 "GPS",
                 [
-                    FieldSchema::new("Lat", DataType::Int32, Some("deg"), 1e-7).unwrap(),
+                    FieldSchema::new("Lat", DataType::Int32, Some("deg"), 1e-7)
+                        .unwrap()
+                        .with_description("latitude"),
                     FieldSchema::new("Alt", DataType::Float64, Some("m"), 1.0).unwrap(),
                 ],
             )
@@ -763,6 +772,7 @@ mod tests {
         assert_eq!(gps.fields[1].name, "Lat");
         assert_eq!(gps.fields[1].dtype, "i32");
         assert_eq!(gps.fields[1].unit.as_deref(), Some("deg"));
+        assert_eq!(gps.fields[1].description.as_deref(), Some("latitude"));
         assert_eq!(gps.fields[1].count, 3);
     }
 
