@@ -22,4 +22,10 @@ arrow = { workspace = true, optional = true }
 
 [dev-dependencies]
 arrow = { workspace = true }
+criterion = { workspace = true }
 proptest = { workspace = true }
+
+[[bench]]
+name = "custom_parser"
+harness = false
+required-features = ["python"]
