@@ -89,10 +89,13 @@ impl ScriptsPanel {
         }
     }
 
-    pub fn cancel_parsers(&self) {
-        if let Some(engine) = &self.engine {
-            let _ = engine.cancel_parsers();
-        }
+    pub fn cancel_parsers(&mut self) {
+        let result = self
+            .engine
+            .as_ref()
+            .map(ScriptEngine::cancel_parsers)
+            .unwrap_or(Ok(()));
+        self.finish_cancel_dispatch(result);
     }
 
     /// Load a saved script into the Console editor and open the window for editing.
@@ -217,6 +220,12 @@ impl ScriptsPanel {
             Err(error) => self
                 .parsers
                 .parse_dispatch_failed(parser_name, path, &error),
+        }
+    }
+
+    fn finish_cancel_dispatch(&mut self, result: Result<(), String>) {
+        if let Err(error) = result {
+            self.parsers.cancel_dispatch_failed(&error);
         }
     }
 
@@ -614,6 +623,28 @@ mod tests {
                 .take_parser_diagnostics()
                 .join("\n")
                 .contains("disconnected")
+        );
+    }
+
+    #[test]
+    fn failed_parser_cancel_records_diagnostic_without_clearing_pending() {
+        let root = std::env::temp_dir().join(format!(
+            "delog-scripts-parser-cancel-error-{}",
+            std::process::id()
+        ));
+        let mut panel = ScriptsPanel::new(root.join("scripts"), root.join("parsers"));
+        panel
+            .parsers
+            .mark_parse_dispatched("raw.py", &PathBuf::from("flight.raw"));
+
+        panel.finish_cancel_dispatch(Err("pending-call queue full".into()));
+
+        assert!(panel.is_parser_running());
+        assert!(
+            panel
+                .take_parser_diagnostics()
+                .join("\n")
+                .contains("pending-call queue full")
         );
     }
 }
