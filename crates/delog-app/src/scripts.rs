@@ -1,5 +1,6 @@
 //! Scripts window: REPL + editor + library (SCR-07). Feature-gated.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use delog_core::ingest::IngestSender;
@@ -10,6 +11,38 @@ use delog_script::{ScriptCommand, ScriptEngine, ScriptEvent};
 use egui_code_editor::{CodeEditor, ColorTheme, Syntax};
 
 use crate::parsers::{ParserUiAction, ParsersPanel};
+
+enum PreparedParserCommand {
+    Validation {
+        name: String,
+        source: String,
+    },
+    Parse {
+        parser_name: String,
+        source: String,
+        path: std::path::PathBuf,
+    },
+}
+
+impl PreparedParserCommand {
+    fn command(&self) -> ScriptCommand {
+        match self {
+            Self::Validation { name, source } => ScriptCommand::ValidateParser {
+                name: name.clone(),
+                source: source.clone(),
+            },
+            Self::Parse {
+                parser_name,
+                source,
+                path,
+            } => ScriptCommand::ParseFile {
+                parser_name: parser_name.clone(),
+                source: source.clone(),
+                path: path.clone(),
+            },
+        }
+    }
+}
 
 /// All UI + engine state for the scripts window (the editor + REPL console). The
 /// saved-script library is surfaced through the Tools / Scripts / Run menu, not
@@ -28,6 +61,7 @@ pub struct ScriptsPanel {
     /// Whether a command is in flight (toggles the Run/Cancel button).
     running: bool,
     parsers: ParsersPanel,
+    deferred_parser_actions: VecDeque<ParserUiAction>,
 }
 
 impl ScriptsPanel {
@@ -45,6 +79,7 @@ impl ScriptsPanel {
             pending_delete: None,
             running: false,
             parsers: ParsersPanel::new(parsers_dir),
+            deferred_parser_actions: VecDeque::new(),
         }
     }
 
@@ -64,8 +99,13 @@ impl ScriptsPanel {
     }
 
     #[allow(dead_code)] // Consumed by the Task 6 Parsers menu.
-    pub fn request_open(&mut self, ctx: &egui::Context, name: &str) {
+    pub fn request_open(&mut self, ctx: &egui::Context, name: &str) -> bool {
+        if !self.parser_dispatch_enabled() {
+            self.status = "finish the running console command before opening a parser file".into();
+            return false;
+        }
         self.parsers.request_open(ctx, name);
+        true
     }
 
     #[allow(dead_code)] // Consumed by the Task 6 combined toolbar state.
@@ -92,6 +132,10 @@ impl ScriptsPanel {
 
     pub fn ordinary_dispatch_enabled(&self) -> bool {
         !self.running && !self.should_poll_parser_events()
+    }
+
+    pub fn parser_dispatch_enabled(&self) -> bool {
+        !self.running
     }
 
     fn can_interrupt_console(&self) -> bool {
@@ -302,6 +346,47 @@ impl ScriptsPanel {
         }
     }
 
+    fn queue_parser_action(&mut self, action: ParserUiAction) {
+        self.deferred_parser_actions.push_back(action);
+    }
+
+    fn take_ready_parser_commands(&mut self) -> Vec<PreparedParserCommand> {
+        if !self.parser_dispatch_enabled() {
+            return Vec::new();
+        }
+        let mut commands = Vec::new();
+        for action in self.deferred_parser_actions.drain(..) {
+            match action {
+                ParserUiAction::ValidateAndSave { name, source, .. } => {
+                    commands.push(PreparedParserCommand::Validation { name, source });
+                }
+            }
+        }
+        for request in self.parsers.take_parse_requests() {
+            commands.push(PreparedParserCommand::Parse {
+                parser_name: request.parser_name,
+                source: request.source,
+                path: request.path,
+            });
+        }
+        commands
+    }
+
+    fn finish_parser_dispatch(
+        &mut self,
+        command: PreparedParserCommand,
+        result: Result<(), String>,
+    ) {
+        match command {
+            PreparedParserCommand::Validation { name, .. } => {
+                self.finish_validation_dispatch(&name, result);
+            }
+            PreparedParserCommand::Parse {
+                parser_name, path, ..
+            } => self.finish_parse_dispatch(&parser_name, &path, result),
+        }
+    }
+
     fn should_poll_parser_events(&self) -> bool {
         self.parsers.has_pending_work()
     }
@@ -315,28 +400,14 @@ impl ScriptsPanel {
     ) {
         self.drain();
 
-        for action in self.parsers.ui(ctx) {
-            match action {
-                ParserUiAction::ValidateAndSave { name, source, .. } => {
-                    let parser_name = name.clone();
-                    let result = self
-                        .engine(store.clone(), sender.clone(), Arc::clone(&metrics))
-                        .send(ScriptCommand::ValidateParser { name, source });
-                    self.finish_validation_dispatch(&parser_name, result);
-                }
-            }
+        for action in self.parsers.ui(ctx, self.parser_dispatch_enabled()) {
+            self.queue_parser_action(action);
         }
-        for request in self.parsers.take_parse_requests() {
-            let parser_name = request.parser_name.clone();
-            let path = request.path.clone();
+        for command in self.take_ready_parser_commands() {
             let result = self
                 .engine(store.clone(), sender.clone(), Arc::clone(&metrics))
-                .send(ScriptCommand::ParseFile {
-                    parser_name: request.parser_name,
-                    source: request.source,
-                    path: request.path,
-                });
-            self.finish_parse_dispatch(&parser_name, &path, result);
+                .send(command.command());
+            self.finish_parser_dispatch(command, result);
         }
 
         // Drawn unconditionally so a Remove triggered from the menu can be
@@ -639,6 +710,70 @@ mod tests {
         }));
 
         assert!(panel.ordinary_dispatch_enabled());
+    }
+
+    #[test]
+    fn ordinary_run_defers_picker_request_until_done_is_processed() {
+        let root = std::env::temp_dir().join(format!(
+            "delog-scripts-reverse-parser-{}",
+            std::process::id()
+        ));
+        let mut panel = ScriptsPanel::new(root.join("scripts"), root.join("parsers"));
+        let path = PathBuf::from("flight.raw");
+        panel.running = true;
+        assert!(!panel.request_open(&egui::Context::default(), "raw.py"));
+        assert!(!panel.parser_dispatch_enabled());
+        panel
+            .parsers
+            .enqueue_parse_request(crate::parsers::ParseRequest {
+                parser_name: "raw.py".into(),
+                source: "def Parse(data): return []".into(),
+                path: path.clone(),
+            });
+
+        assert!(panel.take_ready_parser_commands().is_empty());
+        assert!(!panel.parsers.has_pending_work());
+        assert!(panel.can_interrupt_console());
+
+        panel.handle_event(ScriptEvent::Done);
+        let commands = panel.take_ready_parser_commands();
+        assert_eq!(commands.len(), 1);
+        assert!(matches!(
+            commands[0].command(),
+            ScriptCommand::ParseFile { parser_name, path: command_path, .. }
+                if parser_name == "raw.py" && command_path.as_path() == path.as_path()
+        ));
+        panel.finish_parser_dispatch(commands.into_iter().next().unwrap(), Ok(()));
+
+        assert!(panel.parsers.has_pending_work());
+        assert!(!panel.can_interrupt_console());
+    }
+
+    #[test]
+    fn ordinary_run_defers_validation_without_marking_it_dispatched() {
+        let root = std::env::temp_dir().join(format!(
+            "delog-scripts-reverse-validation-{}",
+            std::process::id()
+        ));
+        let mut panel = ScriptsPanel::new(root.join("scripts"), root.join("parsers"));
+        panel.parsers.add_new();
+        let action = panel.parsers.stage_save().unwrap();
+        panel.running = true;
+        panel.queue_parser_action(action);
+
+        assert!(panel.take_ready_parser_commands().is_empty());
+        assert!(!panel.parsers.validation_dispatched());
+
+        panel.handle_event(ScriptEvent::Done);
+        let commands = panel.take_ready_parser_commands();
+        assert_eq!(commands.len(), 1);
+        assert!(matches!(
+            commands[0].command(),
+            ScriptCommand::ValidateParser { name, .. } if name == "new_parser.py"
+        ));
+        panel.finish_parser_dispatch(commands.into_iter().next().unwrap(), Ok(()));
+        assert!(panel.parsers.validation_dispatched());
+        assert!(!panel.can_interrupt_console());
     }
 
     #[test]

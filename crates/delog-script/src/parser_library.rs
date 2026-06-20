@@ -215,8 +215,16 @@ fn finish_rename(
     old: &Path,
     destination: &Path,
     permissions: fs::Permissions,
+    set_permissions: impl FnOnce(&Path, fs::Permissions) -> io::Result<()>,
     remove_old: impl FnOnce(&Path) -> io::Result<()>,
 ) -> io::Result<()> {
+    if let Err(error) = set_permissions(destination, permissions) {
+        return Err(io::Error::other(format!(
+            "partial parser rename: destination '{}' was written but permissions could not be finalized; old remains at '{}': {error}",
+            destination.display(),
+            old.display(),
+        )));
+    }
     if let Err(error) = remove_old(old) {
         return Err(io::Error::other(format!(
             "partial parser rename: destination '{}' was written but old remains at '{}': {error}",
@@ -224,7 +232,7 @@ fn finish_rename(
             old.display(),
         )));
     }
-    fs::set_permissions(destination, permissions)
+    Ok(())
 }
 
 fn cleanup_stale_staging_files(dir: &Path, now: SystemTime) {
@@ -362,9 +370,13 @@ impl ParserLibrary {
                 stage_and_publish(&self.dir, &destination, source, |file, bytes| {
                     file.write_all(bytes)
                 })?;
-                finish_rename(&old, &destination, permissions, |path| {
-                    fs::remove_file(path)
-                })?;
+                finish_rename(
+                    &old,
+                    &destination,
+                    permissions,
+                    |path, permissions| fs::set_permissions(path, permissions),
+                    |path| fs::remove_file(path),
+                )?;
             }
         }
         Ok(destination_name)
@@ -529,14 +541,56 @@ mod tests {
         .unwrap();
         let permissions = fs::metadata(&old).unwrap().permissions();
 
-        let error = finish_rename(&old, &destination, permissions, |_| {
-            Err(io::Error::other("injected remove failure"))
-        })
+        let error = finish_rename(
+            &old,
+            &destination,
+            permissions,
+            |path, permissions| fs::set_permissions(path, permissions),
+            |_| Err(io::Error::other("injected remove failure")),
+        )
         .unwrap_err();
 
         assert!(error.to_string().contains("old remains"));
         assert_eq!(fs::read_to_string(old).unwrap(), "old source");
         assert_eq!(fs::read_to_string(destination).unwrap(), "new source");
+    }
+
+    #[test]
+    fn permission_finalization_failure_preserves_both_complete_files() {
+        let temp = TestDir::new();
+        fs::create_dir_all(&temp.0).unwrap();
+        let old = temp.0.join("old.py");
+        let destination = temp.0.join("new.py");
+        fs::write(&old, "old source").unwrap();
+        stage_and_publish(&temp.0, &destination, "new source", |file, bytes| {
+            file.write_all(bytes)
+        })
+        .unwrap();
+        let permissions = fs::metadata(&old).unwrap().permissions();
+
+        let error = finish_rename(
+            &old,
+            &destination,
+            permissions,
+            |_, _| Err(io::Error::other("injected permission failure")),
+            |_| panic!("old removal must not run after permission failure"),
+        )
+        .unwrap_err();
+
+        let message = error.to_string();
+        assert!(message.contains("old.py"));
+        assert!(message.contains("new.py"));
+        assert!(message.contains("old remains"));
+        assert_eq!(fs::read_to_string(old).unwrap(), "old source");
+        assert_eq!(fs::read_to_string(&destination).unwrap(), "new source");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(destination).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
     }
 
     #[cfg(unix)]
