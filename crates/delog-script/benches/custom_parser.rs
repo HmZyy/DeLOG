@@ -13,7 +13,7 @@ use pyo3::types::PyDict;
 
 const READ_VALUES: usize = 1_048_576;
 const PYTHON_ROWS: usize = 16_384;
-const PYTHON_FIELDS: u64 = 64;
+const PYTHON_FIELDS: usize = 64;
 
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -79,7 +79,10 @@ def Parse(raw_data):
         (parse, raw_data)
     });
 
-    group.throughput(Throughput::Elements(PYTHON_ROWS as u64 * PYTHON_FIELDS));
+    // Conversion handles the RTC array and all synthetic data-field arrays.
+    group.throughput(Throughput::Elements(
+        PYTHON_ROWS as u64 * (PYTHON_FIELDS as u64 + 1),
+    ));
     group.bench_function("python_and_convert", |b| {
         Python::attach(|py| {
             b.iter_batched(
