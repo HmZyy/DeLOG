@@ -91,15 +91,10 @@ fn representative_custom_parser_reaches_canonical_store_transactionally() {
     assert!(topic_store.schema.field_by_name("index").is_some());
     assert!(topic_store.schema.field_by_name("rtc").is_some());
     let value_index = topic_store.schema.field_index("value").unwrap();
-    assert_eq!(
-        topic_store
-            .schema
-            .field(value_index)
-            .unwrap()
-            .description
-            .as_deref(),
-        Some("last duplicate wins")
-    );
+    // Tooltips are ignored, and these names carry no unit suffix.
+    let value_field = topic_store.schema.field(value_index).unwrap();
+    assert_eq!(value_field.description, None);
+    assert_eq!(value_field.unit, None);
     let values = topic_store.chunks[0].cols[value_index]
         .as_any()
         .downcast_ref::<Float32Array>()
