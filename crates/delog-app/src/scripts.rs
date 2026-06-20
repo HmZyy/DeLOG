@@ -49,7 +49,7 @@ impl ScriptsPanel {
     }
 
     #[allow(dead_code)] // Consumed by the Task 6 Parsers menu.
-    pub fn parser_names(&self) -> std::io::Result<Vec<String>> {
+    pub fn parser_names(&mut self) -> std::io::Result<Vec<String>> {
         self.parsers.list()
     }
 
@@ -561,9 +561,11 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&root);
         std::fs::write(&root, "not a directory").unwrap();
-        let panel = ScriptsPanel::new(root.join("scripts"), root.clone());
+        let mut panel = ScriptsPanel::new(root.join("scripts"), root.clone());
 
         assert!(panel.parser_names().is_err());
+        assert!(panel.parser_names().is_err());
+        assert_eq!(panel.take_parser_diagnostics().len(), 1);
 
         std::fs::remove_file(root).unwrap();
     }
