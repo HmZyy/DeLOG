@@ -101,6 +101,10 @@ impl ParsersPanel {
 
     #[allow(dead_code)] // Task 6 menu facade.
     pub fn add_new(&mut self) {
+        if self.pending_save.is_some() {
+            self.status = "finish the current parser validation before creating another".into();
+            return;
+        }
         self.filename = NEW_PARSER_NAME.to_owned();
         self.source = NEW_PARSER_TEMPLATE.to_owned();
         self.saved_original_name = None;
@@ -112,6 +116,10 @@ impl ParsersPanel {
 
     #[allow(dead_code)] // Task 6 menu facade.
     pub fn edit(&mut self, name: &str) {
+        if self.pending_save.is_some() {
+            self.status = "finish the current parser validation before reopening a parser".into();
+            return;
+        }
         match self.library.load(name) {
             Ok(source) => {
                 self.filename = name.to_owned();
@@ -197,6 +205,37 @@ impl ParsersPanel {
         {
             self.validation_dispatched = true;
         }
+    }
+
+    pub fn validation_dispatch_failed(&mut self, name: &str, detail: &str) {
+        if self
+            .pending_save
+            .as_ref()
+            .is_none_or(|pending| pending.name != name)
+        {
+            return;
+        }
+        self.pending_save = None;
+        self.validation_dispatched = false;
+        let concise = format!("Parser validation could not start for {name}.");
+        self.status = concise.clone();
+        self.error_popup = Some(concise);
+        self.diagnostics.push(format!(
+            "custom parser validation dispatch {name}: {detail}"
+        ));
+    }
+
+    pub fn parse_dispatch_failed(&mut self, parser_name: &str, path: &Path, detail: &str) {
+        let concise = format!(
+            "Parser {parser_name} could not start for {}.",
+            file_label(path)
+        );
+        self.status = concise.clone();
+        self.error_popup = Some(concise);
+        self.diagnostics.push(format!(
+            "custom parser dispatch {parser_name} ({}): {detail}",
+            path.display()
+        ));
     }
 
     pub fn mark_parse_dispatched(&mut self, parser_name: &str, path: &Path) {
@@ -841,5 +880,60 @@ mod tests {
         });
         assert!(!panel.has_pending_work());
         assert!(!panel.is_running());
+    }
+
+    #[test]
+    fn pending_validation_blocks_reopen_and_saves_original_stage_only() {
+        let temp = TestDir::new();
+        fs::create_dir_all(&temp.0).unwrap();
+        fs::write(temp.0.join("saved.py"), "original").unwrap();
+        let mut panel = ParsersPanel::new(temp.0.clone());
+        panel.edit("saved.py");
+        panel.set_source("first staged source");
+        panel.stage_save().unwrap();
+        panel.mark_validation_dispatched("saved.py");
+        fs::write(temp.0.join("saved.py"), "newer invalid source").unwrap();
+
+        panel.edit("saved.py");
+        panel.add_new();
+        assert_eq!(panel.source(), "first staged source");
+        assert!(panel.stage_save().is_err());
+        panel.handle_event(ParserEvent::SyntaxValid {
+            name: "saved.py".into(),
+        });
+
+        assert_eq!(
+            fs::read_to_string(temp.0.join("saved.py")).unwrap(),
+            "first staged source"
+        );
+        assert!(!panel.has_pending_work());
+    }
+
+    #[test]
+    fn list_propagates_non_directory_errors() {
+        let temp = TestDir::new();
+        fs::write(&temp.0, "not a directory").unwrap();
+        let panel = ParsersPanel::new(temp.0.clone());
+
+        assert!(panel.list().is_err());
+    }
+
+    #[test]
+    fn failed_validation_dispatch_clears_pending_and_records_diagnostic() {
+        let temp = TestDir::new();
+        let mut panel = ParsersPanel::new(temp.0.clone());
+        panel.add_new();
+        panel.stage_save().unwrap();
+
+        panel.validation_dispatch_failed("new_parser.py", "worker disconnected");
+
+        assert!(!panel.has_pending_work());
+        assert!(panel.status().contains("could not start"));
+        assert!(
+            panel
+                .take_diagnostics()
+                .join("\n")
+                .contains("worker disconnected")
+        );
     }
 }
