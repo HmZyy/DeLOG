@@ -253,6 +253,10 @@ impl ParsersPanel {
         ));
     }
 
+    pub fn cancel_dispatch_failed(&mut self, detail: &str) {
+        self.record_error(format!("custom parser cancellation failed: {detail}"));
+    }
+
     pub fn mark_parse_dispatched(&mut self, parser_name: &str, path: &Path) {
         let pending = PendingParse {
             parser: parser_name.to_owned(),
