@@ -8,6 +8,7 @@ use delog_core::chunk::Chunk;
 use delog_core::identity::IdentityRegistry;
 use delog_core::ingest::ingest_channel;
 use delog_core::ingestor::{Ingestor, NullObserver};
+use delog_core::metrics::MetricsRegistry;
 use delog_core::schema::{FieldSchema, TopicSchema};
 use delog_core::snapshot::{DataStore, StoreSnapshot};
 use delog_core::store::TopicStore;
@@ -51,7 +52,7 @@ fn accel_magnitude_script_emits_expected_values() {
     let ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
 
     // Read side: the IMU store built above.
-    let engine = ScriptEngine::spawn(read_store(), sender);
+    let engine = ScriptEngine::spawn(read_store(), sender, Arc::new(MetricsRegistry::new()));
     let script = r#"
 import numpy as np
 x = delog.field('flight/IMU/AccX').v

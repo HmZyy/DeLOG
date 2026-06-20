@@ -1542,6 +1542,7 @@ impl eframe::App for DelogApp {
                                                 &name,
                                                 self.session.store(),
                                                 self.session.ingest_sender(),
+                                                Arc::clone(self.session.metrics()),
                                             );
                                             ui.close();
                                         }
@@ -2101,8 +2102,12 @@ impl eframe::App for DelogApp {
             if let Some(sink) = self.scripts.live_batch_sender_if_running() {
                 self.session.set_live_script_sink(Some(sink));
             }
-            self.scripts
-                .ui(ui.ctx(), self.session.store(), self.session.ingest_sender());
+            self.scripts.ui(
+                ui.ctx(),
+                self.session.store(),
+                self.session.ingest_sender(),
+                Arc::clone(self.session.metrics()),
+            );
         }
     }
 }
