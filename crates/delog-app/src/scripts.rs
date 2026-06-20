@@ -82,11 +82,29 @@ impl ScriptsPanel {
         self.parsers.take_diagnostics()
     }
 
-    #[allow(dead_code)] // Consumed by the Task 6 combined stop control.
     pub fn request_interrupt(&self) {
-        if let Some(engine) = &self.engine {
+        if self.can_interrupt_console()
+            && let Some(engine) = &self.engine
+        {
             engine.request_interrupt();
         }
+    }
+
+    pub fn ordinary_dispatch_enabled(&self) -> bool {
+        !self.running && !self.should_poll_parser_events()
+    }
+
+    fn can_interrupt_console(&self) -> bool {
+        self.running
+    }
+
+    fn reject_ordinary_dispatch(&mut self) -> bool {
+        self.status = if self.should_poll_parser_events() {
+            "parser work is pending; console command not started".into()
+        } else {
+            "another console command is already running".into()
+        };
+        false
     }
 
     pub fn cancel_parsers(&mut self) {
@@ -131,20 +149,75 @@ impl ScriptsPanel {
         store: Arc<DataStore>,
         sender: IngestSender,
         metrics: Arc<MetricsRegistry>,
-    ) {
+    ) -> bool {
+        if !self.ordinary_dispatch_enabled() {
+            return self.reject_ordinary_dispatch();
+        }
         match self.library.load(name) {
-            Ok(source) => {
+            Ok(source) => self.dispatch_run(name.to_owned(), source, store, sender, metrics),
+            Err(e) => {
+                self.status = format!("load failed: {e}");
+                false
+            }
+        }
+    }
+
+    fn dispatch_run(
+        &mut self,
+        name: String,
+        source: String,
+        store: Arc<DataStore>,
+        sender: IngestSender,
+        metrics: Arc<MetricsRegistry>,
+    ) -> bool {
+        if !self.ordinary_dispatch_enabled() {
+            return self.reject_ordinary_dispatch();
+        }
+        match self
+            .engine(store, sender, metrics)
+            .send(ScriptCommand::RunScript {
+                name: name.clone(),
+                source,
+            }) {
+            Ok(()) => {
                 self.console.push_str(&format!("# run {name}\n"));
                 self.status = format!("running {name}");
                 self.running = true;
-                let _ = self
-                    .engine(store, sender, metrics)
-                    .send(ScriptCommand::RunScript {
-                        name: name.to_owned(),
-                        source,
-                    });
+                true
             }
-            Err(e) => self.status = format!("load failed: {e}"),
+            Err(error) => {
+                self.status = format!("run dispatch failed: {error}");
+                false
+            }
+        }
+    }
+
+    fn dispatch_eval(
+        &mut self,
+        line: String,
+        store: Arc<DataStore>,
+        sender: IngestSender,
+        metrics: Arc<MetricsRegistry>,
+    ) -> bool {
+        if !self.ordinary_dispatch_enabled() {
+            return self.reject_ordinary_dispatch();
+        }
+        match self
+            .engine(store, sender, metrics)
+            .send(ScriptCommand::Eval(line.clone()))
+        {
+            Ok(()) => {
+                self.console.push_str(">>> ");
+                self.console.push_str(&line);
+                self.console.push('\n');
+                self.status = "running REPL input".into();
+                self.running = true;
+                true
+            }
+            Err(error) => {
+                self.status = format!("REPL dispatch failed: {error}");
+                false
+            }
         }
     }
 
@@ -352,18 +425,19 @@ impl ScriptsPanel {
                         if icon_btn(ui, crate::icons::trash(), "Clear console").clicked() {
                             self.console.clear();
                         }
-                        let resp = ui.add(
+                        let resp = ui.add_enabled(
+                            self.ordinary_dispatch_enabled(),
                             egui::TextEdit::singleline(&mut self.repl_input)
                                 .desired_width(f32::INFINITY),
                         );
                         if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                             let line = std::mem::take(&mut self.repl_input);
-                            self.console.push_str(">>> ");
-                            self.console.push_str(&line);
-                            self.console.push('\n');
-                            let _ = self
-                                .engine(store.clone(), sender.clone(), Arc::clone(metrics))
-                                .send(ScriptCommand::Eval(line));
+                            self.dispatch_eval(
+                                line,
+                                store.clone(),
+                                sender.clone(),
+                                Arc::clone(metrics),
+                            );
                         }
                     });
                 });
@@ -414,24 +488,34 @@ impl ScriptsPanel {
                     .is_some_and(|e| e.has_live_transform(&run_name));
 
                 // Start: run the editor buffer (enabled only while idle).
-                if icon_btn_enabled(ui, !self.running, crate::icons::play(), "Run").clicked() {
-                    self.console.push_str(&format!("# run {run_name}\n"));
-                    self.status = format!("running {run_name}");
-                    self.running = true;
+                if icon_btn_enabled(
+                    ui,
+                    self.ordinary_dispatch_enabled(),
+                    crate::icons::play(),
+                    "Run",
+                )
+                .clicked()
+                {
                     let source = self.editor_text.clone();
-                    let _ = self
-                        .engine(store.clone(), sender.clone(), Arc::clone(metrics))
-                        .send(ScriptCommand::RunScript {
-                            name: run_name.clone(),
-                            source,
-                        });
+                    self.dispatch_run(
+                        run_name.clone(),
+                        source,
+                        store.clone(),
+                        sender.clone(),
+                        Arc::clone(metrics),
+                    );
                 }
 
                 // Stop: cooperatively interrupt the running script.
-                if icon_btn_enabled(ui, self.running, crate::icons::square(), "Stop").clicked()
-                    && let Some(e) = &self.engine
+                if icon_btn_enabled(
+                    ui,
+                    self.can_interrupt_console(),
+                    crate::icons::square(),
+                    "Stop",
+                )
+                .clicked()
                 {
-                    e.request_interrupt();
+                    self.request_interrupt();
                 }
 
                 // Unregister: drop this script's live transform and remove its
@@ -490,6 +574,7 @@ fn icon_btn_enabled(
 mod tests {
     use std::path::PathBuf;
 
+    use delog_core::ingest::ingest_channel;
     use delog_script::ParserEvent;
 
     use super::*;
@@ -516,6 +601,44 @@ mod tests {
         assert_eq!(panel.status, "running console script");
         assert!(panel.is_parser_running());
         assert!(panel.parser_active_label().contains("raw.py"));
+        assert!(!panel.ordinary_dispatch_enabled());
+        assert!(panel.can_interrupt_console());
+    }
+
+    #[test]
+    fn parser_pending_blocks_saved_runs_and_repl_until_terminal_event() {
+        let root = std::env::temp_dir().join(format!(
+            "delog-scripts-shared-worker-{}",
+            std::process::id()
+        ));
+        let mut panel = ScriptsPanel::new(root.join("scripts"), root.join("parsers"));
+        panel.library.save("saved", "print('saved')").unwrap();
+        panel
+            .parsers
+            .mark_parse_dispatched("raw.py", std::path::Path::new("flight.raw"));
+        let store = Arc::new(DataStore::new());
+        let (sender, _receiver) = ingest_channel();
+        let metrics = Arc::new(MetricsRegistry::new());
+
+        assert!(!panel.run_named(
+            "saved",
+            Arc::clone(&store),
+            sender.clone(),
+            Arc::clone(&metrics),
+        ));
+        assert!(!panel.dispatch_eval("1 + 1".into(), Arc::clone(&store), sender, metrics,));
+        assert!(panel.engine.is_none());
+        assert!(!panel.running);
+        assert!(!panel.can_interrupt_console());
+
+        panel.handle_event(ScriptEvent::Parser(ParserEvent::Succeeded {
+            parser_name: "raw.py".into(),
+            path: PathBuf::from("flight.raw"),
+            topics: 1,
+            rows: 1,
+        }));
+
+        assert!(panel.ordinary_dispatch_enabled());
     }
 
     #[test]
