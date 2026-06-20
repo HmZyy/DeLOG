@@ -1608,6 +1608,7 @@ impl eframe::App for DelogApp {
                                 ui.add_enabled(false, egui::Button::new("No saved parsers"));
                             }
                             Ok(names) => {
+                                let parser_open_enabled = self.scripts.parser_dispatch_enabled();
                                 let tint = ui.visuals().text_color();
                                 let icon = |src: egui::ImageSource<'static>| {
                                     egui::Image::new(src)
@@ -1629,13 +1630,16 @@ impl eframe::App for DelogApp {
                                             ui.close();
                                         }
                                         if ui
-                                            .add(egui::Button::image(icon(
-                                                crate::icons::folder_open(),
-                                            )))
+                                            .add_enabled(
+                                                parser_open_enabled,
+                                                egui::Button::image(icon(
+                                                    crate::icons::folder_open(),
+                                                )),
+                                            )
                                             .on_hover_text("Open file with parser")
                                             .clicked()
                                         {
-                                            self.scripts.request_open(ui.ctx(), &name);
+                                            let _ = self.scripts.request_open(ui.ctx(), &name);
                                             ui.close();
                                         }
                                     });
