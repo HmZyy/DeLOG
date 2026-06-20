@@ -25,4 +25,4 @@ pub mod engine;
 pub mod live;
 
 #[cfg(feature = "python")]
-pub use engine::{ScriptCommand, ScriptEngine, ScriptEvent};
+pub use engine::{ParserEvent, ScriptCommand, ScriptEngine, ScriptEvent};

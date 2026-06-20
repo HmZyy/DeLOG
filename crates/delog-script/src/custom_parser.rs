@@ -9,6 +9,10 @@ use arrow::array::{
     Int64Array, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
 };
 use arrow::datatypes::DataType;
+use delog_core::diagnostics::Diag;
+use delog_core::ingest::{IngestSink, ParseSummary, ParsedBatch, SourceKind};
+use delog_core::schema::{FieldSchema, TopicSchema};
+use delog_core::time::TimeRange;
 use numpy::PyReadonlyArray1;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -56,6 +60,83 @@ pub struct ParserOutput {
     pub warnings: Vec<String>,
     /// Sum of Arrow's logical array buffers (`Array::get_buffer_memory_size`).
     pub arrow_bytes: u64,
+}
+
+/// Validate and emit a fully materialized parser result as one canonical file source.
+///
+/// All fallible schema and shape work happens before `open_source`, so an error
+/// cannot leave a partially opened source behind.
+pub fn emit_parser_output(
+    sink: &mut dyn IngestSink,
+    source_label: &str,
+    output: ParserOutput,
+) -> Result<ParseSummary, String> {
+    let mut topic_names = std::collections::HashSet::with_capacity(output.topics.len());
+    let mut prepared = Vec::with_capacity(output.topics.len());
+    let mut row_count = 0_u64;
+    let mut time_range: Option<TimeRange> = None;
+
+    for topic in output.topics {
+        if !topic_names.insert(topic.name.clone()) {
+            return Err(format!("duplicate parser topic '{}'", topic.name));
+        }
+        let rows = topic.timestamps.len();
+        let fields = topic
+            .fields
+            .iter()
+            .map(|field| {
+                if field.values.len() != rows {
+                    return Err(format!(
+                        "field '{}.{}' has {} values but topic clock has {rows}",
+                        topic.name,
+                        field.name,
+                        field.values.len()
+                    ));
+                }
+                FieldSchema::new(
+                    field.name.clone(),
+                    field.values.data_type().clone(),
+                    None::<String>,
+                    1.0,
+                )
+                .map(|schema| schema.with_description(field.description.clone()))
+                .map_err(|error| format!("topic '{}': {error}", topic.name))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let schema = Arc::new(
+            TopicSchema::new(topic.name.clone(), fields)
+                .map_err(|error| format!("topic '{}': {error}", topic.name))?,
+        );
+        row_count = row_count
+            .checked_add(rows as u64)
+            .ok_or_else(|| "parser row count overflow".to_owned())?;
+        if rows > 0 {
+            let range = TimeRange::new(topic.timestamps.value(0), topic.timestamps.value(rows - 1))
+                .ok_or_else(|| format!("topic '{}' timestamps are not ordered", topic.name))?;
+            time_range = Some(time_range.map_or(range, |current| current.union(range)));
+        }
+        let columns = topic.fields.into_iter().map(|field| field.values).collect();
+        prepared.push((schema, topic.timestamps, columns));
+    }
+
+    let topic_count = prepared.len() as u64;
+    let diagnostics = output.warnings.len() as u64;
+    let summary = ParseSummary {
+        topic_count,
+        row_count,
+        time_range,
+        diagnostics,
+        ..ParseSummary::default()
+    };
+    let source = sink.open_source(source_label, SourceKind::File);
+    for (schema, timestamps, columns) in prepared {
+        sink.submit(ParsedBatch::new(source, schema, timestamps, columns));
+    }
+    for warning in output.warnings {
+        sink.diagnostic(Diag::warning("python-parser-duplicate", warning).with_source(source));
+    }
+    sink.close_source(source, summary.clone());
+    Ok(summary)
 }
 
 struct PendingTopic {
@@ -397,9 +478,38 @@ mod tests {
         Int64Array, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
     };
     use arrow::datatypes::DataType;
+    use delog_core::diagnostics::Diag;
+    use delog_core::identity::SourceId;
+    use delog_core::ingest::{IngestSink, ParseSummary, ParsedBatch, SourceKind};
     use pyo3::prelude::*;
 
     use super::*;
+
+    #[derive(Default)]
+    struct CollectSink {
+        opened: Vec<(String, SourceKind)>,
+        batches: Vec<ParsedBatch>,
+        diagnostics: Vec<Diag>,
+        closed: Vec<(SourceId, ParseSummary)>,
+    }
+
+    impl IngestSink for CollectSink {
+        fn open_source(&mut self, key: &str, kind: SourceKind) -> SourceId {
+            self.opened.push((key.to_owned(), kind));
+            SourceId(7)
+        }
+
+        fn submit(&mut self, batch: ParsedBatch) {
+            self.batches.push(batch);
+        }
+        fn diagnostic(&mut self, diag: Diag) {
+            self.diagnostics.push(diag);
+        }
+        fn progress(&mut self, _source: SourceId, _frac: f32) {}
+        fn close_source(&mut self, source: SourceId, summary: ParseSummary) {
+            self.closed.push((source, summary));
+        }
+    }
 
     static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -426,6 +536,60 @@ mod tests {
             Ok(_) => panic!("expected parser result to be rejected"),
             Err(error) => error.to_string(),
         }
+    }
+
+    #[test]
+    fn emits_complete_output_with_schema_descriptions_warning_and_summary() {
+        let output = parse("[('AP.index',[1.,2.],'clock'),('AP.value',[3.,4.],'tooltip'),('AP.value',[5.,6.],'last')]" ).unwrap();
+        let mut sink = CollectSink::default();
+
+        let summary = emit_parser_output(&mut sink, "flight", output).unwrap();
+
+        assert_eq!(sink.opened, [("flight".into(), SourceKind::File)]);
+        assert_eq!(sink.batches.len(), 1);
+        assert_eq!(sink.batches[0].source, SourceId(7));
+        assert_eq!(sink.batches[0].topic(), "AP");
+        assert_eq!(
+            sink.batches[0]
+                .schema
+                .field_by_name("value")
+                .unwrap()
+                .description
+                .as_deref(),
+            Some("last")
+        );
+        assert_eq!(sink.diagnostics.len(), 1);
+        assert_eq!(sink.diagnostics[0].code, "python-parser-duplicate");
+        assert_eq!(sink.diagnostics[0].source, Some(SourceId(7)));
+        assert_eq!(summary.topic_count, 1);
+        assert_eq!(summary.row_count, 2);
+        assert_eq!(summary.time_range.unwrap().min_us, 1_000_000);
+        assert_eq!(summary.time_range.unwrap().max_us, 2_000_000);
+        assert_eq!(summary.diagnostics, 1);
+        assert_eq!(sink.closed, [(SourceId(7), summary)]);
+    }
+
+    #[test]
+    fn invalid_schema_does_not_open_a_source() {
+        let output = ParserOutput {
+            topics: vec![ParserTopic {
+                name: String::new(),
+                timestamps: Int64Array::from(vec![0]),
+                fields: vec![ParserField {
+                    name: "v".into(),
+                    description: String::new(),
+                    values: Arc::new(Float32Array::from(vec![1.0])),
+                }],
+            }],
+            warnings: vec![],
+            arrow_bytes: 4,
+        };
+        let mut sink = CollectSink::default();
+
+        assert!(emit_parser_output(&mut sink, "bad", output).is_err());
+        assert!(sink.opened.is_empty());
+        assert!(sink.batches.is_empty());
+        assert!(sink.closed.is_empty());
     }
 
     #[test]
