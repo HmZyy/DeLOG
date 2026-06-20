@@ -49,8 +49,8 @@ impl ScriptsPanel {
     }
 
     #[allow(dead_code)] // Consumed by the Task 6 Parsers menu.
-    pub fn parser_names(&self) -> Vec<String> {
-        self.parsers.list().unwrap_or_default()
+    pub fn parser_names(&self) -> std::io::Result<Vec<String>> {
+        self.parsers.list()
     }
 
     #[allow(dead_code)] // Consumed by the Task 6 Parsers menu.
@@ -128,7 +128,8 @@ impl ScriptsPanel {
                 self.console.push_str(&format!("# run {name}\n"));
                 self.status = format!("running {name}");
                 self.running = true;
-                self.engine(store, sender, metrics)
+                let _ = self
+                    .engine(store, sender, metrics)
                     .send(ScriptCommand::RunScript {
                         name: name.to_owned(),
                         source,
@@ -192,11 +193,24 @@ impl ScriptsPanel {
         }
     }
 
-    fn mark_parser_action_dispatched(&mut self, action: &ParserUiAction) {
-        match action {
-            ParserUiAction::ValidateAndSave { name, .. } => {
-                self.parsers.mark_validation_dispatched(name);
-            }
+    fn finish_validation_dispatch(&mut self, name: &str, result: Result<(), String>) {
+        match result {
+            Ok(()) => self.parsers.mark_validation_dispatched(name),
+            Err(error) => self.parsers.validation_dispatch_failed(name, &error),
+        }
+    }
+
+    fn finish_parse_dispatch(
+        &mut self,
+        parser_name: &str,
+        path: &std::path::Path,
+        result: Result<(), String>,
+    ) {
+        match result {
+            Ok(()) => self.parsers.mark_parse_dispatched(parser_name, path),
+            Err(error) => self
+                .parsers
+                .parse_dispatch_failed(parser_name, path, &error),
         }
     }
 
@@ -214,23 +228,27 @@ impl ScriptsPanel {
         self.drain();
 
         for action in self.parsers.ui(ctx) {
-            self.mark_parser_action_dispatched(&action);
             match action {
                 ParserUiAction::ValidateAndSave { name, source, .. } => {
-                    self.engine(store.clone(), sender.clone(), Arc::clone(&metrics))
+                    let parser_name = name.clone();
+                    let result = self
+                        .engine(store.clone(), sender.clone(), Arc::clone(&metrics))
                         .send(ScriptCommand::ValidateParser { name, source });
+                    self.finish_validation_dispatch(&parser_name, result);
                 }
             }
         }
         for request in self.parsers.take_parse_requests() {
-            self.parsers
-                .mark_parse_dispatched(&request.parser_name, &request.path);
-            self.engine(store.clone(), sender.clone(), Arc::clone(&metrics))
+            let parser_name = request.parser_name.clone();
+            let path = request.path.clone();
+            let result = self
+                .engine(store.clone(), sender.clone(), Arc::clone(&metrics))
                 .send(ScriptCommand::ParseFile {
                     parser_name: request.parser_name,
                     source: request.source,
                     path: request.path,
                 });
+            self.finish_parse_dispatch(&parser_name, &path, result);
         }
 
         // Drawn unconditionally so a Remove triggered from the menu can be
@@ -239,7 +257,7 @@ impl ScriptsPanel {
 
         if !self.open {
             if self.should_poll_parser_events() {
-                ctx.request_repaint();
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
             }
             return;
         }
@@ -328,7 +346,8 @@ impl ScriptsPanel {
                             self.console.push_str(">>> ");
                             self.console.push_str(&line);
                             self.console.push('\n');
-                            self.engine(store.clone(), sender.clone(), Arc::clone(metrics))
+                            let _ = self
+                                .engine(store.clone(), sender.clone(), Arc::clone(metrics))
                                 .send(ScriptCommand::Eval(line));
                         }
                     });
@@ -385,7 +404,8 @@ impl ScriptsPanel {
                     self.status = format!("running {run_name}");
                     self.running = true;
                     let source = self.editor_text.clone();
-                    self.engine(store.clone(), sender.clone(), Arc::clone(metrics))
+                    let _ = self
+                        .engine(store.clone(), sender.clone(), Arc::clone(metrics))
                         .send(ScriptCommand::RunScript {
                             name: run_name.clone(),
                             source,
@@ -410,7 +430,7 @@ impl ScriptsPanel {
                 .clicked()
                 {
                     if let Some(e) = &self.engine {
-                        e.send(ScriptCommand::UnregisterLive {
+                        let _ = e.send(ScriptCommand::UnregisterLive {
                             name: run_name.clone(),
                         });
                     }
@@ -494,7 +514,8 @@ mod tests {
         panel.parsers.add_new();
         let action = panel.parsers.stage_save().unwrap();
 
-        panel.mark_parser_action_dispatched(&action);
+        let ParserUiAction::ValidateAndSave { name, .. } = action;
+        panel.finish_validation_dispatch(&name, Ok(()));
 
         assert!(panel.should_poll_parser_events());
         assert!(!panel.running);
@@ -530,5 +551,61 @@ mod tests {
         }));
         assert!(!panel.should_poll_parser_events());
         assert!(!panel.is_parser_running());
+    }
+
+    #[test]
+    fn parser_names_propagates_library_errors() {
+        let root = std::env::temp_dir().join(format!(
+            "delog-scripts-parser-list-error-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&root);
+        std::fs::write(&root, "not a directory").unwrap();
+        let panel = ScriptsPanel::new(root.join("scripts"), root.clone());
+
+        assert!(panel.parser_names().is_err());
+
+        std::fs::remove_file(root).unwrap();
+    }
+
+    #[test]
+    fn failed_validation_dispatch_does_not_start_polling() {
+        let root = std::env::temp_dir().join(format!(
+            "delog-scripts-parser-dispatch-error-{}",
+            std::process::id()
+        ));
+        let mut panel = ScriptsPanel::new(root.join("scripts"), root.join("parsers"));
+        panel.parsers.add_new();
+        panel.parsers.stage_save().unwrap();
+
+        panel.finish_validation_dispatch("new_parser.py", Err("disconnected".into()));
+
+        assert!(!panel.should_poll_parser_events());
+        assert!(
+            panel
+                .take_parser_diagnostics()
+                .join("\n")
+                .contains("disconnected")
+        );
+    }
+
+    #[test]
+    fn failed_parse_dispatch_does_not_start_polling() {
+        let root = std::env::temp_dir().join(format!(
+            "delog-scripts-parse-dispatch-error-{}",
+            std::process::id()
+        ));
+        let mut panel = ScriptsPanel::new(root.join("scripts"), root.join("parsers"));
+        let path = PathBuf::from("flight.raw");
+
+        panel.finish_parse_dispatch("raw.py", &path, Err("disconnected".into()));
+
+        assert!(!panel.should_poll_parser_events());
+        assert!(
+            panel
+                .take_parser_diagnostics()
+                .join("\n")
+                .contains("disconnected")
+        );
     }
 }
