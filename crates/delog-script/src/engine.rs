@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, SyncSender, channel, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -12,7 +13,7 @@ use delog_core::ingest::{IngestSender, IngestSink, ParsedBatch, SourceKind};
 use delog_core::metrics::MetricsRegistry;
 use delog_core::snapshot::DataStore;
 use numpy::IntoPyArray;
-use pyo3::exceptions::{PyKeyboardInterrupt, PyValueError};
+use pyo3::exceptions::{PyKeyboardInterrupt, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
@@ -74,16 +75,65 @@ enum EngineCommand {
     ResetParserCancellation,
 }
 
+struct ParserInterruptToken {
+    pending: AtomicUsize,
+    armed: AtomicBool,
+}
+
+impl Default for ParserInterruptToken {
+    fn default() -> Self {
+        Self {
+            pending: AtomicUsize::new(0),
+            armed: AtomicBool::new(true),
+        }
+    }
+}
+
+impl ParserInterruptToken {
+    fn schedule(self: &Arc<Self>) {
+        self.pending.fetch_add(1, Ordering::SeqCst);
+        let raw = Arc::into_raw(Arc::clone(self)).cast_mut().cast();
+        // Safety: CPython accepts this callback from threads without the GIL.
+        let queued =
+            unsafe { pyo3::ffi::Py_AddPendingCall(Some(raise_parser_interrupt), raw) } == 0;
+        if !queued {
+            self.pending.fetch_sub(1, Ordering::SeqCst);
+            self.disarm();
+            // Safety: the failed queue operation did not take ownership.
+            drop(unsafe { Arc::from_raw(raw.cast::<ParserInterruptToken>()) });
+        }
+    }
+
+    fn disarm(&self) {
+        self.armed.store(false, Ordering::SeqCst);
+    }
+}
+
+extern "C" fn raise_parser_interrupt(arg: *mut std::ffi::c_void) -> std::ffi::c_int {
+    // Safety: every successful queue entry owns one `Arc` raw pointer.
+    let token = unsafe { Arc::from_raw(arg.cast::<ParserInterruptToken>()) };
+    token.pending.fetch_sub(1, Ordering::SeqCst);
+    if token.armed.load(Ordering::SeqCst) {
+        // Safety: this callback runs with the GIL at a CPython pending-call boundary.
+        unsafe { pyo3::ffi::PyErr_SetNone(pyo3::ffi::PyExc_KeyboardInterrupt) };
+        -1
+    } else {
+        0
+    }
+}
+
 #[derive(Default)]
 struct ParserCancellationState {
     requested: bool,
     active: bool,
+    interrupt: Option<Arc<ParserInterruptToken>>,
 }
 
 impl ParserCancellationState {
     fn request(&mut self) -> bool {
+        let should_interrupt = !self.requested && self.active;
         self.requested = true;
-        self.active
+        should_interrupt
     }
 
     fn begin(&mut self) -> bool {
@@ -106,21 +156,73 @@ impl ParserCancellationState {
 
 struct ActiveParserGuard<'a> {
     cancellation: &'a Mutex<ParserCancellationState>,
+    finished: bool,
 }
 
 impl<'a> ActiveParserGuard<'a> {
     fn begin(cancellation: &'a Mutex<ParserCancellationState>) -> Option<Self> {
-        cancellation
-            .lock()
-            .unwrap()
-            .begin()
-            .then_some(Self { cancellation })
+        cancellation.lock().unwrap().begin().then_some(Self {
+            cancellation,
+            finished: false,
+        })
+    }
+
+    fn finish(mut self, py: Python<'_>) -> PyResult<bool> {
+        let mut cancellation = self.cancellation.lock().unwrap();
+        cancellation.finish();
+        self.finished = true;
+        let requested = cancellation.requested;
+        if let Some(interrupt) = cancellation.interrupt.take() {
+            consume_parser_interrupts(py, &interrupt)?;
+        }
+        Ok(requested)
     }
 }
 
 impl Drop for ActiveParserGuard<'_> {
     fn drop(&mut self) {
-        self.cancellation.lock().unwrap().finish();
+        if !self.finished {
+            let mut cancellation = self.cancellation.lock().unwrap();
+            cancellation.finish();
+            if let Some(interrupt) = cancellation.interrupt.take() {
+                interrupt.disarm();
+            }
+        }
+    }
+}
+
+fn consume_parser_interrupts(py: Python<'_>, token: &ParserInterruptToken) -> PyResult<()> {
+    const MAX_DRAIN_ATTEMPTS: usize = 64;
+
+    let mut unrelated_error = None;
+    for _ in 0..MAX_DRAIN_ATTEMPTS {
+        if token.pending.load(Ordering::SeqCst) == 0 {
+            break;
+        }
+        let before = token.pending.load(Ordering::SeqCst);
+        // Safety: the parser worker holds the GIL at its final Python boundary.
+        let status = unsafe { pyo3::ffi::Py_MakePendingCalls() };
+        let after = token.pending.load(Ordering::SeqCst);
+        let error = PyErr::take(py);
+        if let Some(error) = error {
+            if after < before && error.is_instance_of::<PyKeyboardInterrupt>(py) {
+                // This callback consumed one parser-owned interrupt.
+            } else if unrelated_error.is_none() {
+                unrelated_error = Some(error);
+            }
+        } else if status < 0 && unrelated_error.is_none() {
+            unrelated_error = Some(PyRuntimeError::new_err(
+                "CPython failed to process a pending parser interrupt",
+            ));
+        }
+    }
+    // Some CPython configurations only execute pending calls on a designated
+    // interpreter thread. The fixed budget prevents a spin; disarming ensures
+    // any callback left queued cannot poison a later script.
+    token.disarm();
+    match unrelated_error {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
 }
 
@@ -241,7 +343,9 @@ impl ScriptEngine {
     pub fn cancel_parsers(&self) -> Result<(), String> {
         let mut cancellation = self.parser_cancellation.lock().unwrap();
         if cancellation.request() {
-            request_python_interrupt();
+            let interrupt = Arc::new(ParserInterruptToken::default());
+            interrupt.schedule();
+            cancellation.interrupt = Some(interrupt);
         }
         self.tx
             .send(EngineCommand::ResetParserCancellation)
@@ -717,6 +821,7 @@ fn handle_command(
 enum ParserRunError {
     Python(PyErr),
     Other(String),
+    Cancelled,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -728,7 +833,7 @@ fn run_parser_file<F>(
     source: String,
     path: PathBuf,
     parser_cancellation: &Mutex<ParserCancellationState>,
-    before_emit: F,
+    final_python_boundary: F,
 ) where
     F: FnOnce(),
 {
@@ -767,30 +872,37 @@ fn run_parser_file<F>(
         return;
     };
     let parsed = Python::attach(|py| -> Result<ParserOutput, ParserRunError> {
-        let _active_parser = active_parser;
-        let namespace = PyDict::new(py);
-        let code = std::ffi::CString::new(source).map_err(|_| {
-            ParserRunError::Python(PyValueError::new_err("source contains a NUL byte"))
-        })?;
-        let execution = {
-            let _python_timer = metrics.scope("python_parser_python");
-            (|| -> PyResult<Bound<'_, PyAny>> {
-                py.run(&code, Some(&namespace), None)?;
-                let parse = namespace.get_item("Parse")?.ok_or_else(|| {
-                    PyValueError::new_err("parser must define callable Parse(raw_data)")
-                })?;
-                if !parse.is_callable() {
-                    return Err(PyValueError::new_err(
-                        "parser attribute Parse must be callable",
-                    ));
-                }
-                let values = raw.values.into_pyarray(py);
-                parse.call1((values,))
-            })()
-        };
-        let result = execution.map_err(ParserRunError::Python)?;
-        let _convert_timer = metrics.scope("python_parser_convert");
-        parse_python_result(py, &result).map_err(ParserRunError::Python)
+        let parsed = (|| {
+            let namespace = PyDict::new(py);
+            let code = std::ffi::CString::new(source).map_err(|_| {
+                ParserRunError::Python(PyValueError::new_err("source contains a NUL byte"))
+            })?;
+            let execution = {
+                let _python_timer = metrics.scope("python_parser_python");
+                (|| -> PyResult<Bound<'_, PyAny>> {
+                    py.run(&code, Some(&namespace), None)?;
+                    let parse = namespace.get_item("Parse")?.ok_or_else(|| {
+                        PyValueError::new_err("parser must define callable Parse(raw_data)")
+                    })?;
+                    if !parse.is_callable() {
+                        return Err(PyValueError::new_err(
+                            "parser attribute Parse must be callable",
+                        ));
+                    }
+                    let values = raw.values.into_pyarray(py);
+                    parse.call1((values,))
+                })()
+            };
+            let result = execution.map_err(ParserRunError::Python)?;
+            let _convert_timer = metrics.scope("python_parser_convert");
+            parse_python_result(py, &result).map_err(ParserRunError::Python)
+        })();
+        final_python_boundary();
+        match active_parser.finish(py) {
+            Ok(true) => Err(ParserRunError::Cancelled),
+            Ok(false) => parsed,
+            Err(error) => Err(ParserRunError::Python(error)),
+        }
     });
 
     let output = match parsed {
@@ -801,7 +913,6 @@ fn run_parser_file<F>(
             return;
         }
     };
-    before_emit();
     metrics.record("python_parser_output_bytes", output.arrow_bytes as f32);
     let source_label = path.file_stem().or_else(|| path.file_name()).map_or_else(
         || path.to_string_lossy().into_owned(),
@@ -843,6 +954,12 @@ fn finish_parser_failure(
     path: Option<PathBuf>,
     error: ParserRunError,
 ) {
+    if matches!(error, ParserRunError::Cancelled) {
+        if let Some(path) = path {
+            finish_parser_cancelled(metrics, evt_tx, parser_name, path);
+        }
+        return;
+    }
     let message = match error {
         ParserRunError::Python(error) => Python::attach(|py| {
             if error.is_instance_of::<PyKeyboardInterrupt>(py) {
@@ -856,6 +973,7 @@ fn finish_parser_failure(
             metrics.add("python_parser_failures", 1);
             Some(message)
         }
+        ParserRunError::Cancelled => unreachable!("handled above"),
     };
     if message.is_none()
         && let Some(path) = path
@@ -1627,8 +1745,38 @@ def f(batch):
 
         assert!(cancellation.begin());
         assert!(cancellation.request());
+        assert!(!cancellation.request());
         cancellation.finish();
         assert!(!cancellation.active);
+    }
+
+    #[test]
+    fn parser_interrupt_callback_reclaims_its_arc() {
+        for armed in [true, false] {
+            let interrupt = Arc::new(ParserInterruptToken::default());
+            if !armed {
+                interrupt.disarm();
+            }
+            interrupt.pending.store(1, Ordering::SeqCst);
+            let weak = Arc::downgrade(&interrupt);
+            let raw = Arc::into_raw(Arc::clone(&interrupt)).cast_mut().cast();
+
+            Python::attach(|py| {
+                let status = raise_parser_interrupt(raw);
+                if armed {
+                    assert_eq!(status, -1);
+                    let error = PyErr::take(py).expect("armed callback raises");
+                    assert!(error.is_instance_of::<PyKeyboardInterrupt>(py));
+                } else {
+                    assert_eq!(status, 0);
+                    assert!(PyErr::take(py).is_none());
+                }
+            });
+
+            assert_eq!(interrupt.pending.load(Ordering::SeqCst), 0);
+            drop(interrupt);
+            assert!(weak.upgrade().is_none());
+        }
     }
 
     #[test]
@@ -1636,7 +1784,6 @@ def f(batch):
         let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use delog_core::ingest::ingest_channel;
         use delog_core::ingestor::{Ingestor, NullObserver};
-        use std::sync::atomic::{AtomicBool, Ordering};
 
         let path = std::env::temp_dir().join(format!(
             "delog-parser-late-cancel-{}.bin",
@@ -1648,57 +1795,90 @@ def f(batch):
         let (sender, receiver) = ingest_channel();
         let ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
         let metrics = test_metrics();
-        let (event_tx, event_rx) = channel();
-        let cancellation = Arc::new(Mutex::new(ParserCancellationState::default()));
-        let interrupt_requested = AtomicBool::new(false);
+        let ordinary_engine =
+            ScriptEngine::spawn(Arc::new(DataStore::new()), dummy_sender(), test_metrics());
+        for _ in 0..8 {
+            let (event_tx, event_rx) = channel();
+            let cancellation = Arc::new(Mutex::new(ParserCancellationState::default()));
+            let (command_tx, command_rx) = channel();
+            let (live_tx, _live_rx) = sync_channel(LIVE_TRANSFORM_QUEUE_CAP);
+            let (_unused_event_tx, unused_events) = channel();
+            let cancel_engine = ScriptEngine {
+                tx: command_tx,
+                live_tx,
+                events: unused_events,
+                handle: None,
+                active_live: Arc::new(Mutex::new(HashMap::new())),
+                parser_cancellation: Arc::clone(&cancellation),
+            };
+            let (boundary_tx, boundary_rx) = channel();
+            let (cancelled_tx, cancelled_rx) = channel();
+            let (active_tx, active_rx) = channel();
+            let cancellation_for_thread = Arc::clone(&cancellation);
+            let cancel_thread = std::thread::spawn(move || {
+                boundary_rx.recv().unwrap();
+                active_tx
+                    .send(cancellation_for_thread.lock().unwrap().active)
+                    .unwrap();
+                cancel_engine.cancel_parsers().unwrap();
+                cancelled_tx.send(()).unwrap();
+            });
 
-        run_parser_file(
-            &sender,
-            &metrics,
-            &event_tx,
-            "late.py".into(),
-            "import numpy as np\ndef Parse(raw_data):\n    return [('AP.index', np.arange(len(raw_data)), ''), ('AP.value', raw_data, '')]\n".into(),
-            path.clone(),
-            &cancellation,
-            || {
-                let mut state = cancellation.lock().unwrap();
-                assert!(!state.active, "Python active flag leaked into publication");
-                interrupt_requested.store(state.request(), Ordering::SeqCst);
-            },
-        );
+            run_parser_file(
+                &sender,
+                &metrics,
+                &event_tx,
+                "late.py".into(),
+                "import numpy as np\ndef Parse(raw_data):\n    return [('AP.index', np.arange(len(raw_data)), ''), ('AP.value', raw_data, '')]\n".into(),
+                path.clone(),
+                &cancellation,
+                || {
+                    boundary_tx.send(()).unwrap();
+                    cancelled_rx.recv().unwrap();
+                },
+            );
 
-        assert!(!interrupt_requested.load(Ordering::SeqCst));
-        assert!(matches!(
-            event_rx.recv().unwrap(),
-            ScriptEvent::Parser(ParserEvent::Reading { .. })
-        ));
-        assert!(matches!(
-            event_rx.recv().unwrap(),
-            ScriptEvent::Parser(ParserEvent::Running { .. })
-        ));
-        let terminal = event_rx.recv().unwrap();
-        assert!(
-            matches!(terminal, ScriptEvent::Parser(ParserEvent::Cancelled { .. })),
-            "unexpected terminal event: {terminal:?}"
-        );
-        assert!(event_rx.try_recv().is_err());
+            cancel_thread.join().unwrap();
+            assert!(
+                active_rx.recv().unwrap(),
+                "test barrier must run before parser detaches"
+            );
+            assert!(matches!(
+                command_rx.recv().unwrap(),
+                EngineCommand::ResetParserCancellation
+            ));
+            assert!(matches!(
+                event_rx.recv().unwrap(),
+                ScriptEvent::Parser(ParserEvent::Reading { .. })
+            ));
+            assert!(matches!(
+                event_rx.recv().unwrap(),
+                ScriptEvent::Parser(ParserEvent::Running { .. })
+            ));
+            let terminal = event_rx.recv().unwrap();
+            assert!(
+                matches!(terminal, ScriptEvent::Parser(ParserEvent::Cancelled { .. })),
+                "unexpected terminal event: {terminal:?}"
+            );
+            assert!(event_rx.try_recv().is_err());
+
+            ordinary_engine
+                .send(ScriptCommand::Eval("40 + 2".into()))
+                .unwrap();
+            let mut result = None;
+            loop {
+                match ordinary_engine.recv_blocking() {
+                    ScriptEvent::Result(value) => result = Some(value),
+                    ScriptEvent::Done => break,
+                    ScriptEvent::Error(error) => panic!("stray parser interrupt: {error}"),
+                    _ => {}
+                }
+            }
+            assert_eq!(result.as_deref(), Some("42"));
+        }
         drop(sender);
         ingest_thread.join().unwrap();
         assert!(store.load().sources.is_empty());
-
-        let engine =
-            ScriptEngine::spawn(Arc::new(DataStore::new()), dummy_sender(), test_metrics());
-        engine.send(ScriptCommand::Eval("40 + 2".into())).unwrap();
-        let mut result = None;
-        loop {
-            match engine.recv_blocking() {
-                ScriptEvent::Result(value) => result = Some(value),
-                ScriptEvent::Done => break,
-                ScriptEvent::Error(error) => panic!("stray parser interrupt: {error}"),
-                _ => {}
-            }
-        }
-        assert_eq!(result.as_deref(), Some("42"));
         std::fs::remove_file(path).unwrap();
     }
 
