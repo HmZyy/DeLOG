@@ -21,6 +21,8 @@ mod legend;
 mod live;
 mod markers;
 mod models;
+#[cfg(feature = "scripting")]
+mod parsers;
 mod performance;
 mod plot;
 #[cfg(feature = "scripting")]

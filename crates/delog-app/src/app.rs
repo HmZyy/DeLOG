@@ -282,11 +282,11 @@ impl DelogApp {
         Self {
             session,
             #[cfg(feature = "scripting")]
-            scripts: scripts::ScriptsPanel::new(
-                crate::layout::config_dir()
-                    .unwrap_or_else(|| std::path::PathBuf::from("."))
-                    .join("scripts"),
-            ),
+            scripts: {
+                let config_dir =
+                    crate::layout::config_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+                scripts::ScriptsPanel::new(config_dir.join("scripts"), config_dir.join("parsers"))
+            },
             gpu: GpuBridge::from_creation_context(cc),
             caches,
             workspace: Workspace::new(),
@@ -2108,6 +2108,13 @@ impl eframe::App for DelogApp {
                 self.session.ingest_sender(),
                 Arc::clone(self.session.metrics()),
             );
+            for message in self.scripts.take_parser_diagnostics() {
+                self.session
+                    .push_diagnostic(delog_core::diagnostics::Diag::error(
+                        "python-parser",
+                        message,
+                    ));
+            }
         }
     }
 }

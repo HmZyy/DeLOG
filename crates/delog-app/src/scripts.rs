@@ -9,6 +9,8 @@ use delog_script::library::ScriptLibrary;
 use delog_script::{ScriptCommand, ScriptEngine, ScriptEvent};
 use egui_code_editor::{CodeEditor, ColorTheme, Syntax};
 
+use crate::parsers::{ParserUiAction, ParsersPanel};
+
 /// All UI + engine state for the scripts window (the editor + REPL console). The
 /// saved-script library is surfaced through the Tools / Scripts / Run menu, not
 /// in this window.
@@ -25,10 +27,11 @@ pub struct ScriptsPanel {
     pending_delete: Option<String>,
     /// Whether a command is in flight (toggles the Run/Cancel button).
     running: bool,
+    parsers: ParsersPanel,
 }
 
 impl ScriptsPanel {
-    pub fn new(scripts_dir: std::path::PathBuf) -> Self {
+    pub fn new(scripts_dir: std::path::PathBuf, parsers_dir: std::path::PathBuf) -> Self {
         let library = ScriptLibrary::new(scripts_dir);
         Self {
             open: false,
@@ -41,6 +44,48 @@ impl ScriptsPanel {
             status: String::new(),
             pending_delete: None,
             running: false,
+            parsers: ParsersPanel::new(parsers_dir),
+        }
+    }
+
+    #[allow(dead_code)] // Consumed by the Task 6 Parsers menu.
+    pub fn parser_names(&self) -> Vec<String> {
+        self.parsers.list().unwrap_or_default()
+    }
+
+    #[allow(dead_code)] // Consumed by the Task 6 Parsers menu.
+    pub fn add(&mut self) {
+        self.parsers.add_new();
+    }
+
+    #[allow(dead_code)] // Consumed by the Task 6 Parsers menu.
+    pub fn edit(&mut self, name: &str) {
+        self.parsers.edit(name);
+    }
+
+    #[allow(dead_code)] // Consumed by the Task 6 Parsers menu.
+    pub fn request_open(&mut self, ctx: &egui::Context, name: &str) {
+        self.parsers.request_open(ctx, name);
+    }
+
+    #[allow(dead_code)] // Consumed by the Task 6 combined toolbar state.
+    pub fn is_parser_running(&self) -> bool {
+        self.parsers.is_running()
+    }
+
+    #[allow(dead_code)] // Consumed by the Task 6 toolbar.
+    pub fn parser_active_label(&self) -> String {
+        self.parsers.active_label()
+    }
+
+    pub fn take_parser_diagnostics(&mut self) -> Vec<String> {
+        self.parsers.take_diagnostics()
+    }
+
+    #[allow(dead_code)] // Consumed by the Task 6 combined stop control.
+    pub fn request_interrupt(&self) {
+        if let Some(engine) = &self.engine {
+            engine.request_interrupt();
         }
     }
 
@@ -114,30 +159,36 @@ impl ScriptsPanel {
     }
 
     fn drain(&mut self) {
-        if let Some(engine) = &self.engine {
-            for ev in engine.drain_events() {
-                match ev {
-                    ScriptEvent::Output(s) => self.console.push_str(&s),
-                    ScriptEvent::Result(r) => {
-                        self.console.push_str(&r);
-                        self.console.push('\n');
-                    }
-                    ScriptEvent::Error(e) => {
-                        self.console.push_str(&e);
-                        self.console.push('\n');
-                        self.status = "error".into();
-                        self.running = false;
-                    }
-                    ScriptEvent::Done => {
-                        self.status = "done".into();
-                        self.running = false;
-                    }
-                    // Live-batch processing carries no command-completion
-                    // semantics; it must not touch running/status/console.
-                    ScriptEvent::LiveBatchProcessed => {}
-                    ScriptEvent::Parser(_) => {}
-                }
+        let events = self
+            .engine
+            .as_ref()
+            .map(ScriptEngine::drain_events)
+            .unwrap_or_default();
+        for event in events {
+            self.handle_event(event);
+        }
+    }
+
+    fn handle_event(&mut self, event: ScriptEvent) {
+        match event {
+            ScriptEvent::Output(s) => self.console.push_str(&s),
+            ScriptEvent::Result(r) => {
+                self.console.push_str(&r);
+                self.console.push('\n');
             }
+            ScriptEvent::Error(e) => {
+                self.console.push_str(&e);
+                self.console.push('\n');
+                self.status = "error".into();
+                self.running = false;
+            }
+            ScriptEvent::Done => {
+                self.status = "done".into();
+                self.running = false;
+            }
+            // Live-batch processing carries no command-completion semantics.
+            ScriptEvent::LiveBatchProcessed => {}
+            ScriptEvent::Parser(event) => self.parsers.handle_event(event),
         }
     }
 
@@ -148,14 +199,35 @@ impl ScriptsPanel {
         sender: IngestSender,
         metrics: Arc<MetricsRegistry>,
     ) {
+        self.drain();
+
+        for action in self.parsers.ui(ctx) {
+            match action {
+                ParserUiAction::ValidateAndSave { name, source, .. } => {
+                    self.engine(store.clone(), sender.clone(), Arc::clone(&metrics))
+                        .send(ScriptCommand::ValidateParser { name, source });
+                }
+            }
+        }
+        for request in self.parsers.take_parse_requests() {
+            self.engine(store.clone(), sender.clone(), Arc::clone(&metrics))
+                .send(ScriptCommand::ParseFile {
+                    parser_name: request.parser_name,
+                    source: request.source,
+                    path: request.path,
+                });
+        }
+
         // Drawn unconditionally so a Remove triggered from the menu can be
         // confirmed even when the Console window is closed.
         self.delete_confirm_ui(ctx);
 
         if !self.open {
+            if self.parsers.is_open() || self.parsers.is_running() {
+                ctx.request_repaint();
+            }
             return;
         }
-        self.drain();
         let mut open = self.open;
         egui::Window::new("Scripts")
             .open(&mut open)
@@ -362,4 +434,34 @@ fn icon_btn_enabled(
         .tint(ui.visuals().text_color());
     ui.add_enabled(enabled, egui::Button::image(image))
         .on_hover_text(hover)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use delog_script::ParserEvent;
+
+    use super::*;
+
+    #[test]
+    fn parser_events_do_not_change_console_running_state() {
+        let root = std::env::temp_dir().join(format!(
+            "delog-scripts-parser-routing-{}",
+            std::process::id()
+        ));
+        let mut panel = ScriptsPanel::new(root.join("scripts"), root.join("parsers"));
+        panel.running = true;
+        panel.status = "running console script".into();
+
+        panel.handle_event(ScriptEvent::Parser(ParserEvent::Running {
+            parser_name: "raw.py".into(),
+            path: PathBuf::from("flight.raw"),
+        }));
+
+        assert!(panel.running);
+        assert_eq!(panel.status, "running console script");
+        assert!(panel.is_parser_running());
+        assert!(panel.parser_active_label().contains("raw.py"));
+    }
 }
