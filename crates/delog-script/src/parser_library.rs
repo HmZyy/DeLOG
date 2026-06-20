@@ -12,6 +12,16 @@ static NEXT_STAGING_FILE: AtomicU64 = AtomicU64::new(0);
 const STAGING_PREFIX: &str = ".delog-parser-";
 const STAGING_SUFFIX: &str = ".tmp";
 const STALE_STAGING_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+#[cfg(windows)]
+const WINDOWS_MOVE_FILE_FLAGS: u32 =
+    windows_sys::Win32::Storage::FileSystem::MOVEFILE_WRITE_THROUGH;
+#[cfg(all(not(windows), test))]
+const WINDOWS_MOVE_FILE_FLAGS: u32 = 8;
+#[cfg(all(windows, test))]
+const WINDOWS_MOVE_FILE_REPLACE_EXISTING: u32 =
+    windows_sys::Win32::Storage::FileSystem::MOVEFILE_REPLACE_EXISTING;
+#[cfg(all(not(windows), test))]
+const WINDOWS_MOVE_FILE_REPLACE_EXISTING: u32 = 1;
 
 fn private_create_options() -> OpenOptions {
     let mut options = OpenOptions::new();
@@ -125,7 +135,39 @@ fn rename_noclobber(source: &Path, destination: &Path) -> io::Result<()> {
 
 #[cfg(windows)]
 fn rename_noclobber(source: &Path, destination: &Path) -> io::Result<()> {
-    fs::rename(source, destination)
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+
+    fn wide_path(path: &Path) -> io::Result<Vec<u16>> {
+        let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+        if wide.contains(&0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Windows paths passed to MoveFileExW cannot contain NUL",
+            ));
+        }
+        wide.push(0);
+        Ok(wide)
+    }
+
+    let source = wide_path(source)?;
+    let destination = wide_path(destination)?;
+    // MOVEFILE_REPLACE_EXISTING is deliberately absent: an existing parser
+    // must make publication fail rather than be overwritten.
+    // SAFETY: both buffers are NUL-terminated and live for the duration of the call.
+    let moved = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            WINDOWS_MOVE_FILE_FLAGS,
+        )
+    };
+    if moved == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(not(any(
@@ -345,6 +387,14 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     static NEXT_TEMP_DIR: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn windows_move_flags_never_allow_destination_replacement() {
+        assert_eq!(
+            WINDOWS_MOVE_FILE_FLAGS & WINDOWS_MOVE_FILE_REPLACE_EXISTING,
+            0
+        );
+    }
 
     struct TestDir(PathBuf);
 
