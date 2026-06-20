@@ -1,8 +1,64 @@
 //! Persistent library for custom Python log parsers.
 
-use std::fs;
-use std::io;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_STAGING_FILE: AtomicU64 = AtomicU64::new(0);
+
+struct StagedFile {
+    path: PathBuf,
+    moved: bool,
+}
+
+impl StagedFile {
+    fn write(dir: &Path, source: &str) -> io::Result<Self> {
+        let (staged, mut file) = Self::create(dir)?;
+        file.write_all(source.as_bytes())?;
+        file.flush()?;
+        file.sync_all()?;
+        drop(file);
+        Ok(staged)
+    }
+
+    fn create(dir: &Path) -> io::Result<(Self, File)> {
+        loop {
+            let sequence = NEXT_STAGING_FILE.fetch_add(1, Ordering::Relaxed);
+            let path = dir.join(format!(
+                ".delog-parser-{}-{sequence}.tmp",
+                std::process::id()
+            ));
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(file) => return Ok((Self { path, moved: false }, file)),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+}
+
+impl Drop for StagedFile {
+    fn drop(&mut self) {
+        if !self.moved {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn commit_replace(
+    staged: &mut StagedFile,
+    destination: &Path,
+    replace: impl FnOnce(&Path, &Path) -> io::Result<()>,
+) -> io::Result<()> {
+    replace(&staged.path, destination)?;
+    staged.moved = true;
+    Ok(())
+}
+
+fn publish_new(staged: &StagedFile, destination: &Path) -> io::Result<()> {
+    fs::hard_link(&staged.path, destination)
+}
 
 /// A custom parser library rooted at a directory of `.py` files.
 pub struct ParserLibrary {
@@ -86,25 +142,24 @@ impl ParserLibrary {
         let old_name = old_name
             .map(|old_name| self.normalize_name(old_name))
             .transpose()?;
-        let is_rename = old_name
-            .as_ref()
-            .is_some_and(|old_name| old_name != &destination_name);
-
         fs::create_dir_all(&self.dir)?;
         let destination = self.dir.join(&destination_name);
-        if is_rename && destination.try_exists()? {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!("parser '{destination_name}' already exists"),
-            ));
-        }
-        fs::write(&destination, source)?;
+        let mut staged = StagedFile::write(&self.dir, source)?;
 
-        if let Some(old_name) = old_name.filter(|_| is_rename)
-            && let Err(error) = fs::remove_file(self.dir.join(old_name))
-        {
-            let _ = fs::remove_file(destination);
-            return Err(error);
+        match old_name {
+            None => publish_new(&staged, &destination)?,
+            Some(old_name) if old_name == destination_name => {
+                commit_replace(&mut staged, &destination, |source, destination| {
+                    fs::rename(source, destination)
+                })?;
+            }
+            Some(old_name) => {
+                publish_new(&staged, &destination)?;
+                if let Err(error) = fs::remove_file(self.dir.join(old_name)) {
+                    let _ = fs::remove_file(&destination);
+                    return Err(error);
+                }
+            }
         }
         Ok(destination_name)
     }
@@ -192,6 +247,41 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(library.load("old.py").unwrap(), "old source");
         assert_eq!(library.load("existing.py").unwrap(), "existing source");
+    }
+
+    #[test]
+    fn new_save_rejects_existing_destination_without_overwriting_it() {
+        let temp = TestDir::new();
+        let library = ParserLibrary::new(&temp.0);
+        library
+            .save(None, "existing.py", "original source")
+            .unwrap();
+
+        let error = library
+            .save(None, "existing.py", "replacement source")
+            .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(library.load("existing.py").unwrap(), "original source");
+    }
+
+    #[test]
+    fn failed_same_name_publish_preserves_original_and_cleans_staging_file() {
+        let temp = TestDir::new();
+        let library = ParserLibrary::new(&temp.0);
+        library.save(None, "parser.py", "original source").unwrap();
+
+        let mut staged = StagedFile::write(&temp.0, "replacement source").unwrap();
+        let error = commit_replace(&mut staged, &temp.0.join("parser.py"), |_, _| {
+            Err(io::Error::other("injected publish failure"))
+        })
+        .unwrap_err();
+        drop(staged);
+
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(library.load("parser.py").unwrap(), "original source");
+        assert_eq!(library.list().unwrap(), vec!["parser.py"]);
+        assert_eq!(fs::read_dir(&temp.0).unwrap().count(), 1);
     }
 
     #[test]
