@@ -410,7 +410,7 @@ impl ParsersPanel {
         }
     }
 
-    pub fn ui(&mut self, ctx: &egui::Context) -> Vec<ParserUiAction> {
+    pub fn ui(&mut self, ctx: &egui::Context, validation_enabled: bool) -> Vec<ParserUiAction> {
         self.delete_confirm_ui(ctx);
         self.error_ui(ctx);
         if !self.open {
@@ -434,7 +434,7 @@ impl ParsersPanel {
                         ui,
                         crate::icons::save(),
                         "Save",
-                        self.pending_save.is_none(),
+                        validation_enabled && self.pending_save.is_none(),
                     )
                     .clicked()
                     {
@@ -585,6 +585,16 @@ impl ParsersPanel {
     #[cfg(test)]
     pub fn set_source(&mut self, source: impl Into<String>) {
         self.source = source.into();
+    }
+
+    #[cfg(test)]
+    pub fn enqueue_parse_request(&self, request: ParseRequest) {
+        self.parse_requests_tx.send(request).unwrap();
+    }
+
+    #[cfg(test)]
+    pub fn validation_dispatched(&self) -> bool {
+        self.validation_dispatched
     }
 }
 
