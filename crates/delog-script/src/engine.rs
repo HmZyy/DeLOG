@@ -90,18 +90,27 @@ impl Default for ParserInterruptToken {
 }
 
 impl ParserInterruptToken {
-    fn schedule(self: &Arc<Self>) {
+    fn schedule(self: &Arc<Self>) -> bool {
+        self.schedule_with(|raw| {
+            // Safety: CPython accepts this callback from threads without the GIL.
+            unsafe { pyo3::ffi::Py_AddPendingCall(Some(raise_parser_interrupt), raw) }
+        })
+    }
+
+    fn schedule_with(
+        self: &Arc<Self>,
+        add_pending: impl FnOnce(*mut std::ffi::c_void) -> std::ffi::c_int,
+    ) -> bool {
         self.pending.fetch_add(1, Ordering::SeqCst);
         let raw = Arc::into_raw(Arc::clone(self)).cast_mut().cast();
-        // Safety: CPython accepts this callback from threads without the GIL.
-        let queued =
-            unsafe { pyo3::ffi::Py_AddPendingCall(Some(raise_parser_interrupt), raw) } == 0;
+        let queued = add_pending(raw) == 0;
         if !queued {
             self.pending.fetch_sub(1, Ordering::SeqCst);
             self.disarm();
             // Safety: the failed queue operation did not take ownership.
             drop(unsafe { Arc::from_raw(raw.cast::<ParserInterruptToken>()) });
         }
+        queued
     }
 
     fn disarm(&self) {
@@ -127,13 +136,13 @@ struct ParserCancellationState {
     requested: bool,
     active: bool,
     interrupt: Option<Arc<ParserInterruptToken>>,
+    reset_queued: bool,
 }
 
 impl ParserCancellationState {
     fn request(&mut self) -> bool {
-        let should_interrupt = !self.requested && self.active;
         self.requested = true;
-        should_interrupt
+        self.active && self.interrupt.is_none()
     }
 
     fn begin(&mut self) -> bool {
@@ -151,6 +160,7 @@ impl ParserCancellationState {
 
     fn reset(&mut self) {
         self.requested = false;
+        self.reset_queued = false;
     }
 }
 
@@ -341,15 +351,33 @@ impl ScriptEngine {
     /// marker forms a FIFO boundary: parser commands already queued are
     /// cancelled, while commands submitted after this method returns may run.
     pub fn cancel_parsers(&self) -> Result<(), String> {
+        self.cancel_parsers_with(ParserInterruptToken::schedule)
+    }
+
+    fn cancel_parsers_with(
+        &self,
+        schedule: impl FnOnce(&Arc<ParserInterruptToken>) -> bool,
+    ) -> Result<(), String> {
         let mut cancellation = self.parser_cancellation.lock().unwrap();
+        let mut interrupt_error = None;
         if cancellation.request() {
             let interrupt = Arc::new(ParserInterruptToken::default());
-            interrupt.schedule();
-            cancellation.interrupt = Some(interrupt);
+            if schedule(&interrupt) {
+                cancellation.interrupt = Some(interrupt);
+            } else {
+                interrupt_error = Some("could not queue pending parser interrupt".to_owned());
+            }
         }
-        self.tx
-            .send(EngineCommand::ResetParserCancellation)
-            .map_err(|_| "script worker command channel disconnected".to_owned())
+        if !cancellation.reset_queued {
+            self.tx
+                .send(EngineCommand::ResetParserCancellation)
+                .map_err(|_| "script worker command channel disconnected".to_owned())?;
+            cancellation.reset_queued = true;
+        }
+        match interrupt_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     /// A cloneable sender for raw live batches (the app's live-decoder side
@@ -1745,7 +1773,15 @@ def f(batch):
 
         assert!(cancellation.begin());
         assert!(cancellation.request());
-        assert!(!cancellation.request());
+        assert!(
+            cancellation.request(),
+            "an unscheduled interrupt is retryable"
+        );
+        cancellation.interrupt = Some(Arc::new(ParserInterruptToken::default()));
+        assert!(
+            !cancellation.request(),
+            "a queued interrupt is not duplicated"
+        );
         cancellation.finish();
         assert!(!cancellation.active);
     }
@@ -1777,6 +1813,113 @@ def f(batch):
             drop(interrupt);
             assert!(weak.upgrade().is_none());
         }
+    }
+
+    #[test]
+    fn failed_active_cancel_can_retry_without_a_second_reset_marker() {
+        let (command_tx, command_rx) = channel();
+        let (live_tx, _live_rx) = sync_channel(LIVE_TRANSFORM_QUEUE_CAP);
+        let (_event_tx, events) = channel();
+        let cancellation = Arc::new(Mutex::new(ParserCancellationState::default()));
+        cancellation.lock().unwrap().active = true;
+        let engine = ScriptEngine {
+            tx: command_tx,
+            live_tx,
+            events,
+            handle: None,
+            active_live: Arc::new(Mutex::new(HashMap::new())),
+            parser_cancellation: Arc::clone(&cancellation),
+        };
+
+        let failed_interrupt = std::sync::Mutex::new(None);
+        let error = engine
+            .cancel_parsers_with(|interrupt| {
+                interrupt.schedule_with(|raw| {
+                    // Observe the allocation without taking the queue's ownership.
+                    unsafe { Arc::increment_strong_count(raw.cast::<ParserInterruptToken>()) };
+                    let observer = unsafe { Arc::from_raw(raw.cast::<ParserInterruptToken>()) };
+                    *failed_interrupt.lock().unwrap() = Some(Arc::downgrade(&observer));
+                    -1
+                })
+            })
+            .unwrap_err();
+        assert!(error.contains("pending parser interrupt"));
+        assert!(
+            failed_interrupt
+                .into_inner()
+                .unwrap()
+                .unwrap()
+                .upgrade()
+                .is_none(),
+            "failed queue operation retained its raw Arc"
+        );
+        {
+            let state = cancellation.lock().unwrap();
+            assert!(state.requested);
+            assert!(state.active);
+            assert!(state.interrupt.is_none());
+            assert!(state.reset_queued);
+        }
+        assert!(matches!(
+            command_rx.recv().unwrap(),
+            EngineCommand::ResetParserCancellation
+        ));
+
+        let queued_raw = std::sync::Mutex::new(None);
+        engine
+            .cancel_parsers_with(|interrupt| {
+                interrupt.schedule_with(|raw| {
+                    *queued_raw.lock().unwrap() = Some(raw);
+                    0
+                })
+            })
+            .unwrap();
+        assert!(
+            command_rx.try_recv().is_err(),
+            "retry queued a second reset"
+        );
+        let interrupt = Arc::downgrade(cancellation.lock().unwrap().interrupt.as_ref().unwrap());
+        Python::attach(|py| {
+            assert_eq!(
+                raise_parser_interrupt(queued_raw.into_inner().unwrap().unwrap()),
+                -1
+            );
+            assert!(
+                PyErr::take(py)
+                    .unwrap()
+                    .is_instance_of::<PyKeyboardInterrupt>(py)
+            );
+        });
+        cancellation.lock().unwrap().interrupt.take();
+        assert!(interrupt.upgrade().is_none());
+    }
+
+    #[test]
+    fn inactive_parser_cancel_succeeds_without_scheduling_an_interrupt() {
+        let (command_tx, command_rx) = channel();
+        let (live_tx, _live_rx) = sync_channel(LIVE_TRANSFORM_QUEUE_CAP);
+        let (_event_tx, events) = channel();
+        let cancellation = Arc::new(Mutex::new(ParserCancellationState::default()));
+        let engine = ScriptEngine {
+            tx: command_tx,
+            live_tx,
+            events,
+            handle: None,
+            active_live: Arc::new(Mutex::new(HashMap::new())),
+            parser_cancellation: Arc::clone(&cancellation),
+        };
+
+        engine
+            .cancel_parsers_with(|_| panic!("inactive cancellation scheduled an interrupt"))
+            .unwrap();
+        let state = cancellation.lock().unwrap();
+        assert!(state.requested);
+        assert!(state.interrupt.is_none());
+        assert!(state.reset_queued);
+        assert!(matches!(
+            command_rx.recv().unwrap(),
+            EngineCommand::ResetParserCancellation
+        ));
     }
 
     #[test]
