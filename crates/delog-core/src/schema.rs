@@ -16,6 +16,7 @@ pub struct FieldSchema {
     pub name: String,
     pub dtype: DataType,
     pub unit: Option<String>,
+    pub description: Option<String>,
     pub multiplier: f64,
 }
 
@@ -64,8 +65,17 @@ impl FieldSchema {
             unit: unit
                 .map(Into::into)
                 .and_then(|u: String| if u.is_empty() { None } else { Some(u) }),
+            description: None,
             multiplier,
         })
+    }
+
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = match description.into() {
+            description if description.is_empty() => None,
+            description => Some(description),
+        };
+        self
     }
 
     pub fn is_numeric(&self) -> bool {
@@ -275,6 +285,18 @@ mod tests {
     fn empty_unit_is_normalized_to_none() {
         let f = FieldSchema::new("Alt", DataType::Float64, Some(""), 1.0).unwrap();
         assert_eq!(f.unit, None);
+    }
+
+    #[test]
+    fn field_description_is_optional_and_builder_preserves_other_metadata() {
+        let field = FieldSchema::new("Alt", DataType::Float64, Some("m"), 1.0).unwrap();
+        assert_eq!(field.description, None);
+
+        let field = field.with_description("filtered altitude");
+        assert_eq!(field.description.as_deref(), Some("filtered altitude"));
+        assert_eq!(field.unit.as_deref(), Some("m"));
+
+        assert_eq!(field.with_description("").description, None);
     }
 
     #[test]
