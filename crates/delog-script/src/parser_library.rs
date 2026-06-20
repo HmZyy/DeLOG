@@ -16,7 +16,13 @@ impl ParserLibrary {
 
     /// Validates a local parser filename and ensures it has one `.py` suffix.
     pub fn normalize_name(&self, name: &str) -> io::Result<String> {
-        if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+        if name.is_empty()
+            || name.contains(['/', '\\'])
+            || name.contains("..")
+            || name
+                .chars()
+                .any(|character| character.is_control() || "<>:\"|?*".contains(character))
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("invalid parser name '{name}'"),
@@ -24,13 +30,30 @@ impl ParserLibrary {
         }
 
         match name.split_once('.') {
-            None => Ok(format!("{name}.py")),
-            Some((stem, "py")) if !stem.is_empty() => Ok(name.to_owned()),
+            None if !Self::is_windows_reserved_stem(name) => Ok(format!("{name}.py")),
+            Some((stem, "py")) if !stem.is_empty() && !Self::is_windows_reserved_stem(stem) => {
+                Ok(name.to_owned())
+            }
             Some(_) => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("parser name must have exactly one .py extension: '{name}'"),
             )),
+            None => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid parser name '{name}'"),
+            )),
         }
+    }
+
+    fn is_windows_reserved_stem(stem: &str) -> bool {
+        let stem = stem.to_ascii_uppercase();
+        matches!(
+            stem.as_str(),
+            "CON" | "PRN" | "AUX" | "NUL" | "CLOCK$" | "CONIN$" | "CONOUT$"
+        ) || ["COM", "LPT"].iter().any(|prefix| {
+            stem.strip_prefix(prefix)
+                .is_some_and(|suffix| matches!(suffix.as_bytes(), [b'1'..=b'9']))
+        })
     }
 
     /// Returns parser filenames, including `.py`, in lexical order.
@@ -44,12 +67,8 @@ impl ParserLibrary {
         for entry in entries {
             let entry = entry?;
             if entry.file_type()?.is_file()
-                && entry
-                    .path()
-                    .extension()
-                    .and_then(|extension| extension.to_str())
-                    == Some("py")
                 && let Some(name) = entry.file_name().to_str()
+                && matches!(self.normalize_name(name), Ok(normalized) if normalized == name)
             {
                 names.push(name.to_owned());
             }
@@ -158,11 +177,47 @@ mod tests {
     }
 
     #[test]
+    fn list_omits_files_that_do_not_normalize_to_their_own_name() {
+        let temp = TestDir::new();
+        fs::create_dir_all(&temp.0).unwrap();
+        fs::write(temp.0.join("parser.py"), "valid").unwrap();
+        fs::write(temp.0.join("parser.v1.py"), "multiple extensions").unwrap();
+        fs::write(temp.0.join(".py"), "empty stem").unwrap();
+        fs::write(temp.0.join("C:parser.py"), "Windows drive prefix").unwrap();
+
+        let library = ParserLibrary::new(&temp.0);
+        assert_eq!(library.list().unwrap(), vec!["parser.py"]);
+    }
+
+    #[test]
     fn rejects_unsafe_paths() {
         let temp = TestDir::new();
         let library = ParserLibrary::new(&temp.0);
 
         for name in ["", "../evil", "safe..evil", "nested/file", "nested\\file"] {
+            assert_eq!(
+                library.normalize_name(name).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput,
+                "{name:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_non_portable_filename_components() {
+        let temp = TestDir::new();
+        let library = ParserLibrary::new(&temp.0);
+
+        for name in [
+            "C:parser.py",
+            "parser:name.py",
+            "parser?.py",
+            "parser*.py",
+            "parser|name.py",
+            "parser\u{7f}.py",
+            "CON.py",
+            "lpt1.py",
+        ] {
             assert_eq!(
                 library.normalize_name(name).unwrap_err().kind(),
                 io::ErrorKind::InvalidInput,
