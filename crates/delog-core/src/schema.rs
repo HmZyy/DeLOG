@@ -294,7 +294,10 @@ mod tests {
 
         let field = field.with_description("filtered altitude");
         assert_eq!(field.description.as_deref(), Some("filtered altitude"));
+        assert_eq!(field.name, "Alt");
+        assert_eq!(field.dtype, DataType::Float64);
         assert_eq!(field.unit.as_deref(), Some("m"));
+        assert_eq!(field.multiplier, 1.0);
 
         assert_eq!(field.with_description("").description, None);
     }
