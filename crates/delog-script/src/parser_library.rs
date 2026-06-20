@@ -86,12 +86,25 @@ impl ParserLibrary {
         let old_name = old_name
             .map(|old_name| self.normalize_name(old_name))
             .transpose()?;
+        let is_rename = old_name
+            .as_ref()
+            .is_some_and(|old_name| old_name != &destination_name);
 
         fs::create_dir_all(&self.dir)?;
-        fs::write(self.dir.join(&destination_name), source)?;
+        let destination = self.dir.join(&destination_name);
+        if is_rename && destination.try_exists()? {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("parser '{destination_name}' already exists"),
+            ));
+        }
+        fs::write(&destination, source)?;
 
-        if let Some(old_name) = old_name.filter(|old_name| old_name != &destination_name) {
-            fs::remove_file(self.dir.join(old_name))?;
+        if let Some(old_name) = old_name.filter(|_| is_rename)
+            && let Err(error) = fs::remove_file(self.dir.join(old_name))
+        {
+            let _ = fs::remove_file(destination);
+            return Err(error);
         }
         Ok(destination_name)
     }
@@ -164,6 +177,40 @@ mod tests {
     }
 
     #[test]
+    fn rename_rejects_existing_destination_without_overwriting_it() {
+        let temp = TestDir::new();
+        let library = ParserLibrary::new(&temp.0);
+        library.save(None, "old.py", "old source").unwrap();
+        library
+            .save(None, "existing.py", "existing source")
+            .unwrap();
+
+        let error = library
+            .save(Some("old.py"), "existing.py", "replacement")
+            .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(library.load("old.py").unwrap(), "old source");
+        assert_eq!(library.load("existing.py").unwrap(), "existing source");
+    }
+
+    #[test]
+    fn failed_old_remove_cleans_up_new_destination() {
+        let temp = TestDir::new();
+        fs::create_dir_all(temp.0.join("old.py")).unwrap();
+        let library = ParserLibrary::new(&temp.0);
+
+        assert!(
+            library
+                .save(Some("old.py"), "new.py", "new source")
+                .is_err()
+        );
+
+        assert!(temp.0.join("old.py").is_dir());
+        assert!(!temp.0.join("new.py").exists());
+    }
+
+    #[test]
     fn list_returns_only_sorted_python_filenames() {
         let temp = TestDir::new();
         fs::create_dir_all(&temp.0).unwrap();
@@ -174,6 +221,14 @@ mod tests {
 
         let library = ParserLibrary::new(&temp.0);
         assert_eq!(library.list().unwrap(), vec!["alpha.py", "zulu.py"]);
+    }
+
+    #[test]
+    fn missing_directory_lists_as_empty() {
+        let temp = TestDir::new();
+        let library = ParserLibrary::new(&temp.0);
+
+        assert!(library.list().unwrap().is_empty());
     }
 
     #[test]
