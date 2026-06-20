@@ -41,6 +41,7 @@ struct PendingSave {
 #[allow(dead_code)] // Labels are consumed by the Task 6 toolbar.
 #[derive(Debug, Clone)]
 enum ParsePhase {
+    Queued { parser: String, path: PathBuf },
     Reading { parser: String, path: PathBuf },
     Running { parser: String, path: PathBuf },
 }
@@ -54,6 +55,7 @@ pub struct ParsersPanel {
     saved_original_name: Option<String>,
     pending_delete: Option<String>,
     pending_save: Option<PendingSave>,
+    validation_dispatched: bool,
     phase: Option<ParsePhase>,
     running: bool,
     error_popup: Option<String>,
@@ -75,6 +77,7 @@ impl ParsersPanel {
             saved_original_name: None,
             pending_delete: None,
             pending_save: None,
+            validation_dispatched: false,
             phase: None,
             running: false,
             error_popup: None,
@@ -95,6 +98,7 @@ impl ParsersPanel {
         self.source = NEW_PARSER_TEMPLATE.to_owned();
         self.saved_original_name = None;
         self.pending_save = None;
+        self.validation_dispatched = false;
         self.status.clear();
         self.open = true;
     }
@@ -107,6 +111,7 @@ impl ParsersPanel {
                 self.source = source;
                 self.saved_original_name = Some(name.to_owned());
                 self.pending_save = None;
+                self.validation_dispatched = false;
                 self.status = format!("editing {name}");
                 self.open = true;
             }
@@ -177,6 +182,28 @@ impl ParsersPanel {
         Ok(action)
     }
 
+    pub fn mark_validation_dispatched(&mut self, name: &str) {
+        if self
+            .pending_save
+            .as_ref()
+            .is_some_and(|pending| pending.name == name)
+        {
+            self.validation_dispatched = true;
+        }
+    }
+
+    pub fn mark_parse_dispatched(&mut self, parser_name: &str, path: &Path) {
+        self.running = true;
+        self.phase = Some(ParsePhase::Queued {
+            parser: parser_name.to_owned(),
+            path: path.to_owned(),
+        });
+    }
+
+    pub fn has_pending_work(&self) -> bool {
+        self.validation_dispatched || self.running
+    }
+
     pub fn handle_event(&mut self, event: ParserEvent) {
         match event {
             ParserEvent::SyntaxValid { name } => {
@@ -188,6 +215,7 @@ impl ParsersPanel {
                     return;
                 }
                 let pending = self.pending_save.take().expect("matching pending save");
+                self.validation_dispatched = false;
                 match self
                     .library
                     .save(pending.old_name.as_deref(), &pending.name, &pending.source)
@@ -236,6 +264,7 @@ impl ParsersPanel {
                         .is_some_and(|pending| pending.name == parser_name)
                 {
                     self.pending_save = None;
+                    self.validation_dispatched = false;
                 }
                 let concise = match &path {
                     Some(path) => format!(
@@ -263,6 +292,9 @@ impl ParsersPanel {
     #[allow(dead_code)] // Task 6 toolbar facade.
     pub fn active_label(&self) -> String {
         match &self.phase {
+            Some(ParsePhase::Queued { parser, path }) => {
+                format!("Queued {} with {parser}", file_label(path))
+            }
             Some(ParsePhase::Reading { parser, path }) => {
                 format!("Reading {} with {parser}", file_label(path))
             }
@@ -431,6 +463,7 @@ impl ParsersPanel {
         self.saved_original_name.is_some()
     }
 
+    #[cfg(test)]
     pub fn is_open(&self) -> bool {
         self.open
     }
@@ -705,5 +738,42 @@ mod tests {
         assert_eq!(request.parser_name, "raw.py");
         assert!(request.source.contains("Parse"));
         assert_eq!(request.path, PathBuf::from("flight.raw"));
+    }
+
+    #[test]
+    fn dispatched_validation_is_pending_until_matching_result() {
+        let temp = TestDir::new();
+        let mut panel = ParsersPanel::new(temp.0.clone());
+        panel.add_new();
+        panel.stage_save().unwrap();
+
+        panel.mark_validation_dispatched("new_parser.py");
+
+        assert!(panel.has_pending_work());
+        panel.handle_event(ParserEvent::SyntaxValid {
+            name: "new_parser.py".into(),
+        });
+        assert!(!panel.has_pending_work());
+    }
+
+    #[test]
+    fn dispatched_parse_is_pending_before_reading_and_clears_on_success() {
+        let temp = TestDir::new();
+        let mut panel = ParsersPanel::new(temp.0.clone());
+        let path = PathBuf::from("flight.raw");
+
+        panel.mark_parse_dispatched("raw.py", &path);
+
+        assert!(panel.has_pending_work());
+        assert!(panel.is_running());
+        assert!(panel.active_label().contains("Queued"));
+        panel.handle_event(ParserEvent::Succeeded {
+            parser_name: "raw.py".into(),
+            path,
+            topics: 1,
+            rows: 3,
+        });
+        assert!(!panel.has_pending_work());
+        assert!(!panel.is_running());
     }
 }
