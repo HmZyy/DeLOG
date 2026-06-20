@@ -23,15 +23,12 @@ impl ParserLibrary {
             ));
         }
 
-        match Path::new(name)
-            .extension()
-            .and_then(|extension| extension.to_str())
-        {
+        match name.split_once('.') {
             None => Ok(format!("{name}.py")),
-            Some("py") => Ok(name.to_owned()),
+            Some((stem, "py")) if !stem.is_empty() => Ok(name.to_owned()),
             Some(_) => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("parser name must have a .py extension: '{name}'"),
+                format!("parser name must have exactly one .py extension: '{name}'"),
             )),
         }
     }
@@ -183,6 +180,20 @@ mod tests {
             assert_eq!(
                 library.normalize_name(name).unwrap_err().kind(),
                 io::ErrorKind::InvalidInput
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_multiple_extensions() {
+        let temp = TestDir::new();
+        let library = ParserLibrary::new(&temp.0);
+
+        for name in ["parser.py.py", "parser.txt.py", "parser.v1.py"] {
+            assert_eq!(
+                library.normalize_name(name).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput,
+                "{name:?} should be rejected"
             );
         }
     }
