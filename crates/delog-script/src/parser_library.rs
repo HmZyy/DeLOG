@@ -4,33 +4,136 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 static NEXT_STAGING_FILE: AtomicU64 = AtomicU64::new(0);
+const STAGING_PREFIX: &str = ".delog-parser-";
+const STAGING_SUFFIX: &str = ".tmp";
+const STALE_STAGING_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
+fn private_create_options() -> OpenOptions {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+}
+
+#[cfg(unix)]
+fn same_file(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(not(unix))]
+fn same_file(_left: &fs::Metadata, _right: &fs::Metadata) -> bool {
+    // The portable Metadata API exposes no stable file identity. Retaining a
+    // private partial file is safer than deleting a concurrently replaced path.
+    false
+}
+
+fn remove_if_owned(path: &Path, created: &fs::Metadata) {
+    if fs::metadata(path).is_ok_and(|current| same_file(created, &current)) {
+        let _ = fs::remove_file(path);
+    }
+}
+
+struct NewlyCreatedFile {
+    path: PathBuf,
+    file: Option<File>,
+    created: fs::Metadata,
+    complete: bool,
+}
+
+impl NewlyCreatedFile {
+    fn create(path: &Path) -> io::Result<Self> {
+        let file = private_create_options().open(path)?;
+        let created = file.metadata()?;
+        Ok(Self {
+            path: path.to_owned(),
+            file: Some(file),
+            created,
+            complete: false,
+        })
+    }
+
+    fn file(&mut self) -> &mut File {
+        self.file.as_mut().expect("new file remains open")
+    }
+
+    fn finish(mut self) -> io::Result<()> {
+        self.file().flush()?;
+        self.file().sync_all()?;
+        self.complete = true;
+        Ok(())
+    }
+}
+
+impl Drop for NewlyCreatedFile {
+    fn drop(&mut self) {
+        self.file.take();
+        if !self.complete {
+            remove_if_owned(&self.path, &self.created);
+        }
+    }
+}
+
+fn write_new_file(
+    destination: &Path,
+    source: &str,
+    write: impl FnOnce(&mut File, &[u8]) -> io::Result<()>,
+) -> io::Result<()> {
+    let mut destination = NewlyCreatedFile::create(destination)?;
+    write(destination.file(), source.as_bytes())?;
+    destination.finish()
+}
 
 struct StagedFile {
     path: PathBuf,
+    created: fs::Metadata,
     moved: bool,
 }
 
 impl StagedFile {
     fn write(dir: &Path, source: &str) -> io::Result<Self> {
         let (staged, mut file) = Self::create(dir)?;
-        file.write_all(source.as_bytes())?;
-        file.flush()?;
-        file.sync_all()?;
+        let result = (|| {
+            file.write_all(source.as_bytes())?;
+            file.flush()?;
+            file.sync_all()
+        })();
         drop(file);
+        result?;
         Ok(staged)
     }
 
     fn create(dir: &Path) -> io::Result<(Self, File)> {
         loop {
             let sequence = NEXT_STAGING_FILE.fetch_add(1, Ordering::Relaxed);
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
             let path = dir.join(format!(
-                ".delog-parser-{}-{sequence}.tmp",
-                std::process::id()
+                "{STAGING_PREFIX}{}-{nonce}-{sequence}{STAGING_SUFFIX}",
+                std::process::id(),
             ));
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(file) => return Ok((Self { path, moved: false }, file)),
+            match private_create_options().open(&path) {
+                Ok(file) => {
+                    let created = file.metadata()?;
+                    return Ok((
+                        Self {
+                            path,
+                            created,
+                            moved: false,
+                        },
+                        file,
+                    ));
+                }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
                 Err(error) => return Err(error),
             }
@@ -41,7 +144,7 @@ impl StagedFile {
 impl Drop for StagedFile {
     fn drop(&mut self) {
         if !self.moved {
-            let _ = fs::remove_file(&self.path);
+            remove_if_owned(&self.path, &self.created);
         }
     }
 }
@@ -56,8 +159,48 @@ fn commit_replace(
     Ok(())
 }
 
-fn publish_new(staged: &StagedFile, destination: &Path) -> io::Result<()> {
-    fs::hard_link(&staged.path, destination)
+fn finish_rename(
+    old: &Path,
+    destination: &Path,
+    permissions: fs::Permissions,
+    remove_old: impl FnOnce(&Path) -> io::Result<()>,
+) -> io::Result<()> {
+    if let Err(error) = remove_old(old) {
+        return Err(io::Error::other(format!(
+            "partial parser rename: destination '{}' was written but old remains at '{}': {error}",
+            destination.display(),
+            old.display(),
+        )));
+    }
+    fs::set_permissions(destination, permissions)
+}
+
+fn cleanup_stale_staging_files(dir: &Path, now: SystemTime) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !name.starts_with(STAGING_PREFIX) || !name.ends_with(STAGING_SUFFIX) {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !metadata.is_file()
+            || metadata
+                .modified()
+                .ok()
+                .and_then(|modified| now.duration_since(modified).ok())
+                .is_none_or(|age| age < STALE_STAGING_AGE)
+        {
+            continue;
+        }
+        remove_if_owned(&path, &metadata);
+    }
 }
 
 /// A custom parser library rooted at a directory of `.py` files.
@@ -114,6 +257,7 @@ impl ParserLibrary {
 
     /// Returns parser filenames, including `.py`, in lexical order.
     pub fn list(&self) -> io::Result<Vec<String>> {
+        cleanup_stale_staging_files(&self.dir, SystemTime::now());
         let entries = match fs::read_dir(&self.dir) {
             Ok(entries) => entries,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -143,22 +287,29 @@ impl ParserLibrary {
             .map(|old_name| self.normalize_name(old_name))
             .transpose()?;
         fs::create_dir_all(&self.dir)?;
+        cleanup_stale_staging_files(&self.dir, SystemTime::now());
         let destination = self.dir.join(&destination_name);
-        let mut staged = StagedFile::write(&self.dir, source)?;
 
         match old_name {
-            None => publish_new(&staged, &destination)?,
+            // A brand-new private destination may be visible while it is being
+            // written. There is no prior data to protect, and UI saves are
+            // serialized; create_new makes the collision decision atomic.
+            None => write_new_file(&destination, source, |file, bytes| file.write_all(bytes))?,
             Some(old_name) if old_name == destination_name => {
+                let permissions = fs::metadata(&destination)?.permissions();
+                let mut staged = StagedFile::write(&self.dir, source)?;
                 commit_replace(&mut staged, &destination, |source, destination| {
                     fs::rename(source, destination)
                 })?;
+                fs::set_permissions(&destination, permissions)?;
             }
             Some(old_name) => {
-                publish_new(&staged, &destination)?;
-                if let Err(error) = fs::remove_file(self.dir.join(old_name)) {
-                    let _ = fs::remove_file(&destination);
-                    return Err(error);
-                }
+                let old = self.dir.join(old_name);
+                let permissions = fs::metadata(&old)?.permissions();
+                write_new_file(&destination, source, |file, bytes| file.write_all(bytes))?;
+                finish_rename(&old, &destination, permissions, |path| {
+                    fs::remove_file(path)
+                })?;
             }
         }
         Ok(destination_name)
@@ -285,19 +436,140 @@ mod tests {
     }
 
     #[test]
-    fn failed_old_remove_cleans_up_new_destination() {
+    fn failed_old_remove_reports_partial_completion_and_preserves_both_paths() {
         let temp = TestDir::new();
         fs::create_dir_all(temp.0.join("old.py")).unwrap();
         let library = ParserLibrary::new(&temp.0);
 
-        assert!(
-            library
-                .save(Some("old.py"), "new.py", "new source")
-                .is_err()
-        );
+        let error = library
+            .save(Some("old.py"), "new.py", "new source")
+            .unwrap_err();
 
+        let message = error.to_string();
+        assert!(message.contains("old.py"));
+        assert!(message.contains("new.py"));
+        assert!(message.contains("old remains"));
         assert!(temp.0.join("old.py").is_dir());
-        assert!(!temp.0.join("new.py").exists());
+        assert_eq!(library.load("new.py").unwrap(), "new source");
+    }
+
+    #[test]
+    fn injected_old_remove_failure_preserves_both_parser_files() {
+        let temp = TestDir::new();
+        fs::create_dir_all(&temp.0).unwrap();
+        let old = temp.0.join("old.py");
+        let destination = temp.0.join("new.py");
+        fs::write(&old, "old source").unwrap();
+        write_new_file(&destination, "new source", |file, bytes| {
+            file.write_all(bytes)
+        })
+        .unwrap();
+        let permissions = fs::metadata(&old).unwrap().permissions();
+
+        let error = finish_rename(&old, &destination, permissions, |_| {
+            Err(io::Error::other("injected remove failure"))
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("old remains"));
+        assert_eq!(fs::read_to_string(old).unwrap(), "old source");
+        assert_eq!(fs::read_to_string(destination).unwrap(), "new source");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_files_are_private_and_edits_and_renames_preserve_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        for mode in [0o600, 0o640] {
+            let temp = TestDir::new();
+            let library = ParserLibrary::new(&temp.0);
+            library.save(None, "parser.py", "original").unwrap();
+            let path = temp.0.join("parser.py");
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+
+            library
+                .save(Some("parser.py"), "parser.py", "replacement")
+                .unwrap();
+
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                mode
+            );
+
+            library
+                .save(Some("parser.py"), "renamed.py", "renamed")
+                .unwrap();
+            assert_eq!(
+                fs::metadata(temp.0.join("renamed.py"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                mode
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_files_are_private_until_publication() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TestDir::new();
+        fs::create_dir_all(&temp.0).unwrap();
+        let staged = StagedFile::write(&temp.0, "replacement").unwrap();
+
+        assert_eq!(
+            fs::metadata(&staged.path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_new_write_removes_only_the_owned_partial_file() {
+        let temp = TestDir::new();
+        fs::create_dir_all(&temp.0).unwrap();
+        let destination = temp.0.join("partial.py");
+
+        let error = write_new_file(&destination, "replacement", |file, bytes| {
+            file.write_all(&bytes[..3])?;
+            Err(io::Error::other("injected write failure"))
+        })
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn list_cleans_only_staging_files_older_than_one_day() {
+        use std::time::Duration;
+
+        let temp = TestDir::new();
+        fs::create_dir_all(&temp.0).unwrap();
+        let stale = temp.0.join(".delog-parser-stale.tmp");
+        let recent = temp.0.join(".delog-parser-recent.tmp");
+        fs::write(&stale, "stale").unwrap();
+        fs::write(&recent, "recent").unwrap();
+        let old = SystemTime::now() - Duration::from_secs(25 * 60 * 60);
+        fs::File::options()
+            .write(true)
+            .open(&stale)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(old))
+            .unwrap();
+
+        let library = ParserLibrary::new(&temp.0);
+        library.list().unwrap();
+
+        assert!(!stale.exists());
+        assert!(recent.exists());
     }
 
     #[test]
