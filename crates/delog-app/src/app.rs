@@ -1544,22 +1544,26 @@ impl eframe::App for DelogApp {
                                         .fit_to_exact_size(egui::vec2(16.0, 16.0))
                                         .tint(tint)
                                 };
+                                let run_enabled = self.scripts.ordinary_dispatch_enabled();
                                 for name in names {
                                     ui.horizontal(|ui| {
                                         // Fixed-width name button so the trailing
                                         // edit/remove icons line up across rows; the
                                         // trailing grow atom left-aligns the name.
                                         if ui
-                                            .add_sized(
-                                                [180.0, 22.0],
-                                                egui::Button::new((
-                                                    name.as_str(),
-                                                    egui::Atom::grow(),
-                                                )),
-                                            )
+                                            .add_enabled_ui(run_enabled, |ui| {
+                                                ui.add_sized(
+                                                    [180.0, 22.0],
+                                                    egui::Button::new((
+                                                        name.as_str(),
+                                                        egui::Atom::grow(),
+                                                    )),
+                                                )
+                                            })
+                                            .inner
                                             .clicked()
                                         {
-                                            self.scripts.run_named(
+                                            let _ = self.scripts.run_named(
                                                 &name,
                                                 self.session.store(),
                                                 self.session.ingest_sender(),
