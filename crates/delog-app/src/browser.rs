@@ -345,6 +345,10 @@ fn is_discrete_dtype(label: &str) -> bool {
     )
 }
 
+fn hover_description(description: Option<&str>) -> Option<&str> {
+    description.filter(|description| !description.is_empty())
+}
+
 pub fn panel_toggle_button_size(ui: &egui::Ui) -> egui::Vec2 {
     let side = ui.spacing().interact_size.y + ui.spacing().button_padding.x * 2.0;
     egui::Vec2::splat(side)
@@ -620,7 +624,7 @@ fn field_row(
                 });
             });
     });
-    let response = if let Some(description) = &field.description {
+    let response = if let Some(description) = hover_description(field.description.as_deref()) {
         response.on_hover_text(description)
     } else {
         response
@@ -954,6 +958,13 @@ mod tests {
         // Blank queries match everything.
         assert!(matches_query("", "anything"));
         assert!(matches_query("   ", "anything"));
+    }
+
+    #[test]
+    fn hover_description_rejects_empty_text() {
+        assert_eq!(hover_description(Some("latitude")), Some("latitude"));
+        assert_eq!(hover_description(Some("")), None);
+        assert_eq!(hover_description(None), None);
     }
 
     #[test]
