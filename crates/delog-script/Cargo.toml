@@ -22,6 +22,9 @@ pyo3 = { workspace = true, optional = true }
 numpy = { workspace = true, optional = true }
 arrow = { workspace = true, optional = true }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 arrow = { workspace = true }
 criterion = { workspace = true }
