@@ -89,6 +89,12 @@ impl ScriptsPanel {
         }
     }
 
+    pub fn cancel_parsers(&self) {
+        if let Some(engine) = &self.engine {
+            let _ = engine.cancel_parsers();
+        }
+    }
+
     /// Load a saved script into the Console editor and open the window for editing.
     pub fn edit_named(&mut self, name: &str) {
         match self.library.load(name) {

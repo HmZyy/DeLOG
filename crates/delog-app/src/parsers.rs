@@ -320,6 +320,14 @@ impl ParsersPanel {
                     self.status = self.active_label();
                 }
             }
+            ParserEvent::Cancelled { parser_name, path } => {
+                self.complete_parse(&parser_name, &path);
+                if self.pending_parses.is_empty() {
+                    self.status.clear();
+                } else {
+                    self.status = self.active_label();
+                }
+            }
             ParserEvent::Failed {
                 parser_name,
                 path,
@@ -895,6 +903,30 @@ mod tests {
         });
         assert!(!panel.has_pending_work());
         assert!(!panel.is_running());
+    }
+
+    #[test]
+    fn cancelled_parser_events_clear_pending_fifo_without_reporting_errors() {
+        let temp = TestDir::new();
+        let mut panel = ParsersPanel::new(temp.0.clone());
+        let first = temp.0.join("first.bin");
+        let second = temp.0.join("second.bin");
+        panel.mark_parse_dispatched("first.py", &first);
+        panel.mark_parse_dispatched("second.py", &second);
+
+        panel.handle_event(ParserEvent::Cancelled {
+            parser_name: "first.py".into(),
+            path: first,
+        });
+        assert!(panel.is_running());
+        panel.handle_event(ParserEvent::Cancelled {
+            parser_name: "second.py".into(),
+            path: second,
+        });
+
+        assert!(!panel.is_running());
+        assert!(panel.take_diagnostics().is_empty());
+        assert!(panel.error_popup.is_none());
     }
 
     #[test]
