@@ -10,6 +10,9 @@ pub mod library;
 pub mod parser_library;
 
 #[cfg(feature = "python")]
+pub mod custom_parser;
+
+#[cfg(feature = "python")]
 pub mod api;
 
 #[cfg(feature = "python")]
