@@ -104,6 +104,26 @@ impl ParserCancellationState {
     }
 }
 
+struct ActiveParserGuard<'a> {
+    cancellation: &'a Mutex<ParserCancellationState>,
+}
+
+impl<'a> ActiveParserGuard<'a> {
+    fn begin(cancellation: &'a Mutex<ParserCancellationState>) -> Option<Self> {
+        cancellation
+            .lock()
+            .unwrap()
+            .begin()
+            .then_some(Self { cancellation })
+    }
+}
+
+impl Drop for ActiveParserGuard<'_> {
+    fn drop(&mut self) {
+        self.cancellation.lock().unwrap().finish();
+    }
+}
+
 /// Lifecycle events specific to custom file parsers.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParserEvent {
@@ -637,14 +657,19 @@ fn handle_command(
                 source,
                 path,
             } => {
-                let mut cancellation = parser_cancellation.lock().unwrap();
-                if !cancellation.begin() {
-                    drop(cancellation);
+                if parser_cancellation.lock().unwrap().requested {
                     finish_parser_cancelled(metrics, evt_tx, parser_name, path);
                 } else {
-                    drop(cancellation);
-                    run_parser_file(sender, metrics, evt_tx, parser_name, source, path);
-                    parser_cancellation.lock().unwrap().finish();
+                    run_parser_file(
+                        sender,
+                        metrics,
+                        evt_tx,
+                        parser_name,
+                        source,
+                        path,
+                        parser_cancellation,
+                        || {},
+                    );
                 }
             }
             ScriptCommand::UnregisterLive { name } => {
@@ -694,14 +719,19 @@ enum ParserRunError {
     Other(String),
 }
 
-fn run_parser_file(
+#[allow(clippy::too_many_arguments)]
+fn run_parser_file<F>(
     sender: &IngestSender,
     metrics: &MetricsRegistry,
     evt_tx: &Sender<ScriptEvent>,
     parser_name: String,
     source: String,
     path: PathBuf,
-) {
+    parser_cancellation: &Mutex<ParserCancellationState>,
+    before_emit: F,
+) where
+    F: FnOnce(),
+{
     let total_timer = metrics.scope("python_parser_total");
     let _ = evt_tx.send(ScriptEvent::Parser(ParserEvent::Reading {
         parser_name: parser_name.clone(),
@@ -731,7 +761,13 @@ fn run_parser_file(
         path: path.clone(),
     }));
 
+    let Some(active_parser) = ActiveParserGuard::begin(parser_cancellation) else {
+        drop(total_timer);
+        finish_parser_cancelled(metrics, evt_tx, parser_name, path);
+        return;
+    };
     let parsed = Python::attach(|py| -> Result<ParserOutput, ParserRunError> {
+        let _active_parser = active_parser;
         let namespace = PyDict::new(py);
         let code = std::ffi::CString::new(source).map_err(|_| {
             ParserRunError::Python(PyValueError::new_err("source contains a NUL byte"))
@@ -765,11 +801,17 @@ fn run_parser_file(
             return;
         }
     };
+    before_emit();
     metrics.record("python_parser_output_bytes", output.arrow_bytes as f32);
     let source_label = path.file_stem().or_else(|| path.file_name()).map_or_else(
         || path.to_string_lossy().into_owned(),
         |name| name.to_string_lossy().into_owned(),
     );
+    if parser_cancellation.lock().unwrap().requested {
+        drop(total_timer);
+        finish_parser_cancelled(metrics, evt_tx, parser_name, path);
+        return;
+    }
     let mut sink = sender.file_sink();
     match emit_parser_output(&mut sink, &source_label, output) {
         Ok(summary) => {
@@ -1587,6 +1629,77 @@ def f(batch):
         assert!(cancellation.request());
         cancellation.finish();
         assert!(!cancellation.active);
+    }
+
+    #[test]
+    fn cancelling_after_python_before_emit_does_not_leak_interrupt_or_publish() {
+        let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use delog_core::ingest::ingest_channel;
+        use delog_core::ingestor::{Ingestor, NullObserver};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let path = std::env::temp_dir().join(format!(
+            "delog-parser-late-cancel-{}.bin",
+            std::process::id()
+        ));
+        std::fs::write(&path, [1_f32.to_ne_bytes(), 2_f32.to_ne_bytes()].concat()).unwrap();
+        let ingestor = Ingestor::new(NullObserver);
+        let store = ingestor.store();
+        let (sender, receiver) = ingest_channel();
+        let ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
+        let metrics = test_metrics();
+        let (event_tx, event_rx) = channel();
+        let cancellation = Arc::new(Mutex::new(ParserCancellationState::default()));
+        let interrupt_requested = AtomicBool::new(false);
+
+        run_parser_file(
+            &sender,
+            &metrics,
+            &event_tx,
+            "late.py".into(),
+            "import numpy as np\ndef Parse(raw_data):\n    return [('AP.index', np.arange(len(raw_data)), ''), ('AP.value', raw_data, '')]\n".into(),
+            path.clone(),
+            &cancellation,
+            || {
+                let mut state = cancellation.lock().unwrap();
+                assert!(!state.active, "Python active flag leaked into publication");
+                interrupt_requested.store(state.request(), Ordering::SeqCst);
+            },
+        );
+
+        assert!(!interrupt_requested.load(Ordering::SeqCst));
+        assert!(matches!(
+            event_rx.recv().unwrap(),
+            ScriptEvent::Parser(ParserEvent::Reading { .. })
+        ));
+        assert!(matches!(
+            event_rx.recv().unwrap(),
+            ScriptEvent::Parser(ParserEvent::Running { .. })
+        ));
+        let terminal = event_rx.recv().unwrap();
+        assert!(
+            matches!(terminal, ScriptEvent::Parser(ParserEvent::Cancelled { .. })),
+            "unexpected terminal event: {terminal:?}"
+        );
+        assert!(event_rx.try_recv().is_err());
+        drop(sender);
+        ingest_thread.join().unwrap();
+        assert!(store.load().sources.is_empty());
+
+        let engine =
+            ScriptEngine::spawn(Arc::new(DataStore::new()), dummy_sender(), test_metrics());
+        engine.send(ScriptCommand::Eval("40 + 2".into())).unwrap();
+        let mut result = None;
+        loop {
+            match engine.recv_blocking() {
+                ScriptEvent::Result(value) => result = Some(value),
+                ScriptEvent::Done => break,
+                ScriptEvent::Error(error) => panic!("stray parser interrupt: {error}"),
+                _ => {}
+            }
+        }
+        assert_eq!(result.as_deref(), Some("42"));
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
