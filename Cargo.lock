@@ -993,6 +993,8 @@ dependencies = [
  "numpy",
  "proptest",
  "pyo3",
+ "rustix 1.1.4",
+ "same-file",
 ]
 
 [[package]]

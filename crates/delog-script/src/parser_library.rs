@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use same_file::Handle;
+
 static NEXT_STAGING_FILE: AtomicU64 = AtomicU64::new(0);
 const STAGING_PREFIX: &str = ".delog-parser-";
 const STAGING_SUFFIX: &str = ".tmp";
@@ -22,90 +24,40 @@ fn private_create_options() -> OpenOptions {
     options
 }
 
-#[cfg(unix)]
-fn same_file(left: &fs::Metadata, right: &fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-
-    left.dev() == right.dev() && left.ino() == right.ino()
-}
-
-#[cfg(not(unix))]
-fn same_file(_left: &fs::Metadata, _right: &fs::Metadata) -> bool {
-    // The portable Metadata API exposes no stable file identity. Retaining a
-    // private partial file is safer than deleting a concurrently replaced path.
-    false
-}
-
-fn remove_if_owned(path: &Path, created: &fs::Metadata) {
-    if fs::metadata(path).is_ok_and(|current| same_file(created, &current)) {
+fn remove_if_owned(path: &Path, created: &Handle) {
+    if Handle::from_path(path).is_ok_and(|current| current == *created) {
         let _ = fs::remove_file(path);
     }
 }
 
-struct NewlyCreatedFile {
-    path: PathBuf,
-    file: Option<File>,
-    created: fs::Metadata,
-    complete: bool,
-}
-
-impl NewlyCreatedFile {
-    fn create(path: &Path) -> io::Result<Self> {
-        let file = private_create_options().open(path)?;
-        let created = file.metadata()?;
-        Ok(Self {
-            path: path.to_owned(),
-            file: Some(file),
-            created,
-            complete: false,
-        })
-    }
-
-    fn file(&mut self) -> &mut File {
-        self.file.as_mut().expect("new file remains open")
-    }
-
-    fn finish(mut self) -> io::Result<()> {
-        self.file().flush()?;
-        self.file().sync_all()?;
-        self.complete = true;
-        Ok(())
-    }
-}
-
-impl Drop for NewlyCreatedFile {
-    fn drop(&mut self) {
-        self.file.take();
-        if !self.complete {
-            remove_if_owned(&self.path, &self.created);
-        }
-    }
-}
-
-fn write_new_file(
-    destination: &Path,
-    source: &str,
-    write: impl FnOnce(&mut File, &[u8]) -> io::Result<()>,
-) -> io::Result<()> {
-    let mut destination = NewlyCreatedFile::create(destination)?;
-    write(destination.file(), source.as_bytes())?;
-    destination.finish()
-}
-
 struct StagedFile {
     path: PathBuf,
-    created: fs::Metadata,
+    identity: Option<Handle>,
     moved: bool,
 }
 
 impl StagedFile {
     fn write(dir: &Path, source: &str) -> io::Result<Self> {
-        let (staged, mut file) = Self::create(dir)?;
+        Self::write_with(dir, source, |file, bytes| file.write_all(bytes))
+    }
+
+    fn write_with(
+        dir: &Path,
+        source: &str,
+        write: impl FnOnce(&mut File, &[u8]) -> io::Result<()>,
+    ) -> io::Result<Self> {
+        let (mut staged, mut file) = Self::create(dir)?;
         let result = (|| {
-            file.write_all(source.as_bytes())?;
+            write(&mut file, source.as_bytes())?;
             file.flush()?;
             file.sync_all()
         })();
+        // same-file's Windows identity includes size, so capture it after the
+        // write attempt before closing the handle used for cleanup.
+        staged.identity = file
+            .try_clone()
+            .ok()
+            .and_then(|file| Handle::from_file(file).ok());
         drop(file);
         result?;
         Ok(staged)
@@ -124,11 +76,10 @@ impl StagedFile {
             ));
             match private_create_options().open(&path) {
                 Ok(file) => {
-                    let created = file.metadata()?;
                     return Ok((
                         Self {
                             path,
-                            created,
+                            identity: None,
                             moved: false,
                         },
                         file,
@@ -143,10 +94,69 @@ impl StagedFile {
 
 impl Drop for StagedFile {
     fn drop(&mut self) {
-        if !self.moved {
-            remove_if_owned(&self.path, &self.created);
+        if !self.moved
+            && let Some(identity) = &self.identity
+        {
+            remove_if_owned(&self.path, identity);
         }
     }
+}
+
+#[cfg(any(
+    target_os = "android",
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "redox",
+))]
+fn rename_noclobber(source: &Path, destination: &Path) -> io::Result<()> {
+    use rustix::fs::{CWD, RenameFlags, renameat_with};
+    use rustix::io::Errno;
+
+    match renameat_with(CWD, source, CWD, destination, RenameFlags::NOREPLACE) {
+        Ok(()) => Ok(()),
+        Err(Errno::NOSYS | Errno::INVAL) => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "filesystem does not support atomic no-replace rename",
+        )),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(windows)]
+fn rename_noclobber(source: &Path, destination: &Path) -> io::Result<()> {
+    fs::rename(source, destination)
+}
+
+#[cfg(not(any(
+    target_os = "android",
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "redox",
+    windows,
+)))]
+fn rename_noclobber(_source: &Path, _destination: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "atomic no-replace rename is unavailable on this platform",
+    ))
+}
+
+fn publish_noclobber(staged: &mut StagedFile, destination: &Path) -> io::Result<()> {
+    rename_noclobber(&staged.path, destination)?;
+    staged.moved = true;
+    Ok(())
+}
+
+fn stage_and_publish(
+    dir: &Path,
+    destination: &Path,
+    source: &str,
+    write: impl FnOnce(&mut File, &[u8]) -> io::Result<()>,
+) -> io::Result<()> {
+    let mut staged = StagedFile::write_with(dir, source, write)?;
+    publish_noclobber(&mut staged, destination)
 }
 
 fn commit_replace(
@@ -199,7 +209,9 @@ fn cleanup_stale_staging_files(dir: &Path, now: SystemTime) {
         {
             continue;
         }
-        remove_if_owned(&path, &metadata);
+        if let Ok(identity) = Handle::from_path(&path) {
+            remove_if_owned(&path, &identity);
+        }
     }
 }
 
@@ -291,10 +303,9 @@ impl ParserLibrary {
         let destination = self.dir.join(&destination_name);
 
         match old_name {
-            // A brand-new private destination may be visible while it is being
-            // written. There is no prior data to protect, and UI saves are
-            // serialized; create_new makes the collision decision atomic.
-            None => write_new_file(&destination, source, |file, bytes| file.write_all(bytes))?,
+            None => stage_and_publish(&self.dir, &destination, source, |file, bytes| {
+                file.write_all(bytes)
+            })?,
             Some(old_name) if old_name == destination_name => {
                 let permissions = fs::metadata(&destination)?.permissions();
                 let mut staged = StagedFile::write(&self.dir, source)?;
@@ -306,7 +317,9 @@ impl ParserLibrary {
             Some(old_name) => {
                 let old = self.dir.join(old_name);
                 let permissions = fs::metadata(&old)?.permissions();
-                write_new_file(&destination, source, |file, bytes| file.write_all(bytes))?;
+                stage_and_publish(&self.dir, &destination, source, |file, bytes| {
+                    file.write_all(bytes)
+                })?;
                 finish_rename(&old, &destination, permissions, |path| {
                     fs::remove_file(path)
                 })?;
@@ -460,7 +473,7 @@ mod tests {
         let old = temp.0.join("old.py");
         let destination = temp.0.join("new.py");
         fs::write(&old, "old source").unwrap();
-        write_new_file(&destination, "new source", |file, bytes| {
+        stage_and_publish(&temp.0, &destination, "new source", |file, bytes| {
             file.write_all(bytes)
         })
         .unwrap();
@@ -530,21 +543,83 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
-    fn failed_new_write_removes_only_the_owned_partial_file() {
+    fn failed_staged_write_never_exposes_destination_and_cleans_temp() {
         let temp = TestDir::new();
         fs::create_dir_all(&temp.0).unwrap();
-        let destination = temp.0.join("partial.py");
+        let destination = temp.0.join("parser.py");
 
-        let error = write_new_file(&destination, "replacement", |file, bytes| {
+        let error = stage_and_publish(&temp.0, &destination, "replacement", |file, bytes| {
             file.write_all(&bytes[..3])?;
+            assert!(!destination.exists());
             Err(io::Error::other("injected write failure"))
         })
         .unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::Other);
         assert!(!destination.exists());
+        assert_eq!(fs::read_dir(&temp.0).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn completed_staging_publishes_atomically_without_overwrite() {
+        let temp = TestDir::new();
+        fs::create_dir_all(&temp.0).unwrap();
+        let destination = temp.0.join("parser.py");
+        let mut staged = StagedFile::write(&temp.0, "complete source").unwrap();
+        assert!(!destination.exists());
+
+        publish_noclobber(&mut staged, &destination).unwrap();
+
+        assert_eq!(fs::read_to_string(&destination).unwrap(), "complete source");
+        assert_eq!(fs::read_dir(&temp.0).unwrap().count(), 1);
+    }
+
+    #[cfg(any(
+        target_os = "android",
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "redox",
+        windows,
+    ))]
+    #[test]
+    fn concurrent_publishers_never_overwrite_each_other() {
+        use std::sync::{Arc, Barrier};
+
+        let temp = TestDir::new();
+        fs::create_dir_all(&temp.0).unwrap();
+        let destination = temp.0.join("parser.py");
+        let first = StagedFile::write(&temp.0, "first source").unwrap();
+        let second = StagedFile::write(&temp.0, "second source").unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+
+        let results = std::thread::scope(|scope| {
+            let publish = |mut staged: StagedFile, barrier: Arc<Barrier>| {
+                let destination = destination.clone();
+                scope.spawn(move || {
+                    barrier.wait();
+                    publish_noclobber(&mut staged, &destination).map_err(|error| error.kind())
+                })
+            };
+            let first = publish(first, Arc::clone(&barrier));
+            let second = publish(second, barrier);
+            [first.join().unwrap(), second.join().unwrap()]
+        });
+
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(io::ErrorKind::AlreadyExists)))
+                .count(),
+            1
+        );
+        assert!(matches!(
+            fs::read_to_string(&destination).unwrap().as_str(),
+            "first source" | "second source"
+        ));
+        assert_eq!(fs::read_dir(&temp.0).unwrap().count(), 1);
     }
 
     #[test]

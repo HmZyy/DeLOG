@@ -71,6 +71,8 @@ rayon = "1.12.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 memmap2 = "0.9.10"
+same-file = "1.0.6"
+rustix = { version = "1.1.4", features = ["fs"] }
 
 # errors / logging
 thiserror = "2.0.18"
