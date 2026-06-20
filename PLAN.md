@@ -1048,6 +1048,7 @@ Maintained per §0. IDs are stable — never renumber; append new items at the e
 - [x] **SCR-08** — Tests: engine, golden accel-mag script, numpy↔Arrow round-trip incl. NaN, error path, resample_prev proptest, derived-source substrate tests.
 - [x] **SCR-09** — Live Python same-topic transforms: `@delog.live_transform` callbacks run on incoming live batches and append to an appendable `SourceKind::LiveDerived` `script:<name>` source (remove-on-rerun, non-blocking mirror queue, self-disable after 3 consecutive errors).
 - [x] **SCR-10** — Console controls: split the Run/Cancel toggle into separate Start + Stop buttons and add an Unregister button (`ScriptCommand::UnregisterLive`) that tears down the current script's live transform + its `script:<name>` source; engine exposes `has_live_transform` to gate the button. Icon-only (Lucide `unplug`); verified by manual GUI run.
+- [ ] **SCR-11** — User-created Python file parsers: persistent `parsers/*.py` library, Tools ▸ Parsers management/editor UI, explicit open-with-parser action, and unchanged `Parse(numpy.float32[]) -> [(name, values, tooltip)]` compatibility routed through the embedded scripting worker and canonical ingest pipeline. Design: `docs/superpowers/specs/2026-06-20-custom-python-parsers-design.md`
 
 `delog-app` gains a `scripting` feature (OFF by default); see CLAUDE.md build matrix. Scripting build requires a local libpython pin (gitignored .cargo/config.toml).
 
