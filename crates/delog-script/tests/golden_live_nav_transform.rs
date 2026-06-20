@@ -62,7 +62,7 @@ def convert(batch):
         "nav_bearing_rad": (batch.t, batch.nav_bearing * DEG_TO_RAD, "rad"),
     }
 "#;
-    engine.send(ScriptCommand::RunScript {
+    let _ = engine.send(ScriptCommand::RunScript {
         name: "nav_rad".into(),
         source: script.into(),
     });

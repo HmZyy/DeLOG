@@ -57,7 +57,7 @@ fn representative_custom_parser_reaches_canonical_store_transactionally() {
         Arc::clone(&metrics),
     );
 
-    engine.send(ScriptCommand::ParseFile {
+    let _ = engine.send(ScriptCommand::ParseFile {
         parser_name: "representative.py".into(),
         source: REPRESENTATIVE_PARSER.into(),
         path: path.clone(),
@@ -124,7 +124,7 @@ fn representative_custom_parser_reaches_canonical_store_transactionally() {
         16.0
     );
 
-    engine.send(ScriptCommand::ParseFile {
+    let _ = engine.send(ScriptCommand::ParseFile {
         parser_name: "invalid.py".into(),
         source: "def Parse(raw_data):\n    return [('BROKEN.value', raw_data, '')]\n".into(),
         path: path.clone(),

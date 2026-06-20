@@ -62,7 +62,7 @@ t = delog.field('flight/IMU/AccX').t
 out = delog.output(t, "AccMag")
 out.add_field("mag", np.sqrt(x*x + y*y + z*z), unit="m/s^2")
 "#;
-    engine.send(ScriptCommand::RunScript {
+    let _ = engine.send(ScriptCommand::RunScript {
         name: "accel_mag".into(),
         source: script.into(),
     });

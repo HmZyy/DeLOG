@@ -165,8 +165,10 @@ impl ScriptEngine {
         }
     }
 
-    pub fn send(&self, cmd: ScriptCommand) {
-        let _ = self.tx.send(cmd);
+    pub fn send(&self, cmd: ScriptCommand) -> Result<(), String> {
+        self.tx
+            .send(cmd)
+            .map_err(|_| "script worker command channel disconnected".to_owned())
     }
 
     /// A cloneable sender for raw live batches (the app's live-decoder side
@@ -823,7 +825,7 @@ mod tests {
         let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let engine =
             ScriptEngine::spawn(Arc::new(DataStore::new()), dummy_sender(), test_metrics());
-        engine.send(ScriptCommand::Eval("print('hello')".into()));
+        let _ = engine.send(ScriptCommand::Eval("print('hello')".into()));
         let mut text = String::new();
         loop {
             match engine.recv_blocking() {
@@ -843,7 +845,7 @@ mod tests {
         let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let engine =
             ScriptEngine::spawn(Arc::new(DataStore::new()), dummy_sender(), test_metrics());
-        engine.send(ScriptCommand::Eval("1 + 1".into()));
+        let _ = engine.send(ScriptCommand::Eval("1 + 1".into()));
         let mut got_result = None;
         loop {
             match engine.recv_blocking() {
@@ -863,7 +865,7 @@ mod tests {
         let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let store = test_store_with_baro_alt();
         let engine = ScriptEngine::spawn(store, dummy_sender(), test_metrics());
-        engine.send(ScriptCommand::Eval(
+        let _ = engine.send(ScriptCommand::Eval(
             "float(delog.field('flight/BARO/Alt').v[0])".into(),
         ));
         let mut result = None;
@@ -900,7 +902,7 @@ t = np.array([0, 100, 200], dtype=np.int64)
 out = delog.output(t, "Mag")
 out.add_field("v", np.array([1.0, 2.0, 3.0]), unit="m")
 "#;
-        engine.send(ScriptCommand::RunScript {
+        let _ = engine.send(ScriptCommand::RunScript {
             name: "test".into(),
             source: script.into(),
         });
@@ -955,7 +957,7 @@ out.add_field("v", np.array([1.0, 2.0, 3.0]), unit="m")
 def convert(batch):
     return {}
 "#;
-        engine.send(ScriptCommand::RunScript {
+        let _ = engine.send(ScriptCommand::RunScript {
             name: "nav_rad".into(),
             source: script.into(),
         });
@@ -990,7 +992,7 @@ def convert(batch):
 def f(batch):
     return {"x": batch.v}
 "#;
-        engine.send(ScriptCommand::RunScript {
+        let _ = engine.send(ScriptCommand::RunScript {
             name: "live".into(),
             source: script.into(),
         });
@@ -1007,7 +1009,7 @@ def f(batch):
         );
 
         // Unregister it. The worker emits an Output confirmation when done.
-        engine.send(ScriptCommand::UnregisterLive {
+        let _ = engine.send(ScriptCommand::UnregisterLive {
             name: "live".into(),
         });
         loop {
@@ -1054,7 +1056,7 @@ def f(batch):
         let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let engine =
             ScriptEngine::spawn(Arc::new(DataStore::new()), dummy_sender(), test_metrics());
-        engine.send(ScriptCommand::Eval("while True:\n    pass".into()));
+        let _ = engine.send(ScriptCommand::Eval("while True:\n    pass".into()));
         // Let the interpreter enter the loop, then interrupt.
         std::thread::sleep(std::time::Duration::from_millis(200));
         engine.request_interrupt();
@@ -1096,7 +1098,7 @@ def f(batch):
         // published either (it would be a phantom). The second run must REMOVE
         // the first-generation live source.
         for _ in 0..2 {
-            engine.send(ScriptCommand::RunScript {
+            let _ = engine.send(ScriptCommand::RunScript {
                 name: "live".into(),
                 source: script.into(),
             });
@@ -1161,7 +1163,7 @@ def f(batch):
 
         let engine = ScriptEngine::spawn(Arc::new(DataStore::new()), sender, test_metrics());
         let script = "import numpy as np\nout = delog.output(np.array([0],dtype=np.int64),'X')\nout.add_field('v', np.array([1.0]))\nraise ValueError('boom')\n";
-        engine.send(ScriptCommand::RunScript {
+        let _ = engine.send(ScriptCommand::RunScript {
             name: "bad".into(),
             source: script.into(),
         });
@@ -1192,7 +1194,7 @@ def f(batch):
         let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let engine =
             ScriptEngine::spawn(Arc::new(DataStore::new()), dummy_sender(), test_metrics());
-        engine.send(ScriptCommand::ValidateParser {
+        let _ = engine.send(ScriptCommand::ValidateParser {
             name: "side_effect.py".into(),
             source: "raise RuntimeError('must not run')\ndef Parse(raw_data):\n    return []\n"
                 .into(),
@@ -1215,7 +1217,7 @@ def f(batch):
             Arc::clone(&metrics),
         );
         for source in ["def Parse(:\n    pass", "x = '\0'"] {
-            engine.send(ScriptCommand::ValidateParser {
+            let _ = engine.send(ScriptCommand::ValidateParser {
                 name: "bad.py".into(),
                 source: source.into(),
             });
@@ -1245,7 +1247,7 @@ def f(batch):
             Arc::clone(&metrics),
         );
         let path = PathBuf::from("/definitely/missing/custom-parser.bin");
-        engine.send(ScriptCommand::ParseFile {
+        let _ = engine.send(ScriptCommand::ParseFile {
             parser_name: "bad.py".into(),
             source: "def Parse(raw_data): return []".into(),
             path: path.clone(),
@@ -1284,7 +1286,7 @@ def f(batch):
             dummy_sender(),
             Arc::clone(&metrics),
         );
-        engine.send(ScriptCommand::ParseFile {
+        let _ = engine.send(ScriptCommand::ParseFile {
             parser_name: "cancel.py".into(),
             source: "def Parse(raw_data):\n    raise KeyboardInterrupt()\n".into(),
             path: path.clone(),
@@ -1300,5 +1302,22 @@ def f(batch):
         assert_eq!(metrics.counter("python_parser_cancelled"), Some(1));
         assert_eq!(metrics.counter("python_parser_failures"), None);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn send_reports_a_disconnected_worker() {
+        let (tx, rx) = channel();
+        drop(rx);
+        let (live_tx, _live_rx) = sync_channel(LIVE_TRANSFORM_QUEUE_CAP);
+        let (_event_tx, events) = channel();
+        let engine = ScriptEngine {
+            tx,
+            live_tx,
+            events,
+            handle: None,
+            active_live: Arc::new(Mutex::new(HashMap::new())),
+        };
+
+        assert!(engine.send(ScriptCommand::Eval("1".into())).is_err());
     }
 }
