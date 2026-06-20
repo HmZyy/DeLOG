@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use delog_core::ingest::IngestSender;
+use delog_core::metrics::MetricsRegistry;
 use delog_core::snapshot::DataStore;
 use delog_script::library::ScriptLibrary;
 use delog_script::{ScriptCommand, ScriptEngine, ScriptEvent};
@@ -70,25 +71,37 @@ impl ScriptsPanel {
     /// Load a saved script by name and run it through the engine (Tools / Scripts
     /// / Run / <name>). The editor buffer is left untouched; output buffers in the
     /// console and the derived source appears in the data browser.
-    pub fn run_named(&mut self, name: &str, store: Arc<DataStore>, sender: IngestSender) {
+    pub fn run_named(
+        &mut self,
+        name: &str,
+        store: Arc<DataStore>,
+        sender: IngestSender,
+        metrics: Arc<MetricsRegistry>,
+    ) {
         match self.library.load(name) {
             Ok(source) => {
                 self.console.push_str(&format!("# run {name}\n"));
                 self.status = format!("running {name}");
                 self.running = true;
-                self.engine(store, sender).send(ScriptCommand::RunScript {
-                    name: name.to_owned(),
-                    source,
-                });
+                self.engine(store, sender, metrics)
+                    .send(ScriptCommand::RunScript {
+                        name: name.to_owned(),
+                        source,
+                    });
             }
             Err(e) => self.status = format!("load failed: {e}"),
         }
     }
 
     /// Lazily start the interpreter on first use.
-    fn engine(&mut self, store: Arc<DataStore>, sender: IngestSender) -> &ScriptEngine {
+    fn engine(
+        &mut self,
+        store: Arc<DataStore>,
+        sender: IngestSender,
+        metrics: Arc<MetricsRegistry>,
+    ) -> &ScriptEngine {
         self.engine
-            .get_or_insert_with(|| ScriptEngine::spawn(store, sender))
+            .get_or_insert_with(|| ScriptEngine::spawn(store, sender, metrics))
     }
 
     /// The live-batch sender IF the engine has already been spawned (e.g. the
@@ -122,12 +135,19 @@ impl ScriptsPanel {
                     // Live-batch processing carries no command-completion
                     // semantics; it must not touch running/status/console.
                     ScriptEvent::LiveBatchProcessed => {}
+                    ScriptEvent::Parser(_) => {}
                 }
             }
         }
     }
 
-    pub fn ui(&mut self, ctx: &egui::Context, store: Arc<DataStore>, sender: IngestSender) {
+    pub fn ui(
+        &mut self,
+        ctx: &egui::Context,
+        store: Arc<DataStore>,
+        sender: IngestSender,
+        metrics: Arc<MetricsRegistry>,
+    ) {
         // Drawn unconditionally so a Remove triggered from the menu can be
         // confirmed even when the Console window is closed.
         self.delete_confirm_ui(ctx);
@@ -143,7 +163,9 @@ impl ScriptsPanel {
             .default_pos(ctx.content_rect().center())
             .pivot(egui::Align2::CENTER_CENTER)
             .default_size([720.0, 480.0])
-            .show(ctx, |ui| self.window_contents(ui, &store, &sender));
+            .show(ctx, |ui| {
+                self.window_contents(ui, &store, &sender, &metrics)
+            });
         self.open = open;
         ctx.request_repaint(); // keep draining engine events while open
     }
@@ -196,6 +218,7 @@ impl ScriptsPanel {
         ui: &mut egui::Ui,
         store: &Arc<DataStore>,
         sender: &IngestSender,
+        metrics: &Arc<MetricsRegistry>,
     ) {
         egui::Panel::bottom("scripts_repl")
             .resizable(true)
@@ -218,7 +241,7 @@ impl ScriptsPanel {
                             self.console.push_str(">>> ");
                             self.console.push_str(&line);
                             self.console.push('\n');
-                            self.engine(store.clone(), sender.clone())
+                            self.engine(store.clone(), sender.clone(), Arc::clone(metrics))
                                 .send(ScriptCommand::Eval(line));
                         }
                     });
@@ -275,7 +298,7 @@ impl ScriptsPanel {
                     self.status = format!("running {run_name}");
                     self.running = true;
                     let source = self.editor_text.clone();
-                    self.engine(store.clone(), sender.clone())
+                    self.engine(store.clone(), sender.clone(), Arc::clone(metrics))
                         .send(ScriptCommand::RunScript {
                             name: run_name.clone(),
                             source,

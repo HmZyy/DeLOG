@@ -2,17 +2,24 @@
 //! and serves REPL evals over channels (SCR-02..05).
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, SyncSender, channel, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use delog_core::identity::SourceId;
 use delog_core::ingest::{IngestSender, IngestSink, ParsedBatch, SourceKind};
+use delog_core::metrics::MetricsRegistry;
 use delog_core::snapshot::DataStore;
+use numpy::IntoPyArray;
+use pyo3::exceptions::{PyKeyboardInterrupt, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use crate::api::Delog;
+use crate::custom_parser::{
+    ParserOutput, emit_parser_output, parse_python_result, read_float32_file,
+};
 use crate::live::{
     LiveBatchPy, LiveTransformBatch, LiveTransformSpec, parse_transform_result, result_to_batch,
 };
@@ -50,8 +57,43 @@ pub enum ScriptCommand {
     /// Unregister the live transforms registered under `name` and remove their
     /// appendable `script:<name>` live-derived source.
     UnregisterLive { name: String },
+    /// Compile a custom parser without executing it.
+    ValidateParser { name: String, source: String },
+    /// Read and parse one raw float file using a custom parser.
+    ParseFile {
+        parser_name: String,
+        source: String,
+        path: PathBuf,
+    },
     /// Stop the worker (sender dropped also stops it).
     Shutdown,
+}
+
+/// Lifecycle events specific to custom file parsers.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ParserEvent {
+    SyntaxValid {
+        name: String,
+    },
+    Reading {
+        parser_name: String,
+        path: PathBuf,
+    },
+    Running {
+        parser_name: String,
+        path: PathBuf,
+    },
+    Succeeded {
+        parser_name: String,
+        path: PathBuf,
+        topics: u64,
+        rows: u64,
+    },
+    Failed {
+        parser_name: String,
+        path: Option<PathBuf>,
+        message: String,
+    },
 }
 
 /// An event streamed from the worker back to the UI thread.
@@ -68,6 +110,8 @@ pub enum ScriptEvent {
     /// One mirrored live batch was processed by the registered transforms.
     /// Carries no command-completion semantics; the UI ignores it.
     LiveBatchProcessed,
+    /// A custom parser lifecycle event; never implies ordinary script completion.
+    Parser(ParserEvent),
 }
 
 /// Handle to the worker thread. Dropping it shuts the worker down.
@@ -87,7 +131,11 @@ pub struct ScriptEngine {
 impl ScriptEngine {
     /// Spawn the interpreter worker. The interpreter and its global namespace
     /// live for the worker's lifetime, so REPL state persists across evals.
-    pub fn spawn(store: Arc<DataStore>, sender: IngestSender) -> Self {
+    pub fn spawn(
+        store: Arc<DataStore>,
+        sender: IngestSender,
+        metrics: Arc<MetricsRegistry>,
+    ) -> Self {
         let (cmd_tx, cmd_rx) = channel::<ScriptCommand>();
         let (evt_tx, evt_rx) = channel::<ScriptEvent>();
         let (live_tx, live_rx) = sync_channel::<ParsedBatch>(LIVE_TRANSFORM_QUEUE_CAP);
@@ -96,7 +144,17 @@ impl ScriptEngine {
         let active_live_worker = Arc::clone(&active_live);
         let handle = std::thread::Builder::new()
             .name("delog-script".into())
-            .spawn(move || worker_loop(store, sender, cmd_rx, live_rx, evt_tx, active_live_worker))
+            .spawn(move || {
+                worker_loop(
+                    store,
+                    sender,
+                    metrics,
+                    cmd_rx,
+                    live_rx,
+                    evt_tx,
+                    active_live_worker,
+                )
+            })
             .expect("spawn script thread");
         Self {
             tx: cmd_tx,
@@ -217,6 +275,7 @@ impl OutputCapture {
 fn worker_loop(
     store: Arc<DataStore>,
     sender: IngestSender,
+    metrics: Arc<MetricsRegistry>,
     cmd_rx: Receiver<ScriptCommand>,
     live_rx: Receiver<ParsedBatch>,
     evt_tx: Sender<ScriptEvent>,
@@ -259,6 +318,7 @@ fn worker_loop(
                     cmd,
                     &store,
                     &sender,
+                    &metrics,
                     &globals,
                     &evt_tx,
                     &active_live,
@@ -354,6 +414,7 @@ fn handle_command(
     cmd: ScriptCommand,
     store: &Arc<DataStore>,
     sender: &IngestSender,
+    metrics: &MetricsRegistry,
     globals: &Py<PyDict>,
     evt_tx: &Sender<ScriptEvent>,
     active_live: &Arc<Mutex<HashMap<String, Vec<LiveTransformSpec>>>>,
@@ -480,6 +541,31 @@ fn handle_command(
                 }
                 let _ = evt_tx.send(ScriptEvent::Done);
             }
+            ScriptCommand::ValidateParser { name, source } => {
+                let event = Python::attach(|py| {
+                    let compiled = py
+                        .import("builtins")
+                        .and_then(|builtins| builtins.getattr("compile"))
+                        .and_then(|compile| compile.call1((source, name.clone(), "exec")));
+                    match compiled {
+                        Ok(_) => ParserEvent::SyntaxValid { name },
+                        Err(error) => {
+                            metrics.add("python_parser_failures", 1);
+                            ParserEvent::Failed {
+                                parser_name: name,
+                                path: None,
+                                message: format_pyerr(py, &error),
+                            }
+                        }
+                    }
+                });
+                let _ = evt_tx.send(ScriptEvent::Parser(event));
+            }
+            ScriptCommand::ParseFile {
+                parser_name,
+                source,
+                path,
+            } => run_parser_file(sender, metrics, evt_tx, parser_name, source, path),
             ScriptCommand::UnregisterLive { name } => {
                 // Same teardown as the empty-rerun path: stop running the
                 // callbacks and tombstone the appendable live-derived source.
@@ -520,6 +606,139 @@ fn handle_command(
         }
     }
     false
+}
+
+enum ParserRunError {
+    Python(PyErr),
+    Other(String),
+}
+
+fn run_parser_file(
+    sender: &IngestSender,
+    metrics: &MetricsRegistry,
+    evt_tx: &Sender<ScriptEvent>,
+    parser_name: String,
+    source: String,
+    path: PathBuf,
+) {
+    let total_timer = metrics.scope("python_parser_total");
+    let _ = evt_tx.send(ScriptEvent::Parser(ParserEvent::Reading {
+        parser_name: parser_name.clone(),
+        path: path.clone(),
+    }));
+    let raw_result = {
+        let _read_timer = metrics.scope("python_parser_read");
+        read_float32_file(&path)
+    };
+    let raw = match raw_result {
+        Ok(raw) => raw,
+        Err(error) => {
+            drop(total_timer);
+            finish_parser_failure(
+                metrics,
+                evt_tx,
+                parser_name,
+                Some(path),
+                ParserRunError::Other(error.to_string()),
+            );
+            return;
+        }
+    };
+    metrics.record("python_parser_input_bytes", raw.input_bytes as f32);
+    let _ = evt_tx.send(ScriptEvent::Parser(ParserEvent::Running {
+        parser_name: parser_name.clone(),
+        path: path.clone(),
+    }));
+
+    let parsed = Python::attach(|py| -> Result<ParserOutput, ParserRunError> {
+        let namespace = PyDict::new(py);
+        let code = std::ffi::CString::new(source).map_err(|_| {
+            ParserRunError::Python(PyValueError::new_err("source contains a NUL byte"))
+        })?;
+        let execution = {
+            let _python_timer = metrics.scope("python_parser_python");
+            (|| -> PyResult<Bound<'_, PyAny>> {
+                py.run(&code, Some(&namespace), None)?;
+                let parse = namespace.get_item("Parse")?.ok_or_else(|| {
+                    PyValueError::new_err("parser must define callable Parse(raw_data)")
+                })?;
+                if !parse.is_callable() {
+                    return Err(PyValueError::new_err(
+                        "parser attribute Parse must be callable",
+                    ));
+                }
+                let values = raw.values.into_pyarray(py);
+                parse.call1((values,))
+            })()
+        };
+        let result = execution.map_err(ParserRunError::Python)?;
+        let _convert_timer = metrics.scope("python_parser_convert");
+        parse_python_result(py, &result).map_err(ParserRunError::Python)
+    });
+
+    let output = match parsed {
+        Ok(output) => output,
+        Err(error) => {
+            drop(total_timer);
+            finish_parser_failure(metrics, evt_tx, parser_name, Some(path), error);
+            return;
+        }
+    };
+    metrics.record("python_parser_output_bytes", output.arrow_bytes as f32);
+    let source_label = path.file_stem().or_else(|| path.file_name()).map_or_else(
+        || path.to_string_lossy().into_owned(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let mut sink = sender.file_sink();
+    match emit_parser_output(&mut sink, &source_label, output) {
+        Ok(summary) => {
+            drop(total_timer);
+            let _ = evt_tx.send(ScriptEvent::Parser(ParserEvent::Succeeded {
+                parser_name,
+                path,
+                topics: summary.topic_count,
+                rows: summary.row_count,
+            }));
+        }
+        Err(message) => {
+            drop(total_timer);
+            finish_parser_failure(
+                metrics,
+                evt_tx,
+                parser_name,
+                Some(path),
+                ParserRunError::Other(message),
+            )
+        }
+    }
+}
+
+fn finish_parser_failure(
+    metrics: &MetricsRegistry,
+    evt_tx: &Sender<ScriptEvent>,
+    parser_name: String,
+    path: Option<PathBuf>,
+    error: ParserRunError,
+) {
+    let message = match error {
+        ParserRunError::Python(error) => Python::attach(|py| {
+            if error.is_instance_of::<PyKeyboardInterrupt>(py) {
+                metrics.add("python_parser_cancelled", 1);
+            } else {
+                metrics.add("python_parser_failures", 1);
+            }
+            format_pyerr(py, &error)
+        }),
+        ParserRunError::Other(message) => {
+            metrics.add("python_parser_failures", 1);
+            message
+        }
+    };
+    let _ = evt_tx.send(ScriptEvent::Parser(ParserEvent::Failed {
+        parser_name,
+        path,
+        message,
+    }));
 }
 
 /// Evaluate one line: try as an expression (to report its repr), else exec it.
@@ -566,9 +785,15 @@ mod tests {
     use arrow::datatypes::DataType;
     use delog_core::chunk::Chunk;
     use delog_core::identity::IdentityRegistry;
+    use delog_core::metrics::MetricsRegistry;
     use delog_core::schema::{FieldSchema, TopicSchema};
     use delog_core::snapshot::StoreSnapshot;
     use delog_core::store::TopicStore;
+    use std::path::PathBuf;
+
+    fn test_metrics() -> Arc<MetricsRegistry> {
+        Arc::new(MetricsRegistry::new())
+    }
 
     fn dummy_sender() -> delog_core::ingest::IngestSender {
         delog_core::ingest::ingest_channel().0
@@ -596,7 +821,8 @@ mod tests {
     #[test]
     fn print_is_captured_as_output_events() {
         let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let engine = ScriptEngine::spawn(Arc::new(DataStore::new()), dummy_sender());
+        let engine =
+            ScriptEngine::spawn(Arc::new(DataStore::new()), dummy_sender(), test_metrics());
         engine.send(ScriptCommand::Eval("print('hello')".into()));
         let mut text = String::new();
         loop {
@@ -604,7 +830,9 @@ mod tests {
                 ScriptEvent::Output(s) => text.push_str(&s),
                 ScriptEvent::Done => break,
                 ScriptEvent::Error(e) => panic!("{e}"),
-                ScriptEvent::Result(_) | ScriptEvent::LiveBatchProcessed => {}
+                ScriptEvent::Result(_)
+                | ScriptEvent::LiveBatchProcessed
+                | ScriptEvent::Parser(_) => {}
             }
         }
         assert!(text.contains("hello"), "captured: {text:?}");
@@ -613,7 +841,8 @@ mod tests {
     #[test]
     fn eval_returns_a_result_event() {
         let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let engine = ScriptEngine::spawn(Arc::new(DataStore::new()), dummy_sender());
+        let engine =
+            ScriptEngine::spawn(Arc::new(DataStore::new()), dummy_sender(), test_metrics());
         engine.send(ScriptCommand::Eval("1 + 1".into()));
         let mut got_result = None;
         loop {
@@ -621,7 +850,9 @@ mod tests {
                 ScriptEvent::Result(r) => got_result = Some(r),
                 ScriptEvent::Done => break,
                 ScriptEvent::Error(e) => panic!("unexpected error: {e}"),
-                ScriptEvent::Output(_) | ScriptEvent::LiveBatchProcessed => {}
+                ScriptEvent::Output(_)
+                | ScriptEvent::LiveBatchProcessed
+                | ScriptEvent::Parser(_) => {}
             }
         }
         assert_eq!(got_result.as_deref(), Some("2"));
@@ -631,7 +862,7 @@ mod tests {
     fn python_can_read_a_field_via_delog() {
         let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let store = test_store_with_baro_alt();
-        let engine = ScriptEngine::spawn(store, dummy_sender());
+        let engine = ScriptEngine::spawn(store, dummy_sender(), test_metrics());
         engine.send(ScriptCommand::Eval(
             "float(delog.field('flight/BARO/Alt').v[0])".into(),
         ));
@@ -641,7 +872,9 @@ mod tests {
                 ScriptEvent::Result(r) => result = Some(r),
                 ScriptEvent::Done => break,
                 ScriptEvent::Error(e) => panic!("{e}"),
-                ScriptEvent::Output(_) | ScriptEvent::LiveBatchProcessed => {}
+                ScriptEvent::Output(_)
+                | ScriptEvent::LiveBatchProcessed
+                | ScriptEvent::Parser(_) => {}
             }
         }
         assert_eq!(result.as_deref(), Some("1.0"));
@@ -660,7 +893,7 @@ mod tests {
         let ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
 
         // Read side: empty store (this script builds its own arrays, reads no fields).
-        let engine = ScriptEngine::spawn(Arc::new(DataStore::new()), sender);
+        let engine = ScriptEngine::spawn(Arc::new(DataStore::new()), sender, test_metrics());
         let script = r#"
 import numpy as np
 t = np.array([0, 100, 200], dtype=np.int64)
@@ -711,7 +944,7 @@ out.add_field("v", np.array([1.0, 2.0, 3.0]), unit="m")
         let (sender, receiver) = ingest_channel();
         let _ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
 
-        let engine = ScriptEngine::spawn(store, sender);
+        let engine = ScriptEngine::spawn(store, sender, test_metrics());
 
         let script = r#"
 @delog.live_transform(
@@ -749,7 +982,8 @@ def convert(batch):
         let write_store = ingestor.store();
         let (sender, receiver) = ingest_channel();
         let ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
-        let engine = ScriptEngine::spawn(Arc::new(DataStore::new()), sender.clone());
+        let engine =
+            ScriptEngine::spawn(Arc::new(DataStore::new()), sender.clone(), test_metrics());
 
         let script = r#"
 @delog.live_transform(topic="A", fields=["v"], output_topic="B")
@@ -818,7 +1052,8 @@ def f(batch):
                 where a single interpreter runs on the worker thread."]
     fn interrupt_stops_a_long_loop_with_keyboardinterrupt() {
         let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let engine = ScriptEngine::spawn(Arc::new(DataStore::new()), dummy_sender());
+        let engine =
+            ScriptEngine::spawn(Arc::new(DataStore::new()), dummy_sender(), test_metrics());
         engine.send(ScriptCommand::Eval("while True:\n    pass".into()));
         // Let the interpreter enter the loop, then interrupt.
         std::thread::sleep(std::time::Duration::from_millis(200));
@@ -845,7 +1080,8 @@ def f(batch):
         let (sender, receiver) = ingest_channel();
         let ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
 
-        let engine = ScriptEngine::spawn(Arc::new(DataStore::new()), sender.clone());
+        let engine =
+            ScriptEngine::spawn(Arc::new(DataStore::new()), sender.clone(), test_metrics());
 
         let script = r#"
 @delog.live_transform(topic="A", fields=["v"], output_topic="B")
@@ -923,7 +1159,7 @@ def f(batch):
         let (sender, receiver) = ingest_channel();
         let ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
 
-        let engine = ScriptEngine::spawn(Arc::new(DataStore::new()), sender);
+        let engine = ScriptEngine::spawn(Arc::new(DataStore::new()), sender, test_metrics());
         let script = "import numpy as np\nout = delog.output(np.array([0],dtype=np.int64),'X')\nout.add_field('v', np.array([1.0]))\nraise ValueError('boom')\n";
         engine.send(ScriptCommand::RunScript {
             name: "bad".into(),
@@ -949,5 +1185,120 @@ def f(batch):
                 .any(|s| s.entry.label == "script:bad" && !s.entry.removed)
         );
         let _ = ingest_thread;
+    }
+
+    #[test]
+    fn validate_parser_compiles_without_executing_source() {
+        let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let engine =
+            ScriptEngine::spawn(Arc::new(DataStore::new()), dummy_sender(), test_metrics());
+        engine.send(ScriptCommand::ValidateParser {
+            name: "side_effect.py".into(),
+            source: "raise RuntimeError('must not run')\ndef Parse(raw_data):\n    return []\n"
+                .into(),
+        });
+        assert_eq!(
+            engine.recv_blocking(),
+            ScriptEvent::Parser(ParserEvent::SyntaxValid {
+                name: "side_effect.py".into()
+            })
+        );
+    }
+
+    #[test]
+    fn validate_parser_reports_syntax_and_nul_errors_as_parser_failures() {
+        let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let metrics = test_metrics();
+        let engine = ScriptEngine::spawn(
+            Arc::new(DataStore::new()),
+            dummy_sender(),
+            Arc::clone(&metrics),
+        );
+        for source in ["def Parse(:\n    pass", "x = '\0'"] {
+            engine.send(ScriptCommand::ValidateParser {
+                name: "bad.py".into(),
+                source: source.into(),
+            });
+            match engine.recv_blocking() {
+                ScriptEvent::Parser(ParserEvent::Failed {
+                    parser_name,
+                    path,
+                    message,
+                }) => {
+                    assert_eq!(parser_name, "bad.py");
+                    assert_eq!(path, None);
+                    assert!(!message.is_empty());
+                }
+                event => panic!("unexpected event: {event:?}"),
+            }
+        }
+        assert_eq!(metrics.counter("python_parser_failures"), Some(2));
+    }
+
+    #[test]
+    fn parse_file_failure_is_one_parser_event_without_done() {
+        let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let metrics = test_metrics();
+        let engine = ScriptEngine::spawn(
+            Arc::new(DataStore::new()),
+            dummy_sender(),
+            Arc::clone(&metrics),
+        );
+        let path = PathBuf::from("/definitely/missing/custom-parser.bin");
+        engine.send(ScriptCommand::ParseFile {
+            parser_name: "bad.py".into(),
+            source: "def Parse(raw_data): return []".into(),
+            path: path.clone(),
+        });
+        assert_eq!(
+            engine.recv_blocking(),
+            ScriptEvent::Parser(ParserEvent::Reading {
+                parser_name: "bad.py".into(),
+                path: path.clone(),
+            })
+        );
+        match engine.recv_blocking() {
+            ScriptEvent::Parser(ParserEvent::Failed {
+                parser_name,
+                path: failed_path,
+                ..
+            }) => {
+                assert_eq!(parser_name, "bad.py");
+                assert_eq!(failed_path, Some(path));
+            }
+            event => panic!("unexpected event: {event:?}"),
+        }
+        assert_eq!(metrics.counter("python_parser_failures"), Some(1));
+        assert!(engine.drain_events().is_empty());
+    }
+
+    #[test]
+    fn parser_keyboard_interrupt_counts_cancellation_not_failure() {
+        let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let path =
+            std::env::temp_dir().join(format!("delog-parser-cancel-{}.bin", std::process::id()));
+        std::fs::write(&path, 1_f32.to_ne_bytes()).unwrap();
+        let metrics = test_metrics();
+        let engine = ScriptEngine::spawn(
+            Arc::new(DataStore::new()),
+            dummy_sender(),
+            Arc::clone(&metrics),
+        );
+        engine.send(ScriptCommand::ParseFile {
+            parser_name: "cancel.py".into(),
+            source: "def Parse(raw_data):\n    raise KeyboardInterrupt()\n".into(),
+            path: path.clone(),
+        });
+        loop {
+            if matches!(
+                engine.recv_blocking(),
+                ScriptEvent::Parser(ParserEvent::Failed { .. })
+            ) {
+                break;
+            }
+        }
+        assert_eq!(metrics.counter("python_parser_cancelled"), Some(1));
+        assert_eq!(metrics.counter("python_parser_failures"), None);
+        std::fs::remove_file(path).unwrap();
     }
 }
