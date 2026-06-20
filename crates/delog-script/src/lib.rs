@@ -7,6 +7,9 @@
 pub mod library;
 
 #[cfg(feature = "python")]
+pub mod parser_library;
+
+#[cfg(feature = "python")]
 pub mod api;
 
 #[cfg(feature = "python")]
