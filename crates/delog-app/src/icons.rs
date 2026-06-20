@@ -79,6 +79,12 @@ pub fn save() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/save.svg")
 }
 
+/// Open a file with a custom parser. Scripting tools only.
+#[cfg_attr(not(feature = "scripting"), allow(dead_code))]
+pub fn folder_open() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/folder-open.svg")
+}
+
 /// Unplug (unregister the current script's live transform). Scripting Console only.
 #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
 pub fn unplug() -> ImageSource<'static> {

@@ -36,6 +36,30 @@ type ProfilingExportResult = Result<std::path::PathBuf, String>;
 const SESSION_AUTOSAVE_INTERVAL: Duration = Duration::from_secs(30);
 const PERFORMANCE_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 
+struct CombinedLoadState {
+    active: bool,
+    parser_active: bool,
+    labels: Vec<String>,
+}
+
+fn combined_load_state(
+    native_active: bool,
+    mut labels: Vec<String>,
+    parser_label: Option<&str>,
+) -> CombinedLoadState {
+    let parser_label = parser_label.filter(|label| !label.is_empty());
+    if let Some(label) = parser_label
+        && !labels.iter().any(|existing| existing == label)
+    {
+        labels.push(label.to_owned());
+    }
+    CombinedLoadState {
+        active: native_active || parser_label.is_some(),
+        parser_active: parser_label.is_some(),
+        labels,
+    }
+}
+
 #[derive(Serialize)]
 struct DiagnosticsExportDoc {
     delog_diagnostics: u32,
@@ -1417,10 +1441,7 @@ impl eframe::App for DelogApp {
         egui::Panel::top("main_menu").show_inside(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
-                    if ui
-                        .button("Open File")
-                        .clicked()
-                    {
+                    if ui.button("Open File").clicked() {
                         self.spawn_open_dialog(ui.ctx());
                         ui.close();
                     }
@@ -1572,6 +1593,55 @@ impl eframe::App for DelogApp {
                             ui.close();
                         }
                     });
+                    ui.menu_button("Parsers", |ui| {
+                        if ui.button("Add new parser...").clicked() {
+                            self.scripts.add();
+                            ui.close();
+                        }
+                        ui.separator();
+                        match self.scripts.parser_names() {
+                            Ok(names) if names.is_empty() => {
+                                ui.add_enabled(false, egui::Button::new("No saved parsers"));
+                            }
+                            Ok(names) => {
+                                let tint = ui.visuals().text_color();
+                                let icon = |src: egui::ImageSource<'static>| {
+                                    egui::Image::new(src)
+                                        .fit_to_exact_size(egui::vec2(16.0, 16.0))
+                                        .tint(tint)
+                                };
+                                for name in names {
+                                    ui.horizontal(|ui| {
+                                        ui.add_sized(
+                                            [180.0, 22.0],
+                                            egui::Label::new(name.as_str()),
+                                        );
+                                        if ui
+                                            .add(egui::Button::image(icon(crate::icons::pencil())))
+                                            .on_hover_text("Edit")
+                                            .clicked()
+                                        {
+                                            self.scripts.edit(&name);
+                                            ui.close();
+                                        }
+                                        if ui
+                                            .add(egui::Button::image(icon(
+                                                crate::icons::folder_open(),
+                                            )))
+                                            .on_hover_text("Open file with parser")
+                                            .clicked()
+                                        {
+                                            self.scripts.request_open(ui.ctx(), &name);
+                                            ui.close();
+                                        }
+                                    });
+                                }
+                            }
+                            Err(_) => {
+                                ui.add_enabled(false, egui::Button::new("Could not list parsers"));
+                            }
+                        }
+                    });
                 });
                 // FPS badge pinned to the far right (PRF-05), shown only when
                 // enabled in settings (PRF-08).
@@ -1667,16 +1737,32 @@ impl eframe::App for DelogApp {
                     self.session.stop_live(i);
                 }
 
-                if self.session.has_active_loads() {
+                let native_load_active = self.session.has_active_loads();
+                #[cfg(feature = "scripting")]
+                let parser_label = self
+                    .scripts
+                    .is_parser_running()
+                    .then(|| self.scripts.parser_active_label());
+                #[cfg(not(feature = "scripting"))]
+                let parser_label: Option<String> = None;
+                let load_state = combined_load_state(
+                    native_load_active,
+                    self.session.active_labels(),
+                    parser_label.as_deref(),
+                );
+                if load_state.active {
                     ui.separator();
                     if ui.button("Cancel").clicked() {
                         self.session.cancel_all();
+                        #[cfg(feature = "scripting")]
+                        if load_state.parser_active {
+                            self.scripts.request_interrupt();
+                        }
                     }
-                    ui.label(format!(
-                        "loading {}",
-                        self.session.active_labels().join(", ")
-                    ));
-                    if let Some(frac) = self.session.overall_progress() {
+                    ui.label(format!("loading {}", load_state.labels.join(", ")));
+                    if !load_state.parser_active
+                        && let Some(frac) = self.session.overall_progress()
+                    {
                         ui.add(egui::ProgressBar::new(frac).desired_width(120.0));
                     } else {
                         ui.spinner();
@@ -2642,6 +2728,33 @@ mod tests {
     use delog_core::snapshot::StoreSnapshot;
 
     use super::*;
+
+    #[test]
+    fn combined_load_state_appends_parser_label_without_duplicates() {
+        let state = combined_load_state(
+            true,
+            vec![
+                "flight.bin".to_owned(),
+                "Running raw.py on flight.bin".to_owned(),
+            ],
+            Some("Running raw.py on flight.bin"),
+        );
+
+        assert_eq!(
+            state.labels,
+            vec!["flight.bin", "Running raw.py on flight.bin"]
+        );
+        assert!(state.parser_active);
+    }
+
+    #[test]
+    fn combined_load_state_is_active_for_parser_only_work() {
+        let state = combined_load_state(false, Vec::new(), Some("Queued sample.dat with raw.py"));
+
+        assert!(state.active);
+        assert_eq!(state.labels, vec!["Queued sample.dat with raw.py"]);
+        assert!(state.parser_active);
+    }
 
     #[test]
     fn empty_stat_formats_as_a_dash() {

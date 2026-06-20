@@ -67,6 +67,7 @@ pub struct ParsersPanel {
     phase: Option<ParsePhase>,
     error_popup: Option<String>,
     diagnostics: Vec<String>,
+    last_list_error: Option<String>,
     parse_requests: Receiver<ParseRequest>,
     #[allow(dead_code)] // Native picker entry point is surfaced by Task 6.
     parse_requests_tx: Sender<ParseRequest>,
@@ -89,14 +90,28 @@ impl ParsersPanel {
             phase: None,
             error_popup: None,
             diagnostics: Vec::new(),
+            last_list_error: None,
             parse_requests,
             parse_requests_tx,
         }
     }
 
     #[allow(dead_code)] // Task 6 menu facade.
-    pub fn list(&self) -> std::io::Result<Vec<String>> {
-        self.library.list()
+    pub fn list(&mut self) -> std::io::Result<Vec<String>> {
+        match self.library.list() {
+            Ok(names) => {
+                self.last_list_error = None;
+                Ok(names)
+            }
+            Err(error) => {
+                let message = format!("list custom parsers: {error}");
+                if self.last_list_error.as_deref() != Some(&message) {
+                    self.diagnostics.push(message.clone());
+                    self.last_list_error = Some(message);
+                }
+                Err(error)
+            }
+        }
     }
 
     #[allow(dead_code)] // Task 6 menu facade.
@@ -913,7 +928,7 @@ mod tests {
     fn list_propagates_non_directory_errors() {
         let temp = TestDir::new();
         fs::write(&temp.0, "not a directory").unwrap();
-        let panel = ParsersPanel::new(temp.0.clone());
+        let mut panel = ParsersPanel::new(temp.0.clone());
 
         assert!(panel.list().is_err());
     }
