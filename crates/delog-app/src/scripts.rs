@@ -192,6 +192,18 @@ impl ScriptsPanel {
         }
     }
 
+    fn mark_parser_action_dispatched(&mut self, action: &ParserUiAction) {
+        match action {
+            ParserUiAction::ValidateAndSave { name, .. } => {
+                self.parsers.mark_validation_dispatched(name);
+            }
+        }
+    }
+
+    fn should_poll_parser_events(&self) -> bool {
+        self.parsers.has_pending_work()
+    }
+
     pub fn ui(
         &mut self,
         ctx: &egui::Context,
@@ -202,6 +214,7 @@ impl ScriptsPanel {
         self.drain();
 
         for action in self.parsers.ui(ctx) {
+            self.mark_parser_action_dispatched(&action);
             match action {
                 ParserUiAction::ValidateAndSave { name, source, .. } => {
                     self.engine(store.clone(), sender.clone(), Arc::clone(&metrics))
@@ -210,6 +223,8 @@ impl ScriptsPanel {
             }
         }
         for request in self.parsers.take_parse_requests() {
+            self.parsers
+                .mark_parse_dispatched(&request.parser_name, &request.path);
             self.engine(store.clone(), sender.clone(), Arc::clone(&metrics))
                 .send(ScriptCommand::ParseFile {
                     parser_name: request.parser_name,
@@ -223,7 +238,7 @@ impl ScriptsPanel {
         self.delete_confirm_ui(ctx);
 
         if !self.open {
-            if self.parsers.is_open() || self.parsers.is_running() {
+            if self.should_poll_parser_events() {
                 ctx.request_repaint();
             }
             return;
@@ -463,5 +478,26 @@ mod tests {
         assert_eq!(panel.status, "running console script");
         assert!(panel.is_parser_running());
         assert!(panel.parser_active_label().contains("raw.py"));
+    }
+
+    #[test]
+    fn dispatched_validation_polls_events_without_changing_console_state() {
+        let root = std::env::temp_dir().join(format!(
+            "delog-scripts-parser-pending-{}",
+            std::process::id()
+        ));
+        let mut panel = ScriptsPanel::new(root.join("scripts"), root.join("parsers"));
+        panel.running = false;
+        panel.parsers.add_new();
+        let action = panel.parsers.stage_save().unwrap();
+
+        panel.mark_parser_action_dispatched(&action);
+
+        assert!(panel.should_poll_parser_events());
+        assert!(!panel.running);
+        panel.handle_event(ScriptEvent::Parser(ParserEvent::SyntaxValid {
+            name: "new_parser.py".into(),
+        }));
+        assert!(!panel.should_poll_parser_events());
     }
 }
