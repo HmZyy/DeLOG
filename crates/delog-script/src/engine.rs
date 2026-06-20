@@ -69,6 +69,41 @@ pub enum ScriptCommand {
     Shutdown,
 }
 
+enum EngineCommand {
+    Script(ScriptCommand),
+    ResetParserCancellation,
+}
+
+#[derive(Default)]
+struct ParserCancellationState {
+    requested: bool,
+    active: bool,
+}
+
+impl ParserCancellationState {
+    fn request(&mut self) -> bool {
+        self.requested = true;
+        self.active
+    }
+
+    fn begin(&mut self) -> bool {
+        if self.requested {
+            false
+        } else {
+            self.active = true;
+            true
+        }
+    }
+
+    fn finish(&mut self) {
+        self.active = false;
+    }
+
+    fn reset(&mut self) {
+        self.requested = false;
+    }
+}
+
 /// Lifecycle events specific to custom file parsers.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParserEvent {
@@ -94,6 +129,10 @@ pub enum ParserEvent {
         path: Option<PathBuf>,
         message: String,
     },
+    Cancelled {
+        parser_name: String,
+        path: PathBuf,
+    },
 }
 
 /// An event streamed from the worker back to the UI thread.
@@ -116,7 +155,7 @@ pub enum ScriptEvent {
 
 /// Handle to the worker thread. Dropping it shuts the worker down.
 pub struct ScriptEngine {
-    tx: Sender<ScriptCommand>,
+    tx: Sender<EngineCommand>,
     /// Bounded, non-blocking queue of raw live batches to run transforms on.
     live_tx: SyncSender<ParsedBatch>,
     events: Receiver<ScriptEvent>,
@@ -126,6 +165,7 @@ pub struct ScriptEngine {
     /// stays current as scripts register/unregister; the UI reads it through
     /// [`ScriptEngine::has_live_transform`] to enable the Unregister button.
     active_live: Arc<Mutex<HashMap<String, Vec<LiveTransformSpec>>>>,
+    parser_cancellation: Arc<Mutex<ParserCancellationState>>,
 }
 
 impl ScriptEngine {
@@ -136,12 +176,14 @@ impl ScriptEngine {
         sender: IngestSender,
         metrics: Arc<MetricsRegistry>,
     ) -> Self {
-        let (cmd_tx, cmd_rx) = channel::<ScriptCommand>();
+        let (cmd_tx, cmd_rx) = channel::<EngineCommand>();
         let (evt_tx, evt_rx) = channel::<ScriptEvent>();
         let (live_tx, live_rx) = sync_channel::<ParsedBatch>(LIVE_TRANSFORM_QUEUE_CAP);
         let active_live: Arc<Mutex<HashMap<String, Vec<LiveTransformSpec>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let active_live_worker = Arc::clone(&active_live);
+        let parser_cancellation = Arc::new(Mutex::new(ParserCancellationState::default()));
+        let parser_cancellation_worker = Arc::clone(&parser_cancellation);
         let handle = std::thread::Builder::new()
             .name("delog-script".into())
             .spawn(move || {
@@ -153,6 +195,7 @@ impl ScriptEngine {
                     live_rx,
                     evt_tx,
                     active_live_worker,
+                    parser_cancellation_worker,
                 )
             })
             .expect("spawn script thread");
@@ -162,12 +205,26 @@ impl ScriptEngine {
             events: evt_rx,
             handle: Some(handle),
             active_live,
+            parser_cancellation,
         }
     }
 
     pub fn send(&self, cmd: ScriptCommand) -> Result<(), String> {
         self.tx
-            .send(cmd)
+            .send(EngineCommand::Script(cmd))
+            .map_err(|_| "script worker command channel disconnected".to_owned())
+    }
+
+    /// Cancel parser work without interrupting ordinary scripts. The reset
+    /// marker forms a FIFO boundary: parser commands already queued are
+    /// cancelled, while commands submitted after this method returns may run.
+    pub fn cancel_parsers(&self) -> Result<(), String> {
+        let mut cancellation = self.parser_cancellation.lock().unwrap();
+        if cancellation.request() {
+            request_python_interrupt();
+        }
+        self.tx
+            .send(EngineCommand::ResetParserCancellation)
             .map_err(|_| "script worker command channel disconnected".to_owned())
     }
 
@@ -199,30 +256,7 @@ impl ScriptEngine {
     /// bytecode boundary). Pure C calls (e.g. a large numpy op) cannot be
     /// interrupted mid-call — documented limitation (SCR-05).
     pub fn request_interrupt(&self) {
-        // We use both mechanisms for maximum coverage:
-        // 1. PyErr_SetInterrupt sets the pending-SIGINT trip flag (works when a
-        //    SIGINT handler is installed on the main thread, i.e. in the real app).
-        // 2. Py_AddPendingCall injects a callback into CPython's eval-loop pending
-        //    call queue, which is checked at every bytecode boundary in any thread
-        //    regardless of SIGINT handler state — this is what actually fires in
-        //    the embedded/worker-thread test environment.
-        //
-        // Safety: both functions are documented as safe to call from any thread
-        // without holding the GIL.
-        extern "C" fn raise_keyboard_interrupt(_arg: *mut std::ffi::c_void) -> std::ffi::c_int {
-            // Set the exception on the current thread state, then return -1 so
-            // the eval loop propagates it immediately.
-            // Safety: called from within a CPython eval-loop pending-call
-            // callback; PyExc_KeyboardInterrupt is a valid, initialized static.
-            unsafe {
-                pyo3::ffi::PyErr_SetNone(pyo3::ffi::PyExc_KeyboardInterrupt);
-            }
-            -1
-        }
-        unsafe {
-            pyo3::ffi::PyErr_SetInterrupt();
-            pyo3::ffi::Py_AddPendingCall(Some(raise_keyboard_interrupt), std::ptr::null_mut());
-        }
+        request_python_interrupt();
     }
 
     /// Whether the script named `name` currently has a registered live
@@ -248,9 +282,36 @@ impl ScriptEngine {
     }
 }
 
+fn request_python_interrupt() {
+    // We use both mechanisms for maximum coverage:
+    // 1. PyErr_SetInterrupt sets the pending-SIGINT trip flag (works when a
+    //    SIGINT handler is installed on the main thread, i.e. in the real app).
+    // 2. Py_AddPendingCall injects a callback into CPython's eval-loop pending
+    //    call queue, which is checked at every bytecode boundary in any thread
+    //    regardless of SIGINT handler state — this is what actually fires in
+    //    the embedded/worker-thread test environment.
+    //
+    // Safety: both functions are documented as safe to call from any thread
+    // without holding the GIL.
+    extern "C" fn raise_keyboard_interrupt(_arg: *mut std::ffi::c_void) -> std::ffi::c_int {
+        // Set the exception on the current thread state, then return -1 so
+        // the eval loop propagates it immediately.
+        // Safety: called from within a CPython eval-loop pending-call
+        // callback; PyExc_KeyboardInterrupt is a valid, initialized static.
+        unsafe {
+            pyo3::ffi::PyErr_SetNone(pyo3::ffi::PyExc_KeyboardInterrupt);
+        }
+        -1
+    }
+    unsafe {
+        pyo3::ffi::PyErr_SetInterrupt();
+        pyo3::ffi::Py_AddPendingCall(Some(raise_keyboard_interrupt), std::ptr::null_mut());
+    }
+}
+
 impl Drop for ScriptEngine {
     fn drop(&mut self) {
-        let _ = self.tx.send(ScriptCommand::Shutdown);
+        let _ = self.tx.send(EngineCommand::Script(ScriptCommand::Shutdown));
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }
@@ -274,14 +335,16 @@ impl OutputCapture {
     fn flush(&self) {}
 }
 
+#[allow(clippy::too_many_arguments)]
 fn worker_loop(
     store: Arc<DataStore>,
     sender: IngestSender,
     metrics: Arc<MetricsRegistry>,
-    cmd_rx: Receiver<ScriptCommand>,
+    cmd_rx: Receiver<EngineCommand>,
     live_rx: Receiver<ParsedBatch>,
     evt_tx: Sender<ScriptEvent>,
     active_live: Arc<Mutex<HashMap<String, Vec<LiveTransformSpec>>>>,
+    parser_cancellation: Arc<Mutex<ParserCancellationState>>,
 ) {
     // One persistent globals dict for the whole session.
     let globals: Py<PyDict> = Python::attach(|py| PyDict::new(py).unbind());
@@ -315,7 +378,11 @@ fn worker_loop(
     // when both senders are gone (or an explicit Shutdown).
     loop {
         match cmd_rx.try_recv() {
-            Ok(cmd) => {
+            Ok(EngineCommand::ResetParserCancellation) => {
+                parser_cancellation.lock().unwrap().reset();
+                continue;
+            }
+            Ok(EngineCommand::Script(cmd)) => {
                 if handle_command(
                     cmd,
                     &store,
@@ -328,6 +395,7 @@ fn worker_loop(
                     &mut live_sources,
                     &mut active_transforms,
                     &mut run_counter,
+                    &parser_cancellation,
                 ) {
                     break; // Shutdown
                 }
@@ -424,6 +492,7 @@ fn handle_command(
     live_sources: &mut HashMap<String, SourceId>,
     active_transforms: &mut HashMap<String, Vec<ActiveTransform>>,
     run_counter: &mut u64,
+    parser_cancellation: &Arc<Mutex<ParserCancellationState>>,
 ) -> bool {
     {
         match cmd {
@@ -567,7 +636,17 @@ fn handle_command(
                 parser_name,
                 source,
                 path,
-            } => run_parser_file(sender, metrics, evt_tx, parser_name, source, path),
+            } => {
+                let mut cancellation = parser_cancellation.lock().unwrap();
+                if !cancellation.begin() {
+                    drop(cancellation);
+                    finish_parser_cancelled(metrics, evt_tx, parser_name, path);
+                } else {
+                    drop(cancellation);
+                    run_parser_file(sender, metrics, evt_tx, parser_name, source, path);
+                    parser_cancellation.lock().unwrap().finish();
+                }
+            }
             ScriptCommand::UnregisterLive { name } => {
                 // Same teardown as the empty-rerun path: stop running the
                 // callbacks and tombstone the appendable live-derived source.
@@ -725,21 +804,40 @@ fn finish_parser_failure(
     let message = match error {
         ParserRunError::Python(error) => Python::attach(|py| {
             if error.is_instance_of::<PyKeyboardInterrupt>(py) {
-                metrics.add("python_parser_cancelled", 1);
+                None
             } else {
                 metrics.add("python_parser_failures", 1);
+                Some(format_pyerr(py, &error))
             }
-            format_pyerr(py, &error)
         }),
         ParserRunError::Other(message) => {
             metrics.add("python_parser_failures", 1);
-            message
+            Some(message)
         }
     };
+    if message.is_none()
+        && let Some(path) = path
+    {
+        finish_parser_cancelled(metrics, evt_tx, parser_name, path);
+        return;
+    }
     let _ = evt_tx.send(ScriptEvent::Parser(ParserEvent::Failed {
         parser_name,
         path,
-        message,
+        message: message.unwrap_or_else(|| "parser cancelled".to_owned()),
+    }));
+}
+
+fn finish_parser_cancelled(
+    metrics: &MetricsRegistry,
+    evt_tx: &Sender<ScriptEvent>,
+    parser_name: String,
+    path: PathBuf,
+) {
+    metrics.add("python_parser_cancelled", 1);
+    let _ = evt_tx.send(ScriptEvent::Parser(ParserEvent::Cancelled {
+        parser_name,
+        path,
     }));
 }
 
@@ -1294,7 +1392,7 @@ def f(batch):
         loop {
             if matches!(
                 engine.recv_blocking(),
-                ScriptEvent::Parser(ParserEvent::Failed { .. })
+                ScriptEvent::Parser(ParserEvent::Cancelled { .. })
             ) {
                 break;
             }
@@ -1302,6 +1400,193 @@ def f(batch):
         assert_eq!(metrics.counter("python_parser_cancelled"), Some(1));
         assert_eq!(metrics.counter("python_parser_failures"), None);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn cancelling_queued_parser_does_not_interrupt_ordinary_script() {
+        let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let path = std::env::temp_dir().join(format!(
+            "delog-parser-queued-cancel-{}.bin",
+            std::process::id()
+        ));
+        std::fs::write(&path, 1_f32.to_ne_bytes()).unwrap();
+        let engine =
+            ScriptEngine::spawn(Arc::new(DataStore::new()), dummy_sender(), test_metrics());
+        engine
+            .send(ScriptCommand::RunScript {
+                name: "ordinary".into(),
+                source: "import time\ntime.sleep(0.15)\n".into(),
+            })
+            .unwrap();
+        engine
+            .send(ScriptCommand::ParseFile {
+                parser_name: "queued.py".into(),
+                source: "def Parse(raw_data):\n    raise RuntimeError('executed')\n".into(),
+                path: path.clone(),
+            })
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        engine.cancel_parsers().unwrap();
+
+        let mut ordinary_done = false;
+        let mut parser_cancelled = false;
+        while !ordinary_done || !parser_cancelled {
+            match engine
+                .events
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("terminal event")
+            {
+                ScriptEvent::Done => ordinary_done = true,
+                ScriptEvent::Parser(ParserEvent::Cancelled {
+                    parser_name,
+                    path: event_path,
+                }) => {
+                    assert_eq!(parser_name, "queued.py");
+                    assert_eq!(event_path, path);
+                    parser_cancelled = true;
+                }
+                ScriptEvent::Error(error) => panic!("ordinary script was interrupted: {error}"),
+                ScriptEvent::Parser(ParserEvent::Failed { message, .. }) => {
+                    panic!("queued parser executed: {message}")
+                }
+                _ => {}
+            }
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn cancelling_parsers_discards_every_parser_already_queued() {
+        let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let metrics = test_metrics();
+        let engine = ScriptEngine::spawn(
+            Arc::new(DataStore::new()),
+            dummy_sender(),
+            Arc::clone(&metrics),
+        );
+        engine
+            .send(ScriptCommand::RunScript {
+                name: "ordinary".into(),
+                source: "import time\ntime.sleep(0.15)\n".into(),
+            })
+            .unwrap();
+        let paths: Vec<_> = ["first", "second"]
+            .into_iter()
+            .map(|name| {
+                let path = std::env::temp_dir().join(format!(
+                    "delog-parser-{name}-queued-cancel-{}.bin",
+                    std::process::id()
+                ));
+                std::fs::write(&path, 1_f32.to_ne_bytes()).unwrap();
+                engine
+                    .send(ScriptCommand::ParseFile {
+                        parser_name: format!("{name}.py"),
+                        source: "def Parse(raw_data):\n    raise RuntimeError('executed')\n".into(),
+                        path: path.clone(),
+                    })
+                    .unwrap();
+                path
+            })
+            .collect();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        engine.cancel_parsers().unwrap();
+
+        let mut cancelled = Vec::new();
+        while cancelled.len() < 2 {
+            match engine
+                .events
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("parser cancellation event")
+            {
+                ScriptEvent::Parser(ParserEvent::Cancelled { parser_name, .. }) => {
+                    cancelled.push(parser_name)
+                }
+                ScriptEvent::Parser(ParserEvent::Failed { message, .. }) => {
+                    panic!("queued parser executed: {message}")
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(cancelled, ["first.py", "second.py"]);
+        assert_eq!(metrics.counter("python_parser_cancelled"), Some(2));
+        for path in paths {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn parser_submitted_after_cancellation_boundary_executes() {
+        let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let path = std::env::temp_dir().join(format!(
+            "delog-parser-after-cancel-{}.bin",
+            std::process::id()
+        ));
+        std::fs::write(&path, 1_f32.to_ne_bytes()).unwrap();
+        let engine =
+            ScriptEngine::spawn(Arc::new(DataStore::new()), dummy_sender(), test_metrics());
+        engine
+            .send(ScriptCommand::RunScript {
+                name: "ordinary".into(),
+                source: "import time\ntime.sleep(0.15)\n".into(),
+            })
+            .unwrap();
+        engine
+            .send(ScriptCommand::ParseFile {
+                parser_name: "old.py".into(),
+                source: "def Parse(raw_data):\n    raise RuntimeError('old executed')\n".into(),
+                path: path.clone(),
+            })
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        engine.cancel_parsers().unwrap();
+        engine
+            .send(ScriptCommand::ParseFile {
+                parser_name: "new.py".into(),
+                source: "def Parse(raw_data):\n    raise RuntimeError('new executed')\n".into(),
+                path: path.clone(),
+            })
+            .unwrap();
+
+        let mut old_cancelled = false;
+        let mut new_executed = false;
+        while !old_cancelled || !new_executed {
+            match engine
+                .events
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("parser terminal event")
+            {
+                ScriptEvent::Parser(ParserEvent::Cancelled { parser_name, .. }) => {
+                    assert_eq!(parser_name, "old.py");
+                    old_cancelled = true;
+                }
+                ScriptEvent::Parser(ParserEvent::Failed {
+                    parser_name,
+                    message,
+                    ..
+                }) if parser_name == "new.py" => {
+                    assert!(message.contains("new executed"));
+                    new_executed = true;
+                }
+                ScriptEvent::Parser(ParserEvent::Failed { message, .. }) => {
+                    panic!("old parser executed: {message}")
+                }
+                _ => {}
+            }
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn parser_cancellation_requests_interrupt_only_while_parser_is_active() {
+        let mut cancellation = ParserCancellationState::default();
+        assert!(!cancellation.request());
+        assert!(!cancellation.begin());
+        cancellation.reset();
+
+        assert!(cancellation.begin());
+        assert!(cancellation.request());
+        cancellation.finish();
+        assert!(!cancellation.active);
     }
 
     #[test]
@@ -1316,8 +1601,10 @@ def f(batch):
             events,
             handle: None,
             active_live: Arc::new(Mutex::new(HashMap::new())),
+            parser_cancellation: Arc::new(Mutex::new(ParserCancellationState::default())),
         };
 
         assert!(engine.send(ScriptCommand::Eval("1".into())).is_err());
+        assert!(engine.cancel_parsers().is_err());
     }
 }
