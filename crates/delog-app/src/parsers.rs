@@ -1,5 +1,6 @@
 //! Custom Python parser editor and parser-run lifecycle state (SCR-11).
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 
@@ -46,6 +47,12 @@ enum ParsePhase {
     Running { parser: String, path: PathBuf },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingParse {
+    parser: String,
+    path: PathBuf,
+}
+
 pub struct ParsersPanel {
     library: ParserLibrary,
     filename: String,
@@ -56,8 +63,8 @@ pub struct ParsersPanel {
     pending_delete: Option<String>,
     pending_save: Option<PendingSave>,
     validation_dispatched: bool,
+    pending_parses: VecDeque<PendingParse>,
     phase: Option<ParsePhase>,
-    running: bool,
     error_popup: Option<String>,
     diagnostics: Vec<String>,
     parse_requests: Receiver<ParseRequest>,
@@ -78,8 +85,8 @@ impl ParsersPanel {
             pending_delete: None,
             pending_save: None,
             validation_dispatched: false,
+            pending_parses: VecDeque::new(),
             phase: None,
-            running: false,
             error_popup: None,
             diagnostics: Vec::new(),
             parse_requests,
@@ -193,15 +200,21 @@ impl ParsersPanel {
     }
 
     pub fn mark_parse_dispatched(&mut self, parser_name: &str, path: &Path) {
-        self.running = true;
-        self.phase = Some(ParsePhase::Queued {
+        let pending = PendingParse {
             parser: parser_name.to_owned(),
             path: path.to_owned(),
-        });
+        };
+        if self.pending_parses.is_empty() {
+            self.phase = Some(ParsePhase::Queued {
+                parser: pending.parser.clone(),
+                path: pending.path.clone(),
+            });
+        }
+        self.pending_parses.push_back(pending);
     }
 
     pub fn has_pending_work(&self) -> bool {
-        self.validation_dispatched || self.running
+        self.validation_dispatched || !self.pending_parses.is_empty()
     }
 
     pub fn handle_event(&mut self, event: ParserEvent) {
@@ -230,7 +243,6 @@ impl ParsersPanel {
                 }
             }
             ParserEvent::Reading { parser_name, path } => {
-                self.running = true;
                 self.status = format!("reading {}", path.display());
                 self.phase = Some(ParsePhase::Reading {
                     parser: parser_name,
@@ -238,30 +250,33 @@ impl ParsersPanel {
                 });
             }
             ParserEvent::Running { parser_name, path } => {
-                self.running = true;
                 self.status = format!("running {parser_name}");
                 self.phase = Some(ParsePhase::Running {
                     parser: parser_name,
                     path,
                 });
             }
-            ParserEvent::Succeeded { .. } => {
-                self.running = false;
-                self.phase = None;
-                self.status.clear();
+            ParserEvent::Succeeded {
+                parser_name, path, ..
+            } => {
+                self.complete_parse(&parser_name, &path);
+                if self.pending_parses.is_empty() {
+                    self.status.clear();
+                } else {
+                    self.status = self.active_label();
+                }
             }
             ParserEvent::Failed {
                 parser_name,
                 path,
                 message,
             } => {
-                self.running = false;
-                self.phase = None;
-                if path.is_none()
-                    && self
-                        .pending_save
-                        .as_ref()
-                        .is_some_and(|pending| pending.name == parser_name)
+                if let Some(path) = &path {
+                    self.complete_parse(&parser_name, path);
+                } else if self
+                    .pending_save
+                    .as_ref()
+                    .is_some_and(|pending| pending.name == parser_name)
                 {
                     self.pending_save = None;
                     self.validation_dispatched = false;
@@ -286,7 +301,7 @@ impl ParsersPanel {
     }
 
     pub fn is_running(&self) -> bool {
-        self.running
+        !self.pending_parses.is_empty()
     }
 
     #[allow(dead_code)] // Task 6 toolbar facade.
@@ -437,6 +452,24 @@ impl ParsersPanel {
         self.status = message.clone();
         self.error_popup = Some(message.clone());
         self.diagnostics.push(message);
+    }
+
+    fn complete_parse(&mut self, parser_name: &str, path: &Path) {
+        let index = self
+            .pending_parses
+            .iter()
+            .position(|pending| pending.parser == parser_name && pending.path == path)
+            .unwrap_or(0);
+        if !self.pending_parses.is_empty() {
+            self.pending_parses.remove(index);
+        }
+        self.phase = self
+            .pending_parses
+            .front()
+            .map(|pending| ParsePhase::Queued {
+                parser: pending.parser.clone(),
+                path: pending.path.clone(),
+            });
     }
 
     #[cfg(test)]
@@ -655,6 +688,7 @@ mod tests {
         let temp = TestDir::new();
         let mut panel = ParsersPanel::new(temp.0.clone());
         let path = temp.0.join("flight.raw");
+        panel.mark_parse_dispatched("raw.py", &path);
         panel.handle_event(ParserEvent::Running {
             parser_name: "raw.py".into(),
             path: path.clone(),
@@ -684,6 +718,7 @@ mod tests {
         let temp = TestDir::new();
         let mut panel = ParsersPanel::new(temp.0.clone());
         let path = PathBuf::from("flight.raw");
+        panel.mark_parse_dispatched("raw.py", &path);
 
         panel.handle_event(ParserEvent::Reading {
             parser_name: "raw.py".into(),
@@ -772,6 +807,37 @@ mod tests {
             path,
             topics: 1,
             rows: 3,
+        });
+        assert!(!panel.has_pending_work());
+        assert!(!panel.is_running());
+    }
+
+    #[test]
+    fn first_terminal_event_keeps_second_dispatched_parse_pending() {
+        let temp = TestDir::new();
+        let mut panel = ParsersPanel::new(temp.0.clone());
+        let first = PathBuf::from("first.raw");
+        let second = PathBuf::from("second.raw");
+        panel.mark_parse_dispatched("raw.py", &first);
+        panel.mark_parse_dispatched("raw.py", &second);
+
+        panel.handle_event(ParserEvent::Succeeded {
+            parser_name: "raw.py".into(),
+            path: first,
+            topics: 1,
+            rows: 3,
+        });
+
+        assert!(panel.has_pending_work());
+        assert!(panel.is_running());
+        panel.handle_event(ParserEvent::Running {
+            parser_name: "raw.py".into(),
+            path: second.clone(),
+        });
+        panel.handle_event(ParserEvent::Failed {
+            parser_name: "raw.py".into(),
+            path: Some(second),
+            message: "second failed".into(),
         });
         assert!(!panel.has_pending_work());
         assert!(!panel.is_running());
