@@ -1756,7 +1756,7 @@ impl eframe::App for DelogApp {
                         self.session.cancel_all();
                         #[cfg(feature = "scripting")]
                         if load_state.parser_active {
-                            self.scripts.request_interrupt();
+                            self.scripts.cancel_parsers();
                         }
                     }
                     ui.label(format!("loading {}", load_state.labels.join(", ")));
