@@ -1,5 +1,6 @@
 //! Compatibility conversion for legacy `Parse(raw_data)` file parsers.
 
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
@@ -45,7 +46,8 @@ pub fn read_float32_file(path: impl AsRef<Path>) -> std::io::Result<RawFloatFile
 
 pub struct ParserField {
     pub name: String,
-    pub description: String,
+    /// Engineering unit parsed out of the legacy `name [unit]` convention.
+    pub unit: Option<String>,
     pub values: ArrayRef,
 }
 
@@ -96,10 +98,9 @@ pub fn emit_parser_output(
                 FieldSchema::new(
                     field.name.clone(),
                     field.values.data_type().clone(),
-                    None::<String>,
+                    field.unit.clone(),
                     1.0,
                 )
-                .map(|schema| schema.with_description(field.description.clone()))
                 .map_err(|error| format!("topic '{}': {error}", topic.name))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -145,17 +146,53 @@ struct PendingTopic {
 }
 
 struct PendingField {
+    /// Original `topic.field` (unit suffix and lane index included), for diagnostics.
     full_name: String,
-    field_name: String,
-    description: String,
+    /// Unit-stripped field name plus any lane suffix; the preferred schema name.
+    preferred_name: String,
+    /// Field part as emitted (unit kept) plus any lane suffix; the disambiguating
+    /// fallback used when two preferred names would collide within a topic.
+    original_name: String,
+    unit: Option<String>,
     values: ArrayRef,
+}
+
+/// Split a legacy field name into its base name and engineering unit.
+///
+/// Only a trailing `[...]` (optionally preceded by whitespace) is treated as a
+/// unit, and only when its content is not purely numeric — numeric brackets such
+/// as `distance[0]` are array indices and are kept verbatim with no unit.
+fn split_unit(field: &str) -> (String, Option<String>) {
+    if let Some(before_close) = field.strip_suffix(']')
+        && let Some(open) = before_close.rfind('[')
+    {
+        let content = &before_close[open + 1..];
+        let is_index = !content.is_empty() && content.bytes().all(|b| b.is_ascii_digit());
+        if !content.trim().is_empty() && !is_index {
+            return (
+                before_close[..open].trim_end().to_owned(),
+                Some(content.trim().to_owned()),
+            );
+        }
+    }
+    (field.to_owned(), None)
 }
 
 fn value_error(message: impl Into<String>) -> PyErr {
     PyValueError::new_err(message.into())
 }
 
-fn numpy_array(py: Python<'_>, full_name: &str, value: &Bound<'_, PyAny>) -> PyResult<ArrayRef> {
+/// Materialize a field value as one Arrow array per 1-D lane.
+///
+/// 1-D values yield a single lane (`None` index). 2-D values are split along the
+/// first axis — the last axis is the sample/time axis — into one lane per row,
+/// tagged with the row index so the caller can suffix the field name `[k]`.
+/// Higher dimensions are rejected.
+fn numpy_lanes(
+    py: Python<'_>,
+    full_name: &str,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<Vec<(Option<usize>, ArrayRef)>> {
     let numpy = py.import("numpy")?;
     let is_masked: bool = numpy
         .getattr("ma")?
@@ -172,17 +209,35 @@ fn numpy_array(py: Python<'_>, full_name: &str, value: &Bound<'_, PyAny>) -> PyR
         ))
     })?;
     let ndim: usize = array.getattr("ndim")?.extract()?;
-    if ndim != 1 {
-        return Err(value_error(format!(
-            "field '{full_name}' values must be one-dimensional, got ndim={ndim}"
-        )));
+    match ndim {
+        1 => Ok(vec![(None, convert_1d(&numpy, full_name, &array)?)]),
+        2 => {
+            let lanes: usize = array.getattr("shape")?.get_item(0)?.extract()?;
+            (0..lanes)
+                .map(|lane| {
+                    let row = array.get_item(lane)?;
+                    Ok((Some(lane), convert_1d(&numpy, full_name, &row)?))
+                })
+                .collect()
+        }
+        _ => Err(value_error(format!(
+            "field '{full_name}' values must be one- or two-dimensional, got ndim={ndim}"
+        ))),
     }
+}
+
+/// Convert one 1-D NumPy array into a native-endian, contiguous Arrow array.
+fn convert_1d(
+    numpy: &Bound<'_, PyModule>,
+    full_name: &str,
+    array: &Bound<'_, PyAny>,
+) -> PyResult<ArrayRef> {
     let dtype = array.getattr("dtype")?;
     let kind: char = dtype.getattr("kind")?.extract()?;
     let itemsize: usize = dtype.getattr("itemsize")?.extract()?;
     let dtype_name: String = dtype.getattr("name")?.extract()?;
     let native_dtype = dtype.call_method1("newbyteorder", ("=",))?;
-    let contiguous = numpy.call_method1("ascontiguousarray", (&array, native_dtype))?;
+    let contiguous = numpy.call_method1("ascontiguousarray", (array, native_dtype))?;
 
     macro_rules! primitive_array {
         ($native:ty, $arrow:ty) => {{
@@ -368,11 +423,11 @@ pub fn parse_python_result(py: Python<'_>, result: &Bound<'_, PyAny>) -> PyResul
                 "field '{full_name}' must have a non-empty topic and field"
             )));
         }
-        let description: String = tuple
-            .get_item(2)?
-            .extract()
-            .map_err(|_| value_error(format!("field '{full_name}' tooltip must be a string")))?;
-        let values = numpy_array(py, &full_name, &tuple.get_item(1)?)?;
+        // The third tuple item (tooltip) is intentionally ignored: these legacy
+        // parsers were authored for another tool, and DeLOG carries units, not
+        // free-text tooltips, as field metadata.
+        let (base_field, unit) = split_unit(field_name);
+        let lanes = numpy_lanes(py, &full_name, &tuple.get_item(1)?)?;
 
         let topic_index = topics
             .iter()
@@ -385,65 +440,92 @@ pub fn parse_python_result(py: Python<'_>, result: &Bound<'_, PyAny>) -> PyResul
                 topics.len() - 1
             });
         let topic = &mut topics[topic_index];
-        let pending = PendingField {
-            full_name: full_name.clone(),
-            field_name: field_name.to_owned(),
-            description,
-            values,
-        };
-        if let Some(field_index) = topic
-            .fields
-            .iter()
-            .position(|field| field.full_name == full_name)
-        {
-            topic.fields[field_index] = pending;
-            warnings.push(format!(
-                "duplicate parser field '{full_name}'; last occurrence replaced the previous value"
-            ));
-        } else {
-            topic.fields.push(pending);
+        for (lane, values) in lanes {
+            let suffix = lane.map(|k| format!("[{k}]")).unwrap_or_default();
+            topic.fields.push(PendingField {
+                full_name: format!("{topic_name}.{field_name}{suffix}"),
+                preferred_name: format!("{base_field}{suffix}"),
+                original_name: format!("{field_name}{suffix}"),
+                unit: unit.clone(),
+                values,
+            });
         }
     }
 
     let mut output_topics = Vec::with_capacity(topics.len());
-    for topic in topics {
-        let clock = topic
-            .fields
+    for PendingTopic {
+        name: topic_name,
+        fields,
+    } in topics
+    {
+        // A unit-stripped name is only kept when it stays unique within the
+        // topic; if two fields strip to the same name with different originals
+        // (e.g. `gyr.front [rad/s]` and `[deg/s]`), both keep their original
+        // unit-bearing names so neither is lost.
+        let mut originals_by_preferred: HashMap<String, HashSet<String>> = HashMap::new();
+        for field in &fields {
+            originals_by_preferred
+                .entry(field.preferred_name.clone())
+                .or_default()
+                .insert(field.original_name.clone());
+        }
+        let final_names: Vec<String> = fields
             .iter()
-            .find(|field| field.field_name == "rtc")
-            .or_else(|| {
-                topic
-                    .fields
-                    .iter()
-                    .find(|field| field.field_name == "index")
+            .map(|field| {
+                if originals_by_preferred[&field.preferred_name].len() > 1 {
+                    field.original_name.clone()
+                } else {
+                    field.preferred_name.clone()
+                }
             })
+            .collect();
+        drop(originals_by_preferred);
+
+        // Dedup by final name, last occurrence wins in its first-seen position.
+        let mut deduped: Vec<(String, PendingField)> = Vec::with_capacity(fields.len());
+        let mut index_by_name: HashMap<String, usize> = HashMap::new();
+        for (name, field) in final_names.into_iter().zip(fields) {
+            if let Some(&existing) = index_by_name.get(&name) {
+                warnings.push(format!(
+                    "duplicate parser field '{}'; last occurrence replaced the previous value",
+                    field.full_name
+                ));
+                deduped[existing].1 = field;
+            } else {
+                index_by_name.insert(name.clone(), deduped.len());
+                deduped.push((name, field));
+            }
+        }
+
+        let clock = deduped
+            .iter()
+            .find(|(name, _)| name == "rtc")
+            .or_else(|| deduped.iter().find(|(name, _)| name == "index"))
+            .map(|(_, field)| field)
             .ok_or_else(|| {
                 value_error(format!(
-                    "topic '{}' is missing clock field '{}.rtc' or '{}.index'",
-                    topic.name, topic.name, topic.name
+                    "topic '{topic_name}' is missing clock field '{topic_name}.rtc' or '{topic_name}.index'"
                 ))
             })?;
         let timestamps = clock_timestamps(clock)?;
         let expected = timestamps.len();
-        for field in &topic.fields {
+        for (_, field) in &deduped {
             if field.values.len() != expected {
                 return Err(value_error(format!(
-                    "field '{}' has {} values but topic '{}' clock has {expected}",
+                    "field '{}' has {} values but topic '{topic_name}' clock has {expected}",
                     field.full_name,
                     field.values.len(),
-                    topic.name
                 )));
             }
         }
         output_topics.push(ParserTopic {
-            name: topic.name,
+            name: topic_name,
             timestamps,
-            fields: topic
-                .fields
+            fields: deduped
                 .into_iter()
-                .map(|field| ParserField {
-                    name: field.field_name,
-                    description: field.description,
+                .map(|(name, field)| ParserField {
+                    name,
+                    unit: field.unit,
                     values: field.values,
                 })
                 .collect(),
@@ -539,8 +621,8 @@ mod tests {
     }
 
     #[test]
-    fn emits_complete_output_with_schema_descriptions_warning_and_summary() {
-        let output = parse("[('AP.index',[1.,2.],'clock'),('AP.value',[3.,4.],'tooltip'),('AP.value',[5.,6.],'last')]" ).unwrap();
+    fn emits_complete_output_ignoring_tooltips_with_warning_and_summary() {
+        let output = parse("[('AP.index',[1.,2.],'clock'),('AP.value [m]',[3.,4.],'tooltip'),('AP.value [m]',[5.,6.],'last')]" ).unwrap();
         let mut sink = CollectSink::default();
 
         let summary = emit_parser_output(&mut sink, "flight", output).unwrap();
@@ -549,15 +631,10 @@ mod tests {
         assert_eq!(sink.batches.len(), 1);
         assert_eq!(sink.batches[0].source, SourceId(7));
         assert_eq!(sink.batches[0].topic(), "AP");
-        assert_eq!(
-            sink.batches[0]
-                .schema
-                .field_by_name("value")
-                .unwrap()
-                .description
-                .as_deref(),
-            Some("last")
-        );
+        let value = sink.batches[0].schema.field_by_name("value").unwrap();
+        // The tooltip is dropped; the `[m]` suffix becomes the native unit.
+        assert_eq!(value.description, None);
+        assert_eq!(value.unit.as_deref(), Some("m"));
         assert_eq!(sink.diagnostics.len(), 1);
         assert_eq!(sink.diagnostics[0].code, "python-parser-duplicate");
         assert_eq!(sink.diagnostics[0].source, Some(SourceId(7)));
@@ -577,7 +654,7 @@ mod tests {
                 timestamps: Int64Array::from(vec![0]),
                 fields: vec![ParserField {
                     name: "v".into(),
-                    description: String::new(),
+                    unit: None,
                     values: Arc::new(Float32Array::from(vec![1.0])),
                 }],
             }],
@@ -829,7 +906,6 @@ mod tests {
             ["index", "v", "x"]
         );
         let field = &output.topics[0].fields[1];
-        assert_eq!(field.description, "newest");
         assert_eq!(field.values.data_type(), &DataType::Int64);
         assert_eq!(output.warnings.len(), 2);
         assert!(output.warnings.iter().all(|w| w.contains("t.v")));
@@ -840,8 +916,9 @@ mod tests {
         let output =
             parse("[('航法.index',[0,1],''),('航法.温度  ',[float('nan'),2.0],'説明')]").unwrap();
         assert_eq!(output.topics[0].name, "航法");
+        // No unit bracket, so the trailing spaces are preserved verbatim.
         assert_eq!(output.topics[0].fields[1].name, "温度  ");
-        assert_eq!(output.topics[0].fields[1].description, "説明");
+        assert_eq!(output.topics[0].fields[1].unit, None);
         assert!(
             output.topics[0].fields[1]
                 .values
@@ -866,10 +943,8 @@ mod tests {
         assert!(error("[('t.index',[0])]").contains("entry 0"));
         assert!(error("[123]").contains("entry 0"));
         assert!(error("[(1,[0],'')]").contains("entry 0 field name"));
-        assert!(
-            error("[('t.index',[0],1)]").contains("t.index")
-                && error("[('t.index',[0],1)]").contains("tooltip")
-        );
+        // A non-string tooltip is accepted now that tooltips are ignored.
+        assert!(parse("[('t.index',[0],1)]").is_ok());
         assert!(error("[('',[0],'')]").contains("non-empty"));
     }
 
@@ -890,7 +965,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsupported_dtypes_and_non_one_dimensional_values() {
+    fn rejects_unsupported_dtypes_and_arrays_above_two_dimensions() {
         for (source, field) in [
             ("[('t.index',[0],''),('t.s',['x'],'')]", "t.s"),
             ("[('t.index',[0],''),('t.c',[1+2j],'')]", "t.c"),
@@ -899,7 +974,7 @@ mod tests {
                 "t.o",
             ),
             (
-                "[('t.index',[0],''),('t.v',__import__('numpy').array([[1]]),'')]",
+                "[('t.index',[0],''),('t.v',__import__('numpy').array([[[1]]]),'')]",
                 "t.v",
             ),
         ] {
@@ -935,5 +1010,67 @@ mod tests {
         assert!(overflow.contains("t.index") && overflow.contains("range"));
         let decreasing = error("[('t.index',[2.,1.],'')]");
         assert!(decreasing.contains("t.index") && decreasing.contains("non-decreasing"));
+    }
+
+    #[test]
+    fn strips_unit_into_metadata_and_keeps_numeric_index_brackets() {
+        let output = parse(
+            "[('t.index',[0,1],''),('t.z [m]',[1.,2.],''),('t.v [m/s]',[3.,4.],''),('t.d[0]',[5.,6.],'')]",
+        )
+        .unwrap();
+        let by: HashMap<&str, Option<&str>> = output.topics[0]
+            .fields
+            .iter()
+            .map(|f| (f.name.as_str(), f.unit.as_deref()))
+            .collect();
+        assert_eq!(by["z"], Some("m"));
+        assert_eq!(by["v"], Some("m/s"));
+        // A purely numeric bracket is an array index, not a unit: name kept verbatim.
+        assert_eq!(by["d[0]"], None);
+        assert!(!by.contains_key("d"));
+    }
+
+    #[test]
+    fn keeps_original_names_when_unit_stripping_would_collide() {
+        let output =
+            parse("[('t.index',[0,1],''),('t.a [rad/s]',[1.,2.],''),('t.a [deg/s]',[3.,4.],'')]")
+                .unwrap();
+        let names: Vec<&str> = output.topics[0]
+            .fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        assert!(names.contains(&"a [rad/s]"));
+        assert!(names.contains(&"a [deg/s]"));
+        // The colliding fields keep their disambiguating names but still carry units.
+        for field in &output.topics[0].fields {
+            if field.name.starts_with("a ") {
+                assert!(field.unit.is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn splits_two_dimensional_fields_into_indexed_lanes() {
+        let output = parse(
+            "[('t.index',[0,1],''),('t.m',__import__('numpy').array([[1,2],[3,4]],dtype='int16'),'')]",
+        )
+        .unwrap();
+        let fields = &output.topics[0].fields;
+        let lane = |name: &str| -> Vec<i16> {
+            fields
+                .iter()
+                .find(|f| f.name == name)
+                .unwrap()
+                .values
+                .as_any()
+                .downcast_ref::<Int16Array>()
+                .unwrap()
+                .values()
+                .to_vec()
+        };
+        // The last axis is the sample axis, so the first axis becomes lanes [0], [1].
+        assert_eq!(lane("m[0]"), [1, 2]);
+        assert_eq!(lane("m[1]"), [3, 4]);
     }
 }
