@@ -468,6 +468,9 @@ mod tests {
         let mut panel = ScriptsPanel::new(root.join("scripts"), root.join("parsers"));
         panel.running = true;
         panel.status = "running console script".into();
+        panel
+            .parsers
+            .mark_parse_dispatched("raw.py", std::path::Path::new("flight.raw"));
 
         panel.handle_event(ScriptEvent::Parser(ParserEvent::Running {
             parser_name: "raw.py".into(),
@@ -499,5 +502,33 @@ mod tests {
             name: "new_parser.py".into(),
         }));
         assert!(!panel.should_poll_parser_events());
+    }
+
+    #[test]
+    fn first_parse_terminal_keeps_polling_for_second_dispatch() {
+        let root =
+            std::env::temp_dir().join(format!("delog-scripts-parser-queue-{}", std::process::id()));
+        let mut panel = ScriptsPanel::new(root.join("scripts"), root.join("parsers"));
+        let first = PathBuf::from("first.raw");
+        let second = PathBuf::from("second.raw");
+        panel.parsers.mark_parse_dispatched("raw.py", &first);
+        panel.parsers.mark_parse_dispatched("raw.py", &second);
+
+        panel.handle_event(ScriptEvent::Parser(ParserEvent::Succeeded {
+            parser_name: "raw.py".into(),
+            path: first,
+            topics: 1,
+            rows: 1,
+        }));
+
+        assert!(panel.should_poll_parser_events());
+        assert!(panel.is_parser_running());
+        panel.handle_event(ScriptEvent::Parser(ParserEvent::Failed {
+            parser_name: "raw.py".into(),
+            path: Some(second),
+            message: "failed".into(),
+        }));
+        assert!(!panel.should_poll_parser_events());
+        assert!(!panel.is_parser_running());
     }
 }
