@@ -83,6 +83,40 @@ def Parse(raw_data):
     group.throughput(Throughput::Elements(
         PYTHON_ROWS as u64 * (PYTHON_FIELDS as u64 + 1),
     ));
+    group.bench_function("python_call", |b| {
+        Python::attach(|py| {
+            b.iter_batched(
+                || raw_data.clone_ref(py),
+                |raw_data| {
+                    let result = parse
+                        .bind(py)
+                        .call1((raw_data.bind(py),))
+                        .expect("call benchmark parser");
+                    black_box(result);
+                },
+                BatchSize::SmallInput,
+            );
+        });
+    });
+    group.bench_function("convert", |b| {
+        Python::attach(|py| {
+            b.iter_batched(
+                || {
+                    parse
+                        .bind(py)
+                        .call1((raw_data.bind(py),))
+                        .expect("call benchmark parser")
+                        .unbind()
+                },
+                |result| {
+                    let output =
+                        parse_python_result(py, result.bind(py)).expect("convert parser result");
+                    black_box(output);
+                },
+                BatchSize::SmallInput,
+            );
+        });
+    });
     group.bench_function("python_and_convert", |b| {
         Python::attach(|py| {
             b.iter_batched(
