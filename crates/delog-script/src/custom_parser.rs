@@ -8,6 +8,7 @@ use arrow::array::{
     Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array,
     Int64Array, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
 };
+use arrow::datatypes::DataType;
 use numpy::PyReadonlyArray1;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -75,6 +76,15 @@ fn value_error(message: impl Into<String>) -> PyErr {
 
 fn numpy_array(py: Python<'_>, full_name: &str, value: &Bound<'_, PyAny>) -> PyResult<ArrayRef> {
     let numpy = py.import("numpy")?;
+    let is_masked: bool = numpy
+        .getattr("ma")?
+        .call_method1("isMaskedArray", (value,))?
+        .extract()?;
+    if is_masked {
+        return Err(value_error(format!(
+            "field '{full_name}' values must not be a NumPy MaskedArray"
+        )));
+    }
     let array = numpy.call_method1("asarray", (value,)).map_err(|error| {
         value_error(format!(
             "field '{full_name}' values must be NumPy-compatible: {error}"
@@ -128,53 +138,98 @@ fn numpy_array(py: Python<'_>, full_name: &str, value: &Bound<'_, PyAny>) -> PyR
     Ok(output)
 }
 
-fn numeric_value(array: &dyn Array, index: usize) -> Option<f64> {
-    macro_rules! get {
-        ($ty:ty) => {
-            array
-                .as_any()
-                .downcast_ref::<$ty>()
-                .map(|values| values.value(index) as f64)
-        };
-    }
-    get!(Int8Array)
-        .or_else(|| get!(Int16Array))
-        .or_else(|| get!(Int32Array))
-        .or_else(|| get!(Int64Array))
-        .or_else(|| get!(UInt8Array))
-        .or_else(|| get!(UInt16Array))
-        .or_else(|| get!(UInt32Array))
-        .or_else(|| get!(UInt64Array))
-        .or_else(|| get!(Float32Array))
-        .or_else(|| get!(Float64Array))
+fn clock_range_error(field: &PendingField, index: usize) -> PyErr {
+    value_error(format!(
+        "clock field '{}' value at index {index} is outside the i64 microsecond range",
+        field.full_name
+    ))
 }
 
-fn clock_timestamps(field: &PendingField) -> PyResult<Int64Array> {
-    if field.values.as_any().is::<BooleanArray>() {
+fn float_clock_micros(field: &PendingField, index: usize, seconds: f64) -> PyResult<i64> {
+    if !seconds.is_finite() {
         return Err(value_error(format!(
-            "clock field '{}' must be numeric, not Boolean",
+            "clock field '{}' value at index {index} must be finite",
             field.full_name
         )));
     }
+    let micros = (seconds * 1_000_000.0).round();
+    if !micros.is_finite() || !(-(2_f64.powi(63))..2_f64.powi(63)).contains(&micros) {
+        return Err(clock_range_error(field, index));
+    }
+    Ok(micros as i64)
+}
+
+fn clock_micros(field: &PendingField, index: usize) -> PyResult<i64> {
+    macro_rules! signed {
+        ($array:ty) => {{
+            let seconds = field
+                .values
+                .as_any()
+                .downcast_ref::<$array>()
+                .expect("Arrow dtype and array agree")
+                .value(index) as i64;
+            seconds
+                .checked_mul(1_000_000)
+                .ok_or_else(|| clock_range_error(field, index))
+        }};
+    }
+    macro_rules! unsigned {
+        ($array:ty) => {{
+            let seconds = field
+                .values
+                .as_any()
+                .downcast_ref::<$array>()
+                .expect("Arrow dtype and array agree")
+                .value(index) as u64;
+            seconds
+                .checked_mul(1_000_000)
+                .and_then(|micros| i64::try_from(micros).ok())
+                .ok_or_else(|| clock_range_error(field, index))
+        }};
+    }
+
+    match field.values.data_type() {
+        DataType::Int8 => signed!(Int8Array),
+        DataType::Int16 => signed!(Int16Array),
+        DataType::Int32 => signed!(Int32Array),
+        DataType::Int64 => signed!(Int64Array),
+        DataType::UInt8 => unsigned!(UInt8Array),
+        DataType::UInt16 => unsigned!(UInt16Array),
+        DataType::UInt32 => unsigned!(UInt32Array),
+        DataType::UInt64 => unsigned!(UInt64Array),
+        DataType::Float32 => {
+            let seconds = field
+                .values
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .expect("Arrow dtype and array agree")
+                .value(index);
+            float_clock_micros(field, index, f64::from(seconds))
+        }
+        DataType::Float64 => {
+            let seconds = field
+                .values
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .expect("Arrow dtype and array agree")
+                .value(index);
+            float_clock_micros(field, index, seconds)
+        }
+        DataType::Boolean => Err(value_error(format!(
+            "clock field '{}' must be numeric, not Boolean",
+            field.full_name
+        ))),
+        _ => Err(value_error(format!(
+            "clock field '{}' must be numeric",
+            field.full_name
+        ))),
+    }
+}
+
+fn clock_timestamps(field: &PendingField) -> PyResult<Int64Array> {
     let mut timestamps = Vec::with_capacity(field.values.len());
     for index in 0..field.values.len() {
-        let seconds = numeric_value(field.values.as_ref(), index).ok_or_else(|| {
-            value_error(format!("clock field '{}' must be numeric", field.full_name))
-        })?;
-        if !seconds.is_finite() {
-            return Err(value_error(format!(
-                "clock field '{}' value at index {index} must be finite",
-                field.full_name
-            )));
-        }
-        let micros = (seconds * 1_000_000.0).round();
-        if !micros.is_finite() || !(-(2_f64.powi(63))..2_f64.powi(63)).contains(&micros) {
-            return Err(value_error(format!(
-                "clock field '{}' value at index {index} is outside the i64 microsecond range",
-                field.full_name
-            )));
-        }
-        let micros = micros as i64;
+        let micros = clock_micros(field, index)?;
         if timestamps.last().is_some_and(|previous| *previous > micros) {
             return Err(value_error(format!(
                 "clock field '{}' must be non-decreasing (index {index})",
@@ -564,6 +619,38 @@ mod tests {
     }
 
     #[test]
+    fn integer_clocks_preserve_exact_microseconds_at_large_valid_boundaries() {
+        let output = parse(
+            "[('signed.index',__import__('numpy').array([-1,0,9000000000001,9223372036854],dtype='int64'),''),('unsigned.index',__import__('numpy').array([9000000000001,9223372036854],dtype='uint64'),'')]",
+        )
+        .unwrap();
+        assert_eq!(
+            output.topics[0].timestamps.values(),
+            &[
+                -1_000_000,
+                0,
+                9_000_000_000_001_000_000,
+                9_223_372_036_854_000_000,
+            ]
+        );
+        assert_eq!(
+            output.topics[1].timestamps.values(),
+            &[9_000_000_000_001_000_000, 9_223_372_036_854_000_000]
+        );
+    }
+
+    #[test]
+    fn integer_clocks_reject_signed_and_unsigned_multiplication_overflow() {
+        for source in [
+            "[('t.index',__import__('numpy').array([9223372036855],dtype='int64'),'')]",
+            "[('t.index',__import__('numpy').array([9223372036855],dtype='uint64'),'')]",
+        ] {
+            let message = error(source);
+            assert!(message.contains("t.index") && message.contains("range"));
+        }
+    }
+
+    #[test]
     fn duplicate_last_wins_in_place_and_warns_per_occurrence() {
         let output = parse(
             "[('t.index',[0,1],''),('t.v',[1,2],'old'),('t.x',[8,9],''),('t.v',[3.,4.],'new'),('t.v',[5,6],'newest')]",
@@ -654,6 +741,19 @@ mod tests {
         ] {
             assert!(error(source).contains(field));
         }
+    }
+
+    #[test]
+    fn rejects_masked_arrays_before_exposing_hidden_payloads() {
+        let ordinary = error(
+            "[('t.index',[0,1],''),('t.v',__import__('numpy').ma.array([1.,float('nan')],mask=[False,True]),'')]",
+        );
+        assert!(ordinary.contains("t.v") && ordinary.contains("MaskedArray"));
+
+        let clock = error(
+            "[('t.index',__import__('numpy').ma.array([0.,float('nan')],mask=[False,True]),''),('t.v',[1,2],'')]",
+        );
+        assert!(clock.contains("t.index") && clock.contains("MaskedArray"));
     }
 
     #[test]
