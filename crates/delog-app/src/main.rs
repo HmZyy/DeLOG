@@ -43,6 +43,7 @@ fn main() -> eframe::Result {
 
     let viewport = egui::ViewportBuilder::default()
         .with_title("DeLOG")
+        .with_icon(app_icon())
         .with_inner_size([1280.0, 800.0])
         .with_min_inner_size([1024.0, 640.0]);
 
@@ -86,4 +87,29 @@ fn init_tracing() {
     }));
 
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "DeLOG starting");
+}
+
+/// The window/taskbar icon: 256x256 RGBA decoded from `docs/logo.png` by
+/// `build.rs` and embedded into the binary.
+fn app_icon() -> egui::IconData {
+    const RGBA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/icon.rgba"));
+    egui::IconData {
+        rgba: RGBA.to_vec(),
+        width: 256,
+        height: 256,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bundled logo decodes to a 256x256 RGBA window icon (4 bytes/pixel).
+    #[test]
+    fn app_icon_is_256x256_rgba() {
+        let icon = app_icon();
+        assert_eq!(icon.width, 256);
+        assert_eq!(icon.height, 256);
+        assert_eq!(icon.rgba.len(), 256 * 256 * 4);
+    }
 }
