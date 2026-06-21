@@ -9,6 +9,7 @@ This is an **optional, build-time feature**. It is off by default.
 
 - [Enabling scripting](#enabling-scripting)
 - [The Scripts UI](#the-scripts-ui)
+- [Custom file parsers](#custom-file-parsers)
 - [How scripts produce data](#how-scripts-produce-data)
 - [API reference](#api-reference)
 - [The `delog` object](#the-delog-object)
@@ -44,7 +45,7 @@ cargo build --workspace  --no-default-features
 If the build links the wrong `libpython` (e.g. `numpy` fails to import with
 `No module named 'math'`), pin the interpreter with a **local, gitignored**
 `.cargo/config.toml` that sets `PYO3_PYTHON` to your interpreter and adds its
-libdir to the rpath. See `CLAUDE.md` → Commands.
+libdir to the rpath.
 
 ---
 
@@ -88,6 +89,64 @@ life of the app session.
 
 > Running the editor buffer without a name runs it as **`scratch`** (so output
 > still shows); **Save** requires a name.
+
+---
+
+## Custom file parsers
+
+**Tools ▸ Parsers** manages Python parsers for file formats that DeLOG's built-in
+parsers do not handle. Choose **Add new parser...** to create one. Each saved
+filename has a pencil icon to edit it and a folder icon to explicitly choose a
+file and open it with that parser. In the editor, change the filename and press
+**Save** to add or rename the parser; **Delete** removes a saved parser after
+confirmation.
+
+Custom parsers are global `parsers/*.py` files in DeLOG's application config
+directory, like the global script library. They are never auto-sniffed, and the
+Tools menu lists custom Python parsers only, not built-in Rust parsers.
+
+A parser receives the selected file as an exact one-dimensional,
+native-endian NumPy `float32` array. An incomplete trailing 1-3 bytes is ignored.
+It must define `Parse(raw_data)` and return triples of field name, values, and
+hover tooltip:
+
+```python
+import numpy as np
+
+def Parse(raw_data):
+    t = np.arange(raw_data.size, dtype=np.float64) * 0.01
+    return [
+        ("DATA.rtc", t, "time in seconds"),
+        ("DATA.value", raw_data, "raw float32 values"),
+    ]
+```
+
+Every entry is exactly `(field_name, values, tooltip)`. The first dot in the
+field name separates topic from field, so `gps.main.lat` becomes topic `gps`,
+field `main.lat`. Values must be one-dimensional NumPy-compatible arrays of
+equal length within a topic. Supported dtypes are Boolean, signed and unsigned
+8/16/32/64-bit integers, and `float32`/`float64`. Numeric NaNs are ordinary gap
+values and remain gaps in plots. Tooltips appear when hovering over fields in
+the data browser.
+
+Each topic uses its `.rtc` field as the clock when present, otherwise `.index`.
+Both clock fields remain visible. Clock values are seconds and are rounded to
+canonical signed `i64` microseconds. Exact duplicate full field names are
+accepted for legacy compatibility: the last value wins and DeLOG records a
+warning.
+
+Parser code runs in a fresh namespace with full user privileges and must be
+trusted. Imports use the same embedded Python environment as scripts, including
+NumPy and, when installed there, Bottleneck, CFFI, and SciPy. Parsers share the
+single serialized Python worker with scripts, the REPL, and live transforms, so
+only one of these jobs runs at a time.
+
+Opening is transactional: an error or cancellation publishes no partial source.
+The compatibility API holds and copies the raw input, Python result arrays, and
+converted Arrow arrays, so large files can temporarily require substantial
+extra memory. Cancellation raises `KeyboardInterrupt` cooperatively at Python
+boundaries; a long NumPy, SciPy, CFFI, or other native call may not stop until
+that call returns.
 
 ---
 

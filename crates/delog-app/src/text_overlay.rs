@@ -1,4 +1,4 @@
-//! Text-annotation traces (PLT-15, §10): string fields drawn as text labels at
+//! Text-annotation traces: string fields drawn as text labels at
 //! each sample's timestamp, overlaid in screen space over the pane. Auto-packed
 //! top-down so labels don't collide; each is draggable vertically (x is locked
 //! to its time) to declutter, with manual positions persisted per pane.
@@ -17,7 +17,7 @@ const FONT_SIZE: f32 = 11.0;
 /// Horizontal gap (px) required between two labels sharing a row.
 const ROW_GAP: f32 = 6.0;
 
-/// Layout style for text-annotation labels (PLT-15), from `PlotDisplay`.
+/// Layout style for text-annotation labels, from `PlotDisplay`.
 pub struct TextLabelStyle {
     /// Max labels per string trace in the visible window.
     pub cap: usize,
@@ -31,7 +31,7 @@ pub struct TextLabelStyle {
     pub line_opacity: f32,
 }
 
-/// Whether `field`'s dtype is a string (text-annotation trace, PLT-15).
+/// Whether `field`'s dtype is a string (text-annotation trace).
 pub fn field_is_string(snapshot: &StoreSnapshot, field: FieldId) -> bool {
     let Some(entry) = snapshot.fields.get(field.index()).filter(|f| f.id == field) else {
         return false;
@@ -89,7 +89,7 @@ pub fn draw(
 
     // Label dragging is handled through the pane's own response (not per-label
     // interact widgets) so horizontal drags still pan and the wheel still zooms
-    // the pane — labels only take the *vertical* component (PLT-15). The grabbed
+    // the pane — labels only take the *vertical* component. The grabbed
     // label persists across frames in egui temp memory.
     let drag_key = ui.id().with("text_label_drag");
     let mut grabbed: Option<(FieldId, i64)> = ui

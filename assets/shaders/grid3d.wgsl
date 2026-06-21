@@ -1,9 +1,9 @@
-// Infinite ground grid + colored world axes (PLAN.md §9.2 `grid3d`, §12.3,
-// GPU-21). A full-screen triangle is unprojected per-pixel into a world-space
-// ray that intersects the y = 0 ground plane; grid lines are drawn with
-// derivative-based (screen-constant) width and faded by distance, so the grid
-// is "infinite" with no tessellated geometry. Per the §12.3 render mapping
-// `(E, −D, −N)`: X = East (red axis), Z = South (blue axis).
+// Infinite ground grid + colored world axes. A full-screen triangle is
+// unprojected per-pixel into a world-space ray that intersects the y = 0 ground
+// plane; grid lines are drawn with derivative-based (screen-constant) width and
+// faded by distance, so the grid is "infinite" with no tessellated geometry.
+// Per the `(E, −D, −N)` render mapping: X = East (red axis), Z = South (blue
+// axis).
 
 struct Grid {
     view_proj: mat4x4<f32>,

@@ -1,4 +1,4 @@
-//! Topic and field schema metadata (PLAN.md §4.3).
+//! Topic and field schema metadata.
 //!
 //! The canonical store preserves original Arrow-compatible dtypes. Units and
 //! multipliers stay in metadata and are applied only when a render cache is
@@ -16,6 +16,7 @@ pub struct FieldSchema {
     pub name: String,
     pub dtype: DataType,
     pub unit: Option<String>,
+    pub description: Option<String>,
     pub multiplier: f64,
 }
 
@@ -64,8 +65,17 @@ impl FieldSchema {
             unit: unit
                 .map(Into::into)
                 .and_then(|u: String| if u.is_empty() { None } else { Some(u) }),
+            description: None,
             multiplier,
         })
+    }
+
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = match description.into() {
+            description if description.is_empty() => None,
+            description => Some(description),
+        };
+        self
     }
 
     pub fn is_numeric(&self) -> bool {
@@ -93,8 +103,8 @@ impl FieldSchema {
     }
 
     /// Discrete enough to enumerate distinct values from (int/uint/bool/string;
-    /// floats excluded) — gates "Generate markers" (ANA-11). Lets `delog-app`
-    /// decide without touching Arrow types directly (§3.2).
+    /// floats excluded) — gates "Generate markers". Lets `delog-app`
+    /// decide without touching Arrow types directly.
     pub fn is_discrete(&self) -> bool {
         matches!(
             self.dtype,
@@ -114,7 +124,7 @@ impl FieldSchema {
 
     /// Short, fixed display tag for this field's dtype (e.g. `"i32"`, `"f64"`,
     /// `"str"`). Lets `delog-app` show a dtype chip without touching Arrow
-    /// types directly (§3.2).
+    /// types directly.
     pub fn dtype_label(&self) -> &'static str {
         match self.dtype {
             DataType::Int8 => "i8",
@@ -275,6 +285,21 @@ mod tests {
     fn empty_unit_is_normalized_to_none() {
         let f = FieldSchema::new("Alt", DataType::Float64, Some(""), 1.0).unwrap();
         assert_eq!(f.unit, None);
+    }
+
+    #[test]
+    fn field_description_is_optional_and_builder_preserves_other_metadata() {
+        let field = FieldSchema::new("Alt", DataType::Float64, Some("m"), 1.0).unwrap();
+        assert_eq!(field.description, None);
+
+        let field = field.with_description("filtered altitude");
+        assert_eq!(field.description.as_deref(), Some("filtered altitude"));
+        assert_eq!(field.name, "Alt");
+        assert_eq!(field.dtype, DataType::Float64);
+        assert_eq!(field.unit.as_deref(), Some("m"));
+        assert_eq!(field.multiplier, 1.0);
+
+        assert_eq!(field.with_description("").description, None);
     }
 
     #[test]

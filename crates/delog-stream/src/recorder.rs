@@ -1,4 +1,4 @@
-//! Raw MAVLink `.tlog` recorder (PLAN.md §7.5, LIV-09).
+//! Raw MAVLink `.tlog` recorder.
 
 use std::fs::File;
 use std::io::{self, BufWriter, Write};

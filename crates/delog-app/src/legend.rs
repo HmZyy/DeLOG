@@ -1,5 +1,4 @@
-//! Plot legend: per-trace visibility, colour and width editing (PLAN.md §10.4,
-//! PLT-08).
+//! Plot legend: per-trace visibility, colour and width editing.
 //!
 //! An overlay in the plot's top-left listing each trace with a colour editor
 //! and clickable label. Right-clicking a trace opens style controls for draw
@@ -58,10 +57,10 @@ pub fn trace_label(snapshot: &StoreSnapshot, field: FieldId) -> String {
 
 /// Draw the legend overlay and apply edits to `pane`. Each row is a colour
 /// editor plus a clickable label: clicking toggles the trace's visibility, a
-/// hidden trace's label is greyed out (PLT-08), and right-click / Remove returns
-/// the field (PLT-11) so the caller can drop its cache. When a measurement
+/// hidden trace's label is greyed out, and right-click / Remove returns
+/// the field so the caller can drop its cache. When a measurement
 /// marker is placed, `deltas` carries the per-trace ΔY string shown after the
-/// label (§10.8, ANA-10); an empty map shows none.
+/// label; an empty map shows none.
 #[allow(clippy::too_many_arguments)]
 pub fn ui(
     ui: &egui::Ui,
@@ -79,7 +78,7 @@ pub fn ui(
     }
     let mut removed = None;
     // Per-string-trace text filters edited this frame; applied after the Area
-    // closure releases its borrow of `pane` (PLT-15).
+    // closure releases its borrow of `pane`.
     let mut filter_edits: Vec<(FieldId, String)> = Vec::new();
 
     let (pos, pivot) = legend_anchor(position, plot_rect);
@@ -96,7 +95,7 @@ pub fn ui(
             }
             .show(ui, |ui| {
                 for (field, label) in labels {
-                    // String traces are text-annotation traces (PLT-15) and get
+                    // String traces are text-annotation traces and get
                     // a per-trace "contains" filter box.
                     let is_text = crate::text_overlay::field_is_string(snapshot, *field);
                     let mut filter = if is_text {
@@ -135,8 +134,7 @@ pub fn ui(
                         }
 
                         // Per-trace measuring-marker value delta, weak so it
-                        // reads as a secondary annotation next to the trace name
-                        // (ANA-10).
+                        // reads as a secondary annotation next to the trace name.
                         if let Some(delta) = deltas.get(field) {
                             ui.label(
                                 egui::RichText::new(format!("d {delta}"))
@@ -145,7 +143,7 @@ pub fn ui(
                             );
                         }
 
-                        // Per-trace text-annotation filter (PLT-15): only labels
+                        // Per-trace text-annotation filter: only labels
                         // containing this text are drawn (case-insensitive).
                         if is_text
                             && ui

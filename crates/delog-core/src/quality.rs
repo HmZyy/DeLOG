@@ -1,4 +1,4 @@
-//! Data-quality scan (PLAN.md §15, DIA-05).
+//! Data-quality scan.
 //!
 //! Post-load, per-topic sweep over canonical timestamps + seal-time column
 //! stats: cross-chunk timestamp regressions, dt outliers (>10× the median
@@ -12,7 +12,7 @@ use crate::identity::SourceId;
 use crate::snapshot::StoreSnapshot;
 use crate::store::TopicStore;
 
-/// A dt this many times above the median is an outlier (§15).
+/// A dt this many times above the median is an outlier.
 const DT_OUTLIER_FACTOR: i64 = 10;
 
 /// Cap on dts collected for the median estimate; longer topics are sampled
@@ -20,7 +20,7 @@ const DT_OUTLIER_FACTOR: i64 = 10;
 const MEDIAN_SAMPLE_CAP: usize = 65_536;
 
 /// Scan every topic of `source`, returning one summarized diagnostic per
-/// finding category per topic (DIA-05). Empty when the data is clean.
+/// finding category per topic. Empty when the data is clean.
 pub fn scan_source(snapshot: &StoreSnapshot, source: SourceId) -> Vec<Diag> {
     let mut diags = Vec::new();
     let Some(src) = snapshot.source(source) else {
@@ -99,7 +99,7 @@ fn scan_topic(store: &TopicStore, topic: &str, source: SourceId, diags: &mut Vec
         }
     }
 
-    // NaN/Inf from seal-time column stats — no sample re-scan (§4.5-friendly).
+    // NaN/Inf from seal-time column stats — no sample re-scan.
     let mut nan_cells = 0u64;
     let mut inf_fields: Vec<&str> = Vec::new();
     let mut numeric_cells = 0u64;

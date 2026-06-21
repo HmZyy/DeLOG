@@ -1,4 +1,4 @@
-// Vertex-pulled stepped trace pipeline (PLAN.md GPU-08).
+// Vertex-pulled stepped trace pipeline.
 //
 // Each adjacent `[x,y]` sample pair emits two thick screen-space segments:
 // horizontal at the previous value, then vertical at the next timestamp.

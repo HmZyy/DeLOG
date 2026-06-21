@@ -1,4 +1,4 @@
-//! 3D coordinate math for the vehicle view (PLAN.md §12.2): GPS→NED in f64,
+//! 3D coordinate math for the vehicle view: GPS→NED in f64,
 //! the NED→render frame mapping, and orientation (Euler/quaternion) → render
 //! rotation. Pure — no egui/wgpu — so every conversion is unit-tested.
 //!
@@ -7,7 +7,7 @@
 //! - **ECEF**: earth-centred earth-fixed metres (f64; mm-accurate worldwide).
 //! - **NED**: local tangent metres about a reference origin — North, East, Down.
 //! - **Render**: right-handed Y-up, `render = (E, −D, −N)` i.e. X=East, Y=Up,
-//!   Z=South (§12.2). Stated once; every shader and camera obeys it.
+//!   Z=South. Stated once; every shader and camera obeys it.
 
 use glam::{DVec3, EulerRot, Mat3, Quat, Vec3};
 
@@ -55,7 +55,7 @@ pub fn geodetic_to_ned(
     ecef_to_ned(ecef, ref_ecef, ref_lat_rad, ref_lon_rad)
 }
 
-/// NED metres → render space `(E, −D, −N)` (§12.2).
+/// NED metres → render space `(E, −D, −N)`.
 pub fn ned_to_render(ned: Vec3) -> Vec3 {
     Vec3::new(ned.y, -ned.z, -ned.x)
 }
@@ -73,7 +73,7 @@ pub fn ned_to_render_mat3() -> Mat3 {
 }
 
 /// Body→NED Hamilton quaternion from intrinsic Z-Y-X Euler angles
-/// (yaw-pitch-roll, radians) — the AP/PX4 convention (§12.2).
+/// (yaw-pitch-roll, radians) — the AP/PX4 convention.
 pub fn euler_to_quat(roll: f32, pitch: f32, yaw: f32) -> Quat {
     Quat::from_euler(EulerRot::ZYX, yaw, pitch, roll)
 }

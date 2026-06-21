@@ -1,4 +1,4 @@
-//! Performance metrics registry (PLAN.md §16).
+//! Performance metrics registry.
 //!
 //! Hot paths record through cheap atomics — a metric write is one
 //! `fetch_add` plus one relaxed store — so instrumentation can stay on

@@ -1,4 +1,4 @@
-//! Immutable topic store spine (PLAN.md §4.3-§4.4).
+//! Immutable topic store spine.
 
 use std::error::Error;
 use std::fmt;
@@ -22,8 +22,8 @@ pub struct TopicStore {
     time_range: Option<TimeRange>,
     /// Whether the chunk spine is sorted and non-overlapping in time
     /// (`chunks[i].t_max <= chunks[i+1].t_min`). True for the common in-order
-    /// (live/file) case; an out-of-order source clears it (§4.3 tolerates
-    /// overlap). `FieldView::sample_at` binary-searches the spine when this
+    /// (live/file) case; an out-of-order source clears it (overlap is
+    /// tolerated). `FieldView::sample_at` binary-searches the spine when this
     /// holds and falls back to a linear scan otherwise. Maintained O(1) per
     /// `append_chunk` like `rows`/`time_range`.
     monotonic: bool,

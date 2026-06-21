@@ -1,12 +1,12 @@
-//! ArduPilot DataFlash `.BIN` parser (PLAN.md §6.2, PAR-02..05).
+//! ArduPilot DataFlash `.BIN` parser.
 //!
 //! DataFlash is self-describing: every record is `0xA3 0x95 <msgid> <payload>`.
 //! `FMT` records (msgid 128) define each message's name, length and field
 //! layout; `FMTU`/`UNIT`/`MULT` attach units and multipliers. We store **raw**
-//! values and record the unit + multiplier in the [`TopicSchema`] (§6.2, ZC) —
+//! values and record the unit + multiplier in the [`TopicSchema`] —
 //! the One Copy applies the multiplier later. Malformed records are skipped with
-//! a byte-offset diagnostic and parsing resynchronises on the next sync pair
-//! (PAR-02); only an unreadable stream aborts.
+//! a byte-offset diagnostic and parsing resynchronises on the next sync pair;
+//! only an unreadable stream aborts.
 
 use std::collections::HashMap;
 use std::io::{BufReader, Read};
@@ -258,7 +258,7 @@ impl<'a> Decoder<'a> {
         record_offset: u64,
     ) -> Result<bool, ParseError> {
         let Some(format) = self.formats.get(&msgid) else {
-            // Unknown msgid: we cannot know its length, so resync (PAR-02).
+            // Unknown msgid: we cannot know its length, so resync.
             self.diagnostic(
                 Diag::warning("bin-unknown-msgid", format!("unknown message id {msgid}"))
                     .at_byte(record_offset),
@@ -322,7 +322,7 @@ impl<'a> Decoder<'a> {
         };
 
         // Each instance topic gets its own schema *named* `MOT[N]` so the topic
-        // name is the schema name (the one-name invariant, §4.3); the base
+        // name is the schema name (the one-name invariant); the base
         // schema is reused unchanged for non-instance topics.
         let accum = if let Some(accum) = self.topics.get_mut(&topic_name) {
             accum
@@ -394,7 +394,7 @@ impl<'a> Decoder<'a> {
             return None;
         };
 
-        // Optional instance discriminator (§4.3, PAR-05).
+        // Optional instance discriminator.
         let instance = format
             .fields
             .iter()
@@ -444,7 +444,7 @@ impl<'a> Decoder<'a> {
         })
     }
 
-    /// Resolve a field's multiplier and unit (§6.2). Pre-scaled type chars
+    /// Resolve a field's multiplier and unit. Pre-scaled type chars
     /// (`c/C/e/E/L`) carry their own scale; other fields take the FMTU/MULT
     /// multiplier when one is defined.
     fn resolve_unit_mult(&self, msgid: u8, field_index: usize, chr: u8) -> (f64, Option<String>) {

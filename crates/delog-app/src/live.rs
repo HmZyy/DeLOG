@@ -1,4 +1,4 @@
-//! Live endpoint connection dialog state (PLAN.md LIV-01).
+//! Live endpoint connection dialog state.
 
 use std::net::{IpAddr, SocketAddr};
 

@@ -1,4 +1,4 @@
-//! Vehicle configuration dialog (PLAN.md §12.1, TDV-03), styled after
+//! Vehicle configuration dialog, styled after
 //! tiplot-rs: each vehicle is an in-place collapsible section edited through a
 //! two-column grid (name, type, colours, scale, then Orientation and Position
 //! mappings), with an "Add Vehicle" button on top and a per-vehicle "Remove

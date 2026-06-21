@@ -1,8 +1,8 @@
-//! Decimated min/max column pipeline (PLAN.md §9.5, GPU-09).
+//! Decimated min/max column pipeline.
 //!
 //! For zoomed-out views (`samples/px > 8`) the plot draws one vertical span per
 //! pixel column instead of every segment — min/max so no transient is ever
-//! hidden (the §9.5 "not LTTB" decision). Columns are `[x, min, max]` f32
+//! hidden (the "not LTTB" decision). Columns are `[x, min, max]` f32
 //! triples in a STORAGE buffer; each emits a six-vertex quad via vertex pulling,
 //! sharing the [`PlotUniform`](crate::uniforms::PlotUniform) transform with
 //! `line_pull`.
@@ -125,14 +125,14 @@ impl MinMaxColPipeline {
         })
     }
 
-    /// Bind this pipeline once for a run of traces (GPU-11).
+    /// Bind this pipeline once for a run of traces.
     pub fn bind(&self, pass: &mut wgpu::RenderPass<'_>) {
         pass.set_pipeline(&self.pipeline);
     }
 
     /// Draw `column_count` vertical spans (six vertices each) with the trace's
     /// dynamic uniform offset; the pipeline must already be bound via
-    /// [`Self::bind`] (GPU-11).
+    /// [`Self::bind`].
     pub fn draw_trace(
         &self,
         pass: &mut wgpu::RenderPass<'_>,
@@ -174,7 +174,7 @@ mod tests {
     use crate::target::OffscreenTarget;
     use crate::uniforms::PlotUniform;
 
-    /// GPU-09: a column band renders as a filled vertical region.
+    /// A column band renders as a filled vertical region.
     #[test]
     fn columns_render_a_minmax_band() {
         let Some(ctx) = RenderContext::headless() else {
