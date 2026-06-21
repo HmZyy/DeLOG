@@ -99,6 +99,11 @@ impl ScriptsPanel {
     }
 
     #[allow(dead_code)] // Consumed by the Task 6 Parsers menu.
+    pub fn delete_parser(&mut self, name: &str) {
+        self.parsers.request_delete_named(name);
+    }
+
+    #[allow(dead_code)] // Consumed by the Task 6 Parsers menu.
     pub fn request_open(&mut self, ctx: &egui::Context, name: &str) -> bool {
         if !self.parser_dispatch_enabled() {
             self.status = "finish the running console command before opening a parser file".into();
