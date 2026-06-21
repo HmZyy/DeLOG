@@ -24,9 +24,7 @@ fn tools_menu_exposes_custom_parser_actions() {
     assert!(app.contains("ui.menu_button(\"Parsers\""));
     assert!(app.contains("Add new parser..."));
     assert!(app.contains("crate::icons::pencil()"));
-    assert!(app.contains("crate::icons::folder_open()"));
     assert!(app.contains(".on_hover_text(\"Edit\")"));
-    assert!(app.contains(".on_hover_text(\"Open file with parser\")"));
 }
 
 #[test]

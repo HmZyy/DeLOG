@@ -390,8 +390,11 @@ impl ParsersPanel {
         std::mem::take(&mut self.diagnostics)
     }
 
-    pub fn request_delete(&mut self) {
-        self.pending_delete = self.saved_original_name.clone();
+    /// Stage a saved parser for deletion by name (Tools / Parsers list). The
+    /// confirmation dialog is rendered by [`Self::ui`] every frame, so this works
+    /// whether or not the editor popup is open.
+    pub fn request_delete_named(&mut self, name: &str) {
+        self.pending_delete = Some(name.to_owned());
     }
 
     pub fn confirm_delete(&mut self, confirmed: bool) {
@@ -403,7 +406,12 @@ impl ParsersPanel {
         }
         match self.library.delete(&name) {
             Ok(()) => {
-                self.saved_original_name = None;
+                // Only forget the open editor's identity when it is the parser
+                // being deleted; deleting a different one from the list must not
+                // detach the editor from its file.
+                if self.saved_original_name.as_deref() == Some(name.as_str()) {
+                    self.saved_original_name = None;
+                }
                 self.status = format!("deleted {name}");
             }
             Err(error) => self.record_error(format!("delete parser {name}: {error}")),
@@ -422,13 +430,17 @@ impl ParsersPanel {
         egui::Window::new("Custom Python Parser")
             .open(&mut open)
             .collapsible(false)
+            .resizable(true)
             .default_pos(ctx.content_rect().center())
             .pivot(egui::Align2::CENTER_CENTER)
             .default_size([720.0, 480.0])
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
+                    // A fixed width keeps the field from demanding infinite width,
+                    // which would force the window to its maximum size and block
+                    // shrinking on resize (matches the Scripts editor).
                     ui.add(
-                        egui::TextEdit::singleline(&mut self.filename).desired_width(f32::INFINITY),
+                        egui::TextEdit::singleline(&mut self.filename).desired_width(160.0),
                     );
                     if image_text_button(
                         ui,
@@ -442,11 +454,6 @@ impl ParsersPanel {
                             Ok(action) => actions.push(action),
                             Err(error) => self.record_error(format!("save parser: {error}")),
                         }
-                    }
-                    if image_text_button(ui, crate::icons::trash(), "Delete", self.delete_enabled())
-                        .clicked()
-                    {
-                        self.request_delete();
                     }
                 });
                 ui.label(&self.status);
@@ -558,6 +565,7 @@ impl ParsersPanel {
         self.saved_original_name.as_deref()
     }
 
+    #[cfg(test)]
     pub fn delete_enabled(&self) -> bool {
         self.saved_original_name.is_some()
     }
@@ -826,11 +834,11 @@ mod tests {
         let mut panel = ParsersPanel::new(temp.0.clone());
         panel.edit("saved.py");
 
-        panel.request_delete();
+        panel.request_delete_named("saved.py");
         assert_eq!(panel.pending_delete_name(), Some("saved.py"));
         panel.confirm_delete(false);
         assert!(temp.0.join("saved.py").exists());
-        panel.request_delete();
+        panel.request_delete_named("saved.py");
         panel.confirm_delete(true);
 
         assert!(!temp.0.join("saved.py").exists());
