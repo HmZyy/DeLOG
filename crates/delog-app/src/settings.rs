@@ -42,14 +42,14 @@ pub struct AppSettings {
     /// Plot rendering tuning (live-adjustable, persisted in the config).
     #[serde(default)]
     pub render: RenderTuning,
-    /// Show the corner FPS badge (PRF-08). Default off.
+    /// Show the corner FPS badge. Default off.
     #[serde(default)]
     pub show_fps: bool,
-    /// Show the F12 debug overlay of frame timings (PRF-06). Default off;
+    /// Show the F12 debug overlay of frame timings. Default off;
     /// toggled by the View menu or the F12 key.
     #[serde(default)]
     pub show_debug_overlay: bool,
-    /// Frame-pacing policy (PRF-09). Default `Reactive`.
+    /// Frame-pacing policy. Default `Reactive`.
     #[serde(default)]
     pub render_mode: RenderMode,
     /// Last valid live connection entered in the MAVLink connection dialog.
@@ -66,7 +66,7 @@ pub struct AppSettings {
     pub font: FontOverride,
 }
 
-/// Global font override applied through `Style::override_font_id` (UIX-13),
+/// Global font override applied through `Style::override_font_id`,
 /// mirroring the egui demo's font control. Disabled by default (egui's own
 /// per-text-style fonts are used).
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -108,7 +108,7 @@ impl FontOverride {
     }
 }
 
-/// Where the per-pane legend overlay sits inside the plot rect (PLT-08).
+/// Where the per-pane legend overlay sits inside the plot rect.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LegendPosition {
@@ -138,7 +138,7 @@ impl LegendPosition {
 }
 
 /// Whether the measurement marker is one shared time across all panes or
-/// independent per pane (ANA-10).
+/// independent per pane.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MarkerScope {
@@ -161,7 +161,7 @@ impl MarkerScope {
     }
 }
 
-/// Where the measurement marker's per-trace ΔY is shown (ANA-10).
+/// Where the measurement marker's per-trace ΔY is shown.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MarkerDeltaReadout {
@@ -185,7 +185,7 @@ impl MarkerDeltaReadout {
 
 /// Plot overlay display preferences (legend + hover readout). All live-read each
 /// frame so changes apply immediately; `show_legend_default` only seeds newly
-/// created panes (PLT-08/09).
+/// created panes.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PlotDisplay {
     /// Corner the legend overlay anchors to.
@@ -206,47 +206,44 @@ pub struct PlotDisplay {
     /// Hover/playhead readout background opacity (1 = solid, 0 = transparent).
     #[serde(default = "default_opacity")]
     pub hover_opacity: f32,
-    /// Where the measurement marker's per-trace ΔY is shown (ANA-10).
+    /// Where the measurement marker's per-trace ΔY is shown.
     #[serde(default)]
     pub marker_delta_readout: MarkerDeltaReadout,
-    /// Whether the marker is shared across all panes or per-pane (ANA-10).
+    /// Whether the marker is shared across all panes or per-pane.
     #[serde(default)]
     pub marker_scope: MarkerScope,
     /// Opacity of the manual session-marker verticals on plots (1 = solid,
-    /// 0 = transparent) (§17.4, ANA-05).
+    /// 0 = transparent).
     #[serde(default = "default_opacity")]
     pub marker_line_opacity: f32,
-    /// Width of the manual session-marker verticals on plots, in pixels (ANA-05).
+    /// Width of the manual session-marker verticals on plots, in pixels.
     #[serde(default = "default_marker_line_width")]
     pub marker_line_width: f32,
-    /// Draw each manual session marker's label at the top of its line (ANA-05).
+    /// Draw each manual session marker's label at the top of its line.
     #[serde(default = "default_true")]
     pub marker_show_label: bool,
     /// Shade each plot region from one marker to the next (or the end) with that
-    /// marker's colour (§17.4, ANA-05).
+    /// marker's colour.
     #[serde(default)]
     pub marker_shade_regions: bool,
     /// Opacity of the inter-marker region shading (1 = solid, 0 = transparent).
     #[serde(default = "default_marker_shade_opacity")]
     pub marker_shade_opacity: f32,
-    /// Max text-annotation labels drawn per string trace in the visible window
-    /// (PLT-15); bounds per-frame cost on high-rate string fields.
+    /// Max text-annotation labels drawn per string trace in the visible window;
+    /// bounds per-frame cost on high-rate string fields.
     #[serde(default = "default_text_label_cap")]
     pub text_label_cap: usize,
-    /// Stack text-annotation labels from the bottom up (default) vs top down
-    /// (PLT-15).
+    /// Stack text-annotation labels from the bottom up (default) vs top down.
     #[serde(default = "default_true")]
     pub text_labels_bottom_up: bool,
-    /// Default vertical spacing between stacked text-annotation rows, in px
-    /// (PLT-15).
+    /// Default vertical spacing between stacked text-annotation rows, in px.
     #[serde(default = "default_text_label_spacing")]
     pub text_label_spacing: f32,
     /// Width of the timestamp connector line under each text-annotation label,
-    /// in px (PLT-15).
+    /// in px.
     #[serde(default = "default_text_line_width")]
     pub text_line_width: f32,
-    /// Opacity of the timestamp connector line (1 = solid, 0 = transparent)
-    /// (PLT-15).
+    /// Opacity of the timestamp connector line (1 = solid, 0 = transparent).
     #[serde(default = "default_text_line_opacity")]
     pub text_line_opacity: f32,
 }
@@ -276,7 +273,7 @@ impl Default for PlotDisplay {
     }
 }
 
-/// Knobs for the plot draw path (§9.5 decimation + line/edge AA). Lives in the
+/// Knobs for the plot draw path (decimation + line/edge AA). Lives in the
 /// config so the values can be tuned live and persist across sessions.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RenderTuning {
@@ -287,7 +284,7 @@ pub struct RenderTuning {
     #[serde(default = "default_line_aa_px")]
     pub line_aa_px: f32,
     /// Bridge adjacent decimated columns so smooth slopes read as a connected
-    /// line instead of disjoint bars (§9.5).
+    /// line instead of disjoint bars.
     #[serde(default = "default_true")]
     pub bridge_columns: bool,
 }
@@ -302,8 +299,8 @@ impl Default for RenderTuning {
     }
 }
 
-/// Frame-pacing policy (PRF-09). `Reactive` is event-driven and idles at 0% GPU
-/// (§11 / TLN-06); `Continuous` repaints every frame regardless of activity.
+/// Frame-pacing policy. `Reactive` is event-driven and idles at 0% GPU;
+/// `Continuous` repaints every frame regardless of activity.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RenderMode {
     #[default]
@@ -743,7 +740,7 @@ fn plots_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
             ui.end_row();
 
             ui.label("Text label cap")
-                .on_hover_text("Max text-annotation labels drawn per string trace in the visible window (PLT-15). Higher shows more at once but costs more per frame on high-rate fields.");
+                .on_hover_text("Max text-annotation labels drawn per string trace in the visible window. Higher shows more at once but costs more per frame on high-rate fields.");
             ui.add(egui::Slider::new(&mut p.text_label_cap, 16..=8192).logarithmic(true));
             ui.end_row();
 

@@ -1,6 +1,6 @@
-//! Per-parse control: cancellation and byte-based progress (PLAN.md §5, ING-04).
+//! Per-parse control: cancellation and byte-based progress.
 //!
-//! A parser receives a `&ParseCtl` alongside its [`IngestSink`] (§6.1). It
+//! A parser receives a `&ParseCtl` alongside its [`IngestSink`]. It
 //! polls cancellation cheaply — the `Arc<AtomicBool>` is read at most once every
 //! [`CANCEL_POLL_INTERVAL`] records, so the common path is a counter compare,
 //! not an atomic load — and reports progress as a byte fraction, throttled so a
@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::identity::SourceId;
 use crate::ingest::IngestSink;
 
-/// Records between cancellation polls (§5). Coarse enough to be free per record,
+/// Records between cancellation polls. Coarse enough to be free per record,
 /// fine enough to stay responsive on a fast parse.
 pub const CANCEL_POLL_INTERVAL: u64 = 4096;
 
@@ -48,7 +48,7 @@ impl CancelToken {
 /// and hands the parser this control carrying the resulting [`SourceId`]; the
 /// parser tags every batch with [`source`](Self::source). The progress throttle
 /// uses interior mutability so the whole control can be passed as `&ParseCtl`
-/// (matching the parser trait, §6.1); a `ParseCtl` belongs to a single parser
+/// (matching the parser trait); a `ParseCtl` belongs to a single parser
 /// thread and is not shared, so a `Cell` is sufficient.
 #[derive(Debug)]
 pub struct ParseCtl {

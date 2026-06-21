@@ -1,10 +1,10 @@
-//! App data session: the never-block load path (PLAN.md §19.6, UIX-11).
+//! App data session: the never-block load path.
 //!
 //! [`Session`] owns the one ingest thread (the store's only writer) and the
 //! parser registry. Opening a path sniffs the format and runs the parser on a
 //! worker thread, so the UI thread only ever does `snapshot()` + draw. Progress
 //! and diagnostics flow back through an [`IngestObserver`] into shared state the
-//! UI reads; an epoch listener requests a repaint whenever data lands (ING-06).
+//! UI reads; an epoch listener requests a repaint whenever data lands.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -111,7 +111,7 @@ pub struct Session {
     diagnostics: Arc<DiagnosticHub>,
     active: Vec<ActiveLoad>,
     live_links: Vec<delog_stream::LiveLink>,
-    /// Sources already swept by the post-load quality scan (DIA-05).
+    /// Sources already swept by the post-load quality scan.
     scanned: HashSet<SourceId>,
     ctx: egui::Context,
     #[cfg(feature = "scripting")]
@@ -176,21 +176,21 @@ impl Session {
     }
 
     /// The published store, for background engines that load fresh snapshots.
-    /// Consumed by the scripts engine (SCR-07); dead without that feature.
+    /// Consumed by the scripts engine; dead without that feature.
     #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
     pub fn store(&self) -> Arc<DataStore> {
         Arc::clone(&self.store)
     }
 
     /// A clone of the ingest sender, for engines that emit derived sources.
-    /// Consumed by the scripts engine (SCR-07); dead without that feature.
+    /// Consumed by the scripts engine; dead without that feature.
     #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
     pub fn ingest_sender(&self) -> IngestSender {
         self.sender.clone()
     }
 
     /// Wire (or unwire) the live-batch mirror into the script engine's queue.
-    /// Called once per frame from `app.rs` to keep the sink current (SCR-08).
+    /// Called once per frame from `app.rs` to keep the sink current.
     #[cfg(feature = "scripting")]
     pub fn set_live_script_sink(
         &self,
@@ -199,8 +199,8 @@ impl Session {
         *self.live_scripts.lock().unwrap() = sink;
     }
 
-    /// The shared metrics registry (PLAN.md §16) — instrumentation reads/writes
-    /// through this; the perf dock (PRF-*) snapshots it at 4 Hz.
+    /// The shared metrics registry — instrumentation reads/writes
+    /// through this; the perf dock snapshots it at 4 Hz.
     pub fn metrics(&self) -> &Arc<MetricsRegistry> {
         &self.metrics
     }
@@ -214,14 +214,14 @@ impl Session {
     }
 
     /// Push a diagnostic raised outside the ingest path (e.g. wgpu error
-    /// scopes, GPU-12) into the same retained list.
+    /// scopes) into the same retained list.
     pub fn push_diagnostic(&self, diag: Diag) {
         self.diagnostics.emit(diag);
         self.ctx.request_repaint();
     }
 
-    /// Start one live MAVLink link. Multiple calls create independent links
-    /// (LIV-10); each link demuxes sysids into live sources downstream.
+    /// Start one live MAVLink link. Multiple calls create independent links;
+    /// each link demuxes sysids into live sources downstream.
     pub fn start_live(
         &mut self,
         endpoint: delog_stream::Endpoint,
@@ -266,14 +266,14 @@ impl Session {
             .any(|link| link.status().state == delog_stream::LinkState::Connected)
     }
 
-    /// Request a per-source time-offset change (§4.2, BRW-07). Applied by the
+    /// Request a per-source time-offset change. Applied by the
     /// ingest thread (the single registry writer), which publishes a new
     /// epoch; stale render caches rebuild off that.
     pub fn set_source_offset(&self, source: SourceId, offset_us: i64) {
         self.sender.set_source_offset(source, offset_us);
     }
 
-    /// Request removal of a source (§4.6, BRW-06). Applied by the ingest thread
+    /// Request removal of a source. Applied by the ingest thread
     /// (the single registry writer): it tombstones the source and its
     /// topics/fields, drops their stores, and publishes a new epoch off which
     /// the cache manager GCs the orphaned render caches.
@@ -308,7 +308,7 @@ impl Session {
             .any(|a| a.handle.as_ref().is_some_and(|h| !h.is_finished()))
     }
 
-    /// Start parsing `path` on a worker thread. Returns immediately (§19.6).
+    /// Start parsing `path` on a worker thread. Returns immediately.
     pub fn open_path(&mut self, path: impl Into<PathBuf>) {
         let path = path.into();
         let label = source_label(&path);
@@ -324,7 +324,7 @@ impl Session {
             .name("delog-parse".into())
             .spawn(move || {
                 {
-                    // Wall-clock parse time for this file (§16 `parse_total`).
+                    // Wall-clock parse time for this file (`parse_total`).
                     let _t = metrics.scope("parse_total");
                     run_parse(&path, &worker_label, &registry, &sender, worker_cancel);
                 }
@@ -339,7 +339,7 @@ impl Session {
         });
     }
 
-    /// Request cancellation of every running load (UIX-02 cancel).
+    /// Request cancellation of every running load.
     pub fn cancel_all(&self) {
         for load in &self.active {
             load.cancel.cancel();
@@ -347,7 +347,7 @@ impl Session {
     }
 
     /// Drop bookkeeping for finished loads and kick the post-load data-quality
-    /// scan for newly finished sources (§15, DIA-05).
+    /// scan for newly finished sources.
     pub fn prune_finished(&mut self) {
         self.active
             .retain(|a| a.handle.as_ref().is_some_and(|h| !h.is_finished()));
@@ -367,7 +367,7 @@ impl Session {
     }
 
     /// Scan `source` for data-quality findings off the UI thread and push the
-    /// summarized diagnostics (DIA-05). The snapshot is an immutable Arc, so
+    /// summarized diagnostics. The snapshot is an immutable Arc, so
     /// the scan races nothing.
     fn spawn_quality_scan(&self, source: SourceId) {
         let snapshot = self.store.load();
@@ -448,7 +448,7 @@ fn run_parse(
     let parser = match registry.detect(&head) {
         Detection::Auto(parser) => parser,
         Detection::Ambiguous(candidates) => {
-            // Auto-pick the best until the manual picker exists (UIX-10).
+            // Auto-pick the best until the manual picker exists.
             let best = &candidates[0];
             sink.diagnostic(Diag::warning(
                 "format-ambiguous",

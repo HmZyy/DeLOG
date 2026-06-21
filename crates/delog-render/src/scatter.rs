@@ -1,4 +1,4 @@
-//! Vertex-pulled scatter pipeline (PLAN.md GPU-07).
+//! Vertex-pulled scatter pipeline.
 //!
 //! Trace samples stay in the `BufferManager`'s interleaved `[x, y]` STORAGE
 //! buffer. This pipeline emits one screen-space quad per sample, with point
@@ -120,13 +120,13 @@ impl ScatterPipeline {
         })
     }
 
-    /// Bind this pipeline once for a run of traces (GPU-11).
+    /// Bind this pipeline once for a run of traces.
     pub fn bind(&self, pass: &mut wgpu::RenderPass<'_>) {
         pass.set_pipeline(&self.pipeline);
     }
 
     /// Draw one trace with its dynamic uniform offset; the pipeline must
-    /// already be bound via [`Self::bind`] (GPU-11). `sample_count` is the
+    /// already be bound via [`Self::bind`]. `sample_count` is the
     /// number of `[x,y]` pairs; each sample emits one six-vertex quad.
     pub fn draw_trace(
         &self,

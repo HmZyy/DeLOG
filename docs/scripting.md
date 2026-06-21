@@ -45,7 +45,7 @@ cargo build --workspace  --no-default-features
 If the build links the wrong `libpython` (e.g. `numpy` fails to import with
 `No module named 'math'`), pin the interpreter with a **local, gitignored**
 `.cargo/config.toml` that sets `PYO3_PYTHON` to your interpreter and adds its
-libdir to the rpath. See `CLAUDE.md` → Commands.
+libdir to the rpath.
 
 ---
 

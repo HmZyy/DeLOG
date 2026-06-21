@@ -1,13 +1,13 @@
 //! Ingestion pipeline vocabulary: the parser-facing [`IngestSink`], the
 //! [`IngestMsg`] wire type, and the bounded channel that funnels every source
-//! into the single ingest thread (PLAN.md §5, ING-01).
+//! into the single ingest thread.
 //!
 //! Parsers and live decoders never touch the store directly: they hold an
-//! [`IngestSink`] and emit messages. A single ingest thread (ING-02) is the
-//! only store writer, which makes the epoch-snapshot concurrency model (§4.4)
+//! [`IngestSink`] and emit messages. A single ingest thread is the
+//! only store writer, which makes the epoch-snapshot concurrency model
 //! correct by construction. The channel is bounded at [`INGEST_CHANNEL_CAP`];
 //! the backpressure *policy* over that bound (file-block vs live-drop) is
-//! ING-03 — this module ships the blocking, file-parser sink.
+//! handled here — this module ships the blocking, file-parser sink.
 
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
@@ -21,11 +21,11 @@ use crate::metrics::MetricsRegistry;
 use crate::schema::TopicSchema;
 use crate::time::TimeRange;
 
-/// Bounded ingest channel capacity (§5). Small enough to bound memory and make
+/// Bounded ingest channel capacity. Small enough to bound memory and make
 /// backpressure bite promptly, large enough to absorb bursty parser flushes.
 pub const INGEST_CHANNEL_CAP: usize = 256;
 
-/// Monotonic counter metric for live batches dropped under backpressure (§5).
+/// Monotonic counter metric for live batches dropped under backpressure.
 pub const METRIC_DROPPED_BATCHES: &str = "ingest_dropped_batches";
 
 /// Emit a drop diagnostic on the 1st drop and every Nth thereafter, so a
@@ -35,9 +35,9 @@ const DROP_DIAG_INTERVAL: u64 = 256;
 /// What kind of source produced a stream of batches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceKind {
-    /// A log file parsed start-to-finish; may block on backpressure (§5).
+    /// A log file parsed start-to-finish; may block on backpressure.
     File,
-    /// A live link; must never block — full channel drops the batch (ING-03).
+    /// A live link; must never block — full channel drops the batch.
     Live,
     /// A completed programmatically-generated source (snapshot scripts).
     Derived,
@@ -46,11 +46,11 @@ pub enum SourceKind {
 }
 
 /// A parsed slice of one topic: sorted `i64` µs timestamps plus original-dtype
-/// Arrow columns, moved (never copied) from the parser's builders — upholds
-/// ZC-1. The ingest thread validates and seals these into immutable chunks.
+/// Arrow columns, moved (never copied) from the parser's builders.
+/// The ingest thread validates and seals these into immutable chunks.
 ///
 /// The topic name is the [`schema`](ParsedBatch::schema) name — multi-instance
-/// topics carry their `[N]` suffix there (§4.3), so there is exactly one name.
+/// topics carry their `[N]` suffix there, so there is exactly one name.
 #[derive(Debug, Clone)]
 pub struct ParsedBatch {
     pub source: SourceId,
@@ -84,7 +84,7 @@ impl ParsedBatch {
     }
 }
 
-/// Tally a parser reports when it finishes a source (§6.1).
+/// Tally a parser reports when it finishes a source.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ParseSummary {
     pub topic_count: u64,
@@ -94,7 +94,7 @@ pub struct ParseSummary {
     pub source_meta: SourceMetadata,
 }
 
-/// One message on the ingest channel (§5).
+/// One message on the ingest channel.
 #[derive(Debug)]
 pub enum IngestMsg {
     /// Register a source; the ingest thread (single writer) assigns the dense
@@ -114,14 +114,14 @@ pub enum IngestMsg {
         source: SourceId,
         summary: ParseSummary,
     },
-    /// Set a source's time offset (§4.2; the offset-drag UI, BRW-07). Routed
+    /// Set a source's time offset (the offset-drag UI). Routed
     /// through the ingest thread because it is the only registry writer.
     SetSourceOffset {
         source: SourceId,
         offset_us: i64,
     },
     /// Remove a source: tombstone it and its topics/fields in the registry,
-    /// drop their stores, and republish a snapshot without them (§4.6, SCR-01).
+    /// drop their stores, and republish a snapshot without them.
     RemoveSource {
         source: SourceId,
     },
@@ -131,7 +131,7 @@ pub enum IngestMsg {
 /// has gone away (app shutdown), the sink goes *inert* — submissions become
 /// no-ops and `open_source` returns [`SourceId`]`(0)` — so a still-running
 /// parser cannot panic or corrupt the store. Stopping such a parser promptly is
-/// the cancellation token's job (ING-04), not the sink's.
+/// the cancellation token's job, not the sink's.
 pub trait IngestSink: Send {
     fn open_source(&mut self, key: &str, kind: SourceKind) -> SourceId;
     fn submit(&mut self, batch: ParsedBatch);
@@ -146,7 +146,7 @@ pub struct IngestSender {
     tx: SyncSender<IngestMsg>,
 }
 
-/// Single-consumer end drained by the ingest thread (ING-02).
+/// Single-consumer end drained by the ingest thread.
 #[derive(Debug)]
 pub struct IngestReceiver {
     rx: Receiver<IngestMsg>,
@@ -160,7 +160,7 @@ pub fn ingest_channel() -> (IngestSender, IngestReceiver) {
 
 impl IngestSender {
     /// A blocking, file-parser sink: a full channel parks the caller until the
-    /// ingest thread drains, trading latency for zero loss (§5).
+    /// ingest thread drains, trading latency for zero loss.
     pub fn file_sink(&self) -> ChannelSink {
         ChannelSink {
             tx: self.tx.clone(),
@@ -168,7 +168,7 @@ impl IngestSender {
         }
     }
 
-    /// Request a source time-offset change (BRW-07). Blocking like a file
+    /// Request a source time-offset change. Blocking like a file
     /// sink: offset edits are rare UI events, never hot-path. A no-op once
     /// the ingest thread is gone.
     pub fn set_source_offset(&self, source: SourceId, offset_us: i64) {
@@ -177,7 +177,7 @@ impl IngestSender {
             .send(IngestMsg::SetSourceOffset { source, offset_us });
     }
 
-    /// Request removal of a source (§4.6, SCR-01). Blocking like a file sink;
+    /// Request removal of a source. Blocking like a file sink;
     /// a no-op once the ingest thread is gone.
     pub fn remove_source(&self, source: SourceId) {
         let _ = self.tx.send(IngestMsg::RemoveSource { source });
@@ -185,7 +185,7 @@ impl IngestSender {
 
     /// A non-blocking, live-decoder sink: a full channel *drops* the batch and
     /// bumps [`METRIC_DROPPED_BATCHES`] rather than stalling the link reader and
-    /// overflowing OS socket buffers (§5). `metrics` is shared with the perf
+    /// overflowing OS socket buffers. `metrics` is shared with the perf
     /// dock so the drop count is visible.
     pub fn live_sink(&self, metrics: Arc<MetricsRegistry>) -> LiveSink {
         LiveSink {
@@ -211,7 +211,7 @@ impl IngestReceiver {
 
     /// Block up to `timeout` for a message. [`RecvOutcome::Idle`] means the
     /// deadline passed with nothing ready (the ingest loop uses this to flush
-    /// aged live chunks, §4.3); [`RecvOutcome::Disconnected`] means every sender
+    /// aged live chunks); [`RecvOutcome::Disconnected`] means every sender
     /// has dropped.
     pub fn recv_timeout(&self, timeout: Duration) -> RecvOutcome {
         match self.rx.recv_timeout(timeout) {
@@ -292,7 +292,7 @@ impl IngestSink for ChannelSink {
 ///
 /// `open_source` blocks briefly for its reply — it runs once at connect, before
 /// any data flows — but every data-bearing call uses `try_send` and never
-/// parks the link reader. A full channel drops the batch (the §5 value
+/// parks the link reader. A full channel drops the batch (the value
 /// judgement: visible, counted loss at a defined point beats silent socket
 /// overflow).
 pub struct LiveSink {

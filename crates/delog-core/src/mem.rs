@@ -1,11 +1,11 @@
-//! Memory accounting per field/topic/source (PLAN.md §4.6, CORE-09).
+//! Memory accounting per field/topic/source.
 //!
 //! [`MemBreakdown`] is the shared vocabulary type for the four memory pools the
 //! tool tracks. `delog-core` can only measure the `canonical` pool — the Arrow
 //! buffers held by the store — because the others live in crates it must not
-//! depend on (§3.2): `cache_cpu` is `delog-cache`'s f32 render caches,
-//! `gpu` is `delog-render`'s buffer-manager ledger (§9.3), and `mmap` is the
-//! memory-mapped IPC sidecars (§4.5 ZC-5). Upper layers fill those pools in and
+//! depend on: `cache_cpu` is `delog-cache`'s f32 render caches,
+//! `gpu` is `delog-render`'s buffer-manager ledger, and `mmap` is the
+//! memory-mapped IPC sidecars. Upper layers fill those pools in and
 //! merge with the canonical report built here.
 
 use std::iter::Sum;
@@ -17,7 +17,7 @@ use crate::identity::{FieldId, SourceId, TopicId};
 use crate::snapshot::StoreSnapshot;
 
 /// Bytes attributed to one entity (field, topic, source, or the whole store),
-/// split across the four pools described in PLAN.md §4.6.
+/// split across the four pools.
 ///
 /// All arithmetic saturates: byte totals never realistically overflow `u64`,
 /// but saturating keeps accounting panic-free even on absurd inputs.
@@ -29,7 +29,7 @@ pub struct MemBreakdown {
     pub cache_cpu: u64,
     /// GPU storage buffers tracked by the renderer ledger (`delog-render`).
     pub gpu: u64,
-    /// Memory-mapped Arrow IPC sidecar pages (`delog-cache` reload, ZC-5).
+    /// Memory-mapped Arrow IPC sidecar pages (`delog-cache` reload).
     pub mmap: u64,
 }
 
@@ -106,7 +106,7 @@ pub struct MemReport {
 impl MemReport {
     /// Measure the canonical (Arrow buffer) memory of every field, topic and
     /// source in `snapshot`. The other three pools are left zero — only
-    /// `delog-core`'s store is in scope here (§4.6).
+    /// `delog-core`'s store is in scope here.
     pub fn canonical(snapshot: &StoreSnapshot) -> Self {
         let mut fields = vec![MemBreakdown::ZERO; snapshot.fields.len()];
         let mut topics = vec![MemBreakdown::ZERO; snapshot.topics.len()];

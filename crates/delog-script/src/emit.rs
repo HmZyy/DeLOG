@@ -1,4 +1,4 @@
-//! Turn a script's pending derived topics into batches on the ingest path (SCR-04).
+//! Turn a script's pending derived topics into batches on the ingest path.
 
 use std::sync::Arc;
 

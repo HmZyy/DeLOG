@@ -17,8 +17,8 @@ license = "MIT"
 repository = "https://github.com/HmZyy/DeLOG"
 rust-version = "1.92"
 
-# Pin philosophy (PLAN.md §2): every third-party version is pinned here, once;
-# member crates inherit with `workspace = true`. Cargo.lock is committed.
+# Every third-party version is pinned here, once; member crates inherit with
+# `workspace = true`. Cargo.lock is committed.
 [workspace.dependencies]
 # intra-workspace
 delog-core = { path = "crates/delog-core" }
@@ -80,7 +80,7 @@ thiserror = "2.0.18"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
-# scripting (optional; behind feature flags — PLAN.md §17.3, SCR-*)
+# scripting (optional; behind feature flags)
 pyo3 = { version = "0.29.0", features = ["auto-initialize"] }
 numpy = "0.29.0"
 egui_code_editor = "0.3.3"

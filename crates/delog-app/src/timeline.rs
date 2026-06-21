@@ -1,4 +1,4 @@
-//! Global timeline: playback model, scrubber and transport (PLAN.md §11).
+//! Global timeline: playback model, scrubber and transport.
 //!
 //! The playhead is the single time authority for plots and the 3D view. The
 //! model is pure state + time math (no egui) so it is unit-testable; the
@@ -8,18 +8,18 @@ use delog_core::time::TimeRange;
 
 use crate::plot::ViewX;
 
-/// Playback speed bounds (§11; TLN-09 widened the upper bound to 100×).
+/// Playback speed bounds.
 pub const MIN_SPEED: f32 = 0.1;
 pub const MAX_SPEED: f32 = 100.0;
 
-/// Play/pause state, playhead position and speed (§11, TLN-01).
+/// Play/pause state, playhead position and speed.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Playback {
     pub playing: bool,
     /// Playhead in canonical effective microseconds.
     pub t_us: i64,
     pub speed: f32,
-    /// Tail-follow mode for live streams (TLN-05). When set, each frame pins
+    /// Tail-follow mode for live streams. When set, each frame pins
     /// the playhead to the current global range end until a manual scrub
     /// clears it.
     pub follow_live: bool,
@@ -82,7 +82,7 @@ impl Playback {
         }
     }
 
-    /// Enter live-tail mode and pin immediately (TLN-05).
+    /// Enter live-tail mode and pin immediately.
     pub fn lock_to_live(&mut self, range: TimeRange) {
         self.follow_live = true;
         self.t_us = range.max_us;
@@ -92,21 +92,21 @@ impl Playback {
         self.follow_live = false;
     }
 
-    /// Jump to the start of the range (`Home`, TLN-04).
+    /// Jump to the start of the range (`Home`).
     pub fn jump_start(&mut self, range: TimeRange) {
         self.scrub(range.min_us, range);
     }
 
-    /// Jump to the end of the range (`End`, TLN-04).
+    /// Jump to the end of the range (`End`).
     pub fn jump_end(&mut self, range: TimeRange) {
         self.scrub(range.max_us, range);
     }
 }
 
-/// Fallback step when no plot is focused: 1/30 s (§11).
+/// Fallback step when no plot is focused: 1/30 s.
 const FALLBACK_STEP_US: i64 = 1_000_000 / 30;
 
-/// Where `←`/`→` land (TLN-04): the adjacent canonical sample of the focused
+/// Where `←`/`→` land: the adjacent canonical sample of the focused
 /// plot's reference trace, or ±1/30 s without a focus. Stays put at the ends
 /// of the reference trace.
 pub fn step_target(
@@ -153,7 +153,7 @@ fn bar_x_at(t_us: i64, rect: egui::Rect, range: TimeRange) -> f32 {
 }
 
 /// `t_us` relative to the log origin as `M:SS.mmm` (hours only when nonzero),
-/// clamped at zero (§11, TLN-03).
+/// clamped at zero.
 pub fn format_relative(t_us: i64, origin_us: i64) -> String {
     let rel_ms = (t_us - origin_us).max(0) / 1_000;
     let ms = rel_ms % 1_000;
@@ -167,7 +167,7 @@ pub fn format_relative(t_us: i64, origin_us: i64) -> String {
     }
 }
 
-/// Unix microseconds → `YYYY-MM-DD HH:MM:SS.mmm UTC` (TLN-03). Hand-rolled
+/// Unix microseconds → `YYYY-MM-DD HH:MM:SS.mmm UTC`. Hand-rolled
 /// civil-from-days so no date crate enters the pinned dependency set.
 pub fn format_utc(unix_us: i64) -> String {
     let ms_total = unix_us.div_euclid(1_000);
@@ -205,20 +205,20 @@ pub struct TimelineAction {
     pub lock_live: bool,
     /// User manually scrubbed or jumped away from live mode.
     pub manual_scrub: bool,
-    /// User dragged the visible-window range slider, changing the X view
-    /// (TLN-08) — treated like a manual pan/zoom (disengages fit-all/live).
+    /// User dragged the visible-window range slider, changing the X view —
+    /// treated like a manual pan/zoom (disengages fit-all/live).
     pub view_changed: bool,
-    /// Click a timeline flag → scrub the playhead here (§17.4, ANA-05).
+    /// Click a timeline flag → scrub the playhead here.
     pub marker_jump: Option<i64>,
-    /// Drag a flag → set that marker's time (ANA-05).
+    /// Drag a flag → set that marker's time.
     pub marker_move: Option<(u64, i64)>,
-    /// Right-click → delete that marker (ANA-05).
+    /// Right-click → delete that marker.
     pub marker_delete: Option<u64>,
-    /// Right-click → rename/recolour that marker (ANA-05).
+    /// Right-click → rename/recolour that marker.
     pub marker_edit: Option<(u64, MarkerEdit)>,
 }
 
-/// A rename/recolour edit reported from a timeline flag's context menu (ANA-05).
+/// A rename/recolour edit reported from a timeline flag's context menu.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MarkerEdit {
     pub label: Option<String>,
@@ -226,7 +226,7 @@ pub struct MarkerEdit {
 }
 
 /// The timeline bar: transport buttons, speed picker, the scrubber and the
-/// time display (§11, TLN-02/03). `utc_offset_us` maps canonical time to unix
+/// time display. `utc_offset_us` maps canonical time to unix
 /// time when a source carries a UTC reference; `any_live` shades the tail of
 /// the bar to mark a still growing extent (live links, M7).
 #[allow(clippy::too_many_arguments)]
@@ -245,7 +245,7 @@ pub fn ui(
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         // Square transport buttons, tall enough to sit centered between the two
-        // stacked sliders on the right (TLN-08).
+        // stacked sliders on the right.
         let button_size = egui::vec2(40.0, 40.0);
         // Live-link status dot: grey = not streaming, yellow = streaming but
         // not locked to the live tail, red = locked. While streaming it is
@@ -354,7 +354,7 @@ pub fn ui(
             *fit_all = !*fit_all;
         }
 
-        // Playback speed as a free drag value within the spec bounds (TLN-09).
+        // Playback speed as a free drag value within the spec bounds.
         let mut speed = playback.speed;
         if ui
             .add(
@@ -371,7 +371,7 @@ pub fn ui(
         }
 
         // Log-relative position / total, plus absolute UTC when the source
-        // carries a reference (TLN-03).
+        // carries a reference.
         ui.monospace(format!(
             "{} / {}",
             format_relative(playback.t_us, range.min_us),
@@ -382,7 +382,7 @@ pub fn ui(
         }
 
         // Two stacked sliders sharing the remaining width: the playhead scrubber
-        // on top and the visible-window range slider directly beneath it (TLN-08).
+        // on top and the visible-window range slider directly beneath it.
         ui.vertical(|ui| {
             if scrubber(ui, playback, range, any_live, markers, &mut action) {
                 action.manual_scrub = true;
@@ -399,8 +399,8 @@ pub fn ui(
     action
 }
 
-/// Full-range bar with a draggable playhead handle (TLN-02) and manual-marker
-/// flags (§17.4, ANA-05). A drag that begins on a flag moves that marker; a
+/// Full-range bar with a draggable playhead handle and manual-marker
+/// flags. A drag that begins on a flag moves that marker; a
 /// click on a flag jumps to it; right-click edits/deletes; drags/clicks
 /// elsewhere scrub the playhead. Marker interactions are reported via `action`.
 fn scrubber(
@@ -485,7 +485,7 @@ fn scrubber(
     painter.rect_filled(elapsed, 3.0, visuals.selection.bg_fill);
 
     // Live links keep growing the extent — tint the tail as a reminder that
-    // the end of the bar is moving (§11; live arrives with M7).
+    // the end of the bar is moving.
     if any_live {
         let tail_w = (rect.width() * 0.03).clamp(4.0, 24.0);
         let tail = egui::Rect::from_min_max(egui::pos2(bar.right() - tail_w, bar.top()), bar.max);
@@ -577,7 +577,7 @@ fn scrubber(
 }
 
 /// Two-ended range slider over the full data range that sets the visible X
-/// window (the global view, TLN-08). Dragging an end moves that bound; dragging
+/// window (the global view). Dragging an end moves that bound; dragging
 /// the band between them pans the window. Returns whether the view changed.
 fn window_slider(ui: &mut egui::Ui, view: &mut ViewX, range: TimeRange) -> bool {
     let height = 16.0;
@@ -594,7 +594,7 @@ fn window_slider(ui: &mut egui::Ui, view: &mut ViewX, range: TimeRange) -> bool 
     let min_span_us = (span as f64 * (8.0 / rect.width().max(1.0)) as f64) as i64 + 1;
 
     // The view may legitimately extend beyond the data range (pan/zoom is not
-    // limited, TLN-08). We do NOT clamp it here; instead the handles ride the
+    // limited). We do NOT clamp it here; instead the handles ride the
     // bar edges (via `bar_x_at`'s clamp) and grey out when out of range.
     let lo_in_range = (range.min_us..=range.max_us).contains(&view.min_us);
     let hi_in_range = (range.min_us..=range.max_us).contains(&view.max_us);
@@ -637,7 +637,7 @@ fn window_slider(ui: &mut egui::Ui, view: &mut ViewX, range: TimeRange) -> bool 
         let dx = mid_resp.drag_delta().x;
         if dx != 0.0 {
             // Pan the window by the dragged delta without clamping to the data
-            // range — the window may move past either end (TLN-08).
+            // range — the window may move past either end.
             let win = view.max_us - view.min_us;
             let delta = (dx as f64 / rect.width().max(1.0) as f64 * span as f64).round() as i64;
             view.min_us = view.min_us.saturating_add(delta);

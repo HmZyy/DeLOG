@@ -1,6 +1,6 @@
-//! Stable counterpart to the cargo-fuzz targets (PAR-13): feed adversarial and
+//! Stable counterpart to the cargo-fuzz targets: feed adversarial and
 //! pseudo-random bytes to every parser and to the shared MAVLink frame decoder,
-//! asserting the §6.1 policy — malformed input is skipped, never panics, hangs,
+//! asserting the policy — malformed input is skipped, never panics, hangs,
 //! or runs away on memory. The libfuzzer targets in `/fuzz` add coverage-guided
 //! depth in CI; this runs everywhere `cargo test` does.
 
