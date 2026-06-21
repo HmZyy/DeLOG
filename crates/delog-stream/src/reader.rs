@@ -1,13 +1,13 @@
-//! Per-link reader thread with owned framing (PLAN.md §7.2, LIV-02).
+//! Per-link reader thread with owned framing.
 //!
 //! Each configured [`Endpoint`] gets one reader thread. We own the byte-level
 //! loop — buffered transport → the shared [`FrameDecoder`] (v1/v2 sync, CRC,
 //! sequence-gap and resync counting) — and hand decoded *frames* downstream,
 //! rather than using `rust-mavlink`'s blocking `connect()` helpers. That access
-//! to the raw stream is what makes the honest per-link counters of §7.2
-//! possible. Decoding the frame's *fields* (LIV-05) and batching into the
-//! ingest pipeline (LIV-07) happen on the consumer side of the frame channel;
-//! the link state machine (LIV-03) and auto-reconnect (LIV-04) wrap this.
+//! to the raw stream is what makes the honest per-link counters possible.
+//! Decoding the frame's *fields* and batching into the ingest pipeline happen
+//! on the consumer side of the frame channel; the link state machine and
+//! auto-reconnect wrap this.
 
 use std::io::{self, Read};
 use std::net::{TcpStream, UdpSocket};
@@ -27,9 +27,9 @@ const READ_TIMEOUT: Duration = Duration::from_millis(200);
 /// Transport read buffer; comfortably larger than any single MAVLink frame.
 const READ_BUF: usize = 8192;
 
-/// First reconnect backoff; doubles per consecutive failure (§7.2, LIV-04).
+/// First reconnect backoff; doubles per consecutive failure.
 pub const RECONNECT_INITIAL: Duration = Duration::from_millis(500);
-/// Reconnect backoff ceiling (§7.2).
+/// Reconnect backoff ceiling.
 pub const RECONNECT_CAP: Duration = Duration::from_secs(8);
 
 /// Next backoff after `prev` (`None` = first wait): exponential, capped.
@@ -40,14 +40,14 @@ fn next_backoff(prev: Option<Duration>) -> Duration {
     }
 }
 
-/// A connected link goes `Stale` after this long without a valid frame (§7.2).
+/// A connected link goes `Stale` after this long without a valid frame.
 pub const STALE_AFTER: Duration = Duration::from_secs(2);
-/// …and `Lost` after this long (§7.2).
+/// …and `Lost` after this long.
 pub const LOST_AFTER: Duration = Duration::from_secs(10);
 
-/// Link liveness for the UI indicator (§7.2, LIV-03). `Connecting` is the state
-/// before the first valid frame; afterwards liveness is a function of the time
-/// since the last frame.
+/// Link liveness for the UI indicator. `Connecting` is the state before the
+/// first valid frame; afterwards liveness is a function of the time since the
+/// last frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkState {
     Connecting,
@@ -77,8 +77,8 @@ impl LinkState {
     }
 }
 
-/// Live, lock-free per-link counters (§7.2). Cloned into the reader thread and
-/// read by the UI; values are monotonic, so `Relaxed` ordering is enough.
+/// Live, lock-free per-link counters. Cloned into the reader thread and read by
+/// the UI; values are monotonic, so `Relaxed` ordering is enough.
 #[derive(Debug, Default)]
 pub struct LinkCounters {
     rx_frames: AtomicU64,
@@ -87,7 +87,7 @@ pub struct LinkCounters {
     seq_gaps: AtomicU64,
     resync_bytes: AtomicU64,
     unknown_messages: AtomicU64,
-    /// Transport reconnections after the initial connect (LIV-04).
+    /// Transport reconnections after the initial connect.
     reconnects: AtomicU64,
     /// Millis (since the reader's start instant) of the last valid frame; 0
     /// until the first frame arrives. Drives [`LinkReader::state`].
@@ -130,7 +130,7 @@ impl LinkCounters {
     }
 }
 
-/// A point-in-time copy of a link's counters (§7.2).
+/// A point-in-time copy of a link's counters.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LinkStats {
     /// CRC-valid frames received (rx packets).
@@ -145,7 +145,7 @@ pub struct LinkStats {
     pub resync_bytes: u64,
     /// CRC-valid frames whose message id the dialect can't decode.
     pub unknown_messages: u64,
-    /// Transport reconnections after the initial connect (LIV-04).
+    /// Transport reconnections after the initial connect.
     pub reconnects: u64,
 }
 
@@ -203,8 +203,8 @@ impl LinkReader {
         self.counters.snapshot()
     }
 
-    /// Current link liveness (§7.2). `Connecting` until the first valid frame,
-    /// then `Connected`/`Stale`/`Lost` by time since the last frame.
+    /// Current link liveness. `Connecting` until the first valid frame, then
+    /// `Connected`/`Stale`/`Lost` by time since the last frame.
     pub fn state(&self) -> LinkState {
         if self.counters.rx_frames.load(Ordering::Relaxed) == 0 {
             return LinkState::Connecting;
@@ -285,7 +285,7 @@ fn pump(
 }
 
 /// Supervise a link: pump the connection and, for reconnectable transports,
-/// re-open it with exponential backoff (§7.2, LIV-04). The backoff resets only
+/// re-open it with exponential backoff. The backoff resets only
 /// after a session that actually delivered frames, so a flapping link still
 /// backs off. `connect`/`backoff_sleep` are injected so the schedule is
 /// testable without real sockets or real sleeps.

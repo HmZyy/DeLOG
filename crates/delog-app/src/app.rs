@@ -1,5 +1,3 @@
-//! Top-level eframe application state.
-
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
@@ -36,6 +34,30 @@ type ProfilingExportResult = Result<std::path::PathBuf, String>;
 const SESSION_AUTOSAVE_INTERVAL: Duration = Duration::from_secs(30);
 const PERFORMANCE_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 
+struct CombinedLoadState {
+    active: bool,
+    parser_active: bool,
+    labels: Vec<String>,
+}
+
+fn combined_load_state(
+    native_active: bool,
+    mut labels: Vec<String>,
+    parser_label: Option<&str>,
+) -> CombinedLoadState {
+    let parser_label = parser_label.filter(|label| !label.is_empty());
+    if let Some(label) = parser_label
+        && !labels.iter().any(|existing| existing == label)
+    {
+        labels.push(label.to_owned());
+    }
+    CombinedLoadState {
+        active: native_active || parser_label.is_some(),
+        parser_active: parser_label.is_some(),
+        labels,
+    }
+}
+
 #[derive(Serialize)]
 struct DiagnosticsExportDoc {
     delog_diagnostics: u32,
@@ -56,8 +78,6 @@ struct DiagnosticsExportRecord {
     message: String,
 }
 
-/// The profiling snapshot artifact (§16, PRF-07): all metric rings/gauges plus
-/// resource totals and per-trace summaries — the file to attach to a perf bug.
 #[derive(Serialize)]
 struct ProfilingExportDoc {
     delog_profiling: u32,
@@ -75,9 +95,7 @@ struct ProfilingResources {
     cache_cpu_bytes: u64,
 }
 
-/// One metric's ring statistics. Timers are milliseconds; gauges carry their
-/// call-site unit (e.g. `upload_bytes` is bytes). `samples` is the lifetime
-/// sample count; `counter` the monotonic counter (0 for pure gauges/timers).
+/// Timers are milliseconds; gauges carry their call-site unit (e.g. bytes).
 #[derive(Serialize)]
 struct ProfilingMetric {
     name: &'static str,
@@ -189,26 +207,26 @@ pub struct DelogApp {
     /// while streaming. Disengaged by manual pan/zoom or toggling it off.
     fit_view_all: bool,
     hover_mode: delog_core::field_view::SampleMode,
-    /// Shared measurement-marker time when the marker scope is Global (ANA-10);
+    /// Shared measurement-marker time when the marker scope is Global;
     /// `None` when no global marker is placed. Per-pane markers live on the pane.
     marker_us: Option<i64>,
-    /// Manual markers / bookmarks (§17.4, ANA-05).
+    /// Manual markers / bookmarks.
     markers: crate::markers::Markers,
-    /// Whether Alt+hover snaps the playhead to the nearest data point (PLT-10).
+    /// Whether Alt+hover snaps the playhead to the nearest data point.
     snap_playhead: bool,
     frame: u64,
     last_epoch: u64,
     origin_us: i64,
     /// Exponentially-smoothed frame rate for the corner FPS indicator
-    /// (PRF-05). Only meaningful while frames are continuous; reads `None`
+    /// Only meaningful while frames are continuous; reads `None`
     /// when the app is idle/event-driven so we don't display a misleading
-    /// rate built from a single stale frame (§11 idle policy).
+    /// rate built from a single stale frame.
     fps_ema: Option<f32>,
     /// Wall-clock instant of the previous frame, used to measure the real
     /// frame-to-frame gap that feeds `fps_ema`.
     last_frame_at: Option<Instant>,
     /// Paths picked in the native open dialog, sent from its worker thread
-    /// (the dialog must never block the UI thread, §19.6).
+    /// (the dialog must never block the UI thread).
     picked_files: mpsc::Receiver<Vec<std::path::PathBuf>>,
     picked_files_tx: mpsc::Sender<Vec<std::path::PathBuf>>,
     imported_layouts: mpsc::Receiver<LayoutImportResult>,
@@ -228,7 +246,7 @@ pub struct DelogApp {
     browser_query: String,
     browser_selection: browser::Selection,
     /// Cached browser tree keyed by the snapshot epoch it was built from
-    /// (BRW-07: offset edits also bump the epoch), so `BrowserModel::from_snapshot`
+    /// (offset edits also bump the epoch), so `BrowserModel::from_snapshot`
     /// runs once per data change instead of every frame (it is O(topics×fields)
     /// plus a full string clone of the tree).
     browser_model: Option<(u64, BrowserModel)>,
@@ -248,11 +266,11 @@ pub struct DelogApp {
     last_session_autosave_json: Option<String>,
     show_connection_dialog: bool,
     connection_dialog: ConnectionDialog,
-    /// Configured vehicles for the 3D view (TDV-03); empty until one is added.
+    /// Configured vehicles for the 3D view; empty until one is added.
     vehicles: Vec<crate::vehicle::VehicleConfig>,
     vehicle_dialog: crate::vehicle_dialog::VehicleDialog,
     /// Cached render-space trajectories, parallel to `vehicles`, rebuilt on a
-    /// worker when the data epoch or vehicle set changes (TDV-04/11).
+    /// worker when the data epoch or vehicle set changes.
     vehicle_trajectories: Vec<Vec<[f32; 3]>>,
     traj_epoch: u64,
     traj_vehicle_revision: u64,
@@ -277,16 +295,16 @@ impl DelogApp {
         let (exported_profiling_tx, exported_profiling) = mpsc::channel();
         let session = Session::new(cc.egui_ctx.clone());
         // Share the registry into the cache manager so `cache_build`/
-        // `cache_append`/`minmax_build` land in the same dock (§16, PRF-01).
+        // `cache_append`/`minmax_build` land in the same dock.
         let caches = CacheManager::new().with_metrics(std::sync::Arc::clone(session.metrics()));
         Self {
             session,
             #[cfg(feature = "scripting")]
-            scripts: scripts::ScriptsPanel::new(
-                crate::layout::config_dir()
-                    .unwrap_or_else(|| std::path::PathBuf::from("."))
-                    .join("scripts"),
-            ),
+            scripts: {
+                let config_dir =
+                    crate::layout::config_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+                scripts::ScriptsPanel::new(config_dir.join("scripts"), config_dir.join("parsers"))
+            },
             gpu: GpuBridge::from_creation_context(cc),
             caches,
             workspace: Workspace::new(),
@@ -354,7 +372,7 @@ impl DelogApp {
         }
     }
 
-    /// Open every log dropped onto the window this frame (minimal UIX-08).
+    /// Open every log dropped onto the window this frame.
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
         for file in dropped {
@@ -364,8 +382,8 @@ impl DelogApp {
         }
     }
 
-    /// Show the native open dialog on a worker thread (UIX-02 open; §19.6
-    /// never-block) and queue the picked logs for the next frame.
+    /// Show the native open dialog on a worker thread (never blocking the UI)
+    /// and queue the picked logs for the next frame.
     fn spawn_open_dialog(&self, ctx: &egui::Context) {
         let tx = self.picked_files_tx.clone();
         let ctx = ctx.clone();
@@ -573,7 +591,7 @@ impl DelogApp {
 
     /// Assemble a fresh performance snapshot (metrics rings + resource totals +
     /// per-trace summaries). Shared by the 4 Hz dock refresh and the profiling
-    /// export (PRF-04/PRF-07).
+    /// export.
     fn build_performance_snapshot(
         &self,
         frame: &eframe::Frame,
@@ -612,7 +630,7 @@ impl DelogApp {
 
     /// Paint the F12 debug overlay: key per-frame timings read live from the
     /// metrics registry, anchored top-left so it clears the corner FPS badge
-    /// (PRF-06). Non-interactive; toggled by the View menu or F12.
+    /// Non-interactive; toggled by the View menu or F12.
     fn paint_debug_overlay(&self, ctx: &egui::Context) {
         if !self.settings.show_debug_overlay {
             return;
@@ -639,7 +657,7 @@ impl DelogApp {
                             ui.strong("last");
                             ui.strong("avg");
                             ui.end_row();
-                            // §16 frame timers (ms). Only ones with samples show.
+                            // Frame timers (ms). Only ones with samples show.
                             for name in [
                                 "frame_total",
                                 "plot_paint_cpu",
@@ -861,7 +879,7 @@ impl DelogApp {
     }
 
     /// Export the current profiling snapshot (metric rings + resources + traces)
-    /// to JSON off the UI thread (§16, PRF-07). The doc is built on the UI
+    /// to JSON off the UI thread. The doc is built on the UI
     /// thread (it needs the wgpu frame for GPU stats); only the file dialog and
     /// write run on the worker.
     fn spawn_export_profiling_dialog(
@@ -1014,7 +1032,7 @@ impl DelogApp {
         // A restored view is authoritative — don't let the data-fit refit
         // overwrite it on the next frame.
         self.view_fitted = layout.view.is_some();
-        // Restore the fit-to-view toggle (LAY-09): when set, the view re-fits
+        // Restore the fit-to-view toggle: when set, the view re-fits
         // the data range each frame.
         self.fit_view_all = layout.fit_all;
         self.playback.set_speed(layout.speed as f32);
@@ -1269,12 +1287,12 @@ impl eframe::App for DelogApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        // Whole-frame CPU time (§16 `frame_total`); drops at function end.
+        // Whole-frame CPU time (`frame_total`); drops at function end.
         let _frame_timer = self.session.metrics().scope("frame_total");
         // Apply the global font override before any widget is laid out so a
-        // changed size/family takes effect this frame (UIX-13).
+        // changed size/family takes effect this frame.
         self.settings.font.apply(ui.ctx());
-        // Pre-UI bookkeeping (§16, PRF-10): dropped/picked files, job pruning,
+        // Pre-UI bookkeeping: dropped/picked files, job pruning,
         // cache lifecycle + epoch handling, trajectory builds and autosave —
         // none of it inside a panel scope. `ui_prelude` captures this block so
         // `frame_total − Σ(ui_*)` no longer hides it as an unattributed gap.
@@ -1286,11 +1304,11 @@ impl eframe::App for DelogApp {
         self.poll_trajectory_builds();
         self.frame = self.frame.wrapping_add(1);
 
-        // FPS indicator (PRF-05): measure the real wall-clock gap between
+        // FPS indicator: measure the real wall-clock gap between
         // frames. While the app renders continuously (playback, live, or any
         // interaction egui repaints for) the gaps are small and we show a
         // smoothed rate. When event-driven and truly idle the next frame is
-        // far apart (§11 idle policy) — a rate from that gap is meaningless,
+        // far apart — a rate from that gap is meaningless,
         // so the corner badge reads "idle" instead.
         let now = Instant::now();
         if let Some(prev) = self.last_frame_at.replace(now) {
@@ -1310,8 +1328,8 @@ impl eframe::App for DelogApp {
         let snapshot = self.session.snapshot();
 
         // Cache lifecycle: shared origin, frame recency, drain builds, and an
-        // epoch-driven incremental append + GC (§8.5).
-        // `global_range` (§16, PRF-10): one `global_time_range()` call measured
+        // epoch-driven incremental append + GC.
+        // `global_range`: one `global_time_range()` call measured
         // in isolation. It is O(total chunks across all topics) and called
         // several times per frame from different sections, so this quantifies a
         // suspected cross-cutting cost as chunks accumulate during live.
@@ -1329,7 +1347,7 @@ impl eframe::App for DelogApp {
                 self.view_fitted = true;
             }
 
-            // Advance the playhead — the single time authority (§11, TLN-01).
+            // Advance the playhead — the single time authority.
             let dt = ui.ctx().input(|i| i.stable_dt) as f64;
             self.playback.clamp_to(range);
             self.playback.advance(dt, range);
@@ -1340,8 +1358,8 @@ impl eframe::App for DelogApp {
                 self.pin_view_to_live(range);
             }
 
-            // Idle-aware repaint policy (§11, TLN-06): continuous frames only
-            // while playing (later: or a link is Connected, M7). Everything
+            // Idle-aware repaint policy: continuous frames only
+            // while playing (later: or a link is Connected). Everything
             // else is event-driven — ingest progress, epoch changes and
             // diagnostics each request their own repaint — so a static plot
             // idles at 0% GPU. (The Continuous render mode override is applied
@@ -1356,7 +1374,7 @@ impl eframe::App for DelogApp {
             self.caches.set_origin(0);
             self.view.get_or_insert(ViewX::new(0, 10_000_000));
         }
-        // Continuous render mode (PRF-09) forces a repaint every frame,
+        // Continuous render mode forces a repaint every frame,
         // overriding the idle-aware policy above for both the data and
         // empty-session branches.
         if self.settings.render_mode == RenderMode::Continuous {
@@ -1402,7 +1420,7 @@ impl eframe::App for DelogApp {
         }
         self.caches.evict_over_budget();
 
-        // Surface captured wgpu errors as diagnostics (GPU-12).
+        // Surface captured wgpu errors as diagnostics.
         for message in self.gpu.drain_gpu_errors(frame) {
             self.session
                 .push_diagnostic(delog_core::diagnostics::Diag::error("gpu", message));
@@ -1410,17 +1428,14 @@ impl eframe::App for DelogApp {
 
         drop(ui_prelude_timer);
 
-        // Per-section UI-thread timers (§16, PRF-10): `frame_total` minus the
+        // Per-section UI-thread timers: `frame_total` minus the
         // sum of these scopes is egui's own tessellation/bookkeeping, so the
         // breakdown attributes the frame to the panel that actually costs it.
         let ui_menu_timer = self.session.metrics().scope("ui_menu");
         egui::Panel::top("main_menu").show_inside(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
-                    if ui
-                        .button("Open File")
-                        .clicked()
-                    {
+                    if ui.button("Open File").clicked() {
                         self.spawn_open_dialog(ui.ctx());
                         ui.close();
                     }
@@ -1523,25 +1538,30 @@ impl eframe::App for DelogApp {
                                         .fit_to_exact_size(egui::vec2(16.0, 16.0))
                                         .tint(tint)
                                 };
+                                let run_enabled = self.scripts.ordinary_dispatch_enabled();
                                 for name in names {
                                     ui.horizontal(|ui| {
                                         // Fixed-width name button so the trailing
                                         // edit/remove icons line up across rows; the
                                         // trailing grow atom left-aligns the name.
                                         if ui
-                                            .add_sized(
-                                                [180.0, 22.0],
-                                                egui::Button::new((
-                                                    name.as_str(),
-                                                    egui::Atom::grow(),
-                                                )),
-                                            )
+                                            .add_enabled_ui(run_enabled, |ui| {
+                                                ui.add_sized(
+                                                    [180.0, 22.0],
+                                                    egui::Button::new((
+                                                        name.as_str(),
+                                                        egui::Atom::grow(),
+                                                    )),
+                                                )
+                                            })
+                                            .inner
                                             .clicked()
                                         {
-                                            self.scripts.run_named(
+                                            let _ = self.scripts.run_named(
                                                 &name,
                                                 self.session.store(),
                                                 self.session.ingest_sender(),
+                                                Arc::clone(self.session.metrics()),
                                             );
                                             ui.close();
                                         }
@@ -1571,9 +1591,74 @@ impl eframe::App for DelogApp {
                             ui.close();
                         }
                     });
+                    ui.menu_button("Parsers", |ui| {
+                        if ui.button("Add new parser...").clicked() {
+                            self.scripts.add();
+                            ui.close();
+                        }
+                        ui.separator();
+                        match self.scripts.parser_names() {
+                            Ok(names) if names.is_empty() => {
+                                ui.add_enabled(false, egui::Button::new("No saved parsers"));
+                            }
+                            Ok(names) => {
+                                let parser_open_enabled = self.scripts.parser_dispatch_enabled();
+                                let tint = ui.visuals().text_color();
+                                let icon = |src: egui::ImageSource<'static>| {
+                                    egui::Image::new(src)
+                                        .fit_to_exact_size(egui::vec2(16.0, 16.0))
+                                        .tint(tint)
+                                };
+                                for name in names {
+                                    ui.horizontal(|ui| {
+                                        // Fixed-width name button so the trailing edit
+                                        // icon lines up across rows; the trailing grow
+                                        // atom left-aligns the name. Clicking the name
+                                        // opens a file dialog to parse with this parser.
+                                        if ui
+                                            .add_enabled_ui(parser_open_enabled, |ui| {
+                                                ui.add_sized(
+                                                    [180.0, 22.0],
+                                                    egui::Button::new((
+                                                        name.as_str(),
+                                                        egui::Atom::grow(),
+                                                    )),
+                                                )
+                                            })
+                                            .inner
+                                            .on_hover_text("Open file with parser")
+                                            .clicked()
+                                        {
+                                            let _ = self.scripts.request_open(ui.ctx(), &name);
+                                            ui.close();
+                                        }
+                                        if ui
+                                            .add(egui::Button::image(icon(crate::icons::pencil())))
+                                            .on_hover_text("Edit")
+                                            .clicked()
+                                        {
+                                            self.scripts.edit(&name);
+                                            ui.close();
+                                        }
+                                        if ui
+                                            .add(egui::Button::image(icon(crate::icons::trash())))
+                                            .on_hover_text("Remove")
+                                            .clicked()
+                                        {
+                                            self.scripts.delete_parser(&name);
+                                            ui.close();
+                                        }
+                                    });
+                                }
+                            }
+                            Err(_) => {
+                                ui.add_enabled(false, egui::Button::new("Could not list parsers"));
+                            }
+                        }
+                    });
                 });
-                // FPS badge pinned to the far right (PRF-05), shown only when
-                // enabled in settings (PRF-08).
+                // FPS badge pinned to the far right, shown only when
+                // enabled in settings.
                 if self.settings.show_fps {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         match self.fps_ema {
@@ -1666,16 +1751,32 @@ impl eframe::App for DelogApp {
                     self.session.stop_live(i);
                 }
 
-                if self.session.has_active_loads() {
+                let native_load_active = self.session.has_active_loads();
+                #[cfg(feature = "scripting")]
+                let parser_label = self
+                    .scripts
+                    .is_parser_running()
+                    .then(|| self.scripts.parser_active_label());
+                #[cfg(not(feature = "scripting"))]
+                let parser_label: Option<String> = None;
+                let load_state = combined_load_state(
+                    native_load_active,
+                    self.session.active_labels(),
+                    parser_label.as_deref(),
+                );
+                if load_state.active {
                     ui.separator();
                     if ui.button("Cancel").clicked() {
                         self.session.cancel_all();
+                        #[cfg(feature = "scripting")]
+                        if load_state.parser_active {
+                            self.scripts.cancel_parsers();
+                        }
                     }
-                    ui.label(format!(
-                        "loading {}",
-                        self.session.active_labels().join(", ")
-                    ));
-                    if let Some(frac) = self.session.overall_progress() {
+                    ui.label(format!("loading {}", load_state.labels.join(", ")));
+                    if !load_state.parser_active
+                        && let Some(frac) = self.session.overall_progress()
+                    {
                         ui.add(egui::ProgressBar::new(frac).desired_width(120.0));
                     } else {
                         ui.spinner();
@@ -1684,10 +1785,10 @@ impl eframe::App for DelogApp {
             });
         });
 
-        // Global timeline bar (§11, TLN-02/03). `utc_offset_us` stays None
+        // Global timeline bar. `utc_offset_us` stays None
         // until a parser captures a UTC reference (BIN GPS week / ULog
-        // time_ref_utc — M6); `any_live` stays false until live links exist
-        // (M7): the snapshot has no streaming flag yet.
+        // time_ref_utc); `any_live` stays false until live links exist:
+        // the snapshot has no streaming flag yet.
         drop(ui_toolbar_timer);
         if let Some(range) = snapshot.global_time_range() {
             let ui_timeline_timer = self.session.metrics().scope("ui_timeline");
@@ -1708,12 +1809,12 @@ impl eframe::App for DelogApp {
                 }
                 if action.view_changed {
                     // Dragging the window slider is a manual view change: drop
-                    // out of fit-all and live-follow, like a pan/zoom (TLN-08).
+                    // out of fit-all and live-follow, like a pan/zoom.
                     self.fit_view_all = false;
                     self.playback.unlock_live();
                     self.view_fitted = true;
                 }
-                // Manual-marker flag interactions (§17.4, ANA-05).
+                // Manual-marker flag interactions.
                 if let Some(t_us) = action.marker_jump {
                     self.playback.scrub(t_us, range);
                 }
@@ -1738,13 +1839,13 @@ impl eframe::App for DelogApp {
             });
             drop(ui_timeline_timer);
 
-            // F12 toggles the debug overlay (PRF-06). Handled ungated — it is
+            // F12 toggles the debug overlay. Handled ungated — it is
             // not a text key, so it works even while a widget holds focus.
             if ui.ctx().input(|i| i.key_pressed(egui::Key::F12)) {
                 self.settings.show_debug_overlay = !self.settings.show_debug_overlay;
             }
 
-            // Transport keys (§11, TLN-04) — skipped while a widget owns the
+            // Transport keys — skipped while a widget owns the
             // keyboard (e.g. the browser filter box).
             if !ui.ctx().egui_wants_keyboard_input() {
                 let (space, home, end, left, right, save_layout, load_layout, add_marker) =
@@ -1792,7 +1893,7 @@ impl eframe::App for DelogApp {
                     self.playback.scrub(target, range);
                 }
                 if add_marker {
-                    // Drop a manual marker at the playhead (§17.4, ANA-05).
+                    // Drop a manual marker at the playhead.
                     self.markers.add_at(self.playback.t_us);
                 }
             }
@@ -1890,7 +1991,7 @@ impl eframe::App for DelogApp {
             };
             browser_panel.show_inside(ui, |ui| {
                 // Offset edits go through the ingest thread (the single
-                // registry writer) and come back as a new epoch (BRW-07).
+                // registry writer) and come back as a new epoch.
                 let browser_response = browser::ui(
                     ui,
                     &model,
@@ -1945,11 +2046,11 @@ impl eframe::App for DelogApp {
             // arranged and the 3D view opened on an empty session.
 
             // The central panel is a fallback drop zone: dropping a field onto
-            // empty workspace space plots it in the first pane (PLT-13).
+            // empty workspace space plots it in the first pane.
             let frame_style = egui::Frame::default();
             let mut handled_workspace_drop = false;
             // New panes (splits/edge drops) inherit the global legend default;
-            // the per-pane toggle overrides it afterwards (PLT-08).
+            // the per-pane toggle overrides it afterwards.
             self.workspace.default_show_legend = self.settings.plot.show_legend_default;
             let (_, dropped) =
                 ui.dnd_drop_zone::<Vec<delog_core::identity::FieldId>, ()>(frame_style, |ui| {
@@ -1981,7 +2082,7 @@ impl eframe::App for DelogApp {
                         markers: self.markers.as_slice(),
                     };
                     let mut behavior = crate::workspace::Behavior::new(services);
-                    // `workspace_tree` (§16, PRF-10): the egui_tiles layout +
+                    // `workspace_tree`: the egui_tiles layout +
                     // pane rendering. `workspace_tree − Σ(pane_total)` is the
                     // egui_tiles container/tab/drag machinery; `ui_workspace −
                     // workspace_tree` is begin/retain + action handling.
@@ -1990,7 +2091,7 @@ impl eframe::App for DelogApp {
                     drop(tree_timer);
                     let actions = behavior.into_actions();
                     // Share the widest pane gutter so stacked plots align next
-                    // frame (PLT-07). Converges in one frame; until then each
+                    // frame. Converges in one frame; until then each
                     // pane never drops below its own gutter, so labels never
                     // clip.
                     self.workspace.shared_y_gutter = actions.max_y_gutter;
@@ -2101,8 +2202,19 @@ impl eframe::App for DelogApp {
             if let Some(sink) = self.scripts.live_batch_sender_if_running() {
                 self.session.set_live_script_sink(Some(sink));
             }
-            self.scripts
-                .ui(ui.ctx(), self.session.store(), self.session.ingest_sender());
+            self.scripts.ui(
+                ui.ctx(),
+                self.session.store(),
+                self.session.ingest_sender(),
+                Arc::clone(self.session.metrics()),
+            );
+            for message in self.scripts.take_parser_diagnostics() {
+                self.session
+                    .push_diagnostic(delog_core::diagnostics::Diag::error(
+                        "python-parser",
+                        message,
+                    ));
+            }
         }
     }
 }
@@ -2630,6 +2742,33 @@ mod tests {
     use delog_core::snapshot::StoreSnapshot;
 
     use super::*;
+
+    #[test]
+    fn combined_load_state_appends_parser_label_without_duplicates() {
+        let state = combined_load_state(
+            true,
+            vec![
+                "flight.bin".to_owned(),
+                "Running raw.py on flight.bin".to_owned(),
+            ],
+            Some("Running raw.py on flight.bin"),
+        );
+
+        assert_eq!(
+            state.labels,
+            vec!["flight.bin", "Running raw.py on flight.bin"]
+        );
+        assert!(state.parser_active);
+    }
+
+    #[test]
+    fn combined_load_state_is_active_for_parser_only_work() {
+        let state = combined_load_state(false, Vec::new(), Some("Queued sample.dat with raw.py"));
+
+        assert!(state.active);
+        assert_eq!(state.labels, vec!["Queued sample.dat with raw.py"]);
+        assert!(state.parser_active);
+    }
 
     #[test]
     fn empty_stat_formats_as_a_dash() {

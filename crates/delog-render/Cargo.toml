@@ -13,7 +13,7 @@ delog-cache = { workspace = true }
 wgpu = { workspace = true }
 bytemuck = { workspace = true }
 pollster = { workspace = true }
-# Vehicle model loading: GLB → mesh data for the `mesh` pipeline (GPU-22).
+# Vehicle model loading: GLB → mesh data for the `mesh` pipeline.
 gltf = { workspace = true }
 thiserror = { workspace = true }
 

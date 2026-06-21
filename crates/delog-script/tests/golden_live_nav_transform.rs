@@ -6,6 +6,7 @@ use arrow::array::{ArrayRef, Float32Array, Int16Array, Int64Array};
 use arrow::datatypes::DataType;
 use delog_core::ingest::{IngestSink, ingest_channel};
 use delog_core::ingestor::{Ingestor, NullObserver};
+use delog_core::metrics::MetricsRegistry;
 use delog_core::schema::{FieldSchema, TopicSchema};
 use delog_core::snapshot::{DataStore, StoreSnapshot};
 use delog_script::{ScriptCommand, ScriptEngine, ScriptEvent};
@@ -41,7 +42,11 @@ fn live_transform_appends_derived_batches() {
     let (sender, receiver) = ingest_channel();
     let ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
 
-    let engine = ScriptEngine::spawn(read_store(), sender.clone());
+    let engine = ScriptEngine::spawn(
+        read_store(),
+        sender.clone(),
+        Arc::new(MetricsRegistry::new()),
+    );
     let script = r#"
 DEG_TO_RAD = 0.017453292519943295
 
@@ -57,7 +62,7 @@ def convert(batch):
         "nav_bearing_rad": (batch.t, batch.nav_bearing * DEG_TO_RAD, "rad"),
     }
 "#;
-    engine.send(ScriptCommand::RunScript {
+    let _ = engine.send(ScriptCommand::RunScript {
         name: "nav_rad".into(),
         source: script.into(),
     });

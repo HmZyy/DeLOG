@@ -1,8 +1,8 @@
-//! Generate session markers from a field's distinct values (ANA-11, §17.4).
+//! Generate session markers from a field's distinct values.
 //!
 //! A discrete field's value transitions (from [`field_value_transitions`]) are
 //! listed in a popup; each value gets an include checkbox, an editable name
-//! (default `Value <v>`) and a stable colour. Generating appends an ANA-05
+//! (default `Value <v>`) and a stable colour. Generating appends a
 //! marker at every transition into each included value.
 
 use delog_core::analysis::{TransitionsError, field_value_transitions};
@@ -74,7 +74,7 @@ impl GenerateMarkersDialog {
 }
 
 /// FNV-1a of the value label into the trace palette, so the same value is
-/// always the same colour across regenerations and logs (ANA-11).
+/// always the same colour across regenerations and logs.
 fn value_color(label: &str) -> [f32; 4] {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in label.as_bytes() {
@@ -188,7 +188,7 @@ mod tests {
 
     #[test]
     fn value_color_is_stable_per_label() {
-        // The same value label always maps to the same colour (ANA-11).
+        // The same value label always maps to the same colour.
         assert_eq!(value_color("4"), value_color("4"));
         assert_eq!(value_color("AUTO"), value_color("AUTO"));
         // A colour is well-formed sRGBA in 0..=1.

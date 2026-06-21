@@ -1,7 +1,7 @@
-//! Visual verification for the 3D offscreen target (GPU-20) and the infinite
-//! ground grid + axes (GPU-21): renders the grid headlessly from two camera
-//! angles and writes PNGs you can open. There is no in-app scene pane yet
-//! (TDV-01), so this is the surface where the rendered output is observable.
+//! Visual verification for the 3D offscreen target and the infinite
+//! ground grid + axes: renders the grid headlessly from two camera
+//! angles and writes PNGs you can open. There is no in-app scene pane yet,
+//! so this is the surface where the rendered output is observable.
 //!
 //! Run: `cargo run -p delog-render --example render_grid`
 //! Output: `/tmp/delog_grid_perspective.png`, `/tmp/delog_grid_topdown.png`

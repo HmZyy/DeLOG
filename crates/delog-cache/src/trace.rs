@@ -1,13 +1,6 @@
-//! Per-trace f32 render cache — the One Copy (PLAN.md §8.1-§8.2, CCH-01/02/04).
-//!
-//! Exactly one transform copy per plotted field (ZC-3): the builder iterates the
-//! snapshot's canonical Arrow chunks in place (ZC-2), and per sample applies the
-//! schema multiplier in `f64`, casts to `f32`, and rebases effective time to
-//! seconds against a shared `origin_us`. The result is one interleaved
-//! `[x0,y0,x1,y1,…]` buffer (8 B/sample) mirrored 1:1 into a GPU storage buffer.
-//! Non-finite values stay `NaN` so the line shader breaks the segment (§9.4) —
-//! gaps render as gaps. On a later epoch the cache *appends* new rows; it never
-//! rebuilds (CCH-04).
+//! Per-trace f32 render cache — the One Copy: exactly one transform copy per
+//! plotted field, an interleaved `[x0,y0,…]` buffer (8 B/sample). NaN stays NaN
+//! so the shader breaks the segment (gaps render as gaps).
 
 use arrow::array::{
     Array, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
@@ -27,16 +20,16 @@ use crate::pyramid::{BRANCH, MinMax, MinMaxPyramid};
 pub struct TraceCache {
     /// Interleaved `[x0,y0,x1,y1,…]`; one buffer, one GPU upload span.
     pub xy: Vec<f32>,
-    /// Time rebase origin: `x = (t_eff - origin_us) * 1e-6` as f32 (§8.3).
+    /// Time rebase origin: `x = (t_eff - origin_us) * 1e-6` as f32.
     pub origin_us: i64,
     /// Rows already transformed — the high-water mark vs the canonical store.
     pub built_rows: u64,
     /// Min/max index over the y-channel of `xy` (stride 2, offset 1).
     pub pyramid: MinMaxPyramid,
-    /// Frame of last use, for LRU eviction (CCH-09).
+    /// Frame of last use, for LRU eviction.
     pub last_used_frame: u64,
     /// Source offset baked into the x values; a snapshot with a different
-    /// offset makes this cache stale (BRW-07 → rebuild, not append).
+    /// offset makes this cache stale (rebuild, not append).
     pub offset_us: i64,
 }
 
@@ -67,8 +60,8 @@ fn resolve(snapshot: &StoreSnapshot, field: FieldId) -> Option<Resolved<'_>> {
 }
 
 impl TraceCache {
-    /// Build the cache for `field` against `origin_us`, off the UI thread
-    /// (CCH-02/03). Returns `None` if the field has no data in this snapshot.
+    /// Build the cache for `field` against `origin_us`, off the UI thread.
+    /// Returns `None` if the field has no data in this snapshot.
     pub fn build(
         snapshot: &StoreSnapshot,
         field: FieldId,
@@ -104,15 +97,15 @@ impl TraceCache {
     }
 
     /// Whether `snapshot` carries a different source offset than this cache
-    /// was built with — its x values are stale and need a rebuild (BRW-07).
+    /// was built with — its x values are stale and need a rebuild.
     pub fn offset_changed(&self, snapshot: &StoreSnapshot, field: FieldId) -> bool {
         resolve(snapshot, field).is_some_and(|r| r.offset_us != self.offset_us)
     }
 
-    /// Append rows that arrived since the last build/append (CCH-04). Returns
+    /// Append rows that arrived since the last build/append. Returns
     /// `true` if any rows were added. Uses the cache's fixed `origin_us`; a
     /// changed global origin is a rebuild, not an append (handled by the
-    /// manager, §8.3).
+    /// manager).
     pub fn append(
         &mut self,
         snapshot: &StoreSnapshot,
@@ -191,7 +184,7 @@ impl TraceCache {
     }
 
     /// Min/max y over the visible x window `[x0, x1]` (seconds) — the
-    /// AutoVisible y range (PLT-06). One sample of context is included on each
+    /// AutoVisible y range. One sample of context is included on each
     /// side so a line entering/leaving the window is bounded.
     pub fn y_range(&self, x0: f32, x1: f32) -> MinMax {
         let (a, b) = self.index_range(x0, x1);
@@ -201,7 +194,7 @@ impl TraceCache {
     }
 
     /// Per-pixel-column `[x, min, max]` triples over `[x0, x1)` split into
-    /// `width` equal **time** columns — the decimated draw input (§9.5, GPU-09).
+    /// `width` equal **time** columns — the decimated draw input.
     /// Columns are half-open `[x0 + c·s, x0 + (c+1)·s)`; an empty column reports
     /// `NaN` (the shader skips it). Splitting by time, not index, keeps columns
     /// aligned to screen pixels even for irregularly-sampled data.
@@ -267,7 +260,7 @@ impl TraceCache {
 
     /// Fast: distribute each L0 node overlapping `[a, b)` to the column(s) its x
     /// range covers. Conservative at column/edge boundaries (never hides a
-    /// transient, may smear it one column — fine for decimation, §9.5).
+    /// transient, may smear it one column — fine for decimation).
     fn l0_columns(&self, x0: f32, x1: f32, a: usize, b: usize, mins: &mut [f32], maxs: &mut [f32]) {
         let width = mins.len();
         let inv = 1.0 / (x1 - x0);
@@ -303,7 +296,7 @@ impl TraceCache {
         }
     }
 
-    /// CPU bytes held (xy buffer + pyramid), for `MemBreakdown` (CCH-10).
+    /// CPU bytes held (xy buffer + pyramid), for `MemBreakdown`.
     pub fn bytes(&self) -> u64 {
         (self.xy.capacity() * std::mem::size_of::<f32>()) as u64 + self.pyramid.bytes()
     }
@@ -313,12 +306,12 @@ impl TraceCache {
     }
 }
 
-/// Bridge gaps between adjacent decimated columns (§9.5). Per-column min/max
+/// Bridge gaps between adjacent decimated columns. Per-column min/max
 /// bars are drawn disjoint by the shader, so a smooth, moderately-sloped
 /// signal — where each column's own span is smaller than the value change to
 /// its neighbour — reads as a broken/dashed line. Stretch each finite column's
 /// span just enough to meet its right neighbour's, so consecutive bars always
-/// touch. This only ever *grows* a span (a transient is never hidden, §9.5),
+/// touch. This only ever *grows* a span (a transient is never hidden),
 /// and `NaN` (empty) columns stay gaps so real data gaps are preserved.
 fn bridge_columns(mins: &mut [f32], maxs: &mut [f32]) {
     for c in 0..mins.len().saturating_sub(1) {
@@ -377,7 +370,7 @@ enum ColReader<'a> {
     F32(&'a Float32Array),
     F64(&'a Float64Array),
     Bool(&'a BooleanArray),
-    /// Strings/blobs are not plottable (ZC-6) → all NaN.
+    /// Strings/blobs are not plottable → all NaN.
     NonNumeric,
 }
 
@@ -554,7 +547,7 @@ mod tests {
         // Column 0 = [0,1)s holds only the sample at t=0 (y=0); centre x=0.5.
         assert_eq!(cols[0], 0.5);
         assert_eq!(cols[1], 0.0); // col0 min
-        // col0's max is bridged up to col1's value so the bars connect (§9.5).
+        // col0's max is bridged up to col1's value so the bars connect.
         assert_eq!(cols[2], 1.0); // col0 max, bridged to col1 min
         // Column 1 = [1,2)s holds t=1 → y=1.
         assert_eq!(cols[4], 1.0); // col1 min
@@ -584,7 +577,7 @@ mod tests {
         // Column 0 starts at y=0; the last column reaches the max y≈999.
         assert_eq!(cols[1], 0.0); // col0 min
         assert!(cols[11] >= 990.0); // col3 max near 999
-        // The single-sample spike is NOT decimated away (§9.5).
+        // The single-sample spike is NOT decimated away.
         assert!(
             (cols[5] - 9999.0).abs() < 1.0,
             "spike preserved, got {}",

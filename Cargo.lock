@@ -988,10 +988,14 @@ name = "delog-script"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "criterion",
  "delog-core",
  "numpy",
  "proptest",
  "pyo3",
+ "rustix 1.1.4",
+ "same-file",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

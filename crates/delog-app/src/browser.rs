@@ -1,9 +1,8 @@
-//! Data browser tree: Source → Topic → Field (PLAN.md §13, BRW-01).
+//! Data browser tree: Source → Topic → Field.
 //!
-//! BRW-01 is the read-only tree with dtype/count/unit chips; fuzzy search,
-//! natural sort, highlighting, drag and context menus are later BRW items. The
-//! tree model is built purely from a [`StoreSnapshot`] so it is testable without
-//! a GUI; [`ui`] renders it.
+//! A read-only tree with dtype/count/unit chips, plus fuzzy search, natural
+//! sort, highlighting, drag and context menus. The tree model is built purely
+//! from a [`StoreSnapshot`] so it is testable without a GUI; [`ui`] renders it.
 
 use delog_core::identity::{FieldId, SourceId, TopicId};
 use delog_core::snapshot::StoreSnapshot;
@@ -20,9 +19,9 @@ pub struct SourceNode {
     pub id: SourceId,
     pub label: String,
     pub rows: u64,
-    /// Effective time range (source offset applied, §4.2).
+    /// Effective time range (source offset applied).
     pub range: Option<TimeRange>,
-    /// Per-source time offset (BRW-07).
+    /// Per-source time offset.
     pub offset_us: i64,
     pub topics: Vec<TopicNode>,
 }
@@ -41,6 +40,7 @@ pub struct FieldNode {
     pub name: String,
     pub dtype: &'static str,
     pub unit: Option<String>,
+    pub description: Option<String>,
     pub count: u64,
 }
 
@@ -87,6 +87,7 @@ impl BrowserModel {
                             name: f.name.clone(),
                             dtype: schema.map(|s| s.dtype_label()).unwrap_or("?"),
                             unit: schema.and_then(|s| s.unit.clone()),
+                            description: schema.and_then(|s| s.description.clone()),
                             count: rows,
                         }
                     })
@@ -119,8 +120,8 @@ impl BrowserModel {
         self.sources.is_empty()
     }
 
-    /// Filter the tree by a search query over full `source/topic.field` paths
-    /// (§13, BRW-02). A field is kept when the query matches its full path; a
+    /// Filter the tree by a search query over full `source/topic.field` paths.
+    /// A field is kept when the query matches its full path; a
     /// match at topic or source level keeps the whole branch. Empty branches
     /// are pruned; a blank query is the identity.
     pub fn filtered(&self, query: &str) -> Self {
@@ -164,7 +165,7 @@ impl BrowserModel {
     }
 }
 
-/// How a click modifies the selection (BRW-05).
+/// How a click modifies the selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelectMod {
     /// Plain click: the field becomes the whole selection.
@@ -175,7 +176,7 @@ pub enum SelectMod {
     Range,
 }
 
-/// Multi-select state for the browser tree (§13/§10.7, BRW-05). Pure data —
+/// Multi-select state for the browser tree. Pure data —
 /// `visible` is the tree's current field order so ranges and payloads follow
 /// what the user sees.
 #[derive(Debug, Default)]
@@ -240,7 +241,7 @@ impl Selection {
             .collect()
     }
 
-    /// The `Vec<FieldId>` drag payload (§10.7): the whole selection when the
+    /// The `Vec<FieldId>` drag payload: the whole selection when the
     /// dragged field is part of it, otherwise just the dragged field.
     pub fn drag_payload(&self, dragged: FieldId, visible: &[FieldId]) -> Vec<FieldId> {
         if self.selected.contains(&dragged) {
@@ -252,7 +253,7 @@ impl Selection {
 }
 
 /// Natural order: digit runs compare numerically, text runs case-insensitively
-/// (`GPS[2]` before `GPS[10]`, §13 BRW-03).
+/// (`GPS[2]` before `GPS[10]`).
 fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     let mut a = a.chars().peekable();
@@ -301,7 +302,7 @@ fn take_number(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> u128 {
 }
 
 /// Whitespace-separated query tokens each match the path case-insensitively
-/// (`gps hacc` matches `GPS[0].HAcc`, §13). Blank queries match everything.
+/// (`gps hacc` matches `GPS[0].HAcc`). Blank queries match everything.
 pub(crate) fn matches_query(query: &str, path: &str) -> bool {
     let path = path.to_lowercase();
     query
@@ -309,20 +310,20 @@ pub(crate) fn matches_query(query: &str, path: &str) -> bool {
         .all(|token| path.contains(&token.to_lowercase()))
 }
 
-/// Render the browser tree with its search box (BRW-01/02). `query`,
+/// Render the browser tree with its search box. `query`,
 /// `selection` and the offset dialog draft persist in app state across
 /// frames.
 #[derive(Debug, Default)]
 pub struct BrowserResponse {
-    /// Requested per-source offset change, if any (BRW-07).
+    /// Requested per-source offset change, if any.
     pub offset_change: Option<(SourceId, i64)>,
-    /// The user right-clicked a source and asked to remove it (BRW-06).
+    /// The user right-clicked a source and asked to remove it.
     pub remove_source: Option<SourceId>,
-    /// The user requested source metadata/params/link information (DIA-06).
+    /// The user requested source metadata/params/link information.
     pub inspect_source: Option<SourceId>,
-    /// The user requested global stats for a field (ANA-03).
+    /// The user requested global stats for a field.
     pub inspect_field_stats: Option<FieldId>,
-    /// The user asked to generate markers from a discrete field's values (ANA-11).
+    /// The user asked to generate markers from a discrete field's values.
     pub generate_markers: Option<FieldId>,
     /// The user asked to collapse the data browser panel.
     pub collapse_requested: bool,
@@ -335,12 +336,16 @@ enum FieldRowAction {
 }
 
 /// Whether a field's dtype label is discrete enough to generate markers from
-/// its distinct values (int/uint/bool/string; floats excluded) (ANA-11).
+/// its distinct values (int/uint/bool/string; floats excluded).
 fn is_discrete_dtype(label: &str) -> bool {
     matches!(
         label,
         "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "bool" | "str"
     )
+}
+
+fn hover_description(description: Option<&str>) -> Option<&str> {
+    description.filter(|description| !description.is_empty())
 }
 
 pub fn panel_toggle_button_size(ui: &egui::Ui) -> egui::Vec2 {
@@ -356,7 +361,7 @@ pub fn ui(
     offset_dialog: &mut Option<(SourceId, i64)>,
 ) -> BrowserResponse {
     let mut response = BrowserResponse::default();
-    // Fuzzy filter over full paths (§13, BRW-02).
+    // Fuzzy filter over full paths.
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         let button_size = panel_toggle_button_size(ui);
@@ -502,7 +507,7 @@ pub fn ui(
     response
 }
 
-/// Inline drag-us offset on the source row (§13/§4.2, BRW-07): dragging
+/// Inline drag-us offset on the source row: dragging
 /// shifts the source in ~1 ms steps; the clock button opens the exact-us dialog.
 fn offset_widget(
     ui: &mut egui::Ui,
@@ -534,7 +539,7 @@ fn offset_widget(
     change
 }
 
-/// Exact-µs offset dialog (BRW-07). The draft lives in app state; Apply emits
+/// Exact-µs offset dialog. The draft lives in app state; Apply emits
 /// the change and the window's close button discards it.
 fn offset_dialog_window(
     ui: &egui::Ui,
@@ -584,8 +589,8 @@ fn field_row(
 ) -> Option<FieldRowAction> {
     let mut action = None;
     // The row is a drag source carrying `Vec<FieldId>` — the multi-selection
-    // when the dragged row is part of it (§10.7, BRW-05); plot panes and tile
-    // edges are the drop zones (PLT-13).
+    // when the dragged row is part of it; plot panes and tile
+    // edges are the drop zones.
     let id = egui::Id::new(("field", field.id.0));
     let dragging_this_field = ui.ctx().is_being_dragged(id);
     if dragging_this_field {
@@ -618,6 +623,11 @@ fn field_row(
                 });
             });
     });
+    let response = if let Some(description) = hover_description(field.description.as_deref()) {
+        response.on_hover_text(description)
+    } else {
+        response
+    };
 
     if response.clicked() || response.drag_started() {
         if response.drag_started() {
@@ -722,7 +732,9 @@ mod tests {
             TopicSchema::new(
                 "GPS",
                 [
-                    FieldSchema::new("Lat", DataType::Int32, Some("deg"), 1e-7).unwrap(),
+                    FieldSchema::new("Lat", DataType::Int32, Some("deg"), 1e-7)
+                        .unwrap()
+                        .with_description("latitude"),
                     FieldSchema::new("Alt", DataType::Float64, Some("m"), 1.0).unwrap(),
                 ],
             )
@@ -756,13 +768,14 @@ mod tests {
         assert_eq!(gps.name, "GPS");
         assert_eq!(gps.rows, 3);
 
-        // Fields sort naturally (BRW-03): Alt before Lat.
+        // Fields sort naturally: Alt before Lat.
         assert_eq!(gps.fields.len(), 2);
         assert_eq!(gps.fields[0].name, "Alt");
         assert_eq!(gps.fields[0].dtype, "f64");
         assert_eq!(gps.fields[1].name, "Lat");
         assert_eq!(gps.fields[1].dtype, "i32");
         assert_eq!(gps.fields[1].unit.as_deref(), Some("deg"));
+        assert_eq!(gps.fields[1].description.as_deref(), Some("latitude"));
         assert_eq!(gps.fields[1].count, 3);
     }
 
@@ -813,7 +826,7 @@ mod tests {
         let mut sel = Selection::default();
         sel.click(FieldId(1), SelectMod::Toggle, &visible);
         sel.click(FieldId(3), SelectMod::Toggle, &visible);
-        // Dragging a selected field carries the whole selection (§10.7).
+        // Dragging a selected field carries the whole selection.
         assert_eq!(
             sel.drag_payload(FieldId(3), &visible),
             vec![FieldId(1), FieldId(3)]
@@ -853,7 +866,7 @@ mod tests {
     #[test]
     fn natural_cmp_orders_embedded_numbers_numerically() {
         use std::cmp::Ordering;
-        // The §13 example: GPS[2] before GPS[10].
+        // GPS[2] before GPS[10].
         assert_eq!(natural_cmp("GPS[2]", "GPS[10]"), Ordering::Less);
         assert_eq!(natural_cmp("GPS[10]", "GPS[2]"), Ordering::Greater);
         assert_eq!(natural_cmp("GPS[2]", "GPS[2]"), Ordering::Equal);
@@ -934,7 +947,7 @@ mod tests {
 
     #[test]
     fn query_tokens_match_full_paths_case_insensitively() {
-        // The §13 example: "gps hacc" matches GPS[0].HAcc.
+        // "gps hacc" matches GPS[0].HAcc.
         assert!(matches_query("gps hacc", "flight_21/GPS[0].HAcc"));
         assert!(matches_query("GPS", "flight_21/GPS[0].HAcc"));
         assert!(matches_query("flight hacc", "flight_21/GPS[0].HAcc"));
@@ -944,6 +957,13 @@ mod tests {
         // Blank queries match everything.
         assert!(matches_query("", "anything"));
         assert!(matches_query("   ", "anything"));
+    }
+
+    #[test]
+    fn hover_description_rejects_empty_text() {
+        assert_eq!(hover_description(Some("latitude")), Some("latitude"));
+        assert_eq!(hover_description(Some("")), None);
+        assert_eq!(hover_description(None), None);
     }
 
     #[test]

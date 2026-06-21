@@ -1,5 +1,5 @@
-//! Render-cache benches (PLAN.md §20.4, CCH-11): cache build throughput,
-//! y-range query at scale, and incremental append latency.
+//! Render-cache benches: cache build throughput, y-range query at scale, and
+//! incremental append latency.
 
 use std::sync::Arc;
 

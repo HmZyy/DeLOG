@@ -1,13 +1,13 @@
-//! GPU buffer manager (PLAN.md §9.3, GPU-02/03).
+//! GPU buffer manager.
 //!
 //! Per-`FieldId` ledger of STORAGE buffers mirroring each trace's `xy` cache.
-//! Appending uploads **only the new tail span** via `write_buffer` (ZC-4). When
+//! Appending uploads **only the new tail span** via `write_buffer`. When
 //! a buffer must grow it allocates ×1.5 and copies the old contents **GPU-side**
 //! (`copy_buffer_to_buffer`, no CPU round-trip), then uploads the new span. A
-//! wholesale content change (rebuild / time rebase, §8.3) forces a full
+//! wholesale content change (rebuild / time rebase) forces a full
 //! re-upload. Growth and rebuilds bump `gpu_full_uploads` so a regression that
-//! re-uploads too often is visible (ZC-4). Capacity bytes feed the `gpu` pool of
-//! `MemBreakdown` (§4.6).
+//! re-uploads too often is visible. Capacity bytes feed the `gpu` pool of
+//! `MemBreakdown`.
 
 use std::collections::HashMap;
 
@@ -21,7 +21,7 @@ const F32: u64 = std::mem::size_of::<f32>() as u64;
 const MIN_CAPACITY_FLOATS: u64 = 1024;
 
 /// What a single [`BufferManager::sync`] call actually uploaded — the caller
-/// feeds it into the `upload_bytes`/`gpu_full_uploads` metrics (§16, PRF-01).
+/// feeds it into the `upload_bytes`/`gpu_full_uploads` metrics.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct UploadStat {
     /// Bytes written to the GPU this call (0 for a no-op resync).
@@ -56,7 +56,7 @@ impl BufferManager {
 
     /// Mirror `xy` into `field`'s GPU buffer. Pass `rebuilt = true` when the
     /// contents changed wholesale (rebuild/rebase); otherwise only the appended
-    /// tail beyond what is already resident is uploaded (ZC-4).
+    /// tail beyond what is already resident is uploaded.
     pub fn sync(&mut self, field: FieldId, xy: &[f32], rebuilt: bool) -> UploadStat {
         let needed = xy.len() as u64;
         if needed == 0 {
@@ -172,7 +172,7 @@ impl BufferManager {
         self.traces.len()
     }
 
-    /// Count of full re-uploads (growth or rebuild) — a regression signal (ZC-4).
+    /// Count of full re-uploads (growth or rebuild) — a regression signal.
     pub fn full_uploads(&self) -> u64 {
         self.full_uploads
     }
@@ -182,7 +182,7 @@ impl BufferManager {
         self.traces.values().map(|t| t.capacity_floats * F32).sum()
     }
 
-    /// `MemBreakdown` (gpu pool) for one field (§4.6).
+    /// `MemBreakdown` (gpu pool) for one field.
     pub fn field_mem(&self, field: FieldId) -> MemBreakdown {
         let gpu = self
             .traces

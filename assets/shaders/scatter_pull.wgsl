@@ -1,4 +1,4 @@
-// Vertex-pulled scatter pipeline (PLAN.md GPU-07).
+// Vertex-pulled scatter pipeline.
 //
 // Each `[x,y]` sample emits one screen-space quad centred on the transformed
 // sample. `u.view.z` carries the point size in pixels, sharing PlotUniform with

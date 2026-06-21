@@ -1,18 +1,18 @@
-//! Infinite ground grid + world axes (PLAN.md §9.2 `grid3d`, §12.3, GPU-21).
+//! Infinite ground grid + world axes.
 //!
 //! A single full-screen triangle whose fragment shader unprojects each pixel
 //! back to a ray, intersects the `y = 0` ground plane, and draws an
 //! anti-aliased grid (derivative-based line width) that fades with distance —
 //! so the grid is "infinite" without any tessellated geometry. The principal
-//! ground axes are colored per the §12.3 render mapping `(E, −D, −N)`:
+//! ground axes are colored per the render mapping `(E, −D, −N)`:
 //! **X = East → red**, **Z = South → blue**. The vertical Y (Up) axis is not
 //! on the ground plane; a 3-axis gizmo line draw can ride with the trajectory
-//! pipeline (GPU-23) later.
+//! pipeline later.
 //!
 //! The pipeline writes per-fragment depth (projecting the ground hit back
 //! through the view-projection) so meshes and trajectories added later occlude
 //! the grid correctly. Production code supplies raw `[[f32; 4]; 4]` matrices —
-//! this crate carries no math library (§3.2).
+//! this crate carries no math library.
 
 use crate::context::RenderContext;
 
@@ -200,7 +200,7 @@ mod tests {
         (0..img.width).any(|x| (0..img.height).any(|y| pred(img.pixel(x, y))))
     }
 
-    /// GPU-21: the grid renders distance-faded lines with the principal ground
+    /// The grid renders distance-faded lines with the principal ground
     /// axes colored (X/East red, Z/South blue), over a clear background, when
     /// driven by a real perspective camera looking at the origin.
     #[test]
