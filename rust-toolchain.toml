@@ -1,4 +1,4 @@
-# Pinned toolchain (PLAN.md §2 pin philosophy): reproducible builds and benches.
+# Pinned toolchain for reproducible builds and benches.
 # egui 0.34 requires rustc >= 1.92.
 [toolchain]
 channel = "1.96.0"

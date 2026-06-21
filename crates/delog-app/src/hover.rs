@@ -1,10 +1,9 @@
-//! Hover readout: cursor line, per-trace circles and a value tooltip (PLAN.md
-//! §10.5, PLT-09).
+//! Hover readout: cursor line, per-trace circles and a value tooltip.
 //!
 //! On hover the cursor's x maps to a canonical time; each visible trace is
-//! sampled there via [`FieldView::sample_at`] (the canonical binary search,
-//! CORE-07), and the raw value × the field multiplier is shown — precise and
-//! independent of the f32 render cache (§4.5). A circle marks each trace's
+//! sampled there via [`FieldView::sample_at`] (the canonical binary search),
+//! and the raw value × the field multiplier is shown — precise and
+//! independent of the f32 render cache. A circle marks each trace's
 //! sample; a tooltip lists the values.
 
 use std::collections::HashMap;
@@ -27,7 +26,7 @@ pub struct HoverTarget {
 /// Draw the hover cursor/circles/tooltip if the pointer is over the plot. With
 /// `tooltip: false` the cursor line and sample circles still draw but the value
 /// tooltip is suppressed — used during playback, where the playhead readout
-/// (PLT-10) is the value source instead.
+/// is the value source instead.
 #[allow(clippy::too_many_arguments)]
 pub fn draw(
     ui: &egui::Ui,
@@ -89,7 +88,7 @@ pub fn draw(
 
 /// Mark each visible trace with a small circle at its sampled point, mapping
 /// the canonical sample time + value into screen space. Shared by the hover
-/// readout (PLT-09) and the playhead readout (PLT-10) so the non-hovered panes
+/// readout and the playhead readout so the non-hovered panes
 /// show where the cursor/playhead intersects each line, not just a value.
 fn draw_sample_circles(ui: &egui::Ui, view: PaneView, origin_us: i64, rows: &[Row]) {
     let rect = view.rect;
@@ -153,7 +152,7 @@ fn sampled_rows(
 }
 
 /// The shared value tooltip: time header + one colored `label: value unit`
-/// row per trace. Used by hover (PLT-09) and the playhead readout (PLT-10).
+/// row per trace. Used by hover and the playhead readout.
 #[allow(clippy::too_many_arguments)]
 fn show_tooltip(
     ui: &egui::Ui,
@@ -196,8 +195,8 @@ fn show_tooltip(
                             ui.label(format!("{value} {unit}"));
                         }
                         // Measuring-marker value delta for this trace, when
-                        // routed to the readout (ANA-10); absent when shown in
-                        // the legend instead.
+                        // routed to the readout; absent when shown in the legend
+                        // instead.
                         if let Some(delta) = deltas.get(&row.field) {
                             ui.label(
                                 egui::RichText::new(format!("d {delta}"))
@@ -216,7 +215,7 @@ fn color_swatch(ui: &mut egui::Ui, color: egui::Color32) {
     ui.painter().rect_filled(rect, 2.0, color);
 }
 
-/// Playhead cursor (§10.5/§11, PLT-10): a vertical line at the playback time
+/// Playhead cursor: a vertical line at the playback time
 /// on every pane; with `readout` set, a circle marks each trace's sample at the
 /// playhead and the shared hover tooltip shows the values, anchored to the
 /// bottom of the line (flipping side near the right edge). The caller passes
@@ -284,7 +283,7 @@ pub fn draw_playhead(
     );
 }
 
-/// Measurement marker (delta cursor, §10.8, ANA-10): a second vertical at
+/// Measurement marker (delta cursor): a second vertical at
 /// `marker_us`, painted dashed in a distinct accent so it never reads as the
 /// playhead, with a ΔT readout (`marker − playhead`) anchored at the top of the
 /// line. The per-trace ΔY is shown in the legend via [`marker_deltas`].
@@ -336,10 +335,10 @@ pub fn draw_marker(
         .text(anchor, align, text, egui::FontId::proportional(11.0), color);
 }
 
-/// Per-trace ΔY between the marker and the playhead for the legend (§10.8,
-/// ANA-10): `value(marker) − value(playhead)` sampled with the active hover
+/// Per-trace ΔY between the marker and the playhead for the legend:
+/// `value(marker) − value(playhead)` sampled with the active hover
 /// interpolation `mode`, the field multiplier and unit applied. Either endpoint
-/// missing or non-finite (NaN is a gap, §8.2) yields "n/a". Keyed by `FieldId`.
+/// missing or non-finite (NaN is a gap) yields "n/a". Keyed by `FieldId`.
 pub fn marker_deltas(
     snapshot: &StoreSnapshot,
     pane: &PlotPane,
@@ -367,7 +366,7 @@ pub fn marker_deltas(
 
 /// Format one trace's ΔY for the legend: `(marker − playhead) × multiplier`
 /// with the optional unit, or "n/a" when either endpoint is missing or non-finite
-/// (NaN is a gap, never interpolated across — §8.2, ANA-10).
+/// (NaN is a gap, never interpolated across).
 fn format_delta(
     marker: Option<f64>,
     playhead: Option<f64>,
@@ -388,7 +387,7 @@ fn format_delta(
     }
 }
 
-/// Shade each inter-marker region on a plot (§17.4, ANA-05): from each marker
+/// Shade each inter-marker region on a plot: from each marker
 /// to the next one — and for the last marker, to `data_end_us` (the log's last
 /// timestamp, not the pane edge, so it doesn't extend past the data) — using
 /// that marker's colour at `opacity`. Markers are sorted by time here. Meant to
@@ -434,9 +433,9 @@ pub fn draw_marker_regions(
     }
 }
 
-/// Manual session markers (§17.4, ANA-05): a full-height vertical in each
+/// Manual session markers: a full-height vertical in each
 /// marker's colour on every plot pane, with the label at the top. Read-only;
-/// distinct from the amber playhead and the ANA-10 dashed delta cursor. The
+/// distinct from the amber playhead and the dashed delta cursor. The
 /// line opacity, width and label visibility are user settings (PlotDisplay).
 pub fn draw_session_markers(
     ui: &egui::Ui,
@@ -479,7 +478,7 @@ pub fn draw_session_markers(
     }
 }
 
-/// The visible-trace sample time nearest `t_us` across `pane` (snap, PLT-10):
+/// The visible-trace sample time nearest `t_us` across `pane` (snap):
 /// probes the previous and next sample of each visible trace and returns the
 /// closest. `None` if the pane has no sampled visible traces.
 pub fn nearest_sample_us(snapshot: &StoreSnapshot, pane: &PlotPane, t_us: i64) -> Option<i64> {

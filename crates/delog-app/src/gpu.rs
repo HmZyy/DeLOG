@@ -1,5 +1,4 @@
-//! egui/eframe adapter for DeLOG's pure-wgpu renderer (PLAN.md §9.1-§9.2,
-//! GPU-06, PLT-02/03).
+//! egui/eframe adapter for DeLOG's pure-wgpu renderer.
 //!
 //! `delog-render` contains no egui types; this module is the thin boundary. It
 //! adopts eframe's `wgpu` device/queue, keeps the pipeline + buffer/uniform
@@ -27,7 +26,7 @@ use crate::plot::{PlotPane, TraceMode, ViewX};
 use crate::settings::Scene3dSettings;
 use crate::vehicle::ModelKind;
 
-/// Render-ready data for one vehicle this frame (TDV-09/10): its model, world
+/// Render-ready data for one vehicle this frame: its model, world
 /// transform (pose), colors, and resampled render-space trajectory. Built in
 /// `scene_ui` from a `VehicleConfig` + the snapshot + playhead.
 pub struct VehicleDraw<'a> {
@@ -138,7 +137,7 @@ impl GpuBridge {
     }
 
     /// Resolve finished wgpu error scopes into messages for the diagnostics
-    /// hub (GPU-12). Call once per frame.
+    /// hub. Call once per frame.
     pub fn drain_gpu_errors(&self, frame: &eframe::Frame) -> Vec<String> {
         if !self.available {
             return Vec::new();
@@ -222,7 +221,7 @@ impl GpuBridge {
 
         let mut items = Vec::new();
         // This pane's GPU uploads, accumulated inside the renderer block and
-        // recorded after it (§16 `upload_bytes`/`gpu_full_uploads`, PRF-01).
+        // recorded after it.
         let mut upload_bytes = 0u64;
         let mut full_uploads = 0u64;
         {
@@ -233,10 +232,10 @@ impl GpuBridge {
             else {
                 return;
             };
-            // Capture buffer growth/upload + uniform-write errors (GPU-12).
+            // Capture buffer growth/upload + uniform-write errors.
             let scope = GpuErrorHub::open(res.ctx.device());
             // Share the registry so the deferred paint callback can time
-            // `gpu_encode` (§16, PRF-01).
+            // `gpu_encode`.
             if res.metrics.is_none() {
                 res.metrics = Some(Arc::clone(metrics));
             }
@@ -264,7 +263,7 @@ impl GpuBridge {
 
                 let kind = match trace.mode {
                     TraceMode::Line => {
-                        // Draw-path selector (GPU-10): decimate when the visible
+                        // Draw-path selector: decimate when the visible
                         // window packs more than `decimate_threshold` samples/px.
                         let (a, b) = cache.index_range(x0, x1);
                         let visible = b.saturating_sub(a) as f32;
@@ -311,7 +310,7 @@ impl GpuBridge {
             res.errors.get_mut().unwrap().close(scope);
         }
 
-        // §16 GPU-upload gauges/counters for this pane (PRF-01).
+        // GPU-upload gauges/counters for this pane.
         if upload_bytes > 0 {
             metrics.record("upload_bytes", upload_bytes as f32);
         }
@@ -330,8 +329,8 @@ impl GpuBridge {
 
     /// Render the 3D scene (grid + axes for now) for `camera` into the
     /// offscreen [`Scene3dTarget`], resolve it, and return an egui texture id
-    /// the caller composites with `ui.image`/`painter().image` (PLAN.md §9.1,
-    /// TDV-01). The offscreen pass is submitted on our own queue during
+    /// the caller composites with `ui.image`/`painter().image`. The offscreen
+    /// pass is submitted on our own queue during
     /// `update()`, so the texture is ready before eframe paints this frame.
     pub fn render_scene(
         &self,
@@ -446,8 +445,7 @@ impl GpuBridge {
 }
 
 /// Union of every visible trace's auto-Y range, padded; a sane default when no
-/// finite samples are in view. The Y axis always auto-fits the visible window
-/// (PLT-06 AutoVisible).
+/// finite samples are in view. The Y axis always auto-fits the visible window.
 pub fn visible_y_range(caches: &mut CacheManager, pane: &PlotPane, x0: f32, x1: f32) -> (f32, f32) {
     let mut mm = MinMax::EMPTY;
     for trace in pane.visible_traces() {
@@ -496,7 +494,7 @@ fn srgb_to_linear(c: f32) -> f32 {
     }
 }
 
-/// How one trace is drawn this frame (GPU-10).
+/// How one trace is drawn this frame.
 #[derive(Clone, Copy)]
 enum DrawKind {
     /// Full polyline: `samples` `[x,y]` pairs.
@@ -515,7 +513,7 @@ enum DrawKind {
     },
 }
 
-/// Which render pipeline a [`DrawKind`] uses (GPU-11 batching key).
+/// Which render pipeline a [`DrawKind`] uses (batching key).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PipelineKind {
     Line,
@@ -526,7 +524,7 @@ enum PipelineKind {
 
 /// Consecutive same-pipeline runs in draw order. Each run costs exactly one
 /// `set_pipeline`; items inside it only rebind their trace bind group with a
-/// per-trace dynamic uniform offset (GPU-11). Order-preserving so trace
+/// per-trace dynamic uniform offset. Order-preserving so trace
 /// overlap (z-order) is unchanged — a homogeneous pane is a single run.
 fn pipeline_runs(kinds: impl Iterator<Item = PipelineKind>) -> Vec<(PipelineKind, u32)> {
     let mut runs: Vec<(PipelineKind, u32)> = Vec::new();
@@ -581,12 +579,12 @@ struct PlotCallbackResources {
     scatter_binds: HashMap<FieldId, wgpu::BindGroup>,
     step_binds: HashMap<FieldId, wgpu::BindGroup>,
     col_binds: HashMap<FieldId, wgpu::BindGroup>,
-    /// Error-scope results awaiting drain (GPU-12). Mutex only for the Sync
+    /// Error-scope results awaiting drain. Mutex only for the Sync
     /// bound of `CallbackResources`; never contended (all access is on the
     /// render thread).
     errors: Mutex<GpuErrorHub>,
     /// Shared metrics registry, populated on the first `render_pane` so the
-    /// paint callback can time `gpu_encode` (§16, PRF-01).
+    /// paint callback can time `gpu_encode`.
     metrics: Option<Arc<MetricsRegistry>>,
 }
 
@@ -639,7 +637,7 @@ impl PlotCallbackResources {
     }
 }
 
-/// Offscreen 3D-scene resources held in egui_wgpu's callback map (TDV-01).
+/// Offscreen 3D-scene resources held in egui_wgpu's callback map.
 /// The grid pipeline matches the target's MSAA/format; `texture_id` is the
 /// egui handle to the resolved color, (re)pointed when the pane resizes.
 /// One static scene polyline (the axis gizmo): its points + a uniform whose
@@ -654,7 +652,7 @@ struct SceneTraj {
     color: [f32; 4],
 }
 
-/// Per-vehicle GPU state (TDV-09/10), keyed by configured vehicle row: a mesh
+/// Per-vehicle GPU state, keyed by configured vehicle row: a mesh
 /// uniform/bind and a growable trajectory line (points + uniform + bind).
 struct VehicleGpu {
     mesh_uniform: wgpu::Buffer,
@@ -708,7 +706,7 @@ impl SceneResources {
             target.sample_count(),
         );
 
-        // Vertical Y (Up) axis, green — completes the §12.3 axes gizmo.
+        // Vertical Y (Up) axis, green — completes the axes gizmo.
         let y_axis = vec![[0.0, 0.0, 0.0], [0.0, 12.0, 0.0]];
         let axis_gizmo = SceneTraj::new(&ctx, &traj, &y_axis, [0.25, 0.9, 0.3, 1.0]);
 
@@ -932,7 +930,7 @@ impl egui_wgpu::CallbackTrait for ScenePaintCallback {
                 errors,
                 metrics: _,
             } = res;
-            // Capture bind-group creation errors (GPU-12).
+            // Capture bind-group creation errors.
             let scope = GpuErrorHub::open(ctx.device());
             for item in &self.items {
                 match item.kind {
@@ -974,8 +972,8 @@ impl egui_wgpu::CallbackTrait for ScenePaintCallback {
             return;
         };
 
-        // CPU cost of recording this pane's draw commands (§16 `gpu_encode`,
-        // PRF-01); the guard drops at the end of the callback.
+        // CPU cost of recording this pane's draw commands (`gpu_encode`); the
+        // guard drops at the end of the callback.
         let _encode_timer = res.metrics.as_ref().map(|m| m.scope("gpu_encode"));
 
         let viewport = info.viewport_in_pixels();
@@ -1007,7 +1005,7 @@ impl egui_wgpu::CallbackTrait for ScenePaintCallback {
         );
         render_pass.set_scissor_rect(sx, sy, sw, sh);
 
-        // Batched encoding (GPU-11): one set_pipeline per same-pipeline run in
+        // Batched encoding: one set_pipeline per same-pipeline run in
         // draw order; each trace then only rebinds its bind group with its
         // dynamic uniform offset.
         let runs = pipeline_runs(self.items.iter().map(|i| i.kind.pipeline()));
