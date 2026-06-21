@@ -1617,10 +1617,27 @@ impl eframe::App for DelogApp {
                                 };
                                 for name in names {
                                     ui.horizontal(|ui| {
-                                        ui.add_sized(
-                                            [180.0, 22.0],
-                                            egui::Label::new(name.as_str()),
-                                        );
+                                        // Fixed-width name button so the trailing edit
+                                        // icon lines up across rows; the trailing grow
+                                        // atom left-aligns the name. Clicking the name
+                                        // opens a file dialog to parse with this parser.
+                                        if ui
+                                            .add_enabled_ui(parser_open_enabled, |ui| {
+                                                ui.add_sized(
+                                                    [180.0, 22.0],
+                                                    egui::Button::new((
+                                                        name.as_str(),
+                                                        egui::Atom::grow(),
+                                                    )),
+                                                )
+                                            })
+                                            .inner
+                                            .on_hover_text("Open file with parser")
+                                            .clicked()
+                                        {
+                                            let _ = self.scripts.request_open(ui.ctx(), &name);
+                                            ui.close();
+                                        }
                                         if ui
                                             .add(egui::Button::image(icon(crate::icons::pencil())))
                                             .on_hover_text("Edit")
@@ -1630,16 +1647,11 @@ impl eframe::App for DelogApp {
                                             ui.close();
                                         }
                                         if ui
-                                            .add_enabled(
-                                                parser_open_enabled,
-                                                egui::Button::image(icon(
-                                                    crate::icons::folder_open(),
-                                                )),
-                                            )
-                                            .on_hover_text("Open file with parser")
+                                            .add(egui::Button::image(icon(crate::icons::trash())))
+                                            .on_hover_text("Remove")
                                             .clicked()
                                         {
-                                            let _ = self.scripts.request_open(ui.ctx(), &name);
+                                            self.scripts.delete_parser(&name);
                                             ui.close();
                                         }
                                     });
