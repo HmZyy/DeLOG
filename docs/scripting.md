@@ -1,7 +1,7 @@
-# DeLOG Python Scripting
+# DéLOG Python Scripting
 
-DeLOG can run Python scripts that read the loaded dataset and **produce new
-fields and topics** — derived signals that appear in the data browser and plot
+DéLOG can run Python scripts that read the loaded dataset and **produce new
+fields and topics** - derived signals that appear in the data browser and plot
 exactly like parsed log data. Scripts get the full embedded CPython interpreter
 (including `numpy`), so derived-field math is just numpy.
 
@@ -11,12 +11,14 @@ This is an **optional, build-time feature**. It is off by default.
 - [The Scripts UI](#the-scripts-ui)
 - [Custom file parsers](#custom-file-parsers)
 - [How scripts produce data](#how-scripts-produce-data)
+- [Live transforms](#live-transforms)
 - [API reference](#api-reference)
 - [The `delog` object](#the-delog-object)
 - [Data model & conventions](#data-model--conventions)
 - [The script library](#the-script-library)
 - [Console, errors, and cancellation](#console-errors-and-cancellation)
 - [Worked examples](#worked-examples)
+- [Bundled example scripts](#bundled-example-scripts)
 - [Limitations & gotchas](#limitations--gotchas)
 
 ---
@@ -64,7 +66,7 @@ Each row has:
 | ✎ (pencil) | Load the script into the Console editor for editing. |
 | 🗑 (trash) | Delete the script (with a confirmation dialog). |
 
-Running from here works even with the Console window closed — the derived
+Running from here works even with the Console window closed - the derived
 source shows up in the data browser, and any `print` output is buffered for the
 next time you open the Console.
 
@@ -72,13 +74,13 @@ next time you open the Console.
 
 Opens the scripting window:
 
-- **Code editor** (center) — write a full script here. Syntax-highlighted,
+- **Code editor** (center) - write a full script here. Syntax-highlighted,
   25 rows by default.
 - **Toolbar** (above the editor): a **name** field, a **Save** button (writes
   the editor buffer to the library under that name), and a single **Run/Cancel**
   toggle (▶ runs the editor buffer; while a script is running it becomes ⏹ and
   interrupts it).
-- **REPL** (bottom) — type one line, press <kbd>Enter</kbd> to evaluate it in a
+- **REPL** (bottom) - type one line, press <kbd>Enter</kbd> to evaluate it in a
   persistent interpreter session. The console scrollback shows results,
   `print` output, and errors. The 🗑 at the right of the REPL line clears the
   console.
@@ -94,59 +96,14 @@ life of the app session.
 
 ## Custom file parsers
 
-**Tools ▸ Parsers** manages Python parsers for file formats that DeLOG's built-in
-parsers do not handle. Choose **Add new parser...** to create one. Each saved
-filename has a pencil icon to edit it and a folder icon to explicitly choose a
-file and open it with that parser. In the editor, change the filename and press
-**Save** to add or rename the parser; **Delete** removes a saved parser after
-confirmation.
+Beyond derived-field scripts, DéLOG can run **Python file parsers** (under
+**Tools ▸ Parsers**) for formats its built-in parsers don't handle. A parser
+defines a single `Parse(raw_data)` function that turns raw bytes into topics and
+fields. It uses the same embedded-Python environment and serialized worker as
+scripts.
 
-Custom parsers are global `parsers/*.py` files in DeLOG's application config
-directory, like the global script library. They are never auto-sniffed, and the
-Tools menu lists custom Python parsers only, not built-in Rust parsers.
-
-A parser receives the selected file as an exact one-dimensional,
-native-endian NumPy `float32` array. An incomplete trailing 1-3 bytes is ignored.
-It must define `Parse(raw_data)` and return triples of field name, values, and
-hover tooltip:
-
-```python
-import numpy as np
-
-def Parse(raw_data):
-    t = np.arange(raw_data.size, dtype=np.float64) * 0.01
-    return [
-        ("DATA.rtc", t, "time in seconds"),
-        ("DATA.value", raw_data, "raw float32 values"),
-    ]
-```
-
-Every entry is exactly `(field_name, values, tooltip)`. The first dot in the
-field name separates topic from field, so `gps.main.lat` becomes topic `gps`,
-field `main.lat`. Values must be one-dimensional NumPy-compatible arrays of
-equal length within a topic. Supported dtypes are Boolean, signed and unsigned
-8/16/32/64-bit integers, and `float32`/`float64`. Numeric NaNs are ordinary gap
-values and remain gaps in plots. Tooltips appear when hovering over fields in
-the data browser.
-
-Each topic uses its `.rtc` field as the clock when present, otherwise `.index`.
-Both clock fields remain visible. Clock values are seconds and are rounded to
-canonical signed `i64` microseconds. Exact duplicate full field names are
-accepted for legacy compatibility: the last value wins and DeLOG records a
-warning.
-
-Parser code runs in a fresh namespace with full user privileges and must be
-trusted. Imports use the same embedded Python environment as scripts, including
-NumPy and, when installed there, Bottleneck, CFFI, and SciPy. Parsers share the
-single serialized Python worker with scripts, the REPL, and live transforms, so
-only one of these jobs runs at a time.
-
-Opening is transactional: an error or cancellation publishes no partial source.
-The compatibility API holds and copies the raw input, Python result arrays, and
-converted Arrow arrays, so large files can temporarily require substantial
-extra memory. Cancellation raises `KeyboardInterrupt` cooperatively at Python
-boundaries; a long NumPy, SciPy, CFFI, or other native call may not stop until
-that call returns.
+Custom parsers have their own dedicated guide:
+**[docs/custom_parsers.md](custom_parsers.md)**.
 
 ---
 
@@ -155,19 +112,19 @@ that call returns.
 A script reads existing fields, computes new arrays, and **emits** them. Emitted
 fields are grouped into one or more *output topics* and published as a single
 derived source named **`script:<name>`** (where `<name>` is the script/run
-name). That source flows through DeLOG's normal ingestion path, so derived
+name). That source flows through DéLOG's normal ingestion path, so derived
 fields automatically get chunking, statistics, caching, GPU plotting, and layout
-persistence — no special handling.
+persistence - no special handling.
 
 Key behaviors:
 
 - **Re-running replaces.** Running `script:foo` again removes the previous
-  `script:foo` source and republishes a fresh one — no duplicates.
+  `script:foo` source and republishes a fresh one - no duplicates.
 - **Live data is snapshotted at run time.** A script sees the data that exists
   the moment it runs.
 - **All-or-nothing.** If the script raises, **nothing** is emitted (no partial
   source); the traceback goes to the console.
-- **Add-only.** Scripts never mutate the original log — they only add derived
+- **Add-only.** Scripts never mutate the original log - they only add derived
   sources alongside it.
 
 ---
@@ -197,11 +154,11 @@ def nav_controller_rad(batch):
     }
 ```
 
-- **`topic`** — the incoming topic to transform.
-- **`fields`** — the fields of that topic the callback needs. Each is exposed on
+- **`topic`** - the incoming topic to transform.
+- **`fields`** - the fields of that topic the callback needs. Each is exposed on
   the `batch` object as a `float64` numpy array (e.g. `batch.nav_roll`). A batch
   whose topic doesn't carry every requested field is skipped.
-- **`output_topic`** — the derived topic name the returned fields are published
+- **`output_topic`** - the derived topic name the returned fields are published
   under, on an appendable `script:<name>` source.
 
 **The `batch` object** has `batch.t` (the incoming `int64` microsecond
@@ -209,9 +166,9 @@ timestamps) and one `float64` numpy array attribute per requested field.
 
 **The return value** is a `dict` mapping each output field name to one of:
 
-- `values` — a length-N array; unit unset, timestamps reuse the input batch's.
-- `(values, unit)` — same, with an explicit unit string.
-- `(times, values, unit)` — with explicit timestamps. For same-topic transforms
+- `values` - a length-N array; unit unset, timestamps reuse the input batch's.
+- `(values, unit)` - same, with an explicit unit string.
+- `(times, values, unit)` - with explicit timestamps. For same-topic transforms
   these **must equal** the input batch's timestamps (a mismatch is an error).
 
 All output arrays must have the same length as the incoming batch.
@@ -220,7 +177,7 @@ Key behaviors:
 
 - **Re-running replaces.** Re-running a live script removes the previous
   generation's `script:<name>` source and registers the new callbacks against a
-  fresh one — no duplicate live sources.
+  fresh one - no duplicate live sources.
 - **Non-blocking.** Live batches are mirrored to the script engine through a
   bounded queue; if it fills, batches are dropped (a diagnostic is logged)
   rather than stalling live ingestion.
@@ -230,7 +187,7 @@ Key behaviors:
 
 **Version 1 live transforms are same-topic only.** The callback sees one
 incoming topic batch at a time. It cannot join across topics, resample onto
-another timeline, or keep rolling-window state between batches — for that, use a
+another timeline, or keep rolling-window state between batches - for that, use a
 snapshot script after capture.
 
 ---
@@ -278,7 +235,7 @@ print(f.t[:3], f.v[:3])   # int64 µs, float64 values
 
 - Raises `KeyError` if the path doesn't resolve, `ValueError` if the field has
   no data.
-- Values are always `float64` (ints/bools are widened). **NaN is preserved** —
+- Values are always `float64` (ints/bools are widened). **NaN is preserved** -
   gaps in the source remain NaN, so you can detect and propagate them.
 - All fields **within the same topic** share identical timestamps, so you can
   read several of them and operate element-wise without aligning.
@@ -360,7 +317,7 @@ print(f"emitted {len(f.t)} samples")
   `times_us` are both raw log-time microseconds.
 - **Values are `float64`** on the way in (`.v`) and on the way out (`add_field`
   values). The emitted columns are stored as `Float64`.
-- **NaN means "gap"** — it is never interpolated away. Reads preserve NaN;
+- **NaN means "gap"** - it is never interpolated away. Reads preserve NaN;
   emit preserves NaN; plots render NaN as a line break. Propagate it naturally
   (most numpy ops do).
 - **One timeline per output topic.** Every field in a `delog.output(t, ...)`
@@ -373,7 +330,7 @@ print(f"emitted {len(f.t)} samples")
 
 ## The script library
 
-Saved scripts are plain `.py` files in DeLOG's config directory:
+Saved scripts are plain `.py` files in DéLOG's config directory:
 
 | Platform | Location |
 | --- | --- |
@@ -386,7 +343,7 @@ Saved scripts are plain `.py` files in DeLOG's config directory:
   menu without restarting (the list is read fresh each time the menu opens).
 - In-app: **Save** (Console toolbar) writes the editor buffer; **✎** loads a
   script for editing; **🗑** deletes it (with confirmation).
-- Scripts are a **global library** — reusable across any loaded log. Write them
+- Scripts are a **global library** - reusable across any loaded log. Write them
   to look up fields by name (see the [examples](#worked-examples)) so the same
   script works on any flight.
 
@@ -397,7 +354,7 @@ Saved scripts are plain `.py` files in DeLOG's config directory:
 - **`print(...)`** and anything written to `stdout`/`stderr` is captured to the
   Console scrollback.
 - **Errors** print the Python traceback to the console; the run emits no source.
-- **Cancel**: while a script runs, the toolbar toggle shows ⏹ — click it to
+- **Cancel**: while a script runs, the toolbar toggle shows ⏹ - click it to
   raise `KeyboardInterrupt` in the script (like Ctrl-C). This is cooperative:
   it fires at the next Python bytecode boundary, so a script stuck inside a
   single long C call (e.g. one huge numpy op) can't be interrupted mid-call.
@@ -409,7 +366,7 @@ Saved scripts are plain `.py` files in DeLOG's config directory:
 
 ### 1. Vector magnitude (single topic)
 
-All three accel axes live in one topic, so they share a timeline — no resampling.
+All three accel axes live in one topic, so they share a timeline - no resampling.
 
 ```python
 import numpy as np
@@ -485,6 +442,22 @@ out.add_field("diff", baro.v - gps_on_baro, unit="m")
 
 ---
 
+## Bundled example scripts
+
+The [`scripts/`](../scripts/) directory ships runnable examples you can copy into
+your [script library](#the-script-library) or open in the Console:
+
+| Script | Kind | What it does |
+| --- | --- | --- |
+| [`vehicle_attitude_euler.py`](../scripts/vehicle_attitude_euler.py) | snapshot | Converts a PX4 `vehicle_attitude[0]` quaternion to roll/pitch/yaw. Finds the source prefix automatically so it runs on any PX4 log. |
+| [`nav_controller_output_radians.py`](../scripts/nav_controller_output_radians.py) | snapshot | Re-emits ArduPilot `NAV_CONTROLLER_OUTPUT` angles in radians, locating the topic across sources/instances. |
+| [`nav_controller_live_rad.py`](../scripts/nav_controller_live_rad.py) | live transform | The live-streaming counterpart: a `@delog.live_transform` that converts `NAV_CONTROLLER_OUTPUT` angles to radians as batches arrive. |
+
+The snapshot/live pair (`nav_controller_*`) is a good side-by-side reference for
+the difference between the two execution modes.
+
+---
+
 ## Limitations & gotchas
 
 - **Not sandboxed.** Embedded CPython runs with your full user privileges
@@ -498,7 +471,7 @@ out.add_field("diff", baro.v - gps_on_baro, unit="m")
   topic's `times_us`. Combine differently-sampled inputs with `resample_prev`.
 - **A `print`-only script still emits an (empty) source.** If you never call
   `delog.output(...)`, running still creates an empty `script:<name>` source.
-- **Cancellation is cooperative** (see above) — long single C calls can't be
+- **Cancellation is cooperative** (see above) - long single C calls can't be
   interrupted mid-call.
 - **Long loops block that script.** Each run/eval executes on the interpreter
   thread; the UI stays responsive, but a `while True:` will run until cancelled.
