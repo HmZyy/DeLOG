@@ -1,8 +1,8 @@
 //! DeLOG live streaming: MAVLink link backends (UDP/TCP/serial), the link
 //! state machine, message→field extraction and the raw-frame recorder.
 //!
-//! Dependency rule (PLAN.md §3.2): like parsers, this crate never sees GPU
-//! or UI; live batches feed the same `IngestSink` path as files.
+//! Dependency rule: like parsers, this crate never sees GPU or UI; live
+//! batches feed the same `IngestSink` path as files.
 
 use std::fmt;
 use std::net::SocketAddr;
@@ -15,9 +15,8 @@ pub use live::{LiveIngestStats, LiveLink, LiveLinkStatus, LiveStats};
 pub use reader::{LinkCounters, LinkReader, LinkState, LinkStats};
 pub use recorder::TlogRecorder;
 
-/// Configured live-link endpoint (PLAN.md §7.1, LIV-01). UDP-client and
-/// TCP-server modes were removed by decision — the GCS-side patterns are
-/// UDP listen, TCP connect, and serial.
+/// Configured live-link endpoint. UDP-client and TCP-server modes were removed
+/// by decision — the GCS-side patterns are UDP listen, TCP connect, and serial.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Endpoint {
     /// Listen for UDP datagrams on `bind` (GCS-style).

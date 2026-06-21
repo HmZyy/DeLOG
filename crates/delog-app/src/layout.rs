@@ -1,4 +1,4 @@
-//! Source-agnostic layout persistence (PLAN.md §14, LAY-01/02).
+//! Source-agnostic layout persistence.
 //!
 //! Layouts deliberately store fields as `topic.field`, never as runtime IDs or
 //! source labels, so the same plot/vehicle setup can be reused across logs.
@@ -35,10 +35,10 @@ pub struct LayoutDoc {
     pub playback: PlaybackLayout,
     pub workspace: WorkspaceLayout,
     pub vehicles: Vec<VehicleLayout>,
-    /// Shared (Global-scope) measurement-marker time, if placed (§10.8, ANA-10).
+    /// Shared (Global-scope) measurement-marker time, if placed.
     #[serde(default)]
     pub marker_us: Option<i64>,
-    /// Manual markers / bookmarks for this session (§17.4, ANA-05).
+    /// Manual markers / bookmarks for this session.
     #[serde(default)]
     pub markers: Vec<MarkerLayout>,
     #[serde(default)]
@@ -87,13 +87,13 @@ pub enum LayoutNode {
         show_legend: bool,
         #[serde(default = "default_true")]
         show_tooltip: bool,
-        /// Measurement marker time, if placed (§10.8, ANA-10).
+        /// Measurement marker time, if placed.
         #[serde(default)]
         marker_us: Option<i64>,
-        /// Manual vertical positions for text-annotation labels (§10, PLT-15).
+        /// Manual vertical positions for text-annotation labels.
         #[serde(default)]
         text_offsets: Vec<TextOffsetLayout>,
-        /// Per-string-trace text-annotation filters (§10, PLT-15).
+        /// Per-string-trace text-annotation filters.
         #[serde(default)]
         text_filters: Vec<TextFilterLayout>,
     },
@@ -130,7 +130,7 @@ pub enum TraceModeLayout {
     Step,
 }
 
-/// A manual marker / bookmark for this session (§17.4, ANA-05).
+/// A manual marker / bookmark for this session.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MarkerLayout {
     pub t_us: i64,
@@ -139,8 +139,8 @@ pub struct MarkerLayout {
     pub note: String,
 }
 
-/// A manually-positioned text-annotation label (§10, PLT-15): which field +
-/// sample time, and its y-fraction (0 = top .. 1 = bottom) in the pane.
+/// A manually-positioned text-annotation label: which field + sample time, and
+/// its y-fraction (0 = top .. 1 = bottom) in the pane.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TextOffsetLayout {
     pub field: FieldRef,
@@ -148,7 +148,7 @@ pub struct TextOffsetLayout {
     pub y_frac: f32,
 }
 
-/// A per-string-trace text-annotation "contains" filter (§10, PLT-15).
+/// A per-string-trace text-annotation "contains" filter.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TextFilterLayout {
     pub field: FieldRef,
@@ -252,13 +252,13 @@ pub struct LayoutApply {
     pub workspace: Workspace,
     pub view: Option<ViewX>,
     /// Restored fit-to-view toggle (`ViewMode::Full`), so the view re-fits the
-    /// data range as it would after pressing the timeline fit button (LAY-09).
+    /// data range as it would after pressing the timeline fit button.
     pub fit_all: bool,
     pub speed: f64,
     pub follow_live: bool,
-    /// Restored shared (Global-scope) marker time (§10.8, ANA-10).
+    /// Restored shared (Global-scope) marker time.
     pub marker_us: Option<i64>,
-    /// Restored manual markers / bookmarks (§17.4, ANA-05).
+    /// Restored manual markers / bookmarks.
     pub markers: Vec<MarkerLayout>,
     pub vehicles: Vec<VehicleConfig>,
     pub diagnostics: Vec<Diag>,
@@ -304,13 +304,13 @@ pub struct CurrentLayout<'a> {
     pub snapshot: &'a StoreSnapshot,
     pub view: Option<ViewX>,
     /// Whether the fit-to-view toggle is engaged — persisted as
-    /// `ViewMode::Full` (LAY-09).
+    /// `ViewMode::Full`.
     pub fit_all: bool,
     pub speed: f64,
     pub follow_live: bool,
-    /// Shared (Global-scope) marker time to persist (§10.8, ANA-10).
+    /// Shared (Global-scope) marker time to persist.
     pub marker_us: Option<i64>,
-    /// Manual markers / bookmarks to persist (§17.4, ANA-05).
+    /// Manual markers / bookmarks to persist.
     pub markers: Vec<MarkerLayout>,
     pub vehicles: &'a [VehicleConfig],
 }
@@ -429,13 +429,13 @@ pub fn save_session_json(json: &str) -> Result<(), LayoutError> {
 }
 
 /// The app config directory (where settings.json lives), if resolvable.
-/// Used by the scripts panel (SCR-07) to locate its library dir.
+/// Used by the scripts panel to locate its library dir.
 #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
 pub fn config_dir() -> Option<std::path::PathBuf> {
     storage_dir(APP_ID)
 }
 
-/// Path to the app-wide settings file (LAY-08). Separate from layouts and from
+/// Path to the app-wide settings file. Separate from layouts and from
 /// `session.json` so loading a layout never changes user preferences.
 fn settings_path() -> Result<PathBuf, LayoutError> {
     let Some(base) = storage_dir(APP_ID) else {
@@ -1345,8 +1345,8 @@ mod tests {
 
     #[test]
     fn legacy_layout_with_settings_key_still_decodes_ignoring_it() {
-        // Layouts written before LAY-08 embedded a `settings` object. Decoding
-        // must succeed and simply ignore the unknown key (serde default).
+        // Older layouts embedded a `settings` object. Decoding must succeed and
+        // simply ignore the unknown key (serde default).
         let doc = decode_doc(
             r#"{
                 "delog_layout": 1,
@@ -1368,7 +1368,7 @@ mod tests {
     #[test]
     fn global_marker_us_round_trips_through_json_and_apply() {
         // The shared (Global-scope) marker persists in the layout doc and is
-        // handed back through LayoutApply on load (ANA-10).
+        // handed back through LayoutApply on load.
         let mut doc = empty_doc("marker");
         doc.marker_us = Some(123_456);
 
@@ -1559,7 +1559,7 @@ mod tests {
 
     #[test]
     fn fit_to_view_persists_as_full_mode_and_restores_fit_all() {
-        // ViewMode::Full in the saved view restores the fit-all toggle (LAY-09).
+        // ViewMode::Full in the saved view restores the fit-all toggle.
         let mut doc = empty_doc("fit");
         doc.view = Some(ViewLayout {
             mode: ViewMode::Full,

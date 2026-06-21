@@ -1,5 +1,5 @@
 #![no_main]
-//! PX4 ULog definitions + data decoder (PAR-13).
+//! PX4 ULog definitions + data decoder.
 
 use libfuzzer_sys::fuzz_target;
 

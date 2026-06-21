@@ -1,7 +1,7 @@
-//! Shared harness for the parser fuzz targets (PAR-13).
+//! Shared harness for the parser fuzz targets.
 //!
 //! Each entry point drives a decoder over arbitrary bytes with a sink that
-//! drops everything: fuzzing only asserts the §6.1 error policy — malformed
+//! drops everything: fuzzing only asserts the error policy — malformed
 //! input is skipped with diagnostics, never a panic, hang, or runaway
 //! allocation. The same property is smoke-tested on stable in
 //! `delog-parsers/tests/garbage_smoke.rs`; these targets add coverage-guided

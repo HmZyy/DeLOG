@@ -1,4 +1,4 @@
-//! Canonical microsecond time model (PLAN.md §4.2).
+//! Canonical microsecond time model.
 //!
 //! The core layer stores timestamps as integer microseconds. Source offsets are
 //! also integer microseconds; floating point belongs only in render caches.

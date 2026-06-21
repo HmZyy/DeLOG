@@ -1,4 +1,4 @@
-//! Analysis helpers over immutable snapshots (PLAN.md §17).
+//! Analysis helpers over immutable snapshots.
 
 use std::collections::HashMap;
 
@@ -138,7 +138,7 @@ fn finish_stats(acc: StatsAccumulator, multiplier: f64) -> FieldStats {
 
 /// Exact numeric statistics for samples in the inclusive effective-time window.
 /// Fully covered chunks reuse their seal-time statistics; partial chunks read
-/// Arrow values in place, upholding ZC-2.
+/// Arrow values in place.
 pub fn visible_field_stats(
     snapshot: &StoreSnapshot,
     field: FieldId,
@@ -303,7 +303,7 @@ pub fn global_field_stats(
 }
 
 /// One distinct value of a field and the canonical times at which the field
-/// transitions *into* it — the start of each contiguous run (ANA-11). Groups
+/// transitions *into* it — the start of each contiguous run. Groups
 /// are ordered by first appearance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValueTransitions {
@@ -327,7 +327,7 @@ impl From<FieldViewError> for TransitionsError {
     }
 }
 
-/// Group a field's value-*transition* timestamps by distinct value (ANA-11).
+/// Group a field's value-*transition* timestamps by distinct value.
 /// A transition is a sample whose value differs from the previous non-null
 /// value (the first non-null sample counts). Null/missing is a gap: it ends a
 /// run and is not itself marked. Returns `TooManyValues` once the distinct

@@ -1,10 +1,10 @@
-//! Plot pane state and the shared X view (PLAN.md §10.2-§10.4, PLT-02/03/04).
+//! Plot pane state and the shared X view.
 //!
 //! `ViewX` is the visible time window in canonical microseconds — the shared X
-//! model every pane renders from (§10.3). Pan and zoom are pure transforms on
+//! model every pane renders from. Pan and zoom are pure transforms on
 //! it so they are unit-testable without a GPU or window; the egui layer in
 //! `app.rs` converts pointer input into these calls. `PlotPane` holds the
-//! plotted [`TraceRef`]s with palette-assigned colours (PLT-02).
+//! plotted [`TraceRef`]s with palette-assigned colours.
 
 use std::collections::HashMap;
 
@@ -16,7 +16,7 @@ use delog_render::palette;
 const MIN_SPAN_US: f64 = 1.0;
 const MAX_SPAN_US: f64 = 1e18;
 
-/// The visible X window, in canonical microseconds (§10.3).
+/// The visible X window, in canonical microseconds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ViewX {
     pub min_us: i64,
@@ -36,8 +36,7 @@ impl ViewX {
     }
 
     /// Keep the right edge pinned to the current global/live tail while
-    /// preserving the previous span where the available range allows it
-    /// (PLT-05).
+    /// preserving the previous span where the available range allows it.
     pub fn locked_to_tail(range: TimeRange, span_us: i64) -> Self {
         let span_us = span_us.max(1);
         let min_us = range.max_us.saturating_sub(span_us).max(range.min_us);
@@ -48,14 +47,14 @@ impl ViewX {
         (self.max_us - self.min_us).max(1)
     }
 
-    /// Shift the window by `delta_us` (drag pan, PLT-04).
+    /// Shift the window by `delta_us` (drag pan).
     pub fn pan_us(&mut self, delta_us: i64) {
         self.min_us = self.min_us.saturating_add(delta_us);
         self.max_us = self.max_us.saturating_add(delta_us);
     }
 
     /// Zoom keeping `focus_us` fixed on screen. `factor < 1` zooms in (smaller
-    /// window), `> 1` zooms out (wheel @ cursor, PLT-04).
+    /// window), `> 1` zooms out (wheel @ cursor).
     pub fn zoom_at(&mut self, focus_us: i64, factor: f64) {
         let span = self.span_us() as f64;
         let new_span = (span * factor).clamp(MIN_SPAN_US, MAX_SPAN_US);
@@ -68,7 +67,7 @@ impl ViewX {
         }
     }
 
-    /// The visible window in cache seconds, rebased to `origin_us` (§8.3).
+    /// The visible window in cache seconds, rebased to `origin_us`.
     pub fn seconds(&self, origin_us: i64) -> (f32, f32) {
         (
             ((self.min_us - origin_us) as f64 * 1e-6) as f32,
@@ -77,7 +76,7 @@ impl ViewX {
     }
 }
 
-/// A plotted field with its render style (PLT-02).
+/// A plotted field with its render style.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TraceRef {
     pub field: FieldId,
@@ -85,13 +84,13 @@ pub struct TraceRef {
     pub color: [f32; 4],
     pub width_px: f32,
     pub mode: TraceMode,
-    /// Drawn only when visible; the legend toggles this (PLT-08).
+    /// Drawn only when visible; the legend toggles this.
     pub visible: bool,
 }
 
 /// A layout trace whose `topic.field` is not currently bound to a loaded
 /// source. It persists visually in the legend and can auto-bind on a later
-/// snapshot (LAY-04).
+/// snapshot.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GhostTrace {
     pub topic: String,
@@ -135,31 +134,31 @@ impl TraceMode {
 }
 
 /// One plot pane in the tiled workspace. The X view is deliberately global
-/// app state so every plot pane stays synchronized (PLT-01/03). The Y axis
-/// always auto-fits the visible window (pyramid min/max + pad, PLT-06).
+/// app state so every plot pane stays synchronized. The Y axis
+/// always auto-fits the visible window (pyramid min/max + pad).
 #[derive(Debug)]
 pub struct PlotPane {
     pub traces: Vec<TraceRef>,
     pub ghosts: Vec<GhostTrace>,
-    /// Per-pane legend visibility (context menu, PLT-08/11). Persisted.
+    /// Per-pane legend visibility (context menu). Persisted.
     pub show_legend: bool,
-    /// Per-pane hover-tooltip visibility (context menu, PLT-11). Persisted.
+    /// Per-pane hover-tooltip visibility (context menu). Persisted.
     pub show_tooltip: bool,
-    /// Whether this pane's Plot Info window is open (context menu, PLT-11).
+    /// Whether this pane's Plot Info window is open (context menu).
     /// Transient UI state — not serialized into layouts.
     pub show_info: bool,
-    /// Measurement marker (delta cursor, ANA-10): a second vertical at this
+    /// Measurement marker (delta cursor): a second vertical at this
     /// canonical time, paired with the playhead to read out ΔT + per-trace ΔY.
-    /// `None` when no marker is placed. Persisted per-pane (§10.8).
+    /// `None` when no marker is placed. Persisted per-pane.
     pub marker_us: Option<i64>,
     /// Whether the marker line is currently being dragged. Transient UI state —
     /// not serialized into layouts.
     pub marker_drag: bool,
-    /// Manual vertical positions for text-annotation labels (PLT-15), keyed by
+    /// Manual vertical positions for text-annotation labels, keyed by
     /// `(field, sample t_us)`; value is a y-fraction (0 = top .. 1 = bottom).
     /// Only manually-dragged labels are stored; the rest auto-pack. Persisted.
     pub text_offsets: HashMap<(FieldId, i64), f32>,
-    /// Per-string-trace "contains" filter (PLT-15): only message labels
+    /// Per-string-trace "contains" filter: only message labels
     /// containing this text are drawn. Empty/absent = show all. Persisted.
     pub text_filters: HashMap<FieldId, String>,
 }
@@ -181,8 +180,8 @@ impl Default for PlotPane {
 }
 
 impl PlotPane {
-    /// Add `field` if not already plotted, assigning the next palette colour
-    /// (PLT-02). Returns whether it was newly added.
+    /// Add `field` if not already plotted, assigning the next palette colour.
+    /// Returns whether it was newly added.
     pub fn add_trace(&mut self, field: FieldId) -> bool {
         if self.traces.iter().any(|t| t.field == field) {
             return false;
@@ -200,7 +199,7 @@ impl PlotPane {
         true
     }
 
-    /// Remove a plotted trace (legend/context menu, PLT-11).
+    /// Remove a plotted trace (legend/context menu).
     pub fn remove_trace(&mut self, field: FieldId) {
         self.traces.retain(|t| t.field != field);
     }
@@ -215,7 +214,7 @@ impl PlotPane {
         }
     }
 
-    /// Remove every trace (context menu "Clear", PLT-11).
+    /// Remove every trace (context menu "Clear").
     pub fn clear(&mut self) {
         self.traces.clear();
         self.ghosts.clear();

@@ -1,4 +1,4 @@
-//! Performance metrics dock UI (PLAN.md §16, PRF-02).
+//! Performance metrics dock UI.
 
 use delog_core::metrics::MetricStats;
 

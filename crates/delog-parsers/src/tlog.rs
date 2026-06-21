@@ -1,4 +1,4 @@
-//! MAVLink `.tlog` parser (PLAN.md §6.4, PAR-11).
+//! MAVLink `.tlog` parser.
 //!
 //! A tlog is a flat sequence of records, each an 8-byte **big-endian Unix-µs**
 //! capture timestamp followed by a raw MAVLink v1/v2 frame. The envelope is the
@@ -7,13 +7,13 @@
 //! [`crate::mavlink::decode_frame`]) and field extractor
 //! ([`crate::mavlink::extract_fields`]) — exactly the code path live streaming
 //! uses — so the tlog and the wire share one set of bugs and recordings
-//! round-trip by construction (§7.5).
+//! round-trip by construction.
 //!
 //! One topic per MAVLink message type, columns are the message's flattened
 //! fields, and the envelope timestamp drives the time axis. Streams are keyed by
 //! `(sysid, compid, message)`; the first stream for a message keeps the bare
 //! name and any later `(sysid, compid)` emitting the same message gets a
-//! `message[N]` instance suffix (§4.3) — full sysid→source demux is LIV-06.
+//! `message[N]` instance suffix.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufReader, Read};
@@ -171,7 +171,7 @@ impl<'a> Decoder<'a> {
             if magic != V1_MAGIC && magic != V2_MAGIC {
                 // The frame length is the only delimiter; a non-magic byte here
                 // means envelope sync is lost and cannot be recovered. Keep the
-                // data parsed so far (§6.1: torn tails are the logs you need).
+                // data parsed so far: torn tails are the logs you need.
                 self.diag(
                     Diag::warning(
                         "tlog-desync",

@@ -10,16 +10,27 @@ rust-version.workspace = true
 [features]
 default = []
 # Pulls in the embedded CPython interpreter + numpy. OFF by default so
-# `cargo build --workspace` needs no Python toolchain (PLAN.md §17.3).
+# `cargo build --workspace` needs no Python toolchain.
 python = ["dep:pyo3", "dep:numpy", "dep:arrow"]
 
 [dependencies]
 delog-core = { workspace = true }
+same-file = { workspace = true }
+rustix = { workspace = true }
 
 pyo3 = { workspace = true, optional = true }
 numpy = { workspace = true, optional = true }
 arrow = { workspace = true, optional = true }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 arrow = { workspace = true }
+criterion = { workspace = true }
 proptest = { workspace = true }
+
+[[bench]]
+name = "custom_parser"
+harness = false
+required-features = ["python"]

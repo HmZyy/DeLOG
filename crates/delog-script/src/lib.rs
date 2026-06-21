@@ -1,10 +1,16 @@
-//! Optional embedded-Python scripting for derived fields (PLAN.md §17.3, SCR-*).
+//! Optional embedded-Python scripting for derived fields.
 //!
 //! With the `python` feature off (the default) this crate carries only the
-//! feature-independent script *library* (file persistence, SCR-06); the
+//! feature-independent script *library* (file persistence); the
 //! interpreter engine lives behind `python`.
 
 pub mod library;
+
+#[cfg(feature = "python")]
+pub mod parser_library;
+
+#[cfg(feature = "python")]
+pub mod custom_parser;
 
 #[cfg(feature = "python")]
 pub mod api;
@@ -19,4 +25,4 @@ pub mod engine;
 pub mod live;
 
 #[cfg(feature = "python")]
-pub use engine::{ScriptCommand, ScriptEngine, ScriptEvent};
+pub use engine::{ParserEvent, ScriptCommand, ScriptEngine, ScriptEvent};

@@ -1,0 +1,1076 @@
+//! Compatibility conversion for legacy `Parse(raw_data)` file parsers.
+
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::Path;
+use std::sync::Arc;
+
+use arrow::array::{
+    Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array,
+    Int64Array, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+};
+use arrow::datatypes::DataType;
+use delog_core::diagnostics::Diag;
+use delog_core::ingest::{IngestSink, ParseSummary, ParsedBatch, SourceKind};
+use delog_core::schema::{FieldSchema, TopicSchema};
+use delog_core::time::TimeRange;
+use numpy::PyReadonlyArray1;
+use pyo3::exceptions::PyValueError;
+use pyo3::prelude::*;
+use pyo3::types::{PySequence, PySequenceMethods, PyTuple};
+
+/// A raw file materialized using NumPy `fromfile(..., dtype=float32)` semantics.
+pub struct RawFloatFile {
+    pub values: Vec<f32>,
+    pub input_bytes: u64,
+    pub ignored_trailing_bytes: u8,
+}
+
+/// Read complete native-endian `f32` values and silently omit an incomplete suffix.
+pub fn read_float32_file(path: impl AsRef<Path>) -> std::io::Result<RawFloatFile> {
+    let bytes = fs::read(path)?;
+    let input_bytes = bytes.len() as u64;
+    let ignored_trailing_bytes = (bytes.len() % size_of::<f32>()) as u8;
+    // Custom Python parser compatibility input copy; off the UI hot path and
+    // accounted by `input_bytes` (`python_parser_input_bytes` at emission).
+    let values = bytes
+        .chunks_exact(size_of::<f32>())
+        .map(|chunk| f32::from_ne_bytes(chunk.try_into().expect("four-byte chunk")))
+        .collect();
+    Ok(RawFloatFile {
+        values,
+        input_bytes,
+        ignored_trailing_bytes,
+    })
+}
+
+pub struct ParserField {
+    pub name: String,
+    /// Engineering unit parsed out of the legacy `name [unit]` convention.
+    pub unit: Option<String>,
+    pub values: ArrayRef,
+}
+
+pub struct ParserTopic {
+    pub name: String,
+    pub timestamps: Int64Array,
+    pub fields: Vec<ParserField>,
+}
+
+pub struct ParserOutput {
+    pub topics: Vec<ParserTopic>,
+    pub warnings: Vec<String>,
+    /// Sum of Arrow's logical array buffers (`Array::get_buffer_memory_size`).
+    pub arrow_bytes: u64,
+}
+
+/// Validate and emit a fully materialized parser result as one canonical file source.
+///
+/// All fallible schema and shape work happens before `open_source`, so an error
+/// cannot leave a partially opened source behind.
+pub fn emit_parser_output(
+    sink: &mut dyn IngestSink,
+    source_label: &str,
+    output: ParserOutput,
+) -> Result<ParseSummary, String> {
+    let mut topic_names = std::collections::HashSet::with_capacity(output.topics.len());
+    let mut prepared = Vec::with_capacity(output.topics.len());
+    let mut row_count = 0_u64;
+    let mut time_range: Option<TimeRange> = None;
+
+    for topic in output.topics {
+        if !topic_names.insert(topic.name.clone()) {
+            return Err(format!("duplicate parser topic '{}'", topic.name));
+        }
+        let rows = topic.timestamps.len();
+        let fields = topic
+            .fields
+            .iter()
+            .map(|field| {
+                if field.values.len() != rows {
+                    return Err(format!(
+                        "field '{}.{}' has {} values but topic clock has {rows}",
+                        topic.name,
+                        field.name,
+                        field.values.len()
+                    ));
+                }
+                FieldSchema::new(
+                    field.name.clone(),
+                    field.values.data_type().clone(),
+                    field.unit.clone(),
+                    1.0,
+                )
+                .map_err(|error| format!("topic '{}': {error}", topic.name))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let schema = Arc::new(
+            TopicSchema::new(topic.name.clone(), fields)
+                .map_err(|error| format!("topic '{}': {error}", topic.name))?,
+        );
+        row_count = row_count
+            .checked_add(rows as u64)
+            .ok_or_else(|| "parser row count overflow".to_owned())?;
+        if rows > 0 {
+            let range = TimeRange::new(topic.timestamps.value(0), topic.timestamps.value(rows - 1))
+                .ok_or_else(|| format!("topic '{}' timestamps are not ordered", topic.name))?;
+            time_range = Some(time_range.map_or(range, |current| current.union(range)));
+        }
+        let columns = topic.fields.into_iter().map(|field| field.values).collect();
+        prepared.push((schema, topic.timestamps, columns));
+    }
+
+    let topic_count = prepared.len() as u64;
+    let diagnostics = output.warnings.len() as u64;
+    let summary = ParseSummary {
+        topic_count,
+        row_count,
+        time_range,
+        diagnostics,
+        ..ParseSummary::default()
+    };
+    let source = sink.open_source(source_label, SourceKind::File);
+    for (schema, timestamps, columns) in prepared {
+        sink.submit(ParsedBatch::new(source, schema, timestamps, columns));
+    }
+    for warning in output.warnings {
+        sink.diagnostic(Diag::warning("python-parser-duplicate", warning).with_source(source));
+    }
+    sink.close_source(source, summary.clone());
+    Ok(summary)
+}
+
+struct PendingTopic {
+    name: String,
+    fields: Vec<PendingField>,
+}
+
+struct PendingField {
+    /// Original `topic.field` (unit suffix and lane index included), for diagnostics.
+    full_name: String,
+    /// Unit-stripped field name plus any lane suffix; the preferred schema name.
+    preferred_name: String,
+    /// Field part as emitted (unit kept) plus any lane suffix; the disambiguating
+    /// fallback used when two preferred names would collide within a topic.
+    original_name: String,
+    unit: Option<String>,
+    values: ArrayRef,
+}
+
+/// Split a legacy field name into its base name and engineering unit.
+///
+/// Only a trailing `[...]` (optionally preceded by whitespace) is treated as a
+/// unit, and only when its content is not purely numeric — numeric brackets such
+/// as `distance[0]` are array indices and are kept verbatim with no unit.
+fn split_unit(field: &str) -> (String, Option<String>) {
+    if let Some(before_close) = field.strip_suffix(']')
+        && let Some(open) = before_close.rfind('[')
+    {
+        let content = &before_close[open + 1..];
+        let is_index = !content.is_empty() && content.bytes().all(|b| b.is_ascii_digit());
+        if !content.trim().is_empty() && !is_index {
+            return (
+                before_close[..open].trim_end().to_owned(),
+                Some(content.trim().to_owned()),
+            );
+        }
+    }
+    (field.to_owned(), None)
+}
+
+fn value_error(message: impl Into<String>) -> PyErr {
+    PyValueError::new_err(message.into())
+}
+
+/// Materialize a field value as one Arrow array per 1-D lane.
+///
+/// 1-D values yield a single lane (`None` index). 2-D values are split along the
+/// first axis — the last axis is the sample/time axis — into one lane per row,
+/// tagged with the row index so the caller can suffix the field name `[k]`.
+/// Higher dimensions are rejected.
+fn numpy_lanes(
+    py: Python<'_>,
+    full_name: &str,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<Vec<(Option<usize>, ArrayRef)>> {
+    let numpy = py.import("numpy")?;
+    let is_masked: bool = numpy
+        .getattr("ma")?
+        .call_method1("isMaskedArray", (value,))?
+        .extract()?;
+    if is_masked {
+        return Err(value_error(format!(
+            "field '{full_name}' values must not be a NumPy MaskedArray"
+        )));
+    }
+    let array = numpy.call_method1("asarray", (value,)).map_err(|error| {
+        value_error(format!(
+            "field '{full_name}' values must be NumPy-compatible: {error}"
+        ))
+    })?;
+    let ndim: usize = array.getattr("ndim")?.extract()?;
+    match ndim {
+        1 => Ok(vec![(None, convert_1d(&numpy, full_name, &array)?)]),
+        2 => {
+            let lanes: usize = array.getattr("shape")?.get_item(0)?.extract()?;
+            (0..lanes)
+                .map(|lane| {
+                    let row = array.get_item(lane)?;
+                    Ok((Some(lane), convert_1d(&numpy, full_name, &row)?))
+                })
+                .collect()
+        }
+        _ => Err(value_error(format!(
+            "field '{full_name}' values must be one- or two-dimensional, got ndim={ndim}"
+        ))),
+    }
+}
+
+/// Convert one 1-D NumPy array into a native-endian, contiguous Arrow array.
+fn convert_1d(
+    numpy: &Bound<'_, PyModule>,
+    full_name: &str,
+    array: &Bound<'_, PyAny>,
+) -> PyResult<ArrayRef> {
+    let dtype = array.getattr("dtype")?;
+    let kind: char = dtype.getattr("kind")?.extract()?;
+    let itemsize: usize = dtype.getattr("itemsize")?.extract()?;
+    let dtype_name: String = dtype.getattr("name")?.extract()?;
+    let native_dtype = dtype.call_method1("newbyteorder", ("=",))?;
+    let contiguous = numpy.call_method1("ascontiguousarray", (array, native_dtype))?;
+
+    macro_rules! primitive_array {
+        ($native:ty, $arrow:ty) => {{
+            let array: PyReadonlyArray1<'_, $native> = contiguous.extract().map_err(|_| {
+                value_error(format!(
+                    "field '{full_name}' could not be read as NumPy dtype {dtype_name}"
+                ))
+            })?;
+            Arc::new(<$arrow>::from(array.as_slice()?.to_vec())) as ArrayRef
+        }};
+    }
+
+    // Custom Python parser compatibility output copy; NumPy owns the source
+    // buffer, so Arrow materialization is required and is accounted in
+    // `ParserOutput::arrow_bytes` (`python_parser_output_bytes` at emission).
+    let output = match (kind, itemsize) {
+        ('b', 1) => primitive_array!(bool, BooleanArray),
+        ('i', 1) => primitive_array!(i8, Int8Array),
+        ('i', 2) => primitive_array!(i16, Int16Array),
+        ('i', 4) => primitive_array!(i32, Int32Array),
+        ('i', 8) => primitive_array!(i64, Int64Array),
+        ('u', 1) => primitive_array!(u8, UInt8Array),
+        ('u', 2) => primitive_array!(u16, UInt16Array),
+        ('u', 4) => primitive_array!(u32, UInt32Array),
+        ('u', 8) => primitive_array!(u64, UInt64Array),
+        ('f', 4) => primitive_array!(f32, Float32Array),
+        ('f', 8) => primitive_array!(f64, Float64Array),
+        _ => {
+            return Err(value_error(format!(
+                "field '{full_name}' has unsupported NumPy dtype {dtype_name}; expected bool, signed/unsigned 8/16/32/64-bit integer, or float32/float64"
+            )));
+        }
+    };
+    Ok(output)
+}
+
+fn clock_range_error(field: &PendingField, index: usize) -> PyErr {
+    value_error(format!(
+        "clock field '{}' value at index {index} is outside the i64 microsecond range",
+        field.full_name
+    ))
+}
+
+fn float_clock_micros(field: &PendingField, index: usize, seconds: f64) -> PyResult<i64> {
+    if !seconds.is_finite() {
+        return Err(value_error(format!(
+            "clock field '{}' value at index {index} must be finite",
+            field.full_name
+        )));
+    }
+    let micros = (seconds * 1_000_000.0).round();
+    if !micros.is_finite() || !(-(2_f64.powi(63))..2_f64.powi(63)).contains(&micros) {
+        return Err(clock_range_error(field, index));
+    }
+    Ok(micros as i64)
+}
+
+fn clock_micros(field: &PendingField, index: usize) -> PyResult<i64> {
+    macro_rules! signed {
+        ($array:ty) => {{
+            let seconds = field
+                .values
+                .as_any()
+                .downcast_ref::<$array>()
+                .expect("Arrow dtype and array agree")
+                .value(index) as i64;
+            seconds
+                .checked_mul(1_000_000)
+                .ok_or_else(|| clock_range_error(field, index))
+        }};
+    }
+    macro_rules! unsigned {
+        ($array:ty) => {{
+            let seconds = field
+                .values
+                .as_any()
+                .downcast_ref::<$array>()
+                .expect("Arrow dtype and array agree")
+                .value(index) as u64;
+            seconds
+                .checked_mul(1_000_000)
+                .and_then(|micros| i64::try_from(micros).ok())
+                .ok_or_else(|| clock_range_error(field, index))
+        }};
+    }
+
+    match field.values.data_type() {
+        DataType::Int8 => signed!(Int8Array),
+        DataType::Int16 => signed!(Int16Array),
+        DataType::Int32 => signed!(Int32Array),
+        DataType::Int64 => signed!(Int64Array),
+        DataType::UInt8 => unsigned!(UInt8Array),
+        DataType::UInt16 => unsigned!(UInt16Array),
+        DataType::UInt32 => unsigned!(UInt32Array),
+        DataType::UInt64 => unsigned!(UInt64Array),
+        DataType::Float32 => {
+            let seconds = field
+                .values
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .expect("Arrow dtype and array agree")
+                .value(index);
+            float_clock_micros(field, index, f64::from(seconds))
+        }
+        DataType::Float64 => {
+            let seconds = field
+                .values
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .expect("Arrow dtype and array agree")
+                .value(index);
+            float_clock_micros(field, index, seconds)
+        }
+        DataType::Boolean => Err(value_error(format!(
+            "clock field '{}' must be numeric, not Boolean",
+            field.full_name
+        ))),
+        _ => Err(value_error(format!(
+            "clock field '{}' must be numeric",
+            field.full_name
+        ))),
+    }
+}
+
+fn clock_timestamps(field: &PendingField) -> PyResult<Int64Array> {
+    let mut timestamps = Vec::with_capacity(field.values.len());
+    for index in 0..field.values.len() {
+        let micros = clock_micros(field, index)?;
+        if timestamps.last().is_some_and(|previous| *previous > micros) {
+            return Err(value_error(format!(
+                "clock field '{}' must be non-decreasing (index {index})",
+                field.full_name
+            )));
+        }
+        timestamps.push(micros);
+    }
+    Ok(Int64Array::from(timestamps))
+}
+
+/// Validate and convert the complete legacy Python parser return value.
+pub fn parse_python_result(py: Python<'_>, result: &Bound<'_, PyAny>) -> PyResult<ParserOutput> {
+    let sequence = result
+        .cast::<PySequence>()
+        .map_err(|_| value_error("parser result must be a sequence of three-item tuples"))?;
+    if sequence.is_empty()? {
+        return Err(value_error(
+            "parser result must contain at least one field; empty results have no topics",
+        ));
+    }
+
+    let mut topics: Vec<PendingTopic> = Vec::new();
+    let mut warnings = Vec::new();
+    for entry_index in 0..sequence.len()? {
+        let entry = sequence.get_item(entry_index)?;
+        let tuple = entry.cast::<PyTuple>().map_err(|_| {
+            value_error(format!(
+                "parser result entry {entry_index} must be an exact three-item tuple"
+            ))
+        })?;
+        if tuple.len() != 3 {
+            return Err(value_error(format!(
+                "parser result entry {entry_index} must contain exactly 3 items, got {}",
+                tuple.len()
+            )));
+        }
+        let full_name: String = tuple.get_item(0)?.extract().map_err(|_| {
+            value_error(format!(
+                "parser result entry {entry_index} field name must be a string"
+            ))
+        })?;
+        if full_name.is_empty() {
+            return Err(value_error(format!(
+                "parser result entry {entry_index} field name must be non-empty"
+            )));
+        }
+        let (topic_name, field_name) = full_name.split_once('.').ok_or_else(|| {
+            value_error(format!(
+                "field '{full_name}' must contain a topic and field separated by a dot"
+            ))
+        })?;
+        if topic_name.is_empty() || field_name.is_empty() {
+            return Err(value_error(format!(
+                "field '{full_name}' must have a non-empty topic and field"
+            )));
+        }
+        // The third tuple item (tooltip) is intentionally ignored: these legacy
+        // parsers were authored for another tool, and DeLOG carries units, not
+        // free-text tooltips, as field metadata.
+        let (base_field, unit) = split_unit(field_name);
+        let lanes = numpy_lanes(py, &full_name, &tuple.get_item(1)?)?;
+
+        let topic_index = topics
+            .iter()
+            .position(|topic| topic.name == topic_name)
+            .unwrap_or_else(|| {
+                topics.push(PendingTopic {
+                    name: topic_name.to_owned(),
+                    fields: Vec::new(),
+                });
+                topics.len() - 1
+            });
+        let topic = &mut topics[topic_index];
+        for (lane, values) in lanes {
+            let suffix = lane.map(|k| format!("[{k}]")).unwrap_or_default();
+            topic.fields.push(PendingField {
+                full_name: format!("{topic_name}.{field_name}{suffix}"),
+                preferred_name: format!("{base_field}{suffix}"),
+                original_name: format!("{field_name}{suffix}"),
+                unit: unit.clone(),
+                values,
+            });
+        }
+    }
+
+    let mut output_topics = Vec::with_capacity(topics.len());
+    for PendingTopic {
+        name: topic_name,
+        fields,
+    } in topics
+    {
+        // A unit-stripped name is only kept when it stays unique within the
+        // topic; if two fields strip to the same name with different originals
+        // (e.g. `gyr.front [rad/s]` and `[deg/s]`), both keep their original
+        // unit-bearing names so neither is lost.
+        let mut originals_by_preferred: HashMap<String, HashSet<String>> = HashMap::new();
+        for field in &fields {
+            originals_by_preferred
+                .entry(field.preferred_name.clone())
+                .or_default()
+                .insert(field.original_name.clone());
+        }
+        let final_names: Vec<String> = fields
+            .iter()
+            .map(|field| {
+                if originals_by_preferred[&field.preferred_name].len() > 1 {
+                    field.original_name.clone()
+                } else {
+                    field.preferred_name.clone()
+                }
+            })
+            .collect();
+        drop(originals_by_preferred);
+
+        // Dedup by final name, last occurrence wins in its first-seen position.
+        let mut deduped: Vec<(String, PendingField)> = Vec::with_capacity(fields.len());
+        let mut index_by_name: HashMap<String, usize> = HashMap::new();
+        for (name, field) in final_names.into_iter().zip(fields) {
+            if let Some(&existing) = index_by_name.get(&name) {
+                warnings.push(format!(
+                    "duplicate parser field '{}'; last occurrence replaced the previous value",
+                    field.full_name
+                ));
+                deduped[existing].1 = field;
+            } else {
+                index_by_name.insert(name.clone(), deduped.len());
+                deduped.push((name, field));
+            }
+        }
+
+        let clock = deduped
+            .iter()
+            .find(|(name, _)| name == "rtc")
+            .or_else(|| deduped.iter().find(|(name, _)| name == "index"))
+            .map(|(_, field)| field)
+            .ok_or_else(|| {
+                value_error(format!(
+                    "topic '{topic_name}' is missing clock field '{topic_name}.rtc' or '{topic_name}.index'"
+                ))
+            })?;
+        let timestamps = clock_timestamps(clock)?;
+        let expected = timestamps.len();
+        for (_, field) in &deduped {
+            if field.values.len() != expected {
+                return Err(value_error(format!(
+                    "field '{}' has {} values but topic '{topic_name}' clock has {expected}",
+                    field.full_name,
+                    field.values.len(),
+                )));
+            }
+        }
+        output_topics.push(ParserTopic {
+            name: topic_name,
+            timestamps,
+            fields: deduped
+                .into_iter()
+                .map(|(name, field)| ParserField {
+                    name,
+                    unit: field.unit,
+                    values: field.values,
+                })
+                .collect(),
+        });
+    }
+
+    let arrow_bytes = output_topics
+        .iter()
+        .map(|topic| {
+            topic.timestamps.get_buffer_memory_size() as u64
+                + topic
+                    .fields
+                    .iter()
+                    .map(|field| field.values.get_buffer_memory_size() as u64)
+                    .sum::<u64>()
+        })
+        .sum();
+    Ok(ParserOutput {
+        topics: output_topics,
+        warnings,
+        arrow_bytes,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use arrow::array::{
+        Array, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array,
+        Int64Array, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+    };
+    use arrow::datatypes::DataType;
+    use delog_core::diagnostics::Diag;
+    use delog_core::identity::SourceId;
+    use delog_core::ingest::{IngestSink, ParseSummary, ParsedBatch, SourceKind};
+    use pyo3::prelude::*;
+
+    use super::*;
+
+    #[derive(Default)]
+    struct CollectSink {
+        opened: Vec<(String, SourceKind)>,
+        batches: Vec<ParsedBatch>,
+        diagnostics: Vec<Diag>,
+        closed: Vec<(SourceId, ParseSummary)>,
+    }
+
+    impl IngestSink for CollectSink {
+        fn open_source(&mut self, key: &str, kind: SourceKind) -> SourceId {
+            self.opened.push((key.to_owned(), kind));
+            SourceId(7)
+        }
+
+        fn submit(&mut self, batch: ParsedBatch) {
+            self.batches.push(batch);
+        }
+        fn diagnostic(&mut self, diag: Diag) {
+            self.diagnostics.push(diag);
+        }
+        fn progress(&mut self, _source: SourceId, _frac: f32) {}
+        fn close_source(&mut self, source: SourceId, summary: ParseSummary) {
+            self.closed.push((source, summary));
+        }
+    }
+
+    static TEMP_ID: AtomicU64 = AtomicU64::new(0);
+
+    fn temporary_file(bytes: &[u8]) -> std::path::PathBuf {
+        let id = TEMP_ID.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "delog-custom-parser-{}-{id}.bin",
+            std::process::id()
+        ));
+        fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    fn parse(source: &str) -> PyResult<ParserOutput> {
+        Python::attach(|py| {
+            let source = std::ffi::CString::new(source).unwrap();
+            let result = py.eval(&source, None, None)?;
+            parse_python_result(py, &result)
+        })
+    }
+
+    fn error(source: &str) -> String {
+        match parse(source) {
+            Ok(_) => panic!("expected parser result to be rejected"),
+            Err(error) => error.to_string(),
+        }
+    }
+
+    #[test]
+    fn emits_complete_output_ignoring_tooltips_with_warning_and_summary() {
+        let output = parse("[('AP.index',[1.,2.],'clock'),('AP.value [m]',[3.,4.],'tooltip'),('AP.value [m]',[5.,6.],'last')]" ).unwrap();
+        let mut sink = CollectSink::default();
+
+        let summary = emit_parser_output(&mut sink, "flight", output).unwrap();
+
+        assert_eq!(sink.opened, [("flight".into(), SourceKind::File)]);
+        assert_eq!(sink.batches.len(), 1);
+        assert_eq!(sink.batches[0].source, SourceId(7));
+        assert_eq!(sink.batches[0].topic(), "AP");
+        let value = sink.batches[0].schema.field_by_name("value").unwrap();
+        // The tooltip is dropped; the `[m]` suffix becomes the native unit.
+        assert_eq!(value.description, None);
+        assert_eq!(value.unit.as_deref(), Some("m"));
+        assert_eq!(sink.diagnostics.len(), 1);
+        assert_eq!(sink.diagnostics[0].code, "python-parser-duplicate");
+        assert_eq!(sink.diagnostics[0].source, Some(SourceId(7)));
+        assert_eq!(summary.topic_count, 1);
+        assert_eq!(summary.row_count, 2);
+        assert_eq!(summary.time_range.unwrap().min_us, 1_000_000);
+        assert_eq!(summary.time_range.unwrap().max_us, 2_000_000);
+        assert_eq!(summary.diagnostics, 1);
+        assert_eq!(sink.closed, [(SourceId(7), summary)]);
+    }
+
+    #[test]
+    fn invalid_schema_does_not_open_a_source() {
+        let output = ParserOutput {
+            topics: vec![ParserTopic {
+                name: String::new(),
+                timestamps: Int64Array::from(vec![0]),
+                fields: vec![ParserField {
+                    name: "v".into(),
+                    unit: None,
+                    values: Arc::new(Float32Array::from(vec![1.0])),
+                }],
+            }],
+            warnings: vec![],
+            arrow_bytes: 4,
+        };
+        let mut sink = CollectSink::default();
+
+        assert!(emit_parser_output(&mut sink, "bad", output).is_err());
+        assert!(sink.opened.is_empty());
+        assert!(sink.batches.is_empty());
+        assert!(sink.closed.is_empty());
+    }
+
+    #[test]
+    fn reads_native_endian_float32_and_reports_original_bytes() {
+        let mut bytes = Vec::new();
+        for value in [1.5_f32, -2.25, f32::NAN] {
+            bytes.extend_from_slice(&value.to_ne_bytes());
+        }
+        let path = temporary_file(&bytes);
+
+        let loaded = read_float32_file(&path).unwrap();
+
+        assert_eq!(loaded.values[..2], [1.5, -2.25]);
+        assert!(loaded.values[2].is_nan());
+        assert_eq!(loaded.input_bytes, 12);
+        assert_eq!(loaded.ignored_trailing_bytes, 0);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn ignores_each_possible_incomplete_float32_suffix_and_accepts_empty_files() {
+        for trailing in 0..=3_u8 {
+            let mut bytes = 7.25_f32.to_ne_bytes().to_vec();
+            bytes.extend(std::iter::repeat_n(0xAB, usize::from(trailing)));
+            let path = temporary_file(&bytes);
+            let loaded = read_float32_file(&path).unwrap();
+            assert_eq!(loaded.values, [7.25]);
+            assert_eq!(loaded.input_bytes, u64::from(4 + trailing));
+            assert_eq!(loaded.ignored_trailing_bytes, trailing);
+            fs::remove_file(path).unwrap();
+        }
+
+        let path = temporary_file(&[]);
+        let loaded = read_float32_file(&path).unwrap();
+        assert!(loaded.values.is_empty());
+        assert_eq!(loaded.input_bytes, 0);
+        assert_eq!(loaded.ignored_trailing_bytes, 0);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn preserves_all_supported_numpy_dtypes() {
+        let output = parse(
+            "__import__('builtins').eval(\"[(f't.{n}', __import__('numpy').array([0, 1], dtype=d), '') for n, d in [('index','float64'),('b','bool'),('i8','int8'),('i16','int16'),('i32','int32'),('i64','int64'),('u8','uint8'),('u16','uint16'),('u32','uint32'),('u64','uint64'),('f32','float32'),('f64','float64')]]\")",
+        )
+        .unwrap();
+        let fields = &output.topics[0].fields;
+        let actual: Vec<_> = fields
+            .iter()
+            .map(|field| field.values.data_type())
+            .collect();
+        assert_eq!(
+            actual,
+            [
+                &DataType::Float64,
+                &DataType::Boolean,
+                &DataType::Int8,
+                &DataType::Int16,
+                &DataType::Int32,
+                &DataType::Int64,
+                &DataType::UInt8,
+                &DataType::UInt16,
+                &DataType::UInt32,
+                &DataType::UInt64,
+                &DataType::Float32,
+                &DataType::Float64,
+            ]
+        );
+        assert!(
+            fields[1]
+                .values
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .unwrap()
+                .value(1)
+        );
+        macro_rules! value_is_one {
+            ($index:expr, $ty:ty, $one:expr) => {
+                assert_eq!(
+                    fields[$index]
+                        .values
+                        .as_any()
+                        .downcast_ref::<$ty>()
+                        .unwrap()
+                        .value(1),
+                    $one
+                )
+            };
+        }
+        value_is_one!(2, Int8Array, 1_i8);
+        value_is_one!(3, Int16Array, 1_i16);
+        value_is_one!(4, Int32Array, 1_i32);
+        value_is_one!(5, Int64Array, 1_i64);
+        value_is_one!(6, UInt8Array, 1_u8);
+        value_is_one!(7, UInt16Array, 1_u16);
+        value_is_one!(8, UInt32Array, 1_u32);
+        value_is_one!(9, UInt64Array, 1_u64);
+        value_is_one!(10, Float32Array, 1_f32);
+        value_is_one!(11, Float64Array, 1_f64);
+    }
+
+    #[test]
+    fn accepts_lists_views_slices_and_noncontiguous_arrays() {
+        let output = parse(
+            "__import__('builtins').eval(\"[(\'t.index\',[0,1],\'\'),(\'t.list\',[3,4],\'\'),(\'t.view\',a[3:1:-1],\'\'),(\'t.stride\',a[::2],\'\')]\", {\'a\': __import__(\'numpy\').array([10,20,30,40], dtype=\'int16\')})",
+        )
+        .unwrap();
+        let fields = &output.topics[0].fields;
+        assert_eq!(fields[1].values.data_type(), &DataType::Int64);
+        assert_eq!(
+            fields[2]
+                .values
+                .as_any()
+                .downcast_ref::<Int16Array>()
+                .unwrap()
+                .values(),
+            &[40, 30]
+        );
+        assert_eq!(
+            fields[3]
+                .values
+                .as_any()
+                .downcast_ref::<Int16Array>()
+                .unwrap()
+                .values(),
+            &[10, 30]
+        );
+    }
+
+    #[test]
+    fn accepts_supported_non_native_endian_arrays() {
+        let output = parse(
+            "[('t.index',[0,1],''),('t.big',__import__('numpy').array([258,772],dtype='>i2'),'')]",
+        )
+        .unwrap();
+        let values = output.topics[0].fields[1]
+            .values
+            .as_any()
+            .downcast_ref::<Int16Array>()
+            .unwrap();
+        assert_eq!(values.values(), &[258, 772]);
+    }
+
+    #[test]
+    fn groups_topics_and_preserves_first_seen_topic_and_field_order() {
+        let output =
+            parse("[('z.index',[0],''),('a.index',[0],''),('z.second',[2],''),('z.first',[1],'')]")
+                .unwrap();
+        assert_eq!(
+            output
+                .topics
+                .iter()
+                .map(|t| t.name.as_str())
+                .collect::<Vec<_>>(),
+            ["z", "a"]
+        );
+        assert_eq!(
+            output.topics[0]
+                .fields
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>(),
+            ["index", "second", "first"]
+        );
+    }
+
+    #[test]
+    fn prefers_rtc_converts_seconds_and_keeps_both_clocks_visible() {
+        let output = parse(
+            "[('gps.index',[100,101],''),('gps.v',[5,6],''),('gps.rtc',[1.25,1.250001],'' )]",
+        )
+        .unwrap();
+        assert_eq!(
+            output.topics[0].timestamps.values(),
+            &[1_250_000, 1_250_001]
+        );
+        assert_eq!(
+            output.topics[0]
+                .fields
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>(),
+            ["index", "v", "rtc"]
+        );
+    }
+
+    #[test]
+    fn falls_back_to_index_and_rounds_seconds_to_microseconds() {
+        let output = parse("[('t.value',[9,8],''),('t.index',[0.0000006,1.0000004],'')]").unwrap();
+        assert_eq!(output.topics[0].timestamps.values(), &[1, 1_000_000]);
+    }
+
+    #[test]
+    fn integer_clocks_preserve_exact_microseconds_at_large_valid_boundaries() {
+        let output = parse(
+            "[('signed.index',__import__('numpy').array([-1,0,9000000000001,9223372036854],dtype='int64'),''),('unsigned.index',__import__('numpy').array([9000000000001,9223372036854],dtype='uint64'),'')]",
+        )
+        .unwrap();
+        assert_eq!(
+            output.topics[0].timestamps.values(),
+            &[
+                -1_000_000,
+                0,
+                9_000_000_000_001_000_000,
+                9_223_372_036_854_000_000,
+            ]
+        );
+        assert_eq!(
+            output.topics[1].timestamps.values(),
+            &[9_000_000_000_001_000_000, 9_223_372_036_854_000_000]
+        );
+    }
+
+    #[test]
+    fn integer_clocks_reject_signed_and_unsigned_multiplication_overflow() {
+        for source in [
+            "[('t.index',__import__('numpy').array([9223372036855],dtype='int64'),'')]",
+            "[('t.index',__import__('numpy').array([9223372036855],dtype='uint64'),'')]",
+        ] {
+            let message = error(source);
+            assert!(message.contains("t.index") && message.contains("range"));
+        }
+    }
+
+    #[test]
+    fn duplicate_last_wins_in_place_and_warns_per_occurrence() {
+        let output = parse(
+            "[('t.index',[0,1],''),('t.v',[1,2],'old'),('t.x',[8,9],''),('t.v',[3.,4.],'new'),('t.v',[5,6],'newest')]",
+        )
+        .unwrap();
+        assert_eq!(
+            output.topics[0]
+                .fields
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>(),
+            ["index", "v", "x"]
+        );
+        let field = &output.topics[0].fields[1];
+        assert_eq!(field.values.data_type(), &DataType::Int64);
+        assert_eq!(output.warnings.len(), 2);
+        assert!(output.warnings.iter().all(|w| w.contains("t.v")));
+    }
+
+    #[test]
+    fn preserves_unicode_trailing_spaces_and_nan_in_ordinary_fields() {
+        let output =
+            parse("[('航法.index',[0,1],''),('航法.温度  ',[float('nan'),2.0],'説明')]").unwrap();
+        assert_eq!(output.topics[0].name, "航法");
+        // No unit bracket, so the trailing spaces are preserved verbatim.
+        assert_eq!(output.topics[0].fields[1].name, "温度  ");
+        assert_eq!(output.topics[0].fields[1].unit, None);
+        assert!(
+            output.topics[0].fields[1]
+                .values
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .value(0)
+                .is_nan()
+        );
+    }
+
+    #[test]
+    fn accounts_arrow_logical_buffer_bytes_deterministically() {
+        let output = parse("[('t.index',[0.,1.,2.],''),('t.flag',[True,False,True],''),('t.v',__import__('numpy').array([1,2,3],dtype='int16'),'')]").unwrap();
+        // timestamp i64 (24) + index f64 (24) + packed bool (1) + int16 (6).
+        assert_eq!(output.arrow_bytes, 55);
+    }
+
+    #[test]
+    fn rejects_empty_results_and_invalid_entries() {
+        assert!(error("[]").contains("at least one field"));
+        assert!(error("[('t.index',[0])]").contains("entry 0"));
+        assert!(error("[123]").contains("entry 0"));
+        assert!(error("[(1,[0],'')]").contains("entry 0 field name"));
+        // A non-string tooltip is accepted now that tooltips are ignored.
+        assert!(parse("[('t.index',[0],1)]").is_ok());
+        assert!(error("[('',[0],'')]").contains("non-empty"));
+    }
+
+    #[test]
+    fn rejects_names_without_nonempty_topic_and_field() {
+        assert!(error("[('index',[0],'')]").contains("index"));
+        assert!(error("[('.index',[0],'')]").contains(".index"));
+        assert!(error("[('t.',[0],'')]").contains("t."));
+    }
+
+    #[test]
+    fn rejects_missing_clock_and_unequal_lengths_with_field_names() {
+        assert!(
+            error("[('t.v',[1],'')]").contains("t") && error("[('t.v',[1],'')]").contains("clock")
+        );
+        let message = error("[('t.index',[0,1],''),('t.v',[1],'')]");
+        assert!(message.contains("t.v") && message.contains('1') && message.contains('2'));
+    }
+
+    #[test]
+    fn rejects_unsupported_dtypes_and_arrays_above_two_dimensions() {
+        for (source, field) in [
+            ("[('t.index',[0],''),('t.s',['x'],'')]", "t.s"),
+            ("[('t.index',[0],''),('t.c',[1+2j],'')]", "t.c"),
+            (
+                "[('t.index',[0],''),('t.o',__import__('numpy').array([object()],dtype=object),'')]",
+                "t.o",
+            ),
+            (
+                "[('t.index',[0],''),('t.v',__import__('numpy').array([[[1]]]),'')]",
+                "t.v",
+            ),
+        ] {
+            assert!(error(source).contains(field));
+        }
+    }
+
+    #[test]
+    fn rejects_masked_arrays_before_exposing_hidden_payloads() {
+        let ordinary = error(
+            "[('t.index',[0,1],''),('t.v',__import__('numpy').ma.array([1.,float('nan')],mask=[False,True]),'')]",
+        );
+        assert!(ordinary.contains("t.v") && ordinary.contains("MaskedArray"));
+
+        let clock = error(
+            "[('t.index',__import__('numpy').ma.array([0.,float('nan')],mask=[False,True]),''),('t.v',[1,2],'')]",
+        );
+        assert!(clock.contains("t.index") && clock.contains("MaskedArray"));
+    }
+
+    #[test]
+    fn rejects_boolean_nonfinite_overflow_and_decreasing_clocks() {
+        assert!(error("[('t.index',[False,True],''),('t.v',[1,2],'')]").contains("t.index"));
+        let preferred_rtc =
+            error("[('t.index',[0,1],''),('t.rtc',[False,True],''),('t.v',[1,2],'')]");
+        assert!(preferred_rtc.contains("t.rtc") && preferred_rtc.contains("Boolean"));
+        for value in ["float('nan')", "float('inf')", "-float('inf')"] {
+            let source = format!("[('t.index',[0,{value}],''),('t.v',[1,2],'')]");
+            let message = error(&source);
+            assert!(message.contains("t.index") && message.contains("finite"));
+        }
+        let overflow = error("[('t.index',[1e30],'')]");
+        assert!(overflow.contains("t.index") && overflow.contains("range"));
+        let decreasing = error("[('t.index',[2.,1.],'')]");
+        assert!(decreasing.contains("t.index") && decreasing.contains("non-decreasing"));
+    }
+
+    #[test]
+    fn strips_unit_into_metadata_and_keeps_numeric_index_brackets() {
+        let output = parse(
+            "[('t.index',[0,1],''),('t.z [m]',[1.,2.],''),('t.v [m/s]',[3.,4.],''),('t.d[0]',[5.,6.],'')]",
+        )
+        .unwrap();
+        let by: HashMap<&str, Option<&str>> = output.topics[0]
+            .fields
+            .iter()
+            .map(|f| (f.name.as_str(), f.unit.as_deref()))
+            .collect();
+        assert_eq!(by["z"], Some("m"));
+        assert_eq!(by["v"], Some("m/s"));
+        // A purely numeric bracket is an array index, not a unit: name kept verbatim.
+        assert_eq!(by["d[0]"], None);
+        assert!(!by.contains_key("d"));
+    }
+
+    #[test]
+    fn keeps_original_names_when_unit_stripping_would_collide() {
+        let output =
+            parse("[('t.index',[0,1],''),('t.a [rad/s]',[1.,2.],''),('t.a [deg/s]',[3.,4.],'')]")
+                .unwrap();
+        let names: Vec<&str> = output.topics[0]
+            .fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        assert!(names.contains(&"a [rad/s]"));
+        assert!(names.contains(&"a [deg/s]"));
+        // The colliding fields keep their disambiguating names but still carry units.
+        for field in &output.topics[0].fields {
+            if field.name.starts_with("a ") {
+                assert!(field.unit.is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn splits_two_dimensional_fields_into_indexed_lanes() {
+        let output = parse(
+            "[('t.index',[0,1],''),('t.m',__import__('numpy').array([[1,2],[3,4]],dtype='int16'),'')]",
+        )
+        .unwrap();
+        let fields = &output.topics[0].fields;
+        let lane = |name: &str| -> Vec<i16> {
+            fields
+                .iter()
+                .find(|f| f.name == name)
+                .unwrap()
+                .values
+                .as_any()
+                .downcast_ref::<Int16Array>()
+                .unwrap()
+                .values()
+                .to_vec()
+        };
+        // The last axis is the sample axis, so the first axis becomes lanes [0], [1].
+        assert_eq!(lane("m[0]"), [1, 2]);
+        assert_eq!(lane("m[1]"), [3, 4]);
+    }
+}

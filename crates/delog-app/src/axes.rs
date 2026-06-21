@@ -1,8 +1,7 @@
-//! Plot axes: 1-2-5 tick chooser, labels and grid, painted by egui (PLAN.md
-//! §9.6, §10, PLT-07).
+//! Plot axes: 1-2-5 tick chooser, labels and grid, painted by egui.
 //!
-//! Axes/ticks/labels are CPU-painted by egui above/below the GPU trace callback
-//! (§9.6). The tick chooser is pure and unit-tested; the draw routine maps data
+//! Axes/ticks/labels are CPU-painted by egui above/below the GPU trace callback.
+//! The tick chooser is pure and unit-tested; the draw routine maps data
 //! to the same `plot_rect` the GPU viewport uses, so labels line up with the
 //! rendered lines.
 

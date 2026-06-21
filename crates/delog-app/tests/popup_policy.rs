@@ -3,6 +3,7 @@ const POPUP_SOURCES: &[&str] = &[
     include_str!("../src/browser.rs"),
     include_str!("../src/generate_markers.rs"),
     include_str!("../src/live.rs"),
+    include_str!("../src/parsers.rs"),
     include_str!("../src/scripts.rs"),
     include_str!("../src/settings.rs"),
     include_str!("../src/vehicle_dialog.rs"),
@@ -14,6 +15,16 @@ fn occurrence_count(needle: &str) -> usize {
         .iter()
         .map(|source| source.matches(needle).count())
         .sum()
+}
+
+#[test]
+fn tools_menu_exposes_custom_parser_actions() {
+    let app = include_str!("../src/app.rs");
+
+    assert!(app.contains("ui.menu_button(\"Parsers\""));
+    assert!(app.contains("Add new parser..."));
+    assert!(app.contains("crate::icons::pencil()"));
+    assert!(app.contains(".on_hover_text(\"Edit\")"));
 }
 
 #[test]

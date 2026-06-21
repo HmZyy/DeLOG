@@ -1,7 +1,7 @@
-//! Shared MAVLink layer (PLAN.md §6.4/§7.2/§7.3, PAR-16).
+//! Shared MAVLink layer.
 //!
-//! One code path for the `.tlog` parser (PAR-11) and the live link readers
-//! (LIV-02/05): a push-based v1/v2 frame decoder with honest counters (CRC
+//! One code path for the `.tlog` parser and the live link readers:
+//! a push-based v1/v2 frame decoder with honest counters (CRC
 //! failures, sequence gaps, resync bytes) plus a flat serde-based field
 //! extractor that turns a decoded `MavMessage` into `(field, Scalar)` pairs
 //! without going through a self-describing format.
@@ -21,7 +21,7 @@ const V2_SIGNATURE: usize = 13;
 const V2_IFLAG_SIGNED: u8 = 0x01;
 const CRC_LEN: usize = 2;
 
-/// Honest per-link counters (§7.2).
+/// Honest per-link counters.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FrameCounters {
     /// Frames that passed CRC (decoded or unknown-type).
@@ -49,7 +49,7 @@ pub struct DecodedFrame {
     /// upstream).
     pub message: Option<MavMessage>,
     /// Exact frame bytes after CRC validation. Live recording tees these into
-    /// the `.tlog` envelope so record/replay stays bit-faithful (§7.5).
+    /// the `.tlog` envelope so record/replay stays bit-faithful.
     pub raw: Vec<u8>,
 }
 
@@ -141,7 +141,7 @@ impl FrameDecoder {
 /// Total frame length implied by the header at `bytes[0]`, or `None` when the
 /// first byte is not a frame magic or not enough bytes have arrived to know the
 /// length yet. Shared by [`FrameDecoder`] (which positions on a magic byte) and
-/// the `.tlog` parser's explicit µs-envelope framing (PAR-11): one length
+/// the `.tlog` parser's explicit µs-envelope framing: one length
 /// computation, no duplicate header math.
 pub fn frame_len(bytes: &[u8]) -> Option<usize> {
     match *bytes.first()? {
@@ -212,10 +212,10 @@ pub fn decode_frame(frame: &[u8]) -> Option<DecodedFrame> {
 }
 
 // ---------------------------------------------------------------------------
-// Field extraction (§7.3): a flat serde Serializer over the dialect's derives.
+// Field extraction: a flat serde Serializer over the dialect's derives.
 // ---------------------------------------------------------------------------
 
-/// One extracted value, dtype-faithful (§6.2 raw-value policy). `Str` carries
+/// One extracted value, dtype-faithful (raw-value policy). `Str` carries
 /// enum variant names (the dialect serializes its C-like enums internally
 /// tagged, so the name is what the wire representation exposes).
 #[derive(Debug, Clone, PartialEq)]

@@ -1,5 +1,4 @@
-//! The `LogParser` trait, format sniffing, and the detection registry
-//! (PLAN.md §6.1, PAR-01).
+//! The `LogParser` trait, format sniffing, and the detection registry.
 
 use std::error::Error;
 use std::fmt;
@@ -9,11 +8,11 @@ use std::sync::Arc;
 use delog_core::ingest::{IngestSink, ParseSummary};
 use delog_core::parse_ctl::ParseCtl;
 
-/// Bytes of file head handed to [`LogParser::sniff`] (§6.1).
+/// Bytes of file head handed to [`LogParser::sniff`].
 pub const SNIFF_HEAD_LEN: usize = 4096;
 
 /// Minimum top score for confident auto-detection; below this the UI raises the
-/// manual-override picker (§6.1, UIX-10).
+/// manual-override picker.
 pub const SNIFF_CONFIDENCE: u8 = 60;
 
 /// A parser's confidence that it can read a given file head.
@@ -43,7 +42,7 @@ impl Sniff {
 pub trait ReadSeek: Read + Seek + Send {}
 impl<T: Read + Seek + Send> ReadSeek for T {}
 
-/// A log-format parser (§6.1). Implementors are stateless and shared behind an
+/// A log-format parser. Implementors are stateless and shared behind an
 /// `Arc` in the [`ParserRegistry`].
 pub trait LogParser: Send + Sync {
     /// Stable, machine-usable name (also the manual-override key).
@@ -53,8 +52,8 @@ pub trait LogParser: Send + Sync {
     fn sniff(&self, head: &[u8]) -> Sniff;
 
     /// Parse `src` into `sink`, honouring `ctl` for progress and cancellation.
-    /// Malformed *records* are skipped with a diagnostic (PAR-02); only
-    /// unrecoverable framing corruption returns `Err` (§6.1).
+    /// Malformed *records* are skipped with a diagnostic; only
+    /// unrecoverable framing corruption returns `Err`.
     fn parse(
         &self,
         src: Box<dyn ReadSeek>,
@@ -63,7 +62,7 @@ pub trait LogParser: Send + Sync {
     ) -> Result<ParseSummary, ParseError>;
 }
 
-/// Failure modes of a parse. Per §6.1, only framing/IO failures abort; record
+/// Failure modes of a parse. Only framing/IO failures abort; record
 /// corruption is a diagnostic, not an error.
 #[derive(Debug)]
 pub enum ParseError {
@@ -169,7 +168,7 @@ impl ParserRegistry {
         &self.parsers
     }
 
-    /// Resolve a manual-override choice by parser name (UIX-10 plumbing).
+    /// Resolve a manual-override choice by parser name.
     pub fn by_name(&self, name: &str) -> Option<Arc<dyn LogParser>> {
         self.parsers
             .iter()
@@ -177,7 +176,7 @@ impl ParserRegistry {
             .map(Arc::clone)
     }
 
-    /// Run every parser's `sniff` over `head` and decide (§6.1):
+    /// Run every parser's `sniff` over `head` and decide:
     /// the unique top scorer ≥ [`SNIFF_CONFIDENCE`] auto-opens; a tie at the top
     /// or a low top score is [`Detection::Ambiguous`]; nothing scoring is
     /// [`Detection::Unknown`].

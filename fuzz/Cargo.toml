@@ -1,4 +1,4 @@
-# cargo-fuzz crate (PAR-13). Detached from the root workspace via the empty
+# cargo-fuzz crate. Detached from the root workspace via the empty
 # `[workspace]` table below so the pinned-stable `cargo build --workspace`
 # never tries to compile `libfuzzer-sys` (which needs nightly). Run with
 # `cargo +nightly fuzz run <target>`.
