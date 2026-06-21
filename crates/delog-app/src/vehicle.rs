@@ -1,11 +1,11 @@
-//! Vehicle configuration + pose/trajectory resolution for the 3D view
-//! (PLAN.md §12.1-§12.2, TDV-03/04/06). A [`VehicleConfig`] maps a source's
+//! Vehicle configuration + pose/trajectory resolution for the 3D view.
+//! A [`VehicleConfig`] maps a source's
 //! fields to position and orientation; [`pose_at_with_ref`] reads the pose at a
 //! playback time and [`build_trajectory`] builds the whole path — both into render
-//! space (§12.2) via [`crate::geo`].
+//! space via [`crate::geo`].
 //!
 //! Field samples are read through `delog-core`'s [`FieldView`] (the app never
-//! touches Arrow directly, §3.2); `sample_at` returns the raw stored value, so
+//! touches Arrow directly); `sample_at` returns the raw stored value, so
 //! the schema multiplier is applied here to get engineering units.
 
 use std::path::PathBuf;
@@ -19,7 +19,7 @@ use glam::{Mat3, Mat4, Quat, Vec3};
 
 use crate::geo;
 
-/// Which mesh represents a vehicle (§12.1). `Cone` is the basic procedural
+/// Which mesh represents a vehicle. `Cone` is the basic procedural
 /// cone — the same shape used as the unconditional fallback.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ModelKind {
@@ -86,7 +86,7 @@ pub enum NedReference {
     },
 }
 
-/// How a vehicle's position is read (§12.1).
+/// How a vehicle's position is read.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PosMapping {
     /// Already-local NED metres, optionally annotated with the geodetic origin
@@ -126,7 +126,7 @@ impl PosMapping {
     }
 }
 
-/// How a vehicle's orientation is read (§12.1).
+/// How a vehicle's orientation is read.
 #[derive(Clone, Debug, PartialEq)]
 pub enum OriMapping {
     /// Level attitude (identity body→NED rotation).
@@ -147,7 +147,7 @@ pub enum OriMapping {
     },
 }
 
-/// A configured vehicle (§12.1).
+/// A configured vehicle.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VehicleConfig {
     pub source: SourceId,
@@ -538,7 +538,7 @@ fn build_trajectory_by_time(snapshot: &StoreSnapshot, config: &VehicleConfig) ->
 }
 
 /// Decimate a vehicle's full path into render-space points (with NaN points
-/// marking gaps, so the line shader breaks there). Off-thread work (§19.6):
+/// marking gaps, so the line shader breaks there). Off-thread work:
 /// the caller runs this on a worker and feeds the result to the renderer.
 pub fn build_trajectory(snapshot: &StoreSnapshot, config: &VehicleConfig) -> Vec<[f32; 3]> {
     build_trajectory_from_rows(snapshot, config)

@@ -1,11 +1,11 @@
-//! The single ingest thread: the only writer of the store (PLAN.md §5, ING-02).
+//! The single ingest thread: the only writer of the store.
 //!
 //! [`Ingestor`] drains [`IngestMsg`]s, registers sources/topics/fields, seals
 //! accumulated rows into immutable [`Chunk`]s, and publishes a fresh
 //! [`StoreSnapshot`] on every seal. Being the sole writer is what makes the
-//! epoch-snapshot model (§4.4) correct with no locks.
+//! epoch-snapshot model correct with no locks.
 //!
-//! Sealing policy (§4.3): a file source seals at 64Ki rows; a live source seals
+//! Sealing policy: a file source seals at 64Ki rows; a live source seals
 //! when its pending rows reach [`LIVE_CHUNK_ROWS`] or its per-topic pending age
 //! reaches [`LIVE_MAX_AGE`]. Per-chunk [`ColStats`](crate::chunk::ColStats) are
 //! computed once, at seal, inside [`Chunk::try_new`].
@@ -28,18 +28,18 @@ use crate::schema::TopicSchema;
 use crate::snapshot::{DataStore, StoreSnapshot};
 use crate::store::TopicStore;
 
-/// File source chunk target: 64Ki rows (§4.3).
+/// File source chunk target: 64Ki rows.
 pub const FILE_CHUNK_ROWS: usize = 64 * 1024;
-/// Live source chunk target (§4.3).
+/// Live source chunk target.
 pub const LIVE_CHUNK_ROWS: usize = 512;
-/// Live source max chunk age before a partial seal (§4.3).
+/// Live source max chunk age before a partial seal.
 pub const LIVE_MAX_AGE: Duration = Duration::from_millis(100);
 
 /// Callbacks for the side-channels the ingest loop fans out (diagnostics,
 /// progress, close summaries). All default to no-ops so tests and headless
 /// callers can ignore them; the app wires them to the diagnostics hub and
 /// progress UI. Epoch/repaint notification rides the store's own subscriber
-/// channel (CORE-06), so it is not duplicated here.
+/// channel, so it is not duplicated here.
 pub trait IngestObserver: Send {
     fn on_diagnostic(&mut self, _diag: Diag) {}
     fn on_progress(&mut self, _source: SourceId, _frac: f32) {}
@@ -84,7 +84,7 @@ pub struct Ingestor<O: IngestObserver> {
     observer: O,
     chunks_sealed: u64,
     rows_ingested: u64,
-    /// Shared metrics registry (§16). Defaults to a private registry; the app
+    /// Shared metrics registry. Defaults to a private registry; the app
     /// swaps in the shared one via [`Ingestor::with_metrics`] so the perf dock
     /// sees `ingest_batch`/`snapshot_swap`.
     metrics: Arc<MetricsRegistry>,
@@ -105,8 +105,7 @@ impl<O: IngestObserver> Ingestor<O> {
         }
     }
 
-    /// Record `ingest_batch`/`snapshot_swap` timings into the shared registry
-    /// (§16, PRF-01).
+    /// Record `ingest_batch`/`snapshot_swap` timings into the shared registry.
     pub fn with_metrics(mut self, metrics: Arc<MetricsRegistry>) -> Self {
         self.metrics = metrics;
         self
@@ -216,7 +215,7 @@ impl<O: IngestObserver> Ingestor<O> {
 
         let schema = batch.schema;
 
-        // Defensive within-batch sort (ING-05): parsers should hand us sorted
+        // Defensive within-batch sort: parsers should hand us sorted
         // timestamps, but a malformed log may not. Sorting is the one corrective
         // copy we accept on this path; sorted batches pass through untouched.
         let (timestamps, columns) = if is_sorted(&batch.timestamps) {
@@ -246,9 +245,9 @@ impl<O: IngestObserver> Ingestor<O> {
         let batch_first = timestamps.value(0);
         let batch_last = timestamps.value(timestamps.len() - 1);
 
-        // Cross-chunk regression (ING-05): a batch starting before the highest
+        // Cross-chunk regression: a batch starting before the highest
         // timestamp seen for this topic means the source emitted out of order.
-        // We tolerate it (chunks may overlap, §4.3) but report it.
+        // We tolerate it (chunks may overlap) but report it.
         if let Some(&prev_max) = self.topic_max_ts.get(&topic_id)
             && batch_first < prev_max
         {
@@ -267,7 +266,7 @@ impl<O: IngestObserver> Ingestor<O> {
         *max_ts = (*max_ts).max(batch_last);
 
         // Seal the current accumulator first if this batch would start before it
-        // ends — keeps every sealed chunk internally sorted (§4.3).
+        // ends — keeps every sealed chunk internally sorted.
         if let Some(pending) = self.pending_mut(source_id, topic_id)
             && pending.last_ts.is_some_and(|last| batch_first < last)
         {
@@ -861,7 +860,7 @@ mod tests {
         let after = store.load();
         assert!(after.epoch > before.epoch, "offset change publishes");
         assert_eq!(after.source(source).unwrap().entry.offset_us, 1_000);
-        // Effective times shift with the offset (§4.2).
+        // Effective times shift with the offset.
         assert_eq!(after.global_time_range(), TimeRange::new(1_100, 1_200));
     }
 

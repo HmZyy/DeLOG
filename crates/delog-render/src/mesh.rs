@@ -1,13 +1,13 @@
-//! Vehicle mesh pipeline + GLB upload path (PLAN.md §9.2 `mesh`, §12.4, GPU-22).
+//! Vehicle mesh pipeline + GLB upload path.
 //!
 //! A small Lambert-plus-ambient pipeline draws vehicle models against the 3D
 //! scene. Meshes are static geometry, so this uses a real vertex+index buffer
-//! (the §9.4 no-vertex-buffer rule is about sample data that scales, not models).
+//! (the no-vertex-buffer rule is about sample data that scales, not models).
 //!
 //! [`MeshCpu`] is decoded from a GLB ([`load_glb`]) or generated procedurally
 //! ([`MeshCpu::cone`] — the unconditional fallback so a missing/!broken asset
 //! never blanks the scene), then uploaded to a [`MeshGpu`]. Matrices arrive as
-//! raw `[[f32; 4]; 4]`, keeping the crate math-library-free (§3.2).
+//! raw `[[f32; 4]; 4]`, keeping the crate math-library-free.
 
 use crate::context::RenderContext;
 use wgpu::util::DeviceExt;
@@ -55,7 +55,7 @@ impl MeshCpu {
         Self { vertices, indices }
     }
 
-    /// A procedural half-cone — the unconditional model fallback (§12.4).
+    /// A procedural half-cone — the unconditional model fallback.
     ///
     /// The nose is on +X and the axis runs along the x-axis; the cone is sliced
     /// through its axis by the `y = 0` plane, keeping the upper half. After the
@@ -167,7 +167,7 @@ fn smooth_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
     acc
 }
 
-/// Decode a GLB into a single [`MeshCpu`] (GPU-22): every triangle primitive in
+/// Decode a GLB into a single [`MeshCpu`]: every triangle primitive in
 /// the default scene is baked into one mesh by its node's world transform, so
 /// multi-part models (e.g. a quad's arms) land in the right place. Missing
 /// normals are computed smooth; missing indices become a flat `0..n` list.
@@ -577,7 +577,7 @@ mod tests {
     #[test]
     fn cone_nose_points_along_plus_x() {
         // The fallback model's nose sits on +X so the mesh→body correction
-        // (rot_x −90°, §12.4) leaves it pointing body-forward, like the
+        // (rot_x −90°) leaves it pointing body-forward, like the
         // fixed-wing model — not straight up (+Y).
         let (h, r) = (2.0_f32, 1.0_f32);
         let cone = MeshCpu::cone(16, r, h);
@@ -704,7 +704,7 @@ mod tests {
         );
     }
 
-    /// GPU-22: meshes render double-sided, so a back face whose authored normal
+    /// Meshes render double-sided, so a back face whose authored normal
     /// points away from the light must still be lit (two-sided shading flips the
     /// normal toward the viewer) — otherwise it collapses to the dark ambient
     /// term and shows up as black blotches where interpenetrating sub-meshes

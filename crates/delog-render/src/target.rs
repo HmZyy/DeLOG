@@ -1,5 +1,4 @@
-//! Offscreen render target + readback — the headless golden-image rig
-//! (PLAN.md §20.3, GPU-13).
+//! Offscreen render target + readback — the headless golden-image rig.
 //!
 //! Lets tests, benches and (later) image export drive the renderer with no
 //! window: render into an RGBA texture, then read the pixels back to CPU. Row
@@ -18,7 +17,7 @@ fn align_up(value: u32, alignment: u32) -> u32 {
 /// Copy a single-sample RGBA8 texture to CPU and return tight RGBA bytes
 /// (blocking). Honours wgpu's 256-byte `bytes_per_row` alignment and unpads to
 /// a tight buffer. Shared by [`OffscreenTarget`] and the scene target's
-/// resolve texture (GPU-20).
+/// resolve texture.
 pub(crate) fn read_texture_rgba(
     ctx: &RenderContext,
     texture: &wgpu::Texture,
@@ -187,7 +186,7 @@ mod tests {
     use crate::uniforms::{PlotUniform, UniformRing};
     use delog_core::identity::FieldId;
 
-    /// GPU-13: render a known horizontal trace and verify the rendered pixels.
+    /// Render a known horizontal trace and verify the rendered pixels.
     /// Tolerance/property based rather than byte-exact so it is portable across
     /// drivers (rasterisation differs subtly between GPUs).
     #[test]

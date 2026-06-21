@@ -1,4 +1,4 @@
-//! Custom Python parser stage benchmarks (SCR-11).
+//! Custom Python parser stage benchmarks.
 
 use std::fs;
 use std::hint::black_box;

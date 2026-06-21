@@ -1,4 +1,4 @@
-//! Custom Python parser editor and parser-run lifecycle state (SCR-11).
+//! Custom Python parser editor and parser-run lifecycle state.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -439,9 +439,7 @@ impl ParsersPanel {
                     // A fixed width keeps the field from demanding infinite width,
                     // which would force the window to its maximum size and block
                     // shrinking on resize (matches the Scripts editor).
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.filename).desired_width(160.0),
-                    );
+                    ui.add(egui::TextEdit::singleline(&mut self.filename).desired_width(160.0));
                     if image_text_button(
                         ui,
                         crate::icons::save(),

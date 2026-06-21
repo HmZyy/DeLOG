@@ -1,7 +1,7 @@
 //! DeLOG core: IDs & keys, time model, columnar store, snapshots, chunk
 //! stats, diagnostics types and the metrics registry.
 //!
-//! Dependency rule (PLAN.md §3.2): nothing here may know about parsers, GPU,
+//! Dependency rule: nothing here may know about parsers, GPU,
 //! or UI.
 
 pub mod analysis;

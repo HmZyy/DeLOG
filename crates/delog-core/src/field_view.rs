@@ -1,4 +1,4 @@
-//! Zero-copy field accessors over immutable snapshots (PLAN.md §4.5, CORE-07).
+//! Zero-copy field accessors over immutable snapshots.
 
 use std::error::Error;
 use std::fmt;
@@ -132,7 +132,7 @@ impl<'a> FieldView<'a> {
     }
 
     /// Owned `(effective_time, string)` for every Utf8 sample whose effective
-    /// time falls within `range`, up to `max` entries (PLT-15 text annotations).
+    /// time falls within `range`, up to `max` entries (text annotations).
     /// Non-string samples are skipped. When `filter` is set, only samples whose
     /// text contains it (case-insensitive) are kept — the `max` cap counts
     /// matches, so filtering reaches matches deep in a large field. Returns owned
@@ -198,7 +198,7 @@ impl<'a> FieldView<'a> {
     fn prev_sample(&'a self, raw_time: TimestampUs) -> Option<Sample<'a>> {
         // Fast path: a sorted, non-overlapping spine lets us binary-search to
         // the one chunk that can hold the predecessor — O(log chunks) instead
-        // of scanning every chunk (which dominated the 3D pose reads, PRF-11).
+        // of scanning every chunk (which dominated the 3D pose reads).
         if self.store.is_monotonic() {
             let chunks = &self.store.chunks;
             // Rightmost chunk whose t_min <= raw_time; later chunks start after
@@ -368,7 +368,7 @@ fn upper_bound(t: &Int64Array, query: TimestampUs) -> usize {
 }
 
 /// Read row `row` of `array` as `f64` (NaN for nulls/non-numeric), for script
-/// materialization (SCR-03). NaN gap markers in float columns are preserved.
+/// materialization. NaN gap markers in float columns are preserved.
 pub fn array_row_as_f64(array: &dyn Array, row: usize) -> f64 {
     match value_at(array, row) {
         SampleValue::Int(v) => v as f64,
@@ -608,7 +608,7 @@ mod tests {
 
     #[test]
     fn sample_at_falls_back_to_linear_scan_for_overlapping_chunks() {
-        // Out-of-order source (§4.3): chunk A spans [0, 200], chunk B spans
+        // Out-of-order source: chunk A spans [0, 200], chunk B spans
         // [100, 300] — the spine overlaps, so it is not monotonic and the
         // binary-search fast path must not engage. The predecessor of 150 lives
         // in the *later* chunk B (t=100) and the successor in the *earlier*

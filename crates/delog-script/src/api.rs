@@ -1,4 +1,4 @@
-//! The `delog` Python API object and the Arrow→numpy read path (SCR-03).
+//! The `delog` Python API object and the Arrow→numpy read path.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -43,8 +43,8 @@ pub fn resample_prev(src_t: &[i64], src_v: &[f64], base: &[i64]) -> Vec<f64> {
 /// Materialize a field as `(times_us: Vec<i64>, values: Vec<f64>)` by walking
 /// its chunks in time order. This concatenates chunk buffers — the One Copy for
 /// script consumption, off the render hot path.
-// ZC-EXCEPTION: script materialization (PLAN.md §4.5) — a deliberate copy of the
-// canonical field into a contiguous host buffer for numpy; counted, off-path.
+// Script materialization — a deliberate copy of the canonical field into a
+// contiguous host buffer for numpy; counted, off-path.
 pub fn materialize_field(
     snapshot: &StoreSnapshot,
     field: FieldId,

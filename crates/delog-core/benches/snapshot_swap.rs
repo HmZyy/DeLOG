@@ -1,9 +1,9 @@
-//! Snapshot swap under append load (CORE-12).
+//! Snapshot swap under append load.
 //!
 //! Measures the writer's per-flush cost: rebuild a topic spine by structurally
 //! sharing its existing chunks, build the next [`StoreSnapshot`], and publish it
-//! through the `ArcSwap` (§4.4). Budget: < 10 µs per swap (PLAN.md §20.4),
-//! soft-asserted by TST-05; this bench is the measurement it reads.
+//! through the `ArcSwap`. Budget: < 10 µs per swap, soft-asserted in CI;
+//! this bench is the measurement it reads.
 
 use std::sync::Arc;
 use std::time::Instant;

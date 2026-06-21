@@ -1,4 +1,4 @@
-//! ULog parser hot-path bench (PAR-07): header/format/subscription decode plus
+//! ULog parser hot-path bench: header/format/subscription decode plus
 //! repeated `D` records into Arrow batches.
 
 use std::io::Cursor;

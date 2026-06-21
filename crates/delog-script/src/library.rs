@@ -1,4 +1,4 @@
-//! Persistent global script library: `.py` files in a directory (SCR-06).
+//! Persistent global script library: `.py` files in a directory.
 
 use std::fs;
 use std::io;

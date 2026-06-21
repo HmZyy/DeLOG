@@ -1,4 +1,4 @@
-//! PX4 ULog `.ulg` parser (PLAN.md §6.3, PAR-07).
+//! PX4 ULog `.ulg` parser.
 //!
 //! This implements the structural parser: the 16-byte header, length-prefixed
 //! messages, `F/I/P` definitions, subscriptions (`A`), data (`D`) and sync (`S`)
@@ -1137,7 +1137,7 @@ mod tests {
     }
 
     /// A self-describing log with an array-flattened topic, a two-instance
-    /// topic, padding to skip and several rows per topic (PAR-10).
+    /// topic, padding to skip and several rows per topic.
     fn golden_ulog() -> Vec<u8> {
         let mut buf = Vec::new();
         buf.extend(MAGIC);
@@ -1195,7 +1195,7 @@ mod tests {
         buf
     }
 
-    /// PAR-10 golden table: topics, rows and raw values for the fixture log.
+    /// Golden table: topics, rows and raw values for the fixture log.
     #[test]
     fn golden_topics_rows_and_values() {
         let (summary, sink) = parse(golden_ulog());

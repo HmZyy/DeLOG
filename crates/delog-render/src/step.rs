@@ -1,4 +1,4 @@
-//! Vertex-pulled stepped trace pipeline (PLAN.md GPU-08).
+//! Vertex-pulled stepped trace pipeline.
 //!
 //! This is the previous-sample/hold variant of `line_pull`: every adjacent
 //! sample pair emits two thick screen-space segments, first horizontal at the
@@ -119,13 +119,13 @@ impl StepPipeline {
         })
     }
 
-    /// Bind this pipeline once for a run of traces (GPU-11).
+    /// Bind this pipeline once for a run of traces.
     pub fn bind(&self, pass: &mut wgpu::RenderPass<'_>) {
         pass.set_pipeline(&self.pipeline);
     }
 
     /// Draw one stepped trace with its dynamic uniform offset; the pipeline
-    /// must already be bound via [`Self::bind`] (GPU-11). `sample_count` is
+    /// must already be bound via [`Self::bind`]. `sample_count` is
     /// the number of `[x,y]` pairs; each adjacent pair emits two six-vertex
     /// quads.
     pub fn draw_trace(

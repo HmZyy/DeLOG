@@ -1,4 +1,4 @@
-//! Immutable Arrow chunk storage (PLAN.md §4.3).
+//! Immutable Arrow chunk storage.
 
 use std::error::Error;
 use std::fmt;

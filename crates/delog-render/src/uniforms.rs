@@ -1,8 +1,8 @@
-//! Per-plot transform/style uniforms (PLAN.md §9.3, Appendix B, GPU-04).
+//! Per-plot transform/style uniforms.
 //!
 //! One uniform buffer holds every plot's [`PlotUniform`] at a 256-aligned
 //! stride; a draw selects its plot with a **dynamic offset** rather than push
-//! constants (which aren't universally supported, §9.3). The shader reads three
+//! constants (which aren't universally supported). The shader reads three
 //! `vec4`s: the data→clip transform, the viewport + line width, and the colour.
 
 use crate::context::RenderContext;

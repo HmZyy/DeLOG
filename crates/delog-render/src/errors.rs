@@ -1,10 +1,10 @@
-//! wgpu error scopes → diagnostics (PLAN.md §15, GPU-12).
+//! wgpu error scopes → diagnostics.
 //!
 //! wgpu reports validation/out-of-memory failures through error scopes; an
 //! uncaptured error aborts the process by default. [`GpuErrorHub`] brackets
 //! the renderer's GPU work in scopes and resolves the (async) scope results
 //! into plain messages the app can forward to the diagnostics hub — pure wgpu,
-//! no egui types (§3.2), so it is testable headless.
+//! no egui types, so it is testable headless.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -102,7 +102,7 @@ mod tests {
         messages
     }
 
-    /// GPU-12: a validation error raised inside the scopes surfaces as a
+    /// A validation error raised inside the scopes surfaces as a
     /// drained message instead of an uncaptured-error abort.
     #[test]
     fn validation_error_inside_scopes_drains_as_a_message() {

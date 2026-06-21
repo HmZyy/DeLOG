@@ -1,6 +1,6 @@
-//! Property and concurrency tests for the core data model (CORE-11).
+//! Property and concurrency tests for the core data model.
 //!
-//! Three families, matching the checklist item:
+//! Three families:
 //! * accessor properties — [`FieldView::sample_at`] is pinned to a naive scan;
 //! * time math — effective/raw round-trips and range algebra;
 //! * snapshot interleavings — concurrent publish/load never tears a read.
