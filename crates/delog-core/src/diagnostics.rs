@@ -1,4 +1,4 @@
-//! Diagnostic records and hub emitted across the pipeline (PLAN.md §15).
+//! Diagnostic records and hub emitted across the pipeline.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -16,7 +16,7 @@ pub enum Severity {
 }
 
 /// One diagnostic event. `code` is a stable machine-readable tag (e.g.
-/// `"timestamp-regression"`) used for burst dedup (§15); `message` is the
+/// `"timestamp-regression"`) used for burst dedup; `message` is the
 /// human-facing text. Time/byte-offset locate the event when known.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diag {
@@ -69,7 +69,7 @@ impl Diag {
 }
 
 /// A retained diagnostic row. Repeated burst-equivalent diagnostics collapse
-/// into one row by incrementing `count` (DIA-01).
+/// into one row by incrementing `count`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiagRecord {
     pub seq: u64,
@@ -78,7 +78,7 @@ pub struct DiagRecord {
 }
 
 /// Central diagnostics hub: mpsc ingress, fixed-size ring retention and
-/// last-row burst deduplication (PLAN.md §15, DIA-01).
+/// last-row burst deduplication.
 #[derive(Debug)]
 pub struct DiagnosticHub {
     tx: Sender<Diag>,

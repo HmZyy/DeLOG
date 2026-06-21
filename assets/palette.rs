@@ -1,4 +1,4 @@
-// DeLOG trace color palette (PLAN.md §11, checklist ARC-06).
+// DeLOG trace color palette.
 //
 // The single source of truth for trace colors across plots, legend dots and
 // 3D paths. This file is `include!`d (not `mod`-declared) so the same constants
@@ -78,13 +78,13 @@ fn srgb_to_linear(c: u8) -> f32 {
 }
 
 /// The 10-color trace palette, dark-theme-tuned (Tokyo-Night derived, leading
-/// with the `#7aa2f7` blue pinned by the layout schema in PLAN.md §12.3).
+/// with the `#7aa2f7` blue pinned by the layout schema).
 ///
 /// Ordered so the first traces a user drops are maximally separable, alternating
 /// cool / warm / light hues. The set leans on a blue↔orange↔yellow luminance
 /// axis for color-vision-deficiency robustness; ten is the practical ceiling for
 /// distinctness, so callers that exceed it repeat the cycle with dashed widths
-/// (PLAN.md §11) rather than inventing weaker colors.
+/// rather than inventing weaker colors.
 pub const TRACE_PALETTE: [Rgba8; 10] = [
     Rgba8::hex(0x7aa2f7), // blue
     Rgba8::hex(0xff9e64), // orange

@@ -1,4 +1,4 @@
-//! Immutable store snapshots and wait-free publication (PLAN.md §4.4).
+//! Immutable store snapshots and wait-free publication.
 
 use std::error::Error;
 use std::fmt;
@@ -48,9 +48,9 @@ pub type EpochListener = Arc<dyn Fn(u64) + Send + Sync>;
 /// and hold the returned `Arc<StoreSnapshot>` without blocking the writer.
 pub struct DataStore {
     current: ArcSwap<StoreSnapshot>,
-    /// Pull subscribers (poll a channel — CORE-06).
+    /// Pull subscribers (poll a channel).
     subscribers: Mutex<Vec<Sender<u64>>>,
-    /// Push listeners (epoch callbacks — ING-06): UI repaint, cache GC/append.
+    /// Push listeners (epoch callbacks): UI repaint, cache GC/append.
     listeners: Mutex<Vec<EpochListener>>,
 }
 
@@ -164,7 +164,7 @@ impl StoreSnapshot {
         self.topic(id)?.store.as_ref()
     }
 
-    /// Whether `id` names a source present and not tombstoned (§4.6). Readers
+    /// Whether `id` names a source present and not tombstoned. Readers
     /// (browser rows) and the cache GC use these to skip removed entities.
     pub fn is_source_live(&self, id: SourceId) -> bool {
         self.source(id).is_some_and(|s| !s.entry.removed)
@@ -242,8 +242,8 @@ impl DataStore {
         rx
     }
 
-    /// Register a push callback fired with the new epoch on every publish
-    /// (ING-06): the app registers `ctx.request_repaint`, the cache manager its
+    /// Register a push callback fired with the new epoch on every publish:
+    /// the app registers `ctx.request_repaint`, the cache manager its
     /// incremental-append/GC trigger. Callbacks run on the ingest thread and
     /// must be cheap and non-blocking — and must not re-enter the store.
     pub fn on_epoch(&self, listener: impl Fn(u64) + Send + Sync + 'static) {

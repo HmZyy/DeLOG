@@ -1,8 +1,8 @@
-//! Tracking orbit camera for the 3D scene (PLAN.md §12.3, TDV-01/02).
+//! Tracking orbit camera for the 3D scene.
 //!
 //! Pure math — no egui, no wgpu — so it unit-tests without a window. The scene
-//! works in render space (`X = East, Y = Up, Z = South`, right-handed, Y-up;
-//! PLAN.md §12.2). There is one camera: it always orbits a `target` point that
+//! works in render space (`X = East, Y = Up, Z = South`, right-handed, Y-up).
+//! There is one camera: it always orbits a `target` point that
 //! tracks the selected vehicle's pose (or the world origin when no vehicle is
 //! configured). `yaw` is the azimuth about the up axis, `pitch` the elevation
 //! above the horizon, `distance` the radius; setting a new `target` preserves
@@ -248,7 +248,7 @@ mod tests {
         glam::Vec2::new(cam_pos.x + rel.x, cam_pos.z + rel.z)
     }
 
-    /// Regression for 3D grid jitter (GPU-21): when the camera tracks a vehicle
+    /// Regression for 3D grid jitter: when the camera tracks a vehicle
     /// far from the render origin, the world-anchored grid must not crawl as the
     /// camera follows it. The shader anchors lines to the reconstructed
     /// `world.xz`, so the spurious frame-to-frame shift of that point (beyond the
@@ -319,7 +319,7 @@ mod tests {
     fn moving_the_target_preserves_the_orbit_offset() {
         // The tracking camera follows a vehicle by moving its target; the
         // yaw/pitch/distance offset must be preserved so the eye translates
-        // rigidly with the target (§12.3).
+        // rigidly with the target.
         let mut cam = OrbitCamera {
             target: Vec3::new(2.0, 0.0, -1.0),
             ..OrbitCamera::default()

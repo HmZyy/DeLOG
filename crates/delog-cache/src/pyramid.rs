@@ -1,17 +1,17 @@
-//! Branching-64 min/max pyramid (PLAN.md §8.4, CCH-05..07).
+//! Branching-64 min/max pyramid.
 //!
 //! `L0[i]` holds the (min, max) of the 64 samples `64i..64(i+1)`; each higher
 //! level reduces 64:1. It answers visible-window y-range queries in
 //! O(64 + log₆₄ n) — raw-scanning the unaligned edge samples and reading whole
 //! aligned nodes in the middle, mathematically identical to a full scan — and
-//! per-pixel-column extents for the decimated draw path (§9.5).
+//! per-pixel-column extents for the decimated draw path.
 //!
 //! The y values are read from a backing buffer at `data[stride·i + offset]`, so
 //! a [`TraceCache`](crate::trace::TraceCache) can index the y-channel of its
 //! interleaved `xy` buffer directly (stride 2, offset 1) with no second
-//! allocation, upholding the 8-byte-per-sample invariant (§8.1).
+//! allocation, upholding the 8-byte-per-sample invariant.
 //!
-//! **NaN is a gap, not a value** (§8.2): NaN samples never contribute to a
+//! **NaN is a gap, not a value**: NaN samples never contribute to a
 //! min/max, and a range with no finite sample reports `NaN`.
 
 /// Branching factor: samples per L0 node, nodes per higher-level node.
@@ -125,7 +125,7 @@ impl MinMaxPyramid {
         self.levels.first().map(Vec::as_slice).unwrap_or(&[])
     }
 
-    /// Total bytes held by the level vectors (for memory accounting, CCH-10).
+    /// Total bytes held by the level vectors (for memory accounting).
     pub fn bytes(&self) -> u64 {
         self.levels
             .iter()
@@ -187,7 +187,7 @@ impl MinMaxPyramid {
     }
 
     /// Incrementally extend to cover the full buffer `data` (old prefix + new
-    /// tail) without a full rebuild (CCH-05). Only the tail block of each level
+    /// tail) without a full rebuild. Only the tail block of each level
     /// is recomputed.
     pub fn extend(&mut self, data: &[f32]) {
         if self.levels.is_empty() {
@@ -272,7 +272,7 @@ impl MinMaxPyramid {
     }
 
     /// Per-pixel-column extents over `[a, b)` split into `columns` equal index
-    /// ranges (CCH-07 — drives the decimated draw path, §9.5).
+    /// ranges (drives the decimated draw path).
     pub fn columns(&self, data: &[f32], a: usize, b: usize, columns: usize) -> Vec<MinMax> {
         if columns == 0 || b <= a {
             return Vec::new();

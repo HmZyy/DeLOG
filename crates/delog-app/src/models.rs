@@ -1,5 +1,5 @@
-//! Vehicle model registry (PLAN.md §12.4, TDV-08). The built-in GLBs ship
-//! embedded (`include_bytes!`, §3.1); a procedural cone is the unconditional
+//! Vehicle model registry. The built-in GLBs ship
+//! embedded (`include_bytes!`); a procedural cone is the unconditional
 //! fallback so a missing/broken asset can never blank the scene.
 
 use delog_render::{MeshCpu, load_glb};

@@ -31,8 +31,8 @@ pub fn read_float32_file(path: impl AsRef<Path>) -> std::io::Result<RawFloatFile
     let bytes = fs::read(path)?;
     let input_bytes = bytes.len() as u64;
     let ignored_trailing_bytes = (bytes.len() % size_of::<f32>()) as u8;
-    // ZC-EXCEPTION: custom Python parser compatibility input copy; off the UI hot
-    // path and accounted by `input_bytes` (`python_parser_input_bytes` at emission).
+    // Custom Python parser compatibility input copy; off the UI hot path and
+    // accounted by `input_bytes` (`python_parser_input_bytes` at emission).
     let values = bytes
         .chunks_exact(size_of::<f32>())
         .map(|chunk| f32::from_ne_bytes(chunk.try_into().expect("four-byte chunk")))
@@ -250,9 +250,9 @@ fn convert_1d(
         }};
     }
 
-    // ZC-EXCEPTION: custom Python parser compatibility output copy; NumPy owns
-    // the source buffer, so Arrow materialization is required and is accounted
-    // in `ParserOutput::arrow_bytes` (`python_parser_output_bytes` at emission).
+    // Custom Python parser compatibility output copy; NumPy owns the source
+    // buffer, so Arrow materialization is required and is accounted in
+    // `ParserOutput::arrow_bytes` (`python_parser_output_bytes` at emission).
     let output = match (kind, itemsize) {
         ('b', 1) => primitive_array!(bool, BooleanArray),
         ('i', 1) => primitive_array!(i8, Int8Array),

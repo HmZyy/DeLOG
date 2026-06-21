@@ -10,7 +10,7 @@ rust-version.workspace = true
 [dependencies]
 delog-core = { workspace = true }
 # The shared MAVLink decoder lives in delog-parsers; delog-stream consumes it
-# (the §3.2 downward edge) so live links and the .tlog parser share one path.
+# so live links and the .tlog parser share one path.
 delog-parsers = { workspace = true }
 arrow = { workspace = true }
 mavlink = { workspace = true }

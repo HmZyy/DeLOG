@@ -1,11 +1,11 @@
-// Decimated min/max column pipeline (PLAN.md §9.5, GPU-09).
+// Decimated min/max column pipeline.
 //
 // For zoomed-out views the plot asks the pyramid for per-pixel-column (min,max)
 // and draws one vertical span per column. Columns are packed as [x, min, max]
 // f32 triples; x is in cache seconds, min/max in data-y. The plot transform
 // (shared with line_pull) maps them to clip space. A column whose span is
 // thinner than the line width is expanded to that width so flat signals stay
-// visible — min/max decimation never hides a transient (the §9.5 decision).
+// visible — min/max decimation never hides a transient.
 
 struct PlotUniform {
     transform: vec4<f32>,

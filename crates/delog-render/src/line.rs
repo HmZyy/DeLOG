@@ -1,4 +1,4 @@
-//! Vertex-pulled trace line pipeline (PLAN.md §9.4, GPU-05).
+//! Vertex-pulled trace line pipeline.
 //!
 //! Trace samples stay in the `BufferManager`'s interleaved `[x, y]` STORAGE
 //! buffer. This pipeline has no vertex buffers: each vertex loads two adjacent
@@ -120,13 +120,13 @@ impl LinePipeline {
         })
     }
 
-    /// Bind this pipeline once for a run of traces (GPU-11).
+    /// Bind this pipeline once for a run of traces.
     pub fn bind(&self, pass: &mut wgpu::RenderPass<'_>) {
         pass.set_pipeline(&self.pipeline);
     }
 
     /// Draw one trace with its dynamic uniform offset; the pipeline must
-    /// already be bound via [`Self::bind`] (GPU-11). `sample_count` is the
+    /// already be bound via [`Self::bind`]. `sample_count` is the
     /// number of `[x,y]` pairs resident in the storage buffer; each adjacent
     /// pair emits one six-vertex quad.
     pub fn draw_trace(

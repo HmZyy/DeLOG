@@ -1,4 +1,4 @@
-//! Diagnostics dock UI (PLAN.md §15, DIA-02).
+//! Diagnostics dock UI.
 
 use delog_core::diagnostics::{DiagRecord, Severity};
 use delog_core::identity::SourceId;

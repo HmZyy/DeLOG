@@ -1,11 +1,11 @@
-//! 3D trajectory polyline pipeline (PLAN.md §9.2 `traj3d`, §12.3, GPU-23).
+//! 3D trajectory polyline pipeline.
 //!
 //! Vertex-pulled line-list: trajectory points live in a `vec4<f32>` storage
 //! buffer (xyz + pad), and the pipeline draws `(N-1) * 2` vertices reading two
 //! endpoints per segment — no vertex buffer, no CPU tessellation. A non-finite
-//! endpoint collapses its segment, so NaN marks a gap (§9.4). Lines are 1 px in
-//! v1 (thick/joined lines are GPU-25). The same pipeline draws the vertical
-//! world axis line that the ground-plane grid (GPU-21) cannot.
+//! endpoint collapses its segment, so NaN marks a gap. Lines are 1 px in
+//! v1 (thick/joined lines come later). The same pipeline draws the vertical
+//! world axis line that the ground-plane grid cannot.
 //!
 //! Like the rest of `delog-render` this is pure wgpu: matrices arrive as raw
 //! `[[f32; 4]; 4]` and a points buffer + uniform buffer are supplied by the
@@ -239,7 +239,7 @@ mod tests {
         target.read_rgba()
     }
 
-    /// GPU-23: a polyline along world X renders a yellow line across the view.
+    /// A polyline along world X renders a yellow line across the view.
     #[test]
     fn polyline_renders_a_visible_line() {
         let Some(ctx) = RenderContext::headless() else {
@@ -262,7 +262,7 @@ mod tests {
         assert!(lit < (w * h) as usize / 8, "line should be thin, got {lit}");
     }
 
-    /// GPU-23: a NaN endpoint drops its segment (gap), so a two-point polyline
+    /// A NaN endpoint drops its segment (gap), so a two-point polyline
     /// with a NaN end draws nothing.
     #[test]
     fn nan_endpoint_makes_a_gap() {
