@@ -1,4 +1,4 @@
-//! Scripts window: REPL + editor + library (SCR-07). Feature-gated.
+//! Scripts window: REPL + editor + library. Feature-gated.
 
 use std::collections::VecDeque;
 use std::sync::Arc;

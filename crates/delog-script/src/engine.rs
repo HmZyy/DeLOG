@@ -1,5 +1,5 @@
 //! The script worker thread: owns the CPython interpreter for the app lifetime
-//! and serves REPL evals over channels (SCR-02..05).
+//! and serves REPL evals over channels.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -387,7 +387,7 @@ impl ScriptEngine {
     }
 
     /// Non-blocking submit of one raw live batch. Returns the batch back if the
-    /// queue is full or the worker is gone — live data is droppable (§5).
+    /// queue is full or the worker is gone — live data is droppable.
     // The Err variant hands the (large) batch back so the caller can drop or
     // count it; boxing would defeat the give-back-without-copy purpose.
     #[allow(clippy::result_large_err)]
@@ -406,7 +406,7 @@ impl ScriptEngine {
 
     /// Ask the running script to stop (raises KeyboardInterrupt at the next
     /// bytecode boundary). Pure C calls (e.g. a large numpy op) cannot be
-    /// interrupted mid-call — documented limitation (SCR-05).
+    /// interrupted mid-call — documented limitation.
     pub fn request_interrupt(&self) {
         request_python_interrupt();
     }
@@ -686,10 +686,10 @@ fn handle_command(
                         // live-derived source, replacing this script-name's
                         // prior generation. Live-derived sources are appendable
                         // and never `close_source`d; the prior generation is
-                        // torn down with `remove_source` (BRW-06 semantics:
-                        // tombstones the source in the published snapshot,
-                        // keeping its slot/rows valid for any reader still
-                        // viewing it). Order: remove old -> open new -> record
+                        // torn down with `remove_source`, which tombstones the
+                        // source in the published snapshot, keeping its
+                        // slot/rows valid for any reader still viewing it.
+                        // Order: remove old -> open new -> record
                         // the new id (the new source has a fresh id, so removing
                         // first is safe).
                         let pending = live.borrow();

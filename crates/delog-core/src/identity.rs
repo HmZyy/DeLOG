@@ -1,4 +1,4 @@
-//! Runtime IDs, portable field keys and identity registries (PLAN.md §4.1).
+//! Runtime IDs, portable field keys and identity registries.
 //!
 //! Runtime IDs are dense `u32` indices for hot-path indexing. Persisted layouts
 //! use [`FieldKey`] instead, because runtime IDs are meaningful only for one
@@ -32,8 +32,8 @@ pub struct FieldKey {
 /// Registered source identity.
 ///
 /// `removed` is a tombstone: removing a source keeps its slot (so existing
-/// runtime IDs stay valid for the session — PLAN.md §4.1) but marks it gone so
-/// readers and the cache GC skip it (§4.6).
+/// runtime IDs stay valid for the session) but marks it gone so
+/// readers and the cache GC skip it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceEntry {
     pub id: SourceId,
@@ -84,8 +84,8 @@ pub struct FieldEntry {
 }
 
 /// IDs orphaned by [`IdentityRegistry::remove_source`], handed to the writer so
-/// it can drop their stores and to the cache manager (CCH-08) to GC their
-/// caches (§4.6).
+/// it can drop their stores and to the cache manager to GC their
+/// caches.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemovedSource {
     pub source: SourceId,
@@ -146,7 +146,7 @@ impl IdentityRegistry {
     /// Add a source using a preferred user-visible label.
     ///
     /// If the label is already in use, the returned source receives `#2`,
-    /// `#3`, ... suffixes, matching PLAN.md §4.1.
+    /// `#3`, ... suffixes.
     pub fn add_source(&mut self, preferred_label: impl Into<String>) -> SourceId {
         let label = self.unique_source_label(preferred_label.into());
         let id = SourceId(next_id(self.sources.len(), "source"));
@@ -199,7 +199,7 @@ impl IdentityRegistry {
     /// Add or return an existing topic for a numbered log instance.
     ///
     /// Multi-instance topics are surfaced as `topic[N]` so each instance can
-    /// receive independent caches, styling and browser rows (PLAN.md §4.3).
+    /// receive independent caches, styling and browser rows.
     pub fn add_topic_instance(
         &mut self,
         source: SourceId,
@@ -238,11 +238,11 @@ impl IdentityRegistry {
 
     /// Remove a source by tombstoning it and every topic/field it owns.
     ///
-    /// Dense IDs are preserved (existing references stay valid for the session,
-    /// §4.1); the entries are flagged `removed` and dropped from the name/key
+    /// Dense IDs are preserved (existing references stay valid for the session);
+    /// the entries are flagged `removed` and dropped from the name/key
     /// lookup maps so they no longer resolve and a later re-add of the same
     /// name mints fresh IDs. Returns the orphaned IDs for the writer to drop
-    /// stores and the cache manager to GC (§4.6), or `None` if the source is
+    /// stores and the cache manager to GC, or `None` if the source is
     /// unknown or already removed.
     pub fn remove_source(&mut self, id: SourceId) -> Option<RemovedSource> {
         self.live_source(id)?;

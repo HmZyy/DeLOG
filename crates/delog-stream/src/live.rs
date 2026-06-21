@@ -1,5 +1,5 @@
 //! Live MAVLink frame consumer: sysid demux, field extraction, batching and
-//! optional raw-frame recording (PLAN.md LIV-05..LIV-11).
+//! optional raw-frame recording.
 
 use std::collections::{HashMap, HashSet};
 use std::io;

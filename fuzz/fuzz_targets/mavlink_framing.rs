@@ -1,5 +1,5 @@
 #![no_main]
-//! MAVLink v1/v2 framing + `.tlog` envelope (PAR-13).
+//! MAVLink v1/v2 framing + `.tlog` envelope.
 
 use libfuzzer_sys::fuzz_target;
 

@@ -1,4 +1,4 @@
-//! Frame-encode bench: 32 traces × 1M samples, decimated (PLAN.md §20.4, GPU-14).
+//! Frame-encode bench: 32 traces × 1M samples, decimated.
 //!
 //! Measures the per-frame CPU cost of the zoomed-out plot path: for each trace,
 //! compute per-pixel min/max columns (pyramid), upload them, and encode the

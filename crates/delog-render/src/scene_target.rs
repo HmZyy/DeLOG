@@ -1,23 +1,23 @@
-//! Offscreen 3D render target (PLAN.md §9.1, GPU-20).
+//! Offscreen 3D render target.
 //!
 //! The 3D view cannot draw into egui's main pass — that pass has no depth
 //! attachment, so meshes would z-fight in painter order. Instead the scene
 //! renders into a dedicated **4×MSAA color + depth** target in the paint
 //! callback's `prepare()` phase, resolving the multisampled color into a
 //! single-sample texture which `delog-app` composites as an egui image
-//! (the actual `ui.image` wiring rides with the scene pane, TDV-01).
+//! (the actual `ui.image` wiring rides with the scene pane).
 //!
 //! Confining MSAA to this one offscreen target keeps the antialiasing cost on
 //! the view that benefits, and avoids both per-widget GPU contexts and a
 //! fullscreen extra pass for the 2D plots.
 //!
-//! This module is pure wgpu (§3.2), so the same target backs headless
+//! This module is pure wgpu, so the same target backs headless
 //! golden-image tests with no window.
 
 use crate::context::RenderContext;
 use crate::target::{RgbaImage, read_texture_rgba};
 
-/// Multisample count for the scene target (PLAN.md §9.1: "4×MSAA").
+/// Multisample count for the scene target (4×MSAA).
 pub const SAMPLE_COUNT: u32 = 4;
 
 /// Color format of the resolved scene texture handed to egui / readback.
@@ -171,7 +171,7 @@ impl Scene3dTarget {
     }
 
     /// The resolved single-sample color view — what `delog-app` registers with
-    /// egui to composite the scene as an image (TDV-01).
+    /// egui to composite the scene as an image.
     pub fn resolve_view(&self) -> &wgpu::TextureView {
         &self.resolve_view
     }
@@ -197,7 +197,7 @@ impl Scene3dTarget {
     }
 
     /// Read the resolved color texture back to CPU (blocking) — the headless
-    /// golden-image path (PLAN.md §20.3).
+    /// golden-image path.
     pub fn read_rgba(&self) -> RgbaImage {
         read_texture_rgba(&self.ctx, &self.resolve, self.width, self.height)
     }
@@ -338,7 +338,7 @@ fn fs() -> @location(0) vec4<f32> {
         }
     }
 
-    /// GPU-20: clearing the MSAA target and resolving yields the clear color in
+    /// Clearing the MSAA target and resolving yields the clear color in
     /// every pixel of the single-sample resolve texture — proves the resolve
     /// path and readback are wired.
     #[test]
@@ -377,7 +377,7 @@ fn fs() -> @location(0) vec4<f32> {
         );
     }
 
-    /// GPU-20: depth testing rejects geometry drawn later but farther away.
+    /// Depth testing rejects geometry drawn later but farther away.
     /// A near red triangle is drawn first, then a far green triangle covering
     /// the same area; with depth-compare `Less` the green is rejected, so the
     /// overlap stays red. (Without a working depth buffer, the later green
@@ -428,7 +428,7 @@ fn fs() -> @location(0) vec4<f32> {
         );
     }
 
-    /// GPU-20: 4×MSAA antialiases a slanted triangle edge — a pixel straddling
+    /// 4×MSAA antialiases a slanted triangle edge — a pixel straddling
     /// the edge resolves to partial coverage (strictly between the clear color
     /// and the fill color), which a single-sample target cannot produce.
     #[test]

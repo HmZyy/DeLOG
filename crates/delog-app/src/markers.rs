@@ -1,5 +1,5 @@
-//! Manual markers / bookmarks (PLAN.md §17.4, ANA-05): user-placed time
-//! markers with a label, colour and note. Distinct from the ANA-10 measurement
+//! Manual markers / bookmarks: user-placed time
+//! markers with a label, colour and note. Distinct from the measurement
 //! cursor (a single transient delta cursor) — these are multiple, labelled,
 //! navigable, and persisted with the session.
 
@@ -92,13 +92,13 @@ impl Markers {
     }
 }
 
-/// Bottom dock listing the session's markers (§17.4, ANA-05): per row a colour
+/// Bottom dock listing the session's markers: per row a colour
 /// swatch, relative time, editable label + note, and jump / delete controls.
 /// Returns a jump target time when a row's jump button is clicked.
 #[derive(Default)]
 pub struct MarkersDock {
     pub open: bool,
-    /// Ids of rows ticked for bulk delete (transient UI selection, ANA-05).
+    /// Ids of rows ticked for bulk delete (transient UI selection).
     selected: HashSet<u64>,
 }
 

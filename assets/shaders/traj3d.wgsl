@@ -1,8 +1,7 @@
-// 3D trajectory polyline (PLAN.md §9.2 `traj3d`, §12.3, GPU-23). Vertex-pulled
-// line-list: for N points we draw (N-1)*2 vertices, segment `vi/2` connecting
-// point `seg` to `seg+1`. Either endpoint non-finite collapses the segment to a
-// clipped (zero-area) line, so NaN acts as a gap marker exactly like the 2D
-// line path (§9.4). Width is 1 px in v1; thick/joined lines are GPU-25.
+// 3D trajectory polyline. Vertex-pulled line-list: for N points we draw
+// (N-1)*2 vertices, segment `vi/2` connecting point `seg` to `seg+1`. Either
+// endpoint non-finite collapses the segment to a clipped (zero-area) line, so
+// NaN acts as a gap marker exactly like the 2D line path. Width is 1 px.
 
 const MAX_F32: f32 = 3.4028235e38;
 

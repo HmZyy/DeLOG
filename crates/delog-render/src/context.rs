@@ -1,11 +1,11 @@
-//! Render context: the shared wgpu device/queue (PLAN.md §9.1, GPU-01).
+//! Render context: the shared wgpu device/queue.
 //!
 //! DeLOG uses a *single* `wgpu::Device`/`Queue` — the one eframe already created
 //! — for egui, every plot, and the 3D view, so buffers are shared with no
 //! cross-device copies and there is one place to track VRAM. This crate is pure
-//! wgpu (no egui types, §3.2): `delog-app` hands the device/queue from
+//! wgpu (no egui types): `delog-app` hands the device/queue from
 //! `egui_wgpu`'s render state into [`RenderContext::new`]. [`RenderContext::headless`]
-//! acquires a standalone device with no surface, for golden-image tests (GPU-13),
+//! acquires a standalone device with no surface, for golden-image tests,
 //! benches and headless export.
 
 use std::sync::Arc;
@@ -61,7 +61,7 @@ mod tests {
     use super::*;
 
     /// A device acquires when an adapter exists; on a GPU-less host this is a
-    /// graceful skip so CI stays green (GPU-13 follows the same policy).
+    /// graceful skip so CI stays green.
     #[test]
     fn headless_context_is_usable_when_an_adapter_exists() {
         match RenderContext::headless() {

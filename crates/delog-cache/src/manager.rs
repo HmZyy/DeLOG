@@ -1,11 +1,11 @@
-//! Cache manager: ownership, async build, epoch append, GC, LRU (PLAN.md §8.5).
+//! Cache manager: ownership, async build, epoch append, GC, LRU.
 //!
 //! Owns `FieldId → TraceCache`. First plot of a field spawns an off-thread build
-//! (CCH-03) — the slot reports `Building` so the plot can show "building cache…".
+//! — the slot reports `Building` so the plot can show "building cache…".
 //! On each store epoch the manager appends new rows to ready caches and GCs
-//! caches whose source was removed (CCH-08); when total CPU bytes exceed the
-//! budget it LRU-evicts *unplotted* caches, never pinned (plotted) ones (CCH-09).
-//! All sizes feed `MemBreakdown` (CCH-10, ZC-3 "accounted").
+//! caches whose source was removed; when total CPU bytes exceed the
+//! budget it LRU-evicts *unplotted* caches, never pinned (plotted) ones.
+//! All sizes feed `MemBreakdown`.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -18,7 +18,7 @@ use delog_core::snapshot::StoreSnapshot;
 
 use crate::trace::TraceCache;
 
-/// Default cache budget for unplotted traces: 1 GiB (§8.5).
+/// Default cache budget for unplotted traces: 1 GiB.
 pub const DEFAULT_BUDGET_BYTES: u64 = 1 << 30;
 
 enum Slot {
@@ -30,15 +30,15 @@ enum Slot {
 /// Owns and lifecycle-manages every trace's render cache.
 pub struct CacheManager {
     caches: HashMap<FieldId, Slot>,
-    /// Fields currently plotted — pinned against eviction (§8.5).
+    /// Fields currently plotted — pinned against eviction.
     pinned: HashSet<FieldId>,
     budget_bytes: u64,
     frame: u64,
-    /// Shared time-rebase origin for all caches (global dataset start, §8.3).
+    /// Shared time-rebase origin for all caches (global dataset start).
     origin_us: i64,
     built_tx: Sender<(FieldId, Option<TraceCache>)>,
     built_rx: Receiver<(FieldId, Option<TraceCache>)>,
-    /// Shared metrics registry (§16). Defaults to a private registry; the app
+    /// Shared metrics registry. Defaults to a private registry; the app
     /// swaps in the shared one via [`CacheManager::with_metrics`] so the perf
     /// dock sees `cache_build`/`cache_append`/`minmax_build`.
     metrics: Arc<MetricsRegistry>,
@@ -63,8 +63,7 @@ impl CacheManager {
         }
     }
 
-    /// Record cache build/append timings into the shared registry (§16,
-    /// PRF-01).
+    /// Record cache build/append timings into the shared registry.
     pub fn with_metrics(mut self, metrics: Arc<MetricsRegistry>) -> Self {
         self.metrics = metrics;
         self
@@ -76,7 +75,7 @@ impl CacheManager {
     }
 
     /// Set the shared rebase origin. A change invalidates every cache (their x
-    /// values were rebased against the old origin), forcing a rebuild (§8.3).
+    /// values were rebased against the old origin), forcing a rebuild.
     pub fn set_origin(&mut self, origin_us: i64) {
         if origin_us != self.origin_us {
             self.origin_us = origin_us;
@@ -135,11 +134,11 @@ impl CacheManager {
     }
 
     /// On a new store epoch: append new rows to ready caches and GC caches whose
-    /// field is no longer live (CCH-08).
+    /// field is no longer live.
     pub fn on_epoch(&mut self, snapshot: &StoreSnapshot) {
         // A changed source offset means the cache's x values are stale: drop
         // the slot — the per-frame `request` of plotted fields rebuilds it
-        // with the new offset (BRW-07). Appending would mix offsets.
+        // with the new offset. Appending would mix offsets.
         self.caches.retain(|&field, slot| match slot {
             Slot::Ready(cache) => !cache.offset_changed(snapshot, field),
             Slot::Building => true,
@@ -181,7 +180,7 @@ impl CacheManager {
     }
 
     /// Evict the least-recently-used *unpinned* ready caches until total CPU
-    /// bytes are within budget (CCH-09). Pinned (plotted) caches are never evicted.
+    /// bytes are within budget. Pinned (plotted) caches are never evicted.
     pub fn evict_over_budget(&mut self) {
         while self.total_cache_bytes() > self.budget_bytes {
             let victim = self
@@ -204,7 +203,7 @@ impl CacheManager {
         }
     }
 
-    /// Total CPU bytes across all ready caches (CCH-10).
+    /// Total CPU bytes across all ready caches.
     pub fn total_cache_bytes(&self) -> u64 {
         self.caches
             .values()
@@ -363,7 +362,7 @@ mod tests {
         await_ready(&mut mgr, field);
         assert!(mgr.is_ready(field));
 
-        // Same data, new offset (BRW-07 offset drag): the cache baked the old
+        // Same data, new offset (offset drag): the cache baked the old
         // offset into its x values, so it must be dropped for a rebuild.
         identity.set_source_offset_us(source, 5_000);
         let store = Arc::clone(snap.topic_store(topic).unwrap());
