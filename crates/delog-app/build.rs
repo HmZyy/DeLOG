@@ -1,12 +1,13 @@
 //! Bundles `docs/logo.png` into the binary at build time.
 //!
 //! The logo is decoded once and resized to 256x256 (a sane icon size, and a
-//! width that is a multiple of 4 as egui wants). Two artifacts are emitted:
+//! width that is a multiple of 4 as egui wants) and emitted as:
 //!
 //! * `icon.rgba` — raw RGBA pixels, embedded by `main.rs` via `include_bytes!`
 //!   and handed to eframe as the window/taskbar icon. Cross-platform.
-//! * `logo.ico` — an icon resource compiled into the `.exe` on Windows so the
-//!   logo also shows in Explorer and on a pinned taskbar entry.
+//!
+//! The logo is intentionally *not* compiled into the `.exe` as a resource icon;
+//! it only appears in the running app's window/taskbar.
 //!
 //! `docs/logo.png` is the single source of truth; nothing pre-generated is
 //! committed, so CI and local builds always carry the current logo.
@@ -33,16 +34,4 @@ fn main() {
     // Runtime window icon: raw RGBA, included verbatim by `main.rs`.
     std::fs::write(out_dir.join("icon.rgba"), logo.to_rgba8().into_raw())
         .expect("write icon.rgba");
-
-    // Windows .exe resource icon.
-    #[cfg(windows)]
-    {
-        let ico_path = out_dir.join("logo.ico");
-        logo.save_with_format(&ico_path, image::ImageFormat::Ico)
-            .expect("encode logo.ico");
-
-        let mut res = winresource::WindowsResource::new();
-        res.set_icon(ico_path.to_str().expect("ico path is valid UTF-8"));
-        res.compile().expect("compile Windows resource");
-    }
 }
