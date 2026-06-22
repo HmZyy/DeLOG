@@ -63,6 +63,10 @@ fn combined_load_state(
     }
 }
 
+fn should_auto_open_diagnostics(enabled: bool, last_seen: Option<u64>, newest: u64) -> bool {
+    enabled && last_seen.is_none_or(|prev| newest > prev)
+}
+
 #[derive(Serialize)]
 struct DiagnosticsExportDoc {
     delog_diagnostics: u32,
@@ -244,6 +248,7 @@ pub struct DelogApp {
     exported_profiling_tx: mpsc::Sender<ProfilingExportResult>,
     browser_collapsed: bool,
     diagnostics_dock: DiagnosticsDock,
+    last_diagnostic_seq: Option<u64>,
     performance_dock: PerformanceDock,
     markers_dock: crate::markers::MarkersDock,
     performance_snapshot: PerformanceSnapshot,
@@ -338,6 +343,7 @@ impl DelogApp {
             exported_profiling_tx,
             browser_collapsed: false,
             diagnostics_dock: DiagnosticsDock::default(),
+            last_diagnostic_seq: None,
             performance_dock: PerformanceDock::default(),
             markers_dock: crate::markers::MarkersDock::default(),
             performance_snapshot: PerformanceSnapshot::default(),
@@ -1638,8 +1644,9 @@ impl eframe::App for DelogApp {
                     });
                 });
                 if self.settings.show_fps {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        match self.fps_ema {
+                    ui.with_layout(
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| match self.fps_ema {
                             Some(fps) => {
                                 let color = if fps > 59.0 {
                                     self.settings.theme.success()
@@ -1653,8 +1660,8 @@ impl eframe::App for DelogApp {
                             None => {
                                 ui.weak("idle");
                             }
-                        }
-                    });
+                        },
+                    );
                 }
             });
         });
@@ -1877,6 +1884,19 @@ impl eframe::App for DelogApp {
 
         let ui_diagnostics_timer = self.session.metrics().scope("ui_diagnostics");
         let diagnostics = self.session.diagnostic_records();
+        // Auto-open the dock when a new (distinct) diagnostic arrives. The seq is
+        // tracked even when the feature is off so re-enabling it never opens for
+        // diagnostics that landed while disabled.
+        if let Some(newest_seq) = diagnostics.iter().map(|record| record.seq).max() {
+            if should_auto_open_diagnostics(
+                self.settings.auto_open_diagnostics,
+                self.last_diagnostic_seq,
+                newest_seq,
+            ) {
+                self.diagnostics_dock.open = true;
+            }
+            self.last_diagnostic_seq = Some(newest_seq);
+        }
         if self.diagnostics_dock.open {
             egui::Panel::bottom("diagnostics")
                 .resizable(true)
@@ -2718,6 +2738,20 @@ mod tests {
     use delog_core::snapshot::StoreSnapshot;
 
     use super::*;
+
+    #[test]
+    fn auto_open_diagnostics_only_fires_for_newer_seqs_when_enabled() {
+        // First diagnostic ever seen opens the dock.
+        assert!(should_auto_open_diagnostics(true, None, 0));
+        // A strictly newer seq opens it again.
+        assert!(should_auto_open_diagnostics(true, Some(3), 4));
+        // The same (or older) seq does not — avoids reopening after the user closes.
+        assert!(!should_auto_open_diagnostics(true, Some(4), 4));
+        assert!(!should_auto_open_diagnostics(true, Some(5), 4));
+        // Disabled never opens, even for a brand-new diagnostic.
+        assert!(!should_auto_open_diagnostics(false, None, 0));
+        assert!(!should_auto_open_diagnostics(false, Some(3), 9));
+    }
 
     #[test]
     fn combined_load_state_keeps_parser_label_separate_without_duplicates() {
