@@ -332,8 +332,8 @@ impl LiveSink {
         self.drops += 1;
         self.metrics.add(METRIC_DROPPED_BATCHES, 1);
         if self.drops == 1 || self.drops.is_multiple_of(DROP_DIAG_INTERVAL) {
-            // Best-effort: if the channel is still full the diagnostic is itself
-            // dropped, but the counter above is the authoritative record.
+            // If the channel is still full the diagnostic is itself dropped, but
+            // the counter above is the authoritative record.
             let _ = self.tx.try_send(IngestMsg::Diagnostic(Diag::warning(
                 "ingest-dropped-batch",
                 format!("live channel full: dropped {} batch(es)", self.drops),

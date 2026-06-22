@@ -30,7 +30,6 @@ impl Traj3dUniform {
 const POINTS_BINDING: u32 = 0;
 const UNIFORM_BINDING: u32 = 1;
 
-/// Render pipeline + bind layout for trajectory polylines.
 pub struct Traj3dPipeline {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,

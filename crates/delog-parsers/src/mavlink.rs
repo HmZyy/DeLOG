@@ -93,7 +93,6 @@ impl FrameDecoder {
     /// complete frame (push more bytes).
     pub fn next_frame(&mut self) -> Option<DecodedFrame> {
         loop {
-            // Hunt for a magic byte.
             while self.pos < self.buf.len()
                 && self.buf[self.pos] != V1_MAGIC
                 && self.buf[self.pos] != V2_MAGIC
