@@ -210,11 +210,11 @@ impl Workspace {
             .tree
             .tiles
             .insert_pane(Pane::Scene3D(Scene3dPane::default()));
-        let anchor = self
-            .focused
-            .filter(|id| self.tree.tiles.get(*id).is_some())
-            .or_else(|| self.tree.root());
-        match anchor.and_then(|a| self.attach_split(a, pane, SplitDirection::Horizontal, false)) {
+        match self
+            .tree
+            .root()
+            .and_then(|root| self.attach_split(root, pane, SplitDirection::Horizontal, false))
+        {
             Some(_) => {}
             // Empty tree (no root): the scene pane becomes the root.
             None => self.tree.root = Some(pane),
@@ -1635,6 +1635,33 @@ mod tests {
         workspace.toggle_scene_pane();
         assert_eq!(scene_count(&workspace), 1);
         assert_ne!(workspace.scene_pane_id(), Some(id));
+    }
+
+    #[test]
+    fn scene_splits_at_root_not_inside_the_focused_pane() {
+        let mut workspace = Workspace::new();
+        let pane1 = workspace.tree.root().unwrap();
+        workspace.split_plot(pane1, SplitDirection::Vertical);
+        let inner = workspace.tree.root().unwrap();
+
+        // Focus the nested plot: the buggy path split here instead of globally.
+        workspace.focused = Some(pane1);
+        workspace.toggle_scene_pane();
+
+        let scene = workspace.scene_pane_id().expect("scene pane should exist");
+        let root = workspace.tree.root().unwrap();
+        assert_eq!(
+            workspace.tree.tiles.parent_of(scene),
+            Some(root),
+            "scene must sit directly under the root, beside the whole layout",
+        );
+        let Some(egui_tiles::Tile::Container(root_container)) = workspace.tree.tiles.get(root)
+        else {
+            panic!("root should be a container wrapping the layout and the scene");
+        };
+        assert_eq!(root_container.num_children(), 2);
+        // The previous layout stays intact as a single sibling of the scene.
+        assert_eq!(workspace.tree.tiles.parent_of(pane1), Some(inner));
     }
 
     #[test]
