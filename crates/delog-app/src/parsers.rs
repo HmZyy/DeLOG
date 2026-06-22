@@ -8,9 +8,9 @@ use delog_script::ParserEvent;
 use delog_script::parser_library::ParserLibrary;
 use egui_code_editor::{CodeEditor, ColorTheme, Syntax};
 
-#[allow(dead_code)] // Used by the Task 6 menu through `add_new`.
+#[allow(dead_code)]
 const NEW_PARSER_NAME: &str = "new_parser.py";
-#[allow(dead_code)] // Used by the Task 6 menu through `add_new`.
+#[allow(dead_code)]
 const NEW_PARSER_TEMPLATE: &str = r#"def Parse(raw_data):
     # Return [(name, values, tooltip), ...].
     return []
@@ -39,7 +39,7 @@ struct PendingSave {
     source: String,
 }
 
-#[allow(dead_code)] // Labels are consumed by the Task 6 toolbar.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 enum ParsePhase {
     Queued { parser: String, path: PathBuf },
@@ -69,7 +69,7 @@ pub struct ParsersPanel {
     diagnostics: Vec<String>,
     last_list_error: Option<String>,
     parse_requests: Receiver<ParseRequest>,
-    #[allow(dead_code)] // Native picker entry point is surfaced by Task 6.
+    #[allow(dead_code)]
     parse_requests_tx: Sender<ParseRequest>,
 }
 
@@ -96,7 +96,7 @@ impl ParsersPanel {
         }
     }
 
-    #[allow(dead_code)] // Task 6 menu facade.
+    #[allow(dead_code)]
     pub fn list(&mut self) -> std::io::Result<Vec<String>> {
         match self.library.list() {
             Ok(names) => {
@@ -114,7 +114,7 @@ impl ParsersPanel {
         }
     }
 
-    #[allow(dead_code)] // Task 6 menu facade.
+    #[allow(dead_code)]
     pub fn add_new(&mut self) {
         if self.pending_save.is_some() {
             self.status = "finish the current parser validation before creating another".into();
@@ -129,7 +129,7 @@ impl ParsersPanel {
         self.open = true;
     }
 
-    #[allow(dead_code)] // Task 6 menu facade.
+    #[allow(dead_code)]
     pub fn edit(&mut self, name: &str) {
         if self.pending_save.is_some() {
             self.status = "finish the current parser validation before reopening a parser".into();
@@ -151,7 +151,7 @@ impl ParsersPanel {
 
     /// Load the parser before opening the native dialog so the worker owns an
     /// immutable source snapshot rather than reading mutable editor state.
-    #[allow(dead_code)] // Task 6 menu facade.
+    #[allow(dead_code)]
     pub fn request_open(&mut self, ctx: &egui::Context, name: &str) {
         let source = match self.library.load(name) {
             Ok(source) => source,
@@ -370,7 +370,7 @@ impl ParsersPanel {
         !self.pending_parses.is_empty()
     }
 
-    #[allow(dead_code)] // Task 6 toolbar facade.
+    #[allow(dead_code)]
     pub fn active_label(&self) -> String {
         let (parser, path) = match &self.phase {
             Some(ParsePhase::Queued { parser, path })
