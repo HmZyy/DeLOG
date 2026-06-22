@@ -45,8 +45,7 @@ pub struct AppSettings {
     /// Show the corner FPS badge. Default off.
     #[serde(default)]
     pub show_fps: bool,
-    /// Show the F12 debug overlay of frame timings. Default off;
-    /// toggled by the View menu or the F12 key.
+    /// Show the F12 debug overlay of frame timings. Default off.
     #[serde(default)]
     pub show_debug_overlay: bool,
     /// Frame-pacing policy. Default `Reactive`.
@@ -66,12 +65,10 @@ pub struct AppSettings {
     pub font: FontOverride,
 }
 
-/// Global font override applied through `Style::override_font_id`,
-/// mirroring the egui demo's font control. Disabled by default (egui's own
-/// per-text-style fonts are used).
+/// Global font override applied through `Style::override_font_id`. Disabled by
+/// default (egui's own per-text-style fonts are used).
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FontOverride {
-    /// When off, no override is applied.
     #[serde(default)]
     pub enabled: bool,
     /// Point size used for every text style while enabled.
@@ -93,8 +90,8 @@ impl Default for FontOverride {
 }
 
 impl FontOverride {
-    /// Push (or clear) the override on every theme's style. Cheap; called each
-    /// frame so toggling it off restores the defaults immediately.
+    /// Push (or clear) the override on every theme's style. Called each frame,
+    /// so toggling it off restores the defaults immediately.
     pub fn apply(self, ctx: &egui::Context) {
         let font_id = self.enabled.then(|| {
             let family = if self.monospace {
@@ -142,11 +139,10 @@ impl LegendPosition {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MarkerScope {
-    /// One marker time shared by every plot pane (the default), like the
-    /// playhead — placing/dragging on any pane moves the single marker.
+    /// One marker time shared by every plot pane, like the playhead —
+    /// placing/dragging on any pane moves the single marker.
     #[default]
     Global,
-    /// Each pane keeps its own independent marker.
     PerPane,
 }
 
@@ -165,10 +161,8 @@ impl MarkerScope {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MarkerDeltaReadout {
-    /// Next to each trace's name in the legend (the default).
     #[default]
     Legend,
-    /// On each row of the hover/playhead value readout.
     Hover,
 }
 
@@ -188,45 +182,33 @@ impl MarkerDeltaReadout {
 /// created panes.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PlotDisplay {
-    /// Corner the legend overlay anchors to.
     #[serde(default)]
     pub legend_position: LegendPosition,
     /// Legend visibility for newly created panes (per-pane toggle overrides it).
     #[serde(default = "default_true")]
     pub show_legend_default: bool,
-    /// Legend background opacity (1 = solid, 0 = fully transparent).
     #[serde(default = "default_opacity")]
     pub legend_opacity: f32,
-    /// Show the `topic.field` name on each hover/playhead readout row.
     #[serde(default)]
     pub hover_show_field_name: bool,
-    /// Show the time header on the hover/playhead readout.
     #[serde(default)]
     pub hover_show_time: bool,
-    /// Hover/playhead readout background opacity (1 = solid, 0 = transparent).
     #[serde(default = "default_opacity")]
     pub hover_opacity: f32,
-    /// Where the measurement marker's per-trace ΔY is shown.
     #[serde(default)]
     pub marker_delta_readout: MarkerDeltaReadout,
-    /// Whether the marker is shared across all panes or per-pane.
     #[serde(default)]
     pub marker_scope: MarkerScope,
-    /// Opacity of the manual session-marker verticals on plots (1 = solid,
-    /// 0 = transparent).
     #[serde(default = "default_opacity")]
     pub marker_line_opacity: f32,
-    /// Width of the manual session-marker verticals on plots, in pixels.
     #[serde(default = "default_marker_line_width")]
     pub marker_line_width: f32,
-    /// Draw each manual session marker's label at the top of its line.
     #[serde(default = "default_true")]
     pub marker_show_label: bool,
     /// Shade each plot region from one marker to the next (or the end) with that
     /// marker's colour.
     #[serde(default)]
     pub marker_shade_regions: bool,
-    /// Opacity of the inter-marker region shading (1 = solid, 0 = transparent).
     #[serde(default = "default_marker_shade_opacity")]
     pub marker_shade_opacity: f32,
     /// Max text-annotation labels drawn per string trace in the visible window;
@@ -236,14 +218,10 @@ pub struct PlotDisplay {
     /// Stack text-annotation labels from the bottom up (default) vs top down.
     #[serde(default = "default_true")]
     pub text_labels_bottom_up: bool,
-    /// Default vertical spacing between stacked text-annotation rows, in px.
     #[serde(default = "default_text_label_spacing")]
     pub text_label_spacing: f32,
-    /// Width of the timestamp connector line under each text-annotation label,
-    /// in px.
     #[serde(default = "default_text_line_width")]
     pub text_line_width: f32,
-    /// Opacity of the timestamp connector line (1 = solid, 0 = transparent).
     #[serde(default = "default_text_line_opacity")]
     pub text_line_opacity: f32,
 }
@@ -914,10 +892,8 @@ mod tests {
         let p = PlotDisplay::default();
         assert_eq!(p.legend_position, LegendPosition::TopLeft);
         assert!(p.show_legend_default);
-        // Hover readout stays minimal by default: no field name, no time header.
         assert!(!p.hover_show_field_name);
         assert!(!p.hover_show_time);
-        // Backgrounds are solid by default (current look preserved).
         assert_eq!(p.legend_opacity, 1.0);
         assert_eq!(p.hover_opacity, 1.0);
     }
@@ -996,8 +972,7 @@ mod tests {
 
     #[test]
     fn old_config_without_new_fields_uses_defaults() {
-        // A config written before these fields existed.
-        // ThemeChoice serialises with snake_case, so CatppuccinMocha → "catppuccin_mocha".
+        // ThemeChoice serialises with snake_case: CatppuccinMocha → "catppuccin_mocha".
         let json = r#"{"theme":"catppuccin_mocha"}"#;
         let s: AppSettings = serde_json::from_str(json).unwrap();
         assert!(!s.show_fps);
@@ -1065,11 +1040,10 @@ mod tests {
             grid_cell_auto: true,
             ..Scene3dSettings::default()
         };
-        // ~10 cells across the view, continuous (no 1-2-5 snap), LOD on.
         let (cell, lod) = s.resolved_grid(100.0);
         assert!(lod);
         assert!((cell - 10.0).abs() < 1e-3);
-        // Height drives it continuously and monotonically — no discrete jumps.
+        // Continuous and monotonic in height — no discrete jumps.
         assert!(s.resolved_grid(50.0).0 < s.resolved_grid(5_000.0).0);
     }
 
@@ -1098,7 +1072,6 @@ mod tests {
 
     #[test]
     fn old_scene3d_config_without_new_toggles_defaults_them_on() {
-        // A scene3d config written before fog_enabled / grid_cell_auto existed.
         let json = r#"{"theme":"catppuccin_mocha","scene3d":{"far_clip_m":25000.0}}"#;
         let s: AppSettings = serde_json::from_str(json).unwrap();
         assert!(s.scene3d.fog_enabled);

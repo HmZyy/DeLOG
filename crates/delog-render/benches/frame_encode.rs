@@ -96,7 +96,6 @@ fn bench_frame_encode(c: &mut Criterion) {
 
     c.bench_function("frame_encode_32x1M_decimated", |b| {
         b.iter(|| {
-            // Per-frame: decimate + upload every trace, then encode one pass.
             let mut binds = Vec::with_capacity(TRACES);
             for (i, cache) in caches.iter().enumerate() {
                 let field = FieldId(i as u32);

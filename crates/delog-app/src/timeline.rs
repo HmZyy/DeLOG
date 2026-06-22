@@ -248,8 +248,7 @@ pub fn ui(
         // stacked sliders on the right.
         let button_size = egui::vec2(40.0, 40.0);
         // Live-link status dot: grey = not streaming, yellow = streaming but
-        // not locked to the live tail, red = locked. While streaming it is
-        // clickable to toggle the live-tail lock.
+        // not locked to the live tail, red = locked.
         let (dot_color, dot_tip) = if !any_live {
             (theme.neutral(), "Not streaming")
         } else if playback.follow_live {
@@ -266,7 +265,6 @@ pub fn ui(
             egui::Sense::hover()
         };
         let (dot_rect, mut dot_resp) = ui.allocate_exact_size(button_size, sense);
-        // Slightly brighten the dot on hover to read as interactive.
         let draw_color = if any_live && dot_resp.hovered() {
             dot_color.gamma_multiply(1.3)
         } else {
@@ -354,7 +352,6 @@ pub fn ui(
             *fit_all = !*fit_all;
         }
 
-        // Playback speed as a free drag value within the spec bounds.
         let mut speed = playback.speed;
         if ui
             .add(
@@ -370,8 +367,6 @@ pub fn ui(
             playback.set_speed(speed);
         }
 
-        // Log-relative position / total, plus absolute UTC when the source
-        // carries a reference.
         ui.monospace(format!(
             "{} / {}",
             format_relative(playback.t_us, range.min_us),
@@ -381,8 +376,6 @@ pub fn ui(
             ui.weak(format_utc(playback.t_us + offset));
         }
 
-        // Two stacked sliders sharing the remaining width: the playhead scrubber
-        // on top and the visible-window range slider directly beneath it.
         ui.vertical(|ui| {
             if scrubber(ui, playback, range, any_live, markers, &mut action) {
                 action.manual_scrub = true;
@@ -479,7 +472,6 @@ fn scrubber(
     let bar = egui::Rect::from_center_size(rect.center(), egui::vec2(rect.width(), 6.0));
     painter.rect_filled(bar, 3.0, visuals.extreme_bg_color);
 
-    // Elapsed portion.
     let x = bar_x_at(playback.t_us, rect, range);
     let elapsed = egui::Rect::from_min_max(bar.min, egui::pos2(x, bar.max.y));
     painter.rect_filled(elapsed, 3.0, visuals.selection.bg_fill);
@@ -492,7 +484,6 @@ fn scrubber(
         painter.rect_filled(tail, 3.0, visuals.warn_fg_color.gamma_multiply(0.5));
     }
 
-    // Playhead handle.
     let stroke_color = if response.hovered() || response.dragged() {
         visuals.strong_text_color()
     } else {
@@ -501,7 +492,6 @@ fn scrubber(
     painter.vline(x, rect.y_range(), egui::Stroke::new(2.0, stroke_color));
     painter.circle_filled(egui::pos2(x, rect.center().y), 4.0, stroke_color);
 
-    // Marker flags: a thin stem plus a downward triangle in the marker colour.
     for m in markers.by_time() {
         let fx = bar_x_at(m.t_us, rect, range);
         let color = m.color32();
@@ -517,7 +507,6 @@ fn scrubber(
         ));
     }
 
-    // Per-flag hover tooltip + right-click context menu.
     for m in markers.by_time() {
         let fx = bar_x_at(m.t_us, rect, range);
         let flag_rect = egui::Rect::from_min_max(
@@ -646,7 +635,6 @@ fn window_slider(ui: &mut egui::Ui, view: &mut ViewX, range: TimeRange) -> bool 
         }
     }
 
-    // Draw: full track, the selected window band, two handle knobs.
     let painter = ui.painter();
     let visuals = ui.visuals();
     let bar = egui::Rect::from_center_size(rect.center(), egui::vec2(rect.width(), 6.0));
@@ -726,9 +714,7 @@ mod tests {
     #[test]
     fn step_moves_to_the_adjacent_sample_of_the_reference_trace() {
         let (snapshot, alt) = stepping_fixture();
-        // Between samples: forward snaps to the next one.
         assert_eq!(step_target(&snapshot, Some(alt), 1_500, true), 2_000);
-        // Exactly on a sample: forward moves to the following sample.
         assert_eq!(step_target(&snapshot, Some(alt), 2_000, true), 3_000);
         assert_eq!(step_target(&snapshot, Some(alt), 2_000, false), 1_000);
         // No sample beyond the end: stay put.
@@ -843,7 +829,6 @@ mod tests {
 
     #[test]
     fn relative_time_formats_as_minutes_seconds_millis() {
-        // Relative to the log start (origin).
         assert_eq!(format_relative(1_000_000, 1_000_000), "0:00.000");
         assert_eq!(format_relative(84_456_000, 1_000_000), "1:23.456");
         // Hours appear only when needed.

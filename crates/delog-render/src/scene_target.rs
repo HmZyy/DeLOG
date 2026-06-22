@@ -329,7 +329,6 @@ fn fs() -> @location(0) vec4<f32> {
                     resource: buf.as_entire_binding(),
                 }],
             });
-            // Keep the bind group's backing buffer alive for the pass duration.
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &bind, &[]);
             pass.draw(0..3, 0..1);
