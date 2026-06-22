@@ -589,7 +589,6 @@ mod tests {
         });
 
         let snap = session.snapshot();
-        // The source was labelled from the file stem.
         assert!(snap.sources.iter().any(|s| s.entry.label.contains("load")));
 
         let _ = std::fs::remove_file(&path);

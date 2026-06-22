@@ -310,9 +310,6 @@ pub(crate) fn matches_query(query: &str, path: &str) -> bool {
         .all(|token| path.contains(&token.to_lowercase()))
 }
 
-/// Render the browser tree with its search box. `query`,
-/// `selection` and the offset dialog draft persist in app state across
-/// frames.
 #[derive(Debug, Default)]
 pub struct BrowserResponse {
     /// Requested per-source offset change, if any.
@@ -361,7 +358,6 @@ pub fn ui(
     offset_dialog: &mut Option<(SourceId, i64)>,
 ) -> BrowserResponse {
     let mut response = BrowserResponse::default();
-    // Fuzzy filter over full paths.
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         let button_size = panel_toggle_button_size(ui);

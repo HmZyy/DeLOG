@@ -11,7 +11,6 @@ use crate::uniforms::UniformRing;
 const XY_BINDING: u32 = 0;
 const UNIFORM_BINDING: u32 = 1;
 
-/// Render pipeline and bind layout for scatter points.
 pub struct ScatterPipeline {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
@@ -97,7 +96,6 @@ impl ScatterPipeline {
         }
     }
 
-    /// Create a bind group for one trace buffer plus the shared uniform ring.
     pub fn bind_group(
         &self,
         ctx: &RenderContext,
@@ -120,13 +118,11 @@ impl ScatterPipeline {
         })
     }
 
-    /// Bind this pipeline once for a run of traces.
     pub fn bind(&self, pass: &mut wgpu::RenderPass<'_>) {
         pass.set_pipeline(&self.pipeline);
     }
 
-    /// Draw one trace with its dynamic uniform offset; the pipeline must
-    /// already be bound via [`Self::bind`]. `sample_count` is the
+    /// Pipeline must already be bound via [`Self::bind`]. `sample_count` is the
     /// number of `[x,y]` pairs; each sample emits one six-vertex quad.
     pub fn draw_trace(
         &self,
@@ -143,8 +139,6 @@ impl ScatterPipeline {
         pass.draw(0..sample_count.saturating_mul(6), 0..1);
     }
 
-    /// Bind + draw a single trace (single-trace convenience; batched callers
-    /// use [`Self::bind`] once per run and [`Self::draw_trace`] per trace).
     pub fn encode_trace(
         &self,
         pass: &mut wgpu::RenderPass<'_>,

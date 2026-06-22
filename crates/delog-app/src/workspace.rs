@@ -23,8 +23,6 @@ pub enum Pane {
     Scene3D(Scene3dPane),
 }
 
-/// State for a 3D scene pane. One tracking camera orbits the selected
-/// vehicle's pose, or the world origin until a vehicle is configured.
 #[derive(Debug, Default)]
 pub struct Scene3dPane {
     pub camera: OrbitCamera,
@@ -123,7 +121,6 @@ impl Workspace {
     }
 
     /// First trace of the focused pane — the step reference.
-    /// `None` when nothing is focused or the pane is gone/empty.
     pub fn focused_first_field(&self) -> Option<FieldId> {
         let tile_id = self.focused?;
         match self.tree.tiles.get(tile_id) {
@@ -193,15 +190,13 @@ impl Workspace {
             .collect()
     }
 
-    /// The tile id of the single 3D scene pane, if one is open.
     pub fn scene_pane_id(&self) -> Option<egui_tiles::TileId> {
         self.tree.tiles.iter().find_map(|(id, tile)| {
             matches!(tile, egui_tiles::Tile::Pane(Pane::Scene3D(_))).then_some(*id)
         })
     }
 
-    /// Show or hide the 3D scene view. There is only ever one: the
-    /// toolbar button adds it next to the focused pane, or removes it.
+    /// Show or hide the 3D scene view. There is only ever one.
     pub fn toggle_scene_pane(&mut self) {
         if let Some(id) = self.scene_pane_id() {
             let closing_root = self.tree.root() == Some(id);
@@ -395,7 +390,7 @@ pub struct PlotServices<'a> {
     /// default). When set, the playhead holds a sample until the cursor crosses
     /// to the next one.
     pub snap_playhead: &'a mut bool,
-    /// Shared measurement-marker time, used when `marker_scope` is Global
+    /// Shared measurement-marker time, used when `marker_scope` is Global.
     /// Per-pane markers live on the pane instead.
     pub marker_us: &'a mut Option<i64>,
     /// Whether the marker is shared across panes or per-pane.
@@ -404,12 +399,10 @@ pub struct PlotServices<'a> {
     pub render_tuning: crate::settings::RenderTuning,
     /// Live-adjustable 3D scene tuning, from the config.
     pub scene3d: crate::settings::Scene3dSettings,
-    /// Playback time for the playhead cursor; `None` before any data loads
-    /// before any data loads.
+    /// Playback time for the playhead cursor; `None` before any data loads.
     pub playhead_us: Option<i64>,
     /// Whether playback is running (gates the playhead value tooltip).
     pub playing: bool,
-    /// Configured vehicles for the 3D scene.
     pub vehicles: &'a [crate::vehicle::VehicleConfig],
     /// Cached render-space trajectories, parallel to `vehicles`.
     pub trajectories: &'a [Vec<[f32; 3]>],
@@ -419,8 +412,7 @@ pub struct PlotServices<'a> {
     /// Widest Y-axis gutter seen across all plot panes last frame; every pane
     /// uses at least this much left margin so stacked plots align.
     pub shared_y_gutter: f32,
-    /// Plot overlay display prefs: legend placement + hover readout contents
-    /// Live-read each frame from the config.
+    /// Plot overlay display prefs: legend placement + hover readout contents.
     pub plot_display: crate::settings::PlotDisplay,
     /// Manual session markers, drawn as faint verticals on every pane.
     pub markers: &'a [crate::markers::Marker],
@@ -514,11 +506,8 @@ impl egui_tiles::Behavior<Pane> for Behavior<'_> {
 }
 
 impl Behavior<'_> {
-    /// 3D scene pane. One tracking camera orbits the selected
-    /// vehicle's pose — the world origin until a vehicle is configured.
-    /// Left-drag orbits, wheel zooms, double-click resets the
-    /// offset; a middle-drag moves the tile. The tracked-vehicle dropdown
-    /// appears here once two or more vehicles exist.
+    /// 3D scene pane: a tracking camera orbits the selected vehicle's pose, or
+    /// the world origin until a vehicle is configured.
     fn scene_ui(
         &mut self,
         ui: &mut egui::Ui,
@@ -531,8 +520,6 @@ impl Behavior<'_> {
             self.actions.focus = Some(tile_id);
         }
 
-        // The camera tracks its target (origin until a vehicle binds it);
-        // the user can orbit/zoom around it, offset preserved.
         const SENS: f32 = 0.008;
         if response.dragged_by(egui::PointerButton::Primary) {
             let d = response.drag_delta();
@@ -609,8 +596,6 @@ impl Behavior<'_> {
             .and_then(|i| poses.get(i).and_then(|p| p.as_ref()))
             .or_else(|| poses.iter().flatten().next())
             .map(|p| p.pos);
-        // The camera always tracks the selected vehicle, falling back to the
-        // world origin when no pose is available at the playhead.
         pane.camera.target = tracked.unwrap_or(glam::Vec3::ZERO);
 
         let draws: Vec<VehicleDraw> = self
@@ -666,7 +651,6 @@ impl Behavior<'_> {
             tracked_vehicle_picker(ui, rect, pane, self.services.vehicles);
         }
 
-        // Vehicle-config gear pinned to the scene's top-right.
         if scene_settings_button(ui, rect) {
             self.actions.open_vehicle_config = true;
         }
@@ -697,7 +681,6 @@ impl Behavior<'_> {
             {
                 self.actions.edge_drop = Some((tile_id, edge, (*fields).clone()));
             } else {
-                // Multi-field drop appends every dragged trace.
                 for &field in fields.iter() {
                     if pane.add_trace(field) {
                         self.services.caches.request(field, self.services.snapshot);
@@ -731,12 +714,9 @@ impl Behavior<'_> {
         } else {
             egui_tiles::UiResponse::None
         };
-        // Stacked plots must share one left margin, else a pane whose labels
-        // read "5000" starts further right than one reading "10" and the plots
-        // are horizontally offset. We take the widest gutter any pane needed
-        // last frame (`shared_y_gutter`) and never go below this pane's own need
-        // (so labels never clip), and report this pane's own gutter back so the
-        // shared value tracks the current set of panes.
+        // Stacked plots share one left margin so they line up; use the widest
+        // gutter any pane needed last frame but never below this pane's own
+        // need (so labels never clip), and report this pane's gutter back.
         let shared_gutter = self.services.shared_y_gutter;
         let make_plot_rect =
             |ui: &egui::Ui, y_range: (f32, f32), y_unit: Option<&str>| -> (egui::Rect, f32) {
@@ -778,9 +758,6 @@ impl Behavior<'_> {
             self.plot_info_window(ui, tile_id, pane, None);
             return tile_response;
         };
-        // Geometry + interaction: X/Y ranges, the Y-gutter text layout inside
-        // `make_plot_rect`, and pan/zoom handling (`yquery` is the auto-Y query
-        // nested within). Re-runs once if interaction moved the view.
         let pane_setup_timer = self.services.metrics.scope("pane_setup");
         let mut x_range = view.seconds(self.services.origin_us);
         let y_start = Instant::now();
@@ -877,9 +854,6 @@ impl Behavior<'_> {
             paint_us,
         };
 
-        // Post-paint egui widgets: context menu, playhead/hover readout,
-        // legend and the per-pane info window. All CPU-side egui, drawn over
-        // the GPU trace callback.
         let pane_overlay_timer = self.services.metrics.scope("pane_overlay");
         self.plot_context_menu(tile_id, &response, pane);
 
@@ -907,8 +881,6 @@ impl Behavior<'_> {
             crate::settings::MarkerDeltaReadout::Hover => (&no_deltas, &marker_deltas),
         };
 
-        // Manual session markers: labelled verticals under the playhead and
-        // cursor; line opacity/width/label are user settings.
         hover::draw_session_markers(
             ui,
             pview,
@@ -919,8 +891,7 @@ impl Behavior<'_> {
             self.services.plot_display.marker_show_label,
         );
 
-        // Text-annotation traces: string fields drawn as labels at each sample's
-        // timestamp, draggable vertically.
+        // String fields drawn as labels at each sample's timestamp.
         crate::text_overlay::draw(
             ui,
             &response,
@@ -1053,7 +1024,6 @@ impl Behavior<'_> {
         let playhead = self.services.playhead_us;
         let has_marker = self.marker_us(pane).is_some();
         response.context_menu(|ui| {
-            // Clear all traces.
             if ui
                 .add(egui::Button::image_and_text(
                     menu_icon(ui, crate::icons::trash()),
@@ -1069,7 +1039,6 @@ impl Behavior<'_> {
                 ui.close();
             }
 
-            // Remove trace — submenu listing each trace with its colour.
             ui.menu_image_text_button(menu_icon(ui, crate::icons::ban()), "Remove trace", |ui| {
                 let entries: Vec<_> = pane
                     .traces
@@ -1101,7 +1070,6 @@ impl Behavior<'_> {
                 }
             });
 
-            // Field stats — submenu listing each trace.
             ui.menu_image_text_button(menu_icon(ui, crate::icons::info()), "Field stats", |ui| {
                 let entries: Vec<_> = pane
                     .traces
@@ -1131,7 +1099,6 @@ impl Behavior<'_> {
                 }
             });
 
-            // Edit trace — submenu with per-trace colour / mode / width.
             ui.menu_image_text_button(menu_icon(ui, crate::icons::pencil()), "Edit trace", |ui| {
                 let entries: Vec<_> = pane
                     .traces
@@ -1246,7 +1213,6 @@ impl Behavior<'_> {
                 ui.close();
             }
 
-            // Plot Info opens a separate window (rendered in plot_body).
             if ui
                 .add(egui::Button::image_and_text(
                     menu_icon(ui, crate::icons::info()),
@@ -1405,10 +1371,6 @@ impl Behavior<'_> {
         *self.services.view = Some(view);
     }
 
-    /// Drag the measurement marker line along X. A primary drag
-    /// that starts within a few pixels of the marker grabs it; subsequent drag
-    /// frames set `marker_us` from the pointer (clamped to the global range).
-    /// Returns whether the drag was consumed, so the caller skips panning.
     /// The pane's effective marker time: the shared one in Global scope, or the
     /// pane's own in Per-pane scope.
     fn marker_us(&self, pane: &PlotPane) -> Option<i64> {
@@ -1427,6 +1389,9 @@ impl Behavior<'_> {
         }
     }
 
+    /// Drag the measurement marker line along X. A primary drag that starts
+    /// within a few pixels of the marker grabs it. Returns whether the drag was
+    /// consumed, so the caller skips panning.
     fn handle_marker_drag(
         &mut self,
         response: &egui::Response,
@@ -1657,13 +1622,11 @@ mod tests {
         let mut workspace = Workspace::new();
         assert!(workspace.scene_pane_id().is_none());
 
-        // Show it: one scene pane, original plot untouched.
         workspace.toggle_scene_pane();
         let id = workspace.scene_pane_id().expect("scene pane should exist");
         assert_eq!(scene_count(&workspace), 1);
         assert_eq!(workspace.plot_panes().count(), 1);
 
-        // Toggling again hides it.
         workspace.toggle_scene_pane();
         assert!(workspace.scene_pane_id().is_none());
         assert_eq!(workspace.plot_panes().count(), 1);
@@ -1839,8 +1802,6 @@ mod tests {
         let mut workspace = Workspace::new();
         let root = workspace.tree.root().unwrap();
 
-        // Multi-field edge drop: every dragged field lands in the
-        // new pane.
         let added =
             workspace.split_plot_with_traces(root, DropEdge::Left, &[FieldId(7), FieldId(9)]);
         assert_eq!(added, vec![FieldId(7), FieldId(9)]);
@@ -1861,7 +1822,6 @@ mod tests {
             vec![FieldId(7), FieldId(9)]
         );
 
-        // An empty payload is a no-op.
         let before = workspace.plot_panes().count();
         assert!(
             workspace
