@@ -66,7 +66,6 @@ mod tests {
     fn headless_context_is_usable_when_an_adapter_exists() {
         match RenderContext::headless() {
             Some(ctx) => {
-                // The device is live and shareable.
                 let _limits = ctx.device().limits();
                 assert!(Arc::strong_count(&ctx.queue_arc()) >= 2);
             }

@@ -67,8 +67,8 @@ pub struct LiveTransformBatch {
 }
 
 impl LiveTransformBatch {
-    // Script live materialization copies the incoming live batch into
-    // contiguous f64 buffers for CPython/numpy; off render hot path.
+    /// Copies the incoming live batch into contiguous f64 buffers for
+    /// CPython/numpy; off the render hot path.
     pub fn from_parsed(spec: &LiveTransformSpec, batch: &ParsedBatch) -> Result<Self, String> {
         if !spec.matches(batch) {
             return Err(format!(
@@ -109,8 +109,6 @@ pub struct LiveBatchPy {
 impl LiveBatchPy {
     /// Build the Python batch object from a materialized live batch. Must be
     /// called under the GIL.
-    // Hands the already-materialized f64/i64 buffers to numpy for the
-    // transform callable; off render hot path (mirrors `from_parsed`).
     pub fn from_materialized(py: Python<'_>, batch: LiveTransformBatch) -> Self {
         let t = batch.times.into_pyarray(py).unbind();
         let fields = batch
