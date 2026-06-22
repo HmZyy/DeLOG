@@ -35,7 +35,7 @@ fn default_text_line_opacity() -> f32 {
 fn default_font_size() -> f32 {
     14.0
 }
-#[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AppSettings {
     #[serde(default)]
     pub theme: ThemeChoice,
@@ -63,6 +63,26 @@ pub struct AppSettings {
     /// Optional global font override (size + family), like the egui demo.
     #[serde(default)]
     pub font: FontOverride,
+    /// Auto-open the Diagnostics dock when a new diagnostic arrives. Default on.
+    #[serde(default = "default_true")]
+    pub auto_open_diagnostics: bool,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            theme: ThemeChoice::default(),
+            render: RenderTuning::default(),
+            show_fps: false,
+            show_debug_overlay: false,
+            render_mode: RenderMode::default(),
+            live_connection: LiveConnectionSettings::default(),
+            scene3d: Scene3dSettings::default(),
+            plot: PlotDisplay::default(),
+            font: FontOverride::default(),
+            auto_open_diagnostics: true,
+        }
+    }
 }
 
 /// Global font override applied through `Style::override_font_id`. Disabled by
@@ -583,6 +603,11 @@ fn general_tab(ui: &mut egui::Ui, settings: &mut AppSettings) -> SettingsChange 
             ui.label("Show FPS counter")
                 .on_hover_text("Show a frame-rate badge in the top-right corner.");
             ui.checkbox(&mut settings.show_fps, "");
+            ui.end_row();
+
+            ui.label("Auto-open diagnostics")
+                .on_hover_text("Open the Diagnostics dock automatically when a new diagnostic is reported.");
+            ui.checkbox(&mut settings.auto_open_diagnostics, "");
             ui.end_row();
 
             ui.label("Render mode").on_hover_text(
