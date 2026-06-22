@@ -372,18 +372,13 @@ impl ParsersPanel {
 
     #[allow(dead_code)] // Task 6 toolbar facade.
     pub fn active_label(&self) -> String {
-        match &self.phase {
-            Some(ParsePhase::Queued { parser, path }) => {
-                format!("Queued {} with {parser}", file_label(path))
-            }
-            Some(ParsePhase::Reading { parser, path }) => {
-                format!("Reading {} with {parser}", file_label(path))
-            }
-            Some(ParsePhase::Running { parser, path }) => {
-                format!("Running {parser} on {}", file_label(path))
-            }
-            None => String::new(),
-        }
+        let (parser, path) = match &self.phase {
+            Some(ParsePhase::Queued { parser, path })
+            | Some(ParsePhase::Reading { parser, path })
+            | Some(ParsePhase::Running { parser, path }) => (parser, path),
+            None => return String::new(),
+        };
+        format!("running {parser} on {}", file_label(path))
     }
 
     pub fn take_diagnostics(&mut self) -> Vec<String> {
@@ -807,12 +802,13 @@ mod tests {
             path: path.clone(),
         });
         assert!(panel.is_running());
-        assert!(panel.active_label().contains("Reading"));
+        // The label always reads "running <parser> on <log>", regardless of phase.
+        assert_eq!(panel.active_label(), "running raw.py on flight.raw");
         panel.handle_event(ParserEvent::Running {
             parser_name: "raw.py".into(),
             path: path.clone(),
         });
-        assert!(panel.active_label().contains("Running"));
+        assert_eq!(panel.active_label(), "running raw.py on flight.raw");
         panel.handle_event(ParserEvent::Succeeded {
             parser_name: "raw.py".into(),
             path,
@@ -883,7 +879,7 @@ mod tests {
 
         assert!(panel.has_pending_work());
         assert!(panel.is_running());
-        assert!(panel.active_label().contains("Queued"));
+        assert_eq!(panel.active_label(), "running raw.py on flight.raw");
         panel.handle_event(ParserEvent::Succeeded {
             parser_name: "raw.py".into(),
             path,

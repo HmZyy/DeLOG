@@ -37,24 +37,29 @@ const PERFORMANCE_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 struct CombinedLoadState {
     active: bool,
     parser_active: bool,
-    labels: Vec<String>,
+    native_labels: Vec<String>,
+    parser_label: Option<String>,
 }
 
 fn combined_load_state(
     native_active: bool,
-    mut labels: Vec<String>,
+    native_labels: Vec<String>,
     parser_label: Option<&str>,
 ) -> CombinedLoadState {
-    let parser_label = parser_label.filter(|label| !label.is_empty());
-    if let Some(label) = parser_label
-        && !labels.iter().any(|existing| existing == label)
-    {
-        labels.push(label.to_owned());
-    }
+    let parser_label = parser_label
+        .filter(|label| !label.is_empty())
+        .map(str::to_owned);
+    // Drop any native label that duplicates the parser phrase so it is not
+    // shown twice (the parser label is rendered on its own below).
+    let native_labels = native_labels
+        .into_iter()
+        .filter(|label| parser_label.as_deref() != Some(label.as_str()))
+        .collect();
     CombinedLoadState {
         active: native_active || parser_label.is_some(),
         parser_active: parser_label.is_some(),
-        labels,
+        native_labels,
+        parser_label,
     }
 }
 
@@ -1359,11 +1364,7 @@ impl eframe::App for DelogApp {
             }
 
             // Idle-aware repaint policy: continuous frames only
-            // while playing (later: or a link is Connected). Everything
-            // else is event-driven — ingest progress, epoch changes and
-            // diagnostics each request their own repaint — so a static plot
-            // idles at 0% GPU. (The Continuous render mode override is applied
-            // below, after the if/else, so it covers empty sessions too.)
+            // while playing (later: or a link is Connected).
             if self.playback.playing || self.session.has_connected_live() {
                 ui.ctx().request_repaint();
             }
@@ -1773,7 +1774,12 @@ impl eframe::App for DelogApp {
                             self.scripts.cancel_parsers();
                         }
                     }
-                    ui.label(format!("loading {}", load_state.labels.join(", ")));
+                    if !load_state.native_labels.is_empty() {
+                        ui.label(format!("loading {}", load_state.native_labels.join(", ")));
+                    }
+                    if let Some(label) = &load_state.parser_label {
+                        ui.label(label);
+                    }
                     if !load_state.parser_active
                         && let Some(frac) = self.session.overall_progress()
                     {
@@ -2744,29 +2750,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn combined_load_state_appends_parser_label_without_duplicates() {
+    fn combined_load_state_keeps_parser_label_separate_without_duplicates() {
         let state = combined_load_state(
             true,
             vec![
                 "flight.bin".to_owned(),
-                "Running raw.py on flight.bin".to_owned(),
+                "running raw.py on flight.bin".to_owned(),
             ],
-            Some("Running raw.py on flight.bin"),
+            Some("running raw.py on flight.bin"),
         );
 
+        assert_eq!(state.native_labels, vec!["flight.bin"]);
         assert_eq!(
-            state.labels,
-            vec!["flight.bin", "Running raw.py on flight.bin"]
+            state.parser_label.as_deref(),
+            Some("running raw.py on flight.bin")
         );
         assert!(state.parser_active);
     }
 
     #[test]
     fn combined_load_state_is_active_for_parser_only_work() {
-        let state = combined_load_state(false, Vec::new(), Some("Queued sample.dat with raw.py"));
+        let state = combined_load_state(false, Vec::new(), Some("running raw.py on sample.dat"));
 
         assert!(state.active);
-        assert_eq!(state.labels, vec!["Queued sample.dat with raw.py"]);
+        assert!(state.native_labels.is_empty());
+        assert_eq!(
+            state.parser_label.as_deref(),
+            Some("running raw.py on sample.dat")
+        );
         assert!(state.parser_active);
     }
 
