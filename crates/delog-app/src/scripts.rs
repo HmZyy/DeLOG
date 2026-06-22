@@ -83,27 +83,27 @@ impl ScriptsPanel {
         }
     }
 
-    #[allow(dead_code)] // Consumed by the Task 6 Parsers menu.
+    #[allow(dead_code)]
     pub fn parser_names(&mut self) -> std::io::Result<Vec<String>> {
         self.parsers.list()
     }
 
-    #[allow(dead_code)] // Consumed by the Task 6 Parsers menu.
+    #[allow(dead_code)]
     pub fn add(&mut self) {
         self.parsers.add_new();
     }
 
-    #[allow(dead_code)] // Consumed by the Task 6 Parsers menu.
+    #[allow(dead_code)]
     pub fn edit(&mut self, name: &str) {
         self.parsers.edit(name);
     }
 
-    #[allow(dead_code)] // Consumed by the Task 6 Parsers menu.
+    #[allow(dead_code)]
     pub fn delete_parser(&mut self, name: &str) {
         self.parsers.request_delete_named(name);
     }
 
-    #[allow(dead_code)] // Consumed by the Task 6 Parsers menu.
+    #[allow(dead_code)]
     pub fn request_open(&mut self, ctx: &egui::Context, name: &str) -> bool {
         if !self.parser_dispatch_enabled() {
             self.status = "finish the running console command before opening a parser file".into();
@@ -113,12 +113,12 @@ impl ScriptsPanel {
         true
     }
 
-    #[allow(dead_code)] // Consumed by the Task 6 combined toolbar state.
+    #[allow(dead_code)]
     pub fn is_parser_running(&self) -> bool {
         self.parsers.is_running()
     }
 
-    #[allow(dead_code)] // Consumed by the Task 6 toolbar.
+    #[allow(dead_code)]
     pub fn parser_active_label(&self) -> String {
         self.parsers.active_label()
     }
@@ -445,7 +445,7 @@ impl ScriptsPanel {
             return;
         };
         let mut keep_open = true;
-        let mut decision: Option<bool> = None; // Some(true) = delete, Some(false) = cancel
+        let mut decision: Option<bool> = None;
         egui::Window::new("Delete script?")
             .collapsible(false)
             .default_pos(ctx.content_rect().center())
@@ -536,7 +536,6 @@ impl ScriptsPanel {
                         .desired_width(160.0),
                 );
 
-                // Save (icon-only; disabled until the buffer has a name).
                 let save_img = egui::Image::new(crate::icons::save())
                     .fit_to_exact_size(egui::vec2(16.0, 16.0))
                     .tint(ui.visuals().text_color());
@@ -563,7 +562,6 @@ impl ScriptsPanel {
                     .as_ref()
                     .is_some_and(|e| e.has_live_transform(&run_name));
 
-                // Start: run the editor buffer (enabled only while idle).
                 if icon_btn_enabled(
                     ui,
                     self.ordinary_dispatch_enabled(),
@@ -582,7 +580,6 @@ impl ScriptsPanel {
                     );
                 }
 
-                // Stop: cooperatively interrupt the running script.
                 if icon_btn_enabled(
                     ui,
                     self.can_interrupt_console(),
@@ -594,8 +591,6 @@ impl ScriptsPanel {
                     self.request_interrupt();
                 }
 
-                // Unregister: drop this script's live transform and remove its
-                // appendable source (enabled only when one is registered).
                 if icon_btn_enabled(
                     ui,
                     has_live,

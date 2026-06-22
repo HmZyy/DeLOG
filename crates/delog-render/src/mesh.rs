@@ -256,7 +256,6 @@ fn add_node(
                     }
                 }
                 None => {
-                    // No normals: push placeholders, fix up smooth below.
                     let start = out.vertices.len();
                     for pos in &positions {
                         out.vertices.push(Vertex {

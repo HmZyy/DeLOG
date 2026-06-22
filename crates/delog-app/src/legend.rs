@@ -119,7 +119,6 @@ pub fn ui(
                             trace.color = color32_to_srgb(color);
                         }
 
-                        // Clickable label; greyed when the trace is hidden.
                         let text_color = if trace.visible {
                             ui.visuals().text_color()
                         } else {

@@ -146,7 +146,6 @@ impl TraceCache {
         true
     }
 
-    /// Number of samples cached.
     pub fn samples(&self) -> usize {
         self.xy.len() / 2
     }
@@ -155,7 +154,6 @@ impl TraceCache {
         self.xy.is_empty()
     }
 
-    /// x (seconds, rebased to `origin_us`) of sample `i`.
     fn x_at(&self, i: usize) -> f32 {
         self.xy[2 * i]
     }
@@ -164,8 +162,8 @@ impl TraceCache {
     /// channel is sorted, so this is two binary searches.
     pub fn index_range(&self, x0: f32, x1: f32) -> (usize, usize) {
         let n = self.samples();
-        let a = self.partition_point(0, n, |x| x < x0); // first x >= x0
-        let b = self.partition_point(a, n, |x| x <= x1); // first x > x1
+        let a = self.partition_point(0, n, |x| x < x0);
+        let b = self.partition_point(a, n, |x| x <= x1);
         (a, b)
     }
 
@@ -481,8 +479,8 @@ mod tests {
         assert_eq!(cache.samples(), 3);
         assert_eq!(cache.built_rows, 3);
         // x = (t + offset - origin) * 1e-6 seconds.
-        assert_eq!(cache.xy[0], 0.0); // first sample at origin
-        assert_eq!(cache.xy[2], 1.0); // +1 s
+        assert_eq!(cache.xy[0], 0.0);
+        assert_eq!(cache.xy[2], 1.0);
         assert_eq!(cache.xy[4], 2.0);
         // y = raw * 0.01.
         assert_eq!(cache.xy[1], 1.0);
@@ -499,7 +497,7 @@ mod tests {
         let (snap, field) = snapshot_with(vec![0, 1, 2], vec![Some(100), None, Some(300)], 0);
         let cache = TraceCache::build(&snap, field, 0, 0, &MetricsRegistry::new()).unwrap();
         assert_eq!(cache.xy[1], 1.0);
-        assert!(cache.xy[3].is_nan()); // the gap
+        assert!(cache.xy[3].is_nan());
         assert_eq!(cache.xy[5], 3.0);
         // Pyramid ignores the NaN.
         let q = cache.pyramid.query(&cache.xy, 0, 3);
@@ -546,11 +544,11 @@ mod tests {
         assert_eq!(cols.len(), 4 * 3);
         // Column 0 = [0,1)s holds only the sample at t=0 (y=0); centre x=0.5.
         assert_eq!(cols[0], 0.5);
-        assert_eq!(cols[1], 0.0); // col0 min
+        assert_eq!(cols[1], 0.0);
         // col0's max is bridged up to col1's value so the bars connect.
-        assert_eq!(cols[2], 1.0); // col0 max, bridged to col1 min
+        assert_eq!(cols[2], 1.0);
         // Column 1 = [1,2)s holds t=1 → y=1.
-        assert_eq!(cols[4], 1.0); // col1 min
+        assert_eq!(cols[4], 1.0);
         // Last column [3,4) holds t=3 and the boundary t=4 → max 4 (unchanged).
         assert_eq!(cols[11], 4.0);
         // Monotone ramp: each column's max rises.
@@ -575,8 +573,8 @@ mod tests {
         let cols = cache.minmax_columns(0.0, x1, 4, true);
         assert_eq!(cols.len(), 12);
         // Column 0 starts at y=0; the last column reaches the max y≈999.
-        assert_eq!(cols[1], 0.0); // col0 min
-        assert!(cols[11] >= 990.0); // col3 max near 999
+        assert_eq!(cols[1], 0.0);
+        assert!(cols[11] >= 990.0);
         // The single-sample spike is NOT decimated away.
         assert!(
             (cols[5] - 9999.0).abs() < 1.0,
@@ -603,7 +601,7 @@ mod tests {
         assert_eq!(cache.samples(), 4);
         assert_eq!(cache.built_rows, 4);
         assert_eq!(cache.xy[4], 2.0); // x of 3rd sample = 2 s
-        assert_eq!(cache.xy[5], 0.5); // y = 50 * 0.01
+        assert_eq!(cache.xy[5], 0.5); // y = 50 cm * 0.01
 
         // No-op when nothing new.
         assert!(!cache.append(&snap2, field, &MetricsRegistry::new()));

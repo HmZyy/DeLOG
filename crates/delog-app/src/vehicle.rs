@@ -352,10 +352,6 @@ fn orientation_at(snapshot: &StoreSnapshot, ori: &OriMapping, t_us: i64) -> Mat3
     }
 }
 
-/// The vehicle's render-space pose at an effective playback time, or `None`
-/// when its position can't be read (e.g. before the first sample). The
-/// model's mesh→body correction is folded into the rotation (mesh-local, so
-/// right-multiplied).
 /// Resolve the GPS reference and read the pose in one call. Production code
 /// hoists the (stable) reference out of the per-frame loop and calls
 /// [`pose_at_with_ref`]; this convenience wrapper is kept for tests.

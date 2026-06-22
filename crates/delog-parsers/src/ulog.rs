@@ -1004,7 +1004,7 @@ mod tests {
     fn tiny_ulog() -> Vec<u8> {
         let mut buf = Vec::new();
         buf.extend(MAGIC);
-        buf.push(1); // version
+        buf.push(1);
         buf.extend(0u64.to_le_bytes());
 
         push_msg(
@@ -1020,7 +1020,7 @@ mod tests {
         );
 
         let mut sub = Vec::new();
-        sub.push(2); // multi_id
+        sub.push(2);
         sub.extend(10u16.to_le_bytes());
         sub.extend(b"nested");
         push_msg(&mut buf, b'A', &sub);
@@ -1186,7 +1186,7 @@ mod tests {
             for v in q {
                 data.extend(v.to_le_bytes());
             }
-            data.extend([0u8; 4]); // _padding0
+            data.extend([0u8; 4]);
             push_msg(&mut buf, b'D', &data);
         };
         att_row(1_000, [1.0, 0.0, 0.0, 0.5]);

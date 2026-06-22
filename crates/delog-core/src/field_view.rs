@@ -547,7 +547,7 @@ mod tests {
         let range = TimeRange::new(0, 1_000).unwrap();
 
         let all = mode.string_samples_in_range(range, 100, None);
-        assert_eq!(all.len(), 5); // idle, climb, cruise, descend, land
+        assert_eq!(all.len(), 5);
 
         // Case-insensitive substring; "cruise" is the only match for "CR".
         let matched = mode.string_samples_in_range(range, 100, Some("CR"));

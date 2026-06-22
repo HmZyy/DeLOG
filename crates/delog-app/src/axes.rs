@@ -130,7 +130,6 @@ pub fn draw(
     let to_x = |v: f64| plot_rect.left() + ((v - x0) / (x1 - x0)) as f32 * plot_rect.width();
     let to_y = |v: f64| plot_rect.bottom() - ((v - y0) / (y1 - y0)) as f32 * plot_rect.height();
 
-    // Y grid + labels.
     for v in nice_ticks(y0, y1, y_target) {
         let y = to_y(v);
         painter.hline(plot_rect.x_range(), y, egui::Stroke::new(1.0, grid));
@@ -143,7 +142,6 @@ pub fn draw(
         );
     }
 
-    // X grid + labels.
     for v in nice_ticks(x0, x1, x_target) {
         let x = to_x(v);
         painter.vline(x, plot_rect.y_range(), egui::Stroke::new(1.0, grid));

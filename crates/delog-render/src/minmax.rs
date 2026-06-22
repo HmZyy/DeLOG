@@ -16,7 +16,6 @@ const UNIFORM_BINDING: u32 = 1;
 /// Floats per column triple `[x, min, max]`.
 pub const COLUMN_STRIDE: usize = 3;
 
-/// Render pipeline + bind layout for decimated min/max columns.
 pub struct MinMaxColPipeline {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
@@ -102,7 +101,6 @@ impl MinMaxColPipeline {
         }
     }
 
-    /// Bind group for one column buffer plus the shared uniform ring.
     pub fn bind_group(
         &self,
         ctx: &RenderContext,
@@ -125,14 +123,12 @@ impl MinMaxColPipeline {
         })
     }
 
-    /// Bind this pipeline once for a run of traces.
     pub fn bind(&self, pass: &mut wgpu::RenderPass<'_>) {
         pass.set_pipeline(&self.pipeline);
     }
 
-    /// Draw `column_count` vertical spans (six vertices each) with the trace's
-    /// dynamic uniform offset; the pipeline must already be bound via
-    /// [`Self::bind`].
+    /// Draw `column_count` vertical spans (six vertices each). Pipeline must
+    /// already be bound via [`Self::bind`].
     pub fn draw_trace(
         &self,
         pass: &mut wgpu::RenderPass<'_>,
@@ -147,8 +143,6 @@ impl MinMaxColPipeline {
         pass.draw(0..column_count * 6, 0..1);
     }
 
-    /// Bind + draw `column_count` vertical spans (single-trace convenience;
-    /// batched callers use [`Self::bind`] + [`Self::draw_trace`]).
     pub fn encode(
         &self,
         pass: &mut wgpu::RenderPass<'_>,
@@ -174,7 +168,6 @@ mod tests {
     use crate::target::OffscreenTarget;
     use crate::uniforms::PlotUniform;
 
-    /// A column band renders as a filled vertical region.
     #[test]
     fn columns_render_a_minmax_band() {
         let Some(ctx) = RenderContext::headless() else {

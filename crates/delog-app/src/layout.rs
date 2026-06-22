@@ -130,7 +130,6 @@ pub enum TraceModeLayout {
     Step,
 }
 
-/// A manual marker / bookmark for this session.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MarkerLayout {
     pub t_us: i64,
@@ -1296,7 +1295,7 @@ mod tests {
             std::process::id(),
             std::thread::current().name().unwrap_or("settings")
         ));
-        let _ = fs::remove_file(&missing); // ensure absent
+        let _ = fs::remove_file(&missing);
         assert_eq!(load_app_settings_at(&missing), AppSettings::default());
     }
 
@@ -1367,8 +1366,6 @@ mod tests {
 
     #[test]
     fn global_marker_us_round_trips_through_json_and_apply() {
-        // The shared (Global-scope) marker persists in the layout doc and is
-        // handed back through LayoutApply on load.
         let mut doc = empty_doc("marker");
         doc.marker_us = Some(123_456);
 
@@ -1559,7 +1556,6 @@ mod tests {
 
     #[test]
     fn fit_to_view_persists_as_full_mode_and_restores_fit_all() {
-        // ViewMode::Full in the saved view restores the fit-all toggle.
         let mut doc = empty_doc("fit");
         doc.view = Some(ViewLayout {
             mode: ViewMode::Full,
@@ -1573,7 +1569,6 @@ mod tests {
         };
         assert!(layout.fit_all);
 
-        // A normal windowed view does not engage fit-all.
         let mut doc = empty_doc("win");
         doc.view = Some(ViewLayout {
             mode: ViewMode::Window,

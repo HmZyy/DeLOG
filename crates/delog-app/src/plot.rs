@@ -289,7 +289,7 @@ mod tests {
         let mut pane = PlotPane::default();
         assert!(pane.add_trace(FieldId(0)));
         assert!(pane.add_trace(FieldId(1)));
-        assert!(!pane.add_trace(FieldId(0))); // already plotted
+        assert!(!pane.add_trace(FieldId(0)));
         assert_eq!(pane.traces.len(), 2);
         assert_ne!(pane.traces[0].color, pane.traces[1].color);
         assert_eq!(pane.traces[0].mode, TraceMode::Line);

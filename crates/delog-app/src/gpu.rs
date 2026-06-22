@@ -26,9 +26,7 @@ use crate::plot::{PlotPane, TraceMode, ViewX};
 use crate::settings::Scene3dSettings;
 use crate::vehicle::ModelKind;
 
-/// Render-ready data for one vehicle this frame: its model, world
-/// transform (pose), colors, and resampled render-space trajectory. Built in
-/// `scene_ui` from a `VehicleConfig` + the snapshot + playhead.
+/// Render-ready data for one vehicle this frame.
 pub struct VehicleDraw<'a> {
     /// Stable per-frame key for one configured vehicle row.
     pub key: u32,
@@ -220,8 +218,6 @@ impl GpuBridge {
         let (y0, y1) = view.y_range;
 
         let mut items = Vec::new();
-        // This pane's GPU uploads, accumulated inside the renderer block and
-        // recorded after it.
         let mut upload_bytes = 0u64;
         let mut full_uploads = 0u64;
         {
@@ -310,7 +306,6 @@ impl GpuBridge {
             res.errors.get_mut().unwrap().close(scope);
         }
 
-        // GPU-upload gauges/counters for this pane.
         if upload_bytes > 0 {
             metrics.record("upload_bytes", upload_bytes as f32);
         }
@@ -385,7 +380,6 @@ impl GpuBridge {
                     lod,
                 ),
             );
-            // Refresh the gizmo's view_proj for this frame (color is fixed).
             res.ctx.queue().write_buffer(
                 &res.axis_gizmo.uniform,
                 0,
@@ -637,13 +631,9 @@ impl PlotCallbackResources {
     }
 }
 
-/// Offscreen 3D-scene resources held in egui_wgpu's callback map.
-/// The grid pipeline matches the target's MSAA/format; `texture_id` is the
-/// egui handle to the resolved color, (re)pointed when the pane resizes.
 /// One static scene polyline (the axis gizmo): its points + a uniform whose
 /// `view_proj` is rewritten each frame, with a stable bind group.
 struct SceneTraj {
-    /// Per-frame uniform (view_proj rewritten each frame).
     uniform: wgpu::Buffer,
     /// Holds an internal reference to the points storage buffer, keeping it
     /// alive — the points are uploaded once and never change.
@@ -741,7 +731,6 @@ impl SceneResources {
         // Light from upper front-right; ambient keeps shadowed faces readable.
         let light = glam::Vec3::new(0.4, 1.0, 0.6).normalize().to_array();
         for v in vehicles {
-            // Upload the model mesh on first use (no-op afterwards).
             self.model_mesh(v.model);
 
             let needed = v.trajectory.len() as u32;
@@ -994,7 +983,6 @@ impl egui_wgpu::CallbackTrait for ScenePaintCallback {
             return;
         };
 
-        // Map clip space to the plot rect; scissor to the visible intersection.
         render_pass.set_viewport(
             viewport.left_px.max(0) as f32,
             viewport.top_px.max(0) as f32,
@@ -1140,7 +1128,7 @@ mod tests {
     #[test]
     fn zoom_in_shrinks_the_span_about_the_cursor() {
         let mut view = ViewX::new(0, 1000);
-        apply_zoom(&mut view, 0.5, 200.0); // scroll up at centre
+        apply_zoom(&mut view, 0.5, 200.0);
         assert!(view.span_us() < 1000);
         // Centre stays roughly fixed.
         let centre = (view.min_us + view.max_us) / 2;

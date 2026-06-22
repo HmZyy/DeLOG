@@ -632,7 +632,6 @@ mod tests {
         assert_eq!(sink.batches[0].source, SourceId(7));
         assert_eq!(sink.batches[0].topic(), "AP");
         let value = sink.batches[0].schema.field_by_name("value").unwrap();
-        // The tooltip is dropped; the `[m]` suffix becomes the native unit.
         assert_eq!(value.description, None);
         assert_eq!(value.unit.as_deref(), Some("m"));
         assert_eq!(sink.diagnostics.len(), 1);

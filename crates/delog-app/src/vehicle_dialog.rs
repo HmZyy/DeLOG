@@ -1,11 +1,6 @@
-//! Vehicle configuration dialog, styled after
-//! tiplot-rs: each vehicle is an in-place collapsible section edited through a
-//! two-column grid (name, type, colours, scale, then Orientation and Position
-//! mappings), with an "Add Vehicle" button on top and a per-vehicle "Remove
-//! Vehicle" button. There is no separate draft/Add/Save step — one [`Draft`]
-//! per vehicle is edited live and the `vehicles` vector is rebuilt from the
-//! drafts that resolve to a complete mapping. Building a [`VehicleConfig`] is
-//! where every mapping variant is constructed.
+//! Vehicle configuration dialog. There is no separate draft/Add/Save step —
+//! one [`Draft`] per vehicle is edited live and the `vehicles` vector is
+//! rebuilt from the drafts that resolve to a complete mapping.
 
 use delog_core::identity::{FieldId, SourceId, TopicId};
 use delog_core::snapshot::StoreSnapshot;
@@ -278,10 +273,8 @@ impl Draft {
     }
 }
 
-/// Dialog state: open flag plus one editable draft per vehicle. Editing is
-/// in-place (tiplot-style): each vehicle is a collapsible section and the
-/// `vehicles` vector is rebuilt from the drafts that resolve to a complete
-/// mapping. `was_open` drives a resync from `vehicles` on the open edge.
+/// Dialog state: open flag plus one editable draft per vehicle. `was_open`
+/// drives a resync from `vehicles` on the open edge.
 #[derive(Default)]
 pub struct VehicleDialog {
     pub open: bool,
@@ -635,7 +628,6 @@ fn draft_editor(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapshot) 
             };
             let topics = source_topics(snapshot, source);
 
-            // Orientation.
             ui.label(egui::RichText::new("Orientation").strong());
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut draft.ori_mode, OriMode::Static, "Static");
@@ -684,7 +676,6 @@ fn draft_editor(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapshot) 
                 }
             }
 
-            // Position.
             ui.label(egui::RichText::new("Position").strong());
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut draft.pos_mode, PosMode::Ned, "Local (NED)");
