@@ -43,8 +43,6 @@ pub fn resample_prev(src_t: &[i64], src_v: &[f64], base: &[i64]) -> Vec<f64> {
 /// Materialize a field as `(times_us: Vec<i64>, values: Vec<f64>)` by walking
 /// its chunks in time order. This concatenates chunk buffers — the One Copy for
 /// script consumption, off the render hot path.
-// Script materialization — a deliberate copy of the canonical field into a
-// contiguous host buffer for numpy; counted, off-path.
 pub fn materialize_field(
     snapshot: &StoreSnapshot,
     field: FieldId,
@@ -139,7 +137,7 @@ impl Delog {
         }
     }
 
-    /// The accumulated derived topics (the run lifecycle flushes these — Task 8).
+    /// The accumulated derived topics; flushed by the run lifecycle.
     pub fn emit_buffer(&self) -> EmitBuffer {
         Rc::clone(&self.emit)
     }
@@ -340,7 +338,6 @@ mod tests {
         topic
             .add_field("y".into(), vec![4.0, 5.0, 6.0], None)
             .unwrap();
-        // length mismatch is rejected
         assert!(topic.add_field("bad".into(), vec![1.0], None).is_err());
         assert_eq!(topic.fields.len(), 2);
         assert_eq!(topic.times.len(), 3);

@@ -507,10 +507,6 @@ impl TopicAccum {
     }
 }
 
-// --- The FMTU payload needs its own decode; handle it where the payload is
-// still in scope. We special-case it inside `read_message`'s dispatch instead
-// of `read_fmtu` (which only exists to document the message). ---
-
 impl Decoder<'_> {
     fn decode_fmtu(&mut self, msgid: u8, payload: &[u8]) {
         let fmt = &self.formats[&msgid];

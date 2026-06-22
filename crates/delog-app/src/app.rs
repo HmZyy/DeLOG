@@ -63,6 +63,10 @@ fn combined_load_state(
     }
 }
 
+fn should_auto_open_diagnostics(enabled: bool, last_seen: Option<u64>, newest: u64) -> bool {
+    enabled && last_seen.is_none_or(|prev| newest > prev)
+}
+
 #[derive(Serialize)]
 struct DiagnosticsExportDoc {
     delog_diagnostics: u32,
@@ -244,6 +248,7 @@ pub struct DelogApp {
     exported_profiling_tx: mpsc::Sender<ProfilingExportResult>,
     browser_collapsed: bool,
     diagnostics_dock: DiagnosticsDock,
+    last_diagnostic_seq: Option<u64>,
     performance_dock: PerformanceDock,
     markers_dock: crate::markers::MarkersDock,
     performance_snapshot: PerformanceSnapshot,
@@ -299,8 +304,8 @@ impl DelogApp {
         let (exported_diagnostics_tx, exported_diagnostics) = mpsc::channel();
         let (exported_profiling_tx, exported_profiling) = mpsc::channel();
         let session = Session::new(cc.egui_ctx.clone());
-        // Share the registry into the cache manager so `cache_build`/
-        // `cache_append`/`minmax_build` land in the same dock.
+        // Share the metrics registry so cache build/append metrics land in the
+        // same dock as the rest of the app.
         let caches = CacheManager::new().with_metrics(std::sync::Arc::clone(session.metrics()));
         Self {
             session,
@@ -338,6 +343,7 @@ impl DelogApp {
             exported_profiling_tx,
             browser_collapsed: false,
             diagnostics_dock: DiagnosticsDock::default(),
+            last_diagnostic_seq: None,
             performance_dock: PerformanceDock::default(),
             markers_dock: crate::markers::MarkersDock::default(),
             performance_snapshot: PerformanceSnapshot::default(),
@@ -377,7 +383,6 @@ impl DelogApp {
         }
     }
 
-    /// Open every log dropped onto the window this frame.
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
         for file in dropped {
@@ -408,7 +413,6 @@ impl DelogApp {
             .expect("spawn file dialog thread");
     }
 
-    /// Drain dialog results queued by the worker thread.
     fn handle_picked_files(&mut self) {
         while let Ok(paths) = self.picked_files.try_recv() {
             for path in paths {
@@ -594,9 +598,7 @@ impl DelogApp {
         self.performance_last_refresh = Some(now);
     }
 
-    /// Assemble a fresh performance snapshot (metrics rings + resource totals +
-    /// per-trace summaries). Shared by the 4 Hz dock refresh and the profiling
-    /// export.
+    /// Shared by the 4 Hz dock refresh and the profiling export.
     fn build_performance_snapshot(
         &self,
         frame: &eframe::Frame,
@@ -633,9 +635,7 @@ impl DelogApp {
         }
     }
 
-    /// Paint the F12 debug overlay: key per-frame timings read live from the
-    /// metrics registry, anchored top-left so it clears the corner FPS badge
-    /// Non-interactive; toggled by the View menu or F12.
+    /// Anchored top-left so it clears the corner FPS badge.
     fn paint_debug_overlay(&self, ctx: &egui::Context) {
         if !self.settings.show_debug_overlay {
             return;
@@ -662,7 +662,7 @@ impl DelogApp {
                             ui.strong("last");
                             ui.strong("avg");
                             ui.end_row();
-                            // Frame timers (ms). Only ones with samples show.
+                            // Frame timers, in milliseconds.
                             for name in [
                                 "frame_total",
                                 "plot_paint_cpu",
@@ -1037,8 +1037,6 @@ impl DelogApp {
         // A restored view is authoritative — don't let the data-fit refit
         // overwrite it on the next frame.
         self.view_fitted = layout.view.is_some();
-        // Restore the fit-to-view toggle: when set, the view re-fits
-        // the data range each frame.
         self.fit_view_all = layout.fit_all;
         self.playback.set_speed(layout.speed as f32);
         self.playback.follow_live = layout.follow_live;
@@ -1309,12 +1307,8 @@ impl eframe::App for DelogApp {
         self.poll_trajectory_builds();
         self.frame = self.frame.wrapping_add(1);
 
-        // FPS indicator: measure the real wall-clock gap between
-        // frames. While the app renders continuously (playback, live, or any
-        // interaction egui repaints for) the gaps are small and we show a
-        // smoothed rate. When event-driven and truly idle the next frame is
-        // far apart — a rate from that gap is meaningless,
-        // so the corner badge reads "idle" instead.
+        // When event-driven and idle, the gap to the next frame is large and a
+        // rate computed from it is meaningless, so the badge reads "idle".
         let now = Instant::now();
         if let Some(prev) = self.last_frame_at.replace(now) {
             let gap = now.duration_since(prev).as_secs_f32();
@@ -1332,11 +1326,8 @@ impl eframe::App for DelogApp {
 
         let snapshot = self.session.snapshot();
 
-        // Cache lifecycle: shared origin, frame recency, drain builds, and an
-        // epoch-driven incremental append + GC.
-        // `global_range`: one `global_time_range()` call measured
-        // in isolation. It is O(total chunks across all topics) and called
-        // several times per frame from different sections, so this quantifies a
+        // `global_range` is O(total chunks across all topics) and called
+        // several times per frame, so it is timed in isolation to quantify a
         // suspected cross-cutting cost as chunks accumulate during live.
         let global_range_timer = self.session.metrics().scope("global_range");
         let global_range = snapshot.global_time_range();
@@ -1357,14 +1348,13 @@ impl eframe::App for DelogApp {
             self.playback.clamp_to(range);
             self.playback.advance(dt, range);
             if self.fit_view_all {
-                // Keep the entire range in view, growing it as data streams in.
                 self.view = Some(ViewX::from_range(range));
             } else if self.session.has_live_links() && self.playback.follow_live {
                 self.pin_view_to_live(range);
             }
 
-            // Idle-aware repaint policy: continuous frames only
-            // while playing (later: or a link is Connected).
+            // Idle-aware repaint: keep frames continuous only while playing or
+            // a live link is connected; otherwise stay event-driven.
             if self.playback.playing || self.session.has_connected_live() {
                 ui.ctx().request_repaint();
             }
@@ -1375,9 +1365,6 @@ impl eframe::App for DelogApp {
             self.caches.set_origin(0);
             self.view.get_or_insert(ViewX::new(0, 10_000_000));
         }
-        // Continuous render mode forces a repaint every frame,
-        // overriding the idle-aware policy above for both the data and
-        // empty-session branches.
         if self.settings.render_mode == RenderMode::Continuous {
             ui.ctx().request_repaint();
         }
@@ -1415,13 +1402,11 @@ impl eframe::App for DelogApp {
         }
         self.ensure_trajectory_build(ui.ctx(), &snapshot);
         self.maybe_autosave_session(&snapshot);
-        // Keep every plotted trace's cache requested/warm.
         for field in self.workspace.fields().collect::<Vec<_>>() {
             self.caches.request(field, &snapshot);
         }
         self.caches.evict_over_budget();
 
-        // Surface captured wgpu errors as diagnostics.
         for message in self.gpu.drain_gpu_errors(frame) {
             self.session
                 .push_diagnostic(delog_core::diagnostics::Diag::error("gpu", message));
@@ -1658,13 +1643,11 @@ impl eframe::App for DelogApp {
                         }
                     });
                 });
-                // FPS badge pinned to the far right, shown only when
-                // enabled in settings.
                 if self.settings.show_fps {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        match self.fps_ema {
+                    ui.with_layout(
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| match self.fps_ema {
                             Some(fps) => {
-                                // Green >60, orange 30..=60, red <30.
                                 let color = if fps > 59.0 {
                                     self.settings.theme.success()
                                 } else if fps >= 30.0 {
@@ -1677,21 +1660,18 @@ impl eframe::App for DelogApp {
                             None => {
                                 ui.weak("idle");
                             }
-                        }
-                    });
+                        },
+                    );
                 }
             });
         });
 
         drop(ui_menu_timer);
 
-        // Icon toolbar directly under the menu bar: streaming + 3D view
-        // toggles, plus live/loading status.
         let ui_toolbar_timer = self.session.metrics().scope("ui_toolbar");
         egui::Panel::top("tool_icons").show_inside(ui, |ui| {
             ui.horizontal(|ui| {
                 let streaming = self.session.has_live_links();
-                // Blue when a live link is active, neutral otherwise.
                 let stream_tint = if streaming {
                     self.settings.theme.accent()
                 } else {
@@ -1791,10 +1771,9 @@ impl eframe::App for DelogApp {
             });
         });
 
-        // Global timeline bar. `utc_offset_us` stays None
-        // until a parser captures a UTC reference (BIN GPS week / ULog
-        // time_ref_utc); `any_live` stays false until live links exist:
-        // the snapshot has no streaming flag yet.
+        // The timeline's `utc_offset_us` arg stays None until a parser captures
+        // a UTC reference (BIN GPS week / ULog time_ref_utc); `any_live` stays
+        // false because the snapshot has no streaming flag yet.
         drop(ui_toolbar_timer);
         if let Some(range) = snapshot.global_time_range() {
             let ui_timeline_timer = self.session.metrics().scope("ui_timeline");
@@ -1820,7 +1799,6 @@ impl eframe::App for DelogApp {
                     self.playback.unlock_live();
                     self.view_fitted = true;
                 }
-                // Manual-marker flag interactions.
                 if let Some(t_us) = action.marker_jump {
                     self.playback.scrub(t_us, range);
                 }
@@ -1899,7 +1877,6 @@ impl eframe::App for DelogApp {
                     self.playback.scrub(target, range);
                 }
                 if add_marker {
-                    // Drop a manual marker at the playhead.
                     self.markers.add_at(self.playback.t_us);
                 }
             }
@@ -1907,6 +1884,19 @@ impl eframe::App for DelogApp {
 
         let ui_diagnostics_timer = self.session.metrics().scope("ui_diagnostics");
         let diagnostics = self.session.diagnostic_records();
+        // Auto-open the dock when a new (distinct) diagnostic arrives. The seq is
+        // tracked even when the feature is off so re-enabling it never opens for
+        // diagnostics that landed while disabled.
+        if let Some(newest_seq) = diagnostics.iter().map(|record| record.seq).max() {
+            if should_auto_open_diagnostics(
+                self.settings.auto_open_diagnostics,
+                self.last_diagnostic_seq,
+                newest_seq,
+            ) {
+                self.diagnostics_dock.open = true;
+            }
+            self.last_diagnostic_seq = Some(newest_seq);
+        }
         if self.diagnostics_dock.open {
             egui::Panel::bottom("diagnostics")
                 .resizable(true)
@@ -2748,6 +2738,20 @@ mod tests {
     use delog_core::snapshot::StoreSnapshot;
 
     use super::*;
+
+    #[test]
+    fn auto_open_diagnostics_only_fires_for_newer_seqs_when_enabled() {
+        // First diagnostic ever seen opens the dock.
+        assert!(should_auto_open_diagnostics(true, None, 0));
+        // A strictly newer seq opens it again.
+        assert!(should_auto_open_diagnostics(true, Some(3), 4));
+        // The same (or older) seq does not — avoids reopening after the user closes.
+        assert!(!should_auto_open_diagnostics(true, Some(4), 4));
+        assert!(!should_auto_open_diagnostics(true, Some(5), 4));
+        // Disabled never opens, even for a brand-new diagnostic.
+        assert!(!should_auto_open_diagnostics(false, None, 0));
+        assert!(!should_auto_open_diagnostics(false, Some(3), 9));
+    }
 
     #[test]
     fn combined_load_state_keeps_parser_label_separate_without_duplicates() {

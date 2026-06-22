@@ -57,7 +57,6 @@ pub fn draw(
     }
 
     let painter = ui.painter();
-    // Vertical cursor line at the pointer.
     painter.vline(
         pos.x,
         rect.y_range(),

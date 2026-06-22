@@ -446,8 +446,7 @@ fn request_python_interrupt() {
     // Safety: both functions are documented as safe to call from any thread
     // without holding the GIL.
     extern "C" fn raise_keyboard_interrupt(_arg: *mut std::ffi::c_void) -> std::ffi::c_int {
-        // Set the exception on the current thread state, then return -1 so
-        // the eval loop propagates it immediately.
+        // Returns -1 so the eval loop propagates the exception immediately.
         // Safety: called from within a CPython eval-loop pending-call
         // callback; PyExc_KeyboardInterrupt is a valid, initialized static.
         unsafe {
@@ -498,7 +497,6 @@ fn worker_loop(
     active_live: Arc<Mutex<HashMap<String, Vec<LiveTransformSpec>>>>,
     parser_cancellation: Arc<Mutex<ParserCancellationState>>,
 ) {
-    // One persistent globals dict for the whole session.
     let globals: Py<PyDict> = Python::attach(|py| PyDict::new(py).unbind());
     // Per-script-name snapshot-emit source from the previous run, for
     // replace-on-rerun (the `emit_topics` Derived source). Kept separate from
@@ -513,10 +511,8 @@ fn worker_loop(
     // Live transforms currently active, keyed by the registering script name. A
     // re-run replaces that script's set.
     let mut active_transforms: HashMap<String, Vec<ActiveTransform>> = HashMap::new();
-    // Monotonic counter for generation tracking across script runs.
     let mut run_counter: u64 = 0;
 
-    // Install stdout/stderr capture once, before the command loop.
     Python::attach(|py| {
         let sys = py.import("sys").expect("import sys");
         let cap =
@@ -1174,7 +1170,6 @@ mod tests {
         use delog_core::ingest::ingest_channel;
         use delog_core::ingestor::{Ingestor, NullObserver};
 
-        // Write side: a real ingestor thread we emit into.
         let ingestor = Ingestor::new(NullObserver);
         let write_store = ingestor.store();
         let (sender, receiver) = ingest_channel();
@@ -1343,7 +1338,6 @@ def f(batch):
         let engine =
             ScriptEngine::spawn(Arc::new(DataStore::new()), dummy_sender(), test_metrics());
         let _ = engine.send(ScriptCommand::Eval("while True:\n    pass".into()));
-        // Let the interpreter enter the loop, then interrupt.
         std::thread::sleep(std::time::Duration::from_millis(200));
         engine.request_interrupt();
         let mut err = None;

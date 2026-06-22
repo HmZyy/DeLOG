@@ -45,13 +45,11 @@ fn read_store() -> Arc<DataStore> {
 
 #[test]
 fn accel_magnitude_script_emits_expected_values() {
-    // Write side: a real ingestor thread to receive derived data.
     let ingestor = Ingestor::new(NullObserver);
     let write_store = ingestor.store();
     let (sender, receiver) = ingest_channel();
     let ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
 
-    // Read side: the IMU store built above.
     let engine = ScriptEngine::spawn(read_store(), sender, Arc::new(MetricsRegistry::new()));
     let script = r#"
 import numpy as np
