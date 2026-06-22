@@ -11,14 +11,10 @@ rust-version.workspace = true
 name = "delog"
 path = "src/main.rs"
 
-# `docs/logo.png` is decoded + resized to 256x256 at build time: the raw RGBA is
-# embedded as the runtime window icon, and (on Windows) an .ico is compiled into
-# the .exe so the logo also shows in Explorer / the taskbar pin.
+# `docs/logo.png` is decoded + resized to 256x256 at build time and embedded as
+# the runtime window icon. It is not compiled into the .exe as a resource icon.
 [build-dependencies]
 image = { workspace = true }
-
-[target.'cfg(windows)'.build-dependencies]
-winresource = { workspace = true }
 
 [features]
 # Embedded-Python scripting is ON by default. Build without Python via
