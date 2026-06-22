@@ -56,13 +56,11 @@ mavlink = { version = "0.18.0", default-features = false, features = [
 ] }
 serialport = "4.9.0"
 
-# app packaging (build scripts): decode/resize the logo into the window icon
-# and the Windows .exe resource icon. Build-only; not linked into the binary.
+# app packaging (build scripts): decode/resize the logo into the runtime window
+# icon. Build-only; not linked into the binary.
 image = { version = "0.25.10", default-features = false, features = [
   "png",
-  "ico",
 ] }
-winresource = "0.1.31"
 
 # 3D models
 gltf = "1.4.1"
