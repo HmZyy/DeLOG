@@ -255,6 +255,7 @@ pub struct DelogApp {
     performance_last_refresh: Option<Instant>,
     browser_query: String,
     browser_selection: browser::Selection,
+    browser_expanded: browser::Expanded,
     /// Cached browser tree keyed by the snapshot epoch it was built from
     /// (offset edits also bump the epoch), so `BrowserModel::from_snapshot`
     /// runs once per data change instead of every frame (it is O(topics×fields)
@@ -350,6 +351,7 @@ impl DelogApp {
             performance_last_refresh: None,
             browser_query: String::new(),
             browser_selection: browser::Selection::default(),
+            browser_expanded: browser::Expanded::default(),
             browser_model: None,
             offset_dialog: None,
             source_metadata_dialog: None,
@@ -1979,12 +1981,10 @@ impl eframe::App for DelogApp {
                 Some((cached_epoch, model)) if cached_epoch == epoch => model,
                 _ => BrowserModel::from_snapshot(&snapshot),
             };
-            let browser_panel = egui::Panel::left("data_browser_expanded").resizable(false);
-            let browser_panel = if model.is_empty() {
-                browser_panel.default_size(ui.spacing().text_edit_width)
-            } else {
-                browser_panel
-            };
+            let browser_panel = egui::Panel::left("data_browser_expanded")
+                .resizable(true)
+                .default_size(ui.spacing().text_edit_width)
+                .size_range(180.0..=520.0);
             browser_panel.show_inside(ui, |ui| {
                 // Offset edits go through the ingest thread (the single
                 // registry writer) and come back as a new epoch.
@@ -1993,6 +1993,7 @@ impl eframe::App for DelogApp {
                     &model,
                     &mut self.browser_query,
                     &mut self.browser_selection,
+                    &mut self.browser_expanded,
                     &mut self.offset_dialog,
                 );
                 if browser_response.collapse_requested {

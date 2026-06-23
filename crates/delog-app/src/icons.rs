@@ -120,6 +120,16 @@ pub fn close() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/x.svg")
 }
 
+/// Expanded tree node (browser source/topic open).
+pub fn chevron_down() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/chevron-down.svg")
+}
+
+/// Collapsed tree node (browser source/topic closed).
+pub fn chevron_right() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/chevron-right.svg")
+}
+
 /// Hide the left data browser panel.
 pub fn panel_left_close() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/panel-left-close.svg")

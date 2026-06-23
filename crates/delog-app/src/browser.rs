@@ -252,6 +252,65 @@ impl Selection {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct Expanded {
+    collapsed_sources: std::collections::HashSet<SourceId>,
+    expanded_topics: std::collections::HashSet<TopicId>,
+}
+
+impl Expanded {
+    pub fn source_open(&self, id: SourceId) -> bool {
+        !self.collapsed_sources.contains(&id)
+    }
+
+    pub fn topic_open(&self, id: TopicId) -> bool {
+        self.expanded_topics.contains(&id)
+    }
+
+    pub fn toggle_source(&mut self, id: SourceId) {
+        if !self.collapsed_sources.remove(&id) {
+            self.collapsed_sources.insert(id);
+        }
+    }
+
+    pub fn toggle_topic(&mut self, id: TopicId) {
+        if !self.expanded_topics.remove(&id) {
+            self.expanded_topics.insert(id);
+        }
+    }
+}
+
+/// One row of the flattened, virtualizable tree. Borrows the cached model.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Row<'a> {
+    Source(&'a SourceNode),
+    /// Per-source controls (time range + offset), shown under an open source.
+    SourceMeta(&'a SourceNode),
+    Topic(&'a TopicNode),
+    Field(&'a FieldNode),
+}
+
+/// Flatten the (already filtered) model into the visible row sequence, honoring
+/// open state. While filtering, every surviving topic is forced open so matches
+/// show immediately.
+pub fn flatten<'a>(model: &'a BrowserModel, expanded: &Expanded, filtering: bool) -> Vec<Row<'a>> {
+    let mut rows = Vec::new();
+    for source in &model.sources {
+        rows.push(Row::Source(source));
+        if !expanded.source_open(source.id) {
+            continue;
+        }
+        rows.push(Row::SourceMeta(source));
+        for topic in &source.topics {
+            rows.push(Row::Topic(topic));
+            if filtering || expanded.topic_open(topic.id) {
+                rows.extend(topic.fields.iter().map(Row::Field));
+            }
+        }
+    }
+    rows
+}
+
 /// Natural order: digit runs compare numerically, text runs case-insensitively
 /// (`GPS[2]` before `GPS[10]`).
 fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
@@ -355,6 +414,7 @@ pub fn ui(
     model: &BrowserModel,
     query: &mut String,
     selection: &mut Selection,
+    expanded: &mut Expanded,
     offset_dialog: &mut Option<(SourceId, i64)>,
 ) -> BrowserResponse {
     let mut response = BrowserResponse::default();
@@ -407,7 +467,8 @@ pub fn ui(
         return response;
     }
 
-    // Visible field order, for shift-range selection and drag payloads.
+    // Field order for shift-range selection and drag payloads — every field in
+    // the (filtered) model, independent of collapse state.
     let visible: Vec<FieldId> = model
         .sources
         .iter()
@@ -415,80 +476,45 @@ pub fn ui(
         .flat_map(|t| t.fields.iter().map(|f| f.id))
         .collect();
 
+    // Flatten to the visible row sequence; render only the on-screen slice.
+    // Uniform row height lets `show_rows` virtualize, so cost scales with the
+    // viewport — not with how many sources/topics are expanded.
+    let rows = flatten(model, expanded, filtering);
+    let row_height = ui.spacing().interact_size.y;
+
     let mut offset_change = None;
     let mut remove_source = None;
     let mut inspect_source = None;
     let mut inspect_field_stats = None;
     let mut generate_markers = None;
     egui::ScrollArea::vertical()
-        .auto_shrink([false, true])
-        .show(ui, |ui| {
+        .auto_shrink([false, false])
+        .show_rows(ui, row_height, rows.len(), |ui, range| {
             ui.set_width(ui.available_width());
-            for source in &model.sources {
-                let header = format!("{}  ({} rows)", source.label, source.rows);
-                let collapsing = egui::CollapsingHeader::new(header)
-                    .id_salt(("source", source.id.0))
-                    .default_open(true)
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            if let Some(range) = source.range {
-                                ui.weak(format!(
-                                    "{:.3}–{:.3} s",
-                                    range.min_us as f64 / 1e6,
-                                    range.max_us as f64 / 1e6
-                                ));
-                            }
-                            if let Some(change) = offset_widget(ui, source, offset_dialog) {
-                                offset_change = Some(change);
-                            }
-                        });
-                        for topic in &source.topics {
-                            // While filtering, surviving topics open so the
-                            // matched fields are visible immediately.
-                            egui::CollapsingHeader::new(format!(
-                                "{}  ({})",
-                                topic.name, topic.rows
-                            ))
-                            .id_salt(("topic", topic.id.0))
-                            .default_open(false)
-                            .open(filtering.then_some(true))
-                            .show(ui, |ui| {
-                                for field in &topic.fields {
-                                    match field_row(ui, field, selection, &visible) {
-                                        Some(FieldRowAction::InspectStats(f)) => {
-                                            inspect_field_stats = Some(f);
-                                        }
-                                        Some(FieldRowAction::GenerateMarkers(f)) => {
-                                            generate_markers = Some(f);
-                                        }
-                                        None => {}
-                                    }
-                                }
-                            });
+            for &row in &rows[range] {
+                match row {
+                    Row::Source(source) => {
+                        match source_header_row(ui, source, expanded, row_height) {
+                            Some(SourceAction::Inspect) => inspect_source = Some(source.id),
+                            Some(SourceAction::Remove) => remove_source = Some(source.id),
+                            None => {}
                         }
-                    });
-                collapsing.header_response.context_menu(|ui| {
-                    let info = egui::Image::new(crate::icons::info())
-                        .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
-                        .tint(ui.visuals().text_color());
-                    if ui
-                        .add(egui::Button::image_and_text(info, "Source metadata"))
-                        .clicked()
-                    {
-                        inspect_source = Some(source.id);
-                        ui.close();
                     }
-                    let trash = egui::Image::new(crate::icons::trash())
-                        .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
-                        .tint(ui.visuals().error_fg_color);
-                    if ui
-                        .add(egui::Button::image_and_text(trash, "Remove source"))
-                        .clicked()
-                    {
-                        remove_source = Some(source.id);
-                        ui.close();
+                    Row::SourceMeta(source) => {
+                        if let Some(change) = source_meta_row(ui, source, offset_dialog, row_height)
+                        {
+                            offset_change = Some(change);
+                        }
                     }
-                });
+                    Row::Topic(topic) => topic_header_row(ui, topic, expanded, row_height),
+                    Row::Field(field) => {
+                        match field_row_band(ui, field, selection, &visible, row_height) {
+                            Some(FieldRowAction::InspectStats(f)) => inspect_field_stats = Some(f),
+                            Some(FieldRowAction::GenerateMarkers(f)) => generate_markers = Some(f),
+                            None => {}
+                        }
+                    }
+                }
             }
         });
 
@@ -501,6 +527,162 @@ pub fn ui(
     response.inspect_field_stats = inspect_field_stats;
     response.generate_markers = generate_markers;
     response
+}
+
+/// A source row's context-menu choice.
+enum SourceAction {
+    Inspect,
+    Remove,
+}
+
+/// Left indent applied per tree depth (≈ one chevron width + spacing).
+fn indent_step(ui: &egui::Ui) -> f32 {
+    ui.spacing().icon_width + ui.spacing().item_spacing.x
+}
+
+/// A right/down chevron drawn as a tinted SVG (no glyphs).
+fn chevron(ui: &mut egui::Ui, open: bool) {
+    let src = if open {
+        crate::icons::chevron_down()
+    } else {
+        crate::icons::chevron_right()
+    };
+    ui.add(
+        egui::Image::new(src)
+            .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
+            .tint(ui.visuals().text_color()),
+    );
+}
+
+/// Reserve one fixed-height row band so `ScrollArea::show_rows` can virtualize,
+/// laying content out left-to-right, vertically centered. Returns the band
+/// rect; header rows add their click/context interaction *on top* of this rect
+/// (via [`egui::Ui::interact`]) so it isn't occluded by the content widgets.
+fn row_band(
+    ui: &mut egui::Ui,
+    id_salt: impl std::hash::Hash,
+    height: f32,
+    add: impl FnOnce(&mut egui::Ui),
+) -> egui::Rect {
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+    let mut content = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt(id_salt)
+            .max_rect(rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    add(&mut content);
+    rect
+}
+
+/// Source header: chevron + label, click toggles, right-click for the source
+/// context menu.
+fn source_header_row(
+    ui: &mut egui::Ui,
+    source: &SourceNode,
+    expanded: &mut Expanded,
+    height: f32,
+) -> Option<SourceAction> {
+    let open = expanded.source_open(source.id);
+    let rect = row_band(ui, ("source", source.id.0), height, |ui| {
+        chevron(ui, open);
+        ui.label(egui::RichText::new(format!("{}  ({} rows)", source.label, source.rows)).strong());
+    });
+    let response = ui.interact(
+        rect,
+        egui::Id::new(("source-row", source.id.0)),
+        egui::Sense::click(),
+    );
+    if response.clicked() {
+        expanded.toggle_source(source.id);
+    }
+
+    let mut action = None;
+    response.context_menu(|ui| {
+        let info = egui::Image::new(crate::icons::info())
+            .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
+            .tint(ui.visuals().text_color());
+        if ui
+            .add(egui::Button::image_and_text(info, "Source metadata"))
+            .clicked()
+        {
+            action = Some(SourceAction::Inspect);
+            ui.close();
+        }
+        let trash = egui::Image::new(crate::icons::trash())
+            .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
+            .tint(ui.visuals().error_fg_color);
+        if ui
+            .add(egui::Button::image_and_text(trash, "Remove source"))
+            .clicked()
+        {
+            action = Some(SourceAction::Remove);
+            ui.close();
+        }
+    });
+    action
+}
+
+/// Per-source controls under an open source: time range + offset editor.
+fn source_meta_row(
+    ui: &mut egui::Ui,
+    source: &SourceNode,
+    offset_dialog: &mut Option<(SourceId, i64)>,
+    height: f32,
+) -> Option<(SourceId, i64)> {
+    let mut change = None;
+    let step = indent_step(ui);
+    row_band(ui, ("meta", source.id.0), height, |ui| {
+        ui.add_space(step);
+        if let Some(range) = source.range {
+            ui.weak(format!(
+                "{:.3}–{:.3} s",
+                range.min_us as f64 / 1e6,
+                range.max_us as f64 / 1e6
+            ));
+        }
+        if let Some(c) = offset_widget(ui, source, offset_dialog) {
+            change = Some(c);
+        }
+    });
+    change
+}
+
+/// Topic header: indented chevron + label, click toggles.
+fn topic_header_row(ui: &mut egui::Ui, topic: &TopicNode, expanded: &mut Expanded, height: f32) {
+    let open = expanded.topic_open(topic.id);
+    let step = indent_step(ui);
+    let rect = row_band(ui, ("topic", topic.id.0), height, |ui| {
+        ui.add_space(step);
+        chevron(ui, open);
+        ui.label(format!("{}  ({})", topic.name, topic.rows));
+    });
+    let response = ui.interact(
+        rect,
+        egui::Id::new(("topic-row", topic.id.0)),
+        egui::Sense::click(),
+    );
+    if response.clicked() {
+        expanded.toggle_topic(topic.id);
+    }
+}
+
+/// A field row inside a fixed-height band, indented under its topic.
+fn field_row_band(
+    ui: &mut egui::Ui,
+    field: &FieldNode,
+    selection: &mut Selection,
+    visible: &[FieldId],
+    height: f32,
+) -> Option<FieldRowAction> {
+    let mut action = None;
+    let step = indent_step(ui);
+    row_band(ui, ("fieldrow", field.id.0), height, |ui| {
+        ui.add_space(step * 2.0);
+        action = field_row(ui, field, selection, visible);
+    });
+    action
 }
 
 /// Inline drag-us offset on the source row: dragging
@@ -592,33 +774,40 @@ fn field_row(
     if dragging_this_field {
         selection.start_drag(field.id, current_select_modifier(ui), visible);
     }
-    let payload = selection.drag_payload(field.id, visible);
     let selected = selection.contains(field.id);
 
-    let response = drag_source_with_click(ui, id, payload, |ui| {
-        let fill = if selected {
-            ui.visuals().selection.bg_fill
-        } else {
-            egui::Color32::TRANSPARENT
-        };
-        egui::Frame::new()
-            .fill(fill)
-            .inner_margin(egui::Margin::symmetric(4, 1))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    let name_color = if selected {
-                        ui.visuals().selection.stroke.color
-                    } else {
-                        ui.visuals().text_color()
-                    };
-                    ui.label(egui::RichText::new(&field.name).color(name_color));
-                    ui.weak(field.dtype);
-                    if let Some(unit) = &field.unit {
-                        ui.weak(format!("[{unit}]"));
-                    }
+    // The drag payload is only consumed by the row actually being dragged, so
+    // compute it lazily — otherwise every visible row allocates a `Vec` (and
+    // scans the selection) every frame for nothing.
+    let response = drag_source_with_click(
+        ui,
+        id,
+        || selection.drag_payload(field.id, visible),
+        |ui| {
+            let fill = if selected {
+                ui.visuals().selection.bg_fill
+            } else {
+                egui::Color32::TRANSPARENT
+            };
+            egui::Frame::new()
+                .fill(fill)
+                .inner_margin(egui::Margin::symmetric(4, 1))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let name_color = if selected {
+                            ui.visuals().selection.stroke.color
+                        } else {
+                            ui.visuals().text_color()
+                        };
+                        ui.label(egui::RichText::new(&field.name).color(name_color));
+                        ui.weak(field.dtype);
+                        if let Some(unit) = &field.unit {
+                            ui.weak(format!("[{unit}]"));
+                        }
+                    });
                 });
-            });
-    });
+        },
+    );
     let response = if let Some(description) = hover_description(field.description.as_deref()) {
         response.on_hover_text(description)
     } else {
@@ -677,11 +866,11 @@ fn current_select_modifier(ui: &egui::Ui) -> SelectMod {
 fn drag_source_with_click<Payload: std::any::Any + Send + Sync>(
     ui: &mut egui::Ui,
     id: egui::Id,
-    payload: Payload,
+    make_payload: impl FnOnce() -> Payload,
     add_contents: impl FnOnce(&mut egui::Ui),
 ) -> egui::Response {
     if ui.ctx().is_being_dragged(id) {
-        egui::DragAndDrop::set_payload(ui.ctx(), payload);
+        egui::DragAndDrop::set_payload(ui.ctx(), make_payload());
 
         // Paint the row to a floating layer that follows the pointer.
         let layer_id = egui::LayerId::new(egui::Order::Tooltip, id);
@@ -985,5 +1174,84 @@ mod tests {
 
         // Blank query is the identity.
         assert_eq!(model.filtered(""), model);
+    }
+
+    /// Render the flattened rows as `S:`/`M:`/`T:`/`F:` labels for assertion.
+    fn labels(rows: &[Row]) -> Vec<String> {
+        rows.iter()
+            .map(|row| match row {
+                Row::Source(s) => format!("S:{}", s.label),
+                Row::SourceMeta(s) => format!("M:{}", s.label),
+                Row::Topic(t) => format!("T:{}", t.name),
+                Row::Field(f) => format!("F:{}", f.name),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn expanded_defaults_open_sources_and_closed_topics() {
+        let expanded = Expanded::default();
+        assert!(expanded.source_open(SourceId(1)));
+        assert!(!expanded.topic_open(TopicId(1)));
+    }
+
+    #[test]
+    fn toggling_a_source_closes_then_reopens_it() {
+        let mut expanded = Expanded::default();
+        expanded.toggle_source(SourceId(7));
+        assert!(!expanded.source_open(SourceId(7)));
+        expanded.toggle_source(SourceId(7));
+        assert!(expanded.source_open(SourceId(7)));
+    }
+
+    #[test]
+    fn toggling_a_topic_opens_then_closes_it() {
+        let mut expanded = Expanded::default();
+        expanded.toggle_topic(TopicId(3));
+        assert!(expanded.topic_open(TopicId(3)));
+        expanded.toggle_topic(TopicId(3));
+        assert!(!expanded.topic_open(TopicId(3)));
+    }
+
+    #[test]
+    fn flatten_default_shows_source_meta_and_topics_but_not_fields() {
+        let model = BrowserModel::from_snapshot(&snapshot());
+        let rows = flatten(&model, &Expanded::default(), false);
+        assert_eq!(labels(&rows), vec!["S:flight_21", "M:flight_21", "T:GPS"]);
+    }
+
+    #[test]
+    fn flatten_reveals_fields_under_an_expanded_topic() {
+        let model = BrowserModel::from_snapshot(&snapshot());
+        let topic_id = model.sources[0].topics[0].id;
+        let mut expanded = Expanded::default();
+        expanded.toggle_topic(topic_id);
+        let rows = flatten(&model, &expanded, false);
+        // Fields sort naturally: Alt before Lat.
+        assert_eq!(
+            labels(&rows),
+            vec!["S:flight_21", "M:flight_21", "T:GPS", "F:Alt", "F:Lat"]
+        );
+    }
+
+    #[test]
+    fn flatten_hides_topics_and_meta_under_a_collapsed_source() {
+        let model = BrowserModel::from_snapshot(&snapshot());
+        let source_id = model.sources[0].id;
+        let mut expanded = Expanded::default();
+        expanded.toggle_source(source_id);
+        let rows = flatten(&model, &expanded, false);
+        assert_eq!(labels(&rows), vec!["S:flight_21"]);
+    }
+
+    #[test]
+    fn flatten_while_filtering_forces_every_topic_open() {
+        let model = BrowserModel::from_snapshot(&snapshot());
+        // No topic toggled, but filtering forces fields visible.
+        let rows = flatten(&model, &Expanded::default(), true);
+        assert_eq!(
+            labels(&rows),
+            vec!["S:flight_21", "M:flight_21", "T:GPS", "F:Alt", "F:Lat"]
+        );
     }
 }
