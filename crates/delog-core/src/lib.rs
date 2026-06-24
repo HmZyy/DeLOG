@@ -7,6 +7,7 @@
 pub mod analysis;
 pub mod chunk;
 pub mod diagnostics;
+pub mod export;
 pub mod field_view;
 pub mod identity;
 pub mod ingest;
