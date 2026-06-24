@@ -25,13 +25,8 @@ fn main() {
 
     let logo = image::open(LOGO)
         .unwrap_or_else(|e| panic!("failed to read {LOGO}: {e}"))
-        .resize(
-            ICON_SIZE,
-            ICON_SIZE,
-            image::imageops::FilterType::Lanczos3,
-        );
+        .resize(ICON_SIZE, ICON_SIZE, image::imageops::FilterType::Lanczos3);
 
     // Runtime window icon: raw RGBA, included verbatim by `main.rs`.
-    std::fs::write(out_dir.join("icon.rgba"), logo.to_rgba8().into_raw())
-        .expect("write icon.rgba");
+    std::fs::write(out_dir.join("icon.rgba"), logo.to_rgba8().into_raw()).expect("write icon.rgba");
 }
