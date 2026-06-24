@@ -19,12 +19,24 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Default builds: embedded-Python scripting ON.
           - os: ubuntu-latest
             name: linux-x86_64
             bin: delog
+            cargo_args: ""
           - os: windows-latest
             name: windows-x86_64
             bin: delog.exe
+            cargo_args: ""
+          # Scripting-free builds: drop default features (Python/code editor).
+          - os: ubuntu-latest
+            name: linux-x86_64-no-scripting
+            bin: delog
+            cargo_args: "--no-default-features"
+          - os: windows-latest
+            name: windows-x86_64-no-scripting
+            bin: delog.exe
+            cargo_args: "--no-default-features"
     steps:
       - uses: actions/checkout@v5
 
@@ -43,7 +55,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build release binary
-        run: cargo build --release --locked -p delog-app
+        run: cargo build --release --locked -p delog-app ${{ matrix.cargo_args }}
 
       - name: Package (Linux)
         if: runner.os == 'Linux'
