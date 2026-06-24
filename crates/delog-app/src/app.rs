@@ -1001,7 +1001,7 @@ impl DelogApp {
                     .map_err(|e| e.to_string())?;
                     use std::io::Write;
                     w.flush().map_err(|e| e.to_string())?;
-                    Ok::<_, String>((path.clone(), rows))
+                    Ok::<_, String>((path, rows))
                 })();
                 let _ = tx.send(result);
                 ctx.request_repaint();
