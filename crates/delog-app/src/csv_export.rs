@@ -3,9 +3,6 @@
 //! The row engine is `delog_core::export`; this module formats its `Cell` rows as
 //! CSV and drives the off-thread write. egui wiring lives in `app.rs`.
 
-// Public API consumed by Task 6 (dialog + app wiring); not yet called.
-#![allow(dead_code)]
-
 use std::collections::HashSet;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,6 +12,104 @@ use delog_core::identity::FieldId;
 use delog_core::snapshot::StoreSnapshot;
 
 use crate::browser::BrowserModel;
+
+/// What the dialog hands back when the user clicks Export.
+pub struct CsvExportRequest {
+    pub fields: Vec<FieldId>,
+    pub window: (i64, i64),
+    pub mode: ResampleMode,
+}
+
+/// Render the export window. Returns Some(request) on Export click.
+/// `visible` is the current ViewX (min,max); `full` is the global range.
+pub fn dialog_ui(
+    ctx: &egui::Context,
+    state: &mut CsvExportState,
+    available: &[CsvField],
+    visible: (i64, i64),
+    full: (i64, i64),
+) -> Option<CsvExportRequest> {
+    let mut request = None;
+    let mut open = state.open;
+    egui::Window::new("Export CSV")
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(true)
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Search:");
+                ui.text_edit_singleline(&mut state.search);
+            });
+            let needle = state.search.to_lowercase();
+            egui::ScrollArea::vertical()
+                .max_height(240.0)
+                .show(ui, |ui| {
+                    for f in available {
+                        if !needle.is_empty() && !f.label.to_lowercase().contains(&needle) {
+                            continue;
+                        }
+                        let mut on = state.checked.contains(&f.id);
+                        if ui.checkbox(&mut on, &f.label).changed() {
+                            if on {
+                                state.checked.insert(f.id);
+                            } else {
+                                state.checked.remove(&f.id);
+                            }
+                        }
+                    }
+                });
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label("Range:");
+                ui.radio_value(&mut state.visible_range, true, "Visible window");
+                ui.radio_value(&mut state.visible_range, false, "Full");
+            });
+            ui.horizontal(|ui| {
+                ui.label("Resample:");
+                egui::ComboBox::from_id_salt("csv_mode")
+                    .selected_text(MODES[state.mode_ix])
+                    .show_ui(ui, |ui| {
+                        for (i, m) in MODES.iter().enumerate() {
+                            ui.selectable_value(&mut state.mode_ix, i, *m);
+                        }
+                    });
+                if state.mode_ix == 2 {
+                    ui.label("dt (s):");
+                    ui.add(
+                        egui::DragValue::new(&mut state.dt_s)
+                            .speed(0.001)
+                            .range(1e-4..=3600.0),
+                    );
+                }
+            });
+            ui.separator();
+            ui.horizontal(|ui| {
+                let can_export = !state.checked.is_empty();
+                if ui
+                    .add_enabled(can_export, egui::Button::new("Export…"))
+                    .clicked()
+                {
+                    // Preserve the on-screen order of `available`.
+                    let fields: Vec<FieldId> = available
+                        .iter()
+                        .map(|f| f.id)
+                        .filter(|id| state.checked.contains(id))
+                        .collect();
+                    let window = if state.visible_range { visible } else { full };
+                    request = Some(CsvExportRequest {
+                        fields,
+                        window,
+                        mode: state.mode(),
+                    });
+                }
+                if ui.button("Cancel").clicked() {
+                    state.open = false;
+                }
+            });
+        });
+    state.open = open && state.open;
+    request
+}
 
 pub const MODES: [&str; 3] = ["None (union)", "Previous-fill", "Linear @ dt"];
 
