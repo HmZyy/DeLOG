@@ -113,6 +113,11 @@ impl<'a> FieldView<'a> {
         &self.store.schema.fields()[self.col_index].dtype
     }
 
+    /// The schema entry for this field (name, dtype, unit, multiplier).
+    pub fn schema_field(&self) -> &crate::schema::FieldSchema {
+        &self.store.schema.fields()[self.col_index]
+    }
+
     /// Chunks whose raw time range overlaps the requested effective range.
     pub fn chunks_overlapping(
         &'a self,
