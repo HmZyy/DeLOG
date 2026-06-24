@@ -146,15 +146,12 @@ fn cell_from(value: crate::field_view::SampleValue<'_>, multiplier: f64) -> Cell
 }
 
 pub struct RowCursor<'a> {
-    // Retained for Task 4 (Linear interpolation mode).
-    #[allow(dead_code)]
     views: Vec<FieldView<'a>>,
-    #[allow(dead_code)]
     multipliers: Vec<f64>,
     t_start: i64,
     t_end: i64,
     mode: ResampleMode,
-    started: bool,
+    next_grid_t: i64,
     cursors: Vec<FieldCursor<'a>>,
     last: Vec<Cell>,
 }
@@ -165,7 +162,7 @@ impl fmt::Debug for RowCursor<'_> {
             .field("t_start", &self.t_start)
             .field("t_end", &self.t_end)
             .field("mode", &self.mode)
-            .field("started", &self.started)
+            .field("next_grid_t", &self.next_grid_t)
             .field("cursors_len", &self.cursors.len())
             .finish_non_exhaustive()
     }
@@ -212,7 +209,7 @@ impl<'a> RowCursor<'a> {
             t_start: t_start_us,
             t_end: t_end_us,
             mode,
-            started: false,
+            next_grid_t: t_start_us,
             cursors,
             last: vec![Cell::Empty; n],
         })
@@ -252,9 +249,22 @@ impl<'a> RowCursor<'a> {
         Some(t)
     }
 
-    fn next_linear_row(&mut self, _dt_us: i64, _out: &mut Vec<Cell>) -> Option<i64> {
-        // Task 4.
-        None
+    fn next_linear_row(&mut self, dt_us: i64, out: &mut Vec<Cell>) -> Option<i64> {
+        if self.next_grid_t > self.t_end {
+            return None;
+        }
+        let t = self.next_grid_t;
+        out.clear();
+        for (view, &mult) in self.views.iter().zip(&self.multipliers) {
+            let cell = view
+                .sample_at(t, crate::field_view::SampleMode::Linear)
+                .and_then(|s| s.value.as_f64())
+                .map(|v| Cell::Num(v * mult))
+                .unwrap_or(Cell::Empty);
+            out.push(cell);
+        }
+        self.next_grid_t = self.next_grid_t.saturating_add(dt_us);
+        Some(t)
     }
 }
 
@@ -444,6 +454,51 @@ mod tests {
                 (2, vec![Num(3.0)]),
             ]
         );
+    }
+
+    #[test]
+    fn linear_grid_interpolates_between_samples() {
+        // a: t=0 ->0.0, t=10 ->10.0 ; grid dt=5 over [0,10].
+        let fields = vec![num("a")];
+        let cols: Vec<arrow::array::ArrayRef> = vec![Arc::new(Float64Array::from(vec![0.0, 10.0]))];
+        let (snap, ids) = snapshot_with(&fields, vec![0, 10], cols, 0);
+        let rows = collect(&snap, &ids, 0, 10, ResampleMode::Linear { dt_us: 5 });
+        assert_eq!(
+            rows,
+            vec![
+                (0, vec![Num(0.0)]),
+                (5, vec![Num(5.0)]),
+                (10, vec![Num(10.0)]),
+            ]
+        );
+    }
+
+    #[test]
+    fn linear_outside_sample_span_is_gap() {
+        let fields = vec![num("a")];
+        let cols: Vec<arrow::array::ArrayRef> = vec![Arc::new(Float64Array::from(vec![1.0, 2.0]))];
+        let (snap, ids) = snapshot_with(&fields, vec![10, 20], cols, 0);
+        // grid starts before the first sample and ends after the last.
+        let rows = collect(&snap, &ids, 0, 30, ResampleMode::Linear { dt_us: 10 });
+        assert_eq!(
+            rows,
+            vec![
+                (0, vec![Empty]), // before first sample, no bracket
+                (10, vec![Num(1.0)]),
+                (20, vec![Num(2.0)]),
+                (30, vec![Empty]), // after last sample
+            ]
+        );
+    }
+
+    #[test]
+    fn linear_multiplier_applied() {
+        let mut f = num("a");
+        f.multiplier = 2.0;
+        let cols: Vec<arrow::array::ArrayRef> = vec![Arc::new(Float64Array::from(vec![0.0, 10.0]))];
+        let (snap, ids) = snapshot_with(&[f], vec![0, 10], cols, 0);
+        let rows = collect(&snap, &ids, 0, 10, ResampleMode::Linear { dt_us: 10 });
+        assert_eq!(rows, vec![(0, vec![Num(0.0)]), (10, vec![Num(20.0)])]);
     }
 
     #[test]
