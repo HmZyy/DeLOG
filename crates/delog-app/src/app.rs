@@ -31,6 +31,7 @@ type LayoutImportResult = Result<LayoutDoc, LayoutError>;
 type LayoutExportResult = Result<std::path::PathBuf, LayoutError>;
 type DiagnosticsExportResult = Result<std::path::PathBuf, String>;
 type ProfilingExportResult = Result<std::path::PathBuf, String>;
+type CsvExportResult = Result<(std::path::PathBuf, u64), String>;
 const SESSION_AUTOSAVE_INTERVAL: Duration = Duration::from_secs(30);
 const PERFORMANCE_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -246,6 +247,10 @@ pub struct DelogApp {
     exported_diagnostics_tx: mpsc::Sender<DiagnosticsExportResult>,
     exported_profiling: mpsc::Receiver<ProfilingExportResult>,
     exported_profiling_tx: mpsc::Sender<ProfilingExportResult>,
+    csv_export: crate::csv_export::CsvExportState,
+    csv_export_tx: mpsc::Sender<CsvExportResult>,
+    csv_export_rx: mpsc::Receiver<CsvExportResult>,
+    csv_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     browser_collapsed: bool,
     diagnostics_dock: DiagnosticsDock,
     last_diagnostic_seq: Option<u64>,
@@ -303,6 +308,7 @@ impl DelogApp {
         let (exported_layouts_tx, exported_layouts) = mpsc::channel();
         let (exported_diagnostics_tx, exported_diagnostics) = mpsc::channel();
         let (exported_profiling_tx, exported_profiling) = mpsc::channel();
+        let (csv_export_tx, csv_export_rx) = mpsc::channel();
         let session = Session::new(cc.egui_ctx.clone());
         // Share the metrics registry so cache build/append metrics land in the
         // same dock as the rest of the app.
@@ -341,6 +347,10 @@ impl DelogApp {
             exported_diagnostics_tx,
             exported_profiling,
             exported_profiling_tx,
+            csv_export: crate::csv_export::CsvExportState::default(),
+            csv_export_tx,
+            csv_export_rx,
+            csv_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             browser_collapsed: false,
             diagnostics_dock: DiagnosticsDock::default(),
             last_diagnostic_seq: None,
@@ -483,6 +493,21 @@ impl DelogApp {
                         "profiling-export",
                         err,
                     )),
+            }
+        }
+
+        while let Ok(result) = self.csv_export_rx.try_recv() {
+            match result {
+                Ok((path, rows)) => {
+                    self.session
+                        .push_diagnostic(delog_core::diagnostics::Diag::info(
+                            "csv-export",
+                            format!("exported {rows} rows to {}", path.display()),
+                        ))
+                }
+                Err(err) => self
+                    .session
+                    .push_diagnostic(delog_core::diagnostics::Diag::error("csv-export", err)),
             }
         }
     }
@@ -922,6 +947,66 @@ impl DelogApp {
                 }
             })
             .expect("spawn profiling export dialog thread");
+    }
+
+    fn spawn_csv_export(
+        &mut self,
+        ctx: &egui::Context,
+        snapshot: &std::sync::Arc<delog_core::snapshot::StoreSnapshot>,
+        all_fields: &[crate::csv_export::CsvField],
+        req: crate::csv_export::CsvExportRequest,
+    ) {
+        use std::sync::atomic::Ordering;
+        let chosen: Vec<crate::csv_export::CsvField> = req
+            .fields
+            .iter()
+            .filter_map(|id| all_fields.iter().find(|f| f.id == *id))
+            .map(|f| crate::csv_export::CsvField {
+                id: f.id,
+                label: f.label.clone(),
+                unit: f.unit.clone(),
+            })
+            .collect();
+        let origin_us = snapshot.global_time_range().map(|r| r.min_us).unwrap_or(0);
+        let snapshot = std::sync::Arc::clone(snapshot);
+        let tx = self.csv_export_tx.clone();
+        let ctx = ctx.clone();
+        self.csv_cancel.store(false, Ordering::Relaxed);
+        let cancel = std::sync::Arc::clone(&self.csv_cancel);
+        let mode = req.mode;
+        let window = req.window;
+        std::thread::Builder::new()
+            .name("delog-csv-export".into())
+            .spawn(move || {
+                let picked = rfd::FileDialog::new()
+                    .add_filter("CSV", &["csv"])
+                    .add_filter("All files", &["*"])
+                    .set_title("Export CSV")
+                    .set_file_name("export.csv")
+                    .save_file();
+                let Some(path) = picked else { return };
+                let result = (|| {
+                    let file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
+                    let mut w = std::io::BufWriter::new(file);
+                    let rows = crate::csv_export::write_csv(
+                        &mut w,
+                        &snapshot,
+                        &chosen,
+                        window,
+                        mode,
+                        origin_us,
+                        &cancel,
+                        |_frac| {},
+                    )
+                    .map_err(|e| e.to_string())?;
+                    use std::io::Write;
+                    w.flush().map_err(|e| e.to_string())?;
+                    Ok::<_, String>((path, rows))
+                })();
+                let _ = tx.send(result);
+                ctx.request_repaint();
+            })
+            .expect("spawn csv export thread");
     }
 
     fn load_layout(&mut self, name: &str, snapshot: &delog_core::snapshot::StoreSnapshot) {
@@ -1436,6 +1521,10 @@ impl eframe::App for DelogApp {
                     }
                     if ui.button("Export Profiling JSON...").clicked() {
                         self.spawn_export_profiling_dialog(ui.ctx(), frame, &snapshot);
+                        ui.close();
+                    }
+                    if ui.button("Export CSV...").clicked() {
+                        self.csv_export.open = true;
                         ui.close();
                     }
                     ui.separator();
@@ -2034,6 +2123,26 @@ impl eframe::App for DelogApp {
             &mut self.generate_markers_dialog,
         ) {
             self.markers.push_loaded(t_us, name, color, String::new());
+        }
+
+        if self.csv_export.open {
+            let model = self
+                .browser_model
+                .as_ref()
+                .map(|(_, m)| m.clone())
+                .unwrap_or_default();
+            let fields = crate::csv_export::numeric_fields(&snapshot, &model);
+            let full = snapshot
+                .global_time_range()
+                .map(|r| (r.min_us, r.max_us))
+                .unwrap_or((0, 1));
+            let visible = self.view.map(|v| (v.min_us, v.max_us)).unwrap_or(full);
+            if let Some(req) =
+                crate::csv_export::dialog_ui(ui.ctx(), &mut self.csv_export, &fields, visible, full)
+            {
+                self.spawn_csv_export(ui.ctx(), &snapshot, &fields, req);
+                self.csv_export.open = false;
+            }
         }
 
         let ui_workspace_timer = self.session.metrics().scope("ui_workspace");
