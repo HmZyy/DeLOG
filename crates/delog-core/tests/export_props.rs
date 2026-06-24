@@ -97,17 +97,22 @@ proptest! {
 
         let (snap, field) = snapshot_from_opt_samples(&data, offset_us);
 
-        // Compute the expected in-range samples: those whose effective time is within [t_start, t_end].
+        // Compute the expected in-range samples. SQL-null (`None`) samples are
+        // skipped entirely — they record no measurement and produce no row. A
+        // `Some(v)` sample always produces a row: `Num(v)` when finite, else
+        // `Empty` (a `Some(NaN)` is a float gap, not a missing sample).
         let expected: Vec<(i64, Cell)> = data
             .iter()
             .filter_map(|(raw_t, opt_v)| {
+                let v = (*opt_v)?; // None => no row
                 let eff = raw_t.checked_add(offset_us)?;
                 if eff < t_start || eff > t_end {
                     return None;
                 }
-                let cell = match opt_v {
-                    Some(v) if !v.is_nan() => Cell::Num(*v),
-                    _ => Cell::Empty,
+                let cell = if v.is_nan() {
+                    Cell::Empty
+                } else {
+                    Cell::Num(v)
                 };
                 Some((eff, cell))
             })
