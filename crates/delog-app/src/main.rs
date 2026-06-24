@@ -9,6 +9,7 @@ mod app;
 mod axes;
 mod browser;
 mod camera;
+mod csv_export;
 mod diagnostics;
 mod field_stats;
 mod generate_markers;
