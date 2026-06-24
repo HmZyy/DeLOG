@@ -80,7 +80,12 @@ proptest! {
     #[test]
     fn none_single_field_reproduces_samples(
         raw_samples in prop::collection::vec(
-            (0i64..1_000_000, prop::option::of(-1e6f64..1e6f64)),
+            (
+                0i64..1_000_000,
+                prop::option::of(
+                    prop_oneof![Just(f64::NAN), -1e6f64..1e6f64]
+                ),
+            ),
             1..200
         ),
         offset_us in -500_000i64..500_000,

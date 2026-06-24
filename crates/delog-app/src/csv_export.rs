@@ -113,7 +113,6 @@ pub fn dialog_ui(
 
 pub const MODES: [&str; 3] = ["None (union)", "Previous-fill", "Linear @ dt"];
 
-#[derive(Default)]
 pub struct CsvExportState {
     pub open: bool,
     pub search: String,
@@ -121,6 +120,19 @@ pub struct CsvExportState {
     pub visible_range: bool,
     pub mode_ix: usize,
     pub dt_s: f64,
+}
+
+impl Default for CsvExportState {
+    fn default() -> Self {
+        Self {
+            open: false,
+            search: String::new(),
+            checked: HashSet::new(),
+            visible_range: true,
+            mode_ix: 0,
+            dt_s: f64::default(),
+        }
+    }
 }
 
 impl CsvExportState {
@@ -290,5 +302,10 @@ mod tests {
             unit: None,
         }];
         assert_eq!(header_line(&["t_us"], &fields), "t_us,\"a,b\"");
+    }
+
+    #[test]
+    fn default_range_is_visible_window() {
+        assert!(CsvExportState::default().visible_range);
     }
 }
