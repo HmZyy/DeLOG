@@ -118,11 +118,16 @@ impl<'a> FieldView<'a> {
         &self.store.schema.fields()[self.col_index]
     }
 
+    /// Per-source effective-time offset, for the export engine.
+    pub fn offset_us_for_export(&self) -> crate::time::TimestampUs {
+        self.source_offset_us
+    }
+
     /// Chunks whose raw time range overlaps the requested effective range.
     pub fn chunks_overlapping(
-        &'a self,
+        &self,
         effective_range: TimeRange,
-    ) -> impl Iterator<Item = &'a Chunk> + 'a {
+    ) -> impl Iterator<Item = &'a Chunk> {
         let raw_range =
             raw_time_us(effective_range.min_us, self.source_offset_us).and_then(|min_us| {
                 raw_time_us(effective_range.max_us, self.source_offset_us)
