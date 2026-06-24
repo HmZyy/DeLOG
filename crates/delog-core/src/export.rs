@@ -97,7 +97,9 @@ impl<'a> FieldCursor<'a> {
 
     /// Move (chunk_i, row_i) to the next sample whose effective time is within
     /// [t_start, t_end]; return it without consuming. Samples before t_start are
-    /// skipped; the first sample past t_end ends iteration.
+    /// skipped; the first sample past t_end ends iteration. Rows where this
+    /// field's column is SQL-null (no measurement recorded) are skipped — they
+    /// carry no information and do not update the prev-fill carry.
     fn advance_to_in_range(&mut self) -> Option<(i64, Cell)> {
         loop {
             let chunk = *self.chunks.get(self.chunk_i)?;
@@ -118,10 +120,12 @@ impl<'a> FieldCursor<'a> {
             if eff > self.t_end {
                 return None;
             }
-            let cell = cell_from(
-                value_at(chunk.cols[self.col_index].as_ref(), self.row_i),
-                self.multiplier,
-            );
+            let col = chunk.cols[self.col_index].as_ref();
+            if col.is_null(self.row_i) {
+                self.row_i += 1;
+                continue;
+            }
+            let cell = cell_from(value_at(col, self.row_i), self.multiplier);
             return Some((eff, cell));
         }
     }
@@ -152,6 +156,7 @@ pub struct RowCursor<'a> {
     mode: ResampleMode,
     started: bool,
     cursors: Vec<FieldCursor<'a>>,
+    last: Vec<Cell>,
 }
 
 impl fmt::Debug for RowCursor<'_> {
@@ -195,6 +200,7 @@ impl<'a> RowCursor<'a> {
             multipliers.push(view.schema_field().multiplier);
             views.push(view);
         }
+        let n = fields.len();
         let cursors = views
             .iter()
             .zip(&multipliers)
@@ -208,6 +214,7 @@ impl<'a> RowCursor<'a> {
             mode,
             started: false,
             cursors,
+            last: vec![Cell::Empty; n],
         })
     }
 
@@ -222,7 +229,8 @@ impl<'a> RowCursor<'a> {
     }
 
     /// One row of the union timeline. `prev_fill=false` -> None mode (cell filled
-    /// only on an exact sample); the prev-fill branch is wired in Task 3.
+    /// only on an exact sample); `prev_fill=true` -> PrevFill mode (emit last
+    /// seen value for fields with no sample at this timestamp).
     fn next_union_row(&mut self, prev_fill: bool, out: &mut Vec<Cell>) -> Option<i64> {
         let t = self
             .cursors
@@ -230,15 +238,17 @@ impl<'a> RowCursor<'a> {
             .filter_map(|c| c.peek_time())
             .min()?;
         out.clear();
-        for c in &mut self.cursors {
+        for (i, c) in self.cursors.iter_mut().enumerate() {
             if c.peek_time() == Some(t) {
                 let (_t, cell) = c.pop().expect("peeked");
+                self.last[i] = cell;
                 out.push(cell);
+            } else if prev_fill {
+                out.push(self.last[i]);
             } else {
                 out.push(Cell::Empty);
             }
         }
-        let _ = prev_fill; // Task 3 replaces this method body to honor prev_fill.
         Some(t)
     }
 
@@ -395,6 +405,43 @@ mod tests {
             vec![
                 (500, vec![Num(1.0)]), // effective = raw + offset
                 (1500, vec![Num(2.0)]),
+            ]
+        );
+    }
+
+    #[test]
+    fn prevfill_holds_last_value_and_blanks_before_first() {
+        let fields = vec![num("a"), num("b")];
+        let cols: Vec<arrow::array::ArrayRef> = vec![
+            Arc::new(Float64Array::from(vec![Some(10.0), None, Some(12.0)])),
+            Arc::new(Float64Array::from(vec![None, Some(21.0), Some(22.0)])),
+        ];
+        let (snap, ids) = snapshot_with(&fields, vec![0, 1, 2], cols, 0);
+        let rows = collect(&snap, &ids, 0, 2, ResampleMode::PrevFill);
+        assert_eq!(
+            rows,
+            vec![
+                (0, vec![Num(10.0), Empty]),     // b not seen yet
+                (1, vec![Num(10.0), Num(21.0)]), // a held
+                (2, vec![Num(12.0), Num(22.0)]),
+            ]
+        );
+    }
+
+    #[test]
+    fn prevfill_nan_sample_clears_to_gap() {
+        // a: t0=1.0, t1=NaN, t2=3.0 ; at t1 the held value becomes a gap.
+        let fields = vec![num("a")];
+        let cols: Vec<arrow::array::ArrayRef> =
+            vec![Arc::new(Float64Array::from(vec![1.0, f64::NAN, 3.0]))];
+        let (snap, ids) = snapshot_with(&fields, vec![0, 1, 2], cols, 0);
+        let rows = collect(&snap, &ids, 0, 2, ResampleMode::PrevFill);
+        assert_eq!(
+            rows,
+            vec![
+                (0, vec![Num(1.0)]),
+                (1, vec![Empty]), // NaN is a gap, holds the gap
+                (2, vec![Num(3.0)]),
             ]
         );
     }
