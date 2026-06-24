@@ -8,9 +8,10 @@
 use std::error::Error;
 use std::fmt;
 
-use crate::field_view::{FieldView, FieldViewError};
+use crate::field_view::{FieldView, FieldViewError, value_at};
 use crate::identity::FieldId;
 use crate::snapshot::StoreSnapshot;
+use crate::time::effective_time_us;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResampleMode {
@@ -47,14 +48,110 @@ impl fmt::Display for ExportError {
 }
 impl Error for ExportError {}
 
+/// Lazy ascending iterator over one field's (effective_time, Cell) samples within
+/// [t_start, t_end]. Iterates chunks in spine order; assumes the common
+/// sorted/non-overlapping spine — out-of-order spines export in stored order.
+struct FieldCursor<'a> {
+    chunks: Vec<&'a crate::chunk::Chunk>,
+    col_index: usize,
+    offset_us: i64,
+    multiplier: f64,
+    t_start: i64,
+    t_end: i64,
+    chunk_i: usize,
+    row_i: usize,
+}
+
+impl<'a> FieldCursor<'a> {
+    fn from_view(view: &FieldView<'a>, multiplier: f64, t_start: i64, t_end: i64) -> Self {
+        let range = crate::time::TimeRange {
+            min_us: t_start,
+            max_us: t_end,
+        };
+        let chunks: Vec<_> = view.chunks_overlapping(range).collect();
+        Self {
+            chunks,
+            col_index: view.col_index(),
+            offset_us: view.offset_us_for_export(),
+            multiplier,
+            t_start,
+            t_end,
+            chunk_i: 0,
+            row_i: 0,
+        }
+    }
+
+    /// Peek the next in-range sample's effective time without consuming it.
+    fn peek_time(&mut self) -> Option<i64> {
+        self.advance_to_in_range().map(|(t, _)| t)
+    }
+
+    /// Consume and return the next in-range (effective_time, Cell).
+    fn pop(&mut self) -> Option<(i64, Cell)> {
+        let res = self.advance_to_in_range();
+        if res.is_some() {
+            self.row_i += 1;
+        }
+        res
+    }
+
+    /// Move (chunk_i, row_i) to the next sample whose effective time is within
+    /// [t_start, t_end]; return it without consuming. Samples before t_start are
+    /// skipped; the first sample past t_end ends iteration.
+    fn advance_to_in_range(&mut self) -> Option<(i64, Cell)> {
+        loop {
+            let chunk = *self.chunks.get(self.chunk_i)?;
+            if self.row_i >= chunk.len() {
+                self.chunk_i += 1;
+                self.row_i = 0;
+                continue;
+            }
+            let raw = chunk.t.value(self.row_i);
+            let Some(eff) = effective_time_us(raw, self.offset_us) else {
+                self.row_i += 1;
+                continue;
+            };
+            if eff < self.t_start {
+                self.row_i += 1;
+                continue;
+            }
+            if eff > self.t_end {
+                return None;
+            }
+            let cell = cell_from(
+                value_at(chunk.cols[self.col_index].as_ref(), self.row_i),
+                self.multiplier,
+            );
+            return Some((eff, cell));
+        }
+    }
+}
+
+/// Map a sampled value to an export cell: null / non-numeric / NaN -> Empty,
+/// else Num(value * multiplier). Bool -> 0/1.
+fn cell_from(value: crate::field_view::SampleValue<'_>, multiplier: f64) -> Cell {
+    use crate::field_view::SampleValue;
+    let v = match value {
+        SampleValue::Int(v) => v as f64,
+        SampleValue::UInt(v) => v as f64,
+        SampleValue::Float(v) if !v.is_nan() => v,
+        SampleValue::Bool(b) => b as i64 as f64,
+        SampleValue::Float(_) | SampleValue::Utf8(_) | SampleValue::Null => return Cell::Empty,
+    };
+    Cell::Num(v * multiplier)
+}
+
 pub struct RowCursor<'a> {
+    // Retained for Task 4 (Linear interpolation mode).
+    #[allow(dead_code)]
     views: Vec<FieldView<'a>>,
+    #[allow(dead_code)]
     multipliers: Vec<f64>,
     t_start: i64,
     t_end: i64,
     mode: ResampleMode,
-    // Per-mode iteration state filled in Tasks 2-4.
     started: bool,
+    cursors: Vec<FieldCursor<'a>>,
 }
 
 impl fmt::Debug for RowCursor<'_> {
@@ -64,6 +161,7 @@ impl fmt::Debug for RowCursor<'_> {
             .field("t_end", &self.t_end)
             .field("mode", &self.mode)
             .field("started", &self.started)
+            .field("cursors_len", &self.cursors.len())
             .finish_non_exhaustive()
     }
 }
@@ -97,6 +195,11 @@ impl<'a> RowCursor<'a> {
             multipliers.push(view.schema_field().multiplier);
             views.push(view);
         }
+        let cursors = views
+            .iter()
+            .zip(&multipliers)
+            .map(|(v, &m)| FieldCursor::from_view(v, m, t_start_us, t_end_us))
+            .collect();
         Ok(Self {
             views,
             multipliers,
@@ -104,22 +207,44 @@ impl<'a> RowCursor<'a> {
             t_end: t_end_us,
             mode,
             started: false,
+            cursors,
         })
     }
 
     /// Fill `out` with one row's cells (cleared then pushed, len == fields.len())
     /// and return the row's effective timestamp µs, or `None` at the end.
     pub fn next_row(&mut self, out: &mut Vec<Cell>) -> Option<i64> {
-        let _ = (
-            &self.views,
-            &self.multipliers,
-            self.t_start,
-            self.t_end,
-            self.mode,
-            &mut self.started,
-            out,
-        );
-        None // Tasks 2-4 implement per-mode iteration.
+        match self.mode {
+            ResampleMode::None => self.next_union_row(false, out),
+            ResampleMode::PrevFill => self.next_union_row(true, out), // Task 3
+            ResampleMode::Linear { dt_us } => self.next_linear_row(dt_us, out), // Task 4
+        }
+    }
+
+    /// One row of the union timeline. `prev_fill=false` -> None mode (cell filled
+    /// only on an exact sample); the prev-fill branch is wired in Task 3.
+    fn next_union_row(&mut self, prev_fill: bool, out: &mut Vec<Cell>) -> Option<i64> {
+        let t = self
+            .cursors
+            .iter_mut()
+            .filter_map(|c| c.peek_time())
+            .min()?;
+        out.clear();
+        for c in &mut self.cursors {
+            if c.peek_time() == Some(t) {
+                let (_t, cell) = c.pop().expect("peeked");
+                out.push(cell);
+            } else {
+                out.push(Cell::Empty);
+            }
+        }
+        let _ = prev_fill; // Task 3 replaces this method body to honor prev_fill.
+        Some(t)
+    }
+
+    fn next_linear_row(&mut self, _dt_us: i64, _out: &mut Vec<Cell>) -> Option<i64> {
+        // Task 4.
+        None
     }
 }
 
@@ -131,6 +256,7 @@ mod tests {
     use crate::schema::{FieldSchema, TopicSchema};
     use crate::snapshot::StoreSnapshot;
     use crate::store::TopicStore;
+    use Cell::{Empty, Num};
     use arrow::array::{Float64Array, Int64Array, StringArray};
     use std::sync::Arc;
 
@@ -202,6 +328,75 @@ mod tests {
         let err =
             RowCursor::new(&snap, &ids, 0, 10, ResampleMode::Linear { dt_us: 0 }).unwrap_err();
         assert_eq!(err, ExportError::InvalidDt);
+    }
+
+    /// Collect all rows as (t_us, cells).
+    fn collect(
+        snap: &StoreSnapshot,
+        ids: &[crate::identity::FieldId],
+        a: i64,
+        b: i64,
+        mode: ResampleMode,
+    ) -> Vec<(i64, Vec<Cell>)> {
+        let mut cur = RowCursor::new(snap, ids, a, b, mode).unwrap();
+        let mut rows = Vec::new();
+        let mut out = Vec::new();
+        while let Some(t) = cur.next_row(&mut out) {
+            rows.push((t, out.clone()));
+        }
+        rows
+    }
+
+    #[test]
+    fn none_mode_unions_two_fields_with_blanks() {
+        let fields = vec![num("a"), num("b")];
+        let cols: Vec<arrow::array::ArrayRef> = vec![
+            Arc::new(Float64Array::from(vec![Some(10.0), None, Some(12.0)])),
+            Arc::new(Float64Array::from(vec![None, Some(21.0), Some(22.0)])),
+        ];
+        let (snap, ids) = snapshot_with(&fields, vec![0, 1, 2], cols, 0);
+        let rows = collect(&snap, &ids, 0, 2, ResampleMode::None);
+        assert_eq!(
+            rows,
+            vec![
+                (0, vec![Num(10.0), Empty]),
+                (1, vec![Empty, Num(21.0)]),
+                (2, vec![Num(12.0), Num(22.0)]),
+            ]
+        );
+    }
+
+    #[test]
+    fn none_mode_respects_window_and_nan_is_gap() {
+        let fields = vec![num("a")];
+        let cols: Vec<arrow::array::ArrayRef> =
+            vec![Arc::new(Float64Array::from(vec![1.0, f64::NAN, 3.0, 4.0]))];
+        let (snap, ids) = snapshot_with(&fields, vec![0, 1, 2, 3], cols, 0);
+        let rows = collect(&snap, &ids, 1, 2, ResampleMode::None);
+        assert_eq!(
+            rows,
+            vec![
+                (1, vec![Empty]), // NaN -> gap
+                (2, vec![Num(3.0)]),
+            ]
+        );
+    }
+
+    #[test]
+    fn none_mode_applies_multiplier_and_offset() {
+        let mut f = num("a");
+        f.multiplier = 0.01;
+        let cols: Vec<arrow::array::ArrayRef> =
+            vec![Arc::new(Float64Array::from(vec![100.0, 200.0]))];
+        let (snap, ids) = snapshot_with(&[f], vec![0, 1000], cols, 500); // offset +500us
+        let rows = collect(&snap, &ids, 0, 100_000, ResampleMode::None);
+        assert_eq!(
+            rows,
+            vec![
+                (500, vec![Num(1.0)]), // effective = raw + offset
+                (1500, vec![Num(2.0)]),
+            ]
+        );
     }
 
     #[test]
