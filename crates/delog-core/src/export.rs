@@ -256,10 +256,16 @@ impl<'a> RowCursor<'a> {
         let t = self.next_grid_t;
         out.clear();
         for (view, &mult) in self.views.iter().zip(&self.multipliers) {
+            // Boolean fields use step/hold semantics — interpolating a boolean
+            // is meaningless and `linear_sample` returns None for them.
+            let mode = if view.dtype() == &arrow::datatypes::DataType::Boolean {
+                crate::field_view::SampleMode::Prev
+            } else {
+                crate::field_view::SampleMode::Linear
+            };
             let cell = view
-                .sample_at(t, crate::field_view::SampleMode::Linear)
-                .and_then(|s| s.value.as_f64())
-                .map(|v| Cell::Num(v * mult))
+                .sample_at(t, mode)
+                .map(|s| cell_from(s.value, mult))
                 .unwrap_or(Cell::Empty);
             out.push(cell);
         }
@@ -277,7 +283,7 @@ mod tests {
     use crate::snapshot::StoreSnapshot;
     use crate::store::TopicStore;
     use Cell::{Empty, Num};
-    use arrow::array::{Float64Array, Int64Array, StringArray};
+    use arrow::array::{BooleanArray, Float64Array, Int64Array, StringArray};
     use std::sync::Arc;
 
     /// One source, one topic "T" with the given (name, dtype) fields and rows.
@@ -518,5 +524,36 @@ mod tests {
         );
         let err = RowCursor::new(&snap, &ids, 0, 10, ResampleMode::None).unwrap_err();
         assert_eq!(err, ExportError::NotNumeric(ids[0]));
+    }
+
+    #[test]
+    fn linear_bool_field_steps_not_blank() {
+        // Bool field: t=0 -> true, t=10 -> false, t=20 -> true.
+        // Linear dt=5 over [0,20] must use prev-sample (step/hold) for Bool,
+        // never producing Empty inside the span.
+        let bool_schema = FieldSchema {
+            name: "flag".into(),
+            dtype: arrow::datatypes::DataType::Boolean,
+            unit: None,
+            multiplier: 1.0,
+            description: None,
+        };
+        let (snap, ids) = snapshot_with(
+            &[bool_schema],
+            vec![0, 10, 20],
+            vec![Arc::new(BooleanArray::from(vec![true, false, true]))],
+            0,
+        );
+        let rows = collect(&snap, &ids, 0, 20, ResampleMode::Linear { dt_us: 5 });
+        assert_eq!(
+            rows,
+            vec![
+                (0, vec![Num(1.0)]),  // true at t=0
+                (5, vec![Num(1.0)]),  // held from t=0 (prev-sample)
+                (10, vec![Num(0.0)]), // false at t=10
+                (15, vec![Num(0.0)]), // held from t=10
+                (20, vec![Num(1.0)]), // true at t=20
+            ]
+        );
     }
 }
