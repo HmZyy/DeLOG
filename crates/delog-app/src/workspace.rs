@@ -404,8 +404,9 @@ pub struct PlotServices<'a> {
     /// Whether playback is running (gates the playhead value tooltip).
     pub playing: bool,
     pub vehicles: &'a [crate::vehicle::VehicleConfig],
-    /// Cached render-space trajectories, parallel to `vehicles`.
-    pub trajectories: &'a [Vec<[f32; 3]>],
+    /// Cached render-space trajectories (points + per-point timestamps),
+    /// parallel to `vehicles`.
+    pub trajectories: &'a [crate::vehicle::VehicleTrajectory],
     /// Config generation the cached trajectories were built at (the vehicle
     /// revision); lets the GPU upload only appended tail points.
     pub traj_generation: u64,
@@ -605,6 +606,16 @@ impl Behavior<'_> {
             .enumerate()
             .filter_map(|(i, v)| {
                 let pose = poses[i]?;
+                let traj = self.services.trajectories.get(i);
+                let points: &[[f32; 3]] = traj.map_or(&[], |t| t.points.as_slice());
+                // Clip the drawn path to the playhead: the prefix of points
+                // whose timestamp is ≤ playhead (O(log N) per vehicle). With no
+                // playhead (no data range / live tail at end) show the full
+                // path. The full path stays resident on the GPU regardless.
+                let visible_count = match (traj, playhead) {
+                    (Some(t), Some(ph)) => t.times_us.partition_point(|&ts| ts <= ph) as u32,
+                    _ => points.len() as u32,
+                };
                 Some(VehicleDraw {
                     key: i as u32,
                     model: &v.model,
@@ -612,8 +623,9 @@ impl Behavior<'_> {
                     normal_matrix: glam::Mat4::from_mat3(pose.rot).to_cols_array_2d(),
                     color: legend::color32_to_srgb(v.color),
                     path_color: legend::color32_to_srgb(v.path_color),
-                    trajectory: self.services.trajectories.get(i).map_or(&[], Vec::as_slice),
+                    trajectory: points,
                     traj_generation: self.services.traj_generation,
+                    visible_count,
                 })
             })
             .collect();
