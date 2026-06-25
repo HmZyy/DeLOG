@@ -1,10 +1,6 @@
-//! Shared MAVLink layer.
-//!
-//! One code path for the `.tlog` parser and the live link readers:
-//! a push-based v1/v2 frame decoder with honest counters (CRC
-//! failures, sequence gaps, resync bytes) plus a flat serde-based field
-//! extractor that turns a decoded `MavMessage` into `(field, Scalar)` pairs
-//! without going through a self-describing format.
+//! Shared MAVLink layer: a push-based v1/v2 frame decoder plus a flat
+//! serde-based field extractor, used by both the `.tlog` parser and the live
+//! link readers.
 
 use std::collections::HashMap;
 
@@ -21,14 +17,12 @@ const V2_SIGNATURE: usize = 13;
 const V2_IFLAG_SIGNED: u8 = 0x01;
 const CRC_LEN: usize = 2;
 
-/// Honest per-link counters.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FrameCounters {
     /// Frames that passed CRC (decoded or unknown-type).
     pub frames: u64,
-    /// Candidate frames rejected by CRC.
     pub crc_failures: u64,
-    /// Messages lost to sequence-number gaps, per (sysid, compid) stream.
+    /// Per (sysid, compid) stream.
     pub seq_gaps: u64,
     /// Bytes skipped hunting for a frame magic.
     pub resync_bytes: u64,
@@ -36,7 +30,6 @@ pub struct FrameCounters {
     pub unknown_messages: u64,
 }
 
-/// One CRC-valid frame.
 #[derive(Debug, Clone)]
 pub struct DecodedFrame {
     pub version: MavlinkVersion,
@@ -44,19 +37,15 @@ pub struct DecodedFrame {
     pub component_id: u8,
     pub sequence: u8,
     pub message_id: u32,
-    /// `None` when the dialect cannot decode `message_id` (counted in
-    /// [`FrameCounters::unknown_messages`]; emit the once-per-type diag
-    /// upstream).
+    /// `None` when the dialect cannot decode `message_id`.
     pub message: Option<MavMessage>,
-    /// Exact frame bytes after CRC validation. Live recording tees these into
+    /// Exact frame bytes after CRC validation; live recording tees these into
     /// the `.tlog` envelope so record/replay stays bit-faithful.
     pub raw: Vec<u8>,
 }
 
-/// Push-based MAVLink v1/v2 frame decoder. Feed arbitrary byte slices from a
-/// file or socket via [`Self::push`], drain frames via [`Self::next_frame`].
-/// Garbage between frames is skipped one byte at a time (counted), so torn
-/// streams resynchronize on the next valid magic + CRC.
+/// Push-based MAVLink v1/v2 frame decoder. Garbage between frames is skipped one
+/// byte at a time, so torn streams resynchronize on the next valid magic + CRC.
 #[derive(Debug, Default)]
 pub struct FrameDecoder {
     buf: Vec<u8>,
@@ -74,7 +63,6 @@ impl FrameDecoder {
         self.counters
     }
 
-    /// Append raw transport bytes.
     pub fn push(&mut self, bytes: &[u8]) {
         // Compact consumed prefix before growing.
         if self.pos > 0 && (self.pos >= self.buf.len() || self.pos > 4096) {
@@ -84,13 +72,10 @@ impl FrameDecoder {
         self.buf.extend_from_slice(bytes);
     }
 
-    /// Bytes not yet consumed (a partial frame awaiting more input).
     pub fn pending(&self) -> usize {
         self.buf.len() - self.pos
     }
 
-    /// Decode the next CRC-valid frame, or `None` when the buffer holds no
-    /// complete frame (push more bytes).
     pub fn next_frame(&mut self) -> Option<DecodedFrame> {
         loop {
             while self.pos < self.buf.len()
@@ -138,10 +123,8 @@ impl FrameDecoder {
 }
 
 /// Total frame length implied by the header at `bytes[0]`, or `None` when the
-/// first byte is not a frame magic or not enough bytes have arrived to know the
-/// length yet. Shared by [`FrameDecoder`] (which positions on a magic byte) and
-/// the `.tlog` parser's explicit µs-envelope framing: one length
-/// computation, no duplicate header math.
+/// first byte is not a frame magic or too few bytes have arrived to know the
+/// length yet.
 pub fn frame_len(bytes: &[u8]) -> Option<usize> {
     match *bytes.first()? {
         V1_MAGIC => {
@@ -162,10 +145,9 @@ pub fn frame_len(bytes: &[u8]) -> Option<usize> {
     }
 }
 
-/// Validate the CRC of a complete candidate frame (its length given by
+/// Validate the CRC of a complete candidate frame (length given by
 /// [`frame_len`]) and decode its message. Returns `None` on a bad CRC or a
-/// non-frame first byte. Shared by [`FrameDecoder`] and the `.tlog` parser so
-/// CRC validation and dialect decoding live in exactly one place.
+/// non-frame first byte.
 pub fn decode_frame(frame: &[u8]) -> Option<DecodedFrame> {
     match frame[0] {
         V1_MAGIC => {
@@ -210,13 +192,7 @@ pub fn decode_frame(frame: &[u8]) -> Option<DecodedFrame> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Field extraction: a flat serde Serializer over the dialect's derives.
-// ---------------------------------------------------------------------------
-
-/// One extracted value, dtype-faithful (raw-value policy). `Str` carries
-/// enum variant names (the dialect serializes its C-like enums internally
-/// tagged, so the name is what the wire representation exposes).
+/// One extracted value, dtype-faithful. `Str` carries enum variant names.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Scalar {
     U8(u8),
@@ -233,8 +209,8 @@ pub enum Scalar {
 }
 
 /// Flatten `message` into `(field, Scalar)` pairs. Arrays expand to indexed
-/// names (`satellite_prn[3]` is element 3); enum fields carry their variant
-/// name, bitflags their raw bits.
+/// names (`satellite_prn[3]`); enum fields carry their variant name, bitflags
+/// their raw bits.
 pub fn extract_fields(message: &MavMessage) -> Vec<(String, Scalar)> {
     let mut sink = FieldSink::default();
     // The serializer is infallible by construction (every method returns Ok).
@@ -245,18 +221,17 @@ pub fn extract_fields(message: &MavMessage) -> Vec<(String, Scalar)> {
 #[derive(Default)]
 struct FieldSink {
     fields: Vec<(String, Scalar)>,
-    /// Struct-field name stack. MAVLink data structs are flat, so depth > 1
-    /// only happens inside the internally-tagged enum representation
-    /// (`mavtype: {"type": "MAV_TYPE_..."}`); the outermost name is the field.
+    /// Struct-field name stack. MAVLink data structs are flat, so depth > 1 only
+    /// happens inside the internally-tagged enum representation; the outermost
+    /// name is the field.
     path: Vec<&'static str>,
-    /// Current sequence index, if inside an array field.
     index: Option<usize>,
 }
 
 impl FieldSink {
     fn emit(&mut self, scalar: Scalar) {
         let Some(&field) = self.path.first() else {
-            return; // value outside any named field
+            return;
         };
         let name = match self.index {
             Some(i) => format!("{field}[{i}]"),
@@ -269,7 +244,7 @@ impl FieldSink {
     }
 }
 
-/// The serializer never fails; this error type exists for the trait only.
+/// The serializer never fails; this error type exists only for the trait.
 #[derive(Debug)]
 struct Never;
 
@@ -587,9 +562,9 @@ mod tests {
     #[test]
     fn decodes_mixed_v1_and_v2_frames_with_garbage_between() {
         let mut decoder = FrameDecoder::new();
-        decoder.push(&[0x00, 0x13, 0x37]); // leading garbage
+        decoder.push(&[0x00, 0x13, 0x37]);
         decoder.push(&v2_bytes(0, &attitude(1.0)));
-        decoder.push(&[0xAA, 0xBB]); // inter-frame garbage
+        decoder.push(&[0xAA, 0xBB]);
         decoder.push(&v1_bytes(1, &attitude(2.0)));
 
         let first = decoder.next_frame().expect("v2 frame");
@@ -621,7 +596,7 @@ mod tests {
     fn corrupted_crc_is_counted_and_resyncs_to_the_next_frame() {
         let mut bad = v2_bytes(0, &attitude(1.0));
         let last = bad.len() - 1;
-        bad[last] ^= 0xFF; // break the CRC
+        bad[last] ^= 0xFF;
         let good = v2_bytes(1, &attitude(2.0));
 
         let mut decoder = FrameDecoder::new();
@@ -637,7 +612,7 @@ mod tests {
         let mut decoder = FrameDecoder::new();
         decoder.push(&v2_bytes(0, &attitude(1.0)));
         decoder.push(&v2_bytes(1, &attitude(1.0)));
-        decoder.push(&v2_bytes(5, &attitude(1.0))); // 2,3,4 lost
+        decoder.push(&v2_bytes(5, &attitude(1.0)));
         while decoder.next_frame().is_some() {}
         assert_eq!(decoder.counters().seq_gaps, 3);
     }
@@ -672,10 +647,9 @@ mod tests {
                 .iter()
                 .any(|(n, s)| n == "satellite_prn[2]" && *s == Scalar::U8(17))
         );
-        // 5 × 20-element arrays + satellites_visible.
+        // 5 × 20-element arrays + satellites_visible = 101.
         assert_eq!(fields.len(), 101);
 
-        // HEARTBEAT: enums carry their variant name, bitflags their raw bits.
         let hb = MavMessage::HEARTBEAT(HEARTBEAT_DATA::default());
         let fields = extract_fields(&hb);
         let get = |name: &str| {

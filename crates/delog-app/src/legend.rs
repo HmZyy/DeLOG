@@ -1,9 +1,3 @@
-//! Plot legend: per-trace visibility, colour and width editing.
-//!
-//! An overlay in the plot's top-left listing each trace with a colour editor
-//! and clickable label. Right-clicking a trace opens style controls for draw
-//! mode, width and removal.
-
 use std::collections::HashMap;
 
 use delog_core::identity::FieldId;
@@ -12,16 +6,13 @@ use delog_core::snapshot::StoreSnapshot;
 use crate::plot::{PlotPane, TraceMode};
 use crate::settings::LegendPosition;
 
-/// Scale a background colour's alpha by `opacity` (1 = unchanged, 0 = fully
-/// transparent), keeping its RGB. Shared look for the legend and hover panels.
 pub fn with_bg_opacity(color: egui::Color32, opacity: f32) -> egui::Color32 {
     let [r, g, b, a] = color.to_srgba_unmultiplied();
     let a = (a as f32 * opacity.clamp(0.0, 1.0)).round() as u8;
     egui::Color32::from_rgba_unmultiplied(r, g, b, a)
 }
 
-/// Anchor point + pivot for the legend area at `position` inside `plot_rect`,
-/// inset by 8 px from the chosen corner so it never touches the axes.
+/// Inset from the corner so the legend never touches the axes.
 fn legend_anchor(position: LegendPosition, plot_rect: egui::Rect) -> (egui::Pos2, egui::Align2) {
     const INSET: f32 = 8.0;
     match position {
@@ -44,7 +35,6 @@ fn legend_anchor(position: LegendPosition, plot_rect: egui::Rect) -> (egui::Pos2
     }
 }
 
-/// `topic.field` label for a trace, resolved through core (no Arrow in the app).
 pub fn trace_label(snapshot: &StoreSnapshot, field: FieldId) -> String {
     let Some(entry) = snapshot.fields.get(field.index()).filter(|f| f.id == field) else {
         return format!("field {}", field.0);
@@ -55,12 +45,6 @@ pub fn trace_label(snapshot: &StoreSnapshot, field: FieldId) -> String {
     }
 }
 
-/// Draw the legend overlay and apply edits to `pane`. Each row is a colour
-/// editor plus a clickable label: clicking toggles the trace's visibility, a
-/// hidden trace's label is greyed out, and right-click / Remove returns
-/// the field so the caller can drop its cache. When a measurement
-/// marker is placed, `deltas` carries the per-trace ΔY string shown after the
-/// label; an empty map shows none.
 #[allow(clippy::too_many_arguments)]
 pub fn ui(
     ui: &egui::Ui,
@@ -77,8 +61,7 @@ pub fn ui(
         return None;
     }
     let mut removed = None;
-    // Per-string-trace text filters edited this frame; applied after the Area
-    // closure releases its borrow of `pane`.
+    // Applied after the Area closure releases its borrow of `pane`.
     let mut filter_edits: Vec<(FieldId, String)> = Vec::new();
 
     let (pos, pivot) = legend_anchor(position, plot_rect);
@@ -95,8 +78,6 @@ pub fn ui(
             }
             .show(ui, |ui| {
                 for (field, label) in labels {
-                    // String traces are text-annotation traces and get
-                    // a per-trace "contains" filter box.
                     let is_text = crate::text_overlay::field_is_string(snapshot, *field);
                     let mut filter = if is_text {
                         pane.text_filters.get(field).cloned().unwrap_or_default()
@@ -107,7 +88,6 @@ pub fn ui(
                         continue;
                     };
                     ui.horizontal(|ui| {
-                        // sRGB colour editor (matches the rendered trace).
                         let mut color = trace.color32();
                         if egui::color_picker::color_edit_button_srgba(
                             ui,
@@ -132,8 +112,6 @@ pub fn ui(
                             trace.visible = !trace.visible;
                         }
 
-                        // Per-trace measuring-marker value delta, weak so it
-                        // reads as a secondary annotation next to the trace name.
                         if let Some(delta) = deltas.get(field) {
                             ui.label(
                                 egui::RichText::new(format!("d {delta}"))
@@ -142,8 +120,6 @@ pub fn ui(
                             );
                         }
 
-                        // Per-trace text-annotation filter: only labels
-                        // containing this text are drawn (case-insensitive).
                         if is_text
                             && ui
                                 .add(

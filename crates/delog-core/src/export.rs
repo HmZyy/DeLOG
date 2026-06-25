@@ -1,9 +1,7 @@
 //! Streaming CSV-row production over an immutable snapshot.
 //!
-//! Yields `(effective_time_us, [Cell])` rows for a set of numeric fields under a
-//! resample mode. Reads Arrow chunks in place; multipliers are
-//! applied in f64 (engineering units); a null or NaN sample is an `Empty` cell
-//! (NaN is a gap).
+//! Multipliers are applied in f64; a null or NaN sample is an `Empty` cell
+//! (NaN is a gap, not a missing sample).
 
 use std::error::Error;
 use std::fmt;
@@ -48,9 +46,8 @@ impl fmt::Display for ExportError {
 }
 impl Error for ExportError {}
 
-/// Lazy ascending iterator over one field's (effective_time, Cell) samples within
-/// [t_start, t_end]. Iterates chunks in spine order; assumes the common
-/// sorted/non-overlapping spine — out-of-order spines export in stored order.
+/// Ascending iterator over one field's in-range (effective_time, Cell) samples.
+/// Iterates in spine order: an out-of-order spine exports in stored order.
 struct FieldCursor<'a> {
     chunks: Vec<&'a crate::chunk::Chunk>,
     col_index: usize,
@@ -81,12 +78,10 @@ impl<'a> FieldCursor<'a> {
         }
     }
 
-    /// Peek the next in-range sample's effective time without consuming it.
     fn peek_time(&mut self) -> Option<i64> {
         self.advance_to_in_range().map(|(t, _)| t)
     }
 
-    /// Consume and return the next in-range (effective_time, Cell).
     fn pop(&mut self) -> Option<(i64, Cell)> {
         let res = self.advance_to_in_range();
         if res.is_some() {
@@ -95,11 +90,9 @@ impl<'a> FieldCursor<'a> {
         res
     }
 
-    /// Move (chunk_i, row_i) to the next sample whose effective time is within
-    /// [t_start, t_end]; return it without consuming. Samples before t_start are
-    /// skipped; the first sample past t_end ends iteration. Rows where this
-    /// field's column is SQL-null (no measurement recorded) are skipped — they
-    /// carry no information and do not update the prev-fill carry.
+    /// Next in-range sample without consuming it. SQL-null rows are skipped, so
+    /// they never update the prev-fill carry; the first sample past t_end ends
+    /// iteration.
     fn advance_to_in_range(&mut self) -> Option<(i64, Cell)> {
         loop {
             let chunk = *self.chunks.get(self.chunk_i)?;
@@ -131,8 +124,6 @@ impl<'a> FieldCursor<'a> {
     }
 }
 
-/// Map a sampled value to an export cell: null / non-numeric / NaN -> Empty,
-/// else Num(value * multiplier). Bool -> 0/1.
 fn cell_from(value: crate::field_view::SampleValue<'_>, multiplier: f64) -> Cell {
     use crate::field_view::SampleValue;
     let v = match value {
@@ -215,19 +206,18 @@ impl<'a> RowCursor<'a> {
         })
     }
 
-    /// Fill `out` with one row's cells (cleared then pushed, len == fields.len())
+    /// Fill `out` with one row's cells (cleared then repushed to fields.len())
     /// and return the row's effective timestamp µs, or `None` at the end.
     pub fn next_row(&mut self, out: &mut Vec<Cell>) -> Option<i64> {
         match self.mode {
             ResampleMode::None => self.next_union_row(false, out),
-            ResampleMode::PrevFill => self.next_union_row(true, out), // Task 3
-            ResampleMode::Linear { dt_us } => self.next_linear_row(dt_us, out), // Task 4
+            ResampleMode::PrevFill => self.next_union_row(true, out),
+            ResampleMode::Linear { dt_us } => self.next_linear_row(dt_us, out),
         }
     }
 
-    /// One row of the union timeline. `prev_fill=false` -> None mode (cell filled
-    /// only on an exact sample); `prev_fill=true` -> PrevFill mode (emit last
-    /// seen value for fields with no sample at this timestamp).
+    /// One row of the union timeline. `prev_fill` holds the last seen value for
+    /// fields with no sample at this timestamp; otherwise they are `Empty`.
     fn next_union_row(&mut self, prev_fill: bool, out: &mut Vec<Cell>) -> Option<i64> {
         let t = self
             .cursors
@@ -256,8 +246,8 @@ impl<'a> RowCursor<'a> {
         let t = self.next_grid_t;
         out.clear();
         for (view, &mult) in self.views.iter().zip(&self.multipliers) {
-            // Boolean fields use step/hold semantics — interpolating a boolean
-            // is meaningless and `linear_sample` returns None for them.
+            // Booleans step/hold: interpolating one is meaningless (and
+            // `linear_sample` returns None for them).
             let mode = if view.dtype() == &arrow::datatypes::DataType::Boolean {
                 crate::field_view::SampleMode::Prev
             } else {
@@ -286,8 +276,6 @@ mod tests {
     use arrow::array::{BooleanArray, Float64Array, Int64Array, StringArray};
     use std::sync::Arc;
 
-    /// One source, one topic "T" with the given (name, dtype) fields and rows.
-    /// `cols[i]` is the Arrow array for field i; `t` is raw µs.
     fn snapshot_with(
         fields: &[FieldSchema],
         t: Vec<i64>,
@@ -356,7 +344,6 @@ mod tests {
         assert_eq!(err, ExportError::InvalidDt);
     }
 
-    /// Collect all rows as (t_us, cells).
     fn collect(
         snap: &StoreSnapshot,
         ids: &[crate::identity::FieldId],
@@ -402,7 +389,7 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                (1, vec![Empty]), // NaN -> gap
+                (1, vec![Empty]),
                 (2, vec![Num(3.0)]),
             ]
         );
@@ -414,12 +401,12 @@ mod tests {
         f.multiplier = 0.01;
         let cols: Vec<arrow::array::ArrayRef> =
             vec![Arc::new(Float64Array::from(vec![100.0, 200.0]))];
-        let (snap, ids) = snapshot_with(&[f], vec![0, 1000], cols, 500); // offset +500us
+        let (snap, ids) = snapshot_with(&[f], vec![0, 1000], cols, 500);
         let rows = collect(&snap, &ids, 0, 100_000, ResampleMode::None);
         assert_eq!(
             rows,
             vec![
-                (500, vec![Num(1.0)]), // effective = raw + offset
+                (500, vec![Num(1.0)]),
                 (1500, vec![Num(2.0)]),
             ]
         );
@@ -437,8 +424,8 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                (0, vec![Num(10.0), Empty]),     // b not seen yet
-                (1, vec![Num(10.0), Num(21.0)]), // a held
+                (0, vec![Num(10.0), Empty]),
+                (1, vec![Num(10.0), Num(21.0)]),
                 (2, vec![Num(12.0), Num(22.0)]),
             ]
         );
@@ -446,7 +433,6 @@ mod tests {
 
     #[test]
     fn prevfill_nan_sample_clears_to_gap() {
-        // a: t0=1.0, t1=NaN, t2=3.0 ; at t1 the held value becomes a gap.
         let fields = vec![num("a")];
         let cols: Vec<arrow::array::ArrayRef> =
             vec![Arc::new(Float64Array::from(vec![1.0, f64::NAN, 3.0]))];
@@ -456,7 +442,7 @@ mod tests {
             rows,
             vec![
                 (0, vec![Num(1.0)]),
-                (1, vec![Empty]), // NaN is a gap, holds the gap
+                (1, vec![Empty]),
                 (2, vec![Num(3.0)]),
             ]
         );
@@ -464,7 +450,6 @@ mod tests {
 
     #[test]
     fn linear_grid_interpolates_between_samples() {
-        // a: t=0 ->0.0, t=10 ->10.0 ; grid dt=5 over [0,10].
         let fields = vec![num("a")];
         let cols: Vec<arrow::array::ArrayRef> = vec![Arc::new(Float64Array::from(vec![0.0, 10.0]))];
         let (snap, ids) = snapshot_with(&fields, vec![0, 10], cols, 0);
@@ -484,15 +469,14 @@ mod tests {
         let fields = vec![num("a")];
         let cols: Vec<arrow::array::ArrayRef> = vec![Arc::new(Float64Array::from(vec![1.0, 2.0]))];
         let (snap, ids) = snapshot_with(&fields, vec![10, 20], cols, 0);
-        // grid starts before the first sample and ends after the last.
         let rows = collect(&snap, &ids, 0, 30, ResampleMode::Linear { dt_us: 10 });
         assert_eq!(
             rows,
             vec![
-                (0, vec![Empty]), // before first sample, no bracket
+                (0, vec![Empty]),
                 (10, vec![Num(1.0)]),
                 (20, vec![Num(2.0)]),
-                (30, vec![Empty]), // after last sample
+                (30, vec![Empty]),
             ]
         );
     }
@@ -528,9 +512,7 @@ mod tests {
 
     #[test]
     fn linear_bool_field_steps_not_blank() {
-        // Bool field: t=0 -> true, t=10 -> false, t=20 -> true.
-        // Linear dt=5 over [0,20] must use prev-sample (step/hold) for Bool,
-        // never producing Empty inside the span.
+        // Linear mode must step/hold a bool, never producing Empty inside its span.
         let bool_schema = FieldSchema {
             name: "flag".into(),
             dtype: arrow::datatypes::DataType::Boolean,
@@ -548,11 +530,11 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                (0, vec![Num(1.0)]),  // true at t=0
-                (5, vec![Num(1.0)]),  // held from t=0 (prev-sample)
-                (10, vec![Num(0.0)]), // false at t=10
-                (15, vec![Num(0.0)]), // held from t=10
-                (20, vec![Num(1.0)]), // true at t=20
+                (0, vec![Num(1.0)]),
+                (5, vec![Num(1.0)]),
+                (10, vec![Num(0.0)]),
+                (15, vec![Num(0.0)]),
+                (20, vec![Num(1.0)]),
             ]
         );
     }

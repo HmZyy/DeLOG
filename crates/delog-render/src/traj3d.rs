@@ -1,19 +1,10 @@
 //! 3D trajectory polyline pipeline.
 //!
-//! Vertex-pulled line-list: trajectory points live in a `vec4<f32>` storage
-//! buffer (xyz + pad), and the pipeline draws `(N-1) * 2` vertices reading two
-//! endpoints per segment — no vertex buffer, no CPU tessellation. A non-finite
-//! endpoint collapses its segment, so NaN marks a gap. Lines are 1 px in
-//! v1 (thick/joined lines come later). The same pipeline draws the vertical
-//! world axis line that the ground-plane grid cannot.
-//!
-//! Like the rest of `delog-render` this is pure wgpu: matrices arrive as raw
-//! `[[f32; 4]; 4]` and a points buffer + uniform buffer are supplied by the
-//! caller, so it backs headless golden-image tests.
+//! Vertex-pulled line-list: points live in a `vec4<f32>` storage buffer
+//! (xyz + pad); a non-finite endpoint collapses its segment, so NaN marks a gap.
 
 use crate::context::RenderContext;
 
-/// Per-trajectory uniform: world→clip transform and the line color.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Traj3dUniform {
@@ -36,8 +27,8 @@ pub struct Traj3dPipeline {
 }
 
 impl Traj3dPipeline {
-    /// Build for a target with the given color/depth formats and MSAA sample
-    /// count (match the [`crate::Scene3dTarget`] it draws into).
+    /// Color/depth formats and MSAA sample count must match the
+    /// [`crate::Scene3dTarget`] it draws into.
     pub fn new(
         ctx: &RenderContext,
         color_format: wgpu::TextureFormat,
@@ -130,7 +121,6 @@ impl Traj3dPipeline {
         }
     }
 
-    /// Bind group for one trajectory: its `vec4` points buffer and uniform.
     pub fn bind_group(
         &self,
         ctx: &RenderContext,
@@ -153,8 +143,6 @@ impl Traj3dPipeline {
         })
     }
 
-    /// Draw a polyline of `point_count` points as `(point_count - 1)` line
-    /// segments. Fewer than two points draws nothing.
     pub fn draw(
         &self,
         pass: &mut wgpu::RenderPass<'_>,
@@ -176,7 +164,6 @@ mod tests {
     use crate::Scene3dTarget;
     use glam::{Mat4, Vec3};
 
-    /// Upload `pts` (xyz triples) as a `vec4` storage buffer.
     fn points_buffer(ctx: &RenderContext, pts: &[[f32; 3]]) -> wgpu::Buffer {
         let data: Vec<[f32; 4]> = pts.iter().map(|p| [p[0], p[1], p[2], 1.0]).collect();
         let buf = ctx.device().create_buffer(&wgpu::BufferDescriptor {
@@ -201,8 +188,6 @@ mod tests {
         buf
     }
 
-    /// Top-down camera so world X→screen X and world Z→screen Y; a line along
-    /// X at z=0 lands on the horizontal center row.
     fn topdown(w: u32, h: u32) -> Mat4 {
         let proj = Mat4::perspective_rh(0.9, w as f32 / h as f32, 0.1, 200.0);
         let view = Mat4::look_at_rh(Vec3::new(0.0, 20.0, 0.0), Vec3::ZERO, Vec3::Z);
@@ -238,7 +223,6 @@ mod tests {
         target.read_rgba()
     }
 
-    /// A polyline along world X renders a yellow line across the view.
     #[test]
     fn polyline_renders_a_visible_line() {
         let Some(ctx) = RenderContext::headless() else {
@@ -253,7 +237,6 @@ mod tests {
             .flat_map(|x| (0..h).map(move |y| (x, y)))
             .filter(|&(x, y)| yellow(img.pixel(x, y)))
             .count();
-        // The line drew, but only a thin band of pixels (not a fill).
         assert!(
             lit > 8,
             "trajectory line should be visible, got {lit} lit px"
@@ -261,8 +244,6 @@ mod tests {
         assert!(lit < (w * h) as usize / 8, "line should be thin, got {lit}");
     }
 
-    /// A NaN endpoint drops its segment (gap), so a two-point polyline
-    /// with a NaN end draws nothing.
     #[test]
     fn nan_endpoint_makes_a_gap() {
         let Some(ctx) = RenderContext::headless() else {

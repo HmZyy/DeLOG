@@ -1,43 +1,22 @@
-//! Color palettes and egui visuals for the app's dark themes.
-//!
-//! Each palette maps a well-known scheme onto a small set of semantic slots
-//! that [`Palette::visuals`] and the accent helpers consume. Background slots
-//! run darkest → lightest as `crust < mantle < base < surface0 < surface1 <
-//! surface2`; `base` is the panel fill, the surfaces are widget fills, and the
-//! two darker shades back text fields and inset areas.
+// Background slots run darkest -> lightest: crust < mantle < base < surface0 <
+// surface1 < surface2.
 
-/// A theme palette in semantic slots, independent of any one scheme's naming.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Palette {
-    /// Darkest background - extreme/inset areas (e.g. scroll troughs).
     pub crust: egui::Color32,
-    /// Slightly-dark background - text edit and code block fills.
     pub mantle: egui::Color32,
-    /// Main window/panel fill.
     pub base: egui::Color32,
-    /// Resting widget fill (and faint row striping).
     pub surface0: egui::Color32,
-    /// Active/pressed widget fill.
     pub surface1: egui::Color32,
-    /// Hovered widget fill.
     pub surface2: egui::Color32,
-    /// Mid-grey used for strokes and neutral status.
     pub overlay1: egui::Color32,
-    /// Dimmed (weak) text.
     pub subtext0: egui::Color32,
-    /// Primary text.
     pub text: egui::Color32,
-    /// Hyperlink color.
     pub link: egui::Color32,
-    /// Warning foreground inside egui visuals (typically the scheme's orange).
     pub warn_fg: egui::Color32,
-    /// Accent - selection tint, primary highlights.
     pub accent: egui::Color32,
-    /// Success / OK status.
     pub success: egui::Color32,
-    /// Warning status.
     pub warning: egui::Color32,
-    /// Error status.
     pub error: egui::Color32,
 }
 
@@ -60,99 +39,99 @@ pub const MOCHA: Palette = Palette {
     error: egui::Color32::from_rgb(243, 139, 168),
 };
 
-/// Gruvbox Dark - https://github.com/morhetz/gruvbox (medium contrast).
+/// Gruvbox Dark - https://github.com/morhetz/gruvbox
 pub const GRUVBOX: Palette = Palette {
-    crust: egui::Color32::from_rgb(29, 32, 33),     // bg0_hard
-    mantle: egui::Color32::from_rgb(40, 40, 40),    // bg0
-    base: egui::Color32::from_rgb(50, 48, 47),      // bg0_soft
-    surface0: egui::Color32::from_rgb(60, 56, 54),  // bg1
-    surface1: egui::Color32::from_rgb(80, 73, 69),  // bg2
-    surface2: egui::Color32::from_rgb(102, 92, 84), // bg3
-    overlay1: egui::Color32::from_rgb(146, 131, 116), // gray
-    subtext0: egui::Color32::from_rgb(189, 174, 147), // fg3
-    text: egui::Color32::from_rgb(235, 219, 178),   // fg1
-    link: egui::Color32::from_rgb(142, 192, 124),   // bright_aqua
-    warn_fg: egui::Color32::from_rgb(254, 128, 25), // bright_orange
-    accent: egui::Color32::from_rgb(131, 165, 152), // bright_blue
-    success: egui::Color32::from_rgb(184, 187, 38), // bright_green
-    warning: egui::Color32::from_rgb(250, 189, 47), // bright_yellow
-    error: egui::Color32::from_rgb(251, 73, 52),    // bright_red
+    crust: egui::Color32::from_rgb(29, 32, 33),
+    mantle: egui::Color32::from_rgb(40, 40, 40),
+    base: egui::Color32::from_rgb(50, 48, 47),
+    surface0: egui::Color32::from_rgb(60, 56, 54),
+    surface1: egui::Color32::from_rgb(80, 73, 69),
+    surface2: egui::Color32::from_rgb(102, 92, 84),
+    overlay1: egui::Color32::from_rgb(146, 131, 116),
+    subtext0: egui::Color32::from_rgb(189, 174, 147),
+    text: egui::Color32::from_rgb(235, 219, 178),
+    link: egui::Color32::from_rgb(142, 192, 124),
+    warn_fg: egui::Color32::from_rgb(254, 128, 25),
+    accent: egui::Color32::from_rgb(131, 165, 152),
+    success: egui::Color32::from_rgb(184, 187, 38),
+    warning: egui::Color32::from_rgb(250, 189, 47),
+    error: egui::Color32::from_rgb(251, 73, 52),
 };
 
-/// Tokyo Night - https://github.com/folke/tokyonight.nvim (night variant).
+/// Tokyo Night - https://github.com/folke/tokyonight.nvim
 pub const TOKYO_NIGHT: Palette = Palette {
-    crust: egui::Color32::from_rgb(12, 14, 20),     // bg_dark1
-    mantle: egui::Color32::from_rgb(22, 22, 30),    // bg_dark
-    base: egui::Color32::from_rgb(26, 27, 38),      // bg
-    surface0: egui::Color32::from_rgb(41, 46, 66),  // bg_highlight
-    surface1: egui::Color32::from_rgb(59, 66, 97),  // fg_gutter
-    surface2: egui::Color32::from_rgb(65, 72, 104), // terminal bright black
-    overlay1: egui::Color32::from_rgb(86, 95, 137), // comment
-    subtext0: egui::Color32::from_rgb(169, 177, 214), // fg_dark
-    text: egui::Color32::from_rgb(192, 202, 245),   // fg
-    link: egui::Color32::from_rgb(125, 207, 255),   // cyan
-    warn_fg: egui::Color32::from_rgb(255, 158, 100), // orange
-    accent: egui::Color32::from_rgb(122, 162, 247), // blue
-    success: egui::Color32::from_rgb(158, 206, 106), // green
-    warning: egui::Color32::from_rgb(224, 175, 104), // yellow
-    error: egui::Color32::from_rgb(247, 118, 142),  // red
+    crust: egui::Color32::from_rgb(12, 14, 20),
+    mantle: egui::Color32::from_rgb(22, 22, 30),
+    base: egui::Color32::from_rgb(26, 27, 38),
+    surface0: egui::Color32::from_rgb(41, 46, 66),
+    surface1: egui::Color32::from_rgb(59, 66, 97),
+    surface2: egui::Color32::from_rgb(65, 72, 104),
+    overlay1: egui::Color32::from_rgb(86, 95, 137),
+    subtext0: egui::Color32::from_rgb(169, 177, 214),
+    text: egui::Color32::from_rgb(192, 202, 245),
+    link: egui::Color32::from_rgb(125, 207, 255),
+    warn_fg: egui::Color32::from_rgb(255, 158, 100),
+    accent: egui::Color32::from_rgb(122, 162, 247),
+    success: egui::Color32::from_rgb(158, 206, 106),
+    warning: egui::Color32::from_rgb(224, 175, 104),
+    error: egui::Color32::from_rgb(247, 118, 142),
 };
 
-/// Nord - https://www.nordtheme.com (darker base shades extend Polar Night).
+/// Nord - https://www.nordtheme.com
 pub const NORD: Palette = Palette {
-    crust: egui::Color32::from_rgb(36, 41, 51), // darkened Polar Night
-    mantle: egui::Color32::from_rgb(41, 46, 57), // darkened Polar Night
-    base: egui::Color32::from_rgb(46, 52, 64),  // nord0
-    surface0: egui::Color32::from_rgb(59, 66, 82), // nord1
-    surface1: egui::Color32::from_rgb(67, 76, 94), // nord2
-    surface2: egui::Color32::from_rgb(76, 86, 106), // nord3
-    overlay1: egui::Color32::from_rgb(97, 110, 136), // nord comment grey
-    subtext0: egui::Color32::from_rgb(216, 222, 233), // nord4
-    text: egui::Color32::from_rgb(236, 239, 244), // nord6
-    link: egui::Color32::from_rgb(136, 192, 208), // nord8
-    warn_fg: egui::Color32::from_rgb(208, 135, 112), // nord12 orange
-    accent: egui::Color32::from_rgb(129, 161, 193), // nord9 blue
-    success: egui::Color32::from_rgb(163, 190, 140), // nord14 green
-    warning: egui::Color32::from_rgb(235, 203, 139), // nord13 yellow
-    error: egui::Color32::from_rgb(191, 97, 106), // nord11 red
+    crust: egui::Color32::from_rgb(36, 41, 51),
+    mantle: egui::Color32::from_rgb(41, 46, 57),
+    base: egui::Color32::from_rgb(46, 52, 64),
+    surface0: egui::Color32::from_rgb(59, 66, 82),
+    surface1: egui::Color32::from_rgb(67, 76, 94),
+    surface2: egui::Color32::from_rgb(76, 86, 106),
+    overlay1: egui::Color32::from_rgb(97, 110, 136),
+    subtext0: egui::Color32::from_rgb(216, 222, 233),
+    text: egui::Color32::from_rgb(236, 239, 244),
+    link: egui::Color32::from_rgb(136, 192, 208),
+    warn_fg: egui::Color32::from_rgb(208, 135, 112),
+    accent: egui::Color32::from_rgb(129, 161, 193),
+    success: egui::Color32::from_rgb(163, 190, 140),
+    warning: egui::Color32::from_rgb(235, 203, 139),
+    error: egui::Color32::from_rgb(191, 97, 106),
 };
 
-/// Kanagawa - https://github.com/rebelot/kanagawa.nvim (wave variant).
+/// Kanagawa - https://github.com/rebelot/kanagawa.nvim
 pub const KANAGAWA: Palette = Palette {
-    crust: egui::Color32::from_rgb(22, 22, 29),     // sumiInk0
-    mantle: egui::Color32::from_rgb(24, 24, 32),    // sumiInk1
-    base: egui::Color32::from_rgb(31, 31, 40),      // sumiInk3
-    surface0: egui::Color32::from_rgb(42, 42, 55),  // sumiInk4
-    surface1: egui::Color32::from_rgb(54, 54, 70),  // sumiInk5
-    surface2: egui::Color32::from_rgb(84, 84, 109), // sumiInk6
-    overlay1: egui::Color32::from_rgb(114, 113, 105), // fujiGray
-    subtext0: egui::Color32::from_rgb(200, 192, 147), // oldWhite
-    text: egui::Color32::from_rgb(220, 215, 186),   // fujiWhite
-    link: egui::Color32::from_rgb(127, 180, 202),   // springBlue
-    warn_fg: egui::Color32::from_rgb(255, 160, 102), // surimiOrange
-    accent: egui::Color32::from_rgb(126, 156, 216), // crystalBlue
-    success: egui::Color32::from_rgb(152, 187, 108), // springGreen
-    warning: egui::Color32::from_rgb(230, 195, 132), // carpYellow
-    error: egui::Color32::from_rgb(228, 104, 118),  // waveRed
+    crust: egui::Color32::from_rgb(22, 22, 29),
+    mantle: egui::Color32::from_rgb(24, 24, 32),
+    base: egui::Color32::from_rgb(31, 31, 40),
+    surface0: egui::Color32::from_rgb(42, 42, 55),
+    surface1: egui::Color32::from_rgb(54, 54, 70),
+    surface2: egui::Color32::from_rgb(84, 84, 109),
+    overlay1: egui::Color32::from_rgb(114, 113, 105),
+    subtext0: egui::Color32::from_rgb(200, 192, 147),
+    text: egui::Color32::from_rgb(220, 215, 186),
+    link: egui::Color32::from_rgb(127, 180, 202),
+    warn_fg: egui::Color32::from_rgb(255, 160, 102),
+    accent: egui::Color32::from_rgb(126, 156, 216),
+    success: egui::Color32::from_rgb(152, 187, 108),
+    warning: egui::Color32::from_rgb(230, 195, 132),
+    error: egui::Color32::from_rgb(228, 104, 118),
 };
 
-/// Everforest - https://github.com/sainnhe/everforest (dark, medium contrast).
+/// Everforest - https://github.com/sainnhe/everforest
 pub const EVERFOREST: Palette = Palette {
-    crust: egui::Color32::from_rgb(30, 35, 38),    // hard bg0
-    mantle: egui::Color32::from_rgb(35, 42, 46),   // bg_dim
-    base: egui::Color32::from_rgb(45, 53, 59),     // bg0
-    surface0: egui::Color32::from_rgb(52, 63, 68), // bg1
-    surface1: egui::Color32::from_rgb(61, 72, 77), // bg2
-    surface2: egui::Color32::from_rgb(71, 82, 88), // bg3
-    overlay1: egui::Color32::from_rgb(122, 132, 120), // grey0
-    subtext0: egui::Color32::from_rgb(157, 169, 160), // grey2
-    text: egui::Color32::from_rgb(211, 198, 170),  // fg
-    link: egui::Color32::from_rgb(131, 192, 146),  // aqua
-    warn_fg: egui::Color32::from_rgb(230, 152, 117), // orange
-    accent: egui::Color32::from_rgb(127, 187, 179), // blue
-    success: egui::Color32::from_rgb(167, 192, 128), // green
-    warning: egui::Color32::from_rgb(219, 188, 127), // yellow
-    error: egui::Color32::from_rgb(230, 126, 128), // red
+    crust: egui::Color32::from_rgb(30, 35, 38),
+    mantle: egui::Color32::from_rgb(35, 42, 46),
+    base: egui::Color32::from_rgb(45, 53, 59),
+    surface0: egui::Color32::from_rgb(52, 63, 68),
+    surface1: egui::Color32::from_rgb(61, 72, 77),
+    surface2: egui::Color32::from_rgb(71, 82, 88),
+    overlay1: egui::Color32::from_rgb(122, 132, 120),
+    subtext0: egui::Color32::from_rgb(157, 169, 160),
+    text: egui::Color32::from_rgb(211, 198, 170),
+    link: egui::Color32::from_rgb(131, 192, 146),
+    warn_fg: egui::Color32::from_rgb(230, 152, 117),
+    accent: egui::Color32::from_rgb(127, 187, 179),
+    success: egui::Color32::from_rgb(167, 192, 128),
+    warning: egui::Color32::from_rgb(219, 188, 127),
+    error: egui::Color32::from_rgb(230, 126, 128),
 };
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -194,8 +173,7 @@ impl ThemeChoice {
         }
     }
 
-    /// The palette backing this choice, or `None` for egui's built-in
-    /// Light/Dark visuals.
+    /// `None` selects egui's built-in Light/Dark visuals.
     pub const fn palette(self) -> Option<Palette> {
         match self {
             Self::Light | Self::Dark => None,
@@ -219,7 +197,6 @@ impl ThemeChoice {
                     ctx.set_theme(egui::ThemePreference::Light);
                     ctx.set_visuals(egui::Visuals::light());
                 }
-                // Dark, and any future built-in.
                 _ => {
                     ctx.set_theme(egui::ThemePreference::Dark);
                     ctx.set_visuals(egui::Visuals::dark());

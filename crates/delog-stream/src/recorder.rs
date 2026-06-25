@@ -1,11 +1,8 @@
-//! Raw MAVLink `.tlog` recorder.
-
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
 
-/// Writes `[8-byte big-endian Unix µs][raw MAVLink frame]` records, matching
-/// the tlog parser's framing exactly.
+/// Record framing: `[8-byte big-endian Unix µs][raw MAVLink frame]`.
 pub struct TlogRecorder {
     writer: BufWriter<File>,
     records: u64,

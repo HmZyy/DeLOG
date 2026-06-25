@@ -1,12 +1,6 @@
-//! Memory accounting per field/topic/source.
-//!
-//! [`MemBreakdown`] is the shared vocabulary type for the four memory pools the
-//! tool tracks. `delog-core` can only measure the `canonical` pool — the Arrow
-//! buffers held by the store — because the others live in crates it must not
-//! depend on: `cache_cpu` is `delog-cache`'s f32 render caches,
-//! `gpu` is `delog-render`'s buffer-manager ledger, and `mmap` is the
-//! memory-mapped IPC sidecars. Upper layers fill those pools in and
-//! merge with the canonical report built here.
+//! Memory accounting per field/topic/source. `delog-core` can only measure the
+//! `canonical` pool (the store's Arrow buffers); the other three pools live in
+//! crates it must not depend on, and upper layers fill them in.
 
 use std::iter::Sum;
 use std::ops::{Add, AddAssign};
@@ -16,25 +10,20 @@ use arrow::array::Array;
 use crate::identity::{FieldId, SourceId, TopicId};
 use crate::snapshot::StoreSnapshot;
 
-/// Bytes attributed to one entity (field, topic, source, or the whole store),
-/// split across the four pools.
-///
-/// All arithmetic saturates: byte totals never realistically overflow `u64`,
-/// but saturating keeps accounting panic-free even on absurd inputs.
+/// All arithmetic saturates to keep byte accounting panic-free on absurd inputs.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MemBreakdown {
-    /// Canonical Arrow buffers in the store (timestamps + columns).
+    /// Store's Arrow buffers (timestamps + columns).
     pub canonical: u64,
-    /// Lazily-built f32 render caches + min/max pyramids (`delog-cache`).
+    /// f32 render caches + min/max pyramids (`delog-cache`).
     pub cache_cpu: u64,
-    /// GPU storage buffers tracked by the renderer ledger (`delog-render`).
+    /// GPU storage buffers (`delog-render` ledger).
     pub gpu: u64,
-    /// Memory-mapped Arrow IPC sidecar pages (`delog-cache` reload).
+    /// Memory-mapped Arrow IPC sidecar pages (`delog-cache`).
     pub mmap: u64,
 }
 
 impl MemBreakdown {
-    /// All pools zero.
     pub const ZERO: Self = Self {
         canonical: 0,
         cache_cpu: 0,
@@ -42,8 +31,6 @@ impl MemBreakdown {
         mmap: 0,
     };
 
-    /// A breakdown carrying only canonical bytes — the only pool `delog-core`
-    /// can measure.
     pub const fn canonical(bytes: u64) -> Self {
         Self {
             canonical: bytes,
@@ -53,7 +40,6 @@ impl MemBreakdown {
         }
     }
 
-    /// Sum across all four pools.
     pub const fn total(&self) -> u64 {
         self.canonical
             .saturating_add(self.cache_cpu)
@@ -87,14 +73,9 @@ impl Sum for MemBreakdown {
     }
 }
 
-/// Canonical memory of a snapshot, broken down per field/topic/source plus a
-/// grand total. Built by [`MemReport::canonical`].
-///
-/// The per-entity vectors are indexed by the dense runtime ID (`id.index()`),
-/// aligned to the snapshot's own `fields`/`topics`/`sources` vectors. A topic's
-/// canonical bytes include its shared timestamp buffers; those are *not*
-/// attributed to any single field, so for a topic whose every column has a
-/// registered field, `topic.canonical == timestamp_bytes + Σ field.canonical`.
+/// Per-entity vectors indexed by the dense runtime ID (`id.index()`). A topic's
+/// bytes include its shared timestamp buffers, which are not attributed to any
+/// field — so `topic.canonical == timestamp_bytes + Σ field.canonical`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemReport {
     fields: Vec<MemBreakdown>,
@@ -104,16 +85,12 @@ pub struct MemReport {
 }
 
 impl MemReport {
-    /// Measure the canonical (Arrow buffer) memory of every field, topic and
-    /// source in `snapshot`. The other three pools are left zero — only
-    /// `delog-core`'s store is in scope here.
+    /// Other three pools are left zero; only the store is in scope here.
     pub fn canonical(snapshot: &StoreSnapshot) -> Self {
         let mut fields = vec![MemBreakdown::ZERO; snapshot.fields.len()];
         let mut topics = vec![MemBreakdown::ZERO; snapshot.topics.len()];
         let mut sources = vec![MemBreakdown::ZERO; snapshot.sources.len()];
 
-        // Per-topic: shared timestamp buffers + every column buffer, summed
-        // across chunks. Roll the same total up into the owning source.
         for topic in snapshot.topics.iter() {
             let Some(store) = topic.store.as_ref() else {
                 continue;
@@ -240,9 +217,6 @@ mod tests {
         assert_eq!((big + MemBreakdown::canonical(1)).canonical, u64::MAX);
     }
 
-    // A two-source snapshot: one source with a BARO topic (two numeric fields),
-    // another with a GPS topic (one field). Lets us check per-field/topic/source
-    // attribution and the timestamp-folding invariant.
     fn snapshot() -> (
         StoreSnapshot,
         SourceId,
@@ -316,7 +290,6 @@ mod tests {
         let (snapshot, flight, live, baro, gps, [alt, temp, lat]) = snapshot();
         let report = MemReport::canonical(&snapshot);
 
-        // Every measured pool is canonical-only here.
         for slot in report
             .fields()
             .iter()
@@ -328,18 +301,15 @@ mod tests {
             assert_eq!(slot.mmap, 0);
         }
 
-        // Fields carry their own column buffers, no timestamps.
         assert!(report.field(alt).canonical > 0);
         assert!(report.field(temp).canonical > 0);
         assert!(report.field(lat).canonical > 0);
 
-        // BARO timestamps are shared, so the topic exceeds the field columns.
         let baro_ts = report.topic(baro).canonical
             - report.field(alt).canonical
             - report.field(temp).canonical;
         assert!(baro_ts > 0, "topic must include shared timestamp buffers");
 
-        // Source folds its topic; total folds both sources.
         assert_eq!(report.source(flight), report.topic(baro));
         assert_eq!(report.source(live), report.topic(gps));
         assert_eq!(report.total(), report.source(flight) + report.source(live));
@@ -351,7 +321,6 @@ mod tests {
         let (snapshot, _flight, _live, baro, _gps, [alt, temp, _lat]) = snapshot();
         let report = MemReport::canonical(&snapshot);
 
-        // Recompute the lone timestamp buffer to pin the folding invariant.
         let baro_store = snapshot.topic_store(baro).unwrap();
         let ts_bytes: u64 = baro_store
             .chunks
