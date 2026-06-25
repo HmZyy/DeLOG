@@ -488,11 +488,11 @@ fn position_from_row(
 fn build_trajectory_from_rows(
     snapshot: &StoreSnapshot,
     config: &VehicleConfig,
-) -> Option<Vec<[f32; 3]>> {
+) -> Option<VehicleTrajectory> {
     let rows = position_row_source(snapshot, &config.pos)?;
     let total_rows = usize::try_from(rows.store.rows).ok()?;
     if total_rows == 0 {
-        return Some(Vec::new());
+        return Some(VehicleTrajectory::default());
     }
 
     let gps_ref = gps_reference(snapshot, config);
@@ -501,10 +501,14 @@ fn build_trajectory_from_rows(
     // GPU upload only writes the new tail each rebuild (see
     // `GpuBridge::sync_vehicle_trajectory`) and the line shader handles the full
     // vertex count. No decimation means vertices never move between rebuilds —
-    // the source of the old jiggle.
+    // the source of the old jiggle. The canonical µs time of each row rides
+    // alongside (`chunk.t`, never the f32 cache) so the path can be clipped to
+    // the playhead at draw time.
     let mut points = Vec::with_capacity(total_rows);
+    let mut times_us = Vec::with_capacity(total_rows);
     for chunk in rows.store.chunks.iter() {
         for row in 0..chunk.len() {
+            times_us.push(chunk.t.value(row));
             match position_from_row(&config.pos, &rows, gps_ref, chunk, row) {
                 Some(p) => points.push([p.x, p.y, p.z]),
                 None => points.push([f32::NAN, f32::NAN, f32::NAN]),
@@ -512,31 +516,45 @@ fn build_trajectory_from_rows(
         }
     }
 
-    Some(points)
+    Some(VehicleTrajectory { points, times_us })
 }
 
-fn build_trajectory_by_time(snapshot: &StoreSnapshot, config: &VehicleConfig) -> Vec<[f32; 3]> {
+fn build_trajectory_by_time(snapshot: &StoreSnapshot, config: &VehicleConfig) -> VehicleTrajectory {
     let Some((t0, t1)) = position_topic_range(snapshot, &config.pos) else {
-        return Vec::new();
+        return VehicleTrajectory::default();
     };
     let gps_ref = gps_reference(snapshot, config);
     let span = (t1 - t0).max(1);
     let steps = (span / 50_000).clamp(2, MAX_TRAJECTORY_POINTS as i64) as usize; // ~20 Hz cap
-    let mut pts = Vec::with_capacity(steps);
+    let mut points = Vec::with_capacity(steps);
+    let mut times_us = Vec::with_capacity(steps);
     for i in 0..steps {
         let t = t0 + span * i as i64 / (steps as i64 - 1);
+        times_us.push(t);
         match position_at(snapshot, &config.pos, gps_ref, t) {
-            Some(p) => pts.push([p.x, p.y, p.z]),
-            None => pts.push([f32::NAN, f32::NAN, f32::NAN]),
+            Some(p) => points.push([p.x, p.y, p.z]),
+            None => points.push([f32::NAN, f32::NAN, f32::NAN]),
         }
     }
-    pts
+    VehicleTrajectory { points, times_us }
 }
 
-/// Decimate a vehicle's full path into render-space points (with NaN points
-/// marking gaps, so the line shader breaks there). Off-thread work:
-/// the caller runs this on a worker and feeds the result to the renderer.
-pub fn build_trajectory(snapshot: &StoreSnapshot, config: &VehicleConfig) -> Vec<[f32; 3]> {
+/// A built vehicle path: render-space points plus the canonical µs timestamp
+/// of each point (1:1, gap rows included). The timestamps let the renderer
+/// clip the drawn path to the playhead with a binary search.
+#[derive(Debug, Default, Clone)]
+pub struct VehicleTrajectory {
+    /// Render-space `[x,y,z]` points (NaN = gap, so the line shader breaks).
+    pub points: Vec<[f32; 3]>,
+    /// Canonical µs timestamp of each point, 1:1 with `points`. Non-decreasing
+    /// for the row-order path (the position store is appended in time order).
+    pub times_us: Vec<i64>,
+}
+
+/// Build a vehicle's full path into render-space points + per-point timestamps
+/// (with NaN points marking gaps, so the line shader breaks there). Off-thread
+/// work: the caller runs this on a worker and feeds the result to the renderer.
+pub fn build_trajectory(snapshot: &StoreSnapshot, config: &VehicleConfig) -> VehicleTrajectory {
     build_trajectory_from_rows(snapshot, config)
         .unwrap_or_else(|| build_trajectory_by_time(snapshot, config))
 }
@@ -806,7 +824,7 @@ mod tests {
             vec![0.0, 0.0, 0.0],
             vec![0.0, 0.0, 0.0],
         );
-        let traj = build_trajectory(&snap, &ned_config(f));
+        let traj = build_trajectory(&snap, &ned_config(f)).points;
         assert!(traj.len() >= 2);
         // North maps to render −Z, so z should sweep 0 → −100.
         let first = traj.first().unwrap();
@@ -815,6 +833,48 @@ mod tests {
         assert!(
             (last[2] + 100.0).abs() < 2.0,
             "end near −100 Z, got {last:?}"
+        );
+    }
+
+    #[test]
+    fn trajectory_emits_one_timestamp_per_point_in_nondecreasing_order() {
+        let (snap, f) = ned_snapshot(
+            vec![0, 1_000_000, 2_000_000],
+            vec![0.0, 50.0, 100.0],
+            vec![0.0, 0.0, 0.0],
+            vec![0.0, 0.0, 0.0],
+        );
+        let traj = build_trajectory(&snap, &ned_config(f));
+        assert_eq!(
+            traj.points.len(),
+            traj.times_us.len(),
+            "1:1 point/time alignment"
+        );
+        assert_eq!(traj.times_us, vec![0, 1_000_000, 2_000_000]);
+        assert!(
+            traj.times_us.windows(2).all(|w| w[0] <= w[1]),
+            "row-order path has non-decreasing timestamps",
+        );
+    }
+
+    #[test]
+    fn trajectory_partition_point_clips_prefix_at_a_mid_time() {
+        let (snap, f) = ned_snapshot(
+            vec![0, 1_000_000, 2_000_000],
+            vec![0.0, 50.0, 100.0],
+            vec![0.0, 0.0, 0.0],
+            vec![0.0, 0.0, 0.0],
+        );
+        let traj = build_trajectory(&snap, &ned_config(f));
+        // Playhead exactly on the middle sample includes the first two points.
+        let visible = traj.times_us.partition_point(|&t| t <= 1_000_000);
+        assert_eq!(visible, 2);
+        // Before the first sample: nothing flown yet.
+        assert_eq!(traj.times_us.partition_point(|&t| t <= -1), 0);
+        // At/after the last sample: the full path.
+        assert_eq!(
+            traj.times_us.partition_point(|&t| t <= 2_000_000),
+            traj.points.len()
         );
     }
 
@@ -829,7 +889,7 @@ mod tests {
             vec![0.0, 0.0, 0.0],
             vec![0.0, 0.0, 0.0],
         );
-        let traj = build_trajectory(&snap, &ned_config(f));
+        let traj = build_trajectory(&snap, &ned_config(f)).points;
         assert_eq!(traj.len(), 3);
         assert!((traj[0][2] - 0.0).abs() < 1e-4, "{traj:?}");
         assert!((traj[1][2] + 10.0).abs() < 1e-4, "{traj:?}");
