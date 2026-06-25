@@ -36,12 +36,17 @@ pub struct VehicleDraw<'a> {
     pub normal_matrix: [[f32; 4]; 4],
     pub color: [f32; 4],
     pub path_color: [f32; 4],
-    /// Render-space `[x,y,z]` trajectory points (NaN = gap).
+    /// Render-space `[x,y,z]` trajectory points (NaN = gap). Full path — it
+    /// stays resident; `visible_count` clips what is drawn this frame.
     pub trajectory: &'a [[f32; 3]],
     /// Config generation the trajectory was built at. Unchanged across pure
     /// data-append rebuilds (so the path only grows), bumped on config/offset
     /// change — lets the GPU upload just the new tail vs. a full re-upload.
     pub traj_generation: u64,
+    /// Points of `trajectory` to actually draw this frame (≤ len): the path
+    /// clipped to the playhead. The full path is still uploaded/resident, so
+    /// scrubbing only changes the draw count, never the buffer.
+    pub visible_count: u32,
 }
 
 /// The inner plot rect plus the visible data window the GPU and the egui axes
@@ -830,7 +835,8 @@ impl SceneResources {
             let Some(vg) = self.vehicles.get(&v.key) else {
                 continue;
             };
-            self.traj.draw(pass, &vg.traj_bind, vg.traj_count);
+            self.traj
+                .draw(pass, &vg.traj_bind, v.visible_count.min(vg.traj_count));
             if let Some(mesh) = self.model_cache.get(v.model) {
                 self.mesh.draw(pass, &vg.mesh_bind, mesh);
             }
