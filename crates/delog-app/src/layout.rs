@@ -158,6 +158,14 @@ pub struct TextFilterLayout {
 pub struct SceneLayout {
     pub camera: CameraLayout,
     pub tracked_vehicle: Option<usize>,
+    /// Whether the path is clipped to the playhead. Defaults to true so layouts
+    /// saved before this field decode to the up-to-playhead behavior.
+    #[serde(default = "default_trail_to_playhead")]
+    pub trail_to_playhead: bool,
+}
+
+fn default_trail_to_playhead() -> bool {
+    true
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -675,6 +683,7 @@ fn node_to_layout(
                 distance: scene.camera.distance,
             },
             tracked_vehicle: scene.tracked_vehicle,
+            trail_to_playhead: scene.trail_to_playhead,
         })),
         egui_tiles::Tile::Container(container) => {
             let children = container
@@ -999,6 +1008,7 @@ fn insert_node(
                 distance: scene.camera.distance,
             },
             tracked_vehicle: scene.tracked_vehicle,
+            trail_to_playhead: scene.trail_to_playhead,
         }))),
         LayoutNode::Split { split, children } => {
             let child_ids = children
