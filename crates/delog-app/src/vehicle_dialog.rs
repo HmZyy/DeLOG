@@ -8,6 +8,9 @@ use egui::Color32;
 
 use crate::vehicle::{GeoRef, ModelKind, NedReference, OriMapping, PosMapping, VehicleConfig};
 
+/// Fixed dialog width, applied even when no vehicles are configured.
+const DIALOG_WIDTH: f32 = 360.0;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PosMode {
     Ned,
@@ -459,8 +462,10 @@ pub fn show(
         .collapsible(false)
         .default_pos(ctx.content_rect().center())
         .pivot(egui::Align2::CENTER_CENTER)
-        .default_width(360.0)
+        .default_width(DIALOG_WIDTH)
         .show(ctx, |ui| {
+            // Keep a stable, full width even with no vehicles configured.
+            ui.set_min_width(DIALOG_WIDTH);
             if ui
                 .add(egui::Button::image_and_text(
                     icon(ui, crate::icons::plus()),
@@ -484,9 +489,6 @@ pub fn show(
                         .show(ui, |ui| {
                             draft_editor(ui, draft, snapshot);
                             ui.add_space(8.0);
-                            if draft.build().is_none() {
-                                ui.weak("Incomplete: pick a source, position topic + columns.");
-                            }
                             if ui
                                 .add(egui::Button::image_and_text(
                                     icon(ui, crate::icons::trash()),
@@ -530,6 +532,13 @@ fn icon(ui: &egui::Ui, src: egui::ImageSource<'static>) -> egui::Image<'static> 
         .tint(ui.visuals().text_color())
 }
 
+/// A bold section heading separating the General / Orientation / Position
+/// groups within a vehicle's editor.
+fn section_heading(ui: &mut egui::Ui, text: &str) {
+    ui.label(egui::RichText::new(text).strong());
+    ui.add_space(2.0);
+}
+
 fn draft_editor(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapshot) {
     let sources: Vec<(SourceId, String)> = snapshot
         .sources
@@ -538,7 +547,8 @@ fn draft_editor(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapshot) 
         .map(|s| (s.entry.id, s.entry.label.clone()))
         .collect();
 
-    egui::Grid::new("vehicle_grid")
+    section_heading(ui, "General");
+    egui::Grid::new("vehicle_grid_general")
         .num_columns(2)
         .spacing([18.0, 8.0])
         .show(ui, |ui| {
@@ -612,24 +622,31 @@ fn draft_editor(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapshot) 
                 ui.add(egui::Slider::new(&mut draft.scale, 0.05..=50.0).show_value(false));
             });
             ui.end_row();
+        });
 
-            let Some(source) = draft.source else {
-                ui.label("");
-                ui.weak("Select a source to map its fields.");
-                ui.end_row();
-                return;
-            };
-            let topics = source_topics(snapshot, source);
+    // Field mapping needs a source; until one is chosen there is nothing more
+    // to show.
+    let Some(source) = draft.source else {
+        return;
+    };
+    let topics = source_topics(snapshot, source);
 
-            ui.label(egui::RichText::new("Orientation").strong());
+    ui.add_space(10.0);
+    section_heading(ui, "Orientation");
+    egui::Grid::new("vehicle_grid_orientation")
+        .num_columns(2)
+        .spacing([18.0, 8.0])
+        .show(ui, |ui| {
+            ui.label("Mode");
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut draft.ori_mode, OriMode::Static, "Static");
                 ui.selectable_value(&mut draft.ori_mode, OriMode::Euler, "Euler");
                 ui.selectable_value(&mut draft.ori_mode, OriMode::Quat, "Quaternion");
             });
             ui.end_row();
+
             if draft.ori_mode != OriMode::Static {
-                ui.label("Orient. Topic");
+                ui.label("Topic");
                 if topic_combo(ui, "veh-ori-topic", &mut draft.ori_topic, &topics) {
                     draft.roll = None;
                     draft.pitch = None;
@@ -662,20 +679,24 @@ fn draft_editor(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapshot) 
                             grid_field(ui, "veh-qz", "QZ", &mut draft.qz, &cols);
                         }
                     }
-                } else {
-                    ui.label("");
-                    ui.weak("Select an orientation topic.");
-                    ui.end_row();
                 }
             }
+        });
 
-            ui.label(egui::RichText::new("Position").strong());
+    ui.add_space(10.0);
+    section_heading(ui, "Position");
+    egui::Grid::new("vehicle_grid_position")
+        .num_columns(2)
+        .spacing([18.0, 8.0])
+        .show(ui, |ui| {
+            ui.label("Frame");
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut draft.pos_mode, PosMode::Ned, "Local (NED)");
                 ui.selectable_value(&mut draft.pos_mode, PosMode::Gps, "Global (GPS)");
             });
             ui.end_row();
-            ui.label("Pos. Topic");
+
+            ui.label("Topic");
             if topic_combo(ui, "veh-pos-topic", &mut draft.pos_topic, &topics) {
                 draft.north = None;
                 draft.east = None;
@@ -688,6 +709,7 @@ fn draft_editor(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapshot) 
                 draft.ref_alt_f = None;
             }
             ui.end_row();
+
             if let Some(topic) = draft.pos_topic {
                 let cols = topic_fields(snapshot, topic);
                 match draft.pos_mode {
@@ -736,10 +758,6 @@ fn draft_editor(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapshot) 
                         ui.end_row();
                     }
                 }
-            } else {
-                ui.label("");
-                ui.weak("Select a position topic.");
-                ui.end_row();
             }
         });
 }
