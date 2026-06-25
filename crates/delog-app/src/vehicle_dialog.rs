@@ -556,7 +556,6 @@ fn draft_editor(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapshot) 
         .map(|s| (s.entry.id, s.entry.label.clone()))
         .collect();
 
-    section_heading(ui, "General");
     egui::Grid::new("vehicle_grid_general")
         .num_columns(2)
         .spacing([18.0, 8.0])
@@ -644,7 +643,8 @@ fn draft_editor(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapshot) 
     };
     let topics = source_topics(snapshot, source);
 
-    ui.add_space(10.0);
+    ui.add_space(4.0);
+    ui.separator();
     section_heading(ui, "Orientation");
     egui::Grid::new("vehicle_grid_orientation")
         .num_columns(2)
@@ -696,7 +696,8 @@ fn draft_editor(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapshot) 
             }
         });
 
-    ui.add_space(10.0);
+    ui.add_space(4.0);
+    ui.separator();
     section_heading(ui, "Position");
     egui::Grid::new("vehicle_grid_position")
         .num_columns(2)
