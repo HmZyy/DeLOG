@@ -2177,6 +2177,7 @@ impl eframe::App for DelogApp {
                         marker_scope: self.settings.plot.marker_scope,
                         render_tuning: self.settings.render,
                         scene3d: self.settings.scene3d,
+                        accent: self.settings.theme.accent(),
                         playhead_us: snapshot.global_time_range().map(|_| self.playback.t_us),
                         playing: self.playback.playing,
                         vehicles: &self.vehicles,
