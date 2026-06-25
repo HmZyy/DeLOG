@@ -23,10 +23,24 @@ pub enum Pane {
     Scene3D(Scene3dPane),
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Scene3dPane {
     pub camera: OrbitCamera,
     pub tracked_vehicle: Option<usize>,
+    /// When true (default), each vehicle's path is drawn only up to the
+    /// playhead time; when false, the full flight path is drawn. Toggled by
+    /// the route button in the scene's top-right overlay.
+    pub trail_to_playhead: bool,
+}
+
+impl Default for Scene3dPane {
+    fn default() -> Self {
+        Self {
+            camera: OrbitCamera::default(),
+            tracked_vehicle: None,
+            trail_to_playhead: true,
+        }
+    }
 }
 
 impl Default for Pane {
@@ -399,13 +413,16 @@ pub struct PlotServices<'a> {
     pub render_tuning: crate::settings::RenderTuning,
     /// Live-adjustable 3D scene tuning, from the config.
     pub scene3d: crate::settings::Scene3dSettings,
+    /// Theme accent colour, used to highlight active scene-overlay toggles.
+    pub accent: egui::Color32,
     /// Playback time for the playhead cursor; `None` before any data loads.
     pub playhead_us: Option<i64>,
     /// Whether playback is running (gates the playhead value tooltip).
     pub playing: bool,
     pub vehicles: &'a [crate::vehicle::VehicleConfig],
-    /// Cached render-space trajectories, parallel to `vehicles`.
-    pub trajectories: &'a [Vec<[f32; 3]>],
+    /// Cached render-space trajectories (points + per-point timestamps),
+    /// parallel to `vehicles`.
+    pub trajectories: &'a [crate::vehicle::VehicleTrajectory],
     /// Config generation the cached trajectories were built at (the vehicle
     /// revision); lets the GPU upload only appended tail points.
     pub traj_generation: u64,
@@ -547,6 +564,7 @@ impl Behavior<'_> {
         // frame; trajectories come from the app's epoch-cached build.
         let snapshot = self.services.snapshot;
         let playhead = self.services.playhead_us;
+        let trail_to_playhead = pane.trail_to_playhead;
         // `pose_at` folds GPS-ref resolution and per-playhead reads together; we
         // split them here to see whether the per-frame
         // `resolve_gps_ref` scan or the O(chunks) `sample_at` reads dominate
@@ -605,6 +623,19 @@ impl Behavior<'_> {
             .enumerate()
             .filter_map(|(i, v)| {
                 let pose = poses[i]?;
+                let traj = self.services.trajectories.get(i);
+                let points: &[[f32; 3]] = traj.map_or(&[], |t| t.points.as_slice());
+                // Clip the drawn path to the playhead when trail mode is on: the
+                // prefix of points whose timestamp is ≤ playhead (O(log N) per
+                // vehicle). With trail mode off, or no playhead (no data range),
+                // show the full path. The full path stays resident on the GPU
+                // regardless, so toggling never re-uploads.
+                let visible_count = match (traj, playhead) {
+                    (Some(t), Some(ph)) if trail_to_playhead => {
+                        t.times_us.partition_point(|&ts| ts <= ph) as u32
+                    }
+                    _ => points.len() as u32,
+                };
                 Some(VehicleDraw {
                     key: i as u32,
                     model: &v.model,
@@ -612,8 +643,9 @@ impl Behavior<'_> {
                     normal_matrix: glam::Mat4::from_mat3(pose.rot).to_cols_array_2d(),
                     color: legend::color32_to_srgb(v.color),
                     path_color: legend::color32_to_srgb(v.path_color),
-                    trajectory: self.services.trajectories.get(i).map_or(&[], Vec::as_slice),
+                    trajectory: points,
                     traj_generation: self.services.traj_generation,
+                    visible_count,
                 })
             })
             .collect();
@@ -651,8 +683,13 @@ impl Behavior<'_> {
             tracked_vehicle_picker(ui, rect, pane, self.services.vehicles);
         }
 
-        if scene_settings_button(ui, rect) {
+        let overlay =
+            scene_overlay_buttons(ui, rect, pane.trail_to_playhead, self.services.accent);
+        if overlay.vehicle_config {
             self.actions.open_vehicle_config = true;
+        }
+        if overlay.toggle_trail {
+            pane.trail_to_playhead = !pane.trail_to_playhead;
         }
 
         if response.drag_started_by(egui::PointerButton::Middle) {
@@ -1549,24 +1586,54 @@ fn tracked_vehicle_picker(
         });
 }
 
-/// Gear button overlaid on the scene's top-right corner. Returns true on the
-/// frame it is clicked (opens the vehicle configuration dialog).
-fn scene_settings_button(ui: &mut egui::Ui, scene_rect: egui::Rect) -> bool {
-    let id = ui.make_persistent_id("scene-settings");
-    let mut clicked = false;
+/// Which scene-overlay button was clicked this frame.
+#[derive(Default)]
+struct SceneOverlayClicks {
+    vehicle_config: bool,
+    toggle_trail: bool,
+}
+
+/// Button stack overlaid on the scene's top-right corner: a cog that opens the
+/// vehicle configuration dialog, and directly below it an equally-sized route
+/// button that toggles the path between the full flight path and the portion
+/// up to the playhead. `trail_to_playhead` drives the toggle's pressed state.
+fn scene_overlay_buttons(
+    ui: &mut egui::Ui,
+    scene_rect: egui::Rect,
+    trail_to_playhead: bool,
+    accent: egui::Color32,
+) -> SceneOverlayClicks {
+    let id = ui.make_persistent_id("scene-overlay-buttons");
+    let mut clicks = SceneOverlayClicks::default();
     egui::Area::new(id)
         .order(egui::Order::Foreground)
         .fixed_pos(scene_rect.right_top() + egui::vec2(-36.0, 8.0))
         .show(ui.ctx(), |ui| {
-            let image = egui::Image::new(crate::icons::gear())
-                .fit_to_exact_size(egui::vec2(18.0, 18.0))
-                .tint(ui.visuals().text_color());
-            clicked = ui
-                .add_sized(egui::vec2(28.0, 24.0), egui::Button::image(image))
-                .on_hover_text("Configure 3D vehicles")
-                .clicked();
+            ui.vertical(|ui| {
+                let gear = egui::Image::new(crate::icons::gear())
+                    .fit_to_exact_size(egui::vec2(18.0, 18.0))
+                    .tint(ui.visuals().weak_text_color());
+                clicks.vehicle_config = ui
+                    .add_sized(egui::vec2(28.0, 24.0), egui::Button::image(gear))
+                    .clicked();
+
+                // Route toggle: accent when the path is clipped to the playhead,
+                // dimmed when the full path is shown (mirrors the toolbar's
+                // active/inactive icon-tint convention).
+                let route_tint = if trail_to_playhead {
+                    accent
+                } else {
+                    ui.visuals().weak_text_color()
+                };
+                let route = egui::Image::new(crate::icons::route())
+                    .fit_to_exact_size(egui::vec2(18.0, 18.0))
+                    .tint(route_tint);
+                clicks.toggle_trail = ui
+                    .add_sized(egui::vec2(28.0, 24.0), egui::Button::image(route))
+                    .clicked();
+            });
         });
-    clicked
+    clicks
 }
 
 /// A 16px menu icon tinted to the current text colour (the bundled SVGs are
