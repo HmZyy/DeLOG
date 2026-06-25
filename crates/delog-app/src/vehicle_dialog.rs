@@ -470,17 +470,15 @@ pub fn show(
             {
                 state.drafts.push(Draft::default());
             }
-            ui.separator();
+            ui.add_space(8.0);
 
             let mut remove: Option<usize> = None;
             egui::ScrollArea::vertical().show(ui, |ui| {
                 for (i, draft) in state.drafts.iter_mut().enumerate() {
-                    let title = if draft.label.trim().is_empty() {
-                        format!("Vehicle #{}", i + 1)
-                    } else {
-                        format!("{} — Vehicle #{}", draft.label, i + 1)
-                    };
-                    egui::CollapsingHeader::new(title)
+                    // Vehicles are auto-named by position; the collapsing header
+                    // is the only place the name appears.
+                    draft.label = format!("Vehicle #{}", i + 1);
+                    egui::CollapsingHeader::new(draft.label.clone())
                         .id_salt(("vehicle", i))
                         .default_open(true)
                         .show(ui, |ui| {
@@ -499,7 +497,7 @@ pub fn show(
                                 remove = Some(i);
                             }
                         });
-                    ui.separator();
+                    ui.add_space(6.0);
                 }
             });
             if let Some(i) = remove {
@@ -542,13 +540,8 @@ fn draft_editor(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapshot) 
 
     egui::Grid::new("vehicle_grid")
         .num_columns(2)
-        .spacing([18.0, 6.0])
-        .striped(true)
+        .spacing([18.0, 8.0])
         .show(ui, |ui| {
-            ui.label("Name");
-            ui.text_edit_singleline(&mut draft.label);
-            ui.end_row();
-
             ui.label("Visible");
             ui.checkbox(&mut draft.show, "");
             ui.end_row();
