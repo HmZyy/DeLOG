@@ -1,5 +1,3 @@
-//! Dev tool: parse a PX4 `.ulg` and print the resulting topic tree.
-//!
 //! Usage: `cargo run -p delog-parsers --example parse_ulog -- path/to/log.ulg`
 
 use std::fs::File;

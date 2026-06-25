@@ -1,27 +1,20 @@
-//! Runtime IDs, portable field keys and identity registries.
-//!
-//! Runtime IDs are dense `u32` indices for hot-path indexing. Persisted layouts
-//! use [`FieldKey`] instead, because runtime IDs are meaningful only for one
-//! process session.
+//! Runtime IDs are dense `u32` indices, meaningful only within one process
+//! session; persisted layouts use [`FieldKey`] instead.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::time::{TimestampUs, effective_time_us};
 
-/// Dense source index into a snapshot/source vector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SourceId(pub u32);
 
-/// Dense topic index, global across sources.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TopicId(pub u32);
 
-/// Dense field index, global across topics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FieldId(pub u32);
 
-/// Portable field reference used by layouts and exports.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FieldKey {
     pub source: String,
@@ -29,11 +22,8 @@ pub struct FieldKey {
     pub field: String,
 }
 
-/// Registered source identity.
-///
-/// `removed` is a tombstone: removing a source keeps its slot (so existing
-/// runtime IDs stay valid for the session) but marks it gone so
-/// readers and the cache GC skip it.
+/// `removed` is a tombstone: the slot is kept so existing runtime IDs stay
+/// valid for the session, but readers and the cache GC skip it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceEntry {
     pub id: SourceId,
@@ -43,8 +33,6 @@ pub struct SourceEntry {
     pub removed: bool,
 }
 
-/// Parser-supplied source metadata that is useful outside the canonical sample
-/// store: parameters, logged messages and later file/link facts.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct SourceMetadata {
     pub params: Vec<SourceParam>,
@@ -65,7 +53,6 @@ pub struct AutoMarker {
     pub text: String,
 }
 
-/// Registered topic identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicEntry {
     pub id: TopicId,
@@ -74,7 +61,6 @@ pub struct TopicEntry {
     pub removed: bool,
 }
 
-/// Registered field identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldEntry {
     pub id: FieldId,
@@ -83,9 +69,8 @@ pub struct FieldEntry {
     pub removed: bool,
 }
 
-/// IDs orphaned by [`IdentityRegistry::remove_source`], handed to the writer so
-/// it can drop their stores and to the cache manager to GC their
-/// caches.
+/// IDs orphaned by [`IdentityRegistry::remove_source`], handed to the writer to
+/// drop their stores and the cache manager to GC their caches.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemovedSource {
     pub source: SourceId,
@@ -93,7 +78,6 @@ pub struct RemovedSource {
     pub fields: Vec<FieldId>,
 }
 
-/// Owns the runtime identity tables and portable-key resolver.
 #[derive(Debug, Default, Clone)]
 pub struct IdentityRegistry {
     sources: Vec<SourceEntry>,
@@ -143,10 +127,7 @@ impl IdentityRegistry {
         Self::default()
     }
 
-    /// Add a source using a preferred user-visible label.
-    ///
-    /// If the label is already in use, the returned source receives `#2`,
-    /// `#3`, ... suffixes.
+    /// A label already in use receives `#2`, `#3`, ... suffixes.
     pub fn add_source(&mut self, preferred_label: impl Into<String>) -> SourceId {
         let label = self.unique_source_label(preferred_label.into());
         let id = SourceId(next_id(self.sources.len(), "source"));
@@ -160,7 +141,6 @@ impl IdentityRegistry {
         id
     }
 
-    /// Add a file-backed source, defaulting the label to the file stem.
     pub fn add_source_from_path(&mut self, path: impl AsRef<Path>) -> SourceId {
         let label = path
             .as_ref()
@@ -171,12 +151,10 @@ impl IdentityRegistry {
         self.add_source(label)
     }
 
-    /// Add a live-link source, defaulting the label to the endpoint string.
     pub fn add_source_from_endpoint(&mut self, endpoint: impl Into<String>) -> SourceId {
         self.add_source(endpoint)
     }
 
-    /// Add or return an existing topic for `source` and `name`.
     pub fn add_topic(&mut self, source: SourceId, name: impl Into<String>) -> Option<TopicId> {
         self.live_source(source)?;
         let name = name.into();
@@ -196,10 +174,8 @@ impl IdentityRegistry {
         Some(id)
     }
 
-    /// Add or return an existing topic for a numbered log instance.
-    ///
-    /// Multi-instance topics are surfaced as `topic[N]` so each instance can
-    /// receive independent caches, styling and browser rows.
+    /// Surfaces multi-instance topics as `topic[N]` so each instance gets
+    /// independent caches, styling and browser rows.
     pub fn add_topic_instance(
         &mut self,
         source: SourceId,
@@ -209,7 +185,6 @@ impl IdentityRegistry {
         self.add_topic(source, topic_instance_name(base_name, instance))
     }
 
-    /// Add or return an existing field for `topic` and `name`.
     pub fn add_field(&mut self, topic: TopicId, name: impl Into<String>) -> Option<FieldId> {
         let topic_entry = self.live_topic(topic)?.clone();
         let source_entry = self.live_source(topic_entry.source)?.clone();
@@ -236,14 +211,10 @@ impl IdentityRegistry {
         Some(id)
     }
 
-    /// Remove a source by tombstoning it and every topic/field it owns.
-    ///
-    /// Dense IDs are preserved (existing references stay valid for the session);
-    /// the entries are flagged `removed` and dropped from the name/key
-    /// lookup maps so they no longer resolve and a later re-add of the same
-    /// name mints fresh IDs. Returns the orphaned IDs for the writer to drop
-    /// stores and the cache manager to GC, or `None` if the source is
-    /// unknown or already removed.
+    /// Tombstones the source and every topic/field it owns: IDs are preserved
+    /// (session references stay valid) but dropped from the lookup maps, so they
+    /// no longer resolve and a later re-add of the same name mints fresh IDs.
+    /// `None` if the source is unknown or already removed.
     pub fn remove_source(&mut self, id: SourceId) -> Option<RemovedSource> {
         self.live_source(id)?;
 
@@ -292,17 +263,14 @@ impl IdentityRegistry {
         self.sources.get(id.index()).filter(|entry| entry.id == id)
     }
 
-    /// Like [`source`](Self::source) but `None` for tombstoned sources.
     pub fn live_source(&self, id: SourceId) -> Option<&SourceEntry> {
         self.source(id).filter(|entry| !entry.removed)
     }
 
-    /// Like [`topic`](Self::topic) but `None` for tombstoned topics.
     pub fn live_topic(&self, id: TopicId) -> Option<&TopicEntry> {
         self.topic(id).filter(|entry| !entry.removed)
     }
 
-    /// Like [`field`](Self::field) but `None` for tombstoned fields.
     pub fn live_field(&self, id: FieldId) -> Option<&FieldEntry> {
         self.field(id).filter(|entry| !entry.removed)
     }
@@ -383,8 +351,8 @@ impl IdentityRegistry {
         } else {
             preferred_label
         };
-        // Prefer the bare label whenever it is free — including after a remove
-        // freed it, so reopening a closed source reuses its original label.
+        // Reuse the bare label when free (e.g. after a remove freed it), so
+        // reopening a closed source keeps its original label.
         if self.source_labels.insert(base.clone()) {
             return base;
         }
@@ -409,7 +377,6 @@ fn next_id(len: usize, kind: &str) -> u32 {
     u32::try_from(len).unwrap_or_else(|_| panic!("too many {kind} IDs"))
 }
 
-/// Format a multi-instance topic name as `topic[N]`.
 pub fn topic_instance_name(base_name: impl AsRef<str>, instance: u32) -> String {
     format!("{}[{instance}]", base_name.as_ref())
 }
@@ -537,17 +504,14 @@ mod tests {
         assert_eq!(removed.topics, vec![drop_topic]);
         assert_eq!(removed.fields, vec![drop_lat, drop_lon]);
 
-        // Tombstones keep their slots but stop being live.
         assert!(ids.source(drop).unwrap().removed);
         assert!(ids.live_source(drop).is_none());
         assert!(ids.live_topic(drop_topic).is_none());
         assert!(ids.live_field(drop_lat).is_none());
 
-        // The surviving source is untouched and its IDs are unchanged.
         assert_eq!(ids.live_source(keep).unwrap().id, keep);
         assert_eq!(ids.live_field(keep_field).unwrap().name, "Alt");
 
-        // Removed portable keys no longer resolve; re-removal is a no-op.
         assert_eq!(ids.resolve(&FieldKey::new("drop", "GPS", "Lat")), None);
         assert_eq!(
             ids.resolve(&FieldKey::new("keep", "BARO", "Alt")),

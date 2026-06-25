@@ -1,5 +1,3 @@
-//! Live Python transform support: same-topic batch transforms for scripts.
-
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -67,8 +65,6 @@ pub struct LiveTransformBatch {
 }
 
 impl LiveTransformBatch {
-    /// Copies the incoming live batch into contiguous f64 buffers for
-    /// CPython/numpy; off the render hot path.
     pub fn from_parsed(spec: &LiveTransformSpec, batch: &ParsedBatch) -> Result<Self, String> {
         if !spec.matches(batch) {
             return Err(format!(
@@ -96,9 +92,7 @@ impl LiveTransformBatch {
     }
 }
 
-/// The `batch` object handed to a live transform callable. Exposes `.t`
-/// (int64 µs numpy array) and a dynamic float64 numpy attribute per requested
-/// field (e.g. `batch.nav_roll`).
+/// Exposes `.t` (int64 µs) and a dynamic float64 attribute per field (e.g. `batch.nav_roll`).
 #[pyclass(unsendable, name = "LiveBatch")]
 pub struct LiveBatchPy {
     #[pyo3(get)]
@@ -107,8 +101,7 @@ pub struct LiveBatchPy {
 }
 
 impl LiveBatchPy {
-    /// Build the Python batch object from a materialized live batch. Must be
-    /// called under the GIL.
+    /// Must be called under the GIL.
     pub fn from_materialized(py: Python<'_>, batch: LiveTransformBatch) -> Self {
         let t = batch.times.into_pyarray(py).unbind();
         let fields = batch
@@ -130,16 +123,12 @@ impl LiveBatchPy {
     }
 }
 
-/// The parsed return value of one live transform call: a derived topic with
-/// its timestamps and float64 fields, ready for emission.
 pub struct LiveTransformResult {
     pub topic: String,
     pub times: Vec<i64>,
     pub fields: Vec<PendingField>,
 }
 
-/// Read a Python object as a contiguous f64 vector (any array-like numpy can
-/// view as float64), validating its length against `expected`.
 fn read_f64_array(
     py: Python<'_>,
     field: &str,
@@ -162,11 +151,8 @@ fn read_f64_array(
     Ok(vals)
 }
 
-/// Parse a live transform's return value. Accepts a dict mapping output field
-/// name -> one of:
-///   * `values` (array-like, length N) — unit None, times = `input_times`
-///   * `(values, unit)` — explicit unit, times = `input_times`
-///   * `(times, values, unit)` — explicit times (must equal `input_times`)
+/// Accepts a dict of field -> `values`, `(values, unit)`, or `(times, values, unit)`;
+/// supplied times must equal `input_times`.
 pub fn parse_transform_result(
     py: Python<'_>,
     spec: &LiveTransformSpec,
@@ -198,8 +184,7 @@ pub fn parse_transform_result(
             ))
         })?;
 
-        // Distinguish a tuple `(values, unit)` / `(times, values, unit)` from a
-        // bare array. A numpy array is not a tuple, so this is unambiguous.
+        // A numpy array is never a tuple, so this distinguishes a tuple form from a bare array.
         let (values, unit) = if let Ok(tuple) = value.cast::<pyo3::types::PyTuple>() {
             match tuple.len() {
                 2 => {
@@ -257,8 +242,6 @@ pub fn parse_transform_result(
     })
 }
 
-/// Turn one parsed live transform result into a `ParsedBatch` on the given
-/// derived source.
 pub fn result_to_batch(
     source: SourceId,
     result: LiveTransformResult,

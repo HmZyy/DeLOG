@@ -1,20 +1,6 @@
-// DeLOG trace color palette.
-//
-// The single source of truth for trace colors across plots, legend dots and
-// 3D paths. This file is `include!`d (not `mod`-declared) so the same constants
-// compile into whichever crate needs them without forcing an upward dependency:
-// `delog-render` owns it (pure wgpu, used by the 2D/3D passes) and `delog-app`
-// reaches it through `delog_render::palette`.
-//
-// Representation is framework-neutral sRGB `u8` — no `egui::Color32`, no
-// `wgpu::Color` — because the consumers live in different layers. Callers
-// convert at the edge: `egui::Color32::from_rgb` for the UI, `to_linear_f32`
-// for GPU color uniforms (blending must happen in linear space).
-//
-// NOTE: keep this file `include!`-safe — no leading `//!` inner docs, since the
+// Keep this file `include!`-safe — no leading `//!` inner docs, since the
 // contents are spliced into the middle of an enclosing module.
 
-/// An sRGB color with 8-bit channels — the palette's framework-neutral form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Rgba8 {
     pub r: u8,
@@ -24,7 +10,6 @@ pub struct Rgba8 {
 }
 
 impl Rgba8 {
-    /// Construct an opaque color from a packed `0xRRGGBB` literal.
     #[must_use]
     pub const fn hex(rgb: u32) -> Self {
         Self {
@@ -35,14 +20,11 @@ impl Rgba8 {
         }
     }
 
-    /// The same color at a different opacity (0..=255).
     #[must_use]
     pub const fn with_alpha(self, a: u8) -> Self {
         Self { a, ..self }
     }
 
-    /// sRGB channels as `[r, g, b, a]` in `0.0..=1.0` — for UI toolkits that
-    /// already gamma-correct (egui takes sRGB directly).
     #[must_use]
     pub fn to_srgb_f32(self) -> [f32; 4] {
         [
@@ -53,9 +35,8 @@ impl Rgba8 {
         ]
     }
 
-    /// Linear-light RGB with straight (non-premultiplied) alpha, for GPU color
-    /// uniforms — blending and shading must be done in linear space. Alpha is
-    /// not transfer-encoded, so it is copied through unchanged.
+    /// Blending and shading must be done in linear space; alpha is not
+    /// transfer-encoded, so it is copied through unchanged.
     #[must_use]
     pub fn to_linear_f32(self) -> [f32; 4] {
         [
@@ -67,7 +48,6 @@ impl Rgba8 {
     }
 }
 
-/// The standard sRGB → linear electro-optical transfer function for one channel.
 fn srgb_to_linear(c: u8) -> f32 {
     let s = f32::from(c) / 255.0;
     if s <= 0.04045 {
@@ -77,29 +57,20 @@ fn srgb_to_linear(c: u8) -> f32 {
     }
 }
 
-/// The 10-color trace palette, dark-theme-tuned (Tokyo-Night derived, leading
-/// with the `#7aa2f7` blue pinned by the layout schema).
-///
-/// Ordered so the first traces a user drops are maximally separable, alternating
-/// cool / warm / light hues. The set leans on a blue↔orange↔yellow luminance
-/// axis for color-vision-deficiency robustness; ten is the practical ceiling for
-/// distinctness, so callers that exceed it repeat the cycle with dashed widths
-/// rather than inventing weaker colors.
+/// The `#7aa2f7` blue at index 0 is pinned by the layout schema.
 pub const TRACE_PALETTE: [Rgba8; 10] = [
-    Rgba8::hex(0x7aa2f7), // blue
-    Rgba8::hex(0xff9e64), // orange
-    Rgba8::hex(0x9ece6a), // green
-    Rgba8::hex(0xbb9af7), // purple
-    Rgba8::hex(0xe0af68), // yellow
-    Rgba8::hex(0x2ac3de), // cyan
-    Rgba8::hex(0xf7768e), // red
-    Rgba8::hex(0x73daca), // teal
-    Rgba8::hex(0xff79c6), // pink
-    Rgba8::hex(0xc0caf5), // pale blue
+    Rgba8::hex(0x7aa2f7),
+    Rgba8::hex(0xff9e64),
+    Rgba8::hex(0x9ece6a),
+    Rgba8::hex(0xbb9af7),
+    Rgba8::hex(0xe0af68),
+    Rgba8::hex(0x2ac3de),
+    Rgba8::hex(0xf7768e),
+    Rgba8::hex(0x73daca),
+    Rgba8::hex(0xff79c6),
+    Rgba8::hex(0xc0caf5),
 ];
 
-/// The trace color for index `i`, cycling through [`TRACE_PALETTE`] after
-/// exhaustion (the caller distinguishes the repeated cycle by dash pattern).
 #[must_use]
 pub fn trace_color(i: usize) -> Rgba8 {
     TRACE_PALETTE[i % TRACE_PALETTE.len()]
@@ -159,7 +130,6 @@ mod palette_tests {
         // 50% sRGB is ~0.215 linear; checks the gamma curve, not just clamping.
         assert!((mid - 0.215).abs() < 0.01, "mid -> {mid}");
         assert!(black < mid && mid < white);
-        // Alpha rides through linearization untransformed.
         assert_eq!(Rgba8::hex(0xffffff).with_alpha(0x80).to_linear_f32()[3], 128.0 / 255.0);
     }
 }

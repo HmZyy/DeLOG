@@ -1,5 +1,3 @@
-//! Dev tool: parse an ArduPilot `.BIN` and print the resulting topic tree.
-//!
 //! Usage: `cargo run -p delog-parsers --example parse_bin -- path/to/log.BIN`
 
 use std::fs::File;

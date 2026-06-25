@@ -1,5 +1,3 @@
-//! The `delog` Python API object and the Arrow→numpy read path.
-
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -15,18 +13,15 @@ use pyo3::types::PyList;
 
 use crate::live::LiveTransformSpec;
 
-/// A live transform registration accumulated during one script run.
 pub struct PendingLiveTransform {
     pub spec: LiveTransformSpec,
     pub callable: Py<PyAny>,
 }
 
-/// Shared, single-threaded accumulator of live transform registrations for one run.
 pub type LiveTransformBuffer = Rc<RefCell<Vec<PendingLiveTransform>>>;
 
-/// Prev-sample resample: for each `base` time, the source value at the latest
-/// source timestamp `<= base` (NaN before the first sample). `src_t` must be
-/// sorted ascending. O(m log n) via binary search.
+/// For each `base` time, the source value at the latest source timestamp
+/// `<= base` (NaN before the first sample). `src_t` must be sorted ascending.
 pub fn resample_prev(src_t: &[i64], src_v: &[f64], base: &[i64]) -> Vec<f64> {
     let mut out = Vec::with_capacity(base.len());
     for &bt in base {
@@ -40,9 +35,8 @@ pub fn resample_prev(src_t: &[i64], src_v: &[f64], base: &[i64]) -> Vec<f64> {
     out
 }
 
-/// Materialize a field as `(times_us: Vec<i64>, values: Vec<f64>)` by walking
-/// its chunks in time order. This concatenates chunk buffers — the One Copy for
-/// script consumption, off the render hot path.
+/// Materialize a field as `(times_us, values)` by walking its chunks in time
+/// order. Concatenates chunk buffers — the one copy for script consumption.
 pub fn materialize_field(
     snapshot: &StoreSnapshot,
     field: FieldId,
@@ -63,7 +57,6 @@ pub fn materialize_field(
     Ok((times, values))
 }
 
-/// A field accumulated for emission: name + values aligned to its topic's times.
 pub struct PendingField {
     pub name: String,
     pub values: Vec<f64>,
@@ -105,12 +98,9 @@ impl PendingTopic {
     }
 }
 
-/// Shared, single-threaded accumulator of derived topics for one run.
 pub type EmitBuffer = Rc<RefCell<Vec<PendingTopic>>>;
 
-/// The `delog` object injected into the interpreter namespace. Holds the
-/// snapshot pinned for the current run/eval. `unsendable`: it lives only on the
-/// worker thread under the GIL.
+/// `unsendable`: lives only on the worker thread under the GIL.
 #[pyclass(unsendable, name = "Delog")]
 pub struct Delog {
     snapshot: Arc<StoreSnapshot>,
@@ -137,12 +127,10 @@ impl Delog {
         }
     }
 
-    /// The accumulated derived topics; flushed by the run lifecycle.
     pub fn emit_buffer(&self) -> EmitBuffer {
         Rc::clone(&self.emit)
     }
 
-    /// The accumulated live transform registrations for this run.
     pub fn live_buffer(&self) -> LiveTransformBuffer {
         Rc::clone(&self.live)
     }
@@ -177,7 +165,6 @@ impl Delog {
 
 #[pymethods]
 impl Delog {
-    /// List every live field as "source/topic/field".
     fn sources(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
         let mut paths: Vec<String> = Vec::new();
         for src in self.snapshot.sources.iter() {
@@ -204,7 +191,6 @@ impl Delog {
         Ok(PyList::new(py, paths)?.unbind())
     }
 
-    /// Read a field as a `DelogField` carrying numpy arrays.
     fn field(&self, py: Python<'_>, path: &str) -> PyResult<DelogField> {
         let id = self
             .resolve_path(path)
@@ -217,7 +203,6 @@ impl Delog {
         })
     }
 
-    /// Prev-sample resample a field's values onto `base_times`.
     fn resample_prev(
         &self,
         py: Python<'_>,
@@ -230,7 +215,6 @@ impl Delog {
         Ok(out.into_pyarray(py).unbind())
     }
 
-    /// Begin a derived topic; `times_us` is shared by all its fields.
     fn output(&self, times_us: numpy::PyReadonlyArray1<i64>, name: &str) -> PyResult<DelogOutput> {
         let times = times_us.as_slice()?.to_vec();
         let idx = {
@@ -244,8 +228,8 @@ impl Delog {
         })
     }
 
-    /// Decorator factory: `@delog.live_transform(topic=..., fields=[...], output_topic=...)`
-    /// returns a decorator that registers the function and returns it unchanged.
+    /// Decorator factory: returns a decorator that registers the function and
+    /// returns it unchanged.
     #[pyo3(signature = (*, topic, fields, output_topic))]
     fn live_transform(
         &self,
@@ -292,7 +276,7 @@ impl Delog {
     }
 }
 
-/// A field handed to Python: `.t` int64 µs numpy, `.v` float64 numpy.
+/// `.t` int64 µs, `.v` float64.
 #[pyclass(unsendable, name = "DelogField")]
 pub struct DelogField {
     #[pyo3(get)]
@@ -301,7 +285,6 @@ pub struct DelogField {
     v: Py<PyArray1<f64>>,
 }
 
-/// Returned by `delog.output(...)`; `add_field` appends to the pending topic.
 #[pyclass(unsendable, name = "DelogOutput")]
 pub struct DelogOutput {
     emit: EmitBuffer,

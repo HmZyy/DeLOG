@@ -91,7 +91,7 @@ fn representative_custom_parser_reaches_canonical_store_transactionally() {
     assert!(topic_store.schema.field_by_name("index").is_some());
     assert!(topic_store.schema.field_by_name("rtc").is_some());
     let value_index = topic_store.schema.field_index("value").unwrap();
-    // Tooltips are ignored, and these names carry no unit suffix.
+    // Tooltips are dropped and the name has no unit suffix, so both stay None.
     let value_field = topic_store.schema.field(value_index).unwrap();
     assert_eq!(value_field.description, None);
     assert_eq!(value_field.unit, None);

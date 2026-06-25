@@ -1,5 +1,3 @@
-//! Custom Python parser stage benchmarks.
-
 use std::fs;
 use std::hint::black_box;
 use std::path::{Path, PathBuf};
@@ -79,7 +77,7 @@ def Parse(raw_data):
         (parse, raw_data)
     });
 
-    // Conversion handles the RTC array and all synthetic data-field arrays.
+    // +1 element accounts for the RTC array alongside the data fields.
     group.throughput(Throughput::Elements(
         PYTHON_ROWS as u64 * (PYTHON_FIELDS as u64 + 1),
     ));

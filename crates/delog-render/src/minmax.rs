@@ -1,11 +1,7 @@
 //! Decimated min/max column pipeline.
 //!
-//! For zoomed-out views (`samples/px > 8`) the plot draws one vertical span per
-//! pixel column instead of every segment — min/max so no transient is ever
-//! hidden (the "not LTTB" decision). Columns are `[x, min, max]` f32
-//! triples in a STORAGE buffer; each emits a six-vertex quad via vertex pulling,
-//! sharing the [`PlotUniform`](crate::uniforms::PlotUniform) transform with
-//! `line_pull`.
+//! For zoomed-out views the plot draws one vertical span per pixel column;
+//! min/max (not LTTB) so no transient is ever hidden.
 
 use crate::context::RenderContext;
 use crate::uniforms::UniformRing;
@@ -127,8 +123,7 @@ impl MinMaxColPipeline {
         pass.set_pipeline(&self.pipeline);
     }
 
-    /// Draw `column_count` vertical spans (six vertices each). Pipeline must
-    /// already be bound via [`Self::bind`].
+    /// Pipeline must already be bound via [`Self::bind`].
     pub fn draw_trace(
         &self,
         pass: &mut wgpu::RenderPass<'_>,
@@ -178,8 +173,6 @@ mod tests {
         let target = OffscreenTarget::new(ctx.clone(), w, h);
         let pipeline = MinMaxColPipeline::new(&ctx, target.format());
 
-        // 64 columns across x∈[0,63]; each spans y∈[20,80] within a [0,100] view
-        // → a horizontal band across the middle of the image.
         let mut cols: Vec<f32> = Vec::new();
         for i in 0..64 {
             cols.extend_from_slice(&[i as f32, 20.0, 80.0]);
@@ -235,8 +228,6 @@ mod tests {
             .unwrap();
 
         let img = target.read_rgba();
-        // Band centre (y∈[20,80] of 100 → screen rows ~13..51) is filled red;
-        // the very top (y≈100 data) and bottom (y≈0) are clear.
         assert!(
             img.matches(w / 2, h / 2, red, 16),
             "band centre should be filled"

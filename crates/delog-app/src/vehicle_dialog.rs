@@ -1,14 +1,9 @@
-//! Vehicle configuration dialog. There is no separate draft/Add/Save step —
-//! one [`Draft`] per vehicle is edited live and the `vehicles` vector is
-//! rebuilt from the drafts that resolve to a complete mapping.
-
 use delog_core::identity::{FieldId, SourceId, TopicId};
 use delog_core::snapshot::StoreSnapshot;
 use egui::Color32;
 
 use crate::vehicle::{GeoRef, ModelKind, NedReference, OriMapping, PosMapping, VehicleConfig};
 
-/// Fixed dialog width, applied even when no vehicles are configured.
 const DIALOG_WIDTH: f32 = 240.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -24,7 +19,6 @@ enum OriMode {
     Quat,
 }
 
-/// An editable vehicle form.
 #[derive(Clone)]
 struct Draft {
     label: String,
@@ -38,13 +32,12 @@ struct Draft {
     lat: Option<FieldId>,
     lon: Option<FieldId>,
     alt: Option<FieldId>,
-    /// Interpret the lat/lon columns as `degE7` integers (×1e-7 → degrees).
+    /// degE7 integers (×1e-7 → degrees).
     lat_lon_dege7: bool,
-    /// Interpret the altitude column as millimetres (×1e-3 → metres).
+    /// millimetres (×1e-3 → metres).
     alt_mm: bool,
-    /// Fixed vertical offset in metres (up-positive) for the GPS track.
+    /// metres, up-positive.
     alt_offset_m: f64,
-    /// Optional geodetic reference annotation for a NED/local frame.
     ned_has_ref: bool,
     /// Reference from fixed values (true) or from columns (false).
     ned_ref_manual: bool,
@@ -116,7 +109,6 @@ impl Default for Draft {
 }
 
 impl Draft {
-    /// Load an existing config for editing (FieldIds map back to their topic).
     fn from_config(cfg: &VehicleConfig, snapshot: &StoreSnapshot) -> Self {
         let topic_of = |f: FieldId| field_topic(snapshot, f);
         let mut d = Draft {
@@ -208,7 +200,6 @@ impl Draft {
         d
     }
 
-    /// Build a `VehicleConfig` if the selected mapping has all its fields.
     fn build(&self) -> Option<VehicleConfig> {
         let source = self.source?;
         let pos = match self.pos_mode {
@@ -225,7 +216,6 @@ impl Draft {
                         alt_m: self.ref_alt,
                     }))
                 } else {
-                    // Column reference: kept only when all three are chosen.
                     match (self.ref_lat_f, self.ref_lon_f, self.ref_alt_f) {
                         (Some(lat), Some(lon), Some(alt)) => {
                             Some(NedReference::Fields { lat, lon, alt })
@@ -277,8 +267,6 @@ impl Draft {
     }
 }
 
-/// Dialog state: open flag plus one editable draft per vehicle. `was_open`
-/// drives a resync from `vehicles` on the open edge.
 #[derive(Default)]
 pub struct VehicleDialog {
     pub open: bool,
@@ -328,12 +316,8 @@ fn combo_label<'a, T: PartialEq>(items: &'a [(T, String)], sel: &Option<T>) -> &
     }
 }
 
-/// A **searchable** picker over `(value, label)` items, rendered as a single
-/// toggle button (for use as a grid cell — the caller supplies the label).
-/// The dropdown carries a text filter (persisted in egui memory) so long
-/// topic / field lists are easy to narrow. Returns `true` if the selection
-/// changed. Ids are derived from the calling `ui` so repeated salts across
-/// several vehicles do not collide.
+/// Returns `true` if the selection changed. Ids are derived from the calling
+/// `ui` so repeated salts across several vehicles do not collide.
 fn searchable_combo<T: PartialEq + Copy>(
     ui: &mut egui::Ui,
     salt: &str,
@@ -343,9 +327,8 @@ fn searchable_combo<T: PartialEq + Copy>(
     let before = *sel;
     let filter_id = ui.make_persistent_id((salt, "filter"));
     let highlight_id = ui.make_persistent_id((salt, "highlight"));
-    // A toggle button + an explicit popup: `CloseOnClickOutside` keeps the
-    // popup open while typing in the search box (a plain ComboBox closes on
-    // that click), and the scroll area shows many rows at once.
+    // `CloseOnClickOutside` keeps the popup open while typing in the search box;
+    // a plain ComboBox closes on that click.
     let button = ui.button(combo_label(items, sel));
     egui::Popup::from_toggle_button_response(&button)
         .id(button.id.with("popup"))
@@ -420,8 +403,6 @@ fn searchable_combo<T: PartialEq + Copy>(
     *sel != before
 }
 
-/// A plain field picker restricted to one topic's columns (no search — a
-/// single topic has few columns), rendered as a single combo for a grid cell.
 fn field_combo(
     ui: &mut egui::Ui,
     salt: &str,
@@ -437,15 +418,15 @@ fn field_combo(
         });
 }
 
-/// Render the dialog; returns `true` when the vehicle set changed.
+/// Returns `true` when the vehicle set changed.
 pub fn show(
     ctx: &egui::Context,
     state: &mut VehicleDialog,
     vehicles: &mut Vec<VehicleConfig>,
     snapshot: &StoreSnapshot,
 ) -> bool {
-    // Resync drafts from the current vehicles on the open edge, so external
-    // changes (e.g. a loaded layout) are reflected when the dialog is opened.
+    // Resync drafts on the open edge so external changes (e.g. a loaded layout)
+    // are reflected when the dialog opens.
     if state.open && !state.was_open {
         state.drafts = vehicles
             .iter()
@@ -465,7 +446,6 @@ pub fn show(
         .pivot(egui::Align2::CENTER_CENTER)
         .default_width(DIALOG_WIDTH)
         .show(ctx, |ui| {
-            // Keep a stable, full width even with no vehicles configured.
             ui.set_min_width(DIALOG_WIDTH);
             if ui
                 .add(egui::Button::image_and_text(
@@ -474,7 +454,6 @@ pub fn show(
                 ))
                 .clicked()
             {
-                // Default the name to "Vehicle #N"; the user can rename it.
                 let n = state.drafts.len() + 1;
                 state.drafts.push(Draft {
                     label: format!("Vehicle #{n}"),
@@ -487,8 +466,6 @@ pub fn show(
             let mut duplicate: Option<usize> = None;
             egui::ScrollArea::vertical().show(ui, |ui| {
                 for (i, draft) in state.drafts.iter_mut().enumerate() {
-                    // The header shows the editable name, falling back to the
-                    // positional default when the user clears it.
                     let title = if draft.label.trim().is_empty() {
                         format!("Vehicle #{}", i + 1)
                     } else {
@@ -535,11 +512,9 @@ pub fn show(
         });
     state.open = open;
 
-    // Rebuild the vehicle set from the drafts that resolve to a complete
-    // mapping. Commit whenever it differs so cosmetic edits (colour, scale,
-    // model, visibility) show in the 3D view immediately, but only report a
-    // change — which drives the off-thread trajectory rebuild — when a
-    // trajectory-relevant aspect (source or position mapping) actually moves.
+    // Commit on any diff so cosmetic edits show immediately, but only report a
+    // change (which drives the off-thread trajectory rebuild) when source or
+    // position mapping moves.
     let rebuilt: Vec<VehicleConfig> = state.drafts.iter().filter_map(Draft::build).collect();
     if rebuilt == *vehicles {
         return false;
@@ -552,15 +527,12 @@ pub fn show(
     traj_changed
 }
 
-/// A 16px menu/button icon tinted to the current text colour.
 fn icon(ui: &egui::Ui, src: egui::ImageSource<'static>) -> egui::Image<'static> {
     egui::Image::new(src)
         .fit_to_exact_size(egui::vec2(16.0, 16.0))
         .tint(ui.visuals().text_color())
 }
 
-/// A bold section heading separating the General / Orientation / Position
-/// groups within a vehicle's editor.
 fn section_heading(ui: &mut egui::Ui, text: &str) {
     ui.label(egui::RichText::new(text).strong());
     ui.add_space(2.0);
@@ -654,8 +626,6 @@ fn draft_editor(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapshot) 
             ui.end_row();
         });
 
-    // Field mapping needs a source; until one is chosen there is nothing more
-    // to show.
     let Some(source) = draft.source else {
         return;
     };
@@ -794,7 +764,6 @@ fn draft_editor(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapshot) 
         });
 }
 
-/// One grid row: a label cell and a single-topic column picker, then `end_row`.
 fn grid_field(
     ui: &mut egui::Ui,
     salt: &str,
@@ -807,8 +776,7 @@ fn grid_field(
     ui.end_row();
 }
 
-/// A searchable topic picker for a grid cell; returns `true` if the selection
-/// changed (so the caller can clear the now-stale column selections).
+/// Returns `true` if the selection changed (caller clears stale columns).
 fn topic_combo(
     ui: &mut egui::Ui,
     salt: &str,

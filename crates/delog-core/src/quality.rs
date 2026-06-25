@@ -1,11 +1,8 @@
 //! Data-quality scan.
 //!
-//! Post-load, per-topic sweep over canonical timestamps + seal-time column
-//! stats: cross-chunk timestamp regressions, dt outliers (>10× the median
-//! dt), duplicate timestamps, and NaN/Inf percentages. Each finding category
-//! is summarized as a *single* diagnostic with counts — a noisy log produces
-//! four rows, not four thousand. Pure and synchronous; the app runs it on a
-//! worker thread ("async, post-load").
+//! Per-topic sweep for timestamp regressions, dt outliers, duplicate
+//! timestamps, and NaN/Inf. Each finding category is collapsed to a *single*
+//! diagnostic with counts, so a noisy log produces four rows, not four thousand.
 
 use crate::diagnostics::Diag;
 use crate::identity::SourceId;
@@ -16,11 +13,9 @@ use crate::store::TopicStore;
 const DT_OUTLIER_FACTOR: i64 = 10;
 
 /// Cap on dts collected for the median estimate; longer topics are sampled
-/// evenly. Keeps the scan linear with a small constant.
+/// evenly to keep the scan linear.
 const MEDIAN_SAMPLE_CAP: usize = 65_536;
 
-/// Scan every topic of `source`, returning one summarized diagnostic per
-/// finding category per topic. Empty when the data is clean.
 pub fn scan_source(snapshot: &StoreSnapshot, source: SourceId) -> Vec<Diag> {
     let mut diags = Vec::new();
     let Some(src) = snapshot.source(source) else {
@@ -47,8 +42,6 @@ fn scan_topic(store: &TopicStore, topic: &str, source: SourceId, diags: &mut Vec
     let mut duplicates = 0u64;
     let mut first_duplicate_us = None;
 
-    // Pass 1 over raw timestamps: regressions, duplicates and the sampled
-    // dts for the median estimate.
     let rows = store.rows as usize;
     let stride = rows.div_ceil(MEDIAN_SAMPLE_CAP).max(1);
     let mut dts: Vec<i64> = Vec::with_capacity(rows.div_ceil(stride));
@@ -74,8 +67,7 @@ fn scan_topic(store: &TopicStore, topic: &str, source: SourceId, diags: &mut Vec
         }
     }
 
-    // Pass 2: count dts above 10× the median (positive dts only — regressions
-    // and duplicates are already their own findings).
+    // Positive dts only: regressions and duplicates are already their own findings.
     let median = median_of(&mut dts);
     let mut outliers = 0u64;
     let mut first_outlier_us = None;
@@ -99,7 +91,7 @@ fn scan_topic(store: &TopicStore, topic: &str, source: SourceId, diags: &mut Vec
         }
     }
 
-    // NaN/Inf from seal-time column stats — no sample re-scan.
+    // NaN/Inf come from seal-time column stats — no per-sample re-scan.
     let mut nan_cells = 0u64;
     let mut inf_fields: Vec<&str> = Vec::new();
     let mut numeric_cells = 0u64;
@@ -232,8 +224,8 @@ mod tests {
 
     #[test]
     fn cross_chunk_regression_is_one_summarized_warning() {
-        // Second chunk starts before the first ends (within-chunk order is
-        // enforced at seal time, so regressions only appear across chunks).
+        // Within-chunk order is enforced at seal time; regressions only appear
+        // across chunks, so chunk 2 starts before chunk 1 ends.
         let (snapshot, source) = snapshot_with(
             &[&[100, 200, 300], &[150, 250]],
             &[&[1.0, 2.0, 3.0], &[4.0, 5.0]],
@@ -250,10 +242,9 @@ mod tests {
 
     #[test]
     fn duplicates_and_dt_outliers_are_counted() {
-        // dt median 100 µs; one 10 s gap; one duplicate pair.
         let mut times: Vec<i64> = (0..100).map(|i| i * 100).collect();
-        times.push(9_900); // duplicate of the last sample
-        times.push(10_000_000); // 10 s gap → outlier
+        times.push(9_900);
+        times.push(10_000_000);
         times.push(10_000_100);
         let values: Vec<f64> = times.iter().map(|_| 0.0).collect();
         let (snapshot, source) = snapshot_with(&[&times], &[&values]);

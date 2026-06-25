@@ -1,9 +1,4 @@
 //! Property and concurrency tests for the core data model.
-//!
-//! Three families:
-//! * accessor properties — [`FieldView::sample_at`] is pinned to a naive scan;
-//! * time math — effective/raw round-trips and range algebra;
-//! * snapshot interleavings — concurrent publish/load never tears a read.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -23,10 +18,6 @@ use delog_core::time::{
     TimeRange, effective_time_us, global_effective_range, global_range, raw_time_us,
 };
 
-// ---------------------------------------------------------------------------
-// Shared builders
-// ---------------------------------------------------------------------------
-
 fn float_schema(name: &str) -> Arc<TopicSchema> {
     Arc::new(
         TopicSchema::new(
@@ -37,8 +28,6 @@ fn float_schema(name: &str) -> Arc<TopicSchema> {
     )
 }
 
-/// Build a single-field snapshot whose samples are split across chunks of at
-/// most `chunk_len` rows, plus the `FieldId` to view.
 fn snapshot_from_samples(
     samples: &[(i64, f64)],
     chunk_len: usize,
@@ -83,10 +72,6 @@ fn sample_f64(value: SampleValue<'_>) -> f64 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Accessor properties — pinned to a naive scan
-// ---------------------------------------------------------------------------
-
 proptest! {
     #[test]
     fn prev_and_next_match_a_naive_scan(
@@ -99,7 +84,6 @@ proptest! {
         let view = FieldView::new(&snapshot, field).unwrap();
         let query_eff = query_raw + offset_us;
 
-        // Naive references over the raw domain.
         let naive_prev = samples.iter().filter(|(t, _)| *t <= query_raw).max_by_key(|(t, _)| *t);
         let naive_next = samples.iter().filter(|(t, _)| *t >= query_raw).min_by_key(|(t, _)| *t);
 
@@ -139,8 +123,6 @@ proptest! {
             let got = view.sample_at(query_raw, SampleMode::Linear).unwrap();
             prop_assert_eq!(got.raw_time_us, query_raw);
             let y = sample_f64(got.value);
-            // Interpolated value must lie within the bracket (inclusive); on an
-            // exact hit (pt == nt == query) it equals the endpoint.
             let (lo, hi) = (pv.min(nv), pv.max(nv));
             prop_assert!(y >= lo - 1e-6 && y <= hi + 1e-6, "y={y} not in [{lo},{hi}]");
             if pt == query_raw { prop_assert_eq!(y, pv); }
@@ -148,10 +130,6 @@ proptest! {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Time math properties
-// ---------------------------------------------------------------------------
 
 proptest! {
     #[test]
@@ -191,19 +169,13 @@ proptest! {
         for r in &ranges {
             prop_assert!(g.contains(r.min_us) && g.contains(r.max_us));
         }
-        // With zero offsets, the effective global range equals the raw one.
         let with_offsets = ranges.iter().map(|r| (*r, 0_i64));
         prop_assert_eq!(global_effective_range(with_offsets), Some(g));
     }
 }
 
-// ---------------------------------------------------------------------------
-// Snapshot interleavings — concurrent publish/load is tear-free
-// ---------------------------------------------------------------------------
-
-/// A snapshot whose only sample encodes the epoch it is meant to carry, so a
-/// reader can prove the `epoch` field and the data it loaded came from the same
-/// publication (no torn read).
+/// The only sample encodes its epoch, so a reader can prove the `epoch` field
+/// and the loaded data came from the same publication (no torn read).
 fn epoch_marked_snapshot(identity: &IdentityRegistry, topic: TopicId, epoch: i64) -> StoreSnapshot {
     let schema = float_schema("T");
     let cols: Vec<ArrayRef> = vec![Arc::new(Float64Array::from(vec![epoch as f64]))];
@@ -222,7 +194,6 @@ fn concurrent_publish_and_load_never_tears() {
     identity.add_field(topic, "V").unwrap();
     let identity = Arc::new(identity);
 
-    // Seed epoch 0 so the store starts coherent.
     let store = Arc::new(DataStore::from_snapshot(epoch_marked_snapshot(
         &identity, topic, 0,
     )));
@@ -237,10 +208,8 @@ fn concurrent_publish_and_load_never_tears() {
                 let mut loads = 0_u64;
                 while !stop.load(Ordering::Relaxed) {
                     let snap = store.load();
-                    // A reader's successive loads see monotonically rising epochs.
                     assert!(snap.epoch >= last_epoch, "epoch went backwards");
                     last_epoch = snap.epoch;
-                    // The carried data matches the snapshot's epoch: no torn read.
                     let chunk = &snap.topic_store(topic).unwrap().chunks[0];
                     assert_eq!(chunk.t_min as u64, snap.epoch, "data/epoch mismatch");
                     loads += 1;

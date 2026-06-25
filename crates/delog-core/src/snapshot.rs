@@ -13,44 +13,36 @@ use crate::identity::{
 use crate::store::TopicStore;
 use crate::time::TimeRange;
 
-/// One source row inside a deeply immutable snapshot.
 #[derive(Debug, Clone)]
 pub struct SourceSnapshot {
     pub entry: SourceEntry,
     pub topics: Arc<[TopicId]>,
 }
 
-/// One topic row inside a deeply immutable snapshot.
 #[derive(Debug, Clone)]
 pub struct TopicSnapshot {
     pub entry: TopicEntry,
     pub store: Option<Arc<TopicStore>>,
 }
 
-/// Coherent, deeply immutable view of the current store.
 #[derive(Debug, Clone)]
 pub struct StoreSnapshot {
     pub sources: Arc<[SourceSnapshot]>,
     pub topics: Arc<[TopicSnapshot]>,
     pub fields: Arc<[FieldEntry]>,
     pub epoch: u64,
-    /// Offset-applied union of every topic's time range, computed once when the
-    /// snapshot is built. `global_time_range()` reads this in O(1); computing it
-    /// lazily was O(total chunks across all topics) and the UI calls it several
-    /// times per frame, so it dominated frame time as live chunks accumulated.
+    /// Precomputed at construction: the UI calls `global_time_range()` several
+    /// times per frame, and a lazy O(total chunks) scan dominated frame time.
     global_range: Option<TimeRange>,
 }
 
-/// A push callback invoked with the new epoch on every publish.
 pub type EpochListener = Arc<dyn Fn(u64) + Send + Sync>;
 
-/// Published data store. Readers call [`DataStore::load`] once per frame/job
-/// and hold the returned `Arc<StoreSnapshot>` without blocking the writer.
+/// Readers call [`DataStore::load`] once per frame/job and hold the returned
+/// `Arc<StoreSnapshot>` without blocking the writer.
 pub struct DataStore {
     current: ArcSwap<StoreSnapshot>,
-    /// Pull subscribers (poll a channel).
     subscribers: Mutex<Vec<Sender<u64>>>,
-    /// Push listeners (epoch callbacks): UI repaint, cache GC/append.
     listeners: Mutex<Vec<EpochListener>>,
 }
 
@@ -62,7 +54,6 @@ impl fmt::Debug for DataStore {
     }
 }
 
-/// Snapshot construction failures.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SnapshotError {
     InvalidTopicId(TopicId),
@@ -74,7 +65,6 @@ pub enum SnapshotError {
     },
 }
 
-/// Snapshot publication failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DataStoreError {
     EpochOverflow,
@@ -164,8 +154,6 @@ impl StoreSnapshot {
         self.topic(id)?.store.as_ref()
     }
 
-    /// Whether `id` names a source present and not tombstoned. Readers
-    /// (browser rows) and the cache GC use these to skip removed entities.
     pub fn is_source_live(&self, id: SourceId) -> bool {
         self.source(id).is_some_and(|s| !s.entry.removed)
     }
@@ -181,14 +169,10 @@ impl StoreSnapshot {
             .is_some_and(|entry| !entry.removed)
     }
 
-    /// Offset-applied union of every topic's time range. O(1): returns the
-    /// value computed once at construction by [`Self::compute_global_range`].
     pub fn global_time_range(&self) -> Option<TimeRange> {
         self.global_range
     }
 
-    /// The O(total chunks) scan behind [`Self::global_time_range`], run once
-    /// when the snapshot is built.
     fn compute_global_range(&self) -> Option<TimeRange> {
         let mut out: Option<TimeRange> = None;
         for topic in self.topics.iter() {
@@ -242,10 +226,8 @@ impl DataStore {
         rx
     }
 
-    /// Register a push callback fired with the new epoch on every publish:
-    /// the app registers `ctx.request_repaint`, the cache manager its
-    /// incremental-append/GC trigger. Callbacks run on the ingest thread and
-    /// must be cheap and non-blocking — and must not re-enter the store.
+    /// Callbacks run on the ingest thread and must be cheap, non-blocking, and
+    /// must not re-enter the store.
     pub fn on_epoch(&self, listener: impl Fn(u64) + Send + Sync + 'static) {
         self.listeners
             .lock()
@@ -276,8 +258,8 @@ impl DataStore {
             let mut subscribers = self.subscribers.lock().expect("subscriber list poisoned");
             subscribers.retain(|tx| tx.send(epoch).is_ok());
         }
-        // Clone the listener Arcs out, then invoke them with the lock released,
-        // so a callback can never deadlock by touching the listener list.
+        // Invoke listeners with the lock released so a callback touching the
+        // listener list cannot deadlock.
         let listeners: Vec<EpochListener> = {
             let guard = self.listeners.lock().expect("listener list poisoned");
             guard.clone()
@@ -424,8 +406,6 @@ mod tests {
 
     #[test]
     fn removing_a_source_rebuilds_a_snapshot_without_its_data() {
-        // Two sources, each a topic. The writer flow: tombstone in the registry,
-        // drop the orphaned stores, rebuild the snapshot from what remains.
         let mut identity = IdentityRegistry::new();
         let keep = identity.add_source("keep");
         let drop = identity.add_source("drop");
@@ -446,8 +426,6 @@ mod tests {
         stores.retain(|(topic, _)| !removed.topics.contains(topic));
         let after = StoreSnapshot::from_registry(&identity, stores, 0).unwrap();
 
-        // The dropped source is tombstoned and carries no data; the survivor is
-        // intact and its IDs are unchanged.
         assert!(!after.is_source_live(drop));
         assert!(!after.is_topic_live(drop_topic));
         assert!(after.topic_store(drop_topic).is_none());
@@ -455,7 +433,6 @@ mod tests {
         assert!(after.topic_store(keep_topic).is_some());
         assert_eq!(after.global_time_range(), TimeRange::new(100, 200));
 
-        // The orphaned field is no longer live and a view onto it fails.
         let drop_field = removed.fields[0];
         assert!(!after.is_field_live(drop_field));
     }

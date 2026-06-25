@@ -27,9 +27,8 @@ pub enum Pane {
 pub struct Scene3dPane {
     pub camera: OrbitCamera,
     pub tracked_vehicle: Option<usize>,
-    /// When true (default), each vehicle's path is drawn only up to the
-    /// playhead time; when false, the full flight path is drawn. Toggled by
-    /// the route button in the scene's top-right overlay.
+    /// When true, each vehicle's path is clipped to the playhead time; when
+    /// false, the full flight path is drawn.
     pub trail_to_playhead: bool,
 }
 
@@ -107,18 +106,13 @@ impl DropEdge {
 
 pub struct Workspace {
     pub tree: TileTree,
-    /// Last plot pane the user clicked — the reference for `←`/`→` sample
-    /// stepping.
     pub focused: Option<egui_tiles::TileId>,
-    /// Widest Y-axis gutter across all plot panes from the previous frame, so
-    /// every pane shares one left margin and the plot rects line up vertically
-    /// even when their Y ranges differ wildly (e.g. ~5000 vs ~10). Fed back in
-    /// as `PlotServices::shared_y_gutter`; recomputed each frame from the panes'
-    /// own gutters.
+    /// Widest Y-axis gutter any plot pane needed last frame; every pane uses at
+    /// least this much left margin so stacked plots stay vertically aligned even
+    /// when their Y ranges differ wildly.
     pub shared_y_gutter: f32,
-    /// Legend visibility seeded into newly created panes — the global
-    /// `show_legend_default` setting, refreshed each frame by the app so splits
-    /// honour it. The per-pane toggle still overrides it afterwards.
+    /// Legend visibility seeded into newly created panes; the per-pane toggle
+    /// overrides it afterwards.
     pub default_show_legend: bool,
 }
 
@@ -134,7 +128,6 @@ impl Workspace {
         }
     }
 
-    /// First trace of the focused pane — the step reference.
     pub fn focused_first_field(&self) -> Option<FieldId> {
         let tile_id = self.focused?;
         match self.tree.tiles.get(tile_id) {
@@ -181,8 +174,6 @@ impl Workspace {
         self.split_plot_at(tile_id, direction, false);
     }
 
-    /// Edge drop: split at `tile_id` and plot every dragged field in the new
-    /// pane. Returns the fields actually added.
     pub fn split_plot_with_traces(
         &mut self,
         tile_id: egui_tiles::TileId,
@@ -210,7 +201,6 @@ impl Workspace {
         })
     }
 
-    /// Show or hide the 3D scene view. There is only ever one.
     pub fn toggle_scene_pane(&mut self) {
         if let Some(id) = self.scene_pane_id() {
             let closing_root = self.tree.root() == Some(id);
@@ -230,7 +220,6 @@ impl Workspace {
             .and_then(|root| self.attach_split(root, pane, SplitDirection::Horizontal, false))
         {
             Some(_) => {}
-            // Empty tree (no root): the scene pane becomes the root.
             None => self.tree.root = Some(pane),
         }
         self.focused = Some(pane);
@@ -249,8 +238,6 @@ impl Workspace {
         self.attach_split(tile_id, new_pane, direction, before)
     }
 
-    /// Place an already-inserted `new_pane` next to `tile_id`, splitting in
-    /// `direction`. Returns `new_pane` on success.
     fn attach_split(
         &mut self,
         tile_id: egui_tiles::TileId,
@@ -274,8 +261,8 @@ impl Workspace {
         }
 
         if let Some(parent_id) = self.tree.tiles.parent_of(tile_id) {
-            // `Some(index)` = the pane was removed from `parent` and must be
-            // wrapped in a new `kind` container placed back at `index`.
+            // `Some(index)` = pane removed from parent; wrap it in a new `kind`
+            // container and put it back at `index`.
             let wrap_at = {
                 let Some(egui_tiles::Tile::Container(parent)) = self.tree.tiles.get_mut(parent_id)
                 else {
@@ -313,8 +300,8 @@ impl Workspace {
                 if let Some(egui_tiles::Tile::Container(parent)) =
                     self.tree.tiles.get_mut(parent_id)
                 {
-                    // Put the wrapper back where the pane was — appending
-                    // would shuffle the pane to the end of the parent.
+                    // Insert at `index`; appending would shuffle the pane to
+                    // the end of the parent.
                     insert_child_at(parent, index, replacement);
                     if let egui_tiles::Container::Tabs(tabs) = parent {
                         tabs.set_active(replacement);
@@ -374,20 +361,13 @@ pub struct WorkspaceActions {
     pub edge_drop: Option<(egui_tiles::TileId, DropEdge, Vec<FieldId>)>,
     pub close: Option<egui_tiles::TileId>,
     pub remove_trace: Vec<FieldId>,
-    /// Pane the user clicked this frame (step reference).
     pub focus: Option<egui_tiles::TileId>,
-    /// Alt+hover scrub: move the playhead to this canonical time.
     pub scrub_to: Option<i64>,
-    /// User manually changed the shared X view (pan/zoom/reset), which unlocks
-    /// live-tail mode.
+    /// Manual X-view change (pan/zoom/reset); unlocks live-tail mode.
     pub view_changed: bool,
-    /// User clicked the gear on the 3D scene — open the vehicle config dialog.
     pub open_vehicle_config: bool,
-    /// User requested global stats for a plotted trace.
     pub inspect_field_stats: Option<FieldId>,
-    /// Widest Y-axis gutter any plot pane needed this frame; fed back into
-    /// `Workspace::shared_y_gutter` so next frame's panes share one margin and
-    /// stay vertically aligned.
+    /// Widest Y gutter any pane needed; fed into `Workspace::shared_y_gutter`.
     pub max_y_gutter: f32,
 }
 
@@ -400,38 +380,27 @@ pub struct PlotServices<'a> {
     pub view: &'a mut Option<ViewX>,
     pub origin_us: i64,
     pub hover_mode: &'a mut delog_core::field_view::SampleMode,
-    /// Whether Alt+hover snaps the playhead to the nearest data point (off by
-    /// default). When set, the playhead holds a sample until the cursor crosses
-    /// to the next one.
+    /// When set, Alt+hover holds a sample until the cursor crosses to the next.
     pub snap_playhead: &'a mut bool,
-    /// Shared measurement-marker time, used when `marker_scope` is Global.
-    /// Per-pane markers live on the pane instead.
+    /// Shared marker time, used when `marker_scope` is Global; per-pane markers
+    /// live on the pane instead.
     pub marker_us: &'a mut Option<i64>,
-    /// Whether the marker is shared across panes or per-pane.
     pub marker_scope: crate::settings::MarkerScope,
-    /// Live-adjustable plot draw tuning (decimation/AA), from the config.
     pub render_tuning: crate::settings::RenderTuning,
-    /// Live-adjustable 3D scene tuning, from the config.
     pub scene3d: crate::settings::Scene3dSettings,
-    /// Theme accent colour, used to highlight active scene-overlay toggles.
     pub accent: egui::Color32,
-    /// Playback time for the playhead cursor; `None` before any data loads.
+    /// Playhead cursor time; `None` before any data loads.
     pub playhead_us: Option<i64>,
-    /// Whether playback is running (gates the playhead value tooltip).
     pub playing: bool,
     pub vehicles: &'a [crate::vehicle::VehicleConfig],
-    /// Cached render-space trajectories (points + per-point timestamps),
-    /// parallel to `vehicles`.
+    /// Render-space trajectories (points + per-point timestamps), parallel to
+    /// `vehicles`.
     pub trajectories: &'a [crate::vehicle::VehicleTrajectory],
-    /// Config generation the cached trajectories were built at (the vehicle
-    /// revision); lets the GPU upload only appended tail points.
+    /// Vehicle revision the cached trajectories were built at; lets the GPU
+    /// upload only appended tail points.
     pub traj_generation: u64,
-    /// Widest Y-axis gutter seen across all plot panes last frame; every pane
-    /// uses at least this much left margin so stacked plots align.
     pub shared_y_gutter: f32,
-    /// Plot overlay display prefs: legend placement + hover readout contents.
     pub plot_display: crate::settings::PlotDisplay,
-    /// Manual session markers, drawn as faint verticals on every pane.
     pub markers: &'a [crate::markers::Marker],
 }
 
@@ -523,8 +492,6 @@ impl egui_tiles::Behavior<Pane> for Behavior<'_> {
 }
 
 impl Behavior<'_> {
-    /// 3D scene pane: a tracking camera orbits the selected vehicle's pose, or
-    /// the world origin until a vehicle is configured.
     fn scene_ui(
         &mut self,
         ui: &mut egui::Ui,
@@ -560,16 +527,11 @@ impl Behavior<'_> {
             };
         }
 
-        // Per-vehicle render data: poses are read cheaply at the playhead each
-        // frame; trajectories come from the app's epoch-cached build.
         let snapshot = self.services.snapshot;
         let playhead = self.services.playhead_us;
         let trail_to_playhead = pane.trail_to_playhead;
-        // `pose_at` folds GPS-ref resolution and per-playhead reads together; we
-        // split them here to see whether the per-frame
-        // `resolve_gps_ref` scan or the O(chunks) `sample_at` reads dominate
-        // `scene_ui`. Resolving the ref once per frame here (instead of inside
-        // each `pose_at`) is also the skeleton for caching it across frames.
+        // GPS-ref resolution split out of `pose_at` so it runs once per frame
+        // and can be profiled (and later cached) separately from the reads.
         let gps_refs: Vec<Option<(f64, f64, f64)>> = {
             let _t = self.services.metrics.scope("scene_gpsref");
             self.services
@@ -607,8 +569,8 @@ impl Behavior<'_> {
             pane.tracked_vehicle = Some(tracked);
         }
 
-        // Track the selected visible vehicle; if it is hidden or has no pose at
-        // the playhead, fall back to the first visible pose, then origin.
+        // If the tracked vehicle has no pose, fall back to the first visible
+        // pose, then origin.
         let tracked = pane
             .tracked_vehicle
             .and_then(|i| poses.get(i).and_then(|p| p.as_ref()))
@@ -625,11 +587,9 @@ impl Behavior<'_> {
                 let pose = poses[i]?;
                 let traj = self.services.trajectories.get(i);
                 let points: &[[f32; 3]] = traj.map_or(&[], |t| t.points.as_slice());
-                // Clip the drawn path to the playhead when trail mode is on: the
-                // prefix of points whose timestamp is ≤ playhead (O(log N) per
-                // vehicle). With trail mode off, or no playhead (no data range),
-                // show the full path. The full path stays resident on the GPU
-                // regardless, so toggling never re-uploads.
+                // Clip to the prefix of points at or before the playhead. The
+                // full path stays resident on the GPU, so toggling never
+                // re-uploads.
                 let visible_count = match (traj, playhead) {
                     (Some(t), Some(ph)) if trail_to_playhead => {
                         t.times_us.partition_point(|&ts| ts <= ph) as u32
@@ -650,7 +610,6 @@ impl Behavior<'_> {
             })
             .collect();
 
-        // 3d_frame: CPU cost of building + encoding the scene.
         let rendered = {
             let _t = self.services.metrics.scope("3d_frame");
             self.services.gpu.render_scene(
@@ -735,11 +694,6 @@ impl Behavior<'_> {
         tile_id: egui_tiles::TileId,
         pane: &mut PlotPane,
     ) -> egui_tiles::UiResponse {
-        // Per-pane breakdown: `pane_total` is the whole body and
-        // drops on every return path, so `ui_workspace − Σ(pane_total)` is the
-        // egui_tiles layout/drop-zone overhead around the panes; the inner
-        // `pane_setup`/`pane_axes`/`plot_paint_cpu`/`pane_overlay` scopes split
-        // a single pane's cost. All recorded per pane (like `plot_paint_cpu`).
         let _pane_total = self.services.metrics.scope("pane_total");
         let outer = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(outer, egui::Sense::click_and_drag());
@@ -751,9 +705,8 @@ impl Behavior<'_> {
         } else {
             egui_tiles::UiResponse::None
         };
-        // Stacked plots share one left margin so they line up; use the widest
-        // gutter any pane needed last frame but never below this pane's own
-        // need (so labels never clip), and report this pane's gutter back.
+        // Use the widest gutter any pane needed last frame, but never below this
+        // pane's own need so labels never clip.
         let shared_gutter = self.services.shared_y_gutter;
         let make_plot_rect =
             |ui: &egui::Ui, y_range: (f32, f32), y_unit: Option<&str>| -> (egui::Rect, f32) {
@@ -768,10 +721,8 @@ impl Behavior<'_> {
             };
 
         if pane.is_empty() {
-            // Draw a normal but empty plot frame so the pane reads as a plot
-            // even before a field is dropped. Reuse the shared view's X range
-            // (set from data, or the empty-session placeholder) so the pane
-            // pans and zooms with the rest; else a neutral 0..1 fallback.
+            // Draw an empty frame reusing the shared X range so the pane pans
+            // and zooms with the rest; neutral 0..1 fallback otherwise.
             let y_range = (0.0, 1.0);
             let (plot_rect, own_gutter) = make_plot_rect(ui, y_range, None);
             self.actions.max_y_gutter = self.actions.max_y_gutter.max(own_gutter);
@@ -804,14 +755,14 @@ impl Behavior<'_> {
         let (mut plot_rect, own_gutter) = make_plot_rect(ui, y_range, y_unit.as_deref());
         self.actions.max_y_gutter = self.actions.max_y_gutter.max(own_gutter);
         let view_before_interaction = *self.services.view;
-        // Dragging the measurement marker line takes priority over panning so a
-        // grab near the marker moves it instead of scrolling the view.
+        // Marker drag takes priority over panning so a grab near the marker
+        // moves it instead of scrolling the view.
         let marker_active = self.handle_marker_drag(&response, plot_rect, x_range, pane);
         if !marker_active {
             self.handle_plot_interaction(&response, plot_rect);
         }
-        // Ctrl+hover scrubs an existing marker to the cursor, mirroring
-        // Alt+hover for the playhead — no precise grab on the line needed.
+        // Ctrl+hover scrubs an existing marker to the cursor, with no precise
+        // grab on the line needed.
         if self.marker_us(pane).is_some()
             && ui.input(|i| i.modifiers.ctrl)
             && let Some(pos) = response.hover_pos()
@@ -1276,9 +1227,7 @@ impl Behavior<'_> {
         });
     }
 
-    /// Plot Info window: trace counts, last-frame geometry/timings
-    /// and per-trace cache/GPU details. Opened from the context menu; its
-    /// open state lives on the pane so it survives across frames.
+    /// Open state lives on the pane so it survives across frames.
     fn plot_info_window(
         &mut self,
         ui: &egui::Ui,
@@ -1593,10 +1542,6 @@ struct SceneOverlayClicks {
     toggle_trail: bool,
 }
 
-/// Button stack overlaid on the scene's top-right corner: a cog that opens the
-/// vehicle configuration dialog, and directly below it an equally-sized route
-/// button that toggles the path between the full flight path and the portion
-/// up to the playhead. `trail_to_playhead` drives the toggle's pressed state.
 fn scene_overlay_buttons(
     ui: &mut egui::Ui,
     scene_rect: egui::Rect,

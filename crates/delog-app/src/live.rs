@@ -1,5 +1,3 @@
-//! Live endpoint connection dialog state.
-
 use std::net::{IpAddr, SocketAddr};
 
 use delog_stream::{Endpoint, EndpointKind};
@@ -78,8 +76,8 @@ impl ConnectionDialog {
                                     ui.selectable_value(&mut self.kind, kind, kind.label());
                                 }
                             });
-                        // Switching transport swaps the port to the new mode's
-                        // conventional default, unless the user customized it.
+                        // Swap to the new mode's default port only if the user
+                        // hadn't customized the old one.
                         if self.kind != prev_kind && self.port.trim() == default_port(prev_kind) {
                             self.port = default_port(self.kind).to_owned();
                         }
@@ -169,8 +167,7 @@ impl ConnectionDialog {
     }
 }
 
-/// Conventional default port per transport: 14550 is the MAVLink/GCS UDP
-/// port, 5760 is ArduPilot SITL's TCP port.
+// 14550 is the MAVLink/GCS UDP port; 5760 is ArduPilot SITL's TCP port.
 fn default_port(kind: EndpointKind) -> &'static str {
     match kind {
         EndpointKind::UdpServer => "14550",
