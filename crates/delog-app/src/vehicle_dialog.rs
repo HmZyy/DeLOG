@@ -9,7 +9,7 @@ use egui::Color32;
 use crate::vehicle::{GeoRef, ModelKind, NedReference, OriMapping, PosMapping, VehicleConfig};
 
 /// Fixed dialog width, applied even when no vehicles are configured.
-const DIALOG_WIDTH: f32 = 360.0;
+const DIALOG_WIDTH: f32 = 240.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PosMode {
@@ -473,17 +473,26 @@ pub fn show(
                 ))
                 .clicked()
             {
-                state.drafts.push(Draft::default());
+                // Default the name to "Vehicle #N"; the user can rename it.
+                let n = state.drafts.len() + 1;
+                state.drafts.push(Draft {
+                    label: format!("Vehicle #{n}"),
+                    ..Draft::default()
+                });
             }
             ui.add_space(8.0);
 
             let mut remove: Option<usize> = None;
             egui::ScrollArea::vertical().show(ui, |ui| {
                 for (i, draft) in state.drafts.iter_mut().enumerate() {
-                    // Vehicles are auto-named by position; the collapsing header
-                    // is the only place the name appears.
-                    draft.label = format!("Vehicle #{}", i + 1);
-                    egui::CollapsingHeader::new(draft.label.clone())
+                    // The header shows the editable name, falling back to the
+                    // positional default when the user clears it.
+                    let title = if draft.label.trim().is_empty() {
+                        format!("Vehicle #{}", i + 1)
+                    } else {
+                        draft.label.clone()
+                    };
+                    egui::CollapsingHeader::new(title)
                         .id_salt(("vehicle", i))
                         .default_open(true)
                         .show(ui, |ui| {
@@ -552,6 +561,10 @@ fn draft_editor(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapshot) 
         .num_columns(2)
         .spacing([18.0, 8.0])
         .show(ui, |ui| {
+            ui.label("Name");
+            ui.text_edit_singleline(&mut draft.label);
+            ui.end_row();
+
             ui.label("Visible");
             ui.checkbox(&mut draft.show, "");
             ui.end_row();
