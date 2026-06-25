@@ -37,6 +37,11 @@ pub fn plus() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/plus.svg")
 }
 
+/// Copy (duplicate a vehicle).
+pub fn copy() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/copy.svg")
+}
+
 /// Ban / prohibited (remove a single trace).
 pub fn ban() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/ban.svg")

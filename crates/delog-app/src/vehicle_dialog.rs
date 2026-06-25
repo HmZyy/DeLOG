@@ -25,6 +25,7 @@ enum OriMode {
 }
 
 /// An editable vehicle form.
+#[derive(Clone)]
 struct Draft {
     label: String,
     show: bool,
@@ -483,6 +484,7 @@ pub fn show(
             ui.add_space(8.0);
 
             let mut remove: Option<usize> = None;
+            let mut duplicate: Option<usize> = None;
             egui::ScrollArea::vertical().show(ui, |ui| {
                 for (i, draft) in state.drafts.iter_mut().enumerate() {
                     // The header shows the editable name, falling back to the
@@ -498,19 +500,35 @@ pub fn show(
                         .show(ui, |ui| {
                             draft_editor(ui, draft, snapshot);
                             ui.add_space(8.0);
-                            if ui
-                                .add(egui::Button::image_and_text(
-                                    icon(ui, crate::icons::trash()),
-                                    "Remove Vehicle",
-                                ))
-                                .clicked()
-                            {
-                                remove = Some(i);
-                            }
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .add(egui::Button::image_and_text(
+                                        icon(ui, crate::icons::trash()),
+                                        "Remove Vehicle",
+                                    ))
+                                    .clicked()
+                                {
+                                    remove = Some(i);
+                                }
+                                if ui
+                                    .add(egui::Button::image_and_text(
+                                        icon(ui, crate::icons::copy()),
+                                        "Duplicate",
+                                    ))
+                                    .clicked()
+                                {
+                                    duplicate = Some(i);
+                                }
+                            });
                         });
                     ui.add_space(6.0);
                 }
             });
+            if let Some(i) = duplicate {
+                let mut copy = state.drafts[i].clone();
+                copy.label = format!("{} copy", copy.label);
+                state.drafts.insert(i + 1, copy);
+            }
             if let Some(i) = remove {
                 state.drafts.remove(i);
             }
