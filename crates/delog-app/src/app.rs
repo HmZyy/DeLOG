@@ -24,7 +24,7 @@ use crate::workspace::{PlotServices, Workspace};
 struct TrajectoryBuildResult {
     epoch: u64,
     vehicle_revision: u64,
-    trajectories: Vec<Vec<[f32; 3]>>,
+    trajectories: Vec<crate::vehicle::VehicleTrajectory>,
 }
 
 type LayoutImportResult = Result<LayoutDoc, LayoutError>;
@@ -286,7 +286,7 @@ pub struct DelogApp {
     vehicle_dialog: crate::vehicle_dialog::VehicleDialog,
     /// Cached render-space trajectories, parallel to `vehicles`, rebuilt on a
     /// worker when the data epoch or vehicle set changes.
-    vehicle_trajectories: Vec<Vec<[f32; 3]>>,
+    vehicle_trajectories: Vec<crate::vehicle::VehicleTrajectory>,
     traj_epoch: u64,
     traj_vehicle_revision: u64,
     vehicle_revision: u64,
@@ -2177,6 +2177,7 @@ impl eframe::App for DelogApp {
                         marker_scope: self.settings.plot.marker_scope,
                         render_tuning: self.settings.render,
                         scene3d: self.settings.scene3d,
+                        accent: self.settings.theme.accent(),
                         playhead_us: snapshot.global_time_range().map(|_| self.playback.t_us),
                         playing: self.playback.playing,
                         vehicles: &self.vehicles,
