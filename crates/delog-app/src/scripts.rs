@@ -1,5 +1,3 @@
-//! Scripts window: REPL + editor + library. Feature-gated.
-
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -44,9 +42,6 @@ impl PreparedParserCommand {
     }
 }
 
-/// All UI + engine state for the scripts window (the editor + REPL console). The
-/// saved-script library is surfaced through the Tools / Scripts / Run menu, not
-/// in this window.
 pub struct ScriptsPanel {
     pub open: bool,
     engine: Option<ScriptEngine>,
@@ -56,9 +51,7 @@ pub struct ScriptsPanel {
     repl_input: String,
     console: String,
     status: String,
-    /// Script name awaiting a delete confirmation (Tools / Scripts / Run / Remove).
     pending_delete: Option<String>,
-    /// Whether a command is in flight (toggles the Run/Cancel button).
     running: bool,
     parsers: ParsersPanel,
     deferred_parser_actions: VecDeque<ParserUiAction>,
@@ -165,7 +158,6 @@ impl ScriptsPanel {
         self.finish_cancel_dispatch(result);
     }
 
-    /// Load a saved script into the Console editor and open the window for editing.
     pub fn edit_named(&mut self, name: &str) {
         match self.library.load(name) {
             Ok(source) => {
@@ -178,20 +170,15 @@ impl ScriptsPanel {
         }
     }
 
-    /// Stage a script for deletion; the confirmation dialog is shown by [`ui`].
     pub fn request_delete(&mut self, name: &str) {
         self.pending_delete = Some(name.to_owned());
     }
 
-    /// Saved script names for the Tools / Scripts / Run submenu (read fresh from
-    /// disk so newly-saved scripts appear without restarting).
+    /// Read fresh from disk so newly-saved scripts appear without restarting.
     pub fn script_names(&self) -> Vec<String> {
         self.library.list().unwrap_or_default()
     }
 
-    /// Load a saved script by name and run it through the engine (Tools / Scripts
-    /// / Run / <name>). The editor buffer is left untouched; output buffers in the
-    /// console and the derived source appears in the data browser.
     pub fn run_named(
         &mut self,
         name: &str,
@@ -281,9 +268,8 @@ impl ScriptsPanel {
             .get_or_insert_with(|| ScriptEngine::spawn(store, sender, metrics))
     }
 
-    /// The live-batch sender IF the engine has already been spawned (e.g. the
-    /// user ran a script). Never spawns the interpreter: a live transform can
-    /// only be registered by running a script, which already spawns the engine.
+    /// Returns `None` rather than spawning the engine: a live transform only
+    /// exists if a script already ran (which spawned the engine).
     pub fn live_batch_sender_if_running(
         &self,
     ) -> Option<std::sync::mpsc::SyncSender<delog_core::ingest::ParsedBatch>> {
@@ -318,7 +304,6 @@ impl ScriptsPanel {
                 self.status = "done".into();
                 self.running = false;
             }
-            // Live-batch processing carries no command-completion semantics.
             ScriptEvent::LiveBatchProcessed => {}
             ScriptEvent::Parser(event) => self.parsers.handle_event(event),
         }
@@ -415,8 +400,8 @@ impl ScriptsPanel {
             self.finish_parser_dispatch(command, result);
         }
 
-        // Drawn unconditionally so a Remove triggered from the menu can be
-        // confirmed even when the Console window is closed.
+        // Unconditional so a menu-triggered Remove can be confirmed even when
+        // the Console window is closed.
         self.delete_confirm_ui(ctx);
 
         if !self.open {
@@ -439,7 +424,6 @@ impl ScriptsPanel {
         ctx.request_repaint(); // keep draining engine events while open
     }
 
-    /// Modal confirmation for deleting a saved script.
     fn delete_confirm_ui(&mut self, ctx: &egui::Context) {
         let Some(name) = self.pending_delete.clone() else {
             return;
@@ -465,7 +449,7 @@ impl ScriptsPanel {
                     }
                 });
             });
-        // Closing the window via its [x] is treated as cancel.
+        // Closing via [x] is treated as cancel.
         if !keep_open {
             decision = decision.or(Some(false));
         }
@@ -495,8 +479,6 @@ impl ScriptsPanel {
             .show_inside(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("REPL:");
-                    // Clear-console trash sits at the far right; the input fills
-                    // the space between it and the label.
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if icon_btn(ui, crate::icons::trash(), "Clear console").clicked() {
                             self.console.clear();
@@ -550,8 +532,8 @@ impl ScriptsPanel {
                     }
                 }
 
-                // The run name: an unsaved buffer runs as "scratch" so its
-                // output (and any live transform) is still addressable.
+                // An unsaved buffer runs as "scratch" so its output (and any
+                // live transform) stays addressable.
                 let run_name = if self.current_name.is_empty() {
                     "scratch".to_owned()
                 } else {
@@ -622,12 +604,10 @@ impl ScriptsPanel {
     }
 }
 
-/// A compact icon-only button (16px, tinted to the text colour) with a tooltip.
 fn icon_btn(ui: &mut egui::Ui, icon: egui::ImageSource<'static>, hover: &str) -> egui::Response {
     icon_btn_enabled(ui, true, icon, hover)
 }
 
-/// Like [`icon_btn`] but greys out (and ignores clicks) when `enabled` is false.
 fn icon_btn_enabled(
     ui: &mut egui::Ui,
     enabled: bool,

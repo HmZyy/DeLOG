@@ -1,6 +1,3 @@
-//! ULog parser hot-path bench: header/format/subscription decode plus
-//! repeated `D` records into Arrow batches.
-
 use std::io::Cursor;
 
 use criterion::{Criterion, criterion_group, criterion_main};

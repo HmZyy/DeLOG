@@ -1,10 +1,7 @@
-//! Persistent global script library: `.py` files in a directory.
-
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// A scripts library rooted at a directory of `.py` files.
 pub struct ScriptLibrary {
     dir: PathBuf,
 }
@@ -29,7 +26,6 @@ impl ScriptLibrary {
         Ok(self.dir.join(format!("{name}.py")))
     }
 
-    /// Script names (file stems), sorted.
     pub fn list(&self) -> io::Result<Vec<String>> {
         let mut out = Vec::new();
         let rd = match fs::read_dir(&self.dir) {

@@ -1,19 +1,13 @@
-//! Manual markers / bookmarks: user-placed time
-//! markers with a label, colour and note. Distinct from the measurement
-//! cursor (a single transient delta cursor) — these are multiple, labelled,
-//! navigable, and persisted with the session.
-
 use std::collections::HashSet;
 
-/// One bookmark at a canonical time. `id` is a stable identity so the dock and
-/// timeline can address a marker for edit/delete/drag even as the time-sorted
-/// display order shifts.
+/// `id` is a stable identity so the dock and timeline can address a marker for
+/// edit/delete/drag even as the time-sorted display order shifts.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Marker {
     pub id: u64,
     pub t_us: i64,
     pub label: String,
-    /// sRGB straight RGBA, like `TraceRef`.
+    /// sRGB straight RGBA.
     pub color: [f32; 4],
     pub note: String,
 }
@@ -30,8 +24,8 @@ impl Marker {
     }
 }
 
-/// The session's marker collection. Monotonic `next_id` never reuses numbers,
-/// so labels and ids stay stable across deletions.
+/// Monotonic `next_id` never reuses numbers, so labels and ids stay stable
+/// across deletions.
 #[derive(Debug, Default)]
 pub struct Markers {
     items: Vec<Marker>,
@@ -43,8 +37,6 @@ impl Markers {
         Self::default()
     }
 
-    /// Add a marker at `t_us` with an auto label (`Marker N`) and the next
-    /// palette colour. Returns the new id.
     pub fn add_at(&mut self, t_us: i64) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
@@ -59,7 +51,6 @@ impl Markers {
         id
     }
 
-    /// Re-add a marker loaded from persistence, assigning a fresh id.
     pub fn push_loaded(&mut self, t_us: i64, label: String, color: [f32; 4], note: String) {
         let id = self.next_id;
         self.next_id += 1;
@@ -80,7 +71,6 @@ impl Markers {
         self.items.iter_mut().find(|m| m.id == id)
     }
 
-    /// Markers sorted ascending by time (display order, flags, verticals).
     pub fn by_time(&self) -> Vec<&Marker> {
         let mut v: Vec<&Marker> = self.items.iter().collect();
         v.sort_by_key(|m| m.t_us);
@@ -92,20 +82,15 @@ impl Markers {
     }
 }
 
-/// Bottom dock listing the session's markers: per row a colour
-/// swatch, relative time, editable label + note, and jump / delete controls.
-/// Returns a jump target time when a row's jump button is clicked.
 #[derive(Default)]
 pub struct MarkersDock {
     pub open: bool,
-    /// Ids of rows ticked for bulk delete (transient UI selection).
     selected: HashSet<u64>,
 }
 
 impl MarkersDock {
     pub fn ui(&mut self, ui: &mut egui::Ui, markers: &mut Markers, origin_us: i64) -> Option<i64> {
         let ids: Vec<u64> = markers.by_time().iter().map(|m| m.id).collect();
-        // Drop selections for markers deleted elsewhere.
         self.selected.retain(|id| ids.contains(id));
         let selected_count = ids.iter().filter(|id| self.selected.contains(id)).count();
         let all_selected = !ids.is_empty() && selected_count == ids.len();
@@ -113,9 +98,6 @@ impl MarkersDock {
 
         let mut delete_selected = false;
         ui.horizontal(|ui| {
-            // Tristate select-all: checked when every row is ticked, a dash when
-            // only some are, empty when none. Clicking selects all unless all are
-            // already selected (then it clears).
             let mut master = all_selected;
             let resp = ui
                 .add_enabled(!ids.is_empty(), egui::Checkbox::new(&mut master, ""))
@@ -128,7 +110,6 @@ impl MarkersDock {
                 }
             }
             if any_selected && !all_selected {
-                // Indeterminate dash painted across the (empty) checkbox box.
                 let iw = ui.spacing().icon_width;
                 ui.painter().hline(
                     egui::Rangef::new(resp.rect.left() + iw * 0.3, resp.rect.left() + iw * 0.7),
@@ -163,11 +144,8 @@ impl MarkersDock {
 
         let mut jump = None;
         let mut to_remove = None;
-        // Always render the scroll region (even when empty), and let it fill
-        // the panel height. egui stores the panel size from its content rect,
-        // so a content-shrinking scroll area makes the dock snap back to
-        // content height after a resize; `auto_shrink([false, false])` fills the
-        // dragged height so the resize sticks (matching the performance dock).
+        // auto_shrink([false, false]) so the scroll area fills the dragged
+        // height and the dock resize sticks (egui sizes the panel from content).
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -243,7 +221,6 @@ impl MarkersDock {
     }
 }
 
-/// Format a canonical time relative to the log origin as `m:ss.cc`.
 fn fmt_rel(t_us: i64, origin_us: i64) -> String {
     let secs = (t_us - origin_us) as f64 * 1e-6;
     let sign = if secs < 0.0 { "-" } else { "" };
@@ -285,7 +262,6 @@ mod tests {
         m.add_at(20);
         m.remove(a);
         assert_eq!(m.as_slice().len(), 1);
-        // Next add keeps counting up — no reuse of "Marker 1".
         m.add_at(30);
         let labels: Vec<&str> = m.by_time().iter().map(|x| x.label.as_str()).collect();
         assert_eq!(labels, ["Marker 2", "Marker 3"]);

@@ -1,6 +1,3 @@
-//! Render-cache benches: cache build throughput, y-range query at scale, and
-//! incremental append latency.
-
 use std::sync::Arc;
 
 use arrow::array::{ArrayRef, Float32Array, Int64Array};
@@ -27,7 +24,6 @@ fn schema() -> Arc<TopicSchema> {
     )
 }
 
-/// A 1M-sample single-field snapshot split into 64Ki chunks.
 fn snapshot(rows: i64) -> (StoreSnapshot, FieldId) {
     let schema = schema();
     let mut chunks = Vec::new();
@@ -67,7 +63,6 @@ fn bench_cache(c: &mut Criterion) {
         b.iter(|| TraceCache::build(&snap, field, 0, 0, &metrics).unwrap());
     });
 
-    // Mid-span y-range query over 1M samples (the auto-visible-Y hot path).
     c.bench_function("cache_yquery_1M", |b| {
         b.iter(|| cache.pyramid.query(&cache.xy, 100_000, 900_000));
     });
@@ -76,7 +71,6 @@ fn bench_cache(c: &mut Criterion) {
         b.iter(|| MinMaxPyramid::build(&ys));
     });
 
-    // Append one 512-row live chunk to a warm cache.
     let (snap_small, field_s) = snapshot(ROWS - 512);
     let (snap_full, _) = snapshot(ROWS);
     c.bench_function("cache_append_512", |b| {

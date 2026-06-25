@@ -13,10 +13,6 @@ use delog_core::schema::{FieldSchema, TopicSchema};
 use delog_core::snapshot::StoreSnapshot;
 use delog_core::store::TopicStore;
 
-// ---------------------------------------------------------------------------
-// Helpers mirrored from export.rs unit tests
-// ---------------------------------------------------------------------------
-
 fn num_schema() -> Arc<TopicSchema> {
     Arc::new(
         TopicSchema::new(
@@ -27,8 +23,6 @@ fn num_schema() -> Arc<TopicSchema> {
     )
 }
 
-/// Build a single-field snapshot from a sorted, deduped `(raw_t, Option<f64>)` list.
-/// Returns the snapshot and the field id.
 fn snapshot_from_opt_samples(
     samples: &[(i64, Option<f64>)],
     offset_us: i64,
@@ -51,7 +45,6 @@ fn snapshot_from_opt_samples(
     (snapshot, field)
 }
 
-/// Drain all rows from a None-mode RowCursor.
 fn collect_none(
     snap: &StoreSnapshot,
     field: delog_core::identity::FieldId,
@@ -72,10 +65,6 @@ fn collect_none(
     rows
 }
 
-// ---------------------------------------------------------------------------
-// Property
-// ---------------------------------------------------------------------------
-
 proptest! {
     #[test]
     fn none_single_field_reproduces_samples(
@@ -90,26 +79,22 @@ proptest! {
         ),
         offset_us in -500_000i64..500_000,
     ) {
-        // Sort + dedup timestamps ascending (raw domain).
         let mut data = raw_samples;
         data.sort_by_key(|(t, _)| *t);
         data.dedup_by_key(|(t, _)| *t);
 
-        // Query window: raw range [0, 1_000_000] shifted by offset covers all samples.
-        // Use effective-time coordinates for the query window.
-        let t_start = offset_us; // effective time of raw_t=0
-        let t_end = 1_000_000i64 + offset_us; // effective time of raw_t=1_000_000
+        // Query window in effective time, covering every sample.
+        let t_start = offset_us;
+        let t_end = 1_000_000i64 + offset_us;
 
         let (snap, field) = snapshot_from_opt_samples(&data, offset_us);
 
-        // Compute the expected in-range samples. SQL-null (`None`) samples are
-        // skipped entirely — they record no measurement and produce no row. A
-        // `Some(v)` sample always produces a row: `Num(v)` when finite, else
-        // `Empty` (a `Some(NaN)` is a float gap, not a missing sample).
+        // SQL-null (`None`) produces no row; `Some(v)` always does, as `Empty`
+        // when NaN (a float gap, not a missing sample) else `Num(v)`.
         let expected: Vec<(i64, Cell)> = data
             .iter()
             .filter_map(|(raw_t, opt_v)| {
-                let v = (*opt_v)?; // None => no row
+                let v = (*opt_v)?;
                 let eff = raw_t.checked_add(offset_us)?;
                 if eff < t_start || eff > t_end {
                     return None;
@@ -125,7 +110,6 @@ proptest! {
 
         let got = collect_none(&snap, field, t_start, t_end);
 
-        // Row count must match exactly.
         prop_assert_eq!(
             got.len(),
             expected.len(),
@@ -134,7 +118,6 @@ proptest! {
             expected.len()
         );
 
-        // Each row's timestamp and cell must match.
         for (i, (got_row, exp_row)) in got.iter().zip(expected.iter()).enumerate() {
             prop_assert_eq!(
                 got_row.0, exp_row.0,

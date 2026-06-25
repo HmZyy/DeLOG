@@ -7,7 +7,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use crate::identity::SourceId;
 use crate::time::TimestampUs;
 
-/// Diagnostic severity, ordered so filters can compare (`>= Warning`).
+/// Variant order is load-bearing: filters compare `>= Warning`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
     Info,

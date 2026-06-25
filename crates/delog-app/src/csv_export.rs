@@ -1,8 +1,3 @@
-//! CSV export: field-picker dialog state and the streaming writer.
-//!
-//! The row engine is `delog_core::export`; this module formats its `Cell` rows as
-//! CSV and drives the off-thread write. egui wiring lives in `app.rs`.
-
 use std::collections::HashSet;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,14 +8,12 @@ use delog_core::snapshot::StoreSnapshot;
 
 use crate::browser::BrowserModel;
 
-/// What the dialog hands back when the user clicks Export.
 pub struct CsvExportRequest {
     pub fields: Vec<FieldId>,
     pub window: (i64, i64),
     pub mode: ResampleMode,
 }
 
-/// Render the export window. Returns Some(request) on Export click.
 /// `visible` is the current ViewX (min,max); `full` is the global range.
 pub fn dialog_ui(
     ctx: &egui::Context,
@@ -170,7 +163,6 @@ impl std::fmt::Display for CsvExportError {
     }
 }
 
-/// Numeric/boolean fields across all sources, labelled "source / topic.field".
 pub fn numeric_fields(snapshot: &StoreSnapshot, model: &BrowserModel) -> Vec<CsvField> {
     let mut out = Vec::new();
     for src in &model.sources {

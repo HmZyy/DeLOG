@@ -1,12 +1,3 @@
-//! Cache manager: ownership, async build, epoch append, GC, LRU.
-//!
-//! Owns `FieldId → TraceCache`. First plot of a field spawns an off-thread build
-//! — the slot reports `Building` so the plot can show "building cache…".
-//! On each store epoch the manager appends new rows to ready caches and GCs
-//! caches whose source was removed; when total CPU bytes exceed the
-//! budget it LRU-evicts *unplotted* caches, never pinned (plotted) ones.
-//! All sizes feed `MemBreakdown`.
-
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -18,29 +9,22 @@ use delog_core::snapshot::StoreSnapshot;
 
 use crate::trace::TraceCache;
 
-/// Default cache budget for unplotted traces: 1 GiB.
 pub const DEFAULT_BUDGET_BYTES: u64 = 1 << 30;
 
 enum Slot {
-    /// An off-thread build is in flight.
     Building,
     Ready(TraceCache),
 }
 
-/// Owns and lifecycle-manages every trace's render cache.
 pub struct CacheManager {
     caches: HashMap<FieldId, Slot>,
-    /// Fields currently plotted — pinned against eviction.
+    /// Plotted fields — pinned against eviction.
     pinned: HashSet<FieldId>,
     budget_bytes: u64,
     frame: u64,
-    /// Shared time-rebase origin for all caches (global dataset start).
     origin_us: i64,
     built_tx: Sender<(FieldId, Option<TraceCache>)>,
     built_rx: Receiver<(FieldId, Option<TraceCache>)>,
-    /// Shared metrics registry. Defaults to a private registry; the app
-    /// swaps in the shared one via [`CacheManager::with_metrics`] so the perf
-    /// dock sees `cache_build`/`cache_append`/`minmax_build`.
     metrics: Arc<MetricsRegistry>,
 }
 
@@ -63,19 +47,17 @@ impl CacheManager {
         }
     }
 
-    /// Record cache build/append timings into the shared registry.
     pub fn with_metrics(mut self, metrics: Arc<MetricsRegistry>) -> Self {
         self.metrics = metrics;
         self
     }
 
-    /// Advance the frame counter (drives LRU recency).
     pub fn begin_frame(&mut self, frame: u64) {
         self.frame = frame;
     }
 
-    /// Set the shared rebase origin. A change invalidates every cache (their x
-    /// values were rebased against the old origin), forcing a rebuild.
+    /// A changed origin invalidates every cache: x values were rebased against
+    /// the old origin, forcing a rebuild.
     pub fn set_origin(&mut self, origin_us: i64) {
         if origin_us != self.origin_us {
             self.origin_us = origin_us;
@@ -83,7 +65,6 @@ impl CacheManager {
         }
     }
 
-    /// Pin `field` (it is plotted) and ensure a build is requested or running.
     pub fn request(&mut self, field: FieldId, snapshot: &Arc<StoreSnapshot>) {
         self.pinned.insert(field);
         if self.caches.contains_key(&field) {
@@ -107,16 +88,13 @@ impl CacheManager {
             .expect("spawn cache build thread");
     }
 
-    /// Stop pinning `field` (it is no longer plotted); its cache stays warm and
-    /// becomes eligible for LRU eviction.
     pub fn unpin(&mut self, field: FieldId) {
         self.pinned.remove(&field);
     }
 
-    /// Drain finished builds into ready slots. A build that found no data
-    /// removes its slot so a later request retries. Call once per frame.
-    /// Returns fields whose build produced no cache so the app can surface a
-    /// cache diagnostic without adding a core diagnostic dependency here.
+    /// Drain finished builds into ready slots; a build that found no data
+    /// removes its slot so a later request retries. Returns fields whose build
+    /// produced no cache. Call once per frame.
     pub fn poll_builds(&mut self) -> Vec<FieldId> {
         let mut empty = Vec::new();
         while let Ok((field, result)) = self.built_rx.try_recv() {
@@ -133,12 +111,9 @@ impl CacheManager {
         empty
     }
 
-    /// On a new store epoch: append new rows to ready caches and GC caches whose
-    /// field is no longer live.
     pub fn on_epoch(&mut self, snapshot: &StoreSnapshot) {
-        // A changed source offset means the cache's x values are stale: drop
-        // the slot — the per-frame `request` of plotted fields rebuilds it
-        // with the new offset. Appending would mix offsets.
+        // A changed source offset makes the cache's x values stale: drop the
+        // slot (per-frame `request` rebuilds it). Appending would mix offsets.
         self.caches.retain(|&field, slot| match slot {
             Slot::Ready(cache) => !cache.offset_changed(snapshot, field),
             Slot::Building => true,
@@ -153,14 +128,12 @@ impl CacheManager {
         self.gc(snapshot);
     }
 
-    /// Drop caches and pins for fields no longer present (removed source).
     fn gc(&mut self, snapshot: &StoreSnapshot) {
         self.caches
             .retain(|&field, _| snapshot.is_field_live(field));
         self.pinned.retain(|&field| snapshot.is_field_live(field));
     }
 
-    /// Borrow a ready cache, marking it used this frame (LRU recency).
     pub fn get(&mut self, field: FieldId) -> Option<&TraceCache> {
         match self.caches.get_mut(&field)? {
             Slot::Ready(cache) => {
@@ -179,8 +152,8 @@ impl CacheManager {
         matches!(self.caches.get(&field), Some(Slot::Ready(_)))
     }
 
-    /// Evict the least-recently-used *unpinned* ready caches until total CPU
-    /// bytes are within budget. Pinned (plotted) caches are never evicted.
+    /// Evict least-recently-used unpinned ready caches until within budget;
+    /// pinned caches are never evicted.
     pub fn evict_over_budget(&mut self) {
         while self.total_cache_bytes() > self.budget_bytes {
             let victim = self
@@ -198,12 +171,11 @@ impl CacheManager {
                 Some(field) => {
                     self.caches.remove(&field);
                 }
-                None => break, // nothing evictable
+                None => break,
             }
         }
     }
 
-    /// Total CPU bytes across all ready caches.
     pub fn total_cache_bytes(&self) -> u64 {
         self.caches
             .values()
@@ -214,7 +186,6 @@ impl CacheManager {
             .sum()
     }
 
-    /// `MemBreakdown` (cache_cpu pool) for one field, for the memory panel.
     pub fn field_mem(&self, field: FieldId) -> MemBreakdown {
         let bytes = match self.caches.get(&field) {
             Some(Slot::Ready(c)) => c.bytes(),
@@ -280,7 +251,6 @@ mod tests {
         )
     }
 
-    /// Build a one-source/one-field snapshot with `rows` samples.
     fn snapshot(
         rows: i64,
     ) -> (
@@ -310,7 +280,6 @@ mod tests {
         (identity, snap, source, topic, field)
     }
 
-    /// Spin until the manager reports `field` ready (bounded).
     fn await_ready(mgr: &mut CacheManager, field: FieldId) {
         for _ in 0..2_000 {
             mgr.poll_builds();
@@ -345,7 +314,6 @@ mod tests {
         await_ready(&mut mgr, field);
         assert!(mgr.is_ready(field));
 
-        // Rebuild a snapshot without the source (tombstoned).
         identity.remove_source(source);
         let after = StoreSnapshot::from_registry(&identity, [], 0).unwrap();
         mgr.on_epoch(&after);
@@ -362,8 +330,8 @@ mod tests {
         await_ready(&mut mgr, field);
         assert!(mgr.is_ready(field));
 
-        // Same data, new offset (offset drag): the cache baked the old
-        // offset into its x values, so it must be dropped for a rebuild.
+        // Same data, new offset: the cache baked the old offset into its x
+        // values, so it must be dropped for a rebuild.
         identity.set_source_offset_us(source, 5_000);
         let store = Arc::clone(snap.topic_store(topic).unwrap());
         let after = StoreSnapshot::from_registry(&identity, [(topic, store)], 1).unwrap();
@@ -374,7 +342,6 @@ mod tests {
 
     #[test]
     fn lru_evicts_unpinned_caches_over_budget_but_keeps_pinned() {
-        // Two fields; tiny budget so only one cache fits.
         let mut identity = IdentityRegistry::new();
         let source = identity.add_source("flight");
         let topic = identity.add_topic(source, "BARO").unwrap();
@@ -404,13 +371,12 @@ mod tests {
         mgr.begin_frame(1);
         mgr.request(a, &snap);
         await_ready(&mut mgr, a);
-        mgr.get(a); // touch A at frame 1
+        mgr.get(a);
         mgr.begin_frame(2);
         mgr.request(b, &snap);
         await_ready(&mut mgr, b);
-        mgr.get(b); // touch B at frame 2 (more recent)
+        mgr.get(b); // touched more recently than A
 
-        // Both exceed the tiny budget; unpin A so it's evictable, keep B pinned.
         mgr.unpin(a);
         mgr.evict_over_budget();
         assert!(!mgr.is_ready(a), "unpinned LRU cache should be evicted");

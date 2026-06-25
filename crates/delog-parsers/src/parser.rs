@@ -1,5 +1,3 @@
-//! The `LogParser` trait, format sniffing, and the detection registry.
-
 use std::error::Error;
 use std::fmt;
 use std::io::{self, Read, Seek};
@@ -15,7 +13,6 @@ pub const SNIFF_HEAD_LEN: usize = 4096;
 /// manual-override picker.
 pub const SNIFF_CONFIDENCE: u8 = 60;
 
-/// A parser's confidence that it can read a given file head.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Sniff {
     /// `0..=100`; 0 means "definitely not mine".
@@ -28,7 +25,6 @@ impl Sniff {
         Self { score, reason }
     }
 
-    /// A definitive non-match.
     pub const fn no() -> Self {
         Self {
             score: 0,
@@ -37,23 +33,20 @@ impl Sniff {
     }
 }
 
-/// Combined object-safe bound for parse input: a trait object cannot name two
-/// non-auto traits (`Read` + `Seek`) directly, so we alias them here.
+/// A trait object cannot name two non-auto traits (`Read` + `Seek`) directly,
+/// so they are aliased here.
 pub trait ReadSeek: Read + Seek + Send {}
 impl<T: Read + Seek + Send> ReadSeek for T {}
 
-/// A log-format parser. Implementors are stateless and shared behind an
-/// `Arc` in the [`ParserRegistry`].
+/// Implementors are stateless and shared behind an `Arc` in the registry.
 pub trait LogParser: Send + Sync {
-    /// Stable, machine-usable name (also the manual-override key).
+    /// Also the manual-override key.
     fn name(&self) -> &'static str;
 
-    /// Score this file head. Reads at most [`SNIFF_HEAD_LEN`] bytes.
     fn sniff(&self, head: &[u8]) -> Sniff;
 
-    /// Parse `src` into `sink`, honouring `ctl` for progress and cancellation.
-    /// Malformed *records* are skipped with a diagnostic; only
-    /// unrecoverable framing corruption returns `Err`.
+    /// Malformed *records* are skipped with a diagnostic; only unrecoverable
+    /// framing corruption returns `Err`.
     fn parse(
         &self,
         src: Box<dyn ReadSeek>,
@@ -62,18 +55,15 @@ pub trait LogParser: Send + Sync {
     ) -> Result<ParseSummary, ParseError>;
 }
 
-/// Failure modes of a parse. Only framing/IO failures abort; record
-/// corruption is a diagnostic, not an error.
+/// Only framing/IO failures abort; record corruption is a diagnostic.
 #[derive(Debug)]
 pub enum ParseError {
     Io(io::Error),
-    /// The bytes are not in the format this parser handles.
     UnsupportedFormat {
         detail: String,
     },
-    /// `ctl` requested cancellation; partial data already submitted is kept.
+    /// Partial data already submitted is kept.
     Cancelled,
-    /// Unrecoverable framing corruption at a byte offset.
     Framing {
         byte_offset: u64,
         detail: String,
@@ -111,7 +101,6 @@ impl From<io::Error> for ParseError {
     }
 }
 
-/// One scored parser, returned to the manual-override picker on ambiguity.
 #[derive(Clone)]
 pub struct Candidate {
     pub parser: Arc<dyn LogParser>,
@@ -127,15 +116,12 @@ impl fmt::Debug for Candidate {
     }
 }
 
-/// Outcome of running every parser's `sniff` over a file head.
 #[derive(Clone)]
 pub enum Detection {
-    /// A confident, unambiguous winner — open it directly.
     Auto(Arc<dyn LogParser>),
-    /// A tie at the top, or a top score below [`SNIFF_CONFIDENCE`]: the UI must
-    /// raise the manual-override picker. Candidates are sorted best-first.
+    /// A tie at the top, or a top score below [`SNIFF_CONFIDENCE`]. Candidates
+    /// are sorted best-first.
     Ambiguous(Vec<Candidate>),
-    /// Nothing recognised the head at all.
     Unknown,
 }
 
@@ -149,7 +135,6 @@ impl fmt::Debug for Detection {
     }
 }
 
-/// The set of registered parsers and the auto-detection entry point.
 #[derive(Default)]
 pub struct ParserRegistry {
     parsers: Vec<Arc<dyn LogParser>>,
@@ -168,7 +153,6 @@ impl ParserRegistry {
         &self.parsers
     }
 
-    /// Resolve a manual-override choice by parser name.
     pub fn by_name(&self, name: &str) -> Option<Arc<dyn LogParser>> {
         self.parsers
             .iter()
@@ -176,10 +160,6 @@ impl ParserRegistry {
             .map(Arc::clone)
     }
 
-    /// Run every parser's `sniff` over `head` and decide:
-    /// the unique top scorer ≥ [`SNIFF_CONFIDENCE`] auto-opens; a tie at the top
-    /// or a low top score is [`Detection::Ambiguous`]; nothing scoring is
-    /// [`Detection::Unknown`].
     pub fn detect(&self, head: &[u8]) -> Detection {
         let mut candidates: Vec<Candidate> = self
             .parsers
@@ -262,7 +242,6 @@ mod tests {
         let reg = registry(&[("bin", 40), ("ulog", 20)]);
         match reg.detect(b"head") {
             Detection::Ambiguous(c) => {
-                // Sorted best-first, only the scoring parsers.
                 assert_eq!(c[0].parser.name(), "bin");
                 assert_eq!(c.len(), 2);
             }
