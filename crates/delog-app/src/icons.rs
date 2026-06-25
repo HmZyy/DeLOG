@@ -22,6 +22,11 @@ pub fn gear() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/settings.svg")
 }
 
+/// Route / path (toggles the 3D path between full and up-to-playhead).
+pub fn route() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/route.svg")
+}
+
 /// Trash (clear all traces / remove vehicle).
 pub fn trash() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/trash-2.svg")
