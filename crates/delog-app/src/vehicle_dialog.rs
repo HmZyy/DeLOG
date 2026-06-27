@@ -418,6 +418,22 @@ fn field_combo(
         });
 }
 
+fn choose_custom_glb_path(current_path: &str) -> Option<String> {
+    let mut dialog = rfd::FileDialog::new()
+        .set_title("Choose custom GLB")
+        .add_filter("GLB models", &["glb", "GLB"])
+        .add_filter("All files", &["*"]);
+    let current = std::path::Path::new(current_path.trim());
+    if let Some(parent) = current.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        dialog = dialog.set_directory(parent);
+    }
+    dialog
+        .pick_file()
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
 /// Returns `true` when the vehicle set changed.
 pub fn show(
     ctx: &egui::Context,
@@ -602,7 +618,40 @@ fn draft_editor(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapshot) 
 
             if matches!(draft.model, ModelKind::CustomGlb(_)) {
                 ui.label("GLB path");
-                ui.text_edit_singleline(&mut draft.custom_path);
+                ui.horizontal(|ui| {
+                    let has_path = !draft.custom_path.trim().is_empty();
+                    let text = if has_path {
+                        draft.custom_path.as_str()
+                    } else {
+                        "No GLB selected"
+                    };
+                    let label =
+                        ui.add_sized(egui::vec2(150.0, 18.0), egui::Label::new(text).truncate());
+                    if has_path {
+                        label.on_hover_text(draft.custom_path.as_str());
+                    }
+                    if ui
+                        .add_sized(
+                            egui::vec2(28.0, 24.0),
+                            egui::Button::image(icon(ui, crate::icons::folder_open())),
+                        )
+                        .on_hover_text("Choose custom GLB")
+                        .clicked()
+                        && let Some(path) = choose_custom_glb_path(&draft.custom_path)
+                    {
+                        draft.custom_path = path;
+                    }
+                    if ui
+                        .add_enabled(
+                            has_path,
+                            egui::Button::image(icon(ui, crate::icons::close())),
+                        )
+                        .on_hover_text("Clear custom GLB")
+                        .clicked()
+                    {
+                        draft.custom_path.clear();
+                    }
+                });
                 ui.end_row();
             }
 
@@ -784,4 +833,17 @@ fn topic_combo(
     topics: &[(TopicId, String)],
 ) -> bool {
     searchable_combo(ui, salt, sel, topics)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn custom_glb_path_uses_file_picker_not_text_edit() {
+        let source = include_str!("vehicle_dialog.rs");
+
+        assert!(source.contains(".set_title(\"Choose custom GLB\")"));
+        assert!(source.contains(".add_filter(\"GLB models\", &[\"glb\", \"GLB\"])"));
+        let text_edit = concat!("text_edit_singleline", "(&mut draft.custom_path)");
+        assert!(!source.contains(text_edit));
+    }
 }
