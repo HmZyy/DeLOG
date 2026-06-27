@@ -47,6 +47,19 @@ fn layout_menu_exposes_clear_current_layout() {
 }
 
 #[test]
+fn removed_workspace_fields_are_pruned_before_cache_requests() {
+    let app = include_str!("../src/app.rs");
+    let prune = app
+        .find("self.workspace.prune_removed_fields(&snapshot)")
+        .expect("workspace should prune removed fields on epoch changes");
+    let request = app
+        .find("self.caches.request(field, &snapshot);")
+        .expect("workspace fields should request render caches");
+
+    assert!(prune < request);
+}
+
+#[test]
 fn every_popup_is_non_collapsible_and_centered_by_default() {
     let popup_count = occurrence_count("egui::Window::new(");
 
