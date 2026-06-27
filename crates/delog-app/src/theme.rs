@@ -138,8 +138,8 @@ pub const EVERFOREST: Palette = Palette {
 #[serde(rename_all = "snake_case")]
 pub enum ThemeChoice {
     Light,
-    Dark,
     #[default]
+    Dark,
     CatppuccinMocha,
     Gruvbox,
     TokyoNight,
