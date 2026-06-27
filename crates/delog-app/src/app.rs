@@ -597,6 +597,54 @@ impl DelogApp {
         self.view = Some(ViewX::locked_to_tail(range, span));
     }
 
+    fn clear_current_layout(&mut self) {
+        Self::clear_current_layout_state(
+            &mut self.workspace,
+            &mut self.playback,
+            &mut self.view,
+            &mut self.view_fitted,
+            &mut self.fit_view_all,
+            &mut self.marker_us,
+            &mut self.markers,
+            &mut self.vehicles,
+            &mut self.vehicle_dialog,
+            &mut self.vehicle_revision,
+            &mut self.traj_dirty,
+        );
+        self.pending_layout = None;
+        self.deferred_layout_doc = None;
+        self.traj_building = None;
+        self.vehicle_trajectories.clear();
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn clear_current_layout_state(
+        workspace: &mut Workspace,
+        playback: &mut Playback,
+        view: &mut Option<ViewX>,
+        view_fitted: &mut bool,
+        fit_view_all: &mut bool,
+        marker_us: &mut Option<i64>,
+        markers: &mut crate::markers::Markers,
+        vehicles: &mut Vec<crate::vehicle::VehicleConfig>,
+        vehicle_dialog: &mut crate::vehicle_dialog::VehicleDialog,
+        vehicle_revision: &mut u64,
+        traj_dirty: &mut bool,
+    ) {
+        *workspace = Workspace::new();
+        playback.speed = 1.0;
+        playback.follow_live = false;
+        *view = None;
+        *view_fitted = false;
+        *fit_view_all = DEFAULT_FIT_VIEW_ALL;
+        *marker_us = None;
+        *markers = crate::markers::Markers::new();
+        vehicles.clear();
+        *vehicle_dialog = crate::vehicle_dialog::VehicleDialog::default();
+        *vehicle_revision = vehicle_revision.wrapping_add(1);
+        *traj_dirty = true;
+    }
+
     fn refresh_performance_snapshot(
         &mut self,
         frame: &eframe::Frame,
@@ -1579,6 +1627,10 @@ impl eframe::App for DelogApp {
                     });
                     if ui.button("Manage Layouts...").clicked() {
                         self.open_layout_manager();
+                        ui.close();
+                    }
+                    if ui.button("Clear current layout").clicked() {
+                        self.clear_current_layout();
                         ui.close();
                     }
                     ui.separator();
@@ -3063,6 +3115,69 @@ mod tests {
     #[test]
     fn fit_to_view_defaults_on_for_new_sessions() {
         assert!(DEFAULT_FIT_VIEW_ALL);
+    }
+
+    #[test]
+    fn clear_current_layout_resets_layout_and_vehicle_state() {
+        let mut workspace = Workspace::new();
+        let mut playback = Playback {
+            speed: 2.0,
+            follow_live: true,
+            ..Playback::default()
+        };
+        let mut view = Some(ViewX::new(10, 20));
+        let mut view_fitted = true;
+        let mut fit_view_all = false;
+        let mut marker_us = Some(42);
+        let mut markers = crate::markers::Markers::new();
+        markers.add_at(42);
+        let mut vehicles = vec![crate::vehicle::VehicleConfig {
+            source: delog_core::identity::SourceId(0),
+            label: "Vehicle".into(),
+            show: true,
+            pos: crate::vehicle::PosMapping::Ned {
+                north: delog_core::identity::FieldId(0),
+                east: delog_core::identity::FieldId(1),
+                down: delog_core::identity::FieldId(2),
+                reference: None,
+            },
+            ori: crate::vehicle::OriMapping::Static,
+            model: crate::vehicle::ModelKind::Cone,
+            color: egui::Color32::WHITE,
+            path_color: egui::Color32::WHITE,
+            scale: 1.0,
+        }];
+        let mut vehicle_dialog = crate::vehicle_dialog::VehicleDialog::default();
+        vehicle_dialog.open = true;
+        let mut vehicle_revision = 7;
+        let mut traj_dirty = false;
+
+        DelogApp::clear_current_layout_state(
+            &mut workspace,
+            &mut playback,
+            &mut view,
+            &mut view_fitted,
+            &mut fit_view_all,
+            &mut marker_us,
+            &mut markers,
+            &mut vehicles,
+            &mut vehicle_dialog,
+            &mut vehicle_revision,
+            &mut traj_dirty,
+        );
+
+        assert!(workspace.focused_first_field().is_none());
+        assert_eq!(playback.speed, 1.0);
+        assert!(!playback.follow_live);
+        assert_eq!(view, None);
+        assert!(!view_fitted);
+        assert_eq!(fit_view_all, DEFAULT_FIT_VIEW_ALL);
+        assert_eq!(marker_us, None);
+        assert!(markers.as_slice().is_empty());
+        assert!(vehicles.is_empty());
+        assert!(!vehicle_dialog.open);
+        assert_eq!(vehicle_revision, 8);
+        assert!(traj_dirty);
     }
 
     #[test]
