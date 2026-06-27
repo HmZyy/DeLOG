@@ -38,6 +38,15 @@ fn browser_exposes_field_metadata_inspector() {
 }
 
 #[test]
+fn layout_menu_exposes_clear_current_layout() {
+    let app = include_str!("../src/app.rs");
+
+    assert!(app.contains("ui.menu_button(\"Layout\""));
+    assert!(app.contains("Clear current layout"));
+    assert!(app.contains("self.clear_current_layout();"));
+}
+
+#[test]
 fn every_popup_is_non_collapsible_and_centered_by_default() {
     let popup_count = occurrence_count("egui::Window::new(");
 
