@@ -1,5 +1,4 @@
 #![no_main]
-//! ArduPilot `.BIN` record decoder.
 
 use libfuzzer_sys::fuzz_target;
 

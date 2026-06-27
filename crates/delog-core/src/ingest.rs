@@ -1,13 +1,5 @@
-//! Ingestion pipeline vocabulary: the parser-facing [`IngestSink`], the
-//! [`IngestMsg`] wire type, and the bounded channel that funnels every source
-//! into the single ingest thread.
-//!
-//! Parsers and live decoders never touch the store directly: they hold an
-//! [`IngestSink`] and emit messages. A single ingest thread is the
-//! only store writer, which makes the epoch-snapshot concurrency model
-//! correct by construction. The channel is bounded at [`INGEST_CHANNEL_CAP`];
-//! the backpressure *policy* over that bound (file-block vs live-drop) is
-//! handled here — this module ships the blocking, file-parser sink.
+//! Ingestion vocabulary. A single ingest thread is the only store writer, which
+//! makes the epoch-snapshot concurrency model correct by construction.
 
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
@@ -21,36 +13,26 @@ use crate::metrics::MetricsRegistry;
 use crate::schema::TopicSchema;
 use crate::time::TimeRange;
 
-/// Bounded ingest channel capacity. Small enough to bound memory and make
-/// backpressure bite promptly, large enough to absorb bursty parser flushes.
 pub const INGEST_CHANNEL_CAP: usize = 256;
 
-/// Monotonic counter metric for live batches dropped under backpressure.
 pub const METRIC_DROPPED_BATCHES: &str = "ingest_dropped_batches";
 
 /// Emit a drop diagnostic on the 1st drop and every Nth thereafter, so a
 /// saturated link reports without flooding the channel it is already starving.
 const DROP_DIAG_INTERVAL: u64 = 256;
 
-/// What kind of source produced a stream of batches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceKind {
-    /// A log file parsed start-to-finish; may block on backpressure.
+    /// May block on backpressure.
     File,
-    /// A live link; must never block — full channel drops the batch.
+    /// Must never block — full channel drops the batch.
     Live,
-    /// A completed programmatically-generated source (snapshot scripts).
     Derived,
-    /// A programmatically-generated live source that appends over time.
     LiveDerived,
 }
 
-/// A parsed slice of one topic: sorted `i64` µs timestamps plus original-dtype
-/// Arrow columns, moved (never copied) from the parser's builders.
-/// The ingest thread validates and seals these into immutable chunks.
-///
-/// The topic name is the [`schema`](ParsedBatch::schema) name — multi-instance
-/// topics carry their `[N]` suffix there, so there is exactly one name.
+/// A parsed slice of one topic: sorted i64 µs timestamps plus original-dtype
+/// Arrow columns.
 #[derive(Debug, Clone)]
 pub struct ParsedBatch {
     pub source: SourceId,
@@ -74,7 +56,6 @@ impl ParsedBatch {
         }
     }
 
-    /// The topic name this batch belongs to.
     pub fn topic(&self) -> &str {
         self.schema.name()
     }
@@ -84,7 +65,6 @@ impl ParsedBatch {
     }
 }
 
-/// Tally a parser reports when it finishes a source.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ParseSummary {
     pub topic_count: u64,
@@ -94,11 +74,9 @@ pub struct ParseSummary {
     pub source_meta: SourceMetadata,
 }
 
-/// One message on the ingest channel.
 #[derive(Debug)]
 pub enum IngestMsg {
-    /// Register a source; the ingest thread (single writer) assigns the dense
-    /// [`SourceId`] and returns it on `reply`.
+    /// The single-writer ingest thread assigns the dense `SourceId`, returned on `reply`.
     OpenSource {
         key: String,
         kind: SourceKind,
@@ -114,24 +92,19 @@ pub enum IngestMsg {
         source: SourceId,
         summary: ParseSummary,
     },
-    /// Set a source's time offset (the offset-drag UI). Routed
-    /// through the ingest thread because it is the only registry writer.
+    /// Routed through the ingest thread because it is the only registry writer.
     SetSourceOffset {
         source: SourceId,
         offset_us: i64,
     },
-    /// Remove a source: tombstone it and its topics/fields in the registry,
-    /// drop their stores, and republish a snapshot without them.
     RemoveSource {
         source: SourceId,
     },
 }
 
-/// The parser-facing handle. Every method is infallible: once the ingest thread
-/// has gone away (app shutdown), the sink goes *inert* — submissions become
-/// no-ops and `open_source` returns [`SourceId`]`(0)` — so a still-running
-/// parser cannot panic or corrupt the store. Stopping such a parser promptly is
-/// the cancellation token's job, not the sink's.
+/// Infallible: once the ingest thread is gone the sink goes inert (submits
+/// become no-ops, `open_source` returns `SourceId(0)`) so a running parser
+/// cannot panic or corrupt the store.
 pub trait IngestSink: Send {
     fn open_source(&mut self, key: &str, kind: SourceKind) -> SourceId;
     fn submit(&mut self, batch: ParsedBatch);
@@ -140,27 +113,23 @@ pub trait IngestSink: Send {
     fn close_source(&mut self, source: SourceId, summary: ParseSummary);
 }
 
-/// Cloneable producer end shared by every parser/decoder thread.
 #[derive(Debug, Clone)]
 pub struct IngestSender {
     tx: SyncSender<IngestMsg>,
 }
 
-/// Single-consumer end drained by the ingest thread.
 #[derive(Debug)]
 pub struct IngestReceiver {
     rx: Receiver<IngestMsg>,
 }
 
-/// Build the bounded ingest channel (cap [`INGEST_CHANNEL_CAP`]).
 pub fn ingest_channel() -> (IngestSender, IngestReceiver) {
     let (tx, rx) = sync_channel(INGEST_CHANNEL_CAP);
     (IngestSender { tx }, IngestReceiver { rx })
 }
 
 impl IngestSender {
-    /// A blocking, file-parser sink: a full channel parks the caller until the
-    /// ingest thread drains, trading latency for zero loss.
+    /// Blocking: a full channel parks the caller until the ingest thread drains.
     pub fn file_sink(&self) -> ChannelSink {
         ChannelSink {
             tx: self.tx.clone(),
@@ -168,25 +137,19 @@ impl IngestSender {
         }
     }
 
-    /// Request a source time-offset change. Blocking like a file
-    /// sink: offset edits are rare UI events, never hot-path. A no-op once
-    /// the ingest thread is gone.
     pub fn set_source_offset(&self, source: SourceId, offset_us: i64) {
         let _ = self
             .tx
             .send(IngestMsg::SetSourceOffset { source, offset_us });
     }
 
-    /// Request removal of a source. Blocking like a file sink;
-    /// a no-op once the ingest thread is gone.
     pub fn remove_source(&self, source: SourceId) {
         let _ = self.tx.send(IngestMsg::RemoveSource { source });
     }
 
-    /// A non-blocking, live-decoder sink: a full channel *drops* the batch and
-    /// bumps [`METRIC_DROPPED_BATCHES`] rather than stalling the link reader and
-    /// overflowing OS socket buffers. `metrics` is shared with the perf
-    /// dock so the drop count is visible.
+    /// Non-blocking: a full channel drops the batch and bumps
+    /// `METRIC_DROPPED_BATCHES` rather than stalling the link and overflowing OS
+    /// socket buffers.
     pub fn live_sink(&self, metrics: Arc<MetricsRegistry>) -> LiveSink {
         LiveSink {
             tx: self.tx.clone(),
@@ -198,21 +161,14 @@ impl IngestSender {
 }
 
 impl IngestReceiver {
-    /// Receive the next message, blocking until one is available or every
-    /// sender has dropped (returns `None`).
     pub fn recv(&self) -> Option<IngestMsg> {
         self.rx.recv().ok()
     }
 
-    /// Non-blocking receive of a ready message.
     pub fn try_recv(&self) -> Option<IngestMsg> {
         self.rx.try_recv().ok()
     }
 
-    /// Block up to `timeout` for a message. [`RecvOutcome::Idle`] means the
-    /// deadline passed with nothing ready (the ingest loop uses this to flush
-    /// aged live chunks); [`RecvOutcome::Disconnected`] means every sender
-    /// has dropped.
     pub fn recv_timeout(&self, timeout: Duration) -> RecvOutcome {
         match self.rx.recv_timeout(timeout) {
             Ok(msg) => RecvOutcome::Message(msg),
@@ -222,17 +178,13 @@ impl IngestReceiver {
     }
 }
 
-/// Result of a timed receive on the ingest channel.
 #[derive(Debug)]
 pub enum RecvOutcome {
     Message(IngestMsg),
-    /// Timeout elapsed with no message ready.
     Idle,
-    /// Every sender has dropped; the loop should finish.
     Disconnected,
 }
 
-/// Blocking sink (file-parser semantics). See [`IngestSender::file_sink`].
 #[derive(Debug)]
 pub struct ChannelSink {
     tx: SyncSender<IngestMsg>,
@@ -240,7 +192,6 @@ pub struct ChannelSink {
 }
 
 impl ChannelSink {
-    /// Send blocking, marking the sink inert if the ingest thread has gone.
     fn send(&mut self, msg: IngestMsg) {
         if !self.connected {
             return;
@@ -288,13 +239,9 @@ impl IngestSink for ChannelSink {
     }
 }
 
-/// Non-blocking sink (live-decoder semantics). See [`IngestSender::live_sink`].
-///
-/// `open_source` blocks briefly for its reply — it runs once at connect, before
-/// any data flows — but every data-bearing call uses `try_send` and never
-/// parks the link reader. A full channel drops the batch (the value
-/// judgement: visible, counted loss at a defined point beats silent socket
-/// overflow).
+/// Live-decoder sink. `open_source` blocks for its reply (it runs once at
+/// connect, before data flows); every data-bearing call uses `try_send` and
+/// drops on a full channel rather than parking the link reader.
 pub struct LiveSink {
     tx: SyncSender<IngestMsg>,
     connected: bool,
@@ -312,8 +259,7 @@ impl std::fmt::Debug for LiveSink {
 }
 
 impl LiveSink {
-    /// Non-blocking send; on a full channel returns the message back to the
-    /// caller (so a batch can be counted as dropped), on disconnect goes inert.
+    /// Returns the message back on a full channel so it can be counted as dropped.
     fn try_send(&mut self, msg: IngestMsg) -> Option<IngestMsg> {
         if !self.connected {
             return None;
@@ -341,7 +287,6 @@ impl LiveSink {
         }
     }
 
-    /// Total batches this sink has dropped.
     pub fn dropped(&self) -> u64 {
         self.drops
     }
@@ -379,7 +324,6 @@ impl IngestSink for LiveSink {
     }
 
     fn diagnostic(&mut self, diag: Diag) {
-        // Non-data; dropped silently if the channel is full.
         let _ = self.try_send(IngestMsg::Diagnostic(diag));
     }
 
@@ -462,7 +406,6 @@ mod tests {
     fn open_source_blocks_for_the_writer_assigned_id() {
         let (tx, rx) = ingest_channel();
 
-        // Stand in for the ingest thread: assign id 7 to the open request.
         let writer = thread::spawn(move || {
             while let Some(msg) = rx.recv() {
                 if let IngestMsg::OpenSource { kind, reply, .. } = msg {
@@ -487,7 +430,6 @@ mod tests {
         let mut sink = tx.file_sink();
         drop(rx);
 
-        // No panic; submissions are silently dropped and open returns id 0.
         sink.submit(batch(SourceId(0)));
         sink.diagnostic(Diag::error("late", "after shutdown"));
         assert_eq!(sink.open_source("late", SourceKind::Live), SourceId(0));
@@ -495,12 +437,10 @@ mod tests {
 
     #[test]
     fn live_sink_drops_and_counts_when_the_channel_is_full() {
-        // No drainer: the channel fills to its cap, then submits drop.
         let (tx, _rx) = ingest_channel();
         let metrics = Arc::new(MetricsRegistry::new());
         let mut sink = tx.live_sink(Arc::clone(&metrics));
 
-        // Fill the buffer exactly, then over-submit by a known amount.
         let extra = 50;
         for _ in 0..INGEST_CHANNEL_CAP + extra {
             sink.submit(batch(SourceId(0)));
@@ -512,8 +452,6 @@ mod tests {
 
     #[test]
     fn live_sink_emits_a_rate_limited_drop_diagnostic() {
-        // Leave one free slot so the first drop's best-effort diagnostic fits;
-        // the batch that overflows is dropped, the diagnostic that follows lands.
         let (tx, rx) = ingest_channel();
         let metrics = Arc::new(MetricsRegistry::new());
         let mut sink = tx.live_sink(Arc::clone(&metrics));
@@ -521,11 +459,9 @@ mod tests {
         for _ in 0..INGEST_CHANNEL_CAP - 1 {
             sink.submit(batch(SourceId(0)));
         }
-        sink.submit(batch(SourceId(0))); // fills the last slot, still buffered
-        sink.submit(batch(SourceId(0))); // full → drop → diagnostic try-send fails (full)
+        sink.submit(batch(SourceId(0)));
+        sink.submit(batch(SourceId(0)));
 
-        // Drain and confirm the drop was counted; with the channel saturated the
-        // diagnostic itself may be dropped — the counter is authoritative.
         let mut diags = 0;
         while let Some(msg) = rx.try_recv() {
             if matches!(msg, IngestMsg::Diagnostic(_)) {
@@ -538,8 +474,6 @@ mod tests {
 
     #[test]
     fn many_messages_flow_through_the_bounded_channel() {
-        // More than the channel cap, with a concurrent drainer: blocking sends
-        // make progress as the receiver consumes — nothing is lost.
         let (tx, rx) = ingest_channel();
         let drainer = thread::spawn(move || {
             let mut count = 0;

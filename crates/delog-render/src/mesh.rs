@@ -1,18 +1,8 @@
 //! Vehicle mesh pipeline + GLB upload path.
-//!
-//! A small Lambert-plus-ambient pipeline draws vehicle models against the 3D
-//! scene. Meshes are static geometry, so this uses a real vertex+index buffer
-//! (the no-vertex-buffer rule is about sample data that scales, not models).
-//!
-//! [`MeshCpu`] is decoded from a GLB ([`load_glb`]) or generated procedurally
-//! ([`MeshCpu::cone`] — the unconditional fallback so a missing/!broken asset
-//! never blanks the scene), then uploaded to a [`MeshGpu`]. Matrices arrive as
-//! raw `[[f32; 4]; 4]`, keeping the crate math-library-free.
 
 use crate::context::RenderContext;
 use wgpu::util::DeviceExt;
 
-/// Errors decoding a GLB into a [`MeshCpu`].
 #[derive(Debug, thiserror::Error)]
 pub enum MeshError {
     #[error("glTF decode failed: {0}")]
@@ -23,7 +13,6 @@ pub enum MeshError {
     NoPositions,
 }
 
-/// One interleaved vertex: position + normal, both world-space model units.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
@@ -31,7 +20,6 @@ pub struct Vertex {
     pub normal: [f32; 3],
 }
 
-/// CPU-side mesh: interleaved vertices + a triangle index list.
 #[derive(Clone, Debug, Default)]
 pub struct MeshCpu {
     pub vertices: Vec<Vertex>,
@@ -39,8 +27,6 @@ pub struct MeshCpu {
 }
 
 impl MeshCpu {
-    /// Build from parallel position/normal/index arrays, computing smooth
-    /// normals when none are supplied.
     pub fn new(
         positions: Vec<[f32; 3]>,
         normals: Option<Vec<[f32; 3]>>,
@@ -55,15 +41,8 @@ impl MeshCpu {
         Self { vertices, indices }
     }
 
-    /// A procedural half-cone — the unconditional model fallback.
-    ///
-    /// The nose is on +X and the axis runs along the x-axis; the cone is sliced
-    /// through its axis by the `y = 0` plane, keeping the upper half. After the
-    /// mesh→body correction (`rot_x −90°`) +X stays body-forward and +Y maps to
-    /// body-up, so it renders as a rounded dome on top with a flat cut on the
-    /// bottom (`−Y`), pointing the way it travels. Flat-shaded (per-face
-    /// normals); surfaces are the lateral dome, the flat bottom, and the
-    /// half-disc tail cap.
+    /// Procedural half-cone model fallback. Nose on +X, upper half (y ≥ 0) only,
+    /// so the mesh→body correction (`rot_x −90°`) leaves it body-forward, not up.
     pub fn cone(segments: u32, radius: f32, height: f32) -> Self {
         let segments = segments.max(3);
         let apex = [height, 0.0, 0.0];
@@ -71,15 +50,13 @@ impl MeshCpu {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
         let pi = std::f32::consts::PI;
-        // Upper semicircle (y ≥ 0) of the base ring, in the x = 0 plane.
         let ring = |a: f32| [0.0, radius * a.sin(), radius * a.cos()];
         for i in 0..segments {
             let a0 = i as f32 / segments as f32 * pi;
             let a1 = (i + 1) as f32 / segments as f32 * pi;
             let p0 = ring(a0);
             let p1 = ring(a1);
-            // Lateral dome facet with an outward flat normal (winding
-            // apex→p1→p0 so the normal points nose-and-out, away from the axis).
+            // Winding apex→p1→p0 so the facet normal points outward, off-axis.
             let n = face_normal(apex, p1, p0);
             let base = vertices.len() as u32;
             vertices.push(Vertex {
@@ -89,7 +66,6 @@ impl MeshCpu {
             vertices.push(Vertex { pos: p0, normal: n });
             vertices.push(Vertex { pos: p1, normal: n });
             indices.extend([base, base + 1, base + 2]);
-            // Half-disc tail cap (center, p0, p1), facing −X.
             let tail = [-1.0, 0.0, 0.0];
             let cap = vertices.len() as u32;
             vertices.push(Vertex {
@@ -106,8 +82,6 @@ impl MeshCpu {
             });
             indices.extend([cap, cap + 1, cap + 2]);
         }
-        // Flat bottom: the axial cut, a single triangle from the nose to the
-        // base diameter, facing −Y (down). Winding nose→ring(0)→ring(π).
         let down = [0.0, -1.0, 0.0];
         let b = vertices.len() as u32;
         vertices.push(Vertex {
@@ -143,8 +117,6 @@ fn face_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> [f32; 3] {
     }
 }
 
-/// Per-vertex smooth normals: sum each triangle's face normal into its three
-/// vertices, then normalize.
 fn smooth_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
     let mut acc = vec![[0.0f32; 3]; positions.len()];
     for tri in indices.chunks_exact(3) {
@@ -167,10 +139,8 @@ fn smooth_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
     acc
 }
 
-/// Decode a GLB into a single [`MeshCpu`]: every triangle primitive in
-/// the default scene is baked into one mesh by its node's world transform, so
-/// multi-part models (e.g. a quad's arms) land in the right place. Missing
-/// normals are computed smooth; missing indices become a flat `0..n` list.
+/// Decode a GLB into a single [`MeshCpu`], baking every triangle primitive in
+/// the default scene by its node's world transform.
 pub fn load_glb(bytes: &[u8]) -> Result<MeshCpu, MeshError> {
     let (doc, buffers, _images) = gltf::import_slice(bytes)?;
     let scene = doc
@@ -187,7 +157,6 @@ pub fn load_glb(bytes: &[u8]) -> Result<MeshCpu, MeshError> {
     Ok(out)
 }
 
-/// Column-major 4×4 identity.
 const IDENTITY4: [[f32; 4]; 4] = [
     [1.0, 0.0, 0.0, 0.0],
     [0.0, 1.0, 0.0, 0.0],
@@ -195,7 +164,6 @@ const IDENTITY4: [[f32; 4]; 4] = [
     [0.0, 0.0, 0.0, 1.0],
 ];
 
-/// Column-major 4×4 multiply (`a * b`).
 fn mat4_mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
     let mut m = [[0.0f32; 4]; 4];
     for (c, col) in m.iter_mut().enumerate() {
@@ -206,7 +174,6 @@ fn mat4_mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
     m
 }
 
-/// Transform a point by a column-major 4×4 (w = 1).
 fn mat4_point(m: &[[f32; 4]; 4], p: [f32; 3]) -> [f32; 3] {
     [
         m[0][0] * p[0] + m[1][0] * p[1] + m[2][0] * p[2] + m[3][0],
@@ -215,7 +182,6 @@ fn mat4_point(m: &[[f32; 4]; 4], p: [f32; 3]) -> [f32; 3] {
     ]
 }
 
-/// Transform a direction by the upper 3×3 (no translation), renormalized later.
 fn mat4_dir(m: &[[f32; 4]; 4], v: [f32; 3]) -> [f32; 3] {
     [
         m[0][0] * v[0] + m[1][0] * v[1] + m[2][0] * v[2],
@@ -288,7 +254,6 @@ fn normalize(n: [f32; 3]) -> [f32; 3] {
     }
 }
 
-/// GPU-resident mesh: vertex + index buffers and the index count to draw.
 pub struct MeshGpu {
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
@@ -319,20 +284,18 @@ impl MeshGpu {
     }
 }
 
-/// Per-mesh uniform. Matrices are raw column-major arrays; `normal_mat` is the
-/// inverse-transpose of `model` (upper 3×3 used).
+/// `normal_mat` is the inverse-transpose of `model` (upper 3×3 used).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct MeshUniform {
     pub view_proj: [[f32; 4]; 4],
     pub model: [[f32; 4]; 4],
     pub normal_mat: [[f32; 4]; 4],
-    /// Direction TO the light (world), xyz; should be normalized.
+    /// Direction TO the light (world), xyz; normalized.
     pub light_dir: [f32; 4],
     pub color: [f32; 4],
-    /// Camera world position (xyz). Used for two-sided shading: the normal is
-    /// flipped into the viewer's hemisphere so back-facing surfaces are lit
-    /// rather than collapsing to the dark ambient term.
+    /// Camera world position (xyz). Drives two-sided shading: the normal is
+    /// flipped into the viewer's hemisphere so back faces are lit, not ambient.
     pub cam_pos: [f32; 4],
     /// x = ambient factor (0..1).
     pub params: [f32; 4],
@@ -361,7 +324,6 @@ impl MeshUniform {
     }
 }
 
-/// Render pipeline + bind layout for vehicle meshes.
 pub struct MeshPipeline {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
@@ -432,8 +394,8 @@ impl MeshPipeline {
             },
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
-                // Double-sided in v1: a winding mismatch in a user GLB should
-                // dim a face, never make the model vanish.
+                // Double-sided: a winding mismatch in a user GLB dims a face
+                // rather than making the model vanish.
                 cull_mode: None,
                 ..Default::default()
             },
@@ -479,7 +441,6 @@ impl MeshPipeline {
         })
     }
 
-    /// Draw an uploaded mesh with the given bind group.
     pub fn draw(
         &self,
         pass: &mut wgpu::RenderPass<'_>,
@@ -503,8 +464,6 @@ mod tests {
     use crate::Scene3dTarget;
     use glam::{Mat4, Vec3};
 
-    /// Build a minimal single-buffer GLB with a POSITION accessor + indices and
-    /// no normals — exercises the decode + smooth-normal path.
     fn tiny_glb(positions: &[[f32; 3]], indices: &[u32]) -> Vec<u8> {
         // BIN: indices (u32) then positions (f32 vec3).
         let mut bin = Vec::new();
@@ -563,7 +522,6 @@ mod tests {
     #[test]
     fn cone_has_consistent_geometry_and_unit_normals() {
         let cone = MeshCpu::cone(16, 1.0, 2.0);
-        // dome + tail-cap tri per segment, plus one flat-bottom tri.
         assert_eq!(cone.indices.len(), 16 * 6 + 3);
         assert_eq!(cone.vertices.len(), 16 * 6 + 3);
         for v in &cone.vertices {
@@ -575,21 +533,14 @@ mod tests {
 
     #[test]
     fn cone_nose_points_along_plus_x() {
-        // The fallback model's nose sits on +X so the mesh→body correction
-        // (rot_x −90°) leaves it pointing body-forward, like the
-        // fixed-wing model — not straight up (+Y).
         let (h, r) = (2.0_f32, 1.0_f32);
         let cone = MeshCpu::cone(16, r, h);
-        // Exactly one extreme apex vertex per segment, all at [h, 0, 0].
         let apex = cone
             .vertices
             .iter()
             .map(|v| v.pos)
             .find(|p| p[0] > h - 1e-3);
         assert_eq!(apex, Some([h, 0.0, 0.0]), "apex should be on +X");
-        // The whole cone lies between the tail (x = 0) and the nose (x = h),
-        // and only in the upper half (y ≥ 0) — it's a half-cone whose flat cut
-        // sits on the bottom (−Y); nothing dips below the y = 0 plane.
         for v in &cone.vertices {
             assert!(
                 (0.0..=h + 1e-4).contains(&v.pos[0]),
@@ -602,7 +553,6 @@ mod tests {
                 v.pos
             );
         }
-        // The flat-bottom triangle's far corners are the base diameter ends.
         let near = |p: [f32; 3], q: [f32; 3]| {
             (p[0] - q[0]).abs() < 1e-4 && (p[1] - q[1]).abs() < 1e-4 && (p[2] - q[2]).abs() < 1e-4
         };
@@ -622,7 +572,7 @@ mod tests {
         let mesh = load_glb(&glb).expect("GLB should decode");
         assert_eq!(mesh.vertices.len(), 3);
         assert_eq!(mesh.indices, vec![0, 1, 2]);
-        // The triangle lies in the z=0 plane → computed normal is ±Z.
+        // Triangle lies in z=0 → normal is ±Z.
         let n = mesh.vertices[0].normal;
         assert!(n[2].abs() > 0.99, "expected a ±Z normal, got {n:?}");
     }
@@ -643,8 +593,6 @@ mod tests {
         );
         let gpu = MeshGpu::upload(&ctx, &MeshCpu::cone(24, 1.2, 2.5));
 
-        // Camera looking at the cone from the side; light from the +X/+Y/+Z
-        // front so some facets face it and others fall to ambient.
         let eye = Vec3::new(4.0, 2.5, 4.0);
         let proj = Mat4::perspective_rh(0.9, w as f32 / h as f32, 0.1, 100.0);
         let view = Mat4::look_at_rh(eye, Vec3::new(0.0, 1.0, 0.0), Vec3::Y);
@@ -680,7 +628,6 @@ mod tests {
             .unwrap();
 
         let img = target.read_rgba();
-        // Non-background (lit) pixels: brighter than pure black.
         let mut lit: Vec<u8> = Vec::new();
         for x in 0..w {
             for y in 0..h {
@@ -703,13 +650,8 @@ mod tests {
         );
     }
 
-    /// Meshes render double-sided, so a back face whose authored normal
-    /// points away from the light must still be lit (two-sided shading flips the
-    /// normal toward the viewer) — otherwise it collapses to the dark ambient
-    /// term and shows up as black blotches where interpenetrating sub-meshes
-    /// z-fight. Here a single triangle is viewed from its back side with the
-    /// light on the camera's side: with two-sided shading the visible face is
-    /// bright; the old single-sided shader left it at ambient (~0.2).
+    /// A back face whose authored normal points away from the light must still
+    /// be lit, since two-sided shading flips the normal toward the viewer.
     #[test]
     fn back_face_is_lit_not_dark() {
         let Some(ctx) = RenderContext::headless() else {
@@ -725,9 +667,8 @@ mod tests {
             target.sample_count(),
         );
 
-        // Triangle in the z=0 plane, wound CCW as seen from +Z, with an explicit
-        // +Z normal (its "front"). We view it from −Z, so the visible side is the
-        // back face (front_facing == false).
+        // Triangle in z=0 with an explicit +Z normal (front); viewed from −Z, so
+        // the visible side is the back face.
         let mesh = MeshCpu::new(
             vec![[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [0.0, 1.0, 0.0]],
             Some(vec![[0.0, 0.0, 1.0]; 3]),
@@ -739,10 +680,7 @@ mod tests {
         let proj = Mat4::perspective_rh(0.9, w as f32 / h as f32, 0.1, 100.0);
         let view = Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::Y);
         let model = Mat4::IDENTITY;
-        // Light comes from −Z (the camera's side). The visible face's normal
-        // points +Z (away from the viewer), so two-sided shading flips it toward
-        // the camera, where it faces the light and is fully lit; without the flip
-        // it faces away → dark ambient only.
+        // Light from −Z (camera's side); the flip makes the visible face fully lit.
         let uni_data = MeshUniform::new(
             (proj * view).to_cols_array_2d(),
             model.to_cols_array_2d(),
@@ -774,9 +712,7 @@ mod tests {
             .unwrap();
 
         let img = target.read_rgba();
-        // The brightest covered pixel must be well above the ambient-only level
-        // (ambient 0.2 × 0.8 × 255 ≈ 41); two-sided lighting drives it toward the
-        // fully-lit ~0.8 × 255 ≈ 204.
+        // Brightest pixel must beat ambient-only (0.2 × 0.8 × 255 ≈ 41).
         let max_g = (0..w)
             .flat_map(|x| (0..h).map(move |y| (x, y)))
             .map(|(x, y)| img.pixel(x, y)[1])

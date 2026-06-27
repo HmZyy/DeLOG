@@ -1,5 +1,3 @@
-//! Render cache layer: per-trace f32 caches, min/max pyramid, cache manager.
-
 pub mod manager;
 pub mod pyramid;
 pub mod trace;

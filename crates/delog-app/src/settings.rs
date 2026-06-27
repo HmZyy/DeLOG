@@ -39,31 +39,22 @@ fn default_font_size() -> f32 {
 pub struct AppSettings {
     #[serde(default)]
     pub theme: ThemeChoice,
-    /// Plot rendering tuning (live-adjustable, persisted in the config).
     #[serde(default)]
     pub render: RenderTuning,
-    /// Show the corner FPS badge. Default off.
     #[serde(default)]
     pub show_fps: bool,
-    /// Show the F12 debug overlay of frame timings. Default off.
     #[serde(default)]
     pub show_debug_overlay: bool,
-    /// Frame-pacing policy. Default `Reactive`.
     #[serde(default)]
     pub render_mode: RenderMode,
-    /// Last valid live connection entered in the MAVLink connection dialog.
     #[serde(default)]
     pub live_connection: LiveConnectionSettings,
-    /// 3D scene render and camera tuning.
     #[serde(default)]
     pub scene3d: Scene3dSettings,
-    /// Plot overlay display (legend placement + hover readout contents).
     #[serde(default)]
     pub plot: PlotDisplay,
-    /// Optional global font override (size + family), like the egui demo.
     #[serde(default)]
     pub font: FontOverride,
-    /// Auto-open the Diagnostics dock when a new diagnostic arrives. Default on.
     #[serde(default = "default_true")]
     pub auto_open_diagnostics: bool,
 }
@@ -85,16 +76,12 @@ impl Default for AppSettings {
     }
 }
 
-/// Global font override applied through `Style::override_font_id`. Disabled by
-/// default (egui's own per-text-style fonts are used).
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FontOverride {
     #[serde(default)]
     pub enabled: bool,
-    /// Point size used for every text style while enabled.
     #[serde(default = "default_font_size")]
     pub size: f32,
-    /// `true` selects the monospace family, `false` proportional.
     #[serde(default)]
     pub monospace: bool,
 }
@@ -110,8 +97,6 @@ impl Default for FontOverride {
 }
 
 impl FontOverride {
-    /// Push (or clear) the override on every theme's style. Called each frame,
-    /// so toggling it off restores the defaults immediately.
     pub fn apply(self, ctx: &egui::Context) {
         let font_id = self.enabled.then(|| {
             let family = if self.monospace {
@@ -125,7 +110,6 @@ impl FontOverride {
     }
 }
 
-/// Where the per-pane legend overlay sits inside the plot rect.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LegendPosition {
@@ -154,13 +138,9 @@ impl LegendPosition {
     }
 }
 
-/// Whether the measurement marker is one shared time across all panes or
-/// independent per pane.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MarkerScope {
-    /// One marker time shared by every plot pane, like the playhead —
-    /// placing/dragging on any pane moves the single marker.
     #[default]
     Global,
     PerPane,
@@ -177,7 +157,6 @@ impl MarkerScope {
     }
 }
 
-/// Where the measurement marker's per-trace ΔY is shown.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MarkerDeltaReadout {
@@ -197,14 +176,10 @@ impl MarkerDeltaReadout {
     }
 }
 
-/// Plot overlay display preferences (legend + hover readout). All live-read each
-/// frame so changes apply immediately; `show_legend_default` only seeds newly
-/// created panes.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PlotDisplay {
     #[serde(default)]
     pub legend_position: LegendPosition,
-    /// Legend visibility for newly created panes (per-pane toggle overrides it).
     #[serde(default = "default_true")]
     pub show_legend_default: bool,
     #[serde(default = "default_opacity")]
@@ -225,17 +200,12 @@ pub struct PlotDisplay {
     pub marker_line_width: f32,
     #[serde(default = "default_true")]
     pub marker_show_label: bool,
-    /// Shade each plot region from one marker to the next (or the end) with that
-    /// marker's colour.
     #[serde(default)]
     pub marker_shade_regions: bool,
     #[serde(default = "default_marker_shade_opacity")]
     pub marker_shade_opacity: f32,
-    /// Max text-annotation labels drawn per string trace in the visible window;
-    /// bounds per-frame cost on high-rate string fields.
     #[serde(default = "default_text_label_cap")]
     pub text_label_cap: usize,
-    /// Stack text-annotation labels from the bottom up (default) vs top down.
     #[serde(default = "default_true")]
     pub text_labels_bottom_up: bool,
     #[serde(default = "default_text_label_spacing")]
@@ -271,18 +241,13 @@ impl Default for PlotDisplay {
     }
 }
 
-/// Knobs for the plot draw path (decimation + line/edge AA). Lives in the
-/// config so the values can be tuned live and persist across sessions.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RenderTuning {
-    /// Switch to the decimated min/max path above this many samples per pixel.
     #[serde(default = "default_decimate_threshold")]
     pub decimate_threshold: f32,
-    /// Edge anti-alias feather, in pixels (0 = hard edges).
+    /// pixels (0 = hard edges)
     #[serde(default = "default_line_aa_px")]
     pub line_aa_px: f32,
-    /// Bridge adjacent decimated columns so smooth slopes read as a connected
-    /// line instead of disjoint bars.
     #[serde(default = "default_true")]
     pub bridge_columns: bool,
 }
@@ -297,8 +262,6 @@ impl Default for RenderTuning {
     }
 }
 
-/// Frame-pacing policy. `Reactive` is event-driven and idles at 0% GPU;
-/// `Continuous` repaints every frame regardless of activity.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RenderMode {
     #[default]
@@ -317,7 +280,6 @@ impl RenderMode {
     }
 }
 
-/// Transport persisted for the live MAVLink connection dialog.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LiveConnectionMode {
@@ -347,8 +309,6 @@ fn default_live_baud() -> u32 {
     115_200
 }
 
-/// Last-used values for the live connection dialog. Network modes use
-/// `host`/`port`; serial uses `serial_path`/`baud`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LiveConnectionSettings {
     #[serde(default)]
@@ -361,6 +321,10 @@ pub struct LiveConnectionSettings {
     pub serial_path: String,
     #[serde(default = "default_live_baud")]
     pub baud: u32,
+    #[serde(default)]
+    pub recording_enabled: bool,
+    #[serde(default, alias = "recording_path")]
+    pub recording_dir: String,
 }
 
 impl Default for LiveConnectionSettings {
@@ -371,6 +335,8 @@ impl Default for LiveConnectionSettings {
             port: default_live_port(),
             serial_path: default_live_serial_path(),
             baud: default_live_baud(),
+            recording_enabled: false,
+            recording_dir: String::new(),
         }
     }
 }
@@ -395,9 +361,7 @@ fn finite_or(value: f32, fallback: f32) -> f32 {
     if value.is_finite() { value } else { fallback }
 }
 
-/// Persisted 3D scene tuning. Distances are render-space metres. The camera
-/// always tracks the selected vehicle (falling back to the world origin when no
-/// pose is available).
+/// Distances are render-space metres.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Scene3dSettings {
     #[serde(default = "default_scene_far_clip_m")]
@@ -408,13 +372,11 @@ pub struct Scene3dSettings {
     pub show_grid: bool,
     #[serde(default = "default_true")]
     pub show_axes: bool,
-    /// Auto-size the grid cell from the camera distance (like the plot grids).
     /// When set, `grid_cell_m` is ignored.
     #[serde(default = "default_true")]
     pub grid_cell_auto: bool,
     #[serde(default = "default_scene_grid_cell_m")]
     pub grid_cell_m: f32,
-    /// Whether the distance fog/fade is applied to the grid at all.
     #[serde(default = "default_true")]
     pub fog_enabled: bool,
     #[serde(default = "default_scene_fog_start_m")]
@@ -456,21 +418,13 @@ impl Scene3dSettings {
         finite_or(self.grid_cell_m, default_scene_grid_cell_m()).clamp(0.01, 100_000.0)
     }
 
-    /// The grid cell to render and whether the shader should cross-fade LOD
-    /// levels around it.
-    ///
-    /// In auto mode the cell is a *continuous* function of the camera's height
-    /// above the ground plane (where the grid lives) — so it does not collapse
-    /// to a shimmering fine grid when you orbit tightly around an airborne
-    /// vehicle, and it never *snaps* between sizes as the height changes. The
-    /// `true` flag tells the grid shader to draw two bracketing power-of-ten
-    /// grids and fade the finer one in/out, keeping lines anchored to world
-    /// coordinates with no popping. In fixed mode the exact `grid_cell_m` is
-    /// drawn as a single level (`false`).
+    /// Returns (cell size, whether the shader should cross-fade LOD levels). In
+    /// auto mode the cell is a continuous function of camera height so it never
+    /// snaps between sizes or shimmers when orbiting tightly around an airborne
+    /// vehicle; the `true` flag drives the shader's LOD cross-fade.
     pub fn resolved_grid(self, eye_height_m: f32) -> (f32, bool) {
         if self.grid_cell_auto {
             let height = finite_or(eye_height_m, 100.0).abs().max(1e-3);
-            // ~10 cells across the view; the shader handles LOD continuity.
             (height / 10.0, true)
         } else {
             (self.resolved_grid_cell_m(), false)
@@ -997,11 +951,12 @@ mod tests {
 
     #[test]
     fn old_config_without_new_fields_uses_defaults() {
-        // ThemeChoice serialises with snake_case: CatppuccinMocha → "catppuccin_mocha".
         let json = r#"{"theme":"catppuccin_mocha"}"#;
         let s: AppSettings = serde_json::from_str(json).unwrap();
         assert!(!s.show_fps);
         assert_eq!(s.render_mode, RenderMode::Reactive);
+        assert!(!s.live_connection.recording_enabled);
+        assert!(s.live_connection.recording_dir.is_empty());
     }
 
     #[test]
@@ -1019,6 +974,8 @@ mod tests {
                 port: 5760,
                 serial_path: "/dev/ttyUSB0".to_owned(),
                 baud: 921_600,
+                recording_enabled: true,
+                recording_dir: "/tmp/logs".to_owned(),
             },
             ..AppSettings::default()
         };
@@ -1068,16 +1025,11 @@ mod tests {
         let (cell, lod) = s.resolved_grid(100.0);
         assert!(lod);
         assert!((cell - 10.0).abs() < 1e-3);
-        // Continuous and monotonic in height — no discrete jumps.
         assert!(s.resolved_grid(50.0).0 < s.resolved_grid(5_000.0).0);
     }
 
     #[test]
     fn auto_grid_cell_follows_height_not_orbit_radius() {
-        // Regression: orbiting tightly around an airborne vehicle means a small
-        // orbit radius but a large height above the y=0 grid. The cell follows
-        // the height (≈100 m up → ≈10 m cells), and being continuous it does not
-        // pop between sizes as the orbit pitch nudges the height.
         let s = Scene3dSettings::default();
         let (cell, lod) = s.resolved_grid(101.5);
         assert!(lod);

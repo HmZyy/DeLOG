@@ -1,6 +1,5 @@
-//! Vehicle model registry. The built-in GLBs ship
-//! embedded (`include_bytes!`); a procedural cone is the unconditional
-//! fallback so a missing/broken asset can never blank the scene.
+//! A procedural cone is the unconditional fallback so a missing/broken asset
+//! can never blank the scene.
 
 use delog_render::{MeshCpu, load_glb};
 
@@ -10,13 +9,10 @@ const QUAD_GLB: &[u8] = include_bytes!("../../../assets/models/QuadCopter.glb");
 const FIXEDWING_GLB: &[u8] = include_bytes!("../../../assets/models/FixedWing.glb");
 const DELTAWING_GLB: &[u8] = include_bytes!("../../../assets/models/DeltaWing.glb");
 
-/// The procedural cone used for `ModelKind::Cone` and as the fallback when an
-/// asset fails to decode.
 pub fn cone_mesh() -> MeshCpu {
     MeshCpu::cone(4, 0.5, 1.4)
 }
 
-/// Decode the mesh for a model kind, falling back to the cone on any error.
 pub fn mesh_for(kind: &ModelKind) -> MeshCpu {
     let bytes: &[u8] = match kind {
         ModelKind::Quad => QUAD_GLB,

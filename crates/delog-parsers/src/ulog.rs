@@ -1,10 +1,4 @@
 //! PX4 ULog `.ulg` parser.
-//!
-//! This implements the structural parser: the 16-byte header, length-prefixed
-//! messages, `F/I/P` definitions, subscriptions (`A`), data (`D`) and sync (`S`)
-//! records. Nested message formats are flattened to dotted field paths,
-//! `_padding*` fields are skipped, and PX4 `multi_id` subscriptions become
-//! `topic[N]` names.
 
 use std::collections::HashMap;
 use std::io::{BufReader, Read};
@@ -1136,8 +1130,6 @@ mod tests {
         assert_eq!(ULogParser.sniff(b"not ulog").score, 0);
     }
 
-    /// A self-describing log with an array-flattened topic, a two-instance
-    /// topic, padding to skip and several rows per topic.
     fn golden_ulog() -> Vec<u8> {
         let mut buf = Vec::new();
         buf.extend(MAGIC);
@@ -1195,12 +1187,10 @@ mod tests {
         buf
     }
 
-    /// Golden table: topics, rows and raw values for the fixture log.
     #[test]
     fn golden_topics_rows_and_values() {
         let (summary, sink) = parse(golden_ulog());
 
-        // sensor_gps[0](2) + sensor_gps[1](1) + vehicle_attitude[0](2).
         assert_eq!(summary.topic_count, 3);
         assert_eq!(summary.row_count, 5);
         assert_eq!(summary.diagnostics, 0);
@@ -1225,7 +1215,6 @@ mod tests {
             .downcast_ref::<UInt8Array>()
             .unwrap();
         assert_eq!(fix.values(), &[3, 4]);
-        // The timestamp drives the time axis, not a column.
         assert!(gps0.schema.field_by_name("timestamp").is_none());
 
         let gps1 = batch("sensor_gps[1]");
@@ -1238,7 +1227,6 @@ mod tests {
 
         let att = batch("vehicle_attitude[0]");
         assert_eq!(att.timestamps.values(), &[1_000, 2_000]);
-        // float[4] q flattens to q[0]..q[3]; padding is skipped.
         for idx in 0..4 {
             assert!(att.schema.field_by_name(&format!("q[{idx}]")).is_some());
         }

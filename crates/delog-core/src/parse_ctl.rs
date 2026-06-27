@@ -1,10 +1,8 @@
 //! Per-parse control: cancellation and byte-based progress.
 //!
-//! A parser receives a `&ParseCtl` alongside its [`IngestSink`]. It
-//! polls cancellation cheaply — the `Arc<AtomicBool>` is read at most once every
-//! [`CANCEL_POLL_INTERVAL`] records, so the common path is a counter compare,
-//! not an atomic load — and reports progress as a byte fraction, throttled so a
-//! multi-GB parse emits ~100 events, not millions.
+//! Cancellation is read at most once every [`CANCEL_POLL_INTERVAL`] records, so
+//! the common path is a counter compare, not an atomic load. Progress is
+//! throttled so a multi-GB parse emits ~100 events, not millions.
 
 use std::cell::Cell;
 use std::sync::Arc;
@@ -13,15 +11,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::identity::SourceId;
 use crate::ingest::IngestSink;
 
-/// Records between cancellation polls. Coarse enough to be free per record,
-/// fine enough to stay responsive on a fast parse.
+/// Records between cancellation polls.
 pub const CANCEL_POLL_INTERVAL: u64 = 4096;
 
 /// Smallest progress advance worth an event (1% of the file).
 const PROGRESS_EPSILON: f32 = 0.01;
 
-/// A cancellation flag shared between the UI (which sets it) and a parser thread
-/// (which polls it). Cloning shares the same underlying flag.
+/// Cloning shares the same underlying flag.
 #[derive(Debug, Clone, Default)]
 pub struct CancelToken {
     flag: Arc<AtomicBool>,
@@ -32,7 +28,6 @@ impl CancelToken {
         Self::default()
     }
 
-    /// Request cancellation. The parser observes this on its next poll boundary.
     pub fn cancel(&self) {
         self.flag.store(true, Ordering::Relaxed);
     }
@@ -42,14 +37,9 @@ impl CancelToken {
     }
 }
 
-/// Cancellation + byte-progress for one parse run.
-///
-/// The caller opens the source (it knows the filename → label and byte size)
-/// and hands the parser this control carrying the resulting [`SourceId`]; the
-/// parser tags every batch with [`source`](Self::source). The progress throttle
-/// uses interior mutability so the whole control can be passed as `&ParseCtl`
-/// (matching the parser trait); a `ParseCtl` belongs to a single parser
-/// thread and is not shared, so a `Cell` is sufficient.
+/// Cancellation + byte-progress for one parse run. The progress throttle uses
+/// interior mutability so the control can pass as `&ParseCtl` (the parser
+/// trait); it is single-thread and never shared, so a `Cell` suffices.
 #[derive(Debug)]
 pub struct ParseCtl {
     cancel: CancelToken,
@@ -69,7 +59,6 @@ impl ParseCtl {
         }
     }
 
-    /// The source the caller opened for this parse.
     pub fn source(&self) -> SourceId {
         self.source
     }
@@ -148,12 +137,10 @@ mod tests {
         let ctl = ParseCtl::new(token.clone(), SourceId(0), 1_000);
         token.cancel();
 
-        // Off-boundary indices ignore the flag; the boundary observes it.
         assert!(!ctl.cancelled_at(1));
         assert!(!ctl.cancelled_at(CANCEL_POLL_INTERVAL - 1));
         assert!(ctl.cancelled_at(CANCEL_POLL_INTERVAL));
         assert!(ctl.cancelled_at(0));
-        // The unconditional check always sees it.
         assert!(ctl.is_cancelled());
     }
 
@@ -173,7 +160,6 @@ mod tests {
         let ctl = ParseCtl::new(CancelToken::new(), SourceId(0), 10_000);
         let mut sink = ProgressSink::default();
 
-        // 0.5% advances are swallowed; the 1% step and completion fire.
         ctl.report_progress(&mut sink, 50); // 0.5% — no event
         ctl.report_progress(&mut sink, 100); // 1.0% — event
         ctl.report_progress(&mut sink, 150); // 1.5% — no event

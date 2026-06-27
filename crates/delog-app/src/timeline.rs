@@ -1,27 +1,23 @@
 //! Global timeline: playback model, scrubber and transport.
 //!
-//! The playhead is the single time authority for plots and the 3D view. The
-//! model is pure state + time math (no egui) so it is unit-testable; the
-//! widgets live alongside it and only translate input into model calls.
+//! The model is pure state + time math (no egui) so it is unit-testable; the
+//! widgets only translate input into model calls.
 
 use delog_core::time::TimeRange;
 
 use crate::plot::ViewX;
 
-/// Playback speed bounds.
 pub const MIN_SPEED: f32 = 0.1;
 pub const MAX_SPEED: f32 = 100.0;
 
-/// Play/pause state, playhead position and speed.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Playback {
     pub playing: bool,
-    /// Playhead in canonical effective microseconds.
+    /// Canonical effective microseconds.
     pub t_us: i64,
     pub speed: f32,
-    /// Tail-follow mode for live streams. When set, each frame pins
-    /// the playhead to the current global range end until a manual scrub
-    /// clears it.
+    /// Live-stream tail-follow: each frame pins the playhead to the range end
+    /// until a manual scrub clears it.
     pub follow_live: bool,
 }
 
@@ -41,8 +37,8 @@ impl Playback {
         self.playing = !self.playing;
     }
 
-    /// Advance the playhead by wall-clock `dt` × speed, clamped to `range`.
-    /// Reaching the end pauses (no wrap, no overshoot).
+    /// Advance the playhead by wall-clock `dt` × speed, clamped to `range`;
+    /// reaching the end pauses.
     pub fn advance(&mut self, dt_secs: f64, range: TimeRange) {
         debug_assert!(
             (MIN_SPEED..=MAX_SPEED).contains(&self.speed),
@@ -62,7 +58,6 @@ impl Playback {
         }
     }
 
-    /// Move the playhead directly (scrubber drag, jumps), clamped to `range`.
     pub fn scrub(&mut self, t_us: i64, range: TimeRange) {
         self.follow_live = false;
         self.t_us = t_us.clamp(range.min_us, range.max_us);
@@ -72,8 +67,8 @@ impl Playback {
         self.speed = speed.clamp(MIN_SPEED, MAX_SPEED);
     }
 
-    /// Keep the playhead inside a (possibly grown or shrunk) range without
-    /// touching play state — called once per frame as data streams in.
+    /// Keep the playhead inside a (grown or shrunk) range without touching play
+    /// state; called once per frame as data streams in.
     pub fn clamp_to(&mut self, range: TimeRange) {
         if self.follow_live {
             self.t_us = range.max_us;
@@ -82,7 +77,6 @@ impl Playback {
         }
     }
 
-    /// Enter live-tail mode and pin immediately.
     pub fn lock_to_live(&mut self, range: TimeRange) {
         self.follow_live = true;
         self.t_us = range.max_us;
@@ -92,23 +86,19 @@ impl Playback {
         self.follow_live = false;
     }
 
-    /// Jump to the start of the range (`Home`).
     pub fn jump_start(&mut self, range: TimeRange) {
         self.scrub(range.min_us, range);
     }
 
-    /// Jump to the end of the range (`End`).
     pub fn jump_end(&mut self, range: TimeRange) {
         self.scrub(range.max_us, range);
     }
 }
 
-/// Fallback step when no plot is focused: 1/30 s.
 const FALLBACK_STEP_US: i64 = 1_000_000 / 30;
 
-/// Where `←`/`→` land: the adjacent canonical sample of the focused
-/// plot's reference trace, or ±1/30 s without a focus. Stays put at the ends
-/// of the reference trace.
+/// Where `←`/`→` land: the adjacent sample of the focused plot's reference
+/// trace, or ±1/30 s without a focus. Stays put at the trace ends.
 pub fn step_target(
     snapshot: &delog_core::snapshot::StoreSnapshot,
     reference: Option<delog_core::identity::FieldId>,
@@ -128,7 +118,7 @@ pub fn step_target(
     let Ok(view) = FieldView::new(snapshot, field) else {
         return t_us;
     };
-    // Probe just past the playhead so landing exactly on a sample still
+    // Probe one µs past the playhead so landing exactly on a sample still
     // steps to the adjacent one.
     let (probe, mode) = if forward {
         (t_us.saturating_add(1), SampleMode::Next)
@@ -139,20 +129,18 @@ pub fn step_target(
         .map_or(t_us, |sample| sample.effective_time_us)
 }
 
-/// Where the pointer x lands on the scrubber, as canonical microseconds.
 fn bar_time_at(x: f32, rect: egui::Rect, range: TimeRange) -> i64 {
     let frac = ((x - rect.left()) / rect.width().max(1.0)).clamp(0.0, 1.0) as f64;
     range.min_us + (frac * (range.max_us - range.min_us) as f64).round() as i64
 }
 
-/// Playhead time → scrubber x.
 fn bar_x_at(t_us: i64, rect: egui::Rect, range: TimeRange) -> f32 {
     let span = (range.max_us - range.min_us).max(1) as f64;
     let frac = ((t_us - range.min_us) as f64 / span).clamp(0.0, 1.0);
     rect.left() + rect.width() * frac as f32
 }
 
-/// `t_us` relative to the log origin as `M:SS.mmm` (hours only when nonzero),
+/// `t_us` relative to `origin_us` as `M:SS.mmm` (hours only when nonzero),
 /// clamped at zero.
 pub fn format_relative(t_us: i64, origin_us: i64) -> String {
     let rel_ms = (t_us - origin_us).max(0) / 1_000;
@@ -167,8 +155,8 @@ pub fn format_relative(t_us: i64, origin_us: i64) -> String {
     }
 }
 
-/// Unix microseconds → `YYYY-MM-DD HH:MM:SS.mmm UTC`. Hand-rolled
-/// civil-from-days so no date crate enters the pinned dependency set.
+/// Unix microseconds → `YYYY-MM-DD HH:MM:SS.mmm UTC`. Hand-rolled so no date
+/// crate enters the pinned dependency set.
 pub fn format_utc(unix_us: i64) -> String {
     let ms_total = unix_us.div_euclid(1_000);
     let ms = ms_total.rem_euclid(1_000);
@@ -185,7 +173,7 @@ pub fn format_utc(unix_us: i64) -> String {
 }
 
 /// Days since 1970-01-01 → (year, month, day). Howard Hinnant's
-/// `civil_from_days` algorithm; exact for the proleptic Gregorian calendar.
+/// `civil_from_days`; exact for the proleptic Gregorian calendar.
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = z.div_euclid(146_097);
@@ -201,34 +189,25 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TimelineAction {
-    /// User requested explicit live-tail lock (`End` equivalent).
     pub lock_live: bool,
-    /// User manually scrubbed or jumped away from live mode.
     pub manual_scrub: bool,
-    /// User dragged the visible-window range slider, changing the X view —
-    /// treated like a manual pan/zoom (disengages fit-all/live).
+    /// Window range slider moved; treated like a manual pan/zoom (disengages
+    /// fit-all/live).
     pub view_changed: bool,
-    /// Click a timeline flag → scrub the playhead here.
     pub marker_jump: Option<i64>,
-    /// Drag a flag → set that marker's time.
     pub marker_move: Option<(u64, i64)>,
-    /// Right-click → delete that marker.
     pub marker_delete: Option<u64>,
-    /// Right-click → rename/recolour that marker.
     pub marker_edit: Option<(u64, MarkerEdit)>,
 }
 
-/// A rename/recolour edit reported from a timeline flag's context menu.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MarkerEdit {
     pub label: Option<String>,
     pub color: Option<[f32; 4]>,
 }
 
-/// The timeline bar: transport buttons, speed picker, the scrubber and the
-/// time display. `utc_offset_us` maps canonical time to unix
-/// time when a source carries a UTC reference; `any_live` shades the tail of
-/// the bar to mark a still growing extent (live links, M7).
+/// `utc_offset_us` maps canonical time to unix time when a source carries a UTC
+/// reference; `any_live` shades the bar tail to mark a still-growing extent.
 #[allow(clippy::too_many_arguments)]
 pub fn ui(
     ui: &mut egui::Ui,
@@ -244,11 +223,8 @@ pub fn ui(
     let mut action = TimelineAction::default();
     ui.add_space(6.0);
     ui.horizontal(|ui| {
-        // Square transport buttons, tall enough to sit centered between the two
-        // stacked sliders on the right.
         let button_size = egui::vec2(40.0, 40.0);
-        // Live-link status dot: grey = not streaming, yellow = streaming but
-        // not locked to the live tail, red = locked.
+        // Status dot: grey = not streaming, yellow = streaming unlocked, red = locked.
         let (dot_color, dot_tip) = if !any_live {
             (theme.neutral(), "Not streaming")
         } else if playback.follow_live {
@@ -335,9 +311,6 @@ pub fn ui(
             }
         }
 
-        // Fit-to-view toggle: while on, the plots keep the whole time range in
-        // view (auto-zooming as data streams). Toggling off — or panning/zooming
-        // a plot — restores free pan/zoom.
         let fit_icon = egui::Image::new(crate::icons::maximize())
             .fit_to_exact_size(egui::vec2(16.0, 16.0))
             .tint(ui.visuals().text_color());
@@ -392,10 +365,9 @@ pub fn ui(
     action
 }
 
-/// Full-range bar with a draggable playhead handle and manual-marker
-/// flags. A drag that begins on a flag moves that marker; a
-/// click on a flag jumps to it; right-click edits/deletes; drags/clicks
-/// elsewhere scrub the playhead. Marker interactions are reported via `action`.
+/// Full-range bar with draggable playhead and marker flags. A drag beginning on
+/// a flag moves it, a click jumps to it, right-click edits/deletes; drags/clicks
+/// elsewhere scrub. Marker interactions are reported via `action`.
 fn scrubber(
     ui: &mut egui::Ui,
     playback: &mut Playback,
@@ -413,7 +385,6 @@ fn scrubber(
         return false;
     }
 
-    // Nearest flag to a screen x, within the hit radius.
     let hit_radius = 6.0;
     let nearest_flag = |x: f32| -> Option<u64> {
         markers
@@ -425,7 +396,7 @@ fn scrubber(
             .map(|(id, _)| id)
     };
 
-    // Which marker (if any) is being dragged, tracked across frames.
+    // Marker being dragged, persisted across frames via egui memory.
     let drag_key = ui.id().with("marker_drag");
     let mut dragging: Option<u64> = ui
         .memory_mut(|m| m.data.get_temp::<Option<u64>>(drag_key))
@@ -476,8 +447,7 @@ fn scrubber(
     let elapsed = egui::Rect::from_min_max(bar.min, egui::pos2(x, bar.max.y));
     painter.rect_filled(elapsed, 3.0, visuals.selection.bg_fill);
 
-    // Live links keep growing the extent — tint the tail as a reminder that
-    // the end of the bar is moving.
+    // Tint the tail to mark a still-growing live extent.
     if any_live {
         let tail_w = (rect.width() * 0.03).clamp(4.0, 24.0);
         let tail = egui::Rect::from_min_max(egui::pos2(bar.right() - tail_w, bar.top()), bar.max);
@@ -565,9 +535,8 @@ fn scrubber(
     scrubbed
 }
 
-/// Two-ended range slider over the full data range that sets the visible X
-/// window (the global view). Dragging an end moves that bound; dragging
-/// the band between them pans the window. Returns whether the view changed.
+/// Two-ended range slider setting the visible X window. Dragging an end moves
+/// that bound; dragging the band pans. Returns whether the view changed.
 fn window_slider(ui: &mut egui::Ui, view: &mut ViewX, range: TimeRange) -> bool {
     let height = 16.0;
     let (rect, _resp) = ui.allocate_exact_size(
@@ -579,12 +548,11 @@ fn window_slider(ui: &mut egui::Ui, view: &mut ViewX, range: TimeRange) -> bool 
     }
 
     let span = (range.max_us - range.min_us).max(1);
-    // Keep at least ~8 px of window so both handles stay grabbable.
+    // Keep ~8 px of window so both handles stay grabbable.
     let min_span_us = (span as f64 * (8.0 / rect.width().max(1.0)) as f64) as i64 + 1;
 
-    // The view may legitimately extend beyond the data range (pan/zoom is not
-    // limited). We do NOT clamp it here; instead the handles ride the
-    // bar edges (via `bar_x_at`'s clamp) and grey out when out of range.
+    // The view may extend beyond the data range; don't clamp here — handles
+    // ride the bar edges (via `bar_x_at`'s clamp) and grey out when out of range.
     let lo_in_range = (range.min_us..=range.max_us).contains(&view.min_us);
     let hi_in_range = (range.min_us..=range.max_us).contains(&view.max_us);
 
@@ -625,8 +593,7 @@ fn window_slider(ui: &mut egui::Ui, view: &mut ViewX, range: TimeRange) -> bool 
     if mid_resp.dragged() {
         let dx = mid_resp.drag_delta().x;
         if dx != 0.0 {
-            // Pan the window by the dragged delta without clamping to the data
-            // range — the window may move past either end.
+            // Pan without clamping; the window may move past either end.
             let win = view.max_us - view.min_us;
             let delta = (dx as f64 / rect.width().max(1.0) as f64 * span as f64).round() as i64;
             view.min_us = view.min_us.saturating_add(delta);
@@ -645,7 +612,6 @@ fn window_slider(ui: &mut egui::Ui, view: &mut ViewX, range: TimeRange) -> bool 
     );
     painter.rect_filled(band, 3.0, visuals.selection.bg_fill);
     let handle = |t_us: i64, active: bool, in_range: bool| {
-        // Out-of-range ends sit at a clamped bar edge and read as disabled.
         let c = if !in_range {
             visuals.weak_text_color()
         } else if active {
@@ -689,7 +655,6 @@ mod tests {
         TimeRange::new(1_000_000, 5_000_000).unwrap()
     }
 
-    /// Snapshot with one field sampled at t = 1000, 2000, 3000 µs.
     fn stepping_fixture() -> (StoreSnapshot, FieldId) {
         let mut identity = IdentityRegistry::new();
         let source = identity.add_source("flight");
@@ -717,7 +682,6 @@ mod tests {
         assert_eq!(step_target(&snapshot, Some(alt), 1_500, true), 2_000);
         assert_eq!(step_target(&snapshot, Some(alt), 2_000, true), 3_000);
         assert_eq!(step_target(&snapshot, Some(alt), 2_000, false), 1_000);
-        // No sample beyond the end: stay put.
         assert_eq!(step_target(&snapshot, Some(alt), 3_000, true), 3_000);
         assert_eq!(step_target(&snapshot, Some(alt), 1_000, false), 1_000);
     }
@@ -751,7 +715,7 @@ mod tests {
             speed: 2.0,
             follow_live: false,
         };
-        p.advance(0.5, range()); // 0.5 s × 2× = 1 s
+        p.advance(0.5, range());
         assert_eq!(p.t_us, 2_000_000);
         assert!(p.playing);
     }
@@ -831,20 +795,15 @@ mod tests {
     fn relative_time_formats_as_minutes_seconds_millis() {
         assert_eq!(format_relative(1_000_000, 1_000_000), "0:00.000");
         assert_eq!(format_relative(84_456_000, 1_000_000), "1:23.456");
-        // Hours appear only when needed.
         assert_eq!(format_relative(3_725_500_000, 0), "1:02:05.500");
-        // Before-origin times clamp to zero rather than going negative.
         assert_eq!(format_relative(0, 1_000_000), "0:00.000");
     }
 
     #[test]
     fn absolute_time_formats_as_utc_civil_date() {
-        // 2026-06-11 12:34:56.789 UTC as unix microseconds.
-        let unix_us = 1_781_181_296_789_000;
+        let unix_us = 1_781_181_296_789_000; // 2026-06-11 12:34:56.789 UTC
         assert_eq!(format_utc(unix_us), "2026-06-11 12:34:56.789 UTC");
-        // Unix epoch itself.
         assert_eq!(format_utc(0), "1970-01-01 00:00:00.000 UTC");
-        // Leap-year day.
         let feb29 = 1_709_164_800_000_000; // 2024-02-29 00:00:00 UTC
         assert_eq!(format_utc(feb29), "2024-02-29 00:00:00.000 UTC");
     }
@@ -857,7 +816,6 @@ mod tests {
         assert_eq!(bar_time_at(100.0, rect, range), 1_000_000);
         assert_eq!(bar_time_at(300.0, rect, range), 5_000_000);
         assert_eq!(bar_time_at(200.0, rect, range), 3_000_000);
-        // Outside the bar clamps to the ends.
         assert_eq!(bar_time_at(0.0, rect, range), 1_000_000);
         assert_eq!(bar_time_at(999.0, rect, range), 5_000_000);
 

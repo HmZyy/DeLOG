@@ -1,5 +1,3 @@
-//! Compatibility conversion for legacy `Parse(raw_data)` file parsers.
-
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
@@ -19,7 +17,6 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PySequence, PySequenceMethods, PyTuple};
 
-/// A raw file materialized using NumPy `fromfile(..., dtype=float32)` semantics.
 pub struct RawFloatFile {
     pub values: Vec<f32>,
     pub input_bytes: u64,
@@ -31,8 +28,6 @@ pub fn read_float32_file(path: impl AsRef<Path>) -> std::io::Result<RawFloatFile
     let bytes = fs::read(path)?;
     let input_bytes = bytes.len() as u64;
     let ignored_trailing_bytes = (bytes.len() % size_of::<f32>()) as u8;
-    // Custom Python parser compatibility input copy; off the UI hot path and
-    // accounted by `input_bytes` (`python_parser_input_bytes` at emission).
     let values = bytes
         .chunks_exact(size_of::<f32>())
         .map(|chunk| f32::from_ne_bytes(chunk.try_into().expect("four-byte chunk")))
@@ -46,7 +41,6 @@ pub fn read_float32_file(path: impl AsRef<Path>) -> std::io::Result<RawFloatFile
 
 pub struct ParserField {
     pub name: String,
-    /// Engineering unit parsed out of the legacy `name [unit]` convention.
     pub unit: Option<String>,
     pub values: ArrayRef,
 }
@@ -60,12 +54,9 @@ pub struct ParserTopic {
 pub struct ParserOutput {
     pub topics: Vec<ParserTopic>,
     pub warnings: Vec<String>,
-    /// Sum of Arrow's logical array buffers (`Array::get_buffer_memory_size`).
     pub arrow_bytes: u64,
 }
 
-/// Validate and emit a fully materialized parser result as one canonical file source.
-///
 /// All fallible schema and shape work happens before `open_source`, so an error
 /// cannot leave a partially opened source behind.
 pub fn emit_parser_output(
@@ -226,7 +217,6 @@ fn numpy_lanes(
     }
 }
 
-/// Convert one 1-D NumPy array into a native-endian, contiguous Arrow array.
 fn convert_1d(
     numpy: &Bound<'_, PyModule>,
     full_name: &str,
@@ -377,7 +367,6 @@ fn clock_timestamps(field: &PendingField) -> PyResult<Int64Array> {
     Ok(Int64Array::from(timestamps))
 }
 
-/// Validate and convert the complete legacy Python parser return value.
 pub fn parse_python_result(py: Python<'_>, result: &Bound<'_, PyAny>) -> PyResult<ParserOutput> {
     let sequence = result
         .cast::<PySequence>()
@@ -915,7 +904,6 @@ mod tests {
         let output =
             parse("[('航法.index',[0,1],''),('航法.温度  ',[float('nan'),2.0],'説明')]").unwrap();
         assert_eq!(output.topics[0].name, "航法");
-        // No unit bracket, so the trailing spaces are preserved verbatim.
         assert_eq!(output.topics[0].fields[1].name, "温度  ");
         assert_eq!(output.topics[0].fields[1].unit, None);
         assert!(
@@ -1041,7 +1029,6 @@ mod tests {
             .collect();
         assert!(names.contains(&"a [rad/s]"));
         assert!(names.contains(&"a [deg/s]"));
-        // The colliding fields keep their disambiguating names but still carry units.
         for field in &output.topics[0].fields {
             if field.name.starts_with("a ") {
                 assert!(field.unit.is_some());
