@@ -298,12 +298,14 @@ pub struct BrowserResponse {
     pub offset_change: Option<(SourceId, i64)>,
     pub remove_source: Option<SourceId>,
     pub inspect_source: Option<SourceId>,
+    pub inspect_field_metadata: Option<FieldId>,
     pub inspect_field_stats: Option<FieldId>,
     pub generate_markers: Option<FieldId>,
     pub collapse_requested: bool,
 }
 
 enum FieldRowAction {
+    InspectMetadata(FieldId),
     InspectStats(FieldId),
     GenerateMarkers(FieldId),
 }
@@ -392,6 +394,7 @@ pub fn ui(
     let mut offset_change = None;
     let mut remove_source = None;
     let mut inspect_source = None;
+    let mut inspect_field_metadata = None;
     let mut inspect_field_stats = None;
     let mut generate_markers = None;
     egui::ScrollArea::vertical()
@@ -427,6 +430,9 @@ pub fn ui(
                             .show(ui, |ui| {
                                 for field in &topic.fields {
                                     match field_row(ui, field, selection, &visible) {
+                                        Some(FieldRowAction::InspectMetadata(f)) => {
+                                            inspect_field_metadata = Some(f);
+                                        }
                                         Some(FieldRowAction::InspectStats(f)) => {
                                             inspect_field_stats = Some(f);
                                         }
@@ -470,6 +476,7 @@ pub fn ui(
     response.offset_change = offset_change;
     response.remove_source = remove_source;
     response.inspect_source = inspect_source;
+    response.inspect_field_metadata = inspect_field_metadata;
     response.inspect_field_stats = inspect_field_stats;
     response.generate_markers = generate_markers;
     response
@@ -598,11 +605,24 @@ fn field_row(
         }
     }
     response.context_menu(|ui| {
-        let info = egui::Image::new(crate::icons::info())
+        let metadata_info = egui::Image::new(crate::icons::info())
             .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
             .tint(ui.visuals().text_color());
         if ui
-            .add(egui::Button::image_and_text(info, "Field stats"))
+            .add(egui::Button::image_and_text(
+                metadata_info,
+                "Field metadata",
+            ))
+            .clicked()
+        {
+            action = Some(FieldRowAction::InspectMetadata(field.id));
+            ui.close();
+        }
+        let stats_info = egui::Image::new(crate::icons::info())
+            .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
+            .tint(ui.visuals().text_color());
+        if ui
+            .add(egui::Button::image_and_text(stats_info, "Field stats"))
             .clicked()
         {
             action = Some(FieldRowAction::InspectStats(field.id));

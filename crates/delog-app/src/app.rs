@@ -255,6 +255,7 @@ pub struct DelogApp {
     browser_model: Option<(u64, BrowserModel)>,
     offset_dialog: Option<(delog_core::identity::SourceId, i64)>,
     source_metadata_dialog: Option<delog_core::identity::SourceId>,
+    field_metadata_dialog: Option<delog_core::identity::FieldId>,
     field_stats: FieldStatsController,
     generate_markers_dialog: Option<crate::generate_markers::GenerateMarkersDialog>,
     save_layout_dialog: SaveLayoutDialog,
@@ -349,6 +350,7 @@ impl DelogApp {
             browser_model: None,
             offset_dialog: None,
             source_metadata_dialog: None,
+            field_metadata_dialog: None,
             field_stats: FieldStatsController::default(),
             generate_markers_dialog: None,
             save_layout_dialog: SaveLayoutDialog {
@@ -2078,6 +2080,9 @@ impl eframe::App for DelogApp {
                 if let Some(source) = browser_response.inspect_source {
                     self.source_metadata_dialog = Some(source);
                 }
+                if let Some(field) = browser_response.inspect_field_metadata {
+                    self.field_metadata_dialog = Some(field);
+                }
                 if let Some(field) = browser_response.inspect_field_stats {
                     self.field_stats.open(field);
                 }
@@ -2093,6 +2098,7 @@ impl eframe::App for DelogApp {
         }
         drop(ui_browser_timer);
         show_source_metadata_window(ui.ctx(), &snapshot, &mut self.source_metadata_dialog);
+        show_field_metadata_window(ui.ctx(), &snapshot, &mut self.field_metadata_dialog);
         show_field_stats_window(
             ui.ctx(),
             &snapshot,
@@ -2384,6 +2390,134 @@ enum SourceMetaTab {
     Info,
     Parameters,
     LoggedMessages,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct FieldMetadata {
+    title: String,
+    source_label: String,
+    topic_name: String,
+    field_name: String,
+    dtype: &'static str,
+    unit: Option<String>,
+    description: Option<String>,
+    multiplier: f64,
+    rows: u64,
+    source_offset_us: i64,
+    range: Option<TimeRange>,
+}
+
+fn field_metadata(
+    snapshot: &delog_core::snapshot::StoreSnapshot,
+    field_id: delog_core::identity::FieldId,
+) -> Option<FieldMetadata> {
+    let field = snapshot
+        .fields
+        .get(field_id.index())
+        .filter(|field| field.id == field_id && !field.removed)?;
+    let topic = snapshot
+        .topic(field.topic)
+        .filter(|topic| !topic.entry.removed)?;
+    let source = snapshot
+        .source(topic.entry.source)
+        .filter(|source| !source.entry.removed)?;
+    let store = topic.store.as_ref()?;
+    let schema = store.schema.field_by_name(&field.name)?;
+    let range = store
+        .time_range()
+        .and_then(|range| range.offset(source.entry.offset_us));
+
+    Some(FieldMetadata {
+        title: format!(
+            "{} / {}.{}",
+            source.entry.label, topic.entry.name, field.name
+        ),
+        source_label: source.entry.label.clone(),
+        topic_name: topic.entry.name.clone(),
+        field_name: field.name.clone(),
+        dtype: schema.dtype_label(),
+        unit: schema.unit.clone(),
+        description: schema.description.clone(),
+        multiplier: schema.multiplier,
+        rows: store.rows,
+        source_offset_us: source.entry.offset_us,
+        range,
+    })
+}
+
+fn show_field_metadata_window(
+    ctx: &egui::Context,
+    snapshot: &delog_core::snapshot::StoreSnapshot,
+    selected: &mut Option<delog_core::identity::FieldId>,
+) {
+    let Some(field_id) = *selected else {
+        return;
+    };
+    let Some(meta) = field_metadata(snapshot, field_id) else {
+        *selected = None;
+        return;
+    };
+
+    let mut open = true;
+    egui::Window::new(format!("Field Metadata - {}", meta.title))
+        .id(egui::Id::new(("field_metadata", field_id.0)))
+        .open(&mut open)
+        .collapsible(false)
+        .default_pos(ctx.content_rect().center())
+        .pivot(egui::Align2::CENTER_CENTER)
+        .default_width(440.0)
+        .resizable(false)
+        .show(ctx, |ui| {
+            egui::Grid::new("field_metadata_summary")
+                .num_columns(2)
+                .striped(true)
+                .spacing([16.0, 4.0])
+                .show(ui, |ui| {
+                    ui.strong("Source");
+                    ui.label(meta.source_label.as_str());
+                    ui.end_row();
+                    ui.strong("Topic");
+                    ui.label(meta.topic_name.as_str());
+                    ui.end_row();
+                    ui.strong("Field");
+                    ui.label(meta.field_name.as_str());
+                    ui.end_row();
+                    ui.strong("Field ID");
+                    ui.monospace(field_id.0.to_string());
+                    ui.end_row();
+                    ui.strong("Type");
+                    ui.label(meta.dtype);
+                    ui.end_row();
+                    ui.strong("Unit");
+                    ui.label(meta.unit.as_deref().unwrap_or("-"));
+                    ui.end_row();
+                    ui.strong("Multiplier");
+                    ui.monospace(meta.multiplier.to_string());
+                    ui.end_row();
+                    ui.strong("Rows");
+                    ui.label(meta.rows.to_string());
+                    ui.end_row();
+                    ui.strong("Offset");
+                    ui.label(format!("{} us", meta.source_offset_us));
+                    ui.end_row();
+                    ui.strong("Range");
+                    ui.label(meta.range.map(format_range).unwrap_or_else(|| "-".into()));
+                    ui.end_row();
+                });
+            ui.separator();
+            match meta.description.as_deref() {
+                Some(description) if !description.is_empty() => {
+                    ui.label(description);
+                }
+                _ => {
+                    ui.weak("No field description.");
+                }
+            }
+        });
+
+    if !open {
+        *selected = None;
+    }
 }
 
 fn show_source_metadata_window(
@@ -2854,9 +2988,16 @@ fn icon_button(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use arrow::array::{ArrayRef, Float64Array, Int32Array, Int64Array};
+    use arrow::datatypes::DataType;
+    use delog_core::chunk::Chunk;
     use delog_core::diagnostics::{Diag, DiagRecord};
     use delog_core::identity::IdentityRegistry;
+    use delog_core::schema::{FieldSchema, TopicSchema};
     use delog_core::snapshot::StoreSnapshot;
+    use delog_core::store::TopicStore;
 
     use super::*;
 
@@ -3031,5 +3172,55 @@ mod tests {
 
         assert_eq!(json["traces"][0]["label"], "GPS.alt");
         assert_eq!(json["traces"][0]["visible_samples"], 500);
+    }
+
+    #[test]
+    fn field_metadata_includes_schema_rows_and_effective_range() {
+        let mut identity = IdentityRegistry::new();
+        let source = identity.add_source("flight");
+        identity.set_source_offset_us(source, 250);
+        let topic = identity.add_topic(source, "GPS").unwrap();
+        let lat = identity.add_field(topic, "Lat").unwrap();
+        identity.add_field(topic, "Alt").unwrap();
+
+        let schema = Arc::new(
+            TopicSchema::new(
+                "GPS",
+                [
+                    FieldSchema::new("Lat", DataType::Int32, Some("deg"), 1e-7)
+                        .unwrap()
+                        .with_description("latitude"),
+                    FieldSchema::new("Alt", DataType::Float64, Some("m"), 1.0).unwrap(),
+                ],
+            )
+            .unwrap(),
+        );
+        let chunk = Arc::new(
+            Chunk::try_new(
+                Int64Array::from(vec![1_000, 2_000, 3_000]),
+                vec![
+                    Arc::new(Int32Array::from(vec![1, 2, 3])) as ArrayRef,
+                    Arc::new(Float64Array::from(vec![10.0, 11.0, 12.0])) as ArrayRef,
+                ],
+                &schema,
+            )
+            .unwrap(),
+        );
+        let store = Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap());
+        let snapshot = StoreSnapshot::from_registry(&identity, [(topic, store)], 9).unwrap();
+
+        let meta = field_metadata(&snapshot, lat).unwrap();
+
+        assert_eq!(meta.title, "flight / GPS.Lat");
+        assert_eq!(meta.source_label, "flight");
+        assert_eq!(meta.topic_name, "GPS");
+        assert_eq!(meta.field_name, "Lat");
+        assert_eq!(meta.dtype, "i32");
+        assert_eq!(meta.unit.as_deref(), Some("deg"));
+        assert_eq!(meta.description.as_deref(), Some("latitude"));
+        assert_eq!(meta.multiplier, 1e-7);
+        assert_eq!(meta.rows, 3);
+        assert_eq!(meta.source_offset_us, 250);
+        assert_eq!(meta.range, TimeRange::new(1_250, 3_250));
     }
 }
