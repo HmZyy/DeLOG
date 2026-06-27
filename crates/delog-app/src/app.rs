@@ -34,6 +34,10 @@ type ProfilingExportResult = Result<std::path::PathBuf, String>;
 type CsvExportResult = Result<(std::path::PathBuf, u64), String>;
 const SESSION_AUTOSAVE_INTERVAL: Duration = Duration::from_secs(30);
 const PERFORMANCE_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
+const EMPTY_SESSION_TIMELINE_RANGE: TimeRange = TimeRange {
+    min_us: 0,
+    max_us: 10_000_000,
+};
 
 struct CombinedLoadState {
     active: bool,
@@ -65,6 +69,10 @@ fn combined_load_state(
 
 fn should_auto_open_diagnostics(enabled: bool, last_seen: Option<u64>, newest: u64) -> bool {
     enabled && last_seen.is_none_or(|prev| newest > prev)
+}
+
+fn timeline_range_for_ui(snapshot_range: Option<TimeRange>) -> TimeRange {
+    snapshot_range.unwrap_or(EMPTY_SESSION_TIMELINE_RANGE)
 }
 
 #[derive(Serialize)]
@@ -1432,7 +1440,8 @@ impl eframe::App for DelogApp {
             // panned and zoomed before any log is loaded.
             self.origin_us = 0;
             self.caches.set_origin(0);
-            self.view.get_or_insert(ViewX::new(0, 10_000_000));
+            self.view
+                .get_or_insert(ViewX::from_range(EMPTY_SESSION_TIMELINE_RANGE));
         }
         if self.settings.render_mode == RenderMode::Continuous {
             ui.ctx().request_repaint();
@@ -1848,110 +1857,105 @@ impl eframe::App for DelogApp {
         // a UTC reference (BIN GPS week / ULog time_ref_utc); `any_live` stays
         // false because the snapshot has no streaming flag yet.
         drop(ui_toolbar_timer);
-        if let Some(range) = snapshot.global_time_range() {
-            let ui_timeline_timer = self.session.metrics().scope("ui_timeline");
-            egui::Panel::bottom("timeline").show_inside(ui, |ui| {
-                let action = crate::timeline::ui(
-                    ui,
-                    &mut self.playback,
-                    &mut self.fit_view_all,
-                    &mut self.view,
-                    range,
-                    None,
-                    self.session.has_live_links(),
-                    self.settings.theme,
-                    &self.markers,
-                );
-                if action.lock_live {
-                    self.lock_to_live(range);
-                }
-                if action.view_changed {
-                    // Dragging the window slider is a manual view change: drop
-                    // out of fit-all and live-follow, like a pan/zoom.
-                    self.fit_view_all = false;
-                    self.playback.unlock_live();
-                    self.view_fitted = true;
-                }
-                if let Some(t_us) = action.marker_jump {
-                    self.playback.scrub(t_us, range);
-                }
-                if let Some((id, t_us)) = action.marker_move
-                    && let Some(m) = self.markers.get_mut(id)
-                {
-                    m.t_us = t_us.clamp(range.min_us, range.max_us);
-                }
-                if let Some(id) = action.marker_delete {
-                    self.markers.remove(id);
-                }
-                if let Some((id, edit)) = action.marker_edit
-                    && let Some(m) = self.markers.get_mut(id)
-                {
-                    if let Some(label) = edit.label {
-                        m.label = label;
-                    }
-                    if let Some(color) = edit.color {
-                        m.color = color;
-                    }
-                }
-            });
-            drop(ui_timeline_timer);
-
-            // F12 toggles the debug overlay. Handled ungated — it is
-            // not a text key, so it works even while a widget holds focus.
-            if ui.ctx().input(|i| i.key_pressed(egui::Key::F12)) {
-                self.settings.show_debug_overlay = !self.settings.show_debug_overlay;
+        let range = timeline_range_for_ui(global_range);
+        let ui_timeline_timer = self.session.metrics().scope("ui_timeline");
+        egui::Panel::bottom("timeline").show_inside(ui, |ui| {
+            let action = crate::timeline::ui(
+                ui,
+                &mut self.playback,
+                &mut self.fit_view_all,
+                &mut self.view,
+                range,
+                None,
+                self.session.has_live_links(),
+                self.settings.theme,
+                &self.markers,
+            );
+            if action.lock_live {
+                self.lock_to_live(range);
             }
+            if action.view_changed {
+                // Dragging the window slider is a manual view change: drop
+                // out of fit-all and live-follow, like a pan/zoom.
+                self.fit_view_all = false;
+                self.playback.unlock_live();
+                self.view_fitted = true;
+            }
+            if let Some(t_us) = action.marker_jump {
+                self.playback.scrub(t_us, range);
+            }
+            if let Some((id, t_us)) = action.marker_move
+                && let Some(m) = self.markers.get_mut(id)
+            {
+                m.t_us = t_us.clamp(range.min_us, range.max_us);
+            }
+            if let Some(id) = action.marker_delete {
+                self.markers.remove(id);
+            }
+            if let Some((id, edit)) = action.marker_edit
+                && let Some(m) = self.markers.get_mut(id)
+            {
+                if let Some(label) = edit.label {
+                    m.label = label;
+                }
+                if let Some(color) = edit.color {
+                    m.color = color;
+                }
+            }
+        });
+        drop(ui_timeline_timer);
 
-            // Transport keys — skipped while a widget owns the
-            // keyboard (e.g. the browser filter box).
-            if !ui.ctx().egui_wants_keyboard_input() {
-                let (space, home, end, left, right, save_layout, load_layout, add_marker) =
-                    ui.ctx().input(|i| {
-                        (
-                            i.key_pressed(egui::Key::Space),
-                            i.key_pressed(egui::Key::Home),
-                            i.key_pressed(egui::Key::End),
-                            i.key_pressed(egui::Key::ArrowLeft),
-                            i.key_pressed(egui::Key::ArrowRight),
-                            i.modifiers.command && i.key_pressed(egui::Key::S),
-                            i.modifiers.command && i.key_pressed(egui::Key::L),
-                            i.key_pressed(egui::Key::M),
-                        )
-                    });
-                if save_layout {
-                    self.save_layout_dialog.open = true;
+        // F12 toggles the debug overlay. Handled ungated — it is
+        // not a text key, so it works even while a widget holds focus.
+        if ui.ctx().input(|i| i.key_pressed(egui::Key::F12)) {
+            self.settings.show_debug_overlay = !self.settings.show_debug_overlay;
+        }
+
+        // Transport keys — skipped while a widget owns the
+        // keyboard (e.g. the browser filter box).
+        if !ui.ctx().egui_wants_keyboard_input() {
+            let (space, home, end, left, right, save_layout, load_layout, add_marker) =
+                ui.ctx().input(|i| {
+                    (
+                        i.key_pressed(egui::Key::Space),
+                        i.key_pressed(egui::Key::Home),
+                        i.key_pressed(egui::Key::End),
+                        i.key_pressed(egui::Key::ArrowLeft),
+                        i.key_pressed(egui::Key::ArrowRight),
+                        i.modifiers.command && i.key_pressed(egui::Key::S),
+                        i.modifiers.command && i.key_pressed(egui::Key::L),
+                        i.key_pressed(egui::Key::M),
+                    )
+                });
+            if save_layout {
+                self.save_layout_dialog.open = true;
+            }
+            if load_layout {
+                self.load_layout_dialog.layouts = crate::layout::list_layouts();
+                self.load_layout_dialog.selected = None;
+                self.load_layout_dialog.open = true;
+            }
+            if space {
+                self.playback.toggle();
+            }
+            if home {
+                self.playback.jump_start(range);
+            }
+            if end {
+                if self.session.has_live_links() {
+                    self.lock_to_live(range);
+                } else {
+                    self.playback.jump_end(range);
                 }
-                if load_layout {
-                    self.load_layout_dialog.layouts = crate::layout::list_layouts();
-                    self.load_layout_dialog.selected = None;
-                    self.load_layout_dialog.open = true;
-                }
-                if space {
-                    self.playback.toggle();
-                }
-                if home {
-                    self.playback.jump_start(range);
-                }
-                if end {
-                    if self.session.has_live_links() {
-                        self.lock_to_live(range);
-                    } else {
-                        self.playback.jump_end(range);
-                    }
-                }
-                if left || right {
-                    let reference = self.workspace.focused_first_field();
-                    let target = crate::timeline::step_target(
-                        &snapshot,
-                        reference,
-                        self.playback.t_us,
-                        right,
-                    );
-                    self.playback.scrub(target, range);
-                }
-                if add_marker {
-                    self.markers.add_at(self.playback.t_us);
-                }
+            }
+            if left || right {
+                let reference = self.workspace.focused_first_field();
+                let target =
+                    crate::timeline::step_target(&snapshot, reference, self.playback.t_us, right);
+                self.playback.scrub(target, range);
+            }
+            if add_marker {
+                self.markers.add_at(self.playback.t_us);
             }
         }
 
@@ -3045,6 +3049,14 @@ mod tests {
             Some("running raw.py on sample.dat")
         );
         assert!(state.parser_active);
+    }
+
+    #[test]
+    fn timeline_range_uses_empty_session_placeholder_without_data() {
+        assert_eq!(
+            timeline_range_for_ui(None),
+            TimeRange::new(0, 10_000_000).unwrap()
+        );
     }
 
     #[test]
