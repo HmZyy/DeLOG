@@ -39,17 +39,7 @@ use app::DelogApp;
 fn main() -> eframe::Result {
     init_tracing();
 
-    let viewport = egui::ViewportBuilder::default()
-        .with_title("DeLOG")
-        .with_icon(app_icon())
-        .with_inner_size([1280.0, 800.0])
-        .with_min_inner_size([1024.0, 640.0]);
-
-    let options = eframe::NativeOptions {
-        viewport,
-        renderer: eframe::Renderer::Wgpu,
-        ..Default::default()
-    };
+    let options = app_native_options();
 
     eframe::run_native(
         "DeLOG",
@@ -59,6 +49,30 @@ fn main() -> eframe::Result {
             Ok(Box::new(DelogApp::new(cc)))
         }),
     )
+}
+
+fn app_native_options() -> eframe::NativeOptions {
+    let mut options = eframe::NativeOptions {
+        viewport: app_viewport(),
+        renderer: eframe::Renderer::Wgpu,
+        ..Default::default()
+    };
+
+    configure_file_drop_backend(&mut options);
+
+    options
+}
+
+#[cfg(target_os = "linux")]
+fn configure_file_drop_backend(options: &mut eframe::NativeOptions) {
+    options.event_loop_builder = Some(Box::new(|builder| {
+        use winit::platform::x11::EventLoopBuilderExtX11 as _;
+        builder.with_x11();
+    }));
+}
+
+#[cfg(not(target_os = "linux"))]
+fn configure_file_drop_backend(_options: &mut eframe::NativeOptions) {
 }
 
 /// Filter via `RUST_LOG` (default `info`). The panic hook records the panic
@@ -83,6 +97,15 @@ fn init_tracing() {
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "DeLOG starting");
 }
 
+fn app_viewport() -> egui::ViewportBuilder {
+    egui::ViewportBuilder::default()
+        .with_title("DeLOG")
+        .with_icon(app_icon())
+        .with_inner_size([1280.0, 800.0])
+        .with_min_inner_size([1024.0, 640.0])
+        .with_drag_and_drop(true)
+}
+
 /// 256x256 RGBA decoded from `docs/logo.png` by `build.rs` into `OUT_DIR`.
 fn app_icon() -> egui::IconData {
     const RGBA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/icon.rgba"));
@@ -96,6 +119,18 @@ fn app_icon() -> egui::IconData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_viewport_enables_native_file_drag_and_drop() {
+        assert_eq!(app_viewport().drag_and_drop, Some(true));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn app_native_options_force_x11_backend_for_file_drag_and_drop() {
+        let options = app_native_options();
+        assert!(options.event_loop_builder.is_some());
+    }
 
     #[test]
     fn app_icon_is_256x256_rgba() {
