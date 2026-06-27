@@ -1,8 +1,5 @@
-//! DeLOG application shell: eframe window, widgets, docks, layouts, glue.
-
-// Hide the Windows console window in release builds: a default Rust binary is a
-// console subsystem app, so Windows spawns a terminal alongside the GUI. Debug
-// builds keep the console so `tracing` output stays visible during development.
+// Release builds: hide the Windows console window that a console-subsystem
+// binary would otherwise spawn alongside the GUI. Debug keeps it for `tracing`.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
@@ -58,18 +55,14 @@ fn main() -> eframe::Result {
         "DeLOG",
         options,
         Box::new(|cc| {
-            // SVG icon loader for the toolbar/overlay icons (see `icons`).
             egui_extras::install_image_loaders(&cc.egui_ctx);
             Ok(Box::new(DelogApp::new(cc)))
         }),
     )
 }
 
-/// Initialize the tracing subscriber and a panic hook that records the
-/// panic through tracing before the default hook prints the backtrace.
-///
-/// Filter via `RUST_LOG` (default `info`). The fmt writer goes to stderr
-/// and is flushed per event, so panic messages are never lost in a buffer.
+/// Filter via `RUST_LOG` (default `info`). The panic hook records the panic
+/// through tracing before the default hook runs.
 fn init_tracing() {
     use tracing_subscriber::EnvFilter;
 
@@ -90,8 +83,7 @@ fn init_tracing() {
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "DeLOG starting");
 }
 
-/// The window/taskbar icon: 256x256 RGBA decoded from `docs/logo.png` by
-/// `build.rs` and embedded into the binary.
+/// 256x256 RGBA decoded from `docs/logo.png` by `build.rs` into `OUT_DIR`.
 fn app_icon() -> egui::IconData {
     const RGBA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/icon.rgba"));
     egui::IconData {
@@ -105,7 +97,6 @@ fn app_icon() -> egui::IconData {
 mod tests {
     use super::*;
 
-    /// The bundled logo decodes to a 256x256 RGBA window icon (4 bytes/pixel).
     #[test]
     fn app_icon_is_256x256_rgba() {
         let icon = app_icon();

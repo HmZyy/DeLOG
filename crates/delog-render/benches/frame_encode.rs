@@ -1,9 +1,4 @@
-//! Frame-encode bench: 32 traces × 1M samples, decimated.
-//!
-//! Measures the per-frame CPU cost of the zoomed-out plot path: for each trace,
-//! compute per-pixel min/max columns (pyramid), upload them, and encode the
-//! draw. Budget: < 3 ms. Skips when no GPU adapter is present (the work is
-//! GPU-buffer bound), so a headless CI runner just compiles it.
+//! Frame-encode bench: 32 traces × 1M samples, decimated. Budget: < 3 ms.
 
 use std::sync::Arc;
 
@@ -27,7 +22,6 @@ const CHUNK: i64 = 65_536;
 const WIDTH: u32 = 1920;
 const HEIGHT: u32 = 1080;
 
-/// A 1M-sample single-field cache (sine ramp), rebased at origin 0.
 fn cache_of(seed: i64) -> TraceCache {
     let schema = Arc::new(
         TopicSchema::new(
@@ -61,8 +55,8 @@ fn cache_of(seed: i64) -> TraceCache {
     TraceCache::build(&snap, field, 0, 0, &MetricsRegistry::new()).unwrap()
 }
 
-/// Isolate the CPU cost of decimating all 32 traces (no GPU), to see whether
-/// the per-frame budget is column-compute bound or GPU-call bound.
+/// Isolates the CPU decimation cost (no GPU) to see whether the per-frame
+/// budget is column-compute bound or GPU-call bound.
 fn bench_decimate_cpu(c: &mut Criterion) {
     let caches: Vec<TraceCache> = (0..TRACES as i64).map(cache_of).collect();
     let (x0, x1) = (0.0_f32, (SAMPLES as f32) * 1e-6);
@@ -91,7 +85,6 @@ fn bench_frame_encode(c: &mut Criterion) {
     let uniforms = UniformRing::new(ctx.clone(), TRACES as u32);
     let mut col_buffers = BufferManager::new(ctx.clone());
 
-    // Full visible window (seconds): 1M samples at 1 µs spacing → 0..1 s.
     let (x0, x1) = (0.0_f32, (SAMPLES as f32) * 1e-6);
 
     c.bench_function("frame_encode_32x1M_decimated", |b| {

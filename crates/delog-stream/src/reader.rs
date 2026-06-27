@@ -1,13 +1,8 @@
 //! Per-link reader thread with owned framing.
 //!
-//! Each configured [`Endpoint`] gets one reader thread. We own the byte-level
-//! loop — buffered transport → the shared [`FrameDecoder`] (v1/v2 sync, CRC,
-//! sequence-gap and resync counting) — and hand decoded *frames* downstream,
-//! rather than using `rust-mavlink`'s blocking `connect()` helpers. That access
-//! to the raw stream is what makes the honest per-link counters possible.
-//! Decoding the frame's *fields* and batching into the ingest pipeline happen
-//! on the consumer side of the frame channel; the link state machine and
-//! auto-reconnect wrap this.
+//! We own the byte-level loop and hand decoded frames downstream rather than
+//! using `rust-mavlink`'s blocking `connect()` helpers, because access to the
+//! raw stream is what makes the honest per-link counters possible.
 
 use std::io::{self, Read};
 use std::net::{TcpStream, UdpSocket};
@@ -21,18 +16,15 @@ use delog_parsers::mavlink::{DecodedFrame, FrameCounters, FrameDecoder};
 
 use crate::Endpoint;
 
-/// Transport read timeout. Bounds how long a reader blocks before it can notice
-/// a stop request, so [`LinkReader::stop`] takes effect within this window.
+/// Bounds how long a reader blocks before it can notice a stop request, so
+/// [`LinkReader::stop`] takes effect within this window.
 const READ_TIMEOUT: Duration = Duration::from_millis(200);
-/// Transport read buffer; comfortably larger than any single MAVLink frame.
+/// Comfortably larger than any single MAVLink frame.
 const READ_BUF: usize = 8192;
 
-/// First reconnect backoff; doubles per consecutive failure.
 pub const RECONNECT_INITIAL: Duration = Duration::from_millis(500);
-/// Reconnect backoff ceiling.
 pub const RECONNECT_CAP: Duration = Duration::from_secs(8);
 
-/// Next backoff after `prev` (`None` = first wait): exponential, capped.
 fn next_backoff(prev: Option<Duration>) -> Duration {
     match prev {
         None => RECONNECT_INITIAL,
@@ -45,9 +37,6 @@ pub const STALE_AFTER: Duration = Duration::from_secs(2);
 /// …and `Lost` after this long.
 pub const LOST_AFTER: Duration = Duration::from_secs(10);
 
-/// Link liveness for the UI indicator. `Connecting` is the state before the
-/// first valid frame; afterwards liveness is a function of the time since the
-/// last frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkState {
     Connecting,
@@ -130,7 +119,6 @@ impl LinkCounters {
     }
 }
 
-/// A point-in-time copy of a link's counters.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LinkStats {
     /// CRC-valid frames received (rx packets).
@@ -198,7 +186,6 @@ impl LinkReader {
         })
     }
 
-    /// A live snapshot of this link's counters.
     pub fn stats(&self) -> LinkStats {
         self.counters.snapshot()
     }

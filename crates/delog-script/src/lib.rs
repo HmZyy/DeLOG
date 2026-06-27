@@ -1,8 +1,5 @@
-//! Optional embedded-Python scripting for derived fields.
-//!
-//! With the `python` feature off (the default) this crate carries only the
-//! feature-independent script *library* (file persistence); the
-//! interpreter engine lives behind `python`.
+//! With the `python` feature off, only the feature-independent script library
+//! (file persistence) is compiled; the interpreter engine lives behind `python`.
 
 pub mod library;
 

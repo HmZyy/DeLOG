@@ -50,8 +50,7 @@ fn combined_load_state(
     let parser_label = parser_label
         .filter(|label| !label.is_empty())
         .map(str::to_owned);
-    // Drop any native label that duplicates the parser phrase so it is not
-    // shown twice (the parser label is rendered on its own below).
+    // Drop native labels that duplicate the parser phrase (rendered separately).
     let native_labels = native_labels
         .into_iter()
         .filter(|label| parser_label.as_deref() != Some(label.as_str()))
@@ -208,35 +207,26 @@ pub struct DelogApp {
     workspace: Workspace,
     playback: Playback,
     view: Option<ViewX>,
-    /// Whether `view` has been fit to real data yet. Stays false while the
-    /// session is empty (the view is a pan/zoomable placeholder), so the
-    /// first loaded log replaces the placeholder by fitting to its range.
+    /// False while the session is empty (view is a pan/zoomable placeholder), so
+    /// the first loaded log replaces the placeholder by fitting to its range.
     view_fitted: bool,
-    /// "Fit all" timeline toggle: when set, every frame pins the X view to the
-    /// full data range (auto-zoom from start to the current/live point), useful
-    /// while streaming. Disengaged by manual pan/zoom or toggling it off.
+    /// When set, every frame pins the X view to the full data range. Disengaged
+    /// by manual pan/zoom.
     fit_view_all: bool,
     hover_mode: delog_core::field_view::SampleMode,
-    /// Shared measurement-marker time when the marker scope is Global;
-    /// `None` when no global marker is placed. Per-pane markers live on the pane.
+    /// Shared measurement-marker time when the marker scope is Global. Per-pane
+    /// markers live on the pane.
     marker_us: Option<i64>,
-    /// Manual markers / bookmarks.
     markers: crate::markers::Markers,
-    /// Whether Alt+hover snaps the playhead to the nearest data point.
     snap_playhead: bool,
     frame: u64,
     last_epoch: u64,
     origin_us: i64,
-    /// Exponentially-smoothed frame rate for the corner FPS indicator
-    /// Only meaningful while frames are continuous; reads `None`
-    /// when the app is idle/event-driven so we don't display a misleading
+    /// `None` when idle/event-driven, so the badge doesn't show a misleading
     /// rate built from a single stale frame.
     fps_ema: Option<f32>,
-    /// Wall-clock instant of the previous frame, used to measure the real
-    /// frame-to-frame gap that feeds `fps_ema`.
     last_frame_at: Option<Instant>,
-    /// Paths picked in the native open dialog, sent from its worker thread
-    /// (the dialog must never block the UI thread).
+    /// Picked on a worker thread — the dialog must never block the UI thread.
     picked_files: mpsc::Receiver<Vec<std::path::PathBuf>>,
     picked_files_tx: mpsc::Sender<Vec<std::path::PathBuf>>,
     imported_layouts: mpsc::Receiver<LayoutImportResult>,
@@ -260,10 +250,8 @@ pub struct DelogApp {
     performance_last_refresh: Option<Instant>,
     browser_query: String,
     browser_selection: browser::Selection,
-    /// Cached browser tree keyed by the snapshot epoch it was built from
-    /// (offset edits also bump the epoch), so `BrowserModel::from_snapshot`
-    /// runs once per data change instead of every frame (it is O(topics×fields)
-    /// plus a full string clone of the tree).
+    /// Keyed by snapshot epoch so the O(topics×fields) tree rebuild runs once
+    /// per data change, not every frame.
     browser_model: Option<(u64, BrowserModel)>,
     offset_dialog: Option<(delog_core::identity::SourceId, i64)>,
     source_metadata_dialog: Option<delog_core::identity::SourceId>,
@@ -281,11 +269,10 @@ pub struct DelogApp {
     last_session_autosave_json: Option<String>,
     show_connection_dialog: bool,
     connection_dialog: ConnectionDialog,
-    /// Configured vehicles for the 3D view; empty until one is added.
     vehicles: Vec<crate::vehicle::VehicleConfig>,
     vehicle_dialog: crate::vehicle_dialog::VehicleDialog,
-    /// Cached render-space trajectories, parallel to `vehicles`, rebuilt on a
-    /// worker when the data epoch or vehicle set changes.
+    /// Parallel to `vehicles`, rebuilt on a worker when the data epoch or
+    /// vehicle set changes.
     vehicle_trajectories: Vec<crate::vehicle::VehicleTrajectory>,
     traj_epoch: u64,
     traj_vehicle_revision: u64,
@@ -310,8 +297,7 @@ impl DelogApp {
         let (exported_profiling_tx, exported_profiling) = mpsc::channel();
         let (csv_export_tx, csv_export_rx) = mpsc::channel();
         let session = Session::new(cc.egui_ctx.clone());
-        // Share the metrics registry so cache build/append metrics land in the
-        // same dock as the rest of the app.
+        // Shared metrics registry so cache metrics land in the same dock.
         let caches = CacheManager::new().with_metrics(std::sync::Arc::clone(session.metrics()));
         Self {
             session,
@@ -402,8 +388,7 @@ impl DelogApp {
         }
     }
 
-    /// Show the native open dialog on a worker thread (never blocking the UI)
-    /// and queue the picked logs for the next frame.
+    /// On a worker thread so the native dialog never blocks the UI.
     fn spawn_open_dialog(&self, ctx: &egui::Context) {
         let tx = self.picked_files_tx.clone();
         let ctx = ctx.clone();
@@ -623,7 +608,6 @@ impl DelogApp {
         self.performance_last_refresh = Some(now);
     }
 
-    /// Shared by the 4 Hz dock refresh and the profiling export.
     fn build_performance_snapshot(
         &self,
         frame: &eframe::Frame,
@@ -1807,7 +1791,7 @@ impl eframe::App for DelogApp {
                         status.endpoint,
                         status.link.rx_frames,
                         status.ingest.rows,
-                        status.recording.as_ref().map(|_| " · rec").unwrap_or("")
+                        recording_status(&status)
                     ));
                     if ui
                         .button("Disconnect")
@@ -2289,6 +2273,17 @@ impl eframe::App for DelogApp {
             .connection_dialog
             .ui(ui.ctx(), &mut self.show_connection_dialog)
         {
+            let recording = match self.connection_dialog.recording_path() {
+                Ok(recording) => recording,
+                Err(err) => {
+                    self.session
+                        .push_diagnostic(delog_core::diagnostics::Diag::error(
+                            "live-recording",
+                            err,
+                        ));
+                    None
+                }
+            };
             self.settings.live_connection = self.connection_dialog.to_settings();
             if let Err(err) = crate::layout::save_app_settings(&self.settings) {
                 self.session
@@ -2297,7 +2292,7 @@ impl eframe::App for DelogApp {
                         err.to_string(),
                     ));
             }
-            if let Err(err) = self.session.start_live(endpoint, None) {
+            if let Err(err) = self.session.start_live(endpoint, recording) {
                 self.session
                     .push_diagnostic(delog_core::diagnostics::Diag::error("live-open", err));
             }
@@ -2322,6 +2317,20 @@ impl eframe::App for DelogApp {
                     ));
             }
         }
+    }
+}
+
+fn recording_status(status: &delog_stream::LiveLinkStatus) -> String {
+    if status.recording.is_none() {
+        return String::new();
+    }
+    if status.ingest.recorder_errors == 0 {
+        format!(" · rec {} frames", status.ingest.recorder_records)
+    } else {
+        format!(
+            " · rec {} frames · {} errors",
+            status.ingest.recorder_records, status.ingest.recorder_errors
+        )
     }
 }
 

@@ -1,8 +1,7 @@
-//! DeLOG parsers: format sniffing and the ULog / ArduPilot BIN / tlog
-//! parsers.
+//! DeLOG parsers.
 //!
-//! Dependency rule: parsers never see GPU or UI. Their only
-//! output is `ParsedBatch` + diagnostics into an `IngestSink`.
+//! Dependency rule: parsers never depend on GPU or UI; their only output is
+//! `ParsedBatch` + diagnostics into an `IngestSink`.
 
 pub mod ardupilot;
 pub mod mavlink;

@@ -1,9 +1,7 @@
 //! Vertex-pulled scatter pipeline.
 //!
-//! Trace samples stay in the `BufferManager`'s interleaved `[x, y]` STORAGE
-//! buffer. This pipeline emits one screen-space quad per sample, with point
-//! size carried in `PlotUniform::view.z` so it can share the uniform ring used
-//! by the line and min/max paths.
+//! One screen-space quad per sample from the `[x, y]` STORAGE buffer; point
+//! size rides in `PlotUniform::view.z` to share the line/min-max uniform ring.
 
 use crate::context::RenderContext;
 use crate::uniforms::UniformRing;
@@ -122,8 +120,7 @@ impl ScatterPipeline {
         pass.set_pipeline(&self.pipeline);
     }
 
-    /// Pipeline must already be bound via [`Self::bind`]. `sample_count` is the
-    /// number of `[x,y]` pairs; each sample emits one six-vertex quad.
+    /// Pipeline must already be bound via [`Self::bind`].
     pub fn draw_trace(
         &self,
         pass: &mut wgpu::RenderPass<'_>,

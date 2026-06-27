@@ -1,19 +1,13 @@
 //! MAVLink `.tlog` parser.
 //!
-//! A tlog is a flat sequence of records, each an 8-byte **big-endian Unix-µs**
+//! A tlog is a flat sequence of records, each an 8-byte big-endian Unix-µs
 //! capture timestamp followed by a raw MAVLink v1/v2 frame. The envelope is the
-//! only framing; a frame's length lives in its own MAVLink header. This parser
-//! reuses the shared decoder ([`crate::mavlink::frame_len`] /
-//! [`crate::mavlink::decode_frame`]) and field extractor
-//! ([`crate::mavlink::extract_fields`]) — exactly the code path live streaming
-//! uses — so the tlog and the wire share one set of bugs and recordings
-//! round-trip by construction.
+//! only framing; a frame's length lives in its own MAVLink header.
 //!
 //! One topic per MAVLink message type, columns are the message's flattened
 //! fields, and the envelope timestamp drives the time axis. Streams are keyed by
 //! `(sysid, compid, message)`; the first stream for a message keeps the bare
-//! name and any later `(sysid, compid)` emitting the same message gets a
-//! `message[N]` instance suffix.
+//! name and any later `(sysid, compid)` emitting it gets a `message[N]` suffix.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufReader, Read};
@@ -38,14 +32,12 @@ use crate::parser::{LogParser, ParseError, ReadSeek, Sniff};
 
 const V1_MAGIC: u8 = 0xFE;
 const V2_MAGIC: u8 = 0xFD;
-/// Capture-timestamp envelope width.
 const TS_LEN: usize = 8;
 /// Bytes of header needed to compute a frame's length: v2 reads the incompat
 /// flag at index 2, v1 only the length at index 1.
 const V2_HEADER_PEEK: usize = 3;
 const V1_HEADER_PEEK: usize = 2;
 const BATCH_ROWS: usize = 8192;
-/// Rate-limit for repetitive skip diagnostics.
 const SKIP_DIAG_INTERVAL: u64 = 1024;
 
 #[derive(Debug, Default)]
@@ -69,8 +61,6 @@ impl LogParser for TlogParser {
                 if decode_frame(&frame[..len]).is_some() {
                     Sniff::new(96, "µs envelope + CRC-valid MAVLink frame")
                 } else {
-                    // Magic at the envelope offset but the CRC fails — too weak
-                    // to claim on its own; let the picker decide.
                     Sniff::new(40, "µs-envelope magic without a CRC-valid frame")
                 }
             }
@@ -89,9 +79,9 @@ impl LogParser for TlogParser {
     }
 }
 
-/// A per-message-type accumulator. MAVLink messages of a given type always
-/// extract the same fields in the same order, so the schema is built once on
-/// first sight and rows append by position thereafter.
+/// A per-message-type accumulator. Messages of a given type always extract the
+/// same fields in the same order, so the schema is built once and rows append
+/// by position thereafter.
 struct Topic {
     schema: Arc<TopicSchema>,
     ts: Int64Builder,
@@ -115,8 +105,8 @@ struct Decoder<'a> {
     ctl: &'a ParseCtl,
     source: SourceId,
     streams: HashMap<StreamKey, Topic>,
-    /// Distinct `(sysid, compid)` streams already registered per message name,
-    /// used to assign instance suffixes without renaming earlier topics.
+    /// Per message name, used to assign instance suffixes without renaming
+    /// earlier topics.
     instances: HashMap<&'static str, u32>,
     unknown_seen: HashSet<u32>,
     crc_failures: u64,
@@ -169,9 +159,8 @@ impl<'a> Decoder<'a> {
             }
             let magic = r.peek(1)[0];
             if magic != V1_MAGIC && magic != V2_MAGIC {
-                // The frame length is the only delimiter; a non-magic byte here
-                // means envelope sync is lost and cannot be recovered. Keep the
-                // data parsed so far: torn tails are the logs you need.
+                // Frame length is the only delimiter, so a non-magic byte here
+                // means envelope sync is unrecoverable; stop but keep prior data.
                 self.diag(
                     Diag::warning(
                         "tlog-desync",
@@ -212,7 +201,7 @@ impl<'a> Decoder<'a> {
             }
 
             // A bad CRC trusts the declared length and skips exactly one frame,
-            // so the envelope stays in sync for the next record.
+            // keeping the envelope in sync for the next record.
             match decode_frame(r.peek(len)) {
                 None => self.note_crc_failure(r.offset()),
                 Some(decoded) => match decoded.message.as_ref() {
@@ -429,7 +418,7 @@ fn scalar_dtype(scalar: &Scalar) -> DataType {
 }
 
 /// A typed Arrow column builder. `append` returns `false` on a dtype mismatch
-/// (a malformed stream changing field types mid-log); the caller appends a null.
+/// (a stream changing field types mid-log); the caller then appends a null.
 enum Col {
     U8(UInt8Builder),
     I8(Int8Builder),
@@ -512,9 +501,9 @@ impl Col {
     }
 }
 
-/// A minimal buffered reader with byte-offset tracking and look-ahead. The tlog
-/// envelope has no record length, so framing needs to peek a frame's header
-/// before committing to consume it.
+/// A buffered reader with byte-offset tracking and look-ahead. The tlog envelope
+/// has no record length, so framing must peek a frame's header before committing
+/// to consume it.
 struct ByteReader {
     inner: Box<dyn Read>,
     buf: Vec<u8>,
@@ -648,7 +637,6 @@ mod tests {
         raw.raw_bytes().to_vec()
     }
 
-    /// Wrap a frame in the 8-byte big-endian µs capture-time envelope.
     fn record(ts_us: u64, frame: &[u8]) -> Vec<u8> {
         let mut out = ts_us.to_be_bytes().to_vec();
         out.extend_from_slice(frame);
@@ -685,12 +673,9 @@ mod tests {
     /// third unsuffixed message — covers v1+v2 mixing and instance suffixing.
     fn golden_tlog() -> Vec<u8> {
         let mut buf = Vec::new();
-        // ATTITUDE from the autopilot (1,1), v2.
         buf.extend(record(1_000_000, &v2(1, 1, 0, &attitude(1.0))));
-        // HEARTBEAT from the GCS (255,190), v1 — a different message type.
         buf.extend(record(1_050_000, &v1(255, 190, 0, &heartbeat())));
         buf.extend(record(1_100_000, &v2(1, 1, 1, &attitude(2.0))));
-        // GPS_RAW_INT from a second component (1,2) — same message later reused.
         buf.extend(record(
             1_150_000,
             &v1(1, 1, 2, &gps_raw_int(473_000_000, 85_000_000)),
@@ -712,7 +697,6 @@ mod tests {
     fn sniff_scores_a_crc_valid_envelope() {
         let buf = record(1_000_000, &v2(1, 1, 0, &attitude(1.0)));
         assert_eq!(TlogParser.sniff(&buf).score, 96);
-        // Corrupting the CRC drops it below the confidence threshold.
         let mut bad = buf.clone();
         *bad.last_mut().unwrap() ^= 0xFF;
         assert!(TlogParser.sniff(&bad).score < SNIFF_CONFIDENCE);
@@ -723,7 +707,6 @@ mod tests {
     fn golden_topics_rows_and_values() {
         let (summary, sink) = parse(golden_tlog());
 
-        // ATTITUDE, HEARTBEAT, GPS_RAW_INT, GPS_RAW_INT[1].
         assert_eq!(summary.topic_count, 4);
         assert_eq!(summary.row_count, 6);
         assert_eq!(summary.diagnostics, 0);
@@ -740,8 +723,8 @@ mod tests {
         assert_eq!(att.timestamps.values(), &[1_000_000, 1_100_000, 1_200_000]);
         assert_eq!(f32s(att, "roll"), vec![1.0, 2.0, 3.0]);
         assert_eq!(f32s(att, "yaw"), vec![-0.25, -0.25, -0.25]);
-        // The envelope timestamp drives the axis; the message's own boot-time
-        // field stays an ordinary column.
+        // Envelope timestamp drives the axis; the message's own boot-time field
+        // stays an ordinary column.
         let boot = col(att, "time_boot_ms")
             .as_any()
             .downcast_ref::<UInt32Array>()
@@ -761,7 +744,6 @@ mod tests {
             .unwrap();
         assert_eq!(sats.values(), &[9]);
 
-        // Second compid for the same message → instance-suffixed topic.
         let gps1 = batch("GPS_RAW_INT[1]");
         assert_eq!(gps1.timestamps.values(), &[1_250_000]);
 
@@ -777,7 +759,7 @@ mod tests {
     #[test]
     fn corrupt_crc_frame_is_skipped_and_the_envelope_stays_synced() {
         let mut bad = v2(1, 1, 0, &attitude(9.0));
-        *bad.last_mut().unwrap() ^= 0xFF; // break the CRC, keep the length
+        *bad.last_mut().unwrap() ^= 0xFF;
         let mut buf = record(1_000_000, &bad);
         buf.extend(record(1_100_000, &v2(1, 1, 1, &attitude(2.0))));
 
@@ -798,14 +780,13 @@ mod tests {
 
     #[test]
     fn unknown_message_id_is_diagnosed_once_and_skipped() {
-        // Hand-craft a v2 frame with an unallocated message id but a valid CRC.
         let frame = unknown_message_frame();
         let mut buf = record(1_000_000, &frame);
         buf.extend(record(1_100_000, &frame)); // second occurrence: no new diag
         buf.extend(record(1_200_000, &v2(1, 1, 0, &attitude(1.0))));
 
         let (summary, sink) = parse(buf);
-        assert_eq!(summary.row_count, 1); // only the ATTITUDE row
+        assert_eq!(summary.row_count, 1);
         assert_eq!(summary.topic_count, 1);
         let unknown = sink
             .diags
@@ -815,8 +796,8 @@ mod tests {
         assert_eq!(unknown, 1);
     }
 
-    /// A v2 frame carrying message id `0x00FFFF` (not in the dialect) with a
-    /// correctly computed CRC, so it passes framing but fails to decode.
+    /// A v2 frame with an unknown message id `0x00FFFF` but a valid CRC, so it
+    /// passes framing yet fails to decode.
     fn unknown_message_frame() -> Vec<u8> {
         let payload = [0u8; 1];
         let mut frame = vec![
@@ -841,7 +822,7 @@ mod tests {
     fn truncated_tail_keeps_prior_data_and_diagnoses() {
         let mut buf = record(1_000_000, &v2(1, 1, 0, &attitude(1.0)));
         let full = record(1_100_000, &v2(1, 1, 1, &attitude(2.0)));
-        buf.extend_from_slice(&full[..full.len() - 3]); // tear the last frame
+        buf.extend_from_slice(&full[..full.len() - 3]);
 
         let (summary, sink) = parse(buf);
         assert_eq!(summary.row_count, 1);
@@ -851,8 +832,8 @@ mod tests {
     #[test]
     fn desync_after_timestamp_stops_cleanly() {
         let mut buf = record(1_000_000, &v2(1, 1, 0, &attitude(1.0)));
-        buf.extend(0u64.to_be_bytes()); // a timestamp...
-        buf.extend([0x12, 0x34, 0x56]); // ...followed by non-frame bytes
+        buf.extend(0u64.to_be_bytes());
+        buf.extend([0x12, 0x34, 0x56]); // non-frame bytes after a timestamp
 
         let (summary, sink) = parse(buf);
         assert_eq!(summary.row_count, 1);

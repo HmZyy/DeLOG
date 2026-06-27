@@ -1,14 +1,12 @@
 //! Data browser tree: Source → Topic → Field.
 //!
-//! A read-only tree with dtype/count/unit chips, plus fuzzy search, natural
-//! sort, highlighting, drag and context menus. The tree model is built purely
-//! from a [`StoreSnapshot`] so it is testable without a GUI; [`ui`] renders it.
+//! The tree model is built purely from a [`StoreSnapshot`] so it is testable
+//! without a GUI; [`ui`] renders it.
 
 use delog_core::identity::{FieldId, SourceId, TopicId};
 use delog_core::snapshot::StoreSnapshot;
 use delog_core::time::TimeRange;
 
-/// A flattened, render-ready view of one snapshot's live sources.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct BrowserModel {
     pub sources: Vec<SourceNode>,
@@ -19,9 +17,8 @@ pub struct SourceNode {
     pub id: SourceId,
     pub label: String,
     pub rows: u64,
-    /// Effective time range (source offset applied).
+    /// Source offset already applied.
     pub range: Option<TimeRange>,
-    /// Per-source time offset.
     pub offset_us: i64,
     pub topics: Vec<TopicNode>,
 }
@@ -45,8 +42,6 @@ pub struct FieldNode {
 }
 
 impl BrowserModel {
-    /// Build the tree from a snapshot, skipping tombstoned entities and topics
-    /// that carry no data yet.
     pub fn from_snapshot(snapshot: &StoreSnapshot) -> Self {
         let mut sources = Vec::new();
         for source in snapshot.sources.iter() {
@@ -120,10 +115,8 @@ impl BrowserModel {
         self.sources.is_empty()
     }
 
-    /// Filter the tree by a search query over full `source/topic.field` paths.
-    /// A field is kept when the query matches its full path; a
-    /// match at topic or source level keeps the whole branch. Empty branches
-    /// are pruned; a blank query is the identity.
+    /// Filter over full `source/topic.field` paths: a match at topic or source
+    /// level keeps the whole branch, empty branches are pruned, blank is identity.
     pub fn filtered(&self, query: &str) -> Self {
         if query.trim().is_empty() {
             return self.clone();
@@ -165,18 +158,13 @@ impl BrowserModel {
     }
 }
 
-/// How a click modifies the selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelectMod {
-    /// Plain click: the field becomes the whole selection.
     Replace,
-    /// Ctrl-click: toggle the field in/out.
     Toggle,
-    /// Shift-click: select the visible range from the anchor to the field.
     Range,
 }
 
-/// Multi-select state for the browser tree. Pure data —
 /// `visible` is the tree's current field order so ranges and payloads follow
 /// what the user sees.
 #[derive(Debug, Default)]
@@ -218,9 +206,8 @@ impl Selection {
         }
     }
 
-    /// Start a drag from `field`, updating selection the same way file
-    /// browsers do: dragging an already selected field preserves a multi-field
-    /// payload, while dragging an unselected field makes it the selection.
+    /// Dragging an already-selected field preserves the multi-field payload;
+    /// dragging an unselected field makes it the selection.
     pub fn start_drag(&mut self, field: FieldId, modifier: SelectMod, visible: &[FieldId]) {
         if modifier == SelectMod::Replace && self.selected.contains(&field) {
             return;
@@ -232,7 +219,6 @@ impl Selection {
         self.selected.contains(&field)
     }
 
-    /// The selection in visible (tree) order.
     pub fn ordered(&self, visible: &[FieldId]) -> Vec<FieldId> {
         visible
             .iter()
@@ -241,8 +227,6 @@ impl Selection {
             .collect()
     }
 
-    /// The `Vec<FieldId>` drag payload: the whole selection when the
-    /// dragged field is part of it, otherwise just the dragged field.
     pub fn drag_payload(&self, dragged: FieldId, visible: &[FieldId]) -> Vec<FieldId> {
         if self.selected.contains(&dragged) {
             self.ordered(visible)
@@ -252,7 +236,7 @@ impl Selection {
     }
 }
 
-/// Natural order: digit runs compare numerically, text runs case-insensitively
+/// Digit runs compare numerically, text runs case-insensitively
 /// (`GPS[2]` before `GPS[10]`).
 fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     use std::cmp::Ordering;
@@ -286,7 +270,6 @@ fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     }
 }
 
-/// Consume a digit run as a number (saturating well past any real instance id).
 fn take_number(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> u128 {
     let mut value: u128 = 0;
     while let Some(c) = chars.peek().copied() {
@@ -301,8 +284,8 @@ fn take_number(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> u128 {
     value
 }
 
-/// Whitespace-separated query tokens each match the path case-insensitively
-/// (`gps hacc` matches `GPS[0].HAcc`). Blank queries match everything.
+/// Every whitespace-separated token must match the path case-insensitively;
+/// a blank query matches everything.
 pub(crate) fn matches_query(query: &str, path: &str) -> bool {
     let path = path.to_lowercase();
     query
@@ -312,28 +295,20 @@ pub(crate) fn matches_query(query: &str, path: &str) -> bool {
 
 #[derive(Debug, Default)]
 pub struct BrowserResponse {
-    /// Requested per-source offset change, if any.
     pub offset_change: Option<(SourceId, i64)>,
-    /// The user right-clicked a source and asked to remove it.
     pub remove_source: Option<SourceId>,
-    /// The user requested source metadata/params/link information.
     pub inspect_source: Option<SourceId>,
-    /// The user requested global stats for a field.
     pub inspect_field_stats: Option<FieldId>,
-    /// The user asked to generate markers from a discrete field's values.
     pub generate_markers: Option<FieldId>,
-    /// The user asked to collapse the data browser panel.
     pub collapse_requested: bool,
 }
 
-/// A context-menu action from a field row.
 enum FieldRowAction {
     InspectStats(FieldId),
     GenerateMarkers(FieldId),
 }
 
-/// Whether a field's dtype label is discrete enough to generate markers from
-/// its distinct values (int/uint/bool/string; floats excluded).
+/// Discrete dtypes markers can be generated from (floats excluded).
 fn is_discrete_dtype(label: &str) -> bool {
     matches!(
         label,
@@ -407,7 +382,6 @@ pub fn ui(
         return response;
     }
 
-    // Visible field order, for shift-range selection and drag payloads.
     let visible: Vec<FieldId> = model
         .sources
         .iter()
@@ -443,8 +417,6 @@ pub fn ui(
                             }
                         });
                         for topic in &source.topics {
-                            // While filtering, surviving topics open so the
-                            // matched fields are visible immediately.
                             egui::CollapsingHeader::new(format!(
                                 "{}  ({})",
                                 topic.name, topic.rows
@@ -503,8 +475,6 @@ pub fn ui(
     response
 }
 
-/// Inline drag-us offset on the source row: dragging
-/// shifts the source in ~1 ms steps; the clock button opens the exact-us dialog.
 fn offset_widget(
     ui: &mut egui::Ui,
     source: &SourceNode,
@@ -535,8 +505,6 @@ fn offset_widget(
     change
 }
 
-/// Exact-µs offset dialog. The draft lives in app state; Apply emits
-/// the change and the window's close button discards it.
 fn offset_dialog_window(
     ui: &egui::Ui,
     model: &BrowserModel,
@@ -584,9 +552,6 @@ fn field_row(
     visible: &[FieldId],
 ) -> Option<FieldRowAction> {
     let mut action = None;
-    // The row is a drag source carrying `Vec<FieldId>` — the multi-selection
-    // when the dragged row is part of it; plot panes and tile
-    // edges are the drop zones.
     let id = egui::Id::new(("field", field.id.0));
     let dragging_this_field = ui.ctx().is_being_dragged(id);
     if dragging_this_field {
@@ -670,10 +635,8 @@ fn current_select_modifier(ui: &egui::Ui) -> SelectMod {
     }
 }
 
-/// `Ui::dnd_drag_source`, but the overlay senses clicks as well as drags so
-/// the whole row both selects (release without movement) and drags. egui's
-/// built-in drag source senses drag only, which fights any clickable widget
-/// rendered inside it.
+/// Like `Ui::dnd_drag_source`, but senses clicks too: egui's built-in drag
+/// source senses drag only, which fights any clickable widget inside it.
 fn drag_source_with_click<Payload: std::any::Any + Send + Sync>(
     ui: &mut egui::Ui,
     id: egui::Id,
@@ -683,7 +646,6 @@ fn drag_source_with_click<Payload: std::any::Any + Send + Sync>(
     if ui.ctx().is_being_dragged(id) {
         egui::DragAndDrop::set_payload(ui.ctx(), payload);
 
-        // Paint the row to a floating layer that follows the pointer.
         let layer_id = egui::LayerId::new(egui::Order::Tooltip, id);
         let response = ui
             .scope_builder(egui::UiBuilder::new().layer_id(layer_id), add_contents)
@@ -755,7 +717,6 @@ mod tests {
         let src = &model.sources[0];
         assert_eq!(src.label, "flight_21");
         assert_eq!(src.rows, 3);
-        // Effective range: raw 100..300 shifted by the -250 µs source offset.
         assert_eq!(src.offset_us, -250);
         assert_eq!(src.range, TimeRange::new(-150, 50));
 
@@ -764,7 +725,6 @@ mod tests {
         assert_eq!(gps.name, "GPS");
         assert_eq!(gps.rows, 3);
 
-        // Fields sort naturally: Alt before Lat.
         assert_eq!(gps.fields.len(), 2);
         assert_eq!(gps.fields[0].name, "Alt");
         assert_eq!(gps.fields[0].dtype, "f64");
@@ -811,7 +771,6 @@ mod tests {
             sel.ordered(&visible),
             vec![FieldId(2), FieldId(3), FieldId(4)]
         );
-        // Range works upward from the anchor too.
         sel.click(FieldId(1), SelectMod::Range, &visible);
         assert_eq!(sel.ordered(&visible), vec![FieldId(1), FieldId(2)]);
     }
@@ -822,12 +781,10 @@ mod tests {
         let mut sel = Selection::default();
         sel.click(FieldId(1), SelectMod::Toggle, &visible);
         sel.click(FieldId(3), SelectMod::Toggle, &visible);
-        // Dragging a selected field carries the whole selection.
         assert_eq!(
             sel.drag_payload(FieldId(3), &visible),
             vec![FieldId(1), FieldId(3)]
         );
-        // Dragging an unselected field carries just that field.
         assert_eq!(sel.drag_payload(FieldId(2), &visible), vec![FieldId(2)]);
     }
 
@@ -862,15 +819,11 @@ mod tests {
     #[test]
     fn natural_cmp_orders_embedded_numbers_numerically() {
         use std::cmp::Ordering;
-        // GPS[2] before GPS[10].
         assert_eq!(natural_cmp("GPS[2]", "GPS[10]"), Ordering::Less);
         assert_eq!(natural_cmp("GPS[10]", "GPS[2]"), Ordering::Greater);
         assert_eq!(natural_cmp("GPS[2]", "GPS[2]"), Ordering::Equal);
-        // Case-insensitive text runs.
         assert_eq!(natural_cmp("baro", "GPS"), Ordering::Less);
-        // Plain text still sorts lexically.
         assert_eq!(natural_cmp("AccX", "AccY"), Ordering::Less);
-        // Numbers with different digit counts.
         assert_eq!(natural_cmp("M9", "M10"), Ordering::Less);
     }
 
@@ -878,7 +831,6 @@ mod tests {
     fn model_topics_and_fields_sort_naturally() {
         let mut identity = IdentityRegistry::new();
         let source = identity.add_source("flight");
-        // Insert out of order: GPS[10] registered before GPS[2].
         let gps10 = identity.add_topic(source, "GPS[10]").unwrap();
         let gps2 = identity.add_topic(source, "GPS[2]").unwrap();
         identity.add_field(gps10, "Y2").unwrap();
@@ -943,14 +895,11 @@ mod tests {
 
     #[test]
     fn query_tokens_match_full_paths_case_insensitively() {
-        // "gps hacc" matches GPS[0].HAcc.
         assert!(matches_query("gps hacc", "flight_21/GPS[0].HAcc"));
         assert!(matches_query("GPS", "flight_21/GPS[0].HAcc"));
         assert!(matches_query("flight hacc", "flight_21/GPS[0].HAcc"));
         assert!(!matches_query("baro", "flight_21/GPS[0].HAcc"));
-        // Every token must match somewhere in the path.
         assert!(!matches_query("gps baro", "flight_21/GPS[0].HAcc"));
-        // Blank queries match everything.
         assert!(matches_query("", "anything"));
         assert!(matches_query("   ", "anything"));
     }
@@ -976,14 +925,11 @@ mod tests {
             .collect();
         assert_eq!(fields, vec!["Lat"]);
 
-        // A topic-level match keeps all its fields.
         let gps = model.filtered("gps");
         assert_eq!(gps.sources[0].topics[0].fields.len(), 2);
 
-        // No match prunes everything.
         assert!(model.filtered("nonexistent").is_empty());
 
-        // Blank query is the identity.
         assert_eq!(model.filtered(""), model);
     }
 }

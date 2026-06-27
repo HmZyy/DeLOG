@@ -1,6 +1,5 @@
-//! Per-trace f32 render cache — the One Copy: exactly one transform copy per
-//! plotted field, an interleaved `[x0,y0,…]` buffer (8 B/sample). NaN stays NaN
-//! so the shader breaks the segment (gaps render as gaps).
+//! Per-trace f32 render cache: one interleaved `[x0,y0,…]` buffer per field.
+//! NaN stays NaN so the shader breaks the segment (gaps render as gaps).
 
 use arrow::array::{
     Array, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
@@ -15,25 +14,20 @@ use delog_core::store::TopicStore;
 
 use crate::pyramid::{BRANCH, MinMax, MinMaxPyramid};
 
-/// The f32 render cache for one field.
 #[derive(Debug)]
 pub struct TraceCache {
-    /// Interleaved `[x0,y0,x1,y1,…]`; one buffer, one GPU upload span.
+    /// Interleaved `[x0,y0,x1,y1,…]`.
     pub xy: Vec<f32>,
     /// Time rebase origin: `x = (t_eff - origin_us) * 1e-6` as f32.
     pub origin_us: i64,
-    /// Rows already transformed — the high-water mark vs the canonical store.
     pub built_rows: u64,
-    /// Min/max index over the y-channel of `xy` (stride 2, offset 1).
     pub pyramid: MinMaxPyramid,
-    /// Frame of last use, for LRU eviction.
     pub last_used_frame: u64,
-    /// Source offset baked into the x values; a snapshot with a different
-    /// offset makes this cache stale (rebuild, not append).
+    /// Source offset baked into the x values; a different offset makes this
+    /// cache stale (rebuild, not append).
     pub offset_us: i64,
 }
 
-/// What a field resolves to in a snapshot.
 struct Resolved<'a> {
     store: &'a TopicStore,
     col_index: usize,
@@ -60,8 +54,6 @@ fn resolve(snapshot: &StoreSnapshot, field: FieldId) -> Option<Resolved<'_>> {
 }
 
 impl TraceCache {
-    /// Build the cache for `field` against `origin_us`, off the UI thread.
-    /// Returns `None` if the field has no data in this snapshot.
     pub fn build(
         snapshot: &StoreSnapshot,
         field: FieldId,
@@ -96,16 +88,12 @@ impl TraceCache {
         })
     }
 
-    /// Whether `snapshot` carries a different source offset than this cache
-    /// was built with — its x values are stale and need a rebuild.
     pub fn offset_changed(&self, snapshot: &StoreSnapshot, field: FieldId) -> bool {
         resolve(snapshot, field).is_some_and(|r| r.offset_us != self.offset_us)
     }
 
-    /// Append rows that arrived since the last build/append. Returns
-    /// `true` if any rows were added. Uses the cache's fixed `origin_us`; a
-    /// changed global origin is a rebuild, not an append (handled by the
-    /// manager).
+    /// Append rows that arrived since the last build/append; returns whether
+    /// any were added. A changed global origin is a rebuild, not an append.
     pub fn append(
         &mut self,
         snapshot: &StoreSnapshot,
@@ -123,7 +111,6 @@ impl TraceCache {
         for chunk in r.store.chunks.iter() {
             let len = chunk.len() as u64;
             if consumed + len > self.built_rows {
-                // Start row within this chunk (0 once we are past built_rows).
                 let start = self.built_rows.saturating_sub(consumed) as usize;
                 append_chunk(
                     &mut self.xy,
@@ -158,8 +145,7 @@ impl TraceCache {
         self.xy[2 * i]
     }
 
-    /// Sample index range `[a, b)` whose x falls in `[x0, x1]` (seconds). The x
-    /// channel is sorted, so this is two binary searches.
+    /// Sample index range `[a, b)` whose x falls in `[x0, x1]` (seconds).
     pub fn index_range(&self, x0: f32, x1: f32) -> (usize, usize) {
         let n = self.samples();
         let a = self.partition_point(0, n, |x| x < x0);
@@ -167,8 +153,8 @@ impl TraceCache {
         (a, b)
     }
 
-    /// First index in `[lo, hi)` whose x fails `pred` (the x channel is sorted,
-    /// so `pred` is monotone-true then monotone-false).
+    /// First index in `[lo, hi)` whose x fails `pred`; relies on the x channel
+    /// being sorted so `pred` is monotone-true-then-false.
     fn partition_point(&self, mut lo: usize, mut hi: usize, pred: impl Fn(f32) -> bool) -> usize {
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
@@ -181,9 +167,8 @@ impl TraceCache {
         lo
     }
 
-    /// Min/max y over the visible x window `[x0, x1]` (seconds) — the
-    /// AutoVisible y range. One sample of context is included on each
-    /// side so a line entering/leaving the window is bounded.
+    /// Min/max y over the visible x window `[x0, x1]` (seconds). One sample of
+    /// context is included each side so a line entering/leaving is bounded.
     pub fn y_range(&self, x0: f32, x1: f32) -> MinMax {
         let (a, b) = self.index_range(x0, x1);
         let a = a.saturating_sub(1);
@@ -191,16 +176,10 @@ impl TraceCache {
         self.pyramid.query(&self.xy, a, b)
     }
 
-    /// Per-pixel-column `[x, min, max]` triples over `[x0, x1)` split into
-    /// `width` equal **time** columns — the decimated draw input.
-    /// Columns are half-open `[x0 + c·s, x0 + (c+1)·s)`; an empty column reports
-    /// `NaN` (the shader skips it). Splitting by time, not index, keeps columns
-    /// aligned to screen pixels even for irregularly-sampled data.
-    ///
-    /// Wide columns (≥ one pyramid node each) walk the compact L0 array —
-    /// O(visible_nodes), 64× fewer items than the samples — binning each node by
-    /// its x range; narrow columns sweep the (necessarily small) visible sample
-    /// range exactly. Both are sequential and cache-friendly.
+    /// Per-column `[x, min, max]` triples over `[x0, x1)` split into `width`
+    /// equal half-open time columns; an empty column reports `NaN` (skipped by
+    /// the shader). Splitting by time, not index, keeps columns aligned to
+    /// screen pixels even for irregularly-sampled data.
     pub fn minmax_columns(&self, x0: f32, x1: f32, width: usize, bridge: bool) -> Vec<f32> {
         if width == 0 || x1 <= x0 {
             return Vec::new();
@@ -229,7 +208,6 @@ impl TraceCache {
         out
     }
 
-    /// Exact: sweep samples `[a, b)`, bucketing each by half-open column.
     fn sweep_columns(
         &self,
         x0: f32,
@@ -256,9 +234,9 @@ impl TraceCache {
         }
     }
 
-    /// Fast: distribute each L0 node overlapping `[a, b)` to the column(s) its x
-    /// range covers. Conservative at column/edge boundaries (never hides a
-    /// transient, may smear it one column — fine for decimation).
+    /// Distribute each L0 node overlapping `[a, b)` to the column(s) its x range
+    /// covers. Conservative at boundaries: never hides a transient, may smear it
+    /// one column.
     fn l0_columns(&self, x0: f32, x1: f32, a: usize, b: usize, mins: &mut [f32], maxs: &mut [f32]) {
         let width = mins.len();
         let inv = 1.0 / (x1 - x0);
@@ -294,7 +272,6 @@ impl TraceCache {
         }
     }
 
-    /// CPU bytes held (xy buffer + pyramid), for `MemBreakdown`.
     pub fn bytes(&self) -> u64 {
         (self.xy.capacity() * std::mem::size_of::<f32>()) as u64 + self.pyramid.bytes()
     }
@@ -304,13 +281,9 @@ impl TraceCache {
     }
 }
 
-/// Bridge gaps between adjacent decimated columns. Per-column min/max
-/// bars are drawn disjoint by the shader, so a smooth, moderately-sloped
-/// signal — where each column's own span is smaller than the value change to
-/// its neighbour — reads as a broken/dashed line. Stretch each finite column's
-/// span just enough to meet its right neighbour's, so consecutive bars always
-/// touch. This only ever *grows* a span (a transient is never hidden),
-/// and `NaN` (empty) columns stay gaps so real data gaps are preserved.
+/// Stretch each finite column's span to meet its right neighbour's so the
+/// shader's disjoint per-column bars touch (else a sloped signal reads dashed).
+/// Only ever grows a span (no transient hidden); `NaN` columns stay gaps.
 fn bridge_columns(mins: &mut [f32], maxs: &mut [f32]) {
     for c in 0..mins.len().saturating_sub(1) {
         let (cur_min, cur_max) = (mins[c], maxs[c]);
@@ -319,23 +292,18 @@ fn bridge_columns(mins: &mut [f32], maxs: &mut [f32]) {
             continue;
         }
         if cur_max < nxt_min {
-            // The next column sits entirely above: raise this column to meet it.
             maxs[c] = nxt_min;
         } else if nxt_max < cur_min {
-            // The next column sits entirely below: lower this column to meet it.
             mins[c] = nxt_max;
         }
     }
 }
 
-/// Column index for `x` in a `width`-column window starting at `x0` with
-/// inverse span `inv`, clamped to `[0, width)`.
 fn col_index(x: f32, x0: f32, inv: f32, width: usize) -> usize {
     let c = ((x - x0) * inv * width as f32) as i64;
     c.clamp(0, width as i64 - 1) as usize
 }
 
-/// Transform `chunk[start..]` of one column into interleaved x,y f32 pairs.
 fn append_chunk(
     xy: &mut Vec<f32>,
     t: &Int64Array,
@@ -368,7 +336,6 @@ enum ColReader<'a> {
     F32(&'a Float32Array),
     F64(&'a Float64Array),
     Bool(&'a BooleanArray),
-    /// Strings/blobs are not plottable → all NaN.
     NonNumeric,
 }
 
@@ -438,7 +405,6 @@ mod tests {
 
     use super::*;
 
-    /// One source/topic with an Int32 field `Alt` (cm → ×0.01) over `times`.
     fn snapshot_with(
         times: Vec<i64>,
         alts: Vec<Option<i32>>,
@@ -466,23 +432,19 @@ mod tests {
 
     #[test]
     fn build_applies_multiplier_offset_and_rebase() {
-        // raw cm: 100, 200, 300 → metres 1.0, 2.0, 3.0. offset +5_000_000 µs.
         let (snap, field) = snapshot_with(
             vec![1_000_000, 2_000_000, 3_000_000],
             vec![Some(100), Some(200), Some(300)],
             5_000_000,
         );
-        // origin = first effective time = 1_000_000 + 5_000_000.
         let origin = 6_000_000;
         let cache = TraceCache::build(&snap, field, origin, 0, &MetricsRegistry::new()).unwrap();
 
         assert_eq!(cache.samples(), 3);
         assert_eq!(cache.built_rows, 3);
-        // x = (t + offset - origin) * 1e-6 seconds.
         assert_eq!(cache.xy[0], 0.0);
         assert_eq!(cache.xy[2], 1.0);
         assert_eq!(cache.xy[4], 2.0);
-        // y = raw * 0.01.
         assert_eq!(cache.xy[1], 1.0);
         assert_eq!(cache.xy[3], 2.0);
         assert_eq!(cache.xy[5], 3.0);
@@ -499,7 +461,6 @@ mod tests {
         assert_eq!(cache.xy[1], 1.0);
         assert!(cache.xy[3].is_nan());
         assert_eq!(cache.xy[5], 3.0);
-        // Pyramid ignores the NaN.
         let q = cache.pyramid.query(&cache.xy, 0, 3);
         assert_eq!(q.min, 1.0);
         assert_eq!(q.max, 3.0);
@@ -507,7 +468,6 @@ mod tests {
 
     #[test]
     fn index_range_and_y_range_target_the_visible_window() {
-        // t = 0,1,2,3,4 s (µs), raw alt = 0,100,200,300,400 cm → 0..4 m.
         let (snap, field) = snapshot_with(
             vec![0, 1_000_000, 2_000_000, 3_000_000, 4_000_000],
             vec![Some(0), Some(100), Some(200), Some(300), Some(400)],
@@ -515,17 +475,13 @@ mod tests {
         );
         let cache = TraceCache::build(&snap, field, 0, 0, &MetricsRegistry::new()).unwrap();
 
-        // Window [1.0, 3.0] s covers samples at indices 1,2,3.
         let (a, b) = cache.index_range(1.0, 3.0);
         assert_eq!((a, b), (1, 4));
 
-        // y over that window, with one sample of context each side, spans the
-        // full set here → 0..4.
         let mm = cache.y_range(1.0, 3.0);
         assert_eq!(mm.min, 0.0);
         assert_eq!(mm.max, 4.0);
 
-        // A tight inner window still bounds correctly.
         let mm = cache.y_range(2.0, 2.0);
         assert!(mm.is_finite());
     }
@@ -539,21 +495,14 @@ mod tests {
         );
         let cache = TraceCache::build(&snap, field, 0, 0, &MetricsRegistry::new()).unwrap();
 
-        // 4 columns over [0,4]s → 1-second half-open columns [c, c+1).
         let cols = cache.minmax_columns(0.0, 4.0, 4, true);
         assert_eq!(cols.len(), 4 * 3);
-        // Column 0 = [0,1)s holds only the sample at t=0 (y=0); centre x=0.5.
         assert_eq!(cols[0], 0.5);
         assert_eq!(cols[1], 0.0);
-        // col0's max is bridged up to col1's value so the bars connect.
         assert_eq!(cols[2], 1.0);
-        // Column 1 = [1,2)s holds t=1 → y=1.
         assert_eq!(cols[4], 1.0);
-        // Last column [3,4) holds t=3 and the boundary t=4 → max 4 (unchanged).
         assert_eq!(cols[11], 4.0);
-        // Monotone ramp: each column's max rises.
         assert!(cols[5] > cols[2]);
-        // Adjacent columns touch after bridging: col c's max == col c+1's min.
         for c in 0..3 {
             assert_eq!(cols[c * 3 + 2], cols[(c + 1) * 3 + 1], "column {c} bridges");
         }
@@ -561,21 +510,18 @@ mod tests {
 
     #[test]
     fn l0_walk_path_preserves_min_max_and_transients() {
-        // 1000 samples → with width 4 each column is ~250 samples (≥64), so the
-        // fast L0-walk path runs. y = i, plus a single spike in column 1.
-        let times: Vec<i64> = (0..1000).collect(); // µs
-        let mut alts: Vec<Option<i32>> = (0..1000).map(|i| Some(i * 100)).collect(); // y = i
-        alts[300] = Some(999_900); // y = 9999 spike, in column 1
+        // 1000 samples / width 4 = ~250 per column (≥ BRANCH), so the L0 path runs.
+        let times: Vec<i64> = (0..1000).collect();
+        let mut alts: Vec<Option<i32>> = (0..1000).map(|i| Some(i * 100)).collect();
+        alts[300] = Some(999_900);
         let (snap, field) = snapshot_with(times, alts, 0);
         let cache = TraceCache::build(&snap, field, 0, 0, &MetricsRegistry::new()).unwrap();
 
         let x1 = 999.0 * 1e-6;
         let cols = cache.minmax_columns(0.0, x1, 4, true);
         assert_eq!(cols.len(), 12);
-        // Column 0 starts at y=0; the last column reaches the max y≈999.
         assert_eq!(cols[1], 0.0);
         assert!(cols[11] >= 990.0);
-        // The single-sample spike is NOT decimated away.
         assert!(
             (cols[5] - 9999.0).abs() < 1.0,
             "spike preserved, got {}",
@@ -589,7 +535,6 @@ mod tests {
         let mut cache = TraceCache::build(&snap1, field, 0, 0, &MetricsRegistry::new()).unwrap();
         assert_eq!(cache.samples(), 2);
 
-        // A later snapshot of the same field with two more rows.
         let (snap2, field2) = snapshot_with(
             vec![0, 1_000_000, 2_000_000, 3_000_000],
             vec![Some(100), Some(200), Some(50), Some(400)],
@@ -600,10 +545,9 @@ mod tests {
         assert!(cache.append(&snap2, field, &MetricsRegistry::new()));
         assert_eq!(cache.samples(), 4);
         assert_eq!(cache.built_rows, 4);
-        assert_eq!(cache.xy[4], 2.0); // x of 3rd sample = 2 s
-        assert_eq!(cache.xy[5], 0.5); // y = 50 cm * 0.01
+        assert_eq!(cache.xy[4], 2.0);
+        assert_eq!(cache.xy[5], 0.5);
 
-        // No-op when nothing new.
         assert!(!cache.append(&snap2, field, &MetricsRegistry::new()));
 
         let q = cache.pyramid.query(&cache.xy, 0, 4);

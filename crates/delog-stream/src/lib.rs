@@ -1,6 +1,3 @@
-//! DeLOG live streaming: MAVLink link backends (UDP/TCP/serial), the link
-//! state machine, message→field extraction and the raw-frame recorder.
-//!
 //! Dependency rule: like parsers, this crate never sees GPU or UI; live
 //! batches feed the same `IngestSink` path as files.
 
@@ -15,19 +12,13 @@ pub use live::{LiveIngestStats, LiveLink, LiveLinkStatus, LiveStats};
 pub use reader::{LinkCounters, LinkReader, LinkState, LinkStats};
 pub use recorder::TlogRecorder;
 
-/// Configured live-link endpoint. UDP-client and TCP-server modes were removed
-/// by decision — the GCS-side patterns are UDP listen, TCP connect, and serial.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Endpoint {
-    /// Listen for UDP datagrams on `bind` (GCS-style).
     UdpServer { bind: SocketAddr },
-    /// Connect to a TCP server.
     TcpClient { remote: SocketAddr },
-    /// Open a serial device at `baud`.
     Serial { path: String, baud: u32 },
 }
 
-/// Endpoint transport/mode without its address payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EndpointKind {
     UdpServer,
@@ -35,7 +26,6 @@ pub enum EndpointKind {
     Serial,
 }
 
-/// Endpoint validation failures.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EndpointError {
     EmptySerialPath,
