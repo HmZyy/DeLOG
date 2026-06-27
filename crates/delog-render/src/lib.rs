@@ -1,23 +1,9 @@
 //! DeLOG renderer: wgpu pipelines, the GPU buffer manager, the 2D plot
 //! pass and the 3D scene.
 //!
-//! Dependency rule: this crate is pure wgpu — **no egui
-//! types** — so headless benchmarks and golden-image tests can drive it
-//! without a window. `delog-app` adapts it through `egui_wgpu` callbacks.
-//!
-//! ## Embedded assets
-//!
-//! Everything the renderer ships lives under the workspace `assets/` directory
-//! and is embedded at compile time — there is no runtime asset directory to
-//! locate, so a stripped single binary always renders:
-//!
-//! - **Palette** — [`palette`], `include!`d from `assets/palette.rs`.
-//! - **Shaders** — WGSL sources are pulled in with `include_str!` at each
-//!   pipeline's construction site (e.g. the `line_pull` shader via
-//!   `include_str!(".../assets/shaders/line_pull.wgsl")`).
-//! - **Models** — vehicle GLBs are pulled in with `include_bytes!` by the model
-//!   registry (quad / fixed-wing / delta / marker), with a
-//!   procedural cone as the unconditional fallback.
+//! Invariant: this crate is pure wgpu (no egui types), so headless benchmarks
+//! and golden-image tests can drive it without a window. All shipped assets
+//! (palette, shaders, models) are embedded at compile time.
 
 pub mod buffers;
 pub mod context;

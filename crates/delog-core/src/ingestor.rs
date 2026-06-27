@@ -1,14 +1,9 @@
-//! The single ingest thread: the only writer of the store.
-//!
-//! [`Ingestor`] drains [`IngestMsg`]s, registers sources/topics/fields, seals
-//! accumulated rows into immutable [`Chunk`]s, and publishes a fresh
-//! [`StoreSnapshot`] on every seal. Being the sole writer is what makes the
+//! The single ingest thread: the only writer of the store, which makes the
 //! epoch-snapshot model correct with no locks.
 //!
-//! Sealing policy: a file source seals at 64Ki rows; a live source seals
-//! when its pending rows reach [`LIVE_CHUNK_ROWS`] or its per-topic pending age
-//! reaches [`LIVE_MAX_AGE`]. Per-chunk [`ColStats`](crate::chunk::ColStats) are
-//! computed once, at seal, inside [`Chunk::try_new`].
+//! Sealing policy: a file source seals at `FILE_CHUNK_ROWS`; a live source seals
+//! when its pending rows reach `LIVE_CHUNK_ROWS` or its per-topic pending age
+//! reaches `LIVE_MAX_AGE`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -28,18 +23,13 @@ use crate::schema::TopicSchema;
 use crate::snapshot::{DataStore, StoreSnapshot};
 use crate::store::TopicStore;
 
-/// File source chunk target: 64Ki rows.
 pub const FILE_CHUNK_ROWS: usize = 64 * 1024;
-/// Live source chunk target.
 pub const LIVE_CHUNK_ROWS: usize = 512;
 /// Live source max chunk age before a partial seal.
 pub const LIVE_MAX_AGE: Duration = Duration::from_millis(100);
 
-/// Callbacks for the side-channels the ingest loop fans out (diagnostics,
-/// progress, close summaries). All default to no-ops so tests and headless
-/// callers can ignore them; the app wires them to the diagnostics hub and
-/// progress UI. Epoch/repaint notification rides the store's own subscriber
-/// channel, so it is not duplicated here.
+/// Side-channel callbacks; all default to no-ops. Epoch/repaint notification
+/// rides the store's own subscriber channel, not here.
 pub trait IngestObserver: Send {
     fn on_diagnostic(&mut self, _diag: Diag) {}
     fn on_progress(&mut self, _source: SourceId, _frac: f32) {}
@@ -47,36 +37,30 @@ pub trait IngestObserver: Send {
     fn on_batch(&mut self, _kind: SourceKind, _batch: &ParsedBatch) {}
 }
 
-/// An observer that drops everything.
 #[derive(Debug, Default)]
 pub struct NullObserver;
 impl IngestObserver for NullObserver {}
 
-/// Rows accumulated for one topic since its last seal.
 struct Pending {
     schema: Arc<TopicSchema>,
     timestamps: Vec<Int64Array>,
     columns: Vec<Vec<ArrayRef>>,
     rows: usize,
     first_buffered_at: Instant,
-    /// Last timestamp accepted, to guard the cross-batch join (kept sorted).
+    /// Last timestamp accepted, guards the cross-batch join.
     last_ts: Option<i64>,
 }
 
 struct SourceState {
     kind: SourceKind,
     seal_rows: usize,
-    /// topic name → its TopicId and pending accumulator.
     topics: HashMap<String, TopicId>,
     pending: HashMap<TopicId, Pending>,
 }
 
-/// The store writer. Construct it, hand readers [`Ingestor::store`], then drive
-/// it with [`Ingestor::run`] on a dedicated thread.
 pub struct Ingestor<O: IngestObserver> {
     identity: IdentityRegistry,
     store: Arc<DataStore>,
-    /// Latest sealed store per topic; the snapshot is rebuilt from these.
     stores: HashMap<TopicId, Arc<TopicStore>>,
     sources: HashMap<SourceId, SourceState>,
     /// Highest timestamp seen per topic, for the cross-chunk regression check.
@@ -84,9 +68,6 @@ pub struct Ingestor<O: IngestObserver> {
     observer: O,
     chunks_sealed: u64,
     rows_ingested: u64,
-    /// Shared metrics registry. Defaults to a private registry; the app
-    /// swaps in the shared one via [`Ingestor::with_metrics`] so the perf dock
-    /// sees `ingest_batch`/`snapshot_swap`.
     metrics: Arc<MetricsRegistry>,
 }
 
@@ -105,13 +86,11 @@ impl<O: IngestObserver> Ingestor<O> {
         }
     }
 
-    /// Record `ingest_batch`/`snapshot_swap` timings into the shared registry.
     pub fn with_metrics(mut self, metrics: Arc<MetricsRegistry>) -> Self {
         self.metrics = metrics;
         self
     }
 
-    /// The published store readers load from.
     pub fn store(&self) -> Arc<DataStore> {
         Arc::clone(&self.store)
     }
@@ -124,8 +103,8 @@ impl<O: IngestObserver> Ingestor<O> {
         self.rows_ingested
     }
 
-    /// Drain `rx` until every sender drops. The idle tick checks each live
-    /// topic's own pending age, so busy unrelated topics do not starve seals.
+    /// The idle tick checks each live topic's own pending age, so busy
+    /// unrelated topics do not starve seals.
     pub fn run(mut self, rx: IngestReceiver) {
         loop {
             match rx.recv_timeout(LIVE_MAX_AGE) {
@@ -140,12 +119,11 @@ impl<O: IngestObserver> Ingestor<O> {
         self.flush_all();
     }
 
-    /// Apply one message. Public for step-driven testing.
+    /// Public for step-driven testing.
     pub fn process(&mut self, msg: IngestMsg) {
         match msg {
             IngestMsg::OpenSource { key, kind, reply } => {
                 let id = self.open_source(&key, kind);
-                // The parser is gone if this fails; nothing more to do.
                 let _ = reply.send(id);
             }
             IngestMsg::Batch(batch) => self.accept_batch(batch),
@@ -215,9 +193,8 @@ impl<O: IngestObserver> Ingestor<O> {
 
         let schema = batch.schema;
 
-        // Defensive within-batch sort: parsers should hand us sorted
-        // timestamps, but a malformed log may not. Sorting is the one corrective
-        // copy we accept on this path; sorted batches pass through untouched.
+        // Defensive within-batch sort: a malformed log may hand us unsorted
+        // timestamps. Sorted batches pass through untouched (copy-free).
         let (timestamps, columns) = if is_sorted(&batch.timestamps) {
             (batch.timestamps, batch.columns)
         } else {
@@ -245,9 +222,7 @@ impl<O: IngestObserver> Ingestor<O> {
         let batch_first = timestamps.value(0);
         let batch_last = timestamps.value(timestamps.len() - 1);
 
-        // Cross-chunk regression: a batch starting before the highest
-        // timestamp seen for this topic means the source emitted out of order.
-        // We tolerate it (chunks may overlap) but report it.
+        // Cross-chunk regression (chunks may overlap): tolerated but reported.
         if let Some(&prev_max) = self.topic_max_ts.get(&topic_id)
             && batch_first < prev_max
         {
@@ -265,8 +240,8 @@ impl<O: IngestObserver> Ingestor<O> {
         let max_ts = self.topic_max_ts.entry(topic_id).or_insert(i64::MIN);
         *max_ts = (*max_ts).max(batch_last);
 
-        // Seal the current accumulator first if this batch would start before it
-        // ends — keeps every sealed chunk internally sorted.
+        // Seal first if this batch starts before the accumulator ends, so every
+        // sealed chunk stays internally sorted.
         if let Some(pending) = self.pending_mut(source_id, topic_id)
             && pending.last_ts.is_some_and(|last| batch_first < last)
         {
@@ -287,7 +262,6 @@ impl<O: IngestObserver> Ingestor<O> {
         }
     }
 
-    /// Register the topic and its fields on first sighting; create its store.
     fn ensure_topic(&mut self, source: SourceId, schema: &Arc<TopicSchema>) -> Option<TopicId> {
         let name = schema.name().to_owned();
         if let Some(state) = self.sources.get(&source)
@@ -332,7 +306,6 @@ impl<O: IngestObserver> Ingestor<O> {
             })
     }
 
-    /// Seal one topic's pending rows into a chunk, append, and publish.
     fn seal_topic(&mut self, source: SourceId, topic: TopicId) {
         let Some(pending) = self
             .sources
@@ -383,9 +356,8 @@ impl<O: IngestObserver> Ingestor<O> {
         }
     }
 
-    /// Tombstone a source and drop every store it owned, then republish.
     fn remove_source(&mut self, source: SourceId) {
-        // Flush any pending rows first so the seal path does not race the drop.
+        // Flush pending rows first so the seal path does not race the drop.
         self.flush_source(source);
         let Some(removed) = self.identity.remove_source(source) else {
             return;
@@ -398,7 +370,6 @@ impl<O: IngestObserver> Ingestor<O> {
         self.publish();
     }
 
-    /// Flush every pending topic of one source (used on `CloseSource`).
     fn flush_source(&mut self, source: SourceId) {
         let topics: Vec<TopicId> = self
             .sources
@@ -410,7 +381,6 @@ impl<O: IngestObserver> Ingestor<O> {
         }
     }
 
-    /// Flush expired partial chunks for live sources only (the idle-tick path).
     fn flush_aged_live(&mut self) {
         let now = Instant::now();
         let stale: Vec<(SourceId, TopicId)> = self
@@ -436,7 +406,6 @@ impl<O: IngestObserver> Ingestor<O> {
         }
     }
 
-    /// Rebuild and publish the snapshot from the registry and current stores.
     fn publish(&self) {
         let _swap_timer = self.metrics.scope("snapshot_swap");
         let topic_stores = self
@@ -448,14 +417,13 @@ impl<O: IngestObserver> Ingestor<O> {
                 let _ = self.store.publish(snapshot);
             }
             Err(err) => {
-                // A snapshot build failure is a writer-side bug, not bad input.
+                // A build failure is a writer-side bug, not bad input.
                 debug_assert!(false, "snapshot rebuild failed: {err}");
             }
         }
     }
 }
 
-/// Whether timestamps are non-decreasing (the common, copy-free case).
 fn is_sorted(timestamps: &Int64Array) -> bool {
     timestamps
         .values()
@@ -463,7 +431,6 @@ fn is_sorted(timestamps: &Int64Array) -> bool {
         .all(|pair| pair[0] <= pair[1])
 }
 
-/// Stable-sort a batch by timestamp, reordering every column the same way.
 fn sort_batch(
     timestamps: &Int64Array,
     columns: &[ArrayRef],
@@ -481,8 +448,7 @@ fn sort_batch(
     Ok((sorted_ts, sorted_cols))
 }
 
-/// Concatenate accumulated batch arrays into one sorted timestamp array and one
-/// column set. A single pending batch is moved through without copying.
+/// A single pending batch is moved through without copying.
 fn merge_pending(
     mut pending: Pending,
 ) -> Result<(Int64Array, Vec<ArrayRef>), arrow::error::ArrowError> {
@@ -587,8 +553,6 @@ mod tests {
         let store = ing.store();
         let source = open(&mut ing, "live", SourceKind::Live);
 
-        // Feed LIVE_CHUNK_ROWS rows in small batches; the last push crosses the
-        // threshold and seals exactly one chunk.
         let mut t = 0_i64;
         while ing.chunks_sealed() == 0 {
             let times: Vec<i64> = (t..t + 8).collect();
@@ -608,7 +572,6 @@ mod tests {
             .id;
         let topic_store = snap.topic_store(topic).unwrap();
         assert_eq!(topic_store.rows, LIVE_CHUNK_ROWS as u64);
-        // Stats were computed at seal.
         assert_eq!(topic_store.chunks[0].stats[0].min, 0.0);
         assert_eq!(
             topic_store.chunks[0].stats[0].max,
@@ -687,7 +650,7 @@ mod tests {
         let source = open(&mut ing, "live", SourceKind::Live);
 
         ing.process(IngestMsg::Batch(batch(source, "GPS", &[1, 2, 3])));
-        assert_eq!(ing.chunks_sealed(), 0); // below threshold, still pending
+        assert_eq!(ing.chunks_sealed(), 0);
 
         ing.process(IngestMsg::CloseSource {
             source,
@@ -711,7 +674,6 @@ mod tests {
         let source = open(&mut ing, "live", SourceKind::Live);
 
         ing.process(IngestMsg::Batch(batch(source, "GPS", &[100, 200])));
-        // Next batch starts before the previous ended → seal first, no regression.
         ing.process(IngestMsg::Batch(batch(source, "GPS", &[150, 160])));
         assert_eq!(ing.chunks_sealed(), 1, "overlap forced an early seal");
     }
@@ -793,7 +755,6 @@ mod tests {
             let store = ing.store();
             let source = open_with(&mut ing, "live", SourceKind::Live);
 
-            // Timestamps out of order within one batch.
             ing.process(IngestMsg::Batch(batch(source, "GPS", &[30, 10, 20])));
             ing.process(IngestMsg::CloseSource {
                 source,
@@ -809,7 +770,6 @@ mod tests {
                 .entry
                 .id;
             let chunk = &snap.topic_store(topic).unwrap().chunks[0];
-            // Sealed chunk is sorted (Chunk::try_new would have rejected otherwise).
             assert_eq!(chunk.t.values(), &[10, 20, 30]);
             topic_rows = chunk.len();
         }
@@ -824,7 +784,6 @@ mod tests {
             let mut ing = Ingestor::new(&mut recorder);
             let source = open_with(&mut ing, "live", SourceKind::Live);
             ing.process(IngestMsg::Batch(batch(source, "GPS", &[100, 200])));
-            // Later batch starts before the previous max → regression.
             ing.process(IngestMsg::Batch(batch(source, "GPS", &[150, 160])));
             ing.process(IngestMsg::CloseSource {
                 source,
@@ -860,7 +819,6 @@ mod tests {
         let after = store.load();
         assert!(after.epoch > before.epoch, "offset change publishes");
         assert_eq!(after.source(source).unwrap().entry.offset_us, 1_000);
-        // Effective times shift with the offset.
         assert_eq!(after.global_time_range(), TimeRange::new(1_100, 1_200));
     }
 
@@ -881,11 +839,9 @@ mod tests {
         let mut ing = Ingestor::new(NullObserver);
         let source = open(&mut ing, "script:test", SourceKind::Derived);
 
-        // One batch below the file threshold does not seal.
         ing.process(IngestMsg::Batch(batch(source, "DERIVED", &[1, 2, 3])));
         assert_eq!(ing.chunks_sealed(), 0);
 
-        // Closing flushes the tail.
         ing.process(IngestMsg::CloseSource {
             source,
             summary: ParseSummary::default(),

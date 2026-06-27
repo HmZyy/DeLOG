@@ -14,22 +14,15 @@ pub struct TopicStore {
     pub schema: Arc<TopicSchema>,
     pub chunks: Arc<[Arc<Chunk>]>,
     pub rows: u64,
-    /// Union of every chunk's `[t_min, t_max]`, maintained as a cached aggregate
-    /// like `rows`: O(chunks) once in `from_chunks`, O(1) per `append_chunk`.
-    /// `time_range()` reads it in O(1) — it used to rescan all chunks on every
-    /// call, and the UI calls it (via `global_time_range`/the browser tree)
-    /// several times per frame, so the scan grew with the live chunk count.
+    /// Cached union of every chunk's `[t_min, t_max]`, so `time_range()` is O(1):
+    /// the UI reads it several times per frame.
     time_range: Option<TimeRange>,
-    /// Whether the chunk spine is sorted and non-overlapping in time
-    /// (`chunks[i].t_max <= chunks[i+1].t_min`). True for the common in-order
-    /// (live/file) case; an out-of-order source clears it (overlap is
-    /// tolerated). `FieldView::sample_at` binary-searches the spine when this
-    /// holds and falls back to a linear scan otherwise. Maintained O(1) per
-    /// `append_chunk` like `rows`/`time_range`.
+    /// Whether the spine is sorted and non-overlapping
+    /// (`chunks[i].t_max <= chunks[i+1].t_min`); an out-of-order source clears
+    /// it. `FieldView::sample_at` binary-searches when set, else linear-scans.
     monotonic: bool,
 }
 
-/// Topic store construction/append failures.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TopicStoreError {
     ChunkSchemaMismatch { expected: usize, actual: usize },
@@ -80,8 +73,7 @@ impl TopicStore {
         })
     }
 
-    /// Return a new store with a rebuilt spine that structurally shares every
-    /// existing sealed chunk.
+    /// New store sharing every existing sealed chunk, with `chunk` appended.
     pub fn append_chunk(&self, chunk: Arc<Chunk>) -> Result<Self, TopicStoreError> {
         validate_chunk(&self.schema, &chunk)?;
 
@@ -116,22 +108,15 @@ impl TopicStore {
         self.rows == 0
     }
 
-    /// Union of every chunk's time range. O(1): returns the cached aggregate
-    /// maintained by `from_chunks`/`append_chunk`.
     pub fn time_range(&self) -> Option<TimeRange> {
         self.time_range
     }
 
-    /// Whether the chunk spine is sorted and non-overlapping in time, so a
-    /// time query can binary-search the chunks instead of scanning them all.
     pub fn is_monotonic(&self) -> bool {
         self.monotonic
     }
 }
 
-/// Fold one chunk's `[t_min, t_max]` into a running union. Mirrors the
-/// `expect` the previous per-call scan used — a sealed chunk always has a
-/// valid range.
 fn union_with_chunk(acc: Option<TimeRange>, chunk: &Chunk) -> TimeRange {
     let chunk_range = TimeRange::new(chunk.t_min, chunk.t_max).expect("chunk range is valid");
     match acc {
@@ -218,15 +203,13 @@ mod tests {
         assert!(Arc::ptr_eq(&first, &two.chunks[0]));
         assert!(Arc::ptr_eq(&second, &two.chunks[1]));
         assert_eq!(two.time_range(), TimeRange::new(50, 300));
-        // `second` starts (50) before `first` ends (200): the spine overlaps,
-        // so the appended store is no longer monotonic.
+        // `second` (50) starts before `first` ends (200): spine overlaps.
         assert!(one.is_monotonic());
         assert!(!two.is_monotonic());
     }
 
     #[test]
     fn monotonic_flag_tracks_chunk_ordering() {
-        // In-order, non-overlapping chunks stay monotonic.
         let store = TopicStore::from_chunks(
             schema(),
             [
@@ -236,7 +219,6 @@ mod tests {
         )
         .unwrap();
         assert!(store.is_monotonic());
-        // Appending a still-later chunk keeps it monotonic; an out-of-order one clears it.
         assert!(
             store
                 .append_chunk(chunk(vec![20], vec![5.0]))
@@ -250,7 +232,6 @@ mod tests {
                 .is_monotonic()
         );
 
-        // Overlapping inputs to from_chunks are detected too.
         let overlapping = TopicStore::from_chunks(
             schema(),
             [

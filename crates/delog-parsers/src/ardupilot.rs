@@ -1,12 +1,9 @@
 //! ArduPilot DataFlash `.BIN` parser.
 //!
-//! DataFlash is self-describing: every record is `0xA3 0x95 <msgid> <payload>`.
-//! `FMT` records (msgid 128) define each message's name, length and field
-//! layout; `FMTU`/`UNIT`/`MULT` attach units and multipliers. We store **raw**
-//! values and record the unit + multiplier in the [`TopicSchema`] —
-//! the One Copy applies the multiplier later. Malformed records are skipped with
-//! a byte-offset diagnostic and parsing resynchronises on the next sync pair;
-//! only an unreadable stream aborts.
+//! Self-describing: every record is `0xA3 0x95 <msgid> <payload>`. `FMT` records
+//! (msgid 128) define each message's name, length and field layout;
+//! `FMTU`/`UNIT`/`MULT` attach units and multipliers. Raw values are stored and
+//! the unit + multiplier recorded in the [`TopicSchema`].
 
 use std::collections::HashMap;
 use std::io::{BufReader, Read};
@@ -31,10 +28,8 @@ const HEAD2: u8 = 0x95;
 const FMT_MSGID: u8 = 0x80;
 /// FMT payload: Type(1) Length(1) Name(4) Format(16) Columns(64).
 const FMT_PAYLOAD_LEN: usize = 1 + 1 + 4 + 16 + 64;
-/// Rows the parser buffers per topic before submitting a batch.
 const BATCH_ROWS: usize = 8192;
 
-/// The registered ArduPilot DataFlash parser.
 #[derive(Debug, Default)]
 pub struct ArduPilotParser;
 
@@ -62,7 +57,6 @@ impl LogParser for ArduPilotParser {
     }
 }
 
-/// One field within a registered message format, with its payload byte offset.
 #[derive(Debug, Clone)]
 struct RawField {
     name: String,
@@ -70,14 +64,13 @@ struct RawField {
     chr: u8,
 }
 
-/// A message layout decoded from an `FMT` record.
 #[derive(Debug, Clone)]
 struct MsgFormat {
     name: String,
     payload_len: usize,
     fields: Vec<RawField>,
-    /// False when the field sizes did not sum to `payload_len`; we can still
-    /// skip records of this type but not decode them.
+    /// False when field sizes did not sum to `payload_len`: skippable but not
+    /// decodable.
     decodable: bool,
 }
 
@@ -87,23 +80,20 @@ impl MsgFormat {
     }
 }
 
-/// One emitted column: where to read it and as what.
 #[derive(Debug, Clone)]
 struct Emit {
     offset: usize,
     chr: u8,
 }
 
-/// Where the timestamp lives in a record's payload.
 #[derive(Debug, Clone, Copy)]
 enum TimeSource {
-    /// `TimeUS` (u64 microseconds).
+    /// `TimeUS`, u64 microseconds.
     Micros(usize),
-    /// `TimeMS` (u32 milliseconds) — older logs.
+    /// `TimeMS`, u32 milliseconds (older logs).
     Millis(usize),
 }
 
-/// Precomputed decode plan for one msgid (shared across its instances).
 #[derive(Debug, Clone)]
 struct Plan {
     base_name: String,
@@ -113,7 +103,6 @@ struct Plan {
     schema: Arc<TopicSchema>,
 }
 
-/// Accumulates rows for one topic (one msgid, one instance).
 struct TopicAccum {
     schema: Arc<TopicSchema>,
     ts: Int64Builder,
@@ -202,7 +191,6 @@ impl<'a> Decoder<'a> {
         Ok(summary)
     }
 
-    /// Read and register an `FMT` record (fixed layout).
     fn read_fmt(&mut self, reader: &mut FrameReader) -> Result<bool, ParseError> {
         let Some(payload) = reader.read_payload(FMT_PAYLOAD_LEN)? else {
             return Ok(false);
@@ -249,8 +237,6 @@ impl<'a> Decoder<'a> {
         Ok(true)
     }
 
-    /// Read a non-FMT record: metadata (`FMTU`/`UNIT`/`MULT`) updates tables;
-    /// everything else becomes topic rows. Returns `false` on EOF.
     fn read_message(
         &mut self,
         reader: &mut FrameReader,
@@ -299,7 +285,6 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    /// Build (once) and apply a decode plan, routing rows to the right topic.
     fn decode_data(&mut self, msgid: u8, payload: &[u8]) {
         if !self.plans.contains_key(&msgid) {
             let plan = self.build_plan(msgid);
@@ -321,9 +306,8 @@ impl<'a> Decoder<'a> {
             None => plan.base_name.clone(),
         };
 
-        // Each instance topic gets its own schema *named* `MOT[N]` so the topic
-        // name is the schema name (the one-name invariant); the base
-        // schema is reused unchanged for non-instance topics.
+        // Instance topics get a schema renamed `MOT[N]` to hold the one-name
+        // invariant (topic name == schema name); the base schema is reused as-is.
         let accum = if let Some(accum) = self.topics.get_mut(&topic_name) {
             accum
         } else {
@@ -378,7 +362,6 @@ impl<'a> Decoder<'a> {
             return None;
         }
 
-        // Locate the timestamp.
         let time = if let Some(f) = format.field("TimeUS") {
             TimeSource::Micros(f.offset)
         } else if let Some(f) = format.field("TimeMS") {
@@ -394,7 +377,6 @@ impl<'a> Decoder<'a> {
             return None;
         };
 
-        // Optional instance discriminator.
         let instance = format
             .fields
             .iter()
@@ -524,7 +506,6 @@ impl Decoder<'_> {
     }
 }
 
-/// Column builder for one emitted field; the variant matches the type char.
 enum ColBuilder {
     I8(Int8Builder),
     I16(Int16Builder),
@@ -593,7 +574,6 @@ impl ColBuilder {
     }
 }
 
-/// Streaming framed reader with resync and a one-byte pushback.
 struct FrameReader {
     inner: Box<dyn Read>,
     offset: u64,
@@ -636,7 +616,6 @@ impl FrameReader {
         }
     }
 
-    /// Scan to the next `HEAD1 HEAD2` pair.
     fn next_sync(&mut self) -> Result<SyncResult, ParseError> {
         let mut skipped = 0u64;
         loop {
@@ -817,7 +796,6 @@ mod tests {
 
     use super::*;
 
-    /// Collects submitted batches synchronously for assertions.
     #[derive(Default)]
     struct Collect {
         batches: Vec<ParsedBatch>,
@@ -837,7 +815,6 @@ mod tests {
         fn close_source(&mut self, _source: SourceId, _summary: ParseSummary) {}
     }
 
-    /// Append an FMT record describing message `type_id`.
     fn push_fmt(buf: &mut Vec<u8>, type_id: u8, name: &str, format: &str, columns: &str) {
         let payload_len: usize = format.bytes().map(|c| type_size(c).unwrap()).sum();
         buf.extend([HEAD1, HEAD2, FMT_MSGID, type_id, (payload_len + 3) as u8]);
@@ -872,8 +849,6 @@ mod tests {
             .unwrap_or_else(|| panic!("no batch for topic {topic}"))
     }
 
-    /// A self-describing log with a scalar, a fixed-point field, strings, and an
-    /// instance-split message.
     fn golden_log() -> Vec<u8> {
         let mut buf = Vec::new();
         // TEST: TimeUS(Q), A(f float), B(c int16 ×0.01).
@@ -927,10 +902,8 @@ mod tests {
             .unwrap();
         assert_eq!(b.values(), &[250, 300]);
         assert_eq!(test.schema.field_by_name("B").unwrap().multiplier, 0.01);
-        // TimeUS and the instance field are not columns.
         assert!(test.schema.field_by_name("TimeUS").is_none());
 
-        // Instance split into separate topics; the discriminator is not a column.
         let mot0 = batch(&sink, "MOT[0]");
         assert_eq!(mot0.timestamps.values(), &[1_000, 2_000]);
         assert!(mot0.schema.field_by_name("I").is_none());
@@ -964,7 +937,6 @@ mod tests {
 
         let (summary, sink) = parse(corrupt);
         assert!(sink.diags.iter().any(|d| d.code == "bin-resync"));
-        // The valid record after the garbage still parsed.
         let test = batch(&sink, "TEST");
         assert_eq!(test.timestamps.values(), &[3_000]);
         assert!(summary.diagnostics >= 1);
