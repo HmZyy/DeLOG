@@ -38,6 +38,7 @@ const EMPTY_SESSION_TIMELINE_RANGE: TimeRange = TimeRange {
     min_us: 0,
     max_us: 10_000_000,
 };
+const DEFAULT_FIT_VIEW_ALL: bool = true;
 
 struct CombinedLoadState {
     active: bool,
@@ -322,7 +323,7 @@ impl DelogApp {
             playback: Playback::default(),
             view: None,
             view_fitted: false,
-            fit_view_all: false,
+            fit_view_all: DEFAULT_FIT_VIEW_ALL,
             hover_mode: delog_core::field_view::SampleMode::Prev,
             marker_us: None,
             markers: crate::markers::Markers::new(),
@@ -3057,6 +3058,11 @@ mod tests {
             timeline_range_for_ui(None),
             TimeRange::new(0, 10_000_000).unwrap()
         );
+    }
+
+    #[test]
+    fn fit_to_view_defaults_on_for_new_sessions() {
+        assert!(DEFAULT_FIT_VIEW_ALL);
     }
 
     #[test]
