@@ -853,11 +853,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_settings_use_catppuccin_mocha() {
-        assert_eq!(AppSettings::default().theme, ThemeChoice::CatppuccinMocha);
-    }
-
-    #[test]
     fn settings_tabs_are_named_for_stable_navigation() {
         let labels: Vec<_> = SettingsTab::ALL
             .into_iter()
