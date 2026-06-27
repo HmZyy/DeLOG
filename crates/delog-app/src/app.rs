@@ -1517,6 +1517,9 @@ impl eframe::App for DelogApp {
         if snapshot.epoch != self.last_epoch {
             self.caches.on_epoch(&snapshot);
             self.try_apply_deferred_layout(&snapshot);
+            for field in self.workspace.prune_removed_fields(&snapshot) {
+                self.caches.unpin(field);
+            }
             let resolved = self.workspace.resolve_ghosts(&snapshot);
             if resolved > 0 {
                 self.session

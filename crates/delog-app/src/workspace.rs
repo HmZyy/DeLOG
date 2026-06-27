@@ -164,6 +164,23 @@ impl Workspace {
         resolved
     }
 
+    pub fn prune_removed_fields(&mut self, snapshot: &StoreSnapshot) -> Vec<FieldId> {
+        let mut removed = Vec::new();
+        for pane in self.plot_panes_mut() {
+            let mut i = 0;
+            while i < pane.traces.len() {
+                let field = pane.traces[i].field;
+                if snapshot.is_field_live(field) {
+                    i += 1;
+                } else {
+                    pane.traces.remove(i);
+                    removed.push(field);
+                }
+            }
+        }
+        removed
+    }
+
     pub fn add_trace_to_first_plot(&mut self, field: FieldId) -> bool {
         self.plot_panes_mut()
             .next()
@@ -1619,6 +1636,28 @@ mod tests {
         let workspace = Workspace::new();
         assert_eq!(workspace.plot_panes().count(), 1);
         assert!(workspace.fields().next().is_none());
+    }
+
+    #[test]
+    fn prune_removed_fields_drops_traces_for_removed_sources() {
+        let mut identity = delog_core::identity::IdentityRegistry::new();
+        let keep_source = identity.add_source("keep");
+        let drop_source = identity.add_source("drop");
+        let keep_topic = identity.add_topic(keep_source, "POS").unwrap();
+        let drop_topic = identity.add_topic(drop_source, "POS").unwrap();
+        let keep_field = identity.add_field(keep_topic, "Alt").unwrap();
+        let drop_field = identity.add_field(drop_topic, "Alt").unwrap();
+        identity.remove_source(drop_source);
+        let snapshot = StoreSnapshot::from_registry(&identity, [], 1).unwrap();
+
+        let mut workspace = Workspace::new();
+        assert!(workspace.add_trace_to_first_plot(keep_field));
+        assert!(workspace.add_trace_to_first_plot(drop_field));
+
+        let removed = workspace.prune_removed_fields(&snapshot);
+
+        assert_eq!(removed, vec![drop_field]);
+        assert_eq!(workspace.fields().collect::<Vec<_>>(), vec![keep_field]);
     }
 
     #[test]
