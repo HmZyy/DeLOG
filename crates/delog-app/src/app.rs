@@ -381,10 +381,8 @@ impl DelogApp {
 
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
-        for file in dropped {
-            if let Some(path) = file.path {
-                self.session.open_path(path);
-            }
+        for path in dropped_file_paths(&dropped) {
+            self.session.open_path(path);
         }
     }
 
@@ -2822,6 +2820,10 @@ fn source_kind_label(label: &str) -> &'static str {
     }
 }
 
+fn dropped_file_paths(files: &[egui::DroppedFile]) -> Vec<std::path::PathBuf> {
+    files.iter().filter_map(|file| file.path.clone()).collect()
+}
+
 /// Fixed footprint of a toolbar icon button. Allocating an explicit size
 /// keeps the button's rect independent of the SVG's load state, so the
 /// toolbar's height can't change between egui's layout passes (which would
@@ -2914,6 +2916,41 @@ mod tests {
         assert_eq!(
             field_stats_window_title("flight / ATT.Roll"),
             "flight / ATT.Roll"
+        );
+    }
+
+    #[test]
+    fn dropped_file_paths_keep_path_backed_drops_in_order() {
+        let files = vec![
+            egui::DroppedFile {
+                path: Some("/tmp/a.BIN".into()),
+                name: "a.BIN".into(),
+                mime: String::new(),
+                last_modified: None,
+                bytes: None,
+            },
+            egui::DroppedFile {
+                path: None,
+                name: "browser-only.ulg".into(),
+                mime: "application/octet-stream".into(),
+                last_modified: None,
+                bytes: Some(std::sync::Arc::from([1_u8, 2, 3])),
+            },
+            egui::DroppedFile {
+                path: Some("/tmp/b.ulg".into()),
+                name: "b.ulg".into(),
+                mime: String::new(),
+                last_modified: None,
+                bytes: None,
+            },
+        ];
+
+        assert_eq!(
+            dropped_file_paths(&files),
+            vec![
+                std::path::PathBuf::from("/tmp/a.BIN"),
+                std::path::PathBuf::from("/tmp/b.ulg"),
+            ]
         );
     }
 
