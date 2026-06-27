@@ -28,6 +28,16 @@ fn tools_menu_exposes_custom_parser_actions() {
 }
 
 #[test]
+fn browser_exposes_field_metadata_inspector() {
+    let app = include_str!("../src/app.rs");
+    let browser = include_str!("../src/browser.rs");
+
+    assert!(browser.contains("inspect_field_metadata"));
+    assert!(browser.contains("Field metadata"));
+    assert!(app.contains("show_field_metadata_window"));
+}
+
+#[test]
 fn every_popup_is_non_collapsible_and_centered_by_default() {
     let popup_count = occurrence_count("egui::Window::new(");
 
