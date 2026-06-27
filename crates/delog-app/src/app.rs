@@ -1791,7 +1791,7 @@ impl eframe::App for DelogApp {
                         status.endpoint,
                         status.link.rx_frames,
                         status.ingest.rows,
-                        status.recording.as_ref().map(|_| " · rec").unwrap_or("")
+                        recording_status(&status)
                     ));
                     if ui
                         .button("Disconnect")
@@ -2273,6 +2273,17 @@ impl eframe::App for DelogApp {
             .connection_dialog
             .ui(ui.ctx(), &mut self.show_connection_dialog)
         {
+            let recording = match self.connection_dialog.recording_path() {
+                Ok(recording) => recording,
+                Err(err) => {
+                    self.session
+                        .push_diagnostic(delog_core::diagnostics::Diag::error(
+                            "live-recording",
+                            err,
+                        ));
+                    None
+                }
+            };
             self.settings.live_connection = self.connection_dialog.to_settings();
             if let Err(err) = crate::layout::save_app_settings(&self.settings) {
                 self.session
@@ -2281,7 +2292,7 @@ impl eframe::App for DelogApp {
                         err.to_string(),
                     ));
             }
-            if let Err(err) = self.session.start_live(endpoint, None) {
+            if let Err(err) = self.session.start_live(endpoint, recording) {
                 self.session
                     .push_diagnostic(delog_core::diagnostics::Diag::error("live-open", err));
             }
@@ -2306,6 +2317,20 @@ impl eframe::App for DelogApp {
                     ));
             }
         }
+    }
+}
+
+fn recording_status(status: &delog_stream::LiveLinkStatus) -> String {
+    if status.recording.is_none() {
+        return String::new();
+    }
+    if status.ingest.recorder_errors == 0 {
+        format!(" · rec {} frames", status.ingest.recorder_records)
+    } else {
+        format!(
+            " · rec {} frames · {} errors",
+            status.ingest.recorder_records, status.ingest.recorder_errors
+        )
     }
 }
 

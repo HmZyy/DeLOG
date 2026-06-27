@@ -321,6 +321,10 @@ pub struct LiveConnectionSettings {
     pub serial_path: String,
     #[serde(default = "default_live_baud")]
     pub baud: u32,
+    #[serde(default)]
+    pub recording_enabled: bool,
+    #[serde(default, alias = "recording_path")]
+    pub recording_dir: String,
 }
 
 impl Default for LiveConnectionSettings {
@@ -331,6 +335,8 @@ impl Default for LiveConnectionSettings {
             port: default_live_port(),
             serial_path: default_live_serial_path(),
             baud: default_live_baud(),
+            recording_enabled: false,
+            recording_dir: String::new(),
         }
     }
 }
@@ -949,6 +955,8 @@ mod tests {
         let s: AppSettings = serde_json::from_str(json).unwrap();
         assert!(!s.show_fps);
         assert_eq!(s.render_mode, RenderMode::Reactive);
+        assert!(!s.live_connection.recording_enabled);
+        assert!(s.live_connection.recording_dir.is_empty());
     }
 
     #[test]
@@ -966,6 +974,8 @@ mod tests {
                 port: 5760,
                 serial_path: "/dev/ttyUSB0".to_owned(),
                 baud: 921_600,
+                recording_enabled: true,
+                recording_dir: "/tmp/logs".to_owned(),
             },
             ..AppSettings::default()
         };
