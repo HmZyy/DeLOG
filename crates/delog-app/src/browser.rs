@@ -4,8 +4,8 @@
 //! without a GUI; [`ui`] renders it.
 
 use arrow::array::{
-    Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array,
-    Int64Array, LargeStringArray, StringArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+    Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
+    Int8Array, LargeStringArray, StringArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
 };
 use arrow::datatypes::DataType;
 use delog_core::identity::{FieldId, SourceId, TopicId};
@@ -70,6 +70,7 @@ pub struct VisibleTopic {
 
 #[derive(Debug, Default)]
 pub struct BrowserFilterCache {
+    epoch: u64,
     query: String,
     view: BrowserFilter,
     valid: bool,
@@ -77,14 +78,14 @@ pub struct BrowserFilterCache {
 
 impl BrowserFilter {
     pub fn build(model: &BrowserModel, query: &str) -> Self {
-        let query = query.trim();
-        if query.is_empty() {
+        let tokens = lowercase_query_tokens(query);
+        if tokens.is_empty() {
             return Self::all(model);
         }
 
         let mut sources = Vec::new();
         for (source_idx, source) in model.sources.iter().enumerate() {
-            if matches_query(query, &source.search_path) {
+            if matches_lowercase_tokens(&tokens, &source.search_path) {
                 sources.push(VisibleSource {
                     source: source_idx,
                     topics: source
@@ -102,7 +103,7 @@ impl BrowserFilter {
 
             let mut topics = Vec::new();
             for (topic_idx, topic) in source.topics.iter().enumerate() {
-                if matches_query(query, &topic.search_path) {
+                if matches_lowercase_tokens(&tokens, &topic.search_path) {
                     topics.push(VisibleTopic {
                         topic: topic_idx,
                         fields: (0..topic.fields.len()).collect(),
@@ -115,7 +116,7 @@ impl BrowserFilter {
                     .iter()
                     .enumerate()
                     .filter_map(|(field_idx, field)| {
-                        matches_query(query, &field.search_path).then_some(field_idx)
+                        matches_lowercase_tokens(&tokens, &field.search_path).then_some(field_idx)
                     })
                     .collect();
                 if !fields.is_empty() {
@@ -164,8 +165,9 @@ impl BrowserFilter {
 }
 
 impl BrowserFilterCache {
-    pub fn view(&mut self, model: &BrowserModel, query: &str) -> &BrowserFilter {
-        if !self.valid || self.query != query {
+    pub fn view(&mut self, model_epoch: u64, model: &BrowserModel, query: &str) -> &BrowserFilter {
+        if !self.valid || self.epoch != model_epoch || self.query != query {
+            self.epoch = model_epoch;
             self.query.clear();
             self.query.push_str(query);
             self.view = BrowserFilter::build(model, query);
@@ -175,6 +177,7 @@ impl BrowserFilterCache {
     }
 
     pub fn reset(&mut self) {
+        self.epoch = 0;
         self.query.clear();
         self.view = BrowserFilter::default();
         self.valid = false;
@@ -396,9 +399,20 @@ fn take_number(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> u128 {
 /// a blank query matches everything.
 pub(crate) fn matches_query(query: &str, path: &str) -> bool {
     let path = path.to_lowercase();
+    matches_lowercase_tokens(&lowercase_query_tokens(query), &path)
+}
+
+fn lowercase_query_tokens(query: &str) -> Vec<String> {
     query
         .split_whitespace()
-        .all(|token| path.contains(&token.to_lowercase()))
+        .map(|token| token.to_lowercase())
+        .collect()
+}
+
+fn matches_lowercase_tokens(tokens: &[String], lowercase_path: &str) -> bool {
+    tokens
+        .iter()
+        .all(|token| lowercase_path.contains(token.as_str()))
 }
 
 #[derive(Debug, Default)]
@@ -489,6 +503,7 @@ pub fn panel_toggle_button_size(ui: &egui::Ui) -> egui::Vec2 {
 
 pub fn ui(
     ui: &mut egui::Ui,
+    model_epoch: u64,
     model: &BrowserModel,
     query: &mut String,
     filter_cache: &mut BrowserFilterCache,
@@ -532,7 +547,7 @@ pub fn ui(
     }
 
     let filtering = !query.trim().is_empty();
-    let view = filter_cache.view(model, query);
+    let view = filter_cache.view(model_epoch, model, query);
     if filtering && view.is_empty() {
         ui.add_space(8.0);
         ui.weak("Nothing matches the filter.");
@@ -1202,17 +1217,50 @@ mod tests {
     }
 
     #[test]
-    fn filter_cache_reuses_results_until_query_changes() {
+    fn filter_view_preserves_branch_match_semantics() {
         let model = BrowserModel::from_snapshot(&snapshot());
+
+        let source = BrowserFilter::build(&model, "flight");
+        assert_eq!(source.sources.len(), 1);
+        assert_eq!(source.sources[0].topics.len(), 1);
+        assert_eq!(source.sources[0].topics[0].fields.len(), 2);
+
+        let topic = BrowserFilter::build(&model, "gps");
+        assert_eq!(topic.sources.len(), 1);
+        assert_eq!(topic.sources[0].topics.len(), 1);
+        assert_eq!(topic.sources[0].topics[0].fields.len(), 2);
+
+        let field = BrowserFilter::build(&model, "lat");
+        let field_names: Vec<_> = field.sources[0].topics[0]
+            .fields
+            .iter()
+            .map(|&field_idx| model.sources[0].topics[0].fields[field_idx].name.as_str())
+            .collect();
+        assert_eq!(field_names, vec!["Lat"]);
+
+        assert!(BrowserFilter::build(&model, "nonexistent").is_empty());
+        assert_eq!(BrowserFilter::build(&model, ""), BrowserFilter::all(&model));
+    }
+
+    #[test]
+    fn filter_cache_reuses_results_until_query_or_epoch_changes() {
+        let model = BrowserModel::from_snapshot(&snapshot());
+        let mut changed = model.clone();
+        changed.sources[0].topics[0]
+            .fields
+            .retain(|field| field.name != "Lat");
         let mut cache = BrowserFilterCache::default();
 
-        let blank = cache.view(&model, "");
+        let blank = cache.view(1, &model, "");
         assert_eq!(blank.sources[0].topics[0].fields.len(), 2);
 
-        let lat = cache.view(&model, "lat");
+        let lat = cache.view(1, &model, "lat");
         assert_eq!(lat.sources[0].topics[0].fields.len(), 1);
 
-        let blank_again = cache.view(&model, "");
-        assert_eq!(blank_again.sources[0].topics[0].fields.len(), 2);
+        let lat_after_epoch_change = cache.view(2, &changed, "lat");
+        assert!(lat_after_epoch_change.is_empty());
+
+        let blank_again = cache.view(2, &changed, "");
+        assert_eq!(blank_again.sources[0].topics[0].fields.len(), 1);
     }
 }
