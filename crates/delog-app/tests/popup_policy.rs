@@ -107,6 +107,17 @@ fn browser_topic_tables_keep_field_drag_source() {
 }
 
 #[test]
+fn browser_topic_table_layout_keeps_source_actions() {
+    let browser = include_str!("../src/browser.rs");
+
+    assert!(browser.contains("Source metadata"));
+    assert!(browser.contains("Remove source"));
+    assert!(browser.contains("offset_widget"));
+    assert!(browser.contains("offset_dialog_window"));
+    assert!(browser.contains("collapse_requested"));
+}
+
+#[test]
 fn layout_menu_exposes_clear_current_layout() {
     let app = include_str!("../src/app.rs");
 
