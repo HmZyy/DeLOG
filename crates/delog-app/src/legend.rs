@@ -12,26 +12,34 @@ pub fn with_bg_opacity(color: egui::Color32, opacity: f32) -> egui::Color32 {
     egui::Color32::from_rgba_unmultiplied(r, g, b, a)
 }
 
-/// Inset from the corner so the legend never touches the axes.
-fn legend_anchor(position: LegendPosition, plot_rect: egui::Rect) -> (egui::Pos2, egui::Align2) {
-    const INSET: f32 = 8.0;
+/// Inset from the plot edge so the legend never touches the axes.
+const LEGEND_INSET: f32 = 8.0;
+
+/// Minimum positive dimension passed to egui sizing APIs for degenerate plots.
+const MIN_LEGEND_CONTENT_EXTENT: f32 = 1.0;
+
+fn legend_bounds(plot_rect: egui::Rect) -> egui::Rect {
+    let inset = egui::vec2(
+        LEGEND_INSET.min((plot_rect.width() * 0.5).max(0.0)),
+        LEGEND_INSET.min((plot_rect.height() * 0.5).max(0.0)),
+    );
+    plot_rect.shrink2(inset)
+}
+
+fn legend_content_max_size(bounds: egui::Rect, frame: &egui::Frame) -> egui::Vec2 {
+    let frame_margin = frame.total_margin().sum();
+    egui::vec2(
+        (bounds.width() - frame_margin.x).max(MIN_LEGEND_CONTENT_EXTENT),
+        (bounds.height() - frame_margin.y).max(MIN_LEGEND_CONTENT_EXTENT),
+    )
+}
+
+fn legend_anchor(position: LegendPosition, bounds: egui::Rect) -> (egui::Pos2, egui::Align2) {
     match position {
-        LegendPosition::TopLeft => (
-            plot_rect.left_top() + egui::vec2(INSET, INSET),
-            egui::Align2::LEFT_TOP,
-        ),
-        LegendPosition::TopRight => (
-            plot_rect.right_top() + egui::vec2(-INSET, INSET),
-            egui::Align2::RIGHT_TOP,
-        ),
-        LegendPosition::BottomLeft => (
-            plot_rect.left_bottom() + egui::vec2(INSET, -INSET),
-            egui::Align2::LEFT_BOTTOM,
-        ),
-        LegendPosition::BottomRight => (
-            plot_rect.right_bottom() + egui::vec2(-INSET, -INSET),
-            egui::Align2::RIGHT_BOTTOM,
-        ),
+        LegendPosition::TopLeft => (bounds.left_top(), egui::Align2::LEFT_TOP),
+        LegendPosition::TopRight => (bounds.right_top(), egui::Align2::RIGHT_TOP),
+        LegendPosition::BottomLeft => (bounds.left_bottom(), egui::Align2::LEFT_BOTTOM),
+        LegendPosition::BottomRight => (bounds.right_bottom(), egui::Align2::RIGHT_BOTTOM),
     }
 }
 
@@ -64,19 +72,22 @@ pub fn ui(
     // Applied after the Area closure releases its borrow of `pane`.
     let mut filter_edits: Vec<(FieldId, String)> = Vec::new();
 
-    let (pos, pivot) = legend_anchor(position, plot_rect);
+    let bounds = legend_bounds(plot_rect);
+    let (pos, pivot) = legend_anchor(position, bounds);
     egui::Area::new(id)
         .fixed_pos(pos)
         .pivot(pivot)
         .order(egui::Order::Middle)
         .show(ui.ctx(), |ui| {
             let base = egui::Frame::popup(ui.style());
-            egui::Frame {
+            let frame = egui::Frame {
                 shadow: egui::Shadow::NONE,
                 fill: with_bg_opacity(base.fill, opacity),
                 ..base
-            }
-            .show(ui, |ui| {
+            };
+            let content_max_size = legend_content_max_size(bounds, &frame);
+            frame.show(ui, |ui| {
+                ui.set_max_size(content_max_size);
                 for (field, label) in labels {
                     let is_text = crate::text_overlay::field_is_string(snapshot, *field);
                     let mut filter = if is_text {
