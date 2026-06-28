@@ -150,6 +150,7 @@ impl GpuBridge {
             .field_mem(field)
             .gpu
             .saturating_add(res.col_buffers.field_mem(field).gpu)
+            .saturating_add(res.win_buffers.field_mem(field).gpu)
     }
 
     pub fn summary(&self, frame: &eframe::Frame) -> GpuSummary {
@@ -164,11 +165,14 @@ impl GpuBridge {
             return GpuSummary::default();
         };
         GpuSummary {
-            buffer_count: res.buffers.buffer_count() + res.col_buffers.buffer_count(),
+            buffer_count: res.buffers.buffer_count()
+                + res.col_buffers.buffer_count()
+                + res.win_buffers.buffer_count(),
             gpu_bytes: res
                 .buffers
                 .total_gpu_bytes()
-                .saturating_add(res.col_buffers.total_gpu_bytes()),
+                .saturating_add(res.col_buffers.total_gpu_bytes())
+                .saturating_add(res.win_buffers.total_gpu_bytes()),
         }
     }
 
@@ -266,11 +270,24 @@ impl GpuBridge {
                                 count: width as u32,
                             }
                         } else {
-                            let stat = res.buffers.sync(trace.field, &cache.xy, false);
-                            upload_bytes += stat.bytes;
-                            full_uploads += stat.full_upload as u64;
+                            let (aw, bw) = pad_window(a, b, cache.samples());
+                            let key = WinKey {
+                                a: aw,
+                                b: bw,
+                                len: cache.samples(),
+                            };
+                            if res.win_params.get(&trace.field) != Some(&key) {
+                                let stat = res.win_buffers.sync(
+                                    trace.field,
+                                    &cache.xy[2 * aw..2 * bw],
+                                    true,
+                                );
+                                upload_bytes += stat.bytes;
+                                full_uploads += stat.full_upload as u64;
+                                res.win_params.insert(trace.field, key);
+                            }
                             DrawKind::Line {
-                                samples: res.buffers.samples(trace.field) as u32,
+                                samples: (bw - aw) as u32,
                             }
                         }
                     }
@@ -491,6 +508,13 @@ enum PipelineKind {
     Columns,
 }
 
+/// Pad a visible index range `[a, b)` over `n` samples by one sample of context
+/// each side so the line segments entering/leaving the viewport are drawn.
+/// Clamps to `[0, n]`.
+fn pad_window(a: usize, b: usize, n: usize) -> (usize, usize) {
+    (a.saturating_sub(1), (b + 1).min(n))
+}
+
 /// Consecutive same-pipeline runs in draw order (one `set_pipeline` each).
 /// Order-preserving so trace overlap (z-order) is unchanged.
 fn pipeline_runs(kinds: impl Iterator<Item = PipelineKind>) -> Vec<(PipelineKind, u32)> {
@@ -540,6 +564,9 @@ struct PlotCallbackResources {
     buffers: BufferManager,
     /// `[x,min,max]` column buffers (decimated path).
     col_buffers: BufferManager,
+    /// Interleaved `[x,y]` buffers holding only the visible window per field
+    /// (raw `Line` path); sized to what's on screen, not the full trace.
+    win_buffers: BufferManager,
     uniforms: UniformRing,
     next_uniform_slot: u32,
     line_binds: HashMap<FieldId, wgpu::BindGroup>,
@@ -549,6 +576,9 @@ struct PlotCallbackResources {
     /// Memoizes the decimated columns resident in `col_buffers` per field, so a
     /// static view skips the per-frame `minmax_columns` recompute and upload.
     col_params: HashMap<FieldId, ColKey>,
+    /// Memoizes the window resident in `win_buffers` per field, so a static view
+    /// skips the per-frame slice upload (mirrors `col_params`).
+    win_params: HashMap<FieldId, WinKey>,
     /// Mutex only satisfies the `Sync` bound; never contended (render thread only).
     errors: Mutex<GpuErrorHub>,
     metrics: Option<Arc<MetricsRegistry>>,
@@ -566,6 +596,16 @@ struct ColKey {
     len: usize,
 }
 
+/// Identifies the raw-line sample window currently resident for a field. A
+/// match means the same visible window over unchanged data, so the windowed
+/// GPU buffer is already correct and the slice upload can be skipped.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct WinKey {
+    a: usize,
+    b: usize,
+    len: usize,
+}
+
 impl PlotCallbackResources {
     fn new(ctx: RenderContext, color_format: wgpu::TextureFormat) -> Self {
         let line = LinePipeline::new(&ctx, color_format);
@@ -574,6 +614,7 @@ impl PlotCallbackResources {
         let minmax = MinMaxColPipeline::new(&ctx, color_format);
         let buffers = BufferManager::new(ctx.clone());
         let col_buffers = BufferManager::new(ctx.clone());
+        let win_buffers = BufferManager::new(ctx.clone());
         let uniforms = UniformRing::new(ctx.clone(), 8);
         Self {
             ctx,
@@ -583,6 +624,7 @@ impl PlotCallbackResources {
             minmax,
             buffers,
             col_buffers,
+            win_buffers,
             uniforms,
             next_uniform_slot: 0,
             line_binds: HashMap::new(),
@@ -590,6 +632,7 @@ impl PlotCallbackResources {
             step_binds: HashMap::new(),
             col_binds: HashMap::new(),
             col_params: HashMap::new(),
+            win_params: HashMap::new(),
             errors: Mutex::new(GpuErrorHub::new()),
             metrics: None,
         }
@@ -606,12 +649,15 @@ impl PlotCallbackResources {
             .buffers
             .fields()
             .chain(self.col_buffers.fields())
+            .chain(self.win_buffers.fields())
             .filter(|f| !plotted.contains(f))
             .collect();
         for field in stale {
             self.buffers.remove(field);
             self.col_buffers.remove(field);
             self.col_params.remove(&field);
+            self.win_buffers.remove(field);
+            self.win_params.remove(&field);
         }
     }
 }
@@ -888,6 +934,7 @@ impl egui_wgpu::CallbackTrait for ScenePaintCallback {
                 minmax,
                 buffers,
                 col_buffers,
+                win_buffers,
                 uniforms,
                 next_uniform_slot: _,
                 line_binds,
@@ -895,6 +942,7 @@ impl egui_wgpu::CallbackTrait for ScenePaintCallback {
                 step_binds,
                 col_binds,
                 col_params: _,
+                win_params: _,
                 errors,
                 metrics: _,
             } = res;
@@ -903,7 +951,7 @@ impl egui_wgpu::CallbackTrait for ScenePaintCallback {
             for item in &self.items {
                 match item.kind {
                     DrawKind::Line { .. } => {
-                        if let Some(buf) = buffers.buffer(item.field) {
+                        if let Some(buf) = win_buffers.buffer(item.field) {
                             line_binds.insert(item.field, line.bind_group(ctx, buf, uniforms));
                         }
                     }
@@ -1063,6 +1111,23 @@ pub fn apply_zoom(view: &mut ViewX, cursor_frac: f32, scroll: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pad_window_adds_one_sample_of_context_each_side() {
+        assert_eq!(pad_window(10, 20, 100), (9, 21));
+    }
+
+    #[test]
+    fn pad_window_clamps_at_buffer_ends() {
+        assert_eq!(pad_window(0, 100, 100), (0, 100)); // both ends clamp
+        assert_eq!(pad_window(0, 5, 100), (0, 6)); // low clamps, high pads
+        assert_eq!(pad_window(95, 100, 100), (94, 100)); // low pads, high clamps
+    }
+
+    #[test]
+    fn pad_window_handles_empty() {
+        assert_eq!(pad_window(0, 0, 0), (0, 0));
+    }
 
     #[test]
     fn batching_groups_consecutive_items_into_one_bind_per_pipeline_run() {
