@@ -6,7 +6,7 @@ use delog_core::diagnostics::{DiagRecord, Severity};
 use delog_core::time::TimeRange;
 use serde::Serialize;
 
-use crate::browser::{self, BrowserModel};
+use crate::browser::{self, BrowserFilterCache, BrowserModel};
 use crate::diagnostics::DiagnosticsDock;
 use crate::field_stats::{FieldStatsController, StatsRequestKey, StatsTab};
 use crate::gpu::GpuBridge;
@@ -258,6 +258,7 @@ pub struct DelogApp {
     performance_snapshot: PerformanceSnapshot,
     performance_last_refresh: Option<Instant>,
     browser_query: String,
+    browser_filter: BrowserFilterCache,
     browser_selection: browser::Selection,
     /// Keyed by snapshot epoch so the O(topics×fields) tree rebuild runs once
     /// per data change, not every frame.
@@ -355,6 +356,7 @@ impl DelogApp {
             performance_snapshot: PerformanceSnapshot::default(),
             performance_last_refresh: None,
             browser_query: String::new(),
+            browser_filter: BrowserFilterCache::default(),
             browser_selection: browser::Selection::default(),
             browser_model: None,
             offset_dialog: None,
@@ -2110,7 +2112,10 @@ impl eframe::App for DelogApp {
             let epoch = snapshot.epoch;
             let model = match self.browser_model.take() {
                 Some((cached_epoch, model)) if cached_epoch == epoch => model,
-                _ => BrowserModel::from_snapshot(&snapshot),
+                _ => {
+                    self.browser_filter.reset();
+                    BrowserModel::from_snapshot(&snapshot)
+                }
             };
             let browser_panel = egui::Panel::left("data_browser_expanded").resizable(false);
             let browser_panel = if model.is_empty() {
@@ -2125,6 +2130,7 @@ impl eframe::App for DelogApp {
                     ui,
                     &model,
                     &mut self.browser_query,
+                    &mut self.browser_filter,
                     &mut self.browser_selection,
                     &mut self.offset_dialog,
                 );
