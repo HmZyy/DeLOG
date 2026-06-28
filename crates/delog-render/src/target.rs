@@ -1,9 +1,4 @@
 //! Offscreen render target + readback — the headless golden-image rig.
-//!
-//! Lets tests, benches and (later) image export drive the renderer with no
-//! window: render into an RGBA texture, then read the pixels back to CPU. Row
-//! readback honours wgpu's 256-byte `bytes_per_row` alignment and unpads to a
-//! tight RGBA buffer.
 
 use crate::context::RenderContext;
 
@@ -15,9 +10,7 @@ fn align_up(value: u32, alignment: u32) -> u32 {
 }
 
 /// Copy a single-sample RGBA8 texture to CPU and return tight RGBA bytes
-/// (blocking). Honours wgpu's 256-byte `bytes_per_row` alignment and unpads to
-/// a tight buffer. Shared by [`OffscreenTarget`] and the scene target's
-/// resolve texture.
+/// (blocking), unpadding wgpu's aligned `bytes_per_row`.
 pub(crate) fn read_texture_rgba(
     ctx: &RenderContext,
     texture: &wgpu::Texture,
@@ -82,7 +75,6 @@ pub(crate) fn read_texture_rgba(
     }
 }
 
-/// A tight, row-major RGBA8 image read back from the GPU.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RgbaImage {
     pub width: u32,
@@ -91,7 +83,6 @@ pub struct RgbaImage {
 }
 
 impl RgbaImage {
-    /// The RGBA bytes of one pixel.
     pub fn pixel(&self, x: u32, y: u32) -> [u8; 4] {
         let i = ((y * self.width + x) * 4) as usize;
         [
@@ -102,13 +93,11 @@ impl RgbaImage {
         ]
     }
 
-    /// Whether `pixel(x, y)` matches `rgba` within `±tol` per channel.
     pub fn matches(&self, x: u32, y: u32, rgba: [u8; 4], tol: u8) -> bool {
         let p = self.pixel(x, y);
         (0..4).all(|c| p[c].abs_diff(rgba[c]) <= tol)
     }
 
-    /// Count of pixels matching `rgba` within `±tol` per channel.
     pub fn count_matching(&self, rgba: [u8; 4], tol: u8) -> usize {
         self.pixels
             .chunks_exact(4)
@@ -117,7 +106,6 @@ impl RgbaImage {
     }
 }
 
-/// An offscreen color texture the renderer draws into.
 pub struct OffscreenTarget {
     ctx: RenderContext,
     texture: wgpu::Texture,
@@ -128,7 +116,6 @@ pub struct OffscreenTarget {
 }
 
 impl OffscreenTarget {
-    /// An `RGBA8Unorm` render target of the given size.
     pub fn new(ctx: RenderContext, width: u32, height: u32) -> Self {
         let format = wgpu::TextureFormat::Rgba8Unorm;
         let texture = ctx.device().create_texture(&wgpu::TextureDescriptor {
@@ -172,7 +159,6 @@ impl OffscreenTarget {
         self.height
     }
 
-    /// Copy the texture to CPU and return tight RGBA bytes (blocking).
     pub fn read_rgba(&self) -> RgbaImage {
         read_texture_rgba(&self.ctx, &self.texture, self.width, self.height)
     }
@@ -186,9 +172,8 @@ mod tests {
     use crate::uniforms::{PlotUniform, UniformRing};
     use delog_core::identity::FieldId;
 
-    /// Render a known horizontal trace and verify the rendered pixels.
-    /// Tolerance/property based rather than byte-exact so it is portable across
-    /// drivers (rasterisation differs subtly between GPUs).
+    /// Tolerance/property based rather than byte-exact: rasterisation differs
+    /// subtly between GPUs.
     #[test]
     fn golden_horizontal_line_renders_to_expected_pixels() {
         let Some(ctx) = RenderContext::headless() else {
@@ -200,8 +185,6 @@ mod tests {
         let target = OffscreenTarget::new(ctx.clone(), w, h);
         let pipeline = LinePipeline::new(&ctx, target.format());
 
-        // A flat trace at y = 0 spanning the full x range, identity transform:
-        // x in [-1, 1] → full width; y = 0 → the middle row.
         let mut buffers = BufferManager::new(ctx.clone());
         let field = FieldId(0);
         buffers.sync(field, &[-1.0, 0.0, 1.0, 0.0], false);
@@ -251,7 +234,6 @@ mod tests {
 
         let img = target.read_rgba();
 
-        // The line crosses the vertical centre; corners stay the clear colour.
         let cx = w / 2;
         assert!(
             img.matches(cx, h / 2, red, 8),
@@ -263,7 +245,6 @@ mod tests {
             "top-left corner should be the clear colour, got {:?}",
             img.pixel(0, 0)
         );
-        // A ~4px line across 64px ≈ 256 red pixels; assert a sane band exists.
         let red_pixels = img.count_matching(red, 8);
         assert!(
             (128..1024).contains(&red_pixels),
@@ -271,8 +252,6 @@ mod tests {
         );
     }
 
-    /// A windowed (non-identity) transform places the trace at the expected
-    /// screen position — proving `PlotUniform::from_view` on real hardware.
     #[test]
     fn from_view_positions_a_trace_in_the_upper_quarter() {
         let Some(ctx) = RenderContext::headless() else {
@@ -282,8 +261,6 @@ mod tests {
         let target = OffscreenTarget::new(ctx.clone(), w, h);
         let pipeline = LinePipeline::new(&ctx, target.format());
 
-        // Flat trace at data y = 75 with the visible window y ∈ [0, 100]:
-        // clip y = 0.5 → screen row ≈ h/4 (upper quarter), x spans the width.
         let mut buffers = BufferManager::new(ctx.clone());
         let field = FieldId(0);
         buffers.sync(field, &[0.0, 75.0, 10.0, 75.0], false);

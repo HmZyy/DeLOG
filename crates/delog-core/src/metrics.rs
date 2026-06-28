@@ -1,20 +1,15 @@
-//! Performance metrics registry.
+//! A metric write is one `fetch_add` plus one relaxed store, so instrumentation
+//! can stay on permanently.
 //!
-//! Hot paths record through cheap atomics — a metric write is one
-//! `fetch_add` plus one relaxed store — so instrumentation can stay on
-//! permanently. The perf dock merely *reads*, computing ring statistics at
-//! its own 4 Hz refresh rate.
-//!
-//! Usage:
 //! ```
 //! use delog_core::metrics::MetricsRegistry;
 //!
 //! let metrics = MetricsRegistry::new();
 //! {
-//!     let _t = metrics.scope("yquery"); // RAII: records elapsed ms on drop
+//!     let _t = metrics.scope("yquery");
 //! }
-//! metrics.record("upload_bytes", 4096.0); // gauge sample
-//! metrics.add("ingest_dropped_batches", 1); // monotonic counter
+//! metrics.record("upload_bytes", 4096.0);
+//! metrics.add("ingest_dropped_batches", 1);
 //! assert_eq!(metrics.stats("yquery").unwrap().n, 1);
 //! ```
 
@@ -23,15 +18,10 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
-/// Number of samples each metric ring retains.
 pub const RING_LEN: usize = 256;
 
-/// Statistics over the last [`RING_LEN`] recorded samples of one metric.
-///
-/// Timers record **milliseconds**; gauges record whatever unit their call
-/// site documents. `n` is the total number of samples ever recorded (not
-/// capped at the ring length). `counter` is the metric's monotonic counter
-/// value (0 unless [`MetricsRegistry::add`] was used).
+/// Timers record milliseconds; gauges record their call site's unit. `n` is the
+/// total samples ever recorded, not capped at the ring length.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MetricStats {
     pub last: f32,
@@ -43,25 +33,17 @@ pub struct MetricStats {
     pub counter: u64,
 }
 
-/// A registry of named metrics: RAII scope timers, gauges and counters.
-///
-/// Cloneable handle semantics are provided by wrapping in `Arc` at the
-/// call site; the registry itself is `Send + Sync`.
 pub struct MetricsRegistry {
     metrics: RwLock<HashMap<&'static str, Arc<Metric>>>,
 }
 
 struct Metric {
-    /// Ring of f32 sample bit patterns; index = `count % RING_LEN`.
+    /// f32 sample bit patterns; index = `count % RING_LEN`.
     ring: [AtomicU32; RING_LEN],
-    /// Total samples ever recorded; the write cursor.
     count: AtomicU64,
-    /// Monotonic counter (for drop/overflow style metrics).
     counter: AtomicU64,
 }
 
-/// RAII timer returned by [`MetricsRegistry::scope`]; records elapsed
-/// milliseconds into the metric's ring when dropped.
 pub struct ScopeTimer {
     metric: Arc<Metric>,
     start: Instant,
@@ -74,8 +56,7 @@ impl MetricsRegistry {
         }
     }
 
-    /// Start an RAII timer; elapsed time is recorded in **milliseconds**
-    /// when the returned guard drops.
+    /// Elapsed time is recorded in milliseconds when the guard drops.
     #[must_use = "the timer records on drop — binding to `_` discards it immediately"]
     pub fn scope(&self, name: &'static str) -> ScopeTimer {
         ScopeTimer {
@@ -84,32 +65,27 @@ impl MetricsRegistry {
         }
     }
 
-    /// Record one gauge sample.
     pub fn record(&self, name: &'static str, value: f32) {
         self.get_or_register(name).record(value);
     }
 
-    /// Increment the metric's monotonic counter.
     pub fn add(&self, name: &'static str, delta: u64) {
         self.get_or_register(name)
             .counter
             .fetch_add(delta, Ordering::Relaxed);
     }
 
-    /// Current monotonic counter value, or `None` for unknown metrics.
     pub fn counter(&self, name: &'static str) -> Option<u64> {
         let metrics = self.metrics.read().expect("metrics map poisoned");
         Some(metrics.get(name)?.counter.load(Ordering::Relaxed))
     }
 
-    /// Ring statistics for one metric, or `None` for unknown metrics.
     pub fn stats(&self, name: &'static str) -> Option<MetricStats> {
         let metrics = self.metrics.read().expect("metrics map poisoned");
         Some(metrics.get(name)?.stats())
     }
 
-    /// `(name, stats)` for every registered metric, sorted by name —
-    /// what the perf dock iterates at 4 Hz.
+    /// `(name, stats)` for every registered metric, sorted by name.
     pub fn snapshot(&self) -> Vec<(&'static str, MetricStats)> {
         let metrics = self.metrics.read().expect("metrics map poisoned");
         let mut out: Vec<_> = metrics.iter().map(|(&n, m)| (n, m.stats())).collect();
@@ -139,10 +115,8 @@ impl Metric {
         }
     }
 
-    /// One `fetch_add` + one relaxed store — safe on any hot path.
-    /// Two concurrent writers may claim slots that alias the same ring
-    /// cell after wrap; the stats are advisory, so the lost sample is
-    /// acceptable by design.
+    /// Concurrent writers may alias the same ring cell after wrap; stats are
+    /// advisory, so a lost sample is acceptable.
     fn record(&self, value: f32) {
         let idx = self.count.fetch_add(1, Ordering::Relaxed) as usize % RING_LEN;
         self.ring[idx].store(value.to_bits(), Ordering::Relaxed);
@@ -238,7 +212,6 @@ mod tests {
     #[test]
     fn ring_wraps_and_keeps_only_recent_samples() {
         let m = MetricsRegistry::new();
-        // 300 samples: 0..300. The ring keeps the last 256 (44..300).
         for v in 0..300 {
             m.record("g", v as f32);
         }
@@ -272,7 +245,6 @@ mod tests {
         }
         let s = m.stats("timed").unwrap();
         assert_eq!(s.n, 1);
-        // Sleep is >= 10 ms; allow generous headroom for a loaded machine.
         assert!(s.last >= 10.0, "elapsed {} ms < 10 ms", s.last);
         assert!(s.last < 1000.0, "elapsed {} ms implausibly large", s.last);
     }
@@ -299,7 +271,7 @@ mod tests {
     #[test]
     fn empty_metric_stats_are_zeroed() {
         let m = MetricsRegistry::new();
-        m.add("only_counted", 7); // counter-only: no ring samples yet
+        m.add("only_counted", 7);
         let s = m.stats("only_counted").unwrap();
         assert_eq!(s.n, 0);
         assert_eq!(s.last, 0.0);

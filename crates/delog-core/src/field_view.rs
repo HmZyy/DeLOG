@@ -15,7 +15,6 @@ use crate::snapshot::StoreSnapshot;
 use crate::store::TopicStore;
 use crate::time::{TimeRange, TimestampUs, effective_time_us, raw_time_us};
 
-/// How [`FieldView::sample_at`] chooses a value around the query time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SampleMode {
     Prev,
@@ -23,7 +22,6 @@ pub enum SampleMode {
     Linear,
 }
 
-/// Borrowed sample value. Strings are borrowed directly from Arrow buffers.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SampleValue<'a> {
     Int(i64),
@@ -34,7 +32,6 @@ pub enum SampleValue<'a> {
     Null,
 }
 
-/// One sampled field value.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Sample<'a> {
     pub raw_time_us: TimestampUs,
@@ -42,7 +39,6 @@ pub struct Sample<'a> {
     pub value: SampleValue<'a>,
 }
 
-/// Borrowed view of one field in one snapshot.
 pub struct FieldView<'a> {
     snapshot: &'a StoreSnapshot,
     field: FieldId,
@@ -52,7 +48,6 @@ pub struct FieldView<'a> {
     source_offset_us: TimestampUs,
 }
 
-/// Field view construction failures.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FieldViewError {
     InvalidFieldId(FieldId),
@@ -100,7 +95,6 @@ impl<'a> FieldView<'a> {
         self.field
     }
 
-    /// Column index of this field inside its topic schema.
     pub fn col_index(&self) -> usize {
         self.col_index
     }
@@ -113,11 +107,18 @@ impl<'a> FieldView<'a> {
         &self.store.schema.fields()[self.col_index].dtype
     }
 
-    /// Chunks whose raw time range overlaps the requested effective range.
+    pub fn schema_field(&self) -> &crate::schema::FieldSchema {
+        &self.store.schema.fields()[self.col_index]
+    }
+
+    pub fn offset_us_for_export(&self) -> crate::time::TimestampUs {
+        self.source_offset_us
+    }
+
     pub fn chunks_overlapping(
-        &'a self,
+        &self,
         effective_range: TimeRange,
-    ) -> impl Iterator<Item = &'a Chunk> + 'a {
+    ) -> impl Iterator<Item = &'a Chunk> {
         let raw_range =
             raw_time_us(effective_range.min_us, self.source_offset_us).and_then(|min_us| {
                 raw_time_us(effective_range.max_us, self.source_offset_us)
@@ -131,12 +132,9 @@ impl<'a> FieldView<'a> {
         })
     }
 
-    /// Owned `(effective_time, string)` for every Utf8 sample whose effective
-    /// time falls within `range`, up to `max` entries (text annotations).
-    /// Non-string samples are skipped. When `filter` is set, only samples whose
-    /// text contains it (case-insensitive) are kept — the `max` cap counts
-    /// matches, so filtering reaches matches deep in a large field. Returns owned
-    /// strings so callers need no Arrow access and hold no borrow of the snapshot.
+    /// Owned `(effective_time, string)` for Utf8 samples in `range`. `filter`,
+    /// when set, keeps only case-insensitive substring matches; `max` caps
+    /// matches (not scanned rows), so filtering reaches deep into a large field.
     pub fn string_samples_in_range(
         &self,
         range: TimeRange,
@@ -149,7 +147,6 @@ impl<'a> FieldView<'a> {
             .map(str::to_lowercase);
         let mut out = Vec::new();
         for chunk in self.store.chunks.iter() {
-            // Skip chunks whose effective span can't overlap the range.
             let lo = effective_time_us(chunk.t_min, self.source_offset_us);
             let hi = effective_time_us(chunk.t_max, self.source_offset_us);
             if let (Some(lo), Some(hi)) = (lo, hi)
@@ -181,7 +178,6 @@ impl<'a> FieldView<'a> {
         out
     }
 
-    /// Sample this field at an effective/global timestamp.
     pub fn sample_at(
         &'a self,
         effective_time_us: TimestampUs,
@@ -196,13 +192,11 @@ impl<'a> FieldView<'a> {
     }
 
     fn prev_sample(&'a self, raw_time: TimestampUs) -> Option<Sample<'a>> {
-        // Fast path: a sorted, non-overlapping spine lets us binary-search to
-        // the one chunk that can hold the predecessor — O(log chunks) instead
-        // of scanning every chunk (which dominated the 3D pose reads).
+        // Monotonic spine: binary-search the one chunk holding the predecessor
+        // (O(log chunks)); a full scan dominated the 3D pose reads.
         if self.store.is_monotonic() {
             let chunks = &self.store.chunks;
-            // Rightmost chunk whose t_min <= raw_time; later chunks start after
-            // raw_time, earlier ones end before this chunk's first sample.
+            // Rightmost chunk whose t_min <= raw_time.
             let idx = chunks
                 .partition_point(|c| c.t_min <= raw_time)
                 .checked_sub(1)?;
@@ -232,8 +226,7 @@ impl<'a> FieldView<'a> {
     fn next_sample(&'a self, raw_time: TimestampUs) -> Option<Sample<'a>> {
         if self.store.is_monotonic() {
             let chunks = &self.store.chunks;
-            // Leftmost chunk whose t_max >= raw_time; it holds the successor
-            // (earlier chunks end before raw_time).
+            // Leftmost chunk whose t_max >= raw_time holds the successor.
             let idx = chunks.partition_point(|c| c.t_max < raw_time);
             let chunk = chunks.get(idx)?;
             let row = lower_bound(&chunk.t, raw_time);
@@ -367,8 +360,8 @@ fn upper_bound(t: &Int64Array, query: TimestampUs) -> usize {
     left
 }
 
-/// Read row `row` of `array` as `f64` (NaN for nulls/non-numeric), for script
-/// materialization. NaN gap markers in float columns are preserved.
+/// Row `row` of `array` as `f64`; NaN for nulls/non-numeric, and NaN gap
+/// markers in float columns are preserved (not coalesced).
 pub fn array_row_as_f64(array: &dyn Array, row: usize) -> f64 {
     match value_at(array, row) {
         SampleValue::Int(v) => v as f64,
@@ -549,12 +542,10 @@ mod tests {
         let all = mode.string_samples_in_range(range, 100, None);
         assert_eq!(all.len(), 5);
 
-        // Case-insensitive substring; "cruise" is the only match for "CR".
         let matched = mode.string_samples_in_range(range, 100, Some("CR"));
         let labels: Vec<&str> = matched.iter().map(|(_, s)| s.as_str()).collect();
         assert_eq!(labels, ["cruise"]);
 
-        // Blank/whitespace filter disables filtering.
         let blank = mode.string_samples_in_range(range, 100, Some("   "));
         assert_eq!(blank.len(), 5);
     }
@@ -608,11 +599,9 @@ mod tests {
 
     #[test]
     fn sample_at_falls_back_to_linear_scan_for_overlapping_chunks() {
-        // Out-of-order source: chunk A spans [0, 200], chunk B spans
-        // [100, 300] — the spine overlaps, so it is not monotonic and the
-        // binary-search fast path must not engage. The predecessor of 150 lives
-        // in the *later* chunk B (t=100) and the successor in the *earlier*
-        // chunk A (t=200), which a naive bsearch would miss.
+        // Overlapping (non-monotonic) spine: predecessor of 150 is in the later
+        // chunk B (t=100), successor in the earlier chunk A (t=200) — a bsearch
+        // fast path would miss them, so it must not engage here.
         let mut identity = IdentityRegistry::new();
         let source = identity.add_source("flight");
         let topic = identity.add_topic(source, "BARO").unwrap();

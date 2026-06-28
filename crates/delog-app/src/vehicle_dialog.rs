@@ -1,12 +1,10 @@
-//! Vehicle configuration dialog. There is no separate draft/Add/Save step —
-//! one [`Draft`] per vehicle is edited live and the `vehicles` vector is
-//! rebuilt from the drafts that resolve to a complete mapping.
-
 use delog_core::identity::{FieldId, SourceId, TopicId};
 use delog_core::snapshot::StoreSnapshot;
 use egui::Color32;
 
 use crate::vehicle::{GeoRef, ModelKind, NedReference, OriMapping, PosMapping, VehicleConfig};
+
+const DIALOG_WIDTH: f32 = 240.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PosMode {
@@ -21,7 +19,7 @@ enum OriMode {
     Quat,
 }
 
-/// An editable vehicle form.
+#[derive(Clone)]
 struct Draft {
     label: String,
     show: bool,
@@ -34,13 +32,12 @@ struct Draft {
     lat: Option<FieldId>,
     lon: Option<FieldId>,
     alt: Option<FieldId>,
-    /// Interpret the lat/lon columns as `degE7` integers (×1e-7 → degrees).
+    /// degE7 integers (×1e-7 → degrees).
     lat_lon_dege7: bool,
-    /// Interpret the altitude column as millimetres (×1e-3 → metres).
+    /// millimetres (×1e-3 → metres).
     alt_mm: bool,
-    /// Fixed vertical offset in metres (up-positive) for the GPS track.
+    /// metres, up-positive.
     alt_offset_m: f64,
-    /// Optional geodetic reference annotation for a NED/local frame.
     ned_has_ref: bool,
     /// Reference from fixed values (true) or from columns (false).
     ned_ref_manual: bool,
@@ -112,7 +109,6 @@ impl Default for Draft {
 }
 
 impl Draft {
-    /// Load an existing config for editing (FieldIds map back to their topic).
     fn from_config(cfg: &VehicleConfig, snapshot: &StoreSnapshot) -> Self {
         let topic_of = |f: FieldId| field_topic(snapshot, f);
         let mut d = Draft {
@@ -204,7 +200,6 @@ impl Draft {
         d
     }
 
-    /// Build a `VehicleConfig` if the selected mapping has all its fields.
     fn build(&self) -> Option<VehicleConfig> {
         let source = self.source?;
         let pos = match self.pos_mode {
@@ -221,7 +216,6 @@ impl Draft {
                         alt_m: self.ref_alt,
                     }))
                 } else {
-                    // Column reference: kept only when all three are chosen.
                     match (self.ref_lat_f, self.ref_lon_f, self.ref_alt_f) {
                         (Some(lat), Some(lon), Some(alt)) => {
                             Some(NedReference::Fields { lat, lon, alt })
@@ -273,8 +267,6 @@ impl Draft {
     }
 }
 
-/// Dialog state: open flag plus one editable draft per vehicle. `was_open`
-/// drives a resync from `vehicles` on the open edge.
 #[derive(Default)]
 pub struct VehicleDialog {
     pub open: bool,
@@ -324,12 +316,8 @@ fn combo_label<'a, T: PartialEq>(items: &'a [(T, String)], sel: &Option<T>) -> &
     }
 }
 
-/// A **searchable** picker over `(value, label)` items, rendered as a single
-/// toggle button (for use as a grid cell — the caller supplies the label).
-/// The dropdown carries a text filter (persisted in egui memory) so long
-/// topic / field lists are easy to narrow. Returns `true` if the selection
-/// changed. Ids are derived from the calling `ui` so repeated salts across
-/// several vehicles do not collide.
+/// Returns `true` if the selection changed. Ids are derived from the calling
+/// `ui` so repeated salts across several vehicles do not collide.
 fn searchable_combo<T: PartialEq + Copy>(
     ui: &mut egui::Ui,
     salt: &str,
@@ -339,9 +327,8 @@ fn searchable_combo<T: PartialEq + Copy>(
     let before = *sel;
     let filter_id = ui.make_persistent_id((salt, "filter"));
     let highlight_id = ui.make_persistent_id((salt, "highlight"));
-    // A toggle button + an explicit popup: `CloseOnClickOutside` keeps the
-    // popup open while typing in the search box (a plain ComboBox closes on
-    // that click), and the scroll area shows many rows at once.
+    // `CloseOnClickOutside` keeps the popup open while typing in the search box;
+    // a plain ComboBox closes on that click.
     let button = ui.button(combo_label(items, sel));
     egui::Popup::from_toggle_button_response(&button)
         .id(button.id.with("popup"))
@@ -416,8 +403,6 @@ fn searchable_combo<T: PartialEq + Copy>(
     *sel != before
 }
 
-/// A plain field picker restricted to one topic's columns (no search — a
-/// single topic has few columns), rendered as a single combo for a grid cell.
 fn field_combo(
     ui: &mut egui::Ui,
     salt: &str,
@@ -433,15 +418,31 @@ fn field_combo(
         });
 }
 
-/// Render the dialog; returns `true` when the vehicle set changed.
+fn choose_custom_glb_path(current_path: &str) -> Option<String> {
+    let mut dialog = rfd::FileDialog::new()
+        .set_title("Choose custom GLB")
+        .add_filter("GLB models", &["glb", "GLB"])
+        .add_filter("All files", &["*"]);
+    let current = std::path::Path::new(current_path.trim());
+    if let Some(parent) = current.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        dialog = dialog.set_directory(parent);
+    }
+    dialog
+        .pick_file()
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
+/// Returns `true` when the vehicle set changed.
 pub fn show(
     ctx: &egui::Context,
     state: &mut VehicleDialog,
     vehicles: &mut Vec<VehicleConfig>,
     snapshot: &StoreSnapshot,
 ) -> bool {
-    // Resync drafts from the current vehicles on the open edge, so external
-    // changes (e.g. a loaded layout) are reflected when the dialog is opened.
+    // Resync drafts on the open edge so external changes (e.g. a loaded layout)
+    // are reflected when the dialog opens.
     if state.open && !state.was_open {
         state.drafts = vehicles
             .iter()
@@ -459,8 +460,9 @@ pub fn show(
         .collapsible(false)
         .default_pos(ctx.content_rect().center())
         .pivot(egui::Align2::CENTER_CENTER)
-        .default_width(360.0)
+        .default_width(DIALOG_WIDTH)
         .show(ctx, |ui| {
+            ui.set_min_width(DIALOG_WIDTH);
             if ui
                 .add(egui::Button::image_and_text(
                     icon(ui, crate::icons::plus()),
@@ -468,17 +470,22 @@ pub fn show(
                 ))
                 .clicked()
             {
-                state.drafts.push(Draft::default());
+                let n = state.drafts.len() + 1;
+                state.drafts.push(Draft {
+                    label: format!("Vehicle #{n}"),
+                    ..Draft::default()
+                });
             }
-            ui.separator();
+            ui.add_space(8.0);
 
             let mut remove: Option<usize> = None;
+            let mut duplicate: Option<usize> = None;
             egui::ScrollArea::vertical().show(ui, |ui| {
                 for (i, draft) in state.drafts.iter_mut().enumerate() {
                     let title = if draft.label.trim().is_empty() {
                         format!("Vehicle #{}", i + 1)
                     } else {
-                        format!("{} — Vehicle #{}", draft.label, i + 1)
+                        draft.label.clone()
                     };
                     egui::CollapsingHeader::new(title)
                         .id_salt(("vehicle", i))
@@ -486,33 +493,44 @@ pub fn show(
                         .show(ui, |ui| {
                             draft_editor(ui, draft, snapshot);
                             ui.add_space(8.0);
-                            if draft.build().is_none() {
-                                ui.weak("Incomplete: pick a source, position topic + columns.");
-                            }
-                            if ui
-                                .add(egui::Button::image_and_text(
-                                    icon(ui, crate::icons::trash()),
-                                    "Remove Vehicle",
-                                ))
-                                .clicked()
-                            {
-                                remove = Some(i);
-                            }
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .add(egui::Button::image_and_text(
+                                        icon(ui, crate::icons::trash()),
+                                        "Remove Vehicle",
+                                    ))
+                                    .clicked()
+                                {
+                                    remove = Some(i);
+                                }
+                                if ui
+                                    .add(egui::Button::image_and_text(
+                                        icon(ui, crate::icons::copy()),
+                                        "Duplicate",
+                                    ))
+                                    .clicked()
+                                {
+                                    duplicate = Some(i);
+                                }
+                            });
                         });
-                    ui.separator();
+                    ui.add_space(6.0);
                 }
             });
+            if let Some(i) = duplicate {
+                let mut copy = state.drafts[i].clone();
+                copy.label = format!("{} copy", copy.label);
+                state.drafts.insert(i + 1, copy);
+            }
             if let Some(i) = remove {
                 state.drafts.remove(i);
             }
         });
     state.open = open;
 
-    // Rebuild the vehicle set from the drafts that resolve to a complete
-    // mapping. Commit whenever it differs so cosmetic edits (colour, scale,
-    // model, visibility) show in the 3D view immediately, but only report a
-    // change — which drives the off-thread trajectory rebuild — when a
-    // trajectory-relevant aspect (source or position mapping) actually moves.
+    // Commit on any diff so cosmetic edits show immediately, but only report a
+    // change (which drives the off-thread trajectory rebuild) when source or
+    // position mapping moves.
     let rebuilt: Vec<VehicleConfig> = state.drafts.iter().filter_map(Draft::build).collect();
     if rebuilt == *vehicles {
         return false;
@@ -525,11 +543,15 @@ pub fn show(
     traj_changed
 }
 
-/// A 16px menu/button icon tinted to the current text colour.
 fn icon(ui: &egui::Ui, src: egui::ImageSource<'static>) -> egui::Image<'static> {
     egui::Image::new(src)
         .fit_to_exact_size(egui::vec2(16.0, 16.0))
         .tint(ui.visuals().text_color())
+}
+
+fn section_heading(ui: &mut egui::Ui, text: &str) {
+    ui.label(egui::RichText::new(text).strong());
+    ui.add_space(2.0);
 }
 
 fn draft_editor(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapshot) {
@@ -540,10 +562,9 @@ fn draft_editor(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapshot) 
         .map(|s| (s.entry.id, s.entry.label.clone()))
         .collect();
 
-    egui::Grid::new("vehicle_grid")
+    egui::Grid::new("vehicle_grid_general")
         .num_columns(2)
-        .spacing([18.0, 6.0])
-        .striped(true)
+        .spacing([18.0, 8.0])
         .show(ui, |ui| {
             ui.label("Name");
             ui.text_edit_singleline(&mut draft.label);
@@ -597,7 +618,40 @@ fn draft_editor(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapshot) 
 
             if matches!(draft.model, ModelKind::CustomGlb(_)) {
                 ui.label("GLB path");
-                ui.text_edit_singleline(&mut draft.custom_path);
+                ui.horizontal(|ui| {
+                    let has_path = !draft.custom_path.trim().is_empty();
+                    let text = if has_path {
+                        draft.custom_path.as_str()
+                    } else {
+                        "No GLB selected"
+                    };
+                    let label =
+                        ui.add_sized(egui::vec2(150.0, 18.0), egui::Label::new(text).truncate());
+                    if has_path {
+                        label.on_hover_text(draft.custom_path.as_str());
+                    }
+                    if ui
+                        .add_sized(
+                            egui::vec2(28.0, 24.0),
+                            egui::Button::image(icon(ui, crate::icons::folder_open())),
+                        )
+                        .on_hover_text("Choose custom GLB")
+                        .clicked()
+                        && let Some(path) = choose_custom_glb_path(&draft.custom_path)
+                    {
+                        draft.custom_path = path;
+                    }
+                    if ui
+                        .add_enabled(
+                            has_path,
+                            egui::Button::image(icon(ui, crate::icons::close())),
+                        )
+                        .on_hover_text("Clear custom GLB")
+                        .clicked()
+                    {
+                        draft.custom_path.clear();
+                    }
+                });
                 ui.end_row();
             }
 
@@ -619,24 +673,30 @@ fn draft_editor(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapshot) 
                 ui.add(egui::Slider::new(&mut draft.scale, 0.05..=50.0).show_value(false));
             });
             ui.end_row();
+        });
 
-            let Some(source) = draft.source else {
-                ui.label("");
-                ui.weak("Select a source to map its fields.");
-                ui.end_row();
-                return;
-            };
-            let topics = source_topics(snapshot, source);
+    let Some(source) = draft.source else {
+        return;
+    };
+    let topics = source_topics(snapshot, source);
 
-            ui.label(egui::RichText::new("Orientation").strong());
+    ui.add_space(4.0);
+    ui.separator();
+    section_heading(ui, "Orientation");
+    egui::Grid::new("vehicle_grid_orientation")
+        .num_columns(2)
+        .spacing([18.0, 8.0])
+        .show(ui, |ui| {
+            ui.label("Mode");
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut draft.ori_mode, OriMode::Static, "Static");
                 ui.selectable_value(&mut draft.ori_mode, OriMode::Euler, "Euler");
                 ui.selectable_value(&mut draft.ori_mode, OriMode::Quat, "Quaternion");
             });
             ui.end_row();
+
             if draft.ori_mode != OriMode::Static {
-                ui.label("Orient. Topic");
+                ui.label("Topic");
                 if topic_combo(ui, "veh-ori-topic", &mut draft.ori_topic, &topics) {
                     draft.roll = None;
                     draft.pitch = None;
@@ -669,20 +729,25 @@ fn draft_editor(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapshot) 
                             grid_field(ui, "veh-qz", "QZ", &mut draft.qz, &cols);
                         }
                     }
-                } else {
-                    ui.label("");
-                    ui.weak("Select an orientation topic.");
-                    ui.end_row();
                 }
             }
+        });
 
-            ui.label(egui::RichText::new("Position").strong());
+    ui.add_space(4.0);
+    ui.separator();
+    section_heading(ui, "Position");
+    egui::Grid::new("vehicle_grid_position")
+        .num_columns(2)
+        .spacing([18.0, 8.0])
+        .show(ui, |ui| {
+            ui.label("Frame");
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut draft.pos_mode, PosMode::Ned, "Local (NED)");
                 ui.selectable_value(&mut draft.pos_mode, PosMode::Gps, "Global (GPS)");
             });
             ui.end_row();
-            ui.label("Pos. Topic");
+
+            ui.label("Topic");
             if topic_combo(ui, "veh-pos-topic", &mut draft.pos_topic, &topics) {
                 draft.north = None;
                 draft.east = None;
@@ -695,6 +760,7 @@ fn draft_editor(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapshot) 
                 draft.ref_alt_f = None;
             }
             ui.end_row();
+
             if let Some(topic) = draft.pos_topic {
                 let cols = topic_fields(snapshot, topic);
                 match draft.pos_mode {
@@ -743,15 +809,10 @@ fn draft_editor(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapshot) 
                         ui.end_row();
                     }
                 }
-            } else {
-                ui.label("");
-                ui.weak("Select a position topic.");
-                ui.end_row();
             }
         });
 }
 
-/// One grid row: a label cell and a single-topic column picker, then `end_row`.
 fn grid_field(
     ui: &mut egui::Ui,
     salt: &str,
@@ -764,8 +825,7 @@ fn grid_field(
     ui.end_row();
 }
 
-/// A searchable topic picker for a grid cell; returns `true` if the selection
-/// changed (so the caller can clear the now-stale column selections).
+/// Returns `true` if the selection changed (caller clears stale columns).
 fn topic_combo(
     ui: &mut egui::Ui,
     salt: &str,
@@ -773,4 +833,17 @@ fn topic_combo(
     topics: &[(TopicId, String)],
 ) -> bool {
     searchable_combo(ui, salt, sel, topics)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn custom_glb_path_uses_file_picker_not_text_edit() {
+        let source = include_str!("vehicle_dialog.rs");
+
+        assert!(source.contains(".set_title(\"Choose custom GLB\")"));
+        assert!(source.contains(".add_filter(\"GLB models\", &[\"glb\", \"GLB\"])"));
+        let text_edit = concat!("text_edit_singleline", "(&mut draft.custom_path)");
+        assert!(!source.contains(text_edit));
+    }
 }

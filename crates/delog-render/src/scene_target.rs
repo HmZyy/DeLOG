@@ -1,33 +1,19 @@
 //! Offscreen 3D render target.
 //!
-//! The 3D view cannot draw into egui's main pass — that pass has no depth
-//! attachment, so meshes would z-fight in painter order. Instead the scene
-//! renders into a dedicated **4×MSAA color + depth** target in the paint
-//! callback's `prepare()` phase, resolving the multisampled color into a
-//! single-sample texture which `delog-app` composites as an egui image
-//! (the actual `ui.image` wiring rides with the scene pane).
-//!
-//! Confining MSAA to this one offscreen target keeps the antialiasing cost on
-//! the view that benefits, and avoids both per-widget GPU contexts and a
-//! fullscreen extra pass for the 2D plots.
-//!
-//! This module is pure wgpu, so the same target backs headless
-//! golden-image tests with no window.
+//! The 3D view renders into its own 4×MSAA color+depth target rather than
+//! egui's main pass, which has no depth attachment (meshes would z-fight in
+//! painter order). The resolved single-sample color is composited as an egui
+//! image. Pure wgpu, so the same target backs headless golden-image tests.
 
 use crate::context::RenderContext;
 use crate::target::{RgbaImage, read_texture_rgba};
 
-/// Multisample count for the scene target (4×MSAA).
 pub const SAMPLE_COUNT: u32 = 4;
 
-/// Color format of the resolved scene texture handed to egui / readback.
 pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
-/// Depth format for the scene's depth attachment.
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
-/// A 4×MSAA color+depth offscreen target that resolves to a single-sample
-/// color texture for compositing or readback.
 pub struct Scene3dTarget {
     ctx: RenderContext,
     color_msaa: wgpu::TextureView,
@@ -39,9 +25,8 @@ pub struct Scene3dTarget {
 }
 
 impl Scene3dTarget {
-    /// A 4×MSAA color+depth scene target of the given size. `width`/`height`
-    /// are clamped to at least 1 so a zero-area widget rect cannot create an
-    /// invalid texture.
+    /// `width`/`height` are clamped to at least 1 so a zero-area widget rect
+    /// cannot create an invalid texture.
     pub fn new(ctx: RenderContext, width: u32, height: u32) -> Self {
         let (width, height) = (width.max(1), height.max(1));
         let (color_msaa, depth_msaa, resolve, resolve_view) =
@@ -97,9 +82,6 @@ impl Scene3dTarget {
                 view_formats: &[],
             })
             .create_view(&wgpu::TextureViewDescriptor::default());
-        // Single-sample resolve: egui samples it (TEXTURE_BINDING) and golden
-        // tests read it back (COPY_SRC); it is the MSAA resolve destination
-        // (RENDER_ATTACHMENT).
         let resolve = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("delog-scene-resolve"),
             size,
@@ -116,9 +98,7 @@ impl Scene3dTarget {
         (color_msaa, depth_msaa, resolve, resolve_view)
     }
 
-    /// Recreate the textures if the requested size changed (e.g. the scene
-    /// pane was resized). No-op when the size is unchanged so steady-state
-    /// frames allocate nothing.
+    /// No-op when the size is unchanged so steady-state frames allocate nothing.
     pub fn resize(&mut self, width: u32, height: u32) {
         let (width, height) = (width.max(1), height.max(1));
         if width == self.width && height == self.height {
@@ -134,10 +114,7 @@ impl Scene3dTarget {
         self.height = height;
     }
 
-    /// Begin a render pass into the MSAA color+depth attachments, resolving
-    /// the color into the single-sample texture. Clears color to `clear` and
-    /// depth to `1.0` (the far plane, so any `Less` comparison passes). The
-    /// caller draws the scene into the returned pass.
+    /// Clears depth to 1.0 (far plane, so any `Less` comparison passes).
     pub fn begin_pass<'a>(
         &'a self,
         encoder: &'a mut wgpu::CommandEncoder,
@@ -151,8 +128,7 @@ impl Scene3dTarget {
                 resolve_target: Some(&self.resolve_view),
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(clear),
-                    // The MSAA color is transient — only the resolve is read —
-                    // so it need not be stored.
+                    // Only the resolve is read, so the MSAA color need not be stored.
                     store: wgpu::StoreOp::Discard,
                 },
             })],
@@ -170,8 +146,6 @@ impl Scene3dTarget {
         })
     }
 
-    /// The resolved single-sample color view — what `delog-app` registers with
-    /// egui to composite the scene as an image.
     pub fn resolve_view(&self) -> &wgpu::TextureView {
         &self.resolve_view
     }
@@ -196,8 +170,6 @@ impl Scene3dTarget {
         self.height
     }
 
-    /// Read the resolved color texture back to CPU (blocking) — the headless
-    /// golden-image path.
     pub fn read_rgba(&self) -> RgbaImage {
         read_texture_rgba(&self.ctx, &self.resolve, self.width, self.height)
     }
@@ -207,19 +179,15 @@ impl Scene3dTarget {
 mod tests {
     use super::*;
 
-    /// A self-contained test pipeline that draws one solid-color triangle at a
-    /// fixed clip-space depth, multisampled to match the scene target. Used to
-    /// prove depth testing and MSAA resolve on real hardware.
     struct TriPipeline {
         pipeline: wgpu::RenderPipeline,
         layout: wgpu::BindGroupLayout,
     }
 
-    /// Per-draw uniform: three clip-space xy corners, a depth, and a color.
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
     struct TriUniform {
-        // Three corners as xy pairs, padded to vec4 for std140 alignment.
+        // Corners padded to vec4 for std140 alignment.
         p0: [f32; 4],
         p1: [f32; 4],
         p2: [f32; 4],
@@ -332,14 +300,11 @@ fn fs() -> @location(0) vec4<f32> {
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &bind, &[]);
             pass.draw(0..3, 0..1);
-            // `bind`/`buf` drop here, after the encoded draw — wgpu retains the
-            // resources it references until submission, so this is sound.
+            // `bind`/`buf` drop here, after the encoded draw: wgpu retains
+            // referenced resources until submission, so this is sound.
         }
     }
 
-    /// Clearing the MSAA target and resolving yields the clear color in
-    /// every pixel of the single-sample resolve texture — proves the resolve
-    /// path and readback are wired.
     #[test]
     fn clear_resolves_through_msaa() {
         let Some(ctx) = RenderContext::headless() else {
@@ -376,11 +341,6 @@ fn fs() -> @location(0) vec4<f32> {
         );
     }
 
-    /// Depth testing rejects geometry drawn later but farther away.
-    /// A near red triangle is drawn first, then a far green triangle covering
-    /// the same area; with depth-compare `Less` the green is rejected, so the
-    /// overlap stays red. (Without a working depth buffer, the later green
-    /// draw would win.)
     #[test]
     fn depth_test_rejects_farther_geometry() {
         let Some(ctx) = RenderContext::headless() else {
@@ -390,18 +350,17 @@ fn fs() -> @location(0) vec4<f32> {
         let target = Scene3dTarget::new(ctx.clone(), w, h);
         let tri = TriPipeline::new(&ctx);
 
-        // A big triangle covering the center of the framebuffer.
         let big = ([-1.0f32, -1.0], [3.0f32, -1.0], [-1.0f32, 3.0]);
         let near = TriUniform {
             p0: [big.0[0], big.0[1], 0.0, 0.0],
             p1: [big.1[0], big.1[1], 0.0, 0.0],
             p2: [big.2[0], big.2[1], 0.0, 0.0],
             depth: [0.2, 0.0, 0.0, 0.0],
-            color: [1.0, 0.0, 0.0, 1.0], // red, near
+            color: [1.0, 0.0, 0.0, 1.0],
         };
         let far = TriUniform {
             depth: [0.8, 0.0, 0.0, 0.0],
-            color: [0.0, 1.0, 0.0, 1.0], // green, far
+            color: [0.0, 1.0, 0.0, 1.0],
             ..near
         };
 
@@ -427,9 +386,6 @@ fn fs() -> @location(0) vec4<f32> {
         );
     }
 
-    /// 4×MSAA antialiases a slanted triangle edge — a pixel straddling
-    /// the edge resolves to partial coverage (strictly between the clear color
-    /// and the fill color), which a single-sample target cannot produce.
     #[test]
     fn msaa_smooths_a_triangle_edge() {
         let Some(ctx) = RenderContext::headless() else {
@@ -439,14 +395,12 @@ fn fs() -> @location(0) vec4<f32> {
         let target = Scene3dTarget::new(ctx.clone(), w, h);
         let tri = TriPipeline::new(&ctx);
 
-        // A triangle whose hypotenuse runs along the main diagonal of clip
-        // space: covers the lower-left half, leaving a slanted edge.
         let u = TriUniform {
             p0: [-1.0, -1.0, 0.0, 0.0],
             p1: [1.0, -1.0, 0.0, 0.0],
             p2: [-1.0, 1.0, 0.0, 0.0],
             depth: [0.5, 0.0, 0.0, 0.0],
-            color: [1.0, 1.0, 1.0, 1.0], // white fill on black clear
+            color: [1.0, 1.0, 1.0, 1.0],
         };
 
         let mut enc = ctx
@@ -462,11 +416,10 @@ fn fs() -> @location(0) vec4<f32> {
             .unwrap();
 
         let img = target.read_rgba();
-        // Scan the anti-diagonal (the edge) for a partially-covered pixel:
-        // not pure black, not pure white.
+        // Scan the edge for a partially-covered pixel: not pure black or white.
         let mut found_blend = false;
         for k in 1..(w - 1) {
-            let (x, y) = (k, k); // row index from top; edge runs corner-to-corner
+            let (x, y) = (k, k);
             let p = img.pixel(x, y);
             let g = p[1];
             if g > 16 && g < 239 {

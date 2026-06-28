@@ -1,5 +1,3 @@
-//! Custom Python parser editor and parser-run lifecycle state.
-
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -149,8 +147,8 @@ impl ParsersPanel {
         }
     }
 
-    /// Load the parser before opening the native dialog so the worker owns an
-    /// immutable source snapshot rather than reading mutable editor state.
+    /// Load before opening the dialog so the worker owns an immutable source
+    /// snapshot rather than reading mutable editor state.
     #[allow(dead_code)]
     pub fn request_open(&mut self, ctx: &egui::Context, name: &str) {
         let source = match self.library.load(name) {
@@ -385,9 +383,6 @@ impl ParsersPanel {
         std::mem::take(&mut self.diagnostics)
     }
 
-    /// Stage a saved parser for deletion by name (Tools / Parsers list). The
-    /// confirmation dialog is rendered by [`Self::ui`] every frame, so this works
-    /// whether or not the editor popup is open.
     pub fn request_delete_named(&mut self, name: &str) {
         self.pending_delete = Some(name.to_owned());
     }
@@ -401,9 +396,8 @@ impl ParsersPanel {
         }
         match self.library.delete(&name) {
             Ok(()) => {
-                // Only forget the open editor's identity when it is the parser
-                // being deleted; deleting a different one from the list must not
-                // detach the editor from its file.
+                // Only detach the editor when the deleted parser is the one it
+                // holds; deleting a different one must not detach it.
                 if self.saved_original_name.as_deref() == Some(name.as_str()) {
                     self.saved_original_name = None;
                 }
@@ -431,9 +425,8 @@ impl ParsersPanel {
             .default_size([720.0, 480.0])
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    // A fixed width keeps the field from demanding infinite width,
-                    // which would force the window to its maximum size and block
-                    // shrinking on resize (matches the Scripts editor).
+                    // Fixed width: an infinite-width field forces the window to
+                    // max size and blocks shrinking on resize.
                     ui.add(egui::TextEdit::singleline(&mut self.filename).desired_width(160.0));
                     if image_text_button(
                         ui,
@@ -802,7 +795,6 @@ mod tests {
             path: path.clone(),
         });
         assert!(panel.is_running());
-        // The label always reads "running <parser> on <log>", regardless of phase.
         assert_eq!(panel.active_label(), "running raw.py on flight.raw");
         panel.handle_event(ParserEvent::Running {
             parser_name: "raw.py".into(),

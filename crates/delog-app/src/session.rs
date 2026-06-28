@@ -1,10 +1,5 @@
-//! App data session: the never-block load path.
-//!
-//! [`Session`] owns the one ingest thread (the store's only writer) and the
-//! parser registry. Opening a path sniffs the format and runs the parser on a
-//! worker thread, so the UI thread only ever does `snapshot()` + draw. Progress
-//! and diagnostics flow back through an [`IngestObserver`] into shared state the
-//! UI reads; an epoch listener requests a repaint whenever data lands.
+//! App data session. [`Session`] owns the one ingest thread (the store's only
+//! writer); the UI thread only ever does `snapshot()` + draw.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -28,7 +23,6 @@ use delog_parsers::{
 type LiveScriptSink =
     Arc<Mutex<Option<std::sync::mpsc::SyncSender<delog_core::ingest::ParsedBatch>>>>;
 
-/// Per-source load progress, shared between the ingest thread and the UI.
 #[derive(Debug, Clone, Copy, Default)]
 struct LoadState {
     progress: f32,
@@ -37,8 +31,7 @@ struct LoadState {
 
 type Loads = Arc<Mutex<HashMap<SourceId, LoadState>>>;
 
-/// Observer that funnels ingest-side events into shared UI state and requests
-/// repaints. Lives on the ingest thread.
+/// Lives on the ingest thread.
 struct AppObserver {
     loads: Loads,
     diagnostics: Arc<DiagnosticHub>,
@@ -94,14 +87,12 @@ impl IngestObserver for AppObserver {
     }
 }
 
-/// A parse running on a worker thread.
 struct ActiveLoad {
     label: String,
     cancel: CancelToken,
     handle: Option<JoinHandle<()>>,
 }
 
-/// The owner of the store, ingest thread and parser registry.
 pub struct Session {
     store: Arc<DataStore>,
     sender: IngestSender,
@@ -120,7 +111,6 @@ pub struct Session {
 }
 
 impl Session {
-    /// Spawn the ingest thread and register the built-in parsers.
     pub fn new(ctx: egui::Context) -> Self {
         let loads: Loads = Arc::default();
         let diagnostics = Arc::new(DiagnosticHub::new());
@@ -293,7 +283,6 @@ impl Session {
             .min_by(|a, b| a.total_cmp(b))
     }
 
-    /// Labels + cancel handles of loads still running.
     pub fn active_labels(&self) -> Vec<String> {
         self.active
             .iter()
@@ -339,15 +328,12 @@ impl Session {
         });
     }
 
-    /// Request cancellation of every running load.
     pub fn cancel_all(&self) {
         for load in &self.active {
             load.cancel.cancel();
         }
     }
 
-    /// Drop bookkeeping for finished loads and kick the post-load data-quality
-    /// scan for newly finished sources.
     pub fn prune_finished(&mut self) {
         self.active
             .retain(|a| a.handle.as_ref().is_some_and(|h| !h.is_finished()));
@@ -388,7 +374,6 @@ impl Session {
             .expect("spawn quality scan thread");
     }
 
-    /// Test helper: join every worker so all messages have been sent.
     #[cfg(test)]
     fn join_workers(&mut self) {
         for load in &mut self.active {
@@ -542,7 +527,6 @@ mod tests {
         assert!(rx.try_recv().is_ok(), "live batches are mirrored");
     }
 
-    /// Minimal self-describing DataFlash log: one TEST message, two rows.
     fn tiny_bin() -> Vec<u8> {
         const HEAD1: u8 = 0xA3;
         const HEAD2: u8 = 0x95;
