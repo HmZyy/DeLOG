@@ -26,6 +26,7 @@ pub struct SourceNode {
     pub range: Option<TimeRange>,
     pub offset_us: i64,
     pub topics: Vec<TopicNode>,
+    search_path: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -34,6 +35,7 @@ pub struct TopicNode {
     pub name: String,
     pub rows: u64,
     pub fields: Vec<FieldNode>,
+    search_path: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -46,6 +48,137 @@ pub struct FieldNode {
     pub count: u64,
     pub first_raw: Option<String>,
     pub last_raw: Option<String>,
+    search_path: String,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct BrowserFilter {
+    pub sources: Vec<VisibleSource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VisibleSource {
+    pub source: usize,
+    pub topics: Vec<VisibleTopic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VisibleTopic {
+    pub topic: usize,
+    pub fields: Vec<usize>,
+}
+
+#[derive(Debug, Default)]
+pub struct BrowserFilterCache {
+    query: String,
+    view: BrowserFilter,
+    valid: bool,
+}
+
+impl BrowserFilter {
+    pub fn build(model: &BrowserModel, query: &str) -> Self {
+        let query = query.trim();
+        if query.is_empty() {
+            return Self::all(model);
+        }
+
+        let mut sources = Vec::new();
+        for (source_idx, source) in model.sources.iter().enumerate() {
+            if matches_query(query, &source.search_path) {
+                sources.push(VisibleSource {
+                    source: source_idx,
+                    topics: source
+                        .topics
+                        .iter()
+                        .enumerate()
+                        .map(|(topic_idx, topic)| VisibleTopic {
+                            topic: topic_idx,
+                            fields: (0..topic.fields.len()).collect(),
+                        })
+                        .collect(),
+                });
+                continue;
+            }
+
+            let mut topics = Vec::new();
+            for (topic_idx, topic) in source.topics.iter().enumerate() {
+                if matches_query(query, &topic.search_path) {
+                    topics.push(VisibleTopic {
+                        topic: topic_idx,
+                        fields: (0..topic.fields.len()).collect(),
+                    });
+                    continue;
+                }
+
+                let fields: Vec<usize> = topic
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(field_idx, field)| {
+                        matches_query(query, &field.search_path).then_some(field_idx)
+                    })
+                    .collect();
+                if !fields.is_empty() {
+                    topics.push(VisibleTopic {
+                        topic: topic_idx,
+                        fields,
+                    });
+                }
+            }
+
+            if !topics.is_empty() {
+                sources.push(VisibleSource {
+                    source: source_idx,
+                    topics,
+                });
+            }
+        }
+        Self { sources }
+    }
+
+    pub fn all(model: &BrowserModel) -> Self {
+        Self {
+            sources: model
+                .sources
+                .iter()
+                .enumerate()
+                .map(|(source_idx, source)| VisibleSource {
+                    source: source_idx,
+                    topics: source
+                        .topics
+                        .iter()
+                        .enumerate()
+                        .map(|(topic_idx, topic)| VisibleTopic {
+                            topic: topic_idx,
+                            fields: (0..topic.fields.len()).collect(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.sources.is_empty()
+    }
+}
+
+impl BrowserFilterCache {
+    pub fn view(&mut self, model: &BrowserModel, query: &str) -> &BrowserFilter {
+        if !self.valid || self.query != query {
+            self.query.clear();
+            self.query.push_str(query);
+            self.view = BrowserFilter::build(model, query);
+            self.valid = true;
+        }
+        &self.view
+    }
+
+    pub fn reset(&mut self) {
+        self.query.clear();
+        self.view = BrowserFilter::default();
+        self.valid = false;
+    }
 }
 
 impl BrowserModel {
@@ -77,6 +210,8 @@ impl BrowserModel {
                         None => range,
                     });
                 }
+                let topic_search_path =
+                    format!("{}/{}", source.entry.label, topic.entry.name).to_lowercase();
 
                 let mut fields: Vec<FieldNode> = snapshot
                     .fields
@@ -96,6 +231,7 @@ impl BrowserModel {
                             count: rows,
                             first_raw,
                             last_raw,
+                            search_path: format!("{topic_search_path}.{}", f.name).to_lowercase(),
                         }
                     })
                     .collect();
@@ -106,6 +242,7 @@ impl BrowserModel {
                     name: topic.entry.name.clone(),
                     rows,
                     fields,
+                    search_path: topic_search_path,
                 });
             }
             topics.sort_by(|a, b| natural_cmp(&a.name, &b.name));
@@ -118,6 +255,7 @@ impl BrowserModel {
                 range: source_range.and_then(|r| r.offset(offset_us)),
                 offset_us,
                 topics,
+                search_path: source.entry.label.to_lowercase(),
             });
         }
         Self { sources }
@@ -125,48 +263,6 @@ impl BrowserModel {
 
     pub fn is_empty(&self) -> bool {
         self.sources.is_empty()
-    }
-
-    /// Filter over full `source/topic.field` paths: a match at topic or source
-    /// level keeps the whole branch, empty branches are pruned, blank is identity.
-    pub fn filtered(&self, query: &str) -> Self {
-        if query.trim().is_empty() {
-            return self.clone();
-        }
-        let mut sources = Vec::new();
-        for source in &self.sources {
-            if matches_query(query, &source.label) {
-                sources.push(source.clone());
-                continue;
-            }
-            let mut topics = Vec::new();
-            for topic in &source.topics {
-                let topic_path = format!("{}/{}", source.label, topic.name);
-                if matches_query(query, &topic_path) {
-                    topics.push(topic.clone());
-                    continue;
-                }
-                let fields: Vec<FieldNode> = topic
-                    .fields
-                    .iter()
-                    .filter(|f| matches_query(query, &format!("{topic_path}.{}", f.name)))
-                    .cloned()
-                    .collect();
-                if !fields.is_empty() {
-                    topics.push(TopicNode {
-                        fields,
-                        ..topic.clone()
-                    });
-                }
-            }
-            if !topics.is_empty() {
-                sources.push(SourceNode {
-                    topics,
-                    ..source.clone()
-                });
-            }
-        }
-        Self { sources }
     }
 }
 
@@ -395,6 +491,7 @@ pub fn ui(
     ui: &mut egui::Ui,
     model: &BrowserModel,
     query: &mut String,
+    filter_cache: &mut BrowserFilterCache,
     selection: &mut Selection,
     offset_dialog: &mut Option<(SourceId, i64)>,
 ) -> BrowserResponse {
@@ -435,24 +532,26 @@ pub fn ui(
     }
 
     let filtering = !query.trim().is_empty();
-    let filtered;
-    let model = if filtering {
-        filtered = model.filtered(query);
-        &filtered
-    } else {
-        model
-    };
-    if filtering && model.is_empty() {
+    let view = filter_cache.view(model, query);
+    if filtering && view.is_empty() {
         ui.add_space(8.0);
         ui.weak("Nothing matches the filter.");
         return response;
     }
 
-    let visible: Vec<FieldId> = model
+    let visible: Vec<FieldId> = view
         .sources
         .iter()
-        .flat_map(|s| s.topics.iter())
-        .flat_map(|t| t.fields.iter().map(|f| f.id))
+        .flat_map(|visible_source| {
+            let source = &model.sources[visible_source.source];
+            visible_source.topics.iter().flat_map(move |visible_topic| {
+                let topic = &source.topics[visible_topic.topic];
+                visible_topic
+                    .fields
+                    .iter()
+                    .map(move |&field_idx| topic.fields[field_idx].id)
+            })
+        })
         .collect();
 
     let mut offset_change = None;
@@ -465,7 +564,8 @@ pub fn ui(
         .auto_shrink([false, true])
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            for source in &model.sources {
+            for visible_source in &view.sources {
+                let source = &model.sources[visible_source.source];
                 let header = format!("{}  ({} rows)", source.label, source.rows);
                 let collapsing = egui::CollapsingHeader::new(header)
                     .id_salt(("source", source.id.0))
@@ -483,7 +583,8 @@ pub fn ui(
                                 offset_change = Some(change);
                             }
                         });
-                        for topic in &source.topics {
+                        for visible_topic in &visible_source.topics {
+                            let topic = &source.topics[visible_topic.topic];
                             egui::CollapsingHeader::new(format!(
                                 "{}  ({})",
                                 topic.name, topic.rows
@@ -492,7 +593,8 @@ pub fn ui(
                             .default_open(false)
                             .open(filtering.then_some(true))
                             .show(ui, |ui| {
-                                for field in &topic.fields {
+                                for &field_idx in &visible_topic.fields {
+                                    let field = &topic.fields[field_idx];
                                     match field_row(ui, field, selection, &visible) {
                                         Some(FieldRowAction::InspectMetadata(f)) => {
                                             inspect_field_metadata = Some(f);
@@ -1081,24 +1183,36 @@ mod tests {
     }
 
     #[test]
-    fn filtered_model_retains_matching_fields_and_prunes_empty_branches() {
+    fn filter_view_retains_matching_fields_and_prunes_empty_branches() {
         let model = BrowserModel::from_snapshot(&snapshot());
+        let view = BrowserFilter::build(&model, "gps lat");
 
-        let lat = model.filtered("gps lat");
-        assert_eq!(lat.sources.len(), 1);
-        assert_eq!(lat.sources[0].topics.len(), 1);
-        let fields: Vec<_> = lat.sources[0].topics[0]
+        assert!(!view.is_empty());
+        assert_eq!(view.sources.len(), 1);
+        assert_eq!(view.sources[0].source, 0);
+        assert_eq!(view.sources[0].topics.len(), 1);
+        assert_eq!(view.sources[0].topics[0].topic, 0);
+
+        let field_names: Vec<_> = view.sources[0].topics[0]
             .fields
             .iter()
-            .map(|f| f.name.as_str())
+            .map(|&field_idx| model.sources[0].topics[0].fields[field_idx].name.as_str())
             .collect();
-        assert_eq!(fields, vec!["Lat"]);
+        assert_eq!(field_names, vec!["Lat"]);
+    }
 
-        let gps = model.filtered("gps");
-        assert_eq!(gps.sources[0].topics[0].fields.len(), 2);
+    #[test]
+    fn filter_cache_reuses_results_until_query_changes() {
+        let model = BrowserModel::from_snapshot(&snapshot());
+        let mut cache = BrowserFilterCache::default();
 
-        assert!(model.filtered("nonexistent").is_empty());
+        let blank = cache.view(&model, "");
+        assert_eq!(blank.sources[0].topics[0].fields.len(), 2);
 
-        assert_eq!(model.filtered(""), model);
+        let lat = cache.view(&model, "lat");
+        assert_eq!(lat.sources[0].topics[0].fields.len(), 1);
+
+        let blank_again = cache.view(&model, "");
+        assert_eq!(blank_again.sources[0].topics[0].fields.len(), 2);
     }
 }
