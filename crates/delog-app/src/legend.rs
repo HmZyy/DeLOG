@@ -18,12 +18,19 @@ const LEGEND_INSET: f32 = 8.0;
 /// Minimum positive dimension passed to egui sizing APIs for degenerate plots.
 const MIN_LEGEND_CONTENT_EXTENT: f32 = 1.0;
 
-// Desired width of the optional text-filter editor.
-const LEGEND_TEXT_FILTER_WIDTH: f32 = 90.0;
-// Keeps truncated labels clickable even in very narrow legends.
-const LEGEND_MIN_LABEL_WIDTH: f32 = 24.0;
-// Must match the bounded delta label width below.
-const LEGEND_DELTA_RESERVE_WIDTH: f32 = 96.0;
+// Preferred width of the optional text-filter editor before narrow rows shrink it.
+const LEGEND_PREFERRED_TEXT_FILTER_WIDTH: f32 = 90.0;
+// Preferred minimum label width; tiny rows may shrink below this to preserve containment.
+const LEGEND_PREFERRED_MIN_LABEL_WIDTH: f32 = 24.0;
+// Preferred width of the optional marker-delta label before narrow rows shrink it.
+const LEGEND_PREFERRED_DELTA_WIDTH: f32 = 96.0;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct LegendTraceRowWidths {
+    label: f32,
+    delta: f32,
+    filter: f32,
+}
 
 fn legend_bounds(plot_rect: egui::Rect) -> egui::Rect {
     let inset = egui::vec2(
@@ -41,20 +48,54 @@ fn legend_content_max_size(bounds: egui::Rect, frame: &egui::Frame) -> egui::Vec
     )
 }
 
-fn legend_label_width(ui: &egui::Ui, reserve_width: f32) -> f32 {
-    (ui.available_width() - reserve_width).max(LEGEND_MIN_LABEL_WIDTH)
+fn legend_trace_row_widths(
+    available_width: f32,
+    spacing: f32,
+    has_delta: bool,
+    is_text: bool,
+) -> LegendTraceRowWidths {
+    let available_width = available_width.max(0.0);
+    let trailing_count = usize::from(has_delta) + usize::from(is_text);
+    let spacing_width = spacing * trailing_count as f32;
+    let content_width = (available_width - spacing_width).max(0.0);
+
+    let preferred_delta = if has_delta {
+        LEGEND_PREFERRED_DELTA_WIDTH
+    } else {
+        0.0
+    };
+    let preferred_filter = if is_text {
+        LEGEND_PREFERRED_TEXT_FILTER_WIDTH
+    } else {
+        0.0
+    };
+    let preferred_trailing = preferred_delta + preferred_filter;
+
+    if content_width >= LEGEND_PREFERRED_MIN_LABEL_WIDTH + preferred_trailing {
+        return LegendTraceRowWidths {
+            label: content_width - preferred_trailing,
+            delta: preferred_delta,
+            filter: preferred_filter,
+        };
+    }
+
+    let label = content_width.min(LEGEND_PREFERRED_MIN_LABEL_WIDTH);
+    let trailing_width = (content_width - label).max(0.0);
+    let trailing_share = if preferred_trailing > 0.0 {
+        (trailing_width / preferred_trailing).min(1.0)
+    } else {
+        0.0
+    };
+
+    LegendTraceRowWidths {
+        label,
+        delta: preferred_delta * trailing_share,
+        filter: preferred_filter * trailing_share,
+    }
 }
 
-fn legend_trace_label_width(ui: &egui::Ui, has_delta: bool, is_text: bool) -> f32 {
-    let spacing = ui.spacing().item_spacing.x;
-    let mut reserve_width = 0.0;
-    if has_delta {
-        reserve_width += LEGEND_DELTA_RESERVE_WIDTH + spacing;
-    }
-    if is_text {
-        reserve_width += LEGEND_TEXT_FILTER_WIDTH + spacing;
-    }
-    legend_label_width(ui, reserve_width)
+fn legend_ghost_label_width(available_width: f32) -> f32 {
+    available_width.max(0.0)
 }
 
 fn legend_anchor(position: LegendPosition, bounds: egui::Rect) -> (egui::Pos2, egui::Align2) {
@@ -147,25 +188,29 @@ pub fn ui(
                                     ui.visuals().weak_text_color()
                                 };
                                 let has_delta = deltas.contains_key(field);
-                                let label_width = legend_trace_label_width(ui, has_delta, is_text);
+                                let widths = legend_trace_row_widths(
+                                    ui.available_width(),
+                                    ui.spacing().item_spacing.x,
+                                    has_delta,
+                                    is_text,
+                                );
                                 let label_widget =
                                     egui::Label::new(egui::RichText::new(label).color(text_color))
                                         .truncate()
                                         .sense(egui::Sense::click());
                                 let resp = ui.add_sized(
-                                    egui::vec2(label_width, ui.spacing().interact_size.y),
+                                    egui::vec2(widths.label, ui.spacing().interact_size.y),
                                     label_widget,
                                 );
                                 if resp.clicked() {
                                     trace.visible = !trace.visible;
                                 }
 
-                                if let Some(delta) = deltas.get(field) {
+                                if let Some(delta) =
+                                    deltas.get(field).filter(|_| widths.delta > 0.0)
+                                {
                                     ui.add_sized(
-                                        egui::vec2(
-                                            LEGEND_DELTA_RESERVE_WIDTH,
-                                            ui.spacing().interact_size.y,
-                                        ),
+                                        egui::vec2(widths.delta, ui.spacing().interact_size.y),
                                         egui::Label::new(
                                             egui::RichText::new(format!("d {delta}"))
                                                 .color(ui.visuals().hyperlink_color)
@@ -176,11 +221,12 @@ pub fn ui(
                                 }
 
                                 if is_text
+                                    && widths.filter > 0.0
                                     && ui
-                                        .add(
+                                        .add_sized(
+                                            egui::vec2(widths.filter, ui.spacing().interact_size.y),
                                             egui::TextEdit::singleline(&mut filter)
-                                                .hint_text("filter…")
-                                                .desired_width(LEGEND_TEXT_FILTER_WIDTH),
+                                                .hint_text("filter…"),
                                         )
                                         .on_hover_text("Show only messages containing this text")
                                         .changed()
@@ -215,7 +261,7 @@ pub fn ui(
                                     egui::color_picker::Alpha::Opaque,
                                 );
                                 let label = format!("{}.{} (missing)", ghost.topic, ghost.field);
-                                let label_width = legend_label_width(ui, 0.0);
+                                let label_width = legend_ghost_label_width(ui.available_width());
                                 ui.add_sized(
                                     egui::vec2(label_width, ui.spacing().interact_size.y),
                                     egui::Label::new(
@@ -288,6 +334,32 @@ mod tests {
         assert!(plot.contains_rect(bounds));
         assert!(content_size.x > 0.0);
         assert!(content_size.y > 0.0);
+    }
+
+    #[test]
+    fn trace_row_widths_fit_preferred_controls_when_space_allows() {
+        let widths = legend_trace_row_widths(260.0, 4.0, true, true);
+        assert_eq!(widths.delta, LEGEND_PREFERRED_DELTA_WIDTH);
+        assert_eq!(widths.filter, LEGEND_PREFERRED_TEXT_FILTER_WIDTH);
+        assert!(widths.label >= LEGEND_PREFERRED_MIN_LABEL_WIDTH);
+        assert!(widths.label + widths.delta + widths.filter + 8.0 <= 260.0);
+    }
+
+    #[test]
+    fn trace_row_widths_shrink_controls_to_fit_narrow_rows() {
+        let widths = legend_trace_row_widths(40.0, 4.0, true, true);
+        assert!(widths.label + widths.delta + widths.filter + 8.0 <= 40.0);
+        assert!(widths.label <= LEGEND_PREFERRED_MIN_LABEL_WIDTH);
+        assert!(widths.delta < LEGEND_PREFERRED_DELTA_WIDTH);
+        assert!(widths.filter < LEGEND_PREFERRED_TEXT_FILTER_WIDTH);
+    }
+
+    #[test]
+    fn trace_row_widths_never_go_negative() {
+        let widths = legend_trace_row_widths(-10.0, 4.0, true, true);
+        assert_eq!(widths.label, 0.0);
+        assert_eq!(widths.delta, 0.0);
+        assert_eq!(widths.filter, 0.0);
     }
 
     #[test]
