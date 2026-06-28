@@ -4,8 +4,8 @@
 //! without a GUI; [`ui`] renders it.
 
 use arrow::array::{
-    Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
-    Int8Array, LargeStringArray, StringArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+    Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array,
+    Int64Array, LargeStringArray, StringArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
 };
 use arrow::datatypes::DataType;
 use delog_core::identity::{FieldId, SourceId, TopicId};
@@ -608,9 +608,10 @@ pub fn ui(
                             .default_open(false)
                             .open(filtering.then_some(true))
                             .show(ui, |ui| {
+                                field_table_header(ui);
                                 for &field_idx in &visible_topic.fields {
                                     let field = &topic.fields[field_idx];
-                                    match field_row(ui, field, selection, &visible) {
+                                    match field_table_row(ui, field, selection, &visible) {
                                         Some(FieldRowAction::InspectMetadata(f)) => {
                                             inspect_field_metadata = Some(f);
                                         }
@@ -733,11 +734,75 @@ fn offset_dialog_window(
     change
 }
 
+const FIELD_COL: f32 = 0.34;
+const FIRST_COL: f32 = 0.22;
+const LAST_COL: f32 = 0.22;
+const UNIT_COL: f32 = 0.11;
+const TYPE_COL: f32 = 0.11;
+
+fn field_table_header(ui: &mut egui::Ui) {
+    let width = (ui.available_width() - ui.spacing().item_spacing.x * 4.0).max(0.0);
+    egui::Frame::new()
+        .inner_margin(egui::Margin::symmetric(4, 1))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.add_sized([width * FIELD_COL, 18.0], egui::Label::new("field"));
+                ui.add_sized([width * FIRST_COL, 18.0], egui::Label::new("first"));
+                ui.add_sized([width * LAST_COL, 18.0], egui::Label::new("last"));
+                ui.add_sized([width * UNIT_COL, 18.0], egui::Label::new("unit"));
+                ui.add_sized([width * TYPE_COL, 18.0], egui::Label::new("type"));
+            });
+        });
+}
+
+fn field_table_row(
+    ui: &mut egui::Ui,
+    field: &FieldNode,
+    selection: &mut Selection,
+    visible: &[FieldId],
+) -> Option<FieldRowAction> {
+    field_row(ui, field, selection, visible, |ui, field, selected| {
+        let width = (ui.available_width() - ui.spacing().item_spacing.x * 4.0).max(0.0);
+        let name_color = if selected {
+            ui.visuals().selection.stroke.color
+        } else {
+            ui.visuals().text_color()
+        };
+        ui.horizontal(|ui| {
+            ui.add_sized(
+                [width * FIELD_COL, 18.0],
+                egui::Label::new(egui::RichText::new(&field.name).color(name_color)),
+            );
+            ui.add_sized(
+                [width * FIRST_COL, 18.0],
+                egui::Label::new(
+                    egui::RichText::new(display_endpoint(field.first_raw.as_deref())).weak(),
+                ),
+            );
+            ui.add_sized(
+                [width * LAST_COL, 18.0],
+                egui::Label::new(
+                    egui::RichText::new(display_endpoint(field.last_raw.as_deref())).weak(),
+                ),
+            );
+            ui.add_sized(
+                [width * UNIT_COL, 18.0],
+                egui::Label::new(egui::RichText::new(field.unit.as_deref().unwrap_or("-")).weak()),
+            );
+            ui.add_sized(
+                [width * TYPE_COL, 18.0],
+                egui::Label::new(egui::RichText::new(field.dtype).weak()),
+            );
+        });
+    })
+}
+
 fn field_row(
     ui: &mut egui::Ui,
     field: &FieldNode,
     selection: &mut Selection,
     visible: &[FieldId],
+    add_contents: impl FnOnce(&mut egui::Ui, &FieldNode, bool),
 ) -> Option<FieldRowAction> {
     let mut action = None;
     let id = egui::Id::new(("field", field.id.0));
@@ -758,18 +823,7 @@ fn field_row(
             .fill(fill)
             .inner_margin(egui::Margin::symmetric(4, 1))
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    let name_color = if selected {
-                        ui.visuals().selection.stroke.color
-                    } else {
-                        ui.visuals().text_color()
-                    };
-                    ui.label(egui::RichText::new(&field.name).color(name_color));
-                    ui.weak(field.dtype);
-                    if let Some(unit) = &field.unit {
-                        ui.weak(format!("[{unit}]"));
-                    }
-                });
+                add_contents(ui, field, selected);
             });
     });
     let response = if let Some(description) = hover_description(field.description.as_deref()) {

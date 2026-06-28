@@ -38,6 +38,19 @@ fn browser_exposes_field_metadata_inspector() {
 }
 
 #[test]
+fn browser_topic_tables_keep_field_drag_source() {
+    let browser = include_str!("../src/browser.rs");
+
+    assert!(browser.contains("field_table_header"));
+    assert!(browser.contains("field_table_row"));
+    assert!(browser.contains("drag_source_with_click(ui, id, payload"));
+    assert!(browser.contains("first"));
+    assert!(browser.contains("last"));
+    assert!(browser.contains("unit"));
+    assert!(browser.contains("type"));
+}
+
+#[test]
 fn layout_menu_exposes_clear_current_layout() {
     let app = include_str!("../src/app.rs");
 
