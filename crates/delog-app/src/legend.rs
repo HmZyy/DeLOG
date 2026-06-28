@@ -196,3 +196,73 @@ pub fn color32_to_srgb(c: egui::Color32) -> [f32; 4] {
         c.a() as f32 / 255.0,
     ]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rect(left: f32, top: f32, right: f32, bottom: f32) -> egui::Rect {
+        egui::Rect::from_min_max(egui::pos2(left, top), egui::pos2(right, bottom))
+    }
+
+    #[test]
+    fn legend_bounds_are_inset_inside_plot_rect() {
+        let plot = rect(10.0, 20.0, 210.0, 120.0);
+
+        let bounds = legend_bounds(plot);
+
+        assert!(plot.contains_rect(bounds));
+        assert_eq!(bounds.left(), 18.0);
+        assert_eq!(bounds.top(), 28.0);
+        assert_eq!(bounds.right(), 202.0);
+        assert_eq!(bounds.bottom(), 112.0);
+    }
+
+    #[test]
+    fn tiny_legend_bounds_produce_positive_content_size() {
+        let plot = rect(0.0, 0.0, 6.0, 4.0);
+        let bounds = legend_bounds(plot);
+        let frame = egui::Frame::default().inner_margin(8);
+
+        let content_size = legend_content_max_size(bounds, &frame);
+
+        assert!(plot.contains_rect(bounds));
+        assert!(content_size.x > 0.0);
+        assert!(content_size.y > 0.0);
+    }
+
+    #[test]
+    fn legend_anchor_uses_bounded_rect_for_every_position() {
+        let plot = rect(10.0, 20.0, 210.0, 120.0);
+        let bounds = legend_bounds(plot);
+
+        let cases = [
+            (
+                LegendPosition::TopLeft,
+                bounds.left_top(),
+                egui::Align2::LEFT_TOP,
+            ),
+            (
+                LegendPosition::TopRight,
+                bounds.right_top(),
+                egui::Align2::RIGHT_TOP,
+            ),
+            (
+                LegendPosition::BottomLeft,
+                bounds.left_bottom(),
+                egui::Align2::LEFT_BOTTOM,
+            ),
+            (
+                LegendPosition::BottomRight,
+                bounds.right_bottom(),
+                egui::Align2::RIGHT_BOTTOM,
+            ),
+        ];
+
+        for (position, expected_pos, expected_pivot) in cases {
+            let (pos, pivot) = legend_anchor(position, bounds);
+            assert_eq!(pos, expected_pos);
+            assert_eq!(pivot, expected_pivot);
+        }
+    }
+}
