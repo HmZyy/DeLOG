@@ -12,7 +12,7 @@ fn legend_panel_uses_bounded_vertical_scroll_area() {
     assert!(LEGEND_SOURCE.contains(".truncate()"));
     assert!(LEGEND_SOURCE.contains("fn legend_trace_row_widths"));
     assert!(LEGEND_SOURCE.contains("fn legend_ghost_label_width"));
-    assert!(LEGEND_SOURCE.contains("ui.add_sized("));
+    assert!(LEGEND_SOURCE.contains(".add_sized("));
     assert!(LEGEND_SOURCE.contains("egui::vec2("));
     assert!(LEGEND_SOURCE.contains("LEGEND_PREFERRED_TEXT_FILTER_WIDTH"));
     assert!(LEGEND_SOURCE.contains(".min_scrolled_height("));
@@ -21,4 +21,13 @@ fn legend_panel_uses_bounded_vertical_scroll_area() {
     assert!(LEGEND_SOURCE.contains("widths.filter >= LEGEND_MIN_TEXT_FILTER_WIDTH"));
     assert!(LEGEND_SOURCE.contains("fn legend_can_show_color_picker"));
     assert!(LEGEND_SOURCE.contains("legend_can_show_color_picker("));
+}
+
+#[test]
+fn legend_labels_hug_content_left_aligned() {
+    // Labels must hug their content (capped at the row budget) instead of being
+    // stretched to the full bounded width, so the legend stays compact and
+    // left-aligned rather than spanning the whole plot.
+    assert!(LEGEND_SOURCE.contains("allocate_ui_with_layout"));
+    assert!(LEGEND_SOURCE.contains("egui::Layout::left_to_right(egui::Align::Center)"));
 }

@@ -219,10 +219,16 @@ pub fn ui(
                                     egui::Label::new(egui::RichText::new(label).color(text_color))
                                         .truncate()
                                         .sense(egui::Sense::click());
-                                let resp = ui.add_sized(
-                                    egui::vec2(widths.label, ui.spacing().interact_size.y),
-                                    label_widget,
-                                );
+                                // Hug the label to its content, left-aligned, but cap its width
+                                // so long labels truncate within bounds instead of forcing the
+                                // whole legend to the full plot width.
+                                let resp = ui
+                                    .allocate_ui_with_layout(
+                                        egui::vec2(widths.label, ui.spacing().interact_size.y),
+                                        egui::Layout::left_to_right(egui::Align::Center),
+                                        |ui| ui.add(label_widget),
+                                    )
+                                    .inner;
                                 if resp.clicked() {
                                     trace.visible = !trace.visible;
                                 }
@@ -230,14 +236,19 @@ pub fn ui(
                                 if let Some(delta) =
                                     deltas.get(field).filter(|_| widths.delta > 0.0)
                                 {
-                                    ui.add_sized(
+                                    ui.allocate_ui_with_layout(
                                         egui::vec2(widths.delta, ui.spacing().interact_size.y),
-                                        egui::Label::new(
-                                            egui::RichText::new(format!("d {delta}"))
-                                                .color(ui.visuals().hyperlink_color)
-                                                .weak(),
-                                        )
-                                        .truncate(),
+                                        egui::Layout::left_to_right(egui::Align::Center),
+                                        |ui| {
+                                            ui.add(
+                                                egui::Label::new(
+                                                    egui::RichText::new(format!("d {delta}"))
+                                                        .color(ui.visuals().hyperlink_color)
+                                                        .weak(),
+                                                )
+                                                .truncate(),
+                                            );
+                                        },
                                     );
                                 }
 
@@ -289,13 +300,18 @@ pub fn ui(
                                 }
                                 let label = format!("{}.{} (missing)", ghost.topic, ghost.field);
                                 let label_width = legend_ghost_label_width(ui.available_width());
-                                ui.add_sized(
+                                ui.allocate_ui_with_layout(
                                     egui::vec2(label_width, ui.spacing().interact_size.y),
-                                    egui::Label::new(
-                                        egui::RichText::new(label)
-                                            .color(ui.visuals().weak_text_color()),
-                                    )
-                                    .truncate(),
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
+                                        ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(label)
+                                                    .color(ui.visuals().weak_text_color()),
+                                            )
+                                            .truncate(),
+                                        );
+                                    },
                                 );
                             });
                         }
