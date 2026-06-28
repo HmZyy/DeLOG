@@ -887,9 +887,14 @@ fn field_row(
         selection.start_drag(field.id, current_select_modifier(ui), visible);
     }
     let payload = selection.drag_payload(field.id, visible);
+    let drag_label = if payload.len() > 1 {
+        format!("{} fields", payload.len())
+    } else {
+        field.name.clone()
+    };
     let selected = selection.contains(field.id);
 
-    let response = drag_source_with_click(ui, id, payload, |ui| {
+    let response = drag_source_with_click(ui, id, payload, &drag_label, |ui| {
         let fill = if selected {
             ui.visuals().selection.bg_fill
         } else {
@@ -972,27 +977,38 @@ fn drag_source_with_click<Payload: std::any::Any + Send + Sync>(
     ui: &mut egui::Ui,
     id: egui::Id,
     payload: Payload,
+    drag_label: &str,
     add_contents: impl FnOnce(&mut egui::Ui),
 ) -> egui::Response {
+    // Keep the row in place so the list stays stable during a drag.
+    let inner = ui.scope(add_contents).response;
+    let response = ui.interact(inner.rect, id, egui::Sense::click_and_drag());
+
     if ui.ctx().is_being_dragged(id) {
         egui::DragAndDrop::set_payload(ui.ctx(), payload);
-
-        let layer_id = egui::LayerId::new(egui::Order::Tooltip, id);
-        let response = ui
-            .scope_builder(egui::UiBuilder::new().layer_id(layer_id), add_contents)
-            .response;
+        // A badge follows the cursor instead of lifting the rows out of the
+        // list, so the selection stays visible in the browser.
         if let Some(pointer_pos) = ui.ctx().pointer_interact_pos() {
-            let delta = pointer_pos - response.rect.center();
-            ui.ctx().transform_layer_shapes(
-                layer_id,
-                egui::emath::TSTransform::from_translation(delta),
-            );
+            egui::Area::new(id.with("drag_ghost"))
+                .order(egui::Order::Tooltip)
+                .fixed_pos(pointer_pos + egui::vec2(12.0, 8.0))
+                .interactable(false)
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::new()
+                        .fill(ui.visuals().selection.bg_fill)
+                        .inner_margin(egui::Margin::symmetric(6, 3))
+                        .corner_radius(4)
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(drag_label)
+                                    .color(ui.visuals().selection.stroke.color),
+                            );
+                        });
+                });
         }
-        response
+        response.on_hover_cursor(egui::CursorIcon::Grabbing)
     } else {
-        let response = ui.scope(add_contents).response;
-        ui.interact(response.rect, id, egui::Sense::click_and_drag())
-            .on_hover_cursor(egui::CursorIcon::Grab)
+        response.on_hover_cursor(egui::CursorIcon::Grab)
     }
 }
 
