@@ -12,7 +12,6 @@ use arrow::datatypes::DataType;
 use crate::schema::TopicSchema;
 use crate::time::TimestampUs;
 
-/// Seal-time column statistics.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ColStats {
     pub min: f64,
@@ -22,7 +21,6 @@ pub struct ColStats {
     pub nan_count: u64,
 }
 
-/// Immutable, sorted time chunk.
 #[derive(Debug, Clone)]
 pub struct Chunk {
     pub t: Int64Array,
@@ -32,7 +30,6 @@ pub struct Chunk {
     pub t_max: TimestampUs,
 }
 
-/// Chunk sealing/validation failures.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChunkError {
     EmptyChunk,
@@ -61,7 +58,6 @@ pub enum ChunkError {
 }
 
 impl Chunk {
-    /// Validate and seal a chunk, computing per-column stats once.
     pub fn try_new(
         t: Int64Array,
         cols: Vec<ArrayRef>,

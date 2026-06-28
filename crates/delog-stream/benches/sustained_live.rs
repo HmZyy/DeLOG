@@ -10,8 +10,7 @@ fn sustained_live_batch_sink(c: &mut Criterion) {
             let (tx, rx) = ingest_channel();
             let metrics = Arc::new(MetricsRegistry::new());
             let mut sink = tx.live_sink(metrics);
-            // This exercises the non-blocking live sink under the planned
-            // 60 msg-types @ 50 Hz load shape without needing sockets.
+            // 3_000 = 60 msg-types @ 50 Hz, the target live load shape.
             for _ in 0..3_000 {
                 sink.diagnostic(delog_core::diagnostics::Diag::info("bench", "frame"));
             }

@@ -1,5 +1,3 @@
-//! Diagnostics dock UI.
-
 use delog_core::diagnostics::{DiagRecord, Severity};
 use delog_core::identity::SourceId;
 use delog_core::snapshot::StoreSnapshot;
@@ -30,7 +28,6 @@ struct DisplayRecord<'a> {
 }
 
 impl DiagnosticsDock {
-    /// Render the dock and return user actions requested from diagnostic rows.
     pub fn ui(
         &mut self,
         ui: &mut egui::Ui,

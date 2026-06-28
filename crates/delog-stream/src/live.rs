@@ -1,6 +1,3 @@
-//! Live MAVLink frame consumer: sysid demux, field extraction, batching and
-//! optional raw-frame recording.
-
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::PathBuf;
@@ -33,8 +30,7 @@ const RX_RATE_PERIOD: Duration = Duration::from_secs(1);
 
 type TopicKey = (u8, &'static str);
 
-/// A running link: one byte reader plus one frame→ingest worker. Dropping it
-/// stops both threads.
+/// Dropping it stops both the byte-reader and frame-ingest threads.
 pub struct LiveLink {
     endpoint: Endpoint,
     reader: Option<LinkReader>,
@@ -44,7 +40,6 @@ pub struct LiveLink {
     recording: Option<PathBuf>,
 }
 
-/// Live ingest counters owned by the frame consumer.
 #[derive(Debug, Default)]
 pub struct LiveIngestStats {
     rows: AtomicU64,
@@ -54,7 +49,6 @@ pub struct LiveIngestStats {
     recorder_errors: AtomicU64,
 }
 
-/// Point-in-time live ingest stats.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LiveStats {
     pub rows: u64,
@@ -79,7 +73,6 @@ impl Default for LiveBatchPolicy {
     }
 }
 
-/// Combined status for app/UI callers.
 #[derive(Debug, Clone)]
 pub struct LiveLinkStatus {
     pub endpoint: Endpoint,

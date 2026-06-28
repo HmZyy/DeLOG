@@ -1,0 +1,142 @@
+//! Property test: None-mode export reproduces the exact sorted union timeline.
+
+use std::sync::Arc;
+
+use arrow::array::{ArrayRef, Float64Array, Int64Array};
+use arrow::datatypes::DataType;
+use proptest::prelude::*;
+
+use delog_core::chunk::Chunk;
+use delog_core::export::{Cell, ResampleMode, RowCursor};
+use delog_core::identity::IdentityRegistry;
+use delog_core::schema::{FieldSchema, TopicSchema};
+use delog_core::snapshot::StoreSnapshot;
+use delog_core::store::TopicStore;
+
+fn num_schema() -> Arc<TopicSchema> {
+    Arc::new(
+        TopicSchema::new(
+            "T",
+            [FieldSchema::new("V", DataType::Float64, None::<String>, 1.0).unwrap()],
+        )
+        .unwrap(),
+    )
+}
+
+fn snapshot_from_opt_samples(
+    samples: &[(i64, Option<f64>)],
+    offset_us: i64,
+) -> (StoreSnapshot, delog_core::identity::FieldId) {
+    let schema = num_schema();
+    let times = Int64Array::from(samples.iter().map(|(t, _)| *t).collect::<Vec<_>>());
+    let values: ArrayRef = Arc::new(Float64Array::from(
+        samples.iter().map(|(_, v)| *v).collect::<Vec<_>>(),
+    ));
+    let chunk = Arc::new(Chunk::try_new(times, vec![values], &schema).unwrap());
+    let store = Arc::new(TopicStore::from_chunks(Arc::clone(&schema), vec![chunk]).unwrap());
+
+    let mut identity = IdentityRegistry::new();
+    let source = identity.add_source("flight");
+    identity.set_source_offset_us(source, offset_us);
+    let topic = identity.add_topic(source, "T").unwrap();
+    let field = identity.add_field(topic, "V").unwrap();
+
+    let snapshot = StoreSnapshot::from_registry(&identity, [(topic, store)], 0).unwrap();
+    (snapshot, field)
+}
+
+fn collect_none(
+    snap: &StoreSnapshot,
+    field: delog_core::identity::FieldId,
+    t_start: i64,
+    t_end: i64,
+) -> Vec<(i64, Cell)> {
+    let mut cur = RowCursor::new(snap, &[field], t_start, t_end, ResampleMode::None).unwrap();
+    let mut rows = Vec::new();
+    let mut out = Vec::new();
+    while let Some(t) = cur.next_row(&mut out) {
+        assert_eq!(
+            out.len(),
+            1,
+            "single-field cursor must yield exactly one cell"
+        );
+        rows.push((t, out[0]));
+    }
+    rows
+}
+
+proptest! {
+    #[test]
+    fn none_single_field_reproduces_samples(
+        raw_samples in prop::collection::vec(
+            (
+                0i64..1_000_000,
+                prop::option::of(
+                    prop_oneof![Just(f64::NAN), -1e6f64..1e6f64]
+                ),
+            ),
+            1..200
+        ),
+        offset_us in -500_000i64..500_000,
+    ) {
+        let mut data = raw_samples;
+        data.sort_by_key(|(t, _)| *t);
+        data.dedup_by_key(|(t, _)| *t);
+
+        // Query window in effective time, covering every sample.
+        let t_start = offset_us;
+        let t_end = 1_000_000i64 + offset_us;
+
+        let (snap, field) = snapshot_from_opt_samples(&data, offset_us);
+
+        // SQL-null (`None`) produces no row; `Some(v)` always does, as `Empty`
+        // when NaN (a float gap, not a missing sample) else `Num(v)`.
+        let expected: Vec<(i64, Cell)> = data
+            .iter()
+            .filter_map(|(raw_t, opt_v)| {
+                let v = (*opt_v)?;
+                let eff = raw_t.checked_add(offset_us)?;
+                if eff < t_start || eff > t_end {
+                    return None;
+                }
+                let cell = if v.is_nan() {
+                    Cell::Empty
+                } else {
+                    Cell::Num(v)
+                };
+                Some((eff, cell))
+            })
+            .collect();
+
+        let got = collect_none(&snap, field, t_start, t_end);
+
+        prop_assert_eq!(
+            got.len(),
+            expected.len(),
+            "row count mismatch: got {} rows, expected {}",
+            got.len(),
+            expected.len()
+        );
+
+        for (i, (got_row, exp_row)) in got.iter().zip(expected.iter()).enumerate() {
+            prop_assert_eq!(
+                got_row.0, exp_row.0,
+                "row {}: timestamp mismatch",
+                i
+            );
+            match (got_row.1, exp_row.1) {
+                (Cell::Num(gv), Cell::Num(ev)) => {
+                    prop_assert!(
+                        (gv - ev).abs() < 1e-12,
+                        "row {}: Num value mismatch: got {}, expected {}",
+                        i, gv, ev
+                    );
+                }
+                (Cell::Empty, Cell::Empty) => {}
+                (g, e) => {
+                    prop_assert!(false, "row {}: cell variant mismatch: got {:?}, expected {:?}", i, g, e);
+                }
+            }
+        }
+    }
+}

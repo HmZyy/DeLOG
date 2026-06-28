@@ -1,5 +1,3 @@
-//! Turn a script's pending derived topics into batches on the ingest path.
-
 use std::sync::Arc;
 
 use arrow::array::{ArrayRef, Float64Array, Int64Array};
@@ -10,8 +8,6 @@ use delog_core::schema::{FieldSchema, TopicSchema};
 
 use crate::api::PendingTopic;
 
-/// Open a `script:<name>` derived source, submit one batch per topic, close it.
-/// Returns the new SourceId. Topics with no fields are skipped.
 pub fn emit_topics(
     sink: &mut dyn IngestSink,
     script_name: &str,

@@ -1,9 +1,7 @@
 //! Vertex-pulled trace line pipeline.
 //!
-//! Trace samples stay in the `BufferManager`'s interleaved `[x, y]` STORAGE
-//! buffer. This pipeline has no vertex buffers: each vertex loads two adjacent
-//! samples, expands the segment to a screen-space quad, and uses a dynamic
-//! uniform offset for the plot transform/style.
+//! Reads the `BufferManager`'s interleaved `[x, y]` STORAGE buffer with no
+//! vertex buffers: each adjacent pair expands to a screen-space quad.
 
 use crate::context::RenderContext;
 use crate::uniforms::UniformRing;
@@ -122,9 +120,7 @@ impl LinePipeline {
         pass.set_pipeline(&self.pipeline);
     }
 
-    /// Pipeline must already be bound via [`Self::bind`]. `sample_count` is the
-    /// number of `[x,y]` pairs resident in the storage buffer; each adjacent
-    /// pair emits one six-vertex quad.
+    /// Pipeline must already be bound via [`Self::bind`].
     pub fn draw_trace(
         &self,
         pass: &mut wgpu::RenderPass<'_>,

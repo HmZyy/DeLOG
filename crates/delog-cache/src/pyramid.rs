@@ -1,24 +1,13 @@
 //! Branching-64 min/max pyramid.
 //!
-//! `L0[i]` holds the (min, max) of the 64 samples `64i..64(i+1)`; each higher
-//! level reduces 64:1. It answers visible-window y-range queries in
-//! O(64 + log₆₄ n) — raw-scanning the unaligned edge samples and reading whole
-//! aligned nodes in the middle, mathematically identical to a full scan — and
-//! per-pixel-column extents for the decimated draw path.
-//!
-//! The y values are read from a backing buffer at `data[stride·i + offset]`, so
-//! a [`TraceCache`](crate::trace::TraceCache) can index the y-channel of its
-//! interleaved `xy` buffer directly (stride 2, offset 1) with no second
-//! allocation, upholding the 8-byte-per-sample invariant.
-//!
-//! **NaN is a gap, not a value**: NaN samples never contribute to a
-//! min/max, and a range with no finite sample reports `NaN`.
+//! Reads y from a backing buffer at `data[stride·i + offset]`, so a
+//! [`TraceCache`](crate::trace::TraceCache) indexes the y-channel of its
+//! interleaved `xy` (stride 2, offset 1) with no second allocation.
+//! NaN is a gap: NaN samples never contribute, and an all-NaN range reports NaN.
 
-/// Branching factor: samples per L0 node, nodes per higher-level node.
 pub const BRANCH: usize = 64;
 
-/// Min/max of a sample range; `min`/`max` are `NaN` when the range held no
-/// finite sample.
+/// `min`/`max` are `NaN` when the range held no finite sample.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MinMax {
     pub min: f32,
@@ -32,7 +21,6 @@ impl MinMax {
         max: f32::NAN,
     };
 
-    /// Whether this range saw at least one finite sample.
     pub fn is_finite(&self) -> bool {
         self.min.is_finite() || self.max.is_finite()
     }
@@ -81,7 +69,7 @@ fn reduce(nodes: &[MinMax]) -> MinMax {
     nodes.iter().fold(MinMax::EMPTY, |acc, &m| acc.merge(m))
 }
 
-/// The pyramid. Levels are stored bottom-up; `levels[0]` is L0.
+/// Levels are stored bottom-up; `levels[0]` is L0.
 #[derive(Debug, Clone)]
 pub struct MinMaxPyramid {
     levels: Vec<Vec<MinMax>>,
@@ -106,7 +94,6 @@ impl MinMaxPyramid {
         Self::default()
     }
 
-    /// Sample count the pyramid was built over.
     pub fn len(&self) -> usize {
         self.n
     }
@@ -125,7 +112,6 @@ impl MinMaxPyramid {
         self.levels.first().map(Vec::as_slice).unwrap_or(&[])
     }
 
-    /// Total bytes held by the level vectors (for memory accounting).
     pub fn bytes(&self) -> u64 {
         self.levels
             .iter()
@@ -294,7 +280,6 @@ mod tests {
 
     use super::*;
 
-    /// Naive nan-aware min/max over `ys[a..b]`.
     fn naive(ys: &[f32], a: usize, b: usize) -> MinMax {
         ys[a..b]
             .iter()
@@ -367,7 +352,6 @@ mod tests {
         fn incremental_extend_equals_full_build(
             chunks in prop::collection::vec(prop::collection::vec(-1.0e3_f32..1.0e3, 0..200), 1..40)
         ) {
-            // Build incrementally, appending one chunk at a time.
             let mut all = Vec::new();
             let mut inc = MinMaxPyramid::new();
             for chunk in &chunks {

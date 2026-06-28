@@ -1,6 +1,3 @@
-//! The script worker thread: owns the CPython interpreter for the app lifetime
-//! and serves REPL evals over channels.
-
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -25,13 +22,10 @@ use crate::live::{
     LiveBatchPy, LiveTransformBatch, LiveTransformSpec, parse_transform_result, result_to_batch,
 };
 
-/// Bound on the app→engine live-batch queue. Full = drop (non-blocking submit).
 pub const LIVE_TRANSFORM_QUEUE_CAP: usize = 128;
 
-/// Consecutive errors a live transform may raise before it is disabled.
 const LIVE_TRANSFORM_ERROR_LIMIT: u8 = 3;
 
-/// One registered live transform the worker executes on matching live batches.
 struct ActiveTransform {
     spec: LiveTransformSpec,
     callable: Py<PyAny>,
@@ -40,7 +34,6 @@ struct ActiveTransform {
     disabled: bool,
 }
 
-/// Format a Python error with its traceback (if any) for an Error event.
 fn format_pyerr(py: Python<'_>, err: &PyErr) -> String {
     let tb = err
         .traceback(py)
@@ -49,24 +42,19 @@ fn format_pyerr(py: Python<'_>, err: &PyErr) -> String {
     format!("{tb}{err}")
 }
 
-/// A command sent from the UI thread to the worker.
 pub enum ScriptCommand {
-    /// Evaluate one REPL line in the persistent namespace.
     Eval(String),
-    /// Run a full script buffer; on success emits one `script:<name>` source.
+    /// On success emits one `script:<name>` source.
     RunScript { name: String, source: String },
-    /// Unregister the live transforms registered under `name` and remove their
-    /// appendable `script:<name>` live-derived source.
+    /// Unregister the live transforms under `name` and remove their appendable
+    /// `script:<name>` live-derived source.
     UnregisterLive { name: String },
-    /// Compile a custom parser without executing it.
     ValidateParser { name: String, source: String },
-    /// Read and parse one raw float file using a custom parser.
     ParseFile {
         parser_name: String,
         source: String,
         path: PathBuf,
     },
-    /// Stop the worker (sender dropped also stops it).
     Shutdown,
 }
 
@@ -216,7 +204,7 @@ fn consume_parser_interrupts(py: Python<'_>, token: &ParserInterruptToken) -> Py
         let error = PyErr::take(py);
         if let Some(error) = error {
             if after < before && error.is_instance_of::<PyKeyboardInterrupt>(py) {
-                // This callback consumed one parser-owned interrupt.
+                // Consumed one parser-owned interrupt.
             } else if unrelated_error.is_none() {
                 unrelated_error = Some(error);
             }
@@ -226,9 +214,9 @@ fn consume_parser_interrupts(py: Python<'_>, token: &ParserInterruptToken) -> Py
             ));
         }
     }
-    // Some CPython configurations only execute pending calls on a designated
-    // interpreter thread. The fixed budget prevents a spin; disarming ensures
-    // any callback left queued cannot poison a later script.
+    // Some CPython builds run pending calls only on a designated thread; the
+    // fixed budget prevents a spin, and disarming stops a still-queued callback
+    // from poisoning a later script.
     token.disarm();
     match unrelated_error {
         Some(error) => Err(error),
@@ -236,7 +224,6 @@ fn consume_parser_interrupts(py: Python<'_>, token: &ParserInterruptToken) -> Py
     }
 }
 
-/// Lifecycle events specific to custom file parsers.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParserEvent {
     SyntaxValid {
@@ -267,42 +254,33 @@ pub enum ParserEvent {
     },
 }
 
-/// An event streamed from the worker back to the UI thread.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScriptEvent {
-    /// Captured stdout/stderr text.
     Output(String),
-    /// The repr of a REPL expression value.
     Result(String),
-    /// A Python error / traceback.
     Error(String),
-    /// A command finished.
     Done,
-    /// One mirrored live batch was processed by the registered transforms.
     /// Carries no command-completion semantics; the UI ignores it.
     LiveBatchProcessed,
-    /// A custom parser lifecycle event; never implies ordinary script completion.
+    /// Never implies ordinary script completion.
     Parser(ParserEvent),
 }
 
-/// Handle to the worker thread. Dropping it shuts the worker down.
+/// Dropping it shuts the worker down.
 pub struct ScriptEngine {
     tx: Sender<EngineCommand>,
-    /// Bounded, non-blocking queue of raw live batches to run transforms on.
     live_tx: SyncSender<ParsedBatch>,
     events: Receiver<ScriptEvent>,
     handle: Option<JoinHandle<()>>,
-    /// The live transforms currently active, keyed by registering script name
-    /// (mirrors the worker's `active_transforms`). Shared with the worker so it
-    /// stays current as scripts register/unregister; the UI reads it through
-    /// [`ScriptEngine::has_live_transform`] to enable the Unregister button.
+    /// Mirrors the worker's `active_transforms`, shared so it stays current as
+    /// scripts register/unregister.
     active_live: Arc<Mutex<HashMap<String, Vec<LiveTransformSpec>>>>,
     parser_cancellation: Arc<Mutex<ParserCancellationState>>,
 }
 
 impl ScriptEngine {
-    /// Spawn the interpreter worker. The interpreter and its global namespace
-    /// live for the worker's lifetime, so REPL state persists across evals.
+    /// The interpreter and its global namespace live for the worker's lifetime,
+    /// so REPL state persists across evals.
     pub fn spawn(
         store: Arc<DataStore>,
         sender: IngestSender,
@@ -435,16 +413,11 @@ impl ScriptEngine {
 }
 
 fn request_python_interrupt() {
-    // We use both mechanisms for maximum coverage:
-    // 1. PyErr_SetInterrupt sets the pending-SIGINT trip flag (works when a
-    //    SIGINT handler is installed on the main thread, i.e. in the real app).
-    // 2. Py_AddPendingCall injects a callback into CPython's eval-loop pending
-    //    call queue, which is checked at every bytecode boundary in any thread
-    //    regardless of SIGINT handler state — this is what actually fires in
-    //    the embedded/worker-thread test environment.
-    //
-    // Safety: both functions are documented as safe to call from any thread
-    // without holding the GIL.
+    // Both mechanisms, for coverage: PyErr_SetInterrupt trips the pending-SIGINT
+    // flag (needs a main-thread SIGINT handler, i.e. the real app); Py_AddPendingCall
+    // injects an eval-loop callback checked at every bytecode boundary in any thread
+    // regardless of SIGINT state — what actually fires in the worker-thread tests.
+    // Safety: both are documented safe to call from any thread without the GIL.
     extern "C" fn raise_keyboard_interrupt(_arg: *mut std::ffi::c_void) -> std::ffi::c_int {
         // Returns -1 so the eval loop propagates the exception immediately.
         // Safety: called from within a CPython eval-loop pending-call
@@ -604,8 +577,6 @@ fn run_live_transforms(
     }
 }
 
-/// Execute one live transform end to end: materialize, call the Python
-/// callable, parse + validate the result, and build the derived `ParsedBatch`.
 fn run_one_transform(
     transform: &ActiveTransform,
     batch: &ParsedBatch,
@@ -678,16 +649,11 @@ fn handle_command(
                 });
                 match run_result {
                     Ok(()) => {
-                        // Register this run's live transforms against a single
-                        // live-derived source, replacing this script-name's
-                        // prior generation. Live-derived sources are appendable
-                        // and never `close_source`d; the prior generation is
-                        // torn down with `remove_source`, which tombstones the
-                        // source in the published snapshot, keeping its
-                        // slot/rows valid for any reader still viewing it.
-                        // Order: remove old -> open new -> record
-                        // the new id (the new source has a fresh id, so removing
-                        // first is safe).
+                        // Replace this script-name's prior live-derived source.
+                        // These are appendable (never `close_source`d); the prior
+                        // generation is torn down with `remove_source`, which
+                        // tombstones it so existing readers stay valid. Order:
+                        // remove old -> open new (fresh id) -> record the new id.
                         let pending = live.borrow();
                         if pending.is_empty() {
                             active_transforms.remove(&name);
@@ -730,11 +696,8 @@ fn handle_command(
 
                         let topics = emit.borrow();
                         // A pure live-transform script emits no snapshot topics;
-                        // publishing an empty Derived source would create a
-                        // phantom `script:<name>` entry in the browser. Skip the
-                        // open, but still tear down this name's prior emit source
-                        // (a script that used to emit and now doesn't must clean
-                        // up).
+                        // an empty Derived source would be a phantom browser entry,
+                        // so skip the open but still tear down any prior emit source.
                         if topics.is_empty() {
                             if let Some(prev) = prev_sources.remove(&name) {
                                 sender.remove_source(prev);

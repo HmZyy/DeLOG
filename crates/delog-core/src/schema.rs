@@ -1,8 +1,5 @@
-//! Topic and field schema metadata.
-//!
-//! The canonical store preserves original Arrow-compatible dtypes. Units and
-//! multipliers stay in metadata and are applied only when a render cache is
-//! built.
+//! Topic and field schema metadata. Units and multipliers stay in metadata and
+//! are applied only when a render cache is built.
 
 use std::collections::HashMap;
 use std::error::Error;
@@ -10,7 +7,6 @@ use std::fmt;
 
 use arrow::datatypes::DataType;
 
-/// One data field within a topic schema.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FieldSchema {
     pub name: String,
@@ -20,7 +16,6 @@ pub struct FieldSchema {
     pub multiplier: f64,
 }
 
-/// Ordered field schema for one topic.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TopicSchema {
     name: String,
@@ -28,7 +23,6 @@ pub struct TopicSchema {
     field_indices: HashMap<String, usize>,
 }
 
-/// Schema validation failures.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SchemaError {
     EmptyTopicName,
@@ -102,9 +96,8 @@ impl FieldSchema {
         self.is_numeric() || self.dtype == DataType::Boolean
     }
 
-    /// Discrete enough to enumerate distinct values from (int/uint/bool/string;
-    /// floats excluded) — gates "Generate markers". Lets `delog-app`
-    /// decide without touching Arrow types directly.
+    /// Enumerable distinct values (int/uint/bool/string; floats excluded);
+    /// gates "Generate markers".
     pub fn is_discrete(&self) -> bool {
         matches!(
             self.dtype,
@@ -122,9 +115,6 @@ impl FieldSchema {
         )
     }
 
-    /// Short, fixed display tag for this field's dtype (e.g. `"i32"`, `"f64"`,
-    /// `"str"`). Lets `delog-app` show a dtype chip without touching Arrow
-    /// types directly.
     pub fn dtype_label(&self) -> &'static str {
         match self.dtype {
             DataType::Int8 => "i8",

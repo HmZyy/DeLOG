@@ -1,12 +1,10 @@
-//! DeLOG core: IDs & keys, time model, columnar store, snapshots, chunk
-//! stats, diagnostics types and the metrics registry.
-//!
-//! Dependency rule: nothing here may know about parsers, GPU,
-//! or UI.
+//! DeLOG core data model. Dependency rule: nothing here may depend on parsers,
+//! GPU, or UI.
 
 pub mod analysis;
 pub mod chunk;
 pub mod diagnostics;
+pub mod export;
 pub mod field_view;
 pub mod identity;
 pub mod ingest;

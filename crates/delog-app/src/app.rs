@@ -6,7 +6,7 @@ use delog_core::diagnostics::{DiagRecord, Severity};
 use delog_core::time::TimeRange;
 use serde::Serialize;
 
-use crate::browser::{self, BrowserModel};
+use crate::browser::{self, BrowserFilterCache, BrowserModel};
 use crate::diagnostics::DiagnosticsDock;
 use crate::field_stats::{FieldStatsController, StatsRequestKey, StatsTab};
 use crate::gpu::GpuBridge;
@@ -24,15 +24,21 @@ use crate::workspace::{PlotServices, Workspace};
 struct TrajectoryBuildResult {
     epoch: u64,
     vehicle_revision: u64,
-    trajectories: Vec<Vec<[f32; 3]>>,
+    trajectories: Vec<crate::vehicle::VehicleTrajectory>,
 }
 
 type LayoutImportResult = Result<LayoutDoc, LayoutError>;
 type LayoutExportResult = Result<std::path::PathBuf, LayoutError>;
 type DiagnosticsExportResult = Result<std::path::PathBuf, String>;
 type ProfilingExportResult = Result<std::path::PathBuf, String>;
+type CsvExportResult = Result<(std::path::PathBuf, u64), String>;
 const SESSION_AUTOSAVE_INTERVAL: Duration = Duration::from_secs(30);
 const PERFORMANCE_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
+const EMPTY_SESSION_TIMELINE_RANGE: TimeRange = TimeRange {
+    min_us: 0,
+    max_us: 10_000_000,
+};
+const DEFAULT_FIT_VIEW_ALL: bool = true;
 
 struct CombinedLoadState {
     active: bool,
@@ -49,8 +55,7 @@ fn combined_load_state(
     let parser_label = parser_label
         .filter(|label| !label.is_empty())
         .map(str::to_owned);
-    // Drop any native label that duplicates the parser phrase so it is not
-    // shown twice (the parser label is rendered on its own below).
+    // Drop native labels that duplicate the parser phrase (rendered separately).
     let native_labels = native_labels
         .into_iter()
         .filter(|label| parser_label.as_deref() != Some(label.as_str()))
@@ -65,6 +70,10 @@ fn combined_load_state(
 
 fn should_auto_open_diagnostics(enabled: bool, last_seen: Option<u64>, newest: u64) -> bool {
     enabled && last_seen.is_none_or(|prev| newest > prev)
+}
+
+fn timeline_range_for_ui(snapshot_range: Option<TimeRange>) -> TimeRange {
+    snapshot_range.unwrap_or(EMPTY_SESSION_TIMELINE_RANGE)
 }
 
 #[derive(Serialize)]
@@ -207,35 +216,26 @@ pub struct DelogApp {
     workspace: Workspace,
     playback: Playback,
     view: Option<ViewX>,
-    /// Whether `view` has been fit to real data yet. Stays false while the
-    /// session is empty (the view is a pan/zoomable placeholder), so the
-    /// first loaded log replaces the placeholder by fitting to its range.
+    /// False while the session is empty (view is a pan/zoomable placeholder), so
+    /// the first loaded log replaces the placeholder by fitting to its range.
     view_fitted: bool,
-    /// "Fit all" timeline toggle: when set, every frame pins the X view to the
-    /// full data range (auto-zoom from start to the current/live point), useful
-    /// while streaming. Disengaged by manual pan/zoom or toggling it off.
+    /// When set, every frame pins the X view to the full data range. Disengaged
+    /// by manual pan/zoom.
     fit_view_all: bool,
     hover_mode: delog_core::field_view::SampleMode,
-    /// Shared measurement-marker time when the marker scope is Global;
-    /// `None` when no global marker is placed. Per-pane markers live on the pane.
+    /// Shared measurement-marker time when the marker scope is Global. Per-pane
+    /// markers live on the pane.
     marker_us: Option<i64>,
-    /// Manual markers / bookmarks.
     markers: crate::markers::Markers,
-    /// Whether Alt+hover snaps the playhead to the nearest data point.
     snap_playhead: bool,
     frame: u64,
     last_epoch: u64,
     origin_us: i64,
-    /// Exponentially-smoothed frame rate for the corner FPS indicator
-    /// Only meaningful while frames are continuous; reads `None`
-    /// when the app is idle/event-driven so we don't display a misleading
+    /// `None` when idle/event-driven, so the badge doesn't show a misleading
     /// rate built from a single stale frame.
     fps_ema: Option<f32>,
-    /// Wall-clock instant of the previous frame, used to measure the real
-    /// frame-to-frame gap that feeds `fps_ema`.
     last_frame_at: Option<Instant>,
-    /// Paths picked in the native open dialog, sent from its worker thread
-    /// (the dialog must never block the UI thread).
+    /// Picked on a worker thread — the dialog must never block the UI thread.
     picked_files: mpsc::Receiver<Vec<std::path::PathBuf>>,
     picked_files_tx: mpsc::Sender<Vec<std::path::PathBuf>>,
     imported_layouts: mpsc::Receiver<LayoutImportResult>,
@@ -246,6 +246,10 @@ pub struct DelogApp {
     exported_diagnostics_tx: mpsc::Sender<DiagnosticsExportResult>,
     exported_profiling: mpsc::Receiver<ProfilingExportResult>,
     exported_profiling_tx: mpsc::Sender<ProfilingExportResult>,
+    csv_export: crate::csv_export::CsvExportState,
+    csv_export_tx: mpsc::Sender<CsvExportResult>,
+    csv_export_rx: mpsc::Receiver<CsvExportResult>,
+    csv_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     browser_collapsed: bool,
     diagnostics_dock: DiagnosticsDock,
     last_diagnostic_seq: Option<u64>,
@@ -254,14 +258,14 @@ pub struct DelogApp {
     performance_snapshot: PerformanceSnapshot,
     performance_last_refresh: Option<Instant>,
     browser_query: String,
+    browser_filter: BrowserFilterCache,
     browser_selection: browser::Selection,
-    /// Cached browser tree keyed by the snapshot epoch it was built from
-    /// (offset edits also bump the epoch), so `BrowserModel::from_snapshot`
-    /// runs once per data change instead of every frame (it is O(topics×fields)
-    /// plus a full string clone of the tree).
+    /// Keyed by snapshot epoch so the O(topics×fields) tree rebuild runs once
+    /// per data change, not every frame.
     browser_model: Option<(u64, BrowserModel)>,
     offset_dialog: Option<(delog_core::identity::SourceId, i64)>,
     source_metadata_dialog: Option<delog_core::identity::SourceId>,
+    field_metadata_dialog: Option<delog_core::identity::FieldId>,
     field_stats: FieldStatsController,
     generate_markers_dialog: Option<crate::generate_markers::GenerateMarkersDialog>,
     save_layout_dialog: SaveLayoutDialog,
@@ -276,12 +280,11 @@ pub struct DelogApp {
     last_session_autosave_json: Option<String>,
     show_connection_dialog: bool,
     connection_dialog: ConnectionDialog,
-    /// Configured vehicles for the 3D view; empty until one is added.
     vehicles: Vec<crate::vehicle::VehicleConfig>,
     vehicle_dialog: crate::vehicle_dialog::VehicleDialog,
-    /// Cached render-space trajectories, parallel to `vehicles`, rebuilt on a
-    /// worker when the data epoch or vehicle set changes.
-    vehicle_trajectories: Vec<Vec<[f32; 3]>>,
+    /// Parallel to `vehicles`, rebuilt on a worker when the data epoch or
+    /// vehicle set changes.
+    vehicle_trajectories: Vec<crate::vehicle::VehicleTrajectory>,
     traj_epoch: u64,
     traj_vehicle_revision: u64,
     vehicle_revision: u64,
@@ -303,9 +306,9 @@ impl DelogApp {
         let (exported_layouts_tx, exported_layouts) = mpsc::channel();
         let (exported_diagnostics_tx, exported_diagnostics) = mpsc::channel();
         let (exported_profiling_tx, exported_profiling) = mpsc::channel();
+        let (csv_export_tx, csv_export_rx) = mpsc::channel();
         let session = Session::new(cc.egui_ctx.clone());
-        // Share the metrics registry so cache build/append metrics land in the
-        // same dock as the rest of the app.
+        // Shared metrics registry so cache metrics land in the same dock.
         let caches = CacheManager::new().with_metrics(std::sync::Arc::clone(session.metrics()));
         Self {
             session,
@@ -321,7 +324,7 @@ impl DelogApp {
             playback: Playback::default(),
             view: None,
             view_fitted: false,
-            fit_view_all: false,
+            fit_view_all: DEFAULT_FIT_VIEW_ALL,
             hover_mode: delog_core::field_view::SampleMode::Prev,
             marker_us: None,
             markers: crate::markers::Markers::new(),
@@ -341,6 +344,10 @@ impl DelogApp {
             exported_diagnostics_tx,
             exported_profiling,
             exported_profiling_tx,
+            csv_export: crate::csv_export::CsvExportState::default(),
+            csv_export_tx,
+            csv_export_rx,
+            csv_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             browser_collapsed: false,
             diagnostics_dock: DiagnosticsDock::default(),
             last_diagnostic_seq: None,
@@ -349,10 +356,12 @@ impl DelogApp {
             performance_snapshot: PerformanceSnapshot::default(),
             performance_last_refresh: None,
             browser_query: String::new(),
+            browser_filter: BrowserFilterCache::default(),
             browser_selection: browser::Selection::default(),
             browser_model: None,
             offset_dialog: None,
             source_metadata_dialog: None,
+            field_metadata_dialog: None,
             field_stats: FieldStatsController::default(),
             generate_markers_dialog: None,
             save_layout_dialog: SaveLayoutDialog {
@@ -383,17 +392,7 @@ impl DelogApp {
         }
     }
 
-    fn handle_dropped_files(&mut self, ctx: &egui::Context) {
-        let dropped = ctx.input(|i| i.raw.dropped_files.clone());
-        for file in dropped {
-            if let Some(path) = file.path {
-                self.session.open_path(path);
-            }
-        }
-    }
-
-    /// Show the native open dialog on a worker thread (never blocking the UI)
-    /// and queue the picked logs for the next frame.
+    /// On a worker thread so the native dialog never blocks the UI.
     fn spawn_open_dialog(&self, ctx: &egui::Context) {
         let tx = self.picked_files_tx.clone();
         let ctx = ctx.clone();
@@ -483,6 +482,21 @@ impl DelogApp {
                         "profiling-export",
                         err,
                     )),
+            }
+        }
+
+        while let Ok(result) = self.csv_export_rx.try_recv() {
+            match result {
+                Ok((path, rows)) => {
+                    self.session
+                        .push_diagnostic(delog_core::diagnostics::Diag::info(
+                            "csv-export",
+                            format!("exported {rows} rows to {}", path.display()),
+                        ))
+                }
+                Err(err) => self
+                    .session
+                    .push_diagnostic(delog_core::diagnostics::Diag::error("csv-export", err)),
             }
         }
     }
@@ -578,6 +592,54 @@ impl DelogApp {
         self.view = Some(ViewX::locked_to_tail(range, span));
     }
 
+    fn clear_current_layout(&mut self) {
+        Self::clear_current_layout_state(
+            &mut self.workspace,
+            &mut self.playback,
+            &mut self.view,
+            &mut self.view_fitted,
+            &mut self.fit_view_all,
+            &mut self.marker_us,
+            &mut self.markers,
+            &mut self.vehicles,
+            &mut self.vehicle_dialog,
+            &mut self.vehicle_revision,
+            &mut self.traj_dirty,
+        );
+        self.pending_layout = None;
+        self.deferred_layout_doc = None;
+        self.traj_building = None;
+        self.vehicle_trajectories.clear();
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn clear_current_layout_state(
+        workspace: &mut Workspace,
+        playback: &mut Playback,
+        view: &mut Option<ViewX>,
+        view_fitted: &mut bool,
+        fit_view_all: &mut bool,
+        marker_us: &mut Option<i64>,
+        markers: &mut crate::markers::Markers,
+        vehicles: &mut Vec<crate::vehicle::VehicleConfig>,
+        vehicle_dialog: &mut crate::vehicle_dialog::VehicleDialog,
+        vehicle_revision: &mut u64,
+        traj_dirty: &mut bool,
+    ) {
+        *workspace = Workspace::new();
+        playback.speed = 1.0;
+        playback.follow_live = false;
+        *view = None;
+        *view_fitted = false;
+        *fit_view_all = DEFAULT_FIT_VIEW_ALL;
+        *marker_us = None;
+        *markers = crate::markers::Markers::new();
+        vehicles.clear();
+        *vehicle_dialog = crate::vehicle_dialog::VehicleDialog::default();
+        *vehicle_revision = vehicle_revision.wrapping_add(1);
+        *traj_dirty = true;
+    }
+
     fn refresh_performance_snapshot(
         &mut self,
         frame: &eframe::Frame,
@@ -598,7 +660,6 @@ impl DelogApp {
         self.performance_last_refresh = Some(now);
     }
 
-    /// Shared by the 4 Hz dock refresh and the profiling export.
     fn build_performance_snapshot(
         &self,
         frame: &eframe::Frame,
@@ -922,6 +983,66 @@ impl DelogApp {
                 }
             })
             .expect("spawn profiling export dialog thread");
+    }
+
+    fn spawn_csv_export(
+        &mut self,
+        ctx: &egui::Context,
+        snapshot: &std::sync::Arc<delog_core::snapshot::StoreSnapshot>,
+        all_fields: &[crate::csv_export::CsvField],
+        req: crate::csv_export::CsvExportRequest,
+    ) {
+        use std::sync::atomic::Ordering;
+        let chosen: Vec<crate::csv_export::CsvField> = req
+            .fields
+            .iter()
+            .filter_map(|id| all_fields.iter().find(|f| f.id == *id))
+            .map(|f| crate::csv_export::CsvField {
+                id: f.id,
+                label: f.label.clone(),
+                unit: f.unit.clone(),
+            })
+            .collect();
+        let origin_us = snapshot.global_time_range().map(|r| r.min_us).unwrap_or(0);
+        let snapshot = std::sync::Arc::clone(snapshot);
+        let tx = self.csv_export_tx.clone();
+        let ctx = ctx.clone();
+        self.csv_cancel.store(false, Ordering::Relaxed);
+        let cancel = std::sync::Arc::clone(&self.csv_cancel);
+        let mode = req.mode;
+        let window = req.window;
+        std::thread::Builder::new()
+            .name("delog-csv-export".into())
+            .spawn(move || {
+                let picked = rfd::FileDialog::new()
+                    .add_filter("CSV", &["csv"])
+                    .add_filter("All files", &["*"])
+                    .set_title("Export CSV")
+                    .set_file_name("export.csv")
+                    .save_file();
+                let Some(path) = picked else { return };
+                let result = (|| {
+                    let file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
+                    let mut w = std::io::BufWriter::new(file);
+                    let rows = crate::csv_export::write_csv(
+                        &mut w,
+                        &snapshot,
+                        &chosen,
+                        window,
+                        mode,
+                        origin_us,
+                        &cancel,
+                        |_frac| {},
+                    )
+                    .map_err(|e| e.to_string())?;
+                    use std::io::Write;
+                    w.flush().map_err(|e| e.to_string())?;
+                    Ok::<_, String>((path, rows))
+                })();
+                let _ = tx.send(result);
+                ctx.request_repaint();
+            })
+            .expect("spawn csv export thread");
     }
 
     fn load_layout(&mut self, name: &str, snapshot: &delog_core::snapshot::StoreSnapshot) {
@@ -1295,12 +1416,11 @@ impl eframe::App for DelogApp {
         // Apply the global font override before any widget is laid out so a
         // changed size/family takes effect this frame.
         self.settings.font.apply(ui.ctx());
-        // Pre-UI bookkeeping: dropped/picked files, job pruning,
+        // Pre-UI bookkeeping: picked files, job pruning,
         // cache lifecycle + epoch handling, trajectory builds and autosave —
         // none of it inside a panel scope. `ui_prelude` captures this block so
         // `frame_total − Σ(ui_*)` no longer hides it as an unattributed gap.
         let ui_prelude_timer = self.session.metrics().scope("ui_prelude");
-        self.handle_dropped_files(ui.ctx());
         self.handle_picked_files();
         self.handle_layout_io_results();
         self.session.prune_finished();
@@ -1363,7 +1483,8 @@ impl eframe::App for DelogApp {
             // panned and zoomed before any log is loaded.
             self.origin_us = 0;
             self.caches.set_origin(0);
-            self.view.get_or_insert(ViewX::new(0, 10_000_000));
+            self.view
+                .get_or_insert(ViewX::from_range(EMPTY_SESSION_TIMELINE_RANGE));
         }
         if self.settings.render_mode == RenderMode::Continuous {
             ui.ctx().request_repaint();
@@ -1390,6 +1511,9 @@ impl eframe::App for DelogApp {
         if snapshot.epoch != self.last_epoch {
             self.caches.on_epoch(&snapshot);
             self.try_apply_deferred_layout(&snapshot);
+            for field in self.workspace.prune_removed_fields(&snapshot) {
+                self.caches.unpin(field);
+            }
             let resolved = self.workspace.resolve_ghosts(&snapshot);
             if resolved > 0 {
                 self.session
@@ -1436,6 +1560,10 @@ impl eframe::App for DelogApp {
                     }
                     if ui.button("Export Profiling JSON...").clicked() {
                         self.spawn_export_profiling_dialog(ui.ctx(), frame, &snapshot);
+                        ui.close();
+                    }
+                    if ui.button("Export CSV...").clicked() {
+                        self.csv_export.open = true;
                         ui.close();
                     }
                     ui.separator();
@@ -1496,6 +1624,10 @@ impl eframe::App for DelogApp {
                     });
                     if ui.button("Manage Layouts...").clicked() {
                         self.open_layout_manager();
+                        ui.close();
+                    }
+                    if ui.button("Clear current layout").clicked() {
+                        self.clear_current_layout();
                         ui.close();
                     }
                     ui.separator();
@@ -1718,7 +1850,7 @@ impl eframe::App for DelogApp {
                         status.endpoint,
                         status.link.rx_frames,
                         status.ingest.rows,
-                        status.recording.as_ref().map(|_| " · rec").unwrap_or("")
+                        recording_status(&status)
                     ));
                     if ui
                         .button("Disconnect")
@@ -1775,110 +1907,105 @@ impl eframe::App for DelogApp {
         // a UTC reference (BIN GPS week / ULog time_ref_utc); `any_live` stays
         // false because the snapshot has no streaming flag yet.
         drop(ui_toolbar_timer);
-        if let Some(range) = snapshot.global_time_range() {
-            let ui_timeline_timer = self.session.metrics().scope("ui_timeline");
-            egui::Panel::bottom("timeline").show_inside(ui, |ui| {
-                let action = crate::timeline::ui(
-                    ui,
-                    &mut self.playback,
-                    &mut self.fit_view_all,
-                    &mut self.view,
-                    range,
-                    None,
-                    self.session.has_live_links(),
-                    self.settings.theme,
-                    &self.markers,
-                );
-                if action.lock_live {
-                    self.lock_to_live(range);
-                }
-                if action.view_changed {
-                    // Dragging the window slider is a manual view change: drop
-                    // out of fit-all and live-follow, like a pan/zoom.
-                    self.fit_view_all = false;
-                    self.playback.unlock_live();
-                    self.view_fitted = true;
-                }
-                if let Some(t_us) = action.marker_jump {
-                    self.playback.scrub(t_us, range);
-                }
-                if let Some((id, t_us)) = action.marker_move
-                    && let Some(m) = self.markers.get_mut(id)
-                {
-                    m.t_us = t_us.clamp(range.min_us, range.max_us);
-                }
-                if let Some(id) = action.marker_delete {
-                    self.markers.remove(id);
-                }
-                if let Some((id, edit)) = action.marker_edit
-                    && let Some(m) = self.markers.get_mut(id)
-                {
-                    if let Some(label) = edit.label {
-                        m.label = label;
-                    }
-                    if let Some(color) = edit.color {
-                        m.color = color;
-                    }
-                }
-            });
-            drop(ui_timeline_timer);
-
-            // F12 toggles the debug overlay. Handled ungated — it is
-            // not a text key, so it works even while a widget holds focus.
-            if ui.ctx().input(|i| i.key_pressed(egui::Key::F12)) {
-                self.settings.show_debug_overlay = !self.settings.show_debug_overlay;
+        let range = timeline_range_for_ui(global_range);
+        let ui_timeline_timer = self.session.metrics().scope("ui_timeline");
+        egui::Panel::bottom("timeline").show_inside(ui, |ui| {
+            let action = crate::timeline::ui(
+                ui,
+                &mut self.playback,
+                &mut self.fit_view_all,
+                &mut self.view,
+                range,
+                None,
+                self.session.has_live_links(),
+                self.settings.theme,
+                &self.markers,
+            );
+            if action.lock_live {
+                self.lock_to_live(range);
             }
+            if action.view_changed {
+                // Dragging the window slider is a manual view change: drop
+                // out of fit-all and live-follow, like a pan/zoom.
+                self.fit_view_all = false;
+                self.playback.unlock_live();
+                self.view_fitted = true;
+            }
+            if let Some(t_us) = action.marker_jump {
+                self.playback.scrub(t_us, range);
+            }
+            if let Some((id, t_us)) = action.marker_move
+                && let Some(m) = self.markers.get_mut(id)
+            {
+                m.t_us = t_us.clamp(range.min_us, range.max_us);
+            }
+            if let Some(id) = action.marker_delete {
+                self.markers.remove(id);
+            }
+            if let Some((id, edit)) = action.marker_edit
+                && let Some(m) = self.markers.get_mut(id)
+            {
+                if let Some(label) = edit.label {
+                    m.label = label;
+                }
+                if let Some(color) = edit.color {
+                    m.color = color;
+                }
+            }
+        });
+        drop(ui_timeline_timer);
 
-            // Transport keys — skipped while a widget owns the
-            // keyboard (e.g. the browser filter box).
-            if !ui.ctx().egui_wants_keyboard_input() {
-                let (space, home, end, left, right, save_layout, load_layout, add_marker) =
-                    ui.ctx().input(|i| {
-                        (
-                            i.key_pressed(egui::Key::Space),
-                            i.key_pressed(egui::Key::Home),
-                            i.key_pressed(egui::Key::End),
-                            i.key_pressed(egui::Key::ArrowLeft),
-                            i.key_pressed(egui::Key::ArrowRight),
-                            i.modifiers.command && i.key_pressed(egui::Key::S),
-                            i.modifiers.command && i.key_pressed(egui::Key::L),
-                            i.key_pressed(egui::Key::M),
-                        )
-                    });
-                if save_layout {
-                    self.save_layout_dialog.open = true;
+        // F12 toggles the debug overlay. Handled ungated — it is
+        // not a text key, so it works even while a widget holds focus.
+        if ui.ctx().input(|i| i.key_pressed(egui::Key::F12)) {
+            self.settings.show_debug_overlay = !self.settings.show_debug_overlay;
+        }
+
+        // Transport keys — skipped while a widget owns the
+        // keyboard (e.g. the browser filter box).
+        if !ui.ctx().egui_wants_keyboard_input() {
+            let (space, home, end, left, right, save_layout, load_layout, add_marker) =
+                ui.ctx().input(|i| {
+                    (
+                        i.key_pressed(egui::Key::Space),
+                        i.key_pressed(egui::Key::Home),
+                        i.key_pressed(egui::Key::End),
+                        i.key_pressed(egui::Key::ArrowLeft),
+                        i.key_pressed(egui::Key::ArrowRight),
+                        i.modifiers.command && i.key_pressed(egui::Key::S),
+                        i.modifiers.command && i.key_pressed(egui::Key::L),
+                        i.key_pressed(egui::Key::M),
+                    )
+                });
+            if save_layout {
+                self.save_layout_dialog.open = true;
+            }
+            if load_layout {
+                self.load_layout_dialog.layouts = crate::layout::list_layouts();
+                self.load_layout_dialog.selected = None;
+                self.load_layout_dialog.open = true;
+            }
+            if space {
+                self.playback.toggle();
+            }
+            if home {
+                self.playback.jump_start(range);
+            }
+            if end {
+                if self.session.has_live_links() {
+                    self.lock_to_live(range);
+                } else {
+                    self.playback.jump_end(range);
                 }
-                if load_layout {
-                    self.load_layout_dialog.layouts = crate::layout::list_layouts();
-                    self.load_layout_dialog.selected = None;
-                    self.load_layout_dialog.open = true;
-                }
-                if space {
-                    self.playback.toggle();
-                }
-                if home {
-                    self.playback.jump_start(range);
-                }
-                if end {
-                    if self.session.has_live_links() {
-                        self.lock_to_live(range);
-                    } else {
-                        self.playback.jump_end(range);
-                    }
-                }
-                if left || right {
-                    let reference = self.workspace.focused_first_field();
-                    let target = crate::timeline::step_target(
-                        &snapshot,
-                        reference,
-                        self.playback.t_us,
-                        right,
-                    );
-                    self.playback.scrub(target, range);
-                }
-                if add_marker {
-                    self.markers.add_at(self.playback.t_us);
-                }
+            }
+            if left || right {
+                let reference = self.workspace.focused_first_field();
+                let target =
+                    crate::timeline::step_target(&snapshot, reference, self.playback.t_us, right);
+                self.playback.scrub(target, range);
+            }
+            if add_marker {
+                self.markers.add_at(self.playback.t_us);
             }
         }
 
@@ -1977,21 +2104,28 @@ impl eframe::App for DelogApp {
             let epoch = snapshot.epoch;
             let model = match self.browser_model.take() {
                 Some((cached_epoch, model)) if cached_epoch == epoch => model,
-                _ => BrowserModel::from_snapshot(&snapshot),
+                _ => {
+                    self.browser_filter.reset();
+                    BrowserModel::from_snapshot(&snapshot)
+                }
             };
-            let browser_panel = egui::Panel::left("data_browser_expanded").resizable(false);
+            let browser_panel = egui::Panel::left("data_browser_expanded")
+                .resizable(true)
+                .min_size(360.0);
             let browser_panel = if model.is_empty() {
                 browser_panel.default_size(ui.spacing().text_edit_width)
             } else {
-                browser_panel
+                browser_panel.default_size(360.0)
             };
             browser_panel.show_inside(ui, |ui| {
                 // Offset edits go through the ingest thread (the single
                 // registry writer) and come back as a new epoch.
                 let browser_response = browser::ui(
                     ui,
+                    epoch,
                     &model,
                     &mut self.browser_query,
+                    &mut self.browser_filter,
                     &mut self.browser_selection,
                     &mut self.offset_dialog,
                 );
@@ -2006,6 +2140,9 @@ impl eframe::App for DelogApp {
                 }
                 if let Some(source) = browser_response.inspect_source {
                     self.source_metadata_dialog = Some(source);
+                }
+                if let Some(field) = browser_response.inspect_field_metadata {
+                    self.field_metadata_dialog = Some(field);
                 }
                 if let Some(field) = browser_response.inspect_field_stats {
                     self.field_stats.open(field);
@@ -2022,6 +2159,7 @@ impl eframe::App for DelogApp {
         }
         drop(ui_browser_timer);
         show_source_metadata_window(ui.ctx(), &snapshot, &mut self.source_metadata_dialog);
+        show_field_metadata_window(ui.ctx(), &snapshot, &mut self.field_metadata_dialog);
         show_field_stats_window(
             ui.ctx(),
             &snapshot,
@@ -2034,6 +2172,26 @@ impl eframe::App for DelogApp {
             &mut self.generate_markers_dialog,
         ) {
             self.markers.push_loaded(t_us, name, color, String::new());
+        }
+
+        if self.csv_export.open {
+            let model = self
+                .browser_model
+                .as_ref()
+                .map(|(_, m)| m.clone())
+                .unwrap_or_default();
+            let fields = crate::csv_export::numeric_fields(&snapshot, &model);
+            let full = snapshot
+                .global_time_range()
+                .map(|r| (r.min_us, r.max_us))
+                .unwrap_or((0, 1));
+            let visible = self.view.map(|v| (v.min_us, v.max_us)).unwrap_or(full);
+            if let Some(req) =
+                crate::csv_export::dialog_ui(ui.ctx(), &mut self.csv_export, &fields, visible, full)
+            {
+                self.spawn_csv_export(ui.ctx(), &snapshot, &fields, req);
+                self.csv_export.open = false;
+            }
         }
 
         let ui_workspace_timer = self.session.metrics().scope("ui_workspace");
@@ -2068,6 +2226,7 @@ impl eframe::App for DelogApp {
                         marker_scope: self.settings.plot.marker_scope,
                         render_tuning: self.settings.render,
                         scene3d: self.settings.scene3d,
+                        accent: self.settings.theme.accent(),
                         playhead_us: snapshot.global_time_range().map(|_| self.playback.t_us),
                         playing: self.playback.playing,
                         vehicles: &self.vehicles,
@@ -2078,10 +2237,11 @@ impl eframe::App for DelogApp {
                         markers: self.markers.as_slice(),
                     };
                     let mut behavior = crate::workspace::Behavior::new(services);
-                    // `workspace_tree`: the egui_tiles layout +
-                    // pane rendering. `workspace_tree − Σ(pane_total)` is the
-                    // egui_tiles container/tab/drag machinery; `ui_workspace −
-                    // workspace_tree` is begin/retain + action handling.
+                    // `workspace_tree`: the egui_tiles layout + pane rendering.
+                    // Profiling (2026-06-28) showed egui_tiles' own machinery is
+                    // negligible (~0.02 ms); the cost is the per-pane `pane_ui`
+                    // render. `ui_workspace − workspace_tree` is begin/retain +
+                    // action handling.
                     let tree_timer = tree_metrics.scope("workspace_tree");
                     self.workspace.tree.ui(&mut behavior, ui);
                     drop(tree_timer);
@@ -2179,6 +2339,17 @@ impl eframe::App for DelogApp {
             .connection_dialog
             .ui(ui.ctx(), &mut self.show_connection_dialog)
         {
+            let recording = match self.connection_dialog.recording_path() {
+                Ok(recording) => recording,
+                Err(err) => {
+                    self.session
+                        .push_diagnostic(delog_core::diagnostics::Diag::error(
+                            "live-recording",
+                            err,
+                        ));
+                    None
+                }
+            };
             self.settings.live_connection = self.connection_dialog.to_settings();
             if let Err(err) = crate::layout::save_app_settings(&self.settings) {
                 self.session
@@ -2187,7 +2358,7 @@ impl eframe::App for DelogApp {
                         err.to_string(),
                     ));
             }
-            if let Err(err) = self.session.start_live(endpoint, None) {
+            if let Err(err) = self.session.start_live(endpoint, recording) {
                 self.session
                     .push_diagnostic(delog_core::diagnostics::Diag::error("live-open", err));
             }
@@ -2212,6 +2383,20 @@ impl eframe::App for DelogApp {
                     ));
             }
         }
+    }
+}
+
+fn recording_status(status: &delog_stream::LiveLinkStatus) -> String {
+    if status.recording.is_none() {
+        return String::new();
+    }
+    if status.ingest.recorder_errors == 0 {
+        format!(" · rec {} frames", status.ingest.recorder_records)
+    } else {
+        format!(
+            " · rec {} frames · {} errors",
+            status.ingest.recorder_records, status.ingest.recorder_errors
+        )
     }
 }
 
@@ -2267,6 +2452,134 @@ enum SourceMetaTab {
     Info,
     Parameters,
     LoggedMessages,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct FieldMetadata {
+    title: String,
+    source_label: String,
+    topic_name: String,
+    field_name: String,
+    dtype: &'static str,
+    unit: Option<String>,
+    description: Option<String>,
+    multiplier: f64,
+    rows: u64,
+    source_offset_us: i64,
+    range: Option<TimeRange>,
+}
+
+fn field_metadata(
+    snapshot: &delog_core::snapshot::StoreSnapshot,
+    field_id: delog_core::identity::FieldId,
+) -> Option<FieldMetadata> {
+    let field = snapshot
+        .fields
+        .get(field_id.index())
+        .filter(|field| field.id == field_id && !field.removed)?;
+    let topic = snapshot
+        .topic(field.topic)
+        .filter(|topic| !topic.entry.removed)?;
+    let source = snapshot
+        .source(topic.entry.source)
+        .filter(|source| !source.entry.removed)?;
+    let store = topic.store.as_ref()?;
+    let schema = store.schema.field_by_name(&field.name)?;
+    let range = store
+        .time_range()
+        .and_then(|range| range.offset(source.entry.offset_us));
+
+    Some(FieldMetadata {
+        title: format!(
+            "{} / {}.{}",
+            source.entry.label, topic.entry.name, field.name
+        ),
+        source_label: source.entry.label.clone(),
+        topic_name: topic.entry.name.clone(),
+        field_name: field.name.clone(),
+        dtype: schema.dtype_label(),
+        unit: schema.unit.clone(),
+        description: schema.description.clone(),
+        multiplier: schema.multiplier,
+        rows: store.rows,
+        source_offset_us: source.entry.offset_us,
+        range,
+    })
+}
+
+fn show_field_metadata_window(
+    ctx: &egui::Context,
+    snapshot: &delog_core::snapshot::StoreSnapshot,
+    selected: &mut Option<delog_core::identity::FieldId>,
+) {
+    let Some(field_id) = *selected else {
+        return;
+    };
+    let Some(meta) = field_metadata(snapshot, field_id) else {
+        *selected = None;
+        return;
+    };
+
+    let mut open = true;
+    egui::Window::new(format!("Field Metadata - {}", meta.title))
+        .id(egui::Id::new(("field_metadata", field_id.0)))
+        .open(&mut open)
+        .collapsible(false)
+        .default_pos(ctx.content_rect().center())
+        .pivot(egui::Align2::CENTER_CENTER)
+        .default_width(440.0)
+        .resizable(false)
+        .show(ctx, |ui| {
+            egui::Grid::new("field_metadata_summary")
+                .num_columns(2)
+                .striped(true)
+                .spacing([16.0, 4.0])
+                .show(ui, |ui| {
+                    ui.strong("Source");
+                    ui.label(meta.source_label.as_str());
+                    ui.end_row();
+                    ui.strong("Topic");
+                    ui.label(meta.topic_name.as_str());
+                    ui.end_row();
+                    ui.strong("Field");
+                    ui.label(meta.field_name.as_str());
+                    ui.end_row();
+                    ui.strong("Field ID");
+                    ui.monospace(field_id.0.to_string());
+                    ui.end_row();
+                    ui.strong("Type");
+                    ui.label(meta.dtype);
+                    ui.end_row();
+                    ui.strong("Unit");
+                    ui.label(meta.unit.as_deref().unwrap_or("-"));
+                    ui.end_row();
+                    ui.strong("Multiplier");
+                    ui.monospace(meta.multiplier.to_string());
+                    ui.end_row();
+                    ui.strong("Rows");
+                    ui.label(meta.rows.to_string());
+                    ui.end_row();
+                    ui.strong("Offset");
+                    ui.label(format!("{} us", meta.source_offset_us));
+                    ui.end_row();
+                    ui.strong("Range");
+                    ui.label(meta.range.map(format_range).unwrap_or_else(|| "-".into()));
+                    ui.end_row();
+                });
+            ui.separator();
+            match meta.description.as_deref() {
+                Some(description) if !description.is_empty() => {
+                    ui.label(description);
+                }
+                _ => {
+                    ui.weak("No field description.");
+                }
+            }
+        });
+
+    if !open {
+        *selected = None;
+    }
 }
 
 fn show_source_metadata_window(
@@ -2733,9 +3046,16 @@ fn icon_button(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use arrow::array::{ArrayRef, Float64Array, Int32Array, Int64Array};
+    use arrow::datatypes::DataType;
+    use delog_core::chunk::Chunk;
     use delog_core::diagnostics::{Diag, DiagRecord};
     use delog_core::identity::IdentityRegistry;
+    use delog_core::schema::{FieldSchema, TopicSchema};
     use delog_core::snapshot::StoreSnapshot;
+    use delog_core::store::TopicStore;
 
     use super::*;
 
@@ -2783,6 +3103,82 @@ mod tests {
             Some("running raw.py on sample.dat")
         );
         assert!(state.parser_active);
+    }
+
+    #[test]
+    fn timeline_range_uses_empty_session_placeholder_without_data() {
+        assert_eq!(
+            timeline_range_for_ui(None),
+            TimeRange::new(0, 10_000_000).unwrap()
+        );
+    }
+
+    #[test]
+    fn fit_to_view_defaults_on_for_new_sessions() {
+        assert!(DEFAULT_FIT_VIEW_ALL);
+    }
+
+    #[test]
+    fn clear_current_layout_resets_layout_and_vehicle_state() {
+        let mut workspace = Workspace::new();
+        let mut playback = Playback {
+            speed: 2.0,
+            follow_live: true,
+            ..Playback::default()
+        };
+        let mut view = Some(ViewX::new(10, 20));
+        let mut view_fitted = true;
+        let mut fit_view_all = false;
+        let mut marker_us = Some(42);
+        let mut markers = crate::markers::Markers::new();
+        markers.add_at(42);
+        let mut vehicles = vec![crate::vehicle::VehicleConfig {
+            source: delog_core::identity::SourceId(0),
+            label: "Vehicle".into(),
+            show: true,
+            pos: crate::vehicle::PosMapping::Ned {
+                north: delog_core::identity::FieldId(0),
+                east: delog_core::identity::FieldId(1),
+                down: delog_core::identity::FieldId(2),
+                reference: None,
+            },
+            ori: crate::vehicle::OriMapping::Static,
+            model: crate::vehicle::ModelKind::Cone,
+            color: egui::Color32::WHITE,
+            path_color: egui::Color32::WHITE,
+            scale: 1.0,
+        }];
+        let mut vehicle_dialog = crate::vehicle_dialog::VehicleDialog::default();
+        vehicle_dialog.open = true;
+        let mut vehicle_revision = 7;
+        let mut traj_dirty = false;
+
+        DelogApp::clear_current_layout_state(
+            &mut workspace,
+            &mut playback,
+            &mut view,
+            &mut view_fitted,
+            &mut fit_view_all,
+            &mut marker_us,
+            &mut markers,
+            &mut vehicles,
+            &mut vehicle_dialog,
+            &mut vehicle_revision,
+            &mut traj_dirty,
+        );
+
+        assert!(workspace.focused_first_field().is_none());
+        assert_eq!(playback.speed, 1.0);
+        assert!(!playback.follow_live);
+        assert_eq!(view, None);
+        assert!(!view_fitted);
+        assert_eq!(fit_view_all, DEFAULT_FIT_VIEW_ALL);
+        assert_eq!(marker_us, None);
+        assert!(markers.as_slice().is_empty());
+        assert!(vehicles.is_empty());
+        assert!(!vehicle_dialog.open);
+        assert_eq!(vehicle_revision, 8);
+        assert!(traj_dirty);
     }
 
     #[test]
@@ -2875,5 +3271,55 @@ mod tests {
 
         assert_eq!(json["traces"][0]["label"], "GPS.alt");
         assert_eq!(json["traces"][0]["visible_samples"], 500);
+    }
+
+    #[test]
+    fn field_metadata_includes_schema_rows_and_effective_range() {
+        let mut identity = IdentityRegistry::new();
+        let source = identity.add_source("flight");
+        identity.set_source_offset_us(source, 250);
+        let topic = identity.add_topic(source, "GPS").unwrap();
+        let lat = identity.add_field(topic, "Lat").unwrap();
+        identity.add_field(topic, "Alt").unwrap();
+
+        let schema = Arc::new(
+            TopicSchema::new(
+                "GPS",
+                [
+                    FieldSchema::new("Lat", DataType::Int32, Some("deg"), 1e-7)
+                        .unwrap()
+                        .with_description("latitude"),
+                    FieldSchema::new("Alt", DataType::Float64, Some("m"), 1.0).unwrap(),
+                ],
+            )
+            .unwrap(),
+        );
+        let chunk = Arc::new(
+            Chunk::try_new(
+                Int64Array::from(vec![1_000, 2_000, 3_000]),
+                vec![
+                    Arc::new(Int32Array::from(vec![1, 2, 3])) as ArrayRef,
+                    Arc::new(Float64Array::from(vec![10.0, 11.0, 12.0])) as ArrayRef,
+                ],
+                &schema,
+            )
+            .unwrap(),
+        );
+        let store = Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap());
+        let snapshot = StoreSnapshot::from_registry(&identity, [(topic, store)], 9).unwrap();
+
+        let meta = field_metadata(&snapshot, lat).unwrap();
+
+        assert_eq!(meta.title, "flight / GPS.Lat");
+        assert_eq!(meta.source_label, "flight");
+        assert_eq!(meta.topic_name, "GPS");
+        assert_eq!(meta.field_name, "Lat");
+        assert_eq!(meta.dtype, "i32");
+        assert_eq!(meta.unit.as_deref(), Some("deg"));
+        assert_eq!(meta.description.as_deref(), Some("latitude"));
+        assert_eq!(meta.multiplier, 1e-7);
+        assert_eq!(meta.rows, 3);
+        assert_eq!(meta.source_offset_us, 250);
+        assert_eq!(meta.range, TimeRange::new(1_250, 3_250));
     }
 }
