@@ -107,6 +107,10 @@ fn legend_ghost_label_width(available_width: f32) -> f32 {
     available_width.max(0.0)
 }
 
+fn legend_can_show_color_picker(available_width: f32, interact_width: f32, spacing: f32) -> bool {
+    available_width.max(0.0) >= interact_width.max(0.0) + spacing.max(0.0)
+}
+
 fn legend_anchor(position: LegendPosition, bounds: egui::Rect) -> (egui::Pos2, egui::Align2) {
     match position {
         LegendPosition::TopLeft => (bounds.left_top(), egui::Align2::LEFT_TOP),
@@ -151,7 +155,9 @@ pub fn ui(
         .fixed_pos(pos)
         .pivot(pivot)
         .order(egui::Order::Middle)
+        .constrain_to(bounds)
         .show(ui.ctx(), |ui| {
+            ui.shrink_clip_rect(bounds);
             let base = egui::Frame::popup(ui.style());
             let frame = egui::Frame {
                 shadow: egui::Shadow::NONE,
@@ -180,15 +186,21 @@ pub fn ui(
                                 continue;
                             };
                             ui.horizontal(|ui| {
-                                let mut color = trace.color32();
-                                if egui::color_picker::color_edit_button_srgba(
-                                    ui,
-                                    &mut color,
-                                    egui::color_picker::Alpha::Opaque,
-                                )
-                                .changed()
-                                {
-                                    trace.color = color32_to_srgb(color);
+                                if legend_can_show_color_picker(
+                                    ui.available_width(),
+                                    ui.spacing().interact_size.x,
+                                    ui.spacing().item_spacing.x,
+                                ) {
+                                    let mut color = trace.color32();
+                                    if egui::color_picker::color_edit_button_srgba(
+                                        ui,
+                                        &mut color,
+                                        egui::color_picker::Alpha::Opaque,
+                                    )
+                                    .changed()
+                                    {
+                                        trace.color = color32_to_srgb(color);
+                                    }
                                 }
 
                                 let text_color = if trace.visible {
@@ -263,12 +275,18 @@ pub fn ui(
                         }
                         for ghost in &pane.ghosts {
                             ui.horizontal(|ui| {
-                                let mut color = ghost_color(ghost.color);
-                                let _ = egui::color_picker::color_edit_button_srgba(
-                                    ui,
-                                    &mut color,
-                                    egui::color_picker::Alpha::Opaque,
-                                );
+                                if legend_can_show_color_picker(
+                                    ui.available_width(),
+                                    ui.spacing().interact_size.x,
+                                    ui.spacing().item_spacing.x,
+                                ) {
+                                    let mut color = ghost_color(ghost.color);
+                                    let _ = egui::color_picker::color_edit_button_srgba(
+                                        ui,
+                                        &mut color,
+                                        egui::color_picker::Alpha::Opaque,
+                                    );
+                                }
                                 let label = format!("{}.{} (missing)", ghost.topic, ghost.field);
                                 let label_width = legend_ghost_label_width(ui.available_width());
                                 ui.add_sized(
@@ -375,6 +393,13 @@ mod tests {
         assert_eq!(widths.label, 0.0);
         assert_eq!(widths.delta, 0.0);
         assert_eq!(widths.filter, 0.0);
+    }
+
+    #[test]
+    fn color_picker_is_skipped_when_it_cannot_fit_inside_row() {
+        assert!(legend_can_show_color_picker(32.0, 24.0, 4.0));
+        assert!(!legend_can_show_color_picker(26.0, 24.0, 4.0));
+        assert!(!legend_can_show_color_picker(-1.0, 24.0, 4.0));
     }
 
     #[test]
