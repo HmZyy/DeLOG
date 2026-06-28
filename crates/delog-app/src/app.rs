@@ -6,7 +6,7 @@ use delog_core::diagnostics::{DiagRecord, Severity};
 use delog_core::time::TimeRange;
 use serde::Serialize;
 
-use crate::browser::{self, BrowserModel};
+use crate::browser::{self, BrowserFilterCache, BrowserModel};
 use crate::diagnostics::DiagnosticsDock;
 use crate::field_stats::{FieldStatsController, StatsRequestKey, StatsTab};
 use crate::gpu::GpuBridge;
@@ -258,6 +258,7 @@ pub struct DelogApp {
     performance_snapshot: PerformanceSnapshot,
     performance_last_refresh: Option<Instant>,
     browser_query: String,
+    browser_filter: BrowserFilterCache,
     browser_selection: browser::Selection,
     /// Keyed by snapshot epoch so the O(topics×fields) tree rebuild runs once
     /// per data change, not every frame.
@@ -355,6 +356,7 @@ impl DelogApp {
             performance_snapshot: PerformanceSnapshot::default(),
             performance_last_refresh: None,
             browser_query: String::new(),
+            browser_filter: BrowserFilterCache::default(),
             browser_selection: browser::Selection::default(),
             browser_model: None,
             offset_dialog: None,
@@ -2110,21 +2112,28 @@ impl eframe::App for DelogApp {
             let epoch = snapshot.epoch;
             let model = match self.browser_model.take() {
                 Some((cached_epoch, model)) if cached_epoch == epoch => model,
-                _ => BrowserModel::from_snapshot(&snapshot),
+                _ => {
+                    self.browser_filter.reset();
+                    BrowserModel::from_snapshot(&snapshot)
+                }
             };
-            let browser_panel = egui::Panel::left("data_browser_expanded").resizable(false);
+            let browser_panel = egui::Panel::left("data_browser_expanded")
+                .resizable(true)
+                .min_size(360.0);
             let browser_panel = if model.is_empty() {
                 browser_panel.default_size(ui.spacing().text_edit_width)
             } else {
-                browser_panel
+                browser_panel.default_size(360.0)
             };
             browser_panel.show_inside(ui, |ui| {
                 // Offset edits go through the ingest thread (the single
                 // registry writer) and come back as a new epoch.
                 let browser_response = browser::ui(
                     ui,
+                    epoch,
                     &model,
                     &mut self.browser_query,
+                    &mut self.browser_filter,
                     &mut self.browser_selection,
                     &mut self.offset_dialog,
                 );
@@ -2236,10 +2245,11 @@ impl eframe::App for DelogApp {
                         markers: self.markers.as_slice(),
                     };
                     let mut behavior = crate::workspace::Behavior::new(services);
-                    // `workspace_tree`: the egui_tiles layout +
-                    // pane rendering. `workspace_tree − Σ(pane_total)` is the
-                    // egui_tiles container/tab/drag machinery; `ui_workspace −
-                    // workspace_tree` is begin/retain + action handling.
+                    // `workspace_tree`: the egui_tiles layout + pane rendering.
+                    // Profiling (2026-06-28) showed egui_tiles' own machinery is
+                    // negligible (~0.02 ms); the cost is the per-pane `pane_ui`
+                    // render. `ui_workspace − workspace_tree` is begin/retain +
+                    // action handling.
                     let tree_timer = tree_metrics.scope("workspace_tree");
                     self.workspace.tree.ui(&mut behavior, ui);
                     drop(tree_timer);
