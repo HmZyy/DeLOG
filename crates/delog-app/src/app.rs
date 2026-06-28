@@ -2117,11 +2117,13 @@ impl eframe::App for DelogApp {
                     BrowserModel::from_snapshot(&snapshot)
                 }
             };
-            let browser_panel = egui::Panel::left("data_browser_expanded").resizable(false);
+            let browser_panel = egui::Panel::left("data_browser_expanded")
+                .resizable(true)
+                .min_size(360.0);
             let browser_panel = if model.is_empty() {
                 browser_panel.default_size(ui.spacing().text_edit_width)
             } else {
-                browser_panel
+                browser_panel.default_size(360.0)
             };
             browser_panel.show_inside(ui, |ui| {
                 // Offset edits go through the ingest thread (the single
