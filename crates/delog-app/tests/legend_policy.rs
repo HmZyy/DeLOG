@@ -7,4 +7,5 @@ fn legend_panel_uses_bounded_vertical_scroll_area() {
     assert!(LEGEND_SOURCE.contains(".max_width(content_max_size.x)"));
     assert!(LEGEND_SOURCE.contains(".max_height(content_max_size.y)"));
     assert!(LEGEND_SOURCE.contains("ui.set_max_size(content_max_size)"));
+    assert!(LEGEND_SOURCE.contains(".truncate()"));
 }
