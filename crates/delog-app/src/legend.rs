@@ -86,6 +86,7 @@ pub fn ui(
                 ..base
             };
             let content_max_size = legend_content_max_size(bounds, &frame);
+            ui.set_max_size(bounds.size());
             frame.show(ui, |ui| {
                 ui.set_max_size(content_max_size);
                 for (field, label) in labels {
