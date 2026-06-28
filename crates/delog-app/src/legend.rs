@@ -18,6 +18,10 @@ const LEGEND_INSET: f32 = 8.0;
 /// Minimum positive dimension passed to egui sizing APIs for degenerate plots.
 const MIN_LEGEND_CONTENT_EXTENT: f32 = 1.0;
 
+const LEGEND_TEXT_FILTER_WIDTH: f32 = 90.0;
+const LEGEND_MIN_LABEL_WIDTH: f32 = 24.0;
+const LEGEND_DELTA_RESERVE_WIDTH: f32 = 96.0;
+
 fn legend_bounds(plot_rect: egui::Rect) -> egui::Rect {
     let inset = egui::vec2(
         LEGEND_INSET.min((plot_rect.width() * 0.5).max(0.0)),
@@ -32,6 +36,22 @@ fn legend_content_max_size(bounds: egui::Rect, frame: &egui::Frame) -> egui::Vec
         (bounds.width() - frame_margin.x).max(MIN_LEGEND_CONTENT_EXTENT),
         (bounds.height() - frame_margin.y).max(MIN_LEGEND_CONTENT_EXTENT),
     )
+}
+
+fn legend_label_width(ui: &egui::Ui, reserve_width: f32) -> f32 {
+    (ui.available_width() - reserve_width).max(LEGEND_MIN_LABEL_WIDTH)
+}
+
+fn legend_trace_label_width(ui: &egui::Ui, has_delta: bool, is_text: bool) -> f32 {
+    let spacing = ui.spacing().item_spacing.x;
+    let mut reserve_width = 0.0;
+    if has_delta {
+        reserve_width += LEGEND_DELTA_RESERVE_WIDTH + spacing;
+    }
+    if is_text {
+        reserve_width += LEGEND_TEXT_FILTER_WIDTH + spacing;
+    }
+    legend_label_width(ui, reserve_width)
 }
 
 fn legend_anchor(position: LegendPosition, bounds: egui::Rect) -> (egui::Pos2, egui::Align2) {
@@ -120,11 +140,15 @@ pub fn ui(
                                 } else {
                                     ui.visuals().weak_text_color()
                                 };
+                                let has_delta = deltas.contains_key(field);
+                                let label_width = legend_trace_label_width(ui, has_delta, is_text);
                                 let label_widget =
                                     egui::Label::new(egui::RichText::new(label).color(text_color))
                                         .truncate()
                                         .sense(egui::Sense::click());
-                                let resp = ui.add(label_widget);
+                                let resp = ui.add_sized(egui::vec2(label_width,
+                                    ui.spacing().interact_size.y,
+                                ), label_widget);
                                 if resp.clicked() {
                                     trace.visible = !trace.visible;
                                 }
@@ -142,7 +166,7 @@ pub fn ui(
                                         .add(
                                             egui::TextEdit::singleline(&mut filter)
                                                 .hint_text("filter…")
-                                                .desired_width(90.0),
+                                                .desired_width(LEGEND_TEXT_FILTER_WIDTH),
                                         )
                                         .on_hover_text("Show only messages containing this text")
                                         .changed()
@@ -176,13 +200,15 @@ pub fn ui(
                                     &mut color,
                                     egui::color_picker::Alpha::Opaque,
                                 );
-                                ui.label(
-                                    egui::RichText::new(format!(
-                                        "{}.{} (missing)",
-                                        ghost.topic, ghost.field
-                                    ))
-                                    .color(ui.visuals().weak_text_color()),
-                                );
+                                let label = format!("{}.{} (missing)", ghost.topic, ghost.field);
+                                let label_width = legend_label_width(ui, 0.0);
+                                ui.add_sized(egui::vec2(label_width,
+                                    ui.spacing().interact_size.y,
+                                ), egui::Label::new(
+                                    egui::RichText::new(label)
+                                        .color(ui.visuals().weak_text_color()),
+                                )
+                                .truncate());
                             });
                         }
                     });
