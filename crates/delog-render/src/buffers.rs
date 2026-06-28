@@ -234,6 +234,30 @@ mod tests {
     }
 
     #[test]
+    fn rebuilt_smaller_window_reuploads_from_zero() {
+        let Some(ctx) = RenderContext::headless() else {
+            eprintln!("no wgpu adapter — skipping buffer manager test");
+            return;
+        };
+        let mut mgr = BufferManager::new(ctx.clone());
+        let field = FieldId(7);
+
+        // Large window first.
+        let big: Vec<f32> = (0..2000).map(|i| i as f32).collect();
+        mgr.sync(field, &big, true);
+        assert_eq!(mgr.samples(field), 1000);
+
+        // Smaller window, wholesale replace (windowed sync always passes rebuilt=true).
+        let small: Vec<f32> = (0..20).map(|i| (i as f32) + 0.5).collect();
+        let stat = mgr.sync(field, &small, true);
+        assert_eq!(mgr.samples(field), 10);
+        assert!(stat.full_upload, "rebuilt shrink is a full upload");
+        // The first 20 floats now hold the new window; capacity is grow-only so
+        // the buffer is still large, but only `small.len()` floats are live.
+        assert_eq!(readback(&ctx, mgr.buffer(field).unwrap(), 20), small);
+    }
+
+    #[test]
     fn rebuilt_forces_a_full_reupload() {
         let Some(ctx) = RenderContext::headless() else {
             return;
