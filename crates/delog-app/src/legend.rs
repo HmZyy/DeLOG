@@ -89,97 +89,102 @@ pub fn ui(
             ui.set_max_size(bounds.size());
             frame.show(ui, |ui| {
                 ui.set_max_size(content_max_size);
-                for (field, label) in labels {
-                    let is_text = crate::text_overlay::field_is_string(snapshot, *field);
-                    let mut filter = if is_text {
-                        pane.text_filters.get(field).cloned().unwrap_or_default()
-                    } else {
-                        String::new()
-                    };
-                    let Some(trace) = pane.trace_mut(*field) else {
-                        continue;
-                    };
-                    ui.horizontal(|ui| {
-                        let mut color = trace.color32();
-                        if egui::color_picker::color_edit_button_srgba(
-                            ui,
-                            &mut color,
-                            egui::color_picker::Alpha::Opaque,
-                        )
-                        .changed()
-                        {
-                            trace.color = color32_to_srgb(color);
-                        }
-
-                        let text_color = if trace.visible {
-                            ui.visuals().text_color()
-                        } else {
-                            ui.visuals().weak_text_color()
-                        };
-                        let label_widget =
-                            egui::Label::new(egui::RichText::new(label).color(text_color))
-                                .sense(egui::Sense::click());
-                        let resp = ui.add(label_widget);
-                        if resp.clicked() {
-                            trace.visible = !trace.visible;
-                        }
-
-                        if let Some(delta) = deltas.get(field) {
-                            ui.label(
-                                egui::RichText::new(format!("d {delta}"))
-                                    .color(ui.visuals().hyperlink_color)
-                                    .weak(),
-                            );
-                        }
-
-                        if is_text
-                            && ui
-                                .add(
-                                    egui::TextEdit::singleline(&mut filter)
-                                        .hint_text("filter…")
-                                        .desired_width(90.0),
+                egui::ScrollArea::vertical()
+                    .max_width(content_max_size.x)
+                    .max_height(content_max_size.y)
+                    .show(ui, |ui| {
+                        for (field, label) in labels {
+                            let is_text = crate::text_overlay::field_is_string(snapshot, *field);
+                            let mut filter = if is_text {
+                                pane.text_filters.get(field).cloned().unwrap_or_default()
+                            } else {
+                                String::new()
+                            };
+                            let Some(trace) = pane.trace_mut(*field) else {
+                                continue;
+                            };
+                            ui.horizontal(|ui| {
+                                let mut color = trace.color32();
+                                if egui::color_picker::color_edit_button_srgba(
+                                    ui,
+                                    &mut color,
+                                    egui::color_picker::Alpha::Opaque,
                                 )
-                                .on_hover_text("Show only messages containing this text")
                                 .changed()
-                        {
-                            filter_edits.push((*field, filter.clone()));
-                        }
-                        resp.context_menu(|ui| {
-                            ui.menu_button("Mode", |ui| {
-                                for mode in TraceMode::ALL {
-                                    ui.radio_value(&mut trace.mode, mode, mode.label());
+                                {
+                                    trace.color = color32_to_srgb(color);
                                 }
+
+                                let text_color = if trace.visible {
+                                    ui.visuals().text_color()
+                                } else {
+                                    ui.visuals().weak_text_color()
+                                };
+                                let label_widget =
+                                    egui::Label::new(egui::RichText::new(label).color(text_color))
+                                        .sense(egui::Sense::click());
+                                let resp = ui.add(label_widget);
+                                if resp.clicked() {
+                                    trace.visible = !trace.visible;
+                                }
+
+                                if let Some(delta) = deltas.get(field) {
+                                    ui.label(
+                                        egui::RichText::new(format!("d {delta}"))
+                                            .color(ui.visuals().hyperlink_color)
+                                            .weak(),
+                                    );
+                                }
+
+                                if is_text
+                                    && ui
+                                        .add(
+                                            egui::TextEdit::singleline(&mut filter)
+                                                .hint_text("filter…")
+                                                .desired_width(90.0),
+                                        )
+                                        .on_hover_text("Show only messages containing this text")
+                                        .changed()
+                                {
+                                    filter_edits.push((*field, filter.clone()));
+                                }
+                                resp.context_menu(|ui| {
+                                    ui.menu_button("Mode", |ui| {
+                                        for mode in TraceMode::ALL {
+                                            ui.radio_value(&mut trace.mode, mode, mode.label());
+                                        }
+                                    });
+                                    ui.add(
+                                        egui::Slider::new(&mut trace.width_px, 1.0..=12.0)
+                                            .text("Width")
+                                            .suffix(" px"),
+                                    );
+                                    ui.separator();
+                                    if ui.button("Remove").clicked() {
+                                        removed = Some(*field);
+                                        ui.close();
+                                    }
+                                });
                             });
-                            ui.add(
-                                egui::Slider::new(&mut trace.width_px, 1.0..=12.0)
-                                    .text("Width")
-                                    .suffix(" px"),
-                            );
-                            ui.separator();
-                            if ui.button("Remove").clicked() {
-                                removed = Some(*field);
-                                ui.close();
-                            }
-                        });
+                        }
+                        for ghost in &pane.ghosts {
+                            ui.horizontal(|ui| {
+                                let mut color = ghost_color(ghost.color);
+                                let _ = egui::color_picker::color_edit_button_srgba(
+                                    ui,
+                                    &mut color,
+                                    egui::color_picker::Alpha::Opaque,
+                                );
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{}.{} (missing)",
+                                        ghost.topic, ghost.field
+                                    ))
+                                    .color(ui.visuals().weak_text_color()),
+                                );
+                            });
+                        }
                     });
-                }
-                for ghost in &pane.ghosts {
-                    ui.horizontal(|ui| {
-                        let mut color = ghost_color(ghost.color);
-                        let _ = egui::color_picker::color_edit_button_srgba(
-                            ui,
-                            &mut color,
-                            egui::color_picker::Alpha::Opaque,
-                        );
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "{}.{} (missing)",
-                                ghost.topic, ghost.field
-                            ))
-                            .color(ui.visuals().weak_text_color()),
-                        );
-                    });
-                }
             })
         });
 
