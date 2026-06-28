@@ -664,8 +664,7 @@ impl Behavior<'_> {
             tracked_vehicle_picker(ui, rect, pane, self.services.vehicles);
         }
 
-        let overlay =
-            scene_overlay_buttons(ui, rect, pane.trail_to_playhead, self.services.accent);
+        let overlay = scene_overlay_buttons(ui, rect, pane.trail_to_playhead, self.services.accent);
         if overlay.vehicle_config {
             self.actions.open_vehicle_config = true;
         }
