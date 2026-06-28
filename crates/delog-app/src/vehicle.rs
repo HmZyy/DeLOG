@@ -1,12 +1,7 @@
 //! Vehicle configuration + pose/trajectory resolution for the 3D view.
-//! A [`VehicleConfig`] maps a source's
-//! fields to position and orientation; [`pose_at_with_ref`] reads the pose at a
-//! playback time and [`build_trajectory`] builds the whole path — both into render
-//! space via [`crate::geo`].
 //!
-//! Field samples are read through `delog-core`'s [`FieldView`] (the app never
-//! touches Arrow directly); `sample_at` returns the raw stored value, so
-//! the schema multiplier is applied here to get engineering units.
+//! `sample_at` returns the raw stored value, so the schema multiplier is
+//! applied here to get engineering units.
 
 use std::path::PathBuf;
 
@@ -19,8 +14,6 @@ use glam::{Mat3, Mat4, Quat, Vec3};
 
 use crate::geo;
 
-/// Which mesh represents a vehicle. `Cone` is the basic procedural
-/// cone — the same shape used as the unconditional fallback.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ModelKind {
     Quad,
@@ -48,12 +41,9 @@ impl ModelKind {
         }
     }
 
-    /// Mesh→body correction. Meshes are authored Y-up (glTF convention); the
-    /// body frame is X-forward/Z-down, so every model gets a −90° about X
-    /// (mesh up → body up). Quad and Delta-wing are additionally authored with
-    /// the nose along mesh −Z and get a −90° about mesh-up first to bring the
-    /// nose to body +X. Values match the reference tiplot implementation
-    /// (base × per-type offset).
+    /// Mesh→body correction: meshes are authored Y-up (glTF), body frame is
+    /// X-forward/Z-down. Quad/Delta-wing have the nose along mesh −Z (extra
+    /// −90° about up); the rest along mesh +X.
     pub fn orientation_offset(&self) -> Mat3 {
         let base = Mat3::from_rotation_x(-std::f32::consts::FRAC_PI_2);
         match self {
@@ -65,7 +55,6 @@ impl ModelKind {
     }
 }
 
-/// A fixed geodetic reference origin (degrees / metres).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GeoRef {
     pub lat_deg: f64,
@@ -73,10 +62,8 @@ pub struct GeoRef {
     pub alt_m: f64,
 }
 
-/// The geodetic origin of a local NED frame: read from log columns, or fixed.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum NedReference {
-    /// Fixed lat/lon (degrees) + altitude (m).
     Manual(GeoRef),
     /// Read from lat/lon/alt columns (first valid sample).
     Fields {
@@ -86,38 +73,33 @@ pub enum NedReference {
     },
 }
 
-/// How a vehicle's position is read.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PosMapping {
-    /// Already-local NED metres, optionally annotated with the geodetic origin
-    /// of the local frame (captured for geo-referencing; does not move a single
-    /// vehicle's local render).
+    /// Already-local NED metres. `reference` is captured for geo-referencing
+    /// only; it does not move a single vehicle's local render.
     Ned {
         north: FieldId,
         east: FieldId,
         down: FieldId,
         reference: Option<NedReference>,
     },
-    /// Geodetic latitude/longitude (degrees) + altitude → NED about the first
-    /// valid fix (auto reference).
+    /// Geodetic → NED about the first valid fix.
     Gps {
         lat: FieldId,
         lon: FieldId,
         alt: FieldId,
-        /// Lat/lon are stored as degrees × 1e7 (ArduPilot `degE7` integers);
-        /// scale by 1e-7 to recover degrees before the geodetic conversion.
+        /// degE7 integers (×1e-7 → degrees).
         lat_lon_dege7: bool,
-        /// Altitude is stored in millimetres; scale by 1e-3 to recover metres.
+        /// millimetres (×1e-3 → metres).
         alt_mm: bool,
-        /// Fixed vertical offset (metres, **up-positive**) added to the rendered
-        /// position — raises/lowers the whole track relative to the first fix.
+        /// Fixed vertical offset, metres, up-positive.
         alt_offset_m: f64,
     },
 }
 
 impl PosMapping {
-    /// Extra unit scales for a GPS mapping `(lat_lon, alt)`, applied on top of
-    /// the schema multiplier: `1e-7` for `degE7` lat/lon, `1e-3` for `mm` alt.
+    /// Extra GPS unit scales `(lat_lon, alt)` on top of the schema multiplier:
+    /// `1e-7` for degE7 lat/lon, `1e-3` for mm alt.
     fn gps_unit_scales(lat_lon_dege7: bool, alt_mm: bool) -> (f64, f64) {
         (
             if lat_lon_dege7 { 1e-7 } else { 1.0 },
@@ -126,10 +108,8 @@ impl PosMapping {
     }
 }
 
-/// How a vehicle's orientation is read.
 #[derive(Clone, Debug, PartialEq)]
 pub enum OriMapping {
-    /// Level attitude (identity body→NED rotation).
     Static,
     /// Intrinsic Z-Y-X Euler (yaw-pitch-roll), body→NED.
     Euler {
@@ -147,7 +127,6 @@ pub enum OriMapping {
     },
 }
 
-/// A configured vehicle.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VehicleConfig {
     pub source: SourceId,
@@ -161,9 +140,8 @@ pub struct VehicleConfig {
     pub scale: f32,
 }
 
-/// A vehicle pose in render space: position + rotation. The rotation already
-/// includes the model's mesh→body correction, so it applies to mesh vertices
-/// as-is.
+/// Render-space pose. `rot` already includes the mesh→body correction, so it
+/// applies to mesh vertices as-is.
 #[derive(Clone, Copy, Debug)]
 pub struct Pose {
     pub pos: Vec3,
@@ -171,7 +149,6 @@ pub struct Pose {
 }
 
 impl Pose {
-    /// Model matrix placing a body-frame mesh at this pose, scaled.
     pub fn model_matrix(&self, scale: f32) -> Mat4 {
         Mat4::from_translation(self.pos)
             * Mat4::from_mat3(self.rot)
@@ -179,8 +156,6 @@ impl Pose {
     }
 }
 
-/// The schema multiplier that converts a field's raw stored value to its
-/// engineering unit (1.0 if unknown).
 fn field_multiplier(snapshot: &StoreSnapshot, field: FieldId) -> f64 {
     let Some(entry) = snapshot.fields.get(field.index()) else {
         return 1.0;
@@ -192,7 +167,6 @@ fn field_multiplier(snapshot: &StoreSnapshot, field: FieldId) -> f64 {
         .unwrap_or(1.0)
 }
 
-/// Read a field's engineering value (raw × multiplier) at an effective time.
 fn read_eng(view: &FieldView<'_>, mult: f64, t_us: i64) -> Option<f64> {
     view.sample_at(t_us, SampleMode::Prev)?
         .value
@@ -200,14 +174,11 @@ fn read_eng(view: &FieldView<'_>, mult: f64, t_us: i64) -> Option<f64> {
         .map(|v| v * mult)
 }
 
-/// Open a [`FieldView`] + its multiplier for a field.
 fn open<'a>(snapshot: &'a StoreSnapshot, field: FieldId) -> Option<(FieldView<'a>, f64)> {
     let view = FieldView::new(snapshot, field).ok()?;
     Some((view, field_multiplier(snapshot, field)))
 }
 
-/// The effective (offset-applied) time range covering a vehicle's position
-/// topic — the span the trajectory is resampled over.
 fn position_topic_range(snapshot: &StoreSnapshot, pos: &PosMapping) -> Option<(i64, i64)> {
     let anchor = match pos {
         PosMapping::Ned { north, .. } => *north,
@@ -224,8 +195,7 @@ fn position_topic_range(snapshot: &StoreSnapshot, pos: &PosMapping) -> Option<(i
     Some((range.min_us, range.max_us))
 }
 
-/// Resolve the GPS reference origin (first valid fix) to
-/// `(lat_rad, lon_rad, alt_m)`. Lat/lon are read as degrees.
+/// Resolve the GPS reference origin (first valid fix) to `(lat_rad, lon_rad, alt_m)`.
 fn resolve_gps_ref(
     snapshot: &StoreSnapshot,
     lat: FieldId,
@@ -238,7 +208,7 @@ fn resolve_gps_ref(
     let (lat_v, lm) = open(snapshot, lat)?;
     let (lon_v, om) = open(snapshot, lon)?;
     let (alt_v, am) = open(snapshot, alt)?;
-    // First sample with a finite, non-zero fix.
+    // Skip null/zero fixes to find the first real one.
     let mut t = range.0;
     while t <= range.1 {
         if let (Some(la), Some(lo), Some(al)) = (
@@ -257,12 +227,11 @@ fn resolve_gps_ref(
                 return Some((la.to_radians(), lo.to_radians(), al));
             }
         }
-        t += 1_000_000; // step 1 s looking for the first fix
+        t += 1_000_000; // 1 s step
     }
     None
 }
 
-/// Render-space position of a vehicle at an effective time.
 fn position_at(
     snapshot: &StoreSnapshot,
     pos: &PosMapping,
@@ -274,7 +243,7 @@ fn position_at(
             north,
             east,
             down,
-            reference: _, // captured for geo-referencing; no effect on local render
+            reference: _, // no effect on local render
         } => {
             let (nv, nm) = open(snapshot, *north)?;
             let (ev, em) = open(snapshot, *east)?;
@@ -308,14 +277,12 @@ fn position_at(
     }
 }
 
-/// Read a field's engineering value at an effective time, as f32.
 fn read_f32(snapshot: &StoreSnapshot, field: FieldId, t_us: i64) -> Option<f32> {
     let (view, mult) = open(snapshot, field)?;
     read_eng(&view, mult, t_us).map(|x| x as f32)
 }
 
-/// Render-space rotation of a vehicle at an effective time. Falls back to
-/// level attitude (identity body→NED) when samples can't be read.
+/// Falls back to level attitude (identity body→NED) when samples can't be read.
 fn orientation_at(snapshot: &StoreSnapshot, ori: &OriMapping, t_us: i64) -> Mat3 {
     let read = |f: FieldId| read_f32(snapshot, f, t_us);
     match ori {
@@ -352,19 +319,15 @@ fn orientation_at(snapshot: &StoreSnapshot, ori: &OriMapping, t_us: i64) -> Mat3
     }
 }
 
-/// Resolve the GPS reference and read the pose in one call. Production code
-/// hoists the (stable) reference out of the per-frame loop and calls
-/// [`pose_at_with_ref`]; this convenience wrapper is kept for tests.
 #[cfg(test)]
 pub fn pose_at(snapshot: &StoreSnapshot, config: &VehicleConfig, t_us: i64) -> Option<Pose> {
     let gps_ref = gps_reference(snapshot, config);
     pose_at_with_ref(snapshot, config, gps_ref, t_us)
 }
 
-/// Like [`pose_at`] but with the GPS reference supplied by the caller, so the
-/// (stable) reference can be resolved once and reused across frames instead of
-/// re-scanning for the first fix on every call. `gps_ref` is ignored for
-/// NED-mapped vehicles.
+/// GPS reference is supplied by the caller so it can be resolved once and
+/// reused across frames instead of re-scanning for the first fix per call.
+/// Ignored for NED-mapped vehicles.
 pub(crate) fn pose_at_with_ref(
     snapshot: &StoreSnapshot,
     config: &VehicleConfig,
@@ -397,7 +360,6 @@ pub(crate) fn gps_reference(
     }
 }
 
-/// Maximum trajectory samples selected from the position rows.
 const MAX_TRAJECTORY_POINTS: usize = 4000;
 
 struct PositionRows<'a> {
@@ -488,23 +450,23 @@ fn position_from_row(
 fn build_trajectory_from_rows(
     snapshot: &StoreSnapshot,
     config: &VehicleConfig,
-) -> Option<Vec<[f32; 3]>> {
+) -> Option<VehicleTrajectory> {
     let rows = position_row_source(snapshot, &config.pos)?;
     let total_rows = usize::try_from(rows.store.rows).ok()?;
     if total_rows == 0 {
-        return Some(Vec::new());
+        return Some(VehicleTrajectory::default());
     }
 
     let gps_ref = gps_reference(snapshot, config);
-    // Full-resolution path: every position row, in stored (append) order. The
-    // build is one O(rows) pass over the chunks; the path is append-only, so the
-    // GPU upload only writes the new tail each rebuild (see
-    // `GpuBridge::sync_vehicle_trajectory`) and the line shader handles the full
-    // vertex count. No decimation means vertices never move between rebuilds —
-    // the source of the old jiggle.
+    // Full-resolution path in stored (append) order: no decimation, so vertices
+    // never move between rebuilds (fixes the old jiggle) and the GPU upload only
+    // writes the new tail. Canonical µs time rides alongside (`chunk.t`, not the
+    // f32 cache) so the path can be clipped to the playhead at draw time.
     let mut points = Vec::with_capacity(total_rows);
+    let mut times_us = Vec::with_capacity(total_rows);
     for chunk in rows.store.chunks.iter() {
         for row in 0..chunk.len() {
+            times_us.push(chunk.t.value(row));
             match position_from_row(&config.pos, &rows, gps_ref, chunk, row) {
                 Some(p) => points.push([p.x, p.y, p.z]),
                 None => points.push([f32::NAN, f32::NAN, f32::NAN]),
@@ -512,31 +474,38 @@ fn build_trajectory_from_rows(
         }
     }
 
-    Some(points)
+    Some(VehicleTrajectory { points, times_us })
 }
 
-fn build_trajectory_by_time(snapshot: &StoreSnapshot, config: &VehicleConfig) -> Vec<[f32; 3]> {
+fn build_trajectory_by_time(snapshot: &StoreSnapshot, config: &VehicleConfig) -> VehicleTrajectory {
     let Some((t0, t1)) = position_topic_range(snapshot, &config.pos) else {
-        return Vec::new();
+        return VehicleTrajectory::default();
     };
     let gps_ref = gps_reference(snapshot, config);
     let span = (t1 - t0).max(1);
     let steps = (span / 50_000).clamp(2, MAX_TRAJECTORY_POINTS as i64) as usize; // ~20 Hz cap
-    let mut pts = Vec::with_capacity(steps);
+    let mut points = Vec::with_capacity(steps);
+    let mut times_us = Vec::with_capacity(steps);
     for i in 0..steps {
         let t = t0 + span * i as i64 / (steps as i64 - 1);
+        times_us.push(t);
         match position_at(snapshot, &config.pos, gps_ref, t) {
-            Some(p) => pts.push([p.x, p.y, p.z]),
-            None => pts.push([f32::NAN, f32::NAN, f32::NAN]),
+            Some(p) => points.push([p.x, p.y, p.z]),
+            None => points.push([f32::NAN, f32::NAN, f32::NAN]),
         }
     }
-    pts
+    VehicleTrajectory { points, times_us }
 }
 
-/// Decimate a vehicle's full path into render-space points (with NaN points
-/// marking gaps, so the line shader breaks there). Off-thread work:
-/// the caller runs this on a worker and feeds the result to the renderer.
-pub fn build_trajectory(snapshot: &StoreSnapshot, config: &VehicleConfig) -> Vec<[f32; 3]> {
+#[derive(Debug, Default, Clone)]
+pub struct VehicleTrajectory {
+    /// NaN = gap, so the line shader breaks there.
+    pub points: Vec<[f32; 3]>,
+    /// Canonical µs timestamp, 1:1 with `points`.
+    pub times_us: Vec<i64>,
+}
+
+pub fn build_trajectory(snapshot: &StoreSnapshot, config: &VehicleConfig) -> VehicleTrajectory {
     build_trajectory_from_rows(snapshot, config)
         .unwrap_or_else(|| build_trajectory_by_time(snapshot, config))
 }
@@ -555,7 +524,6 @@ mod tests {
 
     use arrow::array::Int64Array;
 
-    /// A source with one POS topic carrying N/E/D float metres.
     fn ned_snapshot(
         times: Vec<i64>,
         n: Vec<f64>,
@@ -590,8 +558,8 @@ mod tests {
         (snap, [fnf, fef, fdf])
     }
 
-    /// A source with one GPS topic carrying raw Lat/Lng/Alt columns (no schema
-    /// multiplier), so the unit interpretation is up to the vehicle config.
+    // Raw Lat/Lng/Alt columns, no schema multiplier: unit interpretation is up
+    // to the vehicle config.
     fn gps_snapshot(
         times: Vec<i64>,
         lat: Vec<f64>,
@@ -690,9 +658,7 @@ mod tests {
 
     #[test]
     fn gps_alt_offset_raises_render_height_and_positive_is_up() {
-        // The first (only) fix maps to the NED/render origin; a +100 m offset
-        // must raise the rendered position straight up (render +Y), confirming
-        // altitude is up-positive and the offset is applied in metres.
+        // A +100 m alt offset must raise render +Y: altitude is up-positive, in metres.
         let (snap, f) = gps_snapshot(vec![0], vec![47.0], vec![8.0], vec![400.0]);
         let pose = pose_at(&snap, &gps_config(f, 100.0), 0).unwrap();
         assert!(
@@ -728,9 +694,8 @@ mod tests {
 
     #[test]
     fn model_orientation_offsets_map_mesh_axes_to_body_axes() {
-        // Every offset is a proper rotation mapping mesh-up (+Y) to body-up
-        // (−Z, since body Z is down) and the authored nose to body +X
-        // (forward): mesh −Z for Quad/Delta, mesh +X for the rest.
+        // Each offset is a proper rotation: mesh-up (+Y) → body-up (−Z), authored
+        // nose → body +X (nose is mesh −Z for Quad/Delta, mesh +X for the rest).
         for kind in [
             ModelKind::Quad,
             ModelKind::FixedWing,
@@ -758,9 +723,7 @@ mod tests {
 
     #[test]
     fn level_attitude_renders_models_upright_facing_north() {
-        // Static orientation = level attitude. The pose rotation includes the
-        // mesh→body correction, so mesh-up ends render-up (+Y) and the nose
-        // ends render north (−Z) for every model kind.
+        // Static = level attitude: mesh-up ends render-up (+Y), nose ends render north (−Z).
         let (snap, f) = ned_snapshot(vec![0], vec![0.0], vec![0.0], vec![0.0]);
         for kind in [ModelKind::Quad, ModelKind::FixedWing, ModelKind::Cone] {
             let config = VehicleConfig {
@@ -806,7 +769,7 @@ mod tests {
             vec![0.0, 0.0, 0.0],
             vec![0.0, 0.0, 0.0],
         );
-        let traj = build_trajectory(&snap, &ned_config(f));
+        let traj = build_trajectory(&snap, &ned_config(f)).points;
         assert!(traj.len() >= 2);
         // North maps to render −Z, so z should sweep 0 → −100.
         let first = traj.first().unwrap();
@@ -815,6 +778,48 @@ mod tests {
         assert!(
             (last[2] + 100.0).abs() < 2.0,
             "end near −100 Z, got {last:?}"
+        );
+    }
+
+    #[test]
+    fn trajectory_emits_one_timestamp_per_point_in_nondecreasing_order() {
+        let (snap, f) = ned_snapshot(
+            vec![0, 1_000_000, 2_000_000],
+            vec![0.0, 50.0, 100.0],
+            vec![0.0, 0.0, 0.0],
+            vec![0.0, 0.0, 0.0],
+        );
+        let traj = build_trajectory(&snap, &ned_config(f));
+        assert_eq!(
+            traj.points.len(),
+            traj.times_us.len(),
+            "1:1 point/time alignment"
+        );
+        assert_eq!(traj.times_us, vec![0, 1_000_000, 2_000_000]);
+        assert!(
+            traj.times_us.windows(2).all(|w| w[0] <= w[1]),
+            "row-order path has non-decreasing timestamps",
+        );
+    }
+
+    #[test]
+    fn trajectory_partition_point_clips_prefix_at_a_mid_time() {
+        let (snap, f) = ned_snapshot(
+            vec![0, 1_000_000, 2_000_000],
+            vec![0.0, 50.0, 100.0],
+            vec![0.0, 0.0, 0.0],
+            vec![0.0, 0.0, 0.0],
+        );
+        let traj = build_trajectory(&snap, &ned_config(f));
+        // Playhead exactly on the middle sample includes the first two points.
+        let visible = traj.times_us.partition_point(|&t| t <= 1_000_000);
+        assert_eq!(visible, 2);
+        // Before the first sample: nothing flown yet.
+        assert_eq!(traj.times_us.partition_point(|&t| t <= -1), 0);
+        // At/after the last sample: the full path.
+        assert_eq!(
+            traj.times_us.partition_point(|&t| t <= 2_000_000),
+            traj.points.len()
         );
     }
 
@@ -829,7 +834,7 @@ mod tests {
             vec![0.0, 0.0, 0.0],
             vec![0.0, 0.0, 0.0],
         );
-        let traj = build_trajectory(&snap, &ned_config(f));
+        let traj = build_trajectory(&snap, &ned_config(f)).points;
         assert_eq!(traj.len(), 3);
         assert!((traj[0][2] - 0.0).abs() < 1e-4, "{traj:?}");
         assert!((traj[1][2] + 10.0).abs() < 1e-4, "{traj:?}");

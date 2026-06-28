@@ -1,18 +1,8 @@
-//! Plot axes: 1-2-5 tick chooser, labels and grid, painted by egui.
-//!
-//! Axes/ticks/labels are CPU-painted by egui above/below the GPU trace callback.
-//! The tick chooser is pure and unit-tested; the draw routine maps data
-//! to the same `plot_rect` the GPU viewport uses, so labels line up with the
-//! rendered lines.
-
 use std::cmp::Ordering;
 
-/// Height reserved at the bottom for X tick labels.
 pub const X_GUTTER: f32 = 22.0;
 const AXIS_FONT_SIZE: f32 = 11.0;
 
-/// "Nice" tick values across `[min, max]` at a 1-2-5 × 10ᵏ step, aiming for
-/// roughly `target` ticks. Empty when the range is degenerate.
 pub fn nice_ticks(min: f64, max: f64, target: usize) -> Vec<f64> {
     if target == 0
         || !min.is_finite()
@@ -36,7 +26,6 @@ pub fn nice_ticks(min: f64, max: f64, target: usize) -> Vec<f64> {
     ticks
 }
 
-/// Round a raw step up to the nearest 1, 2, 5 × 10ᵏ.
 fn nice_step(raw: f64) -> f64 {
     if raw <= 0.0 {
         return 0.0;
@@ -55,7 +44,6 @@ fn nice_step(raw: f64) -> f64 {
     nice * mag
 }
 
-/// Decimal places to show for a tick at `step` resolution.
 pub fn decimals_for_step(step: f64) -> usize {
     if step <= 0.0 || !step.is_finite() {
         return 0;
@@ -64,12 +52,10 @@ pub fn decimals_for_step(step: f64) -> usize {
     d.clamp(0.0, 8.0) as usize
 }
 
-/// Format a tick value at `step` resolution.
 pub fn format_tick(value: f64, step: f64) -> String {
     format!("{value:.*}", decimals_for_step(step))
 }
 
-/// Width needed to paint the current Y labels without leaving a fixed gutter.
 pub fn y_gutter(ui: &egui::Ui, y_range: (f32, f32), y_unit: Option<&str>, plot_height: f32) -> f32 {
     let (y0, y1) = (y_range.0 as f64, y_range.1 as f64);
     let y_target = (plot_height / 48.0).round().max(2.0) as usize;
@@ -99,8 +85,7 @@ pub fn y_gutter(ui: &egui::Ui, y_range: (f32, f32), y_unit: Option<&str>, plot_h
     (label_width + ui.spacing().item_spacing.x).ceil()
 }
 
-/// Paint grid lines, tick marks and labels around `plot_rect` for the visible
-/// `x_range` (seconds) and `y_range` (data units). Drawn before the GPU trace
+/// `x_range` is seconds, `y_range` is data units. Drawn before the GPU trace
 /// callback so traces sit on top of the grid.
 pub fn draw(
     ui: &egui::Ui,
@@ -154,7 +139,6 @@ pub fn draw(
         );
     }
 
-    // X unit ("s") and optional Y unit, tucked in the corners.
     painter.text(
         egui::pos2(plot_rect.right(), plot_rect.bottom() + 3.0),
         egui::Align2::RIGHT_TOP,
@@ -180,8 +164,6 @@ pub fn draw(
     );
 }
 
-/// The 1-2-5 step `nice_ticks` would use for `[min, max]` at `target` ticks —
-/// exposed so callers can format labels at matching precision.
 pub fn step_for(min: f64, max: f64, target: usize) -> f64 {
     if target == 0 || max.partial_cmp(&min) != Some(Ordering::Greater) {
         return 0.0;
@@ -199,11 +181,9 @@ mod tests {
             nice_ticks(0.0, 10.0, 5),
             vec![0.0, 2.0, 4.0, 6.0, 8.0, 10.0]
         );
-        // 0..1 with ~5 ticks → step 0.2.
         let t = nice_ticks(0.0, 1.0, 5);
         assert_eq!(t.len(), 6);
         assert!((t[1] - 0.2).abs() < 1e-9);
-        // A range that wants step 5.
         assert_eq!(
             nice_ticks(0.0, 30.0, 5),
             vec![0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0]
@@ -213,7 +193,7 @@ mod tests {
     #[test]
     fn ticks_start_on_a_step_boundary_inside_the_range() {
         let t = nice_ticks(3.0, 17.0, 5);
-        assert_eq!(t.first().copied(), Some(4.0)); // step 2, first multiple ≥ 3
+        assert_eq!(t.first().copied(), Some(4.0));
         assert!(*t.last().unwrap() <= 17.0 + 1e-6);
     }
 

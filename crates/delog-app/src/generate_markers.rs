@@ -1,20 +1,11 @@
-//! Generate session markers from a field's distinct values.
-//!
-//! A discrete field's value transitions (from [`field_value_transitions`]) are
-//! listed in a popup; each value gets an include checkbox, an editable name
-//! (default `Value <v>`) and a stable colour. Generating appends a
-//! marker at every transition into each included value.
-
 use delog_core::analysis::{TransitionsError, field_value_transitions};
 use delog_core::identity::FieldId;
 use delog_core::snapshot::StoreSnapshot;
 
-/// Distinct-value cap: above this a field is treated as continuous and refused.
+/// Above this cap a field is treated as continuous and refused.
 const MAX_DISTINCT: usize = 64;
 
-/// One distinct value row in the popup.
 struct ValueRow {
-    /// Canonical value display, e.g. "4".
     label: String,
     transitions: Vec<i64>,
     include: bool,
@@ -22,10 +13,9 @@ struct ValueRow {
     color: [f32; 4],
 }
 
-/// A generated marker to append: (time, name, colour).
+/// (time, name, colour)
 pub type MarkerSpec = (i64, String, [f32; 4]);
 
-/// State of the open "Generate markers" popup, keyed by the source field.
 pub struct GenerateMarkersDialog {
     field: FieldId,
     title: String,
@@ -34,7 +24,6 @@ pub struct GenerateMarkersDialog {
 }
 
 impl GenerateMarkersDialog {
-    /// Scan `field`'s value transitions and build the popup rows.
     pub fn open(snapshot: &StoreSnapshot, field: FieldId, title: String) -> Self {
         match field_value_transitions(snapshot, field, MAX_DISTINCT) {
             Ok(groups) => {
@@ -73,8 +62,8 @@ impl GenerateMarkersDialog {
     }
 }
 
-/// FNV-1a of the value label into the trace palette, so the same value is
-/// always the same colour across regenerations and logs.
+/// Hash the label into the palette so the same value keeps its colour across
+/// regenerations and logs.
 fn value_color(label: &str) -> [f32; 4] {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in label.as_bytes() {
@@ -89,8 +78,7 @@ fn color32_of(c: [f32; 4]) -> egui::Color32 {
     egui::Color32::from_rgba_unmultiplied(u(c[0]), u(c[1]), u(c[2]), u(c[3]))
 }
 
-/// Render the popup. Returns the markers to append when the user clicks
-/// generate (otherwise empty), and clears `dialog` when closed or generated.
+/// Clears `dialog` when closed or generated.
 pub fn generate_markers_window(
     ctx: &egui::Context,
     dialog: &mut Option<GenerateMarkersDialog>,
@@ -188,10 +176,8 @@ mod tests {
 
     #[test]
     fn value_color_is_stable_per_label() {
-        // The same value label always maps to the same colour.
         assert_eq!(value_color("4"), value_color("4"));
         assert_eq!(value_color("AUTO"), value_color("AUTO"));
-        // A colour is well-formed sRGBA in 0..=1.
         for c in value_color("4") {
             assert!((0.0..=1.0).contains(&c));
         }

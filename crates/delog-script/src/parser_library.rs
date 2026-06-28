@@ -1,5 +1,3 @@
-//! Persistent library for custom Python log parsers.
-
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -62,8 +60,7 @@ impl StagedFile {
             file.flush()?;
             file.sync_all()
         })();
-        // same-file's Windows identity includes size, so capture it after the
-        // write attempt before closing the handle used for cleanup.
+        // same-file's Windows identity includes size; capture it after the write.
         staged.identity = file
             .try_clone()
             .ok()
@@ -153,8 +150,7 @@ fn rename_noclobber(source: &Path, destination: &Path) -> io::Result<()> {
 
     let source = wide_path(source)?;
     let destination = wide_path(destination)?;
-    // MOVEFILE_REPLACE_EXISTING is deliberately absent: an existing parser
-    // must make publication fail rather than be overwritten.
+    // MOVEFILE_REPLACE_EXISTING is deliberately absent: an existing parser must fail publication, not be overwritten.
     // SAFETY: both buffers are NUL-terminated and live for the duration of the call.
     let moved = unsafe {
         MoveFileExW(
@@ -265,7 +261,6 @@ fn cleanup_stale_staging_files(dir: &Path, now: SystemTime) {
     }
 }
 
-/// A custom parser library rooted at a directory of `.py` files.
 pub struct ParserLibrary {
     dir: PathBuf,
 }
@@ -275,7 +270,6 @@ impl ParserLibrary {
         Self { dir: dir.into() }
     }
 
-    /// Validates a local parser filename and ensures it has one `.py` suffix.
     pub fn normalize_name(&self, name: &str) -> io::Result<String> {
         if name.is_empty()
             || name.contains(['/', '\\'])
@@ -317,7 +311,6 @@ impl ParserLibrary {
         })
     }
 
-    /// Returns parser filenames, including `.py`, in lexical order.
     pub fn list(&self) -> io::Result<Vec<String>> {
         cleanup_stale_staging_files(&self.dir, SystemTime::now());
         let entries = match fs::read_dir(&self.dir) {

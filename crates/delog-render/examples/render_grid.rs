@@ -1,10 +1,7 @@
-//! Visual verification for the 3D offscreen target and the infinite
-//! ground grid + axes: renders the grid headlessly from two camera
-//! angles and writes PNGs you can open. There is no in-app scene pane yet,
-//! so this is the surface where the rendered output is observable.
+//! Visual verification for the 3D offscreen target and the ground grid + axes:
+//! renders headlessly from several camera angles and writes PNGs.
 //!
 //! Run: `cargo run -p delog-render --example render_grid`
-//! Output: `/tmp/delog_grid_perspective.png`, `/tmp/delog_grid_topdown.png`
 
 use std::fs::File;
 use std::io::BufWriter;
@@ -38,7 +35,6 @@ fn render(ctx: &RenderContext, w: u32, h: u32, eye: Vec3, up: Vec3) -> Vec<u8> {
         ),
     );
 
-    // A dark slate background so grid lines and colored axes read clearly.
     let clear = wgpu::Color {
         r: 18.0 / 255.0,
         g: 20.0 / 255.0,
@@ -77,15 +73,13 @@ fn main() {
     };
     let (w, h) = (960u32, 720u32);
 
-    // Classic floor perspective: camera above and behind, looking at origin.
     let persp = render(&ctx, w, h, Vec3::new(10.0, 8.0, 16.0), Vec3::Y);
     write_png("/tmp/delog_grid_perspective.png", w, h, &persp);
 
-    // Near top-down: the red X (East) and blue Z (South) axes cross at origin.
     let top = render(&ctx, w, h, Vec3::new(0.5, 22.0, 0.5), Vec3::Z);
     write_png("/tmp/delog_grid_topdown.png", w, h, &top);
 
-    // Probe: extreme wide aspect — cells must stay square (aspect handled).
+    // Extreme wide aspect — cells must stay square.
     let wide = render(&ctx, 1280, 360, Vec3::new(0.5, 22.0, 0.5), Vec3::Z);
     write_png("/tmp/delog_grid_wide.png", 1280, 360, &wide);
 }

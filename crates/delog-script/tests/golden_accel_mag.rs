@@ -14,8 +14,7 @@ use delog_core::snapshot::{DataStore, StoreSnapshot};
 use delog_core::store::TopicStore;
 use delog_script::{ScriptCommand, ScriptEngine, ScriptEvent};
 
-/// Build a read store with IMU.AccX/Y/Z = (3, 4, 0) at t=0.
-/// The 3-4-0 right triangle gives magnitude 5 (3-4-5 Pythagorean triple).
+/// AccX/Y/Z = (3, 4, 0) so the magnitude is exactly 5 (3-4-5 triple).
 fn read_store() -> Arc<DataStore> {
     let mut id = IdentityRegistry::new();
     let src = id.add_source("flight");
@@ -65,9 +64,8 @@ out.add_field("mag", np.sqrt(x*x + y*y + z*z), unit="m/s^2")
         source: script.into(),
     });
 
-    // drain_events() is the public non-test API; poll until Done or Error.
-    // recv_blocking() is #[cfg(test)]-gated inside the engine module and
-    // therefore not accessible from integration test crates.
+    // recv_blocking() is #[cfg(test)]-gated and unreachable from this crate,
+    // so poll drain_events() instead.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         let events = engine.drain_events();
@@ -91,12 +89,10 @@ out.add_field("mag", np.sqrt(x*x + y*y + z*z), unit="m/s^2")
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
 
-    // Drop the engine so its sender clone is released; the ingest thread will
-    // drain the channel and exit when the last sender is dropped.
+    // Releases the engine's sender clone so the ingest thread can exit.
     drop(engine);
 
-    // Emission is async through the ingest channel; poll write_store for the
-    // derived AccMag topic.
+    // Emission is async through the ingest channel; poll until AccMag appears.
     let out = {
         let mut snap = write_store.load();
         for _ in 0..100 {

@@ -136,9 +136,7 @@ fn finish_stats(acc: StatsAccumulator, multiplier: f64) -> FieldStats {
     }
 }
 
-/// Exact numeric statistics for samples in the inclusive effective-time window.
-/// Fully covered chunks reuse their seal-time statistics; partial chunks read
-/// Arrow values in place.
+/// Fully covered chunks reuse seal-time statistics; partial chunks read Arrow in place.
 pub fn visible_field_stats(
     snapshot: &StoreSnapshot,
     field: FieldId,
@@ -211,8 +209,7 @@ pub fn visible_field_stats(
     Ok(Some(finish_stats(acc, schema.multiplier)))
 }
 
-/// Fold seal-time [`crate::chunk::ColStats`] for a field. Returns `Ok(None)`
-/// for non-numeric fields, because strings have no meaningful min/mean/sigma.
+/// Returns `Ok(None)` for non-numeric fields (no meaningful min/mean/sigma).
 pub fn global_field_stats(
     snapshot: &StoreSnapshot,
     field: FieldId,
@@ -302,22 +299,18 @@ pub fn global_field_stats(
     }))
 }
 
-/// One distinct value of a field and the canonical times at which the field
-/// transitions *into* it — the start of each contiguous run. Groups
-/// are ordered by first appearance.
+/// One distinct value and the start times of each contiguous run of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValueTransitions {
-    /// Canonical display of the value ("4", "true", "AUTO").
     pub value_label: String,
-    /// Effective µs timestamps of each transition into this value, ascending.
+    /// Effective µs timestamps, ascending.
     pub transitions: Vec<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransitionsError {
     FieldView(FieldViewError),
-    /// More distinct values than `max_distinct` — the field is likely
-    /// continuous; refuse rather than generate a marker per value.
+    /// Field is likely continuous; refuse rather than mark every value.
     TooManyValues(usize),
 }
 
@@ -327,11 +320,8 @@ impl From<FieldViewError> for TransitionsError {
     }
 }
 
-/// Group a field's value-*transition* timestamps by distinct value.
-/// A transition is a sample whose value differs from the previous non-null
-/// value (the first non-null sample counts). Null/missing is a gap: it ends a
-/// run and is not itself marked. Returns `TooManyValues` once the distinct
-/// count exceeds `max_distinct`. Groups are ordered by first appearance.
+/// A transition is a sample differing from the previous non-null value (first
+/// non-null counts); null is a gap that ends a run and is not itself marked.
 pub fn field_value_transitions(
     snapshot: &StoreSnapshot,
     field: FieldId,
@@ -360,9 +350,6 @@ pub fn field_value_transitions(
     })?;
     let offset = source.entry.offset_us;
 
-    // Collect (effective_time, label) in time order. The chunk spine is already
-    // time-ordered when monotonic (the common case); otherwise sort by time so
-    // transition detection still sees samples chronologically.
     let mut samples: Vec<(i64, Option<String>)> = Vec::new();
     for chunk in store.chunks.iter() {
         let col = &chunk.cols[col_index];
@@ -377,8 +364,6 @@ pub fn field_value_transitions(
         samples.sort_by_key(|(t, _)| *t);
     }
 
-    // Walk in time order, emitting a transition each time the (non-null) value
-    // differs from the previous one. Null ends the current run.
     let mut order: Vec<String> = Vec::new();
     let mut index: HashMap<String, usize> = HashMap::new();
     let mut groups: Vec<ValueTransitions> = Vec::new();
@@ -413,7 +398,6 @@ pub fn field_value_transitions(
     Ok(groups)
 }
 
-/// Canonical display label for a discrete value, or `None` for null (a gap).
 fn value_label(value: SampleValue<'_>) -> Option<String> {
     match value {
         SampleValue::Int(v) => Some(v.to_string()),
@@ -539,7 +523,6 @@ mod tests {
         assert!(empty.min.is_nan());
     }
 
-    /// Build a single-`Int64`-field snapshot ("M.mode") from times + values.
     fn int_field_snapshot(times: &[i64], vals: Vec<Option<i64>>) -> (StoreSnapshot, FieldId) {
         let mut identity = IdentityRegistry::new();
         let source = identity.add_source("flight");
@@ -567,7 +550,6 @@ mod tests {
 
     #[test]
     fn transitions_mark_each_run_start_in_first_seen_order() {
-        // mode: 0 0 4 4 0 4 at 0..5 s.
         let (snapshot, field) = int_field_snapshot(
             &[0, 1_000_000, 2_000_000, 3_000_000, 4_000_000, 5_000_000],
             vec![Some(0), Some(0), Some(4), Some(4), Some(0), Some(4)],
@@ -582,7 +564,6 @@ mod tests {
 
     #[test]
     fn null_ends_a_run_and_re_entry_is_a_transition() {
-        // mode: 4 null 4 at 0,1,2 s — null is a gap, not a value.
         let (snapshot, field) =
             int_field_snapshot(&[0, 1_000_000, 2_000_000], vec![Some(4), None, Some(4)]);
         let groups = field_value_transitions(&snapshot, field, 64).unwrap();

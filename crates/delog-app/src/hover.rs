@@ -1,10 +1,4 @@
 //! Hover readout: cursor line, per-trace circles and a value tooltip.
-//!
-//! On hover the cursor's x maps to a canonical time; each visible trace is
-//! sampled there via [`FieldView::sample_at`] (the canonical binary search),
-//! and the raw value × the field multiplier is shown — precise and
-//! independent of the f32 render cache. A circle marks each trace's
-//! sample; a tooltip lists the values.
 
 use std::collections::HashMap;
 
@@ -23,10 +17,6 @@ pub struct HoverTarget {
     pub view: PaneView,
 }
 
-/// Draw the hover cursor/circles/tooltip if the pointer is over the plot. With
-/// `tooltip: false` the cursor line and sample circles still draw but the value
-/// tooltip is suppressed — used during playback, where the playhead readout
-/// is the value source instead.
 #[allow(clippy::too_many_arguments)]
 pub fn draw(
     ui: &egui::Ui,
@@ -85,10 +75,6 @@ pub fn draw(
     }
 }
 
-/// Mark each visible trace with a small circle at its sampled point, mapping
-/// the canonical sample time + value into screen space. Shared by the hover
-/// readout and the playhead readout so the non-hovered panes
-/// show where the cursor/playhead intersects each line, not just a value.
 fn draw_sample_circles(ui: &egui::Ui, view: PaneView, origin_us: i64, rows: &[Row]) {
     let rect = view.rect;
     let (x0, x1) = view.x_range;
@@ -108,7 +94,6 @@ fn draw_sample_circles(ui: &egui::Ui, view: PaneView, origin_us: i64, rows: &[Ro
     }
 }
 
-/// One tooltip row: a trace's canonical value at the probed time.
 struct Row {
     field: FieldId,
     label: String,
@@ -118,8 +103,6 @@ struct Row {
     effective_time_us: i64,
 }
 
-/// Sample every visible trace at `t_us` (canonical binary search, multiplier
-/// applied) — shared by the hover and playhead readouts.
 fn sampled_rows(
     snapshot: &StoreSnapshot,
     pane: &PlotPane,
@@ -150,8 +133,6 @@ fn sampled_rows(
     rows
 }
 
-/// The shared value tooltip: time header + one colored `label: value unit`
-/// row per trace. Used by hover and the playhead readout.
 #[allow(clippy::too_many_arguments)]
 fn show_tooltip(
     ui: &egui::Ui,
@@ -193,9 +174,6 @@ fn show_tooltip(
                         } else {
                             ui.label(format!("{value} {unit}"));
                         }
-                        // Measuring-marker value delta for this trace, when
-                        // routed to the readout; absent when shown in the legend
-                        // instead.
                         if let Some(delta) = deltas.get(&row.field) {
                             ui.label(
                                 egui::RichText::new(format!("d {delta}"))
@@ -214,12 +192,6 @@ fn color_swatch(ui: &mut egui::Ui, color: egui::Color32) {
     ui.painter().rect_filled(rect, 2.0, color);
 }
 
-/// Playhead cursor: a vertical line at the playback time
-/// on every pane; with `readout` set, a circle marks each trace's sample at the
-/// playhead and the shared hover tooltip shows the values, anchored to the
-/// bottom of the line (flipping side near the right edge). The caller passes
-/// `readout: None` on the hovered pane — the hover readout already draws there —
-/// and outside alt-scrub/playback.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_playhead(
     ui: &egui::Ui,
@@ -282,10 +254,6 @@ pub fn draw_playhead(
     );
 }
 
-/// Measurement marker (delta cursor): a second vertical at
-/// `marker_us`, painted dashed in a distinct accent so it never reads as the
-/// playhead, with a ΔT readout (`marker − playhead`) anchored at the top of the
-/// line. The per-trace ΔY is shown in the legend via [`marker_deltas`].
 pub fn draw_marker(
     ui: &egui::Ui,
     view: PaneView,
@@ -314,8 +282,7 @@ pub fn draw_marker(
     );
     ui.painter().extend(dashes);
 
-    // ΔT vs the playhead, anchored at the top of the line (the playhead readout
-    // anchors at the bottom, so the two never collide). Flip side near the edge.
+    // Anchor at the top: the playhead readout anchors at the bottom, so the two never collide.
     let dt_sec = (marker_us - playhead_us) as f64 * 1e-6;
     let text = format!("dt {dt_sec:+.3} s");
     let on_left = x > rect.right() - 80.0;
@@ -334,10 +301,8 @@ pub fn draw_marker(
         .text(anchor, align, text, egui::FontId::proportional(11.0), color);
 }
 
-/// Per-trace ΔY between the marker and the playhead for the legend:
-/// `value(marker) − value(playhead)` sampled with the active hover
-/// interpolation `mode`, the field multiplier and unit applied. Either endpoint
-/// missing or non-finite (NaN is a gap) yields "n/a". Keyed by `FieldId`.
+/// Per-trace ΔY (marker − playhead) for the legend. NaN is a gap, never
+/// interpolated across, so it yields "n/a".
 pub fn marker_deltas(
     snapshot: &StoreSnapshot,
     pane: &PlotPane,
@@ -363,9 +328,6 @@ pub fn marker_deltas(
     out
 }
 
-/// Format one trace's ΔY for the legend: `(marker − playhead) × multiplier`
-/// with the optional unit, or "n/a" when either endpoint is missing or non-finite
-/// (NaN is a gap, never interpolated across).
 fn format_delta(
     marker: Option<f64>,
     playhead: Option<f64>,
@@ -386,11 +348,6 @@ fn format_delta(
     }
 }
 
-/// Shade each inter-marker region on a plot: from each marker
-/// to the next one — and for the last marker, to `data_end_us` (the log's last
-/// timestamp, not the pane edge, so it doesn't extend past the data) — using
-/// that marker's colour at `opacity`. Markers are sorted by time here. Meant to
-/// be drawn *behind* the traces so it reads as a background band.
 pub fn draw_marker_regions(
     ui: &egui::Ui,
     view: PaneView,
@@ -432,10 +389,6 @@ pub fn draw_marker_regions(
     }
 }
 
-/// Manual session markers: a full-height vertical in each
-/// marker's colour on every plot pane, with the label at the top. Read-only;
-/// distinct from the amber playhead and the dashed delta cursor. The
-/// line opacity, width and label visibility are user settings (PlotDisplay).
 pub fn draw_session_markers(
     ui: &egui::Ui,
     view: PaneView,
@@ -477,9 +430,7 @@ pub fn draw_session_markers(
     }
 }
 
-/// The visible-trace sample time nearest `t_us` across `pane` (snap):
-/// probes the previous and next sample of each visible trace and returns the
-/// closest. `None` if the pane has no sampled visible traces.
+/// The visible-trace sample time nearest `t_us` across `pane` (snap).
 pub fn nearest_sample_us(snapshot: &StoreSnapshot, pane: &PlotPane, t_us: i64) -> Option<i64> {
     let mut best: Option<i64> = None;
     for trace in pane.visible_traces() {
@@ -498,7 +449,6 @@ pub fn nearest_sample_us(snapshot: &StoreSnapshot, pane: &PlotPane, t_us: i64) -
     best
 }
 
-/// `(multiplier, unit)` for a field from the topic schema (core API, no Arrow).
 fn field_meta(snapshot: &StoreSnapshot, field: FieldId) -> (f64, Option<String>) {
     let Some(entry) = snapshot.fields.get(field.index()).filter(|f| f.id == field) else {
         return (1.0, None);

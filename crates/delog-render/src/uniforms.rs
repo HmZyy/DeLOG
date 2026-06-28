@@ -1,17 +1,10 @@
 //! Per-plot transform/style uniforms.
 //!
-//! One uniform buffer holds every plot's [`PlotUniform`] at a 256-aligned
-//! stride; a draw selects its plot with a **dynamic offset** rather than push
-//! constants (which aren't universally supported). The shader reads three
-//! `vec4`s: the data→clip transform, the viewport + line width, and the colour.
+//! A draw selects its plot via a dynamic offset rather than push constants
+//! (not universally supported).
 
 use crate::context::RenderContext;
 
-/// Per-plot uniform, laid out as three `vec4<f32>` (std140-clean, 48 bytes).
-///
-/// `transform = [x_scale, x_offset, y_scale, y_offset]` maps data to clip space
-/// as `clip = data * scale + offset`. `view = [viewport_w, viewport_h, width_px,
-/// _pad]`. `color` is linear RGBA.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct PlotUniform {
@@ -37,9 +30,6 @@ impl PlotUniform {
         }
     }
 
-    /// Build the uniform from a visible data window. `x`/`y` are the inclusive
-    /// data ranges mapped to clip `[-1, 1]` (y increasing upward); a degenerate
-    /// range collapses to scale 0 (everything maps to the centre).
     pub fn from_view(
         x: (f32, f32),
         y: (f32, f32),
@@ -54,20 +44,17 @@ impl PlotUniform {
         )
     }
 
-    /// Set the edge anti-alias feather (pixels), stored in `view.w` and read by
-    /// the line/min-max shaders. Defaults to `0.0` (hard edges) otherwise.
+    /// Edge anti-alias feather, stored in `view.w`.
     pub fn with_aa(mut self, aa: f32) -> Self {
         self.view[3] = aa.max(0.0);
         self
     }
 }
 
-/// Scale/offset mapping data `[min, max]` to clip `[-1, 1]`
-/// (`clip = data * scale + offset`).
 fn axis(min: f32, max: f32) -> (f32, f32) {
     let span = max - min;
     if span.abs() <= f32::EPSILON {
-        return (0.0, 0.0); // degenerate window → centre
+        return (0.0, 0.0);
     }
     let scale = 2.0 / span;
     (scale, -1.0 - min * scale)
@@ -79,7 +66,6 @@ fn align_up(value: u64, alignment: u64) -> u64 {
     value.div_ceil(alignment) * alignment
 }
 
-/// A dynamic-offset uniform buffer with one slot per plot.
 pub struct UniformRing {
     ctx: RenderContext,
     buf: wgpu::Buffer,
@@ -88,8 +74,6 @@ pub struct UniformRing {
 }
 
 impl UniformRing {
-    /// Allocate room for `capacity` plot slots, each at the device's required
-    /// dynamic-offset alignment.
     pub fn new(ctx: RenderContext, capacity: u32) -> Self {
         let align = ctx.device().limits().min_uniform_buffer_offset_alignment as u64;
         let stride = align_up(UNIFORM_SIZE, align.max(1));
@@ -113,7 +97,6 @@ impl UniformRing {
         self.capacity
     }
 
-    /// Write one plot's uniform into `slot` (`slot < capacity`).
     pub fn write(&self, slot: u32, uniform: &PlotUniform) {
         debug_assert!(slot < self.capacity, "uniform slot out of range");
         self.ctx.queue().write_buffer(
@@ -123,12 +106,10 @@ impl UniformRing {
         );
     }
 
-    /// The dynamic offset (bytes) to bind `slot` in a draw call.
     pub fn dynamic_offset(&self, slot: u32) -> u32 {
         (slot as u64 * self.stride) as u32
     }
 
-    /// The bind-group layout entry for the uniform at `binding` (dynamic offset).
     pub fn layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
         wgpu::BindGroupLayoutEntry {
             binding,
@@ -142,8 +123,6 @@ impl UniformRing {
         }
     }
 
-    /// The binding resource for a bind group: one plot slot's worth, selected
-    /// at draw time by the dynamic offset.
     pub fn binding_resource(&self) -> wgpu::BindingResource<'_> {
         wgpu::BindingResource::Buffer(wgpu::BufferBinding {
             buffer: &self.buf,
@@ -205,10 +184,8 @@ mod tests {
     fn from_view_maps_window_corners_to_clip() {
         let u = PlotUniform::from_view((0.0, 10.0), (-100.0, 100.0), [1.0, 1.0], 1.0, [0.0; 4]);
         let clip = |data: f32, scale: f32, offset: f32| data * scale + offset;
-        // x: 0 → -1, 10 → +1.
         assert!((clip(0.0, u.transform[0], u.transform[1]) + 1.0).abs() < 1e-5);
         assert!((clip(10.0, u.transform[0], u.transform[1]) - 1.0).abs() < 1e-5);
-        // y: -100 → -1, 100 → +1, 0 → 0 (centre).
         assert!((clip(-100.0, u.transform[2], u.transform[3]) + 1.0).abs() < 1e-5);
         assert!((clip(100.0, u.transform[2], u.transform[3]) - 1.0).abs() < 1e-5);
         assert!(clip(0.0, u.transform[2], u.transform[3]).abs() < 1e-5);
@@ -228,7 +205,6 @@ mod tests {
         };
         let ring = UniformRing::new(ctx.clone(), 4);
 
-        // Dynamic offsets are multiples of the (≥256) alignment.
         let align = ctx.device().limits().min_uniform_buffer_offset_alignment;
         assert_eq!(ring.dynamic_offset(0), 0);
         assert_eq!(ring.dynamic_offset(1) % align, 0);

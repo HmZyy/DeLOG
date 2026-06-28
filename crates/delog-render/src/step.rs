@@ -1,8 +1,7 @@
 //! Vertex-pulled stepped trace pipeline.
 //!
-//! This is the previous-sample/hold variant of `line_pull`: every adjacent
-//! sample pair emits two thick screen-space segments, first horizontal at the
-//! previous value and then vertical at the next timestamp.
+//! Previous-sample/hold variant of `line_pull`: each adjacent pair emits a
+//! horizontal hold then a vertical transition.
 
 use crate::context::RenderContext;
 use crate::uniforms::UniformRing;
@@ -121,8 +120,7 @@ impl StepPipeline {
         pass.set_pipeline(&self.pipeline);
     }
 
-    /// Pipeline must already be bound via [`Self::bind`]. `sample_count` is the
-    /// number of `[x,y]` pairs; each adjacent pair emits two six-vertex quads.
+    /// Pipeline must already be bound via [`Self::bind`].
     pub fn draw_trace(
         &self,
         pass: &mut wgpu::RenderPass<'_>,

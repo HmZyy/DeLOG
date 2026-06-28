@@ -1,11 +1,5 @@
-//! Shared harness for the parser fuzz targets.
-//!
-//! Each entry point drives a decoder over arbitrary bytes with a sink that
-//! drops everything: fuzzing only asserts the error policy — malformed
-//! input is skipped with diagnostics, never a panic, hang, or runaway
-//! allocation. The same property is smoke-tested on stable in
-//! `delog-parsers/tests/garbage_smoke.rs`; these targets add coverage-guided
-//! depth in CI.
+//! Asserted property: malformed input is skipped with diagnostics, never a
+//! panic, hang, or runaway allocation.
 
 use std::io::Cursor;
 
@@ -35,18 +29,14 @@ fn drive(parser: &dyn LogParser, data: &[u8]) {
     let _ = parser.parse(Box::new(Cursor::new(data.to_vec())), &mut sink, &ctl);
 }
 
-/// ArduPilot DataFlash `.BIN` record decoding.
 pub fn fuzz_ardupilot(data: &[u8]) {
     drive(&ArduPilotParser, data);
 }
 
-/// PX4 ULog definitions + data sections.
 pub fn fuzz_ulog(data: &[u8]) {
     drive(&ULogParser, data);
 }
 
-/// MAVLink framing at both layers: the raw push-based frame decoder and the
-/// `.tlog` µs-envelope parser that wraps it.
 pub fn fuzz_mavlink(data: &[u8]) {
     let mut decoder = FrameDecoder::new();
     decoder.push(data);

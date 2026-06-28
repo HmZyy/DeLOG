@@ -1,5 +1,3 @@
-//! Performance metrics dock UI.
-
 use delog_core::metrics::MetricStats;
 
 #[derive(Debug, Clone, Default)]
@@ -26,8 +24,6 @@ pub struct TraceSummary {
     pub gpu_bytes: u64,
 }
 
-/// Which section of the performance dock is shown. Held on the dock so the
-/// selection persists across frames.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum PerfTab {
     #[default]

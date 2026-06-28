@@ -1,7 +1,5 @@
-//! Source-agnostic layout persistence.
-//!
-//! Layouts deliberately store fields as `topic.field`, never as runtime IDs or
-//! source labels, so the same plot/vehicle setup can be reused across logs.
+//! Layouts store fields as `topic.field`, never as runtime IDs or source
+//! labels, so the same plot/vehicle setup can be reused across logs.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -35,10 +33,8 @@ pub struct LayoutDoc {
     pub playback: PlaybackLayout,
     pub workspace: WorkspaceLayout,
     pub vehicles: Vec<VehicleLayout>,
-    /// Shared (Global-scope) measurement-marker time, if placed.
     #[serde(default)]
     pub marker_us: Option<i64>,
-    /// Manual markers / bookmarks for this session.
     #[serde(default)]
     pub markers: Vec<MarkerLayout>,
     #[serde(default)]
@@ -87,13 +83,10 @@ pub enum LayoutNode {
         show_legend: bool,
         #[serde(default = "default_true")]
         show_tooltip: bool,
-        /// Measurement marker time, if placed.
         #[serde(default)]
         marker_us: Option<i64>,
-        /// Manual vertical positions for text-annotation labels.
         #[serde(default)]
         text_offsets: Vec<TextOffsetLayout>,
-        /// Per-string-trace text-annotation filters.
         #[serde(default)]
         text_filters: Vec<TextFilterLayout>,
     },
@@ -138,8 +131,7 @@ pub struct MarkerLayout {
     pub note: String,
 }
 
-/// A manually-positioned text-annotation label: which field + sample time, and
-/// its y-fraction (0 = top .. 1 = bottom) in the pane.
+/// `y_frac`: 0 = top .. 1 = bottom in the pane.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TextOffsetLayout {
     pub field: FieldRef,
@@ -147,7 +139,6 @@ pub struct TextOffsetLayout {
     pub y_frac: f32,
 }
 
-/// A per-string-trace text-annotation "contains" filter.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TextFilterLayout {
     pub field: FieldRef,
@@ -158,6 +149,14 @@ pub struct TextFilterLayout {
 pub struct SceneLayout {
     pub camera: CameraLayout,
     pub tracked_vehicle: Option<usize>,
+    /// Defaults true so layouts saved before this field decode to the
+    /// up-to-playhead behavior.
+    #[serde(default = "default_trail_to_playhead")]
+    pub trail_to_playhead: bool,
+}
+
+fn default_trail_to_playhead() -> bool {
+    true
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -202,13 +201,13 @@ pub enum PosLayout {
         lat: FieldRef,
         lon: FieldRef,
         alt: FieldRef,
-        /// Lat/lon stored as `degE7` integers (scale 1e-7 to degrees).
+        /// degE7 (scale 1e-7 to degrees).
         #[serde(default)]
         lat_lon_dege7: bool,
-        /// Altitude stored in millimetres (scale 1e-3 to metres).
+        /// mm (scale 1e-3 to metres).
         #[serde(default)]
         alt_mm: bool,
-        /// Fixed vertical offset in metres (up-positive).
+        /// metres, up-positive.
         #[serde(default)]
         alt_offset_m: f64,
     },
@@ -250,14 +249,10 @@ pub enum OriLayout {
 pub struct LayoutApply {
     pub workspace: Workspace,
     pub view: Option<ViewX>,
-    /// Restored fit-to-view toggle (`ViewMode::Full`), so the view re-fits the
-    /// data range as it would after pressing the timeline fit button.
     pub fit_all: bool,
     pub speed: f64,
     pub follow_live: bool,
-    /// Restored shared (Global-scope) marker time.
     pub marker_us: Option<i64>,
-    /// Restored manual markers / bookmarks.
     pub markers: Vec<MarkerLayout>,
     pub vehicles: Vec<VehicleConfig>,
     pub diagnostics: Vec<Diag>,
@@ -302,14 +297,11 @@ pub struct CurrentLayout<'a> {
     pub workspace: &'a Workspace,
     pub snapshot: &'a StoreSnapshot,
     pub view: Option<ViewX>,
-    /// Whether the fit-to-view toggle is engaged — persisted as
-    /// `ViewMode::Full`.
+    /// Persisted as `ViewMode::Full`.
     pub fit_all: bool,
     pub speed: f64,
     pub follow_live: bool,
-    /// Shared (Global-scope) marker time to persist.
     pub marker_us: Option<i64>,
-    /// Manual markers / bookmarks to persist.
     pub markers: Vec<MarkerLayout>,
     pub vehicles: &'a [VehicleConfig],
 }
@@ -427,15 +419,13 @@ pub fn save_session_json(json: &str) -> Result<(), LayoutError> {
     write_json_atomic(&base.join("session.json"), json)
 }
 
-/// The app config directory (where settings.json lives), if resolvable.
-/// Used by the scripts panel to locate its library dir.
 #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
 pub fn config_dir() -> Option<std::path::PathBuf> {
     storage_dir(APP_ID)
 }
 
-/// Path to the app-wide settings file. Separate from layouts and from
-/// `session.json` so loading a layout never changes user preferences.
+/// Separate from layouts and `session.json` so loading a layout never changes
+/// user preferences.
 fn settings_path() -> Result<PathBuf, LayoutError> {
     let Some(base) = storage_dir(APP_ID) else {
         return Err(LayoutError::NoStorageDir);
@@ -443,8 +433,6 @@ fn settings_path() -> Result<PathBuf, LayoutError> {
     Ok(base.join("settings.json"))
 }
 
-/// Load app settings, falling back to defaults if the file is absent or
-/// unreadable (first run, or written by a newer version).
 pub fn load_app_settings() -> AppSettings {
     match settings_path() {
         Ok(path) => load_app_settings_at(&path),
@@ -452,12 +440,10 @@ pub fn load_app_settings() -> AppSettings {
     }
 }
 
-/// Persist app settings to `settings.json` atomically.
 pub fn save_app_settings(settings: &AppSettings) -> Result<(), LayoutError> {
     save_app_settings_at(&settings_path()?, settings)
 }
 
-/// Read app settings from an explicit path, defaulting on any failure.
 fn load_app_settings_at(path: &Path) -> AppSettings {
     fs::read_to_string(path)
         .ok()
@@ -465,7 +451,6 @@ fn load_app_settings_at(path: &Path) -> AppSettings {
         .unwrap_or_default()
 }
 
-/// Write app settings to an explicit path atomically.
 fn save_app_settings_at(path: &Path, settings: &AppSettings) -> Result<(), LayoutError> {
     let json =
         serde_json::to_string_pretty(settings).map_err(|e| LayoutError::Json(e.to_string()))?;
@@ -516,7 +501,6 @@ fn migrate_to_current(value: Value) -> Result<Value, LayoutError> {
         .ok_or(LayoutError::MissingVersion)? as u32;
     match version {
         LAYOUT_VERSION => Ok(value),
-        // Future versions will add pure `migrate_vN_to_vN_plus_1` steps here.
         other => Err(LayoutError::UnsupportedVersion(other)),
     }
 }
@@ -675,6 +659,7 @@ fn node_to_layout(
                 distance: scene.camera.distance,
             },
             tracked_vehicle: scene.tracked_vehicle,
+            trail_to_playhead: scene.trail_to_playhead,
         })),
         egui_tiles::Tile::Container(container) => {
             let children = container
@@ -999,6 +984,7 @@ fn insert_node(
                 distance: scene.camera.distance,
             },
             tracked_vehicle: scene.tracked_vehicle,
+            trail_to_playhead: scene.trail_to_playhead,
         }))),
         LayoutNode::Split { split, children } => {
             let child_ids = children
@@ -1344,8 +1330,6 @@ mod tests {
 
     #[test]
     fn legacy_layout_with_settings_key_still_decodes_ignoring_it() {
-        // Older layouts embedded a `settings` object. Decoding must succeed and
-        // simply ignore the unknown key (serde default).
         let doc = decode_doc(
             r#"{
                 "delog_layout": 1,

@@ -1,12 +1,3 @@
-//! egui/eframe adapter for DeLOG's pure-wgpu renderer.
-//!
-//! `delog-render` contains no egui types; this module is the thin boundary. It
-//! adopts eframe's `wgpu` device/queue, keeps the pipeline + buffer/uniform
-//! managers in egui_wgpu's callback-resource map, and each frame uploads the
-//! ready trace caches, writes per-plot uniforms, and emits one paint callback
-//! that draws every trace inside egui's main pass with a per-plot viewport +
-//! scissor.
-
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -26,26 +17,24 @@ use crate::plot::{PlotPane, TraceMode, ViewX};
 use crate::settings::Scene3dSettings;
 use crate::vehicle::ModelKind;
 
-/// Render-ready data for one vehicle this frame.
 pub struct VehicleDraw<'a> {
-    /// Stable per-frame key for one configured vehicle row.
     pub key: u32,
     pub model: &'a ModelKind,
-    /// Body→render model matrix (column-major) and its normal matrix.
     pub model_matrix: [[f32; 4]; 4],
     pub normal_matrix: [[f32; 4]; 4],
     pub color: [f32; 4],
     pub path_color: [f32; 4],
-    /// Render-space `[x,y,z]` trajectory points (NaN = gap).
+    /// Render-space `[x,y,z]` trajectory points; NaN = gap. Full resident path.
     pub trajectory: &'a [[f32; 3]],
-    /// Config generation the trajectory was built at. Unchanged across pure
-    /// data-append rebuilds (so the path only grows), bumped on config/offset
-    /// change — lets the GPU upload just the new tail vs. a full re-upload.
+    /// Build-time config generation; a mismatch forces a full re-upload, a match
+    /// lets a grown path upload only its appended tail.
     pub traj_generation: u64,
+    /// Points to draw this frame (≤ trajectory len); the rest stays resident.
+    pub visible_count: u32,
 }
 
-/// The inner plot rect plus the visible data window the GPU and the egui axes
-/// share (so labels line up with the rendered lines).
+/// Plot rect + data window shared by the GPU and the egui axes so labels line
+/// up with the rendered lines.
 #[derive(Clone, Copy)]
 pub struct PaneView {
     pub rect: egui::Rect,
@@ -53,14 +42,11 @@ pub struct PaneView {
     pub y_range: (f32, f32),
 }
 
-/// App-owned handle to the renderer resources stored in egui_wgpu.
 #[derive(Clone, Copy, Debug)]
 pub struct GpuBridge {
     available: bool,
-    /// Whether the egui render target is an sRGB format (it gamma-encodes the
-    /// shader's linear output) vs a plain UNORM target (raw write). Trace colours
-    /// are stored in sRGB; we convert to match the target so the rendered line
-    /// matches the legend swatch.
+    /// True when the render target gamma-encodes the shader's linear output
+    /// (sRGB) vs raw write (UNORM); selects the trace-colour conversion.
     srgb_target: bool,
 }
 
@@ -134,8 +120,7 @@ impl GpuBridge {
         }
     }
 
-    /// Resolve finished wgpu error scopes into messages for the diagnostics
-    /// hub. Call once per frame.
+    /// Call once per frame.
     pub fn drain_gpu_errors(&self, frame: &eframe::Frame) -> Vec<String> {
         if !self.available {
             return Vec::new();
@@ -187,8 +172,6 @@ impl GpuBridge {
         }
     }
 
-    /// Upload the pane's ready trace caches into the `plot_rect`, write their
-    /// uniforms for the given visible data window, and emit the paint callback.
     /// The caller supplies the X/Y ranges so the egui axes share them exactly.
     #[allow(clippy::too_many_arguments)]
     pub fn render_pane(
@@ -228,10 +211,7 @@ impl GpuBridge {
             else {
                 return;
             };
-            // Capture buffer growth/upload + uniform-write errors.
             let scope = GpuErrorHub::open(res.ctx.device());
-            // Share the registry so the deferred paint callback can time
-            // `gpu_encode`.
             if res.metrics.is_none() {
                 res.metrics = Some(Arc::clone(metrics));
             }
@@ -259,16 +239,29 @@ impl GpuBridge {
 
                 let kind = match trace.mode {
                     TraceMode::Line => {
-                        // Draw-path selector: decimate when the visible
-                        // window packs more than `decimate_threshold` samples/px.
+                        // Decimate when the window packs > decimate_threshold samples/px.
                         let (a, b) = cache.index_range(x0, x1);
                         let visible = b.saturating_sub(a) as f32;
                         if plot_w >= 1.0 && visible / plot_w > tuning.decimate_threshold {
                             let width = plot_w as usize;
-                            let cols = cache.minmax_columns(x0, x1, width, tuning.bridge_columns);
-                            let stat = res.col_buffers.sync(trace.field, &cols, true);
-                            upload_bytes += stat.bytes;
-                            full_uploads += stat.full_upload as u64;
+                            // Skip the per-frame decimation + upload when the same
+                            // view over unchanged data already produced the
+                            // resident columns (static/paused views go ~free).
+                            let key = ColKey {
+                                x0: x0.to_bits(),
+                                x1: x1.to_bits(),
+                                width: width as u32,
+                                bridge: tuning.bridge_columns,
+                                len: cache.samples(),
+                            };
+                            if res.col_params.get(&trace.field) != Some(&key) {
+                                let cols =
+                                    cache.minmax_columns(x0, x1, width, tuning.bridge_columns);
+                                let stat = res.col_buffers.sync(trace.field, &cols, true);
+                                upload_bytes += stat.bytes;
+                                full_uploads += stat.full_upload as u64;
+                                res.col_params.insert(trace.field, key);
+                            }
                             DrawKind::Columns {
                                 count: width as u32,
                             }
@@ -322,11 +315,8 @@ impl GpuBridge {
         ));
     }
 
-    /// Render the 3D scene (grid + axes for now) for `camera` into the
-    /// offscreen [`Scene3dTarget`], resolve it, and return an egui texture id
-    /// the caller composites with `ui.image`/`painter().image`. The offscreen
-    /// pass is submitted on our own queue during
-    /// `update()`, so the texture is ready before eframe paints this frame.
+    /// The offscreen pass is submitted on our own queue during `update()`, so
+    /// the texture is ready before eframe paints this frame.
     pub fn render_scene(
         &self,
         frame: &eframe::Frame,
@@ -346,26 +336,20 @@ impl GpuBridge {
         let device = render_state.device.clone();
         let mut renderer = render_state.renderer.write();
 
-        // Render into the offscreen target and take a handle to its resolved
-        // color view (cloning the view ends the resource borrow so the
-        // texture-registration calls below can borrow the renderer mutably).
+        // Clone the resolved view to end the resource borrow, so the
+        // texture-registration below can borrow the renderer mutably.
         let (view, resized, existing) = {
             let res = renderer.callback_resources.get_mut::<SceneResources>()?;
             let resized = res.target.width() != px_w || res.target.height() != px_h;
             res.target.resize(px_w, px_h);
 
-            // Build the view-projection and its inverse in f64 (downcast to f32
-            // for the GPU). Inverting in f32 is ill-conditioned once the camera
-            // tracks a vehicle far from the render origin and makes the grid crawl
-            // while zooming/following — see `OrbitCamera::view_proj_and_inverse`.
+            // f64 inverse: f32 is ill-conditioned far from the origin and crawls the grid.
             let (vp, inv) = camera
                 .view_proj_and_inverse(px_w as f32 / px_h as f32, scene3d.resolved_far_clip_m());
             let vp_cols = vp.to_cols_array_2d();
             let (fade_start, fade_end) = scene3d.resolved_fog_m();
-            // Auto cell tracks height above the y=0 ground plane (where the grid
-            // is), so tightly orbiting an airborne vehicle does not collapse the
-            // grid to a shimmering fine mesh; the LOD flag lets the shader
-            // cross-fade levels so it never pops between sizes.
+            // Cell tracks height above the y=0 ground so orbiting low doesn't shimmer
+            // into a fine mesh; lod lets the shader cross-fade levels to avoid popping.
             let (cell, lod) = scene3d.resolved_grid(camera.eye().y);
             res.grid.set_uniform(
                 &res.ctx,
@@ -438,8 +422,6 @@ impl GpuBridge {
     }
 }
 
-/// Union of every visible trace's auto-Y range, padded; a sane default when no
-/// finite samples are in view. The Y axis always auto-fits the visible window.
 pub fn visible_y_range(caches: &mut CacheManager, pane: &PlotPane, x0: f32, x1: f32) -> (f32, f32) {
     let mut mm = MinMax::EMPTY;
     for trace in pane.visible_traces() {
@@ -453,7 +435,6 @@ pub fn visible_y_range(caches: &mut CacheManager, pane: &PlotPane, x0: f32, x1: 
     padded(mm.min, mm.max)
 }
 
-/// 5% pad, degenerate ranges widened to ±1.
 fn padded(min: f32, max: f32) -> (f32, f32) {
     if (max - min).abs() <= f32::EPSILON {
         return (min - 1.0, max + 1.0);
@@ -462,11 +443,8 @@ fn padded(min: f32, max: f32) -> (f32, f32) {
     (min - pad, max + pad)
 }
 
-/// Convert a stored sRGB colour to what the shader must output so the rendered
-/// pixel equals the sRGB colour: on an sRGB target the GPU encodes the shader's
-/// linear output, so pass linear; on a UNORM target the write is raw, so pass
-/// the sRGB values as-is (matching egui's own UI output). Keeps the trace and
-/// its legend swatch identical.
+/// sRGB target gamma-encodes the shader output, so emit linear; UNORM writes
+/// raw, so emit sRGB as-is. Keeps the trace identical to its legend swatch.
 fn shader_color(srgb: [f32; 4], srgb_target: bool) -> [f32; 4] {
     if srgb_target {
         [
@@ -488,10 +466,8 @@ fn srgb_to_linear(c: f32) -> f32 {
     }
 }
 
-/// How one trace is drawn this frame.
 #[derive(Clone, Copy)]
 enum DrawKind {
-    /// Full polyline: `samples` `[x,y]` pairs.
     Line {
         samples: u32,
     },
@@ -501,13 +477,12 @@ enum DrawKind {
     Step {
         samples: u32,
     },
-    /// Decimated: `count` per-pixel min/max columns.
+    /// `count` per-pixel min/max columns.
     Columns {
         count: u32,
     },
 }
 
-/// Which render pipeline a [`DrawKind`] uses (batching key).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PipelineKind {
     Line,
@@ -516,10 +491,8 @@ enum PipelineKind {
     Columns,
 }
 
-/// Consecutive same-pipeline runs in draw order. Each run costs exactly one
-/// `set_pipeline`; items inside it only rebind their trace bind group with a
-/// per-trace dynamic uniform offset. Order-preserving so trace
-/// overlap (z-order) is unchanged — a homogeneous pane is a single run.
+/// Consecutive same-pipeline runs in draw order (one `set_pipeline` each).
+/// Order-preserving so trace overlap (z-order) is unchanged.
 fn pipeline_runs(kinds: impl Iterator<Item = PipelineKind>) -> Vec<(PipelineKind, u32)> {
     let mut runs: Vec<(PipelineKind, u32)> = Vec::new();
     for kind in kinds {
@@ -565,7 +538,7 @@ struct PlotCallbackResources {
     minmax: MinMaxColPipeline,
     /// Interleaved `[x,y]` trace buffers (full path).
     buffers: BufferManager,
-    /// Transient `[x,min,max]` column buffers (decimated path).
+    /// `[x,min,max]` column buffers (decimated path).
     col_buffers: BufferManager,
     uniforms: UniformRing,
     next_uniform_slot: u32,
@@ -573,13 +546,24 @@ struct PlotCallbackResources {
     scatter_binds: HashMap<FieldId, wgpu::BindGroup>,
     step_binds: HashMap<FieldId, wgpu::BindGroup>,
     col_binds: HashMap<FieldId, wgpu::BindGroup>,
-    /// Error-scope results awaiting drain. Mutex only for the Sync
-    /// bound of `CallbackResources`; never contended (all access is on the
-    /// render thread).
+    /// Memoizes the decimated columns resident in `col_buffers` per field, so a
+    /// static view skips the per-frame `minmax_columns` recompute and upload.
+    col_params: HashMap<FieldId, ColKey>,
+    /// Mutex only satisfies the `Sync` bound; never contended (render thread only).
     errors: Mutex<GpuErrorHub>,
-    /// Shared metrics registry, populated on the first `render_pane` so the
-    /// paint callback can time `gpu_encode`.
     metrics: Option<Arc<MetricsRegistry>>,
+}
+
+/// Identifies the decimated columns currently resident for a field. A match
+/// means the same view over unchanged data, so the GPU buffer is already
+/// correct and `minmax_columns` can be skipped entirely.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ColKey {
+    x0: u32,
+    x1: u32,
+    width: u32,
+    bridge: bool,
+    len: usize,
 }
 
 impl PlotCallbackResources {
@@ -605,12 +589,12 @@ impl PlotCallbackResources {
             scatter_binds: HashMap::new(),
             step_binds: HashMap::new(),
             col_binds: HashMap::new(),
+            col_params: HashMap::new(),
             errors: Mutex::new(GpuErrorHub::new()),
             metrics: None,
         }
     }
 
-    /// Grow the uniform ring if more plots than slots are needed.
     fn ensure_uniform_capacity(&mut self, needed: u32) {
         if needed > self.uniforms.capacity() {
             self.uniforms = UniformRing::new(self.ctx.clone(), needed.next_power_of_two());
@@ -627,29 +611,24 @@ impl PlotCallbackResources {
         for field in stale {
             self.buffers.remove(field);
             self.col_buffers.remove(field);
+            self.col_params.remove(&field);
         }
     }
 }
 
-/// One static scene polyline (the axis gizmo): its points + a uniform whose
-/// `view_proj` is rewritten each frame, with a stable bind group.
 struct SceneTraj {
     uniform: wgpu::Buffer,
-    /// Holds an internal reference to the points storage buffer, keeping it
-    /// alive — the points are uploaded once and never change.
+    /// Holds the only reference to the points buffer, keeping it alive.
     bind: wgpu::BindGroup,
     count: u32,
     color: [f32; 4],
 }
 
-/// Per-vehicle GPU state, keyed by configured vehicle row: a mesh
-/// uniform/bind and a growable trajectory line (points + uniform + bind).
 struct VehicleGpu {
     mesh_uniform: wgpu::Buffer,
     mesh_bind: wgpu::BindGroup,
     traj_points: wgpu::Buffer,
     traj_capacity: u32,
-    /// Points currently resident in `traj_points` (also the draw count).
     traj_count: u32,
     /// Config generation of the resident points; a mismatch forces a full
     /// re-upload, a match lets a longer path upload only its appended tail.
@@ -666,7 +645,6 @@ struct SceneResources {
     mesh: MeshPipeline,
     /// Decoded meshes by model kind (lazy; built on first use).
     model_cache: HashMap<ModelKind, MeshGpu>,
-    /// Per-vehicle GPU buffers, keyed by configured vehicle row.
     vehicles: HashMap<u32, VehicleGpu>,
     /// Vertical world Y-axis line (the up axis the ground grid can't draw).
     axis_gizmo: SceneTraj,
@@ -713,7 +691,6 @@ impl SceneResources {
         }
     }
 
-    /// Ensure a model's mesh is uploaded, returning it from the cache.
     fn model_mesh(&mut self, kind: &ModelKind) -> &MeshGpu {
         self.model_cache
             .entry(kind.clone())
@@ -830,7 +807,8 @@ impl SceneResources {
             let Some(vg) = self.vehicles.get(&v.key) else {
                 continue;
             };
-            self.traj.draw(pass, &vg.traj_bind, vg.traj_count);
+            self.traj
+                .draw(pass, &vg.traj_bind, v.visible_count.min(vg.traj_count));
             if let Some(mesh) = self.model_cache.get(v.model) {
                 self.mesh.draw(pass, &vg.mesh_bind, mesh);
             }
@@ -916,6 +894,7 @@ impl egui_wgpu::CallbackTrait for ScenePaintCallback {
                 scatter_binds,
                 step_binds,
                 col_binds,
+                col_params: _,
                 errors,
                 metrics: _,
             } = res;

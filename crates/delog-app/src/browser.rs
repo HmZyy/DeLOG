@@ -1,14 +1,17 @@
 //! Data browser tree: Source → Topic → Field.
 //!
-//! A read-only tree with dtype/count/unit chips, plus fuzzy search, natural
-//! sort, highlighting, drag and context menus. The tree model is built purely
-//! from a [`StoreSnapshot`] so it is testable without a GUI; [`ui`] renders it.
+//! The tree model is built purely from a [`StoreSnapshot`] so it is testable
+//! without a GUI; [`ui`] renders it.
 
+use arrow::array::{
+    Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array,
+    Int64Array, LargeStringArray, StringArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+};
+use arrow::datatypes::DataType;
 use delog_core::identity::{FieldId, SourceId, TopicId};
 use delog_core::snapshot::StoreSnapshot;
 use delog_core::time::TimeRange;
 
-/// A flattened, render-ready view of one snapshot's live sources.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct BrowserModel {
     pub sources: Vec<SourceNode>,
@@ -19,11 +22,11 @@ pub struct SourceNode {
     pub id: SourceId,
     pub label: String,
     pub rows: u64,
-    /// Effective time range (source offset applied).
+    /// Source offset already applied.
     pub range: Option<TimeRange>,
-    /// Per-source time offset.
     pub offset_us: i64,
     pub topics: Vec<TopicNode>,
+    search_path: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -32,6 +35,7 @@ pub struct TopicNode {
     pub name: String,
     pub rows: u64,
     pub fields: Vec<FieldNode>,
+    search_path: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -42,11 +46,145 @@ pub struct FieldNode {
     pub unit: Option<String>,
     pub description: Option<String>,
     pub count: u64,
+    pub first_raw: Option<String>,
+    pub last_raw: Option<String>,
+    search_path: String,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct BrowserFilter {
+    pub sources: Vec<VisibleSource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VisibleSource {
+    pub source: usize,
+    pub topics: Vec<VisibleTopic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VisibleTopic {
+    pub topic: usize,
+    pub fields: Vec<usize>,
+}
+
+#[derive(Debug, Default)]
+pub struct BrowserFilterCache {
+    epoch: u64,
+    query: String,
+    view: BrowserFilter,
+    valid: bool,
+}
+
+impl BrowserFilter {
+    pub fn build(model: &BrowserModel, query: &str) -> Self {
+        let tokens = lowercase_query_tokens(query);
+        if tokens.is_empty() {
+            return Self::all(model);
+        }
+
+        let mut sources = Vec::new();
+        for (source_idx, source) in model.sources.iter().enumerate() {
+            if matches_lowercase_tokens(&tokens, &source.search_path) {
+                sources.push(VisibleSource {
+                    source: source_idx,
+                    topics: source
+                        .topics
+                        .iter()
+                        .enumerate()
+                        .map(|(topic_idx, topic)| VisibleTopic {
+                            topic: topic_idx,
+                            fields: (0..topic.fields.len()).collect(),
+                        })
+                        .collect(),
+                });
+                continue;
+            }
+
+            let mut topics = Vec::new();
+            for (topic_idx, topic) in source.topics.iter().enumerate() {
+                if matches_lowercase_tokens(&tokens, &topic.search_path) {
+                    topics.push(VisibleTopic {
+                        topic: topic_idx,
+                        fields: (0..topic.fields.len()).collect(),
+                    });
+                    continue;
+                }
+
+                let fields: Vec<usize> = topic
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(field_idx, field)| {
+                        matches_lowercase_tokens(&tokens, &field.search_path).then_some(field_idx)
+                    })
+                    .collect();
+                if !fields.is_empty() {
+                    topics.push(VisibleTopic {
+                        topic: topic_idx,
+                        fields,
+                    });
+                }
+            }
+
+            if !topics.is_empty() {
+                sources.push(VisibleSource {
+                    source: source_idx,
+                    topics,
+                });
+            }
+        }
+        Self { sources }
+    }
+
+    pub fn all(model: &BrowserModel) -> Self {
+        Self {
+            sources: model
+                .sources
+                .iter()
+                .enumerate()
+                .map(|(source_idx, source)| VisibleSource {
+                    source: source_idx,
+                    topics: source
+                        .topics
+                        .iter()
+                        .enumerate()
+                        .map(|(topic_idx, topic)| VisibleTopic {
+                            topic: topic_idx,
+                            fields: (0..topic.fields.len()).collect(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.sources.is_empty()
+    }
+}
+
+impl BrowserFilterCache {
+    pub fn view(&mut self, model_epoch: u64, model: &BrowserModel, query: &str) -> &BrowserFilter {
+        if !self.valid || self.epoch != model_epoch || self.query != query {
+            self.epoch = model_epoch;
+            self.query.clear();
+            self.query.push_str(query);
+            self.view = BrowserFilter::build(model, query);
+            self.valid = true;
+        }
+        &self.view
+    }
+
+    pub fn reset(&mut self) {
+        self.epoch = 0;
+        self.query.clear();
+        self.view = BrowserFilter::default();
+        self.valid = false;
+    }
 }
 
 impl BrowserModel {
-    /// Build the tree from a snapshot, skipping tombstoned entities and topics
-    /// that carry no data yet.
     pub fn from_snapshot(snapshot: &StoreSnapshot) -> Self {
         let mut sources = Vec::new();
         for source in snapshot.sources.iter() {
@@ -75,6 +213,8 @@ impl BrowserModel {
                         None => range,
                     });
                 }
+                let topic_search_path =
+                    format!("{}/{}", source.entry.label, topic.entry.name).to_lowercase();
 
                 let mut fields: Vec<FieldNode> = snapshot
                     .fields
@@ -82,6 +222,9 @@ impl BrowserModel {
                     .filter(|f| f.topic == topic_id && !f.removed)
                     .map(|f| {
                         let schema = store.schema.field_by_name(&f.name);
+                        let (first_raw, last_raw) = schema
+                            .and_then(|schema| raw_endpoints(store, schema.name.as_str()))
+                            .unwrap_or((None, None));
                         FieldNode {
                             id: f.id,
                             name: f.name.clone(),
@@ -89,6 +232,9 @@ impl BrowserModel {
                             unit: schema.and_then(|s| s.unit.clone()),
                             description: schema.and_then(|s| s.description.clone()),
                             count: rows,
+                            first_raw,
+                            last_raw,
+                            search_path: format!("{topic_search_path}.{}", f.name).to_lowercase(),
                         }
                     })
                     .collect();
@@ -99,6 +245,7 @@ impl BrowserModel {
                     name: topic.entry.name.clone(),
                     rows,
                     fields,
+                    search_path: topic_search_path,
                 });
             }
             topics.sort_by(|a, b| natural_cmp(&a.name, &b.name));
@@ -111,6 +258,7 @@ impl BrowserModel {
                 range: source_range.and_then(|r| r.offset(offset_us)),
                 offset_us,
                 topics,
+                search_path: source.entry.label.to_lowercase(),
             });
         }
         Self { sources }
@@ -119,64 +267,15 @@ impl BrowserModel {
     pub fn is_empty(&self) -> bool {
         self.sources.is_empty()
     }
-
-    /// Filter the tree by a search query over full `source/topic.field` paths.
-    /// A field is kept when the query matches its full path; a
-    /// match at topic or source level keeps the whole branch. Empty branches
-    /// are pruned; a blank query is the identity.
-    pub fn filtered(&self, query: &str) -> Self {
-        if query.trim().is_empty() {
-            return self.clone();
-        }
-        let mut sources = Vec::new();
-        for source in &self.sources {
-            if matches_query(query, &source.label) {
-                sources.push(source.clone());
-                continue;
-            }
-            let mut topics = Vec::new();
-            for topic in &source.topics {
-                let topic_path = format!("{}/{}", source.label, topic.name);
-                if matches_query(query, &topic_path) {
-                    topics.push(topic.clone());
-                    continue;
-                }
-                let fields: Vec<FieldNode> = topic
-                    .fields
-                    .iter()
-                    .filter(|f| matches_query(query, &format!("{topic_path}.{}", f.name)))
-                    .cloned()
-                    .collect();
-                if !fields.is_empty() {
-                    topics.push(TopicNode {
-                        fields,
-                        ..topic.clone()
-                    });
-                }
-            }
-            if !topics.is_empty() {
-                sources.push(SourceNode {
-                    topics,
-                    ..source.clone()
-                });
-            }
-        }
-        Self { sources }
-    }
 }
 
-/// How a click modifies the selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelectMod {
-    /// Plain click: the field becomes the whole selection.
     Replace,
-    /// Ctrl-click: toggle the field in/out.
     Toggle,
-    /// Shift-click: select the visible range from the anchor to the field.
     Range,
 }
 
-/// Multi-select state for the browser tree. Pure data —
 /// `visible` is the tree's current field order so ranges and payloads follow
 /// what the user sees.
 #[derive(Debug, Default)]
@@ -218,9 +317,8 @@ impl Selection {
         }
     }
 
-    /// Start a drag from `field`, updating selection the same way file
-    /// browsers do: dragging an already selected field preserves a multi-field
-    /// payload, while dragging an unselected field makes it the selection.
+    /// Dragging an already-selected field preserves the multi-field payload;
+    /// dragging an unselected field makes it the selection.
     pub fn start_drag(&mut self, field: FieldId, modifier: SelectMod, visible: &[FieldId]) {
         if modifier == SelectMod::Replace && self.selected.contains(&field) {
             return;
@@ -232,7 +330,6 @@ impl Selection {
         self.selected.contains(&field)
     }
 
-    /// The selection in visible (tree) order.
     pub fn ordered(&self, visible: &[FieldId]) -> Vec<FieldId> {
         visible
             .iter()
@@ -241,8 +338,6 @@ impl Selection {
             .collect()
     }
 
-    /// The `Vec<FieldId>` drag payload: the whole selection when the
-    /// dragged field is part of it, otherwise just the dragged field.
     pub fn drag_payload(&self, dragged: FieldId, visible: &[FieldId]) -> Vec<FieldId> {
         if self.selected.contains(&dragged) {
             self.ordered(visible)
@@ -252,7 +347,7 @@ impl Selection {
     }
 }
 
-/// Natural order: digit runs compare numerically, text runs case-insensitively
+/// Digit runs compare numerically, text runs case-insensitively
 /// (`GPS[2]` before `GPS[10]`).
 fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     use std::cmp::Ordering;
@@ -286,7 +381,6 @@ fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     }
 }
 
-/// Consume a digit run as a number (saturating well past any real instance id).
 fn take_number(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> u128 {
     let mut value: u128 = 0;
     while let Some(c) = chars.peek().copied() {
@@ -301,39 +395,44 @@ fn take_number(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> u128 {
     value
 }
 
-/// Whitespace-separated query tokens each match the path case-insensitively
-/// (`gps hacc` matches `GPS[0].HAcc`). Blank queries match everything.
+/// Every whitespace-separated token must match the path case-insensitively;
+/// a blank query matches everything.
 pub(crate) fn matches_query(query: &str, path: &str) -> bool {
     let path = path.to_lowercase();
+    matches_lowercase_tokens(&lowercase_query_tokens(query), &path)
+}
+
+fn lowercase_query_tokens(query: &str) -> Vec<String> {
     query
         .split_whitespace()
-        .all(|token| path.contains(&token.to_lowercase()))
+        .map(|token| token.to_lowercase())
+        .collect()
+}
+
+fn matches_lowercase_tokens(tokens: &[String], lowercase_path: &str) -> bool {
+    tokens
+        .iter()
+        .all(|token| lowercase_path.contains(token.as_str()))
 }
 
 #[derive(Debug, Default)]
 pub struct BrowserResponse {
-    /// Requested per-source offset change, if any.
     pub offset_change: Option<(SourceId, i64)>,
-    /// The user right-clicked a source and asked to remove it.
     pub remove_source: Option<SourceId>,
-    /// The user requested source metadata/params/link information.
     pub inspect_source: Option<SourceId>,
-    /// The user requested global stats for a field.
+    pub inspect_field_metadata: Option<FieldId>,
     pub inspect_field_stats: Option<FieldId>,
-    /// The user asked to generate markers from a discrete field's values.
     pub generate_markers: Option<FieldId>,
-    /// The user asked to collapse the data browser panel.
     pub collapse_requested: bool,
 }
 
-/// A context-menu action from a field row.
 enum FieldRowAction {
+    InspectMetadata(FieldId),
     InspectStats(FieldId),
     GenerateMarkers(FieldId),
 }
 
-/// Whether a field's dtype label is discrete enough to generate markers from
-/// its distinct values (int/uint/bool/string; floats excluded).
+/// Discrete dtypes markers can be generated from (floats excluded).
 fn is_discrete_dtype(label: &str) -> bool {
     matches!(
         label,
@@ -345,6 +444,57 @@ fn hover_description(description: Option<&str>) -> Option<&str> {
     description.filter(|description| !description.is_empty())
 }
 
+fn raw_endpoints(
+    store: &delog_core::store::TopicStore,
+    field_name: &str,
+) -> Option<(Option<String>, Option<String>)> {
+    let field_index = store.schema.field_index(field_name)?;
+    let first_chunk = store.chunks.iter().find(|chunk| !chunk.is_empty())?;
+    let last_chunk = store.chunks.iter().rev().find(|chunk| !chunk.is_empty())?;
+    let first = first_chunk
+        .cols
+        .get(field_index)
+        .and_then(|array| raw_value_string(array, 0));
+    let last_row = last_chunk.len().checked_sub(1)?;
+    let last = last_chunk
+        .cols
+        .get(field_index)
+        .and_then(|array| raw_value_string(array, last_row));
+    Some((first, last))
+}
+
+fn raw_value_string(array: &ArrayRef, row: usize) -> Option<String> {
+    if row >= array.len() || array.is_null(row) {
+        return None;
+    }
+
+    let any = array.as_any();
+    match array.data_type() {
+        DataType::Int8 => Some(any.downcast_ref::<Int8Array>()?.value(row).to_string()),
+        DataType::Int16 => Some(any.downcast_ref::<Int16Array>()?.value(row).to_string()),
+        DataType::Int32 => Some(any.downcast_ref::<Int32Array>()?.value(row).to_string()),
+        DataType::Int64 => Some(any.downcast_ref::<Int64Array>()?.value(row).to_string()),
+        DataType::UInt8 => Some(any.downcast_ref::<UInt8Array>()?.value(row).to_string()),
+        DataType::UInt16 => Some(any.downcast_ref::<UInt16Array>()?.value(row).to_string()),
+        DataType::UInt32 => Some(any.downcast_ref::<UInt32Array>()?.value(row).to_string()),
+        DataType::UInt64 => Some(any.downcast_ref::<UInt64Array>()?.value(row).to_string()),
+        DataType::Float32 => Some(any.downcast_ref::<Float32Array>()?.value(row).to_string()),
+        DataType::Float64 => Some(any.downcast_ref::<Float64Array>()?.value(row).to_string()),
+        DataType::Boolean => Some(any.downcast_ref::<BooleanArray>()?.value(row).to_string()),
+        DataType::Utf8 => Some(any.downcast_ref::<StringArray>()?.value(row).to_owned()),
+        DataType::LargeUtf8 => Some(
+            any.downcast_ref::<LargeStringArray>()?
+                .value(row)
+                .to_owned(),
+        ),
+        _ => None,
+    }
+}
+
+fn display_endpoint(value: Option<&str>) -> &str {
+    value.unwrap_or("-")
+}
+
 pub fn panel_toggle_button_size(ui: &egui::Ui) -> egui::Vec2 {
     let side = ui.spacing().interact_size.y + ui.spacing().button_padding.x * 2.0;
     egui::Vec2::splat(side)
@@ -352,8 +502,10 @@ pub fn panel_toggle_button_size(ui: &egui::Ui) -> egui::Vec2 {
 
 pub fn ui(
     ui: &mut egui::Ui,
+    model_epoch: u64,
     model: &BrowserModel,
     query: &mut String,
+    filter_cache: &mut BrowserFilterCache,
     selection: &mut Selection,
     offset_dialog: &mut Option<(SourceId, i64)>,
 ) -> BrowserResponse {
@@ -394,37 +546,40 @@ pub fn ui(
     }
 
     let filtering = !query.trim().is_empty();
-    let filtered;
-    let model = if filtering {
-        filtered = model.filtered(query);
-        &filtered
-    } else {
-        model
-    };
-    if filtering && model.is_empty() {
+    let view = filter_cache.view(model_epoch, model, query);
+    if filtering && view.is_empty() {
         ui.add_space(8.0);
         ui.weak("Nothing matches the filter.");
         return response;
     }
 
-    // Visible field order, for shift-range selection and drag payloads.
-    let visible: Vec<FieldId> = model
+    let visible: Vec<FieldId> = view
         .sources
         .iter()
-        .flat_map(|s| s.topics.iter())
-        .flat_map(|t| t.fields.iter().map(|f| f.id))
+        .flat_map(|visible_source| {
+            let source = &model.sources[visible_source.source];
+            visible_source.topics.iter().flat_map(move |visible_topic| {
+                let topic = &source.topics[visible_topic.topic];
+                visible_topic
+                    .fields
+                    .iter()
+                    .map(move |&field_idx| topic.fields[field_idx].id)
+            })
+        })
         .collect();
 
     let mut offset_change = None;
     let mut remove_source = None;
     let mut inspect_source = None;
+    let mut inspect_field_metadata = None;
     let mut inspect_field_stats = None;
     let mut generate_markers = None;
     egui::ScrollArea::vertical()
         .auto_shrink([false, true])
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            for source in &model.sources {
+            for visible_source in &view.sources {
+                let source = &model.sources[visible_source.source];
                 let header = format!("{}  ({} rows)", source.label, source.rows);
                 let collapsing = egui::CollapsingHeader::new(header)
                     .id_salt(("source", source.id.0))
@@ -442,29 +597,78 @@ pub fn ui(
                                 offset_change = Some(change);
                             }
                         });
-                        for topic in &source.topics {
-                            // While filtering, surviving topics open so the
-                            // matched fields are visible immediately.
-                            egui::CollapsingHeader::new(format!(
-                                "{}  ({})",
-                                topic.name, topic.rows
-                            ))
-                            .id_salt(("topic", topic.id.0))
-                            .default_open(false)
-                            .open(filtering.then_some(true))
-                            .show(ui, |ui| {
-                                for field in &topic.fields {
-                                    match field_row(ui, field, selection, &visible) {
-                                        Some(FieldRowAction::InspectStats(f)) => {
-                                            inspect_field_stats = Some(f);
+                        for visible_topic in &visible_source.topics {
+                            let topic = &source.topics[visible_topic.topic];
+                            let topic_id = ui.make_persistent_id(("topic", topic.id.0));
+                            let mut state =
+                                egui::collapsing_header::CollapsingState::load_with_default_open(
+                                    ui.ctx(),
+                                    topic_id,
+                                    false,
+                                );
+                            // Filtering force-opens for display only; restore
+                            // the real state afterwards.
+                            let stored_open = state.is_open();
+                            if filtering {
+                                state.set_open(true);
+                            }
+                            let (toggle_button, header_inner, _body) = state
+                                .show_header(ui, |ui| {
+                                    ui.label(&topic.name);
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            ui.weak(format!("({})", topic.rows));
+                                        },
+                                    );
+                                })
+                                .body(|ui| {
+                                    field_table_header(ui);
+                                    for &field_idx in &visible_topic.fields {
+                                        let field = &topic.fields[field_idx];
+                                        match field_table_row(ui, field, selection, &visible) {
+                                            Some(FieldRowAction::InspectMetadata(f)) => {
+                                                inspect_field_metadata = Some(f);
+                                            }
+                                            Some(FieldRowAction::InspectStats(f)) => {
+                                                inspect_field_stats = Some(f);
+                                            }
+                                            Some(FieldRowAction::GenerateMarkers(f)) => {
+                                                generate_markers = Some(f);
+                                            }
+                                            None => {}
                                         }
-                                        Some(FieldRowAction::GenerateMarkers(f)) => {
-                                            generate_markers = Some(f);
-                                        }
-                                        None => {}
                                     }
-                                }
-                            });
+                                });
+                            // Overlay click target on top of the labels (which
+                            // would otherwise swallow clicks) so the whole row
+                            // toggles the topic.
+                            let header_click = ui
+                                .interact(
+                                    header_inner.response.rect,
+                                    topic_id.with("header_click"),
+                                    egui::Sense::click(),
+                                )
+                                .on_hover_cursor(egui::CursorIcon::PointingHand);
+                            if header_click.clicked() && !toggle_button.clicked() {
+                                let mut clicked_state =
+                                    egui::collapsing_header::CollapsingState::load_with_default_open(
+                                        ui.ctx(),
+                                        topic_id,
+                                        false,
+                                    );
+                                clicked_state.toggle(ui);
+                                clicked_state.store(ui.ctx());
+                            }
+                            if filtering {
+                                let mut restored = egui::collapsing_header::CollapsingState::load_with_default_open(
+                                    ui.ctx(),
+                                    topic_id,
+                                    false,
+                                );
+                                restored.set_open(stored_open);
+                                restored.store(ui.ctx());
+                            }
                         }
                     });
                 collapsing.header_response.context_menu(|ui| {
@@ -498,13 +702,12 @@ pub fn ui(
     response.offset_change = offset_change;
     response.remove_source = remove_source;
     response.inspect_source = inspect_source;
+    response.inspect_field_metadata = inspect_field_metadata;
     response.inspect_field_stats = inspect_field_stats;
     response.generate_markers = generate_markers;
     response
 }
 
-/// Inline drag-us offset on the source row: dragging
-/// shifts the source in ~1 ms steps; the clock button opens the exact-us dialog.
 fn offset_widget(
     ui: &mut egui::Ui,
     source: &SourceNode,
@@ -535,8 +738,6 @@ fn offset_widget(
     change
 }
 
-/// Exact-µs offset dialog. The draft lives in app state; Apply emits
-/// the change and the window's close button discards it.
 fn offset_dialog_window(
     ui: &egui::Ui,
     model: &BrowserModel,
@@ -577,25 +778,123 @@ fn offset_dialog_window(
     change
 }
 
-fn field_row(
+const FIELD_COL: f32 = 0.34;
+const FIRST_COL: f32 = 0.22;
+const LAST_COL: f32 = 0.22;
+const UNIT_COL: f32 = 0.11;
+const TYPE_COL: f32 = 0.11;
+
+fn field_table_header(ui: &mut egui::Ui) {
+    egui::Frame::new()
+        .inner_margin(egui::Margin::symmetric(4, 1))
+        .show(ui, |ui| {
+            let width = (ui.available_width() - ui.spacing().item_spacing.x * 4.0).max(0.0);
+            ui.horizontal(|ui| {
+                field_table_cell(ui, width * FIELD_COL, egui::RichText::new(""), None);
+                field_table_cell(ui, width * FIRST_COL, egui::RichText::new("first"), None);
+                field_table_cell(ui, width * LAST_COL, egui::RichText::new("last"), None);
+                field_table_cell(ui, width * UNIT_COL, egui::RichText::new("unit"), None);
+                field_table_cell(ui, width * TYPE_COL, egui::RichText::new("type"), None);
+            });
+        });
+}
+
+fn field_table_row(
     ui: &mut egui::Ui,
     field: &FieldNode,
     selection: &mut Selection,
     visible: &[FieldId],
 ) -> Option<FieldRowAction> {
+    field_row(ui, field, selection, visible, |ui, field, selected| {
+        let width = (ui.available_width() - ui.spacing().item_spacing.x * 4.0).max(0.0);
+        let name_color = if selected {
+            ui.visuals().selection.stroke.color
+        } else {
+            ui.visuals().text_color()
+        };
+        let first = display_endpoint(field.first_raw.as_deref());
+        let last = display_endpoint(field.last_raw.as_deref());
+        let unit = field.unit.as_deref().unwrap_or("-");
+        ui.horizontal(|ui| {
+            field_table_cell(
+                ui,
+                width * FIELD_COL,
+                egui::RichText::new(&field.name).color(name_color),
+                cell_hover_text(&field.name),
+            );
+            field_table_cell(
+                ui,
+                width * FIRST_COL,
+                egui::RichText::new(first).weak(),
+                cell_hover_text(first),
+            );
+            field_table_cell(
+                ui,
+                width * LAST_COL,
+                egui::RichText::new(last).weak(),
+                cell_hover_text(last),
+            );
+            field_table_cell(
+                ui,
+                width * UNIT_COL,
+                egui::RichText::new(unit).weak(),
+                cell_hover_text(unit),
+            );
+            field_table_cell(
+                ui,
+                width * TYPE_COL,
+                egui::RichText::new(field.dtype).weak(),
+                cell_hover_text(field.dtype),
+            );
+        });
+    })
+}
+
+fn field_table_cell(
+    ui: &mut egui::Ui,
+    width: f32,
+    text: impl Into<egui::WidgetText>,
+    hover_text: Option<&str>,
+) {
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, 18.0),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.set_min_width(width);
+            let response = ui.add(egui::Label::new(text).truncate());
+            if let Some(hover_text) = hover_text {
+                response.on_hover_text(hover_text);
+            }
+        },
+    );
+}
+
+fn cell_hover_text(value: &str) -> Option<&str> {
+    (value != "-").then_some(value)
+}
+
+fn field_row(
+    ui: &mut egui::Ui,
+    field: &FieldNode,
+    selection: &mut Selection,
+    visible: &[FieldId],
+    add_contents: impl FnOnce(&mut egui::Ui, &FieldNode, bool),
+) -> Option<FieldRowAction> {
     let mut action = None;
-    // The row is a drag source carrying `Vec<FieldId>` — the multi-selection
-    // when the dragged row is part of it; plot panes and tile
-    // edges are the drop zones.
     let id = egui::Id::new(("field", field.id.0));
     let dragging_this_field = ui.ctx().is_being_dragged(id);
     if dragging_this_field {
         selection.start_drag(field.id, current_select_modifier(ui), visible);
     }
     let payload = selection.drag_payload(field.id, visible);
+    let drag_label = if payload.len() > 1 {
+        format!("{} fields", payload.len())
+    } else {
+        field.name.clone()
+    };
     let selected = selection.contains(field.id);
 
-    let response = drag_source_with_click(ui, id, payload, |ui| {
+    let response = drag_source_with_click(ui, id, payload, &drag_label, |ui| {
         let fill = if selected {
             ui.visuals().selection.bg_fill
         } else {
@@ -605,18 +904,7 @@ fn field_row(
             .fill(fill)
             .inner_margin(egui::Margin::symmetric(4, 1))
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    let name_color = if selected {
-                        ui.visuals().selection.stroke.color
-                    } else {
-                        ui.visuals().text_color()
-                    };
-                    ui.label(egui::RichText::new(&field.name).color(name_color));
-                    ui.weak(field.dtype);
-                    if let Some(unit) = &field.unit {
-                        ui.weak(format!("[{unit}]"));
-                    }
-                });
+                add_contents(ui, field, selected);
             });
     });
     let response = if let Some(description) = hover_description(field.description.as_deref()) {
@@ -633,11 +921,24 @@ fn field_row(
         }
     }
     response.context_menu(|ui| {
-        let info = egui::Image::new(crate::icons::info())
+        let metadata_info = egui::Image::new(crate::icons::info())
             .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
             .tint(ui.visuals().text_color());
         if ui
-            .add(egui::Button::image_and_text(info, "Field stats"))
+            .add(egui::Button::image_and_text(
+                metadata_info,
+                "Field metadata",
+            ))
+            .clicked()
+        {
+            action = Some(FieldRowAction::InspectMetadata(field.id));
+            ui.close();
+        }
+        let stats_info = egui::Image::new(crate::icons::info())
+            .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
+            .tint(ui.visuals().text_color());
+        if ui
+            .add(egui::Button::image_and_text(stats_info, "Field stats"))
             .clicked()
         {
             action = Some(FieldRowAction::InspectStats(field.id));
@@ -670,36 +971,44 @@ fn current_select_modifier(ui: &egui::Ui) -> SelectMod {
     }
 }
 
-/// `Ui::dnd_drag_source`, but the overlay senses clicks as well as drags so
-/// the whole row both selects (release without movement) and drags. egui's
-/// built-in drag source senses drag only, which fights any clickable widget
-/// rendered inside it.
+/// Like `Ui::dnd_drag_source`, but senses clicks too: egui's built-in drag
+/// source senses drag only, which fights any clickable widget inside it.
 fn drag_source_with_click<Payload: std::any::Any + Send + Sync>(
     ui: &mut egui::Ui,
     id: egui::Id,
     payload: Payload,
+    drag_label: &str,
     add_contents: impl FnOnce(&mut egui::Ui),
 ) -> egui::Response {
+    // Keep the row in place so the list stays stable during a drag.
+    let inner = ui.scope(add_contents).response;
+    let response = ui.interact(inner.rect, id, egui::Sense::click_and_drag());
+
     if ui.ctx().is_being_dragged(id) {
         egui::DragAndDrop::set_payload(ui.ctx(), payload);
-
-        // Paint the row to a floating layer that follows the pointer.
-        let layer_id = egui::LayerId::new(egui::Order::Tooltip, id);
-        let response = ui
-            .scope_builder(egui::UiBuilder::new().layer_id(layer_id), add_contents)
-            .response;
+        // A badge follows the cursor instead of lifting the rows out of the
+        // list, so the selection stays visible in the browser.
         if let Some(pointer_pos) = ui.ctx().pointer_interact_pos() {
-            let delta = pointer_pos - response.rect.center();
-            ui.ctx().transform_layer_shapes(
-                layer_id,
-                egui::emath::TSTransform::from_translation(delta),
-            );
+            egui::Area::new(id.with("drag_ghost"))
+                .order(egui::Order::Tooltip)
+                .fixed_pos(pointer_pos + egui::vec2(12.0, 8.0))
+                .interactable(false)
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::new()
+                        .fill(ui.visuals().selection.bg_fill)
+                        .inner_margin(egui::Margin::symmetric(6, 3))
+                        .corner_radius(4)
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(drag_label)
+                                    .color(ui.visuals().selection.stroke.color),
+                            );
+                        });
+                });
         }
-        response
+        response.on_hover_cursor(egui::CursorIcon::Grabbing)
     } else {
-        let response = ui.scope(add_contents).response;
-        ui.interact(response.rect, id, egui::Sense::click_and_drag())
-            .on_hover_cursor(egui::CursorIcon::Grab)
+        response.on_hover_cursor(egui::CursorIcon::Grab)
     }
 }
 
@@ -707,7 +1016,7 @@ fn drag_source_with_click<Payload: std::any::Any + Send + Sync>(
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::{ArrayRef, Float64Array, Int32Array, Int64Array};
+    use arrow::array::{ArrayRef, BooleanArray, Float64Array, Int32Array, Int64Array, StringArray};
     use arrow::datatypes::DataType;
     use delog_core::chunk::Chunk;
     use delog_core::identity::IdentityRegistry;
@@ -755,7 +1064,6 @@ mod tests {
         let src = &model.sources[0];
         assert_eq!(src.label, "flight_21");
         assert_eq!(src.rows, 3);
-        // Effective range: raw 100..300 shifted by the -250 µs source offset.
         assert_eq!(src.offset_us, -250);
         assert_eq!(src.range, TimeRange::new(-150, 50));
 
@@ -764,7 +1072,6 @@ mod tests {
         assert_eq!(gps.name, "GPS");
         assert_eq!(gps.rows, 3);
 
-        // Fields sort naturally: Alt before Lat.
         assert_eq!(gps.fields.len(), 2);
         assert_eq!(gps.fields[0].name, "Alt");
         assert_eq!(gps.fields[0].dtype, "f64");
@@ -773,6 +1080,91 @@ mod tests {
         assert_eq!(gps.fields[1].unit.as_deref(), Some("deg"));
         assert_eq!(gps.fields[1].description.as_deref(), Some("latitude"));
         assert_eq!(gps.fields[1].count, 3);
+    }
+
+    #[test]
+    fn model_includes_raw_first_and_last_values() {
+        let mut identity = IdentityRegistry::new();
+        let source = identity.add_source("flight");
+        let topic = identity.add_topic(source, "STAT").unwrap();
+        identity.add_field(topic, "Mode").unwrap();
+        identity.add_field(topic, "Armed").unwrap();
+        identity.add_field(topic, "Alt").unwrap();
+
+        let schema = Arc::new(
+            TopicSchema::new(
+                "STAT",
+                [
+                    FieldSchema::new("Mode", DataType::Utf8, None::<String>, 1.0).unwrap(),
+                    FieldSchema::new("Armed", DataType::Boolean, None::<String>, 1.0).unwrap(),
+                    FieldSchema::new("Alt", DataType::Float64, Some("m"), 0.01).unwrap(),
+                ],
+            )
+            .unwrap(),
+        );
+        let chunk = Arc::new(
+            Chunk::try_new(
+                Int64Array::from(vec![100, 200, 300]),
+                vec![
+                    Arc::new(StringArray::from(vec!["idle", "climb", "land"])) as ArrayRef,
+                    Arc::new(BooleanArray::from(vec![false, true, false])) as ArrayRef,
+                    Arc::new(Float64Array::from(vec![1200.0, 1234.5, 1300.0])) as ArrayRef,
+                ],
+                &schema,
+            )
+            .unwrap(),
+        );
+        let store = Arc::new(TopicStore::from_chunks(Arc::clone(&schema), [chunk]).unwrap());
+        let snapshot = StoreSnapshot::from_registry(&identity, [(topic, store)], 0).unwrap();
+
+        let model = BrowserModel::from_snapshot(&snapshot);
+        let fields = &model.sources[0].topics[0].fields;
+
+        let alt = fields.iter().find(|f| f.name == "Alt").unwrap();
+        assert_eq!(alt.first_raw.as_deref(), Some("1200"));
+        assert_eq!(alt.last_raw.as_deref(), Some("1300"));
+
+        let armed = fields.iter().find(|f| f.name == "Armed").unwrap();
+        assert_eq!(armed.first_raw.as_deref(), Some("false"));
+        assert_eq!(armed.last_raw.as_deref(), Some("false"));
+
+        let mode = fields.iter().find(|f| f.name == "Mode").unwrap();
+        assert_eq!(mode.first_raw.as_deref(), Some("idle"));
+        assert_eq!(mode.last_raw.as_deref(), Some("land"));
+    }
+
+    #[test]
+    fn raw_endpoint_values_are_none_for_nulls() {
+        let mut identity = IdentityRegistry::new();
+        let source = identity.add_source("flight");
+        let topic = identity.add_topic(source, "STAT").unwrap();
+        identity.add_field(topic, "Alt").unwrap();
+
+        let schema = Arc::new(
+            TopicSchema::new(
+                "STAT",
+                [FieldSchema::new("Alt", DataType::Float64, Some("m"), 1.0).unwrap()],
+            )
+            .unwrap(),
+        );
+        let chunk = Arc::new(
+            Chunk::try_new(
+                Int64Array::from(vec![100, 200]),
+                vec![Arc::new(Float64Array::from(vec![None, Some(42.0)])) as ArrayRef],
+                &schema,
+            )
+            .unwrap(),
+        );
+        let store = Arc::new(TopicStore::from_chunks(Arc::clone(&schema), [chunk]).unwrap());
+        let snapshot = StoreSnapshot::from_registry(&identity, [(topic, store)], 0).unwrap();
+
+        let model = BrowserModel::from_snapshot(&snapshot);
+        let alt = &model.sources[0].topics[0].fields[0];
+
+        assert_eq!(alt.first_raw, None);
+        assert_eq!(alt.last_raw.as_deref(), Some("42"));
+        assert_eq!(display_endpoint(None), "-");
+        assert_eq!(display_endpoint(Some("42")), "42");
     }
 
     #[test]
@@ -811,7 +1203,6 @@ mod tests {
             sel.ordered(&visible),
             vec![FieldId(2), FieldId(3), FieldId(4)]
         );
-        // Range works upward from the anchor too.
         sel.click(FieldId(1), SelectMod::Range, &visible);
         assert_eq!(sel.ordered(&visible), vec![FieldId(1), FieldId(2)]);
     }
@@ -822,12 +1213,10 @@ mod tests {
         let mut sel = Selection::default();
         sel.click(FieldId(1), SelectMod::Toggle, &visible);
         sel.click(FieldId(3), SelectMod::Toggle, &visible);
-        // Dragging a selected field carries the whole selection.
         assert_eq!(
             sel.drag_payload(FieldId(3), &visible),
             vec![FieldId(1), FieldId(3)]
         );
-        // Dragging an unselected field carries just that field.
         assert_eq!(sel.drag_payload(FieldId(2), &visible), vec![FieldId(2)]);
     }
 
@@ -862,15 +1251,11 @@ mod tests {
     #[test]
     fn natural_cmp_orders_embedded_numbers_numerically() {
         use std::cmp::Ordering;
-        // GPS[2] before GPS[10].
         assert_eq!(natural_cmp("GPS[2]", "GPS[10]"), Ordering::Less);
         assert_eq!(natural_cmp("GPS[10]", "GPS[2]"), Ordering::Greater);
         assert_eq!(natural_cmp("GPS[2]", "GPS[2]"), Ordering::Equal);
-        // Case-insensitive text runs.
         assert_eq!(natural_cmp("baro", "GPS"), Ordering::Less);
-        // Plain text still sorts lexically.
         assert_eq!(natural_cmp("AccX", "AccY"), Ordering::Less);
-        // Numbers with different digit counts.
         assert_eq!(natural_cmp("M9", "M10"), Ordering::Less);
     }
 
@@ -878,7 +1263,6 @@ mod tests {
     fn model_topics_and_fields_sort_naturally() {
         let mut identity = IdentityRegistry::new();
         let source = identity.add_source("flight");
-        // Insert out of order: GPS[10] registered before GPS[2].
         let gps10 = identity.add_topic(source, "GPS[10]").unwrap();
         let gps2 = identity.add_topic(source, "GPS[2]").unwrap();
         identity.add_field(gps10, "Y2").unwrap();
@@ -943,14 +1327,11 @@ mod tests {
 
     #[test]
     fn query_tokens_match_full_paths_case_insensitively() {
-        // "gps hacc" matches GPS[0].HAcc.
         assert!(matches_query("gps hacc", "flight_21/GPS[0].HAcc"));
         assert!(matches_query("GPS", "flight_21/GPS[0].HAcc"));
         assert!(matches_query("flight hacc", "flight_21/GPS[0].HAcc"));
         assert!(!matches_query("baro", "flight_21/GPS[0].HAcc"));
-        // Every token must match somewhere in the path.
         assert!(!matches_query("gps baro", "flight_21/GPS[0].HAcc"));
-        // Blank queries match everything.
         assert!(matches_query("", "anything"));
         assert!(matches_query("   ", "anything"));
     }
@@ -963,27 +1344,69 @@ mod tests {
     }
 
     #[test]
-    fn filtered_model_retains_matching_fields_and_prunes_empty_branches() {
+    fn filter_view_retains_matching_fields_and_prunes_empty_branches() {
         let model = BrowserModel::from_snapshot(&snapshot());
+        let view = BrowserFilter::build(&model, "gps lat");
 
-        let lat = model.filtered("gps lat");
-        assert_eq!(lat.sources.len(), 1);
-        assert_eq!(lat.sources[0].topics.len(), 1);
-        let fields: Vec<_> = lat.sources[0].topics[0]
+        assert!(!view.is_empty());
+        assert_eq!(view.sources.len(), 1);
+        assert_eq!(view.sources[0].source, 0);
+        assert_eq!(view.sources[0].topics.len(), 1);
+        assert_eq!(view.sources[0].topics[0].topic, 0);
+
+        let field_names: Vec<_> = view.sources[0].topics[0]
             .fields
             .iter()
-            .map(|f| f.name.as_str())
+            .map(|&field_idx| model.sources[0].topics[0].fields[field_idx].name.as_str())
             .collect();
-        assert_eq!(fields, vec!["Lat"]);
+        assert_eq!(field_names, vec!["Lat"]);
+    }
 
-        // A topic-level match keeps all its fields.
-        let gps = model.filtered("gps");
-        assert_eq!(gps.sources[0].topics[0].fields.len(), 2);
+    #[test]
+    fn filter_view_preserves_branch_match_semantics() {
+        let model = BrowserModel::from_snapshot(&snapshot());
 
-        // No match prunes everything.
-        assert!(model.filtered("nonexistent").is_empty());
+        let source = BrowserFilter::build(&model, "flight");
+        assert_eq!(source.sources.len(), 1);
+        assert_eq!(source.sources[0].topics.len(), 1);
+        assert_eq!(source.sources[0].topics[0].fields.len(), 2);
 
-        // Blank query is the identity.
-        assert_eq!(model.filtered(""), model);
+        let topic = BrowserFilter::build(&model, "gps");
+        assert_eq!(topic.sources.len(), 1);
+        assert_eq!(topic.sources[0].topics.len(), 1);
+        assert_eq!(topic.sources[0].topics[0].fields.len(), 2);
+
+        let field = BrowserFilter::build(&model, "lat");
+        let field_names: Vec<_> = field.sources[0].topics[0]
+            .fields
+            .iter()
+            .map(|&field_idx| model.sources[0].topics[0].fields[field_idx].name.as_str())
+            .collect();
+        assert_eq!(field_names, vec!["Lat"]);
+
+        assert!(BrowserFilter::build(&model, "nonexistent").is_empty());
+        assert_eq!(BrowserFilter::build(&model, ""), BrowserFilter::all(&model));
+    }
+
+    #[test]
+    fn filter_cache_reuses_results_until_query_or_epoch_changes() {
+        let model = BrowserModel::from_snapshot(&snapshot());
+        let mut changed = model.clone();
+        changed.sources[0].topics[0]
+            .fields
+            .retain(|field| field.name != "Lat");
+        let mut cache = BrowserFilterCache::default();
+
+        let blank = cache.view(1, &model, "");
+        assert_eq!(blank.sources[0].topics[0].fields.len(), 2);
+
+        let lat = cache.view(1, &model, "lat");
+        assert_eq!(lat.sources[0].topics[0].fields.len(), 1);
+
+        let lat_after_epoch_change = cache.view(2, &changed, "lat");
+        assert!(lat_after_epoch_change.is_empty());
+
+        let blank_again = cache.view(2, &changed, "");
+        assert_eq!(blank_again.sources[0].topics[0].fields.len(), 1);
     }
 }
