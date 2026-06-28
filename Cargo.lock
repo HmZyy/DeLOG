@@ -912,7 +912,7 @@ checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 
 [[package]]
 name = "delog-app"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "arrow",
  "bytemuck",
@@ -938,7 +938,7 @@ dependencies = [
 
 [[package]]
 name = "delog-cache"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "arrow",
  "criterion",
@@ -948,7 +948,7 @@ dependencies = [
 
 [[package]]
 name = "delog-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "arc-swap",
  "arrow",
@@ -958,7 +958,7 @@ dependencies = [
 
 [[package]]
 name = "delog-parsers"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "arrow",
  "criterion",
@@ -969,7 +969,7 @@ dependencies = [
 
 [[package]]
 name = "delog-render"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "arrow",
  "bytemuck",
@@ -986,7 +986,7 @@ dependencies = [
 
 [[package]]
 name = "delog-script"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "arrow",
  "criterion",
@@ -1001,7 +1001,7 @@ dependencies = [
 
 [[package]]
 name = "delog-stream"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "arrow",
  "criterion",
