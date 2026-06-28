@@ -47,6 +47,8 @@ pub struct AppSettings {
     pub show_debug_overlay: bool,
     #[serde(default)]
     pub render_mode: RenderMode,
+    #[serde(default = "default_true")]
+    pub vsync: bool,
     #[serde(default)]
     pub live_connection: LiveConnectionSettings,
     #[serde(default)]
@@ -67,6 +69,7 @@ impl Default for AppSettings {
             show_fps: false,
             show_debug_overlay: false,
             render_mode: RenderMode::default(),
+            vsync: true,
             live_connection: LiveConnectionSettings::default(),
             scene3d: Scene3dSettings::default(),
             plot: PlotDisplay::default(),
@@ -264,8 +267,8 @@ impl Default for RenderTuning {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RenderMode {
-    #[default]
     Reactive,
+    #[default]
     Continuous,
 }
 
@@ -575,6 +578,13 @@ fn general_tab(ui: &mut egui::Ui, settings: &mut AppSettings) -> SettingsChange 
                         ui.selectable_value(&mut settings.render_mode, mode, mode.label());
                     }
                 });
+            ui.end_row();
+
+            ui.label("VSync").on_hover_text(
+                "Synchronize frames to the monitor's refresh rate to avoid tearing. \
+                     Disable to uncap the frame rate. Takes effect after restarting DeLOG.",
+            );
+            ui.checkbox(&mut settings.vsync, "");
             ui.end_row();
 
             let f = &mut settings.font;
@@ -938,10 +948,11 @@ mod tests {
     }
 
     #[test]
-    fn default_settings_hide_fps_and_render_reactively() {
+    fn default_settings_hide_fps_render_continuously_and_enable_vsync() {
         let s = AppSettings::default();
         assert!(!s.show_fps);
-        assert_eq!(s.render_mode, RenderMode::Reactive);
+        assert_eq!(s.render_mode, RenderMode::Continuous);
+        assert!(s.vsync);
     }
 
     #[test]
@@ -949,7 +960,8 @@ mod tests {
         let json = r#"{"theme":"catppuccin_mocha"}"#;
         let s: AppSettings = serde_json::from_str(json).unwrap();
         assert!(!s.show_fps);
-        assert_eq!(s.render_mode, RenderMode::Reactive);
+        assert_eq!(s.render_mode, RenderMode::Continuous);
+        assert!(s.vsync);
         assert!(!s.live_connection.recording_enabled);
         assert!(s.live_connection.recording_dir.is_empty());
     }

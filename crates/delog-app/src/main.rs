@@ -52,27 +52,27 @@ fn main() -> eframe::Result {
 }
 
 fn app_native_options() -> eframe::NativeOptions {
+    // VSync is configured once at surface creation, so it must be read from the
+    // persisted settings here rather than at app construction.
+    let vsync = crate::layout::load_app_settings().vsync;
+
     let mut options = eframe::NativeOptions {
         viewport: app_viewport(),
         renderer: eframe::Renderer::Wgpu,
+        // `NativeOptions.vsync` only affects the glow backend; the wgpu backend
+        // ignores it and reads `wgpu_options.present_mode`. Set both so the
+        // setting works regardless of renderer. `Fifo` is the canonical, always-
+        // supported vsync mode (hard-caps to the monitor refresh rate).
+        vsync,
         ..Default::default()
     };
-
-    configure_file_drop_backend(&mut options);
+    options.wgpu_options.present_mode = if vsync {
+        eframe::wgpu::PresentMode::Fifo
+    } else {
+        eframe::wgpu::PresentMode::AutoNoVsync
+    };
 
     options
-}
-
-#[cfg(target_os = "linux")]
-fn configure_file_drop_backend(options: &mut eframe::NativeOptions) {
-    options.event_loop_builder = Some(Box::new(|builder| {
-        use winit::platform::x11::EventLoopBuilderExtX11 as _;
-        builder.with_x11();
-    }));
-}
-
-#[cfg(not(target_os = "linux"))]
-fn configure_file_drop_backend(_options: &mut eframe::NativeOptions) {
 }
 
 /// Filter via `RUST_LOG` (default `info`). The panic hook records the panic
@@ -103,7 +103,6 @@ fn app_viewport() -> egui::ViewportBuilder {
         .with_icon(app_icon())
         .with_inner_size([1280.0, 800.0])
         .with_min_inner_size([1024.0, 640.0])
-        .with_drag_and_drop(true)
 }
 
 /// 256x256 RGBA decoded from `docs/logo.png` by `build.rs` into `OUT_DIR`.
@@ -119,18 +118,6 @@ fn app_icon() -> egui::IconData {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn app_viewport_enables_native_file_drag_and_drop() {
-        assert_eq!(app_viewport().drag_and_drop, Some(true));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn app_native_options_force_x11_backend_for_file_drag_and_drop() {
-        let options = app_native_options();
-        assert!(options.event_loop_builder.is_some());
-    }
 
     #[test]
     fn app_icon_is_256x256_rgba() {
