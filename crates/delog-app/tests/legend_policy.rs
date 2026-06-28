@@ -10,6 +10,9 @@ fn legend_panel_uses_bounded_vertical_scroll_area() {
     assert!(LEGEND_SOURCE.contains(".truncate()"));
     assert!(LEGEND_SOURCE.contains("fn legend_trace_label_width"));
     assert!(LEGEND_SOURCE.contains("fn legend_label_width"));
-    assert!(LEGEND_SOURCE.contains("ui.add_sized(egui::vec2(label_width"));
+    assert!(LEGEND_SOURCE.contains("ui.add_sized("));
+    assert!(LEGEND_SOURCE.contains("egui::vec2(label_width"));
     assert!(LEGEND_SOURCE.contains("LEGEND_TEXT_FILTER_WIDTH"));
+    assert!(LEGEND_SOURCE.contains(".min_scrolled_height("));
+    assert!(LEGEND_SOURCE.contains("LEGEND_DELTA_RESERVE_WIDTH"));
 }
