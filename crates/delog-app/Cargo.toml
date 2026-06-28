@@ -25,6 +25,7 @@ default = ["scripting"]
 scripting = ["dep:delog-script", "delog-script/python", "dep:egui_code_editor"]
 
 [dependencies]
+arrow = { workspace = true }
 delog-core = { workspace = true }
 delog-parsers = { workspace = true }
 delog-stream = { workspace = true }
@@ -45,7 +46,3 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 winit = { workspace = true }
-
-[dev-dependencies]
-# Test fixtures build Arrow arrays directly; production app code never does.
-arrow = { workspace = true }
