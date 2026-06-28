@@ -18,8 +18,11 @@ const LEGEND_INSET: f32 = 8.0;
 /// Minimum positive dimension passed to egui sizing APIs for degenerate plots.
 const MIN_LEGEND_CONTENT_EXTENT: f32 = 1.0;
 
+// Desired width of the optional text-filter editor.
 const LEGEND_TEXT_FILTER_WIDTH: f32 = 90.0;
+// Keeps truncated labels clickable even in very narrow legends.
 const LEGEND_MIN_LABEL_WIDTH: f32 = 24.0;
+// Must match the bounded delta label width below.
 const LEGEND_DELTA_RESERVE_WIDTH: f32 = 96.0;
 
 fn legend_bounds(plot_rect: egui::Rect) -> egui::Rect {
@@ -112,6 +115,9 @@ pub fn ui(
                 egui::ScrollArea::vertical()
                     .max_width(content_max_size.x)
                     .max_height(content_max_size.y)
+                    .min_scrolled_height(
+                        content_max_size.y.min(64.0).max(MIN_LEGEND_CONTENT_EXTENT),
+                    )
                     .show(ui, |ui| {
                         for (field, label) in labels {
                             let is_text = crate::text_overlay::field_is_string(snapshot, *field);
@@ -146,18 +152,26 @@ pub fn ui(
                                     egui::Label::new(egui::RichText::new(label).color(text_color))
                                         .truncate()
                                         .sense(egui::Sense::click());
-                                let resp = ui.add_sized(egui::vec2(label_width,
-                                    ui.spacing().interact_size.y,
-                                ), label_widget);
+                                let resp = ui.add_sized(
+                                    egui::vec2(label_width, ui.spacing().interact_size.y),
+                                    label_widget,
+                                );
                                 if resp.clicked() {
                                     trace.visible = !trace.visible;
                                 }
 
                                 if let Some(delta) = deltas.get(field) {
-                                    ui.label(
-                                        egui::RichText::new(format!("d {delta}"))
-                                            .color(ui.visuals().hyperlink_color)
-                                            .weak(),
+                                    ui.add_sized(
+                                        egui::vec2(
+                                            LEGEND_DELTA_RESERVE_WIDTH,
+                                            ui.spacing().interact_size.y,
+                                        ),
+                                        egui::Label::new(
+                                            egui::RichText::new(format!("d {delta}"))
+                                                .color(ui.visuals().hyperlink_color)
+                                                .weak(),
+                                        )
+                                        .truncate(),
                                     );
                                 }
 
@@ -202,13 +216,14 @@ pub fn ui(
                                 );
                                 let label = format!("{}.{} (missing)", ghost.topic, ghost.field);
                                 let label_width = legend_label_width(ui, 0.0);
-                                ui.add_sized(egui::vec2(label_width,
-                                    ui.spacing().interact_size.y,
-                                ), egui::Label::new(
-                                    egui::RichText::new(label)
-                                        .color(ui.visuals().weak_text_color()),
-                                )
-                                .truncate());
+                                ui.add_sized(
+                                    egui::vec2(label_width, ui.spacing().interact_size.y),
+                                    egui::Label::new(
+                                        egui::RichText::new(label)
+                                            .color(ui.visuals().weak_text_color()),
+                                    )
+                                    .truncate(),
+                                );
                             });
                         }
                     });
