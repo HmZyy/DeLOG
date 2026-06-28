@@ -491,6 +491,13 @@ enum PipelineKind {
     Columns,
 }
 
+/// Pad a visible index range `[a, b)` over `n` samples by one sample of context
+/// each side so the line segments entering/leaving the viewport are drawn.
+/// Clamps to `[0, n]`.
+fn pad_window(a: usize, b: usize, n: usize) -> (usize, usize) {
+    (a.saturating_sub(1), (b + 1).min(n))
+}
+
 /// Consecutive same-pipeline runs in draw order (one `set_pipeline` each).
 /// Order-preserving so trace overlap (z-order) is unchanged.
 fn pipeline_runs(kinds: impl Iterator<Item = PipelineKind>) -> Vec<(PipelineKind, u32)> {
@@ -1063,6 +1070,23 @@ pub fn apply_zoom(view: &mut ViewX, cursor_frac: f32, scroll: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pad_window_adds_one_sample_of_context_each_side() {
+        assert_eq!(pad_window(10, 20, 100), (9, 21));
+    }
+
+    #[test]
+    fn pad_window_clamps_at_buffer_ends() {
+        assert_eq!(pad_window(0, 100, 100), (0, 100)); // both ends clamp
+        assert_eq!(pad_window(0, 5, 100), (0, 6)); // low clamps, high pads
+        assert_eq!(pad_window(95, 100, 100), (94, 100)); // low pads, high clamps
+    }
+
+    #[test]
+    fn pad_window_handles_empty() {
+        assert_eq!(pad_window(0, 0, 0), (0, 0));
+    }
 
     #[test]
     fn batching_groups_consecutive_items_into_one_bind_per_pipeline_run() {
