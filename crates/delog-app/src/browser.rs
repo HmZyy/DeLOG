@@ -599,31 +599,76 @@ pub fn ui(
                         });
                         for visible_topic in &visible_source.topics {
                             let topic = &source.topics[visible_topic.topic];
-                            egui::CollapsingHeader::new(format!(
-                                "{}  ({})",
-                                topic.name, topic.rows
-                            ))
-                            .id_salt(("topic", topic.id.0))
-                            .default_open(false)
-                            .open(filtering.then_some(true))
-                            .show(ui, |ui| {
-                                field_table_header(ui);
-                                for &field_idx in &visible_topic.fields {
-                                    let field = &topic.fields[field_idx];
-                                    match field_table_row(ui, field, selection, &visible) {
-                                        Some(FieldRowAction::InspectMetadata(f)) => {
-                                            inspect_field_metadata = Some(f);
+                            let topic_id = ui.make_persistent_id(("topic", topic.id.0));
+                            let mut state =
+                                egui::collapsing_header::CollapsingState::load_with_default_open(
+                                    ui.ctx(),
+                                    topic_id,
+                                    false,
+                                );
+                            // Filtering force-opens for display only; restore
+                            // the real state afterwards.
+                            let stored_open = state.is_open();
+                            if filtering {
+                                state.set_open(true);
+                            }
+                            let (toggle_button, header_inner, _body) = state
+                                .show_header(ui, |ui| {
+                                    ui.label(&topic.name);
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            ui.weak(format!("({})", topic.rows));
+                                        },
+                                    );
+                                })
+                                .body(|ui| {
+                                    field_table_header(ui);
+                                    for &field_idx in &visible_topic.fields {
+                                        let field = &topic.fields[field_idx];
+                                        match field_table_row(ui, field, selection, &visible) {
+                                            Some(FieldRowAction::InspectMetadata(f)) => {
+                                                inspect_field_metadata = Some(f);
+                                            }
+                                            Some(FieldRowAction::InspectStats(f)) => {
+                                                inspect_field_stats = Some(f);
+                                            }
+                                            Some(FieldRowAction::GenerateMarkers(f)) => {
+                                                generate_markers = Some(f);
+                                            }
+                                            None => {}
                                         }
-                                        Some(FieldRowAction::InspectStats(f)) => {
-                                            inspect_field_stats = Some(f);
-                                        }
-                                        Some(FieldRowAction::GenerateMarkers(f)) => {
-                                            generate_markers = Some(f);
-                                        }
-                                        None => {}
                                     }
-                                }
-                            });
+                                });
+                            // Overlay click target on top of the labels (which
+                            // would otherwise swallow clicks) so the whole row
+                            // toggles the topic.
+                            let header_click = ui
+                                .interact(
+                                    header_inner.response.rect,
+                                    topic_id.with("header_click"),
+                                    egui::Sense::click(),
+                                )
+                                .on_hover_cursor(egui::CursorIcon::PointingHand);
+                            if header_click.clicked() && !toggle_button.clicked() {
+                                let mut clicked_state =
+                                    egui::collapsing_header::CollapsingState::load_with_default_open(
+                                        ui.ctx(),
+                                        topic_id,
+                                        false,
+                                    );
+                                clicked_state.toggle(ui);
+                                clicked_state.store(ui.ctx());
+                            }
+                            if filtering {
+                                let mut restored = egui::collapsing_header::CollapsingState::load_with_default_open(
+                                    ui.ctx(),
+                                    topic_id,
+                                    false,
+                                );
+                                restored.set_open(stored_open);
+                                restored.store(ui.ctx());
+                            }
                         }
                     });
                 collapsing.header_response.context_menu(|ui| {
