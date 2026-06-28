@@ -244,10 +244,24 @@ impl GpuBridge {
                         let visible = b.saturating_sub(a) as f32;
                         if plot_w >= 1.0 && visible / plot_w > tuning.decimate_threshold {
                             let width = plot_w as usize;
-                            let cols = cache.minmax_columns(x0, x1, width, tuning.bridge_columns);
-                            let stat = res.col_buffers.sync(trace.field, &cols, true);
-                            upload_bytes += stat.bytes;
-                            full_uploads += stat.full_upload as u64;
+                            // Skip the per-frame decimation + upload when the same
+                            // view over unchanged data already produced the
+                            // resident columns (static/paused views go ~free).
+                            let key = ColKey {
+                                x0: x0.to_bits(),
+                                x1: x1.to_bits(),
+                                width: width as u32,
+                                bridge: tuning.bridge_columns,
+                                len: cache.samples(),
+                            };
+                            if res.col_params.get(&trace.field) != Some(&key) {
+                                let cols =
+                                    cache.minmax_columns(x0, x1, width, tuning.bridge_columns);
+                                let stat = res.col_buffers.sync(trace.field, &cols, true);
+                                upload_bytes += stat.bytes;
+                                full_uploads += stat.full_upload as u64;
+                                res.col_params.insert(trace.field, key);
+                            }
                             DrawKind::Columns {
                                 count: width as u32,
                             }
@@ -532,9 +546,24 @@ struct PlotCallbackResources {
     scatter_binds: HashMap<FieldId, wgpu::BindGroup>,
     step_binds: HashMap<FieldId, wgpu::BindGroup>,
     col_binds: HashMap<FieldId, wgpu::BindGroup>,
+    /// Memoizes the decimated columns resident in `col_buffers` per field, so a
+    /// static view skips the per-frame `minmax_columns` recompute and upload.
+    col_params: HashMap<FieldId, ColKey>,
     /// Mutex only satisfies the `Sync` bound; never contended (render thread only).
     errors: Mutex<GpuErrorHub>,
     metrics: Option<Arc<MetricsRegistry>>,
+}
+
+/// Identifies the decimated columns currently resident for a field. A match
+/// means the same view over unchanged data, so the GPU buffer is already
+/// correct and `minmax_columns` can be skipped entirely.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ColKey {
+    x0: u32,
+    x1: u32,
+    width: u32,
+    bridge: bool,
+    len: usize,
 }
 
 impl PlotCallbackResources {
@@ -560,6 +589,7 @@ impl PlotCallbackResources {
             scatter_binds: HashMap::new(),
             step_binds: HashMap::new(),
             col_binds: HashMap::new(),
+            col_params: HashMap::new(),
             errors: Mutex::new(GpuErrorHub::new()),
             metrics: None,
         }
@@ -581,6 +611,7 @@ impl PlotCallbackResources {
         for field in stale {
             self.buffers.remove(field);
             self.col_buffers.remove(field);
+            self.col_params.remove(&field);
         }
     }
 }
@@ -863,6 +894,7 @@ impl egui_wgpu::CallbackTrait for ScenePaintCallback {
                 scatter_binds,
                 step_binds,
                 col_binds,
+                col_params: _,
                 errors,
                 metrics: _,
             } = res;

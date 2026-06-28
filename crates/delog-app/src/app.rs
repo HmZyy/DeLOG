@@ -2246,11 +2246,10 @@ impl eframe::App for DelogApp {
                     };
                     let mut behavior = crate::workspace::Behavior::new(services);
                     // `workspace_tree`: the egui_tiles layout + pane rendering.
-                    // `workspace_tree − Σ(pane_ui)` is egui_tiles' own
-                    // container/tab/drag machinery; `Σ(pane_ui) − Σ(pane_total)`
-                    // is our per-pane wrapper (plot drop-zone + scene);
-                    // `ui_workspace − workspace_tree` is begin/retain + action
-                    // handling.
+                    // Profiling (2026-06-28) showed egui_tiles' own machinery is
+                    // negligible (~0.02 ms); the cost is the per-pane `pane_ui`
+                    // render. `ui_workspace − workspace_tree` is begin/retain +
+                    // action handling.
                     let tree_timer = tree_metrics.scope("workspace_tree");
                     self.workspace.tree.ui(&mut behavior, ui);
                     drop(tree_timer);
