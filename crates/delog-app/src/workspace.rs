@@ -446,6 +446,11 @@ impl egui_tiles::Behavior<Pane> for Behavior<'_> {
         tile_id: egui_tiles::TileId,
         pane: &mut Pane,
     ) -> egui_tiles::UiResponse {
+        // Wraps the whole callback (incl. the plot drop-zone, which sits outside
+        // `pane_total`). `workspace_tree − Σ pane_ui` isolates egui_tiles' own
+        // layout/tab/drag cost; `Σ pane_ui − Σ pane_total` is our per-pane
+        // wrapper.
+        let _pane_ui = self.services.metrics.scope("pane_ui");
         match pane {
             Pane::Plot(pane) => self.plot_ui(ui, tile_id, pane),
             Pane::Scene3D(pane) => self.scene_ui(ui, tile_id, pane),
