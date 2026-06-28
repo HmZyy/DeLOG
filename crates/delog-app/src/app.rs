@@ -2128,6 +2128,7 @@ impl eframe::App for DelogApp {
                 // registry writer) and come back as a new epoch.
                 let browser_response = browser::ui(
                     ui,
+                    epoch,
                     &model,
                     &mut self.browser_query,
                     &mut self.browser_filter,
