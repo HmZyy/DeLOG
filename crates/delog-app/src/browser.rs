@@ -491,7 +491,6 @@ fn raw_value_string(array: &ArrayRef, row: usize) -> Option<String> {
     }
 }
 
-#[allow(dead_code)]
 fn display_endpoint(value: Option<&str>) -> &str {
     value.unwrap_or("-")
 }
@@ -741,10 +740,10 @@ const UNIT_COL: f32 = 0.11;
 const TYPE_COL: f32 = 0.11;
 
 fn field_table_header(ui: &mut egui::Ui) {
-    let width = (ui.available_width() - ui.spacing().item_spacing.x * 4.0).max(0.0);
     egui::Frame::new()
         .inner_margin(egui::Margin::symmetric(4, 1))
         .show(ui, |ui| {
+            let width = (ui.available_width() - ui.spacing().item_spacing.x * 4.0).max(0.0);
             ui.horizontal(|ui| {
                 ui.add_sized([width * FIELD_COL, 18.0], egui::Label::new("field"));
                 ui.add_sized([width * FIRST_COL, 18.0], egui::Label::new("first"));
@@ -768,33 +767,58 @@ fn field_table_row(
         } else {
             ui.visuals().text_color()
         };
+        let first = display_endpoint(field.first_raw.as_deref());
+        let last = display_endpoint(field.last_raw.as_deref());
+        let unit = field.unit.as_deref().unwrap_or("-");
         ui.horizontal(|ui| {
-            ui.add_sized(
-                [width * FIELD_COL, 18.0],
-                egui::Label::new(egui::RichText::new(&field.name).color(name_color)),
+            field_table_cell(
+                ui,
+                width * FIELD_COL,
+                egui::RichText::new(&field.name).color(name_color),
+                cell_hover_text(&field.name),
             );
-            ui.add_sized(
-                [width * FIRST_COL, 18.0],
-                egui::Label::new(
-                    egui::RichText::new(display_endpoint(field.first_raw.as_deref())).weak(),
-                ),
+            field_table_cell(
+                ui,
+                width * FIRST_COL,
+                egui::RichText::new(first).weak(),
+                cell_hover_text(first),
             );
-            ui.add_sized(
-                [width * LAST_COL, 18.0],
-                egui::Label::new(
-                    egui::RichText::new(display_endpoint(field.last_raw.as_deref())).weak(),
-                ),
+            field_table_cell(
+                ui,
+                width * LAST_COL,
+                egui::RichText::new(last).weak(),
+                cell_hover_text(last),
             );
-            ui.add_sized(
-                [width * UNIT_COL, 18.0],
-                egui::Label::new(egui::RichText::new(field.unit.as_deref().unwrap_or("-")).weak()),
+            field_table_cell(
+                ui,
+                width * UNIT_COL,
+                egui::RichText::new(unit).weak(),
+                cell_hover_text(unit),
             );
-            ui.add_sized(
-                [width * TYPE_COL, 18.0],
-                egui::Label::new(egui::RichText::new(field.dtype).weak()),
+            field_table_cell(
+                ui,
+                width * TYPE_COL,
+                egui::RichText::new(field.dtype).weak(),
+                cell_hover_text(field.dtype),
             );
         });
     })
+}
+
+fn field_table_cell(
+    ui: &mut egui::Ui,
+    width: f32,
+    text: impl Into<egui::WidgetText>,
+    hover_text: Option<&str>,
+) {
+    let response = ui.add_sized([width, 18.0], egui::Label::new(text).truncate());
+    if let Some(hover_text) = hover_text {
+        response.on_hover_text(hover_text);
+    }
+}
+
+fn cell_hover_text(value: &str) -> Option<&str> {
+    (value != "-").then_some(value)
 }
 
 fn field_row(
