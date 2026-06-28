@@ -122,6 +122,7 @@ pub fn ui(
                                 };
                                 let label_widget =
                                     egui::Label::new(egui::RichText::new(label).color(text_color))
+                                        .truncate()
                                         .sense(egui::Sense::click());
                                 let resp = ui.add(label_widget);
                                 if resp.clicked() {
