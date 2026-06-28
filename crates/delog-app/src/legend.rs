@@ -20,6 +20,8 @@ const MIN_LEGEND_CONTENT_EXTENT: f32 = 1.0;
 
 // Preferred width of the optional text-filter editor before narrow rows shrink it.
 const LEGEND_PREFERRED_TEXT_FILTER_WIDTH: f32 = 90.0;
+// Mirrors egui TextEdit's internal minimum width.
+const LEGEND_MIN_TEXT_FILTER_WIDTH: f32 = 24.0;
 // Preferred minimum label width; tiny rows may shrink below this to preserve containment.
 const LEGEND_PREFERRED_MIN_LABEL_WIDTH: f32 = 24.0;
 // Preferred width of the optional marker-delta label before narrow rows shrink it.
@@ -71,27 +73,34 @@ fn legend_trace_row_widths(
     };
     let preferred_trailing = preferred_delta + preferred_filter;
 
-    if content_width >= LEGEND_PREFERRED_MIN_LABEL_WIDTH + preferred_trailing {
-        return LegendTraceRowWidths {
+    let mut widths = if content_width >= LEGEND_PREFERRED_MIN_LABEL_WIDTH + preferred_trailing {
+        LegendTraceRowWidths {
             label: content_width - preferred_trailing,
             delta: preferred_delta,
             filter: preferred_filter,
-        };
-    }
-
-    let label = content_width.min(LEGEND_PREFERRED_MIN_LABEL_WIDTH);
-    let trailing_width = (content_width - label).max(0.0);
-    let trailing_share = if preferred_trailing > 0.0 {
-        (trailing_width / preferred_trailing).min(1.0)
+        }
     } else {
-        0.0
+        let label = content_width.min(LEGEND_PREFERRED_MIN_LABEL_WIDTH);
+        let trailing_width = (content_width - label).max(0.0);
+        let trailing_share = if preferred_trailing > 0.0 {
+            (trailing_width / preferred_trailing).min(1.0)
+        } else {
+            0.0
+        };
+
+        LegendTraceRowWidths {
+            label,
+            delta: preferred_delta * trailing_share,
+            filter: preferred_filter * trailing_share,
+        }
     };
 
-    LegendTraceRowWidths {
-        label,
-        delta: preferred_delta * trailing_share,
-        filter: preferred_filter * trailing_share,
+    if is_text && widths.filter > 0.0 && widths.filter < LEGEND_MIN_TEXT_FILTER_WIDTH {
+        widths.label += widths.filter;
+        widths.filter = 0.0;
     }
+
+    widths
 }
 
 fn legend_ghost_label_width(available_width: f32) -> f32 {
@@ -221,7 +230,7 @@ pub fn ui(
                                 }
 
                                 if is_text
-                                    && widths.filter > 0.0
+                                    && widths.filter >= LEGEND_MIN_TEXT_FILTER_WIDTH
                                     && ui
                                         .add_sized(
                                             egui::vec2(widths.filter, ui.spacing().interact_size.y),
@@ -348,10 +357,16 @@ mod tests {
     #[test]
     fn trace_row_widths_shrink_controls_to_fit_narrow_rows() {
         let widths = legend_trace_row_widths(40.0, 4.0, true, true);
-        assert!(widths.label + widths.delta + widths.filter + 8.0 <= 40.0);
-        assert!(widths.label <= LEGEND_PREFERRED_MIN_LABEL_WIDTH);
+        assert!(widths.label + widths.delta + 4.0 <= 40.0);
         assert!(widths.delta < LEGEND_PREFERRED_DELTA_WIDTH);
         assert!(widths.filter < LEGEND_PREFERRED_TEXT_FILTER_WIDTH);
+    }
+
+    #[test]
+    fn trace_row_widths_skip_filter_when_text_edit_minimum_cannot_fit() {
+        let widths = legend_trace_row_widths(40.0, 4.0, true, true);
+        assert_eq!(widths.filter, 0.0);
+        assert!(widths.label + widths.delta + 4.0 <= 40.0);
     }
 
     #[test]

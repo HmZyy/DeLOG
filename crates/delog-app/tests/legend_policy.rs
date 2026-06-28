@@ -15,4 +15,6 @@ fn legend_panel_uses_bounded_vertical_scroll_area() {
     assert!(LEGEND_SOURCE.contains("LEGEND_PREFERRED_TEXT_FILTER_WIDTH"));
     assert!(LEGEND_SOURCE.contains(".min_scrolled_height("));
     assert!(LEGEND_SOURCE.contains("LEGEND_PREFERRED_DELTA_WIDTH"));
+    assert!(LEGEND_SOURCE.contains("LEGEND_MIN_TEXT_FILTER_WIDTH"));
+    assert!(LEGEND_SOURCE.contains("widths.filter >= LEGEND_MIN_TEXT_FILTER_WIDTH"));
 }
