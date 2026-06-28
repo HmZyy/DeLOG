@@ -745,11 +745,11 @@ fn field_table_header(ui: &mut egui::Ui) {
         .show(ui, |ui| {
             let width = (ui.available_width() - ui.spacing().item_spacing.x * 4.0).max(0.0);
             ui.horizontal(|ui| {
-                ui.add_sized([width * FIELD_COL, 18.0], egui::Label::new("field"));
-                ui.add_sized([width * FIRST_COL, 18.0], egui::Label::new("first"));
-                ui.add_sized([width * LAST_COL, 18.0], egui::Label::new("last"));
-                ui.add_sized([width * UNIT_COL, 18.0], egui::Label::new("unit"));
-                ui.add_sized([width * TYPE_COL, 18.0], egui::Label::new("type"));
+                field_table_cell(ui, width * FIELD_COL, egui::RichText::new(""), None);
+                field_table_cell(ui, width * FIRST_COL, egui::RichText::new("first"), None);
+                field_table_cell(ui, width * LAST_COL, egui::RichText::new("last"), None);
+                field_table_cell(ui, width * UNIT_COL, egui::RichText::new("unit"), None);
+                field_table_cell(ui, width * TYPE_COL, egui::RichText::new("type"), None);
             });
         });
 }
@@ -811,10 +811,17 @@ fn field_table_cell(
     text: impl Into<egui::WidgetText>,
     hover_text: Option<&str>,
 ) {
-    let response = ui.add_sized([width, 18.0], egui::Label::new(text).truncate());
-    if let Some(hover_text) = hover_text {
-        response.on_hover_text(hover_text);
-    }
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, 18.0),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.set_min_width(width);
+            let response = ui.add(egui::Label::new(text).truncate());
+            if let Some(hover_text) = hover_text {
+                response.on_hover_text(hover_text);
+            }
+        },
+    );
 }
 
 fn cell_hover_text(value: &str) -> Option<&str> {

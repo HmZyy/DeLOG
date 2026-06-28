@@ -80,7 +80,8 @@ fn browser_topic_tables_keep_field_drag_source() {
     let header = browser
         .find("fn field_table_header(")
         .expect("field_table_header helper should exist");
-    for label in ["\"field\"", "\"first\"", "\"last\"", "\"unit\"", "\"type\""] {
+    // The field column header is intentionally left empty.
+    for label in ["\"first\"", "\"last\"", "\"unit\"", "\"type\""] {
         let label = browser[header..]
             .find(label)
             .map(|offset| header + offset)
