@@ -3,6 +3,11 @@
 //! The tree model is built purely from a [`StoreSnapshot`] so it is testable
 //! without a GUI; [`ui`] renders it.
 
+use arrow::array::{
+    Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array,
+    Int64Array, LargeStringArray, StringArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+};
+use arrow::datatypes::DataType;
 use delog_core::identity::{FieldId, SourceId, TopicId};
 use delog_core::snapshot::StoreSnapshot;
 use delog_core::time::TimeRange;
@@ -39,6 +44,8 @@ pub struct FieldNode {
     pub unit: Option<String>,
     pub description: Option<String>,
     pub count: u64,
+    pub first_raw: Option<String>,
+    pub last_raw: Option<String>,
 }
 
 impl BrowserModel {
@@ -77,6 +84,9 @@ impl BrowserModel {
                     .filter(|f| f.topic == topic_id && !f.removed)
                     .map(|f| {
                         let schema = store.schema.field_by_name(&f.name);
+                        let (first_raw, last_raw) = schema
+                            .and_then(|schema| raw_endpoints(store, schema.name.as_str()))
+                            .unwrap_or((None, None));
                         FieldNode {
                             id: f.id,
                             name: f.name.clone(),
@@ -84,6 +94,8 @@ impl BrowserModel {
                             unit: schema.and_then(|s| s.unit.clone()),
                             description: schema.and_then(|s| s.description.clone()),
                             count: rows,
+                            first_raw,
+                            last_raw,
                         }
                     })
                     .collect();
@@ -320,6 +332,58 @@ fn is_discrete_dtype(label: &str) -> bool {
 
 fn hover_description(description: Option<&str>) -> Option<&str> {
     description.filter(|description| !description.is_empty())
+}
+
+fn raw_endpoints(
+    store: &delog_core::store::TopicStore,
+    field_name: &str,
+) -> Option<(Option<String>, Option<String>)> {
+    let field_index = store.schema.field_index(field_name)?;
+    let first_chunk = store.chunks.iter().find(|chunk| !chunk.is_empty())?;
+    let last_chunk = store.chunks.iter().rev().find(|chunk| !chunk.is_empty())?;
+    let first = first_chunk
+        .cols
+        .get(field_index)
+        .and_then(|array| raw_value_string(array, 0));
+    let last_row = last_chunk.len().checked_sub(1)?;
+    let last = last_chunk
+        .cols
+        .get(field_index)
+        .and_then(|array| raw_value_string(array, last_row));
+    Some((first, last))
+}
+
+fn raw_value_string(array: &ArrayRef, row: usize) -> Option<String> {
+    if row >= array.len() || array.is_null(row) {
+        return None;
+    }
+
+    let any = array.as_any();
+    match array.data_type() {
+        DataType::Int8 => Some(any.downcast_ref::<Int8Array>()?.value(row).to_string()),
+        DataType::Int16 => Some(any.downcast_ref::<Int16Array>()?.value(row).to_string()),
+        DataType::Int32 => Some(any.downcast_ref::<Int32Array>()?.value(row).to_string()),
+        DataType::Int64 => Some(any.downcast_ref::<Int64Array>()?.value(row).to_string()),
+        DataType::UInt8 => Some(any.downcast_ref::<UInt8Array>()?.value(row).to_string()),
+        DataType::UInt16 => Some(any.downcast_ref::<UInt16Array>()?.value(row).to_string()),
+        DataType::UInt32 => Some(any.downcast_ref::<UInt32Array>()?.value(row).to_string()),
+        DataType::UInt64 => Some(any.downcast_ref::<UInt64Array>()?.value(row).to_string()),
+        DataType::Float32 => Some(any.downcast_ref::<Float32Array>()?.value(row).to_string()),
+        DataType::Float64 => Some(any.downcast_ref::<Float64Array>()?.value(row).to_string()),
+        DataType::Boolean => Some(any.downcast_ref::<BooleanArray>()?.value(row).to_string()),
+        DataType::Utf8 => Some(any.downcast_ref::<StringArray>()?.value(row).to_owned()),
+        DataType::LargeUtf8 => Some(
+            any.downcast_ref::<LargeStringArray>()?
+                .value(row)
+                .to_owned(),
+        ),
+        _ => None,
+    }
+}
+
+#[allow(dead_code)]
+fn display_endpoint(value: Option<&str>) -> &str {
+    value.unwrap_or("-")
 }
 
 pub fn panel_toggle_button_size(ui: &egui::Ui) -> egui::Vec2 {
@@ -689,7 +753,7 @@ fn drag_source_with_click<Payload: std::any::Any + Send + Sync>(
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::{ArrayRef, Float64Array, Int32Array, Int64Array};
+    use arrow::array::{ArrayRef, BooleanArray, Float64Array, Int32Array, Int64Array, StringArray};
     use arrow::datatypes::DataType;
     use delog_core::chunk::Chunk;
     use delog_core::identity::IdentityRegistry;
@@ -753,6 +817,91 @@ mod tests {
         assert_eq!(gps.fields[1].unit.as_deref(), Some("deg"));
         assert_eq!(gps.fields[1].description.as_deref(), Some("latitude"));
         assert_eq!(gps.fields[1].count, 3);
+    }
+
+    #[test]
+    fn model_includes_raw_first_and_last_values() {
+        let mut identity = IdentityRegistry::new();
+        let source = identity.add_source("flight");
+        let topic = identity.add_topic(source, "STAT").unwrap();
+        identity.add_field(topic, "Mode").unwrap();
+        identity.add_field(topic, "Armed").unwrap();
+        identity.add_field(topic, "Alt").unwrap();
+
+        let schema = Arc::new(
+            TopicSchema::new(
+                "STAT",
+                [
+                    FieldSchema::new("Mode", DataType::Utf8, None::<String>, 1.0).unwrap(),
+                    FieldSchema::new("Armed", DataType::Boolean, None::<String>, 1.0).unwrap(),
+                    FieldSchema::new("Alt", DataType::Float64, Some("m"), 0.01).unwrap(),
+                ],
+            )
+            .unwrap(),
+        );
+        let chunk = Arc::new(
+            Chunk::try_new(
+                Int64Array::from(vec![100, 200, 300]),
+                vec![
+                    Arc::new(StringArray::from(vec!["idle", "climb", "land"])) as ArrayRef,
+                    Arc::new(BooleanArray::from(vec![false, true, false])) as ArrayRef,
+                    Arc::new(Float64Array::from(vec![1200.0, 1234.5, 1300.0])) as ArrayRef,
+                ],
+                &schema,
+            )
+            .unwrap(),
+        );
+        let store = Arc::new(TopicStore::from_chunks(Arc::clone(&schema), [chunk]).unwrap());
+        let snapshot = StoreSnapshot::from_registry(&identity, [(topic, store)], 0).unwrap();
+
+        let model = BrowserModel::from_snapshot(&snapshot);
+        let fields = &model.sources[0].topics[0].fields;
+
+        let alt = fields.iter().find(|f| f.name == "Alt").unwrap();
+        assert_eq!(alt.first_raw.as_deref(), Some("1200"));
+        assert_eq!(alt.last_raw.as_deref(), Some("1300"));
+
+        let armed = fields.iter().find(|f| f.name == "Armed").unwrap();
+        assert_eq!(armed.first_raw.as_deref(), Some("false"));
+        assert_eq!(armed.last_raw.as_deref(), Some("false"));
+
+        let mode = fields.iter().find(|f| f.name == "Mode").unwrap();
+        assert_eq!(mode.first_raw.as_deref(), Some("idle"));
+        assert_eq!(mode.last_raw.as_deref(), Some("land"));
+    }
+
+    #[test]
+    fn raw_endpoint_values_are_none_for_nulls() {
+        let mut identity = IdentityRegistry::new();
+        let source = identity.add_source("flight");
+        let topic = identity.add_topic(source, "STAT").unwrap();
+        identity.add_field(topic, "Alt").unwrap();
+
+        let schema = Arc::new(
+            TopicSchema::new(
+                "STAT",
+                [FieldSchema::new("Alt", DataType::Float64, Some("m"), 1.0).unwrap()],
+            )
+            .unwrap(),
+        );
+        let chunk = Arc::new(
+            Chunk::try_new(
+                Int64Array::from(vec![100, 200]),
+                vec![Arc::new(Float64Array::from(vec![None, Some(42.0)])) as ArrayRef],
+                &schema,
+            )
+            .unwrap(),
+        );
+        let store = Arc::new(TopicStore::from_chunks(Arc::clone(&schema), [chunk]).unwrap());
+        let snapshot = StoreSnapshot::from_registry(&identity, [(topic, store)], 0).unwrap();
+
+        let model = BrowserModel::from_snapshot(&snapshot);
+        let alt = &model.sources[0].topics[0].fields[0];
+
+        assert_eq!(alt.first_raw, None);
+        assert_eq!(alt.last_raw.as_deref(), Some("42"));
+        assert_eq!(display_endpoint(None), "-");
+        assert_eq!(display_endpoint(Some("42")), "42");
     }
 
     #[test]
