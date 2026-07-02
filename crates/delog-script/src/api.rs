@@ -36,14 +36,17 @@ pub fn resample_prev(src_t: &[i64], src_v: &[f64], base: &[i64]) -> Vec<f64> {
     out
 }
 
+/// `(times_us, values, strings)`; `strings` is `Some` only for Utf8/LargeUtf8
+/// fields, with null cells materialized as `""`.
+pub type MaterializedField = (Vec<i64>, Vec<f64>, Option<Vec<String>>);
+
 /// Materialize a field as `(times_us, values, strings)` by walking its chunks
 /// in time order. Concatenates chunk buffers — the one copy for script
-/// consumption. `strings` is `Some` only for Utf8/LargeUtf8 fields, with null
-/// cells materialized as `""`.
+/// consumption.
 pub fn materialize_field(
     snapshot: &StoreSnapshot,
     field: FieldId,
-) -> Result<(Vec<i64>, Vec<f64>, Option<Vec<String>>), String> {
+) -> Result<MaterializedField, String> {
     let view = FieldView::new(snapshot, field).map_err(|e| e.to_string())?;
     let col = view.col_index();
     let range = snapshot
