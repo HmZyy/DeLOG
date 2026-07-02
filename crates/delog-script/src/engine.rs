@@ -560,7 +560,9 @@ fn run_live_transforms(
                 Ok(derived) => {
                     transform.consecutive_errors = 0;
                     let mut sink = sender.file_sink();
-                    sink.submit(derived);
+                    for batch in derived {
+                        sink.submit(batch);
+                    }
                 }
                 Err(msg) => {
                     transform.consecutive_errors += 1;
@@ -581,10 +583,10 @@ fn run_live_transforms(
 fn run_one_transform(
     transform: &ActiveTransform,
     batch: &ParsedBatch,
-) -> Result<ParsedBatch, String> {
+) -> Result<Vec<ParsedBatch>, String> {
     let materialized = LiveTransformBatch::from_parsed(&transform.spec, batch)?;
     let input_times = materialized.times.clone();
-    let result = Python::attach(|py| -> Result<crate::live::LiveTransformResult, String> {
+    let results = Python::attach(|py| -> Result<Vec<crate::live::LiveTransformResult>, String> {
         let py_batch = LiveBatchPy::from_materialized(py, materialized)
             .and_then(|b| Bound::new(py, b))
             .map_err(|e| format_pyerr(py, &e))?;
@@ -596,7 +598,10 @@ fn run_one_transform(
         parse_transform_result(py, &transform.spec, &input_times, &ret)
             .map_err(|e| format_pyerr(py, &e))
     })?;
-    result_to_batch(transform.source, result)
+    results
+        .into_iter()
+        .map(|r| result_to_batch(transform.source, r))
+        .collect::<Result<Vec<_>, _>>()
 }
 
 /// Handle one command. Returns `true` if the worker should shut down.
