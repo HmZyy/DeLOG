@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use delog_core::field_view::FieldView;
 use delog_core::field_view::array_row_as_f64;
+use delog_core::field_view::array_row_as_str;
 use delog_core::identity::FieldId;
 use delog_core::snapshot::StoreSnapshot;
 
@@ -35,12 +36,14 @@ pub fn resample_prev(src_t: &[i64], src_v: &[f64], base: &[i64]) -> Vec<f64> {
     out
 }
 
-/// Materialize a field as `(times_us, values)` by walking its chunks in time
-/// order. Concatenates chunk buffers — the one copy for script consumption.
+/// Materialize a field as `(times_us, values, strings)` by walking its chunks
+/// in time order. Concatenates chunk buffers — the one copy for script
+/// consumption. `strings` is `Some` only for Utf8/LargeUtf8 fields, with null
+/// cells materialized as `""`.
 pub fn materialize_field(
     snapshot: &StoreSnapshot,
     field: FieldId,
-) -> Result<(Vec<i64>, Vec<f64>), String> {
+) -> Result<(Vec<i64>, Vec<f64>, Option<Vec<String>>), String> {
     let view = FieldView::new(snapshot, field).map_err(|e| e.to_string())?;
     let col = view.col_index();
     let range = snapshot
@@ -48,13 +51,21 @@ pub fn materialize_field(
         .ok_or_else(|| "field has no data".to_string())?;
     let mut times = Vec::new();
     let mut values = Vec::new();
+    let mut strings = view.schema_field().is_string().then(Vec::new);
     for chunk in view.chunks_overlapping(range) {
         for row in 0..chunk.len() {
             times.push(chunk.t.value(row));
             values.push(array_row_as_f64(chunk.cols[col].as_ref(), row));
+            if let Some(s) = &mut strings {
+                s.push(
+                    array_row_as_str(chunk.cols[col].as_ref(), row)
+                        .unwrap_or_default()
+                        .to_owned(),
+                );
+            }
         }
     }
-    Ok((times, values))
+    Ok((times, values, strings))
 }
 
 /// A numpy unicode ('<U...') array from owned strings, so scripts get
@@ -206,11 +217,13 @@ impl Delog {
         let id = self
             .resolve_path(path)
             .map_err(pyo3::exceptions::PyKeyError::new_err)?;
-        let (t, v) = materialize_field(&self.snapshot, id)
+        let (t, v, s) = materialize_field(&self.snapshot, id)
             .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        let s = s.map(|vals| numpy_str_array(py, vals)).transpose()?;
         Ok(DelogField {
             t: t.into_pyarray(py).unbind(),
             v: v.into_pyarray(py).unbind(),
+            s,
         })
     }
 
@@ -293,13 +306,16 @@ impl Delog {
     }
 }
 
-/// `.t` int64 µs, `.v` float64.
+/// `.t` int64 us, `.v` float64 (NaN for string fields), `.s` numpy unicode
+/// array for string fields (`None` otherwise).
 #[pyclass(unsendable, name = "DelogField")]
 pub struct DelogField {
     #[pyo3(get)]
     t: Py<PyArray1<i64>>,
     #[pyo3(get)]
     v: Py<PyArray1<f64>>,
+    #[pyo3(get)]
+    s: Option<Py<PyAny>>,
 }
 
 #[pyclass(unsendable, name = "DelogOutput")]
@@ -403,8 +419,35 @@ mod tests {
         let store = Arc::new(TopicStore::from_chunks(schema, [chunk1, chunk2]).unwrap());
         let snap = StoreSnapshot::from_registry(&id, [(topic, store)], 0).unwrap();
 
-        let (t, v) = materialize_field(&snap, alt).unwrap();
+        let (t, v, s) = materialize_field(&snap, alt).unwrap();
         assert_eq!(t, vec![10, 20, 30]);
         assert_eq!(v, vec![1.0, 2.0, 3.0]);
+        assert_eq!(s, None);
+    }
+
+    #[test]
+    fn materialize_field_extracts_strings_for_utf8_columns() {
+        use arrow::array::StringArray;
+        let mut id = IdentityRegistry::new();
+        let src = id.add_source("live");
+        let topic = id.add_topic(src, "NAMED_VALUE_FLOAT").unwrap();
+        let name = id.add_field(topic, "name").unwrap();
+        let schema = Arc::new(
+            TopicSchema::new(
+                "NAMED_VALUE_FLOAT",
+                [FieldSchema::new("name", DataType::Utf8, None::<String>, 1.0).unwrap()],
+            )
+            .unwrap(),
+        );
+        let cols: Vec<ArrayRef> = vec![Arc::new(StringArray::from(vec![Some("airspd"), None]))];
+        let chunk =
+            Arc::new(Chunk::try_new(Int64Array::from(vec![10, 20]), cols, &schema).unwrap());
+        let store = Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap());
+        let snap = StoreSnapshot::from_registry(&id, [(topic, store)], 0).unwrap();
+
+        let (t, v, s) = materialize_field(&snap, name).unwrap();
+        assert_eq!(t, vec![10, 20]);
+        assert!(v.iter().all(|x| x.is_nan()));
+        assert_eq!(s, Some(vec!["airspd".to_owned(), String::new()]));
     }
 }
