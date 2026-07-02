@@ -1229,6 +1229,42 @@ def convert(batch):
     }
 
     #[test]
+    fn dynamic_live_transform_registers_without_output_topic() {
+        let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use delog_core::ingest::ingest_channel;
+        use delog_core::ingestor::{Ingestor, NullObserver};
+
+        let ingestor = Ingestor::new(NullObserver);
+        let store = ingestor.store();
+        let (sender, receiver) = ingest_channel();
+        let _ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
+
+        let engine = ScriptEngine::spawn(store, sender, test_metrics());
+
+        let script = r#"
+@delog.live_transform(topic="NAMED_VALUE_FLOAT", fields=["name", "value"])
+def split(batch):
+    return {}
+"#;
+        let _ = engine.send(ScriptCommand::RunScript {
+            name: "nv".into(),
+            source: script.into(),
+        });
+
+        loop {
+            match engine.recv_blocking() {
+                ScriptEvent::Done => break,
+                ScriptEvent::Error(e) => panic!("unexpected error: {e}"),
+                _ => {}
+            }
+        }
+        let specs = engine.transform_specs();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].output_topic, None);
+        assert_eq!(specs[0].func_name, "split");
+    }
+
+    #[test]
     fn unregister_live_removes_the_transform_and_tombstones_its_source() {
         let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use delog_core::ingest::ingest_channel;
