@@ -568,7 +568,8 @@ fn run_live_transforms(
                         transform.disabled = true;
                         let _ = evt_tx.send(ScriptEvent::Error(format!(
                             "live transform '{}' disabled after {} consecutive errors; last: {msg}",
-                            transform.spec.output_topic, LIVE_TRANSFORM_ERROR_LIMIT
+                            transform.spec.label(),
+                            LIVE_TRANSFORM_ERROR_LIMIT
                         )));
                     }
                 }
@@ -1216,7 +1217,10 @@ def convert(batch):
         }
         assert_eq!(engine.transform_specs().len(), 1);
         assert_eq!(engine.transform_specs()[0].topic, "NAV_CONTROLLER_OUTPUT");
-        assert_eq!(engine.transform_specs()[0].output_topic, "NAV_RAD");
+        assert_eq!(
+            engine.transform_specs()[0].output_topic,
+            Some("NAV_RAD".to_string())
+        );
     }
 
     #[test]

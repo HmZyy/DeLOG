@@ -241,13 +241,13 @@ impl Delog {
 
     /// Decorator factory: returns a decorator that registers the function and
     /// returns it unchanged.
-    #[pyo3(signature = (*, topic, fields, output_topic))]
+    #[pyo3(signature = (*, topic, fields, output_topic=None))]
     fn live_transform(
         &self,
         py: Python<'_>,
         topic: String,
         fields: Vec<String>,
-        output_topic: String,
+        output_topic: Option<String>,
     ) -> PyResult<Py<PyAny>> {
         let spec = LiveTransformSpec::new(
             self.script_name.clone(),
@@ -267,8 +267,14 @@ impl Delog {
         #[pymethods]
         impl Decorator {
             fn __call__(&self, py: Python<'_>, func: Py<PyAny>) -> PyResult<Py<PyAny>> {
+                let mut spec = self.spec.clone();
+                spec.func_name = func
+                    .bind(py)
+                    .getattr("__name__")
+                    .and_then(|n| n.extract::<String>())
+                    .unwrap_or_else(|_| "<callable>".into());
                 self.live.borrow_mut().push(PendingLiveTransform {
-                    spec: self.spec.clone(),
+                    spec,
                     callable: func.clone_ref(py),
                 });
                 Ok(func)
