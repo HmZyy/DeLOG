@@ -157,11 +157,16 @@ pub struct LiveTransformResult {
     pub fields: Vec<PendingField>,
 }
 
+/// `length_context` names what `expected` counts, for the length-mismatch
+/// message: callers pass `"the batch"` when `expected` is the input batch's
+/// row count, or `"its times array"` when it is an explicit times array's
+/// length (the dynamic 3-tuple form, where those can differ).
 fn read_f64_array(
     py: Python<'_>,
     field: &str,
     obj: &Bound<'_, PyAny>,
     expected: usize,
+    length_context: &str,
 ) -> PyResult<Vec<f64>> {
     let arr: PyReadonlyArray1<f64> = obj.extract().map_err(|_| {
         PyValueError::new_err(format!(
@@ -171,7 +176,7 @@ fn read_f64_array(
     let vals = arr.as_slice()?.to_vec();
     if vals.len() != expected {
         return Err(PyValueError::new_err(format!(
-            "live transform field '{field}' produced {} values but the batch has {expected}",
+            "live transform field '{field}' produced {} values but {length_context} has {expected}",
             vals.len()
         )));
     }
@@ -208,7 +213,13 @@ fn parse_field_entry(
     if let Ok(tuple) = value.cast::<pyo3::types::PyTuple>() {
         match tuple.len() {
             2 => {
-                let values = read_f64_array(py, name, &tuple.get_item(0)?, input_times.len())?;
+                let values = read_f64_array(
+                    py,
+                    name,
+                    &tuple.get_item(0)?,
+                    input_times.len(),
+                    "the batch",
+                )?;
                 let unit = extract_unit(name, &tuple.get_item(1)?)?;
                 Ok((ParsedTimes::Default, values, unit))
             }
@@ -223,19 +234,25 @@ fn parse_field_entry(
                     })?
                     .as_slice()?
                     .to_vec();
-                if dynamic {
+                let length_context = if dynamic {
                     if times.windows(2).any(|w| w[0] > w[1]) {
                         return Err(PyValueError::new_err(format!(
-                            "live transform '{label}' field '{name}' times must be sorted ascending"
+                            "live transform '{label}' field '{name}' times must be sorted \
+                             non-decreasing"
                         )));
                     }
-                } else if times != input_times {
-                    return Err(PyValueError::new_err(format!(
-                        "live transform field '{name}' supplied times that differ from the \
-                         input batch times (same-topic transforms must preserve timestamps)"
-                    )));
-                }
-                let values = read_f64_array(py, name, &tuple.get_item(1)?, times.len())?;
+                    "its times array"
+                } else {
+                    if times != input_times {
+                        return Err(PyValueError::new_err(format!(
+                            "live transform field '{name}' supplied times that differ from the \
+                             input batch times (same-topic transforms must preserve timestamps)"
+                        )));
+                    }
+                    "the batch"
+                };
+                let values =
+                    read_f64_array(py, name, &tuple.get_item(1)?, times.len(), length_context)?;
                 let unit = extract_unit(name, &tuple.get_item(2)?)?;
                 Ok((ParsedTimes::Explicit(times), values, unit))
             }
@@ -247,7 +264,7 @@ fn parse_field_entry(
     } else {
         Ok((
             ParsedTimes::Default,
-            read_f64_array(py, name, value, input_times.len())?,
+            read_f64_array(py, name, value, input_times.len(), "the batch")?,
             None,
         ))
     }
@@ -288,6 +305,9 @@ fn parse_topic_fields(
         }
         fields.push(PendingField { name, values, unit });
     }
+    // Defensive fallback only: both callers of `parse_topic_fields` reject an
+    // empty dict before calling it, so `dict` always has at least one entry
+    // and `topic_times` is always `Some` by this point.
     Ok((topic_times.unwrap_or_else(|| input_times.to_vec()), fields))
 }
 
