@@ -375,7 +375,10 @@ print(f"emitted {len(f.t)} samples")
 - **Time is `int64` microseconds**, end to end. Field `.t` and `output(...)`
   `times_us` are both raw log-time microseconds.
 - **Values are `float64`** on the way in (`.v`) and on the way out (`add_field`
-  values). The emitted columns are stored as `Float64`.
+  values). The emitted columns are stored as `Float64`. String fields are the
+  one exception on the read side: `.s` on `delog.field(...)` and a live
+  transform's numpy unicode `batch.<name>` attribute expose Utf8 fields as
+  strings, but output stays `float64`-only.
 - **NaN means "gap"** - it is never interpolated away. Reads preserve NaN;
   emit preserves NaN; plots render NaN as a line break. Propagate it naturally
   (most numpy ops do).

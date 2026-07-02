@@ -5,6 +5,8 @@ import numpy as np
 def split_named_floats(batch):
     out = {}
     for name in np.unique(batch.name):
+        if not name:
+            continue
         mask = batch.name == name
         out[f"NAMED_VALUE_FLOAT/{name}"] = {"value": (batch.t[mask], batch.value[mask], None)}
     return out
@@ -14,6 +16,8 @@ def split_named_floats(batch):
 def split_named_ints(batch):
     out = {}
     for name in np.unique(batch.name):
+        if not name:
+            continue
         mask = batch.name == name
         out[f"NAMED_VALUE_INT/{name}"] = {"value": (batch.t[mask], batch.value[mask], None)}
     return out
