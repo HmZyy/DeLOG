@@ -17,10 +17,13 @@ use crate::api::PendingField;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveTransformSpec {
     pub script_name: String,
+    /// The decorated function's `__name__`; set at registration.
+    pub func_name: String,
     pub generation: u64,
     pub topic: String,
     pub fields: Vec<String>,
-    pub output_topic: String,
+    /// `None` selects dynamic mode: the callback returns `{topic: {field: ...}}`.
+    pub output_topic: Option<String>,
 }
 
 impl LiveTransformSpec {
@@ -29,7 +32,7 @@ impl LiveTransformSpec {
         generation: u64,
         topic: String,
         fields: Vec<String>,
-        output_topic: String,
+        output_topic: Option<String>,
     ) -> Result<Self, String> {
         if topic.is_empty() {
             return Err("live_transform topic must not be empty".into());
@@ -37,16 +40,22 @@ impl LiveTransformSpec {
         if fields.is_empty() {
             return Err("live_transform fields must not be empty".into());
         }
-        if output_topic.is_empty() {
+        if output_topic.as_deref() == Some("") {
             return Err("live_transform output_topic must not be empty".into());
         }
         Ok(Self {
             script_name,
+            func_name: String::new(),
             generation,
             topic,
             fields,
             output_topic,
         })
+    }
+
+    /// Identity for error messages: `script.function`.
+    pub fn label(&self) -> String {
+        format!("{}.{}", self.script_name, self.func_name)
     }
 
     pub fn matches(&self, batch: &ParsedBatch) -> bool {
@@ -76,7 +85,7 @@ impl LiveTransformBatch {
             return Err(format!(
                 "batch topic '{}' does not satisfy live transform '{}'",
                 batch.topic(),
-                spec.output_topic
+                spec.label()
             ));
         }
         let times: Vec<i64> = (0..batch.timestamps.len())
@@ -181,14 +190,14 @@ pub fn parse_transform_result(
     let dict = obj.cast::<pyo3::types::PyDict>().map_err(|_| {
         PyValueError::new_err(format!(
             "live transform '{}' must return a dict of {{field: values}}",
-            spec.output_topic
+            spec.label()
         ))
     })?;
 
     if dict.is_empty() {
         return Err(PyValueError::new_err(format!(
             "live transform '{}' returned an empty result; expected at least one output field",
-            spec.output_topic
+            spec.label()
         )));
     }
 
@@ -199,7 +208,7 @@ pub fn parse_transform_result(
         let name: String = key.extract().map_err(|_| {
             PyValueError::new_err(format!(
                 "live transform '{}' field names must be strings",
-                spec.output_topic
+                spec.label()
             ))
         })?;
 
@@ -255,7 +264,9 @@ pub fn parse_transform_result(
     }
 
     Ok(LiveTransformResult {
-        topic: spec.output_topic.clone(),
+        // Dynamic mode (spec.output_topic == None) is parsed by a later task;
+        // this function still assumes a static output topic.
+        topic: spec.output_topic.clone().unwrap_or_default(),
         times: input_times.to_vec(),
         fields,
     })
@@ -352,7 +363,7 @@ mod tests {
             1,
             "NAV_CONTROLLER_OUTPUT".into(),
             vec!["nav_roll".into(), "nav_bearing".into()],
-            "NAV_RAD".into(),
+            Some("NAV_RAD".into()),
         )
         .unwrap();
 
@@ -366,7 +377,7 @@ mod tests {
             1,
             "NAV_CONTROLLER_OUTPUT".into(),
             vec!["missing".into()],
-            "NAV_RAD".into(),
+            Some("NAV_RAD".into()),
         )
         .unwrap();
 
@@ -380,7 +391,7 @@ mod tests {
             1,
             "NAV_CONTROLLER_OUTPUT".into(),
             vec!["nav_roll".into(), "nav_bearing".into()],
-            "NAV_RAD".into(),
+            Some("NAV_RAD".into()),
         )
         .unwrap();
 
@@ -398,13 +409,33 @@ mod tests {
     }
 
     #[test]
+    fn spec_accepts_dynamic_mode_and_labels_by_function() {
+        let mut spec = LiveTransformSpec::new(
+            "named_values".into(),
+            1,
+            "NAMED_VALUE_FLOAT".into(),
+            vec!["name".into(), "value".into()],
+            None,
+        )
+        .unwrap();
+        spec.func_name = "split_floats".into();
+        assert_eq!(spec.output_topic, None);
+        assert_eq!(spec.label(), "named_values.split_floats");
+
+        assert!(
+            LiveTransformSpec::new("s".into(), 1, "T".into(), vec!["v".into()], Some(String::new()))
+                .is_err()
+        );
+    }
+
+    #[test]
     fn materialize_batch_extracts_string_fields_with_empty_for_null() {
         let spec = LiveTransformSpec::new(
             "script".into(),
             1,
             "NAMED_VALUE_FLOAT".into(),
             vec!["name".into(), "value".into()],
-            "OUT".into(),
+            Some("OUT".into()),
         )
         .unwrap();
 
