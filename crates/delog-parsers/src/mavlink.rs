@@ -326,10 +326,14 @@ impl serde::Serializer for &mut FieldSink {
     fn serialize_char(self, _: char) -> Result<(), Never> {
         Ok(())
     }
-    /// Strings only occur as the tag of the internally-tagged enum
-    /// representation (depth 2) — capture the variant name there.
+    /// Strings occur as char-array fields (`CharArray<N>`, depth 1, e.g.
+    /// `NAMED_VALUE_FLOAT.name`) and as the tag of the internally-tagged enum
+    /// representation. At depth 1 the only possible tag key is `type`
+    /// (`MavMessage`'s own tag): real fields can never be named `type` — it is
+    /// a Rust keyword, so the generator renames such fields (e.g. `mavtype`)
+    /// and applies no serde rename.
     fn serialize_str(self, v: &str) -> Result<(), Never> {
-        if self.path.len() >= 2 {
+        if self.path.first() != Some(&"type") {
             self.emit(Scalar::Str(v.to_owned()));
         }
         Ok(())
@@ -522,7 +526,9 @@ impl serde::ser::SerializeStructVariant for &mut FieldSink {
 
 #[cfg(test)]
 mod tests {
-    use ::mavlink::dialects::all::{ATTITUDE_DATA, GPS_STATUS_DATA, HEARTBEAT_DATA};
+    use ::mavlink::dialects::all::{
+        ATTITUDE_DATA, GPS_STATUS_DATA, HEARTBEAT_DATA, NAMED_VALUE_FLOAT_DATA,
+    };
     use ::mavlink::{MAVLinkV1MessageRaw, MAVLinkV2MessageRaw, MavHeader};
 
     use super::*;
@@ -632,6 +638,29 @@ mod tests {
         assert_eq!(get("roll"), Scalar::F32(1.5));
         assert_eq!(get("yaw"), Scalar::F32(-0.25));
         assert_eq!(fields.len(), 7);
+    }
+
+    #[test]
+    fn extraction_captures_char_array_fields_as_strings() {
+        let msg = MavMessage::NAMED_VALUE_FLOAT(NAMED_VALUE_FLOAT_DATA {
+            time_boot_ms: 1_000,
+            value: 3.5,
+            name: "airspd".into(),
+        });
+        let fields = extract_fields(&msg);
+        let get = |name: &str| {
+            fields
+                .iter()
+                .find(|(n, _)| n == name)
+                .unwrap_or_else(|| panic!("missing field {name}"))
+                .1
+                .clone()
+        };
+        assert_eq!(get("time_boot_ms"), Scalar::U32(1_000));
+        assert_eq!(get("value"), Scalar::F32(3.5));
+        assert_eq!(get("name"), Scalar::Str("airspd".to_owned()));
+        // The internally-tagged enum's `type` tag must not leak in as a field.
+        assert_eq!(fields.len(), 3);
     }
 
     #[test]
