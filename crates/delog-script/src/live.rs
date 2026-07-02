@@ -302,8 +302,15 @@ pub fn parse_transform_result(
     obj: &Bound<'_, PyAny>,
 ) -> PyResult<Vec<LiveTransformResult>> {
     let label = spec.label();
+    let shape = if spec.output_topic.is_some() {
+        "{field: values}"
+    } else {
+        "{topic: {field: values}}"
+    };
     let dict = obj.cast::<pyo3::types::PyDict>().map_err(|_| {
-        PyValueError::new_err(format!("live transform '{label}' must return a dict"))
+        PyValueError::new_err(format!(
+            "live transform '{label}' must return a dict of {shape}"
+        ))
     })?;
 
     match &spec.output_topic {
