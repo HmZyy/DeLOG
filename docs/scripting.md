@@ -155,16 +155,23 @@ def nav_controller_rad(batch):
 ```
 
 - **`topic`** - the incoming topic to transform.
-- **`fields`** - the fields of that topic the callback needs. Each is exposed on
-  the `batch` object as a `float64` numpy array (e.g. `batch.nav_roll`). A batch
-  whose topic doesn't carry every requested field is skipped.
-- **`output_topic`** - the derived topic name the returned fields are published
-  under, on an appendable `script:<name>` source.
+- **`fields`** - the fields of that topic the callback needs. Each is exposed
+  on the `batch` object as a numpy array: numeric fields as `float64` (e.g.
+  `batch.nav_roll`), Utf8/string fields as a numpy unicode array (e.g.
+  `batch.name`), with null string cells read as `""` - the string analogue of
+  the NaN gap convention. A batch whose topic doesn't carry every requested
+  field is skipped.
+- **`output_topic`** *(optional)* - the derived topic name the returned fields
+  are published under, on an appendable `script:<name>` source. Omitting it
+  selects **dynamic mode**, where the callback picks its own output topic(s)
+  per batch - see [Dynamic output topics](#dynamic-output-topics) below.
 
 **The `batch` object** has `batch.t` (the incoming `int64` microsecond
-timestamps) and one `float64` numpy array attribute per requested field.
+timestamps) and one numpy array attribute per requested field (`float64` for
+numeric fields, a unicode array for string fields).
 
-**The return value** is a `dict` mapping each output field name to one of:
+**The return value** in static mode (`output_topic` set) is a `dict` mapping
+each output field name to one of:
 
 - `values` - a length-N array; unit unset, timestamps reuse the input batch's.
 - `(values, unit)` - same, with an explicit unit string.
@@ -172,6 +179,52 @@ timestamps) and one `float64` numpy array attribute per requested field.
   these **must equal** the input batch's timestamps (a mismatch is an error).
 
 All output arrays must have the same length as the incoming batch.
+
+### Dynamic output topics
+
+Omit `output_topic` to put the callback in **dynamic mode**. Instead of a flat
+`{field: values}` dict, it returns:
+
+```
+{topic: {field: values | (values, unit) | (times, values, unit)}}
+```
+
+One nested `{field: ...}` dict per derived topic, with topic names chosen at
+run time (typically one topic per distinct value found in the batch):
+
+```python
+import numpy as np
+
+@delog.live_transform(topic="NAMED_VALUE_FLOAT", fields=["name", "value"])
+def split_named_floats(batch):
+    out = {}
+    for name in np.unique(batch.name):
+        mask = batch.name == name
+        out[f"NAMED_VALUE_FLOAT/{name}"] = {"value": (batch.t[mask], batch.value[mask], None)}
+    return out
+```
+
+Rules:
+
+- Each field entry uses the same three forms as static mode (`values`,
+  `(values, unit)`, `(times, values, unit)`), and every field within one
+  topic must resolve to **identical times**.
+- The bare/2-tuple forms reuse the **input batch's** times, so their array
+  length must equal the batch - they don't implicitly follow a mask. To emit a
+  row subset (as in the example above), use the 3-tuple form with explicit
+  `times`.
+- Explicit `times` (the 3-tuple form) must be an `int64` array, **sorted
+  ascending** (equal adjacent values are allowed - e.g. several fields sharing
+  a timestamp), typically a mask-subset of `batch.t`.
+- An **empty outer dict** (`{}`) means "emit nothing for this batch" - not an
+  error.
+- A topic whose fields resolve to **zero rows** is silently skipped.
+- Each inner `{field: ...}` dict must be **non-empty** - a topic with no
+  fields is an error.
+- Topic names (the outer dict's keys) must be non-empty strings.
+- New topic names appear in the browser the first time they're emitted; keep a
+  topic's field set and units consistent across batches so it reads as one
+  continuous derived signal.
 
 Key behaviors:
 
@@ -183,7 +236,8 @@ Key behaviors:
   rather than stalling live ingestion.
 - **Self-disabling on errors.** If a callback raises on three consecutive
   batches, that transform is disabled and an error is reported to the console;
-  other transforms keep running.
+  other transforms keep running. Error messages identify the transform as
+  `<script>.<function>` (e.g. `named_values_live_split.split_named_floats`).
 
 **Version 1 live transforms are same-topic only.** The callback sees one
 incoming topic batch at a time. It cannot join across topics, resample onto
@@ -221,12 +275,13 @@ flight_42/vehicle_attitude[0]/q[0]
 Reads one field, materialized as numpy arrays. `path` is a string exactly as it
 appears in `delog.sources()`.
 
-A `DelogField` has two attributes:
+A `DelogField` has three attributes:
 
 | Attribute | Type | Meaning |
 | --- | --- | --- |
 | `.t` | `np.ndarray[int64]` | Timestamps, microseconds (raw log time). |
-| `.v` | `np.ndarray[float64]` | Values, as `float64`. |
+| `.v` | `np.ndarray[float64]` | Values, as `float64`. All-`NaN` for string fields. |
+| `.s` | `np.ndarray[str]` or `None` | Numpy unicode array of values, for string (Utf8) fields; `None` for numeric fields. |
 
 ```python
 f = delog.field("flight_42/IMU[0]/AccX")
@@ -235,8 +290,12 @@ print(f.t[:3], f.v[:3])   # int64 µs, float64 values
 
 - Raises `KeyError` if the path doesn't resolve, `ValueError` if the field has
   no data.
-- Values are always `float64` (ints/bools are widened). **NaN is preserved** -
-  gaps in the source remain NaN, so you can detect and propagate them.
+- Numeric fields are always widened to `float64` (ints/bools included). **NaN
+  is preserved** - gaps in the source remain NaN, so you can detect and
+  propagate them.
+- **String fields** (Utf8) additionally populate `.s` with a numpy unicode
+  array; null cells read as `""` - the string analogue of the NaN gap
+  convention. `.v` is still present but all-`NaN` for these fields.
 - All fields **within the same topic** share identical timestamps, so you can
   read several of them and operate element-wise without aligning.
 
@@ -452,6 +511,7 @@ your [script library](#the-script-library) or open in the Console:
 | [`vehicle_attitude_euler.py`](../scripts/vehicle_attitude_euler.py) | snapshot | Converts a PX4 `vehicle_attitude[0]` quaternion to roll/pitch/yaw. Finds the source prefix automatically so it runs on any PX4 log. |
 | [`nav_controller_output_radians.py`](../scripts/nav_controller_output_radians.py) | snapshot | Re-emits ArduPilot `NAV_CONTROLLER_OUTPUT` angles in radians, locating the topic across sources/instances. |
 | [`nav_controller_live_rad.py`](../scripts/nav_controller_live_rad.py) | live transform | The live-streaming counterpart: a `@delog.live_transform` that converts `NAV_CONTROLLER_OUTPUT` angles to radians as batches arrive. |
+| [`named_values_live_split.py`](../scripts/named_values_live_split.py) | live transform | Splits live `NAMED_VALUE_FLOAT`/`NAMED_VALUE_INT` streams into one derived topic per `name` (dynamic output topics), so named values arrive sorted by category. |
 
 The snapshot/live pair (`nav_controller_*`) is a good side-by-side reference for
 the difference between the two execution modes.
@@ -463,7 +523,10 @@ the difference between the two execution modes.
 - **Not sandboxed.** Embedded CPython runs with your full user privileges
   (filesystem, network). Only run scripts you trust. This is a deliberate
   trade-off for the power of real CPython + numpy.
-- **`DelogField` exposes only `.t` and `.v`.** There is no `.unit`/`.dtype`
+- **String fields are read-only.** `DelogField.s` and live-transform string
+  batch attributes let you *read* Utf8 fields, but script **output** stays
+  Float64-only - `add_field` and the numeric forms of a live transform's
+  return value always take `float64` arrays. There is also no `.unit`/`.dtype`
   attribute on reads (units are an output concern via `add_field(..., unit=)`).
 - **Output is `float64`.** Even if a source field was integer/bool, derived
   output columns are stored as `Float64`.
