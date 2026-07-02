@@ -34,7 +34,12 @@ fn named_value_batch(source: delog_core::identity::SourceId) -> delog_core::inge
         Arc::new(StringArray::from(vec!["airspd", "clbrate", "airspd"])),
         Arc::new(Float32Array::from(vec![1.5, 2.5, 3.5])),
     ];
-    delog_core::ingest::ParsedBatch::new(source, schema, Int64Array::from(vec![100, 200, 300]), columns)
+    delog_core::ingest::ParsedBatch::new(
+        source,
+        schema,
+        Int64Array::from(vec![100, 200, 300]),
+        columns,
+    )
 }
 
 #[test]
@@ -59,7 +64,9 @@ fn named_value_split_creates_one_topic_per_name() {
         let mut sink = sender.file_sink();
         sink.open_source("live", delog_core::ingest::SourceKind::Live)
     };
-    engine.try_send_live_batch(named_value_batch(raw_source)).unwrap();
+    engine
+        .try_send_live_batch(named_value_batch(raw_source))
+        .unwrap();
     wait_live_processed(&engine);
 
     let snap = wait_for_topic(&write_store, "NAMED_VALUE_FLOAT/airspd");
