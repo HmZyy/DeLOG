@@ -32,6 +32,10 @@ struct ActiveTransform {
     source: SourceId,
     consecutive_errors: u8,
     disabled: bool,
+    /// Sorted field names of the first successful emission per output topic;
+    /// used to reject a later batch that changes a topic's field set (see
+    /// `run_one_transform`).
+    emitted_fields: HashMap<String, Vec<String>>,
 }
 
 fn format_pyerr(py: Python<'_>, err: &PyErr) -> String {
@@ -581,7 +585,7 @@ fn run_live_transforms(
 }
 
 fn run_one_transform(
-    transform: &ActiveTransform,
+    transform: &mut ActiveTransform,
     batch: &ParsedBatch,
 ) -> Result<Vec<ParsedBatch>, String> {
     let materialized = LiveTransformBatch::from_parsed(&transform.spec, batch)?;
@@ -598,10 +602,40 @@ fn run_one_transform(
         parse_transform_result(py, &transform.spec, &input_times, &ret)
             .map_err(|e| format_pyerr(py, &e))
     })?;
-    results
+
+    // A dynamic transform can pick a topic's field set per batch; a change
+    // between batches (different names, count, or a rename) would otherwise
+    // reach the ingest thread as an inconsistent-schema append. Reject it here
+    // instead, as a normal transform error, before any batch is built.
+    let mut sorted_names: Vec<(String, Vec<String>)> = Vec::with_capacity(results.len());
+    for result in &results {
+        let mut names: Vec<String> = result.fields.iter().map(|f| f.name.clone()).collect();
+        names.sort();
+        if let Some(expected) = transform.emitted_fields.get(&result.topic)
+            && *expected != names
+        {
+            return Err(format!(
+                "live transform '{}' changed fields of topic '{}': expected [{}], got [{}]",
+                transform.spec.label(),
+                result.topic,
+                expected.join(", "),
+                names.join(", ")
+            ));
+        }
+        sorted_names.push((result.topic.clone(), names));
+    }
+
+    let batches = results
         .into_iter()
         .map(|r| result_to_batch(transform.source, r))
-        .collect::<Result<Vec<_>, _>>()
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // Record only now that the whole batch validated: a failed batch must not
+    // pin a topic's field set from a partial or since-rejected result.
+    for (topic, names) in sorted_names {
+        transform.emitted_fields.entry(topic).or_insert(names);
+    }
+    Ok(batches)
 }
 
 /// Handle one command. Returns `true` if the worker should shut down.
@@ -689,6 +723,7 @@ fn handle_command(
                                         source: derived_source,
                                         consecutive_errors: 0,
                                         disabled: false,
+                                        emitted_fields: HashMap::new(),
                                     })
                                     .collect::<Vec<_>>()
                             });
@@ -1262,6 +1297,89 @@ def split(batch):
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].output_topic, None);
         assert_eq!(specs[0].func_name, "split");
+    }
+
+    #[test]
+    fn dynamic_transform_disables_when_a_topic_changes_field_set() {
+        let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use delog_core::ingest::ingest_channel;
+        use delog_core::ingestor::{Ingestor, NullObserver};
+
+        let ingestor = Ingestor::new(NullObserver);
+        let store = ingestor.store();
+        let (sender, receiver) = ingest_channel();
+        let _ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
+
+        let engine = ScriptEngine::spawn(store, sender.clone(), test_metrics());
+
+        // First call emits topic "T" with fields {a, b}; every later call emits
+        // "T" with only {a} — a field-set change the callback is allowed to
+        // make (it decides its own output shape per batch) but the engine must
+        // reject before it reaches the ingest thread.
+        let script = r#"
+_calls = [0]
+
+@delog.live_transform(topic="A", fields=["v"])
+def split(batch):
+    _calls[0] += 1
+    if _calls[0] == 1:
+        return {"T": {"a": batch.v, "b": batch.v}}
+    return {"T": {"a": batch.v}}
+"#;
+        let _ = engine.send(ScriptCommand::RunScript {
+            name: "changer".into(),
+            source: script.into(),
+        });
+        loop {
+            match engine.recv_blocking() {
+                ScriptEvent::Done => break,
+                ScriptEvent::Error(e) => panic!("unexpected error: {e}"),
+                _ => {}
+            }
+        }
+
+        let schema = Arc::new(
+            TopicSchema::new(
+                "A",
+                [FieldSchema::new("v", DataType::Float64, None::<String>, 1.0).unwrap()],
+            )
+            .unwrap(),
+        );
+        let batch_source = {
+            let mut sink = sender.file_sink();
+            sink.open_source("live", delog_core::ingest::SourceKind::Live)
+        };
+        let make_batch = || {
+            let cols: Vec<ArrayRef> = vec![Arc::new(Float64Array::from(vec![1.0]))];
+            delog_core::ingest::ParsedBatch::new(
+                batch_source,
+                Arc::clone(&schema),
+                Int64Array::from(vec![0]),
+                cols,
+            )
+        };
+
+        // First batch: {a, b} is recorded as topic T's field set.
+        engine.try_send_live_batch(make_batch()).unwrap();
+        assert_eq!(engine.recv_blocking(), ScriptEvent::LiveBatchProcessed);
+
+        // The next LIVE_TRANSFORM_ERROR_LIMIT batches each emit only {a},
+        // which differs from the recorded {a, b} — each is a transform error,
+        // and the last one disables the transform.
+        let mut disabled_message = None;
+        for _ in 0..LIVE_TRANSFORM_ERROR_LIMIT {
+            engine.try_send_live_batch(make_batch()).unwrap();
+            loop {
+                match engine.recv_blocking() {
+                    ScriptEvent::LiveBatchProcessed => break,
+                    ScriptEvent::Error(e) => disabled_message = Some(e),
+                    other => panic!("unexpected event: {other:?}"),
+                }
+            }
+        }
+        let msg =
+            disabled_message.expect("transform disables after repeated field-set mismatches");
+        assert!(msg.contains("changed fields"), "message: {msg}");
     }
 
     #[test]
