@@ -158,11 +158,21 @@ impl Delog {
     }
 
     fn resolve_path(&self, path: &str) -> Result<FieldId, String> {
+        if let Some(id) = self.resolve_path_fast(path) {
+            return Ok(id);
+        }
+        if let Some(id) = self.resolve_path_scan(path) {
+            return Ok(id);
+        }
+        Err(format!("field path '{path}' not found"))
+    }
+
+    /// Fast path: split on the first two `/` and assume the remainder is the
+    /// field name. Correct as long as the topic name contains no `/`, which
+    /// covers the overwhelming majority of paths without an O(n) scan.
+    fn resolve_path_fast(&self, path: &str) -> Option<FieldId> {
         let mut parts = path.splitn(3, '/');
-        let (s, t, f) = match (parts.next(), parts.next(), parts.next()) {
-            (Some(s), Some(t), Some(f)) => (s, t, f),
-            _ => return Err(format!("bad field path '{path}' (want source/topic/field)")),
-        };
+        let (s, t, f) = (parts.next()?, parts.next()?, parts.next()?);
         for src in self.snapshot.sources.iter() {
             if src.entry.removed || src.entry.label != s {
                 continue;
@@ -176,12 +186,41 @@ impl Delog {
                 }
                 for fe in self.snapshot.fields.iter() {
                     if !fe.removed && fe.topic == topic_id && fe.name == f {
-                        return Ok(fe.id);
+                        return Some(fe.id);
                     }
                 }
             }
         }
-        Err(format!("field path '{path}' not found"))
+        None
+    }
+
+    /// Fallback for topics containing `/` (e.g. dynamic live-transform output
+    /// topics such as "NAMED_VALUE_FLOAT/airspd"), which `resolve_path_fast`
+    /// mis-splits. Scans every live field and matches the exact path
+    /// `sources()` builds for it, guaranteeing a round-trip.
+    fn resolve_path_scan(&self, path: &str) -> Option<FieldId> {
+        for src in self.snapshot.sources.iter() {
+            if src.entry.removed {
+                continue;
+            }
+            for &topic_id in src.topics.iter() {
+                let Some(topic) = self.snapshot.topic(topic_id) else {
+                    continue;
+                };
+                if topic.entry.removed {
+                    continue;
+                }
+                for fe in self.snapshot.fields.iter() {
+                    if !fe.removed
+                        && fe.topic == topic_id
+                        && path == format!("{}/{}/{}", src.entry.label, topic.entry.name, fe.name)
+                    {
+                        return Some(fe.id);
+                    }
+                }
+            }
+        }
+        None
     }
 }
 
@@ -423,6 +462,48 @@ mod tests {
         assert_eq!(t, vec![10, 20, 30]);
         assert_eq!(v, vec![1.0, 2.0, 3.0]);
         assert_eq!(s, None);
+    }
+
+    #[test]
+    fn resolve_path_falls_back_to_scanning_when_the_topic_name_contains_a_slash() {
+        // A dynamic live-transform output topic (e.g. "NAMED_VALUE_FLOAT/airspd")
+        // makes the fast splitn(3, '/') path mis-split into topic
+        // "NAMED_VALUE_FLOAT" and field "airspd/value". The scan fallback must
+        // still resolve it, matching exactly the path `sources()` would build.
+        let mut id = IdentityRegistry::new();
+        let src = id.add_source("live");
+        let topic = id.add_topic(src, "NAMED_VALUE_FLOAT/airspd").unwrap();
+        let value = id.add_field(topic, "value").unwrap();
+        let schema = Arc::new(
+            TopicSchema::new(
+                "NAMED_VALUE_FLOAT/airspd",
+                [FieldSchema::new("value", DataType::Float64, None::<String>, 1.0).unwrap()],
+            )
+            .unwrap(),
+        );
+        let cols: Vec<ArrayRef> = vec![Arc::new(Float64Array::from(vec![1.5]))];
+        let chunk = Arc::new(Chunk::try_new(Int64Array::from(vec![100]), cols, &schema).unwrap());
+        let store = Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap());
+        let snap = Arc::new(StoreSnapshot::from_registry(&id, [(topic, store)], 0).unwrap());
+
+        let delog = Delog::new(
+            snap,
+            EmitBuffer::default(),
+            LiveTransformBuffer::default(),
+            String::new(),
+            0,
+        );
+        assert_eq!(
+            delog
+                .resolve_path("live/NAMED_VALUE_FLOAT/airspd/value")
+                .unwrap(),
+            value
+        );
+        assert!(
+            delog
+                .resolve_path("live/NAMED_VALUE_FLOAT/airspd/missing")
+                .is_err()
+        );
     }
 
     #[test]

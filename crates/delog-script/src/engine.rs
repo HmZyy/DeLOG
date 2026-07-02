@@ -1377,8 +1377,7 @@ def split(batch):
                 }
             }
         }
-        let msg =
-            disabled_message.expect("transform disables after repeated field-set mismatches");
+        let msg = disabled_message.expect("transform disables after repeated field-set mismatches");
         assert!(msg.contains("changed fields"), "message: {msg}");
     }
 
