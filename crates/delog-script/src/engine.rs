@@ -604,13 +604,14 @@ fn run_one_transform(
     })?;
 
     // A dynamic transform can pick a topic's field set per batch; a change
-    // between batches (different names, count, or a rename) would otherwise
-    // reach the ingest thread as an inconsistent-schema append. Reject it here
-    // instead, as a normal transform error, before any batch is built.
-    let mut sorted_names: Vec<(String, Vec<String>)> = Vec::with_capacity(results.len());
+    // between batches (different names, count, a rename, or a reorder) would
+    // otherwise reach the ingest thread as an inconsistent-schema append.
+    // Reject it here instead, as a normal transform error, before any batch is
+    // built. Order matters: ingest appends columns positionally, so names are
+    // compared in emission order (dicts iterate in insertion order).
+    let mut emitted_names: Vec<(String, Vec<String>)> = Vec::with_capacity(results.len());
     for result in &results {
-        let mut names: Vec<String> = result.fields.iter().map(|f| f.name.clone()).collect();
-        names.sort();
+        let names: Vec<String> = result.fields.iter().map(|f| f.name.clone()).collect();
         if let Some(expected) = transform.emitted_fields.get(&result.topic)
             && *expected != names
         {
@@ -622,7 +623,7 @@ fn run_one_transform(
                 names.join(", ")
             ));
         }
-        sorted_names.push((result.topic.clone(), names));
+        emitted_names.push((result.topic.clone(), names));
     }
 
     let batches = results
@@ -632,7 +633,7 @@ fn run_one_transform(
 
     // Record only now that the whole batch validated: a failed batch must not
     // pin a topic's field set from a partial or since-rejected result.
-    for (topic, names) in sorted_names {
+    for (topic, names) in emitted_names {
         transform.emitted_fields.entry(topic).or_insert(names);
     }
     Ok(batches)
