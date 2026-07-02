@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use arrow::array::{ArrayRef, Float64Array, Int64Array};
 use arrow::datatypes::DataType;
-use delog_core::field_view::array_row_as_f64;
+use delog_core::field_view::{array_row_as_f64, array_row_as_str};
 use delog_core::identity::SourceId;
 use delog_core::ingest::ParsedBatch;
 use delog_core::schema::{FieldSchema, TopicSchema};
@@ -59,9 +59,15 @@ impl LiveTransformSpec {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum LiveColumn {
+    F64(Vec<f64>),
+    Str(Vec<String>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct LiveTransformBatch {
     pub times: Vec<i64>,
-    pub values: HashMap<String, Vec<f64>>,
+    pub values: HashMap<String, LiveColumn>,
 }
 
 impl LiveTransformBatch {
@@ -83,42 +89,55 @@ impl LiveTransformBatch {
                 .field_index(field)
                 .ok_or_else(|| format!("field '{field}' missing from {}", batch.topic()))?;
             let col = batch.columns[idx].as_ref();
-            let vals = (0..batch.timestamps.len())
-                .map(|row| array_row_as_f64(col, row))
-                .collect();
+            let vals = match col.data_type() {
+                DataType::Utf8 | DataType::LargeUtf8 => LiveColumn::Str(
+                    (0..batch.timestamps.len())
+                        .map(|row| array_row_as_str(col, row).unwrap_or_default().to_owned())
+                        .collect(),
+                ),
+                _ => LiveColumn::F64(
+                    (0..batch.timestamps.len())
+                        .map(|row| array_row_as_f64(col, row))
+                        .collect(),
+                ),
+            };
             values.insert(field.clone(), vals);
         }
         Ok(Self { times, values })
     }
 }
 
-/// Exposes `.t` (int64 µs) and a dynamic float64 attribute per field (e.g. `batch.nav_roll`).
+/// Exposes `.t` (int64 us) and one attribute per requested field: float64
+/// arrays for numeric fields, numpy unicode arrays for string fields.
 #[pyclass(unsendable, name = "LiveBatch")]
 pub struct LiveBatchPy {
     #[pyo3(get)]
     pub t: Py<PyArray1<i64>>,
-    fields: HashMap<String, Py<PyArray1<f64>>>,
+    fields: HashMap<String, Py<PyAny>>,
 }
 
 impl LiveBatchPy {
     /// Must be called under the GIL.
-    pub fn from_materialized(py: Python<'_>, batch: LiveTransformBatch) -> Self {
+    pub fn from_materialized(py: Python<'_>, batch: LiveTransformBatch) -> PyResult<Self> {
         let t = batch.times.into_pyarray(py).unbind();
-        let fields = batch
-            .values
-            .into_iter()
-            .map(|(name, vals)| (name, vals.into_pyarray(py).unbind()))
-            .collect();
-        Self { t, fields }
+        let mut fields = HashMap::with_capacity(batch.values.len());
+        for (name, col) in batch.values {
+            let obj: Py<PyAny> = match col {
+                LiveColumn::F64(vals) => vals.into_pyarray(py).into_any().unbind(),
+                LiveColumn::Str(vals) => crate::api::numpy_str_array(py, vals)?,
+            };
+            fields.insert(name, obj);
+        }
+        Ok(Self { t, fields })
     }
 }
 
 #[pymethods]
 impl LiveBatchPy {
-    fn __getattr__(&self, name: &str) -> PyResult<Py<PyArray1<f64>>> {
+    fn __getattr__(&self, name: &str) -> PyResult<Py<PyAny>> {
         self.fields
             .get(name)
-            .map(|arr| Python::attach(|py| arr.clone_ref(py)))
+            .map(|obj| Python::attach(|py| obj.clone_ref(py)))
             .ok_or_else(|| PyAttributeError::new_err(name.to_owned()))
     }
 }
@@ -299,6 +318,33 @@ mod tests {
         )
     }
 
+    fn named_batch() -> ParsedBatch {
+        let schema = Arc::new(
+            TopicSchema::new(
+                "NAMED_VALUE_FLOAT",
+                [
+                    FieldSchema::new("name", DataType::Utf8, None::<String>, 1.0).unwrap(),
+                    FieldSchema::new("value", DataType::Float32, None::<String>, 1.0).unwrap(),
+                ],
+            )
+            .unwrap(),
+        );
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(arrow::array::StringArray::from(vec![
+                Some("airspd"),
+                None,
+                Some("clbrate"),
+            ])),
+            Arc::new(Float32Array::from(vec![1.5, 2.5, 3.5])),
+        ];
+        ParsedBatch::new(
+            SourceId(7),
+            schema,
+            Int64Array::from(vec![100, 200, 300]),
+            columns,
+        )
+    }
+
     #[test]
     fn spec_matches_topic_and_required_fields() {
         let spec = LiveTransformSpec::new(
@@ -341,7 +387,36 @@ mod tests {
         let materialized = LiveTransformBatch::from_parsed(&spec, &nav_batch()).unwrap();
 
         assert_eq!(materialized.times, vec![100, 200]);
-        assert_eq!(materialized.values["nav_roll"], vec![0.0, 90.0]);
-        assert_eq!(materialized.values["nav_bearing"], vec![180.0, -90.0]);
+        assert_eq!(
+            materialized.values["nav_roll"],
+            LiveColumn::F64(vec![0.0, 90.0])
+        );
+        assert_eq!(
+            materialized.values["nav_bearing"],
+            LiveColumn::F64(vec![180.0, -90.0])
+        );
+    }
+
+    #[test]
+    fn materialize_batch_extracts_string_fields_with_empty_for_null() {
+        let spec = LiveTransformSpec::new(
+            "script".into(),
+            1,
+            "NAMED_VALUE_FLOAT".into(),
+            vec!["name".into(), "value".into()],
+            "OUT".into(),
+        )
+        .unwrap();
+
+        let materialized = LiveTransformBatch::from_parsed(&spec, &named_batch()).unwrap();
+
+        assert_eq!(
+            materialized.values["name"],
+            LiveColumn::Str(vec!["airspd".into(), "".into(), "clbrate".into()])
+        );
+        assert_eq!(
+            materialized.values["value"],
+            LiveColumn::F64(vec![1.5, 2.5, 3.5])
+        );
     }
 }
