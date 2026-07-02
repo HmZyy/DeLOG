@@ -57,6 +57,17 @@ pub fn materialize_field(
     Ok((times, values))
 }
 
+/// A numpy unicode ('<U...') array from owned strings, so scripts get
+/// vectorized comparisons like `batch.name == "airspd"`.
+pub(crate) fn numpy_str_array(py: Python<'_>, vals: Vec<String>) -> PyResult<Py<PyAny>> {
+    use pyo3::types::IntoPyDict;
+    let kwargs = [("dtype", "str")].into_py_dict(py)?;
+    Ok(py
+        .import("numpy")?
+        .call_method("array", (vals,), Some(&kwargs))?
+        .unbind())
+}
+
 pub struct PendingField {
     pub name: String,
     pub values: Vec<f64>,

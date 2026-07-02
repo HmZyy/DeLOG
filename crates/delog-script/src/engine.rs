@@ -584,7 +584,8 @@ fn run_one_transform(
     let materialized = LiveTransformBatch::from_parsed(&transform.spec, batch)?;
     let input_times = materialized.times.clone();
     let result = Python::attach(|py| -> Result<crate::live::LiveTransformResult, String> {
-        let py_batch = Bound::new(py, LiveBatchPy::from_materialized(py, materialized))
+        let py_batch = LiveBatchPy::from_materialized(py, materialized)
+            .and_then(|b| Bound::new(py, b))
             .map_err(|e| format_pyerr(py, &e))?;
         let ret = transform
             .callable
