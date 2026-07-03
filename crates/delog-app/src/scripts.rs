@@ -55,11 +55,13 @@ pub struct ScriptsPanel {
     running: bool,
     parsers: ParsersPanel,
     deferred_parser_actions: VecDeque<ParserUiAction>,
+    params: delog_script::params::SharedParams,
 }
 
 impl ScriptsPanel {
     pub fn new(scripts_dir: std::path::PathBuf, parsers_dir: std::path::PathBuf) -> Self {
         let library = ScriptLibrary::new(scripts_dir);
+        let params = delog_script::params::shared_empty();
         Self {
             open: false,
             engine: None,
@@ -73,6 +75,7 @@ impl ScriptsPanel {
             running: false,
             parsers: ParsersPanel::new(parsers_dir),
             deferred_parser_actions: VecDeque::new(),
+            params,
         }
     }
 
@@ -264,8 +267,9 @@ impl ScriptsPanel {
         sender: IngestSender,
         metrics: Arc<MetricsRegistry>,
     ) -> &ScriptEngine {
+        let params = Arc::clone(&self.params);
         self.engine
-            .get_or_insert_with(|| ScriptEngine::spawn(store, sender, metrics))
+            .get_or_insert_with(|| ScriptEngine::spawn(store, sender, metrics, params))
     }
 
     /// Returns `None` rather than spawning the engine: a live transform only
