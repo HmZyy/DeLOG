@@ -12,7 +12,7 @@ use crate::camera::OrbitCamera;
 use crate::gpu::{self, GpuBridge, PaneView, VehicleDraw};
 use crate::hover::{self, HoverTarget};
 use crate::legend;
-use crate::plot::{PlotPane, TraceMode, TraceRef, ViewX};
+use crate::plot::{GhostTrace, PlotPane, TraceMode, TraceRef, ViewX};
 use crate::vehicle;
 
 pub type TileTree = egui_tiles::Tree<Pane>;
@@ -145,7 +145,7 @@ impl Workspace {
         for pane in self.plot_panes_mut() {
             let ghosts = std::mem::take(&mut pane.ghosts);
             for ghost in ghosts {
-                if let Some(field) = resolve_source_agnostic(snapshot, &ghost.topic, &ghost.field) {
+                if let Some(field) = resolve_ghost(snapshot, &ghost) {
                     if !pane.traces.iter().any(|t| t.field == field) {
                         pane.traces.push(TraceRef {
                             field,
@@ -154,6 +154,7 @@ impl Workspace {
                             mode: ghost.mode,
                             visible: ghost.visible,
                         });
+                        apply_ghost_text_state(pane, &ghost, field);
                         resolved += 1;
                     }
                 } else {
@@ -172,6 +173,18 @@ impl Workspace {
                 let field = pane.traces[i].field;
                 if snapshot.is_field_live(field) {
                     i += 1;
+                } else if let Some(replacement) = resolve_recreated_script_field(snapshot, field) {
+                    if pane.traces.iter().any(|t| t.field == replacement) {
+                        pane.traces.remove(i);
+                    } else {
+                        pane.traces[i].field = replacement;
+                        rebind_text_state(pane, field, replacement);
+                        i += 1;
+                    }
+                } else if let Some(ghost) = script_ghost_from_removed_trace(snapshot, pane, i) {
+                    pane.traces.remove(i);
+                    pane.add_ghost(ghost);
+                    removed.push(field);
                 } else {
                     pane.traces.remove(i);
                     removed.push(field);
@@ -1445,6 +1458,84 @@ impl Behavior<'_> {
     }
 }
 
+fn apply_ghost_text_state(pane: &mut PlotPane, ghost: &GhostTrace, field: FieldId) {
+    if let Some(filter) = ghost.text_filter.as_ref() {
+        pane.text_filters.insert(field, filter.clone());
+    }
+    for &(time_us, offset) in &ghost.text_offsets {
+        pane.text_offsets.insert((field, time_us), offset);
+    }
+}
+
+fn rebind_text_state(pane: &mut PlotPane, old_field: FieldId, new_field: FieldId) {
+    if let Some(filter) = pane.text_filters.remove(&old_field) {
+        pane.text_filters.insert(new_field, filter);
+    }
+
+    let offsets: Vec<_> = pane
+        .text_offsets
+        .iter()
+        .filter_map(|(&(field, time_us), &offset)| {
+            (field == old_field).then_some((time_us, offset))
+        })
+        .collect();
+    for (time_us, offset) in offsets {
+        pane.text_offsets.remove(&(old_field, time_us));
+        pane.text_offsets.insert((new_field, time_us), offset);
+    }
+}
+
+fn take_text_state(pane: &mut PlotPane, field: FieldId) -> (Option<String>, Vec<(i64, f32)>) {
+    let filter = pane.text_filters.remove(&field);
+    let offsets: Vec<_> = pane
+        .text_offsets
+        .iter()
+        .filter_map(|(&(offset_field, time_us), &offset)| {
+            (offset_field == field).then_some((time_us, offset))
+        })
+        .collect();
+    for &(time_us, _) in &offsets {
+        pane.text_offsets.remove(&(field, time_us));
+    }
+    (filter, offsets)
+}
+
+fn script_ghost_from_removed_trace(
+    snapshot: &StoreSnapshot,
+    pane: &mut PlotPane,
+    trace_index: usize,
+) -> Option<GhostTrace> {
+    let trace = pane.traces.get(trace_index).copied()?;
+    let field = snapshot
+        .fields
+        .get(trace.field.index())
+        .filter(|field| field.id == trace.field && field.removed)?;
+    let topic = snapshot.topic(field.topic)?;
+    let source = snapshot.source(topic.entry.source)?;
+    if !source.entry.removed || !source.entry.label.starts_with("script:") {
+        return None;
+    }
+    let (text_filter, text_offsets) = take_text_state(pane, trace.field);
+    Some(GhostTrace {
+        source: Some(source.entry.label.clone()),
+        topic: topic.entry.name.clone(),
+        field: field.name.clone(),
+        color: trace.color,
+        width_px: trace.width_px,
+        mode: trace.mode,
+        visible: trace.visible,
+        text_filter,
+        text_offsets,
+    })
+}
+
+fn resolve_ghost(snapshot: &StoreSnapshot, ghost: &GhostTrace) -> Option<FieldId> {
+    match ghost.source.as_deref() {
+        Some(source) => resolve_source_field(snapshot, source, &ghost.topic, &ghost.field),
+        None => resolve_source_agnostic(snapshot, &ghost.topic, &ghost.field),
+    }
+}
+
 fn resolve_source_agnostic(
     snapshot: &StoreSnapshot,
     topic_name: &str,
@@ -1470,6 +1561,50 @@ fn resolve_source_agnostic(
         }
     }
     found
+}
+
+fn resolve_source_field(
+    snapshot: &StoreSnapshot,
+    source_label: &str,
+    topic_name: &str,
+    field_name: &str,
+) -> Option<FieldId> {
+    for source in snapshot
+        .sources
+        .iter()
+        .filter(|source| !source.entry.removed && source.entry.label == source_label)
+    {
+        for topic_id in source.topics.iter().copied() {
+            let topic = snapshot.topic(topic_id)?;
+            if topic.entry.removed || topic.entry.name != topic_name {
+                continue;
+            }
+            for field in snapshot
+                .fields
+                .iter()
+                .filter(|f| f.topic == topic_id && !f.removed && f.name == field_name)
+            {
+                return Some(field.id);
+            }
+        }
+    }
+    None
+}
+
+fn resolve_recreated_script_field(snapshot: &StoreSnapshot, old_field: FieldId) -> Option<FieldId> {
+    let field = snapshot
+        .fields
+        .get(old_field.index())
+        .filter(|field| field.id == old_field && field.removed)?;
+    let topic = snapshot.topic(field.topic)?;
+    let source = snapshot.source(topic.entry.source)?;
+    let source_label = source.entry.label.as_str();
+    let topic_name = topic.entry.name.as_str();
+    let field_name = field.name.as_str();
+    if !source.entry.removed || !source_label.starts_with("script:") {
+        return None;
+    }
+    resolve_source_field(snapshot, source_label, topic_name, field_name)
 }
 
 fn y_unit(snapshot: &StoreSnapshot, pane: &PlotPane) -> Option<String> {
@@ -1665,6 +1800,121 @@ mod tests {
     }
 
     #[test]
+    fn prune_removed_fields_rebinds_script_traces_to_recreated_fields() {
+        let mut identity = delog_core::identity::IdentityRegistry::new();
+        let old_source = identity.add_source("script:calc");
+        let old_topic = identity.add_topic(old_source, "Derived").unwrap();
+        let old_field = identity.add_field(old_topic, "value").unwrap();
+        identity.remove_source(old_source);
+        let new_source = identity.add_source("script:calc");
+        let new_topic = identity.add_topic(new_source, "Derived").unwrap();
+        let new_field = identity.add_field(new_topic, "value").unwrap();
+        let snapshot = StoreSnapshot::from_registry(&identity, [], 1).unwrap();
+
+        let mut workspace = Workspace::new();
+        assert!(workspace.add_trace_to_first_plot(old_field));
+        {
+            let pane = workspace.plot_panes_mut().next().unwrap();
+            let trace = pane.trace_mut(old_field).unwrap();
+            trace.color = [0.1, 0.2, 0.3, 0.4];
+            trace.width_px = 3.0;
+            trace.mode = TraceMode::Step;
+            trace.visible = false;
+            pane.text_filters.insert(old_field, "armed".into());
+            pane.text_offsets.insert((old_field, 42), 0.75);
+        }
+
+        let removed = workspace.prune_removed_fields(&snapshot);
+
+        assert!(removed.is_empty());
+        assert_eq!(workspace.fields().collect::<Vec<_>>(), vec![new_field]);
+        let pane = workspace.plot_panes().next().unwrap();
+        assert_eq!(
+            pane.traces[0],
+            TraceRef {
+                field: new_field,
+                color: [0.1, 0.2, 0.3, 0.4],
+                width_px: 3.0,
+                mode: TraceMode::Step,
+                visible: false,
+            }
+        );
+        assert_eq!(pane.text_filters.get(&new_field).unwrap(), "armed");
+        assert_eq!(pane.text_offsets.get(&(new_field, 42)), Some(&0.75));
+        assert!(!pane.text_filters.contains_key(&old_field));
+        assert!(
+            !pane
+                .text_offsets
+                .keys()
+                .any(|(field, _time)| *field == old_field)
+        );
+    }
+
+    #[test]
+    fn prune_removed_fields_keeps_script_trace_until_recreated_field_appears() {
+        let mut identity = delog_core::identity::IdentityRegistry::new();
+        let old_source = identity.add_source("script:calc");
+        let old_topic = identity.add_topic(old_source, "Derived").unwrap();
+        let old_field = identity.add_field(old_topic, "value").unwrap();
+
+        let mut workspace = Workspace::new();
+        assert!(workspace.add_trace_to_first_plot(old_field));
+        {
+            let pane = workspace.plot_panes_mut().next().unwrap();
+            let trace = pane.trace_mut(old_field).unwrap();
+            trace.color = [0.4, 0.3, 0.2, 0.1];
+            trace.width_px = 4.0;
+            trace.mode = TraceMode::Scatter;
+            trace.visible = false;
+            pane.text_filters.insert(old_field, "armed".into());
+            pane.text_offsets.insert((old_field, 42), 0.75);
+        }
+
+        identity.remove_source(old_source);
+        let removed_snapshot = StoreSnapshot::from_registry(&identity, [], 1).unwrap();
+        let removed = workspace.prune_removed_fields(&removed_snapshot);
+
+        assert_eq!(removed, vec![old_field]);
+        assert!(workspace.fields().next().is_none());
+        {
+            let pane = workspace.plot_panes().next().unwrap();
+            assert_eq!(pane.ghosts.len(), 1);
+            assert_eq!(pane.ghosts[0].source.as_deref(), Some("script:calc"));
+            assert_eq!(pane.ghosts[0].topic, "Derived");
+            assert_eq!(pane.ghosts[0].field, "value");
+            assert_eq!(pane.ghosts[0].color, [0.4, 0.3, 0.2, 0.1]);
+            assert_eq!(pane.ghosts[0].width_px, 4.0);
+            assert_eq!(pane.ghosts[0].mode, TraceMode::Scatter);
+            assert!(!pane.ghosts[0].visible);
+            assert_eq!(pane.ghosts[0].text_filter.as_deref(), Some("armed"));
+            assert_eq!(pane.ghosts[0].text_offsets, vec![(42, 0.75)]);
+        }
+
+        let new_source = identity.add_source("script:calc");
+        let new_topic = identity.add_topic(new_source, "Derived").unwrap();
+        let new_field = identity.add_field(new_topic, "value").unwrap();
+        let recreated_snapshot = StoreSnapshot::from_registry(&identity, [], 2).unwrap();
+
+        assert_eq!(workspace.resolve_ghosts(&recreated_snapshot), 1);
+
+        let pane = workspace.plot_panes().next().unwrap();
+        assert!(pane.ghosts.is_empty());
+        assert_eq!(pane.traces.len(), 1);
+        assert_eq!(
+            pane.traces[0],
+            TraceRef {
+                field: new_field,
+                color: [0.4, 0.3, 0.2, 0.1],
+                width_px: 4.0,
+                mode: TraceMode::Scatter,
+                visible: false,
+            }
+        );
+        assert_eq!(pane.text_filters.get(&new_field).unwrap(), "armed");
+        assert_eq!(pane.text_offsets.get(&(new_field, 42)), Some(&0.75));
+    }
+
+    #[test]
     fn scene_pane_toggles_a_single_instance_on_and_off() {
         fn scene_count(w: &Workspace) -> usize {
             w.tree
@@ -1746,12 +1996,15 @@ mod tests {
             panic!("root should be a plot");
         };
         pane.add_ghost(crate::plot::GhostTrace {
+            source: None,
             topic: "ATT".into(),
             field: "Roll".into(),
             color: [1.0, 0.0, 0.0, 1.0],
             width_px: 2.0,
             mode: TraceMode::Step,
             visible: false,
+            text_filter: None,
+            text_offsets: Vec::new(),
         });
 
         let mut ids = delog_core::identity::IdentityRegistry::new();
@@ -1781,12 +2034,15 @@ mod tests {
             panic!("root should be a plot");
         };
         pane.add_ghost(crate::plot::GhostTrace {
+            source: None,
             topic: "ATT".into(),
             field: "Roll".into(),
             color: [0.0, 1.0, 0.0, 1.0],
             width_px: 1.0,
             mode: TraceMode::Line,
             visible: true,
+            text_filter: None,
+            text_offsets: Vec::new(),
         });
 
         let mut ids = delog_core::identity::IdentityRegistry::new();
