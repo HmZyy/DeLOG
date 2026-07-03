@@ -73,12 +73,15 @@ pub struct TraceRef {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct GhostTrace {
+    pub source: Option<String>,
     pub topic: String,
     pub field: String,
     pub color: [f32; 4],
     pub width_px: f32,
     pub mode: TraceMode,
     pub visible: bool,
+    pub text_filter: Option<String>,
+    pub text_offsets: Vec<(i64, f32)>,
 }
 
 impl TraceRef {
@@ -168,7 +171,7 @@ impl PlotPane {
         if !self
             .ghosts
             .iter()
-            .any(|g| g.topic == ghost.topic && g.field == ghost.field)
+            .any(|g| g.source == ghost.source && g.topic == ghost.topic && g.field == ghost.field)
         {
             self.ghosts.push(ghost);
         }
