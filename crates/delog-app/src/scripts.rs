@@ -56,12 +56,23 @@ pub struct ScriptsPanel {
     parsers: ParsersPanel,
     deferred_parser_actions: VecDeque<ParserUiAction>,
     params: delog_script::params::SharedParams,
+    params_file: std::path::PathBuf,
+    #[allow(dead_code)]
+    variables_open: bool,
 }
 
 impl ScriptsPanel {
-    pub fn new(scripts_dir: std::path::PathBuf, parsers_dir: std::path::PathBuf) -> Self {
+    pub fn new(
+        scripts_dir: std::path::PathBuf,
+        parsers_dir: std::path::PathBuf,
+        params_file: std::path::PathBuf,
+    ) -> Self {
         let library = ScriptLibrary::new(scripts_dir);
         let params = delog_script::params::shared_empty();
+        {
+            let loaded = crate::script_params_io::load(&params_file);
+            crate::script_params_io::apply_loaded(&mut params.lock().unwrap(), loaded);
+        }
         Self {
             open: false,
             engine: None,
@@ -76,6 +87,15 @@ impl ScriptsPanel {
             parsers: ParsersPanel::new(parsers_dir),
             deferred_parser_actions: VecDeque::new(),
             params,
+            params_file,
+            variables_open: false,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn save_params(&self) {
+        if let Err(e) = crate::script_params_io::save(&self.params_file, &self.params.lock().unwrap()) {
+            eprintln!("failed to save script params: {e}");
         }
     }
 
@@ -640,7 +660,11 @@ mod tests {
             "delog-scripts-parser-routing-{}",
             std::process::id()
         ));
-        let mut panel = ScriptsPanel::new(root.join("scripts"), root.join("parsers"));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
         panel.running = true;
         panel.status = "running console script".into();
         panel
@@ -666,7 +690,11 @@ mod tests {
             "delog-scripts-shared-worker-{}",
             std::process::id()
         ));
-        let mut panel = ScriptsPanel::new(root.join("scripts"), root.join("parsers"));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
         panel.library.save("saved", "print('saved')").unwrap();
         panel
             .parsers
@@ -702,7 +730,11 @@ mod tests {
             "delog-scripts-reverse-parser-{}",
             std::process::id()
         ));
-        let mut panel = ScriptsPanel::new(root.join("scripts"), root.join("parsers"));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
         let path = PathBuf::from("flight.raw");
         panel.running = true;
         assert!(!panel.request_open(&egui::Context::default(), "raw.py"));
@@ -739,7 +771,11 @@ mod tests {
             "delog-scripts-reverse-validation-{}",
             std::process::id()
         ));
-        let mut panel = ScriptsPanel::new(root.join("scripts"), root.join("parsers"));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
         panel.parsers.add_new();
         let action = panel.parsers.stage_save().unwrap();
         panel.running = true;
@@ -766,7 +802,11 @@ mod tests {
             "delog-scripts-parser-pending-{}",
             std::process::id()
         ));
-        let mut panel = ScriptsPanel::new(root.join("scripts"), root.join("parsers"));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
         panel.running = false;
         panel.parsers.add_new();
         let action = panel.parsers.stage_save().unwrap();
@@ -786,7 +826,11 @@ mod tests {
     fn first_parse_terminal_keeps_polling_for_second_dispatch() {
         let root =
             std::env::temp_dir().join(format!("delog-scripts-parser-queue-{}", std::process::id()));
-        let mut panel = ScriptsPanel::new(root.join("scripts"), root.join("parsers"));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
         let first = PathBuf::from("first.raw");
         let second = PathBuf::from("second.raw");
         panel.parsers.mark_parse_dispatched("raw.py", &first);
@@ -818,7 +862,8 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&root);
         std::fs::write(&root, "not a directory").unwrap();
-        let mut panel = ScriptsPanel::new(root.join("scripts"), root.clone());
+        let mut panel =
+            ScriptsPanel::new(root.join("scripts"), root.clone(), root.join("params.json"));
 
         assert!(panel.parser_names().is_err());
         assert!(panel.parser_names().is_err());
@@ -833,7 +878,11 @@ mod tests {
             "delog-scripts-parser-dispatch-error-{}",
             std::process::id()
         ));
-        let mut panel = ScriptsPanel::new(root.join("scripts"), root.join("parsers"));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
         panel.parsers.add_new();
         panel.parsers.stage_save().unwrap();
 
@@ -854,7 +903,11 @@ mod tests {
             "delog-scripts-parse-dispatch-error-{}",
             std::process::id()
         ));
-        let mut panel = ScriptsPanel::new(root.join("scripts"), root.join("parsers"));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
         let path = PathBuf::from("flight.raw");
 
         panel.finish_parse_dispatch("raw.py", &path, Err("disconnected".into()));
@@ -874,7 +927,11 @@ mod tests {
             "delog-scripts-parser-cancel-error-{}",
             std::process::id()
         ));
-        let mut panel = ScriptsPanel::new(root.join("scripts"), root.join("parsers"));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
         panel
             .parsers
             .mark_parse_dispatched("raw.py", &PathBuf::from("flight.raw"));

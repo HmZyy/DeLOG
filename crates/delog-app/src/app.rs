@@ -316,7 +316,11 @@ impl DelogApp {
             scripts: {
                 let config_dir =
                     crate::layout::config_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-                scripts::ScriptsPanel::new(config_dir.join("scripts"), config_dir.join("parsers"))
+                scripts::ScriptsPanel::new(
+                    config_dir.join("scripts"),
+                    config_dir.join("parsers"),
+                    config_dir.join("script_params.json"),
+                )
             },
             gpu: GpuBridge::from_creation_context(cc),
             caches,
