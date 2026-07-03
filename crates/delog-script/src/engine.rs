@@ -596,6 +596,7 @@ fn run_one_transform(
 ) -> Result<ParsedBatch, String> {
     let materialized = LiveTransformBatch::from_parsed(&transform.spec, batch)?;
     let input_times = materialized.times.clone();
+    crate::params::set_current_script(Some(transform.spec.script_name.clone()));
     let result = Python::attach(|py| -> Result<crate::live::LiveTransformResult, String> {
         let py_batch = Bound::new(py, LiveBatchPy::from_materialized(py, materialized))
             .map_err(|e| format_pyerr(py, &e))?;
@@ -606,8 +607,9 @@ fn run_one_transform(
             .map_err(|e| format_pyerr(py, &e))?;
         parse_transform_result(py, &transform.spec, &input_times, &ret)
             .map_err(|e| format_pyerr(py, &e))
-    })?;
-    result_to_batch(transform.source, result)
+    });
+    crate::params::set_current_script(None);
+    result_to_batch(transform.source, result?)
 }
 
 /// Handle one command. Returns `true` if the worker should shut down.
