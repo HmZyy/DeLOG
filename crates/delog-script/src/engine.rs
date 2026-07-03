@@ -746,12 +746,18 @@ fn handle_command(
                                 sender.remove_source(prev);
                             }
                         } else {
-                            let mut sink = sender.file_sink();
-                            match crate::emit::emit_topics(&mut sink, &name, &topics) {
-                                Ok(new_id) => {
-                                    if let Some(prev) = prev_sources.insert(name.clone(), new_id) {
+                            match crate::emit::prepare_topics(&topics) {
+                                Ok(prepared) => {
+                                    if let Some(prev) = prev_sources.remove(&name) {
                                         sender.remove_source(prev);
                                     }
+                                    let mut sink = sender.file_sink();
+                                    let new_id = crate::emit::emit_prepared_topics(
+                                        &mut sink,
+                                        &name,
+                                        prepared,
+                                    );
+                                    prev_sources.insert(name.clone(), new_id);
                                 }
                                 Err(e) => {
                                     let _ = evt_tx.send(ScriptEvent::Error(e));
@@ -1218,6 +1224,62 @@ out.add_field("v", np.array([1.0, 2.0, 3.0]), unit="m")
         }
         assert!(found, "derived source script:test not published");
         let _ = ingest_thread;
+    }
+
+    #[test]
+    fn rerunning_a_script_reuses_the_unsuffixed_source_label() {
+        let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use delog_core::ingest::ingest_channel;
+        use delog_core::ingestor::{Ingestor, NullObserver};
+
+        let ingestor = Ingestor::new(NullObserver);
+        let write_store = ingestor.store();
+        let (sender, receiver) = ingest_channel();
+        let _ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
+
+        let engine = ScriptEngine::spawn(Arc::new(DataStore::new()), sender, test_metrics());
+        let script = r#"
+import numpy as np
+t = np.array([0, 100, 200], dtype=np.int64)
+out = delog.output(t, "Mag")
+out.add_field("v", np.array([1.0, 2.0, 3.0]), unit="m")
+"#;
+
+        for _ in 0..2 {
+            let _ = engine.send(ScriptCommand::RunScript {
+                name: "test".into(),
+                source: script.into(),
+            });
+            loop {
+                match engine.recv_blocking() {
+                    ScriptEvent::Done => break,
+                    ScriptEvent::Error(e) => panic!("{e}"),
+                    _ => {}
+                }
+            }
+        }
+
+        let mut labels = Vec::new();
+        for _ in 0..100 {
+            let snap = write_store.load();
+            let saw_removed = snap
+                .sources
+                .iter()
+                .any(|s| s.entry.label.starts_with("script:test") && s.entry.removed);
+            labels = snap
+                .sources
+                .iter()
+                .filter(|s| s.entry.label.starts_with("script:test") && !s.entry.removed)
+                .map(|s| s.entry.label.clone())
+                .collect();
+            if saw_removed && !labels.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        assert_eq!(labels, ["script:test"]);
+        drop(engine);
     }
 
     #[test]

@@ -1022,12 +1022,15 @@ fn trace_from_layout(trace: &TraceLayout, resolver: &mut Resolver<'_>) -> Option
 
 fn ghost_from_layout(trace: &TraceLayout) -> GhostTrace {
     GhostTrace {
+        source: None,
         topic: trace.field.topic.clone(),
         field: trace.field.field.clone(),
         color: trace.color,
         width_px: trace.width_px,
         mode: trace.mode.into(),
         visible: trace.visible,
+        text_filter: None,
+        text_offsets: Vec::new(),
     }
 }
 
