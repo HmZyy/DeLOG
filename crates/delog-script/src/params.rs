@@ -81,15 +81,24 @@ impl ParamStore {
         if sp.specs.iter().any(|s| s.name == spec.name) {
             return Err(format!("param '{}' declared twice in one run", spec.name));
         }
-        // Keep an existing value if present and compatible with this kind;
-        // for a combo the value must still be one of the options.
+        // Keep an existing value if present and compatible with this kind.
         let keep = sp.values.get(&spec.name).and_then(|v| {
-            let ok = v.compatible_with(&spec.kind)
-                && match (&spec.kind, v) {
-                    (ParamKind::Combo { options }, ParamValue::Text(s)) => options.contains(s),
-                    _ => true,
-                };
-            ok.then(|| v.clone())
+            if !v.compatible_with(&spec.kind) {
+                return None;
+            }
+            match (&spec.kind, v) {
+                // A persisted / prior-run value may fall outside a range that
+                // was since tightened; clamp it so an out-of-range value never
+                // reaches the script's computation.
+                (ParamKind::Slider { min, max, .. }, ParamValue::Float(f)) => {
+                    Some(ParamValue::Float(f.clamp(*min, *max)))
+                }
+                // A combo value must still be one of the current options.
+                (ParamKind::Combo { options }, ParamValue::Text(s)) => {
+                    options.contains(s).then(|| v.clone())
+                }
+                _ => Some(v.clone()),
+            }
         });
         let value = keep.unwrap_or_else(|| spec.default.clone());
         sp.values.insert(spec.name.clone(), value.clone());
@@ -189,6 +198,17 @@ mod tests {
         s.set_value("foo", "gain", ParamValue::Float(7.5));
         let v = s.declare("foo", 2, slider("gain", 2.0, 0.0, 10.0)).unwrap();
         assert_eq!(v, ParamValue::Float(7.5)); // edit preserved, not reset to default
+    }
+
+    #[test]
+    fn declare_clamps_kept_value_into_a_tightened_slider_range() {
+        let mut s = ParamStore::default();
+        s.declare("foo", 1, slider("gain", 2.0, 0.0, 10.0)).unwrap();
+        s.set_value("foo", "gain", ParamValue::Float(9.0));
+        // Re-declared with a tighter max: the kept 9.0 must be clamped to 5.0.
+        let v = s.declare("foo", 2, slider("gain", 2.0, 0.0, 5.0)).unwrap();
+        assert_eq!(v, ParamValue::Float(5.0));
+        assert_eq!(s.value("foo", "gain"), Some(ParamValue::Float(5.0)));
     }
 
     #[test]

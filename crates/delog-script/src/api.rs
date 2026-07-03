@@ -292,6 +292,8 @@ impl Delog {
         step: Option<f64>,
         label: Option<String>,
     ) -> PyResult<Py<PyAny>> {
+        // `!(min < max)` rather than `min >= max` so NaN bounds are rejected too.
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
         if !(min < max) {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "slider '{name}': min ({min}) must be < max ({max})"
@@ -389,13 +391,17 @@ impl Delog {
     fn param(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
         let script = crate::params::current_script().unwrap_or_else(|| self.script_name.clone());
         let store = self.params.lock().unwrap();
-        let value = store.value(&script, name).ok_or_else(|| {
+        // Resolve against the declared spec (not a bare persisted value), so an
+        // undeclared name raises and a slider's int typing is preserved.
+        let spec = store.spec(&script, name).ok_or_else(|| {
             pyo3::exceptions::PyKeyError::new_err(format!(
                 "param '{name}' is not declared for script '{script}'"
             ))
         })?;
-        let kind = store.spec(&script, name).map(|s| s.kind);
-        value_to_py(py, &value, kind.as_ref())
+        let value = store
+            .value(&script, name)
+            .unwrap_or_else(|| spec.default.clone());
+        value_to_py(py, &value, Some(&spec.kind))
     }
 }
 
