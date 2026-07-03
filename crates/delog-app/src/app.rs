@@ -1712,6 +1712,10 @@ impl eframe::App for DelogApp {
                             self.scripts.open = true;
                             ui.close();
                         }
+                        if ui.button("Variables").clicked() {
+                            self.scripts.variables_open = true;
+                            ui.close();
+                        }
                     });
                     ui.menu_button("Parsers", |ui| {
                         if ui.button("Add new parser...").clicked() {
