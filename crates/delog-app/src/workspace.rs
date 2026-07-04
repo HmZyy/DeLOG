@@ -1484,7 +1484,7 @@ impl Behavior<'_> {
             let frac = ((p.x - rect.left()) / rect.width().max(1.0)).clamp(0.0, 1.0) as f64;
             pane.zoom_drag_anchor_us = Some(view.min_us + (frac * view.span_us() as f64) as i64);
         }
-        if response.drag_stopped()
+        if response.drag_stopped_by(egui::PointerButton::Secondary)
             && let Some(anchor_us) = pane.zoom_drag_anchor_us.take()
             && let Some(p) = response.interact_pointer_pos()
         {
