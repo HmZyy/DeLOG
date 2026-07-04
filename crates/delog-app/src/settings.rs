@@ -59,6 +59,8 @@ pub struct AppSettings {
     pub font: FontOverride,
     #[serde(default = "default_true")]
     pub auto_open_diagnostics: bool,
+    #[serde(default)]
+    pub scripting: ScriptingSettings,
 }
 
 impl Default for AppSettings {
@@ -75,6 +77,7 @@ impl Default for AppSettings {
             plot: PlotDisplay::default(),
             font: FontOverride::default(),
             auto_open_diagnostics: true,
+            scripting: ScriptingSettings::default(),
         }
     }
 }
@@ -261,6 +264,32 @@ impl RenderMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoOpenVariables {
+    NewlyAdded,
+    EveryRun,
+    Never,
+}
+
+impl AutoOpenVariables {
+    pub const ALL: [Self; 3] = [Self::NewlyAdded, Self::EveryRun, Self::Never];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::NewlyAdded => "When a new variable is added",
+            Self::EveryRun => "On every run",
+            Self::Never => "Never",
+        }
+    }
+}
+
+impl Default for AutoOpenVariables {
+    fn default() -> Self {
+        Self::NewlyAdded
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LiveConnectionMode {
@@ -419,6 +448,12 @@ impl Scene3dSettings {
             .clamp(start + 1.0, self.resolved_far_clip_m().max(start + 1.0));
         (start, end)
     }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ScriptingSettings {
+    #[serde(default)]
+    pub auto_open_variables: AutoOpenVariables,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -1034,5 +1069,30 @@ mod tests {
     fn render_mode_labels_are_stable() {
         let labels: Vec<_> = RenderMode::ALL.into_iter().map(RenderMode::label).collect();
         assert_eq!(labels, ["Reactive", "Continuous"]);
+    }
+}
+
+#[cfg(test)]
+mod scripting_settings_tests {
+    use super::*;
+
+    #[test]
+    fn auto_open_defaults_to_newly_added() {
+        assert_eq!(AutoOpenVariables::default(), AutoOpenVariables::NewlyAdded);
+        assert_eq!(AppSettings::default().scripting.auto_open_variables, AutoOpenVariables::NewlyAdded);
+    }
+
+    #[test]
+    fn scripting_defaults_when_absent_from_json() {
+        let s: AppSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(s.scripting.auto_open_variables, AutoOpenVariables::NewlyAdded);
+    }
+
+    #[test]
+    fn auto_open_round_trips_as_snake_case() {
+        let json = serde_json::to_string(&AutoOpenVariables::EveryRun).unwrap();
+        assert_eq!(json, "\"every_run\"");
+        let back: AutoOpenVariables = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, AutoOpenVariables::EveryRun);
     }
 }
