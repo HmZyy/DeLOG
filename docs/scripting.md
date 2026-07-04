@@ -54,41 +54,43 @@ libdir to the rpath.
 
 ## The Scripts UI
 
-Everything lives under the **Tools ▸ Scripts** menu.
+Scripts are a top-level menu. The interactive prompt lives in the
+**View ▸ Scripting Console** dock.
 
-### Tools ▸ Scripts ▸ Run
+### Scripts ▸ Run
 
 A submenu listing every saved script in your [library](#the-script-library).
-Each row has:
+Click a script name to run it immediately.
 
-| Control | Action |
-| --- | --- |
-| **script name** | Run the script immediately. |
-| ✎ (pencil) | Load the script into the Console editor for editing. |
-| 🗑 (trash) | Delete the script (with a confirmation dialog). |
-
-Running from here works even with the Console window closed - the derived
+Running from here works even with the editor and Scripting Console closed - the derived
 source shows up in the data browser, and any `print` output is buffered for the
-next time you open the Console.
+next time you open the Scripting Console.
 
-### Tools ▸ Scripts ▸ Console
+### Scripts ▸ Editor
 
-Opens the scripting window:
+Opens the floating script editor window:
 
+- **Script drawer** (left) - create a new script with **+ New**, click a saved
+  script to load it, or use a row's `...` menu to edit, duplicate, or remove it.
 - **Code editor** (center) - write a full script here. Syntax-highlighted,
   25 rows by default.
 - **Toolbar** (above the editor): a **name** field, a **Save** button (writes
   the editor buffer to the library under that name), and a single **Run/Cancel**
   toggle (▶ runs the editor buffer; while a script is running it becomes ⏹ and
   interrupts it).
-- **REPL** (bottom) - type one line, press <kbd>Enter</kbd> to evaluate it in a
-  persistent interpreter session. The console scrollback shows results,
-  `print` output, and errors. The 🗑 at the right of the REPL line clears the
-  console.
+
+### View ▸ Scripting Console
+
+Opens the bottom Scripting Console dock. Type one line, press <kbd>Enter</kbd>
+to evaluate it in a persistent interpreter session. The scrollback shows
+results, `print` output, and errors.
 
 The REPL and the editor share **one persistent interpreter**, so names you
 define in the REPL are visible to subsequent REPL lines (and vice-versa) for the
 life of the app session.
+
+`Settings ▸ Scripting ▸ Open Scripting Console` controls whether the dock opens
+automatically on any output, only on errors, or never.
 
 > Running the editor buffer without a name runs it as **`scratch`** (so output
 > still shows); **Save** requires a name.
@@ -97,8 +99,8 @@ life of the app session.
 
 ## Custom file parsers
 
-Beyond derived-field scripts, DéLOG can run **Python file parsers** (under
-**Tools ▸ Parsers**) for formats its built-in parsers don't handle. A parser
+Beyond derived-field scripts, DéLOG can run **Python file parsers** (under the
+top-level **Parsers** menu) for formats its built-in parsers don't handle. A parser
 defines a single `Parse(raw_data)` function that turns raw bytes into topics and
 fields. It uses the same embedded-Python environment and serialized worker as
 scripts.
@@ -250,7 +252,7 @@ snapshot script after capture.
 ## Runtime variables
 
 Scripts can declare **runtime-tweakable variables** that appear in a dedicated
-**Tools ▸ Scripts ▸ Variables** window. This is useful for live transforms (and
+**Scripts ▸ Variables** window. This is useful for live transforms (and
 snapshot scripts) where a single numeric or boolean parameter changes the
 behavior - you edit it in the UI and the script responds immediately without
 re-running.
@@ -314,14 +316,14 @@ re-run of the script.
 - **Live transforms**: edits apply to the **next batch**, with **no re-run** of the
   script (only the callback re-executes with the new parameter values).
 - **Snapshot scripts**: edits trigger an **automatic re-run** of the script if it
-  is a named library script (one in **Tools ▸ Scripts ▸ Run**). Scratch scripts
+  is a named library script (one in **Scripts ▸ Run**). Scratch scripts
   do not auto-rerun.
 - **Persistence**: all variable values are stored per-script in `script_params.json`
   in the DéLOG config directory, and restored when you load or run the script again.
 
-### The Tools ▸ Scripts ▸ Variables window
+### The Scripts ▸ Variables window
 
-The **Tools ▸ Scripts ▸ Variables** panel (under the main **Tools** menu) displays
+The **Scripts ▸ Variables** panel displays
 all variables declared by the currently running script (or the most recently run
 script if nothing is active). Edits take effect immediately:
 
@@ -492,11 +494,11 @@ Saved scripts are plain `.py` files in DéLOG's config directory:
 | macOS | `~/Library/Application Support/DeLOG/scripts/` |
 | Windows | `%APPDATA%\DeLOG\data\scripts\` |
 
-- The file **stem** is the script name shown in **Tools ▸ Scripts ▸ Run**.
+- The file **stem** is the script name shown in **Scripts ▸ Run**.
 - Files are editable with any external editor; new/changed files appear in the
   menu without restarting (the list is read fresh each time the menu opens).
-- In-app: **Save** (Console toolbar) writes the editor buffer; **✎** loads a
-  script for editing; **🗑** deletes it (with confirmation).
+- In-app: **Save** writes the editor buffer; the editor drawer loads, duplicates,
+  and removes saved scripts. To rename, edit the name field and save.
 - Scripts are a **global library** - reusable across any loaded log. Write them
   to look up fields by name (see the [examples](#worked-examples)) so the same
   script works on any flight.
@@ -506,13 +508,13 @@ Saved scripts are plain `.py` files in DéLOG's config directory:
 ## Console, errors, and cancellation
 
 - **`print(...)`** and anything written to `stdout`/`stderr` is captured to the
-  Console scrollback.
+  Scripting Console scrollback.
 - **Errors** print the Python traceback to the console; the run emits no source.
 - **Cancel**: while a script runs, the toolbar toggle shows ⏹ - click it to
   raise `KeyboardInterrupt` in the script (like Ctrl-C). This is cooperative:
   it fires at the next Python bytecode boundary, so a script stuck inside a
   single long C call (e.g. one huge numpy op) can't be interrupted mid-call.
-- **Clear**: the 🗑 at the right of the REPL line clears the console scrollback.
+- **Clear**: the Scripting Console dock's **Clear** button clears the scrollback.
 
 ---
 

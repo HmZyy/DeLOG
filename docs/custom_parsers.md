@@ -37,26 +37,27 @@ editor; new or changed files appear without restarting (the list is read fresh e
 menu opens).
 
 Custom parsers are **never auto-sniffed**. DéLOG only auto-detects the built-in Rust formats;
-a custom Python parser is always chosen explicitly, and the Tools menu lists custom Python
+a custom Python parser is always chosen explicitly, and the Parsers menu lists custom Python
 parsers only (not the built-in parsers).
 
 ---
 
 ## The Parsers UI
 
-**Tools ▸ Parsers** manages your Python parsers.
+The top-level **Parsers** menu manages your Python parsers.
 
 | Control | Action |
 | --- | --- |
-| **Add new parser...** | Open the editor on a fresh parser. |
+| **Parsers ▸ Editor...** | Open the floating parser editor. |
+| **+ New** | Create a fresh parser from the editor drawer. |
+| **saved parser row** | Load a saved parser into the editor. |
+| row `...` | Edit, duplicate, or remove a saved parser. |
+| **Parsers ▸ Parse File** | Pick a saved parser, then choose a file to parse with it. |
 | **parser name** | (in the editor) the filename stem; change it and **Save** to add or rename. |
-| ✎ (pencil) | Load a saved parser into the editor. |
-| 📁 (folder) | Explicitly pick a file and open it with that parser. |
 | **Save** | Write the editor buffer to the library under the current name. |
-| **Delete** | Remove a saved parser (with a confirmation dialog). |
 
-To use a parser, click its folder icon, choose the file, and DéLOG opens it through that
-parser.
+To use a parser, choose **Parsers ▸ Parse File ▸ parser_name**, pick the file,
+and DéLOG opens it through that parser.
 
 ---
 
@@ -190,7 +191,8 @@ This produces an `imu` topic clocked by `imu.rtc`, with fields `ax`, `ay`, `az`.
 - **Equal length per topic.** Every field in a topic must match its clock's length.
 - **Clocks are seconds.** `.rtc`/`.index` values are read as seconds and converted to µs;
   scale accordingly.
-- **Not auto-detected.** You always pick a custom parser explicitly via its folder icon.
+- **Not auto-detected.** You always pick a custom parser explicitly from
+  **Parsers ▸ Parse File**.
 - **Not sandboxed.** See *Execution model & safety* above.
 
 See also: **[Scripting](scripting.md)** for derived-field scripts and live transforms that
