@@ -1125,7 +1125,7 @@ pub fn apply_zoom(view: &mut ViewX, cursor_frac: f32, scroll: f32) {
     view.zoom_at(focus, factor);
 }
 
-pub const MIN_ZOOM_DRAG_PX: f32 = 3.0;
+const MIN_ZOOM_DRAG_PX: f32 = 3.0;
 
 /// X view for a right-drag zoom between two pixel x-positions within the plot
 /// rect. None when the drag is too small to act on.
@@ -1270,5 +1270,11 @@ mod tests {
         let out = zoom_drag_view(view, 100.0, 100.0, -50.0, 500.0).unwrap();
         assert_eq!(out.min_us, 0);
         assert_eq!(out.max_us, 1000);
+    }
+
+    #[test]
+    fn zoom_drag_zero_width_rect_is_noop() {
+        let view = ViewX::new(0, 1000);
+        assert!(zoom_drag_view(view, 0.0, 0.0, 5.0, 50.0).is_none());
     }
 }
