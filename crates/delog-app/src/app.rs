@@ -1914,7 +1914,7 @@ impl eframe::App for DelogApp {
                         icon_button(
                             ui,
                             "toolbar-measuring-marker",
-                            crate::icons::ruler(),
+                            crate::icons::ruler_dimension_line(),
                             marker_tint,
                             has_marker,
                         )
@@ -1928,6 +1928,19 @@ impl eframe::App for DelogApp {
                     } else {
                         Some(self.playback.t_us)
                     };
+                }
+
+                if icon_button(
+                    ui,
+                    "toolbar-equal-plot-heights",
+                    crate::icons::grid_2x2_check(),
+                    inactive_tint,
+                    false,
+                )
+                .on_hover_text("Resize all plots")
+                .clicked()
+                {
+                    self.workspace.equalize_plot_heights();
                 }
 
                 ui.separator();
@@ -1946,8 +1959,8 @@ impl eframe::App for DelogApp {
                         next_legend_position(self.settings.plot.legend_position);
                 }
 
-                let legends_visible = self.workspace.all_plot_legends_visible();
-                let legend_tint = if legends_visible {
+                let legends_hidden = !self.workspace.all_plot_legends_visible();
+                let legend_tint = if legends_hidden {
                     active_tint
                 } else {
                     inactive_tint
@@ -1957,12 +1970,12 @@ impl eframe::App for DelogApp {
                     "toolbar-legends",
                     crate::icons::eye_off(),
                     legend_tint,
-                    legends_visible,
+                    legends_hidden,
                 )
                 .on_hover_text("Toggle legends")
                 .clicked()
                 {
-                    self.workspace.set_all_plot_legends(!legends_visible);
+                    self.workspace.set_all_plot_legends(legends_hidden);
                 }
 
                 let mut disconnect = None;
