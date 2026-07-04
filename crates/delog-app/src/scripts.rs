@@ -1,6 +1,7 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
+use crate::settings::AutoOpenVariables;
 use delog_core::ingest::IngestSender;
 use delog_core::metrics::MetricsRegistry;
 use delog_core::snapshot::DataStore;
@@ -55,6 +56,23 @@ struct ScriptVarsView {
     values: HashMap<String, ParamValue>,
 }
 
+fn should_open_variables(
+    mode: AutoOpenVariables,
+    prior: &HashSet<String>,
+    current: &HashSet<String>,
+) -> bool {
+    match mode {
+        AutoOpenVariables::Never => false,
+        AutoOpenVariables::EveryRun => !current.is_empty(),
+        AutoOpenVariables::NewlyAdded => current.difference(prior).next().is_some(),
+    }
+}
+
+struct PendingAutoOpen {
+    script: String,
+    prior_names: HashSet<String>,
+}
+
 pub struct ScriptsPanel {
     pub open: bool,
     engine: Option<ScriptEngine>,
@@ -71,6 +89,8 @@ pub struct ScriptsPanel {
     params: delog_script::params::SharedParams,
     params_file: std::path::PathBuf,
     pub variables_open: bool,
+    pending_auto_open: Option<PendingAutoOpen>,
+    auto_open_mode: AutoOpenVariables,
 }
 
 impl ScriptsPanel {
@@ -101,6 +121,8 @@ impl ScriptsPanel {
             params,
             params_file,
             variables_open: false,
+            pending_auto_open: None,
+            auto_open_mode: AutoOpenVariables::default(),
         }
     }
 
@@ -243,6 +265,14 @@ impl ScriptsPanel {
         if !self.ordinary_dispatch_enabled() {
             return self.reject_ordinary_dispatch();
         }
+        let prior_names: HashSet<String> = self
+            .params
+            .lock()
+            .unwrap()
+            .scripts
+            .get(&name)
+            .map(|sp| sp.specs.iter().map(|s| s.name.clone()).collect())
+            .unwrap_or_default();
         match self
             .engine(store, sender, metrics)
             .send(ScriptCommand::RunScript {
@@ -253,6 +283,10 @@ impl ScriptsPanel {
                 self.console.push_str(&format!("# run {name}\n"));
                 self.status = format!("running {name}");
                 self.running = true;
+                self.pending_auto_open = Some(PendingAutoOpen {
+                    script: name.clone(),
+                    prior_names,
+                });
                 true
             }
             Err(error) => {
@@ -334,10 +368,24 @@ impl ScriptsPanel {
                 self.console.push('\n');
                 self.status = "error".into();
                 self.running = false;
+                self.pending_auto_open = None;
             }
             ScriptEvent::Done => {
                 self.status = "done".into();
                 self.running = false;
+                if let Some(pending) = self.pending_auto_open.take() {
+                    let current_names: HashSet<String> = self
+                        .params
+                        .lock()
+                        .unwrap()
+                        .scripts
+                        .get(&pending.script)
+                        .map(|sp| sp.specs.iter().map(|s| s.name.clone()).collect())
+                        .unwrap_or_default();
+                    if should_open_variables(self.auto_open_mode, &pending.prior_names, &current_names) {
+                        self.variables_open = true;
+                    }
+                }
             }
             ScriptEvent::LiveBatchProcessed => {}
             ScriptEvent::Parser(event) => self.parsers.handle_event(event),
@@ -422,7 +470,9 @@ impl ScriptsPanel {
         store: Arc<DataStore>,
         sender: IngestSender,
         metrics: Arc<MetricsRegistry>,
+        auto_open: AutoOpenVariables,
     ) {
+        self.auto_open_mode = auto_open;
         self.drain();
 
         for action in self.parsers.ui(ctx, self.parser_dispatch_enabled()) {
@@ -851,6 +901,7 @@ fn render_param_widget(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::path::PathBuf;
 
     use delog_core::ingest::ingest_channel;
@@ -1149,5 +1200,46 @@ mod tests {
                 .join("\n")
                 .contains("pending-call queue full")
         );
+    }
+
+    #[test]
+    fn auto_open_never_stays_closed() {
+        let prior = HashSet::new();
+        let current: HashSet<String> = ["gain".into()].into_iter().collect();
+        assert!(!should_open_variables(crate::settings::AutoOpenVariables::Never, &prior, &current));
+    }
+
+    #[test]
+    fn auto_open_every_run_opens_when_params_exist() {
+        let prior: HashSet<String> = ["gain".into()].into_iter().collect();
+        let current: HashSet<String> = ["gain".into()].into_iter().collect();
+        assert!(should_open_variables(crate::settings::AutoOpenVariables::EveryRun, &prior, &current));
+    }
+
+    #[test]
+    fn auto_open_every_run_stays_closed_without_params() {
+        let empty = HashSet::new();
+        assert!(!should_open_variables(crate::settings::AutoOpenVariables::EveryRun, &empty, &empty));
+    }
+
+    #[test]
+    fn auto_open_newly_added_opens_on_first_param() {
+        let prior = HashSet::new();
+        let current: HashSet<String> = ["gain".into()].into_iter().collect();
+        assert!(should_open_variables(crate::settings::AutoOpenVariables::NewlyAdded, &prior, &current));
+    }
+
+    #[test]
+    fn auto_open_newly_added_opens_on_added_param() {
+        let prior: HashSet<String> = ["gain".into()].into_iter().collect();
+        let current: HashSet<String> = ["gain".into(), "freq".into()].into_iter().collect();
+        assert!(should_open_variables(crate::settings::AutoOpenVariables::NewlyAdded, &prior, &current));
+    }
+
+    #[test]
+    fn auto_open_newly_added_stays_closed_on_unchanged_params() {
+        let prior: HashSet<String> = ["gain".into()].into_iter().collect();
+        let current: HashSet<String> = ["gain".into()].into_iter().collect();
+        assert!(!should_open_variables(crate::settings::AutoOpenVariables::NewlyAdded, &prior, &current));
     }
 }

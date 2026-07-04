@@ -59,6 +59,8 @@ pub struct AppSettings {
     pub font: FontOverride,
     #[serde(default = "default_true")]
     pub auto_open_diagnostics: bool,
+    #[serde(default)]
+    pub scripting: ScriptingSettings,
 }
 
 impl Default for AppSettings {
@@ -75,6 +77,7 @@ impl Default for AppSettings {
             plot: PlotDisplay::default(),
             font: FontOverride::default(),
             auto_open_diagnostics: true,
+            scripting: ScriptingSettings::default(),
         }
     }
 }
@@ -261,6 +264,32 @@ impl RenderMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoOpenVariables {
+    NewlyAdded,
+    EveryRun,
+    Never,
+}
+
+impl AutoOpenVariables {
+    pub const ALL: [Self; 3] = [Self::NewlyAdded, Self::EveryRun, Self::Never];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::NewlyAdded => "When a new variable is added",
+            Self::EveryRun => "On every run",
+            Self::Never => "Never",
+        }
+    }
+}
+
+impl Default for AutoOpenVariables {
+    fn default() -> Self {
+        Self::NewlyAdded
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LiveConnectionMode {
@@ -421,6 +450,12 @@ impl Scene3dSettings {
     }
 }
 
+#[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ScriptingSettings {
+    #[serde(default)]
+    pub auto_open_variables: AutoOpenVariables,
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 enum SettingsTab {
     #[default]
@@ -428,10 +463,17 @@ enum SettingsTab {
     Plots,
     Rendering,
     Scene3d,
+    Scripting,
 }
 
 impl SettingsTab {
-    const ALL: [Self; 4] = [Self::General, Self::Plots, Self::Rendering, Self::Scene3d];
+    const ALL: [Self; 5] = [
+        Self::General,
+        Self::Plots,
+        Self::Rendering,
+        Self::Scene3d,
+        Self::Scripting,
+    ];
 
     const fn label(self) -> &'static str {
         match self {
@@ -439,6 +481,7 @@ impl SettingsTab {
             Self::Plots => "Plots",
             Self::Rendering => "Rendering",
             Self::Scene3d => "3D View",
+            Self::Scripting => "Scripting",
         }
     }
 }
@@ -487,6 +530,9 @@ impl SettingsDialog {
                             }
                             SettingsTab::Scene3d => {
                                 scene3d_tab(ui, settings);
+                            }
+                            SettingsTab::Scripting => {
+                                scripting_tab(ui, settings);
                             }
                         }
                     });
@@ -825,6 +871,32 @@ fn scene3d_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
     }
 }
 
+fn scripting_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
+    let s = &mut settings.scripting;
+    ui.heading("Scripting");
+    ui.add_space(8.0);
+    egui::Grid::new("settings-scripting-grid")
+        .num_columns(2)
+        .spacing(egui::vec2(16.0, 10.0))
+        .show(ui, |ui| {
+            ui.label("Open Variables window")
+                .on_hover_text("Automatically show the Script Variables window after running a named script that declares a tunable variable.");
+            egui::ComboBox::from_id_salt("settings-auto-open-variables")
+                .selected_text(s.auto_open_variables.label())
+                .show_ui(ui, |ui| {
+                    for mode in AutoOpenVariables::ALL {
+                        ui.selectable_value(&mut s.auto_open_variables, mode, mode.label());
+                    }
+                });
+            ui.end_row();
+        });
+
+    ui.add_space(10.0);
+    if ui.button("Reset to defaults").clicked() {
+        settings.scripting = ScriptingSettings::default();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -835,7 +907,7 @@ mod tests {
             .into_iter()
             .map(SettingsTab::label)
             .collect();
-        assert_eq!(labels, ["General", "Plots", "Rendering", "3D View"]);
+        assert_eq!(labels, ["General", "Plots", "Rendering", "3D View", "Scripting"]);
     }
 
     #[test]
@@ -1034,5 +1106,30 @@ mod tests {
     fn render_mode_labels_are_stable() {
         let labels: Vec<_> = RenderMode::ALL.into_iter().map(RenderMode::label).collect();
         assert_eq!(labels, ["Reactive", "Continuous"]);
+    }
+}
+
+#[cfg(test)]
+mod scripting_settings_tests {
+    use super::*;
+
+    #[test]
+    fn auto_open_defaults_to_newly_added() {
+        assert_eq!(AutoOpenVariables::default(), AutoOpenVariables::NewlyAdded);
+        assert_eq!(AppSettings::default().scripting.auto_open_variables, AutoOpenVariables::NewlyAdded);
+    }
+
+    #[test]
+    fn scripting_defaults_when_absent_from_json() {
+        let s: AppSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(s.scripting.auto_open_variables, AutoOpenVariables::NewlyAdded);
+    }
+
+    #[test]
+    fn auto_open_round_trips_as_snake_case() {
+        let json = serde_json::to_string(&AutoOpenVariables::EveryRun).unwrap();
+        assert_eq!(json, "\"every_run\"");
+        let back: AutoOpenVariables = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, AutoOpenVariables::EveryRun);
     }
 }
