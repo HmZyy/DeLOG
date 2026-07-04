@@ -99,7 +99,7 @@ impl Default for Draft {
             qx: None,
             qy: None,
             qz: None,
-            model: ModelKind::Cone,
+            model: ModelKind::FixedWing,
             custom_path: String::new(),
             color: Color32::from_rgb(90, 170, 255),
             path_color: Color32::from_rgb(255, 170, 60),
@@ -848,6 +848,8 @@ fn topic_combo(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn custom_glb_path_uses_file_picker_not_text_edit() {
         let source = include_str!("vehicle_dialog.rs");
@@ -885,5 +887,10 @@ mod tests {
             ),
             "unconditional scroll_to_me fights normal mouse-wheel scrolling"
         );
+    }
+
+    #[test]
+    fn new_vehicle_draft_defaults_to_fixed_wing_model() {
+        assert_eq!(Draft::default().model, ModelKind::FixedWing);
     }
 }

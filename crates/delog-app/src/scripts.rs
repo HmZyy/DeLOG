@@ -507,7 +507,6 @@ impl ScriptsPanel {
             .show(ctx, |ui| {
                 if views.is_empty() {
                     ui.label("No script has declared variables yet.");
-                    ui.label("Add controls with delog.slider(...), delog.checkbox(...), delog.combo(...), or delog.text(...) and run the script.");
                     return;
                 }
                 egui::ScrollArea::vertical().show(ui, |ui| {
