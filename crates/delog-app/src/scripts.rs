@@ -1,6 +1,7 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
+use crate::settings::AutoOpenVariables;
 use delog_core::ingest::IngestSender;
 use delog_core::metrics::MetricsRegistry;
 use delog_core::snapshot::DataStore;
@@ -53,6 +54,18 @@ struct ScriptVarsView {
     has_live: bool,
     specs: Vec<ParamSpec>,
     values: HashMap<String, ParamValue>,
+}
+
+fn should_open_variables(
+    mode: AutoOpenVariables,
+    prior: &HashSet<String>,
+    current: &HashSet<String>,
+) -> bool {
+    match mode {
+        AutoOpenVariables::Never => false,
+        AutoOpenVariables::EveryRun => !current.is_empty(),
+        AutoOpenVariables::NewlyAdded => current.difference(prior).next().is_some(),
+    }
 }
 
 pub struct ScriptsPanel {
@@ -851,6 +864,7 @@ fn render_param_widget(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::path::PathBuf;
 
     use delog_core::ingest::ingest_channel;
@@ -1149,5 +1163,46 @@ mod tests {
                 .join("\n")
                 .contains("pending-call queue full")
         );
+    }
+
+    #[test]
+    fn auto_open_never_stays_closed() {
+        let prior = HashSet::new();
+        let current: HashSet<String> = ["gain".into()].into_iter().collect();
+        assert!(!should_open_variables(crate::settings::AutoOpenVariables::Never, &prior, &current));
+    }
+
+    #[test]
+    fn auto_open_every_run_opens_when_params_exist() {
+        let prior: HashSet<String> = ["gain".into()].into_iter().collect();
+        let current: HashSet<String> = ["gain".into()].into_iter().collect();
+        assert!(should_open_variables(crate::settings::AutoOpenVariables::EveryRun, &prior, &current));
+    }
+
+    #[test]
+    fn auto_open_every_run_stays_closed_without_params() {
+        let empty = HashSet::new();
+        assert!(!should_open_variables(crate::settings::AutoOpenVariables::EveryRun, &empty, &empty));
+    }
+
+    #[test]
+    fn auto_open_newly_added_opens_on_first_param() {
+        let prior = HashSet::new();
+        let current: HashSet<String> = ["gain".into()].into_iter().collect();
+        assert!(should_open_variables(crate::settings::AutoOpenVariables::NewlyAdded, &prior, &current));
+    }
+
+    #[test]
+    fn auto_open_newly_added_opens_on_added_param() {
+        let prior: HashSet<String> = ["gain".into()].into_iter().collect();
+        let current: HashSet<String> = ["gain".into(), "freq".into()].into_iter().collect();
+        assert!(should_open_variables(crate::settings::AutoOpenVariables::NewlyAdded, &prior, &current));
+    }
+
+    #[test]
+    fn auto_open_newly_added_stays_closed_on_unchanged_params() {
+        let prior: HashSet<String> = ["gain".into()].into_iter().collect();
+        let current: HashSet<String> = ["gain".into()].into_iter().collect();
+        assert!(!should_open_variables(crate::settings::AutoOpenVariables::NewlyAdded, &prior, &current));
     }
 }
