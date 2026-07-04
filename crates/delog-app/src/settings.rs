@@ -57,7 +57,7 @@ pub struct AppSettings {
     pub plot: PlotDisplay,
     #[serde(default)]
     pub font: FontOverride,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub auto_open_diagnostics: bool,
     #[serde(default)]
     pub scripting: ScriptingSettings,
@@ -76,7 +76,7 @@ impl Default for AppSettings {
             scene3d: Scene3dSettings::default(),
             plot: PlotDisplay::default(),
             font: FontOverride::default(),
-            auto_open_diagnostics: true,
+            auto_open_diagnostics: false,
             scripting: ScriptingSettings::default(),
         }
     }
@@ -1034,6 +1034,7 @@ mod tests {
         assert!(!s.show_fps);
         assert_eq!(s.render_mode, RenderMode::Continuous);
         assert!(s.vsync);
+        assert!(!s.auto_open_diagnostics);
     }
 
     #[test]
@@ -1043,6 +1044,7 @@ mod tests {
         assert!(!s.show_fps);
         assert_eq!(s.render_mode, RenderMode::Continuous);
         assert!(s.vsync);
+        assert!(!s.auto_open_diagnostics);
         assert!(!s.live_connection.recording_enabled);
         assert!(s.live_connection.recording_dir.is_empty());
     }
