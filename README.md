@@ -5,16 +5,25 @@
 # DéLOG
 
 DéLOG is a fast, GPU-accelerated **drone flight-log and live-telemetry analyzer**.
-It reads the formats real autopilots produce (PX4, ArduPilot, QGroundControl), and
-when a format or a derived signal isn't built in, you extend it in Python - both file
-parsers and analysis scripts - without recompiling.
+It supports PX4 ULog, ArduPilot BIN, and MAVLink telemetry logs from QGroundControl
+or Mission Planner, and when a format or a derived signal isn't built in, you extend
+it in Python - both file parsers and analysis scripts - without recompiling.
+
+### Log analysis
+
+![DéLOG log analysis](docs/layout_log.gif)
+
+### Live telemetry
+
+![DéLOG live telemetry](docs/layout_live.gif)
 
 ## Features
 
 - **Drag-and-drop UI** - drop a log file anywhere on the window to load it; arrange plots
   in a tiling workspace that persists across sessions.
-- **Multiple log formats** - PX4 ULog (`.ulg`), ArduPilot (`.BIN`), and QGroundControl
-  MAVLink telemetry (`.tlog`), with automatic format sniffing and a manual-override picker.
+- **Multiple log formats** - PX4 ULog (`.ulg`), ArduPilot (`.BIN`), and MAVLink
+  telemetry logs (`.tlog`) from QGroundControl or Mission Planner, with automatic
+  format sniffing and a manual-override picker.
 - **Live MAVLink telemetry** - stream from a vehicle over UDP, TCP, or serial through the
   same ingest path as files, and record incoming frames to a `.tlog`.
 - **Custom parsers** - add Python parsers for formats DéLOG doesn't ship, defining a single
