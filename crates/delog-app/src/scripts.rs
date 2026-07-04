@@ -265,6 +265,14 @@ impl ScriptsPanel {
         if !self.ordinary_dispatch_enabled() {
             return self.reject_ordinary_dispatch();
         }
+        let prior_names: HashSet<String> = self
+            .params
+            .lock()
+            .unwrap()
+            .scripts
+            .get(&name)
+            .map(|sp| sp.specs.iter().map(|s| s.name.clone()).collect())
+            .unwrap_or_default();
         match self
             .engine(store, sender, metrics)
             .send(ScriptCommand::RunScript {
@@ -275,14 +283,6 @@ impl ScriptsPanel {
                 self.console.push_str(&format!("# run {name}\n"));
                 self.status = format!("running {name}");
                 self.running = true;
-                let prior_names = self
-                    .params
-                    .lock()
-                    .unwrap()
-                    .scripts
-                    .get(&name)
-                    .map(|sp| sp.specs.iter().map(|s| s.name.clone()).collect())
-                    .unwrap_or_default();
                 self.pending_auto_open = Some(PendingAutoOpen {
                     script: name.clone(),
                     prior_names,
