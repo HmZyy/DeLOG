@@ -53,6 +53,7 @@ fn param_value_split_creates_one_topic_per_param_id() {
         read_store(),
         sender.clone(),
         Arc::new(MetricsRegistry::new()),
+        delog_script::params::shared_empty(),
     );
     let _ = engine.send(ScriptCommand::RunScript {
         name: "param_values".into(),

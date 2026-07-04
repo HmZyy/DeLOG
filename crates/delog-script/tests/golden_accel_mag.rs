@@ -49,7 +49,12 @@ fn accel_magnitude_script_emits_expected_values() {
     let (sender, receiver) = ingest_channel();
     let ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
 
-    let engine = ScriptEngine::spawn(read_store(), sender, Arc::new(MetricsRegistry::new()));
+    let engine = ScriptEngine::spawn(
+        read_store(),
+        sender,
+        Arc::new(MetricsRegistry::new()),
+        delog_script::params::shared_empty(),
+    );
     let script = r#"
 import numpy as np
 x = delog.field('flight/IMU/AccX').v
