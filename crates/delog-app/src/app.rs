@@ -1601,6 +1601,13 @@ impl eframe::App for DelogApp {
                     {
                         ui.close();
                     }
+                    #[cfg(feature = "scripting")]
+                    if ui
+                        .checkbox(&mut self.scripts.console_open, "Scripting Console")
+                        .clicked()
+                    {
+                        ui.close();
+                    }
                     if ui
                         .checkbox(&mut self.settings.show_debug_overlay, "Debug Overlay (F12)")
                         .clicked()
@@ -1644,142 +1651,69 @@ impl eframe::App for DelogApp {
                         ui.close();
                     }
                 });
-                // The Tools menu currently only hosts scripting, so it is hidden
-                // entirely in builds without the `scripting` feature.
                 #[cfg(feature = "scripting")]
-                ui.menu_button("Tools", |ui| {
-                    ui.menu_button("Scripts", |ui| {
-                        ui.menu_button("Run", |ui| {
-                            let names = self.scripts.script_names();
-                            if names.is_empty() {
-                                ui.add_enabled(false, egui::Button::new("No saved scripts"));
-                            } else {
-                                let tint = ui.visuals().text_color();
-                                let icon = |src: egui::ImageSource<'static>| {
-                                    egui::Image::new(src)
-                                        .fit_to_exact_size(egui::vec2(16.0, 16.0))
-                                        .tint(tint)
-                                };
-                                let run_enabled = self.scripts.ordinary_dispatch_enabled();
-                                for name in names {
-                                    ui.horizontal(|ui| {
-                                        // Fixed-width name button so the trailing
-                                        // edit/remove icons line up across rows; the
-                                        // trailing grow atom left-aligns the name.
-                                        if ui
-                                            .add_enabled_ui(run_enabled, |ui| {
-                                                ui.add_sized(
-                                                    [180.0, 22.0],
-                                                    egui::Button::new((
-                                                        name.as_str(),
-                                                        egui::Atom::grow(),
-                                                    )),
-                                                )
-                                            })
-                                            .inner
-                                            .clicked()
-                                        {
-                                            let _ = self.scripts.run_named(
-                                                &name,
-                                                self.session.store(),
-                                                self.session.ingest_sender(),
-                                                Arc::clone(self.session.metrics()),
-                                            );
-                                            ui.close();
-                                        }
-                                        if ui
-                                            .add(egui::Button::image(icon(crate::icons::pencil())))
-                                            .on_hover_text("Edit")
-                                            .clicked()
-                                        {
-                                            self.scripts.edit_named(&name);
-                                            ui.close();
-                                        }
-                                        if ui
-                                            .add(egui::Button::image(icon(crate::icons::trash())))
-                                            .on_hover_text("Remove")
-                                            .clicked()
-                                        {
-                                            self.scripts.request_delete(&name);
-                                            ui.close();
-                                        }
-                                    });
+                ui.menu_button("Scripts", |ui| {
+                    if ui.button("Editor...").clicked() {
+                        self.scripts.open = true;
+                        ui.close();
+                    }
+                    if ui.button("Variables...").clicked() {
+                        self.scripts.variables_open = true;
+                        ui.close();
+                    }
+                    ui.separator();
+                    ui.menu_button("Run", |ui| {
+                        let names = self.scripts.script_names();
+                        if names.is_empty() {
+                            ui.add_enabled(false, egui::Button::new("No saved scripts"));
+                        } else {
+                            let run_enabled = self.scripts.ordinary_dispatch_enabled();
+                            for name in names {
+                                if ui
+                                    .add_enabled(run_enabled, egui::Button::new(name.as_str()))
+                                    .clicked()
+                                {
+                                    let _ = self.scripts.run_named(
+                                        &name,
+                                        self.session.store(),
+                                        self.session.ingest_sender(),
+                                        Arc::clone(self.session.metrics()),
+                                    );
+                                    ui.close();
                                 }
                             }
-                        });
-                        ui.separator();
-                        if ui.button("Console").clicked() {
-                            self.scripts.open = true;
-                            ui.close();
-                        }
-                        if ui.button("Variables").clicked() {
-                            self.scripts.variables_open = true;
-                            ui.close();
                         }
                     });
-                    ui.menu_button("Parsers", |ui| {
-                        if ui.button("Add new parser...").clicked() {
-                            self.scripts.add();
-                            ui.close();
+                });
+                #[cfg(feature = "scripting")]
+                ui.menu_button("Parsers", |ui| {
+                    if ui.button("Editor...").clicked() {
+                        self.scripts.open_parser_editor();
+                        ui.close();
+                    }
+                    ui.separator();
+                    ui.menu_button("Parse File", |ui| match self.scripts.parser_names() {
+                        Ok(names) if names.is_empty() => {
+                            ui.add_enabled(false, egui::Button::new("No saved parsers"));
                         }
-                        ui.separator();
-                        match self.scripts.parser_names() {
-                            Ok(names) if names.is_empty() => {
-                                ui.add_enabled(false, egui::Button::new("No saved parsers"));
-                            }
-                            Ok(names) => {
-                                let parser_open_enabled = self.scripts.parser_dispatch_enabled();
-                                let tint = ui.visuals().text_color();
-                                let icon = |src: egui::ImageSource<'static>| {
-                                    egui::Image::new(src)
-                                        .fit_to_exact_size(egui::vec2(16.0, 16.0))
-                                        .tint(tint)
-                                };
-                                for name in names {
-                                    ui.horizontal(|ui| {
-                                        // Fixed-width name button so the trailing edit
-                                        // icon lines up across rows; the trailing grow
-                                        // atom left-aligns the name. Clicking the name
-                                        // opens a file dialog to parse with this parser.
-                                        if ui
-                                            .add_enabled_ui(parser_open_enabled, |ui| {
-                                                ui.add_sized(
-                                                    [180.0, 22.0],
-                                                    egui::Button::new((
-                                                        name.as_str(),
-                                                        egui::Atom::grow(),
-                                                    )),
-                                                )
-                                            })
-                                            .inner
-                                            .on_hover_text("Open file with parser")
-                                            .clicked()
-                                        {
-                                            let _ = self.scripts.request_open(ui.ctx(), &name);
-                                            ui.close();
-                                        }
-                                        if ui
-                                            .add(egui::Button::image(icon(crate::icons::pencil())))
-                                            .on_hover_text("Edit")
-                                            .clicked()
-                                        {
-                                            self.scripts.edit(&name);
-                                            ui.close();
-                                        }
-                                        if ui
-                                            .add(egui::Button::image(icon(crate::icons::trash())))
-                                            .on_hover_text("Remove")
-                                            .clicked()
-                                        {
-                                            self.scripts.delete_parser(&name);
-                                            ui.close();
-                                        }
-                                    });
+                        Ok(names) => {
+                            let parser_open_enabled = self.scripts.parser_dispatch_enabled();
+                            for name in names {
+                                if ui
+                                    .add_enabled(
+                                        parser_open_enabled,
+                                        egui::Button::new(name.as_str()),
+                                    )
+                                    .on_hover_text("Open file with parser")
+                                    .clicked()
+                                {
+                                    let _ = self.scripts.request_open(ui.ctx(), &name);
+                                    ui.close();
                                 }
                             }
-                            Err(_) => {
-                                ui.add_enabled(false, egui::Button::new("Could not list parsers"));
-                            }
+                        }
+                        Err(_) => {
+                            ui.add_enabled(false, egui::Button::new("Could not list parsers"));
                         }
                     });
                 });
@@ -2203,6 +2137,20 @@ impl eframe::App for DelogApp {
                     }
                 });
         }
+        #[cfg(feature = "scripting")]
+        if self.scripts.console_open {
+            egui::Panel::bottom("scripting_console")
+                .resizable(true)
+                .default_size(crate::scripts::SCRIPTING_CONSOLE_DEFAULT_HEIGHT)
+                .show_inside(ui, |ui| {
+                    self.scripts.console_dock_ui(
+                        ui,
+                        &self.session.store(),
+                        &self.session.ingest_sender(),
+                        self.session.metrics(),
+                    );
+                });
+        }
         let ui_browser_timer = self.session.metrics().scope("ui_browser");
         if self.browser_collapsed {
             let button_size = browser::panel_toggle_button_size(ui);
@@ -2511,6 +2459,7 @@ impl eframe::App for DelogApp {
                 self.session.ingest_sender(),
                 Arc::clone(self.session.metrics()),
                 self.settings.scripting.auto_open_variables,
+                self.settings.scripting.auto_open_console,
             );
             for message in self.scripts.take_parser_diagnostics() {
                 self.session

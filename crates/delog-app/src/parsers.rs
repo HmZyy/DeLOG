@@ -127,6 +127,40 @@ impl ParsersPanel {
         self.open = true;
     }
 
+    pub fn open_editor(&mut self) {
+        if self.filename.is_empty() && self.source.is_empty() {
+            self.add_new();
+        } else {
+            self.open = true;
+        }
+    }
+
+    pub fn duplicate(&mut self, name: &str) {
+        if self.pending_save.is_some() {
+            self.status = "finish the current parser validation before duplicating a parser".into();
+            return;
+        }
+        match self.library.load(name) {
+            Ok(source) => {
+                let names = self.list().unwrap_or_default();
+                let copy_name = available_parser_copy_name(&names, name);
+                match self.library.save(None, &copy_name, &source) {
+                    Ok(saved_name) => {
+                        self.filename = saved_name.clone();
+                        self.source = source;
+                        self.saved_original_name = Some(saved_name.clone());
+                        self.pending_save = None;
+                        self.validation_dispatched = false;
+                        self.status = format!("duplicated {name} as {saved_name}");
+                        self.open = true;
+                    }
+                    Err(error) => self.record_error(format!("duplicate parser {name}: {error}")),
+                }
+            }
+            Err(error) => self.record_error(format!("load parser {name}: {error}")),
+        }
+    }
+
     #[allow(dead_code)]
     pub fn edit(&mut self, name: &str) {
         if self.pending_save.is_some() {
@@ -424,34 +458,90 @@ impl ParsersPanel {
             .pivot(egui::Align2::CENTER_CENTER)
             .default_size([720.0, 480.0])
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    // Fixed width: an infinite-width field forces the window to
-                    // max size and blocks shrinking on resize.
-                    ui.add(egui::TextEdit::singleline(&mut self.filename).desired_width(160.0));
-                    if image_text_button(
-                        ui,
-                        crate::icons::save(),
-                        "Save",
-                        validation_enabled && self.pending_save.is_none(),
-                    )
-                    .clicked()
-                    {
-                        match self.stage_save() {
-                            Ok(action) => actions.push(action),
-                            Err(error) => self.record_error(format!("save parser: {error}")),
+                egui::Panel::left("parser_library_drawer")
+                    .resizable(true)
+                    .default_size(180.0)
+                    .size_range(140.0..=260.0)
+                    .show_inside(ui, |ui| self.drawer(ui));
+                egui::CentralPanel::default().show_inside(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        // Fixed width: an infinite-width field forces the window to
+                        // max size and blocks shrinking on resize.
+                        ui.add(egui::TextEdit::singleline(&mut self.filename).desired_width(160.0));
+                        if image_text_button(
+                            ui,
+                            crate::icons::save(),
+                            "Save",
+                            validation_enabled && self.pending_save.is_none(),
+                        )
+                        .clicked()
+                        {
+                            match self.stage_save() {
+                                Ok(action) => actions.push(action),
+                                Err(error) => self.record_error(format!("save parser: {error}")),
+                            }
                         }
-                    }
+                    });
+                    ui.label(&self.status);
+                    CodeEditor::default()
+                        .id_source("custom_parser_editor")
+                        .with_rows(25)
+                        .with_theme(ColorTheme::GITHUB_DARK)
+                        .with_numlines(true)
+                        .show(ui, &mut self.source, &Syntax::python());
                 });
-                ui.label(&self.status);
-                CodeEditor::default()
-                    .id_source("custom_parser_editor")
-                    .with_rows(25)
-                    .with_theme(ColorTheme::GITHUB_DARK)
-                    .with_numlines(true)
-                    .show(ui, &mut self.source, &Syntax::python());
             });
         self.open = open;
         actions
+    }
+
+    fn drawer(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.strong("Parsers");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("+ New").clicked() {
+                    self.add_new();
+                }
+            });
+        });
+        ui.separator();
+        let names = self.list().unwrap_or_default();
+        if names.is_empty() {
+            ui.weak("No saved parsers.");
+            return;
+        }
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for name in names {
+                    ui.horizontal(|ui| {
+                        let selected = self.saved_original_name.as_deref() == Some(name.as_str());
+                        if ui
+                            .selectable_label(selected, name.as_str())
+                            .on_hover_text("Load parser")
+                            .clicked()
+                        {
+                            self.edit(&name);
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.menu_button("...", |ui| {
+                                if ui.button("Edit").clicked() {
+                                    self.edit(&name);
+                                    ui.close();
+                                }
+                                if ui.button("Duplicate").clicked() {
+                                    self.duplicate(&name);
+                                    ui.close();
+                                }
+                                if ui.button("Remove").clicked() {
+                                    self.request_delete_named(&name);
+                                    ui.close();
+                                }
+                            });
+                        });
+                    });
+                }
+            });
     }
 
     fn delete_confirm_ui(&mut self, ctx: &egui::Context) {
@@ -604,6 +694,21 @@ fn image_text_button(
     ui.add_enabled(enabled, egui::Button::image_and_text(image, text))
 }
 
+fn available_parser_copy_name(existing: &[String], name: &str) -> String {
+    let stem = name.strip_suffix(".py").unwrap_or(name);
+    let base = format!("{stem}_copy.py");
+    if !existing.iter().any(|candidate| candidate == &base) {
+        return base;
+    }
+    for i in 2.. {
+        let candidate = format!("{stem}_copy_{i}.py");
+        if !existing.iter().any(|existing| existing == &candidate) {
+            return candidate;
+        }
+    }
+    unreachable!()
+}
+
 fn file_label(path: &Path) -> String {
     path.file_name()
         .and_then(|name| name.to_str())
@@ -671,6 +776,30 @@ mod tests {
         assert_eq!(panel.source(), "def Parse(raw_data):\n    return []\n");
         assert_eq!(panel.saved_original_name(), Some("saved.py"));
         assert!(panel.delete_enabled());
+    }
+
+    #[test]
+    fn duplicate_copies_saved_parser_to_available_name_and_opens_copy() {
+        let temp = TestDir::new();
+        fs::create_dir_all(&temp.0).unwrap();
+        fs::write(
+            temp.0.join("saved.py"),
+            "def Parse(raw_data):\n    return []\n",
+        )
+        .unwrap();
+        fs::write(temp.0.join("saved_copy.py"), "old copy").unwrap();
+        let mut panel = ParsersPanel::new(temp.0.clone());
+
+        panel.duplicate("saved.py");
+
+        assert_eq!(panel.filename(), "saved_copy_2.py");
+        assert_eq!(panel.saved_original_name(), Some("saved_copy_2.py"));
+        assert_eq!(panel.source(), "def Parse(raw_data):\n    return []\n");
+        assert_eq!(
+            fs::read_to_string(temp.0.join("saved_copy_2.py")).unwrap(),
+            "def Parse(raw_data):\n    return []\n"
+        );
+        assert!(panel.is_open());
     }
 
     #[test]

@@ -290,6 +290,32 @@ impl Default for AutoOpenVariables {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoOpenScriptingConsole {
+    OnOutput,
+    OnErrors,
+    Never,
+}
+
+impl AutoOpenScriptingConsole {
+    pub const ALL: [Self; 3] = [Self::OnOutput, Self::OnErrors, Self::Never];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::OnOutput => "On output",
+            Self::OnErrors => "On errors",
+            Self::Never => "Never",
+        }
+    }
+}
+
+impl Default for AutoOpenScriptingConsole {
+    fn default() -> Self {
+        Self::OnErrors
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LiveConnectionMode {
@@ -454,6 +480,8 @@ impl Scene3dSettings {
 pub struct ScriptingSettings {
     #[serde(default)]
     pub auto_open_variables: AutoOpenVariables,
+    #[serde(default)]
+    pub auto_open_console: AutoOpenScriptingConsole,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -889,6 +917,17 @@ fn scripting_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
                     }
                 });
             ui.end_row();
+
+            ui.label("Open Scripting Console")
+                .on_hover_text("Automatically show the Scripting Console dock when Python output or errors are reported.");
+            egui::ComboBox::from_id_salt("settings-auto-open-scripting-console")
+                .selected_text(s.auto_open_console.label())
+                .show_ui(ui, |ui| {
+                    for mode in AutoOpenScriptingConsole::ALL {
+                        ui.selectable_value(&mut s.auto_open_console, mode, mode.label());
+                    }
+                });
+            ui.end_row();
         });
 
     ui.add_space(10.0);
@@ -907,7 +946,10 @@ mod tests {
             .into_iter()
             .map(SettingsTab::label)
             .collect();
-        assert_eq!(labels, ["General", "Plots", "Rendering", "3D View", "Scripting"]);
+        assert_eq!(
+            labels,
+            ["General", "Plots", "Rendering", "3D View", "Scripting"]
+        );
     }
 
     #[test]
@@ -1116,13 +1158,23 @@ mod scripting_settings_tests {
     #[test]
     fn auto_open_defaults_to_newly_added() {
         assert_eq!(AutoOpenVariables::default(), AutoOpenVariables::NewlyAdded);
-        assert_eq!(AppSettings::default().scripting.auto_open_variables, AutoOpenVariables::NewlyAdded);
+        assert_eq!(
+            AppSettings::default().scripting.auto_open_variables,
+            AutoOpenVariables::NewlyAdded
+        );
     }
 
     #[test]
     fn scripting_defaults_when_absent_from_json() {
         let s: AppSettings = serde_json::from_str("{}").unwrap();
-        assert_eq!(s.scripting.auto_open_variables, AutoOpenVariables::NewlyAdded);
+        assert_eq!(
+            s.scripting.auto_open_variables,
+            AutoOpenVariables::NewlyAdded
+        );
+        assert_eq!(
+            s.scripting.auto_open_console,
+            AutoOpenScriptingConsole::OnErrors
+        );
     }
 
     #[test]
@@ -1131,5 +1183,13 @@ mod scripting_settings_tests {
         assert_eq!(json, "\"every_run\"");
         let back: AutoOpenVariables = serde_json::from_str(&json).unwrap();
         assert_eq!(back, AutoOpenVariables::EveryRun);
+    }
+
+    #[test]
+    fn scripting_console_auto_open_round_trips_as_snake_case() {
+        let json = serde_json::to_string(&AutoOpenScriptingConsole::OnOutput).unwrap();
+        assert_eq!(json, "\"on_output\"");
+        let back: AutoOpenScriptingConsole = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, AutoOpenScriptingConsole::OnOutput);
     }
 }
