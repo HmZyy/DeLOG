@@ -277,17 +277,17 @@ impl GpuBridge {
                                 len: cache.samples(),
                             };
                             if res.win_params.get(&trace.field) != Some(&key) {
-                                let stat = res.win_buffers.sync(
-                                    trace.field,
-                                    &cache.xy[2 * aw..2 * bw],
-                                    true,
-                                );
+                                let line_xy = line_window_xy(&cache.xy, aw, bw);
+                                let stat = res.win_buffers.sync(trace.field, &line_xy, true);
+                                if line_xy.is_empty() {
+                                    res.win_buffers.remove(trace.field);
+                                }
                                 upload_bytes += stat.bytes;
                                 full_uploads += stat.full_upload as u64;
                                 res.win_params.insert(trace.field, key);
                             }
                             DrawKind::Line {
-                                samples: (bw - aw) as u32,
+                                samples: res.win_buffers.samples(trace.field) as u32,
                             }
                         }
                     }
@@ -513,6 +513,23 @@ enum PipelineKind {
 /// Clamps to `[0, n]`.
 fn pad_window(a: usize, b: usize, n: usize) -> (usize, usize) {
     (a.saturating_sub(1), (b + 1).min(n))
+}
+
+fn line_window_xy(xy: &[f32], a: usize, b: usize) -> Vec<f32> {
+    let samples = xy.len() / 2;
+    let a = a.min(samples);
+    let b = b.min(samples);
+    if a >= b {
+        return Vec::new();
+    }
+
+    let mut out = Vec::with_capacity((b - a) * 2);
+    for p in xy[2 * a..2 * b].chunks_exact(2) {
+        if p[0].is_finite() && p[1].is_finite() {
+            out.extend_from_slice(p);
+        }
+    }
+    out
 }
 
 /// Consecutive same-pipeline runs in draw order (one `set_pipeline` each).
@@ -1127,6 +1144,26 @@ mod tests {
     #[test]
     fn pad_window_handles_empty() {
         assert_eq!(pad_window(0, 0, 0), (0, 0));
+    }
+
+    #[test]
+    fn line_window_upload_skips_nan_points_so_finite_samples_connect() {
+        let xy = [
+            0.0,
+            10.0, //
+            1.0,
+            f32::NAN, //
+            2.0,
+            12.0, //
+            3.0,
+            f32::INFINITY, //
+            4.0,
+            14.0,
+        ];
+
+        let line_xy = line_window_xy(&xy, 0, 5);
+
+        assert_eq!(line_xy, vec![0.0, 10.0, 2.0, 12.0, 4.0, 14.0]);
     }
 
     #[test]
