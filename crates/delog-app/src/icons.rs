@@ -100,6 +100,34 @@ pub fn ruler() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/ruler.svg")
 }
 
+pub fn mouse_pointer() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/mouse-pointer-2.svg")
+}
+
+pub fn magnet() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/magnet.svg")
+}
+
+pub fn eye_off() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/eye-off.svg")
+}
+
+pub fn dice_top_left() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/dice-top-left.svg")
+}
+
+pub fn dice_top_right() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/dice-top-right.svg")
+}
+
+pub fn dice_bottom_left() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/dice-bottom-left.svg")
+}
+
+pub fn dice_bottom_right() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/dice-bottom-right.svg")
+}
+
 pub fn crosshair() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/crosshair.svg")
 }
