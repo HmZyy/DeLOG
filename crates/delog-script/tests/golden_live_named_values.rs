@@ -53,6 +53,7 @@ fn named_value_split_creates_one_topic_per_name() {
         read_store(),
         sender.clone(),
         Arc::new(MetricsRegistry::new()),
+        delog_script::params::shared_empty(),
     );
     let _ = engine.send(ScriptCommand::RunScript {
         name: "named_values".into(),
