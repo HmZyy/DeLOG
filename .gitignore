@@ -2,6 +2,7 @@
 .worktrees/
 *.swp
 .cache/
+.superpowers/
 
 PLAN.md
 docs/superpowers/

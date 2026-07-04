@@ -12,6 +12,8 @@ use egui_code_editor::{CodeEditor, ColorTheme, Syntax};
 
 use crate::parsers::{ParserUiAction, ParsersPanel};
 
+pub const SCRIPTING_CONSOLE_DEFAULT_HEIGHT: f32 = 240.0;
+
 enum PreparedParserCommand {
     Validation {
         name: String,
@@ -73,11 +75,30 @@ struct PendingAutoOpen {
     prior_names: HashSet<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConsoleEventKind {
+    Output,
+    Error,
+}
+
+fn should_open_scripting_console(
+    mode: crate::settings::AutoOpenScriptingConsole,
+    event: ConsoleEventKind,
+) -> bool {
+    match mode {
+        crate::settings::AutoOpenScriptingConsole::OnOutput => true,
+        crate::settings::AutoOpenScriptingConsole::OnErrors => event == ConsoleEventKind::Error,
+        crate::settings::AutoOpenScriptingConsole::Never => false,
+    }
+}
+
 pub struct ScriptsPanel {
     pub open: bool,
+    pub console_open: bool,
     engine: Option<ScriptEngine>,
     library: ScriptLibrary,
     current_name: String,
+    editing_original_name: Option<String>,
     editor_text: String,
     repl_input: String,
     console: String,
@@ -107,9 +128,11 @@ impl ScriptsPanel {
         }
         Self {
             open: false,
+            console_open: false,
             engine: None,
             library,
             current_name: String::new(),
+            editing_original_name: None,
             editor_text: String::new(),
             repl_input: String::new(),
             console: String::new(),
@@ -127,7 +150,9 @@ impl ScriptsPanel {
     }
 
     fn save_params(&self) {
-        if let Err(e) = crate::script_params_io::save(&self.params_file, &self.params.lock().unwrap()) {
+        if let Err(e) =
+            crate::script_params_io::save(&self.params_file, &self.params.lock().unwrap())
+        {
             eprintln!("failed to save script params: {e}");
         }
     }
@@ -140,6 +165,10 @@ impl ScriptsPanel {
     #[allow(dead_code)]
     pub fn add(&mut self) {
         self.parsers.add_new();
+    }
+
+    pub fn open_parser_editor(&mut self) {
+        self.parsers.open_editor();
     }
 
     #[allow(dead_code)]
@@ -218,9 +247,37 @@ impl ScriptsPanel {
         match self.library.load(name) {
             Ok(source) => {
                 self.current_name = name.to_owned();
+                self.editing_original_name = Some(name.to_owned());
                 self.editor_text = source;
                 self.status = format!("editing {name}");
                 self.open = true;
+            }
+            Err(e) => self.status = format!("load failed: {e}"),
+        }
+    }
+
+    pub fn new_script(&mut self) {
+        self.current_name = "new_script".to_owned();
+        self.editing_original_name = None;
+        self.editor_text.clear();
+        self.status.clear();
+        self.open = true;
+    }
+
+    pub fn duplicate_script(&mut self, name: &str) {
+        match self.library.load(name) {
+            Ok(source) => {
+                let copy_name = available_copy_name(&self.script_names(), name);
+                match self.library.save(&copy_name, &source) {
+                    Ok(()) => {
+                        self.current_name = copy_name.clone();
+                        self.editing_original_name = Some(copy_name.clone());
+                        self.editor_text = source;
+                        self.status = format!("duplicated {name} as {copy_name}");
+                        self.open = true;
+                    }
+                    Err(e) => self.status = format!("duplicate failed: {e}"),
+                }
             }
             Err(e) => self.status = format!("load failed: {e}"),
         }
@@ -345,23 +402,43 @@ impl ScriptsPanel {
         self.engine.as_ref().map(|e| e.live_batch_sender())
     }
 
-    fn drain(&mut self) {
+    fn drain(&mut self, auto_open_console: crate::settings::AutoOpenScriptingConsole) {
         let events = self
             .engine
             .as_ref()
             .map(ScriptEngine::drain_events)
             .unwrap_or_default();
         for event in events {
-            self.handle_event(event);
+            self.handle_event_with_console_policy(event, auto_open_console);
         }
     }
 
+    #[cfg(test)]
     fn handle_event(&mut self, event: ScriptEvent) {
+        self.handle_event_with_console_policy(
+            event,
+            crate::settings::AutoOpenScriptingConsole::Never,
+        );
+    }
+
+    fn handle_event_with_console_policy(
+        &mut self,
+        event: ScriptEvent,
+        auto_open_console: crate::settings::AutoOpenScriptingConsole,
+    ) {
         match event {
-            ScriptEvent::Output(s) => self.console.push_str(&s),
+            ScriptEvent::Output(s) => {
+                self.console.push_str(&s);
+                if should_open_scripting_console(auto_open_console, ConsoleEventKind::Output) {
+                    self.console_open = true;
+                }
+            }
             ScriptEvent::Result(r) => {
                 self.console.push_str(&r);
                 self.console.push('\n');
+                if should_open_scripting_console(auto_open_console, ConsoleEventKind::Output) {
+                    self.console_open = true;
+                }
             }
             ScriptEvent::Error(e) => {
                 self.console.push_str(&e);
@@ -369,6 +446,9 @@ impl ScriptsPanel {
                 self.status = "error".into();
                 self.running = false;
                 self.pending_auto_open = None;
+                if should_open_scripting_console(auto_open_console, ConsoleEventKind::Error) {
+                    self.console_open = true;
+                }
             }
             ScriptEvent::Done => {
                 self.status = "done".into();
@@ -382,7 +462,11 @@ impl ScriptsPanel {
                         .get(&pending.script)
                         .map(|sp| sp.specs.iter().map(|s| s.name.clone()).collect())
                         .unwrap_or_default();
-                    if should_open_variables(self.auto_open_mode, &pending.prior_names, &current_names) {
+                    if should_open_variables(
+                        self.auto_open_mode,
+                        &pending.prior_names,
+                        &current_names,
+                    ) {
                         self.variables_open = true;
                     }
                 }
@@ -471,9 +555,10 @@ impl ScriptsPanel {
         sender: IngestSender,
         metrics: Arc<MetricsRegistry>,
         auto_open: AutoOpenVariables,
+        auto_open_console: crate::settings::AutoOpenScriptingConsole,
     ) {
         self.auto_open_mode = auto_open;
-        self.drain();
+        self.drain(auto_open_console);
 
         for action in self.parsers.ui(ctx, self.parser_dispatch_enabled()) {
             self.queue_parser_action(action);
@@ -507,9 +592,59 @@ impl ScriptsPanel {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
 
-        if self.open || self.variables_open {
+        if self.open || self.variables_open || self.console_open {
             ctx.request_repaint(); // keep draining engine events while open
         }
+    }
+
+    pub fn console_dock_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        store: &Arc<DataStore>,
+        sender: &IngestSender,
+        metrics: &Arc<MetricsRegistry>,
+    ) {
+        ui.horizontal(|ui| {
+            ui.strong("Scripting Console");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Close").clicked() {
+                    self.console_open = false;
+                }
+                if ui.button("Clear").clicked() {
+                    self.console.clear();
+                }
+            });
+        });
+        ui.separator();
+        egui::Panel::bottom("scripting_console_input")
+            .resizable(false)
+            .show_inside(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(">>>");
+                    let resp = ui.add_enabled(
+                        self.ordinary_dispatch_enabled(),
+                        egui::TextEdit::singleline(&mut self.repl_input)
+                            .desired_width(f32::INFINITY),
+                    );
+                    if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        let line = std::mem::take(&mut self.repl_input);
+                        self.dispatch_eval(
+                            line,
+                            store.clone(),
+                            sender.clone(),
+                            Arc::clone(metrics),
+                        );
+                    }
+                });
+            });
+        egui::CentralPanel::default().show_inside(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    ui.monospace(self.console.as_str());
+                });
+        });
     }
 
     fn variables_window(
@@ -584,16 +719,21 @@ impl ScriptsPanel {
                                                     view.has_snapshot,
                                                 ));
                                             }
-                                            let reset = ui
-                                                .add(
-                                                    egui::Button::image(
-                                                        egui::Image::new(crate::icons::rotate_ccw())
-                                                            .fit_to_exact_size(egui::vec2(14.0, 14.0))
+                                            let reset =
+                                                ui
+                                                    .add(
+                                                        egui::Button::image(
+                                                            egui::Image::new(
+                                                                crate::icons::rotate_ccw(),
+                                                            )
+                                                            .fit_to_exact_size(egui::vec2(
+                                                                14.0, 14.0,
+                                                            ))
                                                             .tint(ui.visuals().text_color()),
+                                                        )
+                                                        .frame(false),
                                                     )
-                                                    .frame(false),
-                                                )
-                                                .on_hover_text("Reset to default");
+                                                    .on_hover_text("Reset to default");
                                             if reset.clicked() {
                                                 resets.push((
                                                     view.name.clone(),
@@ -615,8 +755,12 @@ impl ScriptsPanel {
         }
 
         // Apply edits: write store, persist, and re-run named snapshot scripts.
-        let named: std::collections::HashSet<String> =
-            self.library.list().unwrap_or_default().into_iter().collect();
+        let named: std::collections::HashSet<String> = self
+            .library
+            .list()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
         let mut to_rerun: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         {
             let mut s = self.params.lock().unwrap();
@@ -635,7 +779,12 @@ impl ScriptsPanel {
         }
         self.save_params();
         for script in to_rerun {
-            self.run_named(&script, Arc::clone(store), sender.clone(), Arc::clone(metrics));
+            self.run_named(
+                &script,
+                Arc::clone(store),
+                sender.clone(),
+                Arc::clone(metrics),
+            );
         }
     }
 
@@ -688,43 +837,11 @@ impl ScriptsPanel {
         sender: &IngestSender,
         metrics: &Arc<MetricsRegistry>,
     ) {
-        egui::Panel::bottom("scripts_repl")
+        egui::Panel::left("scripts_library_drawer")
             .resizable(true)
-            .min_size(140.0)
-            .show_inside(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("REPL:");
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if icon_btn(ui, crate::icons::trash(), "Clear console").clicked() {
-                            self.console.clear();
-                        }
-                        let resp = ui.add_enabled(
-                            self.ordinary_dispatch_enabled(),
-                            egui::TextEdit::singleline(&mut self.repl_input)
-                                .desired_width(f32::INFINITY),
-                        );
-                        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                            let line = std::mem::take(&mut self.repl_input);
-                            self.dispatch_eval(
-                                line,
-                                store.clone(),
-                                sender.clone(),
-                                Arc::clone(metrics),
-                            );
-                        }
-                    });
-                });
-                egui::ScrollArea::vertical()
-                    .stick_to_bottom(true)
-                    .show(ui, |ui| {
-                        let mut console_view = self.console.as_str();
-                        ui.add(
-                            egui::TextEdit::multiline(&mut console_view)
-                                .desired_width(f32::INFINITY)
-                                .font(egui::TextStyle::Monospace),
-                        );
-                    });
-            });
+            .default_size(180.0)
+            .size_range(140.0..=260.0)
+            .show_inside(ui, |ui| self.script_drawer(ui));
         egui::CentralPanel::default().show_inside(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.add(
@@ -742,7 +859,15 @@ impl ScriptsPanel {
                     .clicked()
                 {
                     match self.library.save(&self.current_name, &self.editor_text) {
-                        Ok(()) => self.status = format!("saved {}", self.current_name),
+                        Ok(()) => {
+                            if let Some(original) = self.editing_original_name.take() {
+                                if original != self.current_name {
+                                    let _ = self.library.delete(&original);
+                                }
+                            }
+                            self.editing_original_name = Some(self.current_name.clone());
+                            self.status = format!("saved {}", self.current_name);
+                        }
                         Err(e) => self.status = format!("save failed: {e}"),
                     }
                 }
@@ -817,8 +942,72 @@ impl ScriptsPanel {
                 .show(ui, &mut self.editor_text, &Syntax::python());
         });
     }
+
+    fn script_drawer(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.strong("Scripts");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("+ New").clicked() {
+                    self.new_script();
+                }
+            });
+        });
+        ui.separator();
+        let names = self.script_names();
+        if names.is_empty() {
+            ui.weak("No saved scripts.");
+            return;
+        }
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for name in names {
+                    ui.horizontal(|ui| {
+                        let selected = self.editing_original_name.as_deref() == Some(name.as_str());
+                        if ui
+                            .selectable_label(selected, name.as_str())
+                            .on_hover_text("Load script")
+                            .clicked()
+                        {
+                            self.edit_named(&name);
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.menu_button("...", |ui| {
+                                if ui.button("Edit").clicked() {
+                                    self.edit_named(&name);
+                                    ui.close();
+                                }
+                                if ui.button("Duplicate").clicked() {
+                                    self.duplicate_script(&name);
+                                    ui.close();
+                                }
+                                if ui.button("Remove").clicked() {
+                                    self.request_delete(&name);
+                                    ui.close();
+                                }
+                            });
+                        });
+                    });
+                }
+            });
+    }
 }
 
+fn available_copy_name(existing: &[String], name: &str) -> String {
+    let base = format!("{name}_copy");
+    if !existing.iter().any(|candidate| candidate == &base) {
+        return base;
+    }
+    for i in 2.. {
+        let candidate = format!("{base}_{i}");
+        if !existing.iter().any(|existing| existing == &candidate) {
+            return candidate;
+        }
+    }
+    unreachable!()
+}
+
+#[allow(dead_code)]
 fn icon_btn(ui: &mut egui::Ui, icon: egui::ImageSource<'static>, hover: &str) -> egui::Response {
     icon_btn_enabled(ui, true, icon, hover)
 }
@@ -846,7 +1035,15 @@ fn render_param_widget(
 ) -> Option<ParamValue> {
     use delog_script::params::ParamKind;
     match (&spec.kind, value) {
-        (ParamKind::Slider { min, max, step, integer }, ParamValue::Float(mut v)) => {
+        (
+            ParamKind::Slider {
+                min,
+                max,
+                step,
+                integer,
+            },
+            ParamValue::Float(mut v),
+        ) => {
             let mut slider = egui::Slider::new(&mut v, *min..=*max);
             if *integer {
                 slider = slider.step_by(step.unwrap_or(1.0)).max_decimals(0);
@@ -876,7 +1073,10 @@ fn render_param_widget(
                 .selected_text(selected.clone())
                 .show_ui(ui, |ui| {
                     for opt in options {
-                        if ui.selectable_value(&mut selected, opt.clone(), opt).clicked() {
+                        if ui
+                            .selectable_value(&mut selected, opt.clone(), opt)
+                            .clicked()
+                        {
                             changed = true;
                         }
                     }
@@ -937,6 +1137,72 @@ mod tests {
         assert!(panel.parser_active_label().contains("raw.py"));
         assert!(!panel.ordinary_dispatch_enabled());
         assert!(panel.can_interrupt_console());
+    }
+
+    #[test]
+    fn console_auto_open_policy_matches_setting() {
+        assert!(should_open_scripting_console(
+            crate::settings::AutoOpenScriptingConsole::OnOutput,
+            ConsoleEventKind::Output,
+        ));
+        assert!(should_open_scripting_console(
+            crate::settings::AutoOpenScriptingConsole::OnOutput,
+            ConsoleEventKind::Error,
+        ));
+        assert!(!should_open_scripting_console(
+            crate::settings::AutoOpenScriptingConsole::OnErrors,
+            ConsoleEventKind::Output,
+        ));
+        assert!(should_open_scripting_console(
+            crate::settings::AutoOpenScriptingConsole::OnErrors,
+            ConsoleEventKind::Error,
+        ));
+        assert!(!should_open_scripting_console(
+            crate::settings::AutoOpenScriptingConsole::Never,
+            ConsoleEventKind::Error,
+        ));
+    }
+
+    #[test]
+    fn new_script_starts_named_empty_buffer_in_editor() {
+        let root =
+            std::env::temp_dir().join(format!("delog-scripts-new-buffer-{}", std::process::id()));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
+        panel.current_name = "old".into();
+        panel.editor_text = "print('old')".into();
+
+        panel.new_script();
+
+        assert_eq!(panel.current_name, "new_script");
+        assert!(panel.editor_text.is_empty());
+        assert!(panel.open);
+    }
+
+    #[test]
+    fn duplicate_script_copies_source_to_available_name_and_opens_copy() {
+        let root = std::env::temp_dir().join(format!(
+            "delog-scripts-duplicate-{}",
+            std::process::id()
+        ));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
+        panel.library.save("demo", "print('demo')").unwrap();
+        panel.library.save("demo_copy", "old copy").unwrap();
+
+        panel.duplicate_script("demo");
+
+        assert_eq!(panel.current_name, "demo_copy_2");
+        assert_eq!(panel.editing_original_name.as_deref(), Some("demo_copy_2"));
+        assert_eq!(panel.editor_text, "print('demo')");
+        assert_eq!(panel.library.load("demo_copy_2").unwrap(), "print('demo')");
+        assert!(panel.open);
     }
 
     #[test]
@@ -1206,40 +1472,64 @@ mod tests {
     fn auto_open_never_stays_closed() {
         let prior = HashSet::new();
         let current: HashSet<String> = ["gain".into()].into_iter().collect();
-        assert!(!should_open_variables(crate::settings::AutoOpenVariables::Never, &prior, &current));
+        assert!(!should_open_variables(
+            crate::settings::AutoOpenVariables::Never,
+            &prior,
+            &current
+        ));
     }
 
     #[test]
     fn auto_open_every_run_opens_when_params_exist() {
         let prior: HashSet<String> = ["gain".into()].into_iter().collect();
         let current: HashSet<String> = ["gain".into()].into_iter().collect();
-        assert!(should_open_variables(crate::settings::AutoOpenVariables::EveryRun, &prior, &current));
+        assert!(should_open_variables(
+            crate::settings::AutoOpenVariables::EveryRun,
+            &prior,
+            &current
+        ));
     }
 
     #[test]
     fn auto_open_every_run_stays_closed_without_params() {
         let empty = HashSet::new();
-        assert!(!should_open_variables(crate::settings::AutoOpenVariables::EveryRun, &empty, &empty));
+        assert!(!should_open_variables(
+            crate::settings::AutoOpenVariables::EveryRun,
+            &empty,
+            &empty
+        ));
     }
 
     #[test]
     fn auto_open_newly_added_opens_on_first_param() {
         let prior = HashSet::new();
         let current: HashSet<String> = ["gain".into()].into_iter().collect();
-        assert!(should_open_variables(crate::settings::AutoOpenVariables::NewlyAdded, &prior, &current));
+        assert!(should_open_variables(
+            crate::settings::AutoOpenVariables::NewlyAdded,
+            &prior,
+            &current
+        ));
     }
 
     #[test]
     fn auto_open_newly_added_opens_on_added_param() {
         let prior: HashSet<String> = ["gain".into()].into_iter().collect();
         let current: HashSet<String> = ["gain".into(), "freq".into()].into_iter().collect();
-        assert!(should_open_variables(crate::settings::AutoOpenVariables::NewlyAdded, &prior, &current));
+        assert!(should_open_variables(
+            crate::settings::AutoOpenVariables::NewlyAdded,
+            &prior,
+            &current
+        ));
     }
 
     #[test]
     fn auto_open_newly_added_stays_closed_on_unchanged_params() {
         let prior: HashSet<String> = ["gain".into()].into_iter().collect();
         let current: HashSet<String> = ["gain".into()].into_iter().collect();
-        assert!(!should_open_variables(crate::settings::AutoOpenVariables::NewlyAdded, &prior, &current));
+        assert!(!should_open_variables(
+            crate::settings::AutoOpenVariables::NewlyAdded,
+            &prior,
+            &current
+        ));
     }
 }
