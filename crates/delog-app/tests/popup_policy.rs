@@ -10,6 +10,7 @@ const POPUP_SOURCES: &[&str] = &[
     include_str!("../src/workspace.rs"),
 ];
 const APP_SOURCE: &str = include_str!("../src/app.rs");
+const SCRIPTS_SOURCE: &str = include_str!("../src/scripts.rs");
 const WORKSPACE_SOURCE: &str = include_str!("../src/workspace.rs");
 const SETTINGS_SOURCE: &str = include_str!("../src/settings.rs");
 
@@ -28,11 +29,26 @@ fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
 }
 
 #[test]
-fn tools_menu_exposes_custom_parser_actions() {
+fn menus_expose_scripts_parsers_and_scripting_console_dock() {
+    assert!(APP_SOURCE.contains("checkbox(&mut self.scripts.console_open, \"Scripting Console\")"));
+    assert!(APP_SOURCE.contains("ui.menu_button(\"Scripts\""));
     assert!(APP_SOURCE.contains("ui.menu_button(\"Parsers\""));
-    assert!(APP_SOURCE.contains("Add new parser..."));
-    assert!(APP_SOURCE.contains("crate::icons::pencil()"));
-    assert!(APP_SOURCE.contains(".on_hover_text(\"Edit\")"));
+    assert!(APP_SOURCE.contains("ui.button(\"Editor...\")"));
+    assert!(APP_SOURCE.contains("ui.menu_button(\"Run\""));
+    assert!(APP_SOURCE.contains("ui.menu_button(\"Parse File\""));
+}
+
+#[test]
+fn scripting_console_dock_matches_diagnostics_height_and_reserves_prompt() {
+    assert!(APP_SOURCE.contains(".default_size(crate::scripts::SCRIPTING_CONSOLE_DEFAULT_HEIGHT)"));
+    assert!(SCRIPTS_SOURCE.contains("pub const SCRIPTING_CONSOLE_DEFAULT_HEIGHT: f32 = 240.0;"));
+    assert!(SCRIPTS_SOURCE.contains("egui::Panel::bottom(\"scripting_console_input\")"));
+    let console = between(
+        SCRIPTS_SOURCE,
+        "pub fn console_dock_ui(",
+        "fn variables_window(",
+    );
+    assert!(!console.contains("self.status"));
 }
 
 #[test]
