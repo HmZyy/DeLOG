@@ -799,6 +799,7 @@ impl Behavior<'_> {
             let (plot_rect, own_gutter) = make_plot_rect(ui, y_range, None);
             self.actions.max_y_gutter = self.actions.max_y_gutter.max(own_gutter);
             self.handle_plot_interaction(&response, plot_rect);
+            self.handle_zoom_drag(&response, plot_rect, pane);
             if plot_rect.width() > 8.0 {
                 let x_range = (*self.services.view)
                     .map(|v| v.seconds(self.services.origin_us))
@@ -814,6 +815,7 @@ impl Behavior<'_> {
             let (plot_rect, own_gutter) = make_plot_rect(ui, (0.0, 1.0), None);
             self.actions.max_y_gutter = self.actions.max_y_gutter.max(own_gutter);
             self.handle_plot_interaction(&response, plot_rect);
+            self.handle_zoom_drag(&response, plot_rect, pane);
             self.plot_context_menu(tile_id, &response, pane);
             self.plot_info_window(ui, tile_id, pane, None);
             return tile_response;
@@ -833,6 +835,7 @@ impl Behavior<'_> {
         if !marker_active {
             self.handle_plot_interaction(&response, plot_rect);
         }
+        self.handle_zoom_drag(&response, plot_rect, pane);
         // Ctrl+hover scrubs an existing marker to the cursor, with no precise
         // grab on the line needed.
         if self.marker_us(pane).is_some()
@@ -915,6 +918,29 @@ impl Behavior<'_> {
         };
 
         let pane_overlay_timer = self.services.metrics.scope("pane_overlay");
+        if let Some(anchor_us) = pane.zoom_drag_anchor_us
+            && let Some(p) = response.interact_pointer_pos()
+        {
+            let anchor_x = zoom_drag_anchor_x(view, plot_rect, anchor_us)
+                .clamp(plot_rect.left(), plot_rect.right());
+            let cursor_x = p.x.clamp(plot_rect.left(), plot_rect.right());
+            let (lo, hi) = (anchor_x.min(cursor_x), anchor_x.max(cursor_x));
+            let painter = ui.painter();
+            let shade = egui::Color32::from_black_alpha(120);
+            painter.rect_filled(
+                egui::Rect::from_min_max(plot_rect.left_top(), egui::pos2(lo, plot_rect.bottom())),
+                0.0,
+                shade,
+            );
+            painter.rect_filled(
+                egui::Rect::from_min_max(egui::pos2(hi, plot_rect.top()), plot_rect.right_bottom()),
+                0.0,
+                shade,
+            );
+            let edge = egui::Stroke::new(1.0, egui::Color32::from_white_alpha(160));
+            painter.vline(lo, plot_rect.y_range(), edge);
+            painter.vline(hi, plot_rect.y_range(), edge);
+        }
         self.plot_context_menu(tile_id, &response, pane);
 
         // Measurement marker (delta cursor): a dashed second
@@ -1438,6 +1464,39 @@ impl Behavior<'_> {
         }
         false
     }
+
+    /// Right-button drag zooms the shared X view to the dragged window. The
+    /// zoom applies on release; a plain right-click never sets the anchor and so
+    /// still opens the context menu.
+    fn handle_zoom_drag(
+        &mut self,
+        response: &egui::Response,
+        rect: egui::Rect,
+        pane: &mut PlotPane,
+    ) {
+        let Some(view) = *self.services.view else {
+            return;
+        };
+        if response.drag_started_by(egui::PointerButton::Secondary)
+            && let Some(p) = response.interact_pointer_pos()
+            && rect.contains(p)
+        {
+            let frac = ((p.x - rect.left()) / rect.width().max(1.0)).clamp(0.0, 1.0) as f64;
+            pane.zoom_drag_anchor_us = Some(view.min_us + (frac * view.span_us() as f64) as i64);
+        }
+        if response.drag_stopped_by(egui::PointerButton::Secondary)
+            && let Some(anchor_us) = pane.zoom_drag_anchor_us.take()
+            && let Some(p) = response.interact_pointer_pos()
+        {
+            let anchor_x = zoom_drag_anchor_x(view, rect, anchor_us);
+            if let Some(new_view) =
+                gpu::zoom_drag_view(view, rect.left(), rect.width(), anchor_x, p.x)
+            {
+                *self.services.view = Some(new_view);
+                self.actions.view_changed = true;
+            }
+        }
+    }
 }
 
 fn apply_ghost_text_state(pane: &mut PlotPane, ghost: &GhostTrace, field: FieldId) {
@@ -1465,6 +1524,11 @@ fn rebind_text_state(pane: &mut PlotPane, old_field: FieldId, new_field: FieldId
         pane.text_offsets.remove(&(old_field, time_us));
         pane.text_offsets.insert((new_field, time_us), offset);
     }
+}
+
+fn zoom_drag_anchor_x(view: ViewX, rect: egui::Rect, anchor_us: i64) -> f32 {
+    let frac = (anchor_us - view.min_us) as f64 / view.span_us() as f64;
+    rect.left() + frac as f32 * rect.width()
 }
 
 fn take_text_state(pane: &mut PlotPane, field: FieldId) -> (Option<String>, Vec<(i64, f32)>) {
