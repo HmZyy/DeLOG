@@ -1849,6 +1849,135 @@ impl eframe::App for DelogApp {
                     self.workspace.toggle_scene_pane();
                 }
 
+                ui.separator();
+
+                let active_tint = self.settings.theme.accent();
+                let inactive_tint = ui.visuals().weak_text_color();
+                hover_mode_menu_button(
+                    ui,
+                    "toolbar-hover-mode",
+                    crate::icons::mouse_pointer(),
+                    active_tint,
+                    true,
+                    |ui| {
+                        use delog_core::field_view::SampleMode::{Linear, Next, Prev};
+                        if ui
+                            .radio_value(&mut self.hover_mode, Prev, "Previous")
+                            .clicked()
+                        {
+                            ui.close();
+                        }
+                        if ui.radio_value(&mut self.hover_mode, Next, "Next").clicked() {
+                            ui.close();
+                        }
+                        if ui
+                            .radio_value(&mut self.hover_mode, Linear, "Linear")
+                            .clicked()
+                        {
+                            ui.close();
+                        }
+                    },
+                )
+                .on_hover_text(format!("Select hover mode"));
+
+                let snap_tint = if self.snap_playhead {
+                    active_tint
+                } else {
+                    inactive_tint
+                };
+                if icon_button(
+                    ui,
+                    "toolbar-snap-playhead",
+                    crate::icons::magnet(),
+                    snap_tint,
+                    self.snap_playhead,
+                )
+                .on_hover_text("Toggle playhead snap")
+                .clicked()
+                {
+                    self.snap_playhead = !self.snap_playhead;
+                }
+
+                let has_marker = self.marker_us.is_some();
+                let marker_tint = if has_marker {
+                    active_tint
+                } else {
+                    inactive_tint
+                };
+                let marker_hover = if has_marker {
+                    "Remove measuring marker"
+                } else {
+                    "Add measuring marker at playhead"
+                };
+                if ui
+                    .add_enabled_ui(has_marker || global_range.is_some(), |ui| {
+                        icon_button(
+                            ui,
+                            "toolbar-measuring-marker",
+                            crate::icons::ruler_dimension_line(),
+                            marker_tint,
+                            has_marker,
+                        )
+                    })
+                    .inner
+                    .on_hover_text(marker_hover)
+                    .clicked()
+                {
+                    self.marker_us = if has_marker {
+                        None
+                    } else {
+                        Some(self.playback.t_us)
+                    };
+                }
+
+                if icon_button(
+                    ui,
+                    "toolbar-equal-plot-heights",
+                    crate::icons::grid_2x2_check(),
+                    inactive_tint,
+                    false,
+                )
+                .on_hover_text("Resize all plots")
+                .clicked()
+                {
+                    self.workspace.equalize_plot_heights();
+                }
+
+                ui.separator();
+
+                if icon_button(
+                    ui,
+                    "toolbar-legend-position",
+                    legend_position_icon(self.settings.plot.legend_position),
+                    active_tint,
+                    true,
+                )
+                .on_hover_text("Cycle legend position")
+                .clicked()
+                {
+                    self.settings.plot.legend_position =
+                        next_legend_position(self.settings.plot.legend_position);
+                }
+
+                let legends_hidden = !self.workspace.all_plot_legends_visible();
+                let legend_tint = if legends_hidden {
+                    active_tint
+                } else {
+                    inactive_tint
+                };
+                if icon_button(
+                    ui,
+                    "toolbar-legends",
+                    crate::icons::eye_off(),
+                    legend_tint,
+                    legends_hidden,
+                )
+                .on_hover_text("Toggle legends")
+                .clicked()
+                {
+                    self.workspace.set_all_plot_legends(legends_hidden);
+                }
+
                 let mut disconnect = None;
                 for (i, status) in self.session.live_statuses().into_iter().enumerate() {
                     ui.separator();
@@ -2231,7 +2360,6 @@ impl eframe::App for DelogApp {
                         hover_mode: &mut self.hover_mode,
                         snap_playhead: &mut self.snap_playhead,
                         marker_us: &mut self.marker_us,
-                        marker_scope: self.settings.plot.marker_scope,
                         render_tuning: self.settings.render,
                         scene3d: self.settings.scene3d,
                         accent: self.settings.theme.accent(),
@@ -3030,6 +3158,26 @@ fn source_kind_label(label: &str) -> &'static str {
 /// otherwise shift every panel below and spam "changed id between passes").
 const ICON_BUTTON_SIZE: egui::Vec2 = egui::vec2(28.0, 24.0);
 
+fn next_legend_position(
+    position: crate::settings::LegendPosition,
+) -> crate::settings::LegendPosition {
+    match position {
+        crate::settings::LegendPosition::TopLeft => crate::settings::LegendPosition::TopRight,
+        crate::settings::LegendPosition::TopRight => crate::settings::LegendPosition::BottomLeft,
+        crate::settings::LegendPosition::BottomLeft => crate::settings::LegendPosition::BottomRight,
+        crate::settings::LegendPosition::BottomRight => crate::settings::LegendPosition::TopLeft,
+    }
+}
+
+fn legend_position_icon(position: crate::settings::LegendPosition) -> egui::ImageSource<'static> {
+    match position {
+        crate::settings::LegendPosition::TopLeft => crate::icons::dice_top_left(),
+        crate::settings::LegendPosition::TopRight => crate::icons::dice_top_right(),
+        crate::settings::LegendPosition::BottomLeft => crate::icons::dice_bottom_left(),
+        crate::settings::LegendPosition::BottomRight => crate::icons::dice_bottom_right(),
+    }
+}
+
 /// A compact toolbar icon button rendering one of the bundled SVG icons.
 /// `salt` gives the button a stable id; `tint` colors the (white) glyph;
 /// `active` draws a selected background.
@@ -3040,9 +3188,7 @@ fn icon_button(
     tint: egui::Color32,
     active: bool,
 ) -> egui::Response {
-    let image = egui::Image::new(icon)
-        .fit_to_exact_size(egui::vec2(18.0, 18.0))
-        .tint(tint);
+    let image = toolbar_icon_image(icon, tint);
     ui.push_id(salt, |ui| {
         ui.add_sized(
             ICON_BUTTON_SIZE,
@@ -3050,6 +3196,34 @@ fn icon_button(
         )
     })
     .inner
+}
+
+fn hover_mode_menu_button(
+    ui: &mut egui::Ui,
+    salt: &str,
+    icon: egui::ImageSource<'_>,
+    tint: egui::Color32,
+    active: bool,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) -> egui::Response {
+    let image = toolbar_icon_image(icon, tint);
+    ui.push_id(salt, |ui| {
+        egui::containers::menu::MenuButton::from_button(
+            egui::Button::image(image)
+                .selected(active)
+                .min_size(ICON_BUTTON_SIZE),
+        )
+        .ui(ui, add_contents)
+        .0
+    })
+    .inner
+}
+
+fn toolbar_icon_image(icon: egui::ImageSource<'_>, tint: egui::Color32) -> egui::Image<'_> {
+    let image = egui::Image::new(icon)
+        .fit_to_exact_size(egui::vec2(18.0, 18.0))
+        .tint(tint);
+    image
 }
 
 #[cfg(test)]

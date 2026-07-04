@@ -200,6 +200,46 @@ impl Workspace {
             .is_some_and(|pane| pane.add_trace(field))
     }
 
+    pub fn all_plot_legends_visible(&self) -> bool {
+        self.plot_panes().all(|pane| pane.show_legend)
+    }
+
+    pub fn set_all_plot_legends(&mut self, visible: bool) {
+        for pane in self.plot_panes_mut() {
+            pane.show_legend = visible;
+        }
+    }
+
+    pub fn equalize_plot_heights(&mut self) {
+        let container_ids = self
+            .tree
+            .tiles
+            .iter()
+            .filter_map(|(id, tile)| matches!(tile, egui_tiles::Tile::Container(_)).then_some(*id))
+            .collect::<Vec<_>>();
+        for id in container_ids {
+            let Some(egui_tiles::Tile::Container(container)) = self.tree.tiles.get_mut(id) else {
+                continue;
+            };
+            match container {
+                egui_tiles::Container::Linear(linear) => {
+                    for child in linear.children.clone() {
+                        linear.shares.set_share(child, 1.0);
+                    }
+                }
+                egui_tiles::Container::Grid(grid) => {
+                    for share in &mut grid.col_shares {
+                        *share = 1.0;
+                    }
+                    for share in &mut grid.row_shares {
+                        *share = 1.0;
+                    }
+                }
+                egui_tiles::Container::Tabs(_) => {}
+            }
+        }
+    }
+
     pub fn split_plot(&mut self, tile_id: egui_tiles::TileId, direction: SplitDirection) {
         self.split_plot_at(tile_id, direction, false);
     }
@@ -412,10 +452,8 @@ pub struct PlotServices<'a> {
     pub hover_mode: &'a mut delog_core::field_view::SampleMode,
     /// When set, Alt+hover holds a sample until the cursor crosses to the next.
     pub snap_playhead: &'a mut bool,
-    /// Shared marker time, used when `marker_scope` is Global; per-pane markers
-    /// live on the pane instead.
+    /// Shared measurement marker time.
     pub marker_us: &'a mut Option<i64>,
-    pub marker_scope: crate::settings::MarkerScope,
     pub render_tuning: crate::settings::RenderTuning,
     pub scene3d: crate::settings::Scene3dSettings,
     pub accent: egui::Color32,
@@ -1039,12 +1077,6 @@ impl Behavior<'_> {
         response: &egui::Response,
         pane: &mut PlotPane,
     ) {
-        // The measurement marker drops at the current playhead time; a
-        // marker is only meaningful once there is a playhead to measure against.
-        // `has_marker` honors the Global/Per-pane scope so the toggle label and
-        // the slot it writes agree.
-        let playhead = self.services.playhead_us;
-        let has_marker = self.marker_us(pane).is_some();
         response.context_menu(|ui| {
             if ui
                 .add(egui::Button::image_and_text(
@@ -1191,49 +1223,7 @@ impl Behavior<'_> {
 
             ui.separator();
 
-            ui.checkbox(&mut pane.show_legend, "Show legend");
             ui.checkbox(&mut pane.show_tooltip, "Show tooltip");
-            ui.menu_button("Hover mode", |ui| {
-                use delog_core::field_view::SampleMode::{Linear, Next, Prev};
-                ui.radio_value(self.services.hover_mode, Prev, "Previous");
-                ui.radio_value(self.services.hover_mode, Next, "Next");
-                ui.radio_value(self.services.hover_mode, Linear, "Linear");
-            });
-            ui.checkbox(self.services.snap_playhead, "Snap")
-                .on_hover_text(
-                    "Alt+hover snaps the playhead to the nearest data point instead of moving \
-                     continuously.",
-                );
-
-            ui.separator();
-
-            // Measurement marker (delta cursor): the same slot
-            // toggles between dropping a marker at the playhead and removing it.
-            if has_marker {
-                if ui
-                    .add(egui::Button::image_and_text(
-                        menu_icon(ui, crate::icons::ban()),
-                        "Remove measuring marker",
-                    ))
-                    .clicked()
-                {
-                    self.set_marker_us(pane, None);
-                    pane.marker_drag = false;
-                    ui.close();
-                }
-            } else if ui
-                .add_enabled(
-                    playhead.is_some(),
-                    egui::Button::image_and_text(
-                        menu_icon(ui, crate::icons::ruler()),
-                        "Add measuring marker",
-                    ),
-                )
-                .clicked()
-            {
-                self.set_marker_us(pane, playhead);
-                ui.close();
-            }
 
             if ui
                 .add(egui::Button::image_and_text(
@@ -1391,22 +1381,14 @@ impl Behavior<'_> {
         *self.services.view = Some(view);
     }
 
-    /// The pane's effective marker time: the shared one in Global scope, or the
-    /// pane's own in Per-pane scope.
-    fn marker_us(&self, pane: &PlotPane) -> Option<i64> {
-        match self.services.marker_scope {
-            crate::settings::MarkerScope::Global => *self.services.marker_us,
-            crate::settings::MarkerScope::PerPane => pane.marker_us,
-        }
+    /// The effective measurement marker time is always shared across plot panes.
+    fn marker_us(&self, _pane: &PlotPane) -> Option<i64> {
+        *self.services.marker_us
     }
 
-    /// Set or clear the effective marker, writing to the shared or per-pane slot
-    /// per the scope setting.
-    fn set_marker_us(&mut self, pane: &mut PlotPane, value: Option<i64>) {
-        match self.services.marker_scope {
-            crate::settings::MarkerScope::Global => *self.services.marker_us = value,
-            crate::settings::MarkerScope::PerPane => pane.marker_us = value,
-        }
+    /// Set or clear the shared measurement marker.
+    fn set_marker_us(&mut self, _pane: &mut PlotPane, value: Option<i64>) {
+        *self.services.marker_us = value;
     }
 
     /// Drag the measurement marker line along X. A primary drag that starts
@@ -2167,6 +2149,199 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(workspace.plot_panes().count(), before);
+    }
+
+    #[test]
+    fn set_all_plot_legends_updates_every_plot() {
+        let mut workspace = Workspace::new();
+        let root = workspace.tree.root().unwrap();
+        workspace.split_plot(root, SplitDirection::Horizontal);
+
+        workspace.set_all_plot_legends(false);
+        assert!(workspace.plot_panes().all(|pane| !pane.show_legend));
+
+        workspace.set_all_plot_legends(true);
+        assert!(workspace.plot_panes().all(|pane| pane.show_legend));
+    }
+
+    #[test]
+    fn all_plot_legends_visible_requires_every_plot() {
+        let mut workspace = Workspace::new();
+        let root = workspace.tree.root().unwrap();
+        workspace.split_plot(root, SplitDirection::Horizontal);
+        assert!(workspace.all_plot_legends_visible());
+
+        workspace.plot_panes_mut().next().unwrap().show_legend = false;
+
+        assert!(!workspace.all_plot_legends_visible());
+    }
+
+    #[test]
+    fn equalize_plot_heights_resets_vertical_split_shares() {
+        let mut workspace = Workspace::new();
+        let root = workspace.tree.root().unwrap();
+        workspace.split_plot(root, SplitDirection::Vertical);
+        let root = workspace.tree.root().unwrap();
+        let Some(egui_tiles::Tile::Container(egui_tiles::Container::Linear(linear))) =
+            workspace.tree.tiles.get_mut(root)
+        else {
+            panic!("root should be a linear split");
+        };
+        assert_eq!(linear.dir, egui_tiles::LinearDir::Vertical);
+        let children = linear.children.clone();
+        linear.shares.set_share(children[0], 4.0);
+        linear.shares.set_share(children[1], 1.0);
+
+        workspace.equalize_plot_heights();
+
+        let Some(egui_tiles::Tile::Container(egui_tiles::Container::Linear(linear))) =
+            workspace.tree.tiles.get(root)
+        else {
+            panic!("root should remain a linear split");
+        };
+        assert_eq!(linear.shares[children[0]], 1.0);
+        assert_eq!(linear.shares[children[1]], 1.0);
+    }
+
+    #[test]
+    fn equalize_plot_heights_resets_horizontal_split_shares() {
+        let mut workspace = Workspace::new();
+        let root = workspace.tree.root().unwrap();
+        workspace.split_plot(root, SplitDirection::Horizontal);
+        let root = workspace.tree.root().unwrap();
+        let Some(egui_tiles::Tile::Container(egui_tiles::Container::Linear(linear))) =
+            workspace.tree.tiles.get_mut(root)
+        else {
+            panic!("root should be a linear split");
+        };
+        assert_eq!(linear.dir, egui_tiles::LinearDir::Horizontal);
+        let children = linear.children.clone();
+        linear.shares.set_share(children[0], 1.0);
+        linear.shares.set_share(children[1], 6.0);
+
+        workspace.equalize_plot_heights();
+
+        let Some(egui_tiles::Tile::Container(egui_tiles::Container::Linear(linear))) =
+            workspace.tree.tiles.get(root)
+        else {
+            panic!("root should remain a linear split");
+        };
+        assert_eq!(linear.shares[children[0]], 1.0);
+        assert_eq!(linear.shares[children[1]], 1.0);
+    }
+
+    #[test]
+    fn equalize_plot_heights_resets_grid_row_shares() {
+        let mut tiles = egui_tiles::Tiles::default();
+        let panes = (0..4)
+            .map(|_| tiles.insert_pane(Pane::Plot(PlotPane::default())))
+            .collect::<Vec<_>>();
+        let root = tiles.insert_container(egui_tiles::Container::new(
+            egui_tiles::ContainerKind::Grid,
+            panes,
+        ));
+        let mut workspace = Workspace {
+            tree: egui_tiles::Tree::new("plot_workspace", root, tiles),
+            focused: None,
+            shared_y_gutter: 0.0,
+            default_show_legend: true,
+        };
+        let Some(egui_tiles::Tile::Container(egui_tiles::Container::Grid(grid))) =
+            workspace.tree.tiles.get_mut(root)
+        else {
+            panic!("root should be a grid");
+        };
+        grid.row_shares = vec![3.0, 1.0];
+
+        workspace.equalize_plot_heights();
+
+        let Some(egui_tiles::Tile::Container(egui_tiles::Container::Grid(grid))) =
+            workspace.tree.tiles.get(root)
+        else {
+            panic!("root should remain a grid");
+        };
+        assert_eq!(grid.row_shares, vec![1.0, 1.0]);
+    }
+
+    #[test]
+    fn equalize_plot_heights_resets_grid_column_shares() {
+        let mut tiles = egui_tiles::Tiles::default();
+        let panes = (0..4)
+            .map(|_| tiles.insert_pane(Pane::Plot(PlotPane::default())))
+            .collect::<Vec<_>>();
+        let root = tiles.insert_container(egui_tiles::Container::new(
+            egui_tiles::ContainerKind::Grid,
+            panes,
+        ));
+        let mut workspace = Workspace {
+            tree: egui_tiles::Tree::new("plot_workspace", root, tiles),
+            focused: None,
+            shared_y_gutter: 0.0,
+            default_show_legend: true,
+        };
+        let Some(egui_tiles::Tile::Container(egui_tiles::Container::Grid(grid))) =
+            workspace.tree.tiles.get_mut(root)
+        else {
+            panic!("root should be a grid");
+        };
+        grid.col_shares = vec![1.0, 4.0];
+
+        workspace.equalize_plot_heights();
+
+        let Some(egui_tiles::Tile::Container(egui_tiles::Container::Grid(grid))) =
+            workspace.tree.tiles.get(root)
+        else {
+            panic!("root should remain a grid");
+        };
+        assert_eq!(grid.col_shares, vec![1.0, 1.0]);
+    }
+
+    #[test]
+    fn equalize_plot_heights_descends_into_multiple_columns() {
+        let mut tiles = egui_tiles::Tiles::default();
+        let left_a = tiles.insert_pane(Pane::Plot(PlotPane::default()));
+        let left_b = tiles.insert_pane(Pane::Plot(PlotPane::default()));
+        let right_a = tiles.insert_pane(Pane::Plot(PlotPane::default()));
+        let right_b = tiles.insert_pane(Pane::Plot(PlotPane::default()));
+        let left = tiles.insert_container(egui_tiles::Container::new(
+            egui_tiles::ContainerKind::Vertical,
+            vec![left_a, left_b],
+        ));
+        let right = tiles.insert_container(egui_tiles::Container::new(
+            egui_tiles::ContainerKind::Vertical,
+            vec![right_a, right_b],
+        ));
+        let root = tiles.insert_container(egui_tiles::Container::new(
+            egui_tiles::ContainerKind::Horizontal,
+            vec![left, right],
+        ));
+        let mut workspace = Workspace {
+            tree: egui_tiles::Tree::new("plot_workspace", root, tiles),
+            focused: None,
+            shared_y_gutter: 0.0,
+            default_show_legend: true,
+        };
+        for (id, first, second) in [(left, left_a, left_b), (right, right_a, right_b)] {
+            let Some(egui_tiles::Tile::Container(egui_tiles::Container::Linear(linear))) =
+                workspace.tree.tiles.get_mut(id)
+            else {
+                panic!("column should be a linear split");
+            };
+            linear.shares.set_share(first, 2.0);
+            linear.shares.set_share(second, 5.0);
+        }
+
+        workspace.equalize_plot_heights();
+
+        for (id, first, second) in [(left, left_a, left_b), (right, right_a, right_b)] {
+            let Some(egui_tiles::Tile::Container(egui_tiles::Container::Linear(linear))) =
+                workspace.tree.tiles.get(id)
+            else {
+                panic!("column should remain a linear split");
+            };
+            assert_eq!(linear.shares[first], 1.0);
+            assert_eq!(linear.shares[second], 1.0);
+        }
     }
 
     #[test]
