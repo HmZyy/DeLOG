@@ -73,6 +73,7 @@ fn moved_plot_controls_live_on_icon_toolbar_not_plot_context_menu() {
         "toolbar-hover-mode",
         "toolbar-snap-playhead",
         "toolbar-measuring-marker",
+        "toolbar-equal-plot-heights",
         "toolbar-legends",
         "toolbar-legend-position",
     ] {
@@ -92,17 +93,32 @@ fn moved_plot_controls_live_on_icon_toolbar_not_plot_context_menu() {
     let marker = toolbar
         .find("toolbar-measuring-marker")
         .expect("measuring marker control should exist");
+    let equal_heights = toolbar
+        .find("toolbar-equal-plot-heights")
+        .expect("equal plot heights control should exist");
     let legends = toolbar
         .find("toolbar-legends")
         .expect("legend visibility control should exist");
     assert!(
+        marker < equal_heights && equal_heights < legends,
+        "equal plot heights should sit between the measuring marker and legend controls"
+    );
+    assert!(
         toolbar[marker..legends].contains("ui.separator();"),
         "a separator should split marker tools from legend tools"
     );
+    assert!(toolbar.contains("self.workspace.equalize_plot_heights();"));
+    assert!(toolbar.contains("crate::icons::ruler_dimension_line()"));
+    assert!(toolbar.contains("crate::icons::grid_2x2_check()"));
+    assert!(toolbar.contains("let legends_hidden = !self.workspace.all_plot_legends_visible();"));
+    assert!(toolbar.contains("legend_tint = if legends_hidden"));
+    assert!(toolbar.contains("crate::icons::eye_off()"));
+    assert!(toolbar.contains("legend_tint,\n                    legends_hidden,"));
     for tooltip in [
         "Select hover mode",
         "Toggle playhead snap",
         "Add measuring marker",
+        "Resize all plots",
         "Toggle legends",
         "Cycle legend position",
     ] {

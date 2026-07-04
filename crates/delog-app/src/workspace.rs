@@ -210,6 +210,36 @@ impl Workspace {
         }
     }
 
+    pub fn equalize_plot_heights(&mut self) {
+        let container_ids = self
+            .tree
+            .tiles
+            .iter()
+            .filter_map(|(id, tile)| matches!(tile, egui_tiles::Tile::Container(_)).then_some(*id))
+            .collect::<Vec<_>>();
+        for id in container_ids {
+            let Some(egui_tiles::Tile::Container(container)) = self.tree.tiles.get_mut(id) else {
+                continue;
+            };
+            match container {
+                egui_tiles::Container::Linear(linear) => {
+                    for child in linear.children.clone() {
+                        linear.shares.set_share(child, 1.0);
+                    }
+                }
+                egui_tiles::Container::Grid(grid) => {
+                    for share in &mut grid.col_shares {
+                        *share = 1.0;
+                    }
+                    for share in &mut grid.row_shares {
+                        *share = 1.0;
+                    }
+                }
+                egui_tiles::Container::Tabs(_) => {}
+            }
+        }
+    }
+
     pub fn split_plot(&mut self, tile_id: egui_tiles::TileId, direction: SplitDirection) {
         self.split_plot_at(tile_id, direction, false);
     }
@@ -2144,6 +2174,174 @@ mod tests {
         workspace.plot_panes_mut().next().unwrap().show_legend = false;
 
         assert!(!workspace.all_plot_legends_visible());
+    }
+
+    #[test]
+    fn equalize_plot_heights_resets_vertical_split_shares() {
+        let mut workspace = Workspace::new();
+        let root = workspace.tree.root().unwrap();
+        workspace.split_plot(root, SplitDirection::Vertical);
+        let root = workspace.tree.root().unwrap();
+        let Some(egui_tiles::Tile::Container(egui_tiles::Container::Linear(linear))) =
+            workspace.tree.tiles.get_mut(root)
+        else {
+            panic!("root should be a linear split");
+        };
+        assert_eq!(linear.dir, egui_tiles::LinearDir::Vertical);
+        let children = linear.children.clone();
+        linear.shares.set_share(children[0], 4.0);
+        linear.shares.set_share(children[1], 1.0);
+
+        workspace.equalize_plot_heights();
+
+        let Some(egui_tiles::Tile::Container(egui_tiles::Container::Linear(linear))) =
+            workspace.tree.tiles.get(root)
+        else {
+            panic!("root should remain a linear split");
+        };
+        assert_eq!(linear.shares[children[0]], 1.0);
+        assert_eq!(linear.shares[children[1]], 1.0);
+    }
+
+    #[test]
+    fn equalize_plot_heights_resets_horizontal_split_shares() {
+        let mut workspace = Workspace::new();
+        let root = workspace.tree.root().unwrap();
+        workspace.split_plot(root, SplitDirection::Horizontal);
+        let root = workspace.tree.root().unwrap();
+        let Some(egui_tiles::Tile::Container(egui_tiles::Container::Linear(linear))) =
+            workspace.tree.tiles.get_mut(root)
+        else {
+            panic!("root should be a linear split");
+        };
+        assert_eq!(linear.dir, egui_tiles::LinearDir::Horizontal);
+        let children = linear.children.clone();
+        linear.shares.set_share(children[0], 1.0);
+        linear.shares.set_share(children[1], 6.0);
+
+        workspace.equalize_plot_heights();
+
+        let Some(egui_tiles::Tile::Container(egui_tiles::Container::Linear(linear))) =
+            workspace.tree.tiles.get(root)
+        else {
+            panic!("root should remain a linear split");
+        };
+        assert_eq!(linear.shares[children[0]], 1.0);
+        assert_eq!(linear.shares[children[1]], 1.0);
+    }
+
+    #[test]
+    fn equalize_plot_heights_resets_grid_row_shares() {
+        let mut tiles = egui_tiles::Tiles::default();
+        let panes = (0..4)
+            .map(|_| tiles.insert_pane(Pane::Plot(PlotPane::default())))
+            .collect::<Vec<_>>();
+        let root = tiles.insert_container(egui_tiles::Container::new(
+            egui_tiles::ContainerKind::Grid,
+            panes,
+        ));
+        let mut workspace = Workspace {
+            tree: egui_tiles::Tree::new("plot_workspace", root, tiles),
+            focused: None,
+            shared_y_gutter: 0.0,
+            default_show_legend: true,
+        };
+        let Some(egui_tiles::Tile::Container(egui_tiles::Container::Grid(grid))) =
+            workspace.tree.tiles.get_mut(root)
+        else {
+            panic!("root should be a grid");
+        };
+        grid.row_shares = vec![3.0, 1.0];
+
+        workspace.equalize_plot_heights();
+
+        let Some(egui_tiles::Tile::Container(egui_tiles::Container::Grid(grid))) =
+            workspace.tree.tiles.get(root)
+        else {
+            panic!("root should remain a grid");
+        };
+        assert_eq!(grid.row_shares, vec![1.0, 1.0]);
+    }
+
+    #[test]
+    fn equalize_plot_heights_resets_grid_column_shares() {
+        let mut tiles = egui_tiles::Tiles::default();
+        let panes = (0..4)
+            .map(|_| tiles.insert_pane(Pane::Plot(PlotPane::default())))
+            .collect::<Vec<_>>();
+        let root = tiles.insert_container(egui_tiles::Container::new(
+            egui_tiles::ContainerKind::Grid,
+            panes,
+        ));
+        let mut workspace = Workspace {
+            tree: egui_tiles::Tree::new("plot_workspace", root, tiles),
+            focused: None,
+            shared_y_gutter: 0.0,
+            default_show_legend: true,
+        };
+        let Some(egui_tiles::Tile::Container(egui_tiles::Container::Grid(grid))) =
+            workspace.tree.tiles.get_mut(root)
+        else {
+            panic!("root should be a grid");
+        };
+        grid.col_shares = vec![1.0, 4.0];
+
+        workspace.equalize_plot_heights();
+
+        let Some(egui_tiles::Tile::Container(egui_tiles::Container::Grid(grid))) =
+            workspace.tree.tiles.get(root)
+        else {
+            panic!("root should remain a grid");
+        };
+        assert_eq!(grid.col_shares, vec![1.0, 1.0]);
+    }
+
+    #[test]
+    fn equalize_plot_heights_descends_into_multiple_columns() {
+        let mut tiles = egui_tiles::Tiles::default();
+        let left_a = tiles.insert_pane(Pane::Plot(PlotPane::default()));
+        let left_b = tiles.insert_pane(Pane::Plot(PlotPane::default()));
+        let right_a = tiles.insert_pane(Pane::Plot(PlotPane::default()));
+        let right_b = tiles.insert_pane(Pane::Plot(PlotPane::default()));
+        let left = tiles.insert_container(egui_tiles::Container::new(
+            egui_tiles::ContainerKind::Vertical,
+            vec![left_a, left_b],
+        ));
+        let right = tiles.insert_container(egui_tiles::Container::new(
+            egui_tiles::ContainerKind::Vertical,
+            vec![right_a, right_b],
+        ));
+        let root = tiles.insert_container(egui_tiles::Container::new(
+            egui_tiles::ContainerKind::Horizontal,
+            vec![left, right],
+        ));
+        let mut workspace = Workspace {
+            tree: egui_tiles::Tree::new("plot_workspace", root, tiles),
+            focused: None,
+            shared_y_gutter: 0.0,
+            default_show_legend: true,
+        };
+        for (id, first, second) in [(left, left_a, left_b), (right, right_a, right_b)] {
+            let Some(egui_tiles::Tile::Container(egui_tiles::Container::Linear(linear))) =
+                workspace.tree.tiles.get_mut(id)
+            else {
+                panic!("column should be a linear split");
+            };
+            linear.shares.set_share(first, 2.0);
+            linear.shares.set_share(second, 5.0);
+        }
+
+        workspace.equalize_plot_heights();
+
+        for (id, first, second) in [(left, left_a, left_b), (right, right_a, right_b)] {
+            let Some(egui_tiles::Tile::Container(egui_tiles::Container::Linear(linear))) =
+                workspace.tree.tiles.get(id)
+            else {
+                panic!("column should remain a linear split");
+            };
+            assert_eq!(linear.shares[first], 1.0);
+            assert_eq!(linear.shares[second], 1.0);
+        }
     }
 
     #[test]
