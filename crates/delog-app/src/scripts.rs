@@ -68,6 +68,11 @@ fn should_open_variables(
     }
 }
 
+struct PendingAutoOpen {
+    script: String,
+    prior_names: HashSet<String>,
+}
+
 pub struct ScriptsPanel {
     pub open: bool,
     engine: Option<ScriptEngine>,
@@ -84,6 +89,8 @@ pub struct ScriptsPanel {
     params: delog_script::params::SharedParams,
     params_file: std::path::PathBuf,
     pub variables_open: bool,
+    pending_auto_open: Option<PendingAutoOpen>,
+    auto_open_mode: AutoOpenVariables,
 }
 
 impl ScriptsPanel {
@@ -114,6 +121,8 @@ impl ScriptsPanel {
             params,
             params_file,
             variables_open: false,
+            pending_auto_open: None,
+            auto_open_mode: AutoOpenVariables::default(),
         }
     }
 
@@ -266,6 +275,18 @@ impl ScriptsPanel {
                 self.console.push_str(&format!("# run {name}\n"));
                 self.status = format!("running {name}");
                 self.running = true;
+                let prior_names = self
+                    .params
+                    .lock()
+                    .unwrap()
+                    .scripts
+                    .get(&name)
+                    .map(|sp| sp.specs.iter().map(|s| s.name.clone()).collect())
+                    .unwrap_or_default();
+                self.pending_auto_open = Some(PendingAutoOpen {
+                    script: name.clone(),
+                    prior_names,
+                });
                 true
             }
             Err(error) => {
@@ -347,10 +368,24 @@ impl ScriptsPanel {
                 self.console.push('\n');
                 self.status = "error".into();
                 self.running = false;
+                self.pending_auto_open = None;
             }
             ScriptEvent::Done => {
                 self.status = "done".into();
                 self.running = false;
+                if let Some(pending) = self.pending_auto_open.take() {
+                    let current_names: HashSet<String> = self
+                        .params
+                        .lock()
+                        .unwrap()
+                        .scripts
+                        .get(&pending.script)
+                        .map(|sp| sp.specs.iter().map(|s| s.name.clone()).collect())
+                        .unwrap_or_default();
+                    if should_open_variables(self.auto_open_mode, &pending.prior_names, &current_names) {
+                        self.variables_open = true;
+                    }
+                }
             }
             ScriptEvent::LiveBatchProcessed => {}
             ScriptEvent::Parser(event) => self.parsers.handle_event(event),
@@ -435,7 +470,9 @@ impl ScriptsPanel {
         store: Arc<DataStore>,
         sender: IngestSender,
         metrics: Arc<MetricsRegistry>,
+        auto_open: AutoOpenVariables,
     ) {
+        self.auto_open_mode = auto_open;
         self.drain();
 
         for action in self.parsers.ui(ctx, self.parser_dispatch_enabled()) {
