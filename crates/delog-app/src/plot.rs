@@ -129,6 +129,8 @@ pub struct PlotPane {
     pub text_offsets: HashMap<(FieldId, i64), f32>,
     /// Empty/absent = show all.
     pub text_filters: HashMap<FieldId, String>,
+    /// Anchor time (µs) of an in-progress right-drag zoom; None when not dragging.
+    pub zoom_drag_anchor_us: Option<i64>,
 }
 
 impl Default for PlotPane {
@@ -143,6 +145,7 @@ impl Default for PlotPane {
             marker_drag: false,
             text_offsets: HashMap::new(),
             text_filters: HashMap::new(),
+            zoom_drag_anchor_us: None,
         }
     }
 }
