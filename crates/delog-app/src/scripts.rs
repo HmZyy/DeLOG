@@ -1,10 +1,11 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use delog_core::ingest::IngestSender;
 use delog_core::metrics::MetricsRegistry;
 use delog_core::snapshot::DataStore;
 use delog_script::library::ScriptLibrary;
+use delog_script::params::{ParamSpec, ParamValue};
 use delog_script::{ScriptCommand, ScriptEngine, ScriptEvent};
 use egui_code_editor::{CodeEditor, ColorTheme, Syntax};
 
@@ -42,6 +43,18 @@ impl PreparedParserCommand {
     }
 }
 
+/// One script's declared params, snapshotted so the Variables window doesn't
+/// hold the store lock across egui closures.
+struct ScriptVarsView {
+    name: String,
+    has_snapshot: bool,
+    // Not read yet: reserved for a future "live params" indicator.
+    #[allow(dead_code)]
+    has_live: bool,
+    specs: Vec<ParamSpec>,
+    values: HashMap<String, ParamValue>,
+}
+
 pub struct ScriptsPanel {
     pub open: bool,
     engine: Option<ScriptEngine>,
@@ -55,11 +68,23 @@ pub struct ScriptsPanel {
     running: bool,
     parsers: ParsersPanel,
     deferred_parser_actions: VecDeque<ParserUiAction>,
+    params: delog_script::params::SharedParams,
+    params_file: std::path::PathBuf,
+    pub variables_open: bool,
 }
 
 impl ScriptsPanel {
-    pub fn new(scripts_dir: std::path::PathBuf, parsers_dir: std::path::PathBuf) -> Self {
+    pub fn new(
+        scripts_dir: std::path::PathBuf,
+        parsers_dir: std::path::PathBuf,
+        params_file: std::path::PathBuf,
+    ) -> Self {
         let library = ScriptLibrary::new(scripts_dir);
+        let params = delog_script::params::shared_empty();
+        {
+            let loaded = crate::script_params_io::load(&params_file);
+            crate::script_params_io::apply_loaded(&mut params.lock().unwrap(), loaded);
+        }
         Self {
             open: false,
             engine: None,
@@ -73,6 +98,15 @@ impl ScriptsPanel {
             running: false,
             parsers: ParsersPanel::new(parsers_dir),
             deferred_parser_actions: VecDeque::new(),
+            params,
+            params_file,
+            variables_open: false,
+        }
+    }
+
+    fn save_params(&self) {
+        if let Err(e) = crate::script_params_io::save(&self.params_file, &self.params.lock().unwrap()) {
+            eprintln!("failed to save script params: {e}");
         }
     }
 
@@ -264,8 +298,9 @@ impl ScriptsPanel {
         sender: IngestSender,
         metrics: Arc<MetricsRegistry>,
     ) -> &ScriptEngine {
+        let params = Arc::clone(&self.params);
         self.engine
-            .get_or_insert_with(|| ScriptEngine::spawn(store, sender, metrics))
+            .get_or_insert_with(|| ScriptEngine::spawn(store, sender, metrics, params))
     }
 
     /// Returns `None` rather than spawning the engine: a live transform only
@@ -404,24 +439,155 @@ impl ScriptsPanel {
         // the Console window is closed.
         self.delete_confirm_ui(ctx);
 
-        if !self.open {
-            if self.should_poll_parser_events() {
-                ctx.request_repaint_after(std::time::Duration::from_millis(50));
-            }
+        self.variables_window(ctx, &store, &sender, &metrics);
+
+        if self.open {
+            let mut open = self.open;
+            egui::Window::new("Scripts")
+                .open(&mut open)
+                .collapsible(false)
+                .default_pos(ctx.content_rect().center())
+                .pivot(egui::Align2::CENTER_CENTER)
+                .default_size([720.0, 480.0])
+                .show(ctx, |ui| {
+                    self.window_contents(ui, &store, &sender, &metrics)
+                });
+            self.open = open;
+        } else if self.should_poll_parser_events() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
+
+        if self.open || self.variables_open {
+            ctx.request_repaint(); // keep draining engine events while open
+        }
+    }
+
+    fn variables_window(
+        &mut self,
+        ctx: &egui::Context,
+        store: &Arc<DataStore>,
+        sender: &IngestSender,
+        metrics: &Arc<MetricsRegistry>,
+    ) {
+        if !self.variables_open {
             return;
         }
-        let mut open = self.open;
-        egui::Window::new("Scripts")
+        let mut open = self.variables_open;
+
+        // Snapshot the store so we don't hold the lock across egui closures.
+        let mut views: Vec<ScriptVarsView> = {
+            let s = self.params.lock().unwrap();
+            let mut v: Vec<_> = s
+                .scripts
+                .iter()
+                .filter(|(_, sp)| !sp.specs.is_empty())
+                .map(|(name, sp)| ScriptVarsView {
+                    name: name.clone(),
+                    has_snapshot: sp.has_snapshot,
+                    has_live: sp.has_live,
+                    specs: sp.specs.clone(),
+                    values: sp.values.clone(),
+                })
+                .collect();
+            v.sort_by(|a, b| a.name.cmp(&b.name));
+            v
+        };
+
+        // Edits committed this frame: (script, param, new value, has_snapshot).
+        let mut commits: Vec<(String, String, ParamValue, bool)> = Vec::new();
+        // Resets committed this frame: (script, param, has_snapshot).
+        let mut resets: Vec<(String, String, bool)> = Vec::new();
+
+        egui::Window::new("Script Variables")
             .open(&mut open)
             .collapsible(false)
             .default_pos(ctx.content_rect().center())
             .pivot(egui::Align2::CENTER_CENTER)
-            .default_size([720.0, 480.0])
+            .default_size([360.0, 420.0])
             .show(ctx, |ui| {
-                self.window_contents(ui, &store, &sender, &metrics)
+                if views.is_empty() {
+                    ui.label("No script has declared variables yet.");
+                    ui.label("Add controls with delog.slider(...), delog.checkbox(...), delog.combo(...), or delog.text(...) and run the script.");
+                    return;
+                }
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for view in views.iter_mut() {
+                        egui::CollapsingHeader::new(view.name.as_str())
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                egui::Grid::new(format!("vars_{}", view.name))
+                                    .num_columns(3)
+                                    .spacing([8.0, 6.0])
+                                    .show(ui, |ui| {
+                                        for spec in view.specs.iter() {
+                                            let value = view
+                                                .values
+                                                .get(&spec.name)
+                                                .cloned()
+                                                .unwrap_or_else(|| spec.default.clone());
+                                            ui.label(&spec.label);
+                                            let committed = render_param_widget(ui, spec, value);
+                                            if let Some(new_value) = committed {
+                                                commits.push((
+                                                    view.name.clone(),
+                                                    spec.name.clone(),
+                                                    new_value,
+                                                    view.has_snapshot,
+                                                ));
+                                            }
+                                            let reset = ui
+                                                .add(
+                                                    egui::Button::image(
+                                                        egui::Image::new(crate::icons::rotate_ccw())
+                                                            .fit_to_exact_size(egui::vec2(14.0, 14.0))
+                                                            .tint(ui.visuals().text_color()),
+                                                    )
+                                                    .frame(false),
+                                                )
+                                                .on_hover_text("Reset to default");
+                                            if reset.clicked() {
+                                                resets.push((
+                                                    view.name.clone(),
+                                                    spec.name.clone(),
+                                                    view.has_snapshot,
+                                                ));
+                                            }
+                                            ui.end_row();
+                                        }
+                                    });
+                            });
+                    }
+                });
             });
-        self.open = open;
-        ctx.request_repaint(); // keep draining engine events while open
+        self.variables_open = open;
+
+        if commits.is_empty() && resets.is_empty() {
+            return;
+        }
+
+        // Apply edits: write store, persist, and re-run named snapshot scripts.
+        let named: std::collections::HashSet<String> =
+            self.library.list().unwrap_or_default().into_iter().collect();
+        let mut to_rerun: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        {
+            let mut s = self.params.lock().unwrap();
+            for (script, name, value, has_snapshot) in &commits {
+                s.set_value(script, name, value.clone());
+                if crate::script_params_io::should_rerun(*has_snapshot, named.contains(script)) {
+                    to_rerun.insert(script.clone());
+                }
+            }
+            for (script, name, has_snapshot) in &resets {
+                s.reset_value(script, name);
+                if crate::script_params_io::should_rerun(*has_snapshot, named.contains(script)) {
+                    to_rerun.insert(script.clone());
+                }
+            }
+        }
+        self.save_params();
+        for script in to_rerun {
+            self.run_named(&script, Arc::clone(store), sender.clone(), Arc::clone(metrics));
+        }
     }
 
     fn delete_confirm_ui(&mut self, ctx: &egui::Context) {
@@ -621,6 +787,69 @@ fn icon_btn_enabled(
         .on_hover_text(hover)
 }
 
+/// Render one param's widget and return `Some(new_value)` only when the edit
+/// is *committed* (slider drag released, checkbox/combo click, or Enter in a
+/// text field) — not on every intermediate change.
+fn render_param_widget(
+    ui: &mut egui::Ui,
+    spec: &ParamSpec,
+    value: ParamValue,
+) -> Option<ParamValue> {
+    use delog_script::params::ParamKind;
+    match (&spec.kind, value) {
+        (ParamKind::Slider { min, max, step, integer }, ParamValue::Float(mut v)) => {
+            let mut slider = egui::Slider::new(&mut v, *min..=*max);
+            if *integer {
+                slider = slider.step_by(step.unwrap_or(1.0)).max_decimals(0);
+            } else if let Some(s) = step {
+                slider = slider.step_by(*s);
+            }
+            let resp = ui.add(slider);
+            // Commit at the end of a drag or on a keyboard/typed change.
+            if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
+                let out = if *integer { v.round() } else { v };
+                Some(ParamValue::Float(out))
+            } else {
+                None
+            }
+        }
+        (ParamKind::Checkbox, ParamValue::Bool(mut b)) => {
+            if ui.checkbox(&mut b, "").changed() {
+                Some(ParamValue::Bool(b))
+            } else {
+                None
+            }
+        }
+        (ParamKind::Combo { options }, ParamValue::Text(current)) => {
+            let mut selected = current.clone();
+            let mut changed = false;
+            egui::ComboBox::from_id_salt(format!("combo_{}", spec.name))
+                .selected_text(selected.clone())
+                .show_ui(ui, |ui| {
+                    for opt in options {
+                        if ui.selectable_value(&mut selected, opt.clone(), opt).clicked() {
+                            changed = true;
+                        }
+                    }
+                });
+            changed.then_some(ParamValue::Text(selected))
+        }
+        (ParamKind::Text, ParamValue::Text(mut t)) => {
+            let resp = ui.add(egui::TextEdit::singleline(&mut t).desired_width(160.0));
+            if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                Some(ParamValue::Text(t))
+            } else {
+                None
+            }
+        }
+        // Value/kind mismatch (shouldn't happen): render nothing editable.
+        _ => {
+            ui.label("(type mismatch)");
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -636,7 +865,11 @@ mod tests {
             "delog-scripts-parser-routing-{}",
             std::process::id()
         ));
-        let mut panel = ScriptsPanel::new(root.join("scripts"), root.join("parsers"));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
         panel.running = true;
         panel.status = "running console script".into();
         panel
@@ -662,7 +895,11 @@ mod tests {
             "delog-scripts-shared-worker-{}",
             std::process::id()
         ));
-        let mut panel = ScriptsPanel::new(root.join("scripts"), root.join("parsers"));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
         panel.library.save("saved", "print('saved')").unwrap();
         panel
             .parsers
@@ -698,7 +935,11 @@ mod tests {
             "delog-scripts-reverse-parser-{}",
             std::process::id()
         ));
-        let mut panel = ScriptsPanel::new(root.join("scripts"), root.join("parsers"));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
         let path = PathBuf::from("flight.raw");
         panel.running = true;
         assert!(!panel.request_open(&egui::Context::default(), "raw.py"));
@@ -735,7 +976,11 @@ mod tests {
             "delog-scripts-reverse-validation-{}",
             std::process::id()
         ));
-        let mut panel = ScriptsPanel::new(root.join("scripts"), root.join("parsers"));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
         panel.parsers.add_new();
         let action = panel.parsers.stage_save().unwrap();
         panel.running = true;
@@ -762,7 +1007,11 @@ mod tests {
             "delog-scripts-parser-pending-{}",
             std::process::id()
         ));
-        let mut panel = ScriptsPanel::new(root.join("scripts"), root.join("parsers"));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
         panel.running = false;
         panel.parsers.add_new();
         let action = panel.parsers.stage_save().unwrap();
@@ -782,7 +1031,11 @@ mod tests {
     fn first_parse_terminal_keeps_polling_for_second_dispatch() {
         let root =
             std::env::temp_dir().join(format!("delog-scripts-parser-queue-{}", std::process::id()));
-        let mut panel = ScriptsPanel::new(root.join("scripts"), root.join("parsers"));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
         let first = PathBuf::from("first.raw");
         let second = PathBuf::from("second.raw");
         panel.parsers.mark_parse_dispatched("raw.py", &first);
@@ -814,7 +1067,8 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&root);
         std::fs::write(&root, "not a directory").unwrap();
-        let mut panel = ScriptsPanel::new(root.join("scripts"), root.clone());
+        let mut panel =
+            ScriptsPanel::new(root.join("scripts"), root.clone(), root.join("params.json"));
 
         assert!(panel.parser_names().is_err());
         assert!(panel.parser_names().is_err());
@@ -829,7 +1083,11 @@ mod tests {
             "delog-scripts-parser-dispatch-error-{}",
             std::process::id()
         ));
-        let mut panel = ScriptsPanel::new(root.join("scripts"), root.join("parsers"));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
         panel.parsers.add_new();
         panel.parsers.stage_save().unwrap();
 
@@ -850,7 +1108,11 @@ mod tests {
             "delog-scripts-parse-dispatch-error-{}",
             std::process::id()
         ));
-        let mut panel = ScriptsPanel::new(root.join("scripts"), root.join("parsers"));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
         let path = PathBuf::from("flight.raw");
 
         panel.finish_parse_dispatch("raw.py", &path, Err("disconnected".into()));
@@ -870,7 +1132,11 @@ mod tests {
             "delog-scripts-parser-cancel-error-{}",
             std::process::id()
         ));
-        let mut panel = ScriptsPanel::new(root.join("scripts"), root.join("parsers"));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
         panel
             .parsers
             .mark_parse_dispatched("raw.py", &PathBuf::from("flight.raw"));

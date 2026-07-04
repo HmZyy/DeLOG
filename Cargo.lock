@@ -996,6 +996,7 @@ dependencies = [
  "pyo3",
  "rustix 1.1.4",
  "same-file",
+ "serde",
  "windows-sys 0.61.2",
 ]
 

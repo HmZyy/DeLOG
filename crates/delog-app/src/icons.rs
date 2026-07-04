@@ -115,3 +115,8 @@ pub fn panel_left_close() -> ImageSource<'static> {
 pub fn panel_left_open() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/panel-left-open.svg")
 }
+
+#[cfg_attr(not(feature = "scripting"), allow(dead_code))]
+pub fn rotate_ccw() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/rotate-ccw.svg")
+}

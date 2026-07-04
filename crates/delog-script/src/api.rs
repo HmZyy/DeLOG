@@ -13,6 +13,8 @@ use pyo3::prelude::*;
 use pyo3::types::PyList;
 
 use crate::live::LiveTransformSpec;
+use crate::params::{ParamKind, ParamSpec, ParamValue, SharedParams};
+use pyo3::types::{PyBool, PyInt};
 
 pub struct PendingLiveTransform {
     pub spec: LiveTransformSpec,
@@ -133,6 +135,7 @@ pub struct Delog {
     live: LiveTransformBuffer,
     script_name: String,
     generation: u64,
+    params: SharedParams,
 }
 
 impl Delog {
@@ -142,6 +145,7 @@ impl Delog {
         live: LiveTransformBuffer,
         script_name: String,
         generation: u64,
+        params: SharedParams,
     ) -> Self {
         Self {
             snapshot,
@@ -149,6 +153,7 @@ impl Delog {
             live,
             script_name,
             generation,
+            params,
         }
     }
 
@@ -346,6 +351,158 @@ impl Delog {
         .into_any()
         .unbind())
     }
+
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (name, default, *, min, max, step=None, label=None))]
+    fn slider(
+        &self,
+        py: Python<'_>,
+        name: String,
+        default: Bound<'_, PyAny>,
+        min: f64,
+        max: f64,
+        step: Option<f64>,
+        label: Option<String>,
+    ) -> PyResult<Py<PyAny>> {
+        // `!(min < max)` rather than `min >= max` so NaN bounds are rejected too.
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
+        if !(min < max) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "slider '{name}': min ({min}) must be < max ({max})"
+            )));
+        }
+        // Integer slider iff the default is a Python int (and not a bool).
+        let integer = default.is_instance_of::<PyInt>() && !default.is_instance_of::<PyBool>();
+        let mut d: f64 = default.extract()?;
+        d = d.clamp(min, max);
+        let spec = ParamSpec {
+            name: name.clone(),
+            label: label.unwrap_or_else(|| name.clone()),
+            kind: ParamKind::Slider { min, max, step, integer },
+            default: ParamValue::Float(d),
+            order: 0,
+            generation: self.generation,
+        };
+        self.declare_and_return(py, spec)
+    }
+
+    #[pyo3(signature = (name, default, *, label=None))]
+    fn checkbox(
+        &self,
+        py: Python<'_>,
+        name: String,
+        default: bool,
+        label: Option<String>,
+    ) -> PyResult<Py<PyAny>> {
+        let spec = ParamSpec {
+            name: name.clone(),
+            label: label.unwrap_or_else(|| name.clone()),
+            kind: ParamKind::Checkbox,
+            default: ParamValue::Bool(default),
+            order: 0,
+            generation: self.generation,
+        };
+        self.declare_and_return(py, spec)
+    }
+
+    #[pyo3(signature = (name, options, *, default=None, label=None))]
+    fn combo(
+        &self,
+        py: Python<'_>,
+        name: String,
+        options: Vec<String>,
+        default: Option<String>,
+        label: Option<String>,
+    ) -> PyResult<Py<PyAny>> {
+        if options.is_empty() || options.iter().any(|o| o.is_empty()) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "combo '{name}': options must be a non-empty list of non-empty strings"
+            )));
+        }
+        let default = match default {
+            Some(d) => {
+                if !options.contains(&d) {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "combo '{name}': default '{d}' is not one of the options"
+                    )));
+                }
+                d
+            }
+            None => options[0].clone(),
+        };
+        let spec = ParamSpec {
+            name: name.clone(),
+            label: label.unwrap_or_else(|| name.clone()),
+            kind: ParamKind::Combo { options },
+            default: ParamValue::Text(default),
+            order: 0,
+            generation: self.generation,
+        };
+        self.declare_and_return(py, spec)
+    }
+
+    #[pyo3(signature = (name, default, *, label=None))]
+    fn text(
+        &self,
+        py: Python<'_>,
+        name: String,
+        default: String,
+        label: Option<String>,
+    ) -> PyResult<Py<PyAny>> {
+        let spec = ParamSpec {
+            name: name.clone(),
+            label: label.unwrap_or_else(|| name.clone()),
+            kind: ParamKind::Text,
+            default: ParamValue::Text(default),
+            order: 0,
+            generation: self.generation,
+        };
+        self.declare_and_return(py, spec)
+    }
+
+    fn param(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
+        let script = crate::params::current_script().unwrap_or_else(|| self.script_name.clone());
+        let store = self.params.lock().unwrap();
+        // Resolve against the declared spec (not a bare persisted value), so an
+        // undeclared name raises and a slider's int typing is preserved.
+        let spec = store.spec(&script, name).ok_or_else(|| {
+            pyo3::exceptions::PyKeyError::new_err(format!(
+                "param '{name}' is not declared for script '{script}'"
+            ))
+        })?;
+        let value = store
+            .value(&script, name)
+            .unwrap_or_else(|| spec.default.clone());
+        value_to_py(py, &value, Some(&spec.kind))
+    }
+}
+
+impl Delog {
+    fn declare_and_return(&self, py: Python<'_>, spec: ParamSpec) -> PyResult<Py<PyAny>> {
+        let kind = spec.kind.clone();
+        let value = self
+            .params
+            .lock()
+            .unwrap()
+            .declare(&self.script_name, self.generation, spec)
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        value_to_py(py, &value, Some(&kind))
+    }
+}
+
+fn value_to_py(py: Python<'_>, value: &ParamValue, kind: Option<&ParamKind>) -> PyResult<Py<PyAny>> {
+    use pyo3::IntoPyObject;
+    match value {
+        ParamValue::Float(v) => {
+            if matches!(kind, Some(ParamKind::Slider { integer: true, .. })) {
+                Ok((v.round() as i64).into_pyobject(py)?.into_any().unbind())
+            } else {
+                Ok(v.into_pyobject(py)?.into_any().unbind())
+            }
+        }
+        ParamValue::Bool(b) => Ok(b.into_pyobject(py)?.to_owned().into_any().unbind()),
+        ParamValue::Text(s) => Ok(s.into_pyobject(py)?.into_any().unbind()),
+    }
 }
 
 /// `.t` int64 us, `.v` float64 (NaN for string fields), `.s` numpy unicode
@@ -495,6 +652,7 @@ mod tests {
             LiveTransformBuffer::default(),
             String::new(),
             0,
+            crate::params::shared_empty(),
         );
         assert_eq!(
             delog

@@ -46,6 +46,7 @@ fn live_transform_appends_derived_batches() {
         read_store(),
         sender.clone(),
         Arc::new(MetricsRegistry::new()),
+        delog_script::params::shared_empty(),
     );
     let script = r#"
 DEG_TO_RAD = 0.017453292519943295

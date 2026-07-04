@@ -24,6 +24,8 @@ mod parsers;
 mod performance;
 mod plot;
 #[cfg(feature = "scripting")]
+mod script_params_io;
+#[cfg(feature = "scripting")]
 mod scripts;
 mod session;
 mod settings;
