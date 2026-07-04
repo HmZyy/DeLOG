@@ -99,7 +99,7 @@ impl Default for Draft {
             qx: None,
             qy: None,
             qz: None,
-            model: ModelKind::Cone,
+            model: ModelKind::FixedWing,
             custom_path: String::new(),
             color: Color32::from_rgb(90, 170, 255),
             path_color: Color32::from_rgb(255, 170, 60),
@@ -335,6 +335,7 @@ fn searchable_combo<T: PartialEq + Copy>(
         .width(170.0)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
+            ui.set_min_width(170.0);
             ui.set_max_width(170.0);
             {
                 let mut filter: String =
@@ -345,6 +346,7 @@ fn searchable_combo<T: PartialEq + Copy>(
                         .desired_width(f32::INFINITY),
                 );
                 response.request_focus();
+                let filter_changed = response.changed();
                 let needle = filter.to_ascii_lowercase();
                 ui.memory_mut(|m| m.data.insert_temp(filter_id, filter));
                 let visible = items
@@ -354,14 +356,15 @@ fn searchable_combo<T: PartialEq + Copy>(
                     })
                     .map(|(value, name)| (*value, name.as_str()))
                     .collect::<Vec<_>>();
-                let mut highlighted = ui
-                    .memory_mut(|m| m.data.get_temp::<usize>(highlight_id))
-                    .unwrap_or_else(|| {
-                        visible
-                            .iter()
-                            .position(|(value, _)| *sel == Some(*value))
-                            .unwrap_or(0)
-                    });
+                let stored_highlight = ui.memory_mut(|m| m.data.get_temp::<usize>(highlight_id));
+                let initialized_highlight = stored_highlight.is_none();
+                let mut highlighted = stored_highlight.unwrap_or_else(|| {
+                    visible
+                        .iter()
+                        .position(|(value, _)| *sel == Some(*value))
+                        .unwrap_or(0)
+                });
+                let mut highlight_changed_by_keyboard = false;
                 if !visible.is_empty() {
                     highlighted = highlighted.min(visible.len() - 1);
                     let move_down = ui
@@ -371,10 +374,14 @@ fn searchable_combo<T: PartialEq + Copy>(
                     let choose =
                         ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
                     if move_down {
-                        highlighted = (highlighted + 1).min(visible.len() - 1);
+                        let next = (highlighted + 1).min(visible.len() - 1);
+                        highlight_changed_by_keyboard |= next != highlighted;
+                        highlighted = next;
                     }
                     if move_up {
-                        highlighted = highlighted.saturating_sub(1);
+                        let next = highlighted.saturating_sub(1);
+                        highlight_changed_by_keyboard |= next != highlighted;
+                        highlighted = next;
                     }
                     if choose {
                         *sel = Some(visible[highlighted].0);
@@ -382,13 +389,17 @@ fn searchable_combo<T: PartialEq + Copy>(
                     }
                 }
                 ui.memory_mut(|m| m.data.insert_temp(highlight_id, highlighted));
+                let scroll_to_highlight =
+                    highlight_changed_by_keyboard || initialized_highlight || filter_changed;
                 egui::ScrollArea::vertical()
                     .max_height(260.0)
+                    .auto_shrink([false, true])
                     .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
                         for (i, (value, name)) in visible.iter().enumerate() {
                             let selected = *sel == Some(*value) || i == highlighted;
                             let response = ui.selectable_label(selected, *name);
-                            if i == highlighted {
+                            if scroll_to_highlight && i == highlighted {
                                 response.scroll_to_me(Some(egui::Align::Center));
                             }
                             if response.clicked() {
@@ -837,6 +848,8 @@ fn topic_combo(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn custom_glb_path_uses_file_picker_not_text_edit() {
         let source = include_str!("vehicle_dialog.rs");
@@ -845,5 +858,39 @@ mod tests {
         assert!(source.contains(".add_filter(\"GLB models\", &[\"glb\", \"GLB\"])"));
         let text_edit = concat!("text_edit_singleline", "(&mut draft.custom_path)");
         assert!(!source.contains(text_edit));
+    }
+
+    #[test]
+    fn searchable_topic_combo_keeps_scrollbar_at_popup_edge_without_fighting_mouse_scroll() {
+        let source = include_str!("vehicle_dialog.rs");
+        let combo = source
+            .split("fn searchable_combo")
+            .nth(1)
+            .expect("searchable combo should exist");
+
+        assert!(
+            combo.contains(".auto_shrink([false, true])"),
+            "topic dropdown list should keep the horizontal space reserved by the popup"
+        );
+        assert!(
+            combo.contains("let scroll_to_highlight")
+                && combo.contains("highlight_changed_by_keyboard || initialized_highlight"),
+            "highlighted topic should only request scrolling after an explicit highlight move"
+        );
+        assert!(
+            combo.contains("if scroll_to_highlight && i == highlighted"),
+            "mouse-wheel frames must not re-scroll to the highlighted topic"
+        );
+        assert!(
+            !combo.contains(
+                "if i == highlighted {\n                                response.scroll_to_me"
+            ),
+            "unconditional scroll_to_me fights normal mouse-wheel scrolling"
+        );
+    }
+
+    #[test]
+    fn new_vehicle_draft_defaults_to_fixed_wing_model() {
+        assert_eq!(Draft::default().model, ModelKind::FixedWing);
     }
 }
