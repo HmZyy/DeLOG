@@ -1,4 +1,6 @@
 const LEGEND_SOURCE: &str = include_str!("../src/legend.rs");
+const WORKSPACE_SOURCE: &str = include_str!("../src/workspace.rs");
+const SETTINGS_SOURCE: &str = include_str!("../src/settings.rs");
 
 #[test]
 fn legend_panel_uses_bounded_vertical_scroll_area() {
@@ -30,4 +32,23 @@ fn legend_labels_hug_content_left_aligned() {
     // left-aligned rather than spanning the whole plot.
     assert!(LEGEND_SOURCE.contains("allocate_ui_with_layout"));
     assert!(LEGEND_SOURCE.contains("egui::Layout::left_to_right(egui::Align::Center)"));
+}
+
+#[test]
+fn workspace_exposes_all_plot_legend_visibility_helpers() {
+    assert!(WORKSPACE_SOURCE.contains("pub fn set_all_plot_legends("));
+    assert!(WORKSPACE_SOURCE.contains("pub fn all_plot_legends_visible("));
+}
+
+#[test]
+fn shade_between_markers_defaults_on() {
+    let start = SETTINGS_SOURCE
+        .find("impl Default for PlotDisplay")
+        .expect("PlotDisplay default should exist");
+    let rest = &SETTINGS_SOURCE[start..];
+    let end = rest
+        .find("impl Default for RenderTuning")
+        .expect("RenderTuning default should follow PlotDisplay default");
+    let defaults = &rest[..end];
+    assert!(defaults.contains("marker_shade_regions: true"));
 }

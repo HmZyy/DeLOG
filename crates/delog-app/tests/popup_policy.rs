@@ -9,6 +9,9 @@ const POPUP_SOURCES: &[&str] = &[
     include_str!("../src/vehicle_dialog.rs"),
     include_str!("../src/workspace.rs"),
 ];
+const APP_SOURCE: &str = include_str!("../src/app.rs");
+const WORKSPACE_SOURCE: &str = include_str!("../src/workspace.rs");
+const SETTINGS_SOURCE: &str = include_str!("../src/settings.rs");
 
 fn occurrence_count(needle: &str) -> usize {
     POPUP_SOURCES
@@ -17,24 +20,119 @@ fn occurrence_count(needle: &str) -> usize {
         .sum()
 }
 
+fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+    let start = source.find(start).expect("start marker should exist");
+    let rest = &source[start..];
+    let end = rest.find(end).expect("end marker should exist");
+    &rest[..end]
+}
+
 #[test]
 fn tools_menu_exposes_custom_parser_actions() {
-    let app = include_str!("../src/app.rs");
-
-    assert!(app.contains("ui.menu_button(\"Parsers\""));
-    assert!(app.contains("Add new parser..."));
-    assert!(app.contains("crate::icons::pencil()"));
-    assert!(app.contains(".on_hover_text(\"Edit\")"));
+    assert!(APP_SOURCE.contains("ui.menu_button(\"Parsers\""));
+    assert!(APP_SOURCE.contains("Add new parser..."));
+    assert!(APP_SOURCE.contains("crate::icons::pencil()"));
+    assert!(APP_SOURCE.contains(".on_hover_text(\"Edit\")"));
 }
 
 #[test]
 fn browser_exposes_field_metadata_inspector() {
-    let app = include_str!("../src/app.rs");
     let browser = include_str!("../src/browser.rs");
 
     assert!(browser.contains("inspect_field_metadata"));
     assert!(browser.contains("Field metadata"));
-    assert!(app.contains("show_field_metadata_window"));
+    assert!(APP_SOURCE.contains("show_field_metadata_window"));
+}
+
+#[test]
+fn moved_plot_controls_live_on_icon_toolbar_not_plot_context_menu() {
+    let context_menu = between(
+        WORKSPACE_SOURCE,
+        "fn plot_context_menu(",
+        "fn plot_info_window(",
+    );
+    for removed in [
+        "\"Show legend\"",
+        "\"Hover mode\"",
+        "\"Snap\"",
+        "\"Add measuring marker\"",
+        "\"Remove measuring marker\"",
+    ] {
+        assert!(
+            !context_menu.contains(removed),
+            "{removed} should not be rendered from the plot context menu"
+        );
+    }
+
+    let toolbar = between(
+        APP_SOURCE,
+        "egui::Panel::top(\"tool_icons\")",
+        "drop(ui_toolbar_timer);",
+    );
+    for id in [
+        "toolbar-hover-mode",
+        "toolbar-snap-playhead",
+        "toolbar-measuring-marker",
+        "toolbar-legends",
+        "toolbar-legend-position",
+    ] {
+        assert!(
+            toolbar.contains(id),
+            "{id} should be an icon toolbar control"
+        );
+    }
+    assert!(!toolbar.contains("toolbar-marker-shade"));
+    assert!(!toolbar.contains("Shade between markers"));
+    assert!(toolbar.contains("hover_mode_menu_button("));
+    assert!(!toolbar.contains("next_sample_mode("));
+    assert!(toolbar.contains("legend_position_icon("));
+    assert!(!toolbar.contains("crate::icons::panel_top()"));
+    assert!(toolbar.contains(".on_hover_text(\"Cycle legend position\")"));
+    assert!(!toolbar.contains("Cycle legend position - current"));
+    let marker = toolbar
+        .find("toolbar-measuring-marker")
+        .expect("measuring marker control should exist");
+    let legends = toolbar
+        .find("toolbar-legends")
+        .expect("legend visibility control should exist");
+    assert!(
+        toolbar[marker..legends].contains("ui.separator();"),
+        "a separator should split marker tools from legend tools"
+    );
+    for tooltip in [
+        "Select hover mode",
+        "Toggle playhead snap",
+        "Add measuring marker",
+        "Toggle legends",
+        "Cycle legend position",
+    ] {
+        assert!(
+            toolbar.contains(tooltip),
+            "{tooltip} should be exposed as hover text"
+        );
+    }
+    for mode in ["Previous", "Next", "Linear"] {
+        assert!(
+            toolbar.contains(mode),
+            "{mode} should be selectable from the hover mode menu"
+        );
+    }
+    for icon in [
+        "dice_top_left",
+        "dice_top_right",
+        "dice_bottom_left",
+        "dice_bottom_right",
+    ] {
+        assert!(APP_SOURCE.contains(icon));
+    }
+}
+
+#[test]
+fn measuring_marker_scope_is_not_a_runtime_plot_setting() {
+    assert!(!WORKSPACE_SOURCE.contains("marker_scope"));
+    assert!(!WORKSPACE_SOURCE.contains("MarkerScope"));
+    assert!(!APP_SOURCE.contains("marker_scope:"));
+    assert!(!SETTINGS_SOURCE.contains("settings-marker-scope"));
 }
 
 #[test]
@@ -120,20 +218,17 @@ fn browser_topic_table_layout_keeps_source_actions() {
 
 #[test]
 fn layout_menu_exposes_clear_current_layout() {
-    let app = include_str!("../src/app.rs");
-
-    assert!(app.contains("ui.menu_button(\"Layout\""));
-    assert!(app.contains("Clear current layout"));
-    assert!(app.contains("self.clear_current_layout();"));
+    assert!(APP_SOURCE.contains("ui.menu_button(\"Layout\""));
+    assert!(APP_SOURCE.contains("Clear current layout"));
+    assert!(APP_SOURCE.contains("self.clear_current_layout();"));
 }
 
 #[test]
 fn removed_workspace_fields_are_pruned_before_cache_requests() {
-    let app = include_str!("../src/app.rs");
-    let prune = app
+    let prune = APP_SOURCE
         .find("self.workspace.prune_removed_fields(&snapshot)")
         .expect("workspace should prune removed fields on epoch changes");
-    let request = app
+    let request = APP_SOURCE
         .find("self.caches.request(field, &snapshot);")
         .expect("workspace fields should request render caches");
 

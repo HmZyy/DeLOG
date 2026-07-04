@@ -200,6 +200,16 @@ impl Workspace {
             .is_some_and(|pane| pane.add_trace(field))
     }
 
+    pub fn all_plot_legends_visible(&self) -> bool {
+        self.plot_panes().all(|pane| pane.show_legend)
+    }
+
+    pub fn set_all_plot_legends(&mut self, visible: bool) {
+        for pane in self.plot_panes_mut() {
+            pane.show_legend = visible;
+        }
+    }
+
     pub fn split_plot(&mut self, tile_id: egui_tiles::TileId, direction: SplitDirection) {
         self.split_plot_at(tile_id, direction, false);
     }
@@ -412,10 +422,8 @@ pub struct PlotServices<'a> {
     pub hover_mode: &'a mut delog_core::field_view::SampleMode,
     /// When set, Alt+hover holds a sample until the cursor crosses to the next.
     pub snap_playhead: &'a mut bool,
-    /// Shared marker time, used when `marker_scope` is Global; per-pane markers
-    /// live on the pane instead.
+    /// Shared measurement marker time.
     pub marker_us: &'a mut Option<i64>,
-    pub marker_scope: crate::settings::MarkerScope,
     pub render_tuning: crate::settings::RenderTuning,
     pub scene3d: crate::settings::Scene3dSettings,
     pub accent: egui::Color32,
@@ -1039,12 +1047,6 @@ impl Behavior<'_> {
         response: &egui::Response,
         pane: &mut PlotPane,
     ) {
-        // The measurement marker drops at the current playhead time; a
-        // marker is only meaningful once there is a playhead to measure against.
-        // `has_marker` honors the Global/Per-pane scope so the toggle label and
-        // the slot it writes agree.
-        let playhead = self.services.playhead_us;
-        let has_marker = self.marker_us(pane).is_some();
         response.context_menu(|ui| {
             if ui
                 .add(egui::Button::image_and_text(
@@ -1191,49 +1193,7 @@ impl Behavior<'_> {
 
             ui.separator();
 
-            ui.checkbox(&mut pane.show_legend, "Show legend");
             ui.checkbox(&mut pane.show_tooltip, "Show tooltip");
-            ui.menu_button("Hover mode", |ui| {
-                use delog_core::field_view::SampleMode::{Linear, Next, Prev};
-                ui.radio_value(self.services.hover_mode, Prev, "Previous");
-                ui.radio_value(self.services.hover_mode, Next, "Next");
-                ui.radio_value(self.services.hover_mode, Linear, "Linear");
-            });
-            ui.checkbox(self.services.snap_playhead, "Snap")
-                .on_hover_text(
-                    "Alt+hover snaps the playhead to the nearest data point instead of moving \
-                     continuously.",
-                );
-
-            ui.separator();
-
-            // Measurement marker (delta cursor): the same slot
-            // toggles between dropping a marker at the playhead and removing it.
-            if has_marker {
-                if ui
-                    .add(egui::Button::image_and_text(
-                        menu_icon(ui, crate::icons::ban()),
-                        "Remove measuring marker",
-                    ))
-                    .clicked()
-                {
-                    self.set_marker_us(pane, None);
-                    pane.marker_drag = false;
-                    ui.close();
-                }
-            } else if ui
-                .add_enabled(
-                    playhead.is_some(),
-                    egui::Button::image_and_text(
-                        menu_icon(ui, crate::icons::ruler()),
-                        "Add measuring marker",
-                    ),
-                )
-                .clicked()
-            {
-                self.set_marker_us(pane, playhead);
-                ui.close();
-            }
 
             if ui
                 .add(egui::Button::image_and_text(
@@ -1391,22 +1351,14 @@ impl Behavior<'_> {
         *self.services.view = Some(view);
     }
 
-    /// The pane's effective marker time: the shared one in Global scope, or the
-    /// pane's own in Per-pane scope.
-    fn marker_us(&self, pane: &PlotPane) -> Option<i64> {
-        match self.services.marker_scope {
-            crate::settings::MarkerScope::Global => *self.services.marker_us,
-            crate::settings::MarkerScope::PerPane => pane.marker_us,
-        }
+    /// The effective measurement marker time is always shared across plot panes.
+    fn marker_us(&self, _pane: &PlotPane) -> Option<i64> {
+        *self.services.marker_us
     }
 
-    /// Set or clear the effective marker, writing to the shared or per-pane slot
-    /// per the scope setting.
-    fn set_marker_us(&mut self, pane: &mut PlotPane, value: Option<i64>) {
-        match self.services.marker_scope {
-            crate::settings::MarkerScope::Global => *self.services.marker_us = value,
-            crate::settings::MarkerScope::PerPane => pane.marker_us = value,
-        }
+    /// Set or clear the shared measurement marker.
+    fn set_marker_us(&mut self, _pane: &mut PlotPane, value: Option<i64>) {
+        *self.services.marker_us = value;
     }
 
     /// Drag the measurement marker line along X. A primary drag that starts
@@ -2167,6 +2119,31 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(workspace.plot_panes().count(), before);
+    }
+
+    #[test]
+    fn set_all_plot_legends_updates_every_plot() {
+        let mut workspace = Workspace::new();
+        let root = workspace.tree.root().unwrap();
+        workspace.split_plot(root, SplitDirection::Horizontal);
+
+        workspace.set_all_plot_legends(false);
+        assert!(workspace.plot_panes().all(|pane| !pane.show_legend));
+
+        workspace.set_all_plot_legends(true);
+        assert!(workspace.plot_panes().all(|pane| pane.show_legend));
+    }
+
+    #[test]
+    fn all_plot_legends_visible_requires_every_plot() {
+        let mut workspace = Workspace::new();
+        let root = workspace.tree.root().unwrap();
+        workspace.split_plot(root, SplitDirection::Horizontal);
+        assert!(workspace.all_plot_legends_visible());
+
+        workspace.plot_panes_mut().next().unwrap().show_legend = false;
+
+        assert!(!workspace.all_plot_legends_visible());
     }
 
     #[test]
