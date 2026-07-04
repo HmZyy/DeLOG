@@ -463,10 +463,17 @@ enum SettingsTab {
     Plots,
     Rendering,
     Scene3d,
+    Scripting,
 }
 
 impl SettingsTab {
-    const ALL: [Self; 4] = [Self::General, Self::Plots, Self::Rendering, Self::Scene3d];
+    const ALL: [Self; 5] = [
+        Self::General,
+        Self::Plots,
+        Self::Rendering,
+        Self::Scene3d,
+        Self::Scripting,
+    ];
 
     const fn label(self) -> &'static str {
         match self {
@@ -474,6 +481,7 @@ impl SettingsTab {
             Self::Plots => "Plots",
             Self::Rendering => "Rendering",
             Self::Scene3d => "3D View",
+            Self::Scripting => "Scripting",
         }
     }
 }
@@ -522,6 +530,9 @@ impl SettingsDialog {
                             }
                             SettingsTab::Scene3d => {
                                 scene3d_tab(ui, settings);
+                            }
+                            SettingsTab::Scripting => {
+                                scripting_tab(ui, settings);
                             }
                         }
                     });
@@ -860,6 +871,32 @@ fn scene3d_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
     }
 }
 
+fn scripting_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
+    let s = &mut settings.scripting;
+    ui.heading("Scripting");
+    ui.add_space(8.0);
+    egui::Grid::new("settings-scripting-grid")
+        .num_columns(2)
+        .spacing(egui::vec2(16.0, 10.0))
+        .show(ui, |ui| {
+            ui.label("Open Variables window")
+                .on_hover_text("Automatically show the Script Variables window after running a named script that declares a tunable variable.");
+            egui::ComboBox::from_id_salt("settings-auto-open-variables")
+                .selected_text(s.auto_open_variables.label())
+                .show_ui(ui, |ui| {
+                    for mode in AutoOpenVariables::ALL {
+                        ui.selectable_value(&mut s.auto_open_variables, mode, mode.label());
+                    }
+                });
+            ui.end_row();
+        });
+
+    ui.add_space(10.0);
+    if ui.button("Reset to defaults").clicked() {
+        settings.scripting = ScriptingSettings::default();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -870,7 +907,7 @@ mod tests {
             .into_iter()
             .map(SettingsTab::label)
             .collect();
-        assert_eq!(labels, ["General", "Plots", "Rendering", "3D View"]);
+        assert_eq!(labels, ["General", "Plots", "Rendering", "3D View", "Scripting"]);
     }
 
     #[test]
