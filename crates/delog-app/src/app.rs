@@ -2510,6 +2510,7 @@ impl eframe::App for DelogApp {
                 self.session.store(),
                 self.session.ingest_sender(),
                 Arc::clone(self.session.metrics()),
+                self.settings.scripting.auto_open_variables,
             );
             for message in self.scripts.take_parser_diagnostics() {
                 self.session
