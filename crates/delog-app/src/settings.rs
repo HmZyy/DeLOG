@@ -143,25 +143,6 @@ impl LegendPosition {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum MarkerScope {
-    #[default]
-    Global,
-    PerPane,
-}
-
-impl MarkerScope {
-    pub const ALL: [Self; 2] = [Self::Global, Self::PerPane];
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Global => "Global (shared)",
-            Self::PerPane => "Per-pane",
-        }
-    }
-}
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum MarkerDeltaReadout {
     #[default]
     Legend,
@@ -195,8 +176,6 @@ pub struct PlotDisplay {
     pub hover_opacity: f32,
     #[serde(default)]
     pub marker_delta_readout: MarkerDeltaReadout,
-    #[serde(default)]
-    pub marker_scope: MarkerScope,
     #[serde(default = "default_opacity")]
     pub marker_line_opacity: f32,
     #[serde(default = "default_marker_line_width")]
@@ -229,11 +208,10 @@ impl Default for PlotDisplay {
             hover_show_time: false,
             hover_opacity: 1.0,
             marker_delta_readout: MarkerDeltaReadout::default(),
-            marker_scope: MarkerScope::default(),
             marker_line_opacity: default_opacity(),
             marker_line_width: default_marker_line_width(),
             marker_show_label: true,
-            marker_shade_regions: false,
+            marker_shade_regions: true,
             marker_shade_opacity: default_marker_shade_opacity(),
             text_label_cap: default_text_label_cap(),
             text_labels_bottom_up: true,
@@ -659,17 +637,6 @@ fn plots_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
             ui.add(egui::Slider::new(&mut p.hover_opacity, 0.0..=1.0));
             ui.end_row();
 
-            ui.label("Measuring marker scope")
-                .on_hover_text("Whether the measuring marker is one shared time across all plot panes (like the playhead) or independent per pane.");
-            egui::ComboBox::from_id_salt("settings-marker-scope")
-                .selected_text(p.marker_scope.label())
-                .show_ui(ui, |ui| {
-                    for s in MarkerScope::ALL {
-                        ui.selectable_value(&mut p.marker_scope, s, s.label());
-                    }
-                });
-            ui.end_row();
-
             ui.label("Measuring marker readout")
                 .on_hover_text("Where the measuring marker's per-trace value delta is shown: in the legend next to each trace, or on the hover/playhead value readout.");
             egui::ComboBox::from_id_salt("settings-marker-delta-readout")
@@ -880,6 +847,7 @@ mod tests {
         assert!(!p.hover_show_time);
         assert_eq!(p.legend_opacity, 1.0);
         assert_eq!(p.hover_opacity, 1.0);
+        assert!(p.marker_shade_regions);
     }
 
     #[test]
@@ -893,7 +861,6 @@ mod tests {
                 hover_show_time: false,
                 hover_opacity: 0.25,
                 marker_delta_readout: MarkerDeltaReadout::Hover,
-                marker_scope: MarkerScope::PerPane,
                 marker_line_opacity: 0.5,
                 marker_line_width: 2.0,
                 marker_show_label: false,
