@@ -348,10 +348,18 @@ session. You never import or construct it.
 | `delog.text(name, default, *, label=None)` | `str` | Declare a text-field variable; returns its current value. |
 | `delog.param(name)` | `float`/`int`/`bool`/`str` | Read the current value of a variable inside a live callback. |
 | `delog.sources()` | `list[str]` | All live field paths, `"source/topic/field"`. |
+| `delog.catalog()` | `Catalog` | Structured source/topic/field catalogue. |
+| `delog.topic(name, *, source=None, instance=None)` | `TopicRef` | Find one topic by name, source, and optional instance. |
+| `delog.find(topic, field=None, *, source=None, instance=None)` | `TopicRef`/`FieldRef` | Find one topic or field, raising on ambiguity. |
+| `delog.find_all(topic=None, field=None, *, source=None, instance=None)` | `list` | Return all matching topic or field refs. |
 | `delog.field(path)` | `DelogField` | Read one field as numpy arrays. |
+| `FieldRef.read()` | `DelogField` | Read a referenced field. |
+| `TopicRef.read(*fields)` | `DelogTable` | Read several fields from one topic on a shared timeline. |
 | `delog.resample_prev(field, base_times)` | `np.ndarray[float64]` | Prev-sample align a field onto another timeline. |
+| `DelogField.align_prev(base)` | `np.ndarray[float64]` | Prev-sample align this field onto another field/table/timeline. |
 | `delog.output(times_us, name)` | `DelogOutput` | Begin a new derived topic. |
 | `DelogOutput.add_field(name, values, unit=None)` | `None` | Add a field to that topic. |
+| `delog.emit(name, times_us, fields)` | `None` | Emit one derived topic from a dict of field entries. |
 
 ### `delog.sources() -> list[str]`
 
@@ -393,6 +401,44 @@ print(f.t[:3], f.v[:3])   # int64 µs, float64 values
 - All fields **within the same topic** share identical timestamps, so you can
   read several of them and operate element-wise without aligning.
 
+### Structured snapshot lookup
+
+For reusable scripts, prefer structured lookup over hardcoded source paths:
+
+```python
+imu = delog.topic("IMU", instance=0)
+accx = imu.field("AccX").read()
+```
+
+`delog.topic(...)` returns one `TopicRef` or raises if the match is missing or
+ambiguous. Use `source=` when several logs or derived sources contain the same
+topic, and `instance=` for topics named like `IMU[0]`.
+
+`TopicRef.read(*fields)` reads several fields from the same topic into a
+`DelogTable`:
+
+```python
+imu = delog.topic("IMU").read("AccX", "AccY", "AccZ")
+print(imu.t[:3], imu.AccX[:3], imu["AccY"][:3])
+```
+
+Calling `read()` with no field names reads every field in the topic. Numeric
+columns are `float64`; string columns are numpy unicode arrays.
+
+Use `TopicRef.fields()` for topic-local field discovery:
+
+```python
+for field in delog.topic("IMU").fields():
+    print(field.path, field.unit)
+```
+
+Use `delog.find_all(...)` when the result may span several sources or topics:
+
+```python
+for field in delog.find_all(field="AccX"):
+    print(field.path)
+```
+
 ### `delog.resample_prev(field, base_times) -> np.ndarray[float64]`
 
 Resamples a `DelogField`'s values onto a different timeline using
@@ -411,6 +457,14 @@ diff = baro.v - gps_on_baro
 `base_times` is any `int64` numpy array of microsecond timestamps (typically
 another field's `.t`). Use this whenever you combine fields from **different
 topics** (which have independent timelines).
+
+The method form is equivalent and is usually easier to read:
+
+```python
+gps_alt = delog.topic("GPS").field("Alt").read()
+baro_alt = delog.topic("BARO").field("Alt").read()
+gps_on_baro = gps_alt.align_prev(baro_alt)
+```
 
 ### `delog.output(times_us, name) -> DelogOutput`
 
@@ -439,6 +493,22 @@ out.add_field("accel", v_accel)            # unit optional
 
 The fields buffer until the script finishes successfully, then publish as
 `script:<name>/<topic>/<field>`.
+
+### `delog.emit(name, times_us, fields) -> None`
+
+Emits one derived topic in a single call:
+
+```python
+delog.emit("imu_derived", imu.t, {
+    "Acc_norm": (norm, "m/s^2"),
+    "AccX_smooth": smooth_x,
+})
+```
+
+Each field entry is either `values` or `(values, unit)`. Values must be a
+1-D `float64`-compatible numpy array with the same length as `times_us`. Like
+the builder API, `emit` buffers until the script finishes successfully, so
+snapshot output remains all-or-nothing.
 
 ---
 
@@ -601,16 +671,21 @@ out.add_field("diff", baro.v - gps_on_baro, unit="m")
 ## Bundled example scripts
 
 The [`scripts/`](../scripts/) directory ships runnable examples you can copy into
-your [script library](#the-script-library) or open in the Console:
+your [script library](#the-script-library) or open in the Console. Snapshot
+examples have two versions: `snapshot/v1` keeps the original path-string style,
+while `snapshot/v2` uses the structured lookup and emit APIs. Live examples
+currently live under `live/v1`.
 
 | Script | Kind | What it does |
 | --- | --- | --- |
-| [`vehicle_attitude_euler.py`](../scripts/vehicle_attitude_euler.py) | snapshot | Converts a PX4 `vehicle_attitude[0]` quaternion to roll/pitch/yaw. Finds the source prefix automatically so it runs on any PX4 log. |
-| [`nav_controller_output_radians.py`](../scripts/nav_controller_output_radians.py) | snapshot | Re-emits ArduPilot `NAV_CONTROLLER_OUTPUT` angles in radians, locating the topic across sources/instances. |
-| [`nav_controller_live_rad.py`](../scripts/nav_controller_live_rad.py) | live transform | The live-streaming counterpart: a `@delog.live_transform` that converts `NAV_CONTROLLER_OUTPUT` angles to radians as batches arrive. |
-| [`named_values_live_split.py`](../scripts/named_values_live_split.py) | live transform | Splits live `NAMED_VALUE_FLOAT`/`NAMED_VALUE_INT` streams into one derived topic per `name` (dynamic output topics), so named values arrive sorted by category. |
-| [`param_value_live_split.py`](../scripts/param_value_live_split.py) | live transform | Splits a live `PARAM_VALUE` stream into one derived topic per `param_id`, so each parameter's value gets its own trace. |
-| [`tunable_lowpass.py`](../scripts/tunable_lowpass.py) | live transform | An exponential low-pass filter with a slider-controlled smoothing factor. Demonstrates runtime-tweakable variables in a live transform: move the slider to change the filter coefficient live, without re-running. |
+| [`snapshot/v2/vehicle_attitude_euler.py`](../scripts/snapshot/v2/vehicle_attitude_euler.py) | snapshot | Converts a PX4 `vehicle_attitude[0]` quaternion to roll/pitch/yaw using `delog.topic(...).read(...)` and `delog.emit(...)`. |
+| [`snapshot/v2/nav_controller_output_radians.py`](../scripts/snapshot/v2/nav_controller_output_radians.py) | snapshot | Re-emits ArduPilot `NAV_CONTROLLER_OUTPUT` angles in radians using structured topic lookup and one-call emit. |
+| [`snapshot/v1/vehicle_attitude_euler.py`](../scripts/snapshot/v1/vehicle_attitude_euler.py) | snapshot | Legacy path-string version of the PX4 attitude conversion example. |
+| [`snapshot/v1/nav_controller_output_radians.py`](../scripts/snapshot/v1/nav_controller_output_radians.py) | snapshot | Legacy path-string version of the ArduPilot angle conversion example. |
+| [`live/v1/nav_controller_live_rad.py`](../scripts/live/v1/nav_controller_live_rad.py) | live transform | The live-streaming counterpart: a `@delog.live_transform` that converts `NAV_CONTROLLER_OUTPUT` angles to radians as batches arrive. |
+| [`live/v1/named_values_live_split.py`](../scripts/live/v1/named_values_live_split.py) | live transform | Splits live `NAMED_VALUE_FLOAT`/`NAMED_VALUE_INT` streams into one derived topic per `name` (dynamic output topics), so named values arrive sorted by category. |
+| [`live/v1/param_value_live_split.py`](../scripts/live/v1/param_value_live_split.py) | live transform | Splits a live `PARAM_VALUE` stream into one derived topic per `param_id`, so each parameter's value gets its own trace. |
+| [`live/v1/tunable_lowpass.py`](../scripts/live/v1/tunable_lowpass.py) | live transform | An exponential low-pass filter with a slider-controlled smoothing factor. Demonstrates runtime-tweakable variables in a live transform: move the slider to change the filter coefficient live, without re-running. |
 
 The snapshot/live pair (`nav_controller_*`) is a good side-by-side reference for
 the difference between the two execution modes.
@@ -625,14 +700,14 @@ the difference between the two execution modes.
 - **String fields are read-only.** `DelogField.s` and live-transform string
   batch attributes let you *read* Utf8 fields, but script **output** stays
   Float64-only - `add_field` and the numeric forms of a live transform's
-  return value always take `float64` arrays. There is also no `.unit`/`.dtype`
-  attribute on reads (units are an output concern via `add_field(..., unit=)`).
+  return value always take `float64` arrays. Materialized `DelogField` reads do
+  not carry `.unit` or `.dtype`; use a `FieldRef` when you need unit metadata.
 - **Output is `float64`.** Even if a source field was integer/bool, derived
   output columns are stored as `Float64`.
 - **Length must match.** `add_field` values must match the length of the
   topic's `times_us`. Combine differently-sampled inputs with `resample_prev`.
-- **A `print`-only script still emits an (empty) source.** If you never call
-  `delog.output(...)`, running still creates an empty `script:<name>` source.
+- **Print-only scripts do not emit a source.** A run that never calls
+  `delog.output(...)` or `delog.emit(...)` only writes console output.
 - **Cancellation is cooperative** (see above) - long single C calls can't be
   interrupted mid-call.
 - **Long loops block that script.** Each run/eval executes on the interpreter
