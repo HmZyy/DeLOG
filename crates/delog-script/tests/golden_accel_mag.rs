@@ -217,6 +217,9 @@ print(len(catalog_fields))
 
 #[test]
 fn topic_ref_reads_table_columns() {
+    let _guard = SCRIPT_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let ingestor = Ingestor::new(NullObserver);
     let (sender, receiver) = ingest_channel();
     let ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
@@ -232,19 +235,23 @@ fn topic_ref_reads_table_columns() {
         "table_read",
         r#"
 imu = delog.topic("IMU").read("AccX", "AccY", "AccZ")
-accx = delog.topic("IMU").field("AccX").read()
+accx_ref = delog.topic("IMU").field("AccX")
+accx = accx_ref.read()
+accx_again = delog.field(accx_ref)
 print(list(imu.fields()))
 print(float(imu.AccX[0]))
 print(float(imu["AccY"][0]))
 print(int(imu.t[0]))
 print(float(accx.v[0]))
+print(float(accx_again.v[0]))
 "#,
     );
 
-    assert!(output.contains("['AccX', 'AccY', 'AccZ']"));
-    assert!(output.contains("3.0"));
-    assert!(output.contains("4.0"));
-    assert!(output.contains("0"));
+    let lines = output.lines().collect::<Vec<_>>();
+    assert_eq!(
+        lines,
+        ["['AccX', 'AccY', 'AccZ']", "3.0", "4.0", "0", "3.0", "3.0"]
+    );
 
     drop(engine);
     drop(sender);
