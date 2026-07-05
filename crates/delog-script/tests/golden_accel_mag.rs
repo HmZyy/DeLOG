@@ -71,28 +71,7 @@ out.add_field("mag", np.sqrt(x*x + y*y + z*z), unit="m/s^2")
 
     // recv_blocking() is #[cfg(test)]-gated and unreachable from this crate,
     // so poll drain_events() instead.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        let events = engine.drain_events();
-        let mut done = false;
-        for ev in events {
-            match ev {
-                ScriptEvent::Done => {
-                    done = true;
-                }
-                ScriptEvent::Error(e) => panic!("script error: {e}"),
-                _ => {}
-            }
-        }
-        if done {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "timed out waiting for ScriptEvent::Done"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
+    wait_done(&engine);
 
     // Releases the engine's sender clone so the ingest thread can exit.
     drop(engine);
@@ -129,4 +108,84 @@ out.add_field("mag", np.sqrt(x*x + y*y + z*z), unit="m/s^2")
     );
 
     let _ = ingest_thread;
+}
+
+fn wait_done(engine: &ScriptEngine) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        for ev in engine.drain_events() {
+            match ev {
+                ScriptEvent::Done => return,
+                ScriptEvent::Error(e) => panic!("script error: {e}"),
+                _ => {}
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for ScriptEvent::Done"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+fn run_script_capture_output(engine: &ScriptEngine, name: &str, source: &str) -> String {
+    engine
+        .send(ScriptCommand::RunScript {
+            name: name.into(),
+            source: source.into(),
+        })
+        .unwrap();
+    let mut captured = String::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        for ev in engine.drain_events() {
+            match ev {
+                ScriptEvent::Output(s) => captured.push_str(&s),
+                ScriptEvent::Done => return captured,
+                ScriptEvent::Error(e) => panic!("script error: {e}"),
+                _ => {}
+            }
+        }
+        assert!(std::time::Instant::now() < deadline, "timed out");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn discovery_refs_expose_paths_and_metadata() {
+    let ingestor = Ingestor::new(NullObserver);
+    let (sender, receiver) = ingest_channel();
+    let ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
+
+    let engine = ScriptEngine::spawn(
+        read_store(),
+        sender.clone(),
+        Arc::new(MetricsRegistry::new()),
+        delog_script::params::shared_empty(),
+    );
+    let output = run_script_capture_output(
+        &engine,
+        "discovery",
+        r#"
+topic = delog.topic("IMU")
+field = delog.find("IMU", "AccX")
+all_fields = topic.fields()
+catalog_fields = delog.catalog().fields()
+print(topic.path)
+print(field.path)
+print(field.unit)
+print(",".join(f.name for f in all_fields))
+print(len(catalog_fields))
+"#,
+    );
+
+    assert!(output.contains("flight/IMU"));
+    assert!(output.contains("flight/IMU/AccX"));
+    assert!(output.contains("m/s^2"));
+    assert!(output.contains("AccX,AccY,AccZ"));
+    assert!(output.contains("3"));
+
+    drop(engine);
+    drop(sender);
+    let _ = ingest_thread.join();
 }
