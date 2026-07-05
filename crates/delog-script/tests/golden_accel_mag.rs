@@ -216,6 +216,42 @@ print(len(catalog_fields))
 }
 
 #[test]
+fn topic_ref_reads_table_columns() {
+    let ingestor = Ingestor::new(NullObserver);
+    let (sender, receiver) = ingest_channel();
+    let ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
+
+    let engine = ScriptEngine::spawn(
+        read_store(),
+        sender.clone(),
+        Arc::new(MetricsRegistry::new()),
+        delog_script::params::shared_empty(),
+    );
+    let output = run_script_capture_output(
+        &engine,
+        "table_read",
+        r#"
+imu = delog.topic("IMU").read("AccX", "AccY", "AccZ")
+accx = delog.topic("IMU").field("AccX").read()
+print(list(imu.fields()))
+print(float(imu.AccX[0]))
+print(float(imu["AccY"][0]))
+print(int(imu.t[0]))
+print(float(accx.v[0]))
+"#,
+    );
+
+    assert!(output.contains("['AccX', 'AccY', 'AccZ']"));
+    assert!(output.contains("3.0"));
+    assert!(output.contains("4.0"));
+    assert!(output.contains("0"));
+
+    drop(engine);
+    drop(sender);
+    let _ = ingest_thread.join();
+}
+
+#[test]
 fn discovery_missing_lookup_errors_include_candidates() {
     let _guard = SCRIPT_TEST_LOCK.lock().unwrap();
     let ingestor = Ingestor::new(NullObserver);

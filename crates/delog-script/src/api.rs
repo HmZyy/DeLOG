@@ -11,7 +11,9 @@ use delog_core::snapshot::StoreSnapshot;
 
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use pyo3::types::PyList;
+use pyo3::types::PyTuple;
 
 use crate::live::LiveTransformSpec;
 use crate::params::{ParamKind, ParamSpec, ParamValue, SharedParams};
@@ -266,12 +268,23 @@ pub fn materialize_field(
 /// A numpy unicode ('<U...') array from owned strings, so scripts get
 /// vectorized comparisons like `batch.name == "airspd"`.
 pub(crate) fn numpy_str_array(py: Python<'_>, vals: Vec<String>) -> PyResult<Py<PyAny>> {
-    use pyo3::types::IntoPyDict;
-    let kwargs = [("dtype", "str")].into_py_dict(py)?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "str")?;
     Ok(py
         .import("numpy")?
         .call_method("array", (vals,), Some(&kwargs))?
         .unbind())
+}
+
+fn materialized_values_to_py(
+    py: Python<'_>,
+    values: Vec<f64>,
+    strings: Option<Vec<String>>,
+) -> PyResult<Py<PyAny>> {
+    match strings {
+        Some(vals) => numpy_str_array(py, vals),
+        None => Ok(values.into_pyarray(py).into_any().unbind()),
+    }
 }
 
 pub struct PendingField {
@@ -588,12 +601,64 @@ impl TopicRefPy {
             ))),
         }
     }
+
+    #[pyo3(signature = (*fields))]
+    fn read(&self, py: Python<'_>, fields: &Bound<'_, PyTuple>) -> PyResult<DelogTable> {
+        let fields = fields
+            .iter()
+            .map(|item| item.extract::<String>())
+            .collect::<PyResult<Vec<_>>>()?;
+        let requested = if fields.is_empty() {
+            find_fields_in_topic(&self.snapshot, self.topic_id, None)
+                .into_iter()
+                .map(|m| m.field_name)
+                .collect::<Vec<_>>()
+        } else {
+            fields
+        };
+        let mut table_t: Option<Vec<i64>> = None;
+        let mut names = Vec::with_capacity(requested.len());
+        let mut columns = std::collections::HashMap::new();
+        for name in requested {
+            let field_ref = self.field(&name)?;
+            let (t, v, s) = materialize_field(&self.snapshot, field_ref.field_id)
+                .map_err(pyo3::exceptions::PyValueError::new_err)?;
+            match &table_t {
+                None => table_t = Some(t),
+                Some(existing) if *existing == t => {}
+                Some(_) => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "topic '{}' field '{name}' does not share the topic timeline",
+                        self.name
+                    )));
+                }
+            }
+            columns.insert(name.clone(), materialized_values_to_py(py, v, s)?);
+            names.push(name);
+        }
+        Ok(DelogTable {
+            t: table_t.unwrap_or_default().into_pyarray(py).unbind(),
+            fields: names,
+            columns,
+        })
+    }
 }
 
 #[pymethods]
 impl FieldRefPy {
     fn __repr__(&self) -> String {
         format!("FieldRef({:?})", self.path)
+    }
+
+    fn read(&self, py: Python<'_>) -> PyResult<DelogField> {
+        let (t, v, s) = materialize_field(&self.snapshot, self.field_id)
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        let s = s.map(|vals| numpy_str_array(py, vals)).transpose()?;
+        Ok(DelogField {
+            t: t.into_pyarray(py).unbind(),
+            v: v.into_pyarray(py).unbind(),
+            s,
+        })
     }
 }
 
@@ -751,9 +816,20 @@ impl Delog {
         Ok(PyList::new(py, paths)?.unbind())
     }
 
-    fn field(&self, py: Python<'_>, path: &str) -> PyResult<DelogField> {
+    fn field(&self, py: Python<'_>, path: &Bound<'_, PyAny>) -> PyResult<DelogField> {
+        if let Ok(field_ref) = path.extract::<PyRef<'_, FieldRefPy>>() {
+            let (t, v, s) = materialize_field(&field_ref.snapshot, field_ref.field_id)
+                .map_err(pyo3::exceptions::PyValueError::new_err)?;
+            let s = s.map(|vals| numpy_str_array(py, vals)).transpose()?;
+            return Ok(DelogField {
+                t: t.into_pyarray(py).unbind(),
+                v: v.into_pyarray(py).unbind(),
+                s,
+            });
+        }
+        let path: String = path.extract()?;
         let id = self
-            .resolve_path(path)
+            .resolve_path(&path)
             .map_err(pyo3::exceptions::PyKeyError::new_err)?;
         let (t, v, s) = materialize_field(&self.snapshot, id)
             .map_err(pyo3::exceptions::PyValueError::new_err)?;
@@ -1002,6 +1078,33 @@ fn value_to_py(
         }
         ParamValue::Bool(b) => Ok(b.into_pyobject(py)?.to_owned().into_any().unbind()),
         ParamValue::Text(s) => Ok(s.into_pyobject(py)?.into_any().unbind()),
+    }
+}
+
+#[pyclass(unsendable, name = "DelogTable")]
+pub struct DelogTable {
+    #[pyo3(get)]
+    t: Py<PyArray1<i64>>,
+    fields: Vec<String>,
+    columns: std::collections::HashMap<String, Py<PyAny>>,
+}
+
+#[pymethods]
+impl DelogTable {
+    fn fields(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
+        Ok(PyList::new(py, self.fields.clone())?.unbind())
+    }
+
+    fn __getitem__(&self, name: &str) -> PyResult<Py<PyAny>> {
+        self.columns
+            .get(name)
+            .map(|obj| Python::attach(|py| obj.clone_ref(py)))
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(name.to_owned()))
+    }
+
+    fn __getattr__(&self, name: &str) -> PyResult<Py<PyAny>> {
+        self.__getitem__(name)
+            .map_err(|_| pyo3::exceptions::PyAttributeError::new_err(name.to_owned()))
     }
 }
 
