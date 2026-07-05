@@ -372,6 +372,15 @@ pub fn array_row_as_f64(array: &dyn Array, row: usize) -> f64 {
     }
 }
 
+/// The row's string for Utf8/LargeUtf8 columns; `None` for nulls and
+/// non-string columns.
+pub fn array_row_as_str(array: &dyn Array, row: usize) -> Option<&str> {
+    match value_at(array, row) {
+        SampleValue::Utf8(s) => Some(s),
+        _ => None,
+    }
+}
+
 pub(crate) fn value_at(array: &dyn Array, row: usize) -> SampleValue<'_> {
     if array.is_null(row) {
         return SampleValue::Null;
@@ -691,5 +700,15 @@ mod tests {
             FieldView::new(&snapshot, field).unwrap_err(),
             FieldViewError::MissingTopicStore(topic)
         );
+    }
+
+    #[test]
+    fn array_row_as_str_reads_utf8_and_rejects_numeric() {
+        use arrow::array::{Float64Array, StringArray};
+        let strings = StringArray::from(vec![Some("airspd"), None]);
+        assert_eq!(array_row_as_str(&strings, 0), Some("airspd"));
+        assert_eq!(array_row_as_str(&strings, 1), None);
+        let floats = Float64Array::from(vec![1.0]);
+        assert_eq!(array_row_as_str(&floats, 0), None);
     }
 }

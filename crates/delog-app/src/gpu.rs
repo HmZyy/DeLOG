@@ -277,17 +277,17 @@ impl GpuBridge {
                                 len: cache.samples(),
                             };
                             if res.win_params.get(&trace.field) != Some(&key) {
-                                let stat = res.win_buffers.sync(
-                                    trace.field,
-                                    &cache.xy[2 * aw..2 * bw],
-                                    true,
-                                );
+                                let line_xy = line_window_xy(&cache.xy, aw, bw);
+                                let stat = res.win_buffers.sync(trace.field, &line_xy, true);
+                                if line_xy.is_empty() {
+                                    res.win_buffers.remove(trace.field);
+                                }
                                 upload_bytes += stat.bytes;
                                 full_uploads += stat.full_upload as u64;
                                 res.win_params.insert(trace.field, key);
                             }
                             DrawKind::Line {
-                                samples: (bw - aw) as u32,
+                                samples: res.win_buffers.samples(trace.field) as u32,
                             }
                         }
                     }
@@ -513,6 +513,23 @@ enum PipelineKind {
 /// Clamps to `[0, n]`.
 fn pad_window(a: usize, b: usize, n: usize) -> (usize, usize) {
     (a.saturating_sub(1), (b + 1).min(n))
+}
+
+fn line_window_xy(xy: &[f32], a: usize, b: usize) -> Vec<f32> {
+    let samples = xy.len() / 2;
+    let a = a.min(samples);
+    let b = b.min(samples);
+    if a >= b {
+        return Vec::new();
+    }
+
+    let mut out = Vec::with_capacity((b - a) * 2);
+    for p in xy[2 * a..2 * b].chunks_exact(2) {
+        if p[0].is_finite() && p[1].is_finite() {
+            out.extend_from_slice(p);
+        }
+    }
+    out
 }
 
 /// Consecutive same-pipeline runs in draw order (one `set_pipeline` each).
@@ -1108,6 +1125,29 @@ pub fn apply_zoom(view: &mut ViewX, cursor_frac: f32, scroll: f32) {
     view.zoom_at(focus, factor);
 }
 
+const MIN_ZOOM_DRAG_PX: f32 = 3.0;
+
+/// X view for a right-drag zoom between two pixel x-positions within the plot
+/// rect. None when the drag is too small to act on.
+pub fn zoom_drag_view(
+    view: ViewX,
+    rect_left: f32,
+    rect_width: f32,
+    x_a: f32,
+    x_b: f32,
+) -> Option<ViewX> {
+    if rect_width <= 0.0 || (x_a - x_b).abs() <= MIN_ZOOM_DRAG_PX {
+        return None;
+    }
+    let span = view.span_us() as f64;
+    let time_at = |x: f32| {
+        let frac = ((x - rect_left) / rect_width).clamp(0.0, 1.0) as f64;
+        view.min_us + (frac * span) as i64
+    };
+    let (a, b) = (time_at(x_a), time_at(x_b));
+    Some(ViewX::new(a.min(b), a.max(b)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1127,6 +1167,26 @@ mod tests {
     #[test]
     fn pad_window_handles_empty() {
         assert_eq!(pad_window(0, 0, 0), (0, 0));
+    }
+
+    #[test]
+    fn line_window_upload_skips_nan_points_so_finite_samples_connect() {
+        let xy = [
+            0.0,
+            10.0, //
+            1.0,
+            f32::NAN, //
+            2.0,
+            12.0, //
+            3.0,
+            f32::INFINITY, //
+            4.0,
+            14.0,
+        ];
+
+        let line_xy = line_window_xy(&xy, 0, 5);
+
+        assert_eq!(line_xy, vec![0.0, 10.0, 2.0, 12.0, 4.0, 14.0]);
     }
 
     #[test]
@@ -1177,5 +1237,44 @@ mod tests {
         // Centre stays roughly fixed.
         let centre = (view.min_us + view.max_us) / 2;
         assert!((centre - 500).abs() < 50);
+    }
+
+    #[test]
+    fn zoom_drag_left_to_right_selects_window() {
+        let view = ViewX::new(0, 1000);
+        // rect: left=100, width=100. Drag from 25% to 75% of the rect.
+        let out = zoom_drag_view(view, 100.0, 100.0, 125.0, 175.0).unwrap();
+        assert_eq!(out.min_us, 250);
+        assert_eq!(out.max_us, 750);
+    }
+
+    #[test]
+    fn zoom_drag_is_symmetric() {
+        let view = ViewX::new(0, 1000);
+        let fwd = zoom_drag_view(view, 100.0, 100.0, 125.0, 175.0).unwrap();
+        let rev = zoom_drag_view(view, 100.0, 100.0, 175.0, 125.0).unwrap();
+        assert_eq!(fwd.min_us, rev.min_us);
+        assert_eq!(fwd.max_us, rev.max_us);
+    }
+
+    #[test]
+    fn zoom_drag_below_threshold_is_noop() {
+        let view = ViewX::new(0, 1000);
+        assert!(zoom_drag_view(view, 100.0, 100.0, 150.0, 152.0).is_none());
+    }
+
+    #[test]
+    fn zoom_drag_clamps_past_rect_edges() {
+        let view = ViewX::new(0, 1000);
+        // x well outside the rect on both sides clamps to full 0..1000.
+        let out = zoom_drag_view(view, 100.0, 100.0, -50.0, 500.0).unwrap();
+        assert_eq!(out.min_us, 0);
+        assert_eq!(out.max_us, 1000);
+    }
+
+    #[test]
+    fn zoom_drag_zero_width_rect_is_noop() {
+        let view = ViewX::new(0, 1000);
+        assert!(zoom_drag_view(view, 0.0, 0.0, 5.0, 50.0).is_none());
     }
 }

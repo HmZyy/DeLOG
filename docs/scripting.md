@@ -12,6 +12,7 @@ This is an **optional, build-time feature**. It is off by default.
 - [Custom file parsers](#custom-file-parsers)
 - [How scripts produce data](#how-scripts-produce-data)
 - [Live transforms](#live-transforms)
+- [Runtime variables](#runtime-variables)
 - [API reference](#api-reference)
 - [The `delog` object](#the-delog-object)
 - [Data model & conventions](#data-model--conventions)
@@ -53,41 +54,43 @@ libdir to the rpath.
 
 ## The Scripts UI
 
-Everything lives under the **Tools ▸ Scripts** menu.
+Scripts are a top-level menu. The interactive prompt lives in the
+**View ▸ Scripting Console** dock.
 
-### Tools ▸ Scripts ▸ Run
+### Scripts ▸ Run
 
 A submenu listing every saved script in your [library](#the-script-library).
-Each row has:
+Click a script name to run it immediately.
 
-| Control | Action |
-| --- | --- |
-| **script name** | Run the script immediately. |
-| ✎ (pencil) | Load the script into the Console editor for editing. |
-| 🗑 (trash) | Delete the script (with a confirmation dialog). |
-
-Running from here works even with the Console window closed - the derived
+Running from here works even with the editor and Scripting Console closed - the derived
 source shows up in the data browser, and any `print` output is buffered for the
-next time you open the Console.
+next time you open the Scripting Console.
 
-### Tools ▸ Scripts ▸ Console
+### Scripts ▸ Editor
 
-Opens the scripting window:
+Opens the floating script editor window:
 
+- **Script drawer** (left) - create a new script with **+ New**, click a saved
+  script to load it, or use a row's `...` menu to edit, duplicate, or remove it.
 - **Code editor** (center) - write a full script here. Syntax-highlighted,
   25 rows by default.
 - **Toolbar** (above the editor): a **name** field, a **Save** button (writes
   the editor buffer to the library under that name), and a single **Run/Cancel**
   toggle (▶ runs the editor buffer; while a script is running it becomes ⏹ and
   interrupts it).
-- **REPL** (bottom) - type one line, press <kbd>Enter</kbd> to evaluate it in a
-  persistent interpreter session. The console scrollback shows results,
-  `print` output, and errors. The 🗑 at the right of the REPL line clears the
-  console.
+
+### View ▸ Scripting Console
+
+Opens the bottom Scripting Console dock. Type one line, press <kbd>Enter</kbd>
+to evaluate it in a persistent interpreter session. The scrollback shows
+results, `print` output, and errors.
 
 The REPL and the editor share **one persistent interpreter**, so names you
 define in the REPL are visible to subsequent REPL lines (and vice-versa) for the
 life of the app session.
+
+`Settings ▸ Scripting ▸ Open Scripting Console` controls whether the dock opens
+automatically on any output, only on errors, or never.
 
 > Running the editor buffer without a name runs it as **`scratch`** (so output
 > still shows); **Save** requires a name.
@@ -96,8 +99,8 @@ life of the app session.
 
 ## Custom file parsers
 
-Beyond derived-field scripts, DéLOG can run **Python file parsers** (under
-**Tools ▸ Parsers**) for formats its built-in parsers don't handle. A parser
+Beyond derived-field scripts, DéLOG can run **Python file parsers** (under the
+top-level **Parsers** menu) for formats its built-in parsers don't handle. A parser
 defines a single `Parse(raw_data)` function that turns raw bytes into topics and
 fields. It uses the same embedded-Python environment and serialized worker as
 scripts.
@@ -155,16 +158,23 @@ def nav_controller_rad(batch):
 ```
 
 - **`topic`** - the incoming topic to transform.
-- **`fields`** - the fields of that topic the callback needs. Each is exposed on
-  the `batch` object as a `float64` numpy array (e.g. `batch.nav_roll`). A batch
-  whose topic doesn't carry every requested field is skipped.
-- **`output_topic`** - the derived topic name the returned fields are published
-  under, on an appendable `script:<name>` source.
+- **`fields`** - the fields of that topic the callback needs. Each is exposed
+  on the `batch` object as a numpy array: numeric fields as `float64` (e.g.
+  `batch.nav_roll`), Utf8/string fields as a numpy unicode array (e.g.
+  `batch.name`), with null string cells read as `""` - the string analogue of
+  the NaN gap convention. A batch whose topic doesn't carry every requested
+  field is skipped.
+- **`output_topic`** *(optional)* - the derived topic name the returned fields
+  are published under, on an appendable `script:<name>` source. Omitting it
+  selects **dynamic mode**, where the callback picks its own output topic(s)
+  per batch - see [Dynamic output topics](#dynamic-output-topics) below.
 
 **The `batch` object** has `batch.t` (the incoming `int64` microsecond
-timestamps) and one `float64` numpy array attribute per requested field.
+timestamps) and one numpy array attribute per requested field (`float64` for
+numeric fields, a unicode array for string fields).
 
-**The return value** is a `dict` mapping each output field name to one of:
+**The return value** in static mode (`output_topic` set) is a `dict` mapping
+each output field name to one of:
 
 - `values` - a length-N array; unit unset, timestamps reuse the input batch's.
 - `(values, unit)` - same, with an explicit unit string.
@@ -172,6 +182,52 @@ timestamps) and one `float64` numpy array attribute per requested field.
   these **must equal** the input batch's timestamps (a mismatch is an error).
 
 All output arrays must have the same length as the incoming batch.
+
+### Dynamic output topics
+
+Omit `output_topic` to put the callback in **dynamic mode**. Instead of a flat
+`{field: values}` dict, it returns:
+
+```
+{topic: {field: values | (values, unit) | (times, values, unit)}}
+```
+
+One nested `{field: ...}` dict per derived topic, with topic names chosen at
+run time (typically one topic per distinct value found in the batch):
+
+```python
+import numpy as np
+
+@delog.live_transform(topic="NAMED_VALUE_FLOAT", fields=["name", "value"])
+def split_named_floats(batch):
+    out = {}
+    for name in np.unique(batch.name):
+        mask = batch.name == name
+        out[f"NAMED_VALUE_FLOAT/{name}"] = {"value": (batch.t[mask], batch.value[mask], None)}
+    return out
+```
+
+Rules:
+
+- Each field entry uses the same three forms as static mode (`values`,
+  `(values, unit)`, `(times, values, unit)`), and every field within one
+  topic must resolve to **identical times**.
+- The bare/2-tuple forms reuse the **input batch's** times, so their array
+  length must equal the batch - they don't implicitly follow a mask. To emit a
+  row subset (as in the example above), use the 3-tuple form with explicit
+  `times`.
+- Explicit `times` (the 3-tuple form) must be an `int64` array, **sorted
+  ascending** (equal adjacent values are allowed - e.g. several fields sharing
+  a timestamp), typically a mask-subset of `batch.t`.
+- An **empty outer dict** (`{}`) means "emit nothing for this batch" - not an
+  error.
+- A topic whose fields resolve to **zero rows** is silently skipped.
+- Each inner `{field: ...}` dict must be **non-empty** - a topic with no
+  fields is an error.
+- Topic names (the outer dict's keys) must be non-empty strings.
+- New topic names appear in the browser the first time they're emitted; keep a
+  topic's field set and units consistent across batches so it reads as one
+  continuous derived signal.
 
 Key behaviors:
 
@@ -183,12 +239,99 @@ Key behaviors:
   rather than stalling live ingestion.
 - **Self-disabling on errors.** If a callback raises on three consecutive
   batches, that transform is disabled and an error is reported to the console;
-  other transforms keep running.
+  other transforms keep running. Error messages identify the transform as
+  `<script>.<function>` (e.g. `named_values_live_split.split_named_floats`).
 
 **Version 1 live transforms are same-topic only.** The callback sees one
 incoming topic batch at a time. It cannot join across topics, resample onto
 another timeline, or keep rolling-window state between batches - for that, use a
 snapshot script after capture.
+
+---
+
+## Runtime variables
+
+Scripts can declare **runtime-tweakable variables** that appear in a dedicated
+**Scripts ▸ Variables** window. This is useful for live transforms (and
+snapshot scripts) where a single numeric or boolean parameter changes the
+behavior - you edit it in the UI and the script responds immediately without
+re-running.
+
+### Declaration
+
+Declare variables at the top level of a script (outside any function or decorator
+scope) using one of four methods:
+
+```python
+delog.slider("alpha", 0.5, min=0.0, max=1.0, step=0.01,
+             label="Smoothing factor")
+delog.checkbox("enabled", True, label="Enable processing")
+delog.combo("mode", ["fast", "accurate", "debug"], default="fast",
+            label="Algorithm mode")
+delog.text("suffix", "_processed", label="Output field suffix")
+```
+
+- **`delog.slider(name, default, *, min, max, step=None, label=None)` → float or int**
+  - If `default` is a Python `int`, it is an integer slider and returns an `int`; otherwise it returns `float`. (`min`/`max` are always read as floats.)
+  - `step` is optional. With `step=None`, an integer slider steps by `1`; a float slider is continuous (no fixed step).
+  - `label` is optional; defaults to `name` if unset.
+
+- **`delog.checkbox(name, default, *, label=None)` → bool**
+  - Returns the checked state.
+
+- **`delog.combo(name, options, *, default=None, label=None)` → str**
+  - Returns the selected option string.
+  - `options` is a list of strings.
+  - `default` must be in `options`; defaults to `options[0]` if unset.
+
+- **`delog.text(name, default, *, label=None)` → str**
+  - Returns the text field value.
+
+Each declaration **returns its current value** immediately; that value is frozen at
+registration time. To read the *live-updated* value inside a callback (e.g. a live
+transform), use `delog.param(name)`.
+
+### Reading live values in callbacks
+
+Inside a **live transform callback**, the top-level variable declaration is
+executed only once (at registration). To pick up slider/checkbox/combo/text
+edits **without re-running** the entire script, call `delog.param(name)`:
+
+```python
+delog.slider("alpha", 0.2, min=0.01, max=1.0, step=0.01)
+
+@delog.live_transform(topic="IMU", fields=["AccX"], output_topic="IMU_LPF")
+def lowpass(batch):
+    alpha = delog.param("alpha")  # read the current value each batch
+    x = batch.AccX
+    # ... filter using alpha ...
+    return {"AccX_lpf": (result, "m/s^2")}
+```
+
+Moving the slider updates `delog.param("alpha")` for the next batch, with no
+re-run of the script.
+
+### Behavior: live vs. snapshot
+
+- **Live transforms**: edits apply to the **next batch**, with **no re-run** of the
+  script (only the callback re-executes with the new parameter values).
+- **Snapshot scripts**: edits trigger an **automatic re-run** of the script if it
+  is a named library script (one in **Scripts ▸ Run**). Scratch scripts
+  do not auto-rerun.
+- **Persistence**: all variable values are stored per-script in `script_params.json`
+  in the DéLOG config directory, and restored when you load or run the script again.
+
+### The Scripts ▸ Variables window
+
+The **Scripts ▸ Variables** panel displays
+all variables declared by the currently running script (or the most recently run
+script if nothing is active). Edits take effect immediately:
+
+- Slider release, checkbox toggle, combo selection, or text Enter all apply the
+  new value.
+- For live transforms, the next batch sees the new value via `delog.param(...)`.
+- For snapshot scripts, auto-rerun is triggered (if the script is a named library
+  script).
 
 ---
 
@@ -199,6 +342,11 @@ session. You never import or construct it.
 
 | Call | Returns | Purpose |
 | --- | --- | --- |
+| `delog.slider(name, default, *, min, max, step=None, label=None)` | `float` or `int` | Declare a slider variable; returns its current value. |
+| `delog.checkbox(name, default, *, label=None)` | `bool` | Declare a checkbox variable; returns its current value. |
+| `delog.combo(name, options, *, default=None, label=None)` | `str` | Declare a combo-box variable; returns its current value. |
+| `delog.text(name, default, *, label=None)` | `str` | Declare a text-field variable; returns its current value. |
+| `delog.param(name)` | `float`/`int`/`bool`/`str` | Read the current value of a variable inside a live callback. |
 | `delog.sources()` | `list[str]` | All live field paths, `"source/topic/field"`. |
 | `delog.field(path)` | `DelogField` | Read one field as numpy arrays. |
 | `delog.resample_prev(field, base_times)` | `np.ndarray[float64]` | Prev-sample align a field onto another timeline. |
@@ -221,12 +369,13 @@ flight_42/vehicle_attitude[0]/q[0]
 Reads one field, materialized as numpy arrays. `path` is a string exactly as it
 appears in `delog.sources()`.
 
-A `DelogField` has two attributes:
+A `DelogField` has three attributes:
 
 | Attribute | Type | Meaning |
 | --- | --- | --- |
 | `.t` | `np.ndarray[int64]` | Timestamps, microseconds (raw log time). |
-| `.v` | `np.ndarray[float64]` | Values, as `float64`. |
+| `.v` | `np.ndarray[float64]` | Values, as `float64`. All-`NaN` for string fields. |
+| `.s` | `np.ndarray[str]` or `None` | Numpy unicode array of values, for string (Utf8) fields; `None` for numeric fields. |
 
 ```python
 f = delog.field("flight_42/IMU[0]/AccX")
@@ -235,8 +384,12 @@ print(f.t[:3], f.v[:3])   # int64 µs, float64 values
 
 - Raises `KeyError` if the path doesn't resolve, `ValueError` if the field has
   no data.
-- Values are always `float64` (ints/bools are widened). **NaN is preserved** -
-  gaps in the source remain NaN, so you can detect and propagate them.
+- Numeric fields are always widened to `float64` (ints/bools included). **NaN
+  is preserved** - gaps in the source remain NaN, so you can detect and
+  propagate them.
+- **String fields** (Utf8) additionally populate `.s` with a numpy unicode
+  array; null cells read as `""` - the string analogue of the NaN gap
+  convention. `.v` is still present but all-`NaN` for these fields.
 - All fields **within the same topic** share identical timestamps, so you can
   read several of them and operate element-wise without aligning.
 
@@ -316,7 +469,10 @@ print(f"emitted {len(f.t)} samples")
 - **Time is `int64` microseconds**, end to end. Field `.t` and `output(...)`
   `times_us` are both raw log-time microseconds.
 - **Values are `float64`** on the way in (`.v`) and on the way out (`add_field`
-  values). The emitted columns are stored as `Float64`.
+  values). The emitted columns are stored as `Float64`. String fields are the
+  one exception on the read side: `.s` on `delog.field(...)` and a live
+  transform's numpy unicode `batch.<name>` attribute expose Utf8 fields as
+  strings, but output stays `float64`-only.
 - **NaN means "gap"** - it is never interpolated away. Reads preserve NaN;
   emit preserves NaN; plots render NaN as a line break. Propagate it naturally
   (most numpy ops do).
@@ -338,11 +494,11 @@ Saved scripts are plain `.py` files in DéLOG's config directory:
 | macOS | `~/Library/Application Support/DeLOG/scripts/` |
 | Windows | `%APPDATA%\DeLOG\data\scripts\` |
 
-- The file **stem** is the script name shown in **Tools ▸ Scripts ▸ Run**.
+- The file **stem** is the script name shown in **Scripts ▸ Run**.
 - Files are editable with any external editor; new/changed files appear in the
   menu without restarting (the list is read fresh each time the menu opens).
-- In-app: **Save** (Console toolbar) writes the editor buffer; **✎** loads a
-  script for editing; **🗑** deletes it (with confirmation).
+- In-app: **Save** writes the editor buffer; the editor drawer loads, duplicates,
+  and removes saved scripts. To rename, edit the name field and save.
 - Scripts are a **global library** - reusable across any loaded log. Write them
   to look up fields by name (see the [examples](#worked-examples)) so the same
   script works on any flight.
@@ -352,13 +508,13 @@ Saved scripts are plain `.py` files in DéLOG's config directory:
 ## Console, errors, and cancellation
 
 - **`print(...)`** and anything written to `stdout`/`stderr` is captured to the
-  Console scrollback.
+  Scripting Console scrollback.
 - **Errors** print the Python traceback to the console; the run emits no source.
 - **Cancel**: while a script runs, the toolbar toggle shows ⏹ - click it to
   raise `KeyboardInterrupt` in the script (like Ctrl-C). This is cooperative:
   it fires at the next Python bytecode boundary, so a script stuck inside a
   single long C call (e.g. one huge numpy op) can't be interrupted mid-call.
-- **Clear**: the 🗑 at the right of the REPL line clears the console scrollback.
+- **Clear**: the Scripting Console dock's **Clear** button clears the scrollback.
 
 ---
 
@@ -452,6 +608,9 @@ your [script library](#the-script-library) or open in the Console:
 | [`vehicle_attitude_euler.py`](../scripts/vehicle_attitude_euler.py) | snapshot | Converts a PX4 `vehicle_attitude[0]` quaternion to roll/pitch/yaw. Finds the source prefix automatically so it runs on any PX4 log. |
 | [`nav_controller_output_radians.py`](../scripts/nav_controller_output_radians.py) | snapshot | Re-emits ArduPilot `NAV_CONTROLLER_OUTPUT` angles in radians, locating the topic across sources/instances. |
 | [`nav_controller_live_rad.py`](../scripts/nav_controller_live_rad.py) | live transform | The live-streaming counterpart: a `@delog.live_transform` that converts `NAV_CONTROLLER_OUTPUT` angles to radians as batches arrive. |
+| [`named_values_live_split.py`](../scripts/named_values_live_split.py) | live transform | Splits live `NAMED_VALUE_FLOAT`/`NAMED_VALUE_INT` streams into one derived topic per `name` (dynamic output topics), so named values arrive sorted by category. |
+| [`param_value_live_split.py`](../scripts/param_value_live_split.py) | live transform | Splits a live `PARAM_VALUE` stream into one derived topic per `param_id`, so each parameter's value gets its own trace. |
+| [`tunable_lowpass.py`](../scripts/tunable_lowpass.py) | live transform | An exponential low-pass filter with a slider-controlled smoothing factor. Demonstrates runtime-tweakable variables in a live transform: move the slider to change the filter coefficient live, without re-running. |
 
 The snapshot/live pair (`nav_controller_*`) is a good side-by-side reference for
 the difference between the two execution modes.
@@ -463,7 +622,10 @@ the difference between the two execution modes.
 - **Not sandboxed.** Embedded CPython runs with your full user privileges
   (filesystem, network). Only run scripts you trust. This is a deliberate
   trade-off for the power of real CPython + numpy.
-- **`DelogField` exposes only `.t` and `.v`.** There is no `.unit`/`.dtype`
+- **String fields are read-only.** `DelogField.s` and live-transform string
+  batch attributes let you *read* Utf8 fields, but script **output** stays
+  Float64-only - `add_field` and the numeric forms of a live transform's
+  return value always take `float64` arrays. There is also no `.unit`/`.dtype`
   attribute on reads (units are an output concern via `add_field(..., unit=)`).
 - **Output is `float64`.** Even if a source field was integer/bool, derived
   output columns are stored as `Float64`.
