@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, Float32Array, Int16Array, Int64Array};
+use arrow::array::{ArrayRef, Float32Array, Int64Array, StringArray, UInt16Array};
 use arrow::datatypes::DataType;
 use delog_core::ingest::{IngestSink, ingest_channel};
 use delog_core::ingestor::{Ingestor, NullObserver};
@@ -11,32 +11,39 @@ use delog_core::schema::{FieldSchema, TopicSchema};
 use delog_core::snapshot::{DataStore, StoreSnapshot};
 use delog_script::{ScriptCommand, ScriptEngine, ScriptEvent};
 
+const SPLIT_SCRIPT: &str = include_str!("../../../scripts/param_value_live_split.py");
+
 fn read_store() -> Arc<DataStore> {
     Arc::new(DataStore::from_snapshot(StoreSnapshot::empty()))
 }
 
-fn nav_batch(source: delog_core::identity::SourceId) -> delog_core::ingest::ParsedBatch {
+fn param_value_batch(source: delog_core::identity::SourceId) -> delog_core::ingest::ParsedBatch {
     let schema = Arc::new(
         TopicSchema::new(
-            "NAV_CONTROLLER_OUTPUT",
+            "PARAM_VALUE",
             [
-                FieldSchema::new("nav_roll", DataType::Float32, Some("deg"), 1.0).unwrap(),
-                FieldSchema::new("nav_pitch", DataType::Float32, Some("deg"), 1.0).unwrap(),
-                FieldSchema::new("nav_bearing", DataType::Int16, Some("deg"), 1.0).unwrap(),
+                FieldSchema::new("param_id", DataType::Utf8, None::<String>, 1.0).unwrap(),
+                FieldSchema::new("param_value", DataType::Float32, None::<String>, 1.0).unwrap(),
+                FieldSchema::new("param_index", DataType::UInt16, None::<String>, 1.0).unwrap(),
             ],
         )
         .unwrap(),
     );
     let columns: Vec<ArrayRef> = vec![
-        Arc::new(Float32Array::from(vec![0.0, 90.0])),
-        Arc::new(Float32Array::from(vec![45.0, -45.0])),
-        Arc::new(Int16Array::from(vec![180, -90])),
+        Arc::new(StringArray::from(vec!["RC1_MIN", "RC1_MAX", "RC1_MIN"])),
+        Arc::new(Float32Array::from(vec![1100.0, 1900.0, 1150.0])),
+        Arc::new(UInt16Array::from(vec![0, 1, 0])),
     ];
-    delog_core::ingest::ParsedBatch::new(source, schema, Int64Array::from(vec![1, 2]), columns)
+    delog_core::ingest::ParsedBatch::new(
+        source,
+        schema,
+        Int64Array::from(vec![100, 200, 300]),
+        columns,
+    )
 }
 
 #[test]
-fn live_transform_appends_derived_batches() {
+fn param_value_split_creates_one_topic_per_param_id() {
     let ingestor = Ingestor::new(NullObserver);
     let write_store = ingestor.store();
     let (sender, receiver) = ingest_channel();
@@ -48,49 +55,39 @@ fn live_transform_appends_derived_batches() {
         Arc::new(MetricsRegistry::new()),
         delog_script::params::shared_empty(),
     );
-    let script = r#"
-DEG_TO_RAD = 0.017453292519943295
-
-@delog.live_transform(
-    topic="NAV_CONTROLLER_OUTPUT",
-    fields=["nav_roll", "nav_pitch", "nav_bearing"],
-    output_topic="NAV_CONTROLLER_OUTPUT_RAD",
-)
-def convert(batch):
-    return {
-        "nav_roll_rad": batch.nav_roll * DEG_TO_RAD,
-        "nav_pitch_rad": (batch.nav_pitch * DEG_TO_RAD, "rad"),
-        "nav_bearing_rad": (batch.t, batch.nav_bearing * DEG_TO_RAD, "rad"),
-    }
-"#;
     let _ = engine.send(ScriptCommand::RunScript {
-        name: "nav_rad".into(),
-        source: script.into(),
+        name: "param_values".into(),
+        source: SPLIT_SCRIPT.into(),
     });
-
     wait_done(&engine);
 
     let raw_source = {
         let mut sink = sender.file_sink();
         sink.open_source("live", delog_core::ingest::SourceKind::Live)
     };
-    engine.try_send_live_batch(nav_batch(raw_source)).unwrap();
+    engine
+        .try_send_live_batch(param_value_batch(raw_source))
+        .unwrap();
     wait_live_processed(&engine);
 
-    let snap = wait_for_topic(&write_store, "NAV_CONTROLLER_OUTPUT_RAD");
-    let topic = snap
-        .topics
-        .iter()
-        .find(|t| t.entry.name == "NAV_CONTROLLER_OUTPUT_RAD")
-        .unwrap();
-    let store = snap.topic_store(topic.entry.id).unwrap();
-    let idx = store.schema.field_index("nav_bearing_rad").unwrap();
-    let values = store.chunks[0].cols[idx]
-        .as_any()
-        .downcast_ref::<arrow::array::Float64Array>()
-        .unwrap();
-    assert!((values.value(0) - std::f64::consts::PI).abs() < 1e-12);
-    assert!((values.value(1) + std::f64::consts::FRAC_PI_2).abs() < 1e-12);
+    let snap = wait_for_topic(&write_store, "PARAM_VALUE/RC1_MIN");
+    let assert_topic = |snap: &StoreSnapshot, name: &str, times: &[i64], values: &[f64]| {
+        let topic = snap.topics.iter().find(|t| t.entry.name == name).unwrap();
+        let store = snap.topic_store(topic.entry.id).unwrap();
+        let idx = store.schema.field_index("value").unwrap();
+        let chunk = &store.chunks[0];
+        let got: Vec<i64> = (0..chunk.len()).map(|r| chunk.t.value(r)).collect();
+        assert_eq!(got, times, "times for {name}");
+        let col = chunk.cols[idx]
+            .as_any()
+            .downcast_ref::<arrow::array::Float64Array>()
+            .unwrap();
+        let got: Vec<f64> = (0..col.len()).map(|r| col.value(r)).collect();
+        assert_eq!(got, values, "values for {name}");
+    };
+    assert_topic(&snap, "PARAM_VALUE/RC1_MIN", &[100, 300], &[1100.0, 1150.0]);
+    let snap = wait_for_topic(&write_store, "PARAM_VALUE/RC1_MAX");
+    assert_topic(&snap, "PARAM_VALUE/RC1_MAX", &[200], &[1900.0]);
 
     drop(engine);
     drop(sender);
