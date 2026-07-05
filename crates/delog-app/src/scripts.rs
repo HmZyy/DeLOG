@@ -1184,10 +1184,8 @@ mod tests {
 
     #[test]
     fn duplicate_script_copies_source_to_available_name_and_opens_copy() {
-        let root = std::env::temp_dir().join(format!(
-            "delog-scripts-duplicate-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("delog-scripts-duplicate-{}", std::process::id()));
         let mut panel = ScriptsPanel::new(
             root.join("scripts"),
             root.join("parsers"),

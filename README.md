@@ -66,7 +66,10 @@ are two modes: **snapshot scripts** that run once against the current data, and 
 transforms** (`@delog.live_transform`) that append derived fields as telemetry arrives. A
 Console window provides an editor and a persistent REPL.
 
-Bundled examples live in [`scripts/`](scripts/). Full API reference and examples:
+Bundled examples live in [`scripts/`](scripts/): snapshot examples are split
+between legacy path-string scripts in `scripts/snapshot/v1/` and new structured
+API scripts in `scripts/snapshot/v2/`; live examples live in `scripts/live/v1/`.
+Full API reference and examples:
 **[docs/scripting.md](docs/scripting.md)**.
 
 ## Custom parsers (overview)
