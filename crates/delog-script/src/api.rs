@@ -476,9 +476,19 @@ fn unique_topic(
     let matches = find_topics(&snapshot, Some(name), source, instance);
     match matches.len() {
         1 => Ok(topic_ref(snapshot, matches.into_iter().next().unwrap())),
-        0 => Err(pyo3::exceptions::PyKeyError::new_err(format!(
-            "topic '{name}' not found"
-        ))),
+        0 => {
+            let candidates = find_topics(&snapshot, None, source, instance);
+            if candidates.is_empty() {
+                Err(pyo3::exceptions::PyKeyError::new_err(format!(
+                    "topic '{name}' not found"
+                )))
+            } else {
+                Err(pyo3::exceptions::PyKeyError::new_err(format!(
+                    "topic '{name}' not found; candidates: {}",
+                    candidate_topic_paths(&candidates)
+                )))
+            }
+        }
         _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
             "topic '{name}' is ambiguous; candidates: {}; pass source= or instance=",
             candidate_topic_paths(&matches)
@@ -636,9 +646,20 @@ impl Delog {
                 )?
                 .into_any()
                 .unbind()),
-                0 => Err(pyo3::exceptions::PyKeyError::new_err(format!(
-                    "field '{field_name}' not found in topic '{topic}'"
-                ))),
+                0 => {
+                    let candidates =
+                        find_fields(&self.snapshot, Some(topic), None, source, instance);
+                    if candidates.is_empty() {
+                        Err(pyo3::exceptions::PyKeyError::new_err(format!(
+                            "field '{field_name}' not found in topic '{topic}'"
+                        )))
+                    } else {
+                        Err(pyo3::exceptions::PyKeyError::new_err(format!(
+                            "field '{field_name}' not found in topic '{topic}'; candidates: {}",
+                            candidate_field_paths(&candidates)
+                        )))
+                    }
+                }
                 _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
                     "field '{field_name}' in topic '{topic}' is ambiguous; candidates: {}; pass source= or instance=",
                     candidate_field_paths(&matches)
