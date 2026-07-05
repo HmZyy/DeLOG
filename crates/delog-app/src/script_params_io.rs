@@ -56,7 +56,11 @@ mod tests {
 
     fn tmp(name: &str) -> std::path::PathBuf {
         let mut p = std::env::temp_dir();
-        p.push(format!("delog_params_test_{}_{}.json", name, std::process::id()));
+        p.push(format!(
+            "delog_params_test_{}_{}.json",
+            name,
+            std::process::id()
+        ));
         p
     }
 
@@ -86,13 +90,24 @@ mod tests {
     fn apply_loaded_then_declare_keeps_persisted_value() {
         let mut store = ParamStore::default();
         let mut loaded = Loaded::default();
-        loaded.entry("foo".into()).or_default().insert("gain".into(), ParamValue::Float(6.0));
+        loaded
+            .entry("foo".into())
+            .or_default()
+            .insert("gain".into(), ParamValue::Float(6.0));
         apply_loaded(&mut store, loaded);
         // Declaration seeds default 1.0 but must keep the persisted 6.0.
         let spec = ParamSpec {
-            name: "gain".into(), label: "gain".into(),
-            kind: ParamKind::Slider { min: 0.0, max: 10.0, step: None, integer: false },
-            default: ParamValue::Float(1.0), order: 0, generation: 0,
+            name: "gain".into(),
+            label: "gain".into(),
+            kind: ParamKind::Slider {
+                min: 0.0,
+                max: 10.0,
+                step: None,
+                integer: false,
+            },
+            default: ParamValue::Float(1.0),
+            order: 0,
+            generation: 0,
         };
         let v = store.declare("foo", 1, spec).unwrap();
         assert_eq!(v, ParamValue::Float(6.0));

@@ -20,7 +20,10 @@ fn read_store() -> Arc<DataStore> {
 
 fn run(engine: &ScriptEngine, name: &str, src: &str) {
     engine
-        .send(ScriptCommand::RunScript { name: name.into(), source: src.into() })
+        .send(ScriptCommand::RunScript {
+            name: name.into(),
+            source: src.into(),
+        })
         .unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
@@ -75,8 +78,14 @@ label  = delog.text("label", "speed")
         ParamKind::Slider { integer: true, .. }
     ));
     assert_eq!(s.value("demo", "smooth"), Some(ParamValue::Bool(true)));
-    assert_eq!(s.value("demo", "mode"), Some(ParamValue::Text("lpf".into())));
-    assert_eq!(s.value("demo", "label"), Some(ParamValue::Text("speed".into())));
+    assert_eq!(
+        s.value("demo", "mode"),
+        Some(ParamValue::Text("lpf".into()))
+    );
+    assert_eq!(
+        s.value("demo", "label"),
+        Some(ParamValue::Text("speed".into()))
+    );
 
     drop(s);
     drop(engine);
@@ -99,20 +108,29 @@ fn param_read_reflects_store_edits() {
     );
 
     // First run declares and prints the current value (default 2.0).
-    run(&engine, "demo", r#"
+    run(
+        &engine,
+        "demo",
+        r#"
 gain = delog.slider("gain", 2.0, min=0.0, max=10.0)
 print(f"gain={delog.param('gain')}")
-"#);
+"#,
+    );
 
     // Simulate a UI edit.
-    store.lock().unwrap().set_value("demo", "gain", ParamValue::Float(6.0));
+    store
+        .lock()
+        .unwrap()
+        .set_value("demo", "gain", ParamValue::Float(6.0));
 
     // Re-run: the declaration keeps the edited value, and delog.param sees it.
     let mut captured = String::new();
-    engine.send(ScriptCommand::RunScript {
-        name: "demo".into(),
-        source: "print(f\"gain={delog.param('gain')}\")".into(),
-    }).unwrap();
+    engine
+        .send(ScriptCommand::RunScript {
+            name: "demo".into(),
+            source: "print(f\"gain={delog.param('gain')}\")".into(),
+        })
+        .unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     'outer: loop {
         for e in engine.drain_events() {
