@@ -149,11 +149,7 @@ fn find_topics(
     out
 }
 
-fn field_unit(
-    snapshot: &StoreSnapshot,
-    topic: TopicId,
-    field_name: &str,
-) -> Option<String> {
+fn field_unit(snapshot: &StoreSnapshot, topic: TopicId, field_name: &str) -> Option<String> {
     let store = snapshot.topic_store(topic)?;
     store.schema.field_by_name(field_name)?.unit.clone()
 }
@@ -382,8 +378,303 @@ impl Delog {
     }
 }
 
+#[pyclass(unsendable, name = "SourceRef", skip_from_py_object)]
+#[derive(Clone)]
+struct SourceRefPy {
+    #[pyo3(get)]
+    label: String,
+    #[pyo3(get)]
+    path: String,
+}
+
+#[allow(dead_code)]
+#[pyclass(unsendable, name = "TopicRef", skip_from_py_object)]
+#[derive(Clone)]
+struct TopicRefPy {
+    snapshot: Arc<StoreSnapshot>,
+    topic_id: TopicId,
+    #[pyo3(get)]
+    source: String,
+    #[pyo3(get)]
+    name: String,
+    #[pyo3(get)]
+    instance: Option<u32>,
+    #[pyo3(get)]
+    path: String,
+}
+
+#[allow(dead_code)]
+#[pyclass(unsendable, name = "FieldRef", skip_from_py_object)]
+#[derive(Clone)]
+struct FieldRefPy {
+    snapshot: Arc<StoreSnapshot>,
+    field_id: FieldId,
+    topic_id: TopicId,
+    #[pyo3(get)]
+    source: String,
+    #[pyo3(get)]
+    topic: String,
+    #[pyo3(get)]
+    name: String,
+    #[pyo3(get)]
+    unit: Option<String>,
+    #[pyo3(get)]
+    path: String,
+}
+
+#[pyclass(unsendable, name = "Catalog")]
+struct CatalogPy {
+    snapshot: Arc<StoreSnapshot>,
+}
+
+fn topic_ref(snapshot: Arc<StoreSnapshot>, m: TopicMatch) -> TopicRefPy {
+    TopicRefPy {
+        snapshot,
+        topic_id: m.topic_id,
+        source: m.source_label.clone(),
+        name: m.topic_name.clone(),
+        instance: m.instance,
+        path: format!("{}/{}", m.source_label, m.topic_name),
+    }
+}
+
+fn field_ref(snapshot: Arc<StoreSnapshot>, m: FieldMatch) -> FieldRefPy {
+    FieldRefPy {
+        snapshot,
+        field_id: m.field_id,
+        topic_id: m.topic_id,
+        source: m.source_label.clone(),
+        topic: m.topic_name.clone(),
+        name: m.field_name.clone(),
+        unit: m.unit.clone(),
+        path: format!("{}/{}/{}", m.source_label, m.topic_name, m.field_name),
+    }
+}
+
+fn candidate_topic_paths(matches: &[TopicMatch]) -> String {
+    matches
+        .iter()
+        .map(|m| format!("{}/{}", m.source_label, m.topic_name))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn candidate_field_paths(matches: &[FieldMatch]) -> String {
+    matches
+        .iter()
+        .map(|m| format!("{}/{}/{}", m.source_label, m.topic_name, m.field_name))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn unique_topic(
+    snapshot: Arc<StoreSnapshot>,
+    name: &str,
+    source: Option<&str>,
+    instance: Option<u32>,
+) -> PyResult<TopicRefPy> {
+    let matches = find_topics(&snapshot, Some(name), source, instance);
+    match matches.len() {
+        1 => Ok(topic_ref(snapshot, matches.into_iter().next().unwrap())),
+        0 => Err(pyo3::exceptions::PyKeyError::new_err(format!(
+            "topic '{name}' not found"
+        ))),
+        _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "topic '{name}' is ambiguous; candidates: {}; pass source= or instance=",
+            candidate_topic_paths(&matches)
+        ))),
+    }
+}
+
+#[pymethods]
+impl SourceRefPy {
+    fn __repr__(&self) -> String {
+        format!("SourceRef({:?})", self.label)
+    }
+}
+
+#[pymethods]
+impl TopicRefPy {
+    fn __repr__(&self) -> String {
+        format!("TopicRef({:?})", self.path)
+    }
+
+    fn fields(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
+        let out = PyList::empty(py);
+        for m in find_fields(
+            &self.snapshot,
+            Some(&self.name),
+            None,
+            Some(&self.source),
+            self.instance,
+        ) {
+            out.append(Bound::new(py, field_ref(Arc::clone(&self.snapshot), m))?)?;
+        }
+        Ok(out.unbind())
+    }
+
+    fn field(&self, name: &str) -> PyResult<FieldRefPy> {
+        let matches = find_fields(
+            &self.snapshot,
+            Some(&self.name),
+            Some(name),
+            Some(&self.source),
+            self.instance,
+        );
+        match matches.len() {
+            1 => Ok(field_ref(
+                Arc::clone(&self.snapshot),
+                matches.into_iter().next().unwrap(),
+            )),
+            0 => {
+                let available = find_fields(
+                    &self.snapshot,
+                    Some(&self.name),
+                    None,
+                    Some(&self.source),
+                    self.instance,
+                )
+                .into_iter()
+                .map(|m| m.field_name)
+                .collect::<Vec<_>>()
+                .join(", ");
+                Err(pyo3::exceptions::PyKeyError::new_err(format!(
+                    "field '{name}' not found in topic '{}'; available: {available}",
+                    self.name
+                )))
+            }
+            _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "field '{name}' in topic '{}' is ambiguous",
+                self.name
+            ))),
+        }
+    }
+}
+
+#[pymethods]
+impl FieldRefPy {
+    fn __repr__(&self) -> String {
+        format!("FieldRef({:?})", self.path)
+    }
+}
+
+#[pymethods]
+impl CatalogPy {
+    fn sources(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
+        let out = PyList::empty(py);
+        for src in self.snapshot.sources.iter().filter(|s| !s.entry.removed) {
+            out.append(Bound::new(
+                py,
+                SourceRefPy {
+                    label: src.entry.label.clone(),
+                    path: src.entry.label.clone(),
+                },
+            )?)?;
+        }
+        Ok(out.unbind())
+    }
+
+    fn topics(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
+        let out = PyList::empty(py);
+        for m in find_topics(&self.snapshot, None, None, None) {
+            out.append(Bound::new(py, topic_ref(Arc::clone(&self.snapshot), m))?)?;
+        }
+        Ok(out.unbind())
+    }
+
+    fn fields(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
+        let out = PyList::empty(py);
+        for m in find_fields(&self.snapshot, None, None, None, None) {
+            out.append(Bound::new(py, field_ref(Arc::clone(&self.snapshot), m))?)?;
+        }
+        Ok(out.unbind())
+    }
+}
+
 #[pymethods]
 impl Delog {
+    fn catalog(&self) -> CatalogPy {
+        CatalogPy {
+            snapshot: Arc::clone(&self.snapshot),
+        }
+    }
+
+    #[pyo3(signature = (name, *, source=None, instance=None))]
+    fn topic(
+        &self,
+        name: &str,
+        source: Option<&str>,
+        instance: Option<u32>,
+    ) -> PyResult<TopicRefPy> {
+        unique_topic(Arc::clone(&self.snapshot), name, source, instance)
+    }
+
+    #[pyo3(signature = (topic, field=None, *, source=None, instance=None))]
+    fn find(
+        &self,
+        topic: &str,
+        field: Option<&str>,
+        source: Option<&str>,
+        instance: Option<u32>,
+        py: Python<'_>,
+    ) -> PyResult<Py<PyAny>> {
+        if let Some(field_name) = field {
+            let matches = find_fields(
+                &self.snapshot,
+                Some(topic),
+                Some(field_name),
+                source,
+                instance,
+            );
+            return match matches.len() {
+                1 => Ok(Bound::new(
+                    py,
+                    field_ref(
+                        Arc::clone(&self.snapshot),
+                        matches.into_iter().next().unwrap(),
+                    ),
+                )?
+                .into_any()
+                .unbind()),
+                0 => Err(pyo3::exceptions::PyKeyError::new_err(format!(
+                    "field '{field_name}' not found in topic '{topic}'"
+                ))),
+                _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "field '{field_name}' in topic '{topic}' is ambiguous; candidates: {}; pass source= or instance=",
+                    candidate_field_paths(&matches)
+                ))),
+            };
+        }
+        Ok(Bound::new(
+            py,
+            unique_topic(Arc::clone(&self.snapshot), topic, source, instance)?,
+        )?
+        .into_any()
+        .unbind())
+    }
+
+    #[pyo3(signature = (topic=None, field=None, *, source=None, instance=None))]
+    fn find_all(
+        &self,
+        py: Python<'_>,
+        topic: Option<&str>,
+        field: Option<&str>,
+        source: Option<&str>,
+        instance: Option<u32>,
+    ) -> PyResult<Py<PyList>> {
+        let out = PyList::empty(py);
+        if field.is_some() {
+            for m in find_fields(&self.snapshot, topic, field, source, instance) {
+                out.append(Bound::new(py, field_ref(Arc::clone(&self.snapshot), m))?)?;
+            }
+            return Ok(out.unbind());
+        }
+        for m in find_topics(&self.snapshot, topic, source, instance) {
+            out.append(Bound::new(py, topic_ref(Arc::clone(&self.snapshot), m))?)?;
+        }
+        Ok(out.unbind())
+    }
+
     fn sources(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
         let mut paths: Vec<String> = Vec::new();
         for src in self.snapshot.sources.iter() {
@@ -528,7 +819,12 @@ impl Delog {
         let spec = ParamSpec {
             name: name.clone(),
             label: label.unwrap_or_else(|| name.clone()),
-            kind: ParamKind::Slider { min, max, step, integer },
+            kind: ParamKind::Slider {
+                min,
+                max,
+                step,
+                integer,
+            },
             default: ParamValue::Float(d),
             order: 0,
             generation: self.generation,
@@ -640,7 +936,11 @@ impl Delog {
     }
 }
 
-fn value_to_py(py: Python<'_>, value: &ParamValue, kind: Option<&ParamKind>) -> PyResult<Py<PyAny>> {
+fn value_to_py(
+    py: Python<'_>,
+    value: &ParamValue,
+    kind: Option<&ParamKind>,
+) -> PyResult<Py<PyAny>> {
     use pyo3::IntoPyObject;
     match value {
         ParamValue::Float(v) => {
