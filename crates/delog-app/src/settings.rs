@@ -57,8 +57,10 @@ pub struct AppSettings {
     pub plot: PlotDisplay,
     #[serde(default)]
     pub font: FontOverride,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub auto_open_diagnostics: bool,
+    #[serde(default)]
+    pub scripting: ScriptingSettings,
 }
 
 impl Default for AppSettings {
@@ -74,7 +76,8 @@ impl Default for AppSettings {
             scene3d: Scene3dSettings::default(),
             plot: PlotDisplay::default(),
             font: FontOverride::default(),
-            auto_open_diagnostics: true,
+            auto_open_diagnostics: false,
+            scripting: ScriptingSettings::default(),
         }
     }
 }
@@ -143,25 +146,6 @@ impl LegendPosition {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum MarkerScope {
-    #[default]
-    Global,
-    PerPane,
-}
-
-impl MarkerScope {
-    pub const ALL: [Self; 2] = [Self::Global, Self::PerPane];
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Global => "Global (shared)",
-            Self::PerPane => "Per-pane",
-        }
-    }
-}
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum MarkerDeltaReadout {
     #[default]
     Legend,
@@ -195,8 +179,6 @@ pub struct PlotDisplay {
     pub hover_opacity: f32,
     #[serde(default)]
     pub marker_delta_readout: MarkerDeltaReadout,
-    #[serde(default)]
-    pub marker_scope: MarkerScope,
     #[serde(default = "default_opacity")]
     pub marker_line_opacity: f32,
     #[serde(default = "default_marker_line_width")]
@@ -229,11 +211,10 @@ impl Default for PlotDisplay {
             hover_show_time: false,
             hover_opacity: 1.0,
             marker_delta_readout: MarkerDeltaReadout::default(),
-            marker_scope: MarkerScope::default(),
             marker_line_opacity: default_opacity(),
             marker_line_width: default_marker_line_width(),
             marker_show_label: true,
-            marker_shade_regions: false,
+            marker_shade_regions: true,
             marker_shade_opacity: default_marker_shade_opacity(),
             text_label_cap: default_text_label_cap(),
             text_labels_bottom_up: true,
@@ -280,6 +261,58 @@ impl RenderMode {
             Self::Reactive => "Reactive",
             Self::Continuous => "Continuous",
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoOpenVariables {
+    NewlyAdded,
+    EveryRun,
+    Never,
+}
+
+impl AutoOpenVariables {
+    pub const ALL: [Self; 3] = [Self::NewlyAdded, Self::EveryRun, Self::Never];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::NewlyAdded => "When a new variable is added",
+            Self::EveryRun => "On every run",
+            Self::Never => "Never",
+        }
+    }
+}
+
+impl Default for AutoOpenVariables {
+    fn default() -> Self {
+        Self::NewlyAdded
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoOpenScriptingConsole {
+    OnOutput,
+    OnErrors,
+    Never,
+}
+
+impl AutoOpenScriptingConsole {
+    pub const ALL: [Self; 3] = [Self::OnOutput, Self::OnErrors, Self::Never];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::OnOutput => "On output",
+            Self::OnErrors => "On errors",
+            Self::Never => "Never",
+        }
+    }
+}
+
+impl Default for AutoOpenScriptingConsole {
+    fn default() -> Self {
+        Self::OnErrors
     }
 }
 
@@ -443,6 +476,14 @@ impl Scene3dSettings {
     }
 }
 
+#[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ScriptingSettings {
+    #[serde(default)]
+    pub auto_open_variables: AutoOpenVariables,
+    #[serde(default)]
+    pub auto_open_console: AutoOpenScriptingConsole,
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 enum SettingsTab {
     #[default]
@@ -450,10 +491,17 @@ enum SettingsTab {
     Plots,
     Rendering,
     Scene3d,
+    Scripting,
 }
 
 impl SettingsTab {
-    const ALL: [Self; 4] = [Self::General, Self::Plots, Self::Rendering, Self::Scene3d];
+    const ALL: [Self; 5] = [
+        Self::General,
+        Self::Plots,
+        Self::Rendering,
+        Self::Scene3d,
+        Self::Scripting,
+    ];
 
     const fn label(self) -> &'static str {
         match self {
@@ -461,6 +509,7 @@ impl SettingsTab {
             Self::Plots => "Plots",
             Self::Rendering => "Rendering",
             Self::Scene3d => "3D View",
+            Self::Scripting => "Scripting",
         }
     }
 }
@@ -509,6 +558,9 @@ impl SettingsDialog {
                             }
                             SettingsTab::Scene3d => {
                                 scene3d_tab(ui, settings);
+                            }
+                            SettingsTab::Scripting => {
+                                scripting_tab(ui, settings);
                             }
                         }
                     });
@@ -657,17 +709,6 @@ fn plots_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
             ui.label("Hover background")
                 .on_hover_text("Opacity of the hover/playhead readout's background panel. 1 = solid, 0 = fully transparent.");
             ui.add(egui::Slider::new(&mut p.hover_opacity, 0.0..=1.0));
-            ui.end_row();
-
-            ui.label("Measuring marker scope")
-                .on_hover_text("Whether the measuring marker is one shared time across all plot panes (like the playhead) or independent per pane.");
-            egui::ComboBox::from_id_salt("settings-marker-scope")
-                .selected_text(p.marker_scope.label())
-                .show_ui(ui, |ui| {
-                    for s in MarkerScope::ALL {
-                        ui.selectable_value(&mut p.marker_scope, s, s.label());
-                    }
-                });
             ui.end_row();
 
             ui.label("Measuring marker readout")
@@ -858,6 +899,43 @@ fn scene3d_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
     }
 }
 
+fn scripting_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
+    let s = &mut settings.scripting;
+    ui.heading("Scripting");
+    ui.add_space(8.0);
+    egui::Grid::new("settings-scripting-grid")
+        .num_columns(2)
+        .spacing(egui::vec2(16.0, 10.0))
+        .show(ui, |ui| {
+            ui.label("Open Variables window")
+                .on_hover_text("Automatically show the Script Variables window after running a named script that declares a tunable variable.");
+            egui::ComboBox::from_id_salt("settings-auto-open-variables")
+                .selected_text(s.auto_open_variables.label())
+                .show_ui(ui, |ui| {
+                    for mode in AutoOpenVariables::ALL {
+                        ui.selectable_value(&mut s.auto_open_variables, mode, mode.label());
+                    }
+                });
+            ui.end_row();
+
+            ui.label("Open Scripting Console")
+                .on_hover_text("Automatically show the Scripting Console dock when Python output or errors are reported.");
+            egui::ComboBox::from_id_salt("settings-auto-open-scripting-console")
+                .selected_text(s.auto_open_console.label())
+                .show_ui(ui, |ui| {
+                    for mode in AutoOpenScriptingConsole::ALL {
+                        ui.selectable_value(&mut s.auto_open_console, mode, mode.label());
+                    }
+                });
+            ui.end_row();
+        });
+
+    ui.add_space(10.0);
+    if ui.button("Reset to defaults").clicked() {
+        settings.scripting = ScriptingSettings::default();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -868,7 +946,10 @@ mod tests {
             .into_iter()
             .map(SettingsTab::label)
             .collect();
-        assert_eq!(labels, ["General", "Plots", "Rendering", "3D View"]);
+        assert_eq!(
+            labels,
+            ["General", "Plots", "Rendering", "3D View", "Scripting"]
+        );
     }
 
     #[test]
@@ -880,6 +961,7 @@ mod tests {
         assert!(!p.hover_show_time);
         assert_eq!(p.legend_opacity, 1.0);
         assert_eq!(p.hover_opacity, 1.0);
+        assert!(p.marker_shade_regions);
     }
 
     #[test]
@@ -893,7 +975,6 @@ mod tests {
                 hover_show_time: false,
                 hover_opacity: 0.25,
                 marker_delta_readout: MarkerDeltaReadout::Hover,
-                marker_scope: MarkerScope::PerPane,
                 marker_line_opacity: 0.5,
                 marker_line_width: 2.0,
                 marker_show_label: false,
@@ -953,6 +1034,7 @@ mod tests {
         assert!(!s.show_fps);
         assert_eq!(s.render_mode, RenderMode::Continuous);
         assert!(s.vsync);
+        assert!(!s.auto_open_diagnostics);
     }
 
     #[test]
@@ -962,6 +1044,7 @@ mod tests {
         assert!(!s.show_fps);
         assert_eq!(s.render_mode, RenderMode::Continuous);
         assert!(s.vsync);
+        assert!(!s.auto_open_diagnostics);
         assert!(!s.live_connection.recording_enabled);
         assert!(s.live_connection.recording_dir.is_empty());
     }
@@ -1067,5 +1150,48 @@ mod tests {
     fn render_mode_labels_are_stable() {
         let labels: Vec<_> = RenderMode::ALL.into_iter().map(RenderMode::label).collect();
         assert_eq!(labels, ["Reactive", "Continuous"]);
+    }
+}
+
+#[cfg(test)]
+mod scripting_settings_tests {
+    use super::*;
+
+    #[test]
+    fn auto_open_defaults_to_newly_added() {
+        assert_eq!(AutoOpenVariables::default(), AutoOpenVariables::NewlyAdded);
+        assert_eq!(
+            AppSettings::default().scripting.auto_open_variables,
+            AutoOpenVariables::NewlyAdded
+        );
+    }
+
+    #[test]
+    fn scripting_defaults_when_absent_from_json() {
+        let s: AppSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            s.scripting.auto_open_variables,
+            AutoOpenVariables::NewlyAdded
+        );
+        assert_eq!(
+            s.scripting.auto_open_console,
+            AutoOpenScriptingConsole::OnErrors
+        );
+    }
+
+    #[test]
+    fn auto_open_round_trips_as_snake_case() {
+        let json = serde_json::to_string(&AutoOpenVariables::EveryRun).unwrap();
+        assert_eq!(json, "\"every_run\"");
+        let back: AutoOpenVariables = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, AutoOpenVariables::EveryRun);
+    }
+
+    #[test]
+    fn scripting_console_auto_open_round_trips_as_snake_case() {
+        let json = serde_json::to_string(&AutoOpenScriptingConsole::OnOutput).unwrap();
+        assert_eq!(json, "\"on_output\"");
+        let back: AutoOpenScriptingConsole = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, AutoOpenScriptingConsole::OnOutput);
     }
 }

@@ -100,6 +100,42 @@ pub fn ruler() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/ruler.svg")
 }
 
+pub fn ruler_dimension_line() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/ruler-dimension-line.svg")
+}
+
+pub fn grid_2x2_check() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/grid-2x2-check.svg")
+}
+
+pub fn mouse_pointer() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/mouse-pointer-2.svg")
+}
+
+pub fn magnet() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/magnet.svg")
+}
+
+pub fn eye_off() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/eye-off.svg")
+}
+
+pub fn dice_top_left() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/dice-top-left.svg")
+}
+
+pub fn dice_top_right() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/dice-top-right.svg")
+}
+
+pub fn dice_bottom_left() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/dice-bottom-left.svg")
+}
+
+pub fn dice_bottom_right() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/dice-bottom-right.svg")
+}
+
 pub fn crosshair() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/crosshair.svg")
 }
@@ -114,4 +150,9 @@ pub fn panel_left_close() -> ImageSource<'static> {
 
 pub fn panel_left_open() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/panel-left-open.svg")
+}
+
+#[cfg_attr(not(feature = "scripting"), allow(dead_code))]
+pub fn rotate_ccw() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/rotate-ccw.svg")
 }

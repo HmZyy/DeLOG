@@ -12,7 +12,7 @@ use crate::camera::OrbitCamera;
 use crate::gpu::{self, GpuBridge, PaneView, VehicleDraw};
 use crate::hover::{self, HoverTarget};
 use crate::legend;
-use crate::plot::{PlotPane, TraceMode, TraceRef, ViewX};
+use crate::plot::{GhostTrace, PlotPane, TraceMode, TraceRef, ViewX};
 use crate::vehicle;
 
 pub type TileTree = egui_tiles::Tree<Pane>;
@@ -145,7 +145,7 @@ impl Workspace {
         for pane in self.plot_panes_mut() {
             let ghosts = std::mem::take(&mut pane.ghosts);
             for ghost in ghosts {
-                if let Some(field) = resolve_source_agnostic(snapshot, &ghost.topic, &ghost.field) {
+                if let Some(field) = resolve_ghost(snapshot, &ghost) {
                     if !pane.traces.iter().any(|t| t.field == field) {
                         pane.traces.push(TraceRef {
                             field,
@@ -154,6 +154,7 @@ impl Workspace {
                             mode: ghost.mode,
                             visible: ghost.visible,
                         });
+                        apply_ghost_text_state(pane, &ghost, field);
                         resolved += 1;
                     }
                 } else {
@@ -172,6 +173,18 @@ impl Workspace {
                 let field = pane.traces[i].field;
                 if snapshot.is_field_live(field) {
                     i += 1;
+                } else if let Some(replacement) = resolve_recreated_script_field(snapshot, field) {
+                    if pane.traces.iter().any(|t| t.field == replacement) {
+                        pane.traces.remove(i);
+                    } else {
+                        pane.traces[i].field = replacement;
+                        rebind_text_state(pane, field, replacement);
+                        i += 1;
+                    }
+                } else if let Some(ghost) = script_ghost_from_removed_trace(snapshot, pane, i) {
+                    pane.traces.remove(i);
+                    pane.add_ghost(ghost);
+                    removed.push(field);
                 } else {
                     pane.traces.remove(i);
                     removed.push(field);
@@ -185,6 +198,46 @@ impl Workspace {
         self.plot_panes_mut()
             .next()
             .is_some_and(|pane| pane.add_trace(field))
+    }
+
+    pub fn all_plot_legends_visible(&self) -> bool {
+        self.plot_panes().all(|pane| pane.show_legend)
+    }
+
+    pub fn set_all_plot_legends(&mut self, visible: bool) {
+        for pane in self.plot_panes_mut() {
+            pane.show_legend = visible;
+        }
+    }
+
+    pub fn equalize_plot_heights(&mut self) {
+        let container_ids = self
+            .tree
+            .tiles
+            .iter()
+            .filter_map(|(id, tile)| matches!(tile, egui_tiles::Tile::Container(_)).then_some(*id))
+            .collect::<Vec<_>>();
+        for id in container_ids {
+            let Some(egui_tiles::Tile::Container(container)) = self.tree.tiles.get_mut(id) else {
+                continue;
+            };
+            match container {
+                egui_tiles::Container::Linear(linear) => {
+                    for child in linear.children.clone() {
+                        linear.shares.set_share(child, 1.0);
+                    }
+                }
+                egui_tiles::Container::Grid(grid) => {
+                    for share in &mut grid.col_shares {
+                        *share = 1.0;
+                    }
+                    for share in &mut grid.row_shares {
+                        *share = 1.0;
+                    }
+                }
+                egui_tiles::Container::Tabs(_) => {}
+            }
+        }
     }
 
     pub fn split_plot(&mut self, tile_id: egui_tiles::TileId, direction: SplitDirection) {
@@ -399,10 +452,8 @@ pub struct PlotServices<'a> {
     pub hover_mode: &'a mut delog_core::field_view::SampleMode,
     /// When set, Alt+hover holds a sample until the cursor crosses to the next.
     pub snap_playhead: &'a mut bool,
-    /// Shared marker time, used when `marker_scope` is Global; per-pane markers
-    /// live on the pane instead.
+    /// Shared measurement marker time.
     pub marker_us: &'a mut Option<i64>,
-    pub marker_scope: crate::settings::MarkerScope,
     pub render_tuning: crate::settings::RenderTuning,
     pub scene3d: crate::settings::Scene3dSettings,
     pub accent: egui::Color32,
@@ -748,6 +799,7 @@ impl Behavior<'_> {
             let (plot_rect, own_gutter) = make_plot_rect(ui, y_range, None);
             self.actions.max_y_gutter = self.actions.max_y_gutter.max(own_gutter);
             self.handle_plot_interaction(&response, plot_rect);
+            self.handle_zoom_drag(&response, plot_rect, pane);
             if plot_rect.width() > 8.0 {
                 let x_range = (*self.services.view)
                     .map(|v| v.seconds(self.services.origin_us))
@@ -763,6 +815,7 @@ impl Behavior<'_> {
             let (plot_rect, own_gutter) = make_plot_rect(ui, (0.0, 1.0), None);
             self.actions.max_y_gutter = self.actions.max_y_gutter.max(own_gutter);
             self.handle_plot_interaction(&response, plot_rect);
+            self.handle_zoom_drag(&response, plot_rect, pane);
             self.plot_context_menu(tile_id, &response, pane);
             self.plot_info_window(ui, tile_id, pane, None);
             return tile_response;
@@ -782,6 +835,7 @@ impl Behavior<'_> {
         if !marker_active {
             self.handle_plot_interaction(&response, plot_rect);
         }
+        self.handle_zoom_drag(&response, plot_rect, pane);
         // Ctrl+hover scrubs an existing marker to the cursor, with no precise
         // grab on the line needed.
         if self.marker_us(pane).is_some()
@@ -864,6 +918,29 @@ impl Behavior<'_> {
         };
 
         let pane_overlay_timer = self.services.metrics.scope("pane_overlay");
+        if let Some(anchor_us) = pane.zoom_drag_anchor_us
+            && let Some(p) = response.interact_pointer_pos()
+        {
+            let anchor_x = zoom_drag_anchor_x(view, plot_rect, anchor_us)
+                .clamp(plot_rect.left(), plot_rect.right());
+            let cursor_x = p.x.clamp(plot_rect.left(), plot_rect.right());
+            let (lo, hi) = (anchor_x.min(cursor_x), anchor_x.max(cursor_x));
+            let painter = ui.painter();
+            let shade = egui::Color32::from_black_alpha(120);
+            painter.rect_filled(
+                egui::Rect::from_min_max(plot_rect.left_top(), egui::pos2(lo, plot_rect.bottom())),
+                0.0,
+                shade,
+            );
+            painter.rect_filled(
+                egui::Rect::from_min_max(egui::pos2(hi, plot_rect.top()), plot_rect.right_bottom()),
+                0.0,
+                shade,
+            );
+            let edge = egui::Stroke::new(1.0, egui::Color32::from_white_alpha(160));
+            painter.vline(lo, plot_rect.y_range(), edge);
+            painter.vline(hi, plot_rect.y_range(), edge);
+        }
         self.plot_context_menu(tile_id, &response, pane);
 
         // Measurement marker (delta cursor): a dashed second
@@ -1026,12 +1103,6 @@ impl Behavior<'_> {
         response: &egui::Response,
         pane: &mut PlotPane,
     ) {
-        // The measurement marker drops at the current playhead time; a
-        // marker is only meaningful once there is a playhead to measure against.
-        // `has_marker` honors the Global/Per-pane scope so the toggle label and
-        // the slot it writes agree.
-        let playhead = self.services.playhead_us;
-        let has_marker = self.marker_us(pane).is_some();
         response.context_menu(|ui| {
             if ui
                 .add(egui::Button::image_and_text(
@@ -1178,49 +1249,7 @@ impl Behavior<'_> {
 
             ui.separator();
 
-            ui.checkbox(&mut pane.show_legend, "Show legend");
             ui.checkbox(&mut pane.show_tooltip, "Show tooltip");
-            ui.menu_button("Hover mode", |ui| {
-                use delog_core::field_view::SampleMode::{Linear, Next, Prev};
-                ui.radio_value(self.services.hover_mode, Prev, "Previous");
-                ui.radio_value(self.services.hover_mode, Next, "Next");
-                ui.radio_value(self.services.hover_mode, Linear, "Linear");
-            });
-            ui.checkbox(self.services.snap_playhead, "Snap")
-                .on_hover_text(
-                    "Alt+hover snaps the playhead to the nearest data point instead of moving \
-                     continuously.",
-                );
-
-            ui.separator();
-
-            // Measurement marker (delta cursor): the same slot
-            // toggles between dropping a marker at the playhead and removing it.
-            if has_marker {
-                if ui
-                    .add(egui::Button::image_and_text(
-                        menu_icon(ui, crate::icons::ban()),
-                        "Remove measuring marker",
-                    ))
-                    .clicked()
-                {
-                    self.set_marker_us(pane, None);
-                    pane.marker_drag = false;
-                    ui.close();
-                }
-            } else if ui
-                .add_enabled(
-                    playhead.is_some(),
-                    egui::Button::image_and_text(
-                        menu_icon(ui, crate::icons::ruler()),
-                        "Add measuring marker",
-                    ),
-                )
-                .clicked()
-            {
-                self.set_marker_us(pane, playhead);
-                ui.close();
-            }
 
             if ui
                 .add(egui::Button::image_and_text(
@@ -1378,22 +1407,14 @@ impl Behavior<'_> {
         *self.services.view = Some(view);
     }
 
-    /// The pane's effective marker time: the shared one in Global scope, or the
-    /// pane's own in Per-pane scope.
-    fn marker_us(&self, pane: &PlotPane) -> Option<i64> {
-        match self.services.marker_scope {
-            crate::settings::MarkerScope::Global => *self.services.marker_us,
-            crate::settings::MarkerScope::PerPane => pane.marker_us,
-        }
+    /// The effective measurement marker time is always shared across plot panes.
+    fn marker_us(&self, _pane: &PlotPane) -> Option<i64> {
+        *self.services.marker_us
     }
 
-    /// Set or clear the effective marker, writing to the shared or per-pane slot
-    /// per the scope setting.
-    fn set_marker_us(&mut self, pane: &mut PlotPane, value: Option<i64>) {
-        match self.services.marker_scope {
-            crate::settings::MarkerScope::Global => *self.services.marker_us = value,
-            crate::settings::MarkerScope::PerPane => pane.marker_us = value,
-        }
+    /// Set or clear the shared measurement marker.
+    fn set_marker_us(&mut self, _pane: &mut PlotPane, value: Option<i64>) {
+        *self.services.marker_us = value;
     }
 
     /// Drag the measurement marker line along X. A primary drag that starts
@@ -1443,6 +1464,122 @@ impl Behavior<'_> {
         }
         false
     }
+
+    /// Right-button drag zooms the shared X view to the dragged window. The
+    /// zoom applies on release; a plain right-click never sets the anchor and so
+    /// still opens the context menu.
+    fn handle_zoom_drag(
+        &mut self,
+        response: &egui::Response,
+        rect: egui::Rect,
+        pane: &mut PlotPane,
+    ) {
+        let Some(view) = *self.services.view else {
+            return;
+        };
+        if response.drag_started_by(egui::PointerButton::Secondary)
+            && let Some(p) = response.interact_pointer_pos()
+            && rect.contains(p)
+        {
+            let frac = ((p.x - rect.left()) / rect.width().max(1.0)).clamp(0.0, 1.0) as f64;
+            pane.zoom_drag_anchor_us = Some(view.min_us + (frac * view.span_us() as f64) as i64);
+        }
+        if response.drag_stopped_by(egui::PointerButton::Secondary)
+            && let Some(anchor_us) = pane.zoom_drag_anchor_us.take()
+            && let Some(p) = response.interact_pointer_pos()
+        {
+            let anchor_x = zoom_drag_anchor_x(view, rect, anchor_us);
+            if let Some(new_view) =
+                gpu::zoom_drag_view(view, rect.left(), rect.width(), anchor_x, p.x)
+            {
+                *self.services.view = Some(new_view);
+                self.actions.view_changed = true;
+            }
+        }
+    }
+}
+
+fn apply_ghost_text_state(pane: &mut PlotPane, ghost: &GhostTrace, field: FieldId) {
+    if let Some(filter) = ghost.text_filter.as_ref() {
+        pane.text_filters.insert(field, filter.clone());
+    }
+    for &(time_us, offset) in &ghost.text_offsets {
+        pane.text_offsets.insert((field, time_us), offset);
+    }
+}
+
+fn rebind_text_state(pane: &mut PlotPane, old_field: FieldId, new_field: FieldId) {
+    if let Some(filter) = pane.text_filters.remove(&old_field) {
+        pane.text_filters.insert(new_field, filter);
+    }
+
+    let offsets: Vec<_> = pane
+        .text_offsets
+        .iter()
+        .filter_map(|(&(field, time_us), &offset)| {
+            (field == old_field).then_some((time_us, offset))
+        })
+        .collect();
+    for (time_us, offset) in offsets {
+        pane.text_offsets.remove(&(old_field, time_us));
+        pane.text_offsets.insert((new_field, time_us), offset);
+    }
+}
+
+fn zoom_drag_anchor_x(view: ViewX, rect: egui::Rect, anchor_us: i64) -> f32 {
+    let frac = (anchor_us - view.min_us) as f64 / view.span_us() as f64;
+    rect.left() + frac as f32 * rect.width()
+}
+
+fn take_text_state(pane: &mut PlotPane, field: FieldId) -> (Option<String>, Vec<(i64, f32)>) {
+    let filter = pane.text_filters.remove(&field);
+    let offsets: Vec<_> = pane
+        .text_offsets
+        .iter()
+        .filter_map(|(&(offset_field, time_us), &offset)| {
+            (offset_field == field).then_some((time_us, offset))
+        })
+        .collect();
+    for &(time_us, _) in &offsets {
+        pane.text_offsets.remove(&(field, time_us));
+    }
+    (filter, offsets)
+}
+
+fn script_ghost_from_removed_trace(
+    snapshot: &StoreSnapshot,
+    pane: &mut PlotPane,
+    trace_index: usize,
+) -> Option<GhostTrace> {
+    let trace = pane.traces.get(trace_index).copied()?;
+    let field = snapshot
+        .fields
+        .get(trace.field.index())
+        .filter(|field| field.id == trace.field && field.removed)?;
+    let topic = snapshot.topic(field.topic)?;
+    let source = snapshot.source(topic.entry.source)?;
+    if !source.entry.removed || !source.entry.label.starts_with("script:") {
+        return None;
+    }
+    let (text_filter, text_offsets) = take_text_state(pane, trace.field);
+    Some(GhostTrace {
+        source: Some(source.entry.label.clone()),
+        topic: topic.entry.name.clone(),
+        field: field.name.clone(),
+        color: trace.color,
+        width_px: trace.width_px,
+        mode: trace.mode,
+        visible: trace.visible,
+        text_filter,
+        text_offsets,
+    })
+}
+
+fn resolve_ghost(snapshot: &StoreSnapshot, ghost: &GhostTrace) -> Option<FieldId> {
+    match ghost.source.as_deref() {
+        Some(source) => resolve_source_field(snapshot, source, &ghost.topic, &ghost.field),
+        None => resolve_source_agnostic(snapshot, &ghost.topic, &ghost.field),
+    }
 }
 
 fn resolve_source_agnostic(
@@ -1470,6 +1607,50 @@ fn resolve_source_agnostic(
         }
     }
     found
+}
+
+fn resolve_source_field(
+    snapshot: &StoreSnapshot,
+    source_label: &str,
+    topic_name: &str,
+    field_name: &str,
+) -> Option<FieldId> {
+    for source in snapshot
+        .sources
+        .iter()
+        .filter(|source| !source.entry.removed && source.entry.label == source_label)
+    {
+        for topic_id in source.topics.iter().copied() {
+            let topic = snapshot.topic(topic_id)?;
+            if topic.entry.removed || topic.entry.name != topic_name {
+                continue;
+            }
+            for field in snapshot
+                .fields
+                .iter()
+                .filter(|f| f.topic == topic_id && !f.removed && f.name == field_name)
+            {
+                return Some(field.id);
+            }
+        }
+    }
+    None
+}
+
+fn resolve_recreated_script_field(snapshot: &StoreSnapshot, old_field: FieldId) -> Option<FieldId> {
+    let field = snapshot
+        .fields
+        .get(old_field.index())
+        .filter(|field| field.id == old_field && field.removed)?;
+    let topic = snapshot.topic(field.topic)?;
+    let source = snapshot.source(topic.entry.source)?;
+    let source_label = source.entry.label.as_str();
+    let topic_name = topic.entry.name.as_str();
+    let field_name = field.name.as_str();
+    if !source.entry.removed || !source_label.starts_with("script:") {
+        return None;
+    }
+    resolve_source_field(snapshot, source_label, topic_name, field_name)
 }
 
 fn y_unit(snapshot: &StoreSnapshot, pane: &PlotPane) -> Option<String> {
@@ -1665,6 +1846,121 @@ mod tests {
     }
 
     #[test]
+    fn prune_removed_fields_rebinds_script_traces_to_recreated_fields() {
+        let mut identity = delog_core::identity::IdentityRegistry::new();
+        let old_source = identity.add_source("script:calc");
+        let old_topic = identity.add_topic(old_source, "Derived").unwrap();
+        let old_field = identity.add_field(old_topic, "value").unwrap();
+        identity.remove_source(old_source);
+        let new_source = identity.add_source("script:calc");
+        let new_topic = identity.add_topic(new_source, "Derived").unwrap();
+        let new_field = identity.add_field(new_topic, "value").unwrap();
+        let snapshot = StoreSnapshot::from_registry(&identity, [], 1).unwrap();
+
+        let mut workspace = Workspace::new();
+        assert!(workspace.add_trace_to_first_plot(old_field));
+        {
+            let pane = workspace.plot_panes_mut().next().unwrap();
+            let trace = pane.trace_mut(old_field).unwrap();
+            trace.color = [0.1, 0.2, 0.3, 0.4];
+            trace.width_px = 3.0;
+            trace.mode = TraceMode::Step;
+            trace.visible = false;
+            pane.text_filters.insert(old_field, "armed".into());
+            pane.text_offsets.insert((old_field, 42), 0.75);
+        }
+
+        let removed = workspace.prune_removed_fields(&snapshot);
+
+        assert!(removed.is_empty());
+        assert_eq!(workspace.fields().collect::<Vec<_>>(), vec![new_field]);
+        let pane = workspace.plot_panes().next().unwrap();
+        assert_eq!(
+            pane.traces[0],
+            TraceRef {
+                field: new_field,
+                color: [0.1, 0.2, 0.3, 0.4],
+                width_px: 3.0,
+                mode: TraceMode::Step,
+                visible: false,
+            }
+        );
+        assert_eq!(pane.text_filters.get(&new_field).unwrap(), "armed");
+        assert_eq!(pane.text_offsets.get(&(new_field, 42)), Some(&0.75));
+        assert!(!pane.text_filters.contains_key(&old_field));
+        assert!(
+            !pane
+                .text_offsets
+                .keys()
+                .any(|(field, _time)| *field == old_field)
+        );
+    }
+
+    #[test]
+    fn prune_removed_fields_keeps_script_trace_until_recreated_field_appears() {
+        let mut identity = delog_core::identity::IdentityRegistry::new();
+        let old_source = identity.add_source("script:calc");
+        let old_topic = identity.add_topic(old_source, "Derived").unwrap();
+        let old_field = identity.add_field(old_topic, "value").unwrap();
+
+        let mut workspace = Workspace::new();
+        assert!(workspace.add_trace_to_first_plot(old_field));
+        {
+            let pane = workspace.plot_panes_mut().next().unwrap();
+            let trace = pane.trace_mut(old_field).unwrap();
+            trace.color = [0.4, 0.3, 0.2, 0.1];
+            trace.width_px = 4.0;
+            trace.mode = TraceMode::Scatter;
+            trace.visible = false;
+            pane.text_filters.insert(old_field, "armed".into());
+            pane.text_offsets.insert((old_field, 42), 0.75);
+        }
+
+        identity.remove_source(old_source);
+        let removed_snapshot = StoreSnapshot::from_registry(&identity, [], 1).unwrap();
+        let removed = workspace.prune_removed_fields(&removed_snapshot);
+
+        assert_eq!(removed, vec![old_field]);
+        assert!(workspace.fields().next().is_none());
+        {
+            let pane = workspace.plot_panes().next().unwrap();
+            assert_eq!(pane.ghosts.len(), 1);
+            assert_eq!(pane.ghosts[0].source.as_deref(), Some("script:calc"));
+            assert_eq!(pane.ghosts[0].topic, "Derived");
+            assert_eq!(pane.ghosts[0].field, "value");
+            assert_eq!(pane.ghosts[0].color, [0.4, 0.3, 0.2, 0.1]);
+            assert_eq!(pane.ghosts[0].width_px, 4.0);
+            assert_eq!(pane.ghosts[0].mode, TraceMode::Scatter);
+            assert!(!pane.ghosts[0].visible);
+            assert_eq!(pane.ghosts[0].text_filter.as_deref(), Some("armed"));
+            assert_eq!(pane.ghosts[0].text_offsets, vec![(42, 0.75)]);
+        }
+
+        let new_source = identity.add_source("script:calc");
+        let new_topic = identity.add_topic(new_source, "Derived").unwrap();
+        let new_field = identity.add_field(new_topic, "value").unwrap();
+        let recreated_snapshot = StoreSnapshot::from_registry(&identity, [], 2).unwrap();
+
+        assert_eq!(workspace.resolve_ghosts(&recreated_snapshot), 1);
+
+        let pane = workspace.plot_panes().next().unwrap();
+        assert!(pane.ghosts.is_empty());
+        assert_eq!(pane.traces.len(), 1);
+        assert_eq!(
+            pane.traces[0],
+            TraceRef {
+                field: new_field,
+                color: [0.4, 0.3, 0.2, 0.1],
+                width_px: 4.0,
+                mode: TraceMode::Scatter,
+                visible: false,
+            }
+        );
+        assert_eq!(pane.text_filters.get(&new_field).unwrap(), "armed");
+        assert_eq!(pane.text_offsets.get(&(new_field, 42)), Some(&0.75));
+    }
+
+    #[test]
     fn scene_pane_toggles_a_single_instance_on_and_off() {
         fn scene_count(w: &Workspace) -> usize {
             w.tree
@@ -1746,12 +2042,15 @@ mod tests {
             panic!("root should be a plot");
         };
         pane.add_ghost(crate::plot::GhostTrace {
+            source: None,
             topic: "ATT".into(),
             field: "Roll".into(),
             color: [1.0, 0.0, 0.0, 1.0],
             width_px: 2.0,
             mode: TraceMode::Step,
             visible: false,
+            text_filter: None,
+            text_offsets: Vec::new(),
         });
 
         let mut ids = delog_core::identity::IdentityRegistry::new();
@@ -1781,12 +2080,15 @@ mod tests {
             panic!("root should be a plot");
         };
         pane.add_ghost(crate::plot::GhostTrace {
+            source: None,
             topic: "ATT".into(),
             field: "Roll".into(),
             color: [0.0, 1.0, 0.0, 1.0],
             width_px: 1.0,
             mode: TraceMode::Line,
             visible: true,
+            text_filter: None,
+            text_offsets: Vec::new(),
         });
 
         let mut ids = delog_core::identity::IdentityRegistry::new();
@@ -1911,6 +2213,199 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(workspace.plot_panes().count(), before);
+    }
+
+    #[test]
+    fn set_all_plot_legends_updates_every_plot() {
+        let mut workspace = Workspace::new();
+        let root = workspace.tree.root().unwrap();
+        workspace.split_plot(root, SplitDirection::Horizontal);
+
+        workspace.set_all_plot_legends(false);
+        assert!(workspace.plot_panes().all(|pane| !pane.show_legend));
+
+        workspace.set_all_plot_legends(true);
+        assert!(workspace.plot_panes().all(|pane| pane.show_legend));
+    }
+
+    #[test]
+    fn all_plot_legends_visible_requires_every_plot() {
+        let mut workspace = Workspace::new();
+        let root = workspace.tree.root().unwrap();
+        workspace.split_plot(root, SplitDirection::Horizontal);
+        assert!(workspace.all_plot_legends_visible());
+
+        workspace.plot_panes_mut().next().unwrap().show_legend = false;
+
+        assert!(!workspace.all_plot_legends_visible());
+    }
+
+    #[test]
+    fn equalize_plot_heights_resets_vertical_split_shares() {
+        let mut workspace = Workspace::new();
+        let root = workspace.tree.root().unwrap();
+        workspace.split_plot(root, SplitDirection::Vertical);
+        let root = workspace.tree.root().unwrap();
+        let Some(egui_tiles::Tile::Container(egui_tiles::Container::Linear(linear))) =
+            workspace.tree.tiles.get_mut(root)
+        else {
+            panic!("root should be a linear split");
+        };
+        assert_eq!(linear.dir, egui_tiles::LinearDir::Vertical);
+        let children = linear.children.clone();
+        linear.shares.set_share(children[0], 4.0);
+        linear.shares.set_share(children[1], 1.0);
+
+        workspace.equalize_plot_heights();
+
+        let Some(egui_tiles::Tile::Container(egui_tiles::Container::Linear(linear))) =
+            workspace.tree.tiles.get(root)
+        else {
+            panic!("root should remain a linear split");
+        };
+        assert_eq!(linear.shares[children[0]], 1.0);
+        assert_eq!(linear.shares[children[1]], 1.0);
+    }
+
+    #[test]
+    fn equalize_plot_heights_resets_horizontal_split_shares() {
+        let mut workspace = Workspace::new();
+        let root = workspace.tree.root().unwrap();
+        workspace.split_plot(root, SplitDirection::Horizontal);
+        let root = workspace.tree.root().unwrap();
+        let Some(egui_tiles::Tile::Container(egui_tiles::Container::Linear(linear))) =
+            workspace.tree.tiles.get_mut(root)
+        else {
+            panic!("root should be a linear split");
+        };
+        assert_eq!(linear.dir, egui_tiles::LinearDir::Horizontal);
+        let children = linear.children.clone();
+        linear.shares.set_share(children[0], 1.0);
+        linear.shares.set_share(children[1], 6.0);
+
+        workspace.equalize_plot_heights();
+
+        let Some(egui_tiles::Tile::Container(egui_tiles::Container::Linear(linear))) =
+            workspace.tree.tiles.get(root)
+        else {
+            panic!("root should remain a linear split");
+        };
+        assert_eq!(linear.shares[children[0]], 1.0);
+        assert_eq!(linear.shares[children[1]], 1.0);
+    }
+
+    #[test]
+    fn equalize_plot_heights_resets_grid_row_shares() {
+        let mut tiles = egui_tiles::Tiles::default();
+        let panes = (0..4)
+            .map(|_| tiles.insert_pane(Pane::Plot(PlotPane::default())))
+            .collect::<Vec<_>>();
+        let root = tiles.insert_container(egui_tiles::Container::new(
+            egui_tiles::ContainerKind::Grid,
+            panes,
+        ));
+        let mut workspace = Workspace {
+            tree: egui_tiles::Tree::new("plot_workspace", root, tiles),
+            focused: None,
+            shared_y_gutter: 0.0,
+            default_show_legend: true,
+        };
+        let Some(egui_tiles::Tile::Container(egui_tiles::Container::Grid(grid))) =
+            workspace.tree.tiles.get_mut(root)
+        else {
+            panic!("root should be a grid");
+        };
+        grid.row_shares = vec![3.0, 1.0];
+
+        workspace.equalize_plot_heights();
+
+        let Some(egui_tiles::Tile::Container(egui_tiles::Container::Grid(grid))) =
+            workspace.tree.tiles.get(root)
+        else {
+            panic!("root should remain a grid");
+        };
+        assert_eq!(grid.row_shares, vec![1.0, 1.0]);
+    }
+
+    #[test]
+    fn equalize_plot_heights_resets_grid_column_shares() {
+        let mut tiles = egui_tiles::Tiles::default();
+        let panes = (0..4)
+            .map(|_| tiles.insert_pane(Pane::Plot(PlotPane::default())))
+            .collect::<Vec<_>>();
+        let root = tiles.insert_container(egui_tiles::Container::new(
+            egui_tiles::ContainerKind::Grid,
+            panes,
+        ));
+        let mut workspace = Workspace {
+            tree: egui_tiles::Tree::new("plot_workspace", root, tiles),
+            focused: None,
+            shared_y_gutter: 0.0,
+            default_show_legend: true,
+        };
+        let Some(egui_tiles::Tile::Container(egui_tiles::Container::Grid(grid))) =
+            workspace.tree.tiles.get_mut(root)
+        else {
+            panic!("root should be a grid");
+        };
+        grid.col_shares = vec![1.0, 4.0];
+
+        workspace.equalize_plot_heights();
+
+        let Some(egui_tiles::Tile::Container(egui_tiles::Container::Grid(grid))) =
+            workspace.tree.tiles.get(root)
+        else {
+            panic!("root should remain a grid");
+        };
+        assert_eq!(grid.col_shares, vec![1.0, 1.0]);
+    }
+
+    #[test]
+    fn equalize_plot_heights_descends_into_multiple_columns() {
+        let mut tiles = egui_tiles::Tiles::default();
+        let left_a = tiles.insert_pane(Pane::Plot(PlotPane::default()));
+        let left_b = tiles.insert_pane(Pane::Plot(PlotPane::default()));
+        let right_a = tiles.insert_pane(Pane::Plot(PlotPane::default()));
+        let right_b = tiles.insert_pane(Pane::Plot(PlotPane::default()));
+        let left = tiles.insert_container(egui_tiles::Container::new(
+            egui_tiles::ContainerKind::Vertical,
+            vec![left_a, left_b],
+        ));
+        let right = tiles.insert_container(egui_tiles::Container::new(
+            egui_tiles::ContainerKind::Vertical,
+            vec![right_a, right_b],
+        ));
+        let root = tiles.insert_container(egui_tiles::Container::new(
+            egui_tiles::ContainerKind::Horizontal,
+            vec![left, right],
+        ));
+        let mut workspace = Workspace {
+            tree: egui_tiles::Tree::new("plot_workspace", root, tiles),
+            focused: None,
+            shared_y_gutter: 0.0,
+            default_show_legend: true,
+        };
+        for (id, first, second) in [(left, left_a, left_b), (right, right_a, right_b)] {
+            let Some(egui_tiles::Tile::Container(egui_tiles::Container::Linear(linear))) =
+                workspace.tree.tiles.get_mut(id)
+            else {
+                panic!("column should be a linear split");
+            };
+            linear.shares.set_share(first, 2.0);
+            linear.shares.set_share(second, 5.0);
+        }
+
+        workspace.equalize_plot_heights();
+
+        for (id, first, second) in [(left, left_a, left_b), (right, right_a, right_b)] {
+            let Some(egui_tiles::Tile::Container(egui_tiles::Container::Linear(linear))) =
+                workspace.tree.tiles.get(id)
+            else {
+                panic!("column should remain a linear split");
+            };
+            assert_eq!(linear.shares[first], 1.0);
+            assert_eq!(linear.shares[second], 1.0);
+        }
     }
 
     #[test]

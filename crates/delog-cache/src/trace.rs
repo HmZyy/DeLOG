@@ -283,8 +283,11 @@ impl TraceCache {
 
 /// Stretch each finite column's span to meet its right neighbour's so the
 /// shader's disjoint per-column bars touch (else a sloped signal reads dashed).
-/// Only ever grows a span (no transient hidden); `NaN` columns stay gaps.
+/// Only ever grows a span (no transient hidden). Bounded empty columns are
+/// interpolated so sparse samples still render as a connected line; leading and
+/// trailing empties stay gaps because there is no finite neighbour to bridge to.
 fn bridge_columns(mins: &mut [f32], maxs: &mut [f32]) {
+    bridge_empty_columns(mins, maxs);
     for c in 0..mins.len().saturating_sub(1) {
         let (cur_min, cur_max) = (mins[c], maxs[c]);
         let (nxt_min, nxt_max) = (mins[c + 1], maxs[c + 1]);
@@ -297,6 +300,32 @@ fn bridge_columns(mins: &mut [f32], maxs: &mut [f32]) {
             mins[c] = nxt_max;
         }
     }
+}
+
+fn bridge_empty_columns(mins: &mut [f32], maxs: &mut [f32]) {
+    let mut left = None;
+    for right in 0..mins.len() {
+        if !(mins[right].is_finite() && maxs[right].is_finite()) {
+            continue;
+        }
+        if let Some(left) = left
+            && right > left + 1
+        {
+            let span = (right - left) as f32;
+            for c in left + 1..right {
+                let t = (c - left) as f32 / span;
+                let lo = lerp(mins[left], mins[right], t);
+                let hi = lerp(maxs[left], maxs[right], t);
+                mins[c] = lo.min(hi);
+                maxs[c] = lo.max(hi);
+            }
+        }
+        left = Some(right);
+    }
+}
+
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
 }
 
 fn col_index(x: f32, x0: f32, inv: f32, width: usize) -> usize {
@@ -506,6 +535,30 @@ mod tests {
         for c in 0..3 {
             assert_eq!(cols[c * 3 + 2], cols[(c + 1) * 3 + 1], "column {c} bridges");
         }
+    }
+
+    #[test]
+    fn bridged_minmax_columns_fill_empty_columns_between_finite_samples() {
+        let (snap, field) = snapshot_with(vec![0, 4_000_000], vec![Some(100), Some(500)], 0);
+        let cache = TraceCache::build(&snap, field, 0, 0, &MetricsRegistry::new()).unwrap();
+
+        let cols = cache.minmax_columns(0.0, 5.0, 5, true);
+
+        assert_eq!(cols.len(), 15);
+        for c in 0..4 {
+            assert!(
+                cols[c * 3 + 1].is_finite(),
+                "column {c} min should be finite"
+            );
+            assert!(
+                cols[c * 3 + 2].is_finite(),
+                "column {c} max should be finite"
+            );
+        }
+        assert_eq!(cols[1], 1.0);
+        assert_eq!(cols[11], 5.0);
+        assert!((cols[4] - 2.0).abs() < 1e-6);
+        assert!((cols[7] - 3.0).abs() < 1e-6);
     }
 
     #[test]

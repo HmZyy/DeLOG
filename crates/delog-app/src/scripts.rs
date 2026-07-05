@@ -1,14 +1,18 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
+use crate::settings::AutoOpenVariables;
 use delog_core::ingest::IngestSender;
 use delog_core::metrics::MetricsRegistry;
 use delog_core::snapshot::DataStore;
 use delog_script::library::ScriptLibrary;
+use delog_script::params::{ParamSpec, ParamValue};
 use delog_script::{ScriptCommand, ScriptEngine, ScriptEvent};
 use egui_code_editor::{CodeEditor, ColorTheme, Syntax};
 
 use crate::parsers::{ParserUiAction, ParsersPanel};
+
+pub const SCRIPTING_CONSOLE_DEFAULT_HEIGHT: f32 = 240.0;
 
 enum PreparedParserCommand {
     Validation {
@@ -42,11 +46,59 @@ impl PreparedParserCommand {
     }
 }
 
+/// One script's declared params, snapshotted so the Variables window doesn't
+/// hold the store lock across egui closures.
+struct ScriptVarsView {
+    name: String,
+    has_snapshot: bool,
+    // Not read yet: reserved for a future "live params" indicator.
+    #[allow(dead_code)]
+    has_live: bool,
+    specs: Vec<ParamSpec>,
+    values: HashMap<String, ParamValue>,
+}
+
+fn should_open_variables(
+    mode: AutoOpenVariables,
+    prior: &HashSet<String>,
+    current: &HashSet<String>,
+) -> bool {
+    match mode {
+        AutoOpenVariables::Never => false,
+        AutoOpenVariables::EveryRun => !current.is_empty(),
+        AutoOpenVariables::NewlyAdded => current.difference(prior).next().is_some(),
+    }
+}
+
+struct PendingAutoOpen {
+    script: String,
+    prior_names: HashSet<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConsoleEventKind {
+    Output,
+    Error,
+}
+
+fn should_open_scripting_console(
+    mode: crate::settings::AutoOpenScriptingConsole,
+    event: ConsoleEventKind,
+) -> bool {
+    match mode {
+        crate::settings::AutoOpenScriptingConsole::OnOutput => true,
+        crate::settings::AutoOpenScriptingConsole::OnErrors => event == ConsoleEventKind::Error,
+        crate::settings::AutoOpenScriptingConsole::Never => false,
+    }
+}
+
 pub struct ScriptsPanel {
     pub open: bool,
+    pub console_open: bool,
     engine: Option<ScriptEngine>,
     library: ScriptLibrary,
     current_name: String,
+    editing_original_name: Option<String>,
     editor_text: String,
     repl_input: String,
     console: String,
@@ -55,16 +107,32 @@ pub struct ScriptsPanel {
     running: bool,
     parsers: ParsersPanel,
     deferred_parser_actions: VecDeque<ParserUiAction>,
+    params: delog_script::params::SharedParams,
+    params_file: std::path::PathBuf,
+    pub variables_open: bool,
+    pending_auto_open: Option<PendingAutoOpen>,
+    auto_open_mode: AutoOpenVariables,
 }
 
 impl ScriptsPanel {
-    pub fn new(scripts_dir: std::path::PathBuf, parsers_dir: std::path::PathBuf) -> Self {
+    pub fn new(
+        scripts_dir: std::path::PathBuf,
+        parsers_dir: std::path::PathBuf,
+        params_file: std::path::PathBuf,
+    ) -> Self {
         let library = ScriptLibrary::new(scripts_dir);
+        let params = delog_script::params::shared_empty();
+        {
+            let loaded = crate::script_params_io::load(&params_file);
+            crate::script_params_io::apply_loaded(&mut params.lock().unwrap(), loaded);
+        }
         Self {
             open: false,
+            console_open: false,
             engine: None,
             library,
             current_name: String::new(),
+            editing_original_name: None,
             editor_text: String::new(),
             repl_input: String::new(),
             console: String::new(),
@@ -73,6 +141,19 @@ impl ScriptsPanel {
             running: false,
             parsers: ParsersPanel::new(parsers_dir),
             deferred_parser_actions: VecDeque::new(),
+            params,
+            params_file,
+            variables_open: false,
+            pending_auto_open: None,
+            auto_open_mode: AutoOpenVariables::default(),
+        }
+    }
+
+    fn save_params(&self) {
+        if let Err(e) =
+            crate::script_params_io::save(&self.params_file, &self.params.lock().unwrap())
+        {
+            eprintln!("failed to save script params: {e}");
         }
     }
 
@@ -84,6 +165,10 @@ impl ScriptsPanel {
     #[allow(dead_code)]
     pub fn add(&mut self) {
         self.parsers.add_new();
+    }
+
+    pub fn open_parser_editor(&mut self) {
+        self.parsers.open_editor();
     }
 
     #[allow(dead_code)]
@@ -162,9 +247,37 @@ impl ScriptsPanel {
         match self.library.load(name) {
             Ok(source) => {
                 self.current_name = name.to_owned();
+                self.editing_original_name = Some(name.to_owned());
                 self.editor_text = source;
                 self.status = format!("editing {name}");
                 self.open = true;
+            }
+            Err(e) => self.status = format!("load failed: {e}"),
+        }
+    }
+
+    pub fn new_script(&mut self) {
+        self.current_name = "new_script".to_owned();
+        self.editing_original_name = None;
+        self.editor_text.clear();
+        self.status.clear();
+        self.open = true;
+    }
+
+    pub fn duplicate_script(&mut self, name: &str) {
+        match self.library.load(name) {
+            Ok(source) => {
+                let copy_name = available_copy_name(&self.script_names(), name);
+                match self.library.save(&copy_name, &source) {
+                    Ok(()) => {
+                        self.current_name = copy_name.clone();
+                        self.editing_original_name = Some(copy_name.clone());
+                        self.editor_text = source;
+                        self.status = format!("duplicated {name} as {copy_name}");
+                        self.open = true;
+                    }
+                    Err(e) => self.status = format!("duplicate failed: {e}"),
+                }
             }
             Err(e) => self.status = format!("load failed: {e}"),
         }
@@ -209,6 +322,14 @@ impl ScriptsPanel {
         if !self.ordinary_dispatch_enabled() {
             return self.reject_ordinary_dispatch();
         }
+        let prior_names: HashSet<String> = self
+            .params
+            .lock()
+            .unwrap()
+            .scripts
+            .get(&name)
+            .map(|sp| sp.specs.iter().map(|s| s.name.clone()).collect())
+            .unwrap_or_default();
         match self
             .engine(store, sender, metrics)
             .send(ScriptCommand::RunScript {
@@ -219,6 +340,10 @@ impl ScriptsPanel {
                 self.console.push_str(&format!("# run {name}\n"));
                 self.status = format!("running {name}");
                 self.running = true;
+                self.pending_auto_open = Some(PendingAutoOpen {
+                    script: name.clone(),
+                    prior_names,
+                });
                 true
             }
             Err(error) => {
@@ -264,8 +389,9 @@ impl ScriptsPanel {
         sender: IngestSender,
         metrics: Arc<MetricsRegistry>,
     ) -> &ScriptEngine {
+        let params = Arc::clone(&self.params);
         self.engine
-            .get_or_insert_with(|| ScriptEngine::spawn(store, sender, metrics))
+            .get_or_insert_with(|| ScriptEngine::spawn(store, sender, metrics, params))
     }
 
     /// Returns `None` rather than spawning the engine: a live transform only
@@ -276,33 +402,74 @@ impl ScriptsPanel {
         self.engine.as_ref().map(|e| e.live_batch_sender())
     }
 
-    fn drain(&mut self) {
+    fn drain(&mut self, auto_open_console: crate::settings::AutoOpenScriptingConsole) {
         let events = self
             .engine
             .as_ref()
             .map(ScriptEngine::drain_events)
             .unwrap_or_default();
         for event in events {
-            self.handle_event(event);
+            self.handle_event_with_console_policy(event, auto_open_console);
         }
     }
 
+    #[cfg(test)]
     fn handle_event(&mut self, event: ScriptEvent) {
+        self.handle_event_with_console_policy(
+            event,
+            crate::settings::AutoOpenScriptingConsole::Never,
+        );
+    }
+
+    fn handle_event_with_console_policy(
+        &mut self,
+        event: ScriptEvent,
+        auto_open_console: crate::settings::AutoOpenScriptingConsole,
+    ) {
         match event {
-            ScriptEvent::Output(s) => self.console.push_str(&s),
+            ScriptEvent::Output(s) => {
+                self.console.push_str(&s);
+                if should_open_scripting_console(auto_open_console, ConsoleEventKind::Output) {
+                    self.console_open = true;
+                }
+            }
             ScriptEvent::Result(r) => {
                 self.console.push_str(&r);
                 self.console.push('\n');
+                if should_open_scripting_console(auto_open_console, ConsoleEventKind::Output) {
+                    self.console_open = true;
+                }
             }
             ScriptEvent::Error(e) => {
                 self.console.push_str(&e);
                 self.console.push('\n');
                 self.status = "error".into();
                 self.running = false;
+                self.pending_auto_open = None;
+                if should_open_scripting_console(auto_open_console, ConsoleEventKind::Error) {
+                    self.console_open = true;
+                }
             }
             ScriptEvent::Done => {
                 self.status = "done".into();
                 self.running = false;
+                if let Some(pending) = self.pending_auto_open.take() {
+                    let current_names: HashSet<String> = self
+                        .params
+                        .lock()
+                        .unwrap()
+                        .scripts
+                        .get(&pending.script)
+                        .map(|sp| sp.specs.iter().map(|s| s.name.clone()).collect())
+                        .unwrap_or_default();
+                    if should_open_variables(
+                        self.auto_open_mode,
+                        &pending.prior_names,
+                        &current_names,
+                    ) {
+                        self.variables_open = true;
+                    }
+                }
             }
             ScriptEvent::LiveBatchProcessed => {}
             ScriptEvent::Parser(event) => self.parsers.handle_event(event),
@@ -387,8 +554,11 @@ impl ScriptsPanel {
         store: Arc<DataStore>,
         sender: IngestSender,
         metrics: Arc<MetricsRegistry>,
+        auto_open: AutoOpenVariables,
+        auto_open_console: crate::settings::AutoOpenScriptingConsole,
     ) {
-        self.drain();
+        self.auto_open_mode = auto_open;
+        self.drain(auto_open_console);
 
         for action in self.parsers.ui(ctx, self.parser_dispatch_enabled()) {
             self.queue_parser_action(action);
@@ -404,24 +574,218 @@ impl ScriptsPanel {
         // the Console window is closed.
         self.delete_confirm_ui(ctx);
 
-        if !self.open {
-            if self.should_poll_parser_events() {
-                ctx.request_repaint_after(std::time::Duration::from_millis(50));
-            }
+        self.variables_window(ctx, &store, &sender, &metrics);
+
+        if self.open {
+            let mut open = self.open;
+            egui::Window::new("Scripts")
+                .open(&mut open)
+                .collapsible(false)
+                .default_pos(ctx.content_rect().center())
+                .pivot(egui::Align2::CENTER_CENTER)
+                .default_size([720.0, 480.0])
+                .show(ctx, |ui| {
+                    self.window_contents(ui, &store, &sender, &metrics)
+                });
+            self.open = open;
+        } else if self.should_poll_parser_events() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
+
+        if self.open || self.variables_open || self.console_open {
+            ctx.request_repaint(); // keep draining engine events while open
+        }
+    }
+
+    pub fn console_dock_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        store: &Arc<DataStore>,
+        sender: &IngestSender,
+        metrics: &Arc<MetricsRegistry>,
+    ) {
+        ui.horizontal(|ui| {
+            ui.strong("Scripting Console");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Close").clicked() {
+                    self.console_open = false;
+                }
+                if ui.button("Clear").clicked() {
+                    self.console.clear();
+                }
+            });
+        });
+        ui.separator();
+        egui::Panel::bottom("scripting_console_input")
+            .resizable(false)
+            .show_inside(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(">>>");
+                    let resp = ui.add_enabled(
+                        self.ordinary_dispatch_enabled(),
+                        egui::TextEdit::singleline(&mut self.repl_input)
+                            .desired_width(f32::INFINITY),
+                    );
+                    if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        let line = std::mem::take(&mut self.repl_input);
+                        self.dispatch_eval(
+                            line,
+                            store.clone(),
+                            sender.clone(),
+                            Arc::clone(metrics),
+                        );
+                    }
+                });
+            });
+        egui::CentralPanel::default().show_inside(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    ui.monospace(self.console.as_str());
+                });
+        });
+    }
+
+    fn variables_window(
+        &mut self,
+        ctx: &egui::Context,
+        store: &Arc<DataStore>,
+        sender: &IngestSender,
+        metrics: &Arc<MetricsRegistry>,
+    ) {
+        if !self.variables_open {
             return;
         }
-        let mut open = self.open;
-        egui::Window::new("Scripts")
+        let mut open = self.variables_open;
+
+        // Snapshot the store so we don't hold the lock across egui closures.
+        let mut views: Vec<ScriptVarsView> = {
+            let s = self.params.lock().unwrap();
+            let mut v: Vec<_> = s
+                .scripts
+                .iter()
+                .filter(|(_, sp)| !sp.specs.is_empty())
+                .map(|(name, sp)| ScriptVarsView {
+                    name: name.clone(),
+                    has_snapshot: sp.has_snapshot,
+                    has_live: sp.has_live,
+                    specs: sp.specs.clone(),
+                    values: sp.values.clone(),
+                })
+                .collect();
+            v.sort_by(|a, b| a.name.cmp(&b.name));
+            v
+        };
+
+        // Edits committed this frame: (script, param, new value, has_snapshot).
+        let mut commits: Vec<(String, String, ParamValue, bool)> = Vec::new();
+        // Resets committed this frame: (script, param, has_snapshot).
+        let mut resets: Vec<(String, String, bool)> = Vec::new();
+
+        egui::Window::new("Script Variables")
             .open(&mut open)
             .collapsible(false)
             .default_pos(ctx.content_rect().center())
             .pivot(egui::Align2::CENTER_CENTER)
-            .default_size([720.0, 480.0])
+            .default_size([360.0, 420.0])
             .show(ctx, |ui| {
-                self.window_contents(ui, &store, &sender, &metrics)
+                if views.is_empty() {
+                    ui.label("No script has declared variables yet.");
+                    return;
+                }
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for view in views.iter_mut() {
+                        egui::CollapsingHeader::new(view.name.as_str())
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                egui::Grid::new(format!("vars_{}", view.name))
+                                    .num_columns(3)
+                                    .spacing([8.0, 6.0])
+                                    .show(ui, |ui| {
+                                        for spec in view.specs.iter() {
+                                            let value = view
+                                                .values
+                                                .get(&spec.name)
+                                                .cloned()
+                                                .unwrap_or_else(|| spec.default.clone());
+                                            ui.label(&spec.label);
+                                            let committed = render_param_widget(ui, spec, value);
+                                            if let Some(new_value) = committed {
+                                                commits.push((
+                                                    view.name.clone(),
+                                                    spec.name.clone(),
+                                                    new_value,
+                                                    view.has_snapshot,
+                                                ));
+                                            }
+                                            let reset =
+                                                ui
+                                                    .add(
+                                                        egui::Button::image(
+                                                            egui::Image::new(
+                                                                crate::icons::rotate_ccw(),
+                                                            )
+                                                            .fit_to_exact_size(egui::vec2(
+                                                                14.0, 14.0,
+                                                            ))
+                                                            .tint(ui.visuals().text_color()),
+                                                        )
+                                                        .frame(false),
+                                                    )
+                                                    .on_hover_text("Reset to default");
+                                            if reset.clicked() {
+                                                resets.push((
+                                                    view.name.clone(),
+                                                    spec.name.clone(),
+                                                    view.has_snapshot,
+                                                ));
+                                            }
+                                            ui.end_row();
+                                        }
+                                    });
+                            });
+                    }
+                });
             });
-        self.open = open;
-        ctx.request_repaint(); // keep draining engine events while open
+        self.variables_open = open;
+
+        if commits.is_empty() && resets.is_empty() {
+            return;
+        }
+
+        // Apply edits: write store, persist, and re-run named snapshot scripts.
+        let named: std::collections::HashSet<String> = self
+            .library
+            .list()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        let mut to_rerun: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        {
+            let mut s = self.params.lock().unwrap();
+            for (script, name, value, has_snapshot) in &commits {
+                s.set_value(script, name, value.clone());
+                if crate::script_params_io::should_rerun(*has_snapshot, named.contains(script)) {
+                    to_rerun.insert(script.clone());
+                }
+            }
+            for (script, name, has_snapshot) in &resets {
+                s.reset_value(script, name);
+                if crate::script_params_io::should_rerun(*has_snapshot, named.contains(script)) {
+                    to_rerun.insert(script.clone());
+                }
+            }
+        }
+        self.save_params();
+        for script in to_rerun {
+            self.run_named(
+                &script,
+                Arc::clone(store),
+                sender.clone(),
+                Arc::clone(metrics),
+            );
+        }
     }
 
     fn delete_confirm_ui(&mut self, ctx: &egui::Context) {
@@ -473,43 +837,11 @@ impl ScriptsPanel {
         sender: &IngestSender,
         metrics: &Arc<MetricsRegistry>,
     ) {
-        egui::Panel::bottom("scripts_repl")
+        egui::Panel::left("scripts_library_drawer")
             .resizable(true)
-            .min_size(140.0)
-            .show_inside(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("REPL:");
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if icon_btn(ui, crate::icons::trash(), "Clear console").clicked() {
-                            self.console.clear();
-                        }
-                        let resp = ui.add_enabled(
-                            self.ordinary_dispatch_enabled(),
-                            egui::TextEdit::singleline(&mut self.repl_input)
-                                .desired_width(f32::INFINITY),
-                        );
-                        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                            let line = std::mem::take(&mut self.repl_input);
-                            self.dispatch_eval(
-                                line,
-                                store.clone(),
-                                sender.clone(),
-                                Arc::clone(metrics),
-                            );
-                        }
-                    });
-                });
-                egui::ScrollArea::vertical()
-                    .stick_to_bottom(true)
-                    .show(ui, |ui| {
-                        let mut console_view = self.console.as_str();
-                        ui.add(
-                            egui::TextEdit::multiline(&mut console_view)
-                                .desired_width(f32::INFINITY)
-                                .font(egui::TextStyle::Monospace),
-                        );
-                    });
-            });
+            .default_size(180.0)
+            .size_range(140.0..=260.0)
+            .show_inside(ui, |ui| self.script_drawer(ui));
         egui::CentralPanel::default().show_inside(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.add(
@@ -527,7 +859,15 @@ impl ScriptsPanel {
                     .clicked()
                 {
                     match self.library.save(&self.current_name, &self.editor_text) {
-                        Ok(()) => self.status = format!("saved {}", self.current_name),
+                        Ok(()) => {
+                            if let Some(original) = self.editing_original_name.take() {
+                                if original != self.current_name {
+                                    let _ = self.library.delete(&original);
+                                }
+                            }
+                            self.editing_original_name = Some(self.current_name.clone());
+                            self.status = format!("saved {}", self.current_name);
+                        }
                         Err(e) => self.status = format!("save failed: {e}"),
                     }
                 }
@@ -602,8 +942,72 @@ impl ScriptsPanel {
                 .show(ui, &mut self.editor_text, &Syntax::python());
         });
     }
+
+    fn script_drawer(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.strong("Scripts");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("+ New").clicked() {
+                    self.new_script();
+                }
+            });
+        });
+        ui.separator();
+        let names = self.script_names();
+        if names.is_empty() {
+            ui.weak("No saved scripts.");
+            return;
+        }
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for name in names {
+                    ui.horizontal(|ui| {
+                        let selected = self.editing_original_name.as_deref() == Some(name.as_str());
+                        if ui
+                            .selectable_label(selected, name.as_str())
+                            .on_hover_text("Load script")
+                            .clicked()
+                        {
+                            self.edit_named(&name);
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.menu_button("...", |ui| {
+                                if ui.button("Edit").clicked() {
+                                    self.edit_named(&name);
+                                    ui.close();
+                                }
+                                if ui.button("Duplicate").clicked() {
+                                    self.duplicate_script(&name);
+                                    ui.close();
+                                }
+                                if ui.button("Remove").clicked() {
+                                    self.request_delete(&name);
+                                    ui.close();
+                                }
+                            });
+                        });
+                    });
+                }
+            });
+    }
 }
 
+fn available_copy_name(existing: &[String], name: &str) -> String {
+    let base = format!("{name}_copy");
+    if !existing.iter().any(|candidate| candidate == &base) {
+        return base;
+    }
+    for i in 2.. {
+        let candidate = format!("{base}_{i}");
+        if !existing.iter().any(|existing| existing == &candidate) {
+            return candidate;
+        }
+    }
+    unreachable!()
+}
+
+#[allow(dead_code)]
 fn icon_btn(ui: &mut egui::Ui, icon: egui::ImageSource<'static>, hover: &str) -> egui::Response {
     icon_btn_enabled(ui, true, icon, hover)
 }
@@ -621,8 +1025,83 @@ fn icon_btn_enabled(
         .on_hover_text(hover)
 }
 
+/// Render one param's widget and return `Some(new_value)` only when the edit
+/// is *committed* (slider drag released, checkbox/combo click, or Enter in a
+/// text field) — not on every intermediate change.
+fn render_param_widget(
+    ui: &mut egui::Ui,
+    spec: &ParamSpec,
+    value: ParamValue,
+) -> Option<ParamValue> {
+    use delog_script::params::ParamKind;
+    match (&spec.kind, value) {
+        (
+            ParamKind::Slider {
+                min,
+                max,
+                step,
+                integer,
+            },
+            ParamValue::Float(mut v),
+        ) => {
+            let mut slider = egui::Slider::new(&mut v, *min..=*max);
+            if *integer {
+                slider = slider.step_by(step.unwrap_or(1.0)).max_decimals(0);
+            } else if let Some(s) = step {
+                slider = slider.step_by(*s);
+            }
+            let resp = ui.add(slider);
+            // Commit at the end of a drag or on a keyboard/typed change.
+            if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
+                let out = if *integer { v.round() } else { v };
+                Some(ParamValue::Float(out))
+            } else {
+                None
+            }
+        }
+        (ParamKind::Checkbox, ParamValue::Bool(mut b)) => {
+            if ui.checkbox(&mut b, "").changed() {
+                Some(ParamValue::Bool(b))
+            } else {
+                None
+            }
+        }
+        (ParamKind::Combo { options }, ParamValue::Text(current)) => {
+            let mut selected = current.clone();
+            let mut changed = false;
+            egui::ComboBox::from_id_salt(format!("combo_{}", spec.name))
+                .selected_text(selected.clone())
+                .show_ui(ui, |ui| {
+                    for opt in options {
+                        if ui
+                            .selectable_value(&mut selected, opt.clone(), opt)
+                            .clicked()
+                        {
+                            changed = true;
+                        }
+                    }
+                });
+            changed.then_some(ParamValue::Text(selected))
+        }
+        (ParamKind::Text, ParamValue::Text(mut t)) => {
+            let resp = ui.add(egui::TextEdit::singleline(&mut t).desired_width(160.0));
+            if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                Some(ParamValue::Text(t))
+            } else {
+                None
+            }
+        }
+        // Value/kind mismatch (shouldn't happen): render nothing editable.
+        _ => {
+            ui.label("(type mismatch)");
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::path::PathBuf;
 
     use delog_core::ingest::ingest_channel;
@@ -636,7 +1115,11 @@ mod tests {
             "delog-scripts-parser-routing-{}",
             std::process::id()
         ));
-        let mut panel = ScriptsPanel::new(root.join("scripts"), root.join("parsers"));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
         panel.running = true;
         panel.status = "running console script".into();
         panel
@@ -657,12 +1140,82 @@ mod tests {
     }
 
     #[test]
+    fn console_auto_open_policy_matches_setting() {
+        assert!(should_open_scripting_console(
+            crate::settings::AutoOpenScriptingConsole::OnOutput,
+            ConsoleEventKind::Output,
+        ));
+        assert!(should_open_scripting_console(
+            crate::settings::AutoOpenScriptingConsole::OnOutput,
+            ConsoleEventKind::Error,
+        ));
+        assert!(!should_open_scripting_console(
+            crate::settings::AutoOpenScriptingConsole::OnErrors,
+            ConsoleEventKind::Output,
+        ));
+        assert!(should_open_scripting_console(
+            crate::settings::AutoOpenScriptingConsole::OnErrors,
+            ConsoleEventKind::Error,
+        ));
+        assert!(!should_open_scripting_console(
+            crate::settings::AutoOpenScriptingConsole::Never,
+            ConsoleEventKind::Error,
+        ));
+    }
+
+    #[test]
+    fn new_script_starts_named_empty_buffer_in_editor() {
+        let root =
+            std::env::temp_dir().join(format!("delog-scripts-new-buffer-{}", std::process::id()));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
+        panel.current_name = "old".into();
+        panel.editor_text = "print('old')".into();
+
+        panel.new_script();
+
+        assert_eq!(panel.current_name, "new_script");
+        assert!(panel.editor_text.is_empty());
+        assert!(panel.open);
+    }
+
+    #[test]
+    fn duplicate_script_copies_source_to_available_name_and_opens_copy() {
+        let root = std::env::temp_dir().join(format!(
+            "delog-scripts-duplicate-{}",
+            std::process::id()
+        ));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
+        panel.library.save("demo", "print('demo')").unwrap();
+        panel.library.save("demo_copy", "old copy").unwrap();
+
+        panel.duplicate_script("demo");
+
+        assert_eq!(panel.current_name, "demo_copy_2");
+        assert_eq!(panel.editing_original_name.as_deref(), Some("demo_copy_2"));
+        assert_eq!(panel.editor_text, "print('demo')");
+        assert_eq!(panel.library.load("demo_copy_2").unwrap(), "print('demo')");
+        assert!(panel.open);
+    }
+
+    #[test]
     fn parser_pending_blocks_saved_runs_and_repl_until_terminal_event() {
         let root = std::env::temp_dir().join(format!(
             "delog-scripts-shared-worker-{}",
             std::process::id()
         ));
-        let mut panel = ScriptsPanel::new(root.join("scripts"), root.join("parsers"));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
         panel.library.save("saved", "print('saved')").unwrap();
         panel
             .parsers
@@ -698,7 +1251,11 @@ mod tests {
             "delog-scripts-reverse-parser-{}",
             std::process::id()
         ));
-        let mut panel = ScriptsPanel::new(root.join("scripts"), root.join("parsers"));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
         let path = PathBuf::from("flight.raw");
         panel.running = true;
         assert!(!panel.request_open(&egui::Context::default(), "raw.py"));
@@ -735,7 +1292,11 @@ mod tests {
             "delog-scripts-reverse-validation-{}",
             std::process::id()
         ));
-        let mut panel = ScriptsPanel::new(root.join("scripts"), root.join("parsers"));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
         panel.parsers.add_new();
         let action = panel.parsers.stage_save().unwrap();
         panel.running = true;
@@ -762,7 +1323,11 @@ mod tests {
             "delog-scripts-parser-pending-{}",
             std::process::id()
         ));
-        let mut panel = ScriptsPanel::new(root.join("scripts"), root.join("parsers"));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
         panel.running = false;
         panel.parsers.add_new();
         let action = panel.parsers.stage_save().unwrap();
@@ -782,7 +1347,11 @@ mod tests {
     fn first_parse_terminal_keeps_polling_for_second_dispatch() {
         let root =
             std::env::temp_dir().join(format!("delog-scripts-parser-queue-{}", std::process::id()));
-        let mut panel = ScriptsPanel::new(root.join("scripts"), root.join("parsers"));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
         let first = PathBuf::from("first.raw");
         let second = PathBuf::from("second.raw");
         panel.parsers.mark_parse_dispatched("raw.py", &first);
@@ -814,7 +1383,8 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&root);
         std::fs::write(&root, "not a directory").unwrap();
-        let mut panel = ScriptsPanel::new(root.join("scripts"), root.clone());
+        let mut panel =
+            ScriptsPanel::new(root.join("scripts"), root.clone(), root.join("params.json"));
 
         assert!(panel.parser_names().is_err());
         assert!(panel.parser_names().is_err());
@@ -829,7 +1399,11 @@ mod tests {
             "delog-scripts-parser-dispatch-error-{}",
             std::process::id()
         ));
-        let mut panel = ScriptsPanel::new(root.join("scripts"), root.join("parsers"));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
         panel.parsers.add_new();
         panel.parsers.stage_save().unwrap();
 
@@ -850,7 +1424,11 @@ mod tests {
             "delog-scripts-parse-dispatch-error-{}",
             std::process::id()
         ));
-        let mut panel = ScriptsPanel::new(root.join("scripts"), root.join("parsers"));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
         let path = PathBuf::from("flight.raw");
 
         panel.finish_parse_dispatch("raw.py", &path, Err("disconnected".into()));
@@ -870,7 +1448,11 @@ mod tests {
             "delog-scripts-parser-cancel-error-{}",
             std::process::id()
         ));
-        let mut panel = ScriptsPanel::new(root.join("scripts"), root.join("parsers"));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
         panel
             .parsers
             .mark_parse_dispatched("raw.py", &PathBuf::from("flight.raw"));
@@ -884,5 +1466,70 @@ mod tests {
                 .join("\n")
                 .contains("pending-call queue full")
         );
+    }
+
+    #[test]
+    fn auto_open_never_stays_closed() {
+        let prior = HashSet::new();
+        let current: HashSet<String> = ["gain".into()].into_iter().collect();
+        assert!(!should_open_variables(
+            crate::settings::AutoOpenVariables::Never,
+            &prior,
+            &current
+        ));
+    }
+
+    #[test]
+    fn auto_open_every_run_opens_when_params_exist() {
+        let prior: HashSet<String> = ["gain".into()].into_iter().collect();
+        let current: HashSet<String> = ["gain".into()].into_iter().collect();
+        assert!(should_open_variables(
+            crate::settings::AutoOpenVariables::EveryRun,
+            &prior,
+            &current
+        ));
+    }
+
+    #[test]
+    fn auto_open_every_run_stays_closed_without_params() {
+        let empty = HashSet::new();
+        assert!(!should_open_variables(
+            crate::settings::AutoOpenVariables::EveryRun,
+            &empty,
+            &empty
+        ));
+    }
+
+    #[test]
+    fn auto_open_newly_added_opens_on_first_param() {
+        let prior = HashSet::new();
+        let current: HashSet<String> = ["gain".into()].into_iter().collect();
+        assert!(should_open_variables(
+            crate::settings::AutoOpenVariables::NewlyAdded,
+            &prior,
+            &current
+        ));
+    }
+
+    #[test]
+    fn auto_open_newly_added_opens_on_added_param() {
+        let prior: HashSet<String> = ["gain".into()].into_iter().collect();
+        let current: HashSet<String> = ["gain".into(), "freq".into()].into_iter().collect();
+        assert!(should_open_variables(
+            crate::settings::AutoOpenVariables::NewlyAdded,
+            &prior,
+            &current
+        ));
+    }
+
+    #[test]
+    fn auto_open_newly_added_stays_closed_on_unchanged_params() {
+        let prior: HashSet<String> = ["gain".into()].into_iter().collect();
+        let current: HashSet<String> = ["gain".into()].into_iter().collect();
+        assert!(!should_open_variables(
+            crate::settings::AutoOpenVariables::NewlyAdded,
+            &prior,
+            &current
+        ));
     }
 }
