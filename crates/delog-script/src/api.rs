@@ -188,6 +188,50 @@ fn find_fields(
     out
 }
 
+fn find_fields_in_topic(
+    snapshot: &StoreSnapshot,
+    topic_id: TopicId,
+    field: Option<&str>,
+) -> Vec<FieldMatch> {
+    let Some(topic_snapshot) = snapshot.topic(topic_id) else {
+        return Vec::new();
+    };
+    if topic_snapshot.entry.removed {
+        return Vec::new();
+    }
+    let Some(src) = snapshot
+        .sources
+        .iter()
+        .find(|src| !src.entry.removed && src.topics.iter().any(|&id| id == topic_id))
+    else {
+        return Vec::new();
+    };
+    let (base_name, instance) = parse_topic_instance(&topic_snapshot.entry.name);
+    let mut out = Vec::new();
+    for fe in snapshot.fields.iter() {
+        if fe.removed || fe.topic != topic_id {
+            continue;
+        }
+        if let Some(field) = field {
+            if fe.name != field {
+                continue;
+            }
+        }
+        out.push(FieldMatch {
+            source_id: src.entry.id,
+            source_label: src.entry.label.clone(),
+            topic_id,
+            topic_name: topic_snapshot.entry.name.clone(),
+            base_name: base_name.clone(),
+            instance,
+            field_id: fe.id,
+            field_name: fe.name.clone(),
+            unit: field_unit(snapshot, topic_id, &fe.name),
+        });
+    }
+    out
+}
+
 /// Materialize a field as `(times_us, values, strings)` by walking its chunks
 /// in time order. Concatenates chunk buffers — the one copy for script
 /// consumption.
@@ -387,7 +431,6 @@ struct SourceRefPy {
     path: String,
 }
 
-#[allow(dead_code)]
 #[pyclass(unsendable, name = "TopicRef", skip_from_py_object)]
 #[derive(Clone)]
 struct TopicRefPy {
@@ -511,39 +554,21 @@ impl TopicRefPy {
 
     fn fields(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
         let out = PyList::empty(py);
-        for m in find_fields(
-            &self.snapshot,
-            Some(&self.name),
-            None,
-            Some(&self.source),
-            self.instance,
-        ) {
+        for m in find_fields_in_topic(&self.snapshot, self.topic_id, None) {
             out.append(Bound::new(py, field_ref(Arc::clone(&self.snapshot), m))?)?;
         }
         Ok(out.unbind())
     }
 
     fn field(&self, name: &str) -> PyResult<FieldRefPy> {
-        let matches = find_fields(
-            &self.snapshot,
-            Some(&self.name),
-            Some(name),
-            Some(&self.source),
-            self.instance,
-        );
+        let matches = find_fields_in_topic(&self.snapshot, self.topic_id, Some(name));
         match matches.len() {
             1 => Ok(field_ref(
                 Arc::clone(&self.snapshot),
                 matches.into_iter().next().unwrap(),
             )),
             0 => {
-                let candidates = find_fields(
-                    &self.snapshot,
-                    Some(&self.name),
-                    None,
-                    Some(&self.source),
-                    self.instance,
-                );
+                let candidates = find_fields_in_topic(&self.snapshot, self.topic_id, None);
                 if candidates.is_empty() {
                     Err(pyo3::exceptions::PyKeyError::new_err(format!(
                         "field '{name}' not found in topic '{}'",
@@ -1169,6 +1194,66 @@ mod tests {
 
         let gps_fields = super::find_fields(&snap, Some("GPS"), Some("Alt"), Some("flight"), None);
         assert_eq!(gps_fields[0].field_id, alt);
+    }
+
+    #[test]
+    fn topic_ref_field_lookup_keeps_exact_topic_identity() {
+        let mut id = IdentityRegistry::new();
+        let src = id.add_source("flight");
+        let gps = id.add_topic(src, "GPS").unwrap();
+        let gps0 = id.add_topic_instance(src, "GPS", 0).unwrap();
+        let lat = id.add_field(gps, "Lat").unwrap();
+        let fix = id.add_field(gps0, "Fix").unwrap();
+
+        let gps_schema = Arc::new(
+            TopicSchema::new(
+                "GPS",
+                [FieldSchema::new("Lat", DataType::Float64, Some("deg"), 1.0).unwrap()],
+            )
+            .unwrap(),
+        );
+        let gps0_schema = Arc::new(
+            TopicSchema::new(
+                "GPS[0]",
+                [FieldSchema::new("Fix", DataType::Float64, None::<String>, 1.0).unwrap()],
+            )
+            .unwrap(),
+        );
+        let gps_chunk = Arc::new(
+            Chunk::try_new(
+                Int64Array::from(vec![10]),
+                vec![Arc::new(Float64Array::from(vec![1.0])) as ArrayRef],
+                &gps_schema,
+            )
+            .unwrap(),
+        );
+        let gps0_chunk = Arc::new(
+            Chunk::try_new(
+                Int64Array::from(vec![10]),
+                vec![Arc::new(Float64Array::from(vec![2.0])) as ArrayRef],
+                &gps0_schema,
+            )
+            .unwrap(),
+        );
+        let gps_store = Arc::new(TopicStore::from_chunks(gps_schema, [gps_chunk]).unwrap());
+        let gps0_store = Arc::new(TopicStore::from_chunks(gps0_schema, [gps0_chunk]).unwrap());
+        let snap = Arc::new(
+            StoreSnapshot::from_registry(&id, [(gps, gps_store), (gps0, gps0_store)], 0).unwrap(),
+        );
+
+        let gps_ref = TopicRefPy {
+            snapshot: Arc::clone(&snap),
+            topic_id: gps,
+            source: "flight".to_owned(),
+            name: "GPS".to_owned(),
+            instance: None,
+            path: "flight/GPS".to_owned(),
+        };
+
+        let lat_ref = gps_ref.field("Lat").unwrap();
+        assert_eq!(lat_ref.field_id, lat);
+        assert!(gps_ref.field("Fix").is_err());
+        assert_ne!(lat_ref.field_id, fix);
     }
 
     #[test]
