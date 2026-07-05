@@ -328,6 +328,52 @@ impl PendingTopic {
     }
 }
 
+fn parse_emit_field_entry(
+    name: &str,
+    value: &Bound<'_, PyAny>,
+    expected: usize,
+) -> PyResult<(Vec<f64>, Option<String>)> {
+    if let Ok(tuple) = value.cast::<PyTuple>() {
+        if tuple.len() != 2 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "emit field '{name}' tuple must be (values, unit)"
+            )));
+        }
+        let values: numpy::PyReadonlyArray1<f64> = tuple.get_item(0)?.extract().map_err(|_| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "emit field '{name}' values must be a 1-D float array"
+            ))
+        })?;
+        let vals = values.as_slice()?.to_vec();
+        if vals.len() != expected {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "emit field '{name}' produced {} values but topic has {expected} timestamps",
+                vals.len()
+            )));
+        }
+        let unit: Option<String> = tuple.get_item(1)?.extract().map_err(|_| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "emit field '{name}' unit must be a string or None"
+            ))
+        })?;
+        return Ok((vals, unit));
+    }
+
+    let values: numpy::PyReadonlyArray1<f64> = value.extract().map_err(|_| {
+        pyo3::exceptions::PyValueError::new_err(format!(
+            "emit field '{name}' must be values or (values, unit)"
+        ))
+    })?;
+    let vals = values.as_slice()?.to_vec();
+    if vals.len() != expected {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "emit field '{name}' produced {} values but topic has {expected} timestamps",
+            vals.len()
+        )));
+    }
+    Ok((vals, None))
+}
+
 pub type EmitBuffer = Rc<RefCell<Vec<PendingTopic>>>;
 
 /// `unsendable`: lives only on the worker thread under the GIL.
@@ -864,6 +910,32 @@ impl Delog {
             emit: Rc::clone(&self.emit),
             index: idx,
         })
+    }
+
+    fn emit(
+        &self,
+        name: &str,
+        times_us: numpy::PyReadonlyArray1<i64>,
+        fields: &Bound<'_, PyDict>,
+    ) -> PyResult<()> {
+        if fields.is_empty() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "emit topic '{name}' must contain at least one field"
+            )));
+        }
+        let times = times_us.as_slice()?.to_vec();
+        let mut topic = PendingTopic::new(name.to_owned(), times);
+        for (key, value) in fields.iter() {
+            let field_name: String = key.extract().map_err(|_| {
+                pyo3::exceptions::PyValueError::new_err("emit field names must be strings")
+            })?;
+            let (values, unit) = parse_emit_field_entry(&field_name, &value, topic.times.len())?;
+            topic
+                .add_field(field_name, values, unit)
+                .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        }
+        self.emit.borrow_mut().push(topic);
+        Ok(())
     }
 
     /// Decorator factory: returns a decorator that registers the function and
