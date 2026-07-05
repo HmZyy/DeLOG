@@ -334,6 +334,63 @@ print(",".join(str(float(v)) for v in aligned))
 }
 
 #[test]
+fn emit_helper_publishes_derived_topic() {
+    let _guard = SCRIPT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let ingestor = Ingestor::new(NullObserver);
+    let write_store = ingestor.store();
+    let (sender, receiver) = ingest_channel();
+    let ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
+
+    let engine = ScriptEngine::spawn(
+        read_store(),
+        sender.clone(),
+        Arc::new(MetricsRegistry::new()),
+        delog_script::params::shared_empty(),
+    );
+    engine
+        .send(ScriptCommand::RunScript {
+            name: "ergonomic_accel".into(),
+            source: r#"
+import numpy as np
+imu = delog.topic("IMU").read("AccX", "AccY", "AccZ")
+norm = np.sqrt(imu.AccX**2 + imu.AccY**2 + imu.AccZ**2)
+delog.emit("imu_derived", imu.t, {
+    "Acc_norm": (norm, "m/s^2"),
+})
+"#
+            .into(),
+        })
+        .unwrap();
+    wait_done(&engine);
+
+    drop(engine);
+
+    let mut snap = write_store.load();
+    for _ in 0..100 {
+        if snap.topics.iter().any(|t| t.entry.name == "imu_derived") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        snap = write_store.load();
+    }
+    let topic = snap
+        .topics
+        .iter()
+        .find(|t| t.entry.name == "imu_derived")
+        .expect("imu_derived topic emitted");
+    let store = snap.topic_store(topic.entry.id).unwrap();
+    let idx = store.schema.field_index("Acc_norm").unwrap();
+    let values = store.chunks[0].cols[idx]
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
+    assert!((values.value(0) - 5.0).abs() < 1e-9);
+
+    drop(sender);
+    let _ = ingest_thread.join();
+}
+
+#[test]
 fn discovery_missing_lookup_errors_include_candidates() {
     let _guard = SCRIPT_TEST_LOCK.lock().unwrap();
     let ingestor = Ingestor::new(NullObserver);
