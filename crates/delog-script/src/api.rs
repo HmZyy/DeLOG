@@ -537,21 +537,25 @@ impl TopicRefPy {
                 matches.into_iter().next().unwrap(),
             )),
             0 => {
-                let available = find_fields(
+                let candidates = find_fields(
                     &self.snapshot,
                     Some(&self.name),
                     None,
                     Some(&self.source),
                     self.instance,
-                )
-                .into_iter()
-                .map(|m| m.field_name)
-                .collect::<Vec<_>>()
-                .join(", ");
-                Err(pyo3::exceptions::PyKeyError::new_err(format!(
-                    "field '{name}' not found in topic '{}'; available: {available}",
-                    self.name
-                )))
+                );
+                if candidates.is_empty() {
+                    Err(pyo3::exceptions::PyKeyError::new_err(format!(
+                        "field '{name}' not found in topic '{}'",
+                        self.name
+                    )))
+                } else {
+                    Err(pyo3::exceptions::PyKeyError::new_err(format!(
+                        "field '{name}' not found in topic '{}'; candidates: {}",
+                        self.name,
+                        candidate_field_paths(&candidates)
+                    )))
+                }
             }
             _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "field '{name}' in topic '{}' is ambiguous",

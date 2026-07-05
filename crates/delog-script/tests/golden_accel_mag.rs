@@ -247,6 +247,18 @@ delog.find("IMU", "Nope")
     );
     assert!(missing_field.contains("flight/IMU/AccX"), "{missing_field}");
 
+    let missing_topic_ref_field = run_script_capture_error(
+        &engine,
+        "missing_topic_ref_field",
+        r#"
+delog.topic("IMU").field("Nope")
+"#,
+    );
+    assert!(
+        missing_topic_ref_field.contains("flight/IMU/AccX"),
+        "{missing_topic_ref_field}"
+    );
+
     drop(engine);
     drop(sender);
     let _ = ingest_thread.join();
