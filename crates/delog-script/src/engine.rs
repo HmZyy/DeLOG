@@ -18,10 +18,10 @@ use crate::api::Delog;
 use crate::custom_parser::{
     ParserOutput, emit_parser_output, parse_python_result, read_float32_file,
 };
-use crate::params::{self, SharedParams};
 use crate::live::{
     LiveBatchPy, LiveTransformBatch, LiveTransformSpec, parse_transform_result, result_to_batch,
 };
+use crate::params::{self, SharedParams};
 
 pub const LIVE_TRANSFORM_QUEUE_CAP: usize = 128;
 
@@ -50,11 +50,19 @@ fn format_pyerr(py: Python<'_>, err: &PyErr) -> String {
 pub enum ScriptCommand {
     Eval(String),
     /// On success emits one `script:<name>` source.
-    RunScript { name: String, source: String },
+    RunScript {
+        name: String,
+        source: String,
+    },
     /// Unregister the live transforms under `name` and remove their appendable
     /// `script:<name>` live-derived source.
-    UnregisterLive { name: String },
-    ValidateParser { name: String, source: String },
+    UnregisterLive {
+        name: String,
+    },
+    ValidateParser {
+        name: String,
+        source: String,
+    },
     ParseFile {
         parser_name: String,
         source: String,
@@ -604,18 +612,20 @@ fn run_one_transform(
     let materialized = LiveTransformBatch::from_parsed(&transform.spec, batch)?;
     let input_times = materialized.times.clone();
     crate::params::set_current_script(Some(transform.spec.script_name.clone()));
-    let results = Python::attach(|py| -> Result<Vec<crate::live::LiveTransformResult>, String> {
-        let py_batch = LiveBatchPy::from_materialized(py, materialized)
-            .and_then(|b| Bound::new(py, b))
-            .map_err(|e| format_pyerr(py, &e))?;
-        let ret = transform
-            .callable
-            .bind(py)
-            .call1((py_batch,))
-            .map_err(|e| format_pyerr(py, &e))?;
-        parse_transform_result(py, &transform.spec, &input_times, &ret)
-            .map_err(|e| format_pyerr(py, &e))
-    });
+    let results = Python::attach(
+        |py| -> Result<Vec<crate::live::LiveTransformResult>, String> {
+            let py_batch = LiveBatchPy::from_materialized(py, materialized)
+                .and_then(|b| Bound::new(py, b))
+                .map_err(|e| format_pyerr(py, &e))?;
+            let ret = transform
+                .callable
+                .bind(py)
+                .call1((py_batch,))
+                .map_err(|e| format_pyerr(py, &e))?;
+            parse_transform_result(py, &transform.spec, &input_times, &ret)
+                .map_err(|e| format_pyerr(py, &e))
+        },
+    );
     crate::params::set_current_script(None);
     let results = results?;
 
@@ -705,7 +715,9 @@ fn handle_command(
                     g.set_item("delog", delog).unwrap();
                     let code = std::ffi::CString::new(source.as_str()).expect("NUL checked above");
                     params::set_current_script(Some(name.clone()));
-                    let r = py.run(&code, Some(g), None).map_err(|e| format_pyerr(py, &e));
+                    let r = py
+                        .run(&code, Some(g), None)
+                        .map_err(|e| format_pyerr(py, &e));
                     params::set_current_script(None);
                     r
                 });
@@ -775,9 +787,7 @@ fn handle_command(
                                     }
                                     let mut sink = sender.file_sink();
                                     let new_id = crate::emit::emit_prepared_topics(
-                                        &mut sink,
-                                        &name,
-                                        prepared,
+                                        &mut sink, &name, prepared,
                                     );
                                     prev_sources.insert(name.clone(), new_id);
                                 }
@@ -786,10 +796,12 @@ fn handle_command(
                                 }
                             }
                         }
-                        params
-                            .lock()
-                            .unwrap()
-                            .finalize(&name, generation, declared_snapshot, declared_live);
+                        params.lock().unwrap().finalize(
+                            &name,
+                            generation,
+                            declared_snapshot,
+                            declared_live,
+                        );
                     }
                     Err(msg) => {
                         // No partial source on failure.
@@ -1146,13 +1158,12 @@ mod tests {
     #[test]
     fn print_is_captured_as_output_events() {
         let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let engine =
-            ScriptEngine::spawn(
-                Arc::new(DataStore::new()),
-                dummy_sender(),
-                test_metrics(),
-                crate::params::shared_empty(),
-            );
+        let engine = ScriptEngine::spawn(
+            Arc::new(DataStore::new()),
+            dummy_sender(),
+            test_metrics(),
+            crate::params::shared_empty(),
+        );
         let _ = engine.send(ScriptCommand::Eval("print('hello')".into()));
         let mut text = String::new();
         loop {
@@ -1171,13 +1182,12 @@ mod tests {
     #[test]
     fn eval_returns_a_result_event() {
         let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let engine =
-            ScriptEngine::spawn(
-                Arc::new(DataStore::new()),
-                dummy_sender(),
-                test_metrics(),
-                crate::params::shared_empty(),
-            );
+        let engine = ScriptEngine::spawn(
+            Arc::new(DataStore::new()),
+            dummy_sender(),
+            test_metrics(),
+            crate::params::shared_empty(),
+        );
         let _ = engine.send(ScriptCommand::Eval("1 + 1".into()));
         let mut got_result = None;
         loop {
@@ -1197,8 +1207,12 @@ mod tests {
     fn python_can_read_a_field_via_delog() {
         let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let store = test_store_with_baro_alt();
-        let engine =
-            ScriptEngine::spawn(store, dummy_sender(), test_metrics(), crate::params::shared_empty());
+        let engine = ScriptEngine::spawn(
+            store,
+            dummy_sender(),
+            test_metrics(),
+            crate::params::shared_empty(),
+        );
         let _ = engine.send(ScriptCommand::Eval(
             "float(delog.field('flight/BARO/Alt').v[0])".into(),
         ));
@@ -1345,7 +1359,8 @@ out.add_field("v", np.array([1.0, 2.0, 3.0]), unit="m")
         let (sender, receiver) = ingest_channel();
         let _ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
 
-        let engine = ScriptEngine::spawn(store, sender, test_metrics(), crate::params::shared_empty());
+        let engine =
+            ScriptEngine::spawn(store, sender, test_metrics(), crate::params::shared_empty());
 
         let script = r#"
 @delog.live_transform(
@@ -1510,13 +1525,12 @@ def split(batch):
         let write_store = ingestor.store();
         let (sender, receiver) = ingest_channel();
         let ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
-        let engine =
-            ScriptEngine::spawn(
-                Arc::new(DataStore::new()),
-                sender.clone(),
-                test_metrics(),
-                crate::params::shared_empty(),
-            );
+        let engine = ScriptEngine::spawn(
+            Arc::new(DataStore::new()),
+            sender.clone(),
+            test_metrics(),
+            crate::params::shared_empty(),
+        );
 
         let script = r#"
 @delog.live_transform(topic="A", fields=["v"], output_topic="B")
@@ -1585,13 +1599,12 @@ def f(batch):
                 where a single interpreter runs on the worker thread."]
     fn interrupt_stops_a_long_loop_with_keyboardinterrupt() {
         let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let engine =
-            ScriptEngine::spawn(
-                Arc::new(DataStore::new()),
-                dummy_sender(),
-                test_metrics(),
-                crate::params::shared_empty(),
-            );
+        let engine = ScriptEngine::spawn(
+            Arc::new(DataStore::new()),
+            dummy_sender(),
+            test_metrics(),
+            crate::params::shared_empty(),
+        );
         let _ = engine.send(ScriptCommand::Eval("while True:\n    pass".into()));
         std::thread::sleep(std::time::Duration::from_millis(200));
         engine.request_interrupt();
@@ -1617,13 +1630,12 @@ def f(batch):
         let (sender, receiver) = ingest_channel();
         let ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
 
-        let engine =
-            ScriptEngine::spawn(
-                Arc::new(DataStore::new()),
-                sender.clone(),
-                test_metrics(),
-                crate::params::shared_empty(),
-            );
+        let engine = ScriptEngine::spawn(
+            Arc::new(DataStore::new()),
+            sender.clone(),
+            test_metrics(),
+            crate::params::shared_empty(),
+        );
 
         let script = r#"
 @delog.live_transform(topic="A", fields=["v"], output_topic="B")
@@ -1737,13 +1749,12 @@ def f(batch):
     #[test]
     fn validate_parser_compiles_without_executing_source() {
         let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let engine =
-            ScriptEngine::spawn(
-                Arc::new(DataStore::new()),
-                dummy_sender(),
-                test_metrics(),
-                crate::params::shared_empty(),
-            );
+        let engine = ScriptEngine::spawn(
+            Arc::new(DataStore::new()),
+            dummy_sender(),
+            test_metrics(),
+            crate::params::shared_empty(),
+        );
         let _ = engine.send(ScriptCommand::ValidateParser {
             name: "side_effect.py".into(),
             source: "raise RuntimeError('must not run')\ndef Parse(raw_data):\n    return []\n"
@@ -1865,13 +1876,12 @@ def f(batch):
             std::process::id()
         ));
         std::fs::write(&path, 1_f32.to_ne_bytes()).unwrap();
-        let engine =
-            ScriptEngine::spawn(
-                Arc::new(DataStore::new()),
-                dummy_sender(),
-                test_metrics(),
-                crate::params::shared_empty(),
-            );
+        let engine = ScriptEngine::spawn(
+            Arc::new(DataStore::new()),
+            dummy_sender(),
+            test_metrics(),
+            crate::params::shared_empty(),
+        );
         engine
             .send(ScriptCommand::RunScript {
                 name: "ordinary".into(),
@@ -1983,13 +1993,12 @@ def f(batch):
             std::process::id()
         ));
         std::fs::write(&path, 1_f32.to_ne_bytes()).unwrap();
-        let engine =
-            ScriptEngine::spawn(
-                Arc::new(DataStore::new()),
-                dummy_sender(),
-                test_metrics(),
-                crate::params::shared_empty(),
-            );
+        let engine = ScriptEngine::spawn(
+            Arc::new(DataStore::new()),
+            dummy_sender(),
+            test_metrics(),
+            crate::params::shared_empty(),
+        );
         engine
             .send(ScriptCommand::RunScript {
                 name: "ordinary".into(),
@@ -2218,13 +2227,12 @@ def f(batch):
         let (sender, receiver) = ingest_channel();
         let ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
         let metrics = test_metrics();
-        let ordinary_engine =
-            ScriptEngine::spawn(
-                Arc::new(DataStore::new()),
-                dummy_sender(),
-                test_metrics(),
-                crate::params::shared_empty(),
-            );
+        let ordinary_engine = ScriptEngine::spawn(
+            Arc::new(DataStore::new()),
+            dummy_sender(),
+            test_metrics(),
+            crate::params::shared_empty(),
+        );
         for _ in 0..8 {
             let (event_tx, event_rx) = channel();
             let cancellation = Arc::new(Mutex::new(ParserCancellationState::default()));
