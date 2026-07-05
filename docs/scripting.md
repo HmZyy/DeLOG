@@ -671,16 +671,21 @@ out.add_field("diff", baro.v - gps_on_baro, unit="m")
 ## Bundled example scripts
 
 The [`scripts/`](../scripts/) directory ships runnable examples you can copy into
-your [script library](#the-script-library) or open in the Console:
+your [script library](#the-script-library) or open in the Console. Snapshot
+examples have two versions: `snapshot/v1` keeps the original path-string style,
+while `snapshot/v2` uses the structured lookup and emit APIs. Live examples
+currently live under `live/v1`.
 
 | Script | Kind | What it does |
 | --- | --- | --- |
-| [`vehicle_attitude_euler.py`](../scripts/vehicle_attitude_euler.py) | snapshot | Converts a PX4 `vehicle_attitude[0]` quaternion to roll/pitch/yaw. Finds the source prefix automatically so it runs on any PX4 log. |
-| [`nav_controller_output_radians.py`](../scripts/nav_controller_output_radians.py) | snapshot | Re-emits ArduPilot `NAV_CONTROLLER_OUTPUT` angles in radians, locating the topic across sources/instances. |
-| [`nav_controller_live_rad.py`](../scripts/nav_controller_live_rad.py) | live transform | The live-streaming counterpart: a `@delog.live_transform` that converts `NAV_CONTROLLER_OUTPUT` angles to radians as batches arrive. |
-| [`named_values_live_split.py`](../scripts/named_values_live_split.py) | live transform | Splits live `NAMED_VALUE_FLOAT`/`NAMED_VALUE_INT` streams into one derived topic per `name` (dynamic output topics), so named values arrive sorted by category. |
-| [`param_value_live_split.py`](../scripts/param_value_live_split.py) | live transform | Splits a live `PARAM_VALUE` stream into one derived topic per `param_id`, so each parameter's value gets its own trace. |
-| [`tunable_lowpass.py`](../scripts/tunable_lowpass.py) | live transform | An exponential low-pass filter with a slider-controlled smoothing factor. Demonstrates runtime-tweakable variables in a live transform: move the slider to change the filter coefficient live, without re-running. |
+| [`snapshot/v2/vehicle_attitude_euler.py`](../scripts/snapshot/v2/vehicle_attitude_euler.py) | snapshot | Converts a PX4 `vehicle_attitude[0]` quaternion to roll/pitch/yaw using `delog.topic(...).read(...)` and `delog.emit(...)`. |
+| [`snapshot/v2/nav_controller_output_radians.py`](../scripts/snapshot/v2/nav_controller_output_radians.py) | snapshot | Re-emits ArduPilot `NAV_CONTROLLER_OUTPUT` angles in radians using structured topic lookup and one-call emit. |
+| [`snapshot/v1/vehicle_attitude_euler.py`](../scripts/snapshot/v1/vehicle_attitude_euler.py) | snapshot | Legacy path-string version of the PX4 attitude conversion example. |
+| [`snapshot/v1/nav_controller_output_radians.py`](../scripts/snapshot/v1/nav_controller_output_radians.py) | snapshot | Legacy path-string version of the ArduPilot angle conversion example. |
+| [`live/v1/nav_controller_live_rad.py`](../scripts/live/v1/nav_controller_live_rad.py) | live transform | The live-streaming counterpart: a `@delog.live_transform` that converts `NAV_CONTROLLER_OUTPUT` angles to radians as batches arrive. |
+| [`live/v1/named_values_live_split.py`](../scripts/live/v1/named_values_live_split.py) | live transform | Splits live `NAMED_VALUE_FLOAT`/`NAMED_VALUE_INT` streams into one derived topic per `name` (dynamic output topics), so named values arrive sorted by category. |
+| [`live/v1/param_value_live_split.py`](../scripts/live/v1/param_value_live_split.py) | live transform | Splits a live `PARAM_VALUE` stream into one derived topic per `param_id`, so each parameter's value gets its own trace. |
+| [`live/v1/tunable_lowpass.py`](../scripts/live/v1/tunable_lowpass.py) | live transform | An exponential low-pass filter with a slider-controlled smoothing factor. Demonstrates runtime-tweakable variables in a live transform: move the slider to change the filter coefficient live, without re-running. |
 
 The snapshot/live pair (`nav_controller_*`) is a good side-by-side reference for
 the difference between the two execution modes.
