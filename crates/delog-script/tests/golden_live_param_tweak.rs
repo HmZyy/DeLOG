@@ -16,7 +16,11 @@ fn read_store() -> Arc<DataStore> {
     Arc::new(DataStore::from_snapshot(StoreSnapshot::empty()))
 }
 
-fn imu_batch(source: delog_core::identity::SourceId, t: i64, ax: f32) -> delog_core::ingest::ParsedBatch {
+fn imu_batch(
+    source: delog_core::identity::SourceId,
+    t: i64,
+    ax: f32,
+) -> delog_core::ingest::ParsedBatch {
     let schema = Arc::new(
         TopicSchema::new(
             "IMU",
@@ -51,33 +55,65 @@ def scale(batch):
     g = delog.param("gain")
     return {"AccX_scaled": (batch.AccX * g, "m/s^2")}
 "#;
-    engine.send(ScriptCommand::RunScript { name: "scaler".into(), source: script.into() }).unwrap();
+    engine
+        .send(ScriptCommand::RunScript {
+            name: "scaler".into(),
+            source: script.into(),
+        })
+        .unwrap();
     wait_for(&engine, ScriptEvent::Done, "Done");
 
-    let raw = { let mut s = sender.file_sink(); s.open_source("live", delog_core::ingest::SourceKind::Live) };
+    let raw = {
+        let mut s = sender.file_sink();
+        s.open_source("live", delog_core::ingest::SourceKind::Live)
+    };
 
     // Batch 1 with default gain=2.0 -> 5.0 * 2.0 = 10.0
     engine.try_send_live_batch(imu_batch(raw, 1, 5.0)).unwrap();
-    wait_for(&engine, ScriptEvent::LiveBatchProcessed, "LiveBatchProcessed");
+    wait_for(
+        &engine,
+        ScriptEvent::LiveBatchProcessed,
+        "LiveBatchProcessed",
+    );
 
     // UI edit: gain -> 3.0
-    store.lock().unwrap().set_value("scaler", "gain", ParamValue::Float(3.0));
+    store
+        .lock()
+        .unwrap()
+        .set_value("scaler", "gain", ParamValue::Float(3.0));
 
     // Batch 2 with gain=3.0 -> 5.0 * 3.0 = 15.0
     engine.try_send_live_batch(imu_batch(raw, 2, 5.0)).unwrap();
-    wait_for(&engine, ScriptEvent::LiveBatchProcessed, "LiveBatchProcessed");
+    wait_for(
+        &engine,
+        ScriptEvent::LiveBatchProcessed,
+        "LiveBatchProcessed",
+    );
 
     let snap = wait_for_topic(&write_store, "IMU_SCALED");
-    let topic = snap.topics.iter().find(|t| t.entry.name == "IMU_SCALED").unwrap();
+    let topic = snap
+        .topics
+        .iter()
+        .find(|t| t.entry.name == "IMU_SCALED")
+        .unwrap();
     let ts = snap.topic_store(topic.entry.id).unwrap();
     let idx = ts.schema.field_index("AccX_scaled").unwrap();
     // Two chunks appended (one per batch); assert the values across them.
     let mut vals = Vec::new();
     for chunk in ts.chunks.iter() {
-        let a = chunk.cols[idx].as_any().downcast_ref::<arrow::array::Float64Array>().unwrap();
-        for i in 0..a.len() { vals.push(a.value(i)); }
+        let a = chunk.cols[idx]
+            .as_any()
+            .downcast_ref::<arrow::array::Float64Array>()
+            .unwrap();
+        for i in 0..a.len() {
+            vals.push(a.value(i));
+        }
     }
-    assert_eq!(vals, vec![10.0, 15.0], "gain edit must apply to the 2nd batch");
+    assert_eq!(
+        vals,
+        vec![10.0, 15.0],
+        "gain edit must apply to the 2nd batch"
+    );
 
     drop(engine);
     drop(sender);
@@ -88,10 +124,17 @@ fn wait_for(engine: &ScriptEngine, expected: ScriptEvent, label: &str) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         for event in engine.drain_events() {
-            if event == expected { return; }
-            if let ScriptEvent::Error(err) = event { panic!("script error: {err}"); }
+            if event == expected {
+                return;
+            }
+            if let ScriptEvent::Error(err) = event {
+                panic!("script error: {err}");
+            }
         }
-        assert!(std::time::Instant::now() < deadline, "timed out waiting for {label}");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {label}"
+        );
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
 }
@@ -100,8 +143,13 @@ fn wait_for_topic(store: &DataStore, topic: &str) -> StoreSnapshot {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         let snap = store.load();
-        if snap.topics.iter().any(|t| t.entry.name == topic) { return (*snap).clone(); }
-        assert!(std::time::Instant::now() < deadline, "timed out waiting for topic {topic}");
+        if snap.topics.iter().any(|t| t.entry.name == topic) {
+            return (*snap).clone();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for topic {topic}"
+        );
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }

@@ -386,13 +386,7 @@ mod tests {
             vec![Arc::new(Float64Array::from(vec![1.0, f64::NAN, 3.0, 4.0]))];
         let (snap, ids) = snapshot_with(&fields, vec![0, 1, 2, 3], cols, 0);
         let rows = collect(&snap, &ids, 1, 2, ResampleMode::None);
-        assert_eq!(
-            rows,
-            vec![
-                (1, vec![Empty]),
-                (2, vec![Num(3.0)]),
-            ]
-        );
+        assert_eq!(rows, vec![(1, vec![Empty]), (2, vec![Num(3.0)]),]);
     }
 
     #[test]
@@ -403,13 +397,7 @@ mod tests {
             vec![Arc::new(Float64Array::from(vec![100.0, 200.0]))];
         let (snap, ids) = snapshot_with(&[f], vec![0, 1000], cols, 500);
         let rows = collect(&snap, &ids, 0, 100_000, ResampleMode::None);
-        assert_eq!(
-            rows,
-            vec![
-                (500, vec![Num(1.0)]),
-                (1500, vec![Num(2.0)]),
-            ]
-        );
+        assert_eq!(rows, vec![(500, vec![Num(1.0)]), (1500, vec![Num(2.0)]),]);
     }
 
     #[test]
@@ -440,11 +428,7 @@ mod tests {
         let rows = collect(&snap, &ids, 0, 2, ResampleMode::PrevFill);
         assert_eq!(
             rows,
-            vec![
-                (0, vec![Num(1.0)]),
-                (1, vec![Empty]),
-                (2, vec![Num(3.0)]),
-            ]
+            vec![(0, vec![Num(1.0)]), (1, vec![Empty]), (2, vec![Num(3.0)]),]
         );
     }
 
