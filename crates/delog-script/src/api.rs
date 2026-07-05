@@ -6,6 +6,7 @@ use delog_core::field_view::FieldView;
 use delog_core::field_view::array_row_as_f64;
 use delog_core::field_view::array_row_as_str;
 use delog_core::identity::FieldId;
+use delog_core::identity::{SourceId, TopicId};
 use delog_core::snapshot::StoreSnapshot;
 
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
@@ -41,6 +42,162 @@ pub fn resample_prev(src_t: &[i64], src_v: &[f64], base: &[i64]) -> Vec<f64> {
 /// `(times_us, values, strings)`; `strings` is `Some` only for Utf8/LargeUtf8
 /// fields, with null cells materialized as `""`.
 pub type MaterializedField = (Vec<i64>, Vec<f64>, Option<Vec<String>>);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) struct TopicMatch {
+    source_id: SourceId,
+    source_label: String,
+    topic_id: TopicId,
+    topic_name: String,
+    base_name: String,
+    instance: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) struct FieldMatch {
+    source_id: SourceId,
+    source_label: String,
+    topic_id: TopicId,
+    topic_name: String,
+    base_name: String,
+    instance: Option<u32>,
+    field_id: FieldId,
+    field_name: String,
+    unit: Option<String>,
+}
+
+#[allow(dead_code)]
+pub(crate) fn parse_topic_instance(name: &str) -> (String, Option<u32>) {
+    let Some(open) = name.rfind('[') else {
+        return (name.to_owned(), None);
+    };
+    if !name.ends_with(']') || open == 0 {
+        return (name.to_owned(), None);
+    }
+    let digits = &name[open + 1..name.len() - 1];
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return (name.to_owned(), None);
+    }
+    match digits.parse::<u32>() {
+        Ok(instance) => (name[..open].to_owned(), Some(instance)),
+        Err(_) => (name.to_owned(), None),
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn topic_matches(
+    topic_name: &str,
+    base_name: &str,
+    parsed_instance: Option<u32>,
+    requested_topic: Option<&str>,
+    requested_instance: Option<u32>,
+) -> bool {
+    if let Some(topic) = requested_topic {
+        if topic_name != topic && base_name != topic {
+            return false;
+        }
+    }
+    if let Some(instance) = requested_instance {
+        if parsed_instance != Some(instance) {
+            return false;
+        }
+    }
+    true
+}
+
+#[allow(dead_code)]
+pub(crate) fn find_topics(
+    snapshot: &StoreSnapshot,
+    topic: Option<&str>,
+    source: Option<&str>,
+    instance: Option<u32>,
+) -> Vec<TopicMatch> {
+    let mut out = Vec::new();
+    for src in snapshot.sources.iter() {
+        if src.entry.removed {
+            continue;
+        }
+        if let Some(source) = source {
+            if src.entry.label != source {
+                continue;
+            }
+        }
+        for &topic_id in src.topics.iter() {
+            let Some(topic_snapshot) = snapshot.topic(topic_id) else {
+                continue;
+            };
+            if topic_snapshot.entry.removed {
+                continue;
+            }
+            let (base_name, parsed_instance) = parse_topic_instance(&topic_snapshot.entry.name);
+            if !topic_matches(
+                &topic_snapshot.entry.name,
+                &base_name,
+                parsed_instance,
+                topic,
+                instance,
+            ) {
+                continue;
+            }
+            out.push(TopicMatch {
+                source_id: src.entry.id,
+                source_label: src.entry.label.clone(),
+                topic_id,
+                topic_name: topic_snapshot.entry.name.clone(),
+                base_name,
+                instance: parsed_instance,
+            });
+        }
+    }
+    out
+}
+
+#[allow(dead_code)]
+pub(crate) fn field_unit(
+    snapshot: &StoreSnapshot,
+    topic: TopicId,
+    field_name: &str,
+) -> Option<String> {
+    let store = snapshot.topic_store(topic)?;
+    store.schema.field_by_name(field_name)?.unit.clone()
+}
+
+#[allow(dead_code)]
+pub(crate) fn find_fields(
+    snapshot: &StoreSnapshot,
+    topic: Option<&str>,
+    field: Option<&str>,
+    source: Option<&str>,
+    instance: Option<u32>,
+) -> Vec<FieldMatch> {
+    let mut out = Vec::new();
+    for topic_match in find_topics(snapshot, topic, source, instance) {
+        for fe in snapshot.fields.iter() {
+            if fe.removed || fe.topic != topic_match.topic_id {
+                continue;
+            }
+            if let Some(field) = field {
+                if fe.name != field {
+                    continue;
+                }
+            }
+            out.push(FieldMatch {
+                source_id: topic_match.source_id,
+                source_label: topic_match.source_label.clone(),
+                topic_id: topic_match.topic_id,
+                topic_name: topic_match.topic_name.clone(),
+                base_name: topic_match.base_name.clone(),
+                instance: topic_match.instance,
+                field_id: fe.id,
+                field_name: fe.name.clone(),
+                unit: field_unit(snapshot, topic_match.topic_id, &fe.name),
+            });
+        }
+    }
+    out
+}
 
 /// Materialize a field as `(times_us, values, strings)` by walking its chunks
 /// in time order. Concatenates chunk buffers — the one copy for script
@@ -597,6 +754,104 @@ mod tests {
     use delog_core::identity::IdentityRegistry;
     use delog_core::schema::{FieldSchema, TopicSchema};
     use delog_core::store::TopicStore;
+
+    #[test]
+    fn parse_topic_instance_suffixes() {
+        assert_eq!(super::parse_topic_instance("IMU"), ("IMU".to_owned(), None));
+        assert_eq!(
+            super::parse_topic_instance("IMU[0]"),
+            ("IMU".to_owned(), Some(0))
+        );
+        assert_eq!(
+            super::parse_topic_instance("vehicle_attitude[12]"),
+            ("vehicle_attitude".to_owned(), Some(12))
+        );
+        assert_eq!(
+            super::parse_topic_instance("NAMED_VALUE_FLOAT/airspd"),
+            ("NAMED_VALUE_FLOAT/airspd".to_owned(), None)
+        );
+        assert_eq!(
+            super::parse_topic_instance("bad[x]"),
+            ("bad[x]".to_owned(), None)
+        );
+        assert_eq!(
+            super::parse_topic_instance("bad[]"),
+            ("bad[]".to_owned(), None)
+        );
+    }
+
+    #[test]
+    fn snapshot_lookup_finds_topics_and_fields() {
+        let mut id = IdentityRegistry::new();
+        let src = id.add_source("flight");
+        let imu = id.add_topic_instance(src, "IMU", 0).unwrap();
+        let gps = id.add_topic(src, "GPS").unwrap();
+        let accx = id.add_field(imu, "AccX").unwrap();
+        let accy = id.add_field(imu, "AccY").unwrap();
+        let alt = id.add_field(gps, "Alt").unwrap();
+
+        let imu_schema = Arc::new(
+            TopicSchema::new(
+                "IMU[0]",
+                [
+                    FieldSchema::new("AccX", DataType::Float64, Some("m/s^2"), 1.0).unwrap(),
+                    FieldSchema::new("AccY", DataType::Float64, Some("m/s^2"), 1.0).unwrap(),
+                ],
+            )
+            .unwrap(),
+        );
+        let gps_schema = Arc::new(
+            TopicSchema::new(
+                "GPS",
+                [FieldSchema::new("Alt", DataType::Float64, Some("m"), 1.0).unwrap()],
+            )
+            .unwrap(),
+        );
+        let imu_chunk = Arc::new(
+            Chunk::try_new(
+                Int64Array::from(vec![10]),
+                vec![
+                    Arc::new(Float64Array::from(vec![1.0])) as ArrayRef,
+                    Arc::new(Float64Array::from(vec![2.0])) as ArrayRef,
+                ],
+                &imu_schema,
+            )
+            .unwrap(),
+        );
+        let gps_chunk = Arc::new(
+            Chunk::try_new(
+                Int64Array::from(vec![10]),
+                vec![Arc::new(Float64Array::from(vec![100.0])) as ArrayRef],
+                &gps_schema,
+            )
+            .unwrap(),
+        );
+        let imu_store = Arc::new(TopicStore::from_chunks(imu_schema, [imu_chunk]).unwrap());
+        let gps_store = Arc::new(TopicStore::from_chunks(gps_schema, [gps_chunk]).unwrap());
+        let snap =
+            StoreSnapshot::from_registry(&id, [(imu, imu_store), (gps, gps_store)], 0).unwrap();
+
+        let topics = super::find_topics(&snap, Some("IMU"), None, Some(0));
+        assert_eq!(topics.len(), 1);
+        assert_eq!(topics[0].topic_id, imu);
+        assert_eq!(topics[0].source_label, "flight");
+        assert_eq!(topics[0].topic_name, "IMU[0]");
+        assert_eq!(topics[0].base_name, "IMU");
+        assert_eq!(topics[0].instance, Some(0));
+
+        let fields = super::find_fields(&snap, Some("IMU"), Some("AccX"), None, Some(0));
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].field_id, accx);
+        assert_eq!(fields[0].field_name, "AccX");
+        assert_eq!(fields[0].unit.as_deref(), Some("m/s^2"));
+
+        let all_fields = super::find_fields(&snap, Some("IMU"), None, None, Some(0));
+        let ids: Vec<_> = all_fields.iter().map(|m| m.field_id).collect();
+        assert_eq!(ids, vec![accx, accy]);
+
+        let gps_fields = super::find_fields(&snap, Some("GPS"), Some("Alt"), Some("flight"), None);
+        assert_eq!(gps_fields[0].field_id, alt);
+    }
 
     #[test]
     fn materialize_field_concatenates_chunks_in_time_order() {
