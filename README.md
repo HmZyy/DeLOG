@@ -54,9 +54,11 @@ cargo run -p delog-app
 cargo run -p delog-app --no-default-features
 ```
 
-Scripting embeds CPython via `pyo3`, so the default build needs a Python 3 toolchain
-(interpreter + dev headers). Disabling the default feature drops that requirement entirely.
-See [docs/scripting.md](docs/scripting.md#enabling-scripting) for interpreter-pinning tips.
+Scripting embeds CPython via `pyo3`, so the default build needs
+[Python 3.12.3](https://www.python.org/downloads/release/python-3123/) plus
+the matching development headers. Disabling the default feature drops that
+requirement entirely. See [docs/scripting.md](docs/scripting.md#enabling-scripting)
+for interpreter-pinning tips.
 
 ## Scripting (overview)
 
