@@ -44,8 +44,7 @@ pub fn resample_prev(src_t: &[i64], src_v: &[f64], base: &[i64]) -> Vec<f64> {
 pub type MaterializedField = (Vec<i64>, Vec<f64>, Option<Vec<String>>);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
-pub(crate) struct TopicMatch {
+struct TopicMatch {
     source_id: SourceId,
     source_label: String,
     topic_id: TopicId,
@@ -55,8 +54,7 @@ pub(crate) struct TopicMatch {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
-pub(crate) struct FieldMatch {
+struct FieldMatch {
     source_id: SourceId,
     source_label: String,
     topic_id: TopicId,
@@ -68,8 +66,7 @@ pub(crate) struct FieldMatch {
     unit: Option<String>,
 }
 
-#[allow(dead_code)]
-pub(crate) fn parse_topic_instance(name: &str) -> (String, Option<u32>) {
+fn parse_topic_instance(name: &str) -> (String, Option<u32>) {
     let Some(open) = name.rfind('[') else {
         return (name.to_owned(), None);
     };
@@ -86,8 +83,7 @@ pub(crate) fn parse_topic_instance(name: &str) -> (String, Option<u32>) {
     }
 }
 
-#[allow(dead_code)]
-pub(crate) fn topic_matches(
+fn topic_matches(
     topic_name: &str,
     base_name: &str,
     parsed_instance: Option<u32>,
@@ -107,8 +103,7 @@ pub(crate) fn topic_matches(
     true
 }
 
-#[allow(dead_code)]
-pub(crate) fn find_topics(
+fn find_topics(
     snapshot: &StoreSnapshot,
     topic: Option<&str>,
     source: Option<&str>,
@@ -154,8 +149,7 @@ pub(crate) fn find_topics(
     out
 }
 
-#[allow(dead_code)]
-pub(crate) fn field_unit(
+fn field_unit(
     snapshot: &StoreSnapshot,
     topic: TopicId,
     field_name: &str,
@@ -164,8 +158,7 @@ pub(crate) fn field_unit(
     store.schema.field_by_name(field_name)?.unit.clone()
 }
 
-#[allow(dead_code)]
-pub(crate) fn find_fields(
+fn find_fields(
     snapshot: &StoreSnapshot,
     topic: Option<&str>,
     field: Option<&str>,
