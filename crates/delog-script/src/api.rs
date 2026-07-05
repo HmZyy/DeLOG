@@ -6,11 +6,14 @@ use delog_core::field_view::FieldView;
 use delog_core::field_view::array_row_as_f64;
 use delog_core::field_view::array_row_as_str;
 use delog_core::identity::FieldId;
+use delog_core::identity::{SourceId, TopicId};
 use delog_core::snapshot::StoreSnapshot;
 
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use pyo3::types::PyList;
+use pyo3::types::PyTuple;
 
 use crate::live::LiveTransformSpec;
 use crate::params::{ParamKind, ParamSpec, ParamValue, SharedParams};
@@ -41,6 +44,195 @@ pub fn resample_prev(src_t: &[i64], src_v: &[f64], base: &[i64]) -> Vec<f64> {
 /// `(times_us, values, strings)`; `strings` is `Some` only for Utf8/LargeUtf8
 /// fields, with null cells materialized as `""`.
 pub type MaterializedField = (Vec<i64>, Vec<f64>, Option<Vec<String>>);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TopicMatch {
+    source_id: SourceId,
+    source_label: String,
+    topic_id: TopicId,
+    topic_name: String,
+    base_name: String,
+    instance: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FieldMatch {
+    source_id: SourceId,
+    source_label: String,
+    topic_id: TopicId,
+    topic_name: String,
+    base_name: String,
+    instance: Option<u32>,
+    field_id: FieldId,
+    field_name: String,
+    unit: Option<String>,
+}
+
+fn parse_topic_instance(name: &str) -> (String, Option<u32>) {
+    let Some(open) = name.rfind('[') else {
+        return (name.to_owned(), None);
+    };
+    if !name.ends_with(']') || open == 0 {
+        return (name.to_owned(), None);
+    }
+    let digits = &name[open + 1..name.len() - 1];
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return (name.to_owned(), None);
+    }
+    match digits.parse::<u32>() {
+        Ok(instance) => (name[..open].to_owned(), Some(instance)),
+        Err(_) => (name.to_owned(), None),
+    }
+}
+
+fn topic_matches(
+    topic_name: &str,
+    base_name: &str,
+    parsed_instance: Option<u32>,
+    requested_topic: Option<&str>,
+    requested_instance: Option<u32>,
+) -> bool {
+    if let Some(topic) = requested_topic {
+        if topic_name != topic && base_name != topic {
+            return false;
+        }
+    }
+    if let Some(instance) = requested_instance {
+        if parsed_instance != Some(instance) {
+            return false;
+        }
+    }
+    true
+}
+
+fn find_topics(
+    snapshot: &StoreSnapshot,
+    topic: Option<&str>,
+    source: Option<&str>,
+    instance: Option<u32>,
+) -> Vec<TopicMatch> {
+    let mut out = Vec::new();
+    for src in snapshot.sources.iter() {
+        if src.entry.removed {
+            continue;
+        }
+        if let Some(source) = source {
+            if src.entry.label != source {
+                continue;
+            }
+        }
+        for &topic_id in src.topics.iter() {
+            let Some(topic_snapshot) = snapshot.topic(topic_id) else {
+                continue;
+            };
+            if topic_snapshot.entry.removed {
+                continue;
+            }
+            let (base_name, parsed_instance) = parse_topic_instance(&topic_snapshot.entry.name);
+            if !topic_matches(
+                &topic_snapshot.entry.name,
+                &base_name,
+                parsed_instance,
+                topic,
+                instance,
+            ) {
+                continue;
+            }
+            out.push(TopicMatch {
+                source_id: src.entry.id,
+                source_label: src.entry.label.clone(),
+                topic_id,
+                topic_name: topic_snapshot.entry.name.clone(),
+                base_name,
+                instance: parsed_instance,
+            });
+        }
+    }
+    out
+}
+
+fn field_unit(snapshot: &StoreSnapshot, topic: TopicId, field_name: &str) -> Option<String> {
+    let store = snapshot.topic_store(topic)?;
+    store.schema.field_by_name(field_name)?.unit.clone()
+}
+
+fn find_fields(
+    snapshot: &StoreSnapshot,
+    topic: Option<&str>,
+    field: Option<&str>,
+    source: Option<&str>,
+    instance: Option<u32>,
+) -> Vec<FieldMatch> {
+    let mut out = Vec::new();
+    for topic_match in find_topics(snapshot, topic, source, instance) {
+        for fe in snapshot.fields.iter() {
+            if fe.removed || fe.topic != topic_match.topic_id {
+                continue;
+            }
+            if let Some(field) = field {
+                if fe.name != field {
+                    continue;
+                }
+            }
+            out.push(FieldMatch {
+                source_id: topic_match.source_id,
+                source_label: topic_match.source_label.clone(),
+                topic_id: topic_match.topic_id,
+                topic_name: topic_match.topic_name.clone(),
+                base_name: topic_match.base_name.clone(),
+                instance: topic_match.instance,
+                field_id: fe.id,
+                field_name: fe.name.clone(),
+                unit: field_unit(snapshot, topic_match.topic_id, &fe.name),
+            });
+        }
+    }
+    out
+}
+
+fn find_fields_in_topic(
+    snapshot: &StoreSnapshot,
+    topic_id: TopicId,
+    field: Option<&str>,
+) -> Vec<FieldMatch> {
+    let Some(topic_snapshot) = snapshot.topic(topic_id) else {
+        return Vec::new();
+    };
+    if topic_snapshot.entry.removed {
+        return Vec::new();
+    }
+    let Some(src) = snapshot
+        .sources
+        .iter()
+        .find(|src| !src.entry.removed && src.topics.iter().any(|&id| id == topic_id))
+    else {
+        return Vec::new();
+    };
+    let (base_name, instance) = parse_topic_instance(&topic_snapshot.entry.name);
+    let mut out = Vec::new();
+    for fe in snapshot.fields.iter() {
+        if fe.removed || fe.topic != topic_id {
+            continue;
+        }
+        if let Some(field) = field {
+            if fe.name != field {
+                continue;
+            }
+        }
+        out.push(FieldMatch {
+            source_id: src.entry.id,
+            source_label: src.entry.label.clone(),
+            topic_id,
+            topic_name: topic_snapshot.entry.name.clone(),
+            base_name: base_name.clone(),
+            instance,
+            field_id: fe.id,
+            field_name: fe.name.clone(),
+            unit: field_unit(snapshot, topic_id, &fe.name),
+        });
+    }
+    out
+}
 
 /// Materialize a field as `(times_us, values, strings)` by walking its chunks
 /// in time order. Concatenates chunk buffers — the one copy for script
@@ -76,12 +268,23 @@ pub fn materialize_field(
 /// A numpy unicode ('<U...') array from owned strings, so scripts get
 /// vectorized comparisons like `batch.name == "airspd"`.
 pub(crate) fn numpy_str_array(py: Python<'_>, vals: Vec<String>) -> PyResult<Py<PyAny>> {
-    use pyo3::types::IntoPyDict;
-    let kwargs = [("dtype", "str")].into_py_dict(py)?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "str")?;
     Ok(py
         .import("numpy")?
         .call_method("array", (vals,), Some(&kwargs))?
         .unbind())
+}
+
+fn materialized_values_to_py(
+    py: Python<'_>,
+    values: Vec<f64>,
+    strings: Option<Vec<String>>,
+) -> PyResult<Py<PyAny>> {
+    match strings {
+        Some(vals) => numpy_str_array(py, vals),
+        None => Ok(values.into_pyarray(py).into_any().unbind()),
+    }
 }
 
 pub struct PendingField {
@@ -123,6 +326,52 @@ impl PendingTopic {
         self.fields.push(PendingField { name, values, unit });
         Ok(())
     }
+}
+
+fn parse_emit_field_entry(
+    name: &str,
+    value: &Bound<'_, PyAny>,
+    expected: usize,
+) -> PyResult<(Vec<f64>, Option<String>)> {
+    if let Ok(tuple) = value.cast::<PyTuple>() {
+        if tuple.len() != 2 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "emit field '{name}' tuple must be (values, unit)"
+            )));
+        }
+        let values: numpy::PyReadonlyArray1<f64> = tuple.get_item(0)?.extract().map_err(|_| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "emit field '{name}' values must be a 1-D float array"
+            ))
+        })?;
+        let vals = values.as_slice()?.to_vec();
+        if vals.len() != expected {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "emit field '{name}' produced {} values but topic has {expected} timestamps",
+                vals.len()
+            )));
+        }
+        let unit: Option<String> = tuple.get_item(1)?.extract().map_err(|_| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "emit field '{name}' unit must be a string or None"
+            ))
+        })?;
+        return Ok((vals, unit));
+    }
+
+    let values: numpy::PyReadonlyArray1<f64> = value.extract().map_err(|_| {
+        pyo3::exceptions::PyValueError::new_err(format!(
+            "emit field '{name}' must be values or (values, unit)"
+        ))
+    })?;
+    let vals = values.as_slice()?.to_vec();
+    if vals.len() != expected {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "emit field '{name}' produced {} values but topic has {expected} timestamps",
+            vals.len()
+        )));
+    }
+    Ok((vals, None))
 }
 
 pub type EmitBuffer = Rc<RefCell<Vec<PendingTopic>>>;
@@ -232,8 +481,361 @@ impl Delog {
     }
 }
 
+#[pyclass(unsendable, name = "SourceRef", skip_from_py_object)]
+#[derive(Clone)]
+struct SourceRefPy {
+    #[pyo3(get)]
+    label: String,
+    #[pyo3(get)]
+    path: String,
+}
+
+#[pyclass(unsendable, name = "TopicRef", skip_from_py_object)]
+#[derive(Clone)]
+struct TopicRefPy {
+    snapshot: Arc<StoreSnapshot>,
+    topic_id: TopicId,
+    #[pyo3(get)]
+    source: String,
+    #[pyo3(get)]
+    name: String,
+    #[pyo3(get)]
+    instance: Option<u32>,
+    #[pyo3(get)]
+    path: String,
+}
+
+#[allow(dead_code)]
+#[pyclass(unsendable, name = "FieldRef", skip_from_py_object)]
+#[derive(Clone)]
+struct FieldRefPy {
+    snapshot: Arc<StoreSnapshot>,
+    field_id: FieldId,
+    topic_id: TopicId,
+    #[pyo3(get)]
+    source: String,
+    #[pyo3(get)]
+    topic: String,
+    #[pyo3(get)]
+    name: String,
+    #[pyo3(get)]
+    unit: Option<String>,
+    #[pyo3(get)]
+    path: String,
+}
+
+#[pyclass(unsendable, name = "Catalog")]
+struct CatalogPy {
+    snapshot: Arc<StoreSnapshot>,
+}
+
+fn topic_ref(snapshot: Arc<StoreSnapshot>, m: TopicMatch) -> TopicRefPy {
+    TopicRefPy {
+        snapshot,
+        topic_id: m.topic_id,
+        source: m.source_label.clone(),
+        name: m.topic_name.clone(),
+        instance: m.instance,
+        path: format!("{}/{}", m.source_label, m.topic_name),
+    }
+}
+
+fn field_ref(snapshot: Arc<StoreSnapshot>, m: FieldMatch) -> FieldRefPy {
+    FieldRefPy {
+        snapshot,
+        field_id: m.field_id,
+        topic_id: m.topic_id,
+        source: m.source_label.clone(),
+        topic: m.topic_name.clone(),
+        name: m.field_name.clone(),
+        unit: m.unit.clone(),
+        path: format!("{}/{}/{}", m.source_label, m.topic_name, m.field_name),
+    }
+}
+
+fn candidate_topic_paths(matches: &[TopicMatch]) -> String {
+    matches
+        .iter()
+        .map(|m| format!("{}/{}", m.source_label, m.topic_name))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn candidate_field_paths(matches: &[FieldMatch]) -> String {
+    matches
+        .iter()
+        .map(|m| format!("{}/{}/{}", m.source_label, m.topic_name, m.field_name))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn unique_topic(
+    snapshot: Arc<StoreSnapshot>,
+    name: &str,
+    source: Option<&str>,
+    instance: Option<u32>,
+) -> PyResult<TopicRefPy> {
+    let matches = find_topics(&snapshot, Some(name), source, instance);
+    match matches.len() {
+        1 => Ok(topic_ref(snapshot, matches.into_iter().next().unwrap())),
+        0 => {
+            let candidates = find_topics(&snapshot, None, source, instance);
+            if candidates.is_empty() {
+                Err(pyo3::exceptions::PyKeyError::new_err(format!(
+                    "topic '{name}' not found"
+                )))
+            } else {
+                Err(pyo3::exceptions::PyKeyError::new_err(format!(
+                    "topic '{name}' not found; candidates: {}",
+                    candidate_topic_paths(&candidates)
+                )))
+            }
+        }
+        _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "topic '{name}' is ambiguous; candidates: {}; pass source= or instance=",
+            candidate_topic_paths(&matches)
+        ))),
+    }
+}
+
+#[pymethods]
+impl SourceRefPy {
+    fn __repr__(&self) -> String {
+        format!("SourceRef({:?})", self.label)
+    }
+}
+
+#[pymethods]
+impl TopicRefPy {
+    fn __repr__(&self) -> String {
+        format!("TopicRef({:?})", self.path)
+    }
+
+    fn fields(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
+        let out = PyList::empty(py);
+        for m in find_fields_in_topic(&self.snapshot, self.topic_id, None) {
+            out.append(Bound::new(py, field_ref(Arc::clone(&self.snapshot), m))?)?;
+        }
+        Ok(out.unbind())
+    }
+
+    fn field(&self, name: &str) -> PyResult<FieldRefPy> {
+        let matches = find_fields_in_topic(&self.snapshot, self.topic_id, Some(name));
+        match matches.len() {
+            1 => Ok(field_ref(
+                Arc::clone(&self.snapshot),
+                matches.into_iter().next().unwrap(),
+            )),
+            0 => {
+                let candidates = find_fields_in_topic(&self.snapshot, self.topic_id, None);
+                if candidates.is_empty() {
+                    Err(pyo3::exceptions::PyKeyError::new_err(format!(
+                        "field '{name}' not found in topic '{}'",
+                        self.name
+                    )))
+                } else {
+                    Err(pyo3::exceptions::PyKeyError::new_err(format!(
+                        "field '{name}' not found in topic '{}'; candidates: {}",
+                        self.name,
+                        candidate_field_paths(&candidates)
+                    )))
+                }
+            }
+            _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "field '{name}' in topic '{}' is ambiguous",
+                self.name
+            ))),
+        }
+    }
+
+    #[pyo3(signature = (*fields))]
+    fn read(&self, py: Python<'_>, fields: &Bound<'_, PyTuple>) -> PyResult<DelogTable> {
+        let fields = fields
+            .iter()
+            .map(|item| item.extract::<String>())
+            .collect::<PyResult<Vec<_>>>()?;
+        let requested = if fields.is_empty() {
+            find_fields_in_topic(&self.snapshot, self.topic_id, None)
+                .into_iter()
+                .map(|m| m.field_name)
+                .collect::<Vec<_>>()
+        } else {
+            fields
+        };
+        let mut table_t: Option<Vec<i64>> = None;
+        let mut names = Vec::with_capacity(requested.len());
+        let mut columns = std::collections::HashMap::new();
+        for name in requested {
+            let field_ref = self.field(&name)?;
+            let (t, v, s) = materialize_field(&self.snapshot, field_ref.field_id)
+                .map_err(pyo3::exceptions::PyValueError::new_err)?;
+            match &table_t {
+                None => table_t = Some(t),
+                Some(existing) if *existing == t => {}
+                Some(_) => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "topic '{}' field '{name}' does not share the topic timeline",
+                        self.name
+                    )));
+                }
+            }
+            columns.insert(name.clone(), materialized_values_to_py(py, v, s)?);
+            names.push(name);
+        }
+        Ok(DelogTable {
+            t: table_t.unwrap_or_default().into_pyarray(py).unbind(),
+            fields: names,
+            columns,
+        })
+    }
+}
+
+#[pymethods]
+impl FieldRefPy {
+    fn __repr__(&self) -> String {
+        format!("FieldRef({:?})", self.path)
+    }
+
+    fn read(&self, py: Python<'_>) -> PyResult<DelogField> {
+        let (t, v, s) = materialize_field(&self.snapshot, self.field_id)
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        let s = s.map(|vals| numpy_str_array(py, vals)).transpose()?;
+        Ok(DelogField {
+            t: t.into_pyarray(py).unbind(),
+            v: v.into_pyarray(py).unbind(),
+            s,
+        })
+    }
+}
+
+#[pymethods]
+impl CatalogPy {
+    fn sources(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
+        let out = PyList::empty(py);
+        for src in self.snapshot.sources.iter().filter(|s| !s.entry.removed) {
+            out.append(Bound::new(
+                py,
+                SourceRefPy {
+                    label: src.entry.label.clone(),
+                    path: src.entry.label.clone(),
+                },
+            )?)?;
+        }
+        Ok(out.unbind())
+    }
+
+    fn topics(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
+        let out = PyList::empty(py);
+        for m in find_topics(&self.snapshot, None, None, None) {
+            out.append(Bound::new(py, topic_ref(Arc::clone(&self.snapshot), m))?)?;
+        }
+        Ok(out.unbind())
+    }
+
+    fn fields(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
+        let out = PyList::empty(py);
+        for m in find_fields(&self.snapshot, None, None, None, None) {
+            out.append(Bound::new(py, field_ref(Arc::clone(&self.snapshot), m))?)?;
+        }
+        Ok(out.unbind())
+    }
+}
+
 #[pymethods]
 impl Delog {
+    fn catalog(&self) -> CatalogPy {
+        CatalogPy {
+            snapshot: Arc::clone(&self.snapshot),
+        }
+    }
+
+    #[pyo3(signature = (name, *, source=None, instance=None))]
+    fn topic(
+        &self,
+        name: &str,
+        source: Option<&str>,
+        instance: Option<u32>,
+    ) -> PyResult<TopicRefPy> {
+        unique_topic(Arc::clone(&self.snapshot), name, source, instance)
+    }
+
+    #[pyo3(signature = (topic, field=None, *, source=None, instance=None))]
+    fn find(
+        &self,
+        topic: &str,
+        field: Option<&str>,
+        source: Option<&str>,
+        instance: Option<u32>,
+        py: Python<'_>,
+    ) -> PyResult<Py<PyAny>> {
+        if let Some(field_name) = field {
+            let matches = find_fields(
+                &self.snapshot,
+                Some(topic),
+                Some(field_name),
+                source,
+                instance,
+            );
+            return match matches.len() {
+                1 => Ok(Bound::new(
+                    py,
+                    field_ref(
+                        Arc::clone(&self.snapshot),
+                        matches.into_iter().next().unwrap(),
+                    ),
+                )?
+                .into_any()
+                .unbind()),
+                0 => {
+                    let candidates =
+                        find_fields(&self.snapshot, Some(topic), None, source, instance);
+                    if candidates.is_empty() {
+                        Err(pyo3::exceptions::PyKeyError::new_err(format!(
+                            "field '{field_name}' not found in topic '{topic}'"
+                        )))
+                    } else {
+                        Err(pyo3::exceptions::PyKeyError::new_err(format!(
+                            "field '{field_name}' not found in topic '{topic}'; candidates: {}",
+                            candidate_field_paths(&candidates)
+                        )))
+                    }
+                }
+                _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "field '{field_name}' in topic '{topic}' is ambiguous; candidates: {}; pass source= or instance=",
+                    candidate_field_paths(&matches)
+                ))),
+            };
+        }
+        Ok(Bound::new(
+            py,
+            unique_topic(Arc::clone(&self.snapshot), topic, source, instance)?,
+        )?
+        .into_any()
+        .unbind())
+    }
+
+    #[pyo3(signature = (topic=None, field=None, *, source=None, instance=None))]
+    fn find_all(
+        &self,
+        py: Python<'_>,
+        topic: Option<&str>,
+        field: Option<&str>,
+        source: Option<&str>,
+        instance: Option<u32>,
+    ) -> PyResult<Py<PyList>> {
+        let out = PyList::empty(py);
+        if field.is_some() {
+            for m in find_fields(&self.snapshot, topic, field, source, instance) {
+                out.append(Bound::new(py, field_ref(Arc::clone(&self.snapshot), m))?)?;
+            }
+            return Ok(out.unbind());
+        }
+        for m in find_topics(&self.snapshot, topic, source, instance) {
+            out.append(Bound::new(py, topic_ref(Arc::clone(&self.snapshot), m))?)?;
+        }
+        Ok(out.unbind())
+    }
+
     fn sources(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
         let mut paths: Vec<String> = Vec::new();
         for src in self.snapshot.sources.iter() {
@@ -260,9 +862,20 @@ impl Delog {
         Ok(PyList::new(py, paths)?.unbind())
     }
 
-    fn field(&self, py: Python<'_>, path: &str) -> PyResult<DelogField> {
+    fn field(&self, py: Python<'_>, path: &Bound<'_, PyAny>) -> PyResult<DelogField> {
+        if let Ok(field_ref) = path.extract::<PyRef<'_, FieldRefPy>>() {
+            let (t, v, s) = materialize_field(&field_ref.snapshot, field_ref.field_id)
+                .map_err(pyo3::exceptions::PyValueError::new_err)?;
+            let s = s.map(|vals| numpy_str_array(py, vals)).transpose()?;
+            return Ok(DelogField {
+                t: t.into_pyarray(py).unbind(),
+                v: v.into_pyarray(py).unbind(),
+                s,
+            });
+        }
+        let path: String = path.extract()?;
         let id = self
-            .resolve_path(path)
+            .resolve_path(&path)
             .map_err(pyo3::exceptions::PyKeyError::new_err)?;
         let (t, v, s) = materialize_field(&self.snapshot, id)
             .map_err(pyo3::exceptions::PyValueError::new_err)?;
@@ -297,6 +910,32 @@ impl Delog {
             emit: Rc::clone(&self.emit),
             index: idx,
         })
+    }
+
+    fn emit(
+        &self,
+        name: &str,
+        times_us: numpy::PyReadonlyArray1<i64>,
+        fields: &Bound<'_, PyDict>,
+    ) -> PyResult<()> {
+        if fields.is_empty() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "emit topic '{name}' must contain at least one field"
+            )));
+        }
+        let times = times_us.as_slice()?.to_vec();
+        let mut topic = PendingTopic::new(name.to_owned(), times);
+        for (key, value) in fields.iter() {
+            let field_name: String = key.extract().map_err(|_| {
+                pyo3::exceptions::PyValueError::new_err("emit field names must be strings")
+            })?;
+            let (values, unit) = parse_emit_field_entry(&field_name, &value, topic.times.len())?;
+            topic
+                .add_field(field_name, values, unit)
+                .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        }
+        self.emit.borrow_mut().push(topic);
+        Ok(())
     }
 
     /// Decorator factory: returns a decorator that registers the function and
@@ -378,7 +1017,12 @@ impl Delog {
         let spec = ParamSpec {
             name: name.clone(),
             label: label.unwrap_or_else(|| name.clone()),
-            kind: ParamKind::Slider { min, max, step, integer },
+            kind: ParamKind::Slider {
+                min,
+                max,
+                step,
+                integer,
+            },
             default: ParamValue::Float(d),
             order: 0,
             generation: self.generation,
@@ -490,7 +1134,11 @@ impl Delog {
     }
 }
 
-fn value_to_py(py: Python<'_>, value: &ParamValue, kind: Option<&ParamKind>) -> PyResult<Py<PyAny>> {
+fn value_to_py(
+    py: Python<'_>,
+    value: &ParamValue,
+    kind: Option<&ParamKind>,
+) -> PyResult<Py<PyAny>> {
     use pyo3::IntoPyObject;
     match value {
         ParamValue::Float(v) => {
@@ -505,6 +1153,50 @@ fn value_to_py(py: Python<'_>, value: &ParamValue, kind: Option<&ParamKind>) -> 
     }
 }
 
+fn extract_base_times(py: Python<'_>, base: &Bound<'_, PyAny>) -> PyResult<Vec<i64>> {
+    if let Ok(field) = base.extract::<PyRef<'_, DelogField>>() {
+        let t = field.t.bind(py).readonly();
+        return Ok(t.as_slice()?.to_vec());
+    }
+    if let Ok(table) = base.extract::<PyRef<'_, DelogTable>>() {
+        let t = table.t.bind(py).readonly();
+        return Ok(t.as_slice()?.to_vec());
+    }
+    let arr: numpy::PyReadonlyArray1<i64> = base.extract().map_err(|_| {
+        pyo3::exceptions::PyTypeError::new_err(
+            "align_prev base must be a DelogField, DelogTable, or int64 numpy array",
+        )
+    })?;
+    Ok(arr.as_slice()?.to_vec())
+}
+
+#[pyclass(unsendable, name = "DelogTable")]
+pub struct DelogTable {
+    #[pyo3(get)]
+    t: Py<PyArray1<i64>>,
+    fields: Vec<String>,
+    columns: std::collections::HashMap<String, Py<PyAny>>,
+}
+
+#[pymethods]
+impl DelogTable {
+    fn fields(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
+        Ok(PyList::new(py, self.fields.clone())?.unbind())
+    }
+
+    fn __getitem__(&self, name: &str) -> PyResult<Py<PyAny>> {
+        self.columns
+            .get(name)
+            .map(|obj| Python::attach(|py| obj.clone_ref(py)))
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(name.to_owned()))
+    }
+
+    fn __getattr__(&self, name: &str) -> PyResult<Py<PyAny>> {
+        self.__getitem__(name)
+            .map_err(|_| pyo3::exceptions::PyAttributeError::new_err(name.to_owned()))
+    }
+}
+
 /// `.t` int64 us, `.v` float64 (NaN for string fields), `.s` numpy unicode
 /// array for string fields (`None` otherwise).
 #[pyclass(unsendable, name = "DelogField")]
@@ -515,6 +1207,17 @@ pub struct DelogField {
     v: Py<PyArray1<f64>>,
     #[pyo3(get)]
     s: Option<Py<PyAny>>,
+}
+
+#[pymethods]
+impl DelogField {
+    fn align_prev(&self, py: Python<'_>, base: &Bound<'_, PyAny>) -> PyResult<Py<PyArray1<f64>>> {
+        let src_t = self.t.bind(py).readonly();
+        let src_v = self.v.bind(py).readonly();
+        let base_times = extract_base_times(py, base)?;
+        let out = resample_prev(src_t.as_slice()?, src_v.as_slice()?, &base_times);
+        Ok(out.into_pyarray(py).unbind())
+    }
 }
 
 #[pyclass(unsendable, name = "DelogOutput")]
@@ -597,6 +1300,164 @@ mod tests {
     use delog_core::identity::IdentityRegistry;
     use delog_core::schema::{FieldSchema, TopicSchema};
     use delog_core::store::TopicStore;
+
+    #[test]
+    fn parse_topic_instance_suffixes() {
+        assert_eq!(super::parse_topic_instance("IMU"), ("IMU".to_owned(), None));
+        assert_eq!(
+            super::parse_topic_instance("IMU[0]"),
+            ("IMU".to_owned(), Some(0))
+        );
+        assert_eq!(
+            super::parse_topic_instance("vehicle_attitude[12]"),
+            ("vehicle_attitude".to_owned(), Some(12))
+        );
+        assert_eq!(
+            super::parse_topic_instance("NAMED_VALUE_FLOAT/airspd"),
+            ("NAMED_VALUE_FLOAT/airspd".to_owned(), None)
+        );
+        assert_eq!(
+            super::parse_topic_instance("bad[x]"),
+            ("bad[x]".to_owned(), None)
+        );
+        assert_eq!(
+            super::parse_topic_instance("bad[]"),
+            ("bad[]".to_owned(), None)
+        );
+    }
+
+    #[test]
+    fn snapshot_lookup_finds_topics_and_fields() {
+        let mut id = IdentityRegistry::new();
+        let src = id.add_source("flight");
+        let imu = id.add_topic_instance(src, "IMU", 0).unwrap();
+        let gps = id.add_topic(src, "GPS").unwrap();
+        let accx = id.add_field(imu, "AccX").unwrap();
+        let accy = id.add_field(imu, "AccY").unwrap();
+        let alt = id.add_field(gps, "Alt").unwrap();
+
+        let imu_schema = Arc::new(
+            TopicSchema::new(
+                "IMU[0]",
+                [
+                    FieldSchema::new("AccX", DataType::Float64, Some("m/s^2"), 1.0).unwrap(),
+                    FieldSchema::new("AccY", DataType::Float64, Some("m/s^2"), 1.0).unwrap(),
+                ],
+            )
+            .unwrap(),
+        );
+        let gps_schema = Arc::new(
+            TopicSchema::new(
+                "GPS",
+                [FieldSchema::new("Alt", DataType::Float64, Some("m"), 1.0).unwrap()],
+            )
+            .unwrap(),
+        );
+        let imu_chunk = Arc::new(
+            Chunk::try_new(
+                Int64Array::from(vec![10]),
+                vec![
+                    Arc::new(Float64Array::from(vec![1.0])) as ArrayRef,
+                    Arc::new(Float64Array::from(vec![2.0])) as ArrayRef,
+                ],
+                &imu_schema,
+            )
+            .unwrap(),
+        );
+        let gps_chunk = Arc::new(
+            Chunk::try_new(
+                Int64Array::from(vec![10]),
+                vec![Arc::new(Float64Array::from(vec![100.0])) as ArrayRef],
+                &gps_schema,
+            )
+            .unwrap(),
+        );
+        let imu_store = Arc::new(TopicStore::from_chunks(imu_schema, [imu_chunk]).unwrap());
+        let gps_store = Arc::new(TopicStore::from_chunks(gps_schema, [gps_chunk]).unwrap());
+        let snap =
+            StoreSnapshot::from_registry(&id, [(imu, imu_store), (gps, gps_store)], 0).unwrap();
+
+        let topics = super::find_topics(&snap, Some("IMU"), None, Some(0));
+        assert_eq!(topics.len(), 1);
+        assert_eq!(topics[0].topic_id, imu);
+        assert_eq!(topics[0].source_label, "flight");
+        assert_eq!(topics[0].topic_name, "IMU[0]");
+        assert_eq!(topics[0].base_name, "IMU");
+        assert_eq!(topics[0].instance, Some(0));
+
+        let fields = super::find_fields(&snap, Some("IMU"), Some("AccX"), None, Some(0));
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].field_id, accx);
+        assert_eq!(fields[0].field_name, "AccX");
+        assert_eq!(fields[0].unit.as_deref(), Some("m/s^2"));
+
+        let all_fields = super::find_fields(&snap, Some("IMU"), None, None, Some(0));
+        let ids: Vec<_> = all_fields.iter().map(|m| m.field_id).collect();
+        assert_eq!(ids, vec![accx, accy]);
+
+        let gps_fields = super::find_fields(&snap, Some("GPS"), Some("Alt"), Some("flight"), None);
+        assert_eq!(gps_fields[0].field_id, alt);
+    }
+
+    #[test]
+    fn topic_ref_field_lookup_keeps_exact_topic_identity() {
+        let mut id = IdentityRegistry::new();
+        let src = id.add_source("flight");
+        let gps = id.add_topic(src, "GPS").unwrap();
+        let gps0 = id.add_topic_instance(src, "GPS", 0).unwrap();
+        let lat = id.add_field(gps, "Lat").unwrap();
+        let fix = id.add_field(gps0, "Fix").unwrap();
+
+        let gps_schema = Arc::new(
+            TopicSchema::new(
+                "GPS",
+                [FieldSchema::new("Lat", DataType::Float64, Some("deg"), 1.0).unwrap()],
+            )
+            .unwrap(),
+        );
+        let gps0_schema = Arc::new(
+            TopicSchema::new(
+                "GPS[0]",
+                [FieldSchema::new("Fix", DataType::Float64, None::<String>, 1.0).unwrap()],
+            )
+            .unwrap(),
+        );
+        let gps_chunk = Arc::new(
+            Chunk::try_new(
+                Int64Array::from(vec![10]),
+                vec![Arc::new(Float64Array::from(vec![1.0])) as ArrayRef],
+                &gps_schema,
+            )
+            .unwrap(),
+        );
+        let gps0_chunk = Arc::new(
+            Chunk::try_new(
+                Int64Array::from(vec![10]),
+                vec![Arc::new(Float64Array::from(vec![2.0])) as ArrayRef],
+                &gps0_schema,
+            )
+            .unwrap(),
+        );
+        let gps_store = Arc::new(TopicStore::from_chunks(gps_schema, [gps_chunk]).unwrap());
+        let gps0_store = Arc::new(TopicStore::from_chunks(gps0_schema, [gps0_chunk]).unwrap());
+        let snap = Arc::new(
+            StoreSnapshot::from_registry(&id, [(gps, gps_store), (gps0, gps0_store)], 0).unwrap(),
+        );
+
+        let gps_ref = TopicRefPy {
+            snapshot: Arc::clone(&snap),
+            topic_id: gps,
+            source: "flight".to_owned(),
+            name: "GPS".to_owned(),
+            instance: None,
+            path: "flight/GPS".to_owned(),
+        };
+
+        let lat_ref = gps_ref.field("Lat").unwrap();
+        assert_eq!(lat_ref.field_id, lat);
+        assert!(gps_ref.field("Fix").is_err());
+        assert_ne!(lat_ref.field_id, fix);
+    }
 
     #[test]
     fn materialize_field_concatenates_chunks_in_time_order() {
