@@ -349,9 +349,9 @@ session. You never import or construct it.
 | `delog.param(name)` | `float`/`int`/`bool`/`str` | Read the current value of a variable inside a live callback. |
 | `delog.sources()` | `list[str]` | All live field paths, `"source/topic/field"`. |
 | `delog.catalog()` | `Catalog` | Structured source/topic/field catalogue. |
-| `delog.topic(name, source=None, instance=None)` | `TopicRef` | Find one topic by name, source, and optional instance. |
-| `delog.find(topic, field=None, source=None, instance=None)` | `TopicRef`/`FieldRef` | Find one topic or field, raising on ambiguity. |
-| `delog.find_all(topic=None, field=None, source=None, instance=None)` | `list` | Return all matching topic or field refs. |
+| `delog.topic(name, *, source=None, instance=None)` | `TopicRef` | Find one topic by name, source, and optional instance. |
+| `delog.find(topic, field=None, *, source=None, instance=None)` | `TopicRef`/`FieldRef` | Find one topic or field, raising on ambiguity. |
+| `delog.find_all(topic=None, field=None, *, source=None, instance=None)` | `list` | Return all matching topic or field refs. |
 | `delog.field(path)` | `DelogField` | Read one field as numpy arrays. |
 | `FieldRef.read()` | `DelogField` | Read a referenced field. |
 | `TopicRef.read(*fields)` | `DelogTable` | Read several fields from one topic on a shared timeline. |
@@ -505,10 +505,10 @@ delog.emit("imu_derived", imu.t, {
 })
 ```
 
-Each field entry is either `values` or `(values, unit)`. Values must be
-float-compatible arrays with the same length as `times_us`. Like the builder
-API, `emit` buffers until the script finishes successfully, so snapshot output
-remains all-or-nothing.
+Each field entry is either `values` or `(values, unit)`. Values must be a
+1-D `float64`-compatible numpy array with the same length as `times_us`. Like
+the builder API, `emit` buffers until the script finishes successfully, so
+snapshot output remains all-or-nothing.
 
 ---
 
