@@ -1081,6 +1081,23 @@ fn value_to_py(
     }
 }
 
+fn extract_base_times(py: Python<'_>, base: &Bound<'_, PyAny>) -> PyResult<Vec<i64>> {
+    if let Ok(field) = base.extract::<PyRef<'_, DelogField>>() {
+        let t = field.t.bind(py).readonly();
+        return Ok(t.as_slice()?.to_vec());
+    }
+    if let Ok(table) = base.extract::<PyRef<'_, DelogTable>>() {
+        let t = table.t.bind(py).readonly();
+        return Ok(t.as_slice()?.to_vec());
+    }
+    let arr: numpy::PyReadonlyArray1<i64> = base.extract().map_err(|_| {
+        pyo3::exceptions::PyTypeError::new_err(
+            "align_prev base must be a DelogField, DelogTable, or int64 numpy array",
+        )
+    })?;
+    Ok(arr.as_slice()?.to_vec())
+}
+
 #[pyclass(unsendable, name = "DelogTable")]
 pub struct DelogTable {
     #[pyo3(get)]
@@ -1118,6 +1135,17 @@ pub struct DelogField {
     v: Py<PyArray1<f64>>,
     #[pyo3(get)]
     s: Option<Py<PyAny>>,
+}
+
+#[pymethods]
+impl DelogField {
+    fn align_prev(&self, py: Python<'_>, base: &Bound<'_, PyAny>) -> PyResult<Py<PyArray1<f64>>> {
+        let src_t = self.t.bind(py).readonly();
+        let src_v = self.v.bind(py).readonly();
+        let base_times = extract_base_times(py, base)?;
+        let out = resample_prev(src_t.as_slice()?, src_v.as_slice()?, &base_times);
+        Ok(out.into_pyarray(py).unbind())
+    }
 }
 
 #[pyclass(unsendable, name = "DelogOutput")]

@@ -44,6 +44,50 @@ fn read_store() -> Arc<DataStore> {
     Arc::new(DataStore::from_snapshot(snap))
 }
 
+fn read_store_with_baro_gps() -> Arc<DataStore> {
+    let mut id = IdentityRegistry::new();
+    let src = id.add_source("flight");
+    let baro = id.add_topic(src, "BARO").unwrap();
+    let gps = id.add_topic(src, "GPS").unwrap();
+    id.add_field(baro, "Alt").unwrap();
+    id.add_field(gps, "Alt").unwrap();
+
+    let baro_schema = Arc::new(
+        TopicSchema::new(
+            "BARO",
+            [FieldSchema::new("Alt", DataType::Float64, Some("m"), 1.0).unwrap()],
+        )
+        .unwrap(),
+    );
+    let gps_schema = Arc::new(
+        TopicSchema::new(
+            "GPS",
+            [FieldSchema::new("Alt", DataType::Float64, Some("m"), 1.0).unwrap()],
+        )
+        .unwrap(),
+    );
+    let baro_chunk = Arc::new(
+        Chunk::try_new(
+            Int64Array::from(vec![0, 10, 20]),
+            vec![Arc::new(Float64Array::from(vec![100.0, 101.0, 102.0])) as ArrayRef],
+            &baro_schema,
+        )
+        .unwrap(),
+    );
+    let gps_chunk = Arc::new(
+        Chunk::try_new(
+            Int64Array::from(vec![0, 15]),
+            vec![Arc::new(Float64Array::from(vec![90.0, 95.0])) as ArrayRef],
+            &gps_schema,
+        )
+        .unwrap(),
+    );
+    let baro_store = Arc::new(TopicStore::from_chunks(baro_schema, [baro_chunk]).unwrap());
+    let gps_store = Arc::new(TopicStore::from_chunks(gps_schema, [gps_chunk]).unwrap());
+    let snap = StoreSnapshot::from_registry(&id, [(baro, baro_store), (gps, gps_store)], 0).unwrap();
+    Arc::new(DataStore::from_snapshot(snap))
+}
+
 #[test]
 fn accel_magnitude_script_emits_expected_values() {
     let _guard = SCRIPT_TEST_LOCK.lock().unwrap();
@@ -252,6 +296,37 @@ print(float(accx_again.v[0]))
         lines,
         ["['AccX', 'AccY', 'AccZ']", "3.0", "4.0", "0", "3.0", "3.0"]
     );
+
+    drop(engine);
+    drop(sender);
+    let _ = ingest_thread.join();
+}
+
+#[test]
+fn field_align_prev_matches_resample_prev() {
+    let _guard = SCRIPT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let ingestor = Ingestor::new(NullObserver);
+    let (sender, receiver) = ingest_channel();
+    let ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
+
+    let engine = ScriptEngine::spawn(
+        read_store_with_baro_gps(),
+        sender.clone(),
+        Arc::new(MetricsRegistry::new()),
+        delog_script::params::shared_empty(),
+    );
+    let output = run_script_capture_output(
+        &engine,
+        "align_prev",
+        r#"
+baro = delog.topic("BARO").field("Alt").read()
+gps = delog.topic("GPS").field("Alt").read()
+aligned = gps.align_prev(baro)
+print(",".join(str(float(v)) for v in aligned))
+"#,
+    );
+
+    assert!(output.contains("90.0,90.0,95.0"));
 
     drop(engine);
     drop(sender);
