@@ -84,7 +84,8 @@ fn read_store_with_baro_gps() -> Arc<DataStore> {
     );
     let baro_store = Arc::new(TopicStore::from_chunks(baro_schema, [baro_chunk]).unwrap());
     let gps_store = Arc::new(TopicStore::from_chunks(gps_schema, [gps_chunk]).unwrap());
-    let snap = StoreSnapshot::from_registry(&id, [(baro, baro_store), (gps, gps_store)], 0).unwrap();
+    let snap =
+        StoreSnapshot::from_registry(&id, [(baro, baro_store), (gps, gps_store)], 0).unwrap();
     Arc::new(DataStore::from_snapshot(snap))
 }
 
