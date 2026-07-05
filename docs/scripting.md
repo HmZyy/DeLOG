@@ -348,10 +348,18 @@ session. You never import or construct it.
 | `delog.text(name, default, *, label=None)` | `str` | Declare a text-field variable; returns its current value. |
 | `delog.param(name)` | `float`/`int`/`bool`/`str` | Read the current value of a variable inside a live callback. |
 | `delog.sources()` | `list[str]` | All live field paths, `"source/topic/field"`. |
+| `delog.catalog()` | `Catalog` | Structured source/topic/field catalogue. |
+| `delog.topic(name, source=None, instance=None)` | `TopicRef` | Find one topic by name, source, and optional instance. |
+| `delog.find(topic, field=None, source=None, instance=None)` | `TopicRef`/`FieldRef` | Find one topic or field, raising on ambiguity. |
+| `delog.find_all(topic=None, field=None, source=None, instance=None)` | `list` | Return all matching topic or field refs. |
 | `delog.field(path)` | `DelogField` | Read one field as numpy arrays. |
+| `FieldRef.read()` | `DelogField` | Read a referenced field. |
+| `TopicRef.read(*fields)` | `DelogTable` | Read several fields from one topic on a shared timeline. |
 | `delog.resample_prev(field, base_times)` | `np.ndarray[float64]` | Prev-sample align a field onto another timeline. |
+| `DelogField.align_prev(base)` | `np.ndarray[float64]` | Prev-sample align this field onto another field/table/timeline. |
 | `delog.output(times_us, name)` | `DelogOutput` | Begin a new derived topic. |
 | `DelogOutput.add_field(name, values, unit=None)` | `None` | Add a field to that topic. |
+| `delog.emit(name, times_us, fields)` | `None` | Emit one derived topic from a dict of field entries. |
 
 ### `delog.sources() -> list[str]`
 
@@ -393,6 +401,44 @@ print(f.t[:3], f.v[:3])   # int64 µs, float64 values
 - All fields **within the same topic** share identical timestamps, so you can
   read several of them and operate element-wise without aligning.
 
+### Structured snapshot lookup
+
+For reusable scripts, prefer structured lookup over hardcoded source paths:
+
+```python
+imu = delog.topic("IMU", instance=0)
+accx = imu.field("AccX").read()
+```
+
+`delog.topic(...)` returns one `TopicRef` or raises if the match is missing or
+ambiguous. Use `source=` when several logs or derived sources contain the same
+topic, and `instance=` for topics named like `IMU[0]`.
+
+`TopicRef.read(*fields)` reads several fields from the same topic into a
+`DelogTable`:
+
+```python
+imu = delog.topic("IMU").read("AccX", "AccY", "AccZ")
+print(imu.t[:3], imu.AccX[:3], imu["AccY"][:3])
+```
+
+Calling `read()` with no field names reads every field in the topic. Numeric
+columns are `float64`; string columns are numpy unicode arrays.
+
+Use `TopicRef.fields()` for topic-local field discovery:
+
+```python
+for field in delog.topic("IMU").fields():
+    print(field.path, field.unit)
+```
+
+Use `delog.find_all(...)` when the result may span several sources or topics:
+
+```python
+for field in delog.find_all(field="AccX"):
+    print(field.path)
+```
+
 ### `delog.resample_prev(field, base_times) -> np.ndarray[float64]`
 
 Resamples a `DelogField`'s values onto a different timeline using
@@ -411,6 +457,14 @@ diff = baro.v - gps_on_baro
 `base_times` is any `int64` numpy array of microsecond timestamps (typically
 another field's `.t`). Use this whenever you combine fields from **different
 topics** (which have independent timelines).
+
+The method form is equivalent and is usually easier to read:
+
+```python
+gps_alt = delog.topic("GPS").field("Alt").read()
+baro_alt = delog.topic("BARO").field("Alt").read()
+gps_on_baro = gps_alt.align_prev(baro_alt)
+```
 
 ### `delog.output(times_us, name) -> DelogOutput`
 
@@ -439,6 +493,22 @@ out.add_field("accel", v_accel)            # unit optional
 
 The fields buffer until the script finishes successfully, then publish as
 `script:<name>/<topic>/<field>`.
+
+### `delog.emit(name, times_us, fields) -> None`
+
+Emits one derived topic in a single call:
+
+```python
+delog.emit("imu_derived", imu.t, {
+    "Acc_norm": (norm, "m/s^2"),
+    "AccX_smooth": smooth_x,
+})
+```
+
+Each field entry is either `values` or `(values, unit)`. Values must be
+float-compatible arrays with the same length as `times_us`. Like the builder
+API, `emit` buffers until the script finishes successfully, so snapshot output
+remains all-or-nothing.
 
 ---
 
