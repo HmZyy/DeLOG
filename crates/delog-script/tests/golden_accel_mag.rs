@@ -14,6 +14,8 @@ use delog_core::snapshot::{DataStore, StoreSnapshot};
 use delog_core::store::TopicStore;
 use delog_script::{ScriptCommand, ScriptEngine, ScriptEvent};
 
+static SCRIPT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// AccX/Y/Z = (3, 4, 0) so the magnitude is exactly 5 (3-4-5 triple).
 fn read_store() -> Arc<DataStore> {
     let mut id = IdentityRegistry::new();
@@ -44,6 +46,7 @@ fn read_store() -> Arc<DataStore> {
 
 #[test]
 fn accel_magnitude_script_emits_expected_values() {
+    let _guard = SCRIPT_TEST_LOCK.lock().unwrap();
     let ingestor = Ingestor::new(NullObserver);
     let write_store = ingestor.store();
     let (sender, receiver) = ingest_channel();
@@ -151,8 +154,30 @@ fn run_script_capture_output(engine: &ScriptEngine, name: &str, source: &str) ->
     }
 }
 
+fn run_script_capture_error(engine: &ScriptEngine, name: &str, source: &str) -> String {
+    engine
+        .send(ScriptCommand::RunScript {
+            name: name.into(),
+            source: source.into(),
+        })
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        for ev in engine.drain_events() {
+            match ev {
+                ScriptEvent::Error(e) => return e,
+                ScriptEvent::Done => panic!("script unexpectedly succeeded"),
+                _ => {}
+            }
+        }
+        assert!(std::time::Instant::now() < deadline, "timed out");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
 #[test]
 fn discovery_refs_expose_paths_and_metadata() {
+    let _guard = SCRIPT_TEST_LOCK.lock().unwrap();
     let ingestor = Ingestor::new(NullObserver);
     let (sender, receiver) = ingest_channel();
     let ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
@@ -184,6 +209,43 @@ print(len(catalog_fields))
     assert!(output.contains("m/s^2"));
     assert!(output.contains("AccX,AccY,AccZ"));
     assert!(output.contains("3"));
+
+    drop(engine);
+    drop(sender);
+    let _ = ingest_thread.join();
+}
+
+#[test]
+fn discovery_missing_lookup_errors_include_candidates() {
+    let _guard = SCRIPT_TEST_LOCK.lock().unwrap();
+    let ingestor = Ingestor::new(NullObserver);
+    let (sender, receiver) = ingest_channel();
+    let ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
+
+    let engine = ScriptEngine::spawn(
+        read_store(),
+        sender.clone(),
+        Arc::new(MetricsRegistry::new()),
+        delog_script::params::shared_empty(),
+    );
+
+    let missing_topic = run_script_capture_error(
+        &engine,
+        "missing_topic",
+        r#"
+delog.topic("GPS")
+"#,
+    );
+    assert!(missing_topic.contains("flight/IMU"), "{missing_topic}");
+
+    let missing_field = run_script_capture_error(
+        &engine,
+        "missing_field",
+        r#"
+delog.find("IMU", "Nope")
+"#,
+    );
+    assert!(missing_field.contains("flight/IMU/AccX"), "{missing_field}");
 
     drop(engine);
     drop(sender);
