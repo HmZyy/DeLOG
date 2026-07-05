@@ -695,14 +695,14 @@ the difference between the two execution modes.
 - **String fields are read-only.** `DelogField.s` and live-transform string
   batch attributes let you *read* Utf8 fields, but script **output** stays
   Float64-only - `add_field` and the numeric forms of a live transform's
-  return value always take `float64` arrays. There is also no `.unit`/`.dtype`
-  attribute on reads (units are an output concern via `add_field(..., unit=)`).
+  return value always take `float64` arrays. Materialized `DelogField` reads do
+  not carry `.unit` or `.dtype`; use a `FieldRef` when you need unit metadata.
 - **Output is `float64`.** Even if a source field was integer/bool, derived
   output columns are stored as `Float64`.
 - **Length must match.** `add_field` values must match the length of the
   topic's `times_us`. Combine differently-sampled inputs with `resample_prev`.
-- **A `print`-only script still emits an (empty) source.** If you never call
-  `delog.output(...)`, running still creates an empty `script:<name>` source.
+- **Print-only scripts do not emit a source.** A run that never calls
+  `delog.output(...)` or `delog.emit(...)` only writes console output.
 - **Cancellation is cooperative** (see above) - long single C calls can't be
   interrupted mid-call.
 - **Long loops block that script.** Each run/eval executes on the interpreter
