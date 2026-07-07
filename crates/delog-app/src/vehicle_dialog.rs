@@ -200,6 +200,13 @@ impl Draft {
         d
     }
 
+    #[allow(dead_code)]
+    fn apply_config_preserving_label(&mut self, cfg: &VehicleConfig, snapshot: &StoreSnapshot) {
+        let previous_label = self.label.clone();
+        *self = Draft::from_config(cfg, snapshot);
+        self.label = previous_label;
+    }
+
     fn build(&self) -> Option<VehicleConfig> {
         let source = self.source?;
         let pos = match self.pos_mode {

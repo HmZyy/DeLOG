@@ -4,7 +4,11 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use delog_core::snapshot::StoreSnapshot;
 use serde::{Deserialize, Serialize};
+
+use crate::layout;
+use crate::vehicle::VehicleConfig;
 
 pub const VEHICLE_PROFILE_VERSION: u32 = 1;
 
@@ -36,6 +40,27 @@ pub struct VehicleProfileDoc {
     pub delog_vehicle_profile: u32,
     pub name: String,
     pub vehicle: crate::layout::VehicleLayout,
+}
+
+impl VehicleProfileDoc {
+    pub fn from_config(
+        name: &str,
+        config: &VehicleConfig,
+        snapshot: &StoreSnapshot,
+    ) -> Option<Self> {
+        Some(Self {
+            delog_vehicle_profile: VEHICLE_PROFILE_VERSION,
+            name: name.trim().to_owned(),
+            vehicle: layout::vehicle_config_to_layout(config, snapshot)?,
+        })
+    }
+
+    pub fn to_config(&self, snapshot: &StoreSnapshot) -> Option<VehicleConfig> {
+        if self.delog_vehicle_profile != VEHICLE_PROFILE_VERSION {
+            return None;
+        }
+        layout::vehicle_config_from_layout(&self.vehicle, snapshot)
+    }
 }
 
 impl PartialEq for VehicleProfileDoc {
@@ -156,7 +181,10 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
+    use egui::Color32;
+
     use crate::layout::{FieldRef, ModelLayout, OriLayout, PosLayout, VehicleLayout};
+    use crate::vehicle::{ModelKind, OriMapping, PosMapping, VehicleConfig};
 
     use super::*;
 
@@ -203,6 +231,40 @@ mod tests {
         }
     }
 
+    fn snapshot_with_local_position_and_attitude() -> delog_core::snapshot::StoreSnapshot {
+        let mut ids = delog_core::identity::IdentityRegistry::new();
+        let source = ids.add_source("log");
+        let local = ids.add_topic(source, "LOCAL_POSITION_NED").unwrap();
+        ids.add_field(local, "x").unwrap();
+        ids.add_field(local, "y").unwrap();
+        ids.add_field(local, "z").unwrap();
+        let attitude = ids.add_topic(source, "ATTITUDE").unwrap();
+        ids.add_field(attitude, "roll").unwrap();
+        ids.add_field(attitude, "pitch").unwrap();
+        ids.add_field(attitude, "yaw").unwrap();
+        delog_core::snapshot::StoreSnapshot::from_registry(&ids, [], 0)
+            .expect("identity snapshot")
+    }
+
+    fn field_id(
+        snapshot: &delog_core::snapshot::StoreSnapshot,
+        topic_name: &str,
+        field_name: &str,
+    ) -> delog_core::identity::FieldId {
+        snapshot
+            .fields
+            .iter()
+            .find(|field| {
+                !field.removed
+                    && field.name == field_name
+                    && snapshot
+                        .topic(field.topic)
+                        .is_some_and(|topic| topic.entry.name == topic_name)
+            })
+            .map(|field| field.id)
+            .expect("field should exist")
+    }
+
     fn sample_doc() -> VehicleProfileDoc {
         VehicleProfileDoc {
             delog_vehicle_profile: VEHICLE_PROFILE_VERSION,
@@ -242,6 +304,43 @@ mod tests {
         assert_eq!(library.load("MAVLink Local Position").unwrap(), doc);
 
         fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn profile_doc_from_vehicle_config_uses_layout_conversion() {
+        let snapshot = snapshot_with_local_position_and_attitude();
+        let source = snapshot
+            .sources
+            .iter()
+            .find(|source| !source.entry.removed)
+            .map(|source| source.entry.id)
+            .expect("source should exist");
+        let cfg = VehicleConfig {
+            source,
+            label: "Rover".to_owned(),
+            show: true,
+            pos: PosMapping::Ned {
+                north: field_id(&snapshot, "LOCAL_POSITION_NED", "x"),
+                east: field_id(&snapshot, "LOCAL_POSITION_NED", "y"),
+                down: field_id(&snapshot, "LOCAL_POSITION_NED", "z"),
+                reference: None,
+            },
+            ori: OriMapping::Static,
+            model: ModelKind::Cone,
+            color: Color32::WHITE,
+            path_color: Color32::BLACK,
+            scale: 2.0,
+        };
+
+        let doc = VehicleProfileDoc::from_config("Local", &cfg, &snapshot)
+            .expect("profile should serialize");
+
+        assert_eq!(doc.name, "Local");
+        assert_eq!(doc.vehicle.label, "Rover");
+        assert_eq!(
+            doc.to_config(&snapshot).expect("profile should resolve"),
+            cfg
+        );
     }
 
     #[test]
