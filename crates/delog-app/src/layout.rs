@@ -739,6 +739,24 @@ pub fn vehicle_config_from_layout(
     vehicle_from_layout(v, &mut resolver)
 }
 
+#[allow(dead_code)]
+pub fn vehicle_config_from_layout_for_source(
+    v: &VehicleLayout,
+    snapshot: &StoreSnapshot,
+    source: SourceId,
+) -> Option<VehicleConfig> {
+    let mut choices = HashMap::new();
+    collect_vehicle_field_choices(v, source, &mut choices);
+    let mut resolver = Resolver {
+        snapshot,
+        choices: &choices,
+        diagnostics: Vec::new(),
+        ambiguities: BTreeMap::new(),
+        collect_ambiguities: false,
+    };
+    vehicle_from_layout(v, &mut resolver)
+}
+
 fn field_ref(snapshot: &StoreSnapshot, field: FieldId) -> Option<FieldRef> {
     let field_entry = snapshot
         .fields
@@ -795,6 +813,67 @@ fn collect_field_refs(doc: &LayoutDoc, resolver: &mut Resolver<'_>) {
     for vehicle in &doc.vehicles {
         collect_pos_field_refs(&vehicle.position, resolver);
         collect_ori_field_refs(&vehicle.orientation, resolver);
+    }
+}
+
+fn collect_vehicle_field_choices(
+    vehicle: &VehicleLayout,
+    source: SourceId,
+    choices: &mut HashMap<FieldRef, SourceId>,
+) {
+    collect_pos_field_choices(&vehicle.position, source, choices);
+    collect_ori_field_choices(&vehicle.orientation, source, choices);
+}
+
+fn collect_pos_field_choices(
+    pos: &PosLayout,
+    source: SourceId,
+    choices: &mut HashMap<FieldRef, SourceId>,
+) {
+    match pos {
+        PosLayout::Ned {
+            north,
+            east,
+            down,
+            reference,
+        } => {
+            choices.insert(north.clone(), source);
+            choices.insert(east.clone(), source);
+            choices.insert(down.clone(), source);
+            if let Some(NedRefLayout::Fields { lat, lon, alt }) = reference {
+                choices.insert(lat.clone(), source);
+                choices.insert(lon.clone(), source);
+                choices.insert(alt.clone(), source);
+            }
+        }
+        PosLayout::Gps { lat, lon, alt, .. } => {
+            choices.insert(lat.clone(), source);
+            choices.insert(lon.clone(), source);
+            choices.insert(alt.clone(), source);
+        }
+    }
+}
+
+fn collect_ori_field_choices(
+    ori: &OriLayout,
+    source: SourceId,
+    choices: &mut HashMap<FieldRef, SourceId>,
+) {
+    match ori {
+        OriLayout::Static => {}
+        OriLayout::Euler {
+            roll, pitch, yaw, ..
+        } => {
+            choices.insert(roll.clone(), source);
+            choices.insert(pitch.clone(), source);
+            choices.insert(yaw.clone(), source);
+        }
+        OriLayout::Quat { w, x, y, z } => {
+            choices.insert(w.clone(), source);
+            choices.insert(x.clone(), source);
+            choices.insert(y.clone(), source);
+            choices.insert(z.clone(), source);
+        }
     }
 }
 
@@ -1505,6 +1584,63 @@ mod tests {
             vehicle_config_from_layout(&layout, &snapshot).expect("vehicle should resolve");
 
         assert_eq!(resolved, cfg);
+    }
+
+    #[test]
+    fn vehicle_config_from_layout_for_source_resolves_duplicate_topic_fields() {
+        let snapshot = snapshot_with_topics(&[
+            ("flight_a", "LOCAL_POSITION_NED", &["x", "y", "z"]),
+            ("flight_b", "LOCAL_POSITION_NED", &["x", "y", "z"]),
+        ]);
+        let second_source = snapshot
+            .sources
+            .iter()
+            .find(|source| source.entry.label == "flight_b")
+            .map(|source| source.entry.id)
+            .expect("second source should exist");
+        let layout = VehicleLayout {
+            label: "Rover".to_owned(),
+            show: true,
+            model: ModelLayout::Cone,
+            color: [255, 255, 255, 255],
+            path_color: [0, 0, 0, 255],
+            scale: 2.0,
+            position: PosLayout::Ned {
+                north: FieldRef {
+                    topic: "LOCAL_POSITION_NED".to_owned(),
+                    field: "x".to_owned(),
+                },
+                east: FieldRef {
+                    topic: "LOCAL_POSITION_NED".to_owned(),
+                    field: "y".to_owned(),
+                },
+                down: FieldRef {
+                    topic: "LOCAL_POSITION_NED".to_owned(),
+                    field: "z".to_owned(),
+                },
+                reference: None,
+            },
+            orientation: OriLayout::Static,
+        };
+
+        let cfg = vehicle_config_from_layout_for_source(&layout, &snapshot, second_source)
+            .expect("vehicle should resolve for selected source");
+
+        assert_eq!(cfg.source, second_source);
+        let PosMapping::Ned {
+            north, east, down, ..
+        } = cfg.pos
+        else {
+            panic!("expected NED mapping");
+        };
+        for field in [north, east, down] {
+            let topic = snapshot
+                .fields
+                .get(field.index())
+                .and_then(|field| snapshot.topic(field.topic))
+                .expect("field topic should exist");
+            assert_eq!(topic.entry.source, second_source);
+        }
     }
 
     #[test]
