@@ -1,0 +1,30 @@
+{
+  "delog_vehicle_profile": 1,
+  "name": "ULG Global Position",
+  "vehicle": {
+    "label": "Vehicle",
+    "show": true,
+    "model": "fixed_wing",
+    "color": [90, 170, 255, 255],
+    "path_color": [255, 170, 60, 255],
+    "scale": 1.0,
+    "position": {
+      "gps": {
+        "lat": { "topic": "vehicle_global_position", "field": "lat" },
+        "lon": { "topic": "vehicle_global_position", "field": "lon" },
+        "alt": { "topic": "vehicle_global_position", "field": "alt" },
+        "lat_lon_dege7": false,
+        "alt_mm": false,
+        "alt_offset_m": 0.0
+      }
+    },
+    "orientation": {
+      "quat": {
+        "w": { "topic": "vehicle_attitude[0]", "field": "q[0]" },
+        "x": { "topic": "vehicle_attitude[0]", "field": "q[1]" },
+        "y": { "topic": "vehicle_attitude[0]", "field": "q[2]" },
+        "z": { "topic": "vehicle_attitude[0]", "field": "q[3]" }
+      }
+    }
+  }
+}

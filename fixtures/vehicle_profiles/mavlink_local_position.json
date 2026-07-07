@@ -1,0 +1,28 @@
+{
+  "delog_vehicle_profile": 1,
+  "name": "MAVLink Local Position",
+  "vehicle": {
+    "label": "Vehicle",
+    "show": true,
+    "model": "fixed_wing",
+    "color": [90, 170, 255, 255],
+    "path_color": [255, 170, 60, 255],
+    "scale": 1.0,
+    "position": {
+      "ned": {
+        "north": { "topic": "LOCAL_POSITION_NED", "field": "x" },
+        "east": { "topic": "LOCAL_POSITION_NED", "field": "y" },
+        "down": { "topic": "LOCAL_POSITION_NED", "field": "z" },
+        "reference": null
+      }
+    },
+    "orientation": {
+      "euler": {
+        "roll": { "topic": "ATTITUDE", "field": "roll" },
+        "pitch": { "topic": "ATTITUDE", "field": "pitch" },
+        "yaw": { "topic": "ATTITUDE", "field": "yaw" },
+        "degrees": false
+      }
+    }
+  }
+}
