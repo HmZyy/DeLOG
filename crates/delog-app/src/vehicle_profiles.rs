@@ -4,6 +4,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use delog_core::identity::SourceId;
 use delog_core::snapshot::StoreSnapshot;
 use serde::{Deserialize, Serialize};
 
@@ -60,6 +61,17 @@ impl VehicleProfileDoc {
             return None;
         }
         layout::vehicle_config_from_layout(&self.vehicle, snapshot)
+    }
+
+    pub fn to_config_for_source(
+        &self,
+        snapshot: &StoreSnapshot,
+        source: SourceId,
+    ) -> Option<VehicleConfig> {
+        if self.delog_vehicle_profile != VEHICLE_PROFILE_VERSION {
+            return None;
+        }
+        layout::vehicle_config_from_layout_for_source(&self.vehicle, snapshot, source)
     }
 }
 
@@ -242,8 +254,31 @@ mod tests {
         ids.add_field(attitude, "roll").unwrap();
         ids.add_field(attitude, "pitch").unwrap();
         ids.add_field(attitude, "yaw").unwrap();
-        delog_core::snapshot::StoreSnapshot::from_registry(&ids, [], 0)
-            .expect("identity snapshot")
+        delog_core::snapshot::StoreSnapshot::from_registry(&ids, [], 0).expect("identity snapshot")
+    }
+
+    fn snapshot_with_duplicate_local_position() -> delog_core::snapshot::StoreSnapshot {
+        let mut ids = delog_core::identity::IdentityRegistry::new();
+        for source in ["flight_a", "flight_b"] {
+            let source = ids.add_source(source);
+            let local = ids.add_topic(source, "LOCAL_POSITION_NED").unwrap();
+            ids.add_field(local, "x").unwrap();
+            ids.add_field(local, "y").unwrap();
+            ids.add_field(local, "z").unwrap();
+        }
+        delog_core::snapshot::StoreSnapshot::from_registry(&ids, [], 0).expect("identity snapshot")
+    }
+
+    fn source_id(
+        snapshot: &delog_core::snapshot::StoreSnapshot,
+        label: &str,
+    ) -> delog_core::identity::SourceId {
+        snapshot
+            .sources
+            .iter()
+            .find(|source| !source.entry.removed && source.entry.label == label)
+            .map(|source| source.entry.id)
+            .expect("source should exist")
     }
 
     fn field_id(
@@ -341,6 +376,51 @@ mod tests {
             doc.to_config(&snapshot).expect("profile should resolve"),
             cfg
         );
+    }
+
+    #[test]
+    fn to_config_for_source_resolves_duplicate_topic_fields() {
+        let snapshot = snapshot_with_duplicate_local_position();
+        let second_source = source_id(&snapshot, "flight_b");
+        let doc = VehicleProfileDoc {
+            delog_vehicle_profile: VEHICLE_PROFILE_VERSION,
+            name: "Local".to_owned(),
+            vehicle: VehicleLayout {
+                label: "Rover".to_owned(),
+                show: true,
+                model: ModelLayout::Cone,
+                color: [255, 255, 255, 255],
+                path_color: [0, 0, 0, 255],
+                scale: 2.0,
+                position: PosLayout::Ned {
+                    north: field("LOCAL_POSITION_NED", "x"),
+                    east: field("LOCAL_POSITION_NED", "y"),
+                    down: field("LOCAL_POSITION_NED", "z"),
+                    reference: None,
+                },
+                orientation: OriLayout::Static,
+            },
+        };
+
+        let cfg = doc
+            .to_config_for_source(&snapshot, second_source)
+            .expect("profile should resolve for selected source");
+
+        assert_eq!(cfg.source, second_source);
+        let PosMapping::Ned {
+            north, east, down, ..
+        } = cfg.pos
+        else {
+            panic!("expected NED mapping");
+        };
+        for field in [north, east, down] {
+            let topic = snapshot
+                .fields
+                .get(field.index())
+                .and_then(|field| snapshot.topic(field.topic))
+                .expect("field topic should exist");
+            assert_eq!(topic.entry.source, second_source);
+        }
     }
 
     #[test]
