@@ -3,6 +3,7 @@ use delog_core::snapshot::StoreSnapshot;
 use egui::Color32;
 
 use crate::vehicle::{GeoRef, ModelKind, NedReference, OriMapping, PosMapping, VehicleConfig};
+use crate::vehicle_profiles::{VehicleProfileDoc, VehicleProfileLibrary};
 
 const DIALOG_WIDTH: f32 = 240.0;
 
@@ -274,11 +275,36 @@ impl Draft {
     }
 }
 
-#[derive(Default)]
 pub struct VehicleDialog {
     pub open: bool,
     drafts: Vec<Draft>,
     was_open: bool,
+    profiles: Vec<String>,
+    selected_profile: Option<String>,
+    save_profile_name: String,
+    pending_profile_delete: Option<String>,
+    profile_status: Option<String>,
+}
+
+impl Default for VehicleDialog {
+    fn default() -> Self {
+        Self {
+            open: false,
+            drafts: Vec::new(),
+            was_open: false,
+            profiles: Vec::new(),
+            selected_profile: None,
+            save_profile_name: String::new(),
+            pending_profile_delete: None,
+            profile_status: None,
+        }
+    }
+}
+
+enum ProfileAction {
+    Apply { draft: usize, name: String },
+    Save { draft: usize, name: String },
+    Delete(String),
 }
 
 fn field_topic(snapshot: &StoreSnapshot, field: FieldId) -> Option<TopicId> {
@@ -310,6 +336,41 @@ fn topic_fields(snapshot: &StoreSnapshot, topic: TopicId) -> Vec<(FieldId, Strin
         .filter(|f| f.topic == topic && !f.removed)
         .map(|f| (f.id, f.name.clone()))
         .collect()
+}
+
+fn profile_library() -> Option<VehicleProfileLibrary> {
+    VehicleProfileLibrary::from_config_dir()
+}
+
+fn refresh_profiles(state: &mut VehicleDialog) {
+    let Some(library) = profile_library() else {
+        state.profile_status = Some("Vehicle profile config directory is unavailable".to_owned());
+        state.profiles.clear();
+        state.selected_profile = None;
+        return;
+    };
+
+    if let Err(err) = library.seed_defaults() {
+        state.profile_status = Some(format!("Could not seed default vehicle profiles: {err}"));
+    }
+
+    match library.list() {
+        Ok(profiles) => {
+            state.profiles = profiles;
+            if state
+                .selected_profile
+                .as_ref()
+                .is_some_and(|selected| !state.profiles.contains(selected))
+            {
+                state.selected_profile = None;
+            }
+        }
+        Err(err) => {
+            state.profile_status = Some(format!("Could not list vehicle profiles: {err}"));
+            state.profiles.clear();
+            state.selected_profile = None;
+        }
+    }
 }
 
 fn combo_label<'a, T: PartialEq>(items: &'a [(T, String)], sel: &Option<T>) -> &'a str {
@@ -466,6 +527,7 @@ pub fn show(
             .iter()
             .map(|v| Draft::from_config(v, snapshot))
             .collect();
+        refresh_profiles(state);
     }
     state.was_open = state.open;
     if !state.open {
@@ -494,10 +556,17 @@ pub fn show(
                     ..Draft::default()
                 });
             }
+            if let Some(status) = &state.profile_status {
+                ui.add_space(6.0);
+                ui.label(status);
+            }
             ui.add_space(8.0);
 
             let mut remove: Option<usize> = None;
             let mut duplicate: Option<usize> = None;
+            let mut profile_action: Option<ProfileAction> = None;
+            let profile_names = state.profiles.clone();
+            let mut selected_profile = state.selected_profile.clone();
             egui::ScrollArea::vertical().show(ui, |ui| {
                 for (i, draft) in state.drafts.iter_mut().enumerate() {
                     let title = if draft.label.trim().is_empty() {
@@ -509,6 +578,15 @@ pub fn show(
                         .id_salt(("vehicle", i))
                         .default_open(true)
                         .show(ui, |ui| {
+                            show_profile_controls(
+                                ui,
+                                i,
+                                &profile_names,
+                                &mut selected_profile,
+                                &mut state.save_profile_name,
+                                &mut profile_action,
+                            );
+                            ui.add_space(8.0);
                             draft_editor(ui, draft, snapshot);
                             ui.add_space(8.0);
                             ui.horizontal(|ui| {
@@ -543,8 +621,13 @@ pub fn show(
             if let Some(i) = remove {
                 state.drafts.remove(i);
             }
+            state.selected_profile = selected_profile;
+            if let Some(action) = profile_action {
+                handle_profile_action(action, state, snapshot);
+            }
         });
     state.open = open;
+    show_profile_delete_confirmation(ctx, state);
 
     // Commit on any diff so cosmetic edits show immediately, but only report a
     // change (which drives the off-thread trajectory rebuild) when source or
@@ -559,6 +642,198 @@ pub fn show(
         .ne(vehicles.iter().map(|v| (v.source, &v.pos)));
     *vehicles = rebuilt;
     traj_changed
+}
+
+fn show_profile_controls(
+    ui: &mut egui::Ui,
+    draft_index: usize,
+    profiles: &[String],
+    selected_profile: &mut Option<String>,
+    save_profile_name: &mut String,
+    action: &mut Option<ProfileAction>,
+) {
+    ui.horizontal(|ui| {
+        ui.label("Profile");
+        egui::ComboBox::from_id_salt(("vehicle-profile", draft_index))
+            .selected_text(selected_profile.as_deref().unwrap_or("—"))
+            .show_ui(ui, |ui| {
+                for name in profiles {
+                    ui.selectable_value(selected_profile, Some(name.clone()), name);
+                }
+            });
+
+        let selected = selected_profile.clone();
+        let can_apply = selected.is_some();
+        if ui
+            .add_enabled(can_apply, egui::Button::new("Apply"))
+            .clicked()
+            && let Some(name) = selected.clone()
+        {
+            *action = Some(ProfileAction::Apply {
+                draft: draft_index,
+                name,
+            });
+        }
+        if ui
+            .add_enabled(can_apply, egui::Button::new("x"))
+            .on_hover_text("Delete selected profile")
+            .clicked()
+            && let Some(name) = selected
+        {
+            *action = Some(ProfileAction::Delete(name));
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::TextEdit::singleline(save_profile_name)
+                .hint_text("Profile name")
+                .desired_width(140.0),
+        );
+        if ui.button("Save Profile").clicked() {
+            *action = Some(ProfileAction::Save {
+                draft: draft_index,
+                name: save_profile_name.trim().to_owned(),
+            });
+        }
+    });
+}
+
+fn handle_profile_action(
+    action: ProfileAction,
+    state: &mut VehicleDialog,
+    snapshot: &StoreSnapshot,
+) {
+    match action {
+        ProfileAction::Apply { draft, name } => {
+            apply_profile_to_draft(state, draft, &name, snapshot)
+        }
+        ProfileAction::Save { draft, name } => {
+            save_profile_from_draft(state, draft, &name, snapshot)
+        }
+        ProfileAction::Delete(name) => {
+            state.pending_profile_delete = Some(name);
+        }
+    }
+}
+
+fn apply_profile_to_draft(
+    state: &mut VehicleDialog,
+    draft_index: usize,
+    name: &str,
+    snapshot: &StoreSnapshot,
+) {
+    let Some(library) = profile_library() else {
+        state.profile_status = Some("Vehicle profile config directory is unavailable".to_owned());
+        return;
+    };
+    let doc = match library.load(name) {
+        Ok(doc) => doc,
+        Err(err) => {
+            state.profile_status = Some(format!("Could not load vehicle profile '{name}': {err}"));
+            return;
+        }
+    };
+    let Some(draft) = state.drafts.get_mut(draft_index) else {
+        state.profile_status = Some("Vehicle draft no longer exists".to_owned());
+        return;
+    };
+    let cfg = match draft.source {
+        Some(source) => doc.to_config_for_source(snapshot, source),
+        None => doc.to_config(snapshot),
+    };
+    let Some(cfg) = cfg else {
+        state.profile_status = Some(format!(
+            "Could not apply vehicle profile '{name}'. Choose a source with matching topics first."
+        ));
+        return;
+    };
+
+    draft.apply_config_preserving_label(&cfg, snapshot);
+    state.selected_profile = Some(name.to_owned());
+    state.profile_status = Some(format!("Applied vehicle profile '{name}'"));
+}
+
+fn save_profile_from_draft(
+    state: &mut VehicleDialog,
+    draft_index: usize,
+    name: &str,
+    snapshot: &StoreSnapshot,
+) {
+    if name.trim().is_empty() {
+        state.profile_status = Some("Enter a profile name before saving".to_owned());
+        return;
+    }
+    let Some(library) = profile_library() else {
+        state.profile_status = Some("Vehicle profile config directory is unavailable".to_owned());
+        return;
+    };
+    let Some(config) = state.drafts.get(draft_index).and_then(Draft::build) else {
+        state.profile_status =
+            Some("Complete the vehicle mapping before saving a profile".to_owned());
+        return;
+    };
+    let Some(doc) = VehicleProfileDoc::from_config(name, &config, snapshot) else {
+        state.profile_status = Some(format!("Could not create vehicle profile '{name}'"));
+        return;
+    };
+    if let Err(err) = library.save(name, &doc) {
+        state.profile_status = Some(format!("Could not save vehicle profile '{name}': {err}"));
+        return;
+    }
+
+    refresh_profiles(state);
+    state.selected_profile = Some(name.to_owned());
+    state.save_profile_name.clear();
+    state.profile_status = Some(format!("Saved vehicle profile '{name}'"));
+}
+
+fn show_profile_delete_confirmation(ctx: &egui::Context, state: &mut VehicleDialog) {
+    let Some(name) = state.pending_profile_delete.clone() else {
+        return;
+    };
+
+    let mut open = true;
+    let mut close_confirmation = false;
+    egui::Window::new("Delete profile?")
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .show(ctx, |ui| {
+            ui.label(format!("Delete vehicle profile '{name}'?"));
+            ui.horizontal(|ui| {
+                if ui.button("Delete").clicked() {
+                    match profile_library() {
+                        Some(library) => match library.delete(&name) {
+                            Ok(()) => {
+                                if state.selected_profile.as_deref() == Some(name.as_str()) {
+                                    state.selected_profile = None;
+                                }
+                                refresh_profiles(state);
+                                state.profile_status =
+                                    Some(format!("Deleted vehicle profile '{name}'"));
+                            }
+                            Err(err) => {
+                                state.profile_status = Some(format!(
+                                    "Could not delete vehicle profile '{name}': {err}"
+                                ));
+                            }
+                        },
+                        None => {
+                            state.profile_status =
+                                Some("Vehicle profile config directory is unavailable".to_owned());
+                        }
+                    }
+                    close_confirmation = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    close_confirmation = true;
+                }
+            });
+        });
+
+    if close_confirmation || !open {
+        state.pending_profile_delete = None;
+    }
 }
 
 fn icon(ui: &egui::Ui, src: egui::ImageSource<'static>) -> egui::Image<'static> {
@@ -899,5 +1174,25 @@ mod tests {
     #[test]
     fn new_vehicle_draft_defaults_to_fixed_wing_model() {
         assert_eq!(Draft::default().model, ModelKind::FixedWing);
+    }
+
+    #[test]
+    fn vehicle_dialog_contains_profile_controls_inside_window() {
+        let source = include_str!("vehicle_dialog.rs");
+
+        assert!(source.contains("Profile"));
+        assert!(source.contains("Apply"));
+        assert!(source.contains("Save Profile"));
+        assert!(source.contains("Delete profile?"));
+        assert!(!source.contains(concat!("open_vehicle", "_profile")));
+    }
+
+    #[test]
+    fn profile_delete_uses_confirmation_window() {
+        let source = include_str!("vehicle_dialog.rs");
+
+        assert!(source.contains("pending_profile_delete"));
+        assert!(source.contains("egui::Window::new(\"Delete profile?\")"));
+        assert!(source.contains(".delete("));
     }
 }
