@@ -8,6 +8,29 @@ use serde::{Deserialize, Serialize};
 
 pub const VEHICLE_PROFILE_VERSION: u32 = 1;
 
+const DEFAULT_PROFILES: &[(&str, &str)] = &[
+    (
+        "mavlink_global_position.json",
+        include_str!("../../../fixtures/vehicle_profiles/mavlink_global_position.json"),
+    ),
+    (
+        "mavlink_local_position.json",
+        include_str!("../../../fixtures/vehicle_profiles/mavlink_local_position.json"),
+    ),
+    (
+        "ardupilot_global_position.json",
+        include_str!("../../../fixtures/vehicle_profiles/ardupilot_global_position.json"),
+    ),
+    (
+        "ulg_local_position.json",
+        include_str!("../../../fixtures/vehicle_profiles/ulg_local_position.json"),
+    ),
+    (
+        "ulg_global_position.json",
+        include_str!("../../../fixtures/vehicle_profiles/ulg_global_position.json"),
+    ),
+];
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VehicleProfileDoc {
     pub delog_vehicle_profile: u32,
@@ -94,6 +117,24 @@ impl VehicleProfileLibrary {
         fs::remove_file(self.profile_path(name)?)
     }
 
+    pub fn seed_defaults(&self) -> io::Result<()> {
+        if self.dir.exists() {
+            return Ok(());
+        }
+
+        fs::create_dir_all(&self.dir)?;
+        for (file, contents) in DEFAULT_PROFILES {
+            let doc: VehicleProfileDoc = serde_json::from_str(contents).map_err(|err| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid default vehicle profile {file}: {err}"),
+                )
+            })?;
+            fs::write(self.profile_path(&doc.name)?, contents)?;
+        }
+        Ok(())
+    }
+
     fn profile_path(&self, name: &str) -> io::Result<PathBuf> {
         Ok(self.dir.join(format!("{}.json", sanitize_name(name)?)))
     }
@@ -118,6 +159,29 @@ mod tests {
     use crate::layout::{FieldRef, ModelLayout, OriLayout, PosLayout, VehicleLayout};
 
     use super::*;
+
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new(test_name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "delog_vehicle_profiles_{test_name}_{}_{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
     fn temp_profile_dir(test_name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -223,5 +287,26 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
 
         fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn seeds_defaults_only_when_profile_dir_is_created() {
+        let tmp = TestDir::new("seed");
+        let profile_dir = tmp.0.join("vehicle_profiles");
+        let library = VehicleProfileLibrary::new(&profile_dir);
+
+        library.seed_defaults().unwrap();
+        let names = library.list().unwrap();
+        assert!(names.contains(&"MAVLink Global Position".to_owned()));
+        assert!(names.contains(&"MAVLink Local Position".to_owned()));
+        assert!(names.contains(&"ArduPilot Global Position".to_owned()));
+        assert!(names.contains(&"ULG Local Position".to_owned()));
+        assert!(names.contains(&"ULG Global Position".to_owned()));
+
+        library.delete("MAVLink Global Position").unwrap();
+        library.seed_defaults().unwrap();
+
+        let names = library.list().unwrap();
+        assert!(!names.contains(&"MAVLink Global Position".to_owned()));
     }
 }

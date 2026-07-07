@@ -1,0 +1,28 @@
+{
+  "delog_vehicle_profile": 1,
+  "name": "ULG Local Position",
+  "vehicle": {
+    "label": "Vehicle",
+    "show": true,
+    "model": "fixed_wing",
+    "color": [90, 170, 255, 255],
+    "path_color": [255, 170, 60, 255],
+    "scale": 1.0,
+    "position": {
+      "ned": {
+        "north": { "topic": "vehicle_local_position[0]", "field": "x" },
+        "east": { "topic": "vehicle_local_position[0]", "field": "y" },
+        "down": { "topic": "vehicle_local_position[0]", "field": "z" },
+        "reference": null
+      }
+    },
+    "orientation": {
+      "quat": {
+        "w": { "topic": "vehicle_attitude[0]", "field": "q[0]" },
+        "x": { "topic": "vehicle_attitude[0]", "field": "q[1]" },
+        "y": { "topic": "vehicle_attitude[0]", "field": "q[2]" },
+        "z": { "topic": "vehicle_attitude[0]", "field": "q[3]" }
+      }
+    }
+  }
+}
