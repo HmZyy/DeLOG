@@ -715,6 +715,30 @@ fn vehicle_to_layout(v: &VehicleConfig, snapshot: &StoreSnapshot) -> Option<Vehi
     })
 }
 
+#[allow(dead_code)]
+pub fn vehicle_config_to_layout(
+    v: &VehicleConfig,
+    snapshot: &StoreSnapshot,
+) -> Option<VehicleLayout> {
+    vehicle_to_layout(v, snapshot)
+}
+
+#[allow(dead_code)]
+pub fn vehicle_config_from_layout(
+    v: &VehicleLayout,
+    snapshot: &StoreSnapshot,
+) -> Option<VehicleConfig> {
+    let choices = HashMap::new();
+    let mut resolver = Resolver {
+        snapshot,
+        choices: &choices,
+        diagnostics: Vec::new(),
+        ambiguities: BTreeMap::new(),
+        collect_ambiguities: false,
+    };
+    vehicle_from_layout(v, &mut resolver)
+}
+
 fn field_ref(snapshot: &StoreSnapshot, field: FieldId) -> Option<FieldRef> {
     let field_entry = snapshot
         .fields
@@ -1437,6 +1461,50 @@ mod tests {
         assert_eq!(layout.vehicles.len(), 1);
         assert_eq!(layout.vehicles[0].label, "Vehicle");
         assert_eq!(layout.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn vehicle_layout_helpers_round_trip_static_ned_vehicle() {
+        let snapshot = snapshot_with_topics(&[("log", "LOCAL_POSITION_NED", &["x", "y", "z"])]);
+        let source = snapshot
+            .sources
+            .iter()
+            .find(|s| !s.entry.removed)
+            .unwrap()
+            .entry
+            .id;
+        let mut fields = snapshot
+            .fields
+            .iter()
+            .filter(|f| !f.removed)
+            .map(|f| (f.name.as_str(), f.id))
+            .collect::<std::collections::HashMap<_, _>>();
+        let north = fields.remove("x").unwrap();
+        let east = fields.remove("y").unwrap();
+        let down = fields.remove("z").unwrap();
+
+        let cfg = VehicleConfig {
+            source,
+            label: "Vehicle".to_owned(),
+            show: true,
+            pos: PosMapping::Ned {
+                north,
+                east,
+                down,
+                reference: None,
+            },
+            ori: OriMapping::Static,
+            model: ModelKind::Cone,
+            color: Color32::from_rgb(1, 2, 3),
+            path_color: Color32::from_rgb(4, 5, 6),
+            scale: 1.5,
+        };
+
+        let layout = vehicle_config_to_layout(&cfg, &snapshot).expect("vehicle should serialize");
+        let resolved =
+            vehicle_config_from_layout(&layout, &snapshot).expect("vehicle should resolve");
+
+        assert_eq!(resolved, cfg);
     }
 
     #[test]
