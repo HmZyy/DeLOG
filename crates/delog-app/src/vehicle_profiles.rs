@@ -54,7 +54,11 @@ impl VehicleProfileLibrary {
                 continue;
             }
             if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
-                profiles.push(stem.to_owned());
+                if let Ok(name) = sanitize_name(stem)
+                    && name == stem
+                {
+                    profiles.push(name);
+                }
             }
         }
         profiles.sort();
@@ -64,7 +68,18 @@ impl VehicleProfileLibrary {
     pub fn load(&self, name: &str) -> io::Result<VehicleProfileDoc> {
         let path = self.profile_path(name)?;
         let json = fs::read_to_string(path)?;
-        serde_json::from_str(&json).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
+        let doc: VehicleProfileDoc = serde_json::from_str(&json)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+        if doc.delog_vehicle_profile != VEHICLE_PROFILE_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "unsupported vehicle profile version {}",
+                    doc.delog_vehicle_profile
+                ),
+            ));
+        }
+        Ok(doc)
     }
 
     pub fn save(&self, name: &str, doc: &VehicleProfileDoc) -> io::Result<()> {
@@ -174,6 +189,38 @@ mod tests {
         assert!(library.save("../evil", &doc).is_err());
         assert!(library.load("a/b").is_err());
         assert!(library.delete("a\\b").is_err());
+
+        fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn list_ignores_invalid_external_file_names() {
+        let tmp = temp_profile_dir("list_ignores_invalid_external_file_names");
+        let library = VehicleProfileLibrary::new(&tmp);
+        let doc = sample_doc();
+
+        library.save("MAVLink Local Position", &doc).unwrap();
+        fs::write(tmp.join("bad..name.json"), "{}").unwrap();
+
+        assert_eq!(library.list().unwrap(), vec!["MAVLink Local Position"]);
+
+        fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn load_rejects_unsupported_profile_version() {
+        let tmp = temp_profile_dir("load_rejects_unsupported_profile_version");
+        let library = VehicleProfileLibrary::new(&tmp);
+        let mut doc = sample_doc();
+        doc.delog_vehicle_profile = 99;
+        fs::write(
+            tmp.join("MAVLink Local Position.json"),
+            serde_json::to_string_pretty(&doc).unwrap(),
+        )
+        .unwrap();
+
+        let err = library.load("MAVLink Local Position").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
 
         fs::remove_dir_all(tmp).unwrap();
     }
