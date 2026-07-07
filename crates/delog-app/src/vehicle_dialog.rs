@@ -63,6 +63,8 @@ struct Draft {
     color: Color32,
     path_color: Color32,
     scale: f32,
+    selected_profile: Option<String>,
+    save_profile_name: String,
 }
 
 impl Default for Draft {
@@ -105,6 +107,8 @@ impl Default for Draft {
             color: Color32::from_rgb(90, 170, 255),
             path_color: Color32::from_rgb(255, 170, 60),
             scale: 1.0,
+            selected_profile: None,
+            save_profile_name: String::new(),
         }
     }
 }
@@ -280,8 +284,6 @@ pub struct VehicleDialog {
     drafts: Vec<Draft>,
     was_open: bool,
     profiles: Vec<String>,
-    selected_profile: Option<String>,
-    save_profile_name: String,
     pending_profile_delete: Option<String>,
     profile_status: Option<String>,
 }
@@ -293,8 +295,6 @@ impl Default for VehicleDialog {
             drafts: Vec::new(),
             was_open: false,
             profiles: Vec::new(),
-            selected_profile: None,
-            save_profile_name: String::new(),
             pending_profile_delete: None,
             profile_status: None,
         }
@@ -346,7 +346,9 @@ fn refresh_profiles(state: &mut VehicleDialog) {
     let Some(library) = profile_library() else {
         state.profile_status = Some("Vehicle profile config directory is unavailable".to_owned());
         state.profiles.clear();
-        state.selected_profile = None;
+        for draft in &mut state.drafts {
+            draft.selected_profile = None;
+        }
         return;
     };
 
@@ -357,18 +359,22 @@ fn refresh_profiles(state: &mut VehicleDialog) {
     match library.list() {
         Ok(profiles) => {
             state.profiles = profiles;
-            if state
-                .selected_profile
-                .as_ref()
-                .is_some_and(|selected| !state.profiles.contains(selected))
-            {
-                state.selected_profile = None;
+            for draft in &mut state.drafts {
+                if draft
+                    .selected_profile
+                    .as_ref()
+                    .is_some_and(|selected| !state.profiles.contains(selected))
+                {
+                    draft.selected_profile = None;
+                }
             }
         }
         Err(err) => {
             state.profile_status = Some(format!("Could not list vehicle profiles: {err}"));
             state.profiles.clear();
-            state.selected_profile = None;
+            for draft in &mut state.drafts {
+                draft.selected_profile = None;
+            }
         }
     }
 }
@@ -531,6 +537,7 @@ pub fn show(
     }
     state.was_open = state.open;
     if !state.open {
+        state.pending_profile_delete = None;
         return false;
     }
 
@@ -560,13 +567,13 @@ pub fn show(
                 ui.add_space(6.0);
                 ui.label(status);
             }
+            show_profile_delete_confirmation(ui, state);
             ui.add_space(8.0);
 
             let mut remove: Option<usize> = None;
             let mut duplicate: Option<usize> = None;
             let mut profile_action: Option<ProfileAction> = None;
             let profile_names = state.profiles.clone();
-            let mut selected_profile = state.selected_profile.clone();
             egui::ScrollArea::vertical().show(ui, |ui| {
                 for (i, draft) in state.drafts.iter_mut().enumerate() {
                     let title = if draft.label.trim().is_empty() {
@@ -582,8 +589,7 @@ pub fn show(
                                 ui,
                                 i,
                                 &profile_names,
-                                &mut selected_profile,
-                                &mut state.save_profile_name,
+                                draft,
                                 &mut profile_action,
                             );
                             ui.add_space(8.0);
@@ -621,13 +627,14 @@ pub fn show(
             if let Some(i) = remove {
                 state.drafts.remove(i);
             }
-            state.selected_profile = selected_profile;
             if let Some(action) = profile_action {
                 handle_profile_action(action, state, snapshot);
             }
         });
     state.open = open;
-    show_profile_delete_confirmation(ctx, state);
+    if !state.open {
+        state.pending_profile_delete = None;
+    }
 
     // Commit on any diff so cosmetic edits show immediately, but only report a
     // change (which drives the off-thread trajectory rebuild) when source or
@@ -648,21 +655,20 @@ fn show_profile_controls(
     ui: &mut egui::Ui,
     draft_index: usize,
     profiles: &[String],
-    selected_profile: &mut Option<String>,
-    save_profile_name: &mut String,
+    draft: &mut Draft,
     action: &mut Option<ProfileAction>,
 ) {
     ui.horizontal(|ui| {
         ui.label("Profile");
         egui::ComboBox::from_id_salt(("vehicle-profile", draft_index))
-            .selected_text(selected_profile.as_deref().unwrap_or("—"))
+            .selected_text(draft.selected_profile.as_deref().unwrap_or("—"))
             .show_ui(ui, |ui| {
                 for name in profiles {
-                    ui.selectable_value(selected_profile, Some(name.clone()), name);
+                    ui.selectable_value(&mut draft.selected_profile, Some(name.clone()), name);
                 }
             });
 
-        let selected = selected_profile.clone();
+        let selected = draft.selected_profile.clone();
         let can_apply = selected.is_some();
         if ui
             .add_enabled(can_apply, egui::Button::new("Apply"))
@@ -685,14 +691,14 @@ fn show_profile_controls(
     });
     ui.horizontal(|ui| {
         ui.add(
-            egui::TextEdit::singleline(save_profile_name)
+            egui::TextEdit::singleline(&mut draft.save_profile_name)
                 .hint_text("Profile name")
                 .desired_width(140.0),
         );
         if ui.button("Save Profile").clicked() {
             *action = Some(ProfileAction::Save {
                 draft: draft_index,
-                name: save_profile_name.trim().to_owned(),
+                name: draft.save_profile_name.trim().to_owned(),
             });
         }
     });
@@ -749,7 +755,7 @@ fn apply_profile_to_draft(
     };
 
     draft.apply_config_preserving_label(&cfg, snapshot);
-    state.selected_profile = Some(name.to_owned());
+    draft.selected_profile = Some(name.to_owned());
     state.profile_status = Some(format!("Applied vehicle profile '{name}'"));
 }
 
@@ -782,56 +788,57 @@ fn save_profile_from_draft(
     }
 
     refresh_profiles(state);
-    state.selected_profile = Some(name.to_owned());
-    state.save_profile_name.clear();
+    if let Some(draft) = state.drafts.get_mut(draft_index) {
+        draft.selected_profile = Some(name.to_owned());
+        draft.save_profile_name.clear();
+    }
     state.profile_status = Some(format!("Saved vehicle profile '{name}'"));
 }
 
-fn show_profile_delete_confirmation(ctx: &egui::Context, state: &mut VehicleDialog) {
+fn show_profile_delete_confirmation(ui: &mut egui::Ui, state: &mut VehicleDialog) {
     let Some(name) = state.pending_profile_delete.clone() else {
         return;
     };
 
-    let mut open = true;
     let mut close_confirmation = false;
-    egui::Window::new("Delete profile?")
-        .open(&mut open)
-        .collapsible(false)
-        .resizable(false)
-        .show(ctx, |ui| {
-            ui.label(format!("Delete vehicle profile '{name}'?"));
-            ui.horizontal(|ui| {
-                if ui.button("Delete").clicked() {
-                    match profile_library() {
-                        Some(library) => match library.delete(&name) {
-                            Ok(()) => {
-                                if state.selected_profile.as_deref() == Some(name.as_str()) {
-                                    state.selected_profile = None;
-                                }
-                                refresh_profiles(state);
-                                state.profile_status =
-                                    Some(format!("Deleted vehicle profile '{name}'"));
-                            }
-                            Err(err) => {
-                                state.profile_status = Some(format!(
-                                    "Could not delete vehicle profile '{name}': {err}"
-                                ));
-                            }
-                        },
-                        None => {
-                            state.profile_status =
-                                Some("Vehicle profile config directory is unavailable".to_owned());
-                        }
-                    }
-                    close_confirmation = true;
-                }
-                if ui.button("Cancel").clicked() {
-                    close_confirmation = true;
-                }
-            });
-        });
 
-    if close_confirmation || !open {
+    ui.add_space(6.0);
+    ui.group(|ui| {
+        ui.label(egui::RichText::new("Delete profile?").strong());
+        ui.label(format!("Delete vehicle profile '{name}'?"));
+        ui.horizontal(|ui| {
+            if ui.button("Delete").clicked() {
+                match profile_library() {
+                    Some(library) => match library.delete(&name) {
+                        Ok(()) => {
+                            for draft in &mut state.drafts {
+                                if draft.selected_profile.as_deref() == Some(name.as_str()) {
+                                    draft.selected_profile = None;
+                                }
+                            }
+                            refresh_profiles(state);
+                            state.profile_status =
+                                Some(format!("Deleted vehicle profile '{name}'"));
+                        }
+                        Err(err) => {
+                            state.profile_status =
+                                Some(format!("Could not delete vehicle profile '{name}': {err}"));
+                        }
+                    },
+                    None => {
+                        state.profile_status =
+                            Some("Vehicle profile config directory is unavailable".to_owned());
+                    }
+                }
+                close_confirmation = true;
+            }
+            if ui.button("Cancel").clicked() {
+                close_confirmation = true;
+            }
+        });
+    });
+
+    if close_confirmation {
         state.pending_profile_delete = None;
     }
 }
@@ -1188,11 +1195,36 @@ mod tests {
     }
 
     #[test]
-    fn profile_delete_uses_confirmation_window() {
+    fn profile_delete_uses_inline_confirmation() {
         let source = include_str!("vehicle_dialog.rs");
 
         assert!(source.contains("pending_profile_delete"));
-        assert!(source.contains("egui::Window::new(\"Delete profile?\")"));
+        assert!(source.contains("Delete profile?"));
+        assert!(!source.contains(concat!("egui::Window::new(\"Delete ", "profile?\")")));
         assert!(source.contains(".delete("));
+    }
+
+    #[test]
+    fn profile_row_state_is_stored_per_draft() {
+        let source = include_str!("vehicle_dialog.rs");
+        let draft = source
+            .split("struct Draft")
+            .nth(1)
+            .expect("Draft should exist")
+            .split("impl Default for Draft")
+            .next()
+            .expect("Draft fields should precede default impl");
+        let dialog = source
+            .split("pub struct VehicleDialog")
+            .nth(1)
+            .expect("VehicleDialog should exist")
+            .split("impl Default for VehicleDialog")
+            .next()
+            .expect("VehicleDialog fields should precede default impl");
+
+        assert!(draft.contains("selected_profile: Option<String>"));
+        assert!(draft.contains("save_profile_name: String"));
+        assert!(!dialog.contains("selected_profile: Option<String>"));
+        assert!(!dialog.contains("save_profile_name: String"));
     }
 }
