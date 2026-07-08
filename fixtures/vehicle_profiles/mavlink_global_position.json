@@ -1,6 +1,6 @@
 {
   "delog_vehicle_profile": 1,
-  "name": "MAVLink Global Position",
+  "name": "mavlink_global_position",
   "vehicle": {
     "label": "Vehicle",
     "show": true,
