@@ -49,6 +49,12 @@ fn format_pyerr(py: Python<'_>, err: &PyErr) -> String {
 
 pub enum ScriptCommand {
     Eval(String),
+    /// Request completions for `text` (a token to complete). The reply is a
+    /// `ScriptEvent::Completions` carrying the same `seq`.
+    Complete {
+        seq: u64,
+        text: String,
+    },
     /// On success emits one `script:<name>` source.
     RunScript {
         name: String,
@@ -275,6 +281,11 @@ pub enum ScriptEvent {
     Done,
     /// Carries no command-completion semantics; the UI ignores it.
     LiveBatchProcessed,
+    /// Completion candidates for a prior `ScriptCommand::Complete`.
+    Completions {
+        seq: u64,
+        matches: Vec<String>,
+    },
     /// Never implies ordinary script completion.
     Parser(ParserEvent),
 }
@@ -890,6 +901,11 @@ fn handle_command(
                 params::set_current_script(None);
                 let _ = evt_tx.send(ScriptEvent::Done);
             }
+            ScriptCommand::Complete { seq, text } => {
+                ensure_delog_present(store, globals, run_counter, params);
+                let matches = complete_line(globals, &text);
+                let _ = evt_tx.send(ScriptEvent::Completions { seq, matches });
+            }
         }
     }
     false
@@ -1106,6 +1122,81 @@ fn eval_line(globals: &Py<PyDict>, src: &str, evt_tx: &Sender<ScriptEvent>) {
     });
 }
 
+/// Guarantee a `delog` object exists in `globals` so attribute completion of
+/// `delog.` works even before the user has run anything. Ordinary evals replace
+/// it with a snapshot-bound instance; for completion the attribute surface is
+/// all we need.
+fn ensure_delog_present(
+    store: &Arc<DataStore>,
+    globals: &Py<PyDict>,
+    run_counter: &u64,
+    params: &SharedParams,
+) {
+    Python::attach(|py| {
+        let g = globals.bind(py);
+        if g.contains("delog").unwrap_or(false) {
+            return;
+        }
+        let snapshot = store.load();
+        let emit: crate::api::EmitBuffer = std::rc::Rc::default();
+        let live: crate::api::LiveTransformBuffer = std::rc::Rc::default();
+        if let Ok(delog) = Bound::new(
+            py,
+            Delog::new(
+                snapshot,
+                std::rc::Rc::clone(&emit),
+                std::rc::Rc::clone(&live),
+                String::new(),
+                *run_counter,
+                Arc::clone(params),
+            ),
+        ) {
+            let _ = g.set_item("delog", delog);
+        }
+    });
+}
+
+/// Compute completion candidates for `text` using stdlib `rlcompleter` against
+/// the live `globals` namespace. Empty result on any failure.
+fn complete_line(globals: &Py<PyDict>, text: &str) -> Vec<String> {
+    Python::attach(|py| {
+        let g = globals.bind(py);
+        let completer = match build_completer(py, &g) {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
+        let mut matches: Vec<String> = Vec::new();
+        let mut state = 0i32;
+        loop {
+            match completer.call_method1("complete", (text, state)) {
+                Ok(obj) if !obj.is_none() => {
+                    if let Ok(mut s) = obj.extract::<String>() {
+                        // rlcompleter appends "(" to callables; drop it.
+                        if s.ends_with('(') {
+                            s.pop();
+                        }
+                        if !matches.contains(&s) {
+                            matches.push(s);
+                        }
+                    }
+                    state += 1;
+                }
+                _ => break,
+            }
+        }
+        matches
+    })
+}
+
+fn build_completer<'py>(
+    py: Python<'py>,
+    globals: &Bound<'py, PyDict>,
+) -> pyo3::PyResult<Bound<'py, pyo3::PyAny>> {
+    let rlcompleter = py.import("rlcompleter")?;
+    let completer_cls = rlcompleter.getattr("Completer")?;
+    completer_cls.call1((globals,))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1173,6 +1264,7 @@ mod tests {
                 ScriptEvent::Error(e) => panic!("{e}"),
                 ScriptEvent::Result(_)
                 | ScriptEvent::LiveBatchProcessed
+                | ScriptEvent::Completions { .. }
                 | ScriptEvent::Parser(_) => {}
             }
         }
@@ -1197,10 +1289,72 @@ mod tests {
                 ScriptEvent::Error(e) => panic!("unexpected error: {e}"),
                 ScriptEvent::Output(_)
                 | ScriptEvent::LiveBatchProcessed
+                | ScriptEvent::Completions { .. }
                 | ScriptEvent::Parser(_) => {}
             }
         }
         assert_eq!(got_result.as_deref(), Some("2"));
+    }
+
+    fn drain_until_done(engine: &ScriptEngine) {
+        loop {
+            match engine.recv_blocking() {
+                ScriptEvent::Done => break,
+                ScriptEvent::Error(e) => panic!("unexpected error: {e}"),
+                _ => {}
+            }
+        }
+    }
+
+    fn completions_for(engine: &ScriptEngine, seq: u64, text: &str) -> Vec<String> {
+        let _ = engine.send(ScriptCommand::Complete {
+            seq,
+            text: text.into(),
+        });
+        loop {
+            match engine.recv_blocking() {
+                ScriptEvent::Completions { seq: got, matches } => {
+                    assert_eq!(got, seq);
+                    return matches;
+                }
+                ScriptEvent::Error(e) => panic!("unexpected error: {e}"),
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn complete_lists_session_names() {
+        let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let engine = ScriptEngine::spawn(
+            Arc::new(DataStore::new()),
+            dummy_sender(),
+            test_metrics(),
+            crate::params::shared_empty(),
+        );
+        let _ = engine.send(ScriptCommand::Eval("xylophone = 1".into()));
+        drain_until_done(&engine);
+        let matches = completions_for(&engine, 7, "xyl");
+        assert!(
+            matches.iter().any(|m| m == "xylophone"),
+            "got {matches:?}"
+        );
+    }
+
+    #[test]
+    fn complete_lists_delog_api_before_any_eval() {
+        let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let engine = ScriptEngine::spawn(
+            Arc::new(DataStore::new()),
+            dummy_sender(),
+            test_metrics(),
+            crate::params::shared_empty(),
+        );
+        let matches = completions_for(&engine, 1, "delog.fi");
+        assert!(
+            matches.iter().any(|m| m == "delog.field"),
+            "got {matches:?}"
+        );
     }
 
     #[test]
@@ -1224,6 +1378,7 @@ mod tests {
                 ScriptEvent::Error(e) => panic!("{e}"),
                 ScriptEvent::Output(_)
                 | ScriptEvent::LiveBatchProcessed
+                | ScriptEvent::Completions { .. }
                 | ScriptEvent::Parser(_) => {}
             }
         }
