@@ -647,28 +647,32 @@ impl ScriptsPanel {
                 ui.horizontal(|ui| {
                     ui.label(">>>");
                     let dispatch_enabled = self.ordinary_dispatch_enabled();
-                    let clear_button_width =
-                        ui.spacing().interact_size.x + ui.spacing().item_spacing.x;
-                    let repl_width = (ui.available_width() - clear_button_width).max(0.0);
-                    let resp = ui.add_enabled(
-                        dispatch_enabled,
-                        egui::TextEdit::singleline(&mut self.repl_input)
-                            .desired_width(repl_width)
-                            .lock_focus(true),
-                    );
+                    // Pin the trash button flush right, then let the REPL input fill
+                    // the remaining space to its left.
+                    let resp = ui
+                        .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let trash = egui::Image::new(crate::icons::trash())
+                                .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
+                                .tint(ui.visuals().text_color());
+                            if ui
+                                .add(egui::Button::image(trash))
+                                .on_hover_text("Clear console")
+                                .clicked()
+                            {
+                                self.console.clear();
+                            }
+
+                            let repl_width = ui.available_width();
+                            ui.add_enabled(
+                                dispatch_enabled,
+                                egui::TextEdit::singleline(&mut self.repl_input)
+                                    .desired_width(repl_width)
+                                    .lock_focus(true),
+                            )
+                        })
+                        .inner;
                     if dispatch_enabled && self.take_repl_refocus_request() {
                         resp.request_focus();
-                    }
-
-                    let trash = egui::Image::new(crate::icons::trash())
-                        .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
-                        .tint(ui.visuals().text_color());
-                    if ui
-                        .add(egui::Button::image(trash))
-                        .on_hover_text("Clear console")
-                        .clicked()
-                    {
-                        self.console.clear();
                     }
 
                     // The popup owns Up/Down/Tab/Enter/Esc while it is open.
