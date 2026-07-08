@@ -270,8 +270,12 @@ impl ReplCompletion {
         let down = ui.input_mut(|i| {
             i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)
                 || i.consume_key(egui::Modifiers::NONE, egui::Key::Tab)
+                || i.consume_key(egui::Modifiers::CTRL, egui::Key::N)
         });
-        let up = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp));
+        let up = ui.input_mut(|i| {
+            i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)
+                || i.consume_key(egui::Modifiers::CTRL, egui::Key::P)
+        });
         let accept = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
         let dismiss = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
         if down {
