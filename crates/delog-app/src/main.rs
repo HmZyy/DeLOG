@@ -34,6 +34,7 @@ mod theme;
 mod timeline;
 mod vehicle;
 mod vehicle_dialog;
+mod vehicle_profiles;
 mod workspace;
 
 use app::DelogApp;
