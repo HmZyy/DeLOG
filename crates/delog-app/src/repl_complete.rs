@@ -304,17 +304,27 @@ impl ReplCompletion {
         let hi_start = token.rfind('.').map(|i| i + 1).unwrap_or(0);
         let hi_end = token.len();
         let mut clicked: Option<usize> = None;
-        // The console input sits at the bottom of the window, so grow the
-        // dropdown upward from the input's top edge where there is room.
+        // Size the dropdown to its rows (capped), then place it directly above
+        // the console input, which sits at the bottom of the window. Anchoring
+        // by a computed top edge (rather than a bottom pivot) keeps the inner
+        // scroll area's height stable instead of collapsing to a few rows.
+        const MAX_ROWS: usize = 12;
+        let row_h = ui.text_style_height(&egui::TextStyle::Monospace)
+            + 2.0 * ui.spacing().button_padding.y
+            + ui.spacing().item_spacing.y;
+        let pad = 8.0;
+        let rows = matches.len().clamp(1, MAX_ROWS) as f32;
+        let popup_h = (rows * row_h + pad).min(input.rect.top().max(row_h + pad));
+        let list_height = (popup_h - pad).max(row_h);
+        let pos = egui::pos2(input.rect.left(), input.rect.top() - popup_h);
         egui::Area::new(ui.id().with("repl_completion_popup"))
             .order(egui::Order::Foreground)
-            .pivot(egui::Align2::LEFT_BOTTOM)
-            .fixed_pos(input.rect.left_top())
+            .fixed_pos(pos)
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.set_max_width(input.rect.width().max(120.0));
                     egui::ScrollArea::vertical()
-                        .max_height(360.0)
+                        .max_height(list_height)
                         .show(ui, |ui| {
                             for (i, m) in matches.iter().enumerate() {
                                 let resp = ui.selectable_label(
