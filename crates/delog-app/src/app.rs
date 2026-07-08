@@ -1578,11 +1578,12 @@ impl eframe::App for DelogApp {
                         ui.close();
                     }
                     #[cfg(feature = "scripting")]
-                    if ui
-                        .checkbox(&mut self.scripts.console_open, "Scripting (F9)")
-                        .clicked()
                     {
-                        ui.close();
+                        let mut console_open = self.scripts.console_open;
+                        if ui.checkbox(&mut console_open, "Scripting (F9)").clicked() {
+                            self.scripts.set_console_open(console_open);
+                            ui.close();
+                        }
                     }
                     if ui
                         .checkbox(&mut self.logging_dock.open, "Logging (F12)")
@@ -1976,7 +1977,7 @@ impl eframe::App for DelogApp {
         }
         #[cfg(feature = "scripting")]
         if ui.ctx().input(|i| i.key_pressed(egui::Key::F9)) {
-            self.scripts.console_open = !self.scripts.console_open;
+            self.scripts.set_console_open(!self.scripts.console_open);
         }
 
         // Transport keys — skipped while a widget owns the
