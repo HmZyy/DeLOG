@@ -63,7 +63,8 @@ impl AppDockController {
             .sum()
     }
 
-    pub fn active_tab(&self) -> Option<AppDockTab> {
+    #[cfg(test)]
+    fn active_tab(&self) -> Option<AppDockTab> {
         self.active_tab.filter(|tab| self.is_open(*tab))
     }
 
