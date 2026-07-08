@@ -12,7 +12,7 @@ use crate::field_stats::{FieldStatsController, StatsRequestKey, StatsTab};
 use crate::gpu::GpuBridge;
 use crate::layout::{LayoutApply, LayoutDoc, LayoutError, LoadOutcome, PendingLayout};
 use crate::live::ConnectionDialog;
-use crate::logging::{LogRecord, LoggingDock, PendingLog};
+use crate::logging::{LogLevel, LogRecord, LoggingDock, PendingLog};
 use crate::performance::{PerformanceDock, PerformanceSnapshot, ResourceSummary, TraceSummary};
 use crate::plot::ViewX;
 #[cfg(feature = "scripting")]
@@ -2474,11 +2474,14 @@ impl eframe::App for DelogApp {
                 self.settings.scripting.auto_open_console,
             );
             for message in self.scripts.take_parser_diagnostics() {
-                self.session
-                    .push_diagnostic(delog_core::diagnostics::Diag::error(
-                        "python-parser",
-                        message,
-                    ));
+                self.push_log(PendingLog::with_target(
+                    LogLevel::Error,
+                    "python-parser",
+                    message,
+                ));
+            }
+            for log in self.scripts.take_logs() {
+                self.push_log(log);
             }
         }
     }
