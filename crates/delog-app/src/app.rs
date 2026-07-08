@@ -12,6 +12,7 @@ use crate::field_stats::{FieldStatsController, StatsRequestKey, StatsTab};
 use crate::gpu::GpuBridge;
 use crate::layout::{LayoutApply, LayoutDoc, LayoutError, LoadOutcome, PendingLayout};
 use crate::live::ConnectionDialog;
+use crate::logging::{LogRecord, LoggingDock};
 use crate::performance::{PerformanceDock, PerformanceSnapshot, ResourceSummary, TraceSummary};
 use crate::plot::ViewX;
 #[cfg(feature = "scripting")]
@@ -253,6 +254,8 @@ pub struct DelogApp {
     browser_collapsed: bool,
     diagnostics_dock: DiagnosticsDock,
     last_diagnostic_seq: Option<u64>,
+    logging_dock: LoggingDock,
+    logs: Vec<LogRecord>,
     performance_dock: PerformanceDock,
     markers_dock: crate::markers::MarkersDock,
     performance_snapshot: PerformanceSnapshot,
@@ -355,6 +358,8 @@ impl DelogApp {
             browser_collapsed: false,
             diagnostics_dock: DiagnosticsDock::default(),
             last_diagnostic_seq: None,
+            logging_dock: LoggingDock::default(),
+            logs: Vec::new(),
             performance_dock: PerformanceDock::default(),
             markers_dock: crate::markers::MarkersDock::default(),
             performance_snapshot: PerformanceSnapshot::default(),
@@ -1590,6 +1595,12 @@ impl eframe::App for DelogApp {
                         ui.close();
                     }
                     if ui
+                        .checkbox(&mut self.logging_dock.open, "Logging")
+                        .clicked()
+                    {
+                        ui.close();
+                    }
+                    if ui
                         .checkbox(&mut self.performance_dock.open, "Performance")
                         .clicked()
                     {
@@ -2112,6 +2123,17 @@ impl eframe::App for DelogApp {
                 });
         }
         drop(ui_diagnostics_timer);
+        if self.logging_dock.open {
+            egui::Panel::bottom("logging")
+                .resizable(true)
+                .default_size(240.0)
+                .show_inside(ui, |ui| {
+                    let action = self.logging_dock.ui(ui, &self.logs);
+                    if action.clear {
+                        self.logs.clear();
+                    }
+                });
+        }
         let ui_performance_timer = self.session.metrics().scope("ui_performance");
         if self.performance_dock.open {
             self.refresh_performance_snapshot(frame, &snapshot);
