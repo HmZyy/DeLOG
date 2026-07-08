@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
+use crate::logging::{LogLevel, PendingLog, log};
 use crate::settings::AutoOpenVariables;
 use delog_core::ingest::IngestSender;
 use delog_core::metrics::MetricsRegistry;
@@ -112,6 +113,7 @@ pub struct ScriptsPanel {
     pub variables_open: bool,
     pending_auto_open: Option<PendingAutoOpen>,
     auto_open_mode: AutoOpenVariables,
+    pending_logs: Vec<PendingLog>,
 }
 
 impl ScriptsPanel {
@@ -146,6 +148,7 @@ impl ScriptsPanel {
             variables_open: false,
             pending_auto_open: None,
             auto_open_mode: AutoOpenVariables::default(),
+            pending_logs: Vec::new(),
         }
     }
 
@@ -203,6 +206,10 @@ impl ScriptsPanel {
 
     pub fn take_parser_diagnostics(&mut self) -> Vec<String> {
         self.parsers.take_diagnostics()
+    }
+
+    pub fn take_logs(&mut self) -> Vec<PendingLog> {
+        std::mem::take(&mut self.pending_logs)
     }
 
     pub fn request_interrupt(&self) {
@@ -443,6 +450,7 @@ impl ScriptsPanel {
             ScriptEvent::Error(e) => {
                 self.console.push_str(&e);
                 self.console.push('\n');
+                self.pending_logs.push(log(LogLevel::Error, e.clone()));
                 self.status = "error".into();
                 self.running = false;
                 self.pending_auto_open = None;
@@ -1161,6 +1169,25 @@ mod tests {
             crate::settings::AutoOpenScriptingConsole::Never,
             ConsoleEventKind::Error,
         ));
+    }
+
+    #[test]
+    fn script_errors_are_buffered_for_logging_dock() {
+        let root =
+            std::env::temp_dir().join(format!("delog-scripts-error-log-{}", std::process::id()));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
+
+        panel.handle_event(ScriptEvent::Error("python exploded".into()));
+
+        let logs = panel.take_logs();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].level, crate::logging::LogLevel::Error);
+        assert!(logs[0].message.contains("python exploded"));
+        assert!(panel.take_logs().is_empty());
     }
 
     #[test]
