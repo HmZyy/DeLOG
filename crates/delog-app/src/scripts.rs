@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
+use crate::logging::{LogLevel, PendingLog, log};
 use crate::settings::AutoOpenVariables;
 use delog_core::ingest::IngestSender;
 use delog_core::metrics::MetricsRegistry;
@@ -101,6 +102,7 @@ pub struct ScriptsPanel {
     editing_original_name: Option<String>,
     editor_text: String,
     repl_input: String,
+    refocus_repl_input: bool,
     console: String,
     status: String,
     pending_delete: Option<String>,
@@ -112,6 +114,7 @@ pub struct ScriptsPanel {
     pub variables_open: bool,
     pending_auto_open: Option<PendingAutoOpen>,
     auto_open_mode: AutoOpenVariables,
+    pending_logs: Vec<PendingLog>,
 }
 
 impl ScriptsPanel {
@@ -135,6 +138,7 @@ impl ScriptsPanel {
             editing_original_name: None,
             editor_text: String::new(),
             repl_input: String::new(),
+            refocus_repl_input: false,
             console: String::new(),
             status: String::new(),
             pending_delete: None,
@@ -146,6 +150,7 @@ impl ScriptsPanel {
             variables_open: false,
             pending_auto_open: None,
             auto_open_mode: AutoOpenVariables::default(),
+            pending_logs: Vec::new(),
         }
     }
 
@@ -205,6 +210,10 @@ impl ScriptsPanel {
         self.parsers.take_diagnostics()
     }
 
+    pub fn take_logs(&mut self) -> Vec<PendingLog> {
+        std::mem::take(&mut self.pending_logs)
+    }
+
     pub fn request_interrupt(&self) {
         if self.can_interrupt_console()
             && let Some(engine) = &self.engine
@@ -215,6 +224,25 @@ impl ScriptsPanel {
 
     pub fn ordinary_dispatch_enabled(&self) -> bool {
         !self.running && !self.should_poll_parser_events()
+    }
+
+    pub fn set_console_open(&mut self, open: bool) {
+        if open && !self.console_open {
+            self.request_repl_refocus();
+        }
+        self.console_open = open;
+    }
+
+    fn request_repl_refocus(&mut self) {
+        self.refocus_repl_input = true;
+    }
+
+    fn take_repl_refocus_request(&mut self) -> bool {
+        if !self.ordinary_dispatch_enabled() || !self.refocus_repl_input {
+            return false;
+        }
+        self.refocus_repl_input = false;
+        true
     }
 
     pub fn parser_dispatch_enabled(&self) -> bool {
@@ -430,24 +458,25 @@ impl ScriptsPanel {
             ScriptEvent::Output(s) => {
                 self.console.push_str(&s);
                 if should_open_scripting_console(auto_open_console, ConsoleEventKind::Output) {
-                    self.console_open = true;
+                    self.set_console_open(true);
                 }
             }
             ScriptEvent::Result(r) => {
                 self.console.push_str(&r);
                 self.console.push('\n');
                 if should_open_scripting_console(auto_open_console, ConsoleEventKind::Output) {
-                    self.console_open = true;
+                    self.set_console_open(true);
                 }
             }
             ScriptEvent::Error(e) => {
                 self.console.push_str(&e);
                 self.console.push('\n');
+                self.pending_logs.push(log(LogLevel::Error, e.clone()));
                 self.status = "error".into();
                 self.running = false;
                 self.pending_auto_open = None;
                 if should_open_scripting_console(auto_open_console, ConsoleEventKind::Error) {
-                    self.console_open = true;
+                    self.set_console_open(true);
                 }
             }
             ScriptEvent::Done => {
@@ -608,7 +637,7 @@ impl ScriptsPanel {
             ui.strong("Scripting Console");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Close").clicked() {
-                    self.console_open = false;
+                    self.set_console_open(false);
                 }
                 if ui.button("Clear").clicked() {
                     self.console.clear();
@@ -621,19 +650,25 @@ impl ScriptsPanel {
             .show_inside(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(">>>");
+                    let dispatch_enabled = self.ordinary_dispatch_enabled();
                     let resp = ui.add_enabled(
-                        self.ordinary_dispatch_enabled(),
+                        dispatch_enabled,
                         egui::TextEdit::singleline(&mut self.repl_input)
                             .desired_width(f32::INFINITY),
                     );
+                    if dispatch_enabled && self.take_repl_refocus_request() {
+                        resp.request_focus();
+                    }
                     if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                         let line = std::mem::take(&mut self.repl_input);
-                        self.dispatch_eval(
+                        if self.dispatch_eval(
                             line,
                             store.clone(),
                             sender.clone(),
                             Arc::clone(metrics),
-                        );
+                        ) {
+                            self.request_repl_refocus();
+                        }
                     }
                 });
             });
@@ -1164,6 +1199,25 @@ mod tests {
     }
 
     #[test]
+    fn script_errors_are_buffered_for_logging_dock() {
+        let root =
+            std::env::temp_dir().join(format!("delog-scripts-error-log-{}", std::process::id()));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
+
+        panel.handle_event(ScriptEvent::Error("python exploded".into()));
+
+        let logs = panel.take_logs();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].level, crate::logging::LogLevel::Error);
+        assert!(logs[0].message.contains("python exploded"));
+        assert!(panel.take_logs().is_empty());
+    }
+
+    #[test]
     fn new_script_starts_named_empty_buffer_in_editor() {
         let root =
             std::env::temp_dir().join(format!("delog-scripts-new-buffer-{}", std::process::id()));
@@ -1339,6 +1393,44 @@ mod tests {
             name: "new_parser.py".into(),
         }));
         assert!(!panel.should_poll_parser_events());
+    }
+
+    #[test]
+    fn repl_refocus_request_waits_until_prompt_is_enabled() {
+        let root =
+            std::env::temp_dir().join(format!("delog-scripts-repl-focus-{}", std::process::id()));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
+
+        panel.request_repl_refocus();
+        panel.running = true;
+        assert!(!panel.take_repl_refocus_request());
+
+        panel.handle_event(ScriptEvent::Done);
+        assert!(panel.take_repl_refocus_request());
+        assert!(!panel.take_repl_refocus_request());
+    }
+
+    #[test]
+    fn opening_console_requests_repl_focus_once() {
+        let root =
+            std::env::temp_dir().join(format!("delog-scripts-open-focus-{}", std::process::id()));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
+
+        panel.set_console_open(true);
+        assert!(panel.console_open);
+        assert!(panel.take_repl_refocus_request());
+        assert!(!panel.take_repl_refocus_request());
+
+        panel.set_console_open(true);
+        assert!(!panel.take_repl_refocus_request());
     }
 
     #[test]

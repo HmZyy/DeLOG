@@ -44,8 +44,6 @@ pub struct AppSettings {
     #[serde(default)]
     pub show_fps: bool,
     #[serde(default)]
-    pub show_debug_overlay: bool,
-    #[serde(default)]
     pub render_mode: RenderMode,
     #[serde(default = "default_true")]
     pub vsync: bool,
@@ -69,7 +67,6 @@ impl Default for AppSettings {
             theme: ThemeChoice::default(),
             render: RenderTuning::default(),
             show_fps: false,
-            show_debug_overlay: false,
             render_mode: RenderMode::default(),
             vsync: true,
             live_connection: LiveConnectionSettings::default(),
