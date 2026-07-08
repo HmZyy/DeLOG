@@ -13,6 +13,7 @@ use egui_code_editor::{CodeEditor, ColorTheme, Syntax};
 
 use crate::parsers::{ParserUiAction, ParsersPanel};
 use crate::repl_complete::{self, ReplCompletion};
+use crate::repl_history::ReplHistory;
 
 pub const SCRIPTING_CONSOLE_DEFAULT_HEIGHT: f32 = 240.0;
 
@@ -117,6 +118,7 @@ pub struct ScriptsPanel {
     auto_open_mode: AutoOpenVariables,
     pending_logs: Vec<PendingLog>,
     completion: ReplCompletion,
+    history: ReplHistory,
 }
 
 impl ScriptsPanel {
@@ -154,6 +156,7 @@ impl ScriptsPanel {
             auto_open_mode: AutoOpenVariables::default(),
             pending_logs: Vec::new(),
             completion: ReplCompletion::new(),
+            history: ReplHistory::new(),
         }
     }
 
@@ -689,6 +692,27 @@ impl ScriptsPanel {
                         resp.request_focus();
                     }
 
+                    // With no popup open, Up/Down walk the command history.
+                    if dispatch_enabled && resp.has_focus() && !self.completion.is_open() {
+                        let up =
+                            ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp));
+                        let down = ui
+                            .input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown));
+                        let recalled = if up {
+                            self.history.older(&self.repl_input)
+                        } else if down {
+                            self.history.newer()
+                        } else {
+                            None
+                        };
+                        if let Some(line) = recalled {
+                            self.repl_input = line;
+                            let end = self.repl_input.len();
+                            repl_complete::set_cursor_byte(ui.ctx(), resp.id, &self.repl_input, end);
+                            resp.request_focus();
+                        }
+                    }
+
                     // Tab with no popup open requests completions for the token at the cursor.
                     if dispatch_enabled
                         && resp.has_focus()
@@ -714,6 +738,7 @@ impl ScriptsPanel {
                         && ui.input(|i| i.key_pressed(egui::Key::Enter))
                     {
                         let line = std::mem::take(&mut self.repl_input);
+                        self.history.push(&line);
                         if self.dispatch_eval(
                             line,
                             store.clone(),
