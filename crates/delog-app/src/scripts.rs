@@ -12,7 +12,7 @@ use delog_script::{ScriptCommand, ScriptEngine, ScriptEvent};
 use egui_code_editor::{CodeEditor, ColorTheme, Syntax};
 
 use crate::parsers::{ParserUiAction, ParsersPanel};
-use crate::repl_complete::ReplCompletion;
+use crate::repl_complete::{self, ReplCompletion};
 
 pub const SCRIPTING_CONSOLE_DEFAULT_HEIGHT: f32 = 240.0;
 
@@ -665,7 +665,35 @@ impl ScriptsPanel {
                     if dispatch_enabled && self.take_repl_refocus_request() {
                         resp.request_focus();
                     }
-                    if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+
+                    // The popup owns Up/Down/Tab/Enter/Esc while it is open.
+                    let popup_took_enter =
+                        self.completion.handle_popup(ui, &resp, &mut self.repl_input);
+
+                    // Tab with no popup open requests completions for the token at the cursor.
+                    if dispatch_enabled
+                        && resp.has_focus()
+                        && !self.completion.is_open()
+                        && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab))
+                    {
+                        let cursor =
+                            repl_complete::cursor_byte(ui.ctx(), resp.id, &self.repl_input);
+                        if let Some((start, token)) =
+                            repl_complete::completable_token(&self.repl_input, cursor)
+                        {
+                            let token = token.to_string();
+                            let seq = self.completion.begin_request(start, cursor, token.clone());
+                            let _ = self
+                                .engine(store.clone(), sender.clone(), Arc::clone(metrics))
+                                .send(ScriptCommand::Complete { seq, text: token });
+                        }
+                    }
+
+                    if !popup_took_enter
+                        && !self.completion.is_open()
+                        && resp.lost_focus()
+                        && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                    {
                         let line = std::mem::take(&mut self.repl_input);
                         if self.dispatch_eval(
                             line,
