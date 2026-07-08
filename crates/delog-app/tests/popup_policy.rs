@@ -98,7 +98,6 @@ fn bottom_docks_share_one_resizable_dock_area() {
 
 #[test]
 fn scripting_console_dock_matches_diagnostics_height_and_reserves_prompt() {
-    assert!(SCRIPTS_SOURCE.contains("pub const SCRIPTING_CONSOLE_DEFAULT_HEIGHT: f32 = 240.0;"));
     assert!(SCRIPTS_SOURCE.contains("egui::Panel::bottom(\"scripting_console_input\")"));
     let console = between(
         SCRIPTS_SOURCE,

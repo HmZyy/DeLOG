@@ -15,8 +15,6 @@ use crate::parsers::{ParserUiAction, ParsersPanel};
 use crate::repl_complete::{self, ReplCompletion};
 use crate::repl_history::ReplHistory;
 
-pub const SCRIPTING_CONSOLE_DEFAULT_HEIGHT: f32 = 240.0;
-
 enum PreparedParserCommand {
     Validation {
         name: String,
