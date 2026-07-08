@@ -647,10 +647,13 @@ impl ScriptsPanel {
                 ui.horizontal(|ui| {
                     ui.label(">>>");
                     let dispatch_enabled = self.ordinary_dispatch_enabled();
+                    let clear_button_width =
+                        ui.spacing().interact_size.x + ui.spacing().item_spacing.x;
+                    let repl_width = (ui.available_width() - clear_button_width).max(0.0);
                     let resp = ui.add_enabled(
                         dispatch_enabled,
                         egui::TextEdit::singleline(&mut self.repl_input)
-                            .desired_width(f32::INFINITY)
+                            .desired_width(repl_width)
                             .lock_focus(true),
                     );
                     if dispatch_enabled && self.take_repl_refocus_request() {

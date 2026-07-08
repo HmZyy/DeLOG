@@ -65,7 +65,8 @@ impl DiagnosticsDock {
                     .hint_text("Search")
                     .desired_width(220.0),
             );
-            ui.add_space(ui.available_width());
+            let clear_button_width = ui.spacing().interact_size.x + ui.spacing().item_spacing.x;
+            ui.add_space((ui.available_width() - clear_button_width).max(0.0));
 
             let trash = egui::Image::new(crate::icons::trash())
                 .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
