@@ -10,6 +10,7 @@ const POPUP_SOURCES: &[&str] = &[
     include_str!("../src/workspace.rs"),
 ];
 const APP_SOURCE: &str = include_str!("../src/app.rs");
+const DOCKS_SOURCE: &str = include_str!("../src/docks.rs");
 const SCRIPTS_SOURCE: &str = include_str!("../src/scripts.rs");
 const WORKSPACE_SOURCE: &str = include_str!("../src/workspace.rs");
 const SETTINGS_SOURCE: &str = include_str!("../src/settings.rs");
@@ -85,15 +86,49 @@ fn view_menu_orders_docks_and_function_keys_focus_them() {
 }
 
 #[test]
-fn bottom_docks_share_one_resizable_dock_area() {
+fn bottom_docks_use_egui_dock_fixed_tabs_without_floating_or_reordering() {
     assert!(APP_SOURCE.contains("egui::Panel::bottom(\"app_docks\")"));
     assert!(APP_SOURCE.contains(".default_size(240.0)"));
     assert!(APP_SOURCE.contains("docks.show_inside(ui, viewer);"));
+    assert!(DOCKS_SOURCE.contains("egui_dock::DockArea"));
+    assert!(DOCKS_SOURCE.contains("egui_dock::AllowedSplits::None"));
+    assert!(DOCKS_SOURCE.contains(".draggable_tabs(false)"));
+    assert!(DOCKS_SOURCE.contains(".show_close_buttons(false)"));
+    assert!(DOCKS_SOURCE.contains(".show_leaf_close_all_buttons(false)"));
+    assert!(DOCKS_SOURCE.contains(".show_leaf_collapse_buttons(false)"));
+    assert!(DOCKS_SOURCE.contains("FIXED_ORDER"));
+    assert!(DOCKS_SOURCE.contains("pub fn open_tabs(&self) -> Vec<AppDockTab>"));
+    assert!(APP_SOURCE.contains("fn allowed_in_windows(&self, _tab: &mut Self::Tab) -> bool"));
+    assert!(APP_SOURCE.contains("fn is_closeable(&self, _tab: &Self::Tab) -> bool"));
+    assert!(APP_SOURCE.contains("false"));
     assert!(!APP_SOURCE.contains("egui::Panel::bottom(\"diagnostics\")"));
     assert!(!APP_SOURCE.contains("egui::Panel::bottom(\"logging\")"));
     assert!(!APP_SOURCE.contains("egui::Panel::bottom(\"performance\")"));
     assert!(!APP_SOURCE.contains("egui::Panel::bottom(\"markers\")"));
     assert!(!APP_SOURCE.contains("egui::Panel::bottom(\"scripting_console\")"));
+}
+
+#[test]
+fn bottom_dock_bodies_do_not_render_redundant_headers_or_close_buttons() {
+    let diagnostics = include_str!("../src/diagnostics.rs");
+    let logging = include_str!("../src/logging.rs");
+    let performance = include_str!("../src/performance.rs");
+    let markers = include_str!("../src/markers.rs");
+
+    for source in [diagnostics, logging, performance, markers, SCRIPTS_SOURCE] {
+        assert!(!source.contains("ui.button(\"Close\")"));
+        assert!(!source.contains("ui.button(\"Clear\")"));
+    }
+
+    assert!(!diagnostics.contains("ui.strong(\"Diagnostics\")"));
+    assert!(!logging.contains("ui.strong(\"Logging\")"));
+    assert!(!performance.contains("ui.strong(\"Performance\")"));
+    assert!(!markers.contains("ui.strong(\"Markers\")"));
+    assert!(!SCRIPTS_SOURCE.contains("ui.strong(\"Scripting Console\")"));
+
+    assert!(diagnostics.contains("crate::icons::trash()"));
+    assert!(logging.contains("crate::icons::trash()"));
+    assert!(SCRIPTS_SOURCE.contains("crate::icons::trash()"));
 }
 
 #[test]

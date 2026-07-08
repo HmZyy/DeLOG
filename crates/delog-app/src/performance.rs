@@ -41,22 +41,11 @@ pub struct PerformanceDock {
 impl PerformanceDock {
     pub fn ui(&mut self, ui: &mut egui::Ui, snapshot: &PerformanceSnapshot) {
         ui.horizontal(|ui| {
-            ui.strong("Performance");
-            ui.weak(format!("{} metric(s)", snapshot.metrics.len()));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Close").clicked() {
-                    self.open = false;
-                }
-            });
-        });
-        ui.separator();
-
-        ui.horizontal(|ui| {
             ui.selectable_value(&mut self.tab, PerfTab::Resources, "Resources");
             ui.selectable_value(&mut self.tab, PerfTab::Traces, "Traces");
             ui.selectable_value(&mut self.tab, PerfTab::Metrics, "Metrics");
         });
-        ui.separator();
+        ui.add_space(4.0);
 
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
