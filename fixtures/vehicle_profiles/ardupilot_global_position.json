@@ -1,6 +1,6 @@
 {
   "delog_vehicle_profile": 1,
-  "name": "ArduPilot Global Position",
+  "name": "ardupilot_global_position",
   "vehicle": {
     "label": "Vehicle",
     "show": true,
