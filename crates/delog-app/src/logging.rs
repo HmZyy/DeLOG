@@ -99,19 +99,18 @@ impl LoggingDock {
                     .hint_text("Search")
                     .desired_width(220.0),
             );
-            let clear_button_width = ui.spacing().interact_size.x + ui.spacing().item_spacing.x;
-            ui.add_space((ui.available_width() - clear_button_width).max(0.0));
-
-            let trash = egui::Image::new(crate::icons::trash())
-                .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
-                .tint(ui.visuals().text_color());
-            if ui
-                .add(egui::Button::image(trash))
-                .on_hover_text("Clear logs")
-                .clicked()
-            {
-                action.clear = true;
-            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let trash = egui::Image::new(crate::icons::trash())
+                    .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
+                    .tint(ui.visuals().text_color());
+                if ui
+                    .add(egui::Button::image(trash))
+                    .on_hover_text("Clear logs")
+                    .clicked()
+                {
+                    action.clear = true;
+                }
+            });
         });
 
         let filtered = filtered_records(records, self.min_level, &self.target, &self.search);
