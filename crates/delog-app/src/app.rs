@@ -12,7 +12,7 @@ use crate::field_stats::{FieldStatsController, StatsRequestKey, StatsTab};
 use crate::gpu::GpuBridge;
 use crate::layout::{LayoutApply, LayoutDoc, LayoutError, LoadOutcome, PendingLayout};
 use crate::live::ConnectionDialog;
-use crate::logging::{LogRecord, LoggingDock};
+use crate::logging::{LogRecord, LoggingDock, PendingLog};
 use crate::performance::{PerformanceDock, PerformanceSnapshot, ResourceSummary, TraceSummary};
 use crate::plot::ViewX;
 #[cfg(feature = "scripting")]
@@ -35,6 +35,7 @@ type ProfilingExportResult = Result<std::path::PathBuf, String>;
 type CsvExportResult = Result<(std::path::PathBuf, u64), String>;
 const SESSION_AUTOSAVE_INTERVAL: Duration = Duration::from_secs(30);
 const PERFORMANCE_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
+const LOG_RETENTION: usize = 1_000;
 const EMPTY_SESSION_TIMELINE_RANGE: TimeRange = TimeRange {
     min_us: 0,
     max_us: 10_000_000,
@@ -256,6 +257,8 @@ pub struct DelogApp {
     last_diagnostic_seq: Option<u64>,
     logging_dock: LoggingDock,
     logs: Vec<LogRecord>,
+    next_log_seq: u64,
+    log_started_at: Instant,
     performance_dock: PerformanceDock,
     markers_dock: crate::markers::MarkersDock,
     performance_snapshot: PerformanceSnapshot,
@@ -360,6 +363,8 @@ impl DelogApp {
             last_diagnostic_seq: None,
             logging_dock: LoggingDock::default(),
             logs: Vec::new(),
+            next_log_seq: 0,
+            log_started_at: Instant::now(),
             performance_dock: PerformanceDock::default(),
             markers_dock: crate::markers::MarkersDock::default(),
             performance_snapshot: PerformanceSnapshot::default(),
@@ -702,6 +707,21 @@ impl DelogApp {
                 cache_cpu_bytes: self.caches.total_cache_bytes(),
             },
             traces,
+        }
+    }
+
+    fn push_log(&mut self, pending: PendingLog) {
+        self.logs.push(LogRecord {
+            seq: self.next_log_seq,
+            elapsed_ms: self.log_started_at.elapsed().as_millis(),
+            level: pending.level,
+            target: pending.target,
+            message: pending.message,
+        });
+        self.next_log_seq = self.next_log_seq.wrapping_add(1);
+        let excess = self.logs.len().saturating_sub(LOG_RETENTION);
+        if excess > 0 {
+            self.logs.drain(0..excess);
         }
     }
 
@@ -2440,6 +2460,9 @@ impl eframe::App for DelogApp {
             self.vehicle_revision = self.vehicle_revision.wrapping_add(1);
             self.traj_dirty = true;
             self.ensure_trajectory_build(ui.ctx(), &snapshot);
+        }
+        for log in self.vehicle_dialog.take_logs() {
+            self.push_log(log);
         }
         if let Some(endpoint) = self
             .connection_dialog
