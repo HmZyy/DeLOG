@@ -99,6 +99,7 @@ impl LoggingDock {
                     .hint_text("Search")
                     .desired_width(220.0),
             );
+            ui.add_space(ui.available_width());
 
             let trash = egui::Image::new(crate::icons::trash())
                 .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))

@@ -3263,10 +3263,6 @@ impl egui_dock::TabViewer for AppDockViewer<'_> {
         }
     }
 
-    fn is_closeable(&self, _tab: &Self::Tab) -> bool {
-        false
-    }
-
     fn allowed_in_windows(&self, _tab: &mut Self::Tab) -> bool {
         false
     }
