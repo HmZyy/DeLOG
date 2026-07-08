@@ -38,24 +38,6 @@ impl DiagnosticsDock {
         let mut clear = false;
         let origins = origins(records, snapshot);
         ui.horizontal(|ui| {
-            ui.strong("Diagnostics");
-            ui.weak(format!("{} retained", records.len()));
-            if let Some(last) = records.last() {
-                ui.separator();
-                ui.label(format!("[{}] {}", last.diag.code, last.diag.message));
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Close").clicked() {
-                    self.open = false;
-                }
-                if ui.button("Clear").clicked() {
-                    clear = true;
-                }
-            });
-        });
-
-        ui.separator();
-        ui.horizontal(|ui| {
             egui::ComboBox::from_id_salt("diagnostics-severity")
                 .selected_text(severity_filter_label(self.min_severity))
                 .show_ui(ui, |ui| {
@@ -83,6 +65,17 @@ impl DiagnosticsDock {
                     .hint_text("Search")
                     .desired_width(220.0),
             );
+
+            let trash = egui::Image::new(crate::icons::trash())
+                .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
+                .tint(ui.visuals().text_color());
+            if ui
+                .add(egui::Button::image(trash))
+                .on_hover_text("Clear diagnostics")
+                .clicked()
+            {
+                clear = true;
+            }
         });
 
         let filtered = filtered_records(

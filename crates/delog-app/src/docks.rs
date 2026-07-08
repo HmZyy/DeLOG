@@ -1,4 +1,4 @@
-use egui_dock::{DockArea, DockState, TabPath, TabViewer};
+use egui_dock::{DockState, TabPath, TabViewer};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AppDockTab {
@@ -9,6 +9,15 @@ pub enum AppDockTab {
     ScriptingConsole,
     Logging,
 }
+
+const FIXED_ORDER: &[AppDockTab] = &[
+    AppDockTab::Diagnostics,
+    AppDockTab::Performance,
+    AppDockTab::Markers,
+    #[cfg(feature = "scripting")]
+    AppDockTab::ScriptingConsole,
+    AppDockTab::Logging,
+];
 
 #[derive(Debug)]
 pub struct AppDockController {
@@ -25,23 +34,32 @@ impl AppDockController {
     }
 
     pub fn open_or_focus(&mut self, tab: AppDockTab) {
-        if let Some(path) = self.state.find_tab(&tab) {
-            self.focus_path(path, tab);
-            return;
+        if !self.is_open(tab) {
+            let mut tabs = self.open_tabs();
+            tabs.push(tab);
+            self.replace_tabs(tabs);
         }
-
-        self.state.push_to_first_leaf(tab);
-        if let Some(path) = self.state.find_tab(&tab) {
-            self.focus_path(path, tab);
-        }
+        self.focus_tab(tab);
     }
 
     pub fn close(&mut self, tab: AppDockTab) {
-        self.state.retain_tabs(|candidate| *candidate != tab);
-        self.active_tab = self
-            .active_tab
-            .filter(|active| self.is_open(*active))
-            .or_else(|| self.first_tab());
+        let active_closed = self.active_tab == Some(tab);
+        let tabs = self
+            .open_tabs()
+            .into_iter()
+            .filter(|candidate| *candidate != tab)
+            .collect();
+        self.replace_tabs(tabs);
+        self.active_tab = if active_closed {
+            self.first_tab()
+        } else {
+            self.active_tab
+                .filter(|active| self.is_open(*active))
+                .or_else(|| self.first_tab())
+        };
+        if let Some(active) = self.active_tab {
+            self.focus_tab(active);
+        }
     }
 
     pub fn is_open(&self, tab: AppDockTab) -> bool {
@@ -52,15 +70,19 @@ impl AppDockController {
         self.tab_count() > 0
     }
 
-    pub fn has_docked_tabs(&self) -> bool {
-        self.state.main_surface().num_tabs() > 0
-    }
-
     pub fn tab_count(&self) -> usize {
         self.state
             .iter_surfaces_indexed()
             .map(|(_, surface)| surface.iter_all_tabs().count())
             .sum()
+    }
+
+    pub fn open_tabs(&self) -> Vec<AppDockTab> {
+        FIXED_ORDER
+            .iter()
+            .copied()
+            .filter(|tab| self.is_open(*tab))
+            .collect()
     }
 
     #[cfg(test)]
@@ -73,11 +95,27 @@ impl AppDockController {
         ui: &mut egui::Ui,
         viewer: &mut impl TabViewer<Tab = AppDockTab>,
     ) {
-        DockArea::new(&mut self.state)
+        egui_dock::DockArea::new(&mut self.state)
             .id(egui::Id::new("app_dock_area"))
             .style(egui_dock::Style::from_egui(ui.style().as_ref()))
+            .allowed_splits(egui_dock::AllowedSplits::None)
+            .draggable_tabs(false)
+            .tab_context_menus(false)
+            .show_close_buttons(false)
+            .show_leaf_close_all_buttons(false)
+            .show_leaf_collapse_buttons(false)
             .show_inside(ui, viewer);
         self.reconcile_active_tab();
+    }
+
+    fn replace_tabs(&mut self, tabs: Vec<AppDockTab>) {
+        self.state = DockState::new(ordered_tabs(tabs));
+    }
+
+    fn focus_tab(&mut self, tab: AppDockTab) {
+        if let Some(path) = self.state.find_tab(&tab) {
+            self.focus_path(path, tab);
+        }
     }
 
     fn focus_path(&mut self, path: TabPath, tab: AppDockTab) {
@@ -98,12 +136,16 @@ impl AppDockController {
     }
 
     fn first_tab(&self) -> Option<AppDockTab> {
-        self.state
-            .iter_surfaces_indexed()
-            .flat_map(|(_, surface)| surface.iter_all_tabs())
-            .map(|(_, tab)| *tab)
-            .next()
+        self.open_tabs().into_iter().next()
     }
+}
+
+fn ordered_tabs(tabs: Vec<AppDockTab>) -> Vec<AppDockTab> {
+    FIXED_ORDER
+        .iter()
+        .copied()
+        .filter(|tab| tabs.contains(tab))
+        .collect()
 }
 
 #[cfg(test)]
@@ -136,16 +178,24 @@ mod tests {
     }
 
     #[test]
-    fn opening_multiple_docks_keeps_them_in_one_state() {
+    fn opening_multiple_docks_keeps_one_fixed_order_tab_strip() {
         let mut docks = AppDockController::new_empty();
+        docks.open_or_focus(AppDockTab::Markers);
         docks.open_or_focus(AppDockTab::Diagnostics);
         docks.open_or_focus(AppDockTab::Performance);
-        docks.open_or_focus(AppDockTab::Markers);
         assert_eq!(docks.tab_count(), 3);
         assert!(docks.is_open(AppDockTab::Diagnostics));
         assert!(docks.is_open(AppDockTab::Performance));
         assert!(docks.is_open(AppDockTab::Markers));
-        assert_eq!(docks.active_tab(), Some(AppDockTab::Markers));
+        assert_eq!(
+            docks.open_tabs(),
+            vec![
+                AppDockTab::Diagnostics,
+                AppDockTab::Performance,
+                AppDockTab::Markers
+            ]
+        );
+        assert_eq!(docks.active_tab(), Some(AppDockTab::Performance));
     }
 
     #[test]
@@ -179,7 +229,9 @@ mod tests {
 
         let logging_path = docks.state.find_tab(&AppDockTab::Logging).unwrap();
         docks.state.set_active_tab(logging_path).unwrap();
-        docks.state.set_focused_node_and_surface(logging_path.node_path());
+        docks
+            .state
+            .set_focused_node_and_surface(logging_path.node_path());
         docks.active_tab = Some(AppDockTab::Diagnostics);
 
         docks.reconcile_active_tab();
@@ -188,18 +240,18 @@ mod tests {
     }
 
     #[test]
-    fn detaching_last_main_tab_leaves_only_floating_tabs() {
+    fn closing_active_tab_selects_first_remaining_fixed_order_tab() {
         let mut docks = AppDockController::new_empty();
         docks.open_or_focus(AppDockTab::Diagnostics);
+        docks.open_or_focus(AppDockTab::Performance);
+        docks.open_or_focus(AppDockTab::Logging);
 
-        let diagnostics_path = docks.state.find_tab(&AppDockTab::Diagnostics).unwrap();
-        docks.state.detach_tab(
-            diagnostics_path,
-            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(320.0, 240.0)),
+        docks.close(AppDockTab::Logging);
+
+        assert_eq!(
+            docks.open_tabs(),
+            vec![AppDockTab::Diagnostics, AppDockTab::Performance]
         );
-
-        assert!(docks.has_tabs());
-        assert!(!docks.has_docked_tabs());
-        assert!(docks.is_open(AppDockTab::Diagnostics));
+        assert_eq!(docks.active_tab(), Some(AppDockTab::Diagnostics));
     }
 }
