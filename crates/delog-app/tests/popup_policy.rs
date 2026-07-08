@@ -143,27 +143,22 @@ fn clear_trash_buttons_are_aligned_to_the_right_of_their_control_rows() {
         "egui::TextEdit::singleline(&mut self.search)",
         "let filtered = filtered_records(",
     );
-    assert!(diagnostics_controls.contains("ui.add_space(ui.available_width())"));
-    assert!(logging_controls.contains("ui.add_space(ui.available_width())"));
+    assert!(!diagnostics_controls.contains("ui.add_space(ui.available_width())"));
+    assert!(!logging_controls.contains("ui.add_space(ui.available_width())"));
+    assert!(diagnostics_controls.contains("let clear_button_width ="));
+    assert!(logging_controls.contains("let clear_button_width ="));
+    assert!(diagnostics_controls.contains("ui.available_width() - clear_button_width"));
+    assert!(logging_controls.contains("ui.available_width() - clear_button_width"));
 
     let console = between(
         SCRIPTS_SOURCE,
-        "let resp = ui.add_enabled(",
+        "let clear_button_width =",
         "// The popup owns Up/Down/Tab/Enter/Esc while it is open.",
     );
+    assert!(!console.contains(".desired_width(f32::INFINITY)"));
+    assert!(console.contains("ui.available_width() - clear_button_width"));
     assert!(console.contains("crate::icons::trash()"));
     assert!(console.find("let resp =").unwrap() < console.find("crate::icons::trash()").unwrap());
-}
-
-#[test]
-fn scripting_console_dock_matches_diagnostics_height_and_reserves_prompt() {
-    assert!(SCRIPTS_SOURCE.contains("egui::Panel::bottom(\"scripting_console_input\")"));
-    let console = between(
-        SCRIPTS_SOURCE,
-        "pub fn console_dock_ui(",
-        "fn variables_window(",
-    );
-    assert!(!console.contains("self.status"));
 }
 
 #[test]
@@ -177,6 +172,17 @@ fn scripting_console_refocuses_prompt_after_enter_dispatch() {
     assert!(console.contains("if dispatch_enabled && self.take_repl_refocus_request() {"));
     assert!(console.contains("resp.request_focus();"));
     assert!(console.contains("self.request_repl_refocus();"));
+}
+
+#[test]
+fn scripting_console_dock_matches_diagnostics_height_and_reserves_prompt() {
+    assert!(SCRIPTS_SOURCE.contains("egui::Panel::bottom(\"scripting_console_input\")"));
+    let console = between(
+        SCRIPTS_SOURCE,
+        "pub fn console_dock_ui(",
+        "fn variables_window(",
+    );
+    assert!(!console.contains("self.status"));
 }
 
 #[test]
