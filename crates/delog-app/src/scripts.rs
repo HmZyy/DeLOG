@@ -660,7 +660,8 @@ impl ScriptsPanel {
                     let resp = ui.add_enabled(
                         dispatch_enabled,
                         egui::TextEdit::singleline(&mut self.repl_input)
-                            .desired_width(f32::INFINITY),
+                            .desired_width(f32::INFINITY)
+                            .lock_focus(true),
                     );
                     if dispatch_enabled && self.take_repl_refocus_request() {
                         resp.request_focus();
