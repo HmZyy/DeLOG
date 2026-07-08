@@ -713,11 +713,15 @@ impl ScriptsPanel {
                         }
                     }
 
-                    // Tab with no popup open requests completions for the token at the cursor.
+                    // Tab (or Ctrl+N) with no popup open requests completions for
+                    // the token at the cursor.
                     if dispatch_enabled
                         && resp.has_focus()
                         && !self.completion.is_open()
-                        && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab))
+                        && ui.input_mut(|i| {
+                            i.consume_key(egui::Modifiers::NONE, egui::Key::Tab)
+                                || i.consume_key(egui::Modifiers::CTRL, egui::Key::N)
+                        })
                     {
                         let cursor =
                             repl_complete::cursor_byte(ui.ctx(), resp.id, &self.repl_input);
