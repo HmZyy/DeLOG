@@ -539,7 +539,6 @@ pub struct VehicleDialog {
     profile_editor_name: String,
     profile_editor_draft: ProfileDraft,
     pending_profile_delete: Option<String>,
-    profile_status: Option<String>,
 }
 
 impl Default for VehicleDialog {
@@ -554,7 +553,6 @@ impl Default for VehicleDialog {
             profile_editor_name: String::new(),
             profile_editor_draft: ProfileDraft::default(),
             pending_profile_delete: None,
-            profile_status: None,
         }
     }
 }
@@ -601,7 +599,7 @@ fn profile_library() -> Option<VehicleProfileLibrary> {
 
 fn refresh_profiles(state: &mut VehicleDialog) {
     let Some(library) = profile_library() else {
-        state.profile_status = Some("Vehicle profile config directory is unavailable".to_owned());
+        // TODO: report unavailable vehicle profile config directory in the future log dock.
         state.profiles.clear();
         for draft in &mut state.drafts {
             draft.selected_profile = None;
@@ -610,7 +608,8 @@ fn refresh_profiles(state: &mut VehicleDialog) {
     };
 
     if let Err(err) = library.seed_defaults() {
-        state.profile_status = Some(format!("Could not seed default vehicle profiles: {err}"));
+        let _ = err;
+        // TODO: report default vehicle profile seed failures in the future log dock.
     }
 
     match library.list() {
@@ -636,7 +635,8 @@ fn refresh_profiles(state: &mut VehicleDialog) {
             }
         }
         Err(err) => {
-            state.profile_status = Some(format!("Could not list vehicle profiles: {err}"));
+            let _ = err;
+            // TODO: report vehicle profile list failures in the future log dock.
             state.profiles.clear();
             state.profile_editor_selected = None;
             for draft in &mut state.drafts {
@@ -817,10 +817,6 @@ pub fn show(
         .default_width(DIALOG_WIDTH)
         .show(ctx, |ui| {
             ui.set_min_width(DIALOG_WIDTH);
-            if let Some(status) = &state.profile_status {
-                ui.add_space(6.0);
-                ui.label(status);
-            }
             ui.add_space(8.0);
 
             ui.horizontal(|ui| {
@@ -1304,7 +1300,7 @@ fn load_profile_editor(state: &mut VehicleDialog) {
         return;
     };
     let Some(library) = profile_library() else {
-        state.profile_status = Some("Vehicle profile config directory is unavailable".to_owned());
+        // TODO: report unavailable vehicle profile config directory in the future log dock.
         return;
     };
     match library.load(&name) {
@@ -1313,7 +1309,8 @@ fn load_profile_editor(state: &mut VehicleDialog) {
             state.profile_editor_draft = ProfileDraft::from_doc(&doc);
         }
         Err(err) => {
-            state.profile_status = Some(format!("Could not load vehicle profile '{name}': {err}"));
+            let _ = err;
+            // TODO: report vehicle profile load failures in the future log dock.
         }
     }
 }
@@ -1321,22 +1318,24 @@ fn load_profile_editor(state: &mut VehicleDialog) {
 fn save_profile_from_editor(state: &mut VehicleDialog) {
     let name = state.profile_editor_name.trim().to_owned();
     if name.is_empty() {
-        state.profile_status = Some("Enter a profile name before saving".to_owned());
+        // TODO: report missing vehicle profile names in the future log dock.
         return;
     }
     let Some(library) = profile_library() else {
-        state.profile_status = Some("Vehicle profile config directory is unavailable".to_owned());
+        // TODO: report unavailable vehicle profile config directory in the future log dock.
         return;
     };
     let doc = match state.profile_editor_draft.to_doc(&name) {
         Ok(doc) => doc,
         Err(err) => {
-            state.profile_status = Some(err);
+            let _ = err;
+            // TODO: report invalid vehicle profile form data in the future log dock.
             return;
         }
     };
     if let Err(err) = library.save(&name, &doc) {
-        state.profile_status = Some(format!("Could not save vehicle profile '{name}': {err}"));
+        let _ = err;
+        // TODO: report vehicle profile save failures in the future log dock.
         return;
     }
 
@@ -1353,18 +1352,19 @@ fn apply_profile_to_draft(
     snapshot: &StoreSnapshot,
 ) {
     let Some(library) = profile_library() else {
-        state.profile_status = Some("Vehicle profile config directory is unavailable".to_owned());
+        // TODO: report unavailable vehicle profile config directory in the future log dock.
         return;
     };
     let doc = match library.load(name) {
         Ok(doc) => doc,
         Err(err) => {
-            state.profile_status = Some(format!("Could not load vehicle profile '{name}': {err}"));
+            let _ = err;
+            // TODO: report vehicle profile load failures in the future log dock.
             return;
         }
     };
     let Some(draft) = state.drafts.get_mut(draft_index) else {
-        state.profile_status = Some("Vehicle draft no longer exists".to_owned());
+        // TODO: report missing vehicle drafts in the future log dock.
         return;
     };
     let cfg = match draft.source {
@@ -1372,9 +1372,7 @@ fn apply_profile_to_draft(
         None => doc.to_config(snapshot),
     };
     let Some(cfg) = cfg else {
-        state.profile_status = Some(format!(
-            "Could not apply vehicle profile '{name}'. Choose a source with matching topics first."
-        ));
+        // TODO: report vehicle profile apply failures in the future log dock.
         return;
     };
 
@@ -1416,14 +1414,12 @@ fn show_profile_delete_confirmation(ctx: &egui::Context, state: &mut VehicleDial
                                 // TODO: report deleted vehicle profiles in the future log dock.
                             }
                             Err(err) => {
-                                state.profile_status = Some(format!(
-                                    "Could not delete vehicle profile '{name}': {err}"
-                                ));
+                                let _ = err;
+                                // TODO: report vehicle profile delete failures in the future log dock.
                             }
                         },
                         None => {
-                            state.profile_status =
-                                Some("Vehicle profile config directory is unavailable".to_owned());
+                            // TODO: report unavailable vehicle profile config directory in the future log dock.
                         }
                     }
                     close_confirmation = true;
