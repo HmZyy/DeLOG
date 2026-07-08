@@ -442,6 +442,25 @@ impl DelogApp {
         }
     }
 
+    fn sync_docks_from_legacy_close_flags(&mut self) {
+        if !self.diagnostics_dock.open {
+            self.docks.close(AppDockTab::Diagnostics);
+        }
+        if !self.performance_dock.open {
+            self.docks.close(AppDockTab::Performance);
+        }
+        if !self.markers_dock.open {
+            self.docks.close(AppDockTab::Markers);
+        }
+        #[cfg(feature = "scripting")]
+        if !self.scripts.console_open {
+            self.docks.close(AppDockTab::ScriptingConsole);
+        }
+        if !self.logging_dock.open {
+            self.docks.close(AppDockTab::Logging);
+        }
+    }
+
     /// On a worker thread so the native dialog never blocks the UI.
     fn spawn_open_dialog(&self, ctx: &egui::Context) {
         let tx = self.picked_files_tx.clone();
@@ -2120,6 +2139,7 @@ impl eframe::App for DelogApp {
                     );
                 });
         }
+        self.sync_docks_from_legacy_close_flags();
 
         // The timeline's `utc_offset_us` arg stays None until a parser captures
         // a UTC reference (BIN GPS week / ULog time_ref_utc); `any_live` stays
