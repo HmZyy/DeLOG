@@ -725,55 +725,6 @@ impl DelogApp {
         }
     }
 
-    /// Anchored top-left so it clears the corner FPS badge.
-    fn paint_debug_overlay(&self, ctx: &egui::Context) {
-        if !self.settings.show_debug_overlay {
-            return;
-        }
-        let metrics = self.session.metrics();
-        egui::Area::new(egui::Id::new("debug_overlay"))
-            .order(egui::Order::Foreground)
-            .anchor(egui::Align2::LEFT_TOP, egui::vec2(8.0, 8.0))
-            .interactable(false)
-            .show(ctx, |ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.set_min_width(190.0);
-                    ui.strong("Debug Overlay (F12)");
-                    match self.fps_ema {
-                        Some(fps) => ui.label(format!("FPS {fps:.0}")),
-                        None => ui.weak("FPS idle"),
-                    };
-                    ui.separator();
-                    egui::Grid::new("debug_overlay_grid")
-                        .num_columns(3)
-                        .spacing([10.0, 2.0])
-                        .show(ui, |ui| {
-                            ui.strong("timer");
-                            ui.strong("last");
-                            ui.strong("avg");
-                            ui.end_row();
-                            // Frame timers, in milliseconds.
-                            for name in [
-                                "frame_total",
-                                "plot_paint_cpu",
-                                "gpu_encode",
-                                "yquery",
-                                "3d_frame",
-                            ] {
-                                if let Some(s) = metrics.stats(name)
-                                    && s.n > 0
-                                {
-                                    ui.monospace(name);
-                                    ui.label(format!("{:.2} ms", s.last));
-                                    ui.label(format!("{:.2} ms", s.avg));
-                                    ui.end_row();
-                                }
-                            }
-                        });
-                });
-            });
-    }
-
     fn poll_trajectory_builds(&mut self) {
         while let Ok(result) = self.traj_results.try_recv() {
             self.traj_building = self
@@ -1639,12 +1590,6 @@ impl eframe::App for DelogApp {
                     {
                         ui.close();
                     }
-                    if ui
-                        .checkbox(&mut self.settings.show_debug_overlay, "Debug Overlay (F12)")
-                        .clicked()
-                    {
-                        ui.close();
-                    }
                 });
                 ui.menu_button("Layout", |ui| {
                     if ui.button("Save Layout...").clicked() {
@@ -2007,12 +1952,6 @@ impl eframe::App for DelogApp {
 
         drop(ui_toolbar_timer);
         let range = timeline_range_for_ui(global_range);
-
-        // F12 toggles the debug overlay. Handled ungated — it is
-        // not a text key, so it works even while a widget holds focus.
-        if ui.ctx().input(|i| i.key_pressed(egui::Key::F12)) {
-            self.settings.show_debug_overlay = !self.settings.show_debug_overlay;
-        }
 
         // Transport keys — skipped while a widget owns the
         // keyboard (e.g. the browser filter box).
@@ -2437,7 +2376,6 @@ impl eframe::App for DelogApp {
         // Floating windows/dialogs + overlays; drops with the function (still
         // inside `frame_total`, after every other section).
         let _ui_windows_timer = self.session.metrics().scope("ui_windows");
-        self.paint_debug_overlay(ui.ctx());
         self.show_layout_windows(ui.ctx());
         let settings_before = self.settings.clone();
         let settings_change = self.settings_dialog.show(ui.ctx(), &mut self.settings);
