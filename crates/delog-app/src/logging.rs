@@ -7,6 +7,38 @@ pub enum LogLevel {
 }
 
 #[derive(Debug, Clone)]
+pub struct PendingLog {
+    pub level: LogLevel,
+    pub target: String,
+    pub message: String,
+}
+
+#[track_caller]
+pub fn log(level: LogLevel, message: impl Into<String>) -> PendingLog {
+    PendingLog::new(level, message)
+}
+
+impl PendingLog {
+    #[track_caller]
+    pub fn new(level: LogLevel, message: impl Into<String>) -> Self {
+        let location = std::panic::Location::caller();
+        Self::with_target(level, caller_target(location.file()), message)
+    }
+
+    pub fn with_target(
+        level: LogLevel,
+        target: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            level,
+            target: target.into(),
+            message: message.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct LogRecord {
     pub seq: u64,
     pub elapsed_ms: u128,
@@ -162,6 +194,15 @@ fn targets(records: &[LogRecord]) -> Vec<String> {
     out
 }
 
+fn caller_target(file: &str) -> String {
+    let normalized = file.replace('\\', "/");
+    let path = normalized
+        .strip_prefix("crates/delog-app/src/")
+        .or_else(|| normalized.strip_prefix("src/"))
+        .unwrap_or(normalized.as_str());
+    path.trim_end_matches(".rs").replace('/', "::")
+}
+
 fn format_elapsed(elapsed_ms: u128) -> String {
     let total_seconds = elapsed_ms / 1_000;
     let hours = total_seconds / 3_600;
@@ -199,7 +240,7 @@ fn level_color(ui: &egui::Ui, level: LogLevel) -> egui::Color32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{LogLevel, LogRecord, filtered_records};
+    use super::{LogLevel, LogRecord, caller_target, filtered_records};
 
     #[test]
     fn filters_by_level_target_and_search() {
@@ -223,6 +264,15 @@ mod tests {
         let filtered = filtered_records(&records, LogLevel::Warning, "vehicle-profile", "save");
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].seq, 1);
+    }
+
+    #[test]
+    fn caller_target_uses_source_relative_module_path() {
+        assert_eq!(
+            caller_target("crates/delog-app/src/vehicle_dialog.rs"),
+            "vehicle_dialog"
+        );
+        assert_eq!(caller_target("crates/delog-app/src/foo/bar.rs"), "foo::bar");
     }
 
     #[test]
