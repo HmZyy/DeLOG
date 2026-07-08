@@ -30,6 +30,49 @@ pub fn set_cursor_byte(ctx: &egui::Context, id: egui::Id, text: &str, byte: usiz
     }
 }
 
+/// Build a monospace layout for one candidate, accenting the byte range
+/// `[hi_start, hi_end)` (the matched fragment) against normal text. Falls back
+/// to all-normal if the range isn't a valid slice of `text`.
+fn match_highlight_job(
+    ui: &egui::Ui,
+    text: &str,
+    hi_start: usize,
+    hi_end: usize,
+) -> egui::text::LayoutJob {
+    use egui::text::{LayoutJob, TextFormat};
+    let font_id = egui::TextStyle::Monospace.resolve(ui.style());
+    let normal = ui.visuals().text_color();
+    let accent = ui.visuals().hyperlink_color;
+    let (hi_start, hi_end) = if hi_start <= hi_end
+        && hi_end <= text.len()
+        && text.is_char_boundary(hi_start)
+        && text.is_char_boundary(hi_end)
+    {
+        (hi_start, hi_end)
+    } else {
+        (0, 0)
+    };
+    let mut job = LayoutJob::default();
+    for (segment, color) in [
+        (&text[..hi_start], normal),
+        (&text[hi_start..hi_end], accent),
+        (&text[hi_end..], normal),
+    ] {
+        if !segment.is_empty() {
+            job.append(
+                segment,
+                0.0,
+                TextFormat {
+                    font_id: font_id.clone(),
+                    color,
+                    ..Default::default()
+                },
+            );
+        }
+    }
+    job
+}
+
 /// The byte range and slice of the completable token ending at `cursor` (a byte
 /// offset into `line`): the longest run of identifier characters and dots
 /// immediately before the cursor. `None` when that run is empty.
@@ -248,10 +291,14 @@ impl ReplCompletion {
             return true;
         }
 
-        let (selected, matches) = {
+        let (selected, matches, token) = {
             let p = self.popup.as_ref().unwrap();
-            (p.selected, p.matches.clone())
+            let token = buffer.get(p.start..p.end).unwrap_or("").to_string();
+            (p.selected, p.matches.clone(), token)
         };
+        // Accent the fragment after the token's last dot (the part being typed).
+        let hi_start = token.rfind('.').map(|i| i + 1).unwrap_or(0);
+        let hi_end = token.len();
         let mut clicked: Option<usize> = None;
         egui::Area::new(ui.id().with("repl_completion_popup"))
             .order(egui::Order::Foreground)
@@ -260,12 +307,12 @@ impl ReplCompletion {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.set_max_width(input.rect.width().max(120.0));
                     egui::ScrollArea::vertical()
-                        .max_height(200.0)
+                        .max_height(360.0)
                         .show(ui, |ui| {
                             for (i, m) in matches.iter().enumerate() {
                                 let resp = ui.selectable_label(
                                     i == selected,
-                                    egui::RichText::new(m).monospace(),
+                                    match_highlight_job(ui, m, hi_start, hi_end),
                                 );
                                 if i == selected {
                                     resp.scroll_to_me(Some(egui::Align::Center));
