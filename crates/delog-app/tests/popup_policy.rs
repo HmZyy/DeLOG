@@ -30,7 +30,8 @@ fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
 
 #[test]
 fn menus_expose_scripts_parsers_and_scripting_console_dock() {
-    assert!(APP_SOURCE.contains("checkbox(&mut self.scripts.console_open, \"Scripting (F9)\")"));
+    assert!(APP_SOURCE.contains("checkbox(&mut console_open, \"Scripting (F9)\")"));
+    assert!(APP_SOURCE.contains("self.scripts.set_console_open(console_open);"));
     assert!(APP_SOURCE.contains("checkbox(&mut self.logging_dock.open, \"Logging (F12)\")"));
     assert!(APP_SOURCE.contains("ui.menu_button(\"Scripts\""));
     assert!(APP_SOURCE.contains("ui.menu_button(\"Parsers\""));
@@ -90,6 +91,19 @@ fn scripting_console_dock_matches_diagnostics_height_and_reserves_prompt() {
         "fn variables_window(",
     );
     assert!(!console.contains("self.status"));
+}
+
+#[test]
+fn scripting_console_refocuses_prompt_after_enter_dispatch() {
+    let console = between(
+        SCRIPTS_SOURCE,
+        "pub fn console_dock_ui(",
+        "fn variables_window(",
+    );
+
+    assert!(console.contains("if dispatch_enabled && self.take_repl_refocus_request() {"));
+    assert!(console.contains("resp.request_focus();"));
+    assert!(console.contains("self.request_repl_refocus();"));
 }
 
 #[test]
