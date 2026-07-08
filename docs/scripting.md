@@ -89,6 +89,22 @@ The REPL and the editor share **one persistent interpreter**, so names you
 define in the REPL are visible to subsequent REPL lines (and vice-versa) for the
 life of the app session.
 
+Press <kbd>Tab</kbd> to autocomplete the token at the cursor. Completions are
+drawn live from the interpreter session, so they cover Python keywords and
+builtins, names you have defined, imported modules, attribute chains on live
+objects (`f.` after `f = delog.field(...)`), and the whole `delog` API. A single
+match is inserted directly; several open a dropdown - <kbd>Up</kbd>/<kbd>Down</kbd>
+(or <kbd>Ctrl</kbd>+<kbd>P</kbd>/<kbd>Ctrl</kbd>+<kbd>N</kbd>, or repeated
+<kbd>Tab</kbd>) move the highlight, <kbd>Enter</kbd> accepts, and <kbd>Esc</kbd>
+dismisses. <kbd>Ctrl</kbd>+<kbd>N</kbd> also opens the dropdown when it is closed,
+like <kbd>Tab</kbd>. Because completion introspects real objects, Tab on an
+attribute of a call expression (e.g. `delog.field("x").`) evaluates that call.
+
+With no completion dropdown open, <kbd>Up</kbd>/<kbd>Down</kbd> walk the command
+history: <kbd>Up</kbd> recalls older submitted lines, <kbd>Down</kbd> moves back
+toward newer ones, and stepping past the newest restores whatever you were
+typing. History lasts for the app session.
+
 `Settings ▸ Scripting ▸ Open Scripting Console` controls whether the dock opens
 automatically on any output, only on errors, or never.
 
