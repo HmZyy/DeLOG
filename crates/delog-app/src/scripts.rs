@@ -12,6 +12,8 @@ use delog_script::{ScriptCommand, ScriptEngine, ScriptEvent};
 use egui_code_editor::{CodeEditor, ColorTheme, Syntax};
 
 use crate::parsers::{ParserUiAction, ParsersPanel};
+use crate::repl_complete::{self, ReplCompletion};
+use crate::repl_history::ReplHistory;
 
 pub const SCRIPTING_CONSOLE_DEFAULT_HEIGHT: f32 = 240.0;
 
@@ -115,6 +117,8 @@ pub struct ScriptsPanel {
     pending_auto_open: Option<PendingAutoOpen>,
     auto_open_mode: AutoOpenVariables,
     pending_logs: Vec<PendingLog>,
+    completion: ReplCompletion,
+    history: ReplHistory,
 }
 
 impl ScriptsPanel {
@@ -151,6 +155,8 @@ impl ScriptsPanel {
             pending_auto_open: None,
             auto_open_mode: AutoOpenVariables::default(),
             pending_logs: Vec::new(),
+            completion: ReplCompletion::new(),
+            history: ReplHistory::new(),
         }
     }
 
@@ -502,6 +508,9 @@ impl ScriptsPanel {
             }
             ScriptEvent::LiveBatchProcessed => {}
             ScriptEvent::Parser(event) => self.parsers.handle_event(event),
+            ScriptEvent::Completions { seq, matches } => {
+                self.completion.on_completions(seq, matches, &mut self.repl_input);
+            }
         }
     }
 
@@ -654,13 +663,86 @@ impl ScriptsPanel {
                     let resp = ui.add_enabled(
                         dispatch_enabled,
                         egui::TextEdit::singleline(&mut self.repl_input)
-                            .desired_width(f32::INFINITY),
+                            .desired_width(f32::INFINITY)
+                            .lock_focus(true),
                     );
                     if dispatch_enabled && self.take_repl_refocus_request() {
                         resp.request_focus();
                     }
-                    if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+
+                    // The popup owns Up/Down/Tab/Enter/Esc while it is open.
+                    let popup_took_enter =
+                        self.completion.handle_popup(ui, &resp, &mut self.repl_input);
+
+                    // Typing (not navigation) while the popup is open dismisses it
+                    // and lets the character pass through to the input.
+                    if resp.changed() {
+                        self.completion.dismiss();
+                    }
+
+                    // A completion that mutated the buffer moves the caret to the
+                    // end of the inserted text.
+                    if let Some(byte) = self.completion.take_pending_cursor() {
+                        repl_complete::set_cursor_byte(
+                            ui.ctx(),
+                            resp.id,
+                            &self.repl_input,
+                            byte,
+                        );
+                        resp.request_focus();
+                    }
+
+                    // With no popup open, Up/Down walk the command history.
+                    if dispatch_enabled && resp.has_focus() && !self.completion.is_open() {
+                        let up =
+                            ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp));
+                        let down = ui
+                            .input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown));
+                        let recalled = if up {
+                            self.history.older(&self.repl_input)
+                        } else if down {
+                            self.history.newer()
+                        } else {
+                            None
+                        };
+                        if let Some(line) = recalled {
+                            self.repl_input = line;
+                            let end = self.repl_input.len();
+                            repl_complete::set_cursor_byte(ui.ctx(), resp.id, &self.repl_input, end);
+                            resp.request_focus();
+                        }
+                    }
+
+                    // Tab (or Ctrl+N) with no popup open requests completions for
+                    // the token at the cursor.
+                    if dispatch_enabled
+                        && resp.has_focus()
+                        && !self.completion.is_open()
+                        && ui.input_mut(|i| {
+                            i.consume_key(egui::Modifiers::NONE, egui::Key::Tab)
+                                || i.consume_key(egui::Modifiers::CTRL, egui::Key::N)
+                        })
+                    {
+                        let cursor =
+                            repl_complete::cursor_byte(ui.ctx(), resp.id, &self.repl_input);
+                        if let Some((start, token)) =
+                            repl_complete::completable_token(&self.repl_input, cursor)
+                        {
+                            let token = token.to_string();
+                            let seq = self.completion.begin_request(start, cursor, token.clone());
+                            let _ = self
+                                .engine(store.clone(), sender.clone(), Arc::clone(metrics))
+                                .send(ScriptCommand::Complete { seq, text: token });
+                        }
+                    }
+
+                    if !popup_took_enter
+                        && !self.completion.is_open()
+                        && resp.lost_focus()
+                        && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                    {
                         let line = std::mem::take(&mut self.repl_input);
+                        self.history.push(&line);
                         if self.dispatch_eval(
                             line,
                             store.clone(),
