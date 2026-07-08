@@ -98,6 +98,11 @@ match is inserted directly; several open a dropdown - <kbd>Up</kbd>/<kbd>Down</k
 <kbd>Esc</kbd> dismisses. Because completion introspects real objects, Tab on an
 attribute of a call expression (e.g. `delog.field("x").`) evaluates that call.
 
+With no completion dropdown open, <kbd>Up</kbd>/<kbd>Down</kbd> walk the command
+history: <kbd>Up</kbd> recalls older submitted lines, <kbd>Down</kbd> moves back
+toward newer ones, and stepping past the newest restores whatever you were
+typing. History lasts for the app session.
+
 `Settings ▸ Scripting ▸ Open Scripting Console` controls whether the dock opens
 automatically on any output, only on errors, or never.
 
