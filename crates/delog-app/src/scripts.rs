@@ -677,6 +677,18 @@ impl ScriptsPanel {
                         self.completion.dismiss();
                     }
 
+                    // A completion that mutated the buffer moves the caret to the
+                    // end of the inserted text.
+                    if let Some(byte) = self.completion.take_pending_cursor() {
+                        repl_complete::set_cursor_byte(
+                            ui.ctx(),
+                            resp.id,
+                            &self.repl_input,
+                            byte,
+                        );
+                        resp.request_focus();
+                    }
+
                     // Tab with no popup open requests completions for the token at the cursor.
                     if dispatch_enabled
                         && resp.has_focus()

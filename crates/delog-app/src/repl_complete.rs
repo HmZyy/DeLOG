@@ -14,6 +14,22 @@ pub fn cursor_byte(ctx: &egui::Context, id: egui::Id, text: &str) -> usize {
         .unwrap_or(text.len())
 }
 
+/// Move a focused `TextEdit`'s cursor to byte offset `byte` in `text` (a single
+/// collapsed caret). No-op if the widget's state isn't loaded yet.
+pub fn set_cursor_byte(ctx: &egui::Context, id: egui::Id, text: &str, byte: usize) {
+    let char_idx = text
+        .get(..byte.min(text.len()))
+        .map(|s| s.chars().count())
+        .unwrap_or_else(|| text.chars().count());
+    if let Some(mut state) = egui::text_edit::TextEditState::load(ctx, id) {
+        let ccursor = egui::text::CCursor::new(char_idx);
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(ccursor)));
+        state.store(ctx, id);
+    }
+}
+
 /// The byte range and slice of the completable token ending at `cursor` (a byte
 /// offset into `line`): the longest run of identifier characters and dots
 /// immediately before the cursor. `None` when that run is empty.
@@ -77,6 +93,9 @@ pub struct ReplCompletion {
     next_seq: u64,
     pending: Option<Pending>,
     popup: Option<Popup>,
+    /// Buffer byte offset the input cursor should jump to after a completion
+    /// mutates the buffer; consumed by the UI once per frame.
+    pending_cursor: Option<usize>,
 }
 
 impl ReplCompletion {
@@ -85,11 +104,17 @@ impl ReplCompletion {
             next_seq: 0,
             pending: None,
             popup: None,
+            pending_cursor: None,
         }
     }
 
     pub fn is_open(&self) -> bool {
         self.popup.is_some()
+    }
+
+    /// The pending post-completion cursor byte offset, cleared on read.
+    pub fn take_pending_cursor(&mut self) -> Option<usize> {
+        self.pending_cursor.take()
     }
 
     #[cfg(test)]
@@ -135,6 +160,7 @@ impl ReplCompletion {
             0 => false,
             1 => {
                 buffer.replace_range(pending.start..pending.end, &matches[0]);
+                self.pending_cursor = Some(pending.start + matches[0].len());
                 true
             }
             _ => {
@@ -143,6 +169,7 @@ impl ReplCompletion {
                 let new_token = if extended { lcp } else { pending.token.clone() };
                 if extended {
                     buffer.replace_range(pending.start..pending.end, &new_token);
+                    self.pending_cursor = Some(pending.start + new_token.len());
                 }
                 let popup_end = pending.start + new_token.len();
                 self.popup = Some(Popup {
@@ -175,6 +202,7 @@ impl ReplCompletion {
                     && buffer.is_char_boundary(popup.end)
                 {
                     buffer.replace_range(popup.start..popup.end, choice);
+                    self.pending_cursor = Some(popup.start + choice.len());
                 }
             }
         }
@@ -363,6 +391,26 @@ mod tests {
         c.accept_selected(&mut buf);
         assert_eq!(buf, "delog.find");
         assert!(!c.is_open());
+    }
+
+    #[test]
+    fn single_match_moves_cursor_to_end() {
+        let mut c = ReplCompletion::new();
+        let mut buf = String::from("de");
+        let seq = c.begin_request(0, 2, "de".into());
+        c.on_completions(seq, s(&["delog"]), &mut buf);
+        assert_eq!(c.take_pending_cursor(), Some("delog".len()));
+    }
+
+    #[test]
+    fn accept_moves_cursor_to_end() {
+        let mut c = ReplCompletion::new();
+        let mut buf = String::from("delog.fi");
+        let seq = c.begin_request(0, 8, "delog.fi".into());
+        c.on_completions(seq, s(&["delog.field", "delog.find"]), &mut buf);
+        c.move_selection(1);
+        c.accept_selected(&mut buf);
+        assert_eq!(c.take_pending_cursor(), Some("delog.find".len()));
     }
 
     #[test]
