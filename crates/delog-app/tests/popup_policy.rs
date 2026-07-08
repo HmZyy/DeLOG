@@ -30,9 +30,9 @@ fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
 
 #[test]
 fn menus_expose_scripts_parsers_and_scripting_console_dock() {
-    assert!(APP_SOURCE.contains("checkbox(&mut console_open, \"Scripting (F9)\")"));
-    assert!(APP_SOURCE.contains("self.scripts.set_console_open(console_open);"));
-    assert!(APP_SOURCE.contains("checkbox(&mut self.logging_dock.open, \"Logging (F12)\")"));
+    assert!(APP_SOURCE.contains("AppDockTab::ScriptingConsole, \"Scripting (F9)\""));
+    assert!(APP_SOURCE.contains("AppDockTab::Logging, \"Logging (F12)\""));
+    assert!(APP_SOURCE.contains("self.dock_open_checkbox(ui, AppDockTab::ScriptingConsole"));
     assert!(APP_SOURCE.contains("ui.menu_button(\"Scripts\""));
     assert!(APP_SOURCE.contains("ui.menu_button(\"Parsers\""));
     assert!(APP_SOURCE.contains("ui.button(\"Editor...\")"));
@@ -41,7 +41,7 @@ fn menus_expose_scripts_parsers_and_scripting_console_dock() {
 }
 
 #[test]
-fn view_menu_orders_docks_and_function_keys_toggle_them() {
+fn view_menu_orders_docks_and_function_keys_focus_them() {
     let view_menu = between(
         APP_SOURCE,
         "ui.menu_button(\"View\"",
@@ -72,17 +72,32 @@ fn view_menu_orders_docks_and_function_keys_toggle_them() {
     ] {
         assert!(APP_SOURCE.contains(key));
     }
+
+    assert!(APP_SOURCE.contains("self.open_dock(AppDockTab::Diagnostics);"));
+    assert!(APP_SOURCE.contains("self.open_dock(AppDockTab::Performance);"));
+    assert!(APP_SOURCE.contains("self.open_dock(AppDockTab::Markers);"));
+    assert!(APP_SOURCE.contains("self.open_dock(AppDockTab::ScriptingConsole);"));
+    assert!(APP_SOURCE.contains("self.open_dock(AppDockTab::Logging);"));
+    assert!(!APP_SOURCE.contains("self.diagnostics_dock.open = !self.diagnostics_dock.open"));
+    assert!(!APP_SOURCE.contains("self.performance_dock.open = !self.performance_dock.open"));
+    assert!(!APP_SOURCE.contains("self.markers_dock.open = !self.markers_dock.open"));
+    assert!(!APP_SOURCE.contains("self.logging_dock.open = !self.logging_dock.open"));
 }
 
 #[test]
-fn logging_dock_matches_diagnostics_height() {
-    assert!(APP_SOURCE.contains("egui::Panel::bottom(\"logging\")"));
+fn bottom_docks_share_one_resizable_dock_area() {
+    assert!(APP_SOURCE.contains("egui::Panel::bottom(\"app_docks\")"));
     assert!(APP_SOURCE.contains(".default_size(240.0)"));
+    assert!(APP_SOURCE.contains("docks.show_inside(ui, viewer);"));
+    assert!(!APP_SOURCE.contains("egui::Panel::bottom(\"diagnostics\")"));
+    assert!(!APP_SOURCE.contains("egui::Panel::bottom(\"logging\")"));
+    assert!(!APP_SOURCE.contains("egui::Panel::bottom(\"performance\")"));
+    assert!(!APP_SOURCE.contains("egui::Panel::bottom(\"markers\")"));
+    assert!(!APP_SOURCE.contains("egui::Panel::bottom(\"scripting_console\")"));
 }
 
 #[test]
 fn scripting_console_dock_matches_diagnostics_height_and_reserves_prompt() {
-    assert!(APP_SOURCE.contains(".default_size(crate::scripts::SCRIPTING_CONSOLE_DEFAULT_HEIGHT)"));
     assert!(SCRIPTS_SOURCE.contains("pub const SCRIPTING_CONSOLE_DEFAULT_HEIGHT: f32 = 240.0;"));
     assert!(SCRIPTS_SOURCE.contains("egui::Panel::bottom(\"scripting_console_input\")"));
     let console = between(
