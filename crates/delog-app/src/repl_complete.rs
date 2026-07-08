@@ -1,3 +1,19 @@
+/// Best-effort byte offset of the text cursor in a focused `TextEdit`. Falls
+/// back to the end of `text` (the common Tab-at-end-of-line case) when the
+/// cursor state is unavailable.
+pub fn cursor_byte(ctx: &egui::Context, id: egui::Id, text: &str) -> usize {
+    egui::text_edit::TextEditState::load(ctx, id)
+        .and_then(|state| state.cursor.char_range())
+        .map(|range| {
+            let char_idx = range.primary.index;
+            text.char_indices()
+                .nth(char_idx)
+                .map(|(b, _)| b)
+                .unwrap_or(text.len())
+        })
+        .unwrap_or(text.len())
+}
+
 /// The byte range and slice of the completable token ending at `cursor` (a byte
 /// offset into `line`): the longest run of identifier characters and dots
 /// immediately before the cursor. `None` when that run is empty.
@@ -76,6 +92,8 @@ impl ReplCompletion {
         self.popup.is_some()
     }
 
+    // Test-facing accessor for the open popup's state.
+    #[allow(dead_code)]
     pub fn popup(&self) -> Option<&Popup> {
         self.popup.as_ref()
     }
@@ -165,6 +183,80 @@ impl ReplCompletion {
 
     pub fn dismiss(&mut self) {
         self.popup = None;
+    }
+
+    /// Render the dropdown (when open) anchored under `input`, handling keyboard
+    /// navigation and mouse selection. Returns true if it consumed an Enter this
+    /// frame (so the caller must not also submit the line).
+    pub fn handle_popup(
+        &mut self,
+        ui: &mut egui::Ui,
+        input: &egui::Response,
+        buffer: &mut String,
+    ) -> bool {
+        if self.popup.is_none() {
+            return false;
+        }
+        let down = ui.input_mut(|i| {
+            i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)
+                || i.consume_key(egui::Modifiers::NONE, egui::Key::Tab)
+        });
+        let up = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp));
+        let accept = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+        let dismiss = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        if down {
+            self.move_selection(1);
+        }
+        if up {
+            self.move_selection(-1);
+        }
+        if dismiss {
+            self.dismiss();
+            return false;
+        }
+        if accept {
+            self.accept_selected(buffer);
+            input.request_focus();
+            return true;
+        }
+
+        let (selected, matches) = {
+            let p = self.popup.as_ref().unwrap();
+            (p.selected, p.matches.clone())
+        };
+        let mut clicked: Option<usize> = None;
+        egui::Area::new(ui.id().with("repl_completion_popup"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(input.rect.left_bottom())
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_max_width(input.rect.width().max(120.0));
+                    egui::ScrollArea::vertical()
+                        .max_height(200.0)
+                        .show(ui, |ui| {
+                            for (i, m) in matches.iter().enumerate() {
+                                let resp = ui.selectable_label(
+                                    i == selected,
+                                    egui::RichText::new(m).monospace(),
+                                );
+                                if i == selected {
+                                    resp.scroll_to_me(Some(egui::Align::Center));
+                                }
+                                if resp.clicked() {
+                                    clicked = Some(i);
+                                }
+                            }
+                        });
+                });
+            });
+        if let Some(i) = clicked {
+            if let Some(p) = &mut self.popup {
+                p.selected = i;
+            }
+            self.accept_selected(buffer);
+            input.request_focus();
+        }
+        false
     }
 }
 
