@@ -31,11 +31,18 @@ fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
 #[test]
 fn menus_expose_scripts_parsers_and_scripting_console_dock() {
     assert!(APP_SOURCE.contains("checkbox(&mut self.scripts.console_open, \"Scripting Console\")"));
+    assert!(APP_SOURCE.contains("checkbox(&mut self.logging_dock.open, \"Logging\")"));
     assert!(APP_SOURCE.contains("ui.menu_button(\"Scripts\""));
     assert!(APP_SOURCE.contains("ui.menu_button(\"Parsers\""));
     assert!(APP_SOURCE.contains("ui.button(\"Editor...\")"));
     assert!(APP_SOURCE.contains("ui.menu_button(\"Run\""));
     assert!(APP_SOURCE.contains("ui.menu_button(\"Parse File\""));
+}
+
+#[test]
+fn logging_dock_matches_diagnostics_height() {
+    assert!(APP_SOURCE.contains("egui::Panel::bottom(\"logging\")"));
+    assert!(APP_SOURCE.contains(".default_size(240.0)"));
 }
 
 #[test]
