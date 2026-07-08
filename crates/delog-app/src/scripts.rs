@@ -12,6 +12,7 @@ use delog_script::{ScriptCommand, ScriptEngine, ScriptEvent};
 use egui_code_editor::{CodeEditor, ColorTheme, Syntax};
 
 use crate::parsers::{ParserUiAction, ParsersPanel};
+use crate::repl_complete::ReplCompletion;
 
 pub const SCRIPTING_CONSOLE_DEFAULT_HEIGHT: f32 = 240.0;
 
@@ -115,6 +116,7 @@ pub struct ScriptsPanel {
     pending_auto_open: Option<PendingAutoOpen>,
     auto_open_mode: AutoOpenVariables,
     pending_logs: Vec<PendingLog>,
+    completion: ReplCompletion,
 }
 
 impl ScriptsPanel {
@@ -151,6 +153,7 @@ impl ScriptsPanel {
             pending_auto_open: None,
             auto_open_mode: AutoOpenVariables::default(),
             pending_logs: Vec::new(),
+            completion: ReplCompletion::new(),
         }
     }
 
@@ -502,6 +505,9 @@ impl ScriptsPanel {
             }
             ScriptEvent::LiveBatchProcessed => {}
             ScriptEvent::Parser(event) => self.parsers.handle_event(event),
+            ScriptEvent::Completions { seq, matches } => {
+                self.completion.on_completions(seq, matches, &mut self.repl_input);
+            }
         }
     }
 
