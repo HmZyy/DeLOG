@@ -30,6 +30,8 @@ mod script_params_io;
 mod scripts;
 #[cfg(feature = "scripting")]
 mod repl_complete;
+#[cfg(feature = "scripting")]
+mod repl_history;
 mod session;
 mod settings;
 mod text_overlay;
