@@ -72,6 +72,7 @@ impl AppDockController {
             .id(egui::Id::new("app_dock_area"))
             .style(egui_dock::Style::from_egui(ui.style().as_ref()))
             .show_inside(ui, viewer);
+        self.reconcile_active_tab();
     }
 
     fn focus_path(&mut self, path: TabPath, tab: AppDockTab) {
@@ -81,6 +82,14 @@ impl AppDockController {
         } else {
             self.active_tab = self.first_tab();
         }
+    }
+
+    fn reconcile_active_tab(&mut self) {
+        self.active_tab = self
+            .state
+            .find_active_focused()
+            .map(|(_, tab)| *tab)
+            .or_else(|| self.first_tab());
     }
 
     fn first_tab(&self) -> Option<AppDockTab> {
@@ -155,5 +164,21 @@ mod tests {
         docks.open_or_focus(AppDockTab::Diagnostics);
         assert_eq!(docks.tab_count(), 2);
         assert_eq!(docks.active_tab(), Some(AppDockTab::Diagnostics));
+    }
+
+    #[test]
+    fn reconcile_active_tab_syncs_from_state() {
+        let mut docks = AppDockController::new_empty();
+        docks.open_or_focus(AppDockTab::Diagnostics);
+        docks.open_or_focus(AppDockTab::Logging);
+
+        let logging_path = docks.state.find_tab(&AppDockTab::Logging).unwrap();
+        docks.state.set_active_tab(logging_path).unwrap();
+        docks.state.set_focused_node_and_surface(logging_path.node_path());
+        docks.active_tab = Some(AppDockTab::Diagnostics);
+
+        docks.reconcile_active_tab();
+
+        assert_eq!(docks.active_tab(), Some(AppDockTab::Logging));
     }
 }
