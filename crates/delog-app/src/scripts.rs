@@ -102,6 +102,7 @@ pub struct ScriptsPanel {
     editing_original_name: Option<String>,
     editor_text: String,
     repl_input: String,
+    refocus_repl_input: bool,
     console: String,
     status: String,
     pending_delete: Option<String>,
@@ -137,6 +138,7 @@ impl ScriptsPanel {
             editing_original_name: None,
             editor_text: String::new(),
             repl_input: String::new(),
+            refocus_repl_input: false,
             console: String::new(),
             status: String::new(),
             pending_delete: None,
@@ -222,6 +224,25 @@ impl ScriptsPanel {
 
     pub fn ordinary_dispatch_enabled(&self) -> bool {
         !self.running && !self.should_poll_parser_events()
+    }
+
+    pub fn set_console_open(&mut self, open: bool) {
+        if open && !self.console_open {
+            self.request_repl_refocus();
+        }
+        self.console_open = open;
+    }
+
+    fn request_repl_refocus(&mut self) {
+        self.refocus_repl_input = true;
+    }
+
+    fn take_repl_refocus_request(&mut self) -> bool {
+        if !self.ordinary_dispatch_enabled() || !self.refocus_repl_input {
+            return false;
+        }
+        self.refocus_repl_input = false;
+        true
     }
 
     pub fn parser_dispatch_enabled(&self) -> bool {
@@ -437,14 +458,14 @@ impl ScriptsPanel {
             ScriptEvent::Output(s) => {
                 self.console.push_str(&s);
                 if should_open_scripting_console(auto_open_console, ConsoleEventKind::Output) {
-                    self.console_open = true;
+                    self.set_console_open(true);
                 }
             }
             ScriptEvent::Result(r) => {
                 self.console.push_str(&r);
                 self.console.push('\n');
                 if should_open_scripting_console(auto_open_console, ConsoleEventKind::Output) {
-                    self.console_open = true;
+                    self.set_console_open(true);
                 }
             }
             ScriptEvent::Error(e) => {
@@ -455,7 +476,7 @@ impl ScriptsPanel {
                 self.running = false;
                 self.pending_auto_open = None;
                 if should_open_scripting_console(auto_open_console, ConsoleEventKind::Error) {
-                    self.console_open = true;
+                    self.set_console_open(true);
                 }
             }
             ScriptEvent::Done => {
@@ -616,7 +637,7 @@ impl ScriptsPanel {
             ui.strong("Scripting Console");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Close").clicked() {
-                    self.console_open = false;
+                    self.set_console_open(false);
                 }
                 if ui.button("Clear").clicked() {
                     self.console.clear();
@@ -629,19 +650,25 @@ impl ScriptsPanel {
             .show_inside(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(">>>");
+                    let dispatch_enabled = self.ordinary_dispatch_enabled();
                     let resp = ui.add_enabled(
-                        self.ordinary_dispatch_enabled(),
+                        dispatch_enabled,
                         egui::TextEdit::singleline(&mut self.repl_input)
                             .desired_width(f32::INFINITY),
                     );
+                    if dispatch_enabled && self.take_repl_refocus_request() {
+                        resp.request_focus();
+                    }
                     if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                         let line = std::mem::take(&mut self.repl_input);
-                        self.dispatch_eval(
+                        if self.dispatch_eval(
                             line,
                             store.clone(),
                             sender.clone(),
                             Arc::clone(metrics),
-                        );
+                        ) {
+                            self.request_repl_refocus();
+                        }
                     }
                 });
             });
@@ -1366,6 +1393,44 @@ mod tests {
             name: "new_parser.py".into(),
         }));
         assert!(!panel.should_poll_parser_events());
+    }
+
+    #[test]
+    fn repl_refocus_request_waits_until_prompt_is_enabled() {
+        let root =
+            std::env::temp_dir().join(format!("delog-scripts-repl-focus-{}", std::process::id()));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
+
+        panel.request_repl_refocus();
+        panel.running = true;
+        assert!(!panel.take_repl_refocus_request());
+
+        panel.handle_event(ScriptEvent::Done);
+        assert!(panel.take_repl_refocus_request());
+        assert!(!panel.take_repl_refocus_request());
+    }
+
+    #[test]
+    fn opening_console_requests_repl_focus_once() {
+        let root =
+            std::env::temp_dir().join(format!("delog-scripts-open-focus-{}", std::process::id()));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
+
+        panel.set_console_open(true);
+        assert!(panel.console_open);
+        assert!(panel.take_repl_refocus_request());
+        assert!(!panel.take_repl_refocus_request());
+
+        panel.set_console_open(true);
+        assert!(!panel.take_repl_refocus_request());
     }
 
     #[test]
