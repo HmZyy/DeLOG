@@ -55,7 +55,7 @@ libdir to the rpath.
 ## The Scripts UI
 
 Scripts are a top-level menu. The interactive prompt lives in the
-**View ▸ Scripting Console** dock.
+**View ▸ Scripting (F9)** dock.
 
 ### Scripts ▸ Run
 
@@ -79,7 +79,7 @@ Opens the floating script editor window:
   toggle (▶ runs the editor buffer; while a script is running it becomes ⏹ and
   interrupts it).
 
-### View ▸ Scripting Console
+### View ▸ Scripting (F9)
 
 Opens the bottom Scripting Console dock. Type one line, press <kbd>Enter</kbd>
 to evaluate it in a persistent interpreter session. The scrollback shows

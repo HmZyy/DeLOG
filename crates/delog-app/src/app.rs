@@ -1560,32 +1560,32 @@ impl eframe::App for DelogApp {
                 });
                 ui.menu_button("View", |ui| {
                     if ui
-                        .checkbox(&mut self.diagnostics_dock.open, "Diagnostics")
+                        .checkbox(&mut self.diagnostics_dock.open, "Diagnostic (F1)")
                         .clicked()
                     {
                         ui.close();
                     }
                     if ui
-                        .checkbox(&mut self.logging_dock.open, "Logging")
+                        .checkbox(&mut self.performance_dock.open, "Performance (F2)")
                         .clicked()
                     {
                         ui.close();
                     }
                     if ui
-                        .checkbox(&mut self.performance_dock.open, "Performance")
-                        .clicked()
-                    {
-                        ui.close();
-                    }
-                    if ui
-                        .checkbox(&mut self.markers_dock.open, "Markers")
+                        .checkbox(&mut self.markers_dock.open, "Markers (F3)")
                         .clicked()
                     {
                         ui.close();
                     }
                     #[cfg(feature = "scripting")]
                     if ui
-                        .checkbox(&mut self.scripts.console_open, "Scripting Console")
+                        .checkbox(&mut self.scripts.console_open, "Scripting (F9)")
+                        .clicked()
+                    {
+                        ui.close();
+                    }
+                    if ui
+                        .checkbox(&mut self.logging_dock.open, "Logging (F12)")
                         .clicked()
                     {
                         ui.close();
@@ -1952,6 +1952,32 @@ impl eframe::App for DelogApp {
 
         drop(ui_toolbar_timer);
         let range = timeline_range_for_ui(global_range);
+
+        let (toggle_diagnostics, toggle_performance, toggle_markers, toggle_logging) =
+            ui.ctx().input(|i| {
+                (
+                    i.key_pressed(egui::Key::F1),
+                    i.key_pressed(egui::Key::F2),
+                    i.key_pressed(egui::Key::F3),
+                    i.key_pressed(egui::Key::F12),
+                )
+            });
+        if toggle_diagnostics {
+            self.diagnostics_dock.open = !self.diagnostics_dock.open;
+        }
+        if toggle_performance {
+            self.performance_dock.open = !self.performance_dock.open;
+        }
+        if toggle_markers {
+            self.markers_dock.open = !self.markers_dock.open;
+        }
+        if toggle_logging {
+            self.logging_dock.open = !self.logging_dock.open;
+        }
+        #[cfg(feature = "scripting")]
+        if ui.ctx().input(|i| i.key_pressed(egui::Key::F9)) {
+            self.scripts.console_open = !self.scripts.console_open;
+        }
 
         // Transport keys — skipped while a widget owns the
         // keyboard (e.g. the browser filter box).
