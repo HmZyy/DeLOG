@@ -304,41 +304,37 @@ impl ReplCompletion {
         let hi_start = token.rfind('.').map(|i| i + 1).unwrap_or(0);
         let hi_end = token.len();
         let mut clicked: Option<usize> = None;
-        // Size the dropdown to its rows (capped), then place it directly above
-        // the console input, which sits at the bottom of the window. Anchoring
-        // by a computed top edge (rather than a bottom pivot) keeps the inner
-        // scroll area's height stable instead of collapsing to a few rows.
+        // Show a window of at most MAX_ROWS rows that keeps the selection in view.
         const MAX_ROWS: usize = 12;
-        let row_h = ui.text_style_height(&egui::TextStyle::Monospace)
-            + 2.0 * ui.spacing().button_padding.y
-            + ui.spacing().item_spacing.y;
-        let pad = 8.0;
-        let rows = matches.len().clamp(1, MAX_ROWS) as f32;
-        let popup_h = (rows * row_h + pad).min(input.rect.top().max(row_h + pad));
-        let list_height = (popup_h - pad).max(row_h);
-        let pos = egui::pos2(input.rect.left(), input.rect.top() - popup_h);
+        let n = matches.len();
+        let start = if n <= MAX_ROWS {
+            0
+        } else {
+            selected.saturating_sub(MAX_ROWS / 2).min(n - MAX_ROWS)
+        };
+        let end = (start + MAX_ROWS).min(n);
+        let width = input.rect.width().max(120.0);
+        // Anchor the dropdown's bottom at the input's top edge (the console input
+        // sits at the window bottom) so it grows upward, next to the caret. No
+        // scroll area: the frame auto-sizes to exactly the visible rows, which
+        // avoids the circular sizing that collapsed a scroll area to a few rows.
         egui::Area::new(ui.id().with("repl_completion_popup"))
             .order(egui::Order::Foreground)
-            .fixed_pos(pos)
+            .pivot(egui::Align2::LEFT_BOTTOM)
+            .fixed_pos(input.rect.left_top())
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.set_max_width(input.rect.width().max(120.0));
-                    egui::ScrollArea::vertical()
-                        .max_height(list_height)
-                        .show(ui, |ui| {
-                            for (i, m) in matches.iter().enumerate() {
-                                let resp = ui.selectable_label(
-                                    i == selected,
-                                    match_highlight_job(ui, m, hi_start, hi_end),
-                                );
-                                if i == selected {
-                                    resp.scroll_to_me(Some(egui::Align::Center));
-                                }
-                                if resp.clicked() {
-                                    clicked = Some(i);
-                                }
-                            }
-                        });
+                    ui.set_min_width(width);
+                    ui.set_max_width(width);
+                    for (i, m) in matches.iter().enumerate().take(end).skip(start) {
+                        let resp = ui.selectable_label(
+                            i == selected,
+                            match_highlight_job(ui, m, hi_start, hi_end),
+                        );
+                        if resp.clicked() {
+                            clicked = Some(i);
+                        }
+                    }
                 });
             });
         if let Some(i) = clicked {
