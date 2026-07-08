@@ -101,8 +101,8 @@ impl AppDockController {
             .allowed_splits(egui_dock::AllowedSplits::None)
             .draggable_tabs(false)
             .tab_context_menus(false)
-            .show_close_buttons(false)
-            .show_leaf_close_all_buttons(false)
+            .show_close_buttons(true)
+            .show_leaf_close_all_buttons(true)
             .show_leaf_collapse_buttons(false)
             .show_inside(ui, viewer);
         self.reconcile_active_tab();
