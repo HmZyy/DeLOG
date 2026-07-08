@@ -71,24 +71,6 @@ impl LoggingDock {
         let mut action = LoggingAction::default();
         let targets = targets(records);
         ui.horizontal(|ui| {
-            ui.strong("Logging");
-            ui.weak(format!("{} retained", records.len()));
-            if let Some(last) = records.last() {
-                ui.separator();
-                ui.label(format!("[{}] {}", level_label(last.level), last.message));
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Close").clicked() {
-                    self.open = false;
-                }
-                if ui.button("Clear").clicked() {
-                    action.clear = true;
-                }
-            });
-        });
-
-        ui.separator();
-        ui.horizontal(|ui| {
             egui::ComboBox::from_id_salt("logging-level")
                 .selected_text(level_filter_label(self.min_level))
                 .show_ui(ui, |ui| {
@@ -117,6 +99,17 @@ impl LoggingDock {
                     .hint_text("Search")
                     .desired_width(220.0),
             );
+
+            let trash = egui::Image::new(crate::icons::trash())
+                .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
+                .tint(ui.visuals().text_color());
+            if ui
+                .add(egui::Button::image(trash))
+                .on_hover_text("Clear logs")
+                .clicked()
+            {
+                action.clear = true;
+            }
         });
 
         let filtered = filtered_records(records, self.min_level, &self.target, &self.search);

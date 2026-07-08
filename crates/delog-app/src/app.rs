@@ -2095,7 +2095,6 @@ impl eframe::App for DelogApp {
         }
         drop(ui_performance_timer);
         self.sync_docks_from_legacy_flags();
-        let has_docked_tabs = self.docks.has_docked_tabs();
         if self.docks.has_tabs() {
             let mut actions = PendingDockActions::default();
             #[cfg(feature = "scripting")]
@@ -2134,22 +2133,12 @@ impl eframe::App for DelogApp {
                 show_docks(ui, &mut self.docks, &mut viewer);
             };
 
-            if has_docked_tabs {
-                egui::Panel::bottom("app_docks")
-                    .resizable(true)
-                    .default_size(240.0)
-                    .show_inside(ui, |ui| {
-                        render_docks(ui);
-                    });
-            } else {
-                ui.allocate_ui_with_layout(
-                    egui::vec2(ui.available_width(), 0.0),
-                    *ui.layout(),
-                    |ui| {
-                        render_docks(ui);
-                    },
-                );
-            }
+            egui::Panel::bottom("app_docks")
+                .resizable(true)
+                .default_size(240.0)
+                .show_inside(ui, |ui| {
+                    render_docks(ui);
+                });
 
             if !self.diagnostics_dock.open {
                 self.sync_dock_from_legacy_flag(AppDockTab::Diagnostics, false);
@@ -3242,7 +3231,9 @@ impl egui_dock::TabViewer for AppDockViewer<'_> {
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
         match tab {
             AppDockTab::Diagnostics => {
-                let action = self.diagnostics_dock.ui(ui, self.diagnostics, self.snapshot);
+                let action = self
+                    .diagnostics_dock
+                    .ui(ui, self.diagnostics, self.snapshot);
                 if action.clear {
                     self.actions.clear_diagnostics = true;
                 }
@@ -3270,6 +3261,14 @@ impl egui_dock::TabViewer for AppDockViewer<'_> {
                 }
             }
         }
+    }
+
+    fn is_closeable(&self, _tab: &Self::Tab) -> bool {
+        false
+    }
+
+    fn allowed_in_windows(&self, _tab: &mut Self::Tab) -> bool {
+        false
     }
 }
 
