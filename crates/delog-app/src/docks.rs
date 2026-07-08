@@ -52,6 +52,10 @@ impl AppDockController {
         self.tab_count() > 0
     }
 
+    pub fn has_docked_tabs(&self) -> bool {
+        self.state.main_surface().num_tabs() > 0
+    }
+
     pub fn tab_count(&self) -> usize {
         self.state
             .iter_surfaces_indexed()
@@ -180,5 +184,21 @@ mod tests {
         docks.reconcile_active_tab();
 
         assert_eq!(docks.active_tab(), Some(AppDockTab::Logging));
+    }
+
+    #[test]
+    fn detaching_last_main_tab_leaves_only_floating_tabs() {
+        let mut docks = AppDockController::new_empty();
+        docks.open_or_focus(AppDockTab::Diagnostics);
+
+        let diagnostics_path = docks.state.find_tab(&AppDockTab::Diagnostics).unwrap();
+        docks.state.detach_tab(
+            diagnostics_path,
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(320.0, 240.0)),
+        );
+
+        assert!(docks.has_tabs());
+        assert!(!docks.has_docked_tabs());
+        assert!(docks.is_open(AppDockTab::Diagnostics));
     }
 }

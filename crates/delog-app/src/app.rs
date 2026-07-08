@@ -2095,6 +2095,7 @@ impl eframe::App for DelogApp {
         }
         drop(ui_performance_timer);
         self.sync_docks_from_legacy_flags();
+        let has_docked_tabs = self.docks.has_docked_tabs();
         if self.docks.has_tabs() {
             let mut actions = PendingDockActions::default();
             #[cfg(feature = "scripting")]
@@ -2103,33 +2104,52 @@ impl eframe::App for DelogApp {
             let ingest_sender = self.session.ingest_sender();
             #[cfg(feature = "scripting")]
             let metrics = self.session.metrics();
-            egui::Panel::bottom("app_docks")
-                .resizable(true)
-                .default_size(240.0)
-                .show_inside(ui, |ui| {
-                    let mut viewer = AppDockViewer {
-                        diagnostics_dock: &mut self.diagnostics_dock,
-                        diagnostics: &diagnostics,
-                        snapshot: &snapshot,
-                        logging_dock: &mut self.logging_dock,
-                        logs: &self.logs,
-                        performance_dock: &mut self.performance_dock,
-                        performance_snapshot: &self.performance_snapshot,
-                        markers_dock: &mut self.markers_dock,
-                        markers: &mut self.markers,
-                        origin_us: self.origin_us,
-                        #[cfg(feature = "scripting")]
-                        scripts: &mut self.scripts,
-                        #[cfg(feature = "scripting")]
-                        store: &store,
-                        #[cfg(feature = "scripting")]
-                        ingest_sender: &ingest_sender,
-                        #[cfg(feature = "scripting")]
-                        metrics,
-                        actions: &mut actions,
-                    };
-                    self.docks.show_inside(ui, &mut viewer);
-                });
+            let show_docks = |ui: &mut egui::Ui,
+                              docks: &mut AppDockController,
+                              viewer: &mut AppDockViewer<'_>| {
+                docks.show_inside(ui, viewer);
+            };
+            let mut render_docks = |ui: &mut egui::Ui| {
+                let mut viewer = AppDockViewer {
+                    diagnostics_dock: &mut self.diagnostics_dock,
+                    diagnostics: &diagnostics,
+                    snapshot: &snapshot,
+                    logging_dock: &mut self.logging_dock,
+                    logs: &self.logs,
+                    performance_dock: &mut self.performance_dock,
+                    performance_snapshot: &self.performance_snapshot,
+                    markers_dock: &mut self.markers_dock,
+                    markers: &mut self.markers,
+                    origin_us: self.origin_us,
+                    #[cfg(feature = "scripting")]
+                    scripts: &mut self.scripts,
+                    #[cfg(feature = "scripting")]
+                    store: &store,
+                    #[cfg(feature = "scripting")]
+                    ingest_sender: &ingest_sender,
+                    #[cfg(feature = "scripting")]
+                    metrics,
+                    actions: &mut actions,
+                };
+                show_docks(ui, &mut self.docks, &mut viewer);
+            };
+
+            if has_docked_tabs {
+                egui::Panel::bottom("app_docks")
+                    .resizable(true)
+                    .default_size(240.0)
+                    .show_inside(ui, |ui| {
+                        render_docks(ui);
+                    });
+            } else {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), 0.0),
+                    *ui.layout(),
+                    |ui| {
+                        render_docks(ui);
+                    },
+                );
+            }
 
             if !self.diagnostics_dock.open {
                 self.sync_dock_from_legacy_flag(AppDockTab::Diagnostics, false);
