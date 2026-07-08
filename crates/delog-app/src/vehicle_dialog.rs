@@ -2,10 +2,17 @@ use delog_core::identity::{FieldId, SourceId, TopicId};
 use delog_core::snapshot::StoreSnapshot;
 use egui::Color32;
 
+use crate::layout::{FieldRef, ModelLayout, NedRefLayout, OriLayout, PosLayout, VehicleLayout};
 use crate::vehicle::{GeoRef, ModelKind, NedReference, OriMapping, PosMapping, VehicleConfig};
-use crate::vehicle_profiles::{VehicleProfileDoc, VehicleProfileLibrary};
+use crate::vehicle_profiles::{VEHICLE_PROFILE_VERSION, VehicleProfileDoc, VehicleProfileLibrary};
 
 const DIALOG_WIDTH: f32 = 240.0;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VehicleDialogTab {
+    Vehicles,
+    Profiles,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PosMode {
@@ -64,7 +71,6 @@ struct Draft {
     path_color: Color32,
     scale: f32,
     selected_profile: Option<String>,
-    save_profile_name: String,
 }
 
 impl Default for Draft {
@@ -108,7 +114,6 @@ impl Default for Draft {
             path_color: Color32::from_rgb(255, 170, 60),
             scale: 1.0,
             selected_profile: None,
-            save_profile_name: String::new(),
         }
     }
 }
@@ -279,11 +284,260 @@ impl Draft {
     }
 }
 
+#[derive(Clone)]
+struct ProfileDraft {
+    label: String,
+    show: bool,
+    pos_mode: PosMode,
+    pos_topic: String,
+    north: String,
+    east: String,
+    down: String,
+    lat: String,
+    lon: String,
+    alt: String,
+    lat_lon_dege7: bool,
+    alt_mm: bool,
+    alt_offset_m: f64,
+    ned_has_ref: bool,
+    ned_ref_manual: bool,
+    ref_lat: f64,
+    ref_lon: f64,
+    ref_alt: f64,
+    ref_lat_f: String,
+    ref_lon_f: String,
+    ref_alt_f: String,
+    ori_mode: OriMode,
+    ori_topic: String,
+    roll: String,
+    pitch: String,
+    yaw: String,
+    euler_degrees: bool,
+    qw: String,
+    qx: String,
+    qy: String,
+    qz: String,
+    model: ModelKind,
+    custom_path: String,
+    color: Color32,
+    path_color: Color32,
+    scale: f32,
+}
+
+impl Default for ProfileDraft {
+    fn default() -> Self {
+        Self {
+            label: "Vehicle".to_owned(),
+            show: true,
+            pos_mode: PosMode::Gps,
+            pos_topic: "GLOBAL_POSITION_INT".to_owned(),
+            north: String::new(),
+            east: String::new(),
+            down: String::new(),
+            lat: "lat".to_owned(),
+            lon: "lon".to_owned(),
+            alt: "alt".to_owned(),
+            lat_lon_dege7: true,
+            alt_mm: true,
+            alt_offset_m: 0.0,
+            ned_has_ref: false,
+            ned_ref_manual: false,
+            ref_lat: 0.0,
+            ref_lon: 0.0,
+            ref_alt: 0.0,
+            ref_lat_f: String::new(),
+            ref_lon_f: String::new(),
+            ref_alt_f: String::new(),
+            ori_mode: OriMode::Static,
+            ori_topic: String::new(),
+            roll: String::new(),
+            pitch: String::new(),
+            yaw: String::new(),
+            euler_degrees: true,
+            qw: String::new(),
+            qx: String::new(),
+            qy: String::new(),
+            qz: String::new(),
+            model: ModelKind::FixedWing,
+            custom_path: String::new(),
+            color: Color32::from_rgb(90, 170, 255),
+            path_color: Color32::from_rgb(255, 170, 60),
+            scale: 1.0,
+        }
+    }
+}
+
+impl ProfileDraft {
+    fn from_doc(doc: &VehicleProfileDoc) -> Self {
+        let vehicle = &doc.vehicle;
+        let mut draft = Self {
+            label: vehicle.label.clone(),
+            show: vehicle.show,
+            model: profile_model_from_layout(&vehicle.model),
+            custom_path: match &vehicle.model {
+                ModelLayout::CustomGlb { path } => path.clone(),
+                _ => String::new(),
+            },
+            color: rgba_to_color(vehicle.color),
+            path_color: rgba_to_color(vehicle.path_color),
+            scale: vehicle.scale,
+            ..Self::default()
+        };
+
+        match &vehicle.position {
+            PosLayout::Ned {
+                north,
+                east,
+                down,
+                reference,
+            } => {
+                draft.pos_mode = PosMode::Ned;
+                draft.pos_topic = north.topic.clone();
+                draft.north = north.field.clone();
+                draft.east = east.field.clone();
+                draft.down = down.field.clone();
+                match reference {
+                    None => {}
+                    Some(NedRefLayout::Manual {
+                        lat_deg,
+                        lon_deg,
+                        alt_m,
+                    }) => {
+                        draft.ned_has_ref = true;
+                        draft.ned_ref_manual = true;
+                        draft.ref_lat = *lat_deg;
+                        draft.ref_lon = *lon_deg;
+                        draft.ref_alt = *alt_m;
+                    }
+                    Some(NedRefLayout::Fields { lat, lon, alt }) => {
+                        draft.ned_has_ref = true;
+                        draft.ned_ref_manual = false;
+                        draft.ref_lat_f = lat.field.clone();
+                        draft.ref_lon_f = lon.field.clone();
+                        draft.ref_alt_f = alt.field.clone();
+                    }
+                }
+            }
+            PosLayout::Gps {
+                lat,
+                lon,
+                alt,
+                lat_lon_dege7,
+                alt_mm,
+                alt_offset_m,
+            } => {
+                draft.pos_mode = PosMode::Gps;
+                draft.pos_topic = lat.topic.clone();
+                draft.lat = lat.field.clone();
+                draft.lon = lon.field.clone();
+                draft.alt = alt.field.clone();
+                draft.lat_lon_dege7 = *lat_lon_dege7;
+                draft.alt_mm = *alt_mm;
+                draft.alt_offset_m = *alt_offset_m;
+            }
+        }
+
+        match &vehicle.orientation {
+            OriLayout::Static => draft.ori_mode = OriMode::Static,
+            OriLayout::Euler {
+                roll,
+                pitch,
+                yaw,
+                degrees,
+            } => {
+                draft.ori_mode = OriMode::Euler;
+                draft.ori_topic = roll.topic.clone();
+                draft.roll = roll.field.clone();
+                draft.pitch = pitch.field.clone();
+                draft.yaw = yaw.field.clone();
+                draft.euler_degrees = *degrees;
+            }
+            OriLayout::Quat { w, x, y, z } => {
+                draft.ori_mode = OriMode::Quat;
+                draft.ori_topic = w.topic.clone();
+                draft.qw = w.field.clone();
+                draft.qx = x.field.clone();
+                draft.qy = y.field.clone();
+                draft.qz = z.field.clone();
+            }
+        }
+
+        draft
+    }
+
+    fn to_doc(&self, name: &str) -> Result<VehicleProfileDoc, String> {
+        let position = match self.pos_mode {
+            PosMode::Ned => PosLayout::Ned {
+                north: profile_field_ref(&self.pos_topic, &self.north, "north")?,
+                east: profile_field_ref(&self.pos_topic, &self.east, "east")?,
+                down: profile_field_ref(&self.pos_topic, &self.down, "down")?,
+                reference: if !self.ned_has_ref {
+                    None
+                } else if self.ned_ref_manual {
+                    Some(NedRefLayout::Manual {
+                        lat_deg: self.ref_lat,
+                        lon_deg: self.ref_lon,
+                        alt_m: self.ref_alt,
+                    })
+                } else {
+                    Some(NedRefLayout::Fields {
+                        lat: profile_field_ref(&self.pos_topic, &self.ref_lat_f, "ref latitude")?,
+                        lon: profile_field_ref(&self.pos_topic, &self.ref_lon_f, "ref longitude")?,
+                        alt: profile_field_ref(&self.pos_topic, &self.ref_alt_f, "ref altitude")?,
+                    })
+                },
+            },
+            PosMode::Gps => PosLayout::Gps {
+                lat: profile_field_ref(&self.pos_topic, &self.lat, "latitude")?,
+                lon: profile_field_ref(&self.pos_topic, &self.lon, "longitude")?,
+                alt: profile_field_ref(&self.pos_topic, &self.alt, "altitude")?,
+                lat_lon_dege7: self.lat_lon_dege7,
+                alt_mm: self.alt_mm,
+                alt_offset_m: self.alt_offset_m,
+            },
+        };
+        let orientation = match self.ori_mode {
+            OriMode::Static => OriLayout::Static,
+            OriMode::Euler => OriLayout::Euler {
+                roll: profile_field_ref(&self.ori_topic, &self.roll, "roll")?,
+                pitch: profile_field_ref(&self.ori_topic, &self.pitch, "pitch")?,
+                yaw: profile_field_ref(&self.ori_topic, &self.yaw, "yaw")?,
+                degrees: self.euler_degrees,
+            },
+            OriMode::Quat => OriLayout::Quat {
+                w: profile_field_ref(&self.ori_topic, &self.qw, "quaternion w")?,
+                x: profile_field_ref(&self.ori_topic, &self.qx, "quaternion x")?,
+                y: profile_field_ref(&self.ori_topic, &self.qy, "quaternion y")?,
+                z: profile_field_ref(&self.ori_topic, &self.qz, "quaternion z")?,
+            },
+        };
+
+        Ok(VehicleProfileDoc {
+            delog_vehicle_profile: VEHICLE_PROFILE_VERSION,
+            name: name.trim().to_owned(),
+            vehicle: VehicleLayout {
+                label: self.label.clone(),
+                show: self.show,
+                model: profile_model_to_layout(&self.model, &self.custom_path),
+                color: color_to_rgba(self.color),
+                path_color: color_to_rgba(self.path_color),
+                scale: self.scale.max(0.01),
+                position,
+                orientation,
+            },
+        })
+    }
+}
+
 pub struct VehicleDialog {
     pub open: bool,
     drafts: Vec<Draft>,
     was_open: bool,
+    selected_tab: VehicleDialogTab,
     profiles: Vec<String>,
+    profile_editor_selected: Option<String>,
+    profile_editor_name: String,
+    profile_editor_draft: ProfileDraft,
     pending_profile_delete: Option<String>,
     profile_status: Option<String>,
 }
@@ -294,7 +548,11 @@ impl Default for VehicleDialog {
             open: false,
             drafts: Vec::new(),
             was_open: false,
+            selected_tab: VehicleDialogTab::Vehicles,
             profiles: Vec::new(),
+            profile_editor_selected: None,
+            profile_editor_name: String::new(),
+            profile_editor_draft: ProfileDraft::default(),
             pending_profile_delete: None,
             profile_status: None,
         }
@@ -303,7 +561,6 @@ impl Default for VehicleDialog {
 
 enum ProfileAction {
     Apply { draft: usize, name: String },
-    Save { draft: usize, name: String },
     Delete(String),
 }
 
@@ -359,6 +616,15 @@ fn refresh_profiles(state: &mut VehicleDialog) {
     match library.list() {
         Ok(profiles) => {
             state.profiles = profiles;
+            if state
+                .profile_editor_selected
+                .as_ref()
+                .is_some_and(|selected| !state.profiles.contains(selected))
+            {
+                state.profile_editor_selected = None;
+                state.profile_editor_name.clear();
+                state.profile_editor_draft = ProfileDraft::default();
+            }
             for draft in &mut state.drafts {
                 if draft
                     .selected_profile
@@ -372,6 +638,7 @@ fn refresh_profiles(state: &mut VehicleDialog) {
         Err(err) => {
             state.profile_status = Some(format!("Could not list vehicle profiles: {err}"));
             state.profiles.clear();
+            state.profile_editor_selected = None;
             for draft in &mut state.drafts {
                 draft.selected_profile = None;
             }
@@ -550,87 +817,32 @@ pub fn show(
         .default_width(DIALOG_WIDTH)
         .show(ctx, |ui| {
             ui.set_min_width(DIALOG_WIDTH);
-            if ui
-                .add(egui::Button::image_and_text(
-                    icon(ui, crate::icons::plus()),
-                    "Add Vehicle",
-                ))
-                .clicked()
-            {
-                let n = state.drafts.len() + 1;
-                state.drafts.push(Draft {
-                    label: format!("Vehicle #{n}"),
-                    ..Draft::default()
-                });
-            }
             if let Some(status) = &state.profile_status {
                 ui.add_space(6.0);
                 ui.label(status);
             }
-            show_profile_delete_confirmation(ui, state);
             ui.add_space(8.0);
 
-            let mut remove: Option<usize> = None;
-            let mut duplicate: Option<usize> = None;
-            let mut profile_action: Option<ProfileAction> = None;
-            let profile_names = state.profiles.clone();
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                for (i, draft) in state.drafts.iter_mut().enumerate() {
-                    let title = if draft.label.trim().is_empty() {
-                        format!("Vehicle #{}", i + 1)
-                    } else {
-                        draft.label.clone()
-                    };
-                    egui::CollapsingHeader::new(title)
-                        .id_salt(("vehicle", i))
-                        .default_open(true)
-                        .show(ui, |ui| {
-                            show_profile_controls(
-                                ui,
-                                i,
-                                &profile_names,
-                                draft,
-                                &mut profile_action,
-                            );
-                            ui.add_space(8.0);
-                            draft_editor(ui, draft, snapshot);
-                            ui.add_space(8.0);
-                            ui.horizontal(|ui| {
-                                if ui
-                                    .add(egui::Button::image_and_text(
-                                        icon(ui, crate::icons::trash()),
-                                        "Remove Vehicle",
-                                    ))
-                                    .clicked()
-                                {
-                                    remove = Some(i);
-                                }
-                                if ui
-                                    .add(egui::Button::image_and_text(
-                                        icon(ui, crate::icons::copy()),
-                                        "Duplicate",
-                                    ))
-                                    .clicked()
-                                {
-                                    duplicate = Some(i);
-                                }
-                            });
-                        });
-                    ui.add_space(6.0);
-                }
+            ui.horizontal(|ui| {
+                ui.selectable_value(
+                    &mut state.selected_tab,
+                    VehicleDialogTab::Vehicles,
+                    "Vehicle Config",
+                );
+                ui.selectable_value(
+                    &mut state.selected_tab,
+                    VehicleDialogTab::Profiles,
+                    "Profiles",
+                );
             });
-            if let Some(i) = duplicate {
-                let mut copy = state.drafts[i].clone();
-                copy.label = format!("{} copy", copy.label);
-                state.drafts.insert(i + 1, copy);
-            }
-            if let Some(i) = remove {
-                state.drafts.remove(i);
-            }
-            if let Some(action) = profile_action {
-                handle_profile_action(action, state, snapshot);
+            ui.separator();
+
+            match state.selected_tab {
+                VehicleDialogTab::Vehicles => show_vehicle_config_tab(ui, state, snapshot),
+                VehicleDialogTab::Profiles => show_profiles_tab(ui, state, snapshot),
             }
         });
+    show_profile_delete_confirmation(ctx, state);
     state.open = open;
     if !state.open {
         state.pending_profile_delete = None;
@@ -651,7 +863,85 @@ pub fn show(
     traj_changed
 }
 
-fn show_profile_controls(
+fn show_vehicle_config_tab(ui: &mut egui::Ui, state: &mut VehicleDialog, snapshot: &StoreSnapshot) {
+    if ui
+        .add(egui::Button::image_and_text(
+            icon(ui, crate::icons::plus()),
+            "Add Vehicle",
+        ))
+        .clicked()
+    {
+        let n = state.drafts.len() + 1;
+        state.drafts.push(Draft {
+            label: format!("Vehicle #{n}"),
+            ..Draft::default()
+        });
+    }
+    ui.add_space(8.0);
+
+    let mut remove: Option<usize> = None;
+    let mut duplicate: Option<usize> = None;
+    let mut profile_action: Option<ProfileAction> = None;
+    let profile_names = state.profiles.clone();
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        for (i, draft) in state.drafts.iter_mut().enumerate() {
+            let title = if draft.label.trim().is_empty() {
+                format!("Vehicle #{}", i + 1)
+            } else {
+                draft.label.clone()
+            };
+            egui::CollapsingHeader::new(title)
+                .id_salt(("vehicle", i))
+                .default_open(true)
+                .show(ui, |ui| {
+                    show_vehicle_profile_dropdown(
+                        ui,
+                        i,
+                        &profile_names,
+                        draft,
+                        &mut profile_action,
+                    );
+                    ui.add_space(8.0);
+                    draft_editor(ui, draft, snapshot);
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add(egui::Button::image_and_text(
+                                icon(ui, crate::icons::trash()),
+                                "Remove Vehicle",
+                            ))
+                            .clicked()
+                        {
+                            remove = Some(i);
+                        }
+                        if ui
+                            .add(egui::Button::image_and_text(
+                                icon(ui, crate::icons::copy()),
+                                "Duplicate",
+                            ))
+                            .clicked()
+                        {
+                            duplicate = Some(i);
+                        }
+                    });
+                });
+            ui.add_space(6.0);
+        }
+    });
+    if let Some(i) = duplicate {
+        let mut copy = state.drafts[i].clone();
+        copy.label = format!("{} copy", copy.label);
+        state.drafts.insert(i + 1, copy);
+    }
+    if let Some(i) = remove {
+        state.drafts.remove(i);
+    }
+    if let Some(action) = profile_action {
+        handle_profile_action(action, state, snapshot);
+    }
+}
+
+fn show_vehicle_profile_dropdown(
     ui: &mut egui::Ui,
     draft_index: usize,
     profiles: &[String],
@@ -660,6 +950,7 @@ fn show_profile_controls(
 ) {
     ui.horizontal(|ui| {
         ui.label("Profile");
+        let before = draft.selected_profile.clone();
         egui::ComboBox::from_id_salt(("vehicle-profile", draft_index))
             .selected_text(draft.selected_profile.as_deref().unwrap_or("—"))
             .show_ui(ui, |ui| {
@@ -667,41 +958,328 @@ fn show_profile_controls(
                     ui.selectable_value(&mut draft.selected_profile, Some(name.clone()), name);
                 }
             });
-
-        let selected = draft.selected_profile.clone();
-        let can_apply = selected.is_some();
-        if ui
-            .add_enabled(can_apply, egui::Button::new("Apply"))
-            .clicked()
-            && let Some(name) = selected.clone()
+        if draft.selected_profile != before
+            && let Some(name) = draft.selected_profile.clone()
         {
             *action = Some(ProfileAction::Apply {
                 draft: draft_index,
                 name,
             });
         }
-        if ui
-            .add_enabled(can_apply, egui::Button::new("x"))
-            .on_hover_text("Delete selected profile")
-            .clicked()
-            && let Some(name) = selected
-        {
-            *action = Some(ProfileAction::Delete(name));
-        }
     });
+}
+
+fn show_profiles_tab(ui: &mut egui::Ui, state: &mut VehicleDialog, snapshot: &StoreSnapshot) {
     ui.horizontal(|ui| {
-        ui.add(
-            egui::TextEdit::singleline(&mut draft.save_profile_name)
-                .hint_text("Profile name")
-                .desired_width(140.0),
-        );
-        if ui.button("Save Profile").clicked() {
-            *action = Some(ProfileAction::Save {
-                draft: draft_index,
-                name: draft.save_profile_name.trim().to_owned(),
+        ui.label("Profile");
+        let before = state.profile_editor_selected.clone();
+        egui::ComboBox::from_id_salt("vehicle-profile-editor")
+            .selected_text(
+                state
+                    .profile_editor_selected
+                    .as_deref()
+                    .unwrap_or("New profile"),
+            )
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut state.profile_editor_selected, None, "New profile");
+                for name in &state.profiles {
+                    ui.selectable_value(
+                        &mut state.profile_editor_selected,
+                        Some(name.clone()),
+                        name,
+                    );
+                }
             });
+        if state.profile_editor_selected != before {
+            load_profile_editor(state);
         }
     });
+
+    ui.horizontal(|ui| {
+        ui.label("Name");
+        ui.add(
+            egui::TextEdit::singleline(&mut state.profile_editor_name)
+                .hint_text("Profile name")
+                .desired_width(150.0),
+        );
+    });
+
+    ui.horizontal(|ui| {
+        let label = if state.profile_editor_selected.is_some() {
+            "Update Profile"
+        } else {
+            "Add Profile"
+        };
+        if ui.button(label).clicked() {
+            save_profile_from_editor(state);
+        }
+        if ui.button("Reset").clicked() {
+            load_profile_editor(state);
+        }
+        if ui
+            .add_enabled(
+                state.profile_editor_selected.is_some(),
+                egui::Button::image(icon(ui, crate::icons::trash())),
+            )
+            .on_hover_text("Delete profile")
+            .clicked()
+            && let Some(name) = state.profile_editor_selected.clone()
+        {
+            handle_profile_action(ProfileAction::Delete(name), state, snapshot);
+        }
+    });
+
+    ui.add_space(8.0);
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        profile_editor_form(ui, &mut state.profile_editor_draft);
+    });
+}
+
+fn profile_editor_form(ui: &mut egui::Ui, draft: &mut ProfileDraft) {
+    section_heading(ui, "General");
+    egui::Grid::new("vehicle_profile_general")
+        .num_columns(2)
+        .spacing([18.0, 8.0])
+        .show(ui, |ui| {
+            ui.label("Vehicle Label");
+            ui.text_edit_singleline(&mut draft.label);
+            ui.end_row();
+
+            ui.label("Visible");
+            ui.checkbox(&mut draft.show, "");
+            ui.end_row();
+
+            ui.label("Type");
+            egui::ComboBox::from_id_salt("vehicle-profile-model")
+                .selected_text(draft.model.label())
+                .show_ui(ui, |ui| {
+                    for kind in ModelKind::PRESETS {
+                        let label = kind.label().to_string();
+                        ui.selectable_value(&mut draft.model, kind, label);
+                    }
+                    ui.selectable_value(
+                        &mut draft.model,
+                        ModelKind::CustomGlb(std::path::PathBuf::new()),
+                        "Custom GLB",
+                    );
+                });
+            ui.end_row();
+
+            if matches!(draft.model, ModelKind::CustomGlb(_)) {
+                ui.label("GLB path");
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut draft.custom_path)
+                            .hint_text("model.glb")
+                            .desired_width(150.0),
+                    );
+                    if ui
+                        .add_sized(
+                            egui::vec2(28.0, 24.0),
+                            egui::Button::image(icon(ui, crate::icons::folder_open())),
+                        )
+                        .on_hover_text("Choose custom GLB")
+                        .clicked()
+                        && let Some(path) = choose_custom_glb_path(&draft.custom_path)
+                    {
+                        draft.custom_path = path;
+                    }
+                });
+                ui.end_row();
+            }
+
+            ui.label("Vehicle Color");
+            ui.color_edit_button_srgba(&mut draft.color);
+            ui.end_row();
+
+            ui.label("Path Color");
+            ui.color_edit_button_srgba(&mut draft.path_color);
+            ui.end_row();
+
+            ui.label("Scale");
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::DragValue::new(&mut draft.scale)
+                        .speed(0.05)
+                        .range(0.05..=50.0),
+                );
+                ui.add(egui::Slider::new(&mut draft.scale, 0.05..=50.0).show_value(false));
+            });
+            ui.end_row();
+        });
+
+    ui.add_space(6.0);
+    ui.separator();
+    section_heading(ui, "Position");
+    egui::Grid::new("vehicle_profile_position")
+        .num_columns(2)
+        .spacing([18.0, 8.0])
+        .show(ui, |ui| {
+            ui.label("Frame");
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut draft.pos_mode, PosMode::Ned, "Local (NED)");
+                ui.selectable_value(&mut draft.pos_mode, PosMode::Gps, "Global (GPS)");
+            });
+            ui.end_row();
+
+            profile_text_field(ui, "Topic", &mut draft.pos_topic, "topic name");
+            match draft.pos_mode {
+                PosMode::Ned => {
+                    profile_text_field(ui, "North (X)", &mut draft.north, "field name");
+                    profile_text_field(ui, "East (Y)", &mut draft.east, "field name");
+                    profile_text_field(ui, "Down (Z)", &mut draft.down, "field name");
+                    ui.label("Reference origin");
+                    ui.checkbox(&mut draft.ned_has_ref, "");
+                    ui.end_row();
+                    if draft.ned_has_ref {
+                        ui.label("Fixed values");
+                        ui.checkbox(&mut draft.ned_ref_manual, "");
+                        ui.end_row();
+                        if draft.ned_ref_manual {
+                            ui.label("Ref lat/lon/alt");
+                            ui.horizontal(|ui| {
+                                ui.add(egui::DragValue::new(&mut draft.ref_lat).speed(0.0001));
+                                ui.add(egui::DragValue::new(&mut draft.ref_lon).speed(0.0001));
+                                ui.add(egui::DragValue::new(&mut draft.ref_alt).speed(0.1));
+                            });
+                            ui.end_row();
+                        } else {
+                            profile_text_field(
+                                ui,
+                                "Ref Latitude",
+                                &mut draft.ref_lat_f,
+                                "field name",
+                            );
+                            profile_text_field(
+                                ui,
+                                "Ref Longitude",
+                                &mut draft.ref_lon_f,
+                                "field name",
+                            );
+                            profile_text_field(
+                                ui,
+                                "Ref Altitude",
+                                &mut draft.ref_alt_f,
+                                "field name",
+                            );
+                        }
+                    }
+                }
+                PosMode::Gps => {
+                    profile_text_field(ui, "Latitude", &mut draft.lat, "field name");
+                    profile_text_field(ui, "Longitude", &mut draft.lon, "field name");
+                    profile_text_field(ui, "Altitude", &mut draft.alt, "field name");
+                    ui.label("Lat/Lon units");
+                    ui.checkbox(&mut draft.lat_lon_dege7, "degE7");
+                    ui.end_row();
+                    ui.label("Altitude units");
+                    ui.checkbox(&mut draft.alt_mm, "mm");
+                    ui.end_row();
+                    ui.label("Altitude offset");
+                    ui.add(
+                        egui::DragValue::new(&mut draft.alt_offset_m)
+                            .speed(1.0)
+                            .suffix(" m"),
+                    );
+                    ui.end_row();
+                }
+            }
+        });
+
+    ui.add_space(6.0);
+    ui.separator();
+    section_heading(ui, "Orientation");
+    egui::Grid::new("vehicle_profile_orientation")
+        .num_columns(2)
+        .spacing([18.0, 8.0])
+        .show(ui, |ui| {
+            ui.label("Mode");
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut draft.ori_mode, OriMode::Static, "Static");
+                ui.selectable_value(&mut draft.ori_mode, OriMode::Euler, "Euler");
+                ui.selectable_value(&mut draft.ori_mode, OriMode::Quat, "Quaternion");
+            });
+            ui.end_row();
+
+            if draft.ori_mode != OriMode::Static {
+                profile_text_field(ui, "Topic", &mut draft.ori_topic, "topic name");
+                match draft.ori_mode {
+                    OriMode::Static => {}
+                    OriMode::Euler => {
+                        profile_text_field(ui, "Roll", &mut draft.roll, "field name");
+                        profile_text_field(ui, "Pitch", &mut draft.pitch, "field name");
+                        profile_text_field(ui, "Yaw", &mut draft.yaw, "field name");
+                        ui.label("Angle Unit");
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(&mut draft.euler_degrees, true, "Degrees");
+                            ui.selectable_value(&mut draft.euler_degrees, false, "Radians");
+                        });
+                        ui.end_row();
+                    }
+                    OriMode::Quat => {
+                        profile_text_field(ui, "QW", &mut draft.qw, "field name");
+                        profile_text_field(ui, "QX", &mut draft.qx, "field name");
+                        profile_text_field(ui, "QY", &mut draft.qy, "field name");
+                        profile_text_field(ui, "QZ", &mut draft.qz, "field name");
+                    }
+                }
+            }
+        });
+}
+
+fn profile_text_field(ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str) {
+    ui.label(label);
+    ui.add(
+        egui::TextEdit::singleline(value)
+            .hint_text(hint)
+            .desired_width(150.0),
+    );
+    ui.end_row();
+}
+
+fn profile_field_ref(topic: &str, field: &str, label: &str) -> Result<FieldRef, String> {
+    let topic = topic.trim();
+    let field = field.trim();
+    if topic.is_empty() {
+        return Err(format!("Enter a topic for {label}"));
+    }
+    if field.is_empty() {
+        return Err(format!("Enter a field for {label}"));
+    }
+    Ok(FieldRef {
+        topic: topic.to_owned(),
+        field: field.to_owned(),
+    })
+}
+
+fn profile_model_to_layout(model: &ModelKind, custom_path: &str) -> ModelLayout {
+    match model {
+        ModelKind::Quad => ModelLayout::Quad,
+        ModelKind::FixedWing => ModelLayout::FixedWing,
+        ModelKind::DeltaWing => ModelLayout::DeltaWing,
+        ModelKind::Cone => ModelLayout::Cone,
+        ModelKind::CustomGlb(_) => ModelLayout::CustomGlb {
+            path: custom_path.trim().to_owned(),
+        },
+    }
+}
+
+fn profile_model_from_layout(model: &ModelLayout) -> ModelKind {
+    match model {
+        ModelLayout::Quad => ModelKind::Quad,
+        ModelLayout::FixedWing => ModelKind::FixedWing,
+        ModelLayout::DeltaWing => ModelKind::DeltaWing,
+        ModelLayout::Cone => ModelKind::Cone,
+        ModelLayout::CustomGlb { path } => ModelKind::CustomGlb(path.into()),
+    }
+}
+
+fn color_to_rgba(c: Color32) -> [u8; 4] {
+    [c.r(), c.g(), c.b(), c.a()]
+}
+
+fn rgba_to_color(rgba: [u8; 4]) -> Color32 {
+    Color32::from_rgba_unmultiplied(rgba[0], rgba[1], rgba[2], rgba[3])
 }
 
 fn handle_profile_action(
@@ -713,13 +1291,59 @@ fn handle_profile_action(
         ProfileAction::Apply { draft, name } => {
             apply_profile_to_draft(state, draft, &name, snapshot)
         }
-        ProfileAction::Save { draft, name } => {
-            save_profile_from_draft(state, draft, &name, snapshot)
-        }
         ProfileAction::Delete(name) => {
             state.pending_profile_delete = Some(name);
         }
     }
+}
+
+fn load_profile_editor(state: &mut VehicleDialog) {
+    let Some(name) = state.profile_editor_selected.clone() else {
+        state.profile_editor_name.clear();
+        state.profile_editor_draft = ProfileDraft::default();
+        return;
+    };
+    let Some(library) = profile_library() else {
+        state.profile_status = Some("Vehicle profile config directory is unavailable".to_owned());
+        return;
+    };
+    match library.load(&name) {
+        Ok(doc) => {
+            state.profile_editor_name = doc.name.clone();
+            state.profile_editor_draft = ProfileDraft::from_doc(&doc);
+        }
+        Err(err) => {
+            state.profile_status = Some(format!("Could not load vehicle profile '{name}': {err}"));
+        }
+    }
+}
+
+fn save_profile_from_editor(state: &mut VehicleDialog) {
+    let name = state.profile_editor_name.trim().to_owned();
+    if name.is_empty() {
+        state.profile_status = Some("Enter a profile name before saving".to_owned());
+        return;
+    }
+    let Some(library) = profile_library() else {
+        state.profile_status = Some("Vehicle profile config directory is unavailable".to_owned());
+        return;
+    };
+    let doc = match state.profile_editor_draft.to_doc(&name) {
+        Ok(doc) => doc,
+        Err(err) => {
+            state.profile_status = Some(err);
+            return;
+        }
+    };
+    if let Err(err) = library.save(&name, &doc) {
+        state.profile_status = Some(format!("Could not save vehicle profile '{name}': {err}"));
+        return;
+    }
+
+    refresh_profiles(state);
+    state.profile_editor_selected = Some(name.clone());
+    state.profile_editor_name = name.clone();
+    // TODO: report saved vehicle profiles in the future log dock.
 }
 
 fn apply_profile_to_draft(
@@ -756,87 +1380,59 @@ fn apply_profile_to_draft(
 
     draft.apply_config_preserving_label(&cfg, snapshot);
     draft.selected_profile = Some(name.to_owned());
-    state.profile_status = Some(format!("Applied vehicle profile '{name}'"));
+    // TODO: report applied vehicle profiles in the future log dock.
 }
 
-fn save_profile_from_draft(
-    state: &mut VehicleDialog,
-    draft_index: usize,
-    name: &str,
-    snapshot: &StoreSnapshot,
-) {
-    if name.trim().is_empty() {
-        state.profile_status = Some("Enter a profile name before saving".to_owned());
-        return;
-    }
-    let Some(library) = profile_library() else {
-        state.profile_status = Some("Vehicle profile config directory is unavailable".to_owned());
-        return;
-    };
-    let Some(config) = state.drafts.get(draft_index).and_then(Draft::build) else {
-        state.profile_status =
-            Some("Complete the vehicle mapping before saving a profile".to_owned());
-        return;
-    };
-    let Some(doc) = VehicleProfileDoc::from_config(name, &config, snapshot) else {
-        state.profile_status = Some(format!("Could not create vehicle profile '{name}'"));
-        return;
-    };
-    if let Err(err) = library.save(name, &doc) {
-        state.profile_status = Some(format!("Could not save vehicle profile '{name}': {err}"));
-        return;
-    }
-
-    refresh_profiles(state);
-    if let Some(draft) = state.drafts.get_mut(draft_index) {
-        draft.selected_profile = Some(name.to_owned());
-        draft.save_profile_name.clear();
-    }
-    state.profile_status = Some(format!("Saved vehicle profile '{name}'"));
-}
-
-fn show_profile_delete_confirmation(ui: &mut egui::Ui, state: &mut VehicleDialog) {
+fn show_profile_delete_confirmation(ctx: &egui::Context, state: &mut VehicleDialog) {
     let Some(name) = state.pending_profile_delete.clone() else {
         return;
     };
 
     let mut close_confirmation = false;
 
-    ui.add_space(6.0);
-    ui.group(|ui| {
-        ui.label(egui::RichText::new("Delete profile?").strong());
-        ui.label(format!("Delete vehicle profile '{name}'?"));
-        ui.horizontal(|ui| {
-            if ui.button("Delete").clicked() {
-                match profile_library() {
-                    Some(library) => match library.delete(&name) {
-                        Ok(()) => {
-                            for draft in &mut state.drafts {
-                                if draft.selected_profile.as_deref() == Some(name.as_str()) {
-                                    draft.selected_profile = None;
+    egui::Window::new("Delete profile?")
+        .collapsible(false)
+        .resizable(false)
+        .default_pos(ctx.content_rect().center())
+        .pivot(egui::Align2::CENTER_CENTER)
+        .show(ctx, |ui| {
+            ui.label(format!("Delete vehicle profile '{name}'?"));
+            ui.horizontal(|ui| {
+                if ui.button("Delete").clicked() {
+                    match profile_library() {
+                        Some(library) => match library.delete(&name) {
+                            Ok(()) => {
+                                for draft in &mut state.drafts {
+                                    if draft.selected_profile.as_deref() == Some(name.as_str()) {
+                                        draft.selected_profile = None;
+                                    }
                                 }
+                                if state.profile_editor_selected.as_deref() == Some(name.as_str()) {
+                                    state.profile_editor_selected = None;
+                                    state.profile_editor_name.clear();
+                                    state.profile_editor_draft = ProfileDraft::default();
+                                }
+                                refresh_profiles(state);
+                                // TODO: report deleted vehicle profiles in the future log dock.
                             }
-                            refresh_profiles(state);
+                            Err(err) => {
+                                state.profile_status = Some(format!(
+                                    "Could not delete vehicle profile '{name}': {err}"
+                                ));
+                            }
+                        },
+                        None => {
                             state.profile_status =
-                                Some(format!("Deleted vehicle profile '{name}'"));
+                                Some("Vehicle profile config directory is unavailable".to_owned());
                         }
-                        Err(err) => {
-                            state.profile_status =
-                                Some(format!("Could not delete vehicle profile '{name}': {err}"));
-                        }
-                    },
-                    None => {
-                        state.profile_status =
-                            Some("Vehicle profile config directory is unavailable".to_owned());
                     }
+                    close_confirmation = true;
                 }
-                close_confirmation = true;
-            }
-            if ui.button("Cancel").clicked() {
-                close_confirmation = true;
-            }
+                if ui.button("Cancel").clicked() {
+                    close_confirmation = true;
+                }
+            });
         });
-    });
 
     if close_confirmation {
         state.pending_profile_delete = None;
@@ -1184,28 +1780,59 @@ mod tests {
     }
 
     #[test]
-    fn vehicle_dialog_contains_profile_controls_inside_window() {
+    fn vehicle_dialog_has_profile_tab_and_auto_apply_dropdown() {
         let source = include_str!("vehicle_dialog.rs");
 
+        assert!(source.contains("VehicleDialogTab"));
+        assert!(source.contains("Vehicle Config"));
+        assert!(source.contains("Profiles"));
         assert!(source.contains("Profile"));
-        assert!(source.contains("Apply"));
-        assert!(source.contains("Save Profile"));
+        assert!(source.contains("draft.selected_profile != before"));
+        assert!(source.contains("ProfileAction::Apply"));
+        assert!(source.contains("Add Profile"));
+        assert!(source.contains("Update Profile"));
+        assert!(source.contains("profile_editor_form"));
+        assert!(source.contains("Lat/Lon units"));
+        assert!(source.contains("Angle Unit"));
         assert!(source.contains("Delete profile?"));
         assert!(!source.contains(concat!("open_vehicle", "_profile")));
     }
 
     #[test]
-    fn profile_delete_uses_inline_confirmation() {
+    fn add_vehicle_button_is_only_in_vehicle_config_tab() {
+        let source = include_str!("vehicle_dialog.rs");
+        let window_body = source
+            .split(".show(ctx, |ui| {")
+            .nth(1)
+            .expect("vehicle window body should exist")
+            .split("fn show_vehicle_config_tab")
+            .next()
+            .expect("window body should precede config tab function");
+        let config_tab = source
+            .split("fn show_vehicle_config_tab")
+            .nth(1)
+            .expect("config tab should exist")
+            .split("fn show_vehicle_profile_dropdown")
+            .next()
+            .expect("config tab should precede profile dropdown");
+
+        assert!(!window_body.contains("\"Add Vehicle\""));
+        assert!(config_tab.contains("\"Add Vehicle\""));
+    }
+
+    #[test]
+    fn profile_delete_uses_confirmation_window() {
         let source = include_str!("vehicle_dialog.rs");
 
         assert!(source.contains("pending_profile_delete"));
         assert!(source.contains("Delete profile?"));
-        assert!(!source.contains(concat!("egui::Window::new(\"Delete ", "profile?\")")));
+        assert!(source.contains(concat!("egui::Window::new(\"Delete ", "profile?\")")));
+        assert!(!source.contains(concat!("ui.", "group(|ui|")));
         assert!(source.contains(".delete("));
     }
 
     #[test]
-    fn profile_row_state_is_stored_per_draft() {
+    fn profile_editor_state_is_stored_on_dialog() {
         let source = include_str!("vehicle_dialog.rs");
         let draft = source
             .split("struct Draft")
@@ -1223,8 +1850,12 @@ mod tests {
             .expect("VehicleDialog fields should precede default impl");
 
         assert!(draft.contains("selected_profile: Option<String>"));
-        assert!(draft.contains("save_profile_name: String"));
+        assert!(!draft.contains("save_profile_name: String"));
         assert!(!dialog.contains("selected_profile: Option<String>"));
-        assert!(!dialog.contains("save_profile_name: String"));
+        assert!(dialog.contains("profile_editor_selected: Option<String>"));
+        assert!(dialog.contains("profile_editor_name: String"));
+        assert!(dialog.contains("profile_editor_draft: ProfileDraft"));
+        assert!(!source.contains(concat!("Add a vehicle before ", "creating a profile.")));
+        assert!(!source.contains(concat!("profile_editor", "_json")));
     }
 }
