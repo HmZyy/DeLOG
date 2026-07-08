@@ -93,14 +93,12 @@ fn bottom_docks_use_egui_dock_fixed_tabs_without_floating_or_reordering() {
     assert!(DOCKS_SOURCE.contains("egui_dock::DockArea"));
     assert!(DOCKS_SOURCE.contains("egui_dock::AllowedSplits::None"));
     assert!(DOCKS_SOURCE.contains(".draggable_tabs(false)"));
-    assert!(DOCKS_SOURCE.contains(".show_close_buttons(false)"));
-    assert!(DOCKS_SOURCE.contains(".show_leaf_close_all_buttons(false)"));
+    assert!(DOCKS_SOURCE.contains(".show_close_buttons(true)"));
+    assert!(DOCKS_SOURCE.contains(".show_leaf_close_all_buttons(true)"));
     assert!(DOCKS_SOURCE.contains(".show_leaf_collapse_buttons(false)"));
     assert!(DOCKS_SOURCE.contains("FIXED_ORDER"));
     assert!(DOCKS_SOURCE.contains("pub fn open_tabs(&self) -> Vec<AppDockTab>"));
     assert!(APP_SOURCE.contains("fn allowed_in_windows(&self, _tab: &mut Self::Tab) -> bool"));
-    assert!(APP_SOURCE.contains("fn is_closeable(&self, _tab: &Self::Tab) -> bool"));
-    assert!(APP_SOURCE.contains("false"));
     assert!(!APP_SOURCE.contains("egui::Panel::bottom(\"diagnostics\")"));
     assert!(!APP_SOURCE.contains("egui::Panel::bottom(\"logging\")"));
     assert!(!APP_SOURCE.contains("egui::Panel::bottom(\"performance\")"));
@@ -129,6 +127,32 @@ fn bottom_dock_bodies_do_not_render_redundant_headers_or_close_buttons() {
     assert!(diagnostics.contains("crate::icons::trash()"));
     assert!(logging.contains("crate::icons::trash()"));
     assert!(SCRIPTS_SOURCE.contains("crate::icons::trash()"));
+}
+
+#[test]
+fn clear_trash_buttons_are_aligned_to_the_right_of_their_control_rows() {
+    let diagnostics = include_str!("../src/diagnostics.rs");
+    let logging = include_str!("../src/logging.rs");
+    let diagnostics_controls = between(
+        diagnostics,
+        "egui::TextEdit::singleline(&mut self.search)",
+        "let filtered = filtered_records(",
+    );
+    let logging_controls = between(
+        logging,
+        "egui::TextEdit::singleline(&mut self.search)",
+        "let filtered = filtered_records(",
+    );
+    assert!(diagnostics_controls.contains("ui.add_space(ui.available_width())"));
+    assert!(logging_controls.contains("ui.add_space(ui.available_width())"));
+
+    let console = between(
+        SCRIPTS_SOURCE,
+        "let resp = ui.add_enabled(",
+        "// The popup owns Up/Down/Tab/Enter/Esc while it is open.",
+    );
+    assert!(console.contains("crate::icons::trash()"));
+    assert!(console.find("let resp =").unwrap() < console.find("crate::icons::trash()").unwrap());
 }
 
 #[test]
