@@ -212,6 +212,7 @@ impl ReplCompletion {
         }
         if dismiss {
             self.dismiss();
+            input.request_focus();
             return false;
         }
         if accept {
