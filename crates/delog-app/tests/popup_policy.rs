@@ -143,22 +143,24 @@ fn clear_trash_buttons_are_aligned_to_the_right_of_their_control_rows() {
         "egui::TextEdit::singleline(&mut self.search)",
         "let filtered = filtered_records(",
     );
+    // The clear button is pinned flush right via a right-to-left layout rather
+    // than reserving a guessed width, which previously left a gap at the edge.
     assert!(!diagnostics_controls.contains("ui.add_space(ui.available_width())"));
     assert!(!logging_controls.contains("ui.add_space(ui.available_width())"));
-    assert!(diagnostics_controls.contains("let clear_button_width ="));
-    assert!(logging_controls.contains("let clear_button_width ="));
-    assert!(diagnostics_controls.contains("ui.available_width() - clear_button_width"));
-    assert!(logging_controls.contains("ui.available_width() - clear_button_width"));
+    assert!(!diagnostics_controls.contains("interact_size.x"));
+    assert!(!logging_controls.contains("interact_size.x"));
+    assert!(diagnostics_controls.contains("egui::Layout::right_to_left(egui::Align::Center)"));
+    assert!(logging_controls.contains("egui::Layout::right_to_left(egui::Align::Center)"));
 
     let console = between(
         SCRIPTS_SOURCE,
-        "let clear_button_width =",
+        "let dispatch_enabled = self.ordinary_dispatch_enabled();",
         "// The popup owns Up/Down/Tab/Enter/Esc while it is open.",
     );
     assert!(!console.contains(".desired_width(f32::INFINITY)"));
-    assert!(console.contains("ui.available_width() - clear_button_width"));
+    assert!(!console.contains("interact_size.x"));
+    assert!(console.contains("egui::Layout::right_to_left(egui::Align::Center)"));
     assert!(console.contains("crate::icons::trash()"));
-    assert!(console.find("let resp =").unwrap() < console.find("crate::icons::trash()").unwrap());
 }
 
 #[test]
