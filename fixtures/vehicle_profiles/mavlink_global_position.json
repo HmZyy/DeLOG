@@ -1,0 +1,30 @@
+{
+  "delog_vehicle_profile": 1,
+  "name": "mavlink_global_position",
+  "vehicle": {
+    "label": "Vehicle",
+    "show": true,
+    "model": "fixed_wing",
+    "color": [90, 170, 255, 255],
+    "path_color": [255, 170, 60, 255],
+    "scale": 1.0,
+    "position": {
+      "gps": {
+        "lat": { "topic": "GLOBAL_POSITION_INT", "field": "lat" },
+        "lon": { "topic": "GLOBAL_POSITION_INT", "field": "lon" },
+        "alt": { "topic": "GLOBAL_POSITION_INT", "field": "alt" },
+        "lat_lon_dege7": true,
+        "alt_mm": true,
+        "alt_offset_m": 0.0
+      }
+    },
+    "orientation": {
+      "euler": {
+        "roll": { "topic": "ATTITUDE", "field": "roll" },
+        "pitch": { "topic": "ATTITUDE", "field": "pitch" },
+        "yaw": { "topic": "ATTITUDE", "field": "yaw" },
+        "degrees": false
+      }
+    }
+  }
+}
