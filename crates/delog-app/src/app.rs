@@ -8,6 +8,7 @@ use serde::Serialize;
 
 use crate::browser::{self, BrowserFilterCache, BrowserModel};
 use crate::diagnostics::DiagnosticsDock;
+use crate::docks::{AppDockController, AppDockTab};
 use crate::field_stats::{FieldStatsController, StatsRequestKey, StatsTab};
 use crate::gpu::GpuBridge;
 use crate::layout::{LayoutApply, LayoutDoc, LayoutError, LoadOutcome, PendingLayout};
@@ -253,6 +254,7 @@ pub struct DelogApp {
     csv_export_rx: mpsc::Receiver<CsvExportResult>,
     csv_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     browser_collapsed: bool,
+    docks: AppDockController,
     diagnostics_dock: DiagnosticsDock,
     last_diagnostic_seq: Option<u64>,
     logging_dock: LoggingDock,
@@ -359,6 +361,7 @@ impl DelogApp {
             csv_export_rx,
             csv_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             browser_collapsed: false,
+            docks: AppDockController::new_empty(),
             diagnostics_dock: DiagnosticsDock::default(),
             last_diagnostic_seq: None,
             logging_dock: LoggingDock::default(),
@@ -403,6 +406,39 @@ impl DelogApp {
             traj_building: None,
             traj_results,
             traj_results_tx,
+        }
+    }
+
+    fn dock_open_checkbox(&mut self, ui: &mut egui::Ui, tab: AppDockTab, label: &str) {
+        let mut open = self.docks.is_open(tab);
+        if ui.checkbox(&mut open, label).clicked() {
+            if open {
+                self.open_dock(tab);
+            } else {
+                self.close_dock(tab);
+            }
+            ui.close();
+        }
+    }
+
+    fn open_dock(&mut self, tab: AppDockTab) {
+        self.set_legacy_dock_open(tab, true);
+        self.docks.open_or_focus(tab);
+    }
+
+    fn close_dock(&mut self, tab: AppDockTab) {
+        self.set_legacy_dock_open(tab, false);
+        self.docks.close(tab);
+    }
+
+    fn set_legacy_dock_open(&mut self, tab: AppDockTab, open: bool) {
+        match tab {
+            AppDockTab::Diagnostics => self.diagnostics_dock.open = open,
+            AppDockTab::Performance => self.performance_dock.open = open,
+            AppDockTab::Markers => self.markers_dock.open = open,
+            #[cfg(feature = "scripting")]
+            AppDockTab::ScriptingConsole => self.scripts.set_console_open(open),
+            AppDockTab::Logging => self.logging_dock.open = open,
         }
     }
 
@@ -1559,38 +1595,12 @@ impl eframe::App for DelogApp {
                     }
                 });
                 ui.menu_button("View", |ui| {
-                    if ui
-                        .checkbox(&mut self.diagnostics_dock.open, "Diagnostic (F1)")
-                        .clicked()
-                    {
-                        ui.close();
-                    }
-                    if ui
-                        .checkbox(&mut self.performance_dock.open, "Performance (F2)")
-                        .clicked()
-                    {
-                        ui.close();
-                    }
-                    if ui
-                        .checkbox(&mut self.markers_dock.open, "Markers (F3)")
-                        .clicked()
-                    {
-                        ui.close();
-                    }
+                    self.dock_open_checkbox(ui, AppDockTab::Diagnostics, "Diagnostic (F1)");
+                    self.dock_open_checkbox(ui, AppDockTab::Performance, "Performance (F2)");
+                    self.dock_open_checkbox(ui, AppDockTab::Markers, "Markers (F3)");
                     #[cfg(feature = "scripting")]
-                    {
-                        let mut console_open = self.scripts.console_open;
-                        if ui.checkbox(&mut console_open, "Scripting (F9)").clicked() {
-                            self.scripts.set_console_open(console_open);
-                            ui.close();
-                        }
-                    }
-                    if ui
-                        .checkbox(&mut self.logging_dock.open, "Logging (F12)")
-                        .clicked()
-                    {
-                        ui.close();
-                    }
+                    self.dock_open_checkbox(ui, AppDockTab::ScriptingConsole, "Scripting (F9)");
+                    self.dock_open_checkbox(ui, AppDockTab::Logging, "Logging (F12)");
                 });
                 ui.menu_button("Layout", |ui| {
                     if ui.button("Save Layout...").clicked() {
@@ -1954,7 +1964,7 @@ impl eframe::App for DelogApp {
         drop(ui_toolbar_timer);
         let range = timeline_range_for_ui(global_range);
 
-        let (toggle_diagnostics, toggle_performance, toggle_markers, toggle_logging) =
+        let (focus_diagnostics, focus_performance, focus_markers, focus_logging) =
             ui.ctx().input(|i| {
                 (
                     i.key_pressed(egui::Key::F1),
@@ -1963,21 +1973,21 @@ impl eframe::App for DelogApp {
                     i.key_pressed(egui::Key::F12),
                 )
             });
-        if toggle_diagnostics {
-            self.diagnostics_dock.open = !self.diagnostics_dock.open;
+        if focus_diagnostics {
+            self.open_dock(AppDockTab::Diagnostics);
         }
-        if toggle_performance {
-            self.performance_dock.open = !self.performance_dock.open;
+        if focus_performance {
+            self.open_dock(AppDockTab::Performance);
         }
-        if toggle_markers {
-            self.markers_dock.open = !self.markers_dock.open;
+        if focus_markers {
+            self.open_dock(AppDockTab::Markers);
         }
-        if toggle_logging {
-            self.logging_dock.open = !self.logging_dock.open;
+        if focus_logging {
+            self.open_dock(AppDockTab::Logging);
         }
         #[cfg(feature = "scripting")]
         if ui.ctx().input(|i| i.key_pressed(egui::Key::F9)) {
-            self.scripts.set_console_open(!self.scripts.console_open);
+            self.open_dock(AppDockTab::ScriptingConsole);
         }
 
         // Transport keys — skipped while a widget owns the
@@ -2039,7 +2049,7 @@ impl eframe::App for DelogApp {
                 self.last_diagnostic_seq,
                 newest_seq,
             ) {
-                self.diagnostics_dock.open = true;
+                self.open_dock(AppDockTab::Diagnostics);
             }
             self.last_diagnostic_seq = Some(newest_seq);
         }
