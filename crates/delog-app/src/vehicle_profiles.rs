@@ -13,29 +13,6 @@ use crate::vehicle::VehicleConfig;
 
 pub const VEHICLE_PROFILE_VERSION: u32 = 1;
 
-const DEFAULT_PROFILES: &[(&str, &str)] = &[
-    (
-        "mavlink_global_position.json",
-        include_str!("../../../fixtures/vehicle_profiles/mavlink_global_position.json"),
-    ),
-    (
-        "mavlink_local_position.json",
-        include_str!("../../../fixtures/vehicle_profiles/mavlink_local_position.json"),
-    ),
-    (
-        "ardupilot_global_position.json",
-        include_str!("../../../fixtures/vehicle_profiles/ardupilot_global_position.json"),
-    ),
-    (
-        "ulg_local_position.json",
-        include_str!("../../../fixtures/vehicle_profiles/ulg_local_position.json"),
-    ),
-    (
-        "ulg_global_position.json",
-        include_str!("../../../fixtures/vehicle_profiles/ulg_global_position.json"),
-    ),
-];
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VehicleProfileDoc {
     pub delog_vehicle_profile: u32,
@@ -152,24 +129,6 @@ impl VehicleProfileLibrary {
 
     pub fn delete(&self, name: &str) -> io::Result<()> {
         fs::remove_file(self.profile_path(name)?)
-    }
-
-    pub fn seed_defaults(&self) -> io::Result<()> {
-        if self.dir.exists() {
-            return Ok(());
-        }
-
-        fs::create_dir_all(&self.dir)?;
-        for (file, contents) in DEFAULT_PROFILES {
-            let doc: VehicleProfileDoc = serde_json::from_str(contents).map_err(|err| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("invalid default vehicle profile {file}: {err}"),
-                )
-            })?;
-            fs::write(self.profile_path(&doc.name)?, contents)?;
-        }
-        Ok(())
     }
 
     fn profile_path(&self, name: &str) -> io::Result<PathBuf> {
@@ -466,26 +425,5 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
 
         fs::remove_dir_all(tmp).unwrap();
-    }
-
-    #[test]
-    fn seeds_defaults_only_when_profile_dir_is_created() {
-        let tmp = TestDir::new("seed");
-        let profile_dir = tmp.0.join("vehicle_profiles");
-        let library = VehicleProfileLibrary::new(&profile_dir);
-
-        library.seed_defaults().unwrap();
-        let names = library.list().unwrap();
-        assert!(names.contains(&"mavlink_global_position".to_owned()));
-        assert!(names.contains(&"mavlink_local_position".to_owned()));
-        assert!(names.contains(&"ardupilot_global_position".to_owned()));
-        assert!(names.contains(&"ulg_local_position".to_owned()));
-        assert!(names.contains(&"ulg_global_position".to_owned()));
-
-        library.delete("mavlink_global_position").unwrap();
-        library.seed_defaults().unwrap();
-
-        let names = library.list().unwrap();
-        assert!(!names.contains(&"mavlink_global_position".to_owned()));
     }
 }

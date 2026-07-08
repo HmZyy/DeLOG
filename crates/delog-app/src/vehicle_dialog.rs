@@ -607,11 +607,6 @@ fn refresh_profiles(state: &mut VehicleDialog) {
         return;
     };
 
-    if let Err(err) = library.seed_defaults() {
-        let _ = err;
-        // TODO: report default vehicle profile seed failures in the future log dock.
-    }
-
     match library.list() {
         Ok(profiles) => {
             state.profiles = profiles;
@@ -1008,9 +1003,6 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut VehicleDialog, snapshot: &St
         };
         if ui.button(label).clicked() {
             save_profile_from_editor(state);
-        }
-        if ui.button("Reset").clicked() {
-            load_profile_editor(state);
         }
         if ui
             .add_enabled(
