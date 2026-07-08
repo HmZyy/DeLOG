@@ -3,7 +3,10 @@
 /// immediately before the cursor. `None` when that run is empty.
 pub fn completable_token(line: &str, cursor: usize) -> Option<(usize, &str)> {
     let cursor = cursor.min(line.len());
-    let head = &line[..cursor];
+    let head = match line.get(..cursor) {
+        Some(head) => head,
+        None => return None,
+    };
     let start = head
         .char_indices()
         .rev()
@@ -60,6 +63,12 @@ mod tests {
     fn token_none_when_empty() {
         assert_eq!(completable_token("x = ", 4), None);
         assert_eq!(completable_token("", 0), None);
+    }
+
+    #[test]
+    fn token_none_when_cursor_not_on_char_boundary() {
+        // "é" is two bytes; cursor 1 lands mid-character.
+        assert_eq!(completable_token("é", 1), None);
     }
 
     #[test]
