@@ -300,9 +300,12 @@ impl ReplCompletion {
         let hi_start = token.rfind('.').map(|i| i + 1).unwrap_or(0);
         let hi_end = token.len();
         let mut clicked: Option<usize> = None;
+        // The console input sits at the bottom of the window, so grow the
+        // dropdown upward from the input's top edge where there is room.
         egui::Area::new(ui.id().with("repl_completion_popup"))
             .order(egui::Order::Foreground)
-            .fixed_pos(input.rect.left_bottom())
+            .pivot(egui::Align2::LEFT_BOTTOM)
+            .fixed_pos(input.rect.left_top())
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.set_max_width(input.rect.width().max(120.0));
