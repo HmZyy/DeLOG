@@ -1,6 +1,6 @@
 {
   "delog_vehicle_profile": 1,
-  "name": "MAVLink Local Position",
+  "name": "mavlink_local_position",
   "vehicle": {
     "label": "Vehicle",
     "show": true,

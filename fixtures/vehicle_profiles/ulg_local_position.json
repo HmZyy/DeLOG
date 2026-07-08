@@ -1,6 +1,6 @@
 {
   "delog_vehicle_profile": 1,
-  "name": "ULG Local Position",
+  "name": "ulg_local_position",
   "vehicle": {
     "label": "Vehicle",
     "show": true,

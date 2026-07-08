@@ -1,6 +1,6 @@
 {
   "delog_vehicle_profile": 1,
-  "name": "ULG Global Position",
+  "name": "ulg_global_position",
   "vehicle": {
     "label": "Vehicle",
     "show": true,
@@ -10,9 +10,9 @@
     "scale": 1.0,
     "position": {
       "gps": {
-        "lat": { "topic": "vehicle_global_position", "field": "lat" },
-        "lon": { "topic": "vehicle_global_position", "field": "lon" },
-        "alt": { "topic": "vehicle_global_position", "field": "alt" },
+        "lat": { "topic": "vehicle_global_position[0]", "field": "lat" },
+        "lon": { "topic": "vehicle_global_position[0]", "field": "lon" },
+        "alt": { "topic": "vehicle_global_position[0]", "field": "alt" },
         "lat_lon_dege7": false,
         "alt_mm": false,
         "alt_offset_m": 0.0

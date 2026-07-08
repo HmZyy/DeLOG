@@ -303,7 +303,7 @@ mod tests {
     fn sample_doc() -> VehicleProfileDoc {
         VehicleProfileDoc {
             delog_vehicle_profile: VEHICLE_PROFILE_VERSION,
-            name: "MAVLink Local Position".to_owned(),
+            name: "mavlink_local_position".to_owned(),
             vehicle: VehicleLayout {
                 label: "Vehicle".to_owned(),
                 show: true,
@@ -333,10 +333,10 @@ mod tests {
         let library = VehicleProfileLibrary::new(&tmp);
         let doc = sample_doc();
 
-        library.save("MAVLink Local Position", &doc).unwrap();
+        library.save("mavlink_local_position", &doc).unwrap();
 
-        assert_eq!(library.list().unwrap(), vec!["MAVLink Local Position"]);
-        assert_eq!(library.load("MAVLink Local Position").unwrap(), doc);
+        assert_eq!(library.list().unwrap(), vec!["mavlink_local_position"]);
+        assert_eq!(library.load("mavlink_local_position").unwrap(), doc);
 
         fs::remove_dir_all(tmp).unwrap();
     }
@@ -442,10 +442,10 @@ mod tests {
         let library = VehicleProfileLibrary::new(&tmp);
         let doc = sample_doc();
 
-        library.save("MAVLink Local Position", &doc).unwrap();
+        library.save("mavlink_local_position", &doc).unwrap();
         fs::write(tmp.join("bad..name.json"), "{}").unwrap();
 
-        assert_eq!(library.list().unwrap(), vec!["MAVLink Local Position"]);
+        assert_eq!(library.list().unwrap(), vec!["mavlink_local_position"]);
 
         fs::remove_dir_all(tmp).unwrap();
     }
@@ -457,12 +457,12 @@ mod tests {
         let mut doc = sample_doc();
         doc.delog_vehicle_profile = 99;
         fs::write(
-            tmp.join("MAVLink Local Position.json"),
+            tmp.join("mavlink_local_position.json"),
             serde_json::to_string_pretty(&doc).unwrap(),
         )
         .unwrap();
 
-        let err = library.load("MAVLink Local Position").unwrap_err();
+        let err = library.load("mavlink_local_position").unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
 
         fs::remove_dir_all(tmp).unwrap();
@@ -476,16 +476,16 @@ mod tests {
 
         library.seed_defaults().unwrap();
         let names = library.list().unwrap();
-        assert!(names.contains(&"MAVLink Global Position".to_owned()));
-        assert!(names.contains(&"MAVLink Local Position".to_owned()));
-        assert!(names.contains(&"ArduPilot Global Position".to_owned()));
-        assert!(names.contains(&"ULG Local Position".to_owned()));
-        assert!(names.contains(&"ULG Global Position".to_owned()));
+        assert!(names.contains(&"mavlink_global_position".to_owned()));
+        assert!(names.contains(&"mavlink_local_position".to_owned()));
+        assert!(names.contains(&"ardupilot_global_position".to_owned()));
+        assert!(names.contains(&"ulg_local_position".to_owned()));
+        assert!(names.contains(&"ulg_global_position".to_owned()));
 
-        library.delete("MAVLink Global Position").unwrap();
+        library.delete("mavlink_global_position").unwrap();
         library.seed_defaults().unwrap();
 
         let names = library.list().unwrap();
-        assert!(!names.contains(&"MAVLink Global Position".to_owned()));
+        assert!(!names.contains(&"mavlink_global_position".to_owned()));
     }
 }
