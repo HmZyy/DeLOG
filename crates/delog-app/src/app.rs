@@ -12,6 +12,7 @@ use crate::field_stats::{FieldStatsController, StatsRequestKey, StatsTab};
 use crate::gpu::GpuBridge;
 use crate::layout::{LayoutApply, LayoutDoc, LayoutError, LoadOutcome, PendingLayout};
 use crate::live::ConnectionDialog;
+use crate::logging::{LogLevel, LogRecord, LoggingDock, PendingLog};
 use crate::performance::{PerformanceDock, PerformanceSnapshot, ResourceSummary, TraceSummary};
 use crate::plot::ViewX;
 #[cfg(feature = "scripting")]
@@ -34,6 +35,7 @@ type ProfilingExportResult = Result<std::path::PathBuf, String>;
 type CsvExportResult = Result<(std::path::PathBuf, u64), String>;
 const SESSION_AUTOSAVE_INTERVAL: Duration = Duration::from_secs(30);
 const PERFORMANCE_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
+const LOG_RETENTION: usize = 1_000;
 const EMPTY_SESSION_TIMELINE_RANGE: TimeRange = TimeRange {
     min_us: 0,
     max_us: 10_000_000,
@@ -253,6 +255,10 @@ pub struct DelogApp {
     browser_collapsed: bool,
     diagnostics_dock: DiagnosticsDock,
     last_diagnostic_seq: Option<u64>,
+    logging_dock: LoggingDock,
+    logs: Vec<LogRecord>,
+    next_log_seq: u64,
+    log_started_at: Instant,
     performance_dock: PerformanceDock,
     markers_dock: crate::markers::MarkersDock,
     performance_snapshot: PerformanceSnapshot,
@@ -355,6 +361,10 @@ impl DelogApp {
             browser_collapsed: false,
             diagnostics_dock: DiagnosticsDock::default(),
             last_diagnostic_seq: None,
+            logging_dock: LoggingDock::default(),
+            logs: Vec::new(),
+            next_log_seq: 0,
+            log_started_at: Instant::now(),
             performance_dock: PerformanceDock::default(),
             markers_dock: crate::markers::MarkersDock::default(),
             performance_snapshot: PerformanceSnapshot::default(),
@@ -700,53 +710,19 @@ impl DelogApp {
         }
     }
 
-    /// Anchored top-left so it clears the corner FPS badge.
-    fn paint_debug_overlay(&self, ctx: &egui::Context) {
-        if !self.settings.show_debug_overlay {
-            return;
+    fn push_log(&mut self, pending: PendingLog) {
+        self.logs.push(LogRecord {
+            seq: self.next_log_seq,
+            elapsed_ms: self.log_started_at.elapsed().as_millis(),
+            level: pending.level,
+            target: pending.target,
+            message: pending.message,
+        });
+        self.next_log_seq = self.next_log_seq.wrapping_add(1);
+        let excess = self.logs.len().saturating_sub(LOG_RETENTION);
+        if excess > 0 {
+            self.logs.drain(0..excess);
         }
-        let metrics = self.session.metrics();
-        egui::Area::new(egui::Id::new("debug_overlay"))
-            .order(egui::Order::Foreground)
-            .anchor(egui::Align2::LEFT_TOP, egui::vec2(8.0, 8.0))
-            .interactable(false)
-            .show(ctx, |ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.set_min_width(190.0);
-                    ui.strong("Debug Overlay (F12)");
-                    match self.fps_ema {
-                        Some(fps) => ui.label(format!("FPS {fps:.0}")),
-                        None => ui.weak("FPS idle"),
-                    };
-                    ui.separator();
-                    egui::Grid::new("debug_overlay_grid")
-                        .num_columns(3)
-                        .spacing([10.0, 2.0])
-                        .show(ui, |ui| {
-                            ui.strong("timer");
-                            ui.strong("last");
-                            ui.strong("avg");
-                            ui.end_row();
-                            // Frame timers, in milliseconds.
-                            for name in [
-                                "frame_total",
-                                "plot_paint_cpu",
-                                "gpu_encode",
-                                "yquery",
-                                "3d_frame",
-                            ] {
-                                if let Some(s) = metrics.stats(name)
-                                    && s.n > 0
-                                {
-                                    ui.monospace(name);
-                                    ui.label(format!("{:.2} ms", s.last));
-                                    ui.label(format!("{:.2} ms", s.avg));
-                                    ui.end_row();
-                                }
-                            }
-                        });
-                });
-            });
     }
 
     fn poll_trajectory_builds(&mut self) {
@@ -1584,32 +1560,33 @@ impl eframe::App for DelogApp {
                 });
                 ui.menu_button("View", |ui| {
                     if ui
-                        .checkbox(&mut self.diagnostics_dock.open, "Diagnostics")
+                        .checkbox(&mut self.diagnostics_dock.open, "Diagnostic (F1)")
                         .clicked()
                     {
                         ui.close();
                     }
                     if ui
-                        .checkbox(&mut self.performance_dock.open, "Performance")
+                        .checkbox(&mut self.performance_dock.open, "Performance (F2)")
                         .clicked()
                     {
                         ui.close();
                     }
                     if ui
-                        .checkbox(&mut self.markers_dock.open, "Markers")
+                        .checkbox(&mut self.markers_dock.open, "Markers (F3)")
                         .clicked()
                     {
                         ui.close();
                     }
                     #[cfg(feature = "scripting")]
-                    if ui
-                        .checkbox(&mut self.scripts.console_open, "Scripting Console")
-                        .clicked()
                     {
-                        ui.close();
+                        let mut console_open = self.scripts.console_open;
+                        if ui.checkbox(&mut console_open, "Scripting (F9)").clicked() {
+                            self.scripts.set_console_open(console_open);
+                            ui.close();
+                        }
                     }
                     if ui
-                        .checkbox(&mut self.settings.show_debug_overlay, "Debug Overlay (F12)")
+                        .checkbox(&mut self.logging_dock.open, "Logging (F12)")
                         .clicked()
                     {
                         ui.close();
@@ -1974,62 +1951,33 @@ impl eframe::App for DelogApp {
             });
         });
 
-        // The timeline's `utc_offset_us` arg stays None until a parser captures
-        // a UTC reference (BIN GPS week / ULog time_ref_utc); `any_live` stays
-        // false because the snapshot has no streaming flag yet.
         drop(ui_toolbar_timer);
         let range = timeline_range_for_ui(global_range);
-        let ui_timeline_timer = self.session.metrics().scope("ui_timeline");
-        egui::Panel::bottom("timeline").show_inside(ui, |ui| {
-            let action = crate::timeline::ui(
-                ui,
-                &mut self.playback,
-                &mut self.fit_view_all,
-                &mut self.view,
-                range,
-                None,
-                self.session.has_live_links(),
-                self.settings.theme,
-                &self.markers,
-            );
-            if action.lock_live {
-                self.lock_to_live(range);
-            }
-            if action.view_changed {
-                // Dragging the window slider is a manual view change: drop
-                // out of fit-all and live-follow, like a pan/zoom.
-                self.fit_view_all = false;
-                self.playback.unlock_live();
-                self.view_fitted = true;
-            }
-            if let Some(t_us) = action.marker_jump {
-                self.playback.scrub(t_us, range);
-            }
-            if let Some((id, t_us)) = action.marker_move
-                && let Some(m) = self.markers.get_mut(id)
-            {
-                m.t_us = t_us.clamp(range.min_us, range.max_us);
-            }
-            if let Some(id) = action.marker_delete {
-                self.markers.remove(id);
-            }
-            if let Some((id, edit)) = action.marker_edit
-                && let Some(m) = self.markers.get_mut(id)
-            {
-                if let Some(label) = edit.label {
-                    m.label = label;
-                }
-                if let Some(color) = edit.color {
-                    m.color = color;
-                }
-            }
-        });
-        drop(ui_timeline_timer);
 
-        // F12 toggles the debug overlay. Handled ungated — it is
-        // not a text key, so it works even while a widget holds focus.
-        if ui.ctx().input(|i| i.key_pressed(egui::Key::F12)) {
-            self.settings.show_debug_overlay = !self.settings.show_debug_overlay;
+        let (toggle_diagnostics, toggle_performance, toggle_markers, toggle_logging) =
+            ui.ctx().input(|i| {
+                (
+                    i.key_pressed(egui::Key::F1),
+                    i.key_pressed(egui::Key::F2),
+                    i.key_pressed(egui::Key::F3),
+                    i.key_pressed(egui::Key::F12),
+                )
+            });
+        if toggle_diagnostics {
+            self.diagnostics_dock.open = !self.diagnostics_dock.open;
+        }
+        if toggle_performance {
+            self.performance_dock.open = !self.performance_dock.open;
+        }
+        if toggle_markers {
+            self.markers_dock.open = !self.markers_dock.open;
+        }
+        if toggle_logging {
+            self.logging_dock.open = !self.logging_dock.open;
+        }
+        #[cfg(feature = "scripting")]
+        if ui.ctx().input(|i| i.key_pressed(egui::Key::F9)) {
+            self.scripts.set_console_open(!self.scripts.console_open);
         }
 
         // Transport keys — skipped while a widget owns the
@@ -2112,6 +2060,17 @@ impl eframe::App for DelogApp {
                 });
         }
         drop(ui_diagnostics_timer);
+        if self.logging_dock.open {
+            egui::Panel::bottom("logging")
+                .resizable(true)
+                .default_size(240.0)
+                .show_inside(ui, |ui| {
+                    let action = self.logging_dock.ui(ui, &self.logs);
+                    if action.clear {
+                        self.logs.clear();
+                    }
+                });
+        }
         let ui_performance_timer = self.session.metrics().scope("ui_performance");
         if self.performance_dock.open {
             self.refresh_performance_snapshot(frame, &snapshot);
@@ -2151,6 +2110,58 @@ impl eframe::App for DelogApp {
                     );
                 });
         }
+
+        // The timeline's `utc_offset_us` arg stays None until a parser captures
+        // a UTC reference (BIN GPS week / ULog time_ref_utc); `any_live` stays
+        // false because the snapshot has no streaming flag yet. It is registered
+        // after the resizable docks so those docks sit below the timeline.
+        let ui_timeline_timer = self.session.metrics().scope("ui_timeline");
+        egui::Panel::bottom("timeline").show_inside(ui, |ui| {
+            let action = crate::timeline::ui(
+                ui,
+                &mut self.playback,
+                &mut self.fit_view_all,
+                &mut self.view,
+                range,
+                None,
+                self.session.has_live_links(),
+                self.settings.theme,
+                &self.markers,
+            );
+            if action.lock_live {
+                self.lock_to_live(range);
+            }
+            if action.view_changed {
+                // Dragging the window slider is a manual view change: drop
+                // out of fit-all and live-follow, like a pan/zoom.
+                self.fit_view_all = false;
+                self.playback.unlock_live();
+                self.view_fitted = true;
+            }
+            if let Some(t_us) = action.marker_jump {
+                self.playback.scrub(t_us, range);
+            }
+            if let Some((id, t_us)) = action.marker_move
+                && let Some(m) = self.markers.get_mut(id)
+            {
+                m.t_us = t_us.clamp(range.min_us, range.max_us);
+            }
+            if let Some(id) = action.marker_delete {
+                self.markers.remove(id);
+            }
+            if let Some((id, edit)) = action.marker_edit
+                && let Some(m) = self.markers.get_mut(id)
+            {
+                if let Some(label) = edit.label {
+                    m.label = label;
+                }
+                if let Some(color) = edit.color {
+                    m.color = color;
+                }
+            }
+        });
+        drop(ui_timeline_timer);
+
         let ui_browser_timer = self.session.metrics().scope("ui_browser");
         if self.browser_collapsed {
             let button_size = browser::panel_toggle_button_size(ui);
@@ -2392,7 +2403,6 @@ impl eframe::App for DelogApp {
         // Floating windows/dialogs + overlays; drops with the function (still
         // inside `frame_total`, after every other section).
         let _ui_windows_timer = self.session.metrics().scope("ui_windows");
-        self.paint_debug_overlay(ui.ctx());
         self.show_layout_windows(ui.ctx());
         let settings_before = self.settings.clone();
         let settings_change = self.settings_dialog.show(ui.ctx(), &mut self.settings);
@@ -2418,6 +2428,9 @@ impl eframe::App for DelogApp {
             self.vehicle_revision = self.vehicle_revision.wrapping_add(1);
             self.traj_dirty = true;
             self.ensure_trajectory_build(ui.ctx(), &snapshot);
+        }
+        for log in self.vehicle_dialog.take_logs() {
+            self.push_log(log);
         }
         if let Some(endpoint) = self
             .connection_dialog
@@ -2462,11 +2475,14 @@ impl eframe::App for DelogApp {
                 self.settings.scripting.auto_open_console,
             );
             for message in self.scripts.take_parser_diagnostics() {
-                self.session
-                    .push_diagnostic(delog_core::diagnostics::Diag::error(
-                        "python-parser",
-                        message,
-                    ));
+                self.push_log(PendingLog::with_target(
+                    LogLevel::Error,
+                    "python-parser",
+                    message,
+                ));
+            }
+            for log in self.scripts.take_logs() {
+                self.push_log(log);
             }
         }
     }

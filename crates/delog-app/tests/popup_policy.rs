@@ -30,12 +30,54 @@ fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
 
 #[test]
 fn menus_expose_scripts_parsers_and_scripting_console_dock() {
-    assert!(APP_SOURCE.contains("checkbox(&mut self.scripts.console_open, \"Scripting Console\")"));
+    assert!(APP_SOURCE.contains("checkbox(&mut console_open, \"Scripting (F9)\")"));
+    assert!(APP_SOURCE.contains("self.scripts.set_console_open(console_open);"));
+    assert!(APP_SOURCE.contains("checkbox(&mut self.logging_dock.open, \"Logging (F12)\")"));
     assert!(APP_SOURCE.contains("ui.menu_button(\"Scripts\""));
     assert!(APP_SOURCE.contains("ui.menu_button(\"Parsers\""));
     assert!(APP_SOURCE.contains("ui.button(\"Editor...\")"));
     assert!(APP_SOURCE.contains("ui.menu_button(\"Run\""));
     assert!(APP_SOURCE.contains("ui.menu_button(\"Parse File\""));
+}
+
+#[test]
+fn view_menu_orders_docks_and_function_keys_toggle_them() {
+    let view_menu = between(
+        APP_SOURCE,
+        "ui.menu_button(\"View\"",
+        "ui.menu_button(\"Layout\"",
+    );
+    let expected_order = [
+        "\"Diagnostic (F1)\"",
+        "\"Performance (F2)\"",
+        "\"Markers (F3)\"",
+        "\"Scripting (F9)\"",
+        "\"Logging (F12)\"",
+    ];
+    let mut previous = 0;
+    for label in expected_order {
+        let index = view_menu[previous..]
+            .find(label)
+            .unwrap_or_else(|| panic!("{label} should be in the View menu"))
+            + previous;
+        previous = index + label.len();
+    }
+
+    for key in [
+        "egui::Key::F1",
+        "egui::Key::F2",
+        "egui::Key::F3",
+        "egui::Key::F9",
+        "egui::Key::F12",
+    ] {
+        assert!(APP_SOURCE.contains(key));
+    }
+}
+
+#[test]
+fn logging_dock_matches_diagnostics_height() {
+    assert!(APP_SOURCE.contains("egui::Panel::bottom(\"logging\")"));
+    assert!(APP_SOURCE.contains(".default_size(240.0)"));
 }
 
 #[test]
@@ -49,6 +91,19 @@ fn scripting_console_dock_matches_diagnostics_height_and_reserves_prompt() {
         "fn variables_window(",
     );
     assert!(!console.contains("self.status"));
+}
+
+#[test]
+fn scripting_console_refocuses_prompt_after_enter_dispatch() {
+    let console = between(
+        SCRIPTS_SOURCE,
+        "pub fn console_dock_ui(",
+        "fn variables_window(",
+    );
+
+    assert!(console.contains("if dispatch_enabled && self.take_repl_refocus_request() {"));
+    assert!(console.contains("resp.request_focus();"));
+    assert!(console.contains("self.request_repl_refocus();"));
 }
 
 #[test]

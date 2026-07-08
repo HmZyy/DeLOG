@@ -3,6 +3,7 @@ use delog_core::snapshot::StoreSnapshot;
 use egui::Color32;
 
 use crate::layout::{FieldRef, ModelLayout, NedRefLayout, OriLayout, PosLayout, VehicleLayout};
+use crate::logging::{LogLevel, PendingLog, log};
 use crate::vehicle::{GeoRef, ModelKind, NedReference, OriMapping, PosMapping, VehicleConfig};
 use crate::vehicle_profiles::{VEHICLE_PROFILE_VERSION, VehicleProfileDoc, VehicleProfileLibrary};
 
@@ -539,6 +540,7 @@ pub struct VehicleDialog {
     profile_editor_name: String,
     profile_editor_draft: ProfileDraft,
     pending_profile_delete: Option<String>,
+    pending_logs: Vec<PendingLog>,
 }
 
 impl Default for VehicleDialog {
@@ -553,8 +555,20 @@ impl Default for VehicleDialog {
             profile_editor_name: String::new(),
             profile_editor_draft: ProfileDraft::default(),
             pending_profile_delete: None,
+            pending_logs: Vec::new(),
         }
     }
+}
+
+impl VehicleDialog {
+    pub fn take_logs(&mut self) -> Vec<PendingLog> {
+        std::mem::take(&mut self.pending_logs)
+    }
+}
+
+#[track_caller]
+fn log_profile(state: &mut VehicleDialog, level: LogLevel, message: impl Into<String>) {
+    state.pending_logs.push(log(level, message));
 }
 
 enum ProfileAction {
@@ -599,7 +613,11 @@ fn profile_library() -> Option<VehicleProfileLibrary> {
 
 fn refresh_profiles(state: &mut VehicleDialog) {
     let Some(library) = profile_library() else {
-        // TODO: report unavailable vehicle profile config directory in the future log dock.
+        log_profile(
+            state,
+            LogLevel::Warning,
+            "vehicle profile config directory is unavailable",
+        );
         state.profiles.clear();
         for draft in &mut state.drafts {
             draft.selected_profile = None;
@@ -630,8 +648,11 @@ fn refresh_profiles(state: &mut VehicleDialog) {
             }
         }
         Err(err) => {
-            let _ = err;
-            // TODO: report vehicle profile list failures in the future log dock.
+            log_profile(
+                state,
+                LogLevel::Error,
+                format!("failed to list vehicle profiles: {err}"),
+            );
             state.profiles.clear();
             state.profile_editor_selected = None;
             for draft in &mut state.drafts {
@@ -1292,7 +1313,11 @@ fn load_profile_editor(state: &mut VehicleDialog) {
         return;
     };
     let Some(library) = profile_library() else {
-        // TODO: report unavailable vehicle profile config directory in the future log dock.
+        log_profile(
+            state,
+            LogLevel::Warning,
+            "vehicle profile config directory is unavailable",
+        );
         return;
     };
     match library.load(&name) {
@@ -1301,8 +1326,11 @@ fn load_profile_editor(state: &mut VehicleDialog) {
             state.profile_editor_draft = ProfileDraft::from_doc(&doc);
         }
         Err(err) => {
-            let _ = err;
-            // TODO: report vehicle profile load failures in the future log dock.
+            log_profile(
+                state,
+                LogLevel::Error,
+                format!("failed to load vehicle profile '{name}': {err}"),
+            );
         }
     }
 }
@@ -1310,31 +1338,45 @@ fn load_profile_editor(state: &mut VehicleDialog) {
 fn save_profile_from_editor(state: &mut VehicleDialog) {
     let name = state.profile_editor_name.trim().to_owned();
     if name.is_empty() {
-        // TODO: report missing vehicle profile names in the future log dock.
+        log_profile(state, LogLevel::Warning, "enter a vehicle profile name");
         return;
     }
     let Some(library) = profile_library() else {
-        // TODO: report unavailable vehicle profile config directory in the future log dock.
+        log_profile(
+            state,
+            LogLevel::Warning,
+            "vehicle profile config directory is unavailable",
+        );
         return;
     };
     let doc = match state.profile_editor_draft.to_doc(&name) {
         Ok(doc) => doc,
         Err(err) => {
-            let _ = err;
-            // TODO: report invalid vehicle profile form data in the future log dock.
+            log_profile(
+                state,
+                LogLevel::Warning,
+                format!("invalid vehicle profile '{name}': {err}"),
+            );
             return;
         }
     };
     if let Err(err) = library.save(&name, &doc) {
-        let _ = err;
-        // TODO: report vehicle profile save failures in the future log dock.
+        log_profile(
+            state,
+            LogLevel::Error,
+            format!("failed to save vehicle profile '{name}': {err}"),
+        );
         return;
     }
 
     refresh_profiles(state);
     state.profile_editor_selected = Some(name.clone());
     state.profile_editor_name = name.clone();
-    // TODO: report saved vehicle profiles in the future log dock.
+    log_profile(
+        state,
+        LogLevel::Info,
+        format!("saved vehicle profile '{name}'"),
+    );
 }
 
 fn apply_profile_to_draft(
@@ -1344,19 +1386,30 @@ fn apply_profile_to_draft(
     snapshot: &StoreSnapshot,
 ) {
     let Some(library) = profile_library() else {
-        // TODO: report unavailable vehicle profile config directory in the future log dock.
+        log_profile(
+            state,
+            LogLevel::Warning,
+            "vehicle profile config directory is unavailable",
+        );
         return;
     };
     let doc = match library.load(name) {
         Ok(doc) => doc,
         Err(err) => {
-            let _ = err;
-            // TODO: report vehicle profile load failures in the future log dock.
+            log_profile(
+                state,
+                LogLevel::Error,
+                format!("failed to load vehicle profile '{name}': {err}"),
+            );
             return;
         }
     };
     let Some(draft) = state.drafts.get_mut(draft_index) else {
-        // TODO: report missing vehicle drafts in the future log dock.
+        log_profile(
+            state,
+            LogLevel::Warning,
+            format!("missing vehicle draft {draft_index} for profile '{name}'"),
+        );
         return;
     };
     let cfg = match draft.source {
@@ -1364,13 +1417,21 @@ fn apply_profile_to_draft(
         None => doc.to_config(snapshot),
     };
     let Some(cfg) = cfg else {
-        // TODO: report vehicle profile apply failures in the future log dock.
+        log_profile(
+            state,
+            LogLevel::Warning,
+            format!("vehicle profile '{name}' does not match the current data"),
+        );
         return;
     };
 
     draft.apply_config_preserving_label(&cfg, snapshot);
     draft.selected_profile = Some(name.to_owned());
-    // TODO: report applied vehicle profiles in the future log dock.
+    log_profile(
+        state,
+        LogLevel::Info,
+        format!("applied vehicle profile '{name}'"),
+    );
 }
 
 fn show_profile_delete_confirmation(ctx: &egui::Context, state: &mut VehicleDialog) {
@@ -1403,15 +1464,26 @@ fn show_profile_delete_confirmation(ctx: &egui::Context, state: &mut VehicleDial
                                     state.profile_editor_draft = ProfileDraft::default();
                                 }
                                 refresh_profiles(state);
-                                // TODO: report deleted vehicle profiles in the future log dock.
+                                log_profile(
+                                    state,
+                                    LogLevel::Info,
+                                    format!("deleted vehicle profile '{name}'"),
+                                );
                             }
                             Err(err) => {
-                                let _ = err;
-                                // TODO: report vehicle profile delete failures in the future log dock.
+                                log_profile(
+                                    state,
+                                    LogLevel::Error,
+                                    format!("failed to delete vehicle profile '{name}': {err}"),
+                                );
                             }
                         },
                         None => {
-                            // TODO: report unavailable vehicle profile config directory in the future log dock.
+                            log_profile(
+                                state,
+                                LogLevel::Warning,
+                                "vehicle profile config directory is unavailable",
+                            );
                         }
                     }
                     close_confirmation = true;
@@ -1814,7 +1886,7 @@ mod tests {
 
         assert!(source.contains("pending_profile_delete"));
         assert!(source.contains("Delete profile?"));
-        assert!(source.contains(concat!("egui::Window::new(\"Delete ", "profile?\")")));
+        assert!(source.contains(concat!("egui::Window", "::new(\"Delete ", "profile?\")")));
         assert!(!source.contains(concat!("ui.", "group(|ui|")));
         assert!(source.contains(".delete("));
     }
