@@ -2005,57 +2005,8 @@ impl eframe::App for DelogApp {
             });
         });
 
-        // The timeline's `utc_offset_us` arg stays None until a parser captures
-        // a UTC reference (BIN GPS week / ULog time_ref_utc); `any_live` stays
-        // false because the snapshot has no streaming flag yet.
         drop(ui_toolbar_timer);
         let range = timeline_range_for_ui(global_range);
-        let ui_timeline_timer = self.session.metrics().scope("ui_timeline");
-        egui::Panel::bottom("timeline").show_inside(ui, |ui| {
-            let action = crate::timeline::ui(
-                ui,
-                &mut self.playback,
-                &mut self.fit_view_all,
-                &mut self.view,
-                range,
-                None,
-                self.session.has_live_links(),
-                self.settings.theme,
-                &self.markers,
-            );
-            if action.lock_live {
-                self.lock_to_live(range);
-            }
-            if action.view_changed {
-                // Dragging the window slider is a manual view change: drop
-                // out of fit-all and live-follow, like a pan/zoom.
-                self.fit_view_all = false;
-                self.playback.unlock_live();
-                self.view_fitted = true;
-            }
-            if let Some(t_us) = action.marker_jump {
-                self.playback.scrub(t_us, range);
-            }
-            if let Some((id, t_us)) = action.marker_move
-                && let Some(m) = self.markers.get_mut(id)
-            {
-                m.t_us = t_us.clamp(range.min_us, range.max_us);
-            }
-            if let Some(id) = action.marker_delete {
-                self.markers.remove(id);
-            }
-            if let Some((id, edit)) = action.marker_edit
-                && let Some(m) = self.markers.get_mut(id)
-            {
-                if let Some(label) = edit.label {
-                    m.label = label;
-                }
-                if let Some(color) = edit.color {
-                    m.color = color;
-                }
-            }
-        });
-        drop(ui_timeline_timer);
 
         // F12 toggles the debug overlay. Handled ungated — it is
         // not a text key, so it works even while a widget holds focus.
@@ -2193,6 +2144,58 @@ impl eframe::App for DelogApp {
                     );
                 });
         }
+
+        // The timeline's `utc_offset_us` arg stays None until a parser captures
+        // a UTC reference (BIN GPS week / ULog time_ref_utc); `any_live` stays
+        // false because the snapshot has no streaming flag yet. It is registered
+        // after the resizable docks so those docks sit below the timeline.
+        let ui_timeline_timer = self.session.metrics().scope("ui_timeline");
+        egui::Panel::bottom("timeline").show_inside(ui, |ui| {
+            let action = crate::timeline::ui(
+                ui,
+                &mut self.playback,
+                &mut self.fit_view_all,
+                &mut self.view,
+                range,
+                None,
+                self.session.has_live_links(),
+                self.settings.theme,
+                &self.markers,
+            );
+            if action.lock_live {
+                self.lock_to_live(range);
+            }
+            if action.view_changed {
+                // Dragging the window slider is a manual view change: drop
+                // out of fit-all and live-follow, like a pan/zoom.
+                self.fit_view_all = false;
+                self.playback.unlock_live();
+                self.view_fitted = true;
+            }
+            if let Some(t_us) = action.marker_jump {
+                self.playback.scrub(t_us, range);
+            }
+            if let Some((id, t_us)) = action.marker_move
+                && let Some(m) = self.markers.get_mut(id)
+            {
+                m.t_us = t_us.clamp(range.min_us, range.max_us);
+            }
+            if let Some(id) = action.marker_delete {
+                self.markers.remove(id);
+            }
+            if let Some((id, edit)) = action.marker_edit
+                && let Some(m) = self.markers.get_mut(id)
+            {
+                if let Some(label) = edit.label {
+                    m.label = label;
+                }
+                if let Some(color) = edit.color {
+                    m.color = color;
+                }
+            }
+        });
+        drop(ui_timeline_timer);
+
         let ui_browser_timer = self.session.metrics().scope("ui_browser");
         if self.browser_collapsed {
             let button_size = browser::panel_toggle_button_size(ui);
