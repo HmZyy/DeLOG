@@ -28,6 +28,8 @@ mod plot;
 mod script_params_io;
 #[cfg(feature = "scripting")]
 mod scripts;
+#[cfg(feature = "scripting")]
+mod repl_complete;
 mod session;
 mod settings;
 mod text_overlay;
