@@ -92,8 +92,7 @@ impl ReplCompletion {
         self.popup.is_some()
     }
 
-    // Test-facing accessor for the open popup's state.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn popup(&self) -> Option<&Popup> {
         self.popup.as_ref()
     }

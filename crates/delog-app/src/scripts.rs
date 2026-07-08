@@ -671,6 +671,12 @@ impl ScriptsPanel {
                     let popup_took_enter =
                         self.completion.handle_popup(ui, &resp, &mut self.repl_input);
 
+                    // Typing (not navigation) while the popup is open dismisses it
+                    // and lets the character pass through to the input.
+                    if resp.changed() {
+                        self.completion.dismiss();
+                    }
+
                     // Tab with no popup open requests completions for the token at the cursor.
                     if dispatch_enabled
                         && resp.has_focus()
