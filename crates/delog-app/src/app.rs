@@ -256,8 +256,8 @@ pub struct DelogApp {
     csv_export_tx: mpsc::Sender<CsvExportResult>,
     csv_export_rx: mpsc::Receiver<CsvExportResult>,
     csv_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    image_export_paths: mpsc::Receiver<crate::image_export::ExportSelection>,
-    image_export_paths_tx: mpsc::Sender<crate::image_export::ExportSelection>,
+    image_export_writes: mpsc::Receiver<crate::image_export::PngWriteRequest>,
+    image_export_writes_tx: mpsc::Sender<crate::image_export::PngWriteRequest>,
     pending_image_capture: Option<crate::image_export::PendingImageCapture>,
     next_image_capture_id: u64,
     last_workspace_rect: Option<egui::Rect>,
@@ -323,7 +323,7 @@ impl DelogApp {
         let (exported_diagnostics_tx, exported_diagnostics) = mpsc::channel();
         let (exported_profiling_tx, exported_profiling) = mpsc::channel();
         let (csv_export_tx, csv_export_rx) = mpsc::channel();
-        let (image_export_paths_tx, image_export_paths) = mpsc::channel();
+        let (image_export_writes_tx, image_export_writes) = mpsc::channel();
         let session = Session::new(cc.egui_ctx.clone());
         // Shared metrics registry so cache metrics land in the same dock.
         let caches = CacheManager::new().with_metrics(std::sync::Arc::clone(session.metrics()));
@@ -369,8 +369,8 @@ impl DelogApp {
             csv_export_tx,
             csv_export_rx,
             csv_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            image_export_paths,
-            image_export_paths_tx,
+            image_export_writes,
+            image_export_writes_tx,
             pending_image_capture: None,
             next_image_capture_id: 1,
             last_workspace_rect: None,
@@ -520,10 +520,9 @@ impl DelogApp {
         &self,
         ctx: &egui::Context,
         kind: crate::image_export::ImageCaptureKind,
-        rect: egui::Rect,
-        pixels_per_point: f32,
+        png_bytes: Vec<u8>,
     ) {
-        let tx = self.image_export_paths_tx.clone();
+        let tx = self.image_export_writes_tx.clone();
         let ctx = ctx.clone();
         let file_name = match kind {
             crate::image_export::ImageCaptureKind::Workspace => "workspace.png",
@@ -538,27 +537,29 @@ impl DelogApp {
                     .set_title("Export PNG")
                     .save_file();
                 if let Some(path) = picked {
-                    let _ = tx.send(crate::image_export::ExportSelection {
-                        path: crate::image_export::png_path(path),
-                        kind,
-                        rect,
-                        pixels_per_point,
-                    });
+                    let _ = tx.send(crate::image_export::PngWriteRequest::new(path, png_bytes));
                     ctx.request_repaint();
                 }
             })
             .expect("spawn image export dialog thread");
     }
 
-    fn handle_image_export_paths(&mut self, ctx: &egui::Context) {
-        while let Ok(selection) = self.image_export_paths.try_recv() {
-            self.request_image_capture(
-                ctx,
-                crate::image_export::ImageCaptureAction::Export(selection.path),
-                selection.kind,
-                selection.rect,
-                selection.pixels_per_point,
-            );
+    fn handle_image_export_writes(&mut self) {
+        while let Ok(request) = self.image_export_writes.try_recv() {
+            match std::fs::write(&request.path, request.png_bytes) {
+                Ok(()) => self
+                    .session
+                    .push_diagnostic(delog_core::diagnostics::Diag::info(
+                        "image-export",
+                        format!("exported image to {}", request.path.display()),
+                    )),
+                Err(err) => self
+                    .session
+                    .push_diagnostic(delog_core::diagnostics::Diag::error(
+                        "image-export",
+                        err.to_string(),
+                    )),
+            }
         }
     }
 
@@ -648,17 +649,9 @@ impl DelogApp {
                             format!("copied {what} image to clipboard"),
                         ));
                 }
-                crate::image_export::ImageCaptureAction::Export(path) => {
-                    match crate::image_export::encode_png(&cropped).and_then(|bytes| {
-                        std::fs::write(&path, bytes).map_err(image::ImageError::IoError)
-                    }) {
-                        Ok(()) => {
-                            self.session
-                                .push_diagnostic(delog_core::diagnostics::Diag::info(
-                                    "image-export",
-                                    format!("exported image to {}", path.display()),
-                                ))
-                        }
+                crate::image_export::ImageCaptureAction::Export => {
+                    match crate::image_export::encode_png(&cropped) {
+                        Ok(png_bytes) => self.spawn_png_export_dialog(ctx, pending.kind, png_bytes),
                         Err(err) => {
                             self.session
                                 .push_diagnostic(delog_core::diagnostics::Diag::error(
@@ -1635,7 +1628,7 @@ impl eframe::App for DelogApp {
         // changed size/family takes effect this frame.
         self.settings.font.apply(ui.ctx());
         self.handle_image_screenshot_events(ui.ctx());
-        self.handle_image_export_paths(ui.ctx());
+        self.handle_image_export_writes();
         // Pre-UI bookkeeping: picked files, job pruning,
         // cache lifecycle + epoch handling, trajectory builds and autosave —
         // none of it inside a panel scope. `ui_prelude` captures this block so
@@ -2079,8 +2072,9 @@ impl eframe::App for DelogApp {
                 .clicked()
                 {
                     if let Some(rect) = self.last_workspace_rect {
-                        self.spawn_png_export_dialog(
+                        self.request_image_capture(
                             ui.ctx(),
+                            crate::image_export::ImageCaptureAction::Export,
                             crate::image_export::ImageCaptureKind::Workspace,
                             rect,
                             ui.ctx().pixels_per_point(),
@@ -2661,8 +2655,9 @@ impl eframe::App for DelogApp {
                                 );
                             }
                             crate::workspace::WorkspaceImageAction::ExportPlot { rect } => {
-                                self.spawn_png_export_dialog(
+                                self.request_image_capture(
                                     ui.ctx(),
+                                    crate::image_export::ImageCaptureAction::Export,
                                     crate::image_export::ImageCaptureKind::Plot,
                                     rect,
                                     ui.ctx().pixels_per_point(),
