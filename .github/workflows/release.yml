@@ -83,9 +83,109 @@ jobs:
           path: ${{ env.ASSET }}
           if-no-files-found: error
 
+  build-bundled:
+    name: build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux-x86_64-bundled
+          - os: windows-latest
+            name: windows-x86_64-bundled
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install system libraries (eframe/wgpu, serialport)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libwayland-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libgl1-mesa-dev libudev-dev
+
+      - name: Install Rust (pinned via rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Fetch bundled Python runtime (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          py="$(scripts/ci/fetch-python-standalone.sh "$PWD/staging/python")"
+          echo "PYO3_PYTHON=$py" >> "$GITHUB_ENV"
+
+      - name: Fetch bundled Python runtime (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/ci/fetch-python-standalone.ps1 -Dest "$PWD\staging\python"
+
+      - name: Build bundled binary
+        run: cargo build --release --locked -p delog-app --no-default-features --features bundled-python
+
+      - name: Stage binary (Linux)
+        if: runner.os == 'Linux'
+        run: cp target/release/delog staging/delog
+
+      - name: Stage binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Copy-Item target/release/delog.exe staging/delog.exe
+
+      - name: Smoke test scripting (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          out="$(staging/delog --check-scripting)"
+          echo "$out"
+          echo "$out" | grep -q "numpy: 2.1.1"
+
+      - name: Smoke test scripting (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $out = & staging\delog.exe --check-scripting
+          $out
+          if ($out -notmatch "numpy: 2.1.1") { exit 1 }
+
+      - name: Package installer (Linux, AppImage)
+        if: runner.os == 'Linux'
+        run: |
+          appdir="DeLOG.AppDir"
+          mkdir -p "$appdir/usr/bin"
+          cp staging/delog "$appdir/usr/bin/delog"
+          cp -r staging/python "$appdir/usr/bin/python"
+          cp packaging/linux/AppRun "$appdir/AppRun"; chmod +x "$appdir/AppRun"
+          cp packaging/linux/delog.desktop "$appdir/delog.desktop"
+          cp docs/logo.png "$appdir/delog.png"
+          curl -fL -o appimagetool "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
+          chmod +x appimagetool
+          ./appimagetool --appimage-extract-and-run "$appdir" "DeLOG-${GITHUB_REF_NAME}-x86_64.AppImage"
+          echo "ASSET=DeLOG-${GITHUB_REF_NAME}-x86_64.AppImage" >> "$GITHUB_ENV"
+
+      - name: Package installer (Windows, Inno Setup)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          $ver = "${env:GITHUB_REF_NAME}".TrimStart("v")
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
+            "/DMyAppVersion=$ver" "/DStagingDir=$PWD\staging" packaging\windows\delog.iss
+          $asset = "delog-$ver-windows-x86_64-bundled-setup.exe"
+          Copy-Item "packaging\windows\Output\$asset" "$asset"
+          "ASSET=$asset" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ env.ASSET }}
+          if-no-files-found: error
+
   release:
     name: publish release
-    needs: build
+    needs: [build, build-bundled]
     runs-on: ubuntu-latest
     steps:
       - name: Download build artifacts
