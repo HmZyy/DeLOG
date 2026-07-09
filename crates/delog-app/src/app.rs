@@ -8,11 +8,14 @@ use serde::Serialize;
 
 use crate::browser::{self, BrowserFilterCache, BrowserModel};
 use crate::diagnostics::DiagnosticsDock;
+use crate::docks::{AppDockController, AppDockTab};
 use crate::field_stats::{FieldStatsController, StatsRequestKey, StatsTab};
 use crate::gpu::GpuBridge;
 use crate::layout::{LayoutApply, LayoutDoc, LayoutError, LoadOutcome, PendingLayout};
 use crate::live::ConnectionDialog;
-use crate::logging::{LogLevel, LogRecord, LoggingDock, PendingLog};
+#[cfg(feature = "scripting")]
+use crate::logging::LogLevel;
+use crate::logging::{LogRecord, LoggingDock, PendingLog};
 use crate::performance::{PerformanceDock, PerformanceSnapshot, ResourceSummary, TraceSummary};
 use crate::plot::ViewX;
 #[cfg(feature = "scripting")]
@@ -253,6 +256,7 @@ pub struct DelogApp {
     csv_export_rx: mpsc::Receiver<CsvExportResult>,
     csv_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     browser_collapsed: bool,
+    docks: AppDockController,
     diagnostics_dock: DiagnosticsDock,
     last_diagnostic_seq: Option<u64>,
     logging_dock: LoggingDock,
@@ -359,6 +363,7 @@ impl DelogApp {
             csv_export_rx,
             csv_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             browser_collapsed: false,
+            docks: AppDockController::new_empty(),
             diagnostics_dock: DiagnosticsDock::default(),
             last_diagnostic_seq: None,
             logging_dock: LoggingDock::default(),
@@ -404,6 +409,71 @@ impl DelogApp {
             traj_results,
             traj_results_tx,
         }
+    }
+
+    fn dock_open_checkbox(&mut self, ui: &mut egui::Ui, tab: AppDockTab, label: &str) {
+        let mut open = self.docks.is_open(tab);
+        if ui.checkbox(&mut open, label).clicked() {
+            if open {
+                self.open_dock(tab);
+            } else {
+                self.close_dock(tab);
+            }
+            ui.close();
+        }
+    }
+
+    fn open_dock(&mut self, tab: AppDockTab) {
+        self.set_legacy_dock_open(tab, true);
+        self.docks.open_or_focus(tab);
+    }
+
+    fn close_dock(&mut self, tab: AppDockTab) {
+        self.set_legacy_dock_open(tab, false);
+        self.docks.close(tab);
+    }
+
+    fn set_legacy_dock_open(&mut self, tab: AppDockTab, open: bool) {
+        match tab {
+            AppDockTab::Diagnostics => self.diagnostics_dock.open = open,
+            AppDockTab::Performance => self.performance_dock.open = open,
+            AppDockTab::Markers => self.markers_dock.open = open,
+            #[cfg(feature = "scripting")]
+            AppDockTab::ScriptingConsole => self.scripts.set_console_open(open),
+            AppDockTab::Logging => self.logging_dock.open = open,
+        }
+    }
+
+    fn sync_dock_from_legacy_flag(&mut self, tab: AppDockTab, open: bool) {
+        if open {
+            if !self.docks.is_open(tab) {
+                self.docks.open_or_focus(tab);
+            }
+        } else if self.docks.is_open(tab) {
+            self.docks.close(tab);
+        }
+    }
+
+    fn sync_docks_from_legacy_flags(&mut self) {
+        self.sync_dock_from_legacy_flag(AppDockTab::Diagnostics, self.diagnostics_dock.open);
+        self.sync_dock_from_legacy_flag(AppDockTab::Performance, self.performance_dock.open);
+        self.sync_dock_from_legacy_flag(AppDockTab::Markers, self.markers_dock.open);
+        #[cfg(feature = "scripting")]
+        self.sync_dock_from_legacy_flag(AppDockTab::ScriptingConsole, self.scripts.console_open);
+        self.sync_dock_from_legacy_flag(AppDockTab::Logging, self.logging_dock.open);
+    }
+
+    fn sync_legacy_dock_flag_from_state(&mut self, tab: AppDockTab) {
+        self.set_legacy_dock_open(tab, self.docks.is_open(tab));
+    }
+
+    fn sync_legacy_dock_flags_from_state(&mut self) {
+        self.sync_legacy_dock_flag_from_state(AppDockTab::Diagnostics);
+        self.sync_legacy_dock_flag_from_state(AppDockTab::Performance);
+        self.sync_legacy_dock_flag_from_state(AppDockTab::Markers);
+        #[cfg(feature = "scripting")]
+        self.sync_legacy_dock_flag_from_state(AppDockTab::ScriptingConsole);
+        self.sync_legacy_dock_flag_from_state(AppDockTab::Logging);
     }
 
     /// On a worker thread so the native dialog never blocks the UI.
@@ -1559,38 +1629,12 @@ impl eframe::App for DelogApp {
                     }
                 });
                 ui.menu_button("View", |ui| {
-                    if ui
-                        .checkbox(&mut self.diagnostics_dock.open, "Diagnostic (F1)")
-                        .clicked()
-                    {
-                        ui.close();
-                    }
-                    if ui
-                        .checkbox(&mut self.performance_dock.open, "Performance (F2)")
-                        .clicked()
-                    {
-                        ui.close();
-                    }
-                    if ui
-                        .checkbox(&mut self.markers_dock.open, "Markers (F3)")
-                        .clicked()
-                    {
-                        ui.close();
-                    }
+                    self.dock_open_checkbox(ui, AppDockTab::Diagnostics, "Diagnostic (F1)");
+                    self.dock_open_checkbox(ui, AppDockTab::Performance, "Performance (F2)");
+                    self.dock_open_checkbox(ui, AppDockTab::Markers, "Markers (F3)");
                     #[cfg(feature = "scripting")]
-                    {
-                        let mut console_open = self.scripts.console_open;
-                        if ui.checkbox(&mut console_open, "Scripting (F9)").clicked() {
-                            self.scripts.set_console_open(console_open);
-                            ui.close();
-                        }
-                    }
-                    if ui
-                        .checkbox(&mut self.logging_dock.open, "Logging (F12)")
-                        .clicked()
-                    {
-                        ui.close();
-                    }
+                    self.dock_open_checkbox(ui, AppDockTab::ScriptingConsole, "Scripting (F9)");
+                    self.dock_open_checkbox(ui, AppDockTab::Logging, "Logging (F12)");
                 });
                 ui.menu_button("Layout", |ui| {
                     if ui.button("Save Layout...").clicked() {
@@ -1954,7 +1998,7 @@ impl eframe::App for DelogApp {
         drop(ui_toolbar_timer);
         let range = timeline_range_for_ui(global_range);
 
-        let (toggle_diagnostics, toggle_performance, toggle_markers, toggle_logging) =
+        let (focus_diagnostics, focus_performance, focus_markers, focus_logging) =
             ui.ctx().input(|i| {
                 (
                     i.key_pressed(egui::Key::F1),
@@ -1963,21 +2007,21 @@ impl eframe::App for DelogApp {
                     i.key_pressed(egui::Key::F12),
                 )
             });
-        if toggle_diagnostics {
-            self.diagnostics_dock.open = !self.diagnostics_dock.open;
+        if focus_diagnostics {
+            self.open_dock(AppDockTab::Diagnostics);
         }
-        if toggle_performance {
-            self.performance_dock.open = !self.performance_dock.open;
+        if focus_performance {
+            self.open_dock(AppDockTab::Performance);
         }
-        if toggle_markers {
-            self.markers_dock.open = !self.markers_dock.open;
+        if focus_markers {
+            self.open_dock(AppDockTab::Markers);
         }
-        if toggle_logging {
-            self.logging_dock.open = !self.logging_dock.open;
+        if focus_logging {
+            self.open_dock(AppDockTab::Logging);
         }
         #[cfg(feature = "scripting")]
         if ui.ctx().input(|i| i.key_pressed(egui::Key::F9)) {
-            self.scripts.set_console_open(!self.scripts.console_open);
+            self.open_dock(AppDockTab::ScriptingConsole);
         }
 
         // Transport keys — skipped while a widget owns the
@@ -2039,76 +2083,98 @@ impl eframe::App for DelogApp {
                 self.last_diagnostic_seq,
                 newest_seq,
             ) {
-                self.diagnostics_dock.open = true;
+                self.open_dock(AppDockTab::Diagnostics);
             }
             self.last_diagnostic_seq = Some(newest_seq);
         }
-        if self.diagnostics_dock.open {
-            egui::Panel::bottom("diagnostics")
-                .resizable(true)
-                .default_size(240.0)
-                .show_inside(ui, |ui| {
-                    let action = self.diagnostics_dock.ui(ui, &diagnostics, &snapshot);
-                    if action.clear {
-                        self.session.clear_diagnostics();
-                    }
-                    if let Some(t_us) = action.jump_to_time_us
-                        && let Some(range) = snapshot.global_time_range()
-                    {
-                        self.playback.scrub(t_us, range);
-                    }
-                });
-        }
         drop(ui_diagnostics_timer);
-        if self.logging_dock.open {
-            egui::Panel::bottom("logging")
-                .resizable(true)
-                .default_size(240.0)
-                .show_inside(ui, |ui| {
-                    let action = self.logging_dock.ui(ui, &self.logs);
-                    if action.clear {
-                        self.logs.clear();
-                    }
-                });
-        }
         let ui_performance_timer = self.session.metrics().scope("ui_performance");
-        if self.performance_dock.open {
+        if self.docks.is_open(AppDockTab::Performance) {
             self.refresh_performance_snapshot(frame, &snapshot);
             ui.ctx().request_repaint_after(PERFORMANCE_REFRESH_INTERVAL);
-            egui::Panel::bottom("performance")
-                .resizable(true)
-                .default_size(220.0)
-                .show_inside(ui, |ui| {
-                    self.performance_dock.ui(ui, &self.performance_snapshot);
-                });
         }
-
         drop(ui_performance_timer);
-        if self.markers_dock.open {
-            egui::Panel::bottom("markers")
+        self.sync_docks_from_legacy_flags();
+        if self.docks.has_tabs() {
+            let mut actions = PendingDockActions::default();
+            #[cfg(feature = "scripting")]
+            let store = self.session.store();
+            #[cfg(feature = "scripting")]
+            let ingest_sender = self.session.ingest_sender();
+            #[cfg(feature = "scripting")]
+            let metrics = self.session.metrics();
+            let show_docks = |ui: &mut egui::Ui,
+                              docks: &mut AppDockController,
+                              viewer: &mut AppDockViewer<'_>| {
+                docks.show_inside(ui, viewer);
+            };
+            let mut render_docks = |ui: &mut egui::Ui| {
+                let mut viewer = AppDockViewer {
+                    diagnostics_dock: &mut self.diagnostics_dock,
+                    diagnostics: &diagnostics,
+                    snapshot: &snapshot,
+                    logging_dock: &mut self.logging_dock,
+                    logs: &self.logs,
+                    performance_dock: &mut self.performance_dock,
+                    performance_snapshot: &self.performance_snapshot,
+                    markers_dock: &mut self.markers_dock,
+                    markers: &mut self.markers,
+                    origin_us: self.origin_us,
+                    #[cfg(feature = "scripting")]
+                    scripts: &mut self.scripts,
+                    #[cfg(feature = "scripting")]
+                    store: &store,
+                    #[cfg(feature = "scripting")]
+                    ingest_sender: &ingest_sender,
+                    #[cfg(feature = "scripting")]
+                    metrics,
+                    actions: &mut actions,
+                };
+                show_docks(ui, &mut self.docks, &mut viewer);
+            };
+
+            egui::Panel::bottom("app_docks")
                 .resizable(true)
-                .default_size(200.0)
+                .default_size(240.0)
                 .show_inside(ui, |ui| {
-                    if let Some(t_us) = self.markers_dock.ui(ui, &mut self.markers, self.origin_us)
-                        && let Some(range) = snapshot.global_time_range()
-                    {
-                        self.playback.scrub(t_us, range);
-                    }
+                    render_docks(ui);
                 });
-        }
-        #[cfg(feature = "scripting")]
-        if self.scripts.console_open {
-            egui::Panel::bottom("scripting_console")
-                .resizable(true)
-                .default_size(crate::scripts::SCRIPTING_CONSOLE_DEFAULT_HEIGHT)
-                .show_inside(ui, |ui| {
-                    self.scripts.console_dock_ui(
-                        ui,
-                        &self.session.store(),
-                        &self.session.ingest_sender(),
-                        self.session.metrics(),
-                    );
-                });
+
+            if !self.diagnostics_dock.open {
+                self.sync_dock_from_legacy_flag(AppDockTab::Diagnostics, false);
+            }
+            if !self.logging_dock.open {
+                self.sync_dock_from_legacy_flag(AppDockTab::Logging, false);
+            }
+            if !self.performance_dock.open {
+                self.sync_dock_from_legacy_flag(AppDockTab::Performance, false);
+            }
+            if !self.markers_dock.open {
+                self.sync_dock_from_legacy_flag(AppDockTab::Markers, false);
+            }
+            #[cfg(feature = "scripting")]
+            if !self.scripts.console_open {
+                self.sync_dock_from_legacy_flag(AppDockTab::ScriptingConsole, false);
+            }
+
+            self.sync_legacy_dock_flags_from_state();
+
+            if actions.clear_diagnostics {
+                self.session.clear_diagnostics();
+            }
+            if let Some(t_us) = actions.diagnostic_jump_us
+                && let Some(range) = snapshot.global_time_range()
+            {
+                self.playback.scrub(t_us, range);
+            }
+            if actions.clear_logs {
+                self.logs.clear();
+            }
+            if let Some(t_us) = actions.marker_jump_us
+                && let Some(range) = snapshot.global_time_range()
+            {
+                self.playback.scrub(t_us, range);
+            }
         }
 
         // The timeline's `utc_offset_us` arg stays None until a parser captures
@@ -3115,6 +3181,90 @@ fn source_kind_label(label: &str) -> &'static str {
         "Derived"
     } else {
         "File"
+    }
+}
+
+#[derive(Default)]
+struct PendingDockActions {
+    clear_diagnostics: bool,
+    diagnostic_jump_us: Option<i64>,
+    clear_logs: bool,
+    marker_jump_us: Option<i64>,
+}
+
+struct AppDockViewer<'a> {
+    diagnostics_dock: &'a mut DiagnosticsDock,
+    diagnostics: &'a [DiagRecord],
+    snapshot: &'a delog_core::snapshot::StoreSnapshot,
+    logging_dock: &'a mut LoggingDock,
+    logs: &'a [LogRecord],
+    performance_dock: &'a mut PerformanceDock,
+    performance_snapshot: &'a PerformanceSnapshot,
+    markers_dock: &'a mut crate::markers::MarkersDock,
+    markers: &'a mut crate::markers::Markers,
+    origin_us: i64,
+    #[cfg(feature = "scripting")]
+    scripts: &'a mut scripts::ScriptsPanel,
+    #[cfg(feature = "scripting")]
+    store: &'a Arc<delog_core::snapshot::DataStore>,
+    #[cfg(feature = "scripting")]
+    ingest_sender: &'a delog_core::ingest::IngestSender,
+    #[cfg(feature = "scripting")]
+    metrics: &'a Arc<delog_core::metrics::MetricsRegistry>,
+    actions: &'a mut PendingDockActions,
+}
+
+impl egui_dock::TabViewer for AppDockViewer<'_> {
+    type Tab = AppDockTab;
+
+    fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
+        match tab {
+            AppDockTab::Diagnostics => "Diagnostics".into(),
+            AppDockTab::Performance => "Performance".into(),
+            AppDockTab::Markers => "Markers".into(),
+            #[cfg(feature = "scripting")]
+            AppDockTab::ScriptingConsole => "Scripting".into(),
+            AppDockTab::Logging => "Logging".into(),
+        }
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
+        match tab {
+            AppDockTab::Diagnostics => {
+                let action = self
+                    .diagnostics_dock
+                    .ui(ui, self.diagnostics, self.snapshot);
+                if action.clear {
+                    self.actions.clear_diagnostics = true;
+                }
+                if action.jump_to_time_us.is_some() {
+                    self.actions.diagnostic_jump_us = action.jump_to_time_us;
+                }
+            }
+            AppDockTab::Performance => {
+                self.performance_dock.ui(ui, self.performance_snapshot);
+            }
+            AppDockTab::Markers => {
+                if let Some(t_us) = self.markers_dock.ui(ui, self.markers, self.origin_us) {
+                    self.actions.marker_jump_us = Some(t_us);
+                }
+            }
+            #[cfg(feature = "scripting")]
+            AppDockTab::ScriptingConsole => {
+                self.scripts
+                    .console_dock_ui(ui, self.store, self.ingest_sender, self.metrics);
+            }
+            AppDockTab::Logging => {
+                let action = self.logging_dock.ui(ui, self.logs);
+                if action.clear {
+                    self.actions.clear_logs = true;
+                }
+            }
+        }
+    }
+
+    fn allowed_in_windows(&self, _tab: &mut Self::Tab) -> bool {
+        false
     }
 }
 
