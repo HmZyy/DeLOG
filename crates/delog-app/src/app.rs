@@ -3035,72 +3035,145 @@ fn show_field_stats_window(
         .default_width(360.0)
         .resizable(false)
         .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                if ui
-                    .selectable_label(tab == StatsTab::Visible, "Visible window")
-                    .clicked()
-                {
-                    controller.set_tab(StatsTab::Visible);
-                }
-                if ui
-                    .selectable_label(tab == StatsTab::Global, "Global")
-                    .clicked()
-                {
-                    controller.set_tab(StatsTab::Global);
-                }
-            });
-            ui.separator();
-
-            if tab == StatsTab::Visible {
-                if let Some(view) = view {
-                    ui.horizontal(|ui| {
-                        ui.weak(format!(
-                            "{} to {}",
-                            format_time_us(view.min_us),
-                            format_time_us(view.max_us)
-                        ));
-                        if updating {
-                            ui.label(
-                                egui::RichText::new("Updating...")
-                                    .color(ui.visuals().hyperlink_color),
-                            );
-                        }
-                    });
-                }
-                if let Some(error) = error.as_deref() {
-                    if error == "This field is not numeric." {
-                        ui.weak(error);
-                    } else {
-                        ui.colored_label(ui.visuals().error_fg_color, error);
-                    }
-                } else {
-                    ui.add_enabled_ui(!updating || displayed.is_none(), |ui| {
-                        stats_grid(
-                            ui,
-                            "visible_field_stats_grid",
-                            displayed,
-                            provisional,
-                            &suffix,
-                        );
-                    });
-                }
-            } else {
-                match delog_core::analysis::global_field_stats(snapshot, field_id) {
-                    Ok(Some(stats)) => {
-                        stats_grid(ui, "global_field_stats_grid", Some(stats), None, &suffix)
-                    }
-                    Ok(None) => {
-                        ui.weak("This field is not numeric.");
-                    }
-                    Err(err) => {
-                        ui.colored_label(ui.visuals().error_fg_color, err.to_string());
-                    }
-                }
-            }
+            let mut dock_state = field_stats_dock_state(tab);
+            let mut viewer = FieldStatsTabViewer {
+                snapshot,
+                field_id,
+                view,
+                displayed,
+                provisional,
+                updating,
+                error: error.as_deref(),
+                suffix: &suffix,
+            };
+            egui_dock::DockArea::new(&mut dock_state)
+                .id(egui::Id::new(("field_stats_dock_area", field_id.0)))
+                .style(egui_dock::Style::from_egui(ui.style().as_ref()))
+                .allowed_splits(egui_dock::AllowedSplits::None)
+                .draggable_tabs(false)
+                .tab_context_menus(false)
+                .show_close_buttons(false)
+                .show_leaf_close_all_buttons(false)
+                .show_leaf_collapse_buttons(false)
+                .show_inside(ui, &mut viewer);
+            controller.set_tab(active_field_stats_tab(&mut dock_state));
         });
 
     if !open {
         controller.close();
+    }
+}
+
+fn field_stats_dock_state(active_tab: StatsTab) -> egui_dock::DockState<StatsTab> {
+    let mut dock_state = egui_dock::DockState::new(StatsTab::ALL.to_vec());
+    if let Some(path) = dock_state.find_tab(&active_tab) {
+        let _ = dock_state.set_active_tab(path);
+        dock_state.set_focused_node_and_surface(path.node_path());
+    }
+    dock_state
+}
+
+fn active_field_stats_tab(dock_state: &mut egui_dock::DockState<StatsTab>) -> StatsTab {
+    dock_state
+        .find_active_focused()
+        .map(|(_, tab)| *tab)
+        .unwrap_or_default()
+}
+
+struct FieldStatsTabViewer<'a> {
+    snapshot: &'a delog_core::snapshot::StoreSnapshot,
+    field_id: delog_core::identity::FieldId,
+    view: Option<ViewX>,
+    displayed: Option<delog_core::analysis::FieldStats>,
+    provisional: Option<(f64, f64)>,
+    updating: bool,
+    error: Option<&'a str>,
+    suffix: &'a str,
+}
+
+impl egui_dock::TabViewer for FieldStatsTabViewer<'_> {
+    type Tab = StatsTab;
+
+    fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
+        tab.label().into()
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
+        match tab {
+            StatsTab::Visible => show_visible_field_stats_tab(
+                ui,
+                self.view,
+                self.displayed,
+                self.provisional,
+                self.updating,
+                self.error,
+                self.suffix,
+            ),
+            StatsTab::Global => {
+                show_global_field_stats_tab(ui, self.snapshot, self.field_id, self.suffix)
+            }
+        }
+    }
+
+    fn allowed_in_windows(&self, _tab: &mut Self::Tab) -> bool {
+        false
+    }
+}
+
+fn show_visible_field_stats_tab(
+    ui: &mut egui::Ui,
+    view: Option<ViewX>,
+    displayed: Option<delog_core::analysis::FieldStats>,
+    provisional: Option<(f64, f64)>,
+    updating: bool,
+    error: Option<&str>,
+    suffix: &str,
+) {
+    if let Some(view) = view {
+        ui.horizontal(|ui| {
+            ui.weak(format!(
+                "{} to {}",
+                format_time_us(view.min_us),
+                format_time_us(view.max_us)
+            ));
+            if updating {
+                ui.label(egui::RichText::new("Updating...").color(ui.visuals().hyperlink_color));
+            }
+        });
+    }
+    if let Some(error) = error {
+        if error == "This field is not numeric." {
+            ui.weak(error);
+        } else {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        }
+    } else {
+        ui.add_enabled_ui(!updating || displayed.is_none(), |ui| {
+            stats_grid(
+                ui,
+                "visible_field_stats_grid",
+                displayed,
+                provisional,
+                suffix,
+            );
+        });
+    }
+}
+
+fn show_global_field_stats_tab(
+    ui: &mut egui::Ui,
+    snapshot: &delog_core::snapshot::StoreSnapshot,
+    field_id: delog_core::identity::FieldId,
+    suffix: &str,
+) {
+    match delog_core::analysis::global_field_stats(snapshot, field_id) {
+        Ok(Some(stats)) => stats_grid(ui, "global_field_stats_grid", Some(stats), None, suffix),
+        Ok(None) => {
+            ui.weak("This field is not numeric.");
+        }
+        Err(err) => {
+            ui.colored_label(ui.visuals().error_fg_color, err.to_string());
+        }
     }
 }
 
@@ -3561,6 +3634,22 @@ mod tests {
             field_stats_window_title("flight / ATT.Roll"),
             "flight / ATT.Roll"
         );
+    }
+
+    #[test]
+    fn field_stats_tabs_use_egui_dock() {
+        let source = include_str!("app.rs");
+        let field_stats_window = source
+            .split("fn show_field_stats_window")
+            .nth(1)
+            .expect("field stats window should exist")
+            .split("fn stats_grid")
+            .next()
+            .expect("field stats window should precede stats grid");
+
+        assert!(field_stats_window.contains("egui_dock::DockArea::new"));
+        assert!(source.contains("impl egui_dock::TabViewer for FieldStatsTabViewer"));
+        assert!(!field_stats_window.contains("selectable_label"));
     }
 
     #[test]
