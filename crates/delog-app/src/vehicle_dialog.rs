@@ -7,12 +7,23 @@ use crate::logging::{LogLevel, PendingLog, log};
 use crate::vehicle::{GeoRef, ModelKind, NedReference, OriMapping, PosMapping, VehicleConfig};
 use crate::vehicle_profiles::{VEHICLE_PROFILE_VERSION, VehicleProfileDoc, VehicleProfileLibrary};
 
-const DIALOG_WIDTH: f32 = 240.0;
+const DIALOG_WIDTH: f32 = 320.0;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum VehicleDialogTab {
     Vehicles,
     Profiles,
+}
+
+impl VehicleDialogTab {
+    const ALL: [Self; 2] = [Self::Vehicles, Self::Profiles];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Vehicles => "Vehicle Config",
+            Self::Profiles => "Profiles",
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -534,7 +545,7 @@ pub struct VehicleDialog {
     pub open: bool,
     drafts: Vec<Draft>,
     was_open: bool,
-    selected_tab: VehicleDialogTab,
+    dock_state: egui_dock::DockState<VehicleDialogTab>,
     profiles: Vec<String>,
     profile_editor_selected: Option<String>,
     profile_editor_name: String,
@@ -549,7 +560,7 @@ impl Default for VehicleDialog {
             open: false,
             drafts: Vec::new(),
             was_open: false,
-            selected_tab: VehicleDialogTab::Vehicles,
+            dock_state: egui_dock::DockState::new(VehicleDialogTab::ALL.to_vec()),
             profiles: Vec::new(),
             profile_editor_selected: None,
             profile_editor_name: String::new(),
@@ -835,24 +846,22 @@ pub fn show(
             ui.set_min_width(DIALOG_WIDTH);
             ui.add_space(8.0);
 
-            ui.horizontal(|ui| {
-                ui.selectable_value(
-                    &mut state.selected_tab,
-                    VehicleDialogTab::Vehicles,
-                    "Vehicle Config",
-                );
-                ui.selectable_value(
-                    &mut state.selected_tab,
-                    VehicleDialogTab::Profiles,
-                    "Profiles",
-                );
-            });
-            ui.separator();
-
-            match state.selected_tab {
-                VehicleDialogTab::Vehicles => show_vehicle_config_tab(ui, state, snapshot),
-                VehicleDialogTab::Profiles => show_profiles_tab(ui, state, snapshot),
-            }
+            let mut dock_state = std::mem::replace(
+                &mut state.dock_state,
+                egui_dock::DockState::new(VehicleDialogTab::ALL.to_vec()),
+            );
+            let mut viewer = VehicleDialogTabViewer { state, snapshot };
+            egui_dock::DockArea::new(&mut dock_state)
+                .id(egui::Id::new("vehicle_dialog_dock_area"))
+                .style(egui_dock::Style::from_egui(ui.style().as_ref()))
+                .allowed_splits(egui_dock::AllowedSplits::None)
+                .draggable_tabs(false)
+                .tab_context_menus(false)
+                .show_close_buttons(false)
+                .show_leaf_close_all_buttons(false)
+                .show_leaf_collapse_buttons(false)
+                .show_inside(ui, &mut viewer);
+            state.dock_state = dock_state;
         });
     show_profile_delete_confirmation(ctx, state);
     state.open = open;
@@ -873,6 +882,30 @@ pub fn show(
         .ne(vehicles.iter().map(|v| (v.source, &v.pos)));
     *vehicles = rebuilt;
     traj_changed
+}
+
+struct VehicleDialogTabViewer<'a> {
+    state: &'a mut VehicleDialog,
+    snapshot: &'a StoreSnapshot,
+}
+
+impl egui_dock::TabViewer for VehicleDialogTabViewer<'_> {
+    type Tab = VehicleDialogTab;
+
+    fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
+        tab.label().into()
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
+        match tab {
+            VehicleDialogTab::Vehicles => show_vehicle_config_tab(ui, self.state, self.snapshot),
+            VehicleDialogTab::Profiles => show_profiles_tab(ui, self.state, self.snapshot),
+        }
+    }
+
+    fn allowed_in_windows(&self, _tab: &mut Self::Tab) -> bool {
+        false
+    }
 }
 
 fn show_vehicle_config_tab(ui: &mut egui::Ui, state: &mut VehicleDialog, snapshot: &StoreSnapshot) {
@@ -1856,6 +1889,20 @@ mod tests {
         assert!(source.contains("Angle Unit"));
         assert!(source.contains("Delete profile?"));
         assert!(!source.contains(concat!("open_vehicle", "_profile")));
+    }
+
+    #[test]
+    fn vehicle_dialog_tabs_use_egui_dock() {
+        let source = include_str!("vehicle_dialog.rs");
+
+        assert!(source.contains("egui_dock::DockArea::new"));
+        assert!(source.contains("impl egui_dock::TabViewer for VehicleDialogTabViewer"));
+        assert!(!source.contains(concat!("selected", "_tab: VehicleDialogTab")));
+    }
+
+    #[test]
+    fn vehicle_dialog_default_width_is_wider_than_original_config() {
+        assert!(DIALOG_WIDTH > 240.0);
     }
 
     #[test]
