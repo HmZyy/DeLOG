@@ -10,6 +10,7 @@ const POPUP_SOURCES: &[&str] = &[
     include_str!("../src/workspace.rs"),
 ];
 const APP_SOURCE: &str = include_str!("../src/app.rs");
+const DOCKS_SOURCE: &str = include_str!("../src/docks.rs");
 const SCRIPTS_SOURCE: &str = include_str!("../src/scripts.rs");
 const WORKSPACE_SOURCE: &str = include_str!("../src/workspace.rs");
 const SETTINGS_SOURCE: &str = include_str!("../src/settings.rs");
@@ -30,9 +31,9 @@ fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
 
 #[test]
 fn menus_expose_scripts_parsers_and_scripting_console_dock() {
-    assert!(APP_SOURCE.contains("checkbox(&mut console_open, \"Scripting (F9)\")"));
-    assert!(APP_SOURCE.contains("self.scripts.set_console_open(console_open);"));
-    assert!(APP_SOURCE.contains("checkbox(&mut self.logging_dock.open, \"Logging (F12)\")"));
+    assert!(APP_SOURCE.contains("AppDockTab::ScriptingConsole, \"Scripting (F9)\""));
+    assert!(APP_SOURCE.contains("AppDockTab::Logging, \"Logging (F12)\""));
+    assert!(APP_SOURCE.contains("self.dock_open_checkbox(ui, AppDockTab::ScriptingConsole"));
     assert!(APP_SOURCE.contains("ui.menu_button(\"Scripts\""));
     assert!(APP_SOURCE.contains("ui.menu_button(\"Parsers\""));
     assert!(APP_SOURCE.contains("ui.button(\"Editor...\")"));
@@ -41,7 +42,7 @@ fn menus_expose_scripts_parsers_and_scripting_console_dock() {
 }
 
 #[test]
-fn view_menu_orders_docks_and_function_keys_toggle_them() {
+fn view_menu_orders_docks_and_function_keys_focus_them() {
     let view_menu = between(
         APP_SOURCE,
         "ui.menu_button(\"View\"",
@@ -72,25 +73,94 @@ fn view_menu_orders_docks_and_function_keys_toggle_them() {
     ] {
         assert!(APP_SOURCE.contains(key));
     }
+
+    assert!(APP_SOURCE.contains("self.open_dock(AppDockTab::Diagnostics);"));
+    assert!(APP_SOURCE.contains("self.open_dock(AppDockTab::Performance);"));
+    assert!(APP_SOURCE.contains("self.open_dock(AppDockTab::Markers);"));
+    assert!(APP_SOURCE.contains("self.open_dock(AppDockTab::ScriptingConsole);"));
+    assert!(APP_SOURCE.contains("self.open_dock(AppDockTab::Logging);"));
+    assert!(!APP_SOURCE.contains("self.diagnostics_dock.open = !self.diagnostics_dock.open"));
+    assert!(!APP_SOURCE.contains("self.performance_dock.open = !self.performance_dock.open"));
+    assert!(!APP_SOURCE.contains("self.markers_dock.open = !self.markers_dock.open"));
+    assert!(!APP_SOURCE.contains("self.logging_dock.open = !self.logging_dock.open"));
 }
 
 #[test]
-fn logging_dock_matches_diagnostics_height() {
-    assert!(APP_SOURCE.contains("egui::Panel::bottom(\"logging\")"));
+fn bottom_docks_use_egui_dock_fixed_tabs_without_floating_or_reordering() {
+    assert!(APP_SOURCE.contains("egui::Panel::bottom(\"app_docks\")"));
     assert!(APP_SOURCE.contains(".default_size(240.0)"));
+    assert!(APP_SOURCE.contains("docks.show_inside(ui, viewer);"));
+    assert!(DOCKS_SOURCE.contains("egui_dock::DockArea"));
+    assert!(DOCKS_SOURCE.contains("egui_dock::AllowedSplits::None"));
+    assert!(DOCKS_SOURCE.contains(".draggable_tabs(false)"));
+    assert!(DOCKS_SOURCE.contains(".show_close_buttons(true)"));
+    assert!(DOCKS_SOURCE.contains(".show_leaf_close_all_buttons(true)"));
+    assert!(DOCKS_SOURCE.contains(".show_leaf_collapse_buttons(false)"));
+    assert!(DOCKS_SOURCE.contains("FIXED_ORDER"));
+    assert!(DOCKS_SOURCE.contains("pub fn open_tabs(&self) -> Vec<AppDockTab>"));
+    assert!(APP_SOURCE.contains("fn allowed_in_windows(&self, _tab: &mut Self::Tab) -> bool"));
+    assert!(!APP_SOURCE.contains("egui::Panel::bottom(\"diagnostics\")"));
+    assert!(!APP_SOURCE.contains("egui::Panel::bottom(\"logging\")"));
+    assert!(!APP_SOURCE.contains("egui::Panel::bottom(\"performance\")"));
+    assert!(!APP_SOURCE.contains("egui::Panel::bottom(\"markers\")"));
+    assert!(!APP_SOURCE.contains("egui::Panel::bottom(\"scripting_console\")"));
 }
 
 #[test]
-fn scripting_console_dock_matches_diagnostics_height_and_reserves_prompt() {
-    assert!(APP_SOURCE.contains(".default_size(crate::scripts::SCRIPTING_CONSOLE_DEFAULT_HEIGHT)"));
-    assert!(SCRIPTS_SOURCE.contains("pub const SCRIPTING_CONSOLE_DEFAULT_HEIGHT: f32 = 240.0;"));
-    assert!(SCRIPTS_SOURCE.contains("egui::Panel::bottom(\"scripting_console_input\")"));
+fn bottom_dock_bodies_do_not_render_redundant_headers_or_close_buttons() {
+    let diagnostics = include_str!("../src/diagnostics.rs");
+    let logging = include_str!("../src/logging.rs");
+    let performance = include_str!("../src/performance.rs");
+    let markers = include_str!("../src/markers.rs");
+
+    for source in [diagnostics, logging, performance, markers, SCRIPTS_SOURCE] {
+        assert!(!source.contains("ui.button(\"Close\")"));
+        assert!(!source.contains("ui.button(\"Clear\")"));
+    }
+
+    assert!(!diagnostics.contains("ui.strong(\"Diagnostics\")"));
+    assert!(!logging.contains("ui.strong(\"Logging\")"));
+    assert!(!performance.contains("ui.strong(\"Performance\")"));
+    assert!(!markers.contains("ui.strong(\"Markers\")"));
+    assert!(!SCRIPTS_SOURCE.contains("ui.strong(\"Scripting Console\")"));
+
+    assert!(diagnostics.contains("crate::icons::trash()"));
+    assert!(logging.contains("crate::icons::trash()"));
+    assert!(SCRIPTS_SOURCE.contains("crate::icons::trash()"));
+}
+
+#[test]
+fn clear_trash_buttons_are_aligned_to_the_right_of_their_control_rows() {
+    let diagnostics = include_str!("../src/diagnostics.rs");
+    let logging = include_str!("../src/logging.rs");
+    let diagnostics_controls = between(
+        diagnostics,
+        "egui::TextEdit::singleline(&mut self.search)",
+        "let filtered = filtered_records(",
+    );
+    let logging_controls = between(
+        logging,
+        "egui::TextEdit::singleline(&mut self.search)",
+        "let filtered = filtered_records(",
+    );
+    // The clear button is pinned flush right via a right-to-left layout rather
+    // than reserving a guessed width, which previously left a gap at the edge.
+    assert!(!diagnostics_controls.contains("ui.add_space(ui.available_width())"));
+    assert!(!logging_controls.contains("ui.add_space(ui.available_width())"));
+    assert!(!diagnostics_controls.contains("interact_size.x"));
+    assert!(!logging_controls.contains("interact_size.x"));
+    assert!(diagnostics_controls.contains("egui::Layout::right_to_left(egui::Align::Center)"));
+    assert!(logging_controls.contains("egui::Layout::right_to_left(egui::Align::Center)"));
+
     let console = between(
         SCRIPTS_SOURCE,
-        "pub fn console_dock_ui(",
-        "fn variables_window(",
+        "let dispatch_enabled = self.ordinary_dispatch_enabled();",
+        "// The popup owns Up/Down/Tab/Enter/Esc while it is open.",
     );
-    assert!(!console.contains("self.status"));
+    assert!(!console.contains(".desired_width(f32::INFINITY)"));
+    assert!(!console.contains("interact_size.x"));
+    assert!(console.contains("egui::Layout::right_to_left(egui::Align::Center)"));
+    assert!(console.contains("crate::icons::trash()"));
 }
 
 #[test]
@@ -104,6 +174,17 @@ fn scripting_console_refocuses_prompt_after_enter_dispatch() {
     assert!(console.contains("if dispatch_enabled && self.take_repl_refocus_request() {"));
     assert!(console.contains("resp.request_focus();"));
     assert!(console.contains("self.request_repl_refocus();"));
+}
+
+#[test]
+fn scripting_console_dock_matches_diagnostics_height_and_reserves_prompt() {
+    assert!(SCRIPTS_SOURCE.contains("egui::Panel::bottom(\"scripting_console_input\")"));
+    let console = between(
+        SCRIPTS_SOURCE,
+        "pub fn console_dock_ui(",
+        "fn variables_window(",
+    );
+    assert!(!console.contains("self.status"));
 }
 
 #[test]
