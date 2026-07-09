@@ -15,8 +15,6 @@ use crate::parsers::{ParserUiAction, ParsersPanel};
 use crate::repl_complete::{self, ReplCompletion};
 use crate::repl_history::ReplHistory;
 
-pub const SCRIPTING_CONSOLE_DEFAULT_HEIGHT: f32 = 240.0;
-
 enum PreparedParserCommand {
     Validation {
         name: String,
@@ -509,7 +507,8 @@ impl ScriptsPanel {
             ScriptEvent::LiveBatchProcessed => {}
             ScriptEvent::Parser(event) => self.parsers.handle_event(event),
             ScriptEvent::Completions { seq, matches } => {
-                self.completion.on_completions(seq, matches, &mut self.repl_input);
+                self.completion
+                    .on_completions(seq, matches, &mut self.repl_input);
             }
         }
     }
@@ -642,37 +641,44 @@ impl ScriptsPanel {
         sender: &IngestSender,
         metrics: &Arc<MetricsRegistry>,
     ) {
-        ui.horizontal(|ui| {
-            ui.strong("Scripting Console");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Close").clicked() {
-                    self.set_console_open(false);
-                }
-                if ui.button("Clear").clicked() {
-                    self.console.clear();
-                }
-            });
-        });
-        ui.separator();
         egui::Panel::bottom("scripting_console_input")
             .resizable(false)
             .show_inside(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(">>>");
                     let dispatch_enabled = self.ordinary_dispatch_enabled();
-                    let resp = ui.add_enabled(
-                        dispatch_enabled,
-                        egui::TextEdit::singleline(&mut self.repl_input)
-                            .desired_width(f32::INFINITY)
-                            .lock_focus(true),
-                    );
+                    // Pin the trash button flush right, then let the REPL input fill
+                    // the remaining space to its left.
+                    let resp = ui
+                        .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let trash = egui::Image::new(crate::icons::trash())
+                                .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
+                                .tint(ui.visuals().text_color());
+                            if ui
+                                .add(egui::Button::image(trash))
+                                .on_hover_text("Clear console")
+                                .clicked()
+                            {
+                                self.console.clear();
+                            }
+
+                            let repl_width = ui.available_width();
+                            ui.add_enabled(
+                                dispatch_enabled,
+                                egui::TextEdit::singleline(&mut self.repl_input)
+                                    .desired_width(repl_width)
+                                    .lock_focus(true),
+                            )
+                        })
+                        .inner;
                     if dispatch_enabled && self.take_repl_refocus_request() {
                         resp.request_focus();
                     }
 
                     // The popup owns Up/Down/Tab/Enter/Esc while it is open.
                     let popup_took_enter =
-                        self.completion.handle_popup(ui, &resp, &mut self.repl_input);
+                        self.completion
+                            .handle_popup(ui, &resp, &mut self.repl_input);
 
                     // Typing (not navigation) while the popup is open dismisses it
                     // and lets the character pass through to the input.
@@ -683,21 +689,18 @@ impl ScriptsPanel {
                     // A completion that mutated the buffer moves the caret to the
                     // end of the inserted text.
                     if let Some(byte) = self.completion.take_pending_cursor() {
-                        repl_complete::set_cursor_byte(
-                            ui.ctx(),
-                            resp.id,
-                            &self.repl_input,
-                            byte,
-                        );
+                        repl_complete::set_cursor_byte(ui.ctx(), resp.id, &self.repl_input, byte);
                         resp.request_focus();
                     }
 
                     // With no popup open, Up/Down walk the command history.
                     if dispatch_enabled && resp.has_focus() && !self.completion.is_open() {
-                        let up =
-                            ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp));
-                        let down = ui
-                            .input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown));
+                        let up = ui.input_mut(|i| {
+                            i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)
+                        });
+                        let down = ui.input_mut(|i| {
+                            i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)
+                        });
                         let recalled = if up {
                             self.history.older(&self.repl_input)
                         } else if down {
@@ -708,7 +711,12 @@ impl ScriptsPanel {
                         if let Some(line) = recalled {
                             self.repl_input = line;
                             let end = self.repl_input.len();
-                            repl_complete::set_cursor_byte(ui.ctx(), resp.id, &self.repl_input, end);
+                            repl_complete::set_cursor_byte(
+                                ui.ctx(),
+                                resp.id,
+                                &self.repl_input,
+                                end,
+                            );
                             resp.request_focus();
                         }
                     }
