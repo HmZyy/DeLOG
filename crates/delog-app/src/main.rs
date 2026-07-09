@@ -51,6 +51,11 @@ fn main() -> eframe::Result {
     #[cfg(feature = "bundled-python")]
     py_runtime::init_bundled_python();
 
+    #[cfg(feature = "scripting")]
+    if std::env::args().any(|a| a == "--check-scripting") {
+        std::process::exit(run_check_scripting());
+    }
+
     init_tracing();
 
     let options = app_native_options();
@@ -87,6 +92,21 @@ fn app_native_options() -> eframe::NativeOptions {
     };
 
     options
+}
+
+#[cfg(feature = "scripting")]
+fn run_check_scripting() -> i32 {
+    match delog_script::check_numpy() {
+        Ok((py, np)) => {
+            println!("python: {py}");
+            println!("numpy: {np}");
+            0
+        }
+        Err(err) => {
+            eprintln!("scripting check failed: {err}");
+            1
+        }
+    }
 }
 
 /// Filter via `RUST_LOG` (default `info`). The panic hook records the panic
