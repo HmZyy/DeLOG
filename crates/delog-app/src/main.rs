@@ -103,10 +103,12 @@ fn app_native_options() -> eframe::NativeOptions {
 
 #[cfg(feature = "scripting")]
 fn run_check_scripting() -> i32 {
-    match delog_script::check_numpy() {
-        Ok((py, np)) => {
+    match delog_script::check_scripting() {
+        Ok((py, packages)) => {
             println!("python: {py}");
-            println!("numpy: {np}");
+            for (name, version) in packages {
+                println!("{name}: {version}");
+            }
             0
         }
         Err(err) => {

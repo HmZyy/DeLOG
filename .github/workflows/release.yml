@@ -143,6 +143,9 @@ jobs:
           out="$(staging/delog --check-scripting)"
           echo "$out"
           echo "$out" | grep -q "numpy: 2.1.1"
+          echo "$out" | grep -q "scipy: 1.14.1"
+          echo "$out" | grep -q "bottleneck: 1.4.0"
+          echo "$out" | grep -q "cffi: 1.17.1"
 
       - name: Smoke test scripting (Windows)
         if: runner.os == 'Windows'
@@ -151,6 +154,9 @@ jobs:
           $out = & staging\delog.exe --check-scripting
           $out
           if ($out -notmatch "numpy: 2.1.1") { exit 1 }
+          if ($out -notmatch "scipy: 1.14.1") { exit 1 }
+          if ($out -notmatch "bottleneck: 1.4.0") { exit 1 }
+          if ($out -notmatch "cffi: 1.17.1") { exit 1 }
 
       - name: Package installer (Linux, AppImage)
         if: runner.os == 'Linux'
