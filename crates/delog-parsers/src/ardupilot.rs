@@ -437,7 +437,8 @@ impl<'a> Decoder<'a> {
             .and_then(|(unit_ids, _)| unit_ids.get(field_index).copied())
             .filter(|&c| c != b'-' && c != 0)
             .and_then(|c| self.units.get(&c).cloned())
-            .or_else(|| default_unit.map(str::to_owned));
+            .or_else(|| default_unit.map(str::to_owned))
+            .filter(|u| !u.is_empty() && !u.eq_ignore_ascii_case("unknown"));
 
         let mult = if matches!(chr, b'c' | b'C' | b'e' | b'E' | b'L') {
             default_mult
