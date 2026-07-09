@@ -481,7 +481,7 @@ pub struct ScriptingSettings {
     pub auto_open_console: AutoOpenScriptingConsole,
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 enum SettingsTab {
     #[default]
     General,
@@ -511,10 +511,19 @@ impl SettingsTab {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SettingsDialog {
     open: bool,
-    selected_tab: SettingsTab,
+    dock_state: egui_dock::DockState<SettingsTab>,
+}
+
+impl Default for SettingsDialog {
+    fn default() -> Self {
+        Self {
+            open: false,
+            dock_state: egui_dock::DockState::new(SettingsTab::ALL.to_vec()),
+        }
+    }
 }
 
 impl SettingsDialog {
@@ -538,42 +547,61 @@ impl SettingsDialog {
             .default_height(340.0)
             .resizable(true)
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    self.tab_list(ui);
-                    ui.separator();
-                    ui.vertical(|ui| {
-                        ui.set_min_width(340.0);
-                        match self.selected_tab {
-                            SettingsTab::General => {
-                                change |= general_tab(ui, settings);
-                            }
-                            SettingsTab::Plots => {
-                                plots_tab(ui, settings);
-                            }
-                            SettingsTab::Rendering => {
-                                rendering_tab(ui, settings);
-                            }
-                            SettingsTab::Scene3d => {
-                                scene3d_tab(ui, settings);
-                            }
-                            SettingsTab::Scripting => {
-                                scripting_tab(ui, settings);
-                            }
-                        }
-                    });
-                });
+                let mut viewer = SettingsTabViewer {
+                    settings,
+                    change: &mut change,
+                };
+                egui_dock::DockArea::new(&mut self.dock_state)
+                    .id(egui::Id::new("settings_dock_area"))
+                    .style(egui_dock::Style::from_egui(ui.style().as_ref()))
+                    .allowed_splits(egui_dock::AllowedSplits::None)
+                    .draggable_tabs(false)
+                    .tab_context_menus(false)
+                    .show_close_buttons(false)
+                    .show_leaf_close_all_buttons(false)
+                    .show_leaf_collapse_buttons(false)
+                    .show_inside(ui, &mut viewer);
             });
         self.open &= open;
         change
     }
+}
 
-    fn tab_list(&mut self, ui: &mut egui::Ui) {
-        ui.vertical(|ui| {
-            ui.set_min_width(132.0);
-            for tab in SettingsTab::ALL {
-                ui.selectable_value(&mut self.selected_tab, tab, tab.label());
+struct SettingsTabViewer<'a> {
+    settings: &'a mut AppSettings,
+    change: &'a mut SettingsChange,
+}
+
+impl egui_dock::TabViewer for SettingsTabViewer<'_> {
+    type Tab = SettingsTab;
+
+    fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
+        tab.label().into()
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
+        ui.set_min_width(340.0);
+        match tab {
+            SettingsTab::General => {
+                *self.change |= general_tab(ui, self.settings);
             }
-        });
+            SettingsTab::Plots => {
+                plots_tab(ui, self.settings);
+            }
+            SettingsTab::Rendering => {
+                rendering_tab(ui, self.settings);
+            }
+            SettingsTab::Scene3d => {
+                scene3d_tab(ui, self.settings);
+            }
+            SettingsTab::Scripting => {
+                scripting_tab(ui, self.settings);
+            }
+        }
+    }
+
+    fn allowed_in_windows(&self, _tab: &mut Self::Tab) -> bool {
+        false
     }
 }
 
@@ -590,8 +618,6 @@ impl std::ops::BitOrAssign for SettingsChange {
 
 fn general_tab(ui: &mut egui::Ui, settings: &mut AppSettings) -> SettingsChange {
     let before = settings.theme;
-    ui.heading("General");
-    ui.add_space(8.0);
     egui::Grid::new("settings-general-grid")
         .num_columns(2)
         .spacing(egui::vec2(16.0, 10.0))
@@ -666,8 +692,6 @@ fn general_tab(ui: &mut egui::Ui, settings: &mut AppSettings) -> SettingsChange 
 
 fn plots_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
     let p = &mut settings.plot;
-    ui.heading("Plots");
-    ui.add_space(8.0);
     egui::Grid::new("settings-plots-grid")
         .num_columns(2)
         .spacing(egui::vec2(16.0, 10.0))
@@ -779,16 +803,13 @@ fn plots_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
             ui.end_row();
         });
 
-    ui.add_space(10.0);
-    if ui.button("Reset to defaults").clicked() {
+    if reset_to_defaults_button(ui) {
         settings.plot = PlotDisplay::default();
     }
 }
 
 fn rendering_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
     let r = &mut settings.render;
-    ui.heading("Rendering");
-    ui.add_space(8.0);
     egui::Grid::new("settings-rendering-grid")
         .num_columns(2)
         .spacing(egui::vec2(16.0, 10.0))
@@ -813,16 +834,13 @@ fn rendering_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
             ui.end_row();
         });
 
-    ui.add_space(10.0);
-    if ui.button("Reset to defaults").clicked() {
+    if reset_to_defaults_button(ui) {
         settings.render = RenderTuning::default();
     }
 }
 
 fn scene3d_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
     let s = &mut settings.scene3d;
-    ui.heading("3D View");
-    ui.add_space(8.0);
     egui::Grid::new("settings-scene3d-grid")
         .num_columns(2)
         .spacing(egui::vec2(16.0, 10.0))
@@ -890,16 +908,13 @@ fn scene3d_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
             ui.end_row();
         });
 
-    ui.add_space(10.0);
-    if ui.button("Reset to defaults").clicked() {
+    if reset_to_defaults_button(ui) {
         settings.scene3d = Scene3dSettings::default();
     }
 }
 
 fn scripting_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
     let s = &mut settings.scripting;
-    ui.heading("Scripting");
-    ui.add_space(8.0);
     egui::Grid::new("settings-scripting-grid")
         .num_columns(2)
         .spacing(egui::vec2(16.0, 10.0))
@@ -927,10 +942,17 @@ fn scripting_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
             ui.end_row();
         });
 
-    ui.add_space(10.0);
-    if ui.button("Reset to defaults").clicked() {
+    if reset_to_defaults_button(ui) {
         settings.scripting = ScriptingSettings::default();
     }
+}
+
+fn reset_to_defaults_button(ui: &mut egui::Ui) -> bool {
+    ui.add_space(10.0);
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.button("Reset to defaults").clicked()
+    })
+    .inner
 }
 
 #[cfg(test)]
@@ -947,6 +969,37 @@ mod tests {
             labels,
             ["General", "Plots", "Rendering", "3D View", "Scripting"]
         );
+    }
+
+    #[test]
+    fn settings_tabs_use_egui_dock() {
+        let source = include_str!("settings.rs");
+
+        assert!(source.contains("egui_dock::DockArea::new"));
+        assert!(source.contains("impl egui_dock::TabViewer for SettingsTabViewer"));
+        assert!(!source.contains(concat!("fn ", "tab_list")));
+    }
+
+    #[test]
+    fn settings_tab_bodies_do_not_repeat_tab_titles_as_headings() {
+        let source = include_str!("settings.rs");
+
+        for title in SettingsTab::ALL.map(SettingsTab::label) {
+            assert!(!source.contains(&format!("ui.heading(\"{title}\")")));
+        }
+    }
+
+    #[test]
+    fn settings_reset_buttons_are_right_aligned() {
+        let source = include_str!("settings.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production settings code should precede tests");
+
+        assert!(source.contains("fn reset_to_defaults_button"));
+        assert!(source.contains("egui::Layout::right_to_left"));
+        assert_eq!(production.matches("reset_to_defaults_button(ui)").count(), 4);
     }
 
     #[test]
