@@ -8,6 +8,7 @@ exactly like parsed log data. Scripts get the full embedded CPython interpreter
 This is an **optional, build-time feature**. It is off by default.
 
 - [Enabling scripting](#enabling-scripting)
+- [Bundled distribution (no system Python required)](#bundled-distribution-no-system-python-required)
 - [The Scripts UI](#the-scripts-ui)
 - [Custom file parsers](#custom-file-parsers)
 - [How scripts produce data](#how-scripts-produce-data)
@@ -49,6 +50,31 @@ If the build links the wrong `libpython` (e.g. `numpy` fails to import with
 `No module named 'math'`), pin the interpreter with a **local, gitignored**
 `.cargo/config.toml` that sets `PYO3_PYTHON` to your interpreter and adds its
 libdir to the rpath.
+
+### Bundled distribution (no system Python required)
+
+Release downloads include a **bundled** variant — a Windows installer
+(`...-bundled-setup.exe`) and a Linux `AppImage` — that ship a private Python
+interpreter and NumPy *inside* the application. Install/run it and scripting
+works with **no system Python**.
+
+Under the hood the bundled binary is built with the `bundled-python` cargo
+feature:
+
+```bash
+cargo build --release -p delog-app --no-default-features --features bundled-python
+```
+
+At startup it pins `PYTHONHOME` to a `python/` directory beside the executable,
+so scripts import the bundled stdlib and NumPy and never touch a system Python.
+If that directory is missing the app exits with a clear error (the install is
+incomplete — reinstall).
+
+To verify a bundled install:
+
+```bash
+delog --check-scripting     # prints the bundled python + numpy versions, exits 0
+```
 
 ---
 
