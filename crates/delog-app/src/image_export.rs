@@ -124,7 +124,15 @@ mod tests {
 
         let got = pixel_rect_for_image(rect, 2.0, [10, 8]);
 
-        assert_eq!(got, Some(PixelRect { x: 0, y: 2, w: 10, h: 6 }));
+        assert_eq!(
+            got,
+            Some(PixelRect {
+                x: 0,
+                y: 2,
+                w: 10,
+                h: 6
+            })
+        );
     }
 
     #[test]
@@ -147,8 +155,14 @@ mod tests {
         let crop = crop_color_image(&image, rect, 1.0).expect("crop should be valid");
 
         assert_eq!(crop.size, [2, 2]);
-        assert_eq!(crop.pixels[0], egui::Color32::from_rgba_unmultiplied(5, 6, 7, 255));
-        assert_eq!(crop.pixels[3], egui::Color32::from_rgba_unmultiplied(10, 11, 12, 255));
+        assert_eq!(
+            crop.pixels[0],
+            egui::Color32::from_rgba_unmultiplied(5, 6, 7, 255)
+        );
+        assert_eq!(
+            crop.pixels[3],
+            egui::Color32::from_rgba_unmultiplied(10, 11, 12, 255)
+        );
     }
 
     #[test]
@@ -162,8 +176,14 @@ mod tests {
 
     #[test]
     fn png_path_adds_png_extension_when_missing() {
-        assert_eq!(png_path(PathBuf::from("capture")).as_os_str(), "capture.png");
-        assert_eq!(png_path(PathBuf::from("capture.png")).as_os_str(), "capture.png");
+        assert_eq!(
+            png_path(PathBuf::from("capture")).as_os_str(),
+            "capture.png"
+        );
+        assert_eq!(
+            png_path(PathBuf::from("capture.png")).as_os_str(),
+            "capture.png"
+        );
     }
 
     #[test]
