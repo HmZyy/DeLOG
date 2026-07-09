@@ -73,7 +73,7 @@ incomplete — reinstall).
 To verify a bundled install:
 
 ```bash
-delog --check-scripting     # prints the bundled python + numpy versions, exits 0
+delog --check-scripting     # prints the bundled python + package versions, exits 0
 ```
 
 ---
