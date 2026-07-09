@@ -11,6 +11,7 @@ url="https://github.com/astral-sh/python-build-standalone/releases/download/${PB
 tmp="$(mktemp -d)"
 curl -fL "$url" -o "$tmp/py.tar.gz"
 tar -xzf "$tmp/py.tar.gz" -C "$tmp"          # extracts a `python/` dir
+mkdir -p "$(dirname "$DEST")"  # CI passes <repo>/staging/python; ensure the parent exists before the move.
 rm -rf "$DEST"
 mv "$tmp/python" "$DEST"
 

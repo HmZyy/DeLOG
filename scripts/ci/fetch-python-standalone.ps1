@@ -9,6 +9,9 @@ $url = "https://github.com/astral-sh/python-build-standalone/releases/download/$
 $tmp = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP "pbs") -Force
 Invoke-WebRequest -Uri $url -OutFile "$tmp\py.tar.gz"
 tar -xzf "$tmp\py.tar.gz" -C "$tmp"          # extracts a `python\` dir
+# CI passes <repo>\staging\python; ensure the parent exists before the move.
+$parent = Split-Path -Parent $Dest
+if ($parent -and -not (Test-Path $parent)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
 if (Test-Path $Dest) { Remove-Item -Recurse -Force $Dest }
 Move-Item "$tmp\python" $Dest
 
