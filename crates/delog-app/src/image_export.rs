@@ -5,7 +5,7 @@ use image::ImageEncoder;
 #[derive(Debug, Clone)]
 pub enum ImageCaptureAction {
     Copy,
-    Export(PathBuf),
+    Export,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,11 +24,18 @@ pub struct PendingImageCapture {
 }
 
 #[derive(Debug, Clone)]
-pub struct ExportSelection {
+pub struct PngWriteRequest {
     pub path: PathBuf,
-    pub kind: ImageCaptureKind,
-    pub rect: egui::Rect,
-    pub pixels_per_point: f32,
+    pub png_bytes: Vec<u8>,
+}
+
+impl PngWriteRequest {
+    pub fn new(path: PathBuf, png_bytes: Vec<u8>) -> Self {
+        Self {
+            path: png_path(path),
+            png_bytes,
+        }
+    }
 }
 
 pub fn screenshot_request_id(user_data: &egui::UserData) -> Option<u64> {
@@ -157,6 +164,14 @@ mod tests {
     fn png_path_adds_png_extension_when_missing() {
         assert_eq!(png_path(PathBuf::from("capture")).as_os_str(), "capture.png");
         assert_eq!(png_path(PathBuf::from("capture.png")).as_os_str(), "capture.png");
+    }
+
+    #[test]
+    fn png_write_request_normalizes_path_and_preserves_bytes() {
+        let request = PngWriteRequest::new(PathBuf::from("capture"), vec![1, 2, 3]);
+
+        assert_eq!(request.path.as_os_str(), "capture.png");
+        assert_eq!(request.png_bytes, vec![1, 2, 3]);
     }
 
     #[test]
