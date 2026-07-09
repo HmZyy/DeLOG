@@ -117,12 +117,7 @@ impl MarkersDock {
                     egui::Stroke::new(2.0, ui.visuals().text_color()),
                 );
             }
-            ui.strong("Markers");
-            ui.weak(format!("{} marker(s)", ids.len()));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Close").clicked() {
-                    self.open = false;
-                }
                 if ui
                     .add_enabled(
                         any_selected,
@@ -134,7 +129,6 @@ impl MarkersDock {
                 }
             });
         });
-        ui.separator();
 
         if delete_selected {
             for id in self.selected.drain() {

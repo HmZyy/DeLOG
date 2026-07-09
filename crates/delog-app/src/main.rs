@@ -8,6 +8,7 @@ mod browser;
 mod camera;
 mod csv_export;
 mod diagnostics;
+mod docks;
 mod field_stats;
 mod generate_markers;
 mod geo;

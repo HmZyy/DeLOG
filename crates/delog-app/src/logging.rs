@@ -1,3 +1,5 @@
+use egui_extras::{Column, TableBuilder};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LogLevel {
     Debug,
@@ -71,24 +73,6 @@ impl LoggingDock {
         let mut action = LoggingAction::default();
         let targets = targets(records);
         ui.horizontal(|ui| {
-            ui.strong("Logging");
-            ui.weak(format!("{} retained", records.len()));
-            if let Some(last) = records.last() {
-                ui.separator();
-                ui.label(format!("[{}] {}", level_label(last.level), last.message));
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Close").clicked() {
-                    self.open = false;
-                }
-                if ui.button("Clear").clicked() {
-                    action.clear = true;
-                }
-            });
-        });
-
-        ui.separator();
-        ui.horizontal(|ui| {
             egui::ComboBox::from_id_salt("logging-level")
                 .selected_text(level_filter_label(self.min_level))
                 .show_ui(ui, |ui| {
@@ -117,41 +101,109 @@ impl LoggingDock {
                     .hint_text("Search")
                     .desired_width(220.0),
             );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let trash = egui::Image::new(crate::icons::trash())
+                    .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
+                    .tint(ui.visuals().text_color());
+                if ui
+                    .add(egui::Button::image(trash))
+                    .on_hover_text("Clear logs")
+                    .clicked()
+                {
+                    action.clear = true;
+                }
+            });
         });
 
         let filtered = filtered_records(records, self.min_level, &self.target, &self.search);
         ui.add_space(4.0);
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                if filtered.is_empty() {
-                    ui.weak("No logs match the current filters.");
-                    return;
-                }
-                egui::Grid::new("logging-grid")
-                    .num_columns(5)
-                    .striped(true)
-                    .spacing([12.0, 4.0])
-                    .show(ui, |ui| {
-                        ui.strong("Level");
-                        ui.strong("Seq");
-                        ui.strong("Time");
-                        ui.strong("Target");
-                        ui.strong("Message");
-                        ui.end_row();
+        if filtered.is_empty() {
+            ui.weak("No logs match the current filters.");
+            return action;
+        }
+        let body_font = egui::TextStyle::Body.resolve(ui.style());
+        let min_row_height = body_font.size.max(ui.spacing().interact_size.y);
 
-                        for record in filtered {
-                            ui.colored_label(
-                                level_color(ui, record.level),
-                                level_label(record.level),
-                            );
-                            ui.label(record.seq.to_string());
-                            ui.label(format_elapsed(record.elapsed_ms));
-                            ui.monospace(record.target.as_str());
-                            ui.label(record.message.as_str());
-                            ui.end_row();
-                        }
+        // The metadata columns are fixed-width so the message column width is
+        // known before layout. The message wraps to fill that width and each
+        // row grows to fit its wrapped height, so nothing is ever cropped.
+        let level_w = 68.0;
+        let seq_w = 60.0;
+        let time_w = 76.0;
+        let target_w = 160.0;
+        let spacing = ui.spacing().item_spacing.x;
+        let message_w = (ui.available_width()
+            - level_w
+            - seq_w
+            - time_w
+            - target_w
+            - spacing * 5.0
+            - ui.spacing().scroll.bar_width)
+            .max(80.0);
+        let row_heights: Vec<f32> = ui.ctx().fonts_mut(|fonts| {
+            filtered
+                .iter()
+                .map(|record| {
+                    fonts
+                        .layout(
+                            record.message.clone(),
+                            body_font.clone(),
+                            egui::Color32::PLACEHOLDER,
+                            message_w,
+                        )
+                        .size()
+                        .y
+                        .max(min_row_height)
+                })
+                .collect()
+        });
+
+        TableBuilder::new(ui)
+            .id_salt("logging-table")
+            .striped(true)
+            .cell_layout(egui::Layout::left_to_right(egui::Align::TOP))
+            .auto_shrink([false, false])
+            .column(Column::exact(level_w))
+            .column(Column::exact(seq_w))
+            .column(Column::exact(time_w))
+            .column(Column::exact(target_w).clip(true))
+            .column(Column::remainder())
+            .header(min_row_height, |mut header| {
+                header.col(|ui| {
+                    ui.strong("Level");
+                });
+                header.col(|ui| {
+                    ui.strong("Seq");
+                });
+                header.col(|ui| {
+                    ui.strong("Time");
+                });
+                header.col(|ui| {
+                    ui.strong("Target");
+                });
+                header.col(|ui| {
+                    ui.strong("Message");
+                });
+            })
+            .body(|body| {
+                body.heterogeneous_rows(row_heights.into_iter(), |mut row| {
+                    let record = filtered[row.index()];
+                    row.col(|ui| {
+                        ui.colored_label(level_color(ui, record.level), level_label(record.level));
                     });
+                    row.col(|ui| {
+                        ui.label(record.seq.to_string());
+                    });
+                    row.col(|ui| {
+                        ui.label(format_elapsed(record.elapsed_ms));
+                    });
+                    row.col(|ui| {
+                        ui.monospace(record.target.as_str());
+                    });
+                    row.col(|ui| {
+                        ui.add(egui::Label::new(record.message.as_str()).wrap());
+                    });
+                });
             });
         action
     }
