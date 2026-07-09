@@ -432,6 +432,7 @@ pub enum WorkspaceImageAction {
 }
 
 impl WorkspaceImageAction {
+    #[cfg(test)]
     pub fn rect(self) -> egui::Rect {
         match self {
             Self::CopyPlot { rect } | Self::ExportPlot { rect } => rect,
