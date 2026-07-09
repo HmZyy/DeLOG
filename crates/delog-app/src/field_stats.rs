@@ -10,11 +10,22 @@ use delog_core::snapshot::StoreSnapshot;
 const REFRESH_INTERVAL: Duration = Duration::from_millis(100);
 const LRU_CAPACITY: usize = 8;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum StatsTab {
     #[default]
     Visible,
     Global,
+}
+
+impl StatsTab {
+    pub const ALL: [Self; 2] = [Self::Visible, Self::Global];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Visible => "Visible window",
+            Self::Global => "Global",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
