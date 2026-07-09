@@ -2068,6 +2068,32 @@ impl eframe::App for DelogApp {
                     self.workspace.equalize_plot_heights();
                 }
 
+                if icon_button(
+                    ui,
+                    "toolbar-export-workspace-png",
+                    crate::icons::save(),
+                    inactive_tint,
+                    false,
+                )
+                .on_hover_text("Export workspace PNG")
+                .clicked()
+                {
+                    if let Some(rect) = self.last_workspace_rect {
+                        self.spawn_png_export_dialog(
+                            ui.ctx(),
+                            crate::image_export::ImageCaptureKind::Workspace,
+                            rect,
+                            ui.ctx().pixels_per_point(),
+                        );
+                    } else {
+                        self.session
+                            .push_diagnostic(delog_core::diagnostics::Diag::warning(
+                                "image-export",
+                                "workspace is not ready to export",
+                            ));
+                    }
+                }
+
                 ui.separator();
 
                 if icon_button(
@@ -2531,6 +2557,8 @@ impl eframe::App for DelogApp {
             // The workspace renders even before any log loads, so plots can be
             // arranged and the 3D view opened on an empty session.
 
+            self.last_workspace_rect = Some(ui.available_rect_before_wrap());
+
             // The central panel is a fallback drop zone: dropping a field onto
             // empty workspace space plots it in the first pane.
             let frame_style = egui::Frame::default();
@@ -2620,6 +2648,27 @@ impl eframe::App for DelogApp {
                     }
                     if let Some(field) = actions.inspect_field_stats {
                         self.field_stats.open(field);
+                    }
+                    if let Some(action) = actions.image {
+                        match action {
+                            crate::workspace::WorkspaceImageAction::CopyPlot { rect } => {
+                                self.request_image_capture(
+                                    ui.ctx(),
+                                    crate::image_export::ImageCaptureAction::Copy,
+                                    crate::image_export::ImageCaptureKind::Plot,
+                                    rect,
+                                    ui.ctx().pixels_per_point(),
+                                );
+                            }
+                            crate::workspace::WorkspaceImageAction::ExportPlot { rect } => {
+                                self.spawn_png_export_dialog(
+                                    ui.ctx(),
+                                    crate::image_export::ImageCaptureKind::Plot,
+                                    rect,
+                                    ui.ctx().pixels_per_point(),
+                                );
+                            }
+                        }
                     }
                 });
             if let Some(fields) = dropped
