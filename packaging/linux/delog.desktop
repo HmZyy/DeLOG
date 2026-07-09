@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=DeLOG
+Comment=Drone flight log & live telemetry analyzer
+Exec=delog
+Icon=delog
+Categories=Utility;Science;
+Terminal=false
