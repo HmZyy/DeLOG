@@ -12,6 +12,7 @@ mod docks;
 mod field_stats;
 mod generate_markers;
 mod geo;
+mod image_export;
 mod gpu;
 mod hover;
 mod icons;
