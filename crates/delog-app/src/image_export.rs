@@ -2,6 +2,43 @@ use std::path::PathBuf;
 
 use image::ImageEncoder;
 
+#[derive(Debug, Clone)]
+pub enum ImageCaptureAction {
+    Copy,
+    Export(PathBuf),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageCaptureKind {
+    Workspace,
+    Plot,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingImageCapture {
+    pub id: u64,
+    pub action: ImageCaptureAction,
+    pub kind: ImageCaptureKind,
+    pub rect: egui::Rect,
+    pub pixels_per_point: f32,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExportSelection {
+    pub path: PathBuf,
+    pub kind: ImageCaptureKind,
+    pub rect: egui::Rect,
+    pub pixels_per_point: f32,
+}
+
+pub fn screenshot_request_id(user_data: &egui::UserData) -> Option<u64> {
+    user_data
+        .data
+        .as_ref()
+        .and_then(|data| data.downcast_ref::<u64>())
+        .copied()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PixelRect {
     pub x: usize,
@@ -120,5 +157,12 @@ mod tests {
     fn png_path_adds_png_extension_when_missing() {
         assert_eq!(png_path(PathBuf::from("capture")).as_os_str(), "capture.png");
         assert_eq!(png_path(PathBuf::from("capture.png")).as_os_str(), "capture.png");
+    }
+
+    #[test]
+    fn screenshot_request_id_reads_u64_userdata() {
+        let user_data = egui::UserData::new(42_u64);
+
+        assert_eq!(screenshot_request_id(&user_data), Some(42));
     }
 }
