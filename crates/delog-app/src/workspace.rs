@@ -425,6 +425,20 @@ impl Default for Workspace {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum WorkspaceImageAction {
+    CopyPlot { rect: egui::Rect },
+    ExportPlot { rect: egui::Rect },
+}
+
+impl WorkspaceImageAction {
+    pub fn rect(self) -> egui::Rect {
+        match self {
+            Self::CopyPlot { rect } | Self::ExportPlot { rect } => rect,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct WorkspaceActions {
     pub split: Option<(egui_tiles::TileId, SplitDirection)>,
@@ -433,6 +447,7 @@ pub struct WorkspaceActions {
     pub remove_trace: Vec<FieldId>,
     pub focus: Option<egui_tiles::TileId>,
     pub scrub_to: Option<i64>,
+    pub image: Option<WorkspaceImageAction>,
     /// Manual X-view change (pan/zoom/reset); unlocks live-tail mode.
     pub view_changed: bool,
     pub open_vehicle_config: bool,
@@ -1228,6 +1243,33 @@ impl Behavior<'_> {
 
             if ui
                 .add(egui::Button::image_and_text(
+                    menu_icon(ui, crate::icons::copy()),
+                    "Copy Image",
+                ))
+                .clicked()
+            {
+                self.actions.image = Some(WorkspaceImageAction::CopyPlot {
+                    rect: response.rect,
+                });
+                ui.close();
+            }
+            if ui
+                .add(egui::Button::image_and_text(
+                    menu_icon(ui, crate::icons::save()),
+                    "Export PNG...",
+                ))
+                .clicked()
+            {
+                self.actions.image = Some(WorkspaceImageAction::ExportPlot {
+                    rect: response.rect,
+                });
+                ui.close();
+            }
+
+            ui.separator();
+
+            if ui
+                .add(egui::Button::image_and_text(
                     menu_icon(ui, crate::icons::columns()),
                     "Split horizontally",
                 ))
@@ -1821,6 +1863,17 @@ mod tests {
         let workspace = Workspace::new();
         assert_eq!(workspace.plot_panes().count(), 1);
         assert!(workspace.fields().next().is_none());
+    }
+
+    #[test]
+    fn workspace_image_actions_carry_plot_rects() {
+        let rect = egui::Rect::from_min_size(egui::pos2(4.0, 8.0), egui::vec2(120.0, 80.0));
+
+        let copy = WorkspaceImageAction::CopyPlot { rect };
+        let export = WorkspaceImageAction::ExportPlot { rect };
+
+        assert_eq!(copy.rect(), rect);
+        assert_eq!(export.rect(), rect);
     }
 
     #[test]
