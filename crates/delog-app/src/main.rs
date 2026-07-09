@@ -25,6 +25,8 @@ mod models;
 mod parsers;
 mod performance;
 mod plot;
+#[cfg(feature = "bundled-python")]
+mod py_runtime;
 #[cfg(feature = "scripting")]
 mod script_params_io;
 #[cfg(feature = "scripting")]
@@ -46,6 +48,21 @@ mod workspace;
 use app::DelogApp;
 
 fn main() -> eframe::Result {
+    #[cfg(feature = "bundled-python")]
+    py_runtime::init_bundled_python();
+
+    #[cfg(feature = "scripting")]
+    if std::env::args().any(|a| a == "--check-scripting") {
+        // Release builds use the Windows GUI subsystem, which detaches stdout;
+        // reattach to the parent console so the diagnostic is visible.
+        #[cfg(windows)]
+        unsafe {
+            use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
+            AttachConsole(ATTACH_PARENT_PROCESS);
+        }
+        std::process::exit(run_check_scripting());
+    }
+
     init_tracing();
 
     let options = app_native_options();
@@ -82,6 +99,23 @@ fn app_native_options() -> eframe::NativeOptions {
     };
 
     options
+}
+
+#[cfg(feature = "scripting")]
+fn run_check_scripting() -> i32 {
+    match delog_script::check_scripting() {
+        Ok((py, packages)) => {
+            println!("python: {py}");
+            for (name, version) in packages {
+                println!("{name}: {version}");
+            }
+            0
+        }
+        Err(err) => {
+            eprintln!("scripting check failed: {err}");
+            1
+        }
+    }
 }
 
 /// Filter via `RUST_LOG` (default `info`). The panic hook records the panic
