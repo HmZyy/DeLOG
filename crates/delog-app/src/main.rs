@@ -25,6 +25,8 @@ mod models;
 mod parsers;
 mod performance;
 mod plot;
+#[cfg(feature = "bundled-python")]
+mod py_runtime;
 #[cfg(feature = "scripting")]
 mod script_params_io;
 #[cfg(feature = "scripting")]
@@ -46,6 +48,9 @@ mod workspace;
 use app::DelogApp;
 
 fn main() -> eframe::Result {
+    #[cfg(feature = "bundled-python")]
+    py_runtime::init_bundled_python();
+
     init_tracing();
 
     let options = app_native_options();

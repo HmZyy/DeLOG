@@ -23,6 +23,7 @@ image = { workspace = true }
 # opt-out).
 default = ["scripting"]
 scripting = ["dep:delog-script", "delog-script/python", "dep:egui_code_editor"]
+bundled-python = ["scripting"]
 
 [dependencies]
 arrow = { workspace = true }
