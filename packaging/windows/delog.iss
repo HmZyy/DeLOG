@@ -9,6 +9,7 @@
 [Setup]
 AppName=DeLOG
 AppVersion={#MyAppVersion}
+AppVerName=DeLOG {#MyAppVersion}
 AppPublisher=HmZyy
 DefaultDirName={autopf}\DeLOG
 DefaultGroupName=DeLOG
