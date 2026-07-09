@@ -16,11 +16,12 @@ rm -rf "$DEST"
 mv "$tmp/python" "$DEST"
 
 py="$DEST/bin/python3"
-"$py" -m pip install --no-cache-dir "numpy==${NUMPY_VERSION}"
+"$py" -m pip install --no-cache-dir "numpy==${NUMPY_VERSION}" >&2
 
 # Trim: remove bytecode caches, the stdlib test suites, and pip/ensurepip.
+py_minor="${PY_VERSION%.*}"   # e.g. 3.12
 find "$DEST" -depth -name '__pycache__' -type d -exec rm -rf {} +
-rm -rf "$DEST"/lib/python3.12/test "$DEST"/lib/python3.12/tests
-rm -rf "$DEST"/lib/python3.12/site-packages/pip "$DEST"/lib/python3.12/ensurepip
+rm -rf "$DEST/lib/python${py_minor}/test" "$DEST/lib/python${py_minor}/tests"
+rm -rf "$DEST/lib/python${py_minor}/site-packages/pip" "$DEST/lib/python${py_minor}/ensurepip"
 
 echo "$py"
