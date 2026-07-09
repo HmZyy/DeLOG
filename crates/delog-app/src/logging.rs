@@ -161,6 +161,7 @@ impl LoggingDock {
         TableBuilder::new(ui)
             .id_salt("logging-table")
             .striped(true)
+            .resizable(true)
             .cell_layout(egui::Layout::left_to_right(egui::Align::TOP))
             .auto_shrink([false, false])
             .column(Column::exact(level_w))
@@ -325,6 +326,18 @@ mod tests {
             "vehicle_dialog"
         );
         assert_eq!(caller_target("crates/delog-app/src/foo/bar.rs"), "foo::bar");
+    }
+
+    #[test]
+    fn logging_table_is_resizable_and_message_column_fills_width() {
+        let source = include_str!("logging.rs");
+        let table = source
+            .split("TableBuilder::new(ui)")
+            .nth(1)
+            .expect("logging table should use TableBuilder");
+
+        assert!(table.contains(".resizable(true)"));
+        assert!(table.contains(".column(Column::remainder()"));
     }
 
     #[test]
