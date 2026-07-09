@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use delog_cache::CacheManager;
 use delog_core::diagnostics::{DiagRecord, Severity};
 use delog_core::time::TimeRange;
+use egui_extras::{Column, TableBuilder};
 use serde::Serialize;
 
 use crate::browser::{self, BrowserFilterCache, BrowserModel};
@@ -2870,33 +2871,24 @@ fn show_source_metadata_tab(
     match tab {
         SourceMetaTab::Info => {
             let (rows, range, topics) = source_summary(snapshot, source_id);
-            egui::Grid::new("source_metadata_summary")
-                .num_columns(2)
-                .striped(true)
-                .spacing([16.0, 4.0])
-                .show(ui, |ui| {
-                    ui.strong("Label");
-                    ui.label(source.entry.label.as_str());
-                    ui.end_row();
-                    ui.strong("Kind");
-                    ui.label(source_kind_label(source.entry.label.as_str()));
-                    ui.end_row();
-                    ui.strong("Source ID");
-                    ui.monospace(source_id.0.to_string());
-                    ui.end_row();
-                    ui.strong("Topics");
-                    ui.label(topics.to_string());
-                    ui.end_row();
-                    ui.strong("Rows");
-                    ui.label(rows.to_string());
-                    ui.end_row();
-                    ui.strong("Offset");
-                    ui.label(format!("{} us", source.entry.offset_us));
-                    ui.end_row();
-                    ui.strong("Range");
-                    ui.label(range.map(format_range).unwrap_or_else(|| "-".into()));
-                    ui.end_row();
-                });
+            source_metadata_summary_table(
+                ui,
+                &[
+                    ("Label", source.entry.label.clone()),
+                    (
+                        "Kind",
+                        source_kind_label(source.entry.label.as_str()).to_owned(),
+                    ),
+                    ("Source ID", source_id.0.to_string()),
+                    ("Topics", topics.to_string()),
+                    ("Rows", rows.to_string()),
+                    ("Offset", format!("{} us", source.entry.offset_us)),
+                    (
+                        "Range",
+                        range.map(format_range).unwrap_or_else(|| "-".into()),
+                    ),
+                ],
+            );
         }
         SourceMetaTab::Parameters => {
             if source.entry.meta.params.is_empty() {
@@ -2923,27 +2915,7 @@ fn show_source_metadata_tab(
                 if matches.is_empty() {
                     ui.weak("No parameters match the filter.");
                 } else {
-                    egui::ScrollArea::vertical()
-                        .id_salt(("source_params", source_id.0))
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            egui::Grid::new("source_metadata_params")
-                                .num_columns(3)
-                                .striped(true)
-                                .spacing([12.0, 4.0])
-                                .show(ui, |ui| {
-                                    ui.strong("Name");
-                                    ui.strong("Type");
-                                    ui.strong("Value");
-                                    ui.end_row();
-                                    for param in matches {
-                                        ui.monospace(param.name.as_str());
-                                        ui.label(param.ty.as_str());
-                                        ui.label(param.value.as_str());
-                                        ui.end_row();
-                                    }
-                                });
-                        });
+                    source_metadata_params_table(ui, source_id, &matches);
                 }
             }
         }
@@ -2951,30 +2923,128 @@ fn show_source_metadata_tab(
             if source.entry.meta.auto_markers.is_empty() {
                 ui.weak("No logged messages captured.");
             } else {
-                egui::ScrollArea::vertical()
-                    .id_salt(("source_markers", source_id.0))
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        egui::Grid::new("source_metadata_markers")
-                            .num_columns(3)
-                            .striped(true)
-                            .spacing([12.0, 4.0])
-                            .show(ui, |ui| {
-                                ui.strong("Time");
-                                ui.strong("Level");
-                                ui.strong("Text");
-                                ui.end_row();
-                                for marker in &source.entry.meta.auto_markers {
-                                    ui.label(format!("{:.3}s", marker.time_us as f64 / 1e6));
-                                    ui.label(marker.level.to_string());
-                                    ui.label(marker.text.as_str());
-                                    ui.end_row();
-                                }
-                            });
-                    });
+                source_metadata_markers_table(ui, source_id, &source.entry.meta.auto_markers);
             }
         }
     }
+}
+
+fn source_metadata_summary_table(ui: &mut egui::Ui, rows: &[(&str, String)]) {
+    let row_height = table_row_height(ui);
+    TableBuilder::new(ui)
+        .id_salt("source_metadata_summary_table")
+        .striped(true)
+        .resizable(true)
+        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+        .auto_shrink([false, false])
+        .column(Column::auto().at_least(96.0))
+        .column(Column::remainder().clip(true))
+        .body(|mut body| {
+            for (key, value) in rows {
+                body.row(row_height, |mut row| {
+                    row.col(|ui| {
+                        ui.strong(*key);
+                    });
+                    row.col(|ui| {
+                        ui.label(value);
+                    });
+                });
+            }
+        });
+}
+
+fn source_metadata_params_table(
+    ui: &mut egui::Ui,
+    source_id: delog_core::identity::SourceId,
+    params: &[&delog_core::identity::SourceParam],
+) {
+    let row_height = table_row_height(ui);
+    egui::ScrollArea::vertical()
+        .id_salt(("source_params", source_id.0))
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            TableBuilder::new(ui)
+                .id_salt("source_metadata_params_table")
+                .striped(true)
+                .resizable(true)
+                .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                .auto_shrink([false, false])
+                .column(Column::auto().at_least(120.0))
+                .column(Column::auto().at_least(72.0))
+                .column(Column::remainder().clip(true))
+                .header(row_height, |mut header| {
+                    header.col(|ui| {
+                        ui.strong("Name");
+                    });
+                    header.col(|ui| {
+                        ui.strong("Type");
+                    });
+                    header.col(|ui| {
+                        ui.strong("Value");
+                    });
+                })
+                .body(|body| {
+                    body.rows(row_height, params.len(), |mut row| {
+                        let param = params[row.index()];
+                        row.col(|ui| {
+                            ui.monospace(param.name.as_str());
+                        });
+                        row.col(|ui| {
+                            ui.label(param.ty.as_str());
+                        });
+                        row.col(|ui| {
+                            ui.label(param.value.as_str());
+                        });
+                    });
+                });
+        });
+}
+
+fn source_metadata_markers_table(
+    ui: &mut egui::Ui,
+    source_id: delog_core::identity::SourceId,
+    markers: &[delog_core::identity::AutoMarker],
+) {
+    let row_height = table_row_height(ui);
+    egui::ScrollArea::vertical()
+        .id_salt(("source_markers", source_id.0))
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            TableBuilder::new(ui)
+                .id_salt("source_metadata_markers_table")
+                .striped(true)
+                .resizable(true)
+                .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                .auto_shrink([false, false])
+                .column(Column::auto().at_least(72.0))
+                .column(Column::auto().at_least(72.0))
+                .column(Column::remainder().clip(true))
+                .header(row_height, |mut header| {
+                    header.col(|ui| {
+                        ui.strong("Time");
+                    });
+                    header.col(|ui| {
+                        ui.strong("Level");
+                    });
+                    header.col(|ui| {
+                        ui.strong("Text");
+                    });
+                })
+                .body(|body| {
+                    body.rows(row_height, markers.len(), |mut row| {
+                        let marker = &markers[row.index()];
+                        row.col(|ui| {
+                            ui.label(format!("{:.3}s", marker.time_us as f64 / 1e6));
+                        });
+                        row.col(|ui| {
+                            ui.label(marker.level.to_string());
+                        });
+                        row.col(|ui| {
+                            ui.label(marker.text.as_str());
+                        });
+                    });
+                });
+        });
 }
 
 fn show_field_stats_window(
@@ -3015,6 +3085,11 @@ fn show_field_stats_window(
     let tab = controller.tab();
     let current = controller.result().copied();
     let displayed = current.or_else(|| controller.stale_result().copied());
+    let visible_range = view.map(|view| TimeRange {
+        min_us: view.min_us,
+        max_us: view.max_us,
+    });
+    let global_range = field_time_range(snapshot, field_id);
     let updating = controller.is_updating();
     if updating {
         ctx.request_repaint_after(Duration::from_millis(100));
@@ -3032,14 +3107,15 @@ fn show_field_stats_window(
         .collapsible(false)
         .default_pos(ctx.content_rect().center())
         .pivot(egui::Align2::CENTER_CENTER)
-        .default_width(360.0)
+        .default_width(320.0)
         .resizable(false)
         .show(ctx, |ui| {
             let mut dock_state = field_stats_dock_state(tab);
             let mut viewer = FieldStatsTabViewer {
                 snapshot,
                 field_id,
-                view,
+                visible_range,
+                global_range,
                 displayed,
                 provisional,
                 updating,
@@ -3083,7 +3159,8 @@ fn active_field_stats_tab(dock_state: &mut egui_dock::DockState<StatsTab>) -> St
 struct FieldStatsTabViewer<'a> {
     snapshot: &'a delog_core::snapshot::StoreSnapshot,
     field_id: delog_core::identity::FieldId,
-    view: Option<ViewX>,
+    visible_range: Option<TimeRange>,
+    global_range: Option<TimeRange>,
     displayed: Option<delog_core::analysis::FieldStats>,
     provisional: Option<(f64, f64)>,
     updating: bool,
@@ -3102,16 +3179,20 @@ impl egui_dock::TabViewer for FieldStatsTabViewer<'_> {
         match tab {
             StatsTab::Visible => show_visible_field_stats_tab(
                 ui,
-                self.view,
+                self.visible_range,
                 self.displayed,
                 self.provisional,
                 self.updating,
                 self.error,
                 self.suffix,
             ),
-            StatsTab::Global => {
-                show_global_field_stats_tab(ui, self.snapshot, self.field_id, self.suffix)
-            }
+            StatsTab::Global => show_global_field_stats_tab(
+                ui,
+                self.snapshot,
+                self.field_id,
+                self.global_range,
+                self.suffix,
+            ),
         }
     }
 
@@ -3122,25 +3203,14 @@ impl egui_dock::TabViewer for FieldStatsTabViewer<'_> {
 
 fn show_visible_field_stats_tab(
     ui: &mut egui::Ui,
-    view: Option<ViewX>,
+    range: Option<TimeRange>,
     displayed: Option<delog_core::analysis::FieldStats>,
     provisional: Option<(f64, f64)>,
     updating: bool,
     error: Option<&str>,
     suffix: &str,
 ) {
-    if let Some(view) = view {
-        ui.horizontal(|ui| {
-            ui.weak(format!(
-                "{} to {}",
-                format_time_us(view.min_us),
-                format_time_us(view.max_us)
-            ));
-            if updating {
-                ui.label(egui::RichText::new("Updating...").color(ui.visuals().hyperlink_color));
-            }
-        });
-    }
+    stats_range_header(ui, range, updating);
     if let Some(error) = error {
         if error == "This field is not numeric." {
             ui.weak(error);
@@ -3164,8 +3234,10 @@ fn show_global_field_stats_tab(
     ui: &mut egui::Ui,
     snapshot: &delog_core::snapshot::StoreSnapshot,
     field_id: delog_core::identity::FieldId,
+    range: Option<TimeRange>,
     suffix: &str,
 ) {
+    stats_range_header(ui, range, false);
     match delog_core::analysis::global_field_stats(snapshot, field_id) {
         Ok(Some(stats)) => stats_grid(ui, "global_field_stats_grid", Some(stats), None, suffix),
         Ok(None) => {
@@ -3177,6 +3249,27 @@ fn show_global_field_stats_tab(
     }
 }
 
+fn stats_range_header(ui: &mut egui::Ui, range: Option<TimeRange>, updating: bool) {
+    ui.horizontal(|ui| {
+        ui.strong("Range");
+        match range {
+            Some(range) => {
+                ui.monospace(format_time_us(range.min_us));
+                ui.weak("to");
+                ui.monospace(format_time_us(range.max_us));
+            }
+            None => {
+                ui.weak("unavailable");
+            }
+        }
+        if updating {
+            ui.separator();
+            ui.label(egui::RichText::new("Updating...").color(ui.visuals().hyperlink_color));
+        }
+    });
+    ui.add_space(6.0);
+}
+
 fn stats_grid(
     ui: &mut egui::Ui,
     id: &'static str,
@@ -3186,42 +3279,80 @@ fn stats_grid(
 ) {
     let min = stats.map(|s| s.min).or(provisional.map(|p| p.0));
     let max = stats.map(|s| s.max).or(provisional.map(|p| p.1));
-    egui::Grid::new(id)
-        .num_columns(2)
+    let rows = [
+        ("Min", stat_with_unit(min, suffix)),
+        ("Max", stat_with_unit(max, suffix)),
+        ("Mean", stat_with_unit(stats.map(|s| s.mean), suffix)),
+        ("Std dev", stat_with_unit(stats.map(|s| s.stddev), suffix)),
+        (
+            "Samples",
+            stats.map_or_else(|| "-".into(), |s| s.count.to_string()),
+        ),
+        (
+            "Missing",
+            stats.map_or_else(|| "-".into(), |s| s.missing_count.to_string()),
+        ),
+        (
+            "Rate",
+            stats
+                .and_then(|s| s.rate_hz)
+                .map(|rate| format!("{} Hz", format_stat(rate)))
+                .unwrap_or_else(|| "-".into()),
+        ),
+    ];
+    let row_height = table_row_height(ui);
+    TableBuilder::new(ui)
+        .id_salt(id)
         .striped(true)
-        .spacing([16.0, 4.0])
-        .show(ui, |ui| {
-            stats_row(ui, "Min", stat_with_unit(min, suffix));
-            stats_row(ui, "Max", stat_with_unit(max, suffix));
-            stats_row(ui, "Mean", stat_with_unit(stats.map(|s| s.mean), suffix));
-            stats_row(
-                ui,
-                "Std dev",
-                stat_with_unit(stats.map(|s| s.stddev), suffix),
-            );
-            stats_row(
-                ui,
-                "Samples",
-                stats.map_or_else(|| "-".into(), |s| s.count.to_string()),
-            );
-            stats_row(
-                ui,
-                "Missing",
-                stats.map_or_else(|| "-".into(), |s| s.missing_count.to_string()),
-            );
-            stats_row(
-                ui,
-                "Rate",
-                stats
-                    .and_then(|s| s.rate_hz)
-                    .map(|rate| format!("{} Hz", format_stat(rate)))
-                    .unwrap_or_else(|| "-".into()),
-            );
+        .resizable(true)
+        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+        .auto_shrink([false, false])
+        .column(Column::auto().at_least(72.0))
+        .column(Column::remainder().clip(true))
+        .body(|mut body| {
+            for (key, value) in rows {
+                body.row(row_height, |mut row| {
+                    row.col(|ui| {
+                        ui.strong(key);
+                    });
+                    row.col(|ui| {
+                        ui.label(value);
+                    });
+                });
+            }
         });
 }
 
 fn field_stats_window_title(field_label: &str) -> String {
     field_label.to_owned()
+}
+
+fn field_time_range(
+    snapshot: &delog_core::snapshot::StoreSnapshot,
+    field_id: delog_core::identity::FieldId,
+) -> Option<TimeRange> {
+    let field = snapshot
+        .fields
+        .get(field_id.index())
+        .filter(|field| field.id == field_id && !field.removed)?;
+    let topic = snapshot
+        .topic(field.topic)
+        .filter(|topic| !topic.entry.removed)?;
+    let source = snapshot
+        .source(topic.entry.source)
+        .filter(|source| !source.entry.removed)?;
+    topic
+        .store
+        .as_ref()?
+        .time_range()
+        .and_then(|range| range.offset(source.entry.offset_us))
+}
+
+fn table_row_height(ui: &egui::Ui) -> f32 {
+    egui::TextStyle::Body
+        .resolve(ui.style())
+        .size
+        .max(ui.spacing().interact_size.y)
 }
 
 fn stat_with_unit(value: Option<f64>, suffix: &str) -> String {
@@ -3232,12 +3363,6 @@ fn stat_with_unit(value: Option<f64>, suffix: &str) -> String {
 
 fn format_time_us(value: i64) -> String {
     format!("{:.3} s", value as f64 / 1e6)
-}
-
-fn stats_row(ui: &mut egui::Ui, key: &str, value: String) {
-    ui.strong(key);
-    ui.label(value);
-    ui.end_row();
 }
 
 fn field_label_and_unit(
@@ -3653,6 +3778,26 @@ mod tests {
     }
 
     #[test]
+    fn field_stats_window_is_compact_and_uses_resizable_tables() {
+        let source = include_str!("app.rs");
+        let field_stats = source
+            .split("fn show_field_stats_window")
+            .nth(1)
+            .expect("field stats window should exist")
+            .split("fn field_stats_window_title")
+            .next()
+            .expect("field stats helpers should precede title helper");
+
+        assert!(field_stats.contains(".default_width(320.0)"));
+        assert!(field_stats.contains("fn stats_range_header"));
+        assert_eq!(field_stats.matches("stats_range_header(ui,").count(), 2);
+        assert!(field_stats.contains("TableBuilder::new(ui)"));
+        assert!(field_stats.contains(".resizable(true)"));
+        assert!(field_stats.contains("Column::remainder()"));
+        assert!(!field_stats.contains("egui::Grid::new(id)"));
+    }
+
+    #[test]
     fn diagnostics_export_doc_includes_source_labels_and_counts() {
         let mut identity = IdentityRegistry::new();
         let source = identity.add_source("flight");
@@ -3795,5 +3940,25 @@ mod tests {
         assert!(source_metadata.contains("egui_dock::DockArea::new"));
         assert!(source.contains("impl egui_dock::TabViewer for SourceMetadataTabViewer"));
         assert!(!source_metadata.contains("selectable_value"));
+    }
+
+    #[test]
+    fn source_metadata_tables_use_resizable_table_builders() {
+        let source = include_str!("app.rs");
+        let source_metadata = source
+            .split("fn show_source_metadata_tab")
+            .nth(1)
+            .expect("source metadata tab renderer should exist")
+            .split("fn show_field_stats_window")
+            .next()
+            .expect("source metadata should precede field stats");
+
+        assert!(source_metadata.contains("source_metadata_summary_table"));
+        assert!(source_metadata.contains("source_metadata_params_table"));
+        assert!(source_metadata.contains("source_metadata_markers_table"));
+        assert_eq!(source_metadata.matches("TableBuilder::new(ui)").count(), 3);
+        assert_eq!(source_metadata.matches(".resizable(true)").count(), 3);
+        assert!(source_metadata.matches("Column::remainder()").count() >= 3);
+        assert!(!source_metadata.contains("egui::Grid::new"));
     }
 }
