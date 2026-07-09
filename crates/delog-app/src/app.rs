@@ -256,6 +256,11 @@ pub struct DelogApp {
     csv_export_tx: mpsc::Sender<CsvExportResult>,
     csv_export_rx: mpsc::Receiver<CsvExportResult>,
     csv_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    image_export_paths: mpsc::Receiver<crate::image_export::ExportSelection>,
+    image_export_paths_tx: mpsc::Sender<crate::image_export::ExportSelection>,
+    pending_image_capture: Option<crate::image_export::PendingImageCapture>,
+    next_image_capture_id: u64,
+    last_workspace_rect: Option<egui::Rect>,
     browser_collapsed: bool,
     docks: AppDockController,
     diagnostics_dock: DiagnosticsDock,
@@ -318,6 +323,7 @@ impl DelogApp {
         let (exported_diagnostics_tx, exported_diagnostics) = mpsc::channel();
         let (exported_profiling_tx, exported_profiling) = mpsc::channel();
         let (csv_export_tx, csv_export_rx) = mpsc::channel();
+        let (image_export_paths_tx, image_export_paths) = mpsc::channel();
         let session = Session::new(cc.egui_ctx.clone());
         // Shared metrics registry so cache metrics land in the same dock.
         let caches = CacheManager::new().with_metrics(std::sync::Arc::clone(session.metrics()));
@@ -363,6 +369,11 @@ impl DelogApp {
             csv_export_tx,
             csv_export_rx,
             csv_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            image_export_paths,
+            image_export_paths_tx,
+            pending_image_capture: None,
+            next_image_capture_id: 1,
+            last_workspace_rect: None,
             browser_collapsed: false,
             docks: AppDockController::new_empty(),
             diagnostics_dock: DiagnosticsDock::default(),
@@ -501,6 +512,154 @@ impl DelogApp {
         while let Ok(paths) = self.picked_files.try_recv() {
             for path in paths {
                 self.session.open_path(path);
+            }
+        }
+    }
+
+    fn spawn_png_export_dialog(
+        &self,
+        ctx: &egui::Context,
+        kind: crate::image_export::ImageCaptureKind,
+        rect: egui::Rect,
+        pixels_per_point: f32,
+    ) {
+        let tx = self.image_export_paths_tx.clone();
+        let ctx = ctx.clone();
+        let file_name = match kind {
+            crate::image_export::ImageCaptureKind::Workspace => "workspace.png",
+            crate::image_export::ImageCaptureKind::Plot => "plot.png",
+        };
+        std::thread::Builder::new()
+            .name("delog-image-export-dialog".into())
+            .spawn(move || {
+                let picked = rfd::FileDialog::new()
+                    .add_filter("PNG image", &["png"])
+                    .set_file_name(file_name)
+                    .set_title("Export PNG")
+                    .save_file();
+                if let Some(path) = picked {
+                    let _ = tx.send(crate::image_export::ExportSelection {
+                        path: crate::image_export::png_path(path),
+                        kind,
+                        rect,
+                        pixels_per_point,
+                    });
+                    ctx.request_repaint();
+                }
+            })
+            .expect("spawn image export dialog thread");
+    }
+
+    fn handle_image_export_paths(&mut self, ctx: &egui::Context) {
+        while let Ok(selection) = self.image_export_paths.try_recv() {
+            self.request_image_capture(
+                ctx,
+                crate::image_export::ImageCaptureAction::Export(selection.path),
+                selection.kind,
+                selection.rect,
+                selection.pixels_per_point,
+            );
+        }
+    }
+
+    fn request_image_capture(
+        &mut self,
+        ctx: &egui::Context,
+        action: crate::image_export::ImageCaptureAction,
+        kind: crate::image_export::ImageCaptureKind,
+        rect: egui::Rect,
+        pixels_per_point: f32,
+    ) {
+        if rect.width() <= 1.0 || rect.height() <= 1.0 {
+            self.session
+                .push_diagnostic(delog_core::diagnostics::Diag::warning(
+                    "image-export",
+                    "nothing to capture",
+                ));
+            return;
+        }
+        let id = self.next_image_capture_id;
+        self.next_image_capture_id = self.next_image_capture_id.wrapping_add(1).max(1);
+        self.pending_image_capture = Some(crate::image_export::PendingImageCapture {
+            id,
+            action,
+            kind,
+            rect,
+            pixels_per_point,
+        });
+        ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(id)));
+        ctx.request_repaint();
+    }
+
+    fn handle_image_screenshot_events(&mut self, ctx: &egui::Context) {
+        let events = ctx.input(|input| input.events.clone());
+        for event in events {
+            let egui::Event::Screenshot {
+                user_data, image, ..
+            } = event
+            else {
+                continue;
+            };
+            let Some(id) = crate::image_export::screenshot_request_id(&user_data) else {
+                continue;
+            };
+            if self
+                .pending_image_capture
+                .as_ref()
+                .map(|pending| pending.id)
+                != Some(id)
+            {
+                continue;
+            }
+            let Some(pending) = self.pending_image_capture.take() else {
+                continue;
+            };
+            let Some(cropped) = crate::image_export::crop_color_image(
+                &image,
+                pending.rect,
+                pending.pixels_per_point,
+            ) else {
+                self.session
+                    .push_diagnostic(delog_core::diagnostics::Diag::error(
+                        "image-export",
+                        "captured image did not overlap the requested area",
+                    ));
+                continue;
+            };
+
+            match pending.action {
+                crate::image_export::ImageCaptureAction::Copy => {
+                    ctx.copy_image(cropped);
+                    let what = match pending.kind {
+                        crate::image_export::ImageCaptureKind::Workspace => "workspace",
+                        crate::image_export::ImageCaptureKind::Plot => "plot",
+                    };
+                    self.session
+                        .push_diagnostic(delog_core::diagnostics::Diag::info(
+                            "image-copy",
+                            format!("copied {what} image to clipboard"),
+                        ));
+                }
+                crate::image_export::ImageCaptureAction::Export(path) => {
+                    match crate::image_export::encode_png(&cropped).and_then(|bytes| {
+                        std::fs::write(&path, bytes).map_err(image::ImageError::IoError)
+                    }) {
+                        Ok(()) => {
+                            self.session
+                                .push_diagnostic(delog_core::diagnostics::Diag::info(
+                                    "image-export",
+                                    format!("exported image to {}", path.display()),
+                                ))
+                        }
+                        Err(err) => {
+                            self.session
+                                .push_diagnostic(delog_core::diagnostics::Diag::error(
+                                    "image-export",
+                                    err.to_string(),
+                                ))
+                        }
+                    }
+                }
             }
         }
     }
@@ -1467,6 +1626,8 @@ impl eframe::App for DelogApp {
         // Apply the global font override before any widget is laid out so a
         // changed size/family takes effect this frame.
         self.settings.font.apply(ui.ctx());
+        self.handle_image_screenshot_events(ui.ctx());
+        self.handle_image_export_paths(ui.ctx());
         // Pre-UI bookkeeping: picked files, job pruning,
         // cache lifecycle + epoch handling, trajectory builds and autosave —
         // none of it inside a panel scope. `ui_prelude` captures this block so
