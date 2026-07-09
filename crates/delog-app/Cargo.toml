@@ -12,9 +12,12 @@ name = "delog"
 path = "src/main.rs"
 
 # `docs/logo.png` is decoded + resized to 256x256 at build time and embedded as
-# the runtime window icon. It is not compiled into the .exe as a resource icon.
+# the runtime window icon.
 [build-dependencies]
 image = { workspace = true }
+# On Windows targets, also embed the logo as a PE icon resource
+# (Explorer/taskbar/shortcuts). No-op for other targets.
+winresource = { workspace = true }
 
 [features]
 # Embedded-Python scripting is ON by default. Build without Python via
