@@ -22,6 +22,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 
 [Files]
 Source: "{#StagingDir}\delog.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#StagingDir}\python3*.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StagingDir}\python\*"; DestDir: "{app}\python"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
