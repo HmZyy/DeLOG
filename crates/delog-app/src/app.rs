@@ -570,6 +570,14 @@ impl DelogApp {
         rect: egui::Rect,
         pixels_per_point: f32,
     ) {
+        if self.pending_image_capture.is_some() {
+            self.session
+                .push_diagnostic(delog_core::diagnostics::Diag::warning(
+                    "image-export",
+                    "image capture already in progress",
+                ));
+            return;
+        }
         if rect.width() <= 1.0 || rect.height() <= 1.0 {
             self.session
                 .push_diagnostic(delog_core::diagnostics::Diag::warning(
