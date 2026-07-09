@@ -116,6 +116,7 @@ jobs:
         run: |
           py="$(scripts/ci/fetch-python-standalone.sh "$PWD/staging/python")"
           echo "PYO3_PYTHON=$py" >> "$GITHUB_ENV"
+          echo 'RUSTFLAGS=-C link-arg=-Wl,-rpath,$ORIGIN/python/lib' >> "$GITHUB_ENV"
 
       - name: Fetch bundled Python runtime (Windows)
         if: runner.os == 'Windows'
@@ -132,7 +133,9 @@ jobs:
       - name: Stage binary (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Copy-Item target/release/delog.exe staging/delog.exe
+        run: |
+          Copy-Item target/release/delog.exe staging/delog.exe
+          Copy-Item staging/python/python3*.dll staging/
 
       - name: Smoke test scripting (Linux)
         if: runner.os == 'Linux'
