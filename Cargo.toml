@@ -33,6 +33,7 @@ arrow = "59.0.0"
 arrow-ipc = "59.0.0"
 
 # GUI / GPU
+arboard = { version = "3.6.1", features = ["wayland-data-control"] }
 egui = "0.34.3"
 eframe = { version = "0.34.3", default-features = false, features = [
   "wgpu",
