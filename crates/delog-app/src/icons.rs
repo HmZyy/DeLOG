@@ -75,6 +75,10 @@ pub fn save() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/save.svg")
 }
 
+pub fn export() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/upload.svg")
+}
+
 #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
 pub fn unplug() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/unplug.svg")
