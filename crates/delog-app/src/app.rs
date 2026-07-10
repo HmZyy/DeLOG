@@ -2111,7 +2111,7 @@ impl eframe::App for DelogApp {
                 if icon_button(
                     ui,
                     "toolbar-export-workspace-png",
-                    crate::icons::save(),
+                    crate::icons::export(),
                     inactive_tint,
                     false,
                 )
