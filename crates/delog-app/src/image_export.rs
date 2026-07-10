@@ -24,6 +24,45 @@ pub struct PendingImageCapture {
 }
 
 #[derive(Debug, Clone)]
+pub struct ImageCaptureIntent {
+    pub action: ImageCaptureAction,
+    pub kind: ImageCaptureKind,
+    rect: Option<egui::Rect>,
+    ready_frame: u64,
+}
+
+impl ImageCaptureIntent {
+    pub fn workspace(action: ImageCaptureAction, current_frame: u64) -> Self {
+        Self {
+            action,
+            kind: ImageCaptureKind::Workspace,
+            rect: None,
+            ready_frame: current_frame,
+        }
+    }
+
+    pub fn plot(action: ImageCaptureAction, rect: egui::Rect, current_frame: u64) -> Self {
+        Self {
+            action,
+            kind: ImageCaptureKind::Plot,
+            rect: Some(rect),
+            ready_frame: current_frame.saturating_add(1),
+        }
+    }
+
+    pub fn is_ready(&self, frame: u64) -> bool {
+        frame >= self.ready_frame
+    }
+
+    pub fn resolve_rect(&self, workspace_rect: Option<egui::Rect>) -> Option<egui::Rect> {
+        match self.kind {
+            ImageCaptureKind::Workspace => workspace_rect,
+            ImageCaptureKind::Plot => self.rect,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct PngWriteRequest {
     pub path: PathBuf,
     pub png_bytes: Vec<u8>,
@@ -192,6 +231,31 @@ mod tests {
 
         assert_eq!(request.path.as_os_str(), "capture.png");
         assert_eq!(request.png_bytes, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn workspace_capture_intent_uses_current_frame_workspace_rect() {
+        let rect = egui::Rect::from_min_size(egui::pos2(8.0, 12.0), egui::vec2(300.0, 200.0));
+
+        let intent = ImageCaptureIntent::workspace(ImageCaptureAction::Export, 17);
+
+        assert!(intent.is_ready(17));
+        assert!(matches!(intent.action, ImageCaptureAction::Export));
+        assert_eq!(intent.kind, ImageCaptureKind::Workspace);
+        assert_eq!(intent.resolve_rect(Some(rect)), Some(rect));
+    }
+
+    #[test]
+    fn plot_capture_intent_waits_until_next_frame() {
+        let rect = egui::Rect::from_min_size(egui::pos2(4.0, 8.0), egui::vec2(120.0, 80.0));
+
+        let intent = ImageCaptureIntent::plot(ImageCaptureAction::Copy, rect, 23);
+
+        assert!(!intent.is_ready(23));
+        assert!(intent.is_ready(24));
+        assert!(matches!(intent.action, ImageCaptureAction::Copy));
+        assert_eq!(intent.kind, ImageCaptureKind::Plot);
+        assert_eq!(intent.resolve_rect(None), Some(rect));
     }
 
     #[test]
