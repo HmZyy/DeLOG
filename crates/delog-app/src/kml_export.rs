@@ -269,8 +269,22 @@ mod tests {
         alt: Vec<f64>,
         utc: Option<Vec<f64>>,
     ) -> (StoreSnapshot, [FieldId; 3]) {
+        gps_snapshot_with_offset(times, lat, lon, alt, utc, 0)
+    }
+
+    /// Like [`gps_snapshot`] but with a per-source boot-time offset applied,
+    /// to distinguish raw store time from effective (offset) time in tests.
+    fn gps_snapshot_with_offset(
+        times: Vec<i64>,
+        lat: Vec<f64>,
+        lon: Vec<f64>,
+        alt: Vec<f64>,
+        utc: Option<Vec<f64>>,
+        source_offset_us: i64,
+    ) -> (StoreSnapshot, [FieldId; 3]) {
         let mut id = IdentityRegistry::new();
         let src = id.add_source("veh");
+        id.set_source_offset_us(src, source_offset_us);
         let topic = id.add_topic(src, "GPS").unwrap();
         let flat = id.add_field(topic, "Lat").unwrap();
         let flon = id.add_field(topic, "Lng").unwrap();
@@ -399,6 +413,27 @@ mod tests {
             vec![8.25, 8.25],
             vec![400.0, 401.0],
             Some(vec![base, base + 1_000_000.0]),
+        );
+        let traj = VehicleTrajectory::default();
+        let out = build_kml(&snap, &[gps_vehicle(f)], std::slice::from_ref(&traj));
+        assert!(
+            out.xml.contains("<when>2020-09-13T12:26:40.000Z</when>"),
+            "{}",
+            out.xml
+        );
+        assert!(out.xml.contains("<when>2020-09-13T12:26:41.000Z</when>"));
+    }
+
+    #[test]
+    fn build_kml_anchors_to_raw_time_not_effective_time() {
+        let base = 1_600_000_000_000_000.0;
+        let (snap, f) = gps_snapshot_with_offset(
+            vec![0, 1_000_000],
+            vec![47.5, 47.5],
+            vec![8.25, 8.25],
+            vec![400.0, 401.0],
+            Some(vec![base, base + 1_000_000.0]),
+            5_000_000,
         );
         let traj = VehicleTrajectory::default();
         let out = build_kml(&snap, &[gps_vehicle(f)], std::slice::from_ref(&traj));

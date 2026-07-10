@@ -1276,11 +1276,16 @@ impl DelogApp {
                 ));
             return;
         }
+        let noun = if export.exported == 1 {
+            "trajectory"
+        } else {
+            "trajectories"
+        };
         let summary = if export.skipped.is_empty() {
-            format!("exported {} vehicle trajectories", export.exported)
+            format!("exported {} vehicle {noun}", export.exported)
         } else {
             format!(
-                "exported {} vehicle trajectories, skipped {} (no geo reference): {}",
+                "exported {} vehicle {noun}, skipped {} (no geo reference): {}",
                 export.exported,
                 export.skipped.len(),
                 export.skipped.join(", ")
