@@ -259,8 +259,8 @@ pub struct DelogApp {
     image_export_writes: mpsc::Receiver<crate::image_export::PngWriteRequest>,
     image_export_writes_tx: mpsc::Sender<crate::image_export::PngWriteRequest>,
     pending_image_capture: Option<crate::image_export::PendingImageCapture>,
+    queued_image_capture: Option<crate::image_export::ImageCaptureIntent>,
     next_image_capture_id: u64,
-    last_workspace_rect: Option<egui::Rect>,
     browser_collapsed: bool,
     docks: AppDockController,
     diagnostics_dock: DiagnosticsDock,
@@ -372,8 +372,8 @@ impl DelogApp {
             image_export_writes,
             image_export_writes_tx,
             pending_image_capture: None,
+            queued_image_capture: None,
             next_image_capture_id: 1,
-            last_workspace_rect: None,
             browser_collapsed: false,
             docks: AppDockController::new_empty(),
             diagnostics_dock: DiagnosticsDock::default(),
@@ -561,6 +561,53 @@ impl DelogApp {
                     )),
             }
         }
+    }
+
+    fn queue_image_capture(
+        &mut self,
+        ctx: &egui::Context,
+        intent: crate::image_export::ImageCaptureIntent,
+    ) {
+        if self.pending_image_capture.is_some() || self.queued_image_capture.is_some() {
+            self.session
+                .push_diagnostic(delog_core::diagnostics::Diag::warning(
+                    "image-export",
+                    "image capture already in progress",
+                ));
+            return;
+        }
+        self.queued_image_capture = Some(intent);
+        ctx.request_repaint();
+    }
+
+    fn start_queued_image_capture(
+        &mut self,
+        ctx: &egui::Context,
+        workspace_rect: Option<egui::Rect>,
+    ) {
+        let Some(intent) = self.queued_image_capture.take() else {
+            return;
+        };
+        if !intent.is_ready(self.frame) || self.pending_image_capture.is_some() {
+            self.queued_image_capture = Some(intent);
+            ctx.request_repaint();
+            return;
+        }
+        let Some(rect) = intent.resolve_rect(workspace_rect) else {
+            self.session
+                .push_diagnostic(delog_core::diagnostics::Diag::warning(
+                    "image-export",
+                    "workspace is not ready to export",
+                ));
+            return;
+        };
+        self.request_image_capture(
+            ctx,
+            intent.action,
+            intent.kind,
+            rect,
+            ctx.pixels_per_point(),
+        );
     }
 
     fn request_image_capture(
@@ -2071,21 +2118,13 @@ impl eframe::App for DelogApp {
                 .on_hover_text("Export workspace PNG")
                 .clicked()
                 {
-                    if let Some(rect) = self.last_workspace_rect {
-                        self.request_image_capture(
-                            ui.ctx(),
+                    self.queue_image_capture(
+                        ui.ctx(),
+                        crate::image_export::ImageCaptureIntent::workspace(
                             crate::image_export::ImageCaptureAction::Export,
-                            crate::image_export::ImageCaptureKind::Workspace,
-                            rect,
-                            ui.ctx().pixels_per_point(),
-                        );
-                    } else {
-                        self.session
-                            .push_diagnostic(delog_core::diagnostics::Diag::warning(
-                                "image-export",
-                                "workspace is not ready to export",
-                            ));
-                    }
+                            self.frame,
+                        ),
+                    );
                 }
 
                 ui.separator();
@@ -2551,7 +2590,7 @@ impl eframe::App for DelogApp {
             // The workspace renders even before any log loads, so plots can be
             // arranged and the 3D view opened on an empty session.
 
-            self.last_workspace_rect = Some(ui.available_rect_before_wrap());
+            let workspace_rect = ui.available_rect_before_wrap();
 
             // The central panel is a fallback drop zone: dropping a field onto
             // empty workspace space plots it in the first pane.
@@ -2646,21 +2685,23 @@ impl eframe::App for DelogApp {
                     if let Some(action) = actions.image {
                         match action {
                             crate::workspace::WorkspaceImageAction::CopyPlot { rect } => {
-                                self.request_image_capture(
+                                self.queue_image_capture(
                                     ui.ctx(),
-                                    crate::image_export::ImageCaptureAction::Copy,
-                                    crate::image_export::ImageCaptureKind::Plot,
-                                    rect,
-                                    ui.ctx().pixels_per_point(),
+                                    crate::image_export::ImageCaptureIntent::plot(
+                                        crate::image_export::ImageCaptureAction::Copy,
+                                        rect,
+                                        self.frame,
+                                    ),
                                 );
                             }
                             crate::workspace::WorkspaceImageAction::ExportPlot { rect } => {
-                                self.request_image_capture(
+                                self.queue_image_capture(
                                     ui.ctx(),
-                                    crate::image_export::ImageCaptureAction::Export,
-                                    crate::image_export::ImageCaptureKind::Plot,
-                                    rect,
-                                    ui.ctx().pixels_per_point(),
+                                    crate::image_export::ImageCaptureIntent::plot(
+                                        crate::image_export::ImageCaptureAction::Export,
+                                        rect,
+                                        self.frame,
+                                    ),
                                 );
                             }
                         }
@@ -2677,6 +2718,7 @@ impl eframe::App for DelogApp {
             }
             let plotted: Vec<_> = self.workspace.fields().collect();
             self.gpu.retain_plotted_buffers(frame, &plotted);
+            self.start_queued_image_capture(ui.ctx(), Some(workspace_rect));
         });
         drop(ui_workspace_timer);
 
