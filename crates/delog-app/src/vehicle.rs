@@ -179,12 +179,8 @@ fn open<'a>(snapshot: &'a StoreSnapshot, field: FieldId) -> Option<(FieldView<'a
     Some((view, field_multiplier(snapshot, field)))
 }
 
-fn position_topic_range(snapshot: &StoreSnapshot, pos: &PosMapping) -> Option<(i64, i64)> {
-    let anchor = match pos {
-        PosMapping::Ned { north, .. } => *north,
-        PosMapping::Gps { lat, .. } => *lat,
-    };
-    let topic_id = snapshot.fields.get(anchor.index())?.topic;
+fn field_topic_range(snapshot: &StoreSnapshot, field: FieldId) -> Option<(i64, i64)> {
+    let topic_id = snapshot.fields.get(field.index())?.topic;
     let store = snapshot.topic_store(topic_id)?;
     let source_id = snapshot.topic(topic_id)?.entry.source;
     let offset = snapshot
@@ -193,6 +189,14 @@ fn position_topic_range(snapshot: &StoreSnapshot, pos: &PosMapping) -> Option<(i
         .unwrap_or(0);
     let range = store.time_range()?.offset(offset)?;
     Some((range.min_us, range.max_us))
+}
+
+fn position_topic_range(snapshot: &StoreSnapshot, pos: &PosMapping) -> Option<(i64, i64)> {
+    let anchor = match pos {
+        PosMapping::Ned { north, .. } => *north,
+        PosMapping::Gps { lat, .. } => *lat,
+    };
+    field_topic_range(snapshot, anchor)
 }
 
 /// Resolve the GPS reference origin (first valid fix) to `(lat_rad, lon_rad, alt_m)`.
@@ -508,6 +512,75 @@ pub struct VehicleTrajectory {
 pub fn build_trajectory(snapshot: &StoreSnapshot, config: &VehicleConfig) -> VehicleTrajectory {
     build_trajectory_from_rows(snapshot, config)
         .unwrap_or_else(|| build_trajectory_by_time(snapshot, config))
+}
+
+/// Raw geodetic sample: canonical µs time + WGS84 degrees/metres.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct GeodeticSample {
+    pub t_us: i64,
+    pub lat_deg: f64,
+    pub lon_deg: f64,
+    pub alt_m: f64,
+}
+
+/// Full-resolution geodetic rows for a GPS-mapped vehicle, in stored order.
+/// Inner `None` = gap (invalid row or pre-fix `(0, 0)`); outer `None` = not a
+/// GPS mapping or the position columns can't be resolved.
+pub(crate) fn geodetic_rows(
+    snapshot: &StoreSnapshot,
+    config: &VehicleConfig,
+) -> Option<Vec<Option<GeodeticSample>>> {
+    let PosMapping::Gps {
+        lat_lon_dege7,
+        alt_mm,
+        alt_offset_m,
+        ..
+    } = &config.pos
+    else {
+        return None;
+    };
+    let rows = position_row_source(snapshot, &config.pos)?;
+    let (ll_scale, alt_scale) = PosMapping::gps_unit_scales(*lat_lon_dege7, *alt_mm);
+    let total_rows = usize::try_from(rows.store.rows).ok()?;
+    let mut out = Vec::with_capacity(total_rows);
+    for chunk in rows.store.chunks.iter() {
+        for row in 0..chunk.len() {
+            let sample = || -> Option<GeodeticSample> {
+                let lat_deg = row_value(&rows, chunk, 0, row)? * ll_scale;
+                let lon_deg = row_value(&rows, chunk, 1, row)? * ll_scale;
+                let alt_m = row_value(&rows, chunk, 2, row)? * alt_scale + alt_offset_m;
+                (lat_deg != 0.0 || lon_deg != 0.0).then_some(GeodeticSample {
+                    t_us: chunk.t.value(row),
+                    lat_deg,
+                    lon_deg,
+                    alt_m,
+                })
+            };
+            out.push(sample());
+        }
+    }
+    Some(out)
+}
+
+/// Resolve a NED-mapped vehicle's geodetic origin to `(lat_rad, lon_rad, alt_m)`.
+pub(crate) fn ned_reference_origin(
+    snapshot: &StoreSnapshot,
+    config: &VehicleConfig,
+) -> Option<(f64, f64, f64)> {
+    let PosMapping::Ned { reference, .. } = &config.pos else {
+        return None;
+    };
+    match reference.as_ref()? {
+        NedReference::Manual(geo_ref) => Some((
+            geo_ref.lat_deg.to_radians(),
+            geo_ref.lon_deg.to_radians(),
+            geo_ref.alt_m,
+        )),
+        NedReference::Fields { lat, lon, alt } => {
+            let range = field_topic_range(snapshot, *lat)?;
+            resolve_gps_ref(snapshot, *lat, *lon, *alt, 1.0, 1.0, range)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -839,5 +912,90 @@ mod tests {
         assert!((traj[0][2] - 0.0).abs() < 1e-4, "{traj:?}");
         assert!((traj[1][2] + 10.0).abs() < 1e-4, "{traj:?}");
         assert!((traj[2][2] + 20.0).abs() < 1e-4, "{traj:?}");
+    }
+
+    #[test]
+    fn geodetic_rows_returns_raw_samples_with_alt_offset() {
+        let (snap, f) = gps_snapshot(
+            vec![0, 1_000_000, 2_000_000],
+            vec![47.5, 47.500_1, 47.500_2],
+            vec![8.25, 8.25, 8.25],
+            vec![400.0, 401.0, 402.0],
+        );
+        let rows = geodetic_rows(&snap, &gps_config(f, 10.0)).unwrap();
+        assert_eq!(rows.len(), 3);
+        let s = rows[1].unwrap();
+        assert_eq!(s.t_us, 1_000_000);
+        assert!((s.lat_deg - 47.500_1).abs() < 1e-9);
+        assert!((s.lon_deg - 8.25).abs() < 1e-9);
+        assert!((s.alt_m - 411.0).abs() < 1e-9, "alt_offset applied, got {}", s.alt_m);
+    }
+
+    #[test]
+    fn geodetic_rows_marks_zero_fixes_as_gaps() {
+        let (snap, f) = gps_snapshot(
+            vec![0, 1_000_000],
+            vec![0.0, 47.5],
+            vec![0.0, 8.25],
+            vec![0.0, 400.0],
+        );
+        let rows = geodetic_rows(&snap, &gps_config(f, 0.0)).unwrap();
+        assert!(rows[0].is_none(), "zero fix should be a gap");
+        assert!(rows[1].is_some());
+    }
+
+    #[test]
+    fn geodetic_rows_is_none_for_ned_mappings() {
+        let (snap, f) = ned_snapshot(vec![0], vec![1.0], vec![2.0], vec![3.0]);
+        assert!(geodetic_rows(&snap, &ned_config(f)).is_none());
+    }
+
+    #[test]
+    fn ned_reference_origin_resolves_manual_reference() {
+        let (snap, f) = ned_snapshot(vec![0], vec![0.0], vec![0.0], vec![0.0]);
+        let mut config = ned_config(f);
+        config.pos = PosMapping::Ned {
+            north: f[0],
+            east: f[1],
+            down: f[2],
+            reference: Some(NedReference::Manual(GeoRef {
+                lat_deg: 47.5,
+                lon_deg: 8.25,
+                alt_m: 400.0,
+            })),
+        };
+        let (lat, lon, alt) = ned_reference_origin(&snap, &config).unwrap();
+        assert!((lat.to_degrees() - 47.5).abs() < 1e-9);
+        assert!((lon.to_degrees() - 8.25).abs() < 1e-9);
+        assert!((alt - 400.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn ned_reference_origin_resolves_fields_reference() {
+        let (snap, [flat, flon, falt]) =
+            gps_snapshot(vec![0], vec![47.5], vec![8.25], vec![400.0]);
+        let f = [flat, flon, falt];
+        let config = VehicleConfig {
+            pos: PosMapping::Ned {
+                north: f[0],
+                east: f[1],
+                down: f[2],
+                reference: Some(NedReference::Fields {
+                    lat: flat,
+                    lon: flon,
+                    alt: falt,
+                }),
+            },
+            ..gps_config(f, 0.0)
+        };
+        let (lat, _, alt) = ned_reference_origin(&snap, &config).unwrap();
+        assert!((lat.to_degrees() - 47.5).abs() < 1e-9);
+        assert!((alt - 400.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn ned_reference_origin_is_none_without_reference() {
+        let (snap, f) = ned_snapshot(vec![0], vec![0.0], vec![0.0], vec![0.0]);
+        assert!(ned_reference_origin(&snap, &ned_config(f)).is_none());
     }
 }
