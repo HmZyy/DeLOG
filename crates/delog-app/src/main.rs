@@ -16,6 +16,7 @@ mod gpu;
 mod hover;
 mod icons;
 mod image_export;
+mod kml_export;
 mod layout;
 mod legend;
 mod live;
