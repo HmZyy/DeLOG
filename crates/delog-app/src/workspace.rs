@@ -1256,7 +1256,7 @@ impl Behavior<'_> {
             }
             if ui
                 .add(egui::Button::image_and_text(
-                    menu_icon(ui, crate::icons::save()),
+                    menu_icon(ui, crate::icons::export()),
                     "Export PNG...",
                 ))
                 .clicked()
