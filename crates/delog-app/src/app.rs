@@ -261,6 +261,7 @@ pub struct DelogApp {
     pending_image_capture: Option<crate::image_export::PendingImageCapture>,
     queued_image_capture: Option<crate::image_export::ImageCaptureIntent>,
     next_image_capture_id: u64,
+    image_clipboard: Option<arboard::Clipboard>,
     browser_collapsed: bool,
     docks: AppDockController,
     diagnostics_dock: DiagnosticsDock,
@@ -374,6 +375,7 @@ impl DelogApp {
             pending_image_capture: None,
             queued_image_capture: None,
             next_image_capture_id: 1,
+            image_clipboard: None,
             browser_collapsed: false,
             docks: AppDockController::new_empty(),
             diagnostics_dock: DiagnosticsDock::default(),
@@ -563,6 +565,54 @@ impl DelogApp {
         }
     }
 
+    fn copy_captured_image_to_clipboard(
+        &mut self,
+        kind: crate::image_export::ImageCaptureKind,
+        image: &egui::ColorImage,
+    ) {
+        let what = match kind {
+            crate::image_export::ImageCaptureKind::Workspace => "workspace",
+            crate::image_export::ImageCaptureKind::Plot => "plot",
+        };
+
+        if self.image_clipboard.is_none() {
+            match arboard::Clipboard::new() {
+                Ok(clipboard) => self.image_clipboard = Some(clipboard),
+                Err(err) => {
+                    self.session
+                        .push_diagnostic(delog_core::diagnostics::Diag::error(
+                            "image-copy",
+                            format!("failed to initialize clipboard: {err}"),
+                        ));
+                    return;
+                }
+            }
+        }
+
+        let Some(clipboard) = self.image_clipboard.as_mut() else {
+            return;
+        };
+        match crate::image_export::copy_image_to_clipboard(clipboard, image) {
+            Ok(()) => self
+                .session
+                .push_diagnostic(delog_core::diagnostics::Diag::info(
+                    "image-copy",
+                    format!(
+                        "copied {what} image to clipboard via arboard ({}x{})",
+                        image.size[0], image.size[1]
+                    ),
+                )),
+            Err(err) => {
+                self.image_clipboard = None;
+                self.session
+                    .push_diagnostic(delog_core::diagnostics::Diag::error(
+                        "image-copy",
+                        format!("failed to copy {what} image to clipboard: {err}"),
+                    ));
+            }
+        }
+    }
+
     fn queue_image_capture(
         &mut self,
         ctx: &egui::Context,
@@ -685,16 +735,7 @@ impl DelogApp {
 
             match pending.action {
                 crate::image_export::ImageCaptureAction::Copy => {
-                    ctx.copy_image(cropped);
-                    let what = match pending.kind {
-                        crate::image_export::ImageCaptureKind::Workspace => "workspace",
-                        crate::image_export::ImageCaptureKind::Plot => "plot",
-                    };
-                    self.session
-                        .push_diagnostic(delog_core::diagnostics::Diag::info(
-                            "image-copy",
-                            format!("copied {what} image to clipboard"),
-                        ));
+                    self.copy_captured_image_to_clipboard(pending.kind, &cropped);
                 }
                 crate::image_export::ImageCaptureAction::Export => {
                     match crate::image_export::encode_png(&cropped) {

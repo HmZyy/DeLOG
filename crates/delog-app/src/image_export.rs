@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{borrow::Cow, path::PathBuf};
 
 use image::ImageEncoder;
 
@@ -129,12 +129,31 @@ pub fn crop_color_image(
     Some(image.region_by_pixels([px.x, px.y], [px.w, px.h]))
 }
 
-pub fn encode_png(image: &egui::ColorImage) -> Result<Vec<u8>, image::ImageError> {
+pub fn rgba_bytes(image: &egui::ColorImage) -> Vec<u8> {
     let mut rgba = Vec::with_capacity(image.pixels.len() * 4);
     for pixel in &image.pixels {
-        rgba.extend_from_slice(&pixel.to_array());
+        rgba.extend_from_slice(&pixel.to_srgba_unmultiplied());
     }
+    rgba
+}
 
+pub fn clipboard_image_data(image: &egui::ColorImage) -> arboard::ImageData<'static> {
+    arboard::ImageData {
+        width: image.size[0],
+        height: image.size[1],
+        bytes: Cow::Owned(rgba_bytes(image)),
+    }
+}
+
+pub fn copy_image_to_clipboard(
+    clipboard: &mut arboard::Clipboard,
+    image: &egui::ColorImage,
+) -> Result<(), arboard::Error> {
+    clipboard.set_image(clipboard_image_data(image))
+}
+
+pub fn encode_png(image: &egui::ColorImage) -> Result<Vec<u8>, image::ImageError> {
+    let rgba = rgba_bytes(image);
     let mut out = Vec::new();
     let encoder = image::codecs::png::PngEncoder::new(&mut out);
     encoder.write_image(
@@ -211,6 +230,23 @@ mod tests {
         let bytes = encode_png(&image).expect("png encoding should succeed");
 
         assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+    }
+
+    #[test]
+    fn clipboard_image_data_uses_rgba_bytes_and_dimensions() {
+        let image = egui::ColorImage::new(
+            [2, 1],
+            vec![
+                egui::Color32::from_rgba_unmultiplied(255, 0, 0, 128),
+                egui::Color32::from_rgba_unmultiplied(0, 255, 0, 128),
+            ],
+        );
+
+        let data = clipboard_image_data(&image);
+
+        assert_eq!(data.width, 2);
+        assert_eq!(data.height, 1);
+        assert_eq!(data.bytes.as_ref(), &[255, 0, 0, 128, 0, 255, 0, 128]);
     }
 
     #[test]
