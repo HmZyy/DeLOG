@@ -15,6 +15,7 @@ mod geo;
 mod gpu;
 mod hover;
 mod icons;
+mod image_export;
 mod layout;
 mod legend;
 mod live;
@@ -28,13 +29,13 @@ mod plot;
 #[cfg(feature = "bundled-python")]
 mod py_runtime;
 #[cfg(feature = "scripting")]
-mod script_params_io;
-#[cfg(feature = "scripting")]
-mod scripts;
-#[cfg(feature = "scripting")]
 mod repl_complete;
 #[cfg(feature = "scripting")]
 mod repl_history;
+#[cfg(feature = "scripting")]
+mod script_params_io;
+#[cfg(feature = "scripting")]
+mod scripts;
 mod session;
 mod settings;
 mod text_overlay;

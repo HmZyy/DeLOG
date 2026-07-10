@@ -29,6 +29,7 @@ scripting = ["dep:delog-script", "delog-script/python", "dep:egui_code_editor"]
 bundled-python = ["scripting"]
 
 [dependencies]
+arboard = { workspace = true }
 arrow = { workspace = true }
 delog-core = { workspace = true }
 delog-parsers = { workspace = true }
@@ -45,6 +46,7 @@ egui_extras = { workspace = true }
 egui_dock = { workspace = true }
 egui_tiles = { workspace = true }
 glam = { workspace = true }
+image = { workspace = true }
 rfd = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
