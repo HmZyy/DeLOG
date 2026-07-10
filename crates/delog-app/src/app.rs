@@ -2108,25 +2108,6 @@ impl eframe::App for DelogApp {
                     self.workspace.equalize_plot_heights();
                 }
 
-                if icon_button(
-                    ui,
-                    "toolbar-export-workspace-png",
-                    crate::icons::export(),
-                    inactive_tint,
-                    false,
-                )
-                .on_hover_text("Export workspace PNG")
-                .clicked()
-                {
-                    self.queue_image_capture(
-                        ui.ctx(),
-                        crate::image_export::ImageCaptureIntent::workspace(
-                            crate::image_export::ImageCaptureAction::Export,
-                            self.frame,
-                        ),
-                    );
-                }
-
                 ui.separator();
 
                 if icon_button(
@@ -2160,6 +2141,27 @@ impl eframe::App for DelogApp {
                 .clicked()
                 {
                     self.workspace.set_all_plot_legends(legends_hidden);
+                }
+
+                ui.separator();
+
+                if icon_button(
+                    ui,
+                    "toolbar-export-workspace-png",
+                    crate::icons::export(),
+                    inactive_tint,
+                    false,
+                )
+                .on_hover_text("Export workspace PNG")
+                .clicked()
+                {
+                    self.queue_image_capture(
+                        ui.ctx(),
+                        crate::image_export::ImageCaptureIntent::workspace(
+                            crate::image_export::ImageCaptureAction::Export,
+                            self.frame,
+                        ),
+                    );
                 }
 
                 let mut disconnect = None;
