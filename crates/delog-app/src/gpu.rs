@@ -5,13 +5,15 @@ use delog_cache::{CacheManager, MinMax};
 use delog_core::identity::FieldId;
 use delog_core::metrics::MetricsRegistry;
 use delog_render::{
-    BufferManager, GpuErrorHub, Grid3dPipeline, GridUniform, LinePipeline, MeshGpu, MeshPipeline,
-    MeshUniform, MinMaxColPipeline, PlotUniform, RenderContext, ScatterPipeline, Scene3dTarget,
-    StepPipeline, Traj3dPipeline, Traj3dUniform, UniformRing,
+    BufferManager, GpuErrorHub, Grid3dPipeline, GridUniform, LinePipeline, MapTilePipeline,
+    MapTileUpload, MeshGpu, MeshPipeline, MeshUniform, MinMaxColPipeline, PlotUniform,
+    RenderContext, ScatterPipeline, Scene3dTarget, StepPipeline, Traj3dPipeline, Traj3dUniform,
+    UniformRing,
 };
 use eframe::{egui_wgpu, wgpu};
 
 use crate::camera::OrbitCamera;
+use crate::map::worker::ReadyTile;
 use crate::models;
 use crate::plot::{PlotPane, TraceMode, ViewX};
 use crate::settings::Scene3dSettings;
@@ -341,6 +343,7 @@ impl GpuBridge {
         rect: egui::Rect,
         camera: &OrbitCamera,
         scene3d: Scene3dSettings,
+        ready_tiles: &[ReadyTile],
         vehicles: &[VehicleDraw],
     ) -> Option<egui::TextureId> {
         if !self.available {
@@ -387,6 +390,7 @@ impl GpuBridge {
                 bytemuck::bytes_of(&Traj3dUniform::new(vp_cols, res.axis_gizmo.color)),
             );
             res.prepare_vehicles(vp_cols, camera.eye().to_array(), vehicles);
+            res.prepare_map_tiles(vp_cols, ready_tiles);
 
             let clear = wgpu::Color {
                 r: 0.07,
@@ -402,6 +406,7 @@ impl GpuBridge {
                     });
             {
                 let mut pass = res.target.begin_pass(&mut enc, clear);
+                res.map_tiles.draw(&mut pass);
                 if scene3d.show_grid {
                     res.grid.draw(&mut pass);
                 }
@@ -704,6 +709,10 @@ struct SceneResources {
     ctx: RenderContext,
     target: Scene3dTarget,
     grid: Grid3dPipeline,
+    map_tiles: MapTilePipeline,
+    map_tile_sets: HashMap<u64, (u64, u8)>,
+    map_current: Option<(u64, u8)>,
+    map_previous: Option<(u64, u8)>,
     traj: Traj3dPipeline,
     mesh: MeshPipeline,
     /// Decoded meshes by model kind (lazy; built on first use).
@@ -719,6 +728,12 @@ impl SceneResources {
         // Start at 1×1; the first `render_scene` resizes to the pane.
         let target = Scene3dTarget::new(ctx.clone(), 1, 1);
         let grid = Grid3dPipeline::new(
+            &ctx,
+            target.color_format(),
+            target.depth_format(),
+            target.sample_count(),
+        );
+        let map_tiles = MapTilePipeline::new(
             &ctx,
             target.color_format(),
             target.depth_format(),
@@ -745,6 +760,10 @@ impl SceneResources {
             ctx,
             target,
             grid,
+            map_tiles,
+            map_tile_sets: HashMap::new(),
+            map_current: None,
+            map_previous: None,
             traj,
             mesh,
             model_cache: HashMap::new(),
@@ -877,6 +896,41 @@ impl SceneResources {
             }
         }
     }
+
+    fn prepare_map_tiles(&mut self, vp: [[f32; 4]; 4], ready: &[ReadyTile]) {
+        self.map_tiles.set_view_proj(vp);
+        for tile in ready {
+            let key = map_tile_key(tile);
+            if let Err(error) = self.map_tiles.upload(MapTileUpload {
+                key,
+                rgba: &tile.rgba,
+                corners: tile.corners,
+            }) {
+                tracing::warn!(%error, "failed to upload map tile");
+            } else {
+                self.map_tile_sets
+                    .insert(key, (tile.generation, tile.id.zoom));
+            }
+        }
+        if let Some(next) = ready.first().map(|tile| (tile.generation, tile.id.zoom))
+            && self.map_current != Some(next)
+        {
+            self.map_previous = self.map_current.filter(|old| old.0 == next.0);
+            self.map_current = Some(next);
+            let current = self.map_current;
+            let previous = self.map_previous;
+            self.map_tile_sets
+                .retain(|_, set| Some(*set) == current || Some(*set) == previous);
+            self.map_tiles.retain(self.map_tile_sets.keys().copied());
+        }
+    }
+}
+
+fn map_tile_key(tile: &ReadyTile) -> u64 {
+    ((tile.generation & 0xffff) << 48)
+        | ((tile.id.zoom as u64) << 40)
+        | ((tile.id.x as u64 & 0xfffff) << 20)
+        | (tile.id.y as u64 & 0xfffff)
 }
 
 fn new_points_buffer(ctx: &RenderContext, count: u32, label: &str) -> wgpu::Buffer {
