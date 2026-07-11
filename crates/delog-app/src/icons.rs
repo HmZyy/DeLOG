@@ -79,6 +79,10 @@ pub fn export() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/upload.svg")
 }
 
+pub fn earth() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/earth.svg")
+}
+
 #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
 pub fn unplug() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/unplug.svg")
@@ -94,6 +98,10 @@ pub fn rows() -> ImageSource<'static> {
 
 pub fn info() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/info.svg")
+}
+
+pub fn circle_alert() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/circle-alert.svg")
 }
 
 pub fn clock() -> ImageSource<'static> {

@@ -16,11 +16,13 @@ mod gpu;
 mod hover;
 mod icons;
 mod image_export;
+mod kml_export;
 mod layout;
 mod legend;
 mod live;
 mod logging;
 mod markers;
+mod message_popup;
 mod models;
 #[cfg(feature = "scripting")]
 mod parsers;

@@ -452,6 +452,7 @@ pub struct WorkspaceActions {
     /// Manual X-view change (pan/zoom/reset); unlocks live-tail mode.
     pub view_changed: bool,
     pub open_vehicle_config: bool,
+    pub export_kml: bool,
     pub inspect_field_stats: Option<FieldId>,
     /// Widest Y gutter any pane needed; fed into `Workspace::shared_y_gutter`.
     pub max_y_gutter: f32,
@@ -737,6 +738,9 @@ impl Behavior<'_> {
         }
         if overlay.toggle_trail {
             pane.trail_to_playhead = !pane.trail_to_playhead;
+        }
+        if overlay.export_kml {
+            self.actions.export_kml = true;
         }
 
         if response.drag_started_by(egui::PointerButton::Middle) {
@@ -1785,6 +1789,7 @@ fn tracked_vehicle_picker(
 struct SceneOverlayClicks {
     vehicle_config: bool,
     toggle_trail: bool,
+    export_kml: bool,
 }
 
 fn scene_overlay_buttons(
@@ -1820,6 +1825,14 @@ fn scene_overlay_buttons(
                     .tint(route_tint);
                 clicks.toggle_trail = ui
                     .add_sized(egui::vec2(28.0, 24.0), egui::Button::image(route))
+                    .clicked();
+
+                let earth = egui::Image::new(crate::icons::earth())
+                    .fit_to_exact_size(egui::vec2(18.0, 18.0))
+                    .tint(ui.visuals().weak_text_color());
+                clicks.export_kml = ui
+                    .add_sized(egui::vec2(28.0, 24.0), egui::Button::image(earth))
+                    .on_hover_text("Export trajectories to KML")
                     .clicked();
             });
         });

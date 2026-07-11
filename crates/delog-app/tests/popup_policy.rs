@@ -3,6 +3,7 @@ const POPUP_SOURCES: &[&str] = &[
     include_str!("../src/browser.rs"),
     include_str!("../src/generate_markers.rs"),
     include_str!("../src/live.rs"),
+    include_str!("../src/message_popup.rs"),
     include_str!("../src/parsers.rs"),
     include_str!("../src/scripts.rs"),
     include_str!("../src/settings.rs"),
@@ -401,6 +402,14 @@ fn removed_workspace_fields_are_pruned_before_cache_requests() {
         .expect("workspace fields should request render caches");
 
     assert!(prune < request);
+}
+
+#[test]
+fn kml_export_results_surface_message_popups() {
+    assert!(APP_SOURCE.contains("message_popup::show_all(&mut self.message_popups"));
+    assert!(APP_SOURCE.contains("MessagePopup::info("));
+    assert!(APP_SOURCE.contains("MessagePopup::error("));
+    assert!(!APP_SOURCE.contains("rfd::MessageDialog"));
 }
 
 #[test]
