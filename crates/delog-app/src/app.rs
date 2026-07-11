@@ -1154,22 +1154,8 @@ impl DelogApp {
             name,
             workspace: &self.workspace,
             snapshot,
-            view: self.view,
-            fit_all: self.fit_view_all,
             speed: self.playback.speed as f64,
             follow_live: self.playback.follow_live,
-            marker_us: self.marker_us,
-            markers: self
-                .markers
-                .as_slice()
-                .iter()
-                .map(|m| crate::layout::MarkerLayout {
-                    t_us: m.t_us,
-                    label: m.label.clone(),
-                    color: m.color,
-                    note: m.note.clone(),
-                })
-                .collect(),
             vehicles: &self.vehicles,
         })
     }
@@ -1544,19 +1530,11 @@ impl DelogApp {
 
     fn apply_layout(&mut self, layout: LayoutApply) {
         self.workspace = layout.workspace;
-        self.view = layout.view;
-        // A restored view is authoritative — don't let the data-fit refit
-        // overwrite it on the next frame.
-        self.view_fitted = layout.view.is_some();
+        self.view = None;
+        self.view_fitted = false;
         self.fit_view_all = layout.fit_all;
         self.playback.set_speed(layout.speed as f32);
         self.playback.follow_live = layout.follow_live;
-        self.marker_us = layout.marker_us;
-        let mut markers = crate::markers::Markers::new();
-        for m in layout.markers {
-            markers.push_loaded(m.t_us, m.label, m.color, m.note);
-        }
-        self.markers = markers;
         // Legend/tooltip visibility is restored per-pane via the workspace.
         self.vehicles = layout.vehicles;
         self.vehicle_revision = self.vehicle_revision.wrapping_add(1);
