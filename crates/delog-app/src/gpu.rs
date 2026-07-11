@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
 use delog_cache::{CacheManager, MinMax};
@@ -722,6 +723,7 @@ struct SceneResources {
     grid: Grid3dPipeline,
     map_tiles: MapTilePipeline,
     map_tile_cache: HashMap<MapScopeId, HashMap<u64, ReadyTile>>,
+    map_tile_resident_signatures: HashMap<u64, u64>,
     map_tile_epoch: u64,
     traj: Traj3dPipeline,
     mesh: MeshPipeline,
@@ -772,6 +774,7 @@ impl SceneResources {
             grid,
             map_tiles,
             map_tile_cache: HashMap::new(),
+            map_tile_resident_signatures: HashMap::new(),
             map_tile_epoch: 0,
             traj,
             mesh,
@@ -916,25 +919,41 @@ impl SceneResources {
         if self.map_tile_epoch != selection.epoch {
             self.map_tile_epoch = selection.epoch;
             self.map_tile_cache.clear();
+            self.map_tile_resident_signatures.clear();
         }
         let cache = self.map_tile_cache.entry(selection.scope).or_default();
+        let mut changed = std::collections::HashSet::new();
         for tile in ready.iter().filter(|tile| tile.scope == selection.scope) {
-            cache.insert(map_tile_key(tile), tile.clone());
+            let key = map_tile_key(tile);
+            let signature = map_tile_signature(tile);
+            if self.map_tile_resident_signatures.get(&key) != Some(&signature) {
+                changed.insert(key);
+            }
+            cache.insert(key, tile.clone());
         }
         cache.retain(|_, tile| map_tile_matches(selection, tile));
-        self.map_tiles.retain(std::iter::empty());
+        let desired: Vec<_> = cache.keys().copied().collect();
+        self.map_tiles.retain(desired.iter().copied());
+        self.map_tile_resident_signatures
+            .retain(|key, _| desired.contains(key));
         if !selection.enabled {
             return;
         }
         let mut tiles: Vec<_> = cache.iter().collect();
         tiles.sort_by_key(|(key, _)| **key);
         for (key, tile) in tiles {
+            if self.map_tiles.contains(*key) && !changed.contains(key) {
+                continue;
+            }
             if let Err(error) = self.map_tiles.upload(MapTileUpload {
                 key: *key,
                 rgba: &tile.rgba,
                 corners: tile.corners,
             }) {
                 tracing::warn!(%error, "failed to upload map tile");
+            } else {
+                self.map_tile_resident_signatures
+                    .insert(*key, map_tile_signature(tile));
             }
         }
     }
@@ -950,10 +969,31 @@ fn map_tile_matches(selection: MapTileSelection, tile: &ReadyTile) -> bool {
 }
 
 fn map_tile_key(tile: &ReadyTile) -> u64 {
-    ((tile.generation & 0xffff) << 48)
-        | ((tile.id.zoom as u64) << 40)
-        | ((tile.id.x as u64 & 0xfffff) << 20)
-        | (tile.id.y as u64 & 0xfffff)
+    let mut hasher = DefaultHasher::new();
+    tile.scope.hash(&mut hasher);
+    tile.epoch.hash(&mut hasher);
+    tile.provider.hash(&mut hasher);
+    tile.generation.hash(&mut hasher);
+    tile.id.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn map_tile_signature(tile: &ReadyTile) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    tile.scope.hash(&mut hasher);
+    tile.epoch.hash(&mut hasher);
+    tile.provider.hash(&mut hasher);
+    tile.generation.hash(&mut hasher);
+    tile.id.zoom.hash(&mut hasher);
+    tile.id.x.hash(&mut hasher);
+    tile.id.y.hash(&mut hasher);
+    tile.rgba.hash(&mut hasher);
+    for corner in tile.corners {
+        for coordinate in corner {
+            coordinate.to_bits().hash(&mut hasher);
+        }
+    }
+    hasher.finish()
 }
 
 fn new_points_buffer(ctx: &RenderContext, count: u32, label: &str) -> wgpu::Buffer {
@@ -1428,6 +1468,73 @@ mod tests {
         );
         assert_eq!(resources.map_tile_cache[&selection.scope].len(), 0);
         assert_eq!(resources.map_tiles.resident_tile_count(), 0);
+    }
+
+    #[test]
+    fn map_tile_prepare_only_uploads_and_allocates_changed_residency() {
+        let Some(ctx) = RenderContext::headless() else {
+            eprintln!("no wgpu adapter — skipping map residency instrumentation test");
+            return;
+        };
+        let mut resources = SceneResources::new(ctx);
+        let selection = MapTileSelection {
+            scope: MapScopeId(8),
+            epoch: 2,
+            generation: 5,
+            current_zoom: Some(4),
+            previous_zoom: None,
+            enabled: true,
+        };
+        let tile = |zoom, x, color: [u8; 4]| ReadyTile {
+            scope: selection.scope,
+            epoch: selection.epoch,
+            provider: crate::map::provider::MapProviderId::BingSatellite,
+            id: crate::map::provider::TileId { zoom, x, y: 1 },
+            generation: selection.generation,
+            rgba: color.repeat(256 * 256),
+            corners: [[x as f32, 0.0, 0.0]; 4],
+        };
+        let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+        resources.prepare_map_tiles(identity, selection, &[tile(4, 1, [1, 2, 3, 255])]);
+        assert_eq!(resources.map_tiles.upload_count(), 1);
+        assert_eq!(resources.map_tiles.allocation_count(), 1);
+
+        resources.prepare_map_tiles(identity, selection, &[]);
+        assert_eq!(
+            resources.map_tiles.upload_count(),
+            1,
+            "static frame uploads zero"
+        );
+        assert_eq!(
+            resources.map_tiles.allocation_count(),
+            1,
+            "static frame allocates zero"
+        );
+
+        let zoomed = MapTileSelection {
+            current_zoom: Some(5),
+            previous_zoom: Some(4),
+            ..selection
+        };
+        resources.prepare_map_tiles(identity, zoomed, &[tile(5, 2, [4, 5, 6, 255])]);
+        assert_eq!(resources.map_tiles.resident_tile_count(), 2);
+        assert_eq!(
+            resources.map_tiles.upload_count(),
+            2,
+            "only the new zoom uploads"
+        );
+        assert_eq!(
+            resources.map_tiles.allocation_count(),
+            2,
+            "only the new zoom allocates"
+        );
+
+        resources.prepare_map_tiles(identity, zoomed, &[tile(5, 2, [7, 8, 9, 255])]);
+        assert_eq!(
+            resources.map_tiles.upload_count(),
+            3,
+            "changed content uploads"
+        );
     }
 
     #[test]
