@@ -45,6 +45,11 @@ pub struct MapTilePipeline {
 }
 
 impl MapTilePipeline {
+    /// Number of tiles currently eligible for drawing.
+    pub fn resident_tile_count(&self) -> usize {
+        self.tiles.len()
+    }
+
     pub fn new(
         ctx: &RenderContext,
         color_format: wgpu::TextureFormat,
@@ -547,6 +552,9 @@ fn fs() -> @location(0) vec4<f32> {
         let red = solid([255, 0, 0, 255]);
         let ctx = RenderContext::headless().expect("headless adapter");
         let target = Scene3dTarget::new(ctx.clone(), 64, 64);
+        let eye = glam::Vec3::new(0.0, 2.5, 2.5);
+        let view_proj = glam::Mat4::perspective_rh(0.9, 1.0, 0.1, 20.0)
+            * glam::Mat4::look_at_rh(eye, glam::Vec3::ZERO, glam::Vec3::Y);
         let mut tiles = MapTilePipeline::new(
             &ctx,
             target.color_format(),
@@ -558,14 +566,14 @@ fn fs() -> @location(0) vec4<f32> {
                 key: 1,
                 rgba: &red,
                 corners: [
-                    [-1.0, -1.0, 0.8],
-                    [1.0, -1.0, 0.8],
-                    [1.0, 1.0, 0.8],
-                    [-1.0, 1.0, 0.8],
+                    [-2.0, 0.0, -2.0],
+                    [2.0, 0.0, -2.0],
+                    [2.0, 0.0, 2.0],
+                    [-2.0, 0.0, 2.0],
                 ],
             })
             .unwrap();
-        tiles.set_view_proj(glam::Mat4::IDENTITY.to_cols_array_2d());
+        tiles.set_view_proj(view_proj.to_cols_array_2d());
         let grid = Grid3dPipeline::new(
             &ctx,
             target.color_format(),
@@ -575,9 +583,9 @@ fn fs() -> @location(0) vec4<f32> {
         grid.set_uniform(
             &ctx,
             &GridUniform::new(
-                glam::Mat4::IDENTITY.to_cols_array_2d(),
-                glam::Mat4::IDENTITY.to_cols_array_2d(),
-                [0.0, 1.0, 0.0],
+                view_proj.to_cols_array_2d(),
+                view_proj.inverse().to_cols_array_2d(),
+                eye.to_array(),
                 1.0,
                 10.0,
                 100.0,
@@ -599,6 +607,20 @@ fn fs() -> @location(0) vec4<f32> {
             .unwrap();
         let image = target.read_rgba();
         assert!(image.matches(32, 32, [0, 255, 0, 255], 4));
-        assert!(image.matches(8, 32, [255, 0, 0, 255], 4));
+        assert!(image.count_matching([255, 0, 0, 255], 4) > 100);
+        let grid_over_tile = image
+            .pixels
+            .chunks_exact(4)
+            .filter(|p| {
+                p[3] == 255
+                    && p[0] > 20
+                    && !(p[0] > 245 && p[1] < 10 && p[2] < 10)
+                    && !(p[0] < 10 && p[1] > 245 && p[2] < 10)
+            })
+            .count();
+        assert!(
+            grid_over_tile > 8,
+            "grid must remain visibly alpha-composed over the red tile, got {grid_over_tile} pixels"
+        );
     }
 }

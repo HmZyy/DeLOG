@@ -22,6 +22,7 @@ use crate::vehicle::ModelKind;
 #[derive(Clone, Copy, Debug)]
 pub struct MapTileSelection {
     pub scope: MapScopeId,
+    pub epoch: u64,
     pub generation: u64,
     pub current_zoom: Option<u8>,
     pub previous_zoom: Option<u8>,
@@ -721,6 +722,7 @@ struct SceneResources {
     grid: Grid3dPipeline,
     map_tiles: MapTilePipeline,
     map_tile_cache: HashMap<MapScopeId, HashMap<u64, ReadyTile>>,
+    map_tile_epoch: u64,
     traj: Traj3dPipeline,
     mesh: MeshPipeline,
     /// Decoded meshes by model kind (lazy; built on first use).
@@ -770,6 +772,7 @@ impl SceneResources {
             grid,
             map_tiles,
             map_tile_cache: HashMap::new(),
+            map_tile_epoch: 0,
             traj,
             mesh,
             model_cache: HashMap::new(),
@@ -910,6 +913,10 @@ impl SceneResources {
         ready: &[ReadyTile],
     ) {
         self.map_tiles.set_view_proj(vp);
+        if self.map_tile_epoch != selection.epoch {
+            self.map_tile_epoch = selection.epoch;
+            self.map_tile_cache.clear();
+        }
         let cache = self.map_tile_cache.entry(selection.scope).or_default();
         for tile in ready.iter().filter(|tile| tile.scope == selection.scope) {
             cache.insert(map_tile_key(tile), tile.clone());
@@ -936,6 +943,7 @@ impl SceneResources {
 fn map_tile_matches(selection: MapTileSelection, tile: &ReadyTile) -> bool {
     selection.enabled
         && tile.scope == selection.scope
+        && tile.epoch == selection.epoch
         && tile.generation == selection.generation
         && (Some(tile.id.zoom) == selection.current_zoom
             || Some(tile.id.zoom) == selection.previous_zoom)
@@ -1351,6 +1359,7 @@ mod tests {
     fn mixed_ready_batch_keeps_requested_current_and_previous_zoom_independent_of_order() {
         let selection = MapTileSelection {
             scope: MapScopeId(4),
+            epoch: 3,
             generation: 9,
             current_zoom: Some(12),
             previous_zoom: Some(11),
@@ -1358,6 +1367,7 @@ mod tests {
         };
         let tile = |zoom| ReadyTile {
             scope: MapScopeId(4),
+            epoch: 3,
             provider: crate::map::provider::MapProviderId::BingSatellite,
             id: crate::map::provider::TileId { zoom, x: 0, y: 0 },
             generation: 9,
@@ -1373,5 +1383,63 @@ mod tests {
                 .all(|tile| map_tile_matches(selection, tile))
         );
         assert!(!map_tile_matches(selection, &tile(10)));
+    }
+
+    #[test]
+    fn cache_epoch_change_purges_cpu_and_gpu_tiles_on_empty_poll() {
+        let Some(ctx) = RenderContext::headless() else {
+            eprintln!("no wgpu adapter — skipping map clear residency test");
+            return;
+        };
+        let mut resources = SceneResources::new(ctx);
+        let selection = MapTileSelection {
+            scope: MapScopeId(7),
+            epoch: 0,
+            generation: 1,
+            current_zoom: Some(3),
+            previous_zoom: None,
+            enabled: true,
+        };
+        let tile = ReadyTile {
+            scope: selection.scope,
+            epoch: 0,
+            provider: crate::map::provider::MapProviderId::BingSatellite,
+            id: crate::map::provider::TileId {
+                zoom: 3,
+                x: 1,
+                y: 2,
+            },
+            generation: 1,
+            rgba: [40, 80, 120, 255].repeat(256 * 256),
+            corners: [[0.0, 0.0, 0.0]; 4],
+        };
+        let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+        resources.prepare_map_tiles(identity, selection, &[tile]);
+        assert_eq!(resources.map_tile_cache[&selection.scope].len(), 1);
+        assert_eq!(resources.map_tiles.resident_tile_count(), 1);
+
+        resources.prepare_map_tiles(
+            identity,
+            MapTileSelection {
+                epoch: 1,
+                ..selection
+            },
+            &[],
+        );
+        assert_eq!(resources.map_tile_cache[&selection.scope].len(), 0);
+        assert_eq!(resources.map_tiles.resident_tile_count(), 0);
+    }
+
+    #[test]
+    fn scene_pass_encodes_tiles_before_grid_before_vehicle_overlays() {
+        let source = include_str!("gpu.rs");
+        let pass = source
+            .split("let mut pass = res.target.begin_pass")
+            .nth(1)
+            .expect("scene pass");
+        let tiles = pass.find("res.map_tiles.draw").expect("tile draw");
+        let grid = pass.find("res.grid.draw").expect("grid draw");
+        let vehicles = pass.find("res.draw_vehicles").expect("vehicle draw");
+        assert!(tiles < grid && grid < vehicles);
     }
 }
