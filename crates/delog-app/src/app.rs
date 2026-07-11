@@ -2742,6 +2742,7 @@ impl eframe::App for DelogApp {
                         snapshot: &snapshot,
                         metrics: self.session.metrics(),
                         gpu: &mut self.gpu,
+                        tile_manager: self.tile_manager.as_mut(),
                         caches: &mut self.caches,
                         view: &mut self.view,
                         origin_us: self.origin_us,

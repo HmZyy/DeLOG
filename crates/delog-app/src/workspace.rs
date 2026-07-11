@@ -12,6 +12,9 @@ use crate::camera::OrbitCamera;
 use crate::gpu::{self, GpuBridge, PaneView, VehicleDraw};
 use crate::hover::{self, HoverTarget};
 use crate::legend;
+use crate::map::mercator;
+use crate::map::provider::{MapProviderId, provider};
+use crate::map::worker::{TileManager, TileRequest};
 use crate::plot::{GhostTrace, PlotPane, TraceMode, TraceRef, ViewX};
 use crate::vehicle;
 
@@ -30,6 +33,18 @@ pub struct Scene3dPane {
     /// When true, each vehicle's path is clipped to the playhead time; when
     /// false, the full flight path is drawn.
     pub trail_to_playhead: bool,
+    pub(crate) map_selection: Option<(usize, MapProviderId)>,
+    pub(crate) map_generation: u64,
+}
+
+impl Scene3dPane {
+    fn update_map_selection(&mut self, selection: Option<(usize, MapProviderId)>) -> u64 {
+        if self.map_selection != selection {
+            self.map_selection = selection;
+            self.map_generation = self.map_generation.wrapping_add(1).max(1);
+        }
+        self.map_generation
+    }
 }
 
 impl Default for Scene3dPane {
@@ -38,6 +53,8 @@ impl Default for Scene3dPane {
             camera: OrbitCamera::default(),
             tracked_vehicle: None,
             trail_to_playhead: true,
+            map_selection: None,
+            map_generation: 0,
         }
     }
 }
@@ -464,6 +481,7 @@ pub struct PlotServices<'a> {
     pub snapshot: &'a Arc<StoreSnapshot>,
     pub metrics: &'a Arc<delog_core::metrics::MetricsRegistry>,
     pub gpu: &'a mut GpuBridge,
+    pub tile_manager: Option<&'a mut TileManager>,
     pub caches: &'a mut CacheManager,
     pub view: &'a mut Option<ViewX>,
     pub origin_us: i64,
@@ -669,6 +687,51 @@ impl Behavior<'_> {
             .map(|p| p.pos);
         pane.camera.target = tracked.unwrap_or(glam::Vec3::ZERO);
 
+        let tracked_reference = pane
+            .tracked_vehicle
+            .and_then(|i| self.services.vehicles.get(i).map(|v| (i, v)))
+            .and_then(|(i, v)| vehicle::geodetic_reference(snapshot, v).map(|r| (i, r)));
+        let provider_id = self.services.scene3d.map_provider;
+        let ready_tiles =
+            if let (Some(manager), Some((tracked_index, anchor)), Some(map_provider)) = (
+                self.services.tile_manager.as_deref_mut(),
+                tracked_reference,
+                provider(provider_id),
+            ) {
+                let selection = (tracked_index, provider_id);
+                pane.update_map_selection(Some(selection));
+                let ppp = ui.ctx().pixels_per_point();
+                let viewport = [
+                    (rect.width() * ppp).round().max(1.0) as u32,
+                    (rect.height() * ppp).round().max(1.0) as u32,
+                ];
+                let aspect = viewport[0] as f32 / viewport[1] as f32;
+                let (_, inverse_relative) = pane
+                    .camera
+                    .view_proj_and_inverse(aspect, self.services.scene3d.resolved_far_clip_m());
+                let inverse = glam::DMat4::from_translation(pane.camera.eye().as_dvec3())
+                    * inverse_relative.as_dmat4();
+                let visible = mercator::visible_tiles(
+                    inverse,
+                    viewport,
+                    [anchor[0], anchor[1]],
+                    map_provider.zoom_range(),
+                );
+                for (priority, id) in visible.tiles.into_iter().enumerate() {
+                    manager.request(TileRequest {
+                        provider: provider_id,
+                        id,
+                        corners: mercator::tile_corners_render(id, anchor),
+                        priority: priority as i32,
+                        generation: pane.map_generation,
+                    });
+                }
+                manager.poll()
+            } else {
+                pane.update_map_selection(None);
+                Vec::new()
+            };
+
         let draws: Vec<VehicleDraw> = self
             .services
             .vehicles
@@ -709,6 +772,7 @@ impl Behavior<'_> {
                 rect,
                 &pane.camera,
                 self.services.scene3d,
+                &ready_tiles,
                 &draws,
             )
         };
@@ -731,6 +795,24 @@ impl Behavior<'_> {
 
         if vehicle_count >= 2 {
             tracked_vehicle_picker(ui, rect, pane, self.services.vehicles);
+        }
+
+        if provider_id != MapProviderId::None {
+            let message = scene_map_overlay(
+                self.services.tile_manager.is_some(),
+                tracked_reference.is_some(),
+            );
+            scene_map_status(ui, rect, message);
+            if let Some(map_provider) = provider(provider_id) {
+                let (label, url) = map_provider.attribution();
+                egui::Area::new(ui.make_persistent_id("scene-map-attribution"))
+                    .order(egui::Order::Foreground)
+                    .fixed_pos(rect.left_bottom() + egui::vec2(8.0, -26.0))
+                    .show(ui.ctx(), |ui| {
+                        ui.small("Imagery © ");
+                        ui.hyperlink_to(label, url);
+                    });
+            }
         }
 
         let overlay = scene_overlay_buttons(ui, rect, pane.trail_to_playhead, self.services.accent);
@@ -1547,6 +1629,26 @@ impl Behavior<'_> {
     }
 }
 
+fn scene_map_overlay(manager_available: bool, reference_available: bool) -> Option<&'static str> {
+    match (manager_available, reference_available) {
+        (false, _) => Some("Map cache unavailable"),
+        (true, false) => Some("Tracked vehicle has no map reference"),
+        (true, true) => None,
+    }
+}
+
+fn scene_map_status(ui: &egui::Ui, rect: egui::Rect, message: Option<&str>) {
+    if let Some(message) = message {
+        ui.painter().text(
+            rect.center_bottom() - egui::vec2(0.0, 12.0),
+            egui::Align2::CENTER_BOTTOM,
+            message,
+            egui::FontId::proportional(13.0),
+            ui.visuals().warn_fg_color,
+        );
+    }
+}
+
 fn apply_ghost_text_state(pane: &mut PlotPane, ghost: &GhostTrace, field: FieldId) {
     if let Some(filter) = ghost.text_filter.as_ref() {
         pane.text_filters.insert(field, filter.clone());
@@ -2099,6 +2201,37 @@ mod tests {
 
         assert_eq!(first_visible_vehicle(&poses), Some(1));
         assert_eq!(first_visible_vehicle(&[None, None]), None);
+    }
+
+    #[test]
+    fn scene_map_overlay_only_reports_actionable_states() {
+        assert_eq!(
+            scene_map_overlay(false, false),
+            Some("Map cache unavailable")
+        );
+        assert_eq!(
+            scene_map_overlay(true, false),
+            Some("Tracked vehicle has no map reference")
+        );
+        assert_eq!(scene_map_overlay(true, true), None);
+    }
+
+    #[test]
+    fn scene_map_tracked_vehicle_switch_changes_generation() {
+        let mut pane = Scene3dPane::default();
+        let first = pane.update_map_selection(Some((0, MapProviderId::BingSatellite)));
+        assert_eq!(
+            pane.update_map_selection(Some((0, MapProviderId::BingSatellite))),
+            first
+        );
+        assert!(pane.update_map_selection(Some((1, MapProviderId::BingSatellite))) > first);
+    }
+
+    #[test]
+    fn scene_map_none_provider_or_reference_produces_no_selection() {
+        let mut pane = Scene3dPane::default();
+        assert_eq!(pane.update_map_selection(None), 0);
+        assert!(pane.map_selection.is_none());
     }
 
     #[test]
