@@ -215,6 +215,13 @@ mod tests {
         (projection * view).inverse()
     }
 
+    fn ground_tile(inv_vp: DMat4, ndc: [f64; 2], anchor: [f64; 2], zoom: u8) -> Option<TileId> {
+        let hit = ground_hit(inv_vp, ndc[0], ndc[1])?;
+        let (lat, lon, _) =
+            crate::geo::ned_to_geodetic(DVec3::new(-hit.z, hit.x, 0.0), anchor[0], anchor[1], 0.0);
+        Some(lat_lon_to_tile(lat, lon, zoom))
+    }
+
     #[test]
     fn latitude_is_clamped_to_web_mercator_limits() {
         assert_eq!(
@@ -311,6 +318,42 @@ mod tests {
         assert!(set.tiles.len() <= TILE_LIMIT);
         let unique: std::collections::HashSet<_> = set.tiles.iter().copied().collect();
         assert_eq!(unique.len(), set.tiles.len());
+    }
+
+    #[test]
+    fn horizontal_view_prioritizes_detailed_lower_screen_ground() {
+        let anchor = [0.0, 0.0];
+        let inv_vp = inverse_view_projection(
+            DVec3::new(0.0, 10_000.0, 0.0),
+            DVec3::new(0.0, 10_000.0, -900_000.0),
+            32.0 / 9.0,
+        );
+        let set = visible_tiles(inv_vp, [15360, 4320], anchor, 0..=19);
+        let zoom = set.tiles.first().expect("horizontal ground selection").zoom;
+
+        assert!(zoom >= 11, "near-horizon outliers degraded zoom to {zoom}");
+        for ndc in [
+            [-1.0, -1.0],
+            [0.0, -1.0],
+            [1.0, -1.0],
+            [-0.5, -0.5],
+            [0.5, -0.5],
+        ] {
+            let tile = ground_tile(inv_vp, ndc, anchor, zoom).expect("lower ray hits ground");
+            assert!(
+                set.tiles.contains(&tile),
+                "missing visible lower-screen tile {tile:?} at {ndc:?}"
+            );
+        }
+        assert!(
+            ground_hit(inv_vp, 0.0, 0.5).is_none(),
+            "sky ray must remain sky"
+        );
+        assert!(set.tiles.len() <= TILE_LIMIT);
+        assert_eq!(
+            set.tiles.iter().copied().collect::<HashSet<_>>().len(),
+            set.tiles.len()
+        );
     }
 
     #[test]
