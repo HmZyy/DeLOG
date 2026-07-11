@@ -34,7 +34,6 @@ pub trait MapProvider: Send + Sync {
     fn label(&self) -> &'static str;
     fn zoom_range(&self) -> RangeInclusive<u8>;
     fn url(&self, tile: TileId) -> String;
-    fn attribution(&self) -> (&'static str, &'static str);
 }
 
 struct BingSatellite;
@@ -54,12 +53,6 @@ impl MapProvider for BingSatellite {
         format!(
             "http://ecn.t{server}.tiles.virtualearth.net/tiles/a{}.jpeg?g=2981&mkt=en-US",
             tile.quadkey()
-        )
-    }
-    fn attribution(&self) -> (&'static str, &'static str) {
-        (
-            "Microsoft Bing",
-            "https://www.microsoft.com/maps/product/terms.html",
         )
     }
 }
