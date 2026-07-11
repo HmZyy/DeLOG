@@ -872,7 +872,11 @@ fn fs() -> @location(0) vec4<f32> {
                 ],
             })
             .unwrap();
-        assert_eq!(tiles.depth_biases_for_test(), (2, 1));
+        let (fallback_bias, current_bias) = tiles.depth_biases_for_test();
+        assert!(
+            fallback_bias > current_bias,
+            "fallback must be biased farther than current; equal or reversed bias breaks overlap"
+        );
         let visible = MapTileDrawGroups {
             previous: vec![1],
             current: vec![2],
@@ -913,6 +917,71 @@ fn fs() -> @location(0) vec4<f32> {
                 .poll(wgpu::PollType::wait_indefinitely())
                 .unwrap();
             let image = target.read_rgba();
+            let project = |point: glam::Vec3| {
+                let ndc = vp.project_point3(point);
+                (
+                    ((ndc.x * 0.5 + 0.5) * 63.0).round() as usize,
+                    ((1.0 - (ndc.y * 0.5 + 0.5)) * 63.0).round() as usize,
+                )
+            };
+            let neighborhood = |point: glam::Vec3| {
+                let (x, y) = project(point);
+                let mut pixels = Vec::with_capacity(25);
+                for dy in -2_isize..=2 {
+                    for dx in -2_isize..=2 {
+                        let Some(px) = x.checked_add_signed(dx) else {
+                            continue;
+                        };
+                        let Some(py) = y.checked_add_signed(dy) else {
+                            continue;
+                        };
+                        if px < 64 && py < 64 {
+                            let offset = (py * 64 + px) * 4;
+                            pixels.push([
+                                image.pixels[offset],
+                                image.pixels[offset + 1],
+                                image.pixels[offset + 2],
+                                image.pixels[offset + 3],
+                            ]);
+                        }
+                    }
+                }
+                pixels
+            };
+            let fallback_sample = neighborhood(glam::vec3(-1.1, 0.0, 0.65))
+                .into_iter()
+                .filter(|p| p[0] > 180 && p[0] > p[2].saturating_add(80))
+                .count();
+            let child_points = [
+                project(glam::vec3(0.0, 0.0, 0.0)),
+                project(glam::vec3(0.0, 0.0, 1.0)),
+                project(glam::vec3(1.0, 0.0, 0.0)),
+                project(glam::vec3(1.0, 0.0, 1.0)),
+            ];
+            let child_bounds = (
+                child_points.iter().map(|p| p.0).min().unwrap(),
+                child_points.iter().map(|p| p.0).max().unwrap(),
+                child_points.iter().map(|p| p.1).min().unwrap(),
+                child_points.iter().map(|p| p.1).max().unwrap(),
+            );
+            let mut current_sample = 0;
+            let mut grid_over_current_sample = 0;
+            for y in child_bounds.2..=child_bounds.3 {
+                for x in child_bounds.0..=child_bounds.1 {
+                    let p = &image.pixels[(y * 64 + x) * 4..][..4];
+                    current_sample += usize::from(p[2] > 180 && p[2] > p[0].saturating_add(80));
+                    grid_over_current_sample += usize::from(p[0] > 10 && p[2] > 10);
+                }
+            }
+            assert!(fallback_sample > 0, "fallback sample missing at dx={dx}");
+            assert!(
+                current_sample > 0,
+                "current child did not cover fallback at dx={dx}"
+            );
+            assert!(
+                grid_over_current_sample > 0,
+                "grid did not depth-compose above current-over-fallback overlap at dx={dx}"
+            );
             let coarse_pixels = image
                 .pixels
                 .chunks_exact(4)
