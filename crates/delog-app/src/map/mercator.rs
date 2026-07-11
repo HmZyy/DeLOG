@@ -1,6 +1,6 @@
 use std::{
-    cmp::Reverse,
-    collections::{BinaryHeap, HashSet},
+    cmp::{Ordering, Reverse},
+    collections::{BinaryHeap, HashMap, HashSet},
     f64::consts::PI,
     ops::RangeInclusive,
 };
@@ -11,6 +11,15 @@ use super::provider::TileId;
 
 const MAX_LAT_RAD: f64 = 85.051_128_78_f64 * PI / 180.0;
 const TILE_LIMIT: usize = 256;
+const SAMPLE_COLS: usize = 9;
+const SAMPLE_ROWS: usize = 17;
+
+#[derive(Clone, Copy, Debug)]
+struct ScreenHit {
+    col: usize,
+    row: usize,
+    world: DVec3,
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct VisibleSet {
@@ -69,6 +78,167 @@ fn ground_hit(inv_vp: DMat4, x: f64, y: f64) -> Option<DVec3> {
     (t >= 0.0).then(|| near + t * direction)
 }
 
+fn sample_ground(inv_vp: DMat4) -> Vec<Option<ScreenHit>> {
+    (0..SAMPLE_ROWS)
+        .flat_map(|row| {
+            (0..SAMPLE_COLS).map(move |col| {
+                let x = -1.0 + 2.0 * col as f64 / (SAMPLE_COLS - 1) as f64;
+                let y = -1.0 + 2.0 * row as f64 / (SAMPLE_ROWS - 1) as f64;
+                ground_hit(inv_vp, x, y).map(|world| ScreenHit { col, row, world })
+            })
+        })
+        .collect()
+}
+
+fn select_zoom(
+    samples: &[Option<ScreenHit>],
+    viewport_px: [u32; 2],
+    min_zoom: u8,
+    max_zoom: u8,
+) -> u8 {
+    let pixel_x = viewport_px[0] as f64 / (SAMPLE_COLS - 1) as f64;
+    let pixel_y = viewport_px[1] as f64 / (SAMPLE_ROWS - 1) as f64;
+    let mut values = Vec::new();
+    for row in 0..SAMPLE_ROWS {
+        for col in 0..SAMPLE_COLS {
+            let Some(hit) = samples[row * SAMPLE_COLS + col] else {
+                continue;
+            };
+            for (other, separation) in [
+                (
+                    (col + 1 < SAMPLE_COLS)
+                        .then(|| samples[row * SAMPLE_COLS + col + 1])
+                        .flatten(),
+                    pixel_x,
+                ),
+                (
+                    (row + 1 < SAMPLE_ROWS)
+                        .then(|| samples[(row + 1) * SAMPLE_COLS + col])
+                        .flatten(),
+                    pixel_y,
+                ),
+            ] {
+                if let Some(other) = other {
+                    let metres_per_pixel = hit.world.distance(other.world) / separation;
+                    if metres_per_pixel.is_finite() && metres_per_pixel > 0.0 {
+                        values.push(metres_per_pixel);
+                    }
+                }
+            }
+        }
+    }
+    if values.is_empty() {
+        return max_zoom;
+    }
+    values.sort_by(f64::total_cmp);
+    let metres_per_pixel = values[values.len() / 4];
+    let earth_circumference = 2.0 * PI * 6_378_137.0;
+    let ideal = (earth_circumference / (metres_per_pixel * 256.0))
+        .log2()
+        .floor() as i32;
+    ideal.clamp(min_zoom as i32, max_zoom as i32) as u8
+}
+
+fn ranked_tiles(
+    samples: &[Option<ScreenHit>],
+    selected_zoom: u8,
+    anchor_rad: [f64; 2],
+) -> Vec<TileId> {
+    let size = i64::from(world_size(selected_zoom));
+    let anchor_tile = lat_lon_to_tile(anchor_rad[0], anchor_rad[1], selected_zoom);
+    let mut coordinates = vec![None; samples.len()];
+    let mut reference_x = None;
+    for (index, sample) in samples.iter().enumerate() {
+        let Some(hit) = sample else { continue };
+        let (lat, lon, _) = crate::geo::ned_to_geodetic(
+            DVec3::new(-hit.world.z, hit.world.x, 0.0),
+            anchor_rad[0],
+            anchor_rad[1],
+            0.0,
+        );
+        let tile = lat_lon_to_tile(lat, lon, selected_zoom);
+        let reference = *reference_x.get_or_insert(i64::from(tile.x));
+        let x = reference + (i64::from(tile.x) - reference + size / 2).rem_euclid(size) - size / 2;
+        coordinates[index] = Some((x, i64::from(tile.y)));
+    }
+    let Some(bottom_index) = samples
+        .iter()
+        .enumerate()
+        .filter_map(|(index, hit)| hit.map(|hit| (index, hit)))
+        .min_by(|(_, a), (_, b)| {
+            a.row.cmp(&b.row).then_with(|| {
+                let center = (SAMPLE_COLS - 1) as i64;
+                let da = (2 * a.col as i64 - center).abs();
+                let db = (2 * b.col as i64 - center).abs();
+                da.cmp(&db)
+            })
+        })
+        .map(|(index, _)| index)
+    else {
+        return vec![anchor_tile];
+    };
+    let bottom = coordinates[bottom_index].unwrap();
+    let mut priorities: HashMap<TileId, usize> = HashMap::new();
+    let mut insert_rect = |min_x, max_x, min_y, max_y, priority| {
+        for tile in nearest_tiles(selected_zoom, min_x, max_x, min_y, max_y) {
+            priorities
+                .entry(tile)
+                .and_modify(|old| *old = (*old).max(priority))
+                .or_insert(priority);
+        }
+    };
+    for row in 0..SAMPLE_ROWS - 1 {
+        for col in 0..SAMPLE_COLS - 1 {
+            let indices = [
+                row * SAMPLE_COLS + col,
+                row * SAMPLE_COLS + col + 1,
+                (row + 1) * SAMPLE_COLS + col,
+                (row + 1) * SAMPLE_COLS + col + 1,
+            ];
+            let Some(corners) = indices
+                .map(|index| coordinates[index])
+                .into_iter()
+                .collect::<Option<Vec<_>>>()
+            else {
+                continue;
+            };
+            let min_x = corners.iter().map(|p| p.0).min().unwrap() - 1;
+            let max_x = corners.iter().map(|p| p.0).max().unwrap() + 1;
+            let min_y = (corners.iter().map(|p| p.1).min().unwrap() - 1).max(0);
+            let max_y = (corners.iter().map(|p| p.1).max().unwrap() + 1).min(size - 1);
+            insert_rect(min_x, max_x, min_y, max_y, SAMPLE_ROWS - 1 - row);
+        }
+    }
+    for (index, hit) in samples.iter().enumerate() {
+        if let (Some(_), Some((x, y))) = (hit, coordinates[index]) {
+            insert_rect(
+                x - 1,
+                x + 1,
+                (y - 1).max(0),
+                (y + 1).min(size - 1),
+                SAMPLE_ROWS,
+            );
+        }
+    }
+    let mut ranked: Vec<_> = priorities.into_iter().collect();
+    ranked.sort_by(|(a, pa), (b, pb)| {
+        let distance = |tile: &TileId| {
+            let dx = (i64::from(tile.x) - bottom.0 + size / 2).rem_euclid(size) - size / 2;
+            let dy = i64::from(tile.y) - bottom.1;
+            dx * dx + dy * dy
+        };
+        pb.cmp(pa)
+            .then_with(|| distance(a).cmp(&distance(b)))
+            .then_with(|| a.y.cmp(&b.y).then_with(|| a.x.cmp(&b.x)))
+            .then(Ordering::Equal)
+    });
+    ranked
+        .into_iter()
+        .take(TILE_LIMIT)
+        .map(|(tile, _)| tile)
+        .collect()
+}
+
 pub fn visible_tiles(
     inv_vp: DMat4,
     viewport_px: [u32; 2],
@@ -83,63 +253,10 @@ pub fn visible_tiles(
     if min_zoom > max_zoom {
         return VisibleSet::default();
     }
-    let mut hits = Vec::new();
-    for sample_y in 0..=4 {
-        for sample_x in 0..=4 {
-            let x = -1.0 + sample_x as f64 * 0.5;
-            let y = -1.0 + sample_y as f64 * 0.5;
-            if let Some(hit) = ground_hit(inv_vp, x, y) {
-                hits.push(hit);
-            }
-        }
-    }
-    let extent = |coordinate: fn(&DVec3) -> f64| {
-        let min = hits.iter().map(coordinate).fold(f64::INFINITY, f64::min);
-        let max = hits
-            .iter()
-            .map(coordinate)
-            .fold(f64::NEG_INFINITY, f64::max);
-        (max - min).max(0.0)
-    };
-    let span = extent(|p| p.x).max(extent(|p| p.z));
-    let pixels = viewport_px[0].max(viewport_px[1]).max(1) as f64;
-    let earth_circumference = 2.0 * PI * 6_378_137.0;
-    let ideal = if span > 0.0 {
-        (earth_circumference * pixels / (span * 256.0))
-            .log2()
-            .floor() as i32
-    } else {
-        max_zoom as i32
-    };
-    let selected_zoom = ideal.clamp(min_zoom as i32, max_zoom as i32) as u8;
-    let size = world_size(selected_zoom) as i64;
-    let anchor_tile = lat_lon_to_tile(anchor_rad[0], anchor_rad[1], selected_zoom);
-    let mut hit_tiles: Vec<_> = hits
-        .iter()
-        .map(|hit| {
-            let (lat, lon, _) = crate::geo::ned_to_geodetic(
-                DVec3::new(-hit.z, hit.x, 0.0),
-                anchor_rad[0],
-                anchor_rad[1],
-                0.0,
-            );
-            lat_lon_to_tile(lat, lon, selected_zoom)
-        })
-        .collect();
-    if hit_tiles.is_empty() {
-        hit_tiles.push(anchor_tile);
-    }
-
-    // Unwrap X around the first hit so an antimeridian footprint stays narrow.
-    let reference_x = i64::from(hit_tiles[0].x);
-    let unwrap_x =
-        |x: u32| reference_x + (i64::from(x) - reference_x + size / 2).rem_euclid(size) - size / 2;
-    let min_x = hit_tiles.iter().map(|t| unwrap_x(t.x)).min().unwrap() - 1;
-    let max_x = hit_tiles.iter().map(|t| unwrap_x(t.x)).max().unwrap() + 1;
-    let min_y = (hit_tiles.iter().map(|t| i64::from(t.y)).min().unwrap() - 1).max(0);
-    let max_y = (hit_tiles.iter().map(|t| i64::from(t.y)).max().unwrap() + 1).min(size - 1);
+    let samples = sample_ground(inv_vp);
+    let selected_zoom = select_zoom(&samples, viewport_px, min_zoom, max_zoom);
     VisibleSet {
-        tiles: nearest_tiles(selected_zoom, min_x, max_x, min_y, max_y),
+        tiles: ranked_tiles(&samples, selected_zoom, anchor_rad),
     }
 }
 
