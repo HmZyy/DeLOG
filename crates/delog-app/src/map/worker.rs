@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crossbeam_channel::{Receiver, Sender, bounded, select, unbounded};
+use crossbeam_channel::{Receiver, Sender, bounded, select};
 use image::GenericImageView;
 
 use super::{
@@ -22,6 +22,7 @@ use super::{
 const WORKERS: usize = 4;
 const QUEUE_CAPACITY: usize = 256;
 const READY_CAPACITY: usize = 256;
+const FAILURE_CAPACITY: usize = 256;
 const MAX_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
@@ -136,8 +137,39 @@ enum Command {
     Clear { id: u64, epoch: u64 },
 }
 
+#[derive(Default)]
+struct PendingControls {
+    limit: Option<Command>,
+    clear: Option<Command>,
+}
+
+impl PendingControls {
+    fn submit(&mut self, command: Command) {
+        match command {
+            command @ Command::SetLimit { .. } => self.limit = Some(command),
+            command @ Command::Clear { .. } => self.clear = Some(command),
+        }
+    }
+
+    fn take(&mut self) -> Vec<Command> {
+        let mut commands: Vec<_> = [self.limit.take(), self.clear.take()]
+            .into_iter()
+            .flatten()
+            .collect();
+        commands.sort_by_key(|command| match command {
+            Command::SetLimit { id, .. } | Command::Clear { id, .. } => *id,
+        });
+        commands
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        usize::from(self.limit.is_some()) + usize::from(self.clear.is_some())
+    }
+}
+
 pub struct TileManager {
-    command_tx: Sender<Command>,
+    controls: Arc<Mutex<PendingControls>>,
     wake_tx: Sender<()>,
     wake_pending: Arc<AtomicBool>,
     ingress: Arc<Mutex<Vec<IngressRequest>>>,
@@ -164,7 +196,7 @@ impl TileManager {
         repaint: impl Fn() + Send + Sync + 'static,
     ) -> io::Result<Self> {
         let cache = TileDiskCache::open(cache_dir, limit)?;
-        let (command_tx, command_rx) = unbounded::<Command>();
+        let controls = Arc::new(Mutex::new(PendingControls::default()));
         let (wake_tx, wake_rx) = bounded::<()>(1);
         let wake_pending = Arc::new(AtomicBool::new(false));
         let ingress = Arc::new(Mutex::new(Vec::with_capacity(QUEUE_CAPACITY)));
@@ -184,11 +216,12 @@ impl TileManager {
         let epoch = Arc::new(AtomicU64::new(0));
         let accepted_generation = Arc::new(AtomicU64::new(0));
         let controller_ingress = Arc::clone(&ingress);
+        let controller_controls = Arc::clone(&controls);
         let controller_wake_pending = Arc::clone(&wake_pending);
         let ready_evict_rx = ready_rx.clone();
         let controller = thread::spawn(move || {
             controller_loop(
-                command_rx,
+                controller_controls,
                 wake_rx,
                 controller_wake_pending,
                 shutdown_rx,
@@ -202,7 +235,7 @@ impl TileManager {
             )
         });
         Ok(Self {
-            command_tx,
+            controls,
             wake_tx,
             wake_pending,
             ingress,
@@ -285,19 +318,11 @@ impl TileManager {
             id,
             kind: CacheActionKind::SetLimit,
         };
-        if let Err(error) = self.command_tx.send(Command::SetLimit { id, bytes }) {
-            finish_cache_action(
-                &self.status,
-                id,
-                CacheActionKind::SetLimit,
-                Err(io::Error::other(error)),
-                None,
-            );
-            return Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "tile controller stopped",
-            ));
-        }
+        self.controls
+            .lock()
+            .unwrap()
+            .submit(Command::SetLimit { id, bytes });
+        self.wake_controller();
         Ok(id)
     }
 
@@ -316,20 +341,18 @@ impl TileManager {
             id,
             kind: CacheActionKind::Clear,
         };
-        if let Err(error) = self.command_tx.send(Command::Clear { id, epoch }) {
-            finish_cache_action(
-                &self.status,
-                id,
-                CacheActionKind::Clear,
-                Err(io::Error::other(error)),
-                None,
-            );
-            return Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "tile controller stopped",
-            ));
-        }
+        self.controls
+            .lock()
+            .unwrap()
+            .submit(Command::Clear { id, epoch });
+        self.wake_controller();
         Ok(id)
+    }
+
+    fn wake_controller(&self) {
+        if !self.wake_pending.swap(true, AtomicOrdering::AcqRel) {
+            let _ = self.wake_tx.try_send(());
+        }
     }
 }
 
@@ -354,7 +377,7 @@ fn network_load(
 }
 
 fn controller_loop(
-    command_rx: Receiver<Command>,
+    controls: Arc<Mutex<PendingControls>>,
     wake_rx: Receiver<()>,
     wake_pending: Arc<AtomicBool>,
     shutdown_rx: Receiver<()>,
@@ -397,24 +420,18 @@ fn controller_loop(
         (0..WORKERS).map(std::cmp::Reverse).collect();
     let mut latest_generation = 0;
     let mut ready_order = VecDeque::with_capacity(READY_CAPACITY);
+    let mut failed_order = VecDeque::with_capacity(FAILURE_CAPACITY);
     let mut epoch = 0_u64;
     let mut shutdown = false;
     while !shutdown {
         select! {
             recv(shutdown_rx) -> _ => shutdown = true,
             recv(wake_rx) -> _ => { wake_pending.store(false, AtomicOrdering::Release); },
-            recv(command_rx) -> command => match command {
-                Ok(command) => handle_command(command, &mut cache, &mut states, &mut pending, &mut latest_generation, &mut epoch, &status_snapshot),
-                Err(_) => shutdown = true,
-            },
             recv(completion_rx) -> completion => if let Ok(completion) = completion {
-                process_completion(completion, &mut idle, &mut states, &mut ready_order, &mut cache, &ready_tx, &ready_evict_rx, &repaint, epoch, latest_generation);
+                process_completion(completion, &mut idle, &mut states, &mut ready_order, &mut failed_order, &mut cache, &ready_tx, &ready_evict_rx, &repaint, epoch, latest_generation);
             }
         }
-        loop {
-            let Ok(command) = command_rx.try_recv() else {
-                break;
-            };
+        for command in controls.lock().unwrap().take() {
             handle_command(
                 command,
                 &mut cache,
@@ -633,6 +650,7 @@ fn process_completion(
     idle: &mut BinaryHeap<std::cmp::Reverse<usize>>,
     states: &mut HashMap<Key, (RequestState, u64)>,
     ready_order: &mut VecDeque<Key>,
+    failed_order: &mut VecDeque<(Key, u64)>,
     cache: &mut TileDiskCache,
     ready_tx: &Sender<ReadyEnvelope>,
     ready_evict_rx: &Receiver<ReadyEnvelope>,
@@ -673,10 +691,10 @@ fn process_completion(
                         },
                     );
                 } else {
-                    mark_failed(states, key, &work);
+                    mark_failed(states, failed_order, key, &work);
                 }
             }
-            Err(_) => mark_failed(states, key, &work),
+            Err(_) => mark_failed(states, failed_order, key, &work),
         }
         repaint();
     }
@@ -712,7 +730,12 @@ fn send_ready(
     }
 }
 
-fn mark_failed(states: &mut HashMap<Key, (RequestState, u64)>, key: Key, work: &Work) {
+fn mark_failed(
+    states: &mut HashMap<Key, (RequestState, u64)>,
+    failed_order: &mut VecDeque<(Key, u64)>,
+    key: Key,
+    work: &Work,
+) {
     let attempts = work.attempts.saturating_add(1);
     states.insert(
         key,
@@ -724,6 +747,16 @@ fn mark_failed(states: &mut HashMap<Key, (RequestState, u64)>, key: Key, work: &
             work.sequence,
         ),
     );
+    failed_order.push_back((key, work.sequence));
+    while failed_order.len() > FAILURE_CAPACITY {
+        if let Some((evicted, token)) = failed_order.pop_front()
+            && states.get(&evicted).is_some_and(|(state, current)| {
+                matches!(state, RequestState::Failed { .. }) && *current == token
+            })
+        {
+            states.remove(&evicted);
+        }
+    }
 }
 
 fn publish_status(
@@ -802,6 +835,7 @@ fn retry_delay(attempts: u32) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossbeam_channel::unbounded;
     use std::{
         io::Cursor,
         sync::atomic::{AtomicUsize, Ordering},
@@ -961,6 +995,83 @@ mod tests {
         manager.request_with_url(request(1), Some(url));
         assert!(await_poll(&mut manager).is_empty());
         assert_eq!(manager.status().failed, 1);
+    }
+
+    #[test]
+    fn repeated_unique_failures_keep_failure_state_bounded_and_evicted_keys_retryable() {
+        let mut states = HashMap::new();
+        let mut failed_order = VecDeque::new();
+        for x in 0..=FAILURE_CAPACITY {
+            let mut req = request(1);
+            req.id = TileId {
+                zoom: 20,
+                x: x as u32,
+                y: 0,
+            };
+            let work = Work {
+                request: req,
+                attempts: 0,
+                url: String::new(),
+                epoch: 0,
+                sequence: x as u64 + 1,
+            };
+            let key = (
+                work.request.provider,
+                work.request.id,
+                work.request.generation,
+            );
+            mark_failed(&mut states, &mut failed_order, key, &work);
+        }
+        assert_eq!(states.len(), FAILURE_CAPACITY);
+        assert_eq!(failed_order.len(), FAILURE_CAPACITY);
+        assert_eq!(
+            states
+                .values()
+                .filter(|(state, _)| matches!(state, RequestState::Failed { .. }))
+                .count(),
+            FAILURE_CAPACITY
+        );
+
+        let mut pending = BinaryHeap::new();
+        let mut latest_generation = 1;
+        let first = request(1);
+        let first_key = (first.provider, first.id, first.generation);
+        assert!(!states.contains_key(&first_key));
+        let ingress = Mutex::new(vec![IngressRequest {
+            request: first,
+            url: "http://retry".into(),
+            sequence: 10_000,
+        }]);
+        drain_ingress(
+            &ingress,
+            &mut states,
+            &mut pending,
+            &mut latest_generation,
+            0,
+        );
+        assert!(
+            states
+                .get(&first_key)
+                .is_some_and(|(state, _)| matches!(state, RequestState::Queued))
+        );
+    }
+
+    #[test]
+    fn stalled_controller_control_submissions_coalesce_to_constant_space() {
+        let mut controls = PendingControls::default();
+        for id in 1..=10_000 {
+            controls.submit(Command::SetLimit { id, bytes: id });
+            controls.submit(Command::Clear { id, epoch: id });
+        }
+        assert_eq!(controls.len(), 2);
+        assert!(matches!(
+            controls.limit,
+            Some(Command::SetLimit { id: 10_000, .. })
+        ));
+        assert!(matches!(
+            controls.clear,
+            Some(Command::Clear { id: 10_000, .. })
+        ));
     }
 
     #[test]
