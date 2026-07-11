@@ -210,6 +210,7 @@ pub struct TileManager {
     status: Arc<Mutex<TileManagerStatus>>,
     epoch: Arc<AtomicU64>,
     accepted_generations: Mutex<HashMap<MapScopeId, u64>>,
+    delivered: Arc<Mutex<Vec<Key>>>,
     request_sequence: AtomicU64,
     next_action: u64,
     shutdown_tx: Sender<()>,
@@ -250,6 +251,8 @@ impl TileManager {
         let controller_ingress = Arc::clone(&ingress);
         let controller_controls = Arc::clone(&controls);
         let controller_wake_pending = Arc::clone(&wake_pending);
+        let delivered = Arc::new(Mutex::new(Vec::new()));
+        let controller_delivered = Arc::clone(&delivered);
         let ready_evict_rx = ready_rx.clone();
         let controller = thread::spawn(move || {
             controller_loop(
@@ -264,6 +267,7 @@ impl TileManager {
                 repaint,
                 client,
                 controller_ingress,
+                controller_delivered,
             )
         });
         Ok(Self {
@@ -276,6 +280,7 @@ impl TileManager {
             status,
             epoch,
             accepted_generations: Mutex::new(HashMap::new()),
+            delivered,
             request_sequence: AtomicU64::new(0),
             next_action: 0,
             shutdown_tx,
@@ -350,6 +355,16 @@ impl TileManager {
         });
         while self.ready_backlog.len() > READY_CAPACITY {
             self.ready_backlog.pop_front();
+        }
+        if !selected.is_empty() {
+            self.delivered.lock().unwrap().extend(
+                selected
+                    .iter()
+                    .map(|tile| (tile.scope, tile.provider, tile.id, tile.generation)),
+            );
+            if !self.wake_pending.swap(true, AtomicOrdering::AcqRel) {
+                let _ = self.wake_tx.try_send(());
+            }
         }
         selected
     }
@@ -451,6 +466,7 @@ fn controller_loop(
     repaint: Arc<dyn Fn() + Send + Sync>,
     client: reqwest::blocking::Client,
     ingress: Arc<Mutex<Vec<IngressRequest>>>,
+    delivered: Arc<Mutex<Vec<Key>>>,
 ) {
     let (completion_tx, completion_rx) = bounded::<Completion>(WORKERS);
     let mut worker_txs = Vec::new();
@@ -504,6 +520,7 @@ fn controller_loop(
                 &status_snapshot,
             );
         }
+        drain_delivered(&delivered, &mut states, &mut ready_order);
         drain_ingress(
             &ingress,
             &mut states,
@@ -582,6 +599,22 @@ fn controller_loop(
     drop(worker_txs);
     for worker in workers {
         let _ = worker.join();
+    }
+}
+
+fn drain_delivered(
+    delivered: &Mutex<Vec<Key>>,
+    states: &mut HashMap<Key, (RequestState, u64)>,
+    ready_order: &mut VecDeque<Key>,
+) {
+    for key in std::mem::take(&mut *delivered.lock().unwrap()) {
+        if states
+            .get(&key)
+            .is_some_and(|(state, _)| matches!(state, RequestState::Ready))
+        {
+            states.remove(&key);
+        }
+        ready_order.retain(|ready| *ready != key);
     }
 }
 
@@ -1177,6 +1210,31 @@ mod tests {
         manager.request_with_url(request(1), Some(url));
         assert_eq!(await_poll(&mut manager).len(), 1);
         assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn delivered_tile_can_be_requested_again_after_an_intervening_tile() {
+        let dir = tempfile::tempdir().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let url = server(jpeg(), "image/jpeg", Arc::clone(&hits));
+        let mut manager = TileManager::new(dir.path().to_owned(), u64::MAX, || {}).unwrap();
+        let tile_a = request(1);
+        let mut tile_b = request(1);
+        tile_b.id.x = 1;
+
+        manager.request_with_url(tile_a.clone(), Some(format!("{url}/a")));
+        assert_eq!(await_poll(&mut manager)[0].id, tile_a.id);
+
+        manager.request_with_url(tile_b.clone(), Some(format!("{url}/b")));
+        assert_eq!(await_poll(&mut manager)[0].id, tile_b.id);
+
+        manager.request_with_url(tile_a.clone(), Some(format!("{url}/a")));
+        assert_eq!(
+            await_poll(&mut manager)[0].id,
+            tile_a.id,
+            "poll delivery must release Ready state so a pruned tile can be disk-loaded again"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "A reload comes from disk");
     }
 
     #[test]

@@ -2030,6 +2030,55 @@ mod tests {
     }
 
     #[test]
+    fn same_zoom_one_tile_pan_retains_old_nonoverlap_with_exact_current_group() {
+        let Some(ctx) = RenderContext::headless() else {
+            return;
+        };
+        let mut resources = SceneResources::new(ctx);
+        let id = |x| crate::map::provider::TileId { zoom: 8, x, y: 2 };
+        let mut selection = MapTileSelection {
+            scope: MapScopeId(34),
+            epoch: 1,
+            provider: crate::map::provider::MapProviderId::BingSatellite,
+            generation: 1,
+            current_tiles: vec![(id(1), 0), (id(2), 1)],
+            previous_tiles: Vec::new(),
+            enabled: true,
+        };
+        let tile = |x, priority| ReadyTile {
+            scope: selection.scope,
+            epoch: selection.epoch,
+            provider: selection.provider,
+            id: id(x),
+            generation: selection.generation,
+            priority,
+            rgba: [x as u8, 8, 0, 255].repeat(256 * 256),
+            corners: [[x as f32, 0.0, 0.0]; 4],
+        };
+        let old = vec![tile(1, 0), tile(2, 1)];
+        let old_key = map_tile_key(&old[0]);
+        let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+        resources.prepare_map_tiles(identity, &selection, &old);
+
+        selection.current_tiles = vec![(id(2), 0), (id(3), 1)];
+        selection.previous_tiles = vec![id(1)];
+        let new = tile(3, 1);
+        let expected_current = [map_tile_key(&old[1]), map_tile_key(&new)]
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>();
+        let draw = resources.prepare_map_tiles(identity, &selection, &[new]);
+
+        assert_eq!(draw.previous, vec![old_key]);
+        assert_eq!(
+            draw.current
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>(),
+            expected_current
+        );
+        assert!(resources.map_tiles.contains(old_key));
+    }
+
+    #[test]
     fn three_saturated_scopes_have_stable_sorted_quotas_and_uploads() {
         let Some(ctx) = RenderContext::headless() else {
             return;
