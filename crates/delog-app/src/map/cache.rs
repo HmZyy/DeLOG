@@ -114,8 +114,8 @@ impl TileDiskCache {
             let mut file = File::create(&part)?;
             file.write_all(bytes)?;
             file.sync_all()?;
-            fs::rename(&part, &path)?;
-            File::open(parent)?.sync_all()?;
+            atomic_replace(&part, &path)?;
+            sync_parent(parent)?;
             Ok(())
         })();
         if result.is_err() {
@@ -250,14 +250,60 @@ impl TileDiskCache {
             let mut file = File::create(&part)?;
             file.write_all(&bytes)?;
             file.sync_all()?;
-            fs::rename(&part, self.root.join(INDEX_FILE))?;
-            File::open(&self.root)?.sync_all()
+            atomic_replace(&part, &self.root.join(INDEX_FILE))?;
+            sync_parent(&self.root)
         })();
         if result.is_err() {
             let _ = remove_if_exists(&part);
         }
         result
     }
+}
+
+#[cfg(not(windows))]
+fn atomic_replace(source: &Path, destination: &Path) -> io::Result<()> {
+    fs::rename(source, destination)
+}
+
+#[cfg(windows)]
+fn atomic_replace(source: &Path, destination: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+
+    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let destination: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    // SAFETY: both pointers reference NUL-terminated UTF-16 buffers that remain
+    // alive for the duration of the call.
+    let replaced = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if replaced == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+fn sync_parent(parent: &Path) -> io::Result<()> {
+    File::open(parent)?.sync_all()
+}
+
+#[cfg(windows)]
+fn sync_parent(_parent: &Path) -> io::Result<()> {
+    // MOVEFILE_WRITE_THROUGH waits for the replacement to reach storage.
+    Ok(())
 }
 
 fn collect_files(directory: &Path, files: &mut Vec<PathBuf>) -> io::Result<()> {
@@ -350,6 +396,43 @@ mod tests {
             Some(b"tile data".to_vec())
         );
         assert_eq!(cache.usage_bytes(), 9);
+    }
+
+    #[test]
+    fn index_can_be_rewritten_repeatedly() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_owned();
+        let mut cache = TileDiskCache::open(root.clone(), u64::MAX).unwrap();
+
+        for x in 1..=8 {
+            cache
+                .write(MapProviderId::BingSatellite, tile(x), &[x as u8])
+                .unwrap();
+        }
+
+        let persisted: PersistedIndex =
+            serde_json::from_slice(&fs::read(root.join(INDEX_FILE)).unwrap()).unwrap();
+        assert_eq!(persisted.entries.len(), 8);
+    }
+
+    #[test]
+    fn writing_existing_tile_replaces_its_contents() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_owned();
+        let mut cache = TileDiskCache::open(root, u64::MAX).unwrap();
+
+        cache
+            .write(MapProviderId::BingSatellite, tile(1), b"old tile")
+            .unwrap();
+        cache
+            .write(MapProviderId::BingSatellite, tile(1), b"replacement tile")
+            .unwrap();
+
+        assert_eq!(
+            cache.read(MapProviderId::BingSatellite, tile(1)).unwrap(),
+            Some(b"replacement tile".to_vec())
+        );
+        assert_eq!(cache.usage_bytes(), 16);
     }
 
     #[test]
