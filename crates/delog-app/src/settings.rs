@@ -164,8 +164,6 @@ impl MarkerDeltaReadout {
 pub struct PlotDisplay {
     #[serde(default)]
     pub legend_position: LegendPosition,
-    #[serde(default = "default_true")]
-    pub show_legend_default: bool,
     #[serde(default = "default_opacity")]
     pub legend_opacity: f32,
     #[serde(default)]
@@ -202,7 +200,6 @@ impl Default for PlotDisplay {
     fn default() -> Self {
         Self {
             legend_position: LegendPosition::default(),
-            show_legend_default: true,
             legend_opacity: 1.0,
             hover_show_field_name: false,
             hover_show_time: false,
@@ -707,11 +704,6 @@ fn plots_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
                 });
             ui.end_row();
 
-            ui.label("Show legend by default")
-                .on_hover_text("Show the legend on newly created plots. Each plot's right-click menu can still toggle it.");
-            ui.checkbox(&mut p.show_legend_default, "");
-            ui.end_row();
-
             ui.label("Legend background")
                 .on_hover_text("Opacity of the legend's background panel. 1 = solid, 0 = fully transparent.");
             ui.add(egui::Slider::new(&mut p.legend_opacity, 0.0..=1.0));
@@ -990,6 +982,17 @@ mod tests {
     }
 
     #[test]
+    fn plot_settings_do_not_expose_a_separate_legend_default() {
+        let source = include_str!("settings.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production settings code should precede tests");
+        assert!(!production.contains("show_legend_default"));
+        assert!(!production.contains("Show legend by default"));
+    }
+
+    #[test]
     fn settings_reset_buttons_are_right_aligned() {
         let source = include_str!("settings.rs");
         let production = source
@@ -1003,10 +1006,9 @@ mod tests {
     }
 
     #[test]
-    fn plot_display_defaults_show_legend_top_left_with_minimal_hover() {
+    fn plot_display_defaults_legend_top_left_with_minimal_hover() {
         let p = PlotDisplay::default();
         assert_eq!(p.legend_position, LegendPosition::TopLeft);
-        assert!(p.show_legend_default);
         assert!(!p.hover_show_field_name);
         assert!(!p.hover_show_time);
         assert_eq!(p.legend_opacity, 1.0);
@@ -1019,7 +1021,6 @@ mod tests {
         let settings = AppSettings {
             plot: PlotDisplay {
                 legend_position: LegendPosition::BottomRight,
-                show_legend_default: false,
                 legend_opacity: 0.5,
                 hover_show_field_name: false,
                 hover_show_time: false,
@@ -1074,7 +1075,6 @@ mod tests {
         let json = r#"{"theme":"catppuccin_mocha"}"#;
         let s: AppSettings = serde_json::from_str(json).unwrap();
         assert_eq!(s.plot.legend_position, LegendPosition::TopLeft);
-        assert!(s.plot.show_legend_default);
         assert!(!s.plot.hover_show_time);
     }
 
