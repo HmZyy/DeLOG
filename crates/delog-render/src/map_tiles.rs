@@ -300,10 +300,10 @@ impl MapTilePipeline {
             .write_buffer(&self.uniform, 0, bytemuck::cast_slice(&view_proj));
     }
 
-    pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
+    pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, keys: &[u64]) {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
-        for tile in self.tiles.values() {
+        for tile in keys.iter().filter_map(|key| self.tiles.get(key)) {
             pass.set_vertex_buffer(0, tile.vertices.slice(..));
             pass.draw(0..6, 0..1);
         }
@@ -424,7 +424,10 @@ fn fs() -> @location(0) vec4<f32> {
         let mut encoder = ctx.device().create_command_encoder(&Default::default());
         {
             let mut pass = target.begin_pass(&mut encoder, wgpu::Color::BLACK);
-            pipeline.draw(&mut pass);
+            pipeline.draw(
+                &mut pass,
+                &tiles.iter().map(|tile| tile.key).collect::<Vec<_>>(),
+            );
         }
         ctx.queue().submit([encoder.finish()]);
         ctx.device()
@@ -551,7 +554,7 @@ fn fs() -> @location(0) vec4<f32> {
             {
                 let mut pass = target.begin_pass(&mut encoder, wgpu::Color::BLACK);
                 triangle.draw(&mut pass);
-                tiles.draw(&mut pass);
+                tiles.draw(&mut pass, &[1, 2]);
             }
             ctx.queue().submit([encoder.finish()]);
             ctx.device()
@@ -613,7 +616,7 @@ fn fs() -> @location(0) vec4<f32> {
         let mut encoder = ctx.device().create_command_encoder(&Default::default());
         {
             let mut pass = target.begin_pass(&mut encoder, wgpu::Color::BLACK);
-            tiles.draw(&mut pass);
+            tiles.draw(&mut pass, &[1]);
             grid.draw(&mut pass);
             trajectory_or_vehicle.draw(&mut pass);
         }
