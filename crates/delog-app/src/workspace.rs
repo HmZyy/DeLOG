@@ -167,6 +167,17 @@ impl Workspace {
         self.plot_panes().flat_map(PlotPane::fields)
     }
 
+    pub fn map_scopes(&self) -> Vec<MapScopeId> {
+        self.tree
+            .tiles
+            .iter()
+            .filter_map(|(_, tile)| match tile {
+                egui_tiles::Tile::Pane(Pane::Scene3D(pane)) => Some(pane.map_scope),
+                _ => None,
+            })
+            .collect()
+    }
+
     pub fn resolve_ghosts(&mut self, snapshot: &StoreSnapshot) -> usize {
         let mut resolved = 0;
         for pane in self.plot_panes_mut() {
