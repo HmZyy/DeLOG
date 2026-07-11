@@ -24,6 +24,10 @@ use crate::plot::ViewX;
 use crate::scripts;
 use crate::session::Session;
 use crate::settings::{AppSettings, RenderMode, SettingsDialog, TileCacheUiState};
+
+fn tile_cache_needs_repaint(clear_submitted: bool, cache_action_pending: bool) -> bool {
+    clear_submitted || cache_action_pending
+}
 use crate::timeline::Playback;
 use crate::workspace::{PlotServices, Workspace};
 
@@ -2865,6 +2869,7 @@ impl eframe::App for DelogApp {
                 .map_or_else(TileCacheUiState::default, |manager| {
                     let status = manager.status();
                     TileCacheUiState {
+                        available: true,
                         usage_bytes: status.cache_bytes,
                         clearing: matches!(
                             status.cache_action,
@@ -2894,7 +2899,9 @@ impl eframe::App for DelogApp {
                 tracing::warn!(%error, "failed to queue map tile cache clear");
             }
         }
-        if settings_change.map_provider_changed || tile_cache.clearing {
+        if settings_change.map_provider_changed
+            || tile_cache_needs_repaint(settings_change.clear_tile_cache, tile_cache.clearing)
+        {
             ui.ctx().request_repaint();
         }
         if self.settings != settings_before
@@ -4380,5 +4387,12 @@ mod tests {
         assert_eq!(source_metadata.matches(".resizable(true)").count(), 3);
         assert!(source_metadata.matches("Column::remainder()").count() >= 3);
         assert!(!source_metadata.contains("egui::Grid::new"));
+    }
+
+    #[test]
+    fn tile_cache_repaints_on_clear_submission_and_while_action_is_pending() {
+        assert!(tile_cache_needs_repaint(true, false));
+        assert!(tile_cache_needs_repaint(false, true));
+        assert!(!tile_cache_needs_repaint(false, false));
     }
 }
