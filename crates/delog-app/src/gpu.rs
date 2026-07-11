@@ -6,10 +6,10 @@ use delog_cache::{CacheManager, MinMax};
 use delog_core::identity::FieldId;
 use delog_core::metrics::MetricsRegistry;
 use delog_render::{
-    BufferManager, GpuErrorHub, Grid3dPipeline, GridUniform, LinePipeline, MapTilePipeline,
-    MapTileUpload, MeshGpu, MeshPipeline, MeshUniform, MinMaxColPipeline, PlotUniform,
-    RenderContext, ScatterPipeline, Scene3dTarget, StepPipeline, Traj3dPipeline, Traj3dUniform,
-    UniformRing,
+    BufferManager, GpuErrorHub, Grid3dPipeline, GridUniform, LinePipeline, MapTileDrawGroups,
+    MapTilePipeline, MapTileUpload, MeshGpu, MeshPipeline, MeshUniform, MinMaxColPipeline,
+    PlotUniform, RenderContext, ScatterPipeline, Scene3dTarget, StepPipeline, Traj3dPipeline,
+    Traj3dUniform, UniformRing,
 };
 use eframe::{egui_wgpu, wgpu};
 
@@ -420,7 +420,7 @@ impl GpuBridge {
                     });
             {
                 let mut pass = res.target.begin_pass(&mut enc, clear);
-                res.map_tiles.draw(&mut pass, &visible_map_tiles);
+                res.map_tiles.draw_visible(&mut pass, &visible_map_tiles);
                 if scene3d.show_grid {
                     res.grid.draw(&mut pass);
                 }
@@ -916,7 +916,7 @@ impl SceneResources {
         vp: [[f32; 4]; 4],
         selection: MapTileSelection,
         ready: &[ReadyTile],
-    ) -> Vec<u64> {
+    ) -> MapTileDrawGroups {
         self.map_tiles.set_view_proj(vp);
         if self.map_tile_epoch != selection.epoch {
             self.map_tile_epoch = selection.epoch;
@@ -926,7 +926,7 @@ impl SceneResources {
         if !selection.enabled {
             self.map_tile_cache.remove(&selection.scope);
             self.retain_map_tile_union();
-            return Vec::new();
+            return MapTileDrawGroups::default();
         }
         let selection_changed = self
             .map_tile_cache
@@ -939,7 +939,7 @@ impl SceneResources {
         if selection_changed {
             self.map_tile_cache.remove(&selection.scope);
         }
-        let (mut visible, changed) = {
+        let changed = {
             let cache = self.map_tile_cache.entry(selection.scope).or_default();
             let mut changed = std::collections::HashSet::new();
             for tile in ready.iter().filter(|tile| tile.scope == selection.scope) {
@@ -951,9 +951,8 @@ impl SceneResources {
                 cache.insert(key, tile.clone());
             }
             cache.retain(|_, tile| map_tile_matches(selection, tile));
-            (cache.keys().copied().collect::<Vec<_>>(), changed)
+            changed
         };
-        visible.sort_unstable();
         // Free stale layers before uploading replacements. This retains the
         // union across scopes, while making provider/generation/zoom changes
         // release this scope's obsolete layers even when the atlas was full.
@@ -976,6 +975,16 @@ impl SceneResources {
                     .insert(*key, map_tile_signature(tile));
             }
         }
+        let mut visible = MapTileDrawGroups::default();
+        for (key, tile) in cache {
+            if Some(tile.id.zoom) == selection.current_zoom {
+                visible.current.push(*key);
+            } else if Some(tile.id.zoom) == selection.previous_zoom {
+                visible.previous.push(*key);
+            }
+        }
+        visible.previous.sort_unstable();
+        visible.current.sort_unstable();
         visible
     }
 
@@ -1461,6 +1470,49 @@ mod tests {
     }
 
     #[test]
+    fn prepare_map_tiles_exposes_sorted_previous_then_current_draw_groups() {
+        let Some(ctx) = RenderContext::headless() else {
+            eprintln!("no wgpu adapter — skipping map zoom grouping test");
+            return;
+        };
+        let mut resources = SceneResources::new(ctx);
+        let selection = MapTileSelection {
+            scope: MapScopeId(44),
+            epoch: 2,
+            provider: crate::map::provider::MapProviderId::BingSatellite,
+            generation: 7,
+            current_zoom: Some(8),
+            previous_zoom: Some(7),
+            enabled: true,
+        };
+        let tile = |zoom, x| ReadyTile {
+            scope: selection.scope,
+            epoch: selection.epoch,
+            provider: selection.provider,
+            id: crate::map::provider::TileId { zoom, x, y: 3 },
+            generation: selection.generation,
+            rgba: [x as u8, zoom, 0, 255].repeat(256 * 256),
+            corners: [[x as f32, 0.0, 0.0]; 4],
+        };
+        let tiles = [tile(8, 5), tile(7, 2), tile(8, 1), tile(7, 6)];
+        let mut expected_previous = vec![map_tile_key(&tiles[1]), map_tile_key(&tiles[3])];
+        let mut expected_current = vec![map_tile_key(&tiles[0]), map_tile_key(&tiles[2])];
+        expected_previous.sort_unstable();
+        expected_current.sort_unstable();
+        let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+
+        let first = resources.prepare_map_tiles(identity, selection, &tiles);
+        let reversed = resources.prepare_map_tiles(
+            identity,
+            selection,
+            &tiles.iter().rev().cloned().collect::<Vec<_>>(),
+        );
+        assert_eq!(first.previous, expected_previous);
+        assert_eq!(first.current, expected_current);
+        assert_eq!(reversed, first, "ready insertion order cannot affect draws");
+    }
+
+    #[test]
     fn cache_epoch_change_purges_cpu_and_gpu_tiles_on_empty_poll() {
         let Some(ctx) = RenderContext::headless() else {
             eprintln!("no wgpu adapter — skipping map clear residency test");
@@ -1606,11 +1658,18 @@ mod tests {
         let key_b = map_tile_key(&tile_b);
 
         let draw_a = resources.prepare_map_tiles(identity, selection(10), &[tile_a]);
-        assert_eq!(draw_a, vec![key_a], "pane A draws only A");
+        assert_eq!(draw_a.current, vec![key_a], "pane A draws only A");
+        assert!(draw_a.previous.is_empty());
         let draw_b = resources.prepare_map_tiles(identity, selection(20), &[tile_b]);
-        assert_eq!(draw_b, vec![key_b], "pane B draws only B");
+        assert_eq!(draw_b.current, vec![key_b], "pane B draws only B");
+        assert!(draw_b.previous.is_empty());
         let draw_a_again = resources.prepare_map_tiles(identity, selection(10), &[]);
-        assert_eq!(draw_a_again, vec![key_a], "pane A still draws only A");
+        assert_eq!(
+            draw_a_again.current,
+            vec![key_a],
+            "pane A still draws only A"
+        );
+        assert!(draw_a_again.previous.is_empty());
         assert_eq!(resources.map_tiles.resident_tile_count(), 2);
         assert_eq!(
             resources.map_tiles.upload_count(),
@@ -1632,7 +1691,8 @@ mod tests {
         assert!(resources.map_tiles.contains(key_a), "disabling B retains A");
 
         let draw_a_after_b_disabled = resources.prepare_map_tiles(identity, selection(10), &[]);
-        assert_eq!(draw_a_after_b_disabled, vec![key_a]);
+        assert_eq!(draw_a_after_b_disabled.current, vec![key_a]);
+        assert!(draw_a_after_b_disabled.previous.is_empty());
         assert_eq!(resources.map_tiles.upload_count(), 2, "A is not reuploaded");
 
         let draw_after_epoch = resources.prepare_map_tiles(

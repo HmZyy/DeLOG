@@ -13,6 +13,20 @@ pub struct MapTileUpload<'a> {
     pub corners: [[f32; 3]; 4],
 }
 
+/// Visible tiles in painter order. Previous-zoom fallback is drawn first so
+/// coplanar current-zoom imagery deterministically replaces it where ready.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MapTileDrawGroups {
+    pub previous: Vec<u64>,
+    pub current: Vec<u64>,
+}
+
+impl MapTileDrawGroups {
+    pub fn is_empty(&self) -> bool {
+        self.previous.is_empty() && self.current.is_empty()
+    }
+}
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum MapTileError {
     #[error("tile RGBA data must contain exactly 256 x 256 x 4 bytes")]
@@ -308,6 +322,11 @@ impl MapTilePipeline {
             pass.draw(0..6, 0..1);
         }
     }
+
+    pub fn draw_visible(&self, pass: &mut wgpu::RenderPass<'_>, visible: &MapTileDrawGroups) {
+        self.draw(pass, &visible.previous);
+        self.draw(pass, &visible.current);
+    }
 }
 
 fn glam_identity() -> [[f32; 4]; 4] {
@@ -321,7 +340,7 @@ fn glam_identity() -> [[f32; 4]; 4] {
 
 #[cfg(test)]
 mod tests {
-    use super::{MapTilePipeline, MapTileUpload};
+    use super::{MapTileDrawGroups, MapTilePipeline, MapTileUpload};
     use crate::{Grid3dPipeline, GridUniform, RenderContext, Scene3dTarget};
 
     struct NearTrianglePipeline(wgpu::RenderPipeline);
@@ -563,6 +582,71 @@ fn fs() -> @location(0) vec4<f32> {
             let image = target.read_rgba();
             assert!(image.matches(32, 32, [0, 255, 0, 255], 4));
             assert!(image.matches(16, 32, [0, 0, 255, 255], 4));
+        }
+    }
+
+    #[test]
+    fn current_zoom_overwrites_coplanar_previous_while_previous_fills_gaps() {
+        let coarse = solid([255, 0, 0, 255]);
+        let current = solid([0, 0, 255, 255]);
+        let full_screen = [
+            [-1.0, -1.0, 0.5],
+            [1.0, -1.0, 0.5],
+            [1.0, 1.0, 0.5],
+            [-1.0, 1.0, 0.5],
+        ];
+        let right_half = [
+            [0.0, -1.0, 0.5],
+            [1.0, -1.0, 0.5],
+            [1.0, 1.0, 0.5],
+            [0.0, 1.0, 0.5],
+        ];
+
+        for reverse_insertion in [false, true] {
+            let ctx = RenderContext::headless().expect("headless adapter");
+            let target = Scene3dTarget::new(ctx.clone(), 64, 64);
+            let mut tiles = MapTilePipeline::new(
+                &ctx,
+                target.color_format(),
+                target.depth_format(),
+                target.sample_count(),
+            );
+            let uploads = [
+                MapTileUpload {
+                    key: 90,
+                    rgba: &coarse,
+                    corners: full_screen,
+                },
+                MapTileUpload {
+                    key: 10,
+                    rgba: &current,
+                    corners: right_half,
+                },
+            ];
+            let order = if reverse_insertion { [1, 0] } else { [0, 1] };
+            for index in order {
+                tiles.upload(uploads[index]).unwrap();
+            }
+            tiles.set_view_proj(glam::Mat4::IDENTITY.to_cols_array_2d());
+            let visible = MapTileDrawGroups {
+                previous: vec![90],
+                current: vec![10],
+            };
+
+            for _ in 0..2 {
+                let mut encoder = ctx.device().create_command_encoder(&Default::default());
+                {
+                    let mut pass = target.begin_pass(&mut encoder, wgpu::Color::BLACK);
+                    tiles.draw_visible(&mut pass, &visible);
+                }
+                ctx.queue().submit([encoder.finish()]);
+                ctx.device()
+                    .poll(wgpu::PollType::wait_indefinitely())
+                    .unwrap();
+                let image = target.read_rgba();
+                assert!(image.matches(16, 32, [255, 0, 0, 255], 4));
+                assert!(image.matches(48, 32, [0, 0, 255, 255], 4));
+            }
         }
     }
 
