@@ -81,10 +81,10 @@ pub struct TileManagerStatus {
     pub in_flight: usize,
     pub ready: usize,
     pub failed: usize,
-    /// Worker responses observed by the controller, including stale responses.
-    pub completions_processed: u64,
-    /// Worker responses rejected after their request was invalidated.
-    pub stale_completions_discarded: u64,
+    #[cfg(test)]
+    completions_processed: u64,
+    #[cfg(test)]
+    stale_completions_discarded: u64,
     pub cache_bytes: u64,
     pub cache_action: CacheActionStatus,
 }
@@ -337,6 +337,15 @@ impl TileManager {
 
     pub fn status(&self) -> TileManagerStatus {
         self.status.lock().unwrap().clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_completion_counts(&self) -> (u64, u64) {
+        let status = self.status.lock().unwrap();
+        (
+            status.completions_processed,
+            status.stale_completions_discarded,
+        )
     }
 
     /// Queues a cache-limit update and returns its operation ID immediately.
@@ -695,7 +704,7 @@ fn process_completion(
     repaint: &Arc<dyn Fn() + Send + Sync>,
     epoch: u64,
     latest_generations: &HashMap<MapScopeId, u64>,
-    status_snapshot: &Mutex<TileManagerStatus>,
+    _status_snapshot: &Mutex<TileManagerStatus>,
 ) {
     idle.push(std::cmp::Reverse(completion.worker));
     let work = completion.work;
@@ -711,8 +720,9 @@ fn process_completion(
     let accepted = current
         && work.epoch == epoch
         && latest_generations.get(&work.request.scope).copied() == Some(work.request.generation);
+    #[cfg(test)]
     {
-        let mut status = status_snapshot.lock().unwrap();
+        let mut status = _status_snapshot.lock().unwrap();
         status.completions_processed = status.completions_processed.saturating_add(1);
         if !accepted {
             status.stale_completions_discarded =

@@ -140,20 +140,20 @@ fn network_disk_reuse_and_clear_discard_stale_inflight_response() {
     observed.recv_timeout(Duration::from_secs(5)).unwrap();
     assert_eq!(hits.load(Ordering::SeqCst), 2);
     manager.clear_cache().unwrap();
-    let stale_before = manager.status().stale_completions_discarded;
+    let stale_before = manager.test_completion_counts().1;
     release.send(()).unwrap();
     await_clear(&manager);
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
         let status = manager.status();
-        if status.stale_completions_discarded > stale_before && status.in_flight == 0 {
+        if manager.test_completion_counts().1 > stale_before && status.in_flight == 0 {
             break;
         }
         thread::yield_now();
     }
     let status = manager.status();
     assert!(
-        status.stale_completions_discarded > stale_before,
+        manager.test_completion_counts().1 > stale_before,
         "controller did not observe the stale completion: {status:?}"
     );
     assert_eq!(
