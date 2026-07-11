@@ -2736,6 +2736,8 @@ impl eframe::App for DelogApp {
                     // Owned metrics handle: `behavior` borrows `self` mutably
                     // below, so we can't reach `self.session` while it lives.
                     let tree_metrics = self.session.metrics().clone();
+                    let live_map_scopes = self.workspace.map_scopes();
+                    self.gpu.retain_map_scopes(frame, &live_map_scopes);
                     self.gpu.begin_plot_frame(frame);
                     let services = PlotServices {
                         frame,
