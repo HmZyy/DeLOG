@@ -6,6 +6,8 @@ use std::collections::{HashMap, HashSet};
 const TILE_SIZE: u32 = 256;
 pub const MAP_TILE_CAPACITY: usize = 128;
 const LAYER_COUNT: u32 = MAP_TILE_CAPACITY as u32;
+const FALLBACK_DEPTH_BIAS: i32 = 2;
+const CURRENT_DEPTH_BIAS: i32 = 1;
 
 #[derive(Clone, Copy, Debug)]
 pub struct MapTileUpload<'a> {
@@ -51,7 +53,8 @@ struct Tile {
 
 pub struct MapTilePipeline {
     ctx: RenderContext,
-    pipeline: wgpu::RenderPipeline,
+    fallback_pipeline: wgpu::RenderPipeline,
+    current_pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
     texture: wgpu::Texture,
     uniform: wgpu::Buffer,
@@ -165,31 +168,61 @@ impl MapTilePipeline {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("delog-map-tiles-pipeline"), layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader, entry_point: Some("vs_main"), compilation_options: Default::default(),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<Vertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2, 2 => Uint32],
-                }],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader, entry_point: Some("fs_main"), compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState { format: color_format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: Some(wgpu::DepthStencilState { format: depth_format, depth_write_enabled: Some(true), depth_compare: Some(wgpu::CompareFunction::LessEqual), stencil: Default::default(), bias: Default::default() }),
-            multisample: wgpu::MultisampleState { count: sample_count, ..Default::default() },
-            multiview_mask: None, cache: None,
-        });
+        let create_pipeline = |label, depth_bias| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<Vertex>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2, 2 => Uint32],
+                    }],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: color_format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: depth_format,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                    stencil: Default::default(),
+                    bias: wgpu::DepthBiasState {
+                        constant: depth_bias,
+                        slope_scale: 0.0,
+                        clamp: 0.0,
+                    },
+                }),
+                multisample: wgpu::MultisampleState {
+                    count: sample_count,
+                    ..Default::default()
+                },
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let fallback_pipeline =
+            create_pipeline("delog-map-tiles-fallback-pipeline", FALLBACK_DEPTH_BIAS);
+        let current_pipeline =
+            create_pipeline("delog-map-tiles-current-pipeline", CURRENT_DEPTH_BIAS);
         let identity = glam_identity();
         ctx.queue()
             .write_buffer(&uniform, 0, bytemuck::cast_slice(&identity));
         Self {
             ctx: ctx.clone(),
-            pipeline,
+            fallback_pipeline,
+            current_pipeline,
             bind_group,
             texture,
             uniform,
@@ -248,32 +281,32 @@ impl MapTilePipeline {
         let vertices = [
             Vertex {
                 position: c[0],
-                uv: [0.0, 1.0],
+                uv: [0.0, 0.0],
                 layer,
             },
             Vertex {
                 position: c[1],
+                uv: [1.0, 0.0],
+                layer,
+            },
+            Vertex {
+                position: c[2],
                 uv: [1.0, 1.0],
                 layer,
             },
             Vertex {
-                position: c[2],
-                uv: [1.0, 0.0],
-                layer,
-            },
-            Vertex {
                 position: c[0],
-                uv: [0.0, 1.0],
+                uv: [0.0, 0.0],
                 layer,
             },
             Vertex {
                 position: c[2],
-                uv: [1.0, 0.0],
+                uv: [1.0, 1.0],
                 layer,
             },
             Vertex {
                 position: c[3],
-                uv: [0.0, 0.0],
+                uv: [0.0, 1.0],
                 layer,
             },
         ];
@@ -315,8 +348,17 @@ impl MapTilePipeline {
             .write_buffer(&self.uniform, 0, bytemuck::cast_slice(&view_proj));
     }
 
-    pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, keys: &[u64]) {
-        pass.set_pipeline(&self.pipeline);
+    pub fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, keys: &[u64]) {
+        self.draw_with_pipeline(pass, keys, &self.current_pipeline);
+    }
+
+    fn draw_with_pipeline<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+        keys: &[u64],
+        pipeline: &'a wgpu::RenderPipeline,
+    ) {
+        pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
         for tile in keys.iter().filter_map(|key| self.tiles.get(key)) {
             pass.set_vertex_buffer(0, tile.vertices.slice(..));
@@ -324,9 +366,18 @@ impl MapTilePipeline {
         }
     }
 
-    pub fn draw_visible(&self, pass: &mut wgpu::RenderPass<'_>, visible: &MapTileDrawGroups) {
-        self.draw(pass, &visible.previous);
-        self.draw(pass, &visible.current);
+    pub fn draw_visible<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+        visible: &MapTileDrawGroups,
+    ) {
+        self.draw_with_pipeline(pass, &visible.previous, &self.fallback_pipeline);
+        self.draw_with_pipeline(pass, &visible.current, &self.current_pipeline);
+    }
+
+    #[cfg(test)]
+    fn depth_biases_for_test(&self) -> (i32, i32) {
+        (FALLBACK_DEPTH_BIAS, CURRENT_DEPTH_BIAS)
     }
 }
 
@@ -428,6 +479,29 @@ fn fs() -> @location(0) vec4<f32> {
         rgba.repeat(256 * 256)
     }
 
+    fn north_south_texture() -> Vec<u8> {
+        let mut rgba = vec![0; 256 * 256 * 4];
+        for y in 0..256 {
+            let color = if y < 128 {
+                [255, 0, 0, 255]
+            } else {
+                [0, 0, 255, 255]
+            };
+            for pixel in rgba[y * 256 * 4..(y + 1) * 256 * 4].chunks_exact_mut(4) {
+                pixel.copy_from_slice(&color);
+            }
+        }
+        rgba
+    }
+
+    fn screen_point(view_proj: glam::Mat4, point: glam::Vec3) -> (u32, u32) {
+        let ndc = view_proj.project_point3(point);
+        (
+            ((ndc.x * 0.5 + 0.5) * 64.0).round() as u32,
+            ((0.5 - ndc.y * 0.5) * 64.0).round() as u32,
+        )
+    }
+
     fn render(tiles: &[MapTileUpload<'_>], view_proj: glam::Mat4) -> crate::RgbaImage {
         let ctx = RenderContext::headless().expect("headless adapter");
         let target = Scene3dTarget::new(ctx.clone(), 64, 64);
@@ -493,6 +567,40 @@ fn fs() -> @location(0) vec4<f32> {
         );
         assert!(image.matches(24, 36, [255, 0, 0, 255], 4));
         assert!(image.matches(40, 36, [0, 0, 255, 255], 4));
+    }
+
+    #[test]
+    fn texture_top_is_mapped_to_north_edge_under_perspective_camera() {
+        let directional = north_south_texture();
+        let view_proj = glam::Mat4::perspective_rh(60f32.to_radians(), 1.0, 0.1, 100.0)
+            * glam::Mat4::look_at_rh(
+                glam::Vec3::new(0.0, 3.0, 3.0),
+                glam::Vec3::ZERO,
+                glam::Vec3::Y,
+            );
+        let image = render(
+            &[MapTileUpload {
+                key: 1,
+                rgba: &directional,
+                corners: [
+                    [-1.5, 0.0, 1.5],
+                    [1.5, 0.0, 1.5],
+                    [1.5, 0.0, -1.5],
+                    [-1.5, 0.0, -1.5],
+                ],
+            }],
+            view_proj,
+        );
+        let north = screen_point(view_proj, glam::Vec3::new(0.0, 0.0, 0.9));
+        let south = screen_point(view_proj, glam::Vec3::new(0.0, 0.0, -0.9));
+        assert!(
+            image.matches(north.0, north.1, [255, 0, 0, 255], 4),
+            "north sample {north:?} must use the texture's top half"
+        );
+        assert!(
+            image.matches(south.0, south.1, [0, 0, 255, 255], 4),
+            "south sample {south:?} must use the texture's bottom half"
+        );
     }
 
     #[test]
@@ -726,5 +834,103 @@ fn fs() -> @location(0) vec4<f32> {
             grid_over_tile > 8,
             "grid must remain visibly alpha-composed over the red tile, got {grid_over_tile} pixels"
         );
+    }
+
+    #[test]
+    fn perspective_fallback_current_and_grid_use_stable_depth_strata() {
+        let coarse = solid([255, 0, 0, 255]);
+        let current = solid([0, 0, 255, 255]);
+        let ctx = RenderContext::headless().expect("headless adapter");
+        let target = Scene3dTarget::new(ctx.clone(), 64, 64);
+        let mut tiles = MapTilePipeline::new(
+            &ctx,
+            target.color_format(),
+            target.depth_format(),
+            target.sample_count(),
+        );
+        tiles
+            .upload(MapTileUpload {
+                key: 1,
+                rgba: &coarse,
+                corners: [
+                    [-2.0, 0.0, 2.0],
+                    [2.0, 0.0, 2.0],
+                    [2.0, 0.0, -2.0],
+                    [-2.0, 0.0, -2.0],
+                ],
+            })
+            .unwrap();
+        tiles
+            .upload(MapTileUpload {
+                key: 2,
+                rgba: &current,
+                corners: [
+                    [0.0, 0.0, 1.0],
+                    [1.0, 0.0, 1.0],
+                    [1.0, 0.0, 0.0],
+                    [0.0, 0.0, 0.0],
+                ],
+            })
+            .unwrap();
+        assert_eq!(tiles.depth_biases_for_test(), (2, 1));
+        let visible = MapTileDrawGroups {
+            previous: vec![1],
+            current: vec![2],
+        };
+        let grid = Grid3dPipeline::new(
+            &ctx,
+            target.color_format(),
+            target.depth_format(),
+            target.sample_count(),
+        );
+
+        for dx in [-0.01, 0.0, 0.01] {
+            let eye = glam::Vec3::new(dx, 3.0, 3.0);
+            let vp = glam::Mat4::perspective_rh(0.9, 1.0, 0.1, 20.0)
+                * glam::Mat4::look_at_rh(eye, glam::Vec3::ZERO, glam::Vec3::Y);
+            tiles.set_view_proj(vp.to_cols_array_2d());
+            grid.set_uniform(
+                &ctx,
+                &GridUniform::new(
+                    vp.to_cols_array_2d(),
+                    vp.inverse().to_cols_array_2d(),
+                    eye.to_array(),
+                    0.25,
+                    10.0,
+                    100.0,
+                    false,
+                    false,
+                ),
+            );
+            let mut encoder = ctx.device().create_command_encoder(&Default::default());
+            {
+                let mut pass = target.begin_pass(&mut encoder, wgpu::Color::BLACK);
+                tiles.draw_visible(&mut pass, &visible);
+                grid.draw(&mut pass);
+            }
+            ctx.queue().submit([encoder.finish()]);
+            ctx.device()
+                .poll(wgpu::PollType::wait_indefinitely())
+                .unwrap();
+            let image = target.read_rgba();
+            let coarse_pixels = image
+                .pixels
+                .chunks_exact(4)
+                .filter(|p| p[0] > 180 && p[0] > p[2].saturating_add(80))
+                .count();
+            let current_pixels = image
+                .pixels
+                .chunks_exact(4)
+                .filter(|p| p[2] > 180 && p[2] > p[0].saturating_add(80))
+                .count();
+            assert!(coarse_pixels > 50, "coarse={coarse_pixels} at dx={dx}");
+            assert!(current_pixels > 20, "current={current_pixels} at dx={dx}");
+            let grid_pixels = image
+                .pixels
+                .chunks_exact(4)
+                .filter(|p| p[3] == 255 && p[0] > 10 && p[2] > 10)
+                .count();
+            assert!(grid_pixels > 8, "grid disappeared at camera dx={dx}");
+        }
     }
 }
