@@ -205,6 +205,7 @@ impl Workspace {
     }
 
     pub fn set_all_plot_legends(&mut self, visible: bool) {
+        self.default_show_legend = visible;
         for pane in self.plot_panes_mut() {
             pane.show_legend = visible;
         }
@@ -2283,15 +2284,19 @@ mod tests {
     }
 
     #[test]
-    fn set_all_plot_legends_updates_every_plot() {
+    fn set_all_plot_legends_updates_existing_and_future_plots() {
         let mut workspace = Workspace::new();
         let root = workspace.tree.root().unwrap();
         workspace.split_plot(root, SplitDirection::Horizontal);
 
         workspace.set_all_plot_legends(false);
+        let root = workspace.tree.root().unwrap();
+        workspace.split_plot(root, SplitDirection::Vertical);
         assert!(workspace.plot_panes().all(|pane| !pane.show_legend));
 
         workspace.set_all_plot_legends(true);
+        let root = workspace.tree.root().unwrap();
+        workspace.split_plot(root, SplitDirection::Vertical);
         assert!(workspace.plot_panes().all(|pane| pane.show_legend));
     }
 
