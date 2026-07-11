@@ -821,7 +821,7 @@ impl SceneResources {
         // Recompute the complete residency union immediately. This both drops
         // signatures for dead scopes and lets the surviving panes consume any
         // quota released by them before the first scene render of this frame.
-        self.admit_map_tiles(&std::collections::HashSet::new());
+        self.admit_map_tiles(&std::collections::HashSet::new(), None);
     }
 
     /// Prepare GPU buffers + uniforms for the frame's vehicles (before the
@@ -958,7 +958,7 @@ impl SceneResources {
         if !selection.enabled {
             self.map_tile_cache.remove(&selection.scope);
             self.map_tile_selections.remove(&selection.scope);
-            self.admit_map_tiles(&std::collections::HashSet::new());
+            self.admit_map_tiles(&std::collections::HashSet::new(), Some(selection.scope));
             return MapTileDrawGroups::default();
         }
         self.map_tile_selections
@@ -991,7 +991,7 @@ impl SceneResources {
             cache.retain(|_, tile| map_tile_matches(selection, tile));
             changed
         };
-        self.admit_map_tiles(&changed);
+        self.admit_map_tiles(&changed, Some(selection.scope));
         let cache = &self.map_tile_cache[&selection.scope];
         let mut visible = MapTileDrawGroups::default();
         for (key, tile) in cache {
@@ -1009,9 +1009,17 @@ impl SceneResources {
         visible
     }
 
-    fn admit_map_tiles(&mut self, changed: &std::collections::HashSet<u64>) {
+    fn admit_map_tiles(
+        &mut self,
+        changed: &std::collections::HashSet<u64>,
+        active_scope: Option<MapScopeId>,
+    ) {
         let mut scopes: Vec<_> = self.map_tile_selections.keys().copied().collect();
         scopes.sort_by_key(|scope| scope.0);
+        // Above capacity, not every scope can own a slot. Keep the pane being
+        // rendered first so it always retains one usable current tile; normal
+        // <=128 deterministic quota allocation is unchanged.
+        prioritize_active_scope(&mut scopes, active_scope);
         let scope_count = scopes.len().max(1);
         let base_quota = MAP_TILE_CAPACITY / scope_count;
         let remainder = MAP_TILE_CAPACITY % scope_count;
@@ -1090,6 +1098,15 @@ impl SceneResources {
                     .insert(key, map_tile_signature(tile));
             }
         }
+    }
+}
+
+fn prioritize_active_scope(scopes: &mut [MapScopeId], active_scope: Option<MapScopeId>) {
+    if scopes.len() > MAP_TILE_CAPACITY
+        && let Some(active) = active_scope
+        && let Some(index) = scopes.iter().position(|scope| *scope == active)
+    {
+        scopes.swap(0, index);
     }
 }
 
@@ -1410,6 +1427,17 @@ pub fn zoom_drag_view(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn active_scope_is_first_only_when_scope_count_exceeds_capacity() {
+        let mut saturated: Vec<_> = (0..=MAP_TILE_CAPACITY as u64).map(MapScopeId).collect();
+        prioritize_active_scope(&mut saturated, Some(MapScopeId(128)));
+        assert_eq!(saturated[0], MapScopeId(128));
+
+        let mut normal = vec![MapScopeId(1), MapScopeId(2)];
+        prioritize_active_scope(&mut normal, Some(MapScopeId(2)));
+        assert_eq!(normal, vec![MapScopeId(1), MapScopeId(2)]);
+    }
 
     fn live_zoom(zoom: u8) -> Vec<(TileId, i32)> {
         (0..4)

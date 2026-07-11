@@ -17,7 +17,7 @@ use crate::hover::{self, HoverTarget};
 use crate::legend;
 use crate::map::mercator;
 use crate::map::provider::{MapProviderId, provider};
-use crate::map::worker::{MapScopeId, TileManager, TileRequest};
+use crate::map::worker::{MapScopeId, TileFailureClass, TileManager, TileRequest};
 use crate::plot::{GhostTrace, PlotPane, TraceMode, TraceRef, ViewX};
 use crate::vehicle;
 
@@ -856,9 +856,17 @@ impl Behavior<'_> {
         }
 
         if provider_id != MapProviderId::None {
+            let map_status = self
+                .services
+                .tile_manager
+                .as_deref()
+                .map(TileManager::status);
             let message = scene_map_overlay(
-                self.services.tile_manager.is_some(),
                 tracked_reference.is_some(),
+                map_status
+                    .as_ref()
+                    .and_then(|status| status.failure.as_ref().map(|failure| failure.class)),
+                map_status.as_ref().is_some_and(|status| status.ready > 0),
             );
             scene_map_status(ui, rect, message);
             if let Some(map_provider) = provider(provider_id) {
@@ -1687,11 +1695,19 @@ impl Behavior<'_> {
     }
 }
 
-fn scene_map_overlay(manager_available: bool, reference_available: bool) -> Option<&'static str> {
-    match (manager_available, reference_available) {
-        (false, _) => Some("Map cache unavailable"),
-        (true, false) => Some("Tracked vehicle has no map reference"),
-        (true, true) => None,
+fn scene_map_overlay(
+    reference_available: bool,
+    failure: Option<TileFailureClass>,
+    cached: bool,
+) -> Option<&'static str> {
+    if !reference_available {
+        Some("Map unavailable: no georeference")
+    } else if failure == Some(TileFailureClass::Cache) {
+        Some("Map cache error")
+    } else if failure == Some(TileFailureClass::NetworkTransient) && cached {
+        Some("Map tiles offline — showing cached imagery")
+    } else {
+        None
     }
 }
 
@@ -2264,14 +2280,18 @@ mod tests {
     #[test]
     fn scene_map_overlay_only_reports_actionable_states() {
         assert_eq!(
-            scene_map_overlay(false, false),
-            Some("Map cache unavailable")
+            scene_map_overlay(false, None, false),
+            Some("Map unavailable: no georeference")
         );
         assert_eq!(
-            scene_map_overlay(true, false),
-            Some("Tracked vehicle has no map reference")
+            scene_map_overlay(true, Some(TileFailureClass::Cache), true),
+            Some("Map cache error")
         );
-        assert_eq!(scene_map_overlay(true, true), None);
+        assert_eq!(
+            scene_map_overlay(true, Some(TileFailureClass::NetworkTransient), true),
+            Some("Map tiles offline — showing cached imagery")
+        );
+        assert_eq!(scene_map_overlay(true, None, true), None);
     }
 
     #[test]

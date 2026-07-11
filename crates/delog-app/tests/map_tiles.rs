@@ -28,7 +28,9 @@ use std::{
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use map::provider::{MapProviderId, TileId};
-use map::worker::{CacheActionKind, CacheActionStatus, MapScopeId, TileManager, TileRequest};
+use map::worker::{
+    CacheActionKind, CacheActionStatus, MapScopeId, TileFailureClass, TileManager, TileRequest,
+};
 
 fn synthetic_tile() -> Vec<u8> {
     let image = image::RgbImage::from_fn(256, 256, |x, y| {
@@ -173,5 +175,41 @@ fn network_disk_reuse_and_clear_discard_stale_inflight_response() {
             .usage_bytes(),
         0,
         "stale response must not repopulate disk"
+    );
+}
+
+#[test]
+fn cache_write_failure_still_delivers_decoded_tile() {
+    let temp = tempfile::tempdir().unwrap();
+    let cache_path = temp.path().join("cache");
+    let hits = Arc::new(AtomicUsize::new(0));
+    let (url, observed, release) = gated_server(synthetic_tile(), hits);
+    let mut manager = TileManager::new(cache_path.clone(), u64::MAX, || {}).unwrap();
+
+    std::fs::remove_dir_all(&cache_path).unwrap();
+    std::fs::write(&cache_path, b"not a directory").unwrap();
+    map::worker::request_from_test(&mut manager, request(), url);
+    observed.recv_timeout(Duration::from_secs(5)).unwrap();
+    release.send(()).unwrap();
+
+    assert_eq!(await_ready(&mut manager).len(), 1);
+    assert_eq!(
+        manager.status().failure.unwrap().class,
+        TileFailureClass::Cache
+    );
+
+    std::fs::remove_file(&cache_path).unwrap();
+    std::fs::create_dir(&cache_path).unwrap();
+    let (url, observed, release) = gated_server(synthetic_tile(), Arc::new(AtomicUsize::new(0)));
+    let mut next = request();
+    next.id.x += 1;
+    map::worker::request_from_test(&mut manager, next, url);
+    observed.recv_timeout(Duration::from_secs(5)).unwrap();
+    release.send(()).unwrap();
+    assert_eq!(await_ready(&mut manager).len(), 1);
+    assert_eq!(
+        manager.status().failure,
+        None,
+        "recovered cache error clears"
     );
 }

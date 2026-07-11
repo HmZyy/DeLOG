@@ -199,7 +199,7 @@ pub fn tile_corners_render(tile: TileId, anchor_rad_alt: [f64; 3]) -> [[f32; 3];
             anchor_rad_alt[1],
             anchor_rad_alt[2],
         );
-        [ned.y as f32, -ned.z as f32, -ned.x as f32]
+        [ned.y as f32, 0.0, -ned.x as f32]
     })
 }
 
@@ -375,5 +375,18 @@ mod tests {
                 .iter()
                 .any(|corner| glam::Vec3::from_array(*corner).length() < 0.01)
         );
+    }
+
+    #[test]
+    fn tile_corners_stay_on_render_ground_for_elevated_anchor() {
+        let corners = tile_corners_render(
+            TileId {
+                zoom: 12,
+                x: 2048,
+                y: 2048,
+            },
+            [0.0, 0.0, 400.0],
+        );
+        assert!(corners.iter().all(|corner| corner[1] == 0.0), "{corners:?}");
     }
 }
