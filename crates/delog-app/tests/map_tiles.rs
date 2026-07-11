@@ -98,15 +98,18 @@ fn await_ready(manager: &mut TileManager) -> Vec<map::worker::ReadyTile> {
     panic!("tile did not become ready: {:?}", manager.status());
 }
 
-fn await_clear(manager: &TileManager) {
+fn await_clear(manager: &TileManager, expected_id: u64) {
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
         match manager.status().cache_action {
             CacheActionStatus::Complete {
+                id,
                 kind: CacheActionKind::Clear,
                 ..
-            } => return,
-            CacheActionStatus::Error { message, .. } => panic!("cache clear failed: {message}"),
+            } if id == expected_id => return,
+            CacheActionStatus::Error { id, message, .. } if id == expected_id => {
+                panic!("cache clear failed: {message}")
+            }
             _ => thread::sleep(Duration::from_millis(10)),
         }
     }
@@ -134,15 +137,15 @@ fn network_disk_reuse_and_clear_discard_stale_inflight_response() {
     assert_eq!(await_ready(&mut manager).len(), 1);
     assert_eq!(hits.load(Ordering::SeqCst), 1, "disk hit avoids the server");
 
-    manager.clear_cache().unwrap();
-    await_clear(&manager);
+    let clear_id = manager.clear_cache().unwrap();
+    await_clear(&manager, clear_id);
     map::worker::request_from_test(&mut manager, request(), url);
     observed.recv_timeout(Duration::from_secs(5)).unwrap();
     assert_eq!(hits.load(Ordering::SeqCst), 2);
-    manager.clear_cache().unwrap();
+    let clear_id = manager.clear_cache().unwrap();
+    await_clear(&manager, clear_id);
     let stale_before = manager.test_completion_counts().1;
     release.send(()).unwrap();
-    await_clear(&manager);
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
         let status = manager.status();
