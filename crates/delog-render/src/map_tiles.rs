@@ -301,7 +301,7 @@ fn glam_identity() -> [[f32; 4]; 4] {
 #[cfg(test)]
 mod tests {
     use super::{MapTilePipeline, MapTileUpload};
-    use crate::{RenderContext, Scene3dTarget};
+    use crate::{Grid3dPipeline, GridUniform, RenderContext, Scene3dTarget};
 
     struct NearTrianglePipeline(wgpu::RenderPipeline);
 
@@ -566,14 +566,31 @@ fn fs() -> @location(0) vec4<f32> {
             })
             .unwrap();
         tiles.set_view_proj(glam::Mat4::IDENTITY.to_cols_array_2d());
+        let grid = Grid3dPipeline::new(
+            &ctx,
+            target.color_format(),
+            target.depth_format(),
+            target.sample_count(),
+        );
+        grid.set_uniform(
+            &ctx,
+            &GridUniform::new(
+                glam::Mat4::IDENTITY.to_cols_array_2d(),
+                glam::Mat4::IDENTITY.to_cols_array_2d(),
+                [0.0, 1.0, 0.0],
+                1.0,
+                10.0,
+                100.0,
+                false,
+                false,
+            ),
+        );
         let trajectory_or_vehicle = NearTrianglePipeline::new(&ctx);
         let mut encoder = ctx.device().create_command_encoder(&Default::default());
         {
             let mut pass = target.begin_pass(&mut encoder, wgpu::Color::BLACK);
-            // Scene contract: map first, then the grid, then trajectories/vehicles.
-            // The grid is omitted here because its ground depth equals the map;
-            // the near triangle proves the later overlay still wins depth.
             tiles.draw(&mut pass);
+            grid.draw(&mut pass);
             trajectory_or_vehicle.draw(&mut pass);
         }
         ctx.queue().submit([encoder.finish()]);

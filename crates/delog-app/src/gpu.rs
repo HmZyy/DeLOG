@@ -13,11 +13,20 @@ use delog_render::{
 use eframe::{egui_wgpu, wgpu};
 
 use crate::camera::OrbitCamera;
-use crate::map::worker::ReadyTile;
+use crate::map::worker::{MapScopeId, ReadyTile};
 use crate::models;
 use crate::plot::{PlotPane, TraceMode, ViewX};
 use crate::settings::Scene3dSettings;
 use crate::vehicle::ModelKind;
+
+#[derive(Clone, Copy, Debug)]
+pub struct MapTileSelection {
+    pub scope: MapScopeId,
+    pub generation: u64,
+    pub current_zoom: Option<u8>,
+    pub previous_zoom: Option<u8>,
+    pub enabled: bool,
+}
 
 pub struct VehicleDraw<'a> {
     pub key: u32,
@@ -343,6 +352,7 @@ impl GpuBridge {
         rect: egui::Rect,
         camera: &OrbitCamera,
         scene3d: Scene3dSettings,
+        map_selection: MapTileSelection,
         ready_tiles: &[ReadyTile],
         vehicles: &[VehicleDraw],
     ) -> Option<egui::TextureId> {
@@ -390,7 +400,7 @@ impl GpuBridge {
                 bytemuck::bytes_of(&Traj3dUniform::new(vp_cols, res.axis_gizmo.color)),
             );
             res.prepare_vehicles(vp_cols, camera.eye().to_array(), vehicles);
-            res.prepare_map_tiles(vp_cols, ready_tiles);
+            res.prepare_map_tiles(vp_cols, map_selection, ready_tiles);
 
             let clear = wgpu::Color {
                 r: 0.07,
@@ -710,9 +720,7 @@ struct SceneResources {
     target: Scene3dTarget,
     grid: Grid3dPipeline,
     map_tiles: MapTilePipeline,
-    map_tile_sets: HashMap<u64, (u64, u8)>,
-    map_current: Option<(u64, u8)>,
-    map_previous: Option<(u64, u8)>,
+    map_tile_cache: HashMap<MapScopeId, HashMap<u64, ReadyTile>>,
     traj: Traj3dPipeline,
     mesh: MeshPipeline,
     /// Decoded meshes by model kind (lazy; built on first use).
@@ -761,9 +769,7 @@ impl SceneResources {
             target,
             grid,
             map_tiles,
-            map_tile_sets: HashMap::new(),
-            map_current: None,
-            map_previous: None,
+            map_tile_cache: HashMap::new(),
             traj,
             mesh,
             model_cache: HashMap::new(),
@@ -897,33 +903,42 @@ impl SceneResources {
         }
     }
 
-    fn prepare_map_tiles(&mut self, vp: [[f32; 4]; 4], ready: &[ReadyTile]) {
+    fn prepare_map_tiles(
+        &mut self,
+        vp: [[f32; 4]; 4],
+        selection: MapTileSelection,
+        ready: &[ReadyTile],
+    ) {
         self.map_tiles.set_view_proj(vp);
-        for tile in ready {
-            let key = map_tile_key(tile);
+        let cache = self.map_tile_cache.entry(selection.scope).or_default();
+        for tile in ready.iter().filter(|tile| tile.scope == selection.scope) {
+            cache.insert(map_tile_key(tile), tile.clone());
+        }
+        cache.retain(|_, tile| map_tile_matches(selection, tile));
+        self.map_tiles.retain(std::iter::empty());
+        if !selection.enabled {
+            return;
+        }
+        let mut tiles: Vec<_> = cache.iter().collect();
+        tiles.sort_by_key(|(key, _)| **key);
+        for (key, tile) in tiles {
             if let Err(error) = self.map_tiles.upload(MapTileUpload {
-                key,
+                key: *key,
                 rgba: &tile.rgba,
                 corners: tile.corners,
             }) {
                 tracing::warn!(%error, "failed to upload map tile");
-            } else {
-                self.map_tile_sets
-                    .insert(key, (tile.generation, tile.id.zoom));
             }
         }
-        if let Some(next) = ready.first().map(|tile| (tile.generation, tile.id.zoom))
-            && self.map_current != Some(next)
-        {
-            self.map_previous = self.map_current.filter(|old| old.0 == next.0);
-            self.map_current = Some(next);
-            let current = self.map_current;
-            let previous = self.map_previous;
-            self.map_tile_sets
-                .retain(|_, set| Some(*set) == current || Some(*set) == previous);
-            self.map_tiles.retain(self.map_tile_sets.keys().copied());
-        }
     }
+}
+
+fn map_tile_matches(selection: MapTileSelection, tile: &ReadyTile) -> bool {
+    selection.enabled
+        && tile.scope == selection.scope
+        && tile.generation == selection.generation
+        && (Some(tile.id.zoom) == selection.current_zoom
+            || Some(tile.id.zoom) == selection.previous_zoom)
 }
 
 fn map_tile_key(tile: &ReadyTile) -> u64 {
@@ -1330,5 +1345,33 @@ mod tests {
     fn zoom_drag_zero_width_rect_is_noop() {
         let view = ViewX::new(0, 1000);
         assert!(zoom_drag_view(view, 0.0, 0.0, 5.0, 50.0).is_none());
+    }
+
+    #[test]
+    fn mixed_ready_batch_keeps_requested_current_and_previous_zoom_independent_of_order() {
+        let selection = MapTileSelection {
+            scope: MapScopeId(4),
+            generation: 9,
+            current_zoom: Some(12),
+            previous_zoom: Some(11),
+            enabled: true,
+        };
+        let tile = |zoom| ReadyTile {
+            scope: MapScopeId(4),
+            provider: crate::map::provider::MapProviderId::BingSatellite,
+            id: crate::map::provider::TileId { zoom, x: 0, y: 0 },
+            generation: 9,
+            rgba: Vec::new(),
+            corners: [[0.0; 3]; 4],
+        };
+        let mixed = [tile(11), tile(12)];
+        assert!(mixed.iter().all(|tile| map_tile_matches(selection, tile)));
+        assert!(
+            mixed
+                .iter()
+                .rev()
+                .all(|tile| map_tile_matches(selection, tile))
+        );
+        assert!(!map_tile_matches(selection, &tile(10)));
     }
 }

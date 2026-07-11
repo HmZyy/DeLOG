@@ -1,6 +1,9 @@
 //! Tiled plot workspace.
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::Instant;
 
 use delog_cache::CacheManager;
@@ -14,7 +17,7 @@ use crate::hover::{self, HoverTarget};
 use crate::legend;
 use crate::map::mercator;
 use crate::map::provider::{MapProviderId, provider};
-use crate::map::worker::{TileManager, TileRequest};
+use crate::map::worker::{MapScopeId, TileManager, TileRequest};
 use crate::plot::{GhostTrace, PlotPane, TraceMode, TraceRef, ViewX};
 use crate::vehicle;
 
@@ -28,17 +31,20 @@ pub enum Pane {
 
 #[derive(Debug)]
 pub struct Scene3dPane {
+    pub(crate) map_scope: MapScopeId,
     pub camera: OrbitCamera,
     pub tracked_vehicle: Option<usize>,
     /// When true, each vehicle's path is clipped to the playhead time; when
     /// false, the full flight path is drawn.
     pub trail_to_playhead: bool,
-    pub(crate) map_selection: Option<(usize, MapProviderId)>,
+    pub(crate) map_selection: Option<(usize, MapProviderId, [u64; 3])>,
     pub(crate) map_generation: u64,
+    pub(crate) map_zoom: Option<u8>,
+    pub(crate) map_previous_zoom: Option<u8>,
 }
 
 impl Scene3dPane {
-    fn update_map_selection(&mut self, selection: Option<(usize, MapProviderId)>) -> u64 {
+    fn update_map_selection(&mut self, selection: Option<(usize, MapProviderId, [u64; 3])>) -> u64 {
         if self.map_selection != selection {
             self.map_selection = selection;
             self.map_generation = self.map_generation.wrapping_add(1).max(1);
@@ -49,12 +55,16 @@ impl Scene3dPane {
 
 impl Default for Scene3dPane {
     fn default() -> Self {
+        static NEXT_SCOPE: AtomicU64 = AtomicU64::new(1);
         Self {
+            map_scope: MapScopeId(NEXT_SCOPE.fetch_add(1, Ordering::Relaxed)),
             camera: OrbitCamera::default(),
             tracked_vehicle: None,
             trail_to_playhead: true,
             map_selection: None,
             map_generation: 0,
+            map_zoom: None,
+            map_previous_zoom: None,
         }
     }
 }
@@ -698,7 +708,7 @@ impl Behavior<'_> {
                 tracked_reference,
                 provider(provider_id),
             ) {
-                let selection = (tracked_index, provider_id);
+                let selection = (tracked_index, provider_id, anchor.map(f64::to_bits));
                 pane.update_map_selection(Some(selection));
                 let ppp = ui.ctx().pixels_per_point();
                 let viewport = [
@@ -717,8 +727,14 @@ impl Behavior<'_> {
                     [anchor[0], anchor[1]],
                     map_provider.zoom_range(),
                 );
+                let requested_zoom = visible.tiles.first().map(|id| id.zoom);
+                if requested_zoom != pane.map_zoom {
+                    pane.map_previous_zoom = pane.map_zoom;
+                    pane.map_zoom = requested_zoom;
+                }
                 for (priority, id) in visible.tiles.into_iter().enumerate() {
                     manager.request(TileRequest {
+                        scope: pane.map_scope,
                         provider: provider_id,
                         id,
                         corners: mercator::tile_corners_render(id, anchor),
@@ -726,9 +742,11 @@ impl Behavior<'_> {
                         generation: pane.map_generation,
                     });
                 }
-                manager.poll()
+                manager.poll(pane.map_scope)
             } else {
                 pane.update_map_selection(None);
+                pane.map_zoom = None;
+                pane.map_previous_zoom = None;
                 Vec::new()
             };
 
@@ -772,6 +790,13 @@ impl Behavior<'_> {
                 rect,
                 &pane.camera,
                 self.services.scene3d,
+                gpu::MapTileSelection {
+                    scope: pane.map_scope,
+                    generation: pane.map_generation,
+                    current_zoom: pane.map_zoom,
+                    previous_zoom: pane.map_previous_zoom,
+                    enabled: pane.map_selection.is_some(),
+                },
                 &ready_tiles,
                 &draws,
             )
@@ -2219,12 +2244,14 @@ mod tests {
     #[test]
     fn scene_map_tracked_vehicle_switch_changes_generation() {
         let mut pane = Scene3dPane::default();
-        let first = pane.update_map_selection(Some((0, MapProviderId::BingSatellite)));
+        let first = pane.update_map_selection(Some((0, MapProviderId::BingSatellite, [0; 3])));
         assert_eq!(
-            pane.update_map_selection(Some((0, MapProviderId::BingSatellite))),
+            pane.update_map_selection(Some((0, MapProviderId::BingSatellite, [0; 3]))),
             first
         );
-        assert!(pane.update_map_selection(Some((1, MapProviderId::BingSatellite))) > first);
+        assert!(
+            pane.update_map_selection(Some((1, MapProviderId::BingSatellite, [0; 3]))) > first
+        );
     }
 
     #[test]
