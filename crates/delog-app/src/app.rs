@@ -17,12 +17,13 @@ use crate::live::ConnectionDialog;
 #[cfg(feature = "scripting")]
 use crate::logging::LogLevel;
 use crate::logging::{LogRecord, LoggingDock, PendingLog};
+use crate::map::worker::{CacheActionKind, CacheActionStatus, TileManager};
 use crate::performance::{PerformanceDock, PerformanceSnapshot, ResourceSummary, TraceSummary};
 use crate::plot::ViewX;
 #[cfg(feature = "scripting")]
 use crate::scripts;
 use crate::session::Session;
-use crate::settings::{AppSettings, RenderMode, SettingsDialog};
+use crate::settings::{AppSettings, RenderMode, SettingsDialog, TileCacheUiState};
 use crate::timeline::Playback;
 use crate::workspace::{PlotServices, Workspace};
 
@@ -293,6 +294,7 @@ pub struct DelogApp {
     layout_manager_dialog: LayoutManagerDialog,
     settings: AppSettings,
     settings_dialog: SettingsDialog,
+    tile_manager: Option<TileManager>,
     theme_needs_apply: bool,
     pending_layout: Option<PendingLayout>,
     deferred_layout_doc: Option<LayoutDoc>,
@@ -320,6 +322,22 @@ impl DelogApp {
         settings.theme.apply(&cc.egui_ctx);
         settings.font.apply(&cc.egui_ctx);
         let connection_dialog = ConnectionDialog::from_settings(&settings.live_connection);
+        let tile_manager = directories::ProjectDirs::from("org", "hmzyy", "DeLOG")
+            .map(|dirs| dirs.cache_dir().join("map-tiles"))
+            .and_then(|cache_dir| {
+                let repaint = cc.egui_ctx.clone();
+                match TileManager::new(
+                    cache_dir,
+                    settings.scene3d.tile_cache_limit_bytes,
+                    move || repaint.request_repaint(),
+                ) {
+                    Ok(manager) => Some(manager),
+                    Err(error) => {
+                        tracing::warn!(%error, "map tile cache unavailable");
+                        None
+                    }
+                }
+            });
         let (picked_files_tx, picked_files) = mpsc::channel();
         let (traj_results_tx, traj_results) = mpsc::channel();
         let (imported_layouts_tx, imported_layouts) = mpsc::channel();
@@ -412,6 +430,7 @@ impl DelogApp {
             layout_manager_dialog: LayoutManagerDialog::default(),
             settings,
             settings_dialog: SettingsDialog::default(),
+            tile_manager,
             theme_needs_apply: false,
             pending_layout: None,
             deferred_layout_doc: None,
@@ -2840,10 +2859,43 @@ impl eframe::App for DelogApp {
         self.show_layout_windows(ui.ctx());
         crate::message_popup::show_all(&mut self.message_popups, ui.ctx());
         let settings_before = self.settings.clone();
-        let settings_change = self.settings_dialog.show(ui.ctx(), &mut self.settings);
+        let tile_cache =
+            self.tile_manager
+                .as_ref()
+                .map_or_else(TileCacheUiState::default, |manager| {
+                    let status = manager.status();
+                    TileCacheUiState {
+                        usage_bytes: status.cache_bytes,
+                        clearing: matches!(
+                            status.cache_action,
+                            CacheActionStatus::Pending {
+                                kind: CacheActionKind::Clear,
+                                ..
+                            }
+                        ),
+                    }
+                });
+        let settings_change = self
+            .settings_dialog
+            .show(ui.ctx(), &mut self.settings, tile_cache);
         if settings_change.theme_changed || self.theme_needs_apply {
             self.settings.theme.apply(ui.ctx());
             self.theme_needs_apply = false;
+        }
+        if let Some(manager) = self.tile_manager.as_mut() {
+            if settings_change.tile_cache_limit_changed
+                && let Err(error) = manager.set_limit(self.settings.scene3d.tile_cache_limit_bytes)
+            {
+                tracing::warn!(%error, "failed to queue map tile cache limit");
+            }
+            if settings_change.clear_tile_cache
+                && let Err(error) = manager.clear_cache()
+            {
+                tracing::warn!(%error, "failed to queue map tile cache clear");
+            }
+        }
+        if settings_change.map_provider_changed || tile_cache.clearing {
+            ui.ctx().request_repaint();
         }
         if self.settings != settings_before
             && let Err(err) = crate::layout::save_app_settings(&self.settings)
