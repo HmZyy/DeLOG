@@ -2730,9 +2730,6 @@ impl eframe::App for DelogApp {
             // empty workspace space plots it in the first pane.
             let frame_style = egui::Frame::default();
             let mut handled_workspace_drop = false;
-            // New panes (splits/edge drops) inherit the global legend default;
-            // the per-pane toggle overrides it afterwards.
-            self.workspace.default_show_legend = self.settings.plot.show_legend_default;
             let (_, dropped) =
                 ui.dnd_drop_zone::<Vec<delog_core::identity::FieldId>, ()>(frame_style, |ui| {
                     // Owned metrics handle: `behavior` borrows `self` mutably

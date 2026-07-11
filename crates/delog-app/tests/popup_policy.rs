@@ -264,6 +264,11 @@ fn moved_plot_controls_live_on_icon_toolbar_not_plot_context_menu() {
     assert!(toolbar.contains("crate::icons::ruler_dimension_line()"));
     assert!(toolbar.contains("crate::icons::grid_2x2_check()"));
     assert!(toolbar.contains("let legends_hidden = !self.workspace.all_plot_legends_visible();"));
+    assert!(
+        !APP_SOURCE.contains(
+            "self.workspace.default_show_legend = self.settings.plot.show_legend_default"
+        )
+    );
     assert!(toolbar.contains("legend_tint = if legends_hidden"));
     assert!(toolbar.contains("crate::icons::eye_off()"));
     assert!(toolbar.contains("legend_tint,\n                    legends_hidden,"));
