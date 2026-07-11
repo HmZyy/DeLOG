@@ -1,5 +1,6 @@
 //! Tiled plot workspace.
 
+use std::collections::HashSet;
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
@@ -52,6 +53,27 @@ impl Scene3dPane {
             self.map_generation = self.map_generation.wrapping_add(1).max(1);
         }
         self.map_generation
+    }
+
+    fn update_visible_map_tiles(&mut self, desired: Vec<crate::map::provider::TileId>) {
+        let desired_set: HashSet<_> = desired.iter().copied().collect();
+        let current_set: HashSet<_> = self.map_tiles.iter().map(|(id, _)| *id).collect();
+        if desired_set != current_set {
+            self.map_previous_zoom = self.map_zoom;
+            self.map_previous_tiles = self
+                .map_tiles
+                .iter()
+                .map(|(id, _)| *id)
+                .filter(|id| !desired_set.contains(id))
+                .take(256)
+                .collect();
+        }
+        self.map_zoom = desired.first().map(|id| id.zoom);
+        self.map_tiles = desired
+            .into_iter()
+            .enumerate()
+            .map(|(priority, id)| (id, priority as i32))
+            .collect();
     }
 }
 
@@ -743,21 +765,7 @@ impl Behavior<'_> {
                     [anchor[0], anchor[1]],
                     map_provider.zoom_range(),
                 );
-                let requested_zoom = visible.tiles.first().map(|id| id.zoom);
-                if requested_zoom != pane.map_zoom {
-                    pane.map_previous_zoom = pane.map_zoom;
-                    pane.map_previous_tiles = std::mem::take(&mut pane.map_tiles)
-                        .into_iter()
-                        .map(|(id, _)| id)
-                        .collect();
-                    pane.map_zoom = requested_zoom;
-                }
-                pane.map_tiles = visible
-                    .tiles
-                    .into_iter()
-                    .enumerate()
-                    .map(|(priority, id)| (id, priority as i32))
-                    .collect();
+                pane.update_visible_map_tiles(visible.tiles);
                 for (id, priority) in pane.map_tiles.iter().copied() {
                     manager.request(TileRequest {
                         scope: pane.map_scope,
@@ -2320,6 +2328,30 @@ mod tests {
             first
         );
         assert!(pane.update_map_selection(Some((1, MapProviderId::BingSatellite, [0; 3]))) > first);
+    }
+
+    #[test]
+    fn same_zoom_pan_keeps_one_nonoverlapping_previous_viewport() {
+        let tile = |x| crate::map::provider::TileId { zoom: 8, x, y: 4 };
+        let mut pane = Scene3dPane::default();
+
+        pane.update_visible_map_tiles(vec![tile(1), tile(2), tile(3)]);
+        assert!(pane.map_previous_tiles.is_empty());
+
+        pane.update_visible_map_tiles(vec![tile(2), tile(3), tile(4)]);
+        assert_eq!(pane.map_previous_tiles, vec![tile(1)]);
+        assert_eq!(
+            pane.map_tiles.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![tile(2), tile(3), tile(4)]
+        );
+
+        pane.update_visible_map_tiles(vec![tile(3), tile(4), tile(5)]);
+        assert_eq!(
+            pane.map_previous_tiles,
+            vec![tile(2)],
+            "the next movement replaces the older fallback ring"
+        );
+        assert!(pane.map_previous_tiles.len() <= 256);
     }
 
     #[test]
