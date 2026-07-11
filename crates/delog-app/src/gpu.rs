@@ -135,6 +135,21 @@ impl GpuBridge {
         }
     }
 
+    /// Drop map state belonging to 3D panes that no longer exist in the
+    /// workspace. Call before rendering any scene panes for the frame.
+    pub fn retain_map_scopes(&self, frame: &eframe::Frame, live: &[MapScopeId]) {
+        if !self.available {
+            return;
+        }
+        let Some(render_state) = frame.wgpu_render_state() else {
+            return;
+        };
+        let mut renderer = render_state.renderer.write();
+        if let Some(res) = renderer.callback_resources.get_mut::<SceneResources>() {
+            res.retain_map_scopes(live);
+        }
+    }
+
     /// Call once per frame.
     pub fn drain_gpu_errors(&self, frame: &eframe::Frame) -> Vec<String> {
         if !self.available {
@@ -793,6 +808,24 @@ impl SceneResources {
         self.model_cache
             .entry(kind.clone())
             .or_insert_with(|| MeshGpu::upload(&self.ctx, &models::mesh_for(kind)))
+    }
+
+    fn retain_map_scopes(&mut self, live: &[MapScopeId]) {
+        let live: std::collections::HashSet<_> = live.iter().copied().collect();
+        self.map_tile_cache.retain(|scope, _| live.contains(scope));
+        self.map_tile_selections
+            .retain(|scope, _| live.contains(scope));
+
+        // Recompute the complete residency union immediately. This both drops
+        // signatures for dead scopes and lets the surviving panes consume any
+        // quota released by them before the first scene render of this frame.
+        let active = self
+            .map_tile_selections
+            .keys()
+            .copied()
+            .min_by_key(|scope| scope.0)
+            .unwrap_or(MapScopeId(0));
+        self.admit_map_tiles(active, &std::collections::HashSet::new());
     }
 
     /// Prepare GPU buffers + uniforms for the frame's vehicles (before the
@@ -1919,6 +1952,76 @@ mod tests {
         let draw_b_again = resources.prepare_map_tiles(identity, selection(42), &[]);
         assert_eq!(draw_b_again.current, vec![b_key]);
         assert_eq!(resources.map_tiles.resident_tile_count(), 128);
+    }
+
+    #[test]
+    fn retaining_live_map_scopes_reclaims_closed_scope_quota_and_cache() {
+        let Some(ctx) = RenderContext::headless() else {
+            return;
+        };
+        let mut resources = SceneResources::new(ctx);
+        let selection = |scope| MapTileSelection {
+            scope: MapScopeId(scope),
+            epoch: 1,
+            provider: crate::map::provider::MapProviderId::BingSatellite,
+            generation: 1,
+            current_zoom: Some(8),
+            previous_zoom: None,
+            enabled: true,
+        };
+        let tile = |scope, x| ReadyTile {
+            scope: MapScopeId(scope),
+            epoch: 1,
+            provider: crate::map::provider::MapProviderId::BingSatellite,
+            id: crate::map::provider::TileId { zoom: 8, x, y: 0 },
+            generation: 1,
+            priority: x as i32,
+            rgba: [scope as u8, x as u8, 0, 255].repeat(256 * 256),
+            corners: [[x as f32, 0.0, 0.0]; 4],
+        };
+        let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+        let a: Vec<_> = (0..128).map(|x| tile(51, x)).collect();
+        let b: Vec<_> = (0..128).map(|x| tile(52, x)).collect();
+        resources.prepare_map_tiles(identity, selection(51), &a);
+        resources.prepare_map_tiles(identity, selection(52), &b);
+
+        resources.retain_map_scopes(&[MapScopeId(52)]);
+
+        assert!(!resources.map_tile_cache.contains_key(&MapScopeId(51)));
+        assert!(!resources.map_tile_selections.contains_key(&MapScopeId(51)));
+        assert_eq!(resources.map_tiles.resident_tile_count(), 128);
+        let draw_b = resources.prepare_map_tiles(identity, selection(52), &[]);
+        assert_eq!(draw_b.current.len(), 128, "B gets the closed pane's quota");
+
+        resources.retain_map_scopes(&[]);
+        assert!(resources.map_tile_cache.is_empty());
+        assert!(resources.map_tile_selections.is_empty());
+        assert!(resources.map_tile_resident_signatures.is_empty());
+        assert_eq!(resources.map_tiles.resident_tile_count(), 0);
+
+        for scope in 60..64 {
+            let tiles: Vec<_> = (0..128).map(|x| tile(scope, x)).collect();
+            resources.prepare_map_tiles(identity, selection(scope), &tiles);
+            resources.retain_map_scopes(&[]);
+            assert!(resources.map_tile_cache.is_empty());
+            assert!(resources.map_tile_selections.is_empty());
+            assert!(resources.map_tile_resident_signatures.is_empty());
+            assert_eq!(resources.map_tiles.resident_tile_count(), 0);
+        }
+
+        let disabled_scope = MapScopeId(70);
+        resources.prepare_map_tiles(
+            identity,
+            MapTileSelection {
+                enabled: false,
+                ..selection(disabled_scope.0)
+            },
+            &[],
+        );
+        resources.retain_map_scopes(&[disabled_scope]);
+        assert!(resources.map_tile_cache.is_empty());
+        assert!(resources.map_tile_selections.is_empty());
+        assert_eq!(resources.map_tiles.resident_tile_count(), 0);
     }
 
     #[test]
