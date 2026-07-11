@@ -3,7 +3,10 @@ use std::{
     collections::{BinaryHeap, HashMap},
     io::{self, Read},
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering as AtomicOrdering},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -38,13 +41,45 @@ pub struct ReadyTile {
     pub corners: [[f32; 3]; 4],
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CacheActionKind {
+    SetLimit,
+    Clear,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum CacheActionStatus {
+    #[default]
+    Idle,
+    Pending {
+        id: u64,
+        kind: CacheActionKind,
+    },
+    Complete {
+        id: u64,
+        kind: CacheActionKind,
+        generation: Option<u64>,
+    },
+    Error {
+        id: u64,
+        kind: CacheActionKind,
+        message: String,
+    },
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TileManagerStatus {
     pub queued: usize,
     pub in_flight: usize,
     pub ready: usize,
     pub failed: usize,
     pub cache_bytes: u64,
+    pub cache_action: CacheActionStatus,
+}
+
+struct ReadyEnvelope {
+    epoch: u64,
+    tile: ReadyTile,
 }
 
 #[derive(Clone)]
@@ -97,15 +132,17 @@ impl Ord for Pending {
 
 enum Command {
     Request(TileRequest, Option<String>),
-    SetLimit(u64, Sender<io::Result<()>>),
-    Clear(Sender<io::Result<u64>>),
-    Shutdown,
+    SetLimit { id: u64, bytes: u64 },
+    Clear { id: u64, epoch: u64 },
 }
 
 pub struct TileManager {
     command_tx: Sender<Command>,
-    ready_rx: Receiver<ReadyTile>,
+    ready_rx: Receiver<ReadyEnvelope>,
     status: Arc<Mutex<TileManagerStatus>>,
+    epoch: Arc<AtomicU64>,
+    next_action: u64,
+    shutdown_tx: Sender<()>,
     controller: Option<thread::JoinHandle<()>>,
 }
 
@@ -116,7 +153,8 @@ impl TileManager {
         repaint: impl Fn() + Send + Sync + 'static,
     ) -> io::Result<Self> {
         let cache = TileDiskCache::open(cache_dir, limit)?;
-        let (command_tx, command_rx) = bounded::<Command>(QUEUE_CAPACITY);
+        let (command_tx, command_rx) = unbounded::<Command>();
+        let (shutdown_tx, shutdown_rx) = bounded::<()>(1);
         let (ready_tx, ready_rx) = unbounded();
         let status = Arc::new(Mutex::new(TileManagerStatus {
             cache_bytes: cache.usage_bytes(),
@@ -129,9 +167,11 @@ impl TileManager {
             .build()
             .map_err(io::Error::other)?;
         let controller_status = Arc::clone(&status);
+        let epoch = Arc::new(AtomicU64::new(0));
         let controller = thread::spawn(move || {
             controller_loop(
                 command_rx,
+                shutdown_rx,
                 ready_tx,
                 controller_status,
                 cache,
@@ -143,6 +183,9 @@ impl TileManager {
             command_tx,
             ready_rx,
             status,
+            epoch,
+            next_action: 0,
+            shutdown_tx,
             controller: Some(controller),
         })
     }
@@ -159,33 +202,79 @@ impl TileManager {
     }
 
     pub fn poll(&mut self) -> Vec<ReadyTile> {
-        self.ready_rx.try_iter().collect()
+        let epoch = self.epoch.load(AtomicOrdering::Acquire);
+        self.ready_rx
+            .try_iter()
+            .filter(|ready| ready.epoch == epoch)
+            .map(|ready| ready.tile)
+            .collect()
     }
 
     pub fn status(&self) -> TileManagerStatus {
-        *self.status.lock().unwrap()
+        self.status.lock().unwrap().clone()
     }
 
-    pub fn set_limit(&mut self, bytes: u64) -> io::Result<()> {
-        let (tx, rx) = bounded(1);
-        self.command_tx
-            .send(Command::SetLimit(bytes, tx))
-            .map_err(io::Error::other)?;
-        rx.recv().map_err(io::Error::other)?
+    /// Queues a cache-limit update and returns its operation ID immediately.
+    /// Completion or failure is published through [`Self::status`].
+    pub fn set_limit(&mut self, bytes: u64) -> io::Result<u64> {
+        let id = self.next_action.wrapping_add(1);
+        self.next_action = id;
+        self.status.lock().unwrap().cache_action = CacheActionStatus::Pending {
+            id,
+            kind: CacheActionKind::SetLimit,
+        };
+        if let Err(error) = self.command_tx.send(Command::SetLimit { id, bytes }) {
+            finish_cache_action(
+                &self.status,
+                id,
+                CacheActionKind::SetLimit,
+                Err(io::Error::other(error)),
+                None,
+            );
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "tile controller stopped",
+            ));
+        }
+        Ok(id)
     }
 
+    /// Invalidates ready results and queues a disk clear, returning its
+    /// operation ID immediately. Completion, generation, or failure is
+    /// published through [`Self::status`].
     pub fn clear_cache(&mut self) -> io::Result<u64> {
-        let (tx, rx) = bounded(1);
-        self.command_tx
-            .send(Command::Clear(tx))
-            .map_err(io::Error::other)?;
-        rx.recv().map_err(io::Error::other)?
+        let id = self.next_action.wrapping_add(1);
+        self.next_action = id;
+        let epoch = self
+            .epoch
+            .fetch_add(1, AtomicOrdering::AcqRel)
+            .wrapping_add(1);
+        self.status.lock().unwrap().cache_action = CacheActionStatus::Pending {
+            id,
+            kind: CacheActionKind::Clear,
+        };
+        if let Err(error) = self.command_tx.send(Command::Clear { id, epoch }) {
+            finish_cache_action(
+                &self.status,
+                id,
+                CacheActionKind::Clear,
+                Err(io::Error::other(error)),
+                None,
+            );
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "tile controller stopped",
+            ));
+        }
+        Ok(id)
     }
 }
 
 impl Drop for TileManager {
     fn drop(&mut self) {
-        let _ = self.command_tx.send(Command::Shutdown);
+        // Shutdown bypasses queued commands. Joining is bounded by the 10-second
+        // HTTP timeout of the at-most-four requests already running.
+        let _ = self.shutdown_tx.try_send(());
         if let Some(controller) = self.controller.take() {
             let _ = controller.join();
         }
@@ -203,7 +292,8 @@ fn network_load(
 
 fn controller_loop(
     command_rx: Receiver<Command>,
-    ready_tx: Sender<ReadyTile>,
+    shutdown_rx: Receiver<()>,
+    ready_tx: Sender<ReadyEnvelope>,
     status_snapshot: Arc<Mutex<TileManagerStatus>>,
     mut cache: TileDiskCache,
     repaint: Arc<dyn Fn() + Send + Sync>,
@@ -243,33 +333,30 @@ fn controller_loop(
     let mut sequence = 0_u64;
     let mut shutdown = false;
     while !shutdown {
-        select! {
+        if pending.len() < QUEUE_CAPACITY {
+            select! {
+            recv(shutdown_rx) -> _ => shutdown = true,
             recv(command_rx) -> command => match command {
-                Ok(command) => shutdown = handle_command(command, &mut cache, &mut states, &mut pending, &mut latest_generation, &mut epoch, &mut sequence),
+                Ok(command) => handle_command(command, &mut cache, &mut states, &mut pending, &mut latest_generation, &mut epoch, &mut sequence, &status_snapshot),
                 Err(_) => shutdown = true,
             },
             recv(completion_rx) -> completion => if let Ok(completion) = completion {
-                let worker = completion.worker;
-                idle.push(std::cmp::Reverse(worker));
-                let work = completion.work;
-                let key = (work.request.provider, work.request.id, work.request.generation);
-                let current = states.get(&key).is_some_and(|(_, token)| *token == work.sequence);
-                if current && work.epoch == epoch && work.request.generation == latest_generation {
-                    match completion.result {
-                        Ok((bytes, rgba)) => {
-                            if cache.write(work.request.provider, work.request.id, &bytes).is_ok() {
-                                states.insert(key, (RequestState::Ready, work.sequence));
-                                let _ = ready_tx.send(ReadyTile { provider: work.request.provider, id: work.request.id, generation: work.request.generation, rgba, corners: work.request.corners });
-                            } else { mark_failed(&mut states, key, &work); }
-                        }
-                        Err(_) => mark_failed(&mut states, key, &work),
-                    }
-                    repaint();
+                process_completion(completion, &mut idle, &mut states, &mut cache, &ready_tx, &repaint, epoch, latest_generation);
+            }
+            }
+        } else {
+            select! {
+                recv(shutdown_rx) -> _ => shutdown = true,
+                recv(completion_rx) -> completion => if let Ok(completion) = completion {
+                    process_completion(completion, &mut idle, &mut states, &mut cache, &ready_tx, &repaint, epoch, latest_generation);
                 }
             }
         }
-        while let Ok(command) = command_rx.try_recv() {
-            if handle_command(
+        while pending.len() < QUEUE_CAPACITY {
+            let Ok(command) = command_rx.try_recv() else {
+                break;
+            };
+            handle_command(
                 command,
                 &mut cache,
                 &mut states,
@@ -277,10 +364,8 @@ fn controller_loop(
                 &mut latest_generation,
                 &mut epoch,
                 &mut sequence,
-            ) {
-                shutdown = true;
-                break;
-            }
+                &status_snapshot,
+            );
         }
         while !shutdown {
             if pending.is_empty() || idle.is_empty() {
@@ -306,12 +391,15 @@ fn controller_loop(
                 Ok(Some(bytes)) => match decode_tile(&bytes) {
                     Ok(rgba) => {
                         states.insert(key, (RequestState::Ready, work.sequence));
-                        let _ = ready_tx.send(ReadyTile {
-                            provider: work.request.provider,
-                            id: work.request.id,
-                            generation: work.request.generation,
-                            rgba,
-                            corners: work.request.corners,
+                        let _ = ready_tx.send(ReadyEnvelope {
+                            epoch: work.epoch,
+                            tile: ReadyTile {
+                                provider: work.request.provider,
+                                id: work.request.id,
+                                generation: work.request.generation,
+                                rgba,
+                                corners: work.request.corners,
+                            },
                         });
                         idle.push(std::cmp::Reverse(worker));
                         repaint();
@@ -343,7 +431,8 @@ fn handle_command(
     latest_generation: &mut u64,
     epoch: &mut u64,
     sequence: &mut u64,
-) -> bool {
+    status_snapshot: &Mutex<TileManagerStatus>,
+) {
     match command {
         Command::Request(request, Some(url)) => {
             if request.generation > *latest_generation {
@@ -351,15 +440,15 @@ fn handle_command(
                 states.retain(|key, _| key.2 == request.generation);
             }
             if request.generation != *latest_generation {
-                return false;
+                return;
             }
             let key = (request.provider, request.id, request.generation);
             let attempts = match states.get(&key).map(|x| &x.0) {
                 Some(RequestState::Queued | RequestState::InFlight | RequestState::Ready) => {
-                    return false;
+                    return;
                 }
                 Some(RequestState::Failed { retry_at, .. }) if Instant::now() < *retry_at => {
-                    return false;
+                    return;
                 }
                 Some(RequestState::Failed { attempts, .. }) => *attempts,
                 None => 0,
@@ -376,22 +465,112 @@ fn handle_command(
             pending.push(Pending(work));
         }
         Command::Request(_, None) => {}
-        Command::SetLimit(bytes, reply) => {
-            let _ = reply.send(cache.set_limit(bytes));
+        Command::SetLimit { id, bytes } => {
+            let result = cache.set_limit(bytes);
+            finish_cache_action(status_snapshot, id, CacheActionKind::SetLimit, result, None);
         }
-        Command::Clear(reply) => {
-            *epoch = epoch.wrapping_add(1);
+        Command::Clear {
+            id,
+            epoch: next_epoch,
+        } => {
+            *epoch = next_epoch;
             states.clear();
             pending.clear();
             let result = cache.clear().map(|generation| {
                 *latest_generation = latest_generation.wrapping_add(1).max(generation.0);
                 *latest_generation
             });
-            let _ = reply.send(result);
+            match result {
+                Ok(generation) => finish_cache_action(
+                    status_snapshot,
+                    id,
+                    CacheActionKind::Clear,
+                    Ok(()),
+                    Some(generation),
+                ),
+                Err(error) => finish_cache_action(
+                    status_snapshot,
+                    id,
+                    CacheActionKind::Clear,
+                    Err(error),
+                    None,
+                ),
+            }
         }
-        Command::Shutdown => return true,
     }
-    false
+}
+
+fn finish_cache_action(
+    snapshot: &Mutex<TileManagerStatus>,
+    id: u64,
+    kind: CacheActionKind,
+    result: io::Result<()>,
+    generation: Option<u64>,
+) {
+    let mut status = snapshot.lock().unwrap();
+    if matches!(status.cache_action, CacheActionStatus::Pending { id: pending, .. } if pending == id)
+    {
+        status.cache_action = match result {
+            Ok(()) => CacheActionStatus::Complete {
+                id,
+                kind,
+                generation,
+            },
+            Err(error) => CacheActionStatus::Error {
+                id,
+                kind,
+                message: error.to_string(),
+            },
+        };
+    }
+}
+
+fn process_completion(
+    completion: Completion,
+    idle: &mut BinaryHeap<std::cmp::Reverse<usize>>,
+    states: &mut HashMap<Key, (RequestState, u64)>,
+    cache: &mut TileDiskCache,
+    ready_tx: &Sender<ReadyEnvelope>,
+    repaint: &Arc<dyn Fn() + Send + Sync>,
+    epoch: u64,
+    latest_generation: u64,
+) {
+    idle.push(std::cmp::Reverse(completion.worker));
+    let work = completion.work;
+    let key = (
+        work.request.provider,
+        work.request.id,
+        work.request.generation,
+    );
+    let current = states
+        .get(&key)
+        .is_some_and(|(_, token)| *token == work.sequence);
+    if current && work.epoch == epoch && work.request.generation == latest_generation {
+        match completion.result {
+            Ok((bytes, rgba)) => {
+                if cache
+                    .write(work.request.provider, work.request.id, &bytes)
+                    .is_ok()
+                {
+                    states.insert(key, (RequestState::Ready, work.sequence));
+                    let _ = ready_tx.send(ReadyEnvelope {
+                        epoch: work.epoch,
+                        tile: ReadyTile {
+                            provider: work.request.provider,
+                            id: work.request.id,
+                            generation: work.request.generation,
+                            rgba,
+                            corners: work.request.corners,
+                        },
+                    });
+                } else {
+                    mark_failed(states, key, &work);
+                }
+            }
+            Err(_) => mark_failed(states, key, &work),
+        }
+        repaint();
+    }
 }
 
 fn mark_failed(states: &mut HashMap<Key, (RequestState, u64)>, key: Key, work: &Work) {
@@ -413,19 +592,24 @@ fn publish_status(
     states: &HashMap<Key, (RequestState, u64)>,
     cache_bytes: u64,
 ) {
-    let mut status = TileManagerStatus {
-        cache_bytes,
-        ..Default::default()
-    };
+    let mut queued = 0;
+    let mut in_flight = 0;
+    let mut ready = 0;
+    let mut failed = 0;
     for (state, _) in states.values() {
         match state {
-            RequestState::Queued => status.queued += 1,
-            RequestState::InFlight => status.in_flight += 1,
-            RequestState::Ready => status.ready += 1,
-            RequestState::Failed { .. } => status.failed += 1,
+            RequestState::Queued => queued += 1,
+            RequestState::InFlight => in_flight += 1,
+            RequestState::Ready => ready += 1,
+            RequestState::Failed { .. } => failed += 1,
         }
     }
-    *snapshot.lock().unwrap() = status;
+    let mut status = snapshot.lock().unwrap();
+    status.queued = queued;
+    status.in_flight = in_flight;
+    status.ready = ready;
+    status.failed = failed;
+    status.cache_bytes = cache_bytes;
 }
 
 fn download(client: &reqwest::blocking::Client, url: &str) -> Result<Vec<u8>, String> {
@@ -549,6 +733,29 @@ mod tests {
         address
     }
 
+    fn gated_server(body: Vec<u8>) -> (String, Receiver<String>, Sender<()>) {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let address = format!("http://{}", server.server_addr());
+        let (observed_tx, observed_rx) = unbounded();
+        let (release_tx, release_rx) = unbounded();
+        thread::spawn(move || {
+            for req in server.incoming_requests() {
+                let body = body.clone();
+                let observed_tx = observed_tx.clone();
+                let release_rx = release_rx.clone();
+                thread::spawn(move || {
+                    let _ = observed_tx.send(req.url().to_owned());
+                    let _ = release_rx.recv();
+                    let response = tiny_http::Response::from_data(body).with_header(
+                        tiny_http::Header::from_bytes("Content-Type", "image/jpeg").unwrap(),
+                    );
+                    let _ = req.respond(response);
+                });
+            }
+        });
+        (address, observed_rx, release_tx)
+    }
+
     fn await_poll(manager: &mut TileManager) -> Vec<ReadyTile> {
         for _ in 0..100 {
             let ready = manager.poll();
@@ -558,6 +765,17 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         panic!("tile did not complete")
+    }
+
+    fn await_cache_action(manager: &TileManager) -> CacheActionStatus {
+        for _ in 0..200 {
+            let action = manager.status().cache_action;
+            if !matches!(action, CacheActionStatus::Pending { .. }) {
+                return action;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("cache action did not complete")
     }
 
     #[test]
@@ -630,6 +848,13 @@ mod tests {
         let mut manager = TileManager::new(dir.path().to_owned(), u64::MAX, || {}).unwrap();
         manager.request_with_url(request(1), Some(url));
         manager.clear_cache().unwrap();
+        assert!(matches!(
+            await_cache_action(&manager),
+            CacheActionStatus::Complete {
+                kind: CacheActionKind::Clear,
+                ..
+            }
+        ));
         thread::sleep(Duration::from_millis(80));
         assert!(manager.poll().is_empty());
         drop(manager);
@@ -639,6 +864,51 @@ mod tests {
                 .usage_bytes(),
             0
         );
+    }
+
+    #[test]
+    fn ready_before_clear_is_not_observable_after_clear_submission() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = server(jpeg(), "image/jpeg", Arc::new(AtomicUsize::new(0)));
+        let mut manager = TileManager::new(dir.path().to_owned(), u64::MAX, || {}).unwrap();
+        manager.request_with_url(request(1), Some(url));
+        for _ in 0..200 {
+            if manager.status().ready == 1 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(manager.status().ready, 1);
+        manager.clear_cache().unwrap();
+        assert!(manager.poll().is_empty());
+    }
+
+    #[test]
+    fn request_ingress_accepts_more_than_the_pending_work_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let url = server(jpeg(), "image/jpeg", Arc::clone(&hits));
+        let mut manager = TileManager::new(dir.path().to_owned(), u64::MAX, || {}).unwrap();
+        let count = QUEUE_CAPACITY + 64;
+        for x in 0..count {
+            let mut req = request(1);
+            req.id = TileId {
+                zoom: 10,
+                x: x as u32,
+                y: 0,
+            };
+            manager.request_with_url(req, Some(url.clone()));
+        }
+        let mut received = 0;
+        for _ in 0..1000 {
+            received += manager.poll().len();
+            if received == count {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(received, count);
+        assert_eq!(hits.load(Ordering::SeqCst), count);
     }
 
     #[test]
@@ -712,6 +982,58 @@ mod tests {
         assert_eq!(queue.pop().unwrap().0.sequence, 2);
         assert_eq!(queue.pop().unwrap().0.sequence, 3);
         assert_eq!(queue.pop().unwrap().0.sequence, 1);
+    }
+
+    #[test]
+    fn controller_dispatches_higher_priority_when_a_worker_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, observed, release) = gated_server(jpeg());
+        let mut manager = TileManager::new(dir.path().to_owned(), u64::MAX, || {}).unwrap();
+        for x in 0..WORKERS {
+            let mut req = request(1);
+            req.id = TileId {
+                zoom: 10,
+                x: x as u32,
+                y: 0,
+            };
+            manager.request_with_url(req, Some(format!("{url}/blocking-{x}")));
+        }
+        for _ in 0..WORKERS {
+            observed.recv_timeout(Duration::from_secs(2)).unwrap();
+        }
+
+        let mut low = request(1);
+        low.id = TileId {
+            zoom: 10,
+            x: 10,
+            y: 0,
+        };
+        low.priority = 100;
+        manager.request_with_url(low, Some(format!("{url}/low")));
+        let mut high = request(1);
+        high.id = TileId {
+            zoom: 10,
+            x: 11,
+            y: 0,
+        };
+        high.priority = 1;
+        manager.request_with_url(high, Some(format!("{url}/high")));
+        for _ in 0..100 {
+            if manager.status().queued == 2 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(manager.status().queued, 2);
+
+        release.send(()).unwrap();
+        assert_eq!(
+            observed.recv_timeout(Duration::from_secs(2)).unwrap(),
+            "/high"
+        );
+        for _ in 0..WORKERS + 2 {
+            let _ = release.send(());
+        }
     }
 
     #[test]
