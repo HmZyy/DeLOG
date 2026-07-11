@@ -64,7 +64,10 @@ serialport = "4.9.0"
 image = { version = "0.25.10", default-features = false, features = [
   "png",
   "ico",
+  "jpeg",
 ] }
+reqwest = { version = "0.12.28", default-features = false, features = ["blocking", "rustls-tls"] }
+directories = "6.0.0"
 # Embeds the .ico into the Windows .exe so Explorer/taskbar/shortcuts show it.
 winresource = "0.1.31"
 
@@ -101,3 +104,4 @@ egui_code_editor = "0.3.3"
 criterion = "0.8.2"
 proptest = "1.11.0"
 png = "0.18.1"
+tiny_http = "0.12.0"
