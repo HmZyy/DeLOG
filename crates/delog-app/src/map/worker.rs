@@ -38,6 +38,7 @@ pub struct TileRequest {
 #[derive(Clone, Debug)]
 pub struct ReadyTile {
     pub scope: MapScopeId,
+    pub epoch: u64,
     pub provider: MapProviderId,
     pub id: TileId,
     pub generation: u64,
@@ -73,6 +74,7 @@ pub enum CacheActionStatus {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TileManagerStatus {
+    pub epoch: u64,
     pub queued: usize,
     pub in_flight: usize,
     pub ready: usize,
@@ -363,6 +365,7 @@ impl TileManager {
             id,
             kind: CacheActionKind::Clear,
         };
+        self.status.lock().unwrap().epoch = epoch;
         self.controls
             .lock()
             .unwrap()
@@ -503,6 +506,7 @@ fn controller_loop(
                                 epoch: work.epoch,
                                 tile: ReadyTile {
                                     scope: work.request.scope,
+                                    epoch: work.epoch,
                                     provider: work.request.provider,
                                     id: work.request.id,
                                     generation: work.request.generation,
@@ -714,6 +718,7 @@ fn process_completion(
                             epoch: work.epoch,
                             tile: ReadyTile {
                                 scope: work.request.scope,
+                                epoch: work.epoch,
                                 provider: work.request.provider,
                                 id: work.request.id,
                                 generation: work.request.generation,
@@ -1211,7 +1216,21 @@ mod tests {
         }
         assert_eq!(manager.status().ready, 1);
         manager.clear_cache().unwrap();
+        assert_eq!(manager.status().epoch, 1);
         assert!(manager.poll(MapScopeId(1)).is_empty());
+    }
+
+    #[test]
+    fn download_submitted_after_clear_uses_the_new_epoch() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = server(jpeg(), "image/jpeg", Arc::new(AtomicUsize::new(0)));
+        let mut manager = TileManager::new(dir.path().to_owned(), u64::MAX, || {}).unwrap();
+        manager.clear_cache().unwrap();
+        manager.request_with_url(request(1), Some(url));
+        let ready = await_poll(&mut manager);
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].epoch, manager.status().epoch);
+        assert_eq!(ready[0].epoch, 1);
     }
 
     #[test]
