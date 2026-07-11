@@ -22,6 +22,7 @@ mod legend;
 mod live;
 mod logging;
 mod markers;
+mod message_popup;
 mod models;
 #[cfg(feature = "scripting")]
 mod parsers;
