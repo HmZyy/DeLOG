@@ -42,6 +42,8 @@ pub struct MapTilePipeline {
     uniform: wgpu::Buffer,
     tiles: HashMap<u64, Tile>,
     free_layers: Vec<u32>,
+    upload_count: u64,
+    allocation_count: u64,
 }
 
 impl MapTilePipeline {
@@ -178,7 +180,19 @@ impl MapTilePipeline {
             uniform,
             tiles: HashMap::new(),
             free_layers: (0..LAYER_COUNT).rev().collect(),
+            upload_count: 0,
+            allocation_count: 0,
         }
+    }
+
+    pub fn contains(&self, key: u64) -> bool {
+        self.tiles.contains_key(&key)
+    }
+    pub fn upload_count(&self) -> u64 {
+        self.upload_count
+    }
+    pub fn allocation_count(&self) -> u64 {
+        self.allocation_count
     }
 
     pub fn upload(&mut self, upload: MapTileUpload<'_>) -> Result<(), MapTileError> {
@@ -191,6 +205,7 @@ impl MapTilePipeline {
             .map(|tile| tile.layer)
             .or_else(|| self.free_layers.pop())
             .ok_or(MapTileError::Full)?;
+        self.upload_count += 1;
         self.ctx.queue().write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.texture,
@@ -253,6 +268,7 @@ impl MapTilePipeline {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        self.allocation_count += 1;
         self.ctx
             .queue()
             .write_buffer(&buffer, 0, bytemuck::cast_slice(&vertices));
