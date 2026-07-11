@@ -643,8 +643,23 @@ impl std::ops::BitOrAssign for SettingsChange {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct TileCacheUiState {
+    pub available: bool,
     pub usage_bytes: u64,
     pub clearing: bool,
+}
+
+impl TileCacheUiState {
+    fn usage_label(self) -> String {
+        if self.available {
+            format_bytes(self.usage_bytes)
+        } else {
+            "Cache unavailable".to_owned()
+        }
+    }
+
+    fn clear_enabled(self) -> bool {
+        self.available && !self.clearing
+    }
 }
 
 fn general_tab(ui: &mut egui::Ui, settings: &mut AppSettings) -> SettingsChange {
@@ -902,9 +917,12 @@ fn scene3d_tab(
 
             ui.label("Cache usage");
             ui.horizontal(|ui| {
-                ui.label(format_bytes(tile_cache.usage_bytes));
+                ui.label(tile_cache.usage_label());
                 if ui
-                    .add_enabled(!tile_cache.clearing, egui::Button::new("Clear tile cache"))
+                    .add_enabled(
+                        tile_cache.clear_enabled(),
+                        egui::Button::new("Clear tile cache"),
+                    )
                     .clicked()
                 {
                     clear_tile_cache = true;
@@ -1099,6 +1117,21 @@ mod tests {
         ] {
             assert!(source.contains(expected), "missing {expected}");
         }
+    }
+
+    #[test]
+    fn unavailable_tile_cache_explains_status_and_disables_clear() {
+        let state = TileCacheUiState::default();
+        assert_eq!(state.usage_label(), "Cache unavailable");
+        assert!(!state.clear_enabled());
+
+        let available = TileCacheUiState {
+            available: true,
+            usage_bytes: 1024 * 1024,
+            clearing: false,
+        };
+        assert_eq!(available.usage_label(), "1 MiB");
+        assert!(available.clear_enabled());
     }
 
     #[test]
