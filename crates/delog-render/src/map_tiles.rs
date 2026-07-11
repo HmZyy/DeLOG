@@ -303,11 +303,91 @@ mod tests {
     use super::{MapTilePipeline, MapTileUpload};
     use crate::{RenderContext, Scene3dTarget};
 
+    struct NearTrianglePipeline(wgpu::RenderPipeline);
+
+    impl NearTrianglePipeline {
+        fn new(ctx: &RenderContext) -> Self {
+            let shader = ctx
+                .device()
+                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("map-tile-depth-test-triangle"),
+                    source: wgpu::ShaderSource::Wgsl(
+                        r#"
+@vertex
+fn vs(@builtin(vertex_index) vertex: u32) -> @builtin(position) vec4<f32> {
+    var positions = array<vec2<f32>, 3>(
+        vec2<f32>(-0.4, -0.4),
+        vec2<f32>(0.4, -0.4),
+        vec2<f32>(0.0, 0.4),
+    );
+    return vec4<f32>(positions[vertex], 0.2, 1.0);
+}
+
+@fragment
+fn fs() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.0, 1.0, 0.0, 1.0);
+}
+"#
+                        .into(),
+                    ),
+                });
+            let layout = ctx
+                .device()
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("map-tile-depth-test-triangle-layout"),
+                    bind_group_layouts: &[],
+                    immediate_size: 0,
+                });
+            Self(
+                ctx.device()
+                    .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                        label: Some("map-tile-depth-test-triangle-pipeline"),
+                        layout: Some(&layout),
+                        vertex: wgpu::VertexState {
+                            module: &shader,
+                            entry_point: Some("vs"),
+                            compilation_options: Default::default(),
+                            buffers: &[],
+                        },
+                        fragment: Some(wgpu::FragmentState {
+                            module: &shader,
+                            entry_point: Some("fs"),
+                            compilation_options: Default::default(),
+                            targets: &[Some(wgpu::ColorTargetState {
+                                format: crate::COLOR_FORMAT,
+                                blend: None,
+                                write_mask: wgpu::ColorWrites::ALL,
+                            })],
+                        }),
+                        primitive: wgpu::PrimitiveState::default(),
+                        depth_stencil: Some(wgpu::DepthStencilState {
+                            format: crate::DEPTH_FORMAT,
+                            depth_write_enabled: Some(true),
+                            depth_compare: Some(wgpu::CompareFunction::Less),
+                            stencil: Default::default(),
+                            bias: Default::default(),
+                        }),
+                        multisample: wgpu::MultisampleState {
+                            count: crate::SAMPLE_COUNT,
+                            ..Default::default()
+                        },
+                        multiview_mask: None,
+                        cache: None,
+                    }),
+            )
+        }
+
+        fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
+            pass.set_pipeline(&self.0);
+            pass.draw(0..3, 0..1);
+        }
+    }
+
     fn solid(rgba: [u8; 4]) -> Vec<u8> {
         rgba.repeat(256 * 256)
     }
 
-    fn render(tiles: &[MapTileUpload<'_>]) -> crate::RgbaImage {
+    fn render(tiles: &[MapTileUpload<'_>], view_proj: glam::Mat4) -> crate::RgbaImage {
         let ctx = RenderContext::headless().expect("headless adapter");
         let target = Scene3dTarget::new(ctx.clone(), 64, 64);
         let mut pipeline = MapTilePipeline::new(
@@ -319,7 +399,7 @@ mod tests {
         for tile in tiles {
             pipeline.upload(*tile).unwrap();
         }
-        pipeline.set_view_proj(glam::Mat4::IDENTITY.to_cols_array_2d());
+        pipeline.set_view_proj(view_proj.to_cols_array_2d());
         let mut encoder = ctx.device().create_command_encoder(&Default::default());
         {
             let mut pass = target.begin_pass(&mut encoder, wgpu::Color::BLACK);
@@ -336,30 +416,39 @@ mod tests {
     fn map_tiles_upload_draw_and_ground_placement() {
         let red = solid([255, 0, 0, 255]);
         let blue = solid([0, 0, 255, 255]);
-        let image = render(&[
-            MapTileUpload {
-                key: 1,
-                rgba: &red,
-                corners: [
-                    [-1.0, -1.0, 0.5],
-                    [0.0, -1.0, 0.5],
-                    [0.0, 1.0, 0.5],
-                    [-1.0, 1.0, 0.5],
-                ],
-            },
-            MapTileUpload {
-                key: 2,
-                rgba: &blue,
-                corners: [
-                    [0.0, -1.0, 0.5],
-                    [1.0, -1.0, 0.5],
-                    [1.0, 1.0, 0.5],
-                    [0.0, 1.0, 0.5],
-                ],
-            },
-        ]);
-        assert!(image.matches(16, 32, [255, 0, 0, 255], 4));
-        assert!(image.matches(48, 32, [0, 0, 255, 255], 4));
+        let view_proj = glam::Mat4::perspective_rh(60f32.to_radians(), 1.0, 0.1, 100.0)
+            * glam::Mat4::look_at_rh(
+                glam::Vec3::new(0.0, 3.0, 3.0),
+                glam::Vec3::ZERO,
+                glam::Vec3::Y,
+            );
+        let image = render(
+            &[
+                MapTileUpload {
+                    key: 1,
+                    rgba: &red,
+                    corners: [
+                        [-2.0, 0.0, 1.0],
+                        [0.0, 0.0, 1.0],
+                        [0.0, 0.0, -1.0],
+                        [-2.0, 0.0, -1.0],
+                    ],
+                },
+                MapTileUpload {
+                    key: 2,
+                    rgba: &blue,
+                    corners: [
+                        [0.0, 0.0, 1.0],
+                        [2.0, 0.0, 1.0],
+                        [2.0, 0.0, -1.0],
+                        [0.0, 0.0, -1.0],
+                    ],
+                },
+            ],
+            view_proj,
+        );
+        assert!(image.matches(24, 36, [255, 0, 0, 255], 4));
+        assert!(image.matches(40, 36, [0, 0, 255, 255], 4));
     }
 
     #[test]
@@ -398,31 +487,58 @@ mod tests {
     }
 
     #[test]
-    fn map_tiles_write_true_depth_and_occlude_farther_tile() {
+    fn map_tile_depth_composes_with_nearer_triangle_independent_of_hash_order() {
         let red = solid([255, 0, 0, 255]);
         let blue = solid([0, 0, 255, 255]);
-        let image = render(&[
-            MapTileUpload {
-                key: 1,
-                rgba: &blue,
-                corners: [
-                    [-1.0, -1.0, 0.2],
-                    [1.0, -1.0, 0.2],
-                    [1.0, 1.0, 0.2],
-                    [-1.0, 1.0, 0.2],
-                ],
-            },
-            MapTileUpload {
-                key: 2,
-                rgba: &red,
-                corners: [
-                    [-1.0, -1.0, 0.8],
-                    [1.0, -1.0, 0.8],
-                    [1.0, 1.0, 0.8],
-                    [-1.0, 1.0, 0.8],
-                ],
-            },
-        ]);
-        assert!(image.matches(32, 32, [0, 0, 255, 255], 4));
+        let full_screen = |depth| {
+            [
+                [-1.0, -1.0, depth],
+                [1.0, -1.0, depth],
+                [1.0, 1.0, depth],
+                [-1.0, 1.0, depth],
+            ]
+        };
+
+        for reverse in [false, true] {
+            let ctx = RenderContext::headless().expect("headless adapter");
+            let target = Scene3dTarget::new(ctx.clone(), 64, 64);
+            let mut tiles = MapTilePipeline::new(
+                &ctx,
+                target.color_format(),
+                target.depth_format(),
+                target.sample_count(),
+            );
+            let uploads = [
+                MapTileUpload {
+                    key: if reverse { 2 } else { 1 },
+                    rgba: &red,
+                    corners: full_screen(0.8),
+                },
+                MapTileUpload {
+                    key: if reverse { 1 } else { 2 },
+                    rgba: &blue,
+                    corners: full_screen(0.6),
+                },
+            ];
+            let insertion_order = if reverse { [1, 0] } else { [0, 1] };
+            for index in insertion_order {
+                tiles.upload(uploads[index]).unwrap();
+            }
+            tiles.set_view_proj(glam::Mat4::IDENTITY.to_cols_array_2d());
+            let triangle = NearTrianglePipeline::new(&ctx);
+            let mut encoder = ctx.device().create_command_encoder(&Default::default());
+            {
+                let mut pass = target.begin_pass(&mut encoder, wgpu::Color::BLACK);
+                triangle.draw(&mut pass);
+                tiles.draw(&mut pass);
+            }
+            ctx.queue().submit([encoder.finish()]);
+            ctx.device()
+                .poll(wgpu::PollType::wait_indefinitely())
+                .unwrap();
+            let image = target.read_rgba();
+            assert!(image.matches(32, 32, [0, 255, 0, 255], 4));
+            assert!(image.matches(16, 32, [0, 0, 255, 255], 4));
+        }
     }
 }
