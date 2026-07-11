@@ -49,6 +49,20 @@ pub struct ReadyTile {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TileFailureClass {
+    NetworkTransient,
+    Cache,
+    Permanent,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TileFailure {
+    pub class: TileFailureClass,
+    pub retryable: bool,
+    pub message: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CacheActionKind {
     SetLimit,
     Clear,
@@ -81,6 +95,7 @@ pub struct TileManagerStatus {
     pub in_flight: usize,
     pub ready: usize,
     pub failed: usize,
+    pub failure: Option<TileFailure>,
     #[cfg(test)]
     completions_processed: u64,
     #[cfg(test)]
@@ -105,7 +120,7 @@ struct Work {
 
 struct Completion {
     work: Work,
-    result: Result<(Vec<u8>, Vec<u8>), String>,
+    result: Result<(Vec<u8>, Vec<u8>), TileFailure>,
     worker: usize,
 }
 
@@ -113,7 +128,11 @@ enum RequestState {
     Queued,
     InFlight,
     Ready,
-    Failed { retry_at: Instant, attempts: u32 },
+    Failed {
+        retry_at: Option<Instant>,
+        attempts: u32,
+        failure: TileFailure,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
@@ -410,9 +429,13 @@ impl Drop for TileManager {
 fn network_load(
     client: &reqwest::blocking::Client,
     work: &Work,
-) -> Result<(Vec<u8>, Vec<u8>), String> {
+) -> Result<(Vec<u8>, Vec<u8>), TileFailure> {
     let bytes = download(client, &work.url)?;
-    let rgba = decode_tile(&bytes)?;
+    let rgba = decode_tile(&bytes).map_err(|message| TileFailure {
+        class: TileFailureClass::Permanent,
+        retryable: false,
+        message,
+    })?;
     Ok((bytes, rgba))
 }
 
@@ -539,7 +562,16 @@ fn controller_loop(
                         let _ = worker_txs[worker].send(work);
                     }
                 },
-                _ => {
+                Err(error) => {
+                    status_snapshot.lock().unwrap().failure = Some(TileFailure {
+                        class: TileFailureClass::Cache,
+                        retryable: false,
+                        message: error.to_string(),
+                    });
+                    states.insert(key, (RequestState::InFlight, work.sequence));
+                    let _ = worker_txs[worker].send(work);
+                }
+                Ok(None) => {
                     states.insert(key, (RequestState::InFlight, work.sequence));
                     let _ = worker_txs[worker].send(work);
                 }
@@ -624,7 +656,11 @@ fn drain_ingress(
         );
         let attempts = match states.get(&key).map(|x| &x.0) {
             Some(RequestState::Queued | RequestState::InFlight | RequestState::Ready) => continue,
-            Some(RequestState::Failed { retry_at, .. }) if Instant::now() < *retry_at => continue,
+            Some(RequestState::Failed {
+                retry_at: Some(retry_at),
+                ..
+            }) if Instant::now() < *retry_at => continue,
+            Some(RequestState::Failed { retry_at: None, .. }) => continue,
             Some(RequestState::Failed { attempts, .. }) => *attempts,
             None => 0,
         };
@@ -732,33 +768,41 @@ fn process_completion(
     if accepted {
         match completion.result {
             Ok((bytes, rgba)) => {
-                if cache
-                    .write(work.request.provider, work.request.id, &bytes)
-                    .is_ok()
-                {
-                    retain_ready(states, ready_order, key, work.sequence);
-                    send_ready(
-                        ready_tx,
-                        ready_evict_rx,
-                        ReadyEnvelope {
-                            epoch: work.epoch,
-                            tile: ReadyTile {
-                                scope: work.request.scope,
-                                epoch: work.epoch,
-                                provider: work.request.provider,
-                                id: work.request.id,
-                                generation: work.request.generation,
-                                priority: work.request.priority,
-                                rgba,
-                                corners: work.request.corners,
-                            },
-                        },
-                    );
+                if let Err(error) = cache.write(work.request.provider, work.request.id, &bytes) {
+                    _status_snapshot.lock().unwrap().failure = Some(TileFailure {
+                        class: TileFailureClass::Cache,
+                        retryable: false,
+                        message: error.to_string(),
+                    });
                 } else {
-                    mark_failed(states, failed_order, key, &work);
+                    let mut status = _status_snapshot.lock().unwrap();
+                    if matches!(
+                        status.failure.as_ref().map(|failure| failure.class),
+                        Some(TileFailureClass::Cache)
+                    ) {
+                        status.failure = None;
+                    }
                 }
+                retain_ready(states, ready_order, key, work.sequence);
+                send_ready(
+                    ready_tx,
+                    ready_evict_rx,
+                    ReadyEnvelope {
+                        epoch: work.epoch,
+                        tile: ReadyTile {
+                            scope: work.request.scope,
+                            epoch: work.epoch,
+                            provider: work.request.provider,
+                            id: work.request.id,
+                            generation: work.request.generation,
+                            priority: work.request.priority,
+                            rgba,
+                            corners: work.request.corners,
+                        },
+                    },
+                );
             }
-            Err(_) => mark_failed(states, failed_order, key, &work),
+            Err(failure) => mark_failed(states, failed_order, key, &work, failure),
         }
         repaint();
     }
@@ -799,14 +843,18 @@ fn mark_failed(
     failed_order: &mut VecDeque<(Key, u64)>,
     key: Key,
     work: &Work,
+    failure: TileFailure,
 ) {
     let attempts = work.attempts.saturating_add(1);
     states.insert(
         key,
         (
             RequestState::Failed {
-                retry_at: Instant::now() + retry_delay(attempts),
+                retry_at: failure
+                    .retryable
+                    .then(|| Instant::now() + retry_delay(attempts)),
                 attempts,
+                failure,
             },
             work.sequence,
         ),
@@ -846,34 +894,87 @@ fn publish_status(
     status.ready = ready;
     status.failed = failed;
     status.cache_bytes = cache_bytes;
+    let state_failure = states
+        .values()
+        .filter_map(|(state, _)| match state {
+            RequestState::Failed { failure, .. } => Some(failure.clone()),
+            _ => None,
+        })
+        .min_by_key(|failure| match failure.class {
+            TileFailureClass::Cache => 0,
+            TileFailureClass::NetworkTransient => 1,
+            TileFailureClass::Permanent => 2,
+        });
+    if !matches!(
+        status.failure.as_ref().map(|f| f.class),
+        Some(TileFailureClass::Cache)
+    ) {
+        status.failure = state_failure;
+    }
 }
 
-fn download(client: &reqwest::blocking::Client, url: &str) -> Result<Vec<u8>, String> {
-    let response = client.get(url).send().map_err(|e| e.to_string())?;
+fn classify_http_failure(status: reqwest::StatusCode) -> TileFailure {
+    let retryable = status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS;
+    TileFailure {
+        class: if retryable {
+            TileFailureClass::NetworkTransient
+        } else {
+            TileFailureClass::Permanent
+        },
+        retryable,
+        message: format!("HTTP {status}"),
+    }
+}
+
+fn is_jpeg_content_type(value: &str) -> bool {
+    value
+        .split(';')
+        .next()
+        .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("image/jpeg"))
+}
+
+fn permanent(message: impl Into<String>) -> TileFailure {
+    TileFailure {
+        class: TileFailureClass::Permanent,
+        retryable: false,
+        message: message.into(),
+    }
+}
+
+fn download(client: &reqwest::blocking::Client, url: &str) -> Result<Vec<u8>, TileFailure> {
+    let response = client.get(url).send().map_err(|e| TileFailure {
+        class: TileFailureClass::NetworkTransient,
+        retryable: true,
+        message: e.to_string(),
+    })?;
     if !response.status().is_success() {
-        return Err(format!("HTTP {}", response.status()));
+        return Err(classify_http_failure(response.status()));
     }
     let content_type = response
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if content_type != "image/jpeg" {
-        return Err(format!("unexpected content type {content_type}"));
+    if !is_jpeg_content_type(content_type) {
+        return Err(permanent(format!("unexpected content type {content_type}")));
     }
     if response
         .content_length()
         .is_some_and(|n| n > MAX_RESPONSE_BYTES)
     {
-        return Err("tile exceeds 2 MiB".into());
+        return Err(permanent("tile exceeds 2 MiB"));
     }
     let mut bytes = Vec::new();
     response
         .take(MAX_RESPONSE_BYTES + 1)
         .read_to_end(&mut bytes)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| TileFailure {
+            class: TileFailureClass::NetworkTransient,
+            retryable: true,
+            message: e.to_string(),
+        })?;
     if bytes.len() as u64 > MAX_RESPONSE_BYTES {
-        return Err("tile exceeds 2 MiB".into());
+        return Err(permanent("tile exceeds 2 MiB"));
     }
     Ok(bytes)
 }
@@ -1036,6 +1137,23 @@ mod tests {
     }
 
     #[test]
+    fn permanent_failures_do_not_become_retryable() {
+        for status in [400, 403, 404] {
+            let failure = classify_http_failure(reqwest::StatusCode::from_u16(status).unwrap());
+            assert!(!failure.retryable);
+            assert_eq!(failure.class, TileFailureClass::Permanent);
+        }
+        assert!(classify_http_failure(reqwest::StatusCode::INTERNAL_SERVER_ERROR).retryable);
+    }
+
+    #[test]
+    fn jpeg_content_type_accepts_parameters() {
+        assert!(is_jpeg_content_type("image/jpeg; charset=binary"));
+        assert!(is_jpeg_content_type("image/jpeg"));
+        assert!(!is_jpeg_content_type("text/html; charset=utf-8"));
+    }
+
+    #[test]
     fn deduplicates_and_uses_disk_before_network() {
         let dir = tempfile::tempdir().unwrap();
         let hits = Arc::new(AtomicUsize::new(0));
@@ -1053,13 +1171,17 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_http_response_becomes_retryable_failure() {
+    fn corrupt_http_response_becomes_permanent_failure() {
         let dir = tempfile::tempdir().unwrap();
         let url = server(b"bad".to_vec(), "image/jpeg", Arc::new(AtomicUsize::new(0)));
         let mut manager = TileManager::new(dir.path().to_owned(), u64::MAX, || {}).unwrap();
         manager.request_with_url(request(1), Some(url));
         assert!(await_poll(&mut manager).is_empty());
         assert_eq!(manager.status().failed, 1);
+        assert_eq!(
+            manager.status().failure.unwrap().class,
+            TileFailureClass::Permanent
+        );
     }
 
     #[test]
@@ -1086,7 +1208,17 @@ mod tests {
                 work.request.id,
                 work.request.generation,
             );
-            mark_failed(&mut states, &mut failed_order, key, &work);
+            mark_failed(
+                &mut states,
+                &mut failed_order,
+                key,
+                &work,
+                TileFailure {
+                    class: TileFailureClass::NetworkTransient,
+                    retryable: true,
+                    message: "test".into(),
+                },
+            );
         }
         assert_eq!(states.len(), FAILURE_CAPACITY);
         assert_eq!(failed_order.len(), FAILURE_CAPACITY);
@@ -1558,7 +1690,7 @@ mod tests {
     }
 
     #[test]
-    fn retry_is_suppressed_until_eligible() {
+    fn permanent_invalid_response_is_not_retried() {
         let dir = tempfile::tempdir().unwrap();
         let hits = Arc::new(AtomicUsize::new(0));
         let url = server(b"bad".to_vec(), "image/jpeg", Arc::clone(&hits));
@@ -1568,15 +1700,10 @@ mod tests {
         manager.request_with_url(request(1), Some(url.clone()));
         thread::sleep(Duration::from_millis(100));
         assert_eq!(hits.load(Ordering::SeqCst), 1);
-        thread::sleep(Duration::from_millis(2000));
+        thread::sleep(Duration::from_millis(2100));
         manager.request_with_url(request(1), Some(url));
-        for _ in 0..100 {
-            if hits.load(Ordering::SeqCst) == 2 {
-                break;
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        thread::sleep(Duration::from_millis(100));
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -1616,11 +1743,13 @@ mod tests {
         assert!(
             download(&client, &one_response(503, "image/jpeg", jpeg()))
                 .unwrap_err()
+                .message
                 .contains("HTTP")
         );
         assert!(
             download(&client, &one_response(200, "text/plain", jpeg()))
                 .unwrap_err()
+                .message
                 .contains("content type")
         );
         assert!(
@@ -1629,6 +1758,7 @@ mod tests {
                 &one_response(200, "image/jpeg", vec![0; MAX_RESPONSE_BYTES as usize + 1])
             )
             .unwrap_err()
+            .message
             .contains("2 MiB")
         );
     }
