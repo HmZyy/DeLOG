@@ -1,5 +1,5 @@
 use std::{
-    cmp::{Ordering, Reverse},
+    cmp::Reverse,
     collections::{BinaryHeap, HashMap, HashSet},
     f64::consts::PI,
     ops::RangeInclusive,
@@ -230,7 +230,6 @@ fn ranked_tiles(
         pb.cmp(pa)
             .then_with(|| distance(a).cmp(&distance(b)))
             .then_with(|| a.y.cmp(&b.y).then_with(|| a.x.cmp(&b.x)))
-            .then(Ordering::Equal)
     });
     ranked
         .into_iter()
@@ -268,12 +267,7 @@ fn nearest_tiles(zoom: u8, min_x: i64, max_x: i64, min_y: i64, max_y: i64) -> Ve
     let mut visited = HashSet::new();
     let mut emitted = HashSet::with_capacity(TILE_LIMIT);
     let mut tiles = Vec::with_capacity(TILE_LIMIT);
-    let key = |x: i64, y: i64| {
-        // Doubled coordinates preserve exact distances from half-tile midpoints.
-        let dx = 2 * x - (min_x + max_x);
-        let dy = 2 * y - (min_y + max_y);
-        Reverse((dx * dx + dy * dy, y, x))
-    };
+    let key = |x: i64, y: i64| Reverse(rectangle_distance_key(min_x, max_x, min_y, max_y, x, y));
     frontier.push(key(center_x, center_y));
     visited.insert((center_x, center_y));
 
@@ -301,6 +295,21 @@ fn nearest_tiles(zoom: u8, min_x: i64, max_x: i64, min_y: i64, max_y: i64) -> Ve
         }
     }
     tiles
+}
+
+fn rectangle_distance_key(
+    min_x: i64,
+    max_x: i64,
+    min_y: i64,
+    max_y: i64,
+    x: i64,
+    y: i64,
+) -> (i128, i64, i64) {
+    // Doubled coordinates preserve exact distances from half-tile midpoints.
+    // i128 keeps the full legal zoom-31 rectangle range overflow-free.
+    let dx = 2 * i128::from(x) - (i128::from(min_x) + i128::from(max_x));
+    let dy = 2 * i128::from(y) - (i128::from(min_y) + i128::from(max_y));
+    (dx * dx + dy * dy, y, x)
 }
 
 pub fn tile_corners_render(tile: TileId, anchor_rad_alt: [f64; 3]) -> [[f32; 3]; 4] {
@@ -438,6 +447,46 @@ mod tests {
     }
 
     #[test]
+    fn nonzero_zoom_antimeridian_selection_wraps_both_edges() {
+        let zoom = 10;
+        let inv_vp = inverse_view_projection(
+            DVec3::new(0.0, 20_000.0, 10_000.0),
+            DVec3::new(0.0, 0.0, 0.0),
+            16.0 / 9.0,
+        );
+        let set = visible_tiles(
+            inv_vp,
+            [1920, 1080],
+            [0.0, 179.99_f64.to_radians()],
+            zoom..=zoom,
+        );
+        let max_x = world_size(zoom) - 1;
+        assert!(set.tiles.iter().any(|tile| tile.x == 0), "{set:?}");
+        assert!(set.tiles.iter().any(|tile| tile.x == max_x), "{set:?}");
+    }
+
+    #[test]
+    fn partial_and_all_sky_samples_remain_bounded_and_nonempty() {
+        let mut partial = vec![None; SAMPLE_COLS * SAMPLE_ROWS];
+        for (col, row, world) in [
+            (0, 0, DVec3::ZERO),
+            (1, 0, DVec3::new(100.0, 0.0, 0.0)),
+            (0, 1, DVec3::new(0.0, 0.0, -100.0)),
+        ] {
+            partial[row * SAMPLE_COLS + col] = Some(ScreenHit { col, row, world });
+        }
+        let partial_tiles = ranked_tiles(&partial, 12, [0.0, 0.0]);
+        assert!(!partial_tiles.is_empty());
+        assert!(partial_tiles.len() <= 27);
+
+        let all_sky = vec![None; SAMPLE_COLS * SAMPLE_ROWS];
+        assert_eq!(
+            ranked_tiles(&all_sky, 12, [0.0, 0.0]),
+            vec![lat_lon_to_tile(0.0, 0.0, 12)]
+        );
+    }
+
+    #[test]
     fn horizontal_view_prioritizes_detailed_lower_screen_ground() {
         let anchor = [0.0, 0.0];
         let inv_vp = inverse_view_projection(
@@ -493,6 +542,29 @@ mod tests {
             .collect();
 
         assert_eq!(tiles, expected);
+    }
+
+    #[test]
+    fn zoom_31_rectangle_distance_key_does_not_overflow() {
+        let size = i64::from(world_size(31));
+        let key = rectangle_distance_key(-size / 2 - 1, size / 2, 0, size - 1, size / 2, size - 1);
+        assert!(key.0 > i128::from(i64::MAX));
+    }
+
+    #[test]
+    fn extreme_zoom_31_rectangle_selection_is_bounded() {
+        let size = i64::from(world_size(31));
+        let tiles = nearest_tiles(31, -size / 2 - 1, size / 2, 0, size - 1);
+        assert_eq!(tiles.len(), TILE_LIMIT);
+        assert_eq!(
+            tiles.iter().copied().collect::<HashSet<_>>().len(),
+            TILE_LIMIT
+        );
+        assert!(
+            tiles
+                .iter()
+                .all(|tile| tile.zoom == 31 && tile.y < world_size(31))
+        );
     }
 
     #[test]
