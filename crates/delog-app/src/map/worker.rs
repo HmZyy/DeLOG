@@ -131,19 +131,28 @@ impl Ord for Pending {
 }
 
 enum Command {
-    Request(TileRequest, Option<String>),
+    RequestsAvailable,
     SetLimit { id: u64, bytes: u64 },
     Clear { id: u64, epoch: u64 },
 }
 
 pub struct TileManager {
     command_tx: Sender<Command>,
+    ingress: Arc<Mutex<Vec<IngressRequest>>>,
     ready_rx: Receiver<ReadyEnvelope>,
     status: Arc<Mutex<TileManagerStatus>>,
     epoch: Arc<AtomicU64>,
+    accepted_generation: Arc<AtomicU64>,
+    request_sequence: AtomicU64,
     next_action: u64,
     shutdown_tx: Sender<()>,
     controller: Option<thread::JoinHandle<()>>,
+}
+
+struct IngressRequest {
+    request: TileRequest,
+    url: String,
+    sequence: u64,
 }
 
 impl TileManager {
@@ -154,6 +163,7 @@ impl TileManager {
     ) -> io::Result<Self> {
         let cache = TileDiskCache::open(cache_dir, limit)?;
         let (command_tx, command_rx) = unbounded::<Command>();
+        let ingress = Arc::new(Mutex::new(Vec::with_capacity(QUEUE_CAPACITY)));
         let (shutdown_tx, shutdown_rx) = bounded::<()>(1);
         let (ready_tx, ready_rx) = unbounded();
         let status = Arc::new(Mutex::new(TileManagerStatus {
@@ -168,6 +178,8 @@ impl TileManager {
             .map_err(io::Error::other)?;
         let controller_status = Arc::clone(&status);
         let epoch = Arc::new(AtomicU64::new(0));
+        let accepted_generation = Arc::new(AtomicU64::new(0));
+        let controller_ingress = Arc::clone(&ingress);
         let controller = thread::spawn(move || {
             controller_loop(
                 command_rx,
@@ -177,13 +189,17 @@ impl TileManager {
                 cache,
                 repaint,
                 client,
+                controller_ingress,
             )
         });
         Ok(Self {
             command_tx,
+            ingress,
             ready_rx,
             status,
             epoch,
+            accepted_generation,
+            request_sequence: AtomicU64::new(0),
             next_action: 0,
             shutdown_tx,
             controller: Some(controller),
@@ -198,14 +214,40 @@ impl TileManager {
     }
 
     fn request_with_url(&mut self, request: TileRequest, url: Option<String>) {
-        let _ = self.command_tx.try_send(Command::Request(request, url));
+        self.accepted_generation
+            .fetch_max(request.generation, AtomicOrdering::AcqRel);
+        let Some(url) = url else { return };
+        let sequence = self
+            .request_sequence
+            .fetch_add(1, AtomicOrdering::Relaxed)
+            .wrapping_add(1);
+        let incoming = IngressRequest {
+            request,
+            url,
+            sequence,
+        };
+        let mut ingress = self.ingress.lock().unwrap();
+        if ingress.len() < QUEUE_CAPACITY {
+            ingress.push(incoming);
+        } else if let Some((worst, _)) = ingress
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, item)| (item.request.priority, item.sequence))
+            && (incoming.request.priority, incoming.sequence)
+                < (ingress[worst].request.priority, ingress[worst].sequence)
+        {
+            ingress[worst] = incoming;
+        }
+        drop(ingress);
+        let _ = self.command_tx.try_send(Command::RequestsAvailable);
     }
 
     pub fn poll(&mut self) -> Vec<ReadyTile> {
         let epoch = self.epoch.load(AtomicOrdering::Acquire);
+        let generation = self.accepted_generation.load(AtomicOrdering::Acquire);
         self.ready_rx
             .try_iter()
-            .filter(|ready| ready.epoch == epoch)
+            .filter(|ready| ready.epoch == epoch && ready.tile.generation == generation)
             .map(|ready| ready.tile)
             .collect()
     }
@@ -249,6 +291,7 @@ impl TileManager {
             .epoch
             .fetch_add(1, AtomicOrdering::AcqRel)
             .wrapping_add(1);
+        self.ingress.lock().unwrap().clear();
         self.status.lock().unwrap().cache_action = CacheActionStatus::Pending {
             id,
             kind: CacheActionKind::Clear,
@@ -298,6 +341,7 @@ fn controller_loop(
     mut cache: TileDiskCache,
     repaint: Arc<dyn Fn() + Send + Sync>,
     client: reqwest::blocking::Client,
+    ingress: Arc<Mutex<Vec<IngressRequest>>>,
 ) {
     let (completion_tx, completion_rx) = unbounded::<Completion>();
     let mut worker_txs = Vec::new();
@@ -330,29 +374,19 @@ fn controller_loop(
         (0..WORKERS).map(std::cmp::Reverse).collect();
     let mut latest_generation = 0;
     let mut epoch = 0_u64;
-    let mut sequence = 0_u64;
     let mut shutdown = false;
     while !shutdown {
-        if pending.len() < QUEUE_CAPACITY {
-            select! {
+        select! {
             recv(shutdown_rx) -> _ => shutdown = true,
             recv(command_rx) -> command => match command {
-                Ok(command) => handle_command(command, &mut cache, &mut states, &mut pending, &mut latest_generation, &mut epoch, &mut sequence, &status_snapshot),
+                Ok(command) => handle_command(command, &mut cache, &mut states, &mut pending, &mut latest_generation, &mut epoch, &status_snapshot),
                 Err(_) => shutdown = true,
             },
             recv(completion_rx) -> completion => if let Ok(completion) = completion {
                 process_completion(completion, &mut idle, &mut states, &mut cache, &ready_tx, &repaint, epoch, latest_generation);
             }
-            }
-        } else {
-            select! {
-                recv(shutdown_rx) -> _ => shutdown = true,
-                recv(completion_rx) -> completion => if let Ok(completion) = completion {
-                    process_completion(completion, &mut idle, &mut states, &mut cache, &ready_tx, &repaint, epoch, latest_generation);
-                }
-            }
         }
-        while pending.len() < QUEUE_CAPACITY {
+        loop {
             let Ok(command) = command_rx.try_recv() else {
                 break;
             };
@@ -363,10 +397,16 @@ fn controller_loop(
                 &mut pending,
                 &mut latest_generation,
                 &mut epoch,
-                &mut sequence,
                 &status_snapshot,
             );
         }
+        drain_ingress(
+            &ingress,
+            &mut states,
+            &mut pending,
+            &mut latest_generation,
+            epoch,
+        );
         while !shutdown {
             if pending.is_empty() || idle.is_empty() {
                 break;
@@ -430,41 +470,10 @@ fn handle_command(
     pending: &mut BinaryHeap<Pending>,
     latest_generation: &mut u64,
     epoch: &mut u64,
-    sequence: &mut u64,
     status_snapshot: &Mutex<TileManagerStatus>,
 ) {
     match command {
-        Command::Request(request, Some(url)) => {
-            if request.generation > *latest_generation {
-                *latest_generation = request.generation;
-                states.retain(|key, _| key.2 == request.generation);
-            }
-            if request.generation != *latest_generation {
-                return;
-            }
-            let key = (request.provider, request.id, request.generation);
-            let attempts = match states.get(&key).map(|x| &x.0) {
-                Some(RequestState::Queued | RequestState::InFlight | RequestState::Ready) => {
-                    return;
-                }
-                Some(RequestState::Failed { retry_at, .. }) if Instant::now() < *retry_at => {
-                    return;
-                }
-                Some(RequestState::Failed { attempts, .. }) => *attempts,
-                None => 0,
-            };
-            *sequence = sequence.wrapping_add(1);
-            let work = Work {
-                request,
-                attempts,
-                url,
-                epoch: *epoch,
-                sequence: *sequence,
-            };
-            states.insert(key, (RequestState::Queued, *sequence));
-            pending.push(Pending(work));
-        }
-        Command::Request(_, None) => {}
+        Command::RequestsAvailable => {}
         Command::SetLimit { id, bytes } => {
             let result = cache.set_limit(bytes);
             finish_cache_action(status_snapshot, id, CacheActionKind::SetLimit, result, None);
@@ -497,6 +506,72 @@ fn handle_command(
                 ),
             }
         }
+    }
+}
+
+fn drain_ingress(
+    ingress: &Mutex<Vec<IngressRequest>>,
+    states: &mut HashMap<Key, (RequestState, u64)>,
+    pending: &mut BinaryHeap<Pending>,
+    latest_generation: &mut u64,
+    epoch: u64,
+) {
+    let requests = std::mem::take(&mut *ingress.lock().unwrap());
+    let Some(newest) = requests.iter().map(|item| item.request.generation).max() else {
+        return;
+    };
+    if newest > *latest_generation {
+        *latest_generation = newest;
+        states.retain(|key, _| key.2 == newest);
+        pending.retain(|item| item.0.request.generation == newest);
+    }
+    for item in requests {
+        let request = item.request;
+        if request.generation != *latest_generation {
+            continue;
+        }
+        let key = (request.provider, request.id, request.generation);
+        let attempts = match states.get(&key).map(|x| &x.0) {
+            Some(RequestState::Queued | RequestState::InFlight | RequestState::Ready) => continue,
+            Some(RequestState::Failed { retry_at, .. }) if Instant::now() < *retry_at => continue,
+            Some(RequestState::Failed { attempts, .. }) => *attempts,
+            None => 0,
+        };
+        let work = Work {
+            request,
+            attempts,
+            url: item.url,
+            epoch,
+            sequence: item.sequence,
+        };
+        if pending.len() == QUEUE_CAPACITY {
+            let mut entries = std::mem::take(pending).into_vec();
+            let worst = entries
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, item)| (item.0.request.priority, item.0.sequence))
+                .map(|(index, _)| index)
+                .unwrap();
+            let worst_rank = (entries[worst].0.request.priority, entries[worst].0.sequence);
+            if (work.request.priority, work.sequence) >= worst_rank {
+                *pending = BinaryHeap::from(entries);
+                continue;
+            }
+            let evicted = entries.swap_remove(worst).0;
+            let evicted_key = (
+                evicted.request.provider,
+                evicted.request.id,
+                evicted.request.generation,
+            );
+            if states.get(&evicted_key).is_some_and(|(state, token)| {
+                matches!(state, RequestState::Queued) && *token == evicted.sequence
+            }) {
+                states.remove(&evicted_key);
+            }
+            *pending = BinaryHeap::from(entries);
+        }
+        states.insert(key, (RequestState::Queued, work.sequence));
+        pending.push(Pending(work));
     }
 }
 
@@ -884,7 +959,28 @@ mod tests {
     }
 
     #[test]
-    fn request_ingress_accepts_more_than_the_pending_work_bound() {
+    fn ready_before_generation_switch_is_not_observable_after_request_submission() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = server(jpeg(), "image/jpeg", Arc::new(AtomicUsize::new(0)));
+        let mut manager = TileManager::new(dir.path().to_owned(), u64::MAX, || {}).unwrap();
+        manager.request_with_url(request(1), Some(url.clone()));
+        for _ in 0..200 {
+            if manager.status().ready == 1 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(manager.status().ready, 1);
+
+        let mut next = request(2);
+        next.provider = MapProviderId::None;
+        manager.request_with_url(next, Some(url));
+
+        assert!(manager.poll().is_empty());
+    }
+
+    #[test]
+    fn request_ingress_drops_worst_requests_beyond_the_pending_work_bound() {
         let dir = tempfile::tempdir().unwrap();
         let hits = Arc::new(AtomicUsize::new(0));
         let url = server(jpeg(), "image/jpeg", Arc::clone(&hits));
@@ -907,8 +1003,8 @@ mod tests {
             }
             thread::sleep(Duration::from_millis(10));
         }
-        assert_eq!(received, count);
-        assert_eq!(hits.load(Ordering::SeqCst), count);
+        assert!(received <= QUEUE_CAPACITY + WORKERS);
+        assert_eq!(hits.load(Ordering::SeqCst), received);
     }
 
     #[test]
@@ -1032,6 +1128,62 @@ mod tests {
             "/high"
         );
         for _ in 0..WORKERS + 2 {
+            let _ = release.send(());
+        }
+    }
+
+    #[test]
+    fn saturated_queue_dispatches_new_high_priority_before_existing_low_priority() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, observed, release) = gated_server(jpeg());
+        let mut manager = TileManager::new(dir.path().to_owned(), u64::MAX, || {}).unwrap();
+        for x in 0..WORKERS {
+            let mut req = request(1);
+            req.id = TileId {
+                zoom: 20,
+                x: x as u32,
+                y: 0,
+            };
+            manager.request_with_url(req, Some(format!("{url}/blocking-{x}")));
+        }
+        for _ in 0..WORKERS {
+            observed.recv_timeout(Duration::from_secs(2)).unwrap();
+        }
+
+        for x in 0..QUEUE_CAPACITY {
+            let mut low = request(1);
+            low.id = TileId {
+                zoom: 20,
+                x: (x + WORKERS) as u32,
+                y: 0,
+            };
+            low.priority = 100;
+            manager.request_with_url(low, Some(format!("{url}/low-{x}")));
+        }
+        for _ in 0..200 {
+            if manager.status().queued == QUEUE_CAPACITY {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(manager.status().queued, QUEUE_CAPACITY);
+
+        let mut high = request(1);
+        high.id = TileId {
+            zoom: 20,
+            x: 1000,
+            y: 0,
+        };
+        high.priority = 0;
+        manager.request_with_url(high, Some(format!("{url}/high")));
+        release.send(()).unwrap();
+
+        assert_eq!(
+            observed.recv_timeout(Duration::from_secs(2)).unwrap(),
+            "/high"
+        );
+        assert_eq!(manager.status().queued, QUEUE_CAPACITY - 1);
+        for _ in 0..WORKERS + 1 {
             let _ = release.send(());
         }
     }
