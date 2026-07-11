@@ -897,16 +897,6 @@ impl Behavior<'_> {
                     .map_selection_has_current_imagery(self.services.frame, &map_tile_selection),
             );
             scene_map_status(ui, rect, message.as_deref());
-            if let Some(map_provider) = provider(provider_id) {
-                let (label, url) = map_provider.attribution();
-                egui::Area::new(ui.make_persistent_id("scene-map-attribution"))
-                    .order(egui::Order::Foreground)
-                    .fixed_pos(rect.left_bottom() + egui::vec2(8.0, -26.0))
-                    .show(ui.ctx(), |ui| {
-                        ui.small("Imagery © ");
-                        ui.hyperlink_to(label, url);
-                    });
-            }
         }
 
         let overlay = scene_overlay_buttons(ui, rect, pane.trail_to_playhead, self.services.accent);
