@@ -507,6 +507,7 @@ pub struct PlotServices<'a> {
     pub metrics: &'a Arc<delog_core::metrics::MetricsRegistry>,
     pub gpu: &'a mut GpuBridge,
     pub tile_manager: Option<&'a mut TileManager>,
+    pub tile_manager_error: Option<&'a str>,
     pub caches: &'a mut CacheManager,
     pub view: &'a mut Option<ViewX>,
     pub origin_us: i64,
@@ -809,6 +810,19 @@ impl Behavior<'_> {
             })
             .collect();
 
+        let map_tile_selection = gpu::MapTileSelection {
+            scope: pane.map_scope,
+            epoch: self
+                .services
+                .tile_manager
+                .as_deref()
+                .map_or(0, |manager| manager.status().epoch),
+            provider: provider_id,
+            generation: pane.map_generation,
+            current_tiles: pane.map_tiles.clone(),
+            previous_tiles: pane.map_previous_tiles.clone(),
+            enabled: pane.map_selection.is_some(),
+        };
         let rendered = {
             let _t = self.services.metrics.scope("3d_frame");
             self.services.gpu.render_scene(
@@ -817,19 +831,7 @@ impl Behavior<'_> {
                 rect,
                 &pane.camera,
                 self.services.scene3d,
-                gpu::MapTileSelection {
-                    scope: pane.map_scope,
-                    epoch: self
-                        .services
-                        .tile_manager
-                        .as_deref()
-                        .map_or(0, |manager| manager.status().epoch),
-                    provider: provider_id,
-                    generation: pane.map_generation,
-                    current_tiles: pane.map_tiles.clone(),
-                    previous_tiles: pane.map_previous_tiles.clone(),
-                    enabled: pane.map_selection.is_some(),
-                },
+                map_tile_selection.clone(),
                 &ready_tiles,
                 &draws,
             )
@@ -863,12 +865,15 @@ impl Behavior<'_> {
                 .map(TileManager::status);
             let message = scene_map_overlay(
                 tracked_reference.is_some(),
+                self.services.tile_manager_error,
                 map_status
                     .as_ref()
                     .and_then(|status| status.failure.as_ref().map(|failure| failure.class)),
-                map_status.as_ref().is_some_and(|status| status.ready > 0),
+                self.services
+                    .gpu
+                    .map_selection_has_current_imagery(self.services.frame, &map_tile_selection),
             );
-            scene_map_status(ui, rect, message);
+            scene_map_status(ui, rect, message.as_deref());
             if let Some(map_provider) = provider(provider_id) {
                 let (label, url) = map_provider.attribution();
                 egui::Area::new(ui.make_persistent_id("scene-map-attribution"))
@@ -1697,15 +1702,18 @@ impl Behavior<'_> {
 
 fn scene_map_overlay(
     reference_available: bool,
+    manager_error: Option<&str>,
     failure: Option<TileFailureClass>,
     cached: bool,
-) -> Option<&'static str> {
+) -> Option<std::borrow::Cow<'static, str>> {
     if !reference_available {
-        Some("Map unavailable: no georeference")
+        Some("Map unavailable: no georeference".into())
+    } else if let Some(error) = manager_error {
+        Some(format!("Map cache error: {error}").into())
     } else if failure == Some(TileFailureClass::Cache) {
-        Some("Map cache error")
+        Some("Map cache error".into())
     } else if failure == Some(TileFailureClass::NetworkTransient) && cached {
-        Some("Map tiles offline — showing cached imagery")
+        Some("Map tiles offline — showing cached imagery".into())
     } else {
         None
     }
@@ -2280,18 +2288,27 @@ mod tests {
     #[test]
     fn scene_map_overlay_only_reports_actionable_states() {
         assert_eq!(
-            scene_map_overlay(false, None, false),
+            scene_map_overlay(false, None, None, false).as_deref(),
             Some("Map unavailable: no georeference")
         );
         assert_eq!(
-            scene_map_overlay(true, Some(TileFailureClass::Cache), true),
+            scene_map_overlay(true, None, Some(TileFailureClass::Cache), true).as_deref(),
             Some("Map cache error")
         );
         assert_eq!(
-            scene_map_overlay(true, Some(TileFailureClass::NetworkTransient), true),
+            scene_map_overlay(true, None, Some(TileFailureClass::NetworkTransient), true)
+                .as_deref(),
             Some("Map tiles offline — showing cached imagery")
         );
-        assert_eq!(scene_map_overlay(true, None, true), None);
+        assert_eq!(scene_map_overlay(true, None, None, true), None);
+        assert_eq!(
+            scene_map_overlay(true, Some("permission denied"), None, false).as_deref(),
+            Some("Map cache error: permission denied")
+        );
+        assert_eq!(
+            scene_map_overlay(true, None, Some(TileFailureClass::NetworkTransient), false),
+            None
+        );
     }
 
     #[test]
