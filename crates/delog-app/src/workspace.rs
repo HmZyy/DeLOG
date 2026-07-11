@@ -797,6 +797,7 @@ impl Behavior<'_> {
                         .tile_manager
                         .as_deref()
                         .map_or(0, |manager| manager.status().epoch),
+                    provider: provider_id,
                     generation: pane.map_generation,
                     current_zoom: pane.map_zoom,
                     previous_zoom: pane.map_previous_zoom,
