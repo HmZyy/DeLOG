@@ -26,7 +26,9 @@ pub use context::RenderContext;
 pub use errors::GpuErrorHub;
 pub use grid3d::{Grid3dPipeline, GridUniform};
 pub use line::LinePipeline;
-pub use map_tiles::{MapTileDrawGroups, MapTileError, MapTilePipeline, MapTileUpload};
+pub use map_tiles::{
+    MAP_TILE_CAPACITY, MapTileDrawGroups, MapTileError, MapTilePipeline, MapTileUpload,
+};
 pub use mesh::{MeshCpu, MeshError, MeshGpu, MeshPipeline, MeshUniform, Vertex, load_glb};
 pub use minmax::{COLUMN_STRIDE, MinMaxColPipeline};
 pub use scatter::ScatterPipeline;

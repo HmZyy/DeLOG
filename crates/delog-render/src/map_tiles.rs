@@ -4,7 +4,8 @@ use crate::RenderContext;
 use std::collections::{HashMap, HashSet};
 
 const TILE_SIZE: u32 = 256;
-const LAYER_COUNT: u32 = 128;
+pub const MAP_TILE_CAPACITY: usize = 128;
+const LAYER_COUNT: u32 = MAP_TILE_CAPACITY as u32;
 
 #[derive(Clone, Copy, Debug)]
 pub struct MapTileUpload<'a> {
