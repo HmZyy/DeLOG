@@ -27,6 +27,7 @@ const MAX_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct TileRequest {
+    pub scope: MapScopeId,
     pub provider: MapProviderId,
     pub id: TileId,
     pub corners: [[f32; 3]; 4],
@@ -36,6 +37,7 @@ pub struct TileRequest {
 
 #[derive(Clone, Debug)]
 pub struct ReadyTile {
+    pub scope: MapScopeId,
     pub provider: MapProviderId,
     pub id: TileId,
     pub generation: u64,
@@ -106,7 +108,10 @@ enum RequestState {
     Failed { retry_at: Instant, attempts: u32 },
 }
 
-type Key = (MapProviderId, TileId, u64);
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub struct MapScopeId(pub u64);
+
+type Key = (MapScopeId, MapProviderId, TileId, u64);
 
 struct Pending(Work);
 
@@ -174,9 +179,10 @@ pub struct TileManager {
     wake_pending: Arc<AtomicBool>,
     ingress: Arc<Mutex<Vec<IngressRequest>>>,
     ready_rx: Receiver<ReadyEnvelope>,
+    ready_backlog: VecDeque<ReadyEnvelope>,
     status: Arc<Mutex<TileManagerStatus>>,
     epoch: Arc<AtomicU64>,
-    accepted_generation: Arc<AtomicU64>,
+    accepted_generations: Mutex<HashMap<MapScopeId, u64>>,
     request_sequence: AtomicU64,
     next_action: u64,
     shutdown_tx: Sender<()>,
@@ -214,7 +220,6 @@ impl TileManager {
             .map_err(io::Error::other)?;
         let controller_status = Arc::clone(&status);
         let epoch = Arc::new(AtomicU64::new(0));
-        let accepted_generation = Arc::new(AtomicU64::new(0));
         let controller_ingress = Arc::clone(&ingress);
         let controller_controls = Arc::clone(&controls);
         let controller_wake_pending = Arc::clone(&wake_pending);
@@ -240,9 +245,10 @@ impl TileManager {
             wake_pending,
             ingress,
             ready_rx,
+            ready_backlog: VecDeque::new(),
             status,
             epoch,
-            accepted_generation,
+            accepted_generations: Mutex::new(HashMap::new()),
             request_sequence: AtomicU64::new(0),
             next_action: 0,
             shutdown_tx,
@@ -259,14 +265,14 @@ impl TileManager {
 
     fn request_with_url(&mut self, request: TileRequest, url: Option<String>) {
         let mut ingress = self.ingress.lock().unwrap();
-        let accepted = self.accepted_generation.load(AtomicOrdering::Acquire);
-        if request.generation < accepted {
+        let mut accepted = self.accepted_generations.lock().unwrap();
+        let generation = accepted.entry(request.scope).or_default();
+        if request.generation < *generation {
             return;
         }
-        if request.generation > accepted {
-            ingress.clear();
-            self.accepted_generation
-                .store(request.generation, AtomicOrdering::Release);
+        if request.generation > *generation {
+            *generation = request.generation;
+            ingress.retain(|item| item.request.scope != request.scope);
         }
         let Some(url) = url else { return };
         let sequence = self
@@ -295,14 +301,30 @@ impl TileManager {
         }
     }
 
-    pub fn poll(&mut self) -> Vec<ReadyTile> {
+    pub fn poll(&mut self, scope: MapScopeId) -> Vec<ReadyTile> {
         let epoch = self.epoch.load(AtomicOrdering::Acquire);
-        let generation = self.accepted_generation.load(AtomicOrdering::Acquire);
-        self.ready_rx
-            .try_iter()
-            .filter(|ready| ready.epoch == epoch && ready.tile.generation == generation)
-            .map(|ready| ready.tile)
-            .collect()
+        let generations = self.accepted_generations.lock().unwrap().clone();
+        let generation = generations.get(&scope).copied().unwrap_or(0);
+        self.ready_backlog.extend(self.ready_rx.try_iter());
+        let mut selected = Vec::new();
+        self.ready_backlog.retain(|ready| {
+            if ready.epoch != epoch {
+                return false;
+            }
+            if generations.get(&ready.tile.scope).copied() != Some(ready.tile.generation) {
+                return false;
+            }
+            if ready.tile.scope == scope && ready.tile.generation == generation {
+                selected.push(ready.tile.clone());
+                false
+            } else {
+                true
+            }
+        });
+        while self.ready_backlog.len() > READY_CAPACITY {
+            self.ready_backlog.pop_front();
+        }
+        selected
     }
 
     pub fn status(&self) -> TileManagerStatus {
@@ -418,7 +440,7 @@ fn controller_loop(
     let mut pending = BinaryHeap::new();
     let mut idle: BinaryHeap<std::cmp::Reverse<usize>> =
         (0..WORKERS).map(std::cmp::Reverse).collect();
-    let mut latest_generation = 0;
+    let mut latest_generations = HashMap::new();
     let mut ready_order = VecDeque::with_capacity(READY_CAPACITY);
     let mut failed_order = VecDeque::with_capacity(FAILURE_CAPACITY);
     let mut epoch = 0_u64;
@@ -428,7 +450,7 @@ fn controller_loop(
             recv(shutdown_rx) -> _ => shutdown = true,
             recv(wake_rx) -> _ => { wake_pending.store(false, AtomicOrdering::Release); },
             recv(completion_rx) -> completion => if let Ok(completion) = completion {
-                process_completion(completion, &mut idle, &mut states, &mut ready_order, &mut failed_order, &mut cache, &ready_tx, &ready_evict_rx, &repaint, epoch, latest_generation);
+                process_completion(completion, &mut idle, &mut states, &mut ready_order, &mut failed_order, &mut cache, &ready_tx, &ready_evict_rx, &repaint, epoch, &latest_generations);
             }
         }
         for command in controls.lock().unwrap().take() {
@@ -437,7 +459,6 @@ fn controller_loop(
                 &mut cache,
                 &mut states,
                 &mut pending,
-                &mut latest_generation,
                 &mut epoch,
                 &status_snapshot,
             );
@@ -446,7 +467,7 @@ fn controller_loop(
             &ingress,
             &mut states,
             &mut pending,
-            &mut latest_generation,
+            &mut latest_generations,
             epoch,
         );
         while !shutdown {
@@ -456,12 +477,14 @@ fn controller_loop(
             let Pending(work) = pending.pop().unwrap();
             let std::cmp::Reverse(worker) = idle.pop().unwrap();
             let key = (
+                work.request.scope,
                 work.request.provider,
                 work.request.id,
                 work.request.generation,
             );
             if work.epoch != epoch
-                || work.request.generation != latest_generation
+                || latest_generations.get(&work.request.scope).copied()
+                    != Some(work.request.generation)
                 || !states
                     .get(&key)
                     .is_some_and(|(_, token)| *token == work.sequence)
@@ -479,6 +502,7 @@ fn controller_loop(
                             ReadyEnvelope {
                                 epoch: work.epoch,
                                 tile: ReadyTile {
+                                    scope: work.request.scope,
                                     provider: work.request.provider,
                                     id: work.request.id,
                                     generation: work.request.generation,
@@ -514,7 +538,6 @@ fn handle_command(
     cache: &mut TileDiskCache,
     states: &mut HashMap<Key, (RequestState, u64)>,
     pending: &mut BinaryHeap<Pending>,
-    latest_generation: &mut u64,
     epoch: &mut u64,
     status_snapshot: &Mutex<TileManagerStatus>,
 ) {
@@ -530,10 +553,7 @@ fn handle_command(
             *epoch = next_epoch;
             states.clear();
             pending.clear();
-            let result = cache.clear().map(|generation| {
-                *latest_generation = latest_generation.wrapping_add(1).max(generation.0);
-                *latest_generation
-            });
+            let result = cache.clear().map(|generation| generation.0);
             match result {
                 Ok(generation) => finish_cache_action(
                     status_snapshot,
@@ -558,24 +578,30 @@ fn drain_ingress(
     ingress: &Mutex<Vec<IngressRequest>>,
     states: &mut HashMap<Key, (RequestState, u64)>,
     pending: &mut BinaryHeap<Pending>,
-    latest_generation: &mut u64,
+    latest_generations: &mut HashMap<MapScopeId, u64>,
     epoch: u64,
 ) {
     let requests = std::mem::take(&mut *ingress.lock().unwrap());
-    let Some(newest) = requests.iter().map(|item| item.request.generation).max() else {
-        return;
-    };
-    if newest > *latest_generation {
-        *latest_generation = newest;
-        states.retain(|key, _| key.2 == newest);
-        pending.retain(|item| item.0.request.generation == newest);
-    }
     for item in requests {
         let request = item.request;
-        if request.generation != *latest_generation {
+        let latest = latest_generations.entry(request.scope).or_default();
+        if request.generation > *latest {
+            *latest = request.generation;
+            states.retain(|key, _| key.0 != request.scope || key.3 == request.generation);
+            pending.retain(|item| {
+                item.0.request.scope != request.scope
+                    || item.0.request.generation == request.generation
+            });
+        }
+        if request.generation != *latest {
             continue;
         }
-        let key = (request.provider, request.id, request.generation);
+        let key = (
+            request.scope,
+            request.provider,
+            request.id,
+            request.generation,
+        );
         let attempts = match states.get(&key).map(|x| &x.0) {
             Some(RequestState::Queued | RequestState::InFlight | RequestState::Ready) => continue,
             Some(RequestState::Failed { retry_at, .. }) if Instant::now() < *retry_at => continue,
@@ -604,6 +630,7 @@ fn drain_ingress(
             }
             let evicted = entries.swap_remove(worst).0;
             let evicted_key = (
+                evicted.request.scope,
                 evicted.request.provider,
                 evicted.request.id,
                 evicted.request.generation,
@@ -656,11 +683,12 @@ fn process_completion(
     ready_evict_rx: &Receiver<ReadyEnvelope>,
     repaint: &Arc<dyn Fn() + Send + Sync>,
     epoch: u64,
-    latest_generation: u64,
+    latest_generations: &HashMap<MapScopeId, u64>,
 ) {
     idle.push(std::cmp::Reverse(completion.worker));
     let work = completion.work;
     let key = (
+        work.request.scope,
         work.request.provider,
         work.request.id,
         work.request.generation,
@@ -668,7 +696,10 @@ fn process_completion(
     let current = states
         .get(&key)
         .is_some_and(|(_, token)| *token == work.sequence);
-    if current && work.epoch == epoch && work.request.generation == latest_generation {
+    if current
+        && work.epoch == epoch
+        && latest_generations.get(&work.request.scope).copied() == Some(work.request.generation)
+    {
         match completion.result {
             Ok((bytes, rgba)) => {
                 if cache
@@ -682,6 +713,7 @@ fn process_completion(
                         ReadyEnvelope {
                             epoch: work.epoch,
                             tile: ReadyTile {
+                                scope: work.request.scope,
                                 provider: work.request.provider,
                                 id: work.request.id,
                                 generation: work.request.generation,
@@ -852,6 +884,7 @@ mod tests {
 
     fn request(generation: u64) -> TileRequest {
         TileRequest {
+            scope: MapScopeId(1),
             provider: MapProviderId::BingSatellite,
             id: TileId {
                 zoom: 1,
@@ -931,7 +964,7 @@ mod tests {
 
     fn await_poll(manager: &mut TileManager) -> Vec<ReadyTile> {
         for _ in 0..100 {
-            let ready = manager.poll();
+            let ready = manager.poll(MapScopeId(1));
             if !ready.is_empty() || manager.status().failed != 0 {
                 return ready;
             }
@@ -1016,6 +1049,7 @@ mod tests {
                 sequence: x as u64 + 1,
             };
             let key = (
+                work.request.scope,
                 work.request.provider,
                 work.request.id,
                 work.request.generation,
@@ -1033,9 +1067,9 @@ mod tests {
         );
 
         let mut pending = BinaryHeap::new();
-        let mut latest_generation = 1;
+        let mut latest_generation = HashMap::from([(MapScopeId(1), 1)]);
         let first = request(1);
-        let first_key = (first.provider, first.id, first.generation);
+        let first_key = (first.scope, first.provider, first.id, first.generation);
         assert!(!states.contains_key(&first_key));
         let ingress = Mutex::new(vec![IngressRequest {
             request: first,
@@ -1084,7 +1118,54 @@ mod tests {
         newer.id.x = 1;
         manager.request_with_url(newer, Some(url));
         thread::sleep(Duration::from_millis(50));
-        assert!(manager.poll().iter().all(|tile| tile.generation == 2));
+        assert!(
+            manager
+                .poll(MapScopeId(1))
+                .iter()
+                .all(|tile| tile.generation == 2)
+        );
+    }
+
+    #[test]
+    fn pane_scopes_accept_generations_and_route_ready_results_independently() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = server(jpeg(), "image/jpeg", Arc::new(AtomicUsize::new(0)));
+        let mut manager = TileManager::new(dir.path().to_owned(), u64::MAX, || {}).unwrap();
+        let mut left = request(7);
+        left.scope = MapScopeId(10);
+        let mut right = request(1);
+        right.scope = MapScopeId(20);
+        right.id.x = 1;
+        manager.request_with_url(left, Some(url.clone()));
+        manager.request_with_url(right, Some(url));
+
+        let mut left_ready = Vec::new();
+        let mut right_ready = Vec::new();
+        for _ in 0..200 {
+            left_ready.extend(manager.poll(MapScopeId(10)));
+            right_ready.extend(manager.poll(MapScopeId(20)));
+            if !left_ready.is_empty() && !right_ready.is_empty() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(left_ready[0].generation, 7);
+        assert_eq!(right_ready[0].generation, 1);
+    }
+
+    #[test]
+    fn none_provider_and_no_reference_submit_zero_tile_requests() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = TileManager::new(dir.path().to_owned(), u64::MAX, || {}).unwrap();
+        let no_reference: Option<TileRequest> = None;
+        if let Some(request) = no_reference {
+            manager.request(request);
+        }
+        let mut none = request(1);
+        none.provider = MapProviderId::None;
+        manager.request(none);
+        assert_eq!(manager.request_sequence.load(Ordering::Relaxed), 0);
+        assert_eq!(manager.status().queued + manager.status().in_flight, 0);
     }
 
     #[test]
@@ -1106,7 +1187,7 @@ mod tests {
             }
         ));
         thread::sleep(Duration::from_millis(80));
-        assert!(manager.poll().is_empty());
+        assert!(manager.poll(MapScopeId(1)).is_empty());
         drop(manager);
         assert_eq!(
             TileDiskCache::open(dir.path().to_owned(), u64::MAX)
@@ -1130,7 +1211,7 @@ mod tests {
         }
         assert_eq!(manager.status().ready, 1);
         manager.clear_cache().unwrap();
-        assert!(manager.poll().is_empty());
+        assert!(manager.poll(MapScopeId(1)).is_empty());
     }
 
     #[test]
@@ -1151,7 +1232,7 @@ mod tests {
         next.provider = MapProviderId::None;
         manager.request_with_url(next, Some(url));
 
-        assert!(manager.poll().is_empty());
+        assert!(manager.poll(MapScopeId(1)).is_empty());
     }
 
     #[test]
@@ -1172,7 +1253,7 @@ mod tests {
         }
         let mut received = 0;
         for _ in 0..1000 {
-            received += manager.poll().len();
+            received += manager.poll(MapScopeId(1)).len();
             if received == count {
                 break;
             }
@@ -1196,7 +1277,7 @@ mod tests {
         }
         let mut received = 0;
         for _ in 0..500 {
-            received += manager.poll().len();
+            received += manager.poll(MapScopeId(1)).len();
             if received == 8 {
                 break;
             }
@@ -1384,7 +1465,11 @@ mod tests {
                     sequence: x as u64,
                 });
             }
-            manager.accepted_generation.store(1, Ordering::Release);
+            manager
+                .accepted_generations
+                .lock()
+                .unwrap()
+                .insert(MapScopeId(1), 1);
         }
 
         let mut newer = request(2);
