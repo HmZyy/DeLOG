@@ -1,5 +1,5 @@
 use std::{
-    collections::{hash_map::DefaultHasher, HashMap},
+    collections::{HashMap, hash_map::DefaultHasher},
     fs::{self, File},
     hash::{Hash, Hasher},
     io::{self, Write},
@@ -53,9 +53,14 @@ pub struct TileDiskCache {
 impl TileDiskCache {
     pub fn open(root: PathBuf, limit: u64) -> io::Result<Self> {
         fs::create_dir_all(&root)?;
-        let persisted = match fs::read(root.join(INDEX_FILE)) {
-            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => PersistedIndex::default(),
+        let (persisted, index_available) = match fs::read(root.join(INDEX_FILE)) {
+            Ok(bytes) => match serde_json::from_slice(&bytes) {
+                Ok(persisted) => (persisted, true),
+                Err(_) => (PersistedIndex::default(), false),
+            },
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                (PersistedIndex::default(), false)
+            }
             Err(error) => return Err(error),
         };
         let mut cache = Self {
@@ -65,7 +70,7 @@ impl TileDiskCache {
             sequence: persisted.sequence,
             index: persisted.entries.into_iter().collect(),
         };
-        cache.reconcile_tiles()?;
+        cache.reconcile_tiles(index_available)?;
         cache.prune()?;
         cache.persist_index()?;
         Ok(cache)
@@ -103,12 +108,8 @@ impl TileDiskCache {
         let path = self.path(&key);
         let parent = path.parent().expect("tile path always has a parent");
         fs::create_dir_all(parent)?;
-        let part = parent.join(format!(
-            "{}.part-{}-{}",
-            path.file_name().unwrap().to_string_lossy(),
-            std::process::id(),
-            self.next_sequence()
-        ));
+        let part = self.tile_part_path(&key);
+        self.next_sequence();
         let result: io::Result<()> = (|| {
             let mut file = File::create(&part)?;
             file.write_all(bytes)?;
@@ -166,7 +167,17 @@ impl TileDiskCache {
             .join(format!("{}.tile", key.y))
     }
 
-    fn reconcile_tiles(&mut self) -> io::Result<()> {
+    fn tile_part_path(&self, key: &CacheKey) -> PathBuf {
+        let path = self.path(key);
+        path.with_file_name(format!(
+            "{}.part-{}-{}",
+            path.file_name().unwrap().to_string_lossy(),
+            std::process::id(),
+            PART_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    fn reconcile_tiles(&mut self, index_available: bool) -> io::Result<()> {
         let mut files = Vec::new();
         collect_files(&self.root, &mut files)?;
         let old = std::mem::take(&mut self.index);
@@ -178,17 +189,26 @@ impl TileDiskCache {
                 remove_if_exists(&path)?;
                 continue;
             };
+            if self.path(&key) != path {
+                remove_if_exists(&path)?;
+                continue;
+            }
             let bytes = fs::read(&path)?;
             let file_checksum = checksum(&bytes);
-            let meta = old
-                .get(&key)
-                .filter(|meta| meta.size == bytes.len() as u64 && meta.checksum == file_checksum)
-                .cloned()
-                .unwrap_or_else(|| CacheMeta {
+            let meta = match old.get(&key) {
+                Some(meta) if meta.size == bytes.len() as u64 && meta.checksum == file_checksum => {
+                    meta.clone()
+                }
+                Some(_) if index_available => {
+                    remove_if_exists(&path)?;
+                    continue;
+                }
+                _ => CacheMeta {
                     size: bytes.len() as u64,
                     last_access: self.next_sequence(),
                     checksum: file_checksum,
-                });
+                },
+            };
             self.index.insert(key, meta);
         }
         Ok(())
@@ -226,11 +246,17 @@ impl TileDiskCache {
             std::process::id(),
             PART_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
-        let mut file = File::create(&part)?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        fs::rename(&part, self.root.join(INDEX_FILE))?;
-        File::open(&self.root)?.sync_all()
+        let result = (|| {
+            let mut file = File::create(&part)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            fs::rename(&part, self.root.join(INDEX_FILE))?;
+            File::open(&self.root)?.sync_all()
+        })();
+        if result.is_err() {
+            let _ = remove_if_exists(&part);
+        }
+        result
     }
 }
 
@@ -377,14 +403,18 @@ mod tests {
         cache
             .write(MapProviderId::BingSatellite, tile(3), &[8])
             .unwrap();
-        assert!(cache
-            .read(MapProviderId::BingSatellite, tile(1))
-            .unwrap()
-            .is_some());
-        assert!(cache
-            .read(MapProviderId::BingSatellite, tile(2))
-            .unwrap()
-            .is_none());
+        assert!(
+            cache
+                .read(MapProviderId::BingSatellite, tile(1))
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            cache
+                .read(MapProviderId::BingSatellite, tile(2))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -400,14 +430,18 @@ mod tests {
             .write(MapProviderId::BingSatellite, tile(2), &chunk)
             .unwrap();
         cache.set_limit(64 * 1024 * 1024).unwrap();
-        assert!(cache
-            .read(MapProviderId::BingSatellite, tile(1))
-            .unwrap()
-            .is_none());
-        assert!(cache
-            .read(MapProviderId::BingSatellite, tile(2))
-            .unwrap()
-            .is_some());
+        assert!(
+            cache
+                .read(MapProviderId::BingSatellite, tile(1))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            cache
+                .read(MapProviderId::BingSatellite, tile(2))
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
@@ -459,5 +493,78 @@ mod tests {
             .filter(|x| root.join(format!("bing_satellite/3/{x}/2.tile")).exists())
             .count();
         assert_eq!(remaining, 2);
+    }
+
+    #[test]
+    fn valid_index_deletes_changed_indexed_tile_but_adopts_orphan() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_owned();
+        let mut cache = TileDiskCache::open(root.clone(), u64::MAX).unwrap();
+        cache
+            .write(MapProviderId::BingSatellite, tile(1), b"trusted")
+            .unwrap();
+        drop(cache);
+
+        let changed = root.join("bing_satellite/3/1/2.tile");
+        fs::write(&changed, b"changed").unwrap();
+        let orphan = root.join("bing_satellite/3/2/2.tile");
+        fs::create_dir_all(orphan.parent().unwrap()).unwrap();
+        fs::write(&orphan, b"orphan").unwrap();
+
+        let mut cache = TileDiskCache::open(root, u64::MAX).unwrap();
+
+        assert!(!changed.exists());
+        assert_eq!(cache.usage_bytes(), 6);
+        assert_eq!(
+            cache.read(MapProviderId::BingSatellite, tile(2)).unwrap(),
+            Some(b"orphan".to_vec())
+        );
+    }
+
+    #[test]
+    fn reconciliation_deletes_noncanonical_numeric_tile_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_owned();
+        let canonical = root.join("bing_satellite/3/1/2.tile");
+        fs::create_dir_all(canonical.parent().unwrap()).unwrap();
+        fs::write(&canonical, b"canonical").unwrap();
+        let noncanonical = root.join("bing_satellite/03/01/02.tile");
+        fs::create_dir_all(noncanonical.parent().unwrap()).unwrap();
+        fs::write(&noncanonical, b"duplicate").unwrap();
+
+        let cache = TileDiskCache::open(root, u64::MAX).unwrap();
+
+        assert!(canonical.exists());
+        assert!(!noncanonical.exists());
+        assert_eq!(cache.usage_bytes(), 9);
+    }
+
+    #[test]
+    fn tile_part_names_are_unique_across_cache_instances() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_owned();
+        let cache_a = TileDiskCache::open(root.clone(), u64::MAX).unwrap();
+        let cache_b = TileDiskCache::open(root, u64::MAX).unwrap();
+        let key = CacheKey::new(MapProviderId::BingSatellite, tile(1));
+
+        assert_ne!(cache_a.tile_part_path(&key), cache_b.tile_part_path(&key));
+    }
+
+    #[test]
+    fn failed_index_persistence_removes_partial_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_owned();
+        let cache = TileDiskCache::open(root.clone(), u64::MAX).unwrap();
+        fs::remove_file(root.join(INDEX_FILE)).unwrap();
+        fs::create_dir(root.join(INDEX_FILE)).unwrap();
+
+        assert!(cache.persist_index().is_err());
+        assert!(fs::read_dir(&root).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".part-")
+        }));
     }
 }
