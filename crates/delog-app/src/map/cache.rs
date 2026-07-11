@@ -4,6 +4,7 @@ use std::{
     hash::{Hash, Hasher},
     io::{self, Write},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use serde::{Deserialize, Serialize};
@@ -14,6 +15,7 @@ pub const DEFAULT_TILE_CACHE_BYTES: u64 = 1_073_741_824;
 const MIN_CACHE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_CACHE_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const INDEX_FILE: &str = "index.json";
+static PART_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CacheGeneration(pub u64);
@@ -63,7 +65,7 @@ impl TileDiskCache {
             sequence: persisted.sequence,
             index: persisted.entries.into_iter().collect(),
         };
-        cache.remove_invalid_entries()?;
+        cache.reconcile_tiles()?;
         cache.prune()?;
         cache.persist_index()?;
         Ok(cache)
@@ -164,21 +166,30 @@ impl TileDiskCache {
             .join(format!("{}.tile", key.y))
     }
 
-    fn remove_invalid_entries(&mut self) -> io::Result<()> {
-        let invalid: Vec<_> = self
-            .index
-            .iter()
-            .filter_map(|(key, meta)| {
-                fs::metadata(self.path(key))
-                    .ok()
-                    .filter(|data| data.is_file() && data.len() == meta.size)
-                    .is_none()
-                    .then(|| key.clone())
-            })
-            .collect();
-        for key in invalid {
-            remove_if_exists(&self.path(&key))?;
-            self.index.remove(&key);
+    fn reconcile_tiles(&mut self) -> io::Result<()> {
+        let mut files = Vec::new();
+        collect_files(&self.root, &mut files)?;
+        let old = std::mem::take(&mut self.index);
+        for path in files {
+            if path == self.root.join(INDEX_FILE) {
+                continue;
+            }
+            let Some(key) = cache_key_from_path(&self.root, &path) else {
+                remove_if_exists(&path)?;
+                continue;
+            };
+            let bytes = fs::read(&path)?;
+            let file_checksum = checksum(&bytes);
+            let meta = old
+                .get(&key)
+                .filter(|meta| meta.size == bytes.len() as u64 && meta.checksum == file_checksum)
+                .cloned()
+                .unwrap_or_else(|| CacheMeta {
+                    size: bytes.len() as u64,
+                    last_access: self.next_sequence(),
+                    checksum: file_checksum,
+                });
+            self.index.insert(key, meta);
         }
         Ok(())
     }
@@ -210,15 +221,51 @@ impl TileDiskCache {
                 .collect(),
         };
         let bytes = serde_json::to_vec(&persisted).map_err(io::Error::other)?;
-        let part = self
-            .root
-            .join(format!("{INDEX_FILE}.part-{}", std::process::id()));
+        let part = self.root.join(format!(
+            "{INDEX_FILE}.part-{}-{}",
+            std::process::id(),
+            PART_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
         let mut file = File::create(&part)?;
         file.write_all(&bytes)?;
         file.sync_all()?;
         fs::rename(&part, self.root.join(INDEX_FILE))?;
         File::open(&self.root)?.sync_all()
     }
+}
+
+fn collect_files(directory: &Path, files: &mut Vec<PathBuf>) -> io::Result<()> {
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            collect_files(&entry.path(), files)?;
+        } else {
+            files.push(entry.path());
+        }
+    }
+    Ok(())
+}
+
+fn cache_key_from_path(root: &Path, path: &Path) -> Option<CacheKey> {
+    let mut components = path.strip_prefix(root).ok()?.components();
+    let provider = components.next()?.as_os_str().to_str()?;
+    if !matches!(provider, "none" | "bing_satellite") {
+        return None;
+    }
+    let zoom = components.next()?.as_os_str().to_str()?.parse().ok()?;
+    let x = components.next()?.as_os_str().to_str()?.parse().ok()?;
+    let filename = components.next()?.as_os_str().to_str()?;
+    if components.next().is_some() {
+        return None;
+    }
+    let y = filename.strip_suffix(".tile")?.parse().ok()?;
+    Some(CacheKey {
+        provider: provider.to_owned(),
+        zoom,
+        x,
+        y,
+    })
 }
 
 impl CacheKey {
@@ -255,27 +302,10 @@ fn remove_if_exists(path: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs,
-        path::PathBuf,
-        time::{SystemTime, UNIX_EPOCH},
-    };
+    use std::fs;
 
     use super::*;
     use crate::map::provider::{MapProviderId, TileId};
-
-    fn temp_root(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "delog-cache-{name}-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&root).unwrap();
-        root
-    }
 
     fn tile(x: u32) -> TileId {
         TileId { zoom: 3, x, y: 2 }
@@ -283,7 +313,8 @@ mod tests {
 
     #[test]
     fn write_read_round_trip() {
-        let root = temp_root("round-trip");
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_owned();
         let mut cache = TileDiskCache::open(root.clone(), u64::MAX).unwrap();
         cache
             .write(MapProviderId::BingSatellite, tile(1), b"tile data")
@@ -293,12 +324,12 @@ mod tests {
             Some(b"tile data".to_vec())
         );
         assert_eq!(cache.usage_bytes(), 9);
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn corrupt_entry_is_deleted() {
-        let root = temp_root("corrupt");
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_owned();
         let mut cache = TileDiskCache::open(root.clone(), u64::MAX).unwrap();
         cache
             .write(MapProviderId::BingSatellite, tile(1), b"valid")
@@ -311,27 +342,29 @@ mod tests {
         );
         assert!(!path.exists());
         assert_eq!(cache.usage_bytes(), 0);
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn part_files_never_count_as_hits() {
-        let root = temp_root("part");
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_owned();
         let dir = root.join("bing_satellite/3/1");
         fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("2.tile.part-123"), b"partial").unwrap();
+        let part = dir.join("2.tile.part-123");
+        fs::write(&part, b"partial").unwrap();
         let mut cache = TileDiskCache::open(root.clone(), u64::MAX).unwrap();
         assert_eq!(
             cache.read(MapProviderId::BingSatellite, tile(1)).unwrap(),
             None
         );
         assert_eq!(cache.usage_bytes(), 0);
-        fs::remove_dir_all(root).unwrap();
+        assert!(!part.exists());
     }
 
     #[test]
     fn lru_pruning_removes_oldest_entry() {
-        let root = temp_root("lru");
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_owned();
         let mut cache = TileDiskCache::open(root.clone(), 64 * 1024 * 1024).unwrap();
         let chunk = vec![7; 32 * 1024 * 1024];
         cache
@@ -352,12 +385,12 @@ mod tests {
             .read(MapProviderId::BingSatellite, tile(2))
             .unwrap()
             .is_none());
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn shrinking_limit_prunes() {
-        let root = temp_root("shrink");
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_owned();
         let mut cache = TileDiskCache::open(root.clone(), 128 * 1024 * 1024).unwrap();
         let chunk = vec![4; 40 * 1024 * 1024];
         cache
@@ -375,12 +408,12 @@ mod tests {
             .read(MapProviderId::BingSatellite, tile(2))
             .unwrap()
             .is_some());
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn clear_increments_generation_and_zeroes_usage() {
-        let root = temp_root("clear");
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_owned();
         let mut cache = TileDiskCache::open(root.clone(), u64::MAX).unwrap();
         cache
             .write(MapProviderId::BingSatellite, tile(1), b"bytes")
@@ -388,6 +421,43 @@ mod tests {
         assert_eq!(cache.clear().unwrap(), CacheGeneration(1));
         assert_eq!(cache.usage_bytes(), 0);
         assert_eq!(cache.clear().unwrap(), CacheGeneration(2));
-        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_index_rebuilds_usage_from_tiles() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_owned();
+        let path = root.join("bing_satellite/3/1/2.tile");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"orphaned tile").unwrap();
+
+        let mut cache = TileDiskCache::open(root, u64::MAX).unwrap();
+
+        assert_eq!(cache.usage_bytes(), 13);
+        assert_eq!(
+            cache.read(MapProviderId::BingSatellite, tile(1)).unwrap(),
+            Some(b"orphaned tile".to_vec())
+        );
+    }
+
+    #[test]
+    fn corrupt_index_rebuilds_and_prunes_scanned_tiles() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_owned();
+        fs::write(root.join(INDEX_FILE), b"not json").unwrap();
+        for x in [1, 2, 3] {
+            let path = root.join(format!("bing_satellite/3/{x}/2.tile"));
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, vec![x as u8; 32 * 1024 * 1024]).unwrap();
+        }
+
+        let cache = TileDiskCache::open(root.clone(), 64 * 1024 * 1024).unwrap();
+
+        assert_eq!(cache.usage_bytes(), 64 * 1024 * 1024);
+        let remaining = [1, 2, 3]
+            .into_iter()
+            .filter(|x| root.join(format!("bing_satellite/3/{x}/2.tile")).exists())
+            .count();
+        assert_eq!(remaining, 2);
     }
 }
