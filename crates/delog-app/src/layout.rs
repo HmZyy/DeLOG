@@ -972,6 +972,7 @@ fn insert_node(
             },
             tracked_vehicle: scene.tracked_vehicle,
             trail_to_playhead: scene.trail_to_playhead,
+            ..Scene3dPane::default()
         }))),
         LayoutNode::Split { split, children } => {
             let child_ids = children

@@ -541,4 +541,47 @@ fn fs() -> @location(0) vec4<f32> {
             assert!(image.matches(16, 32, [0, 0, 255, 255], 4));
         }
     }
+
+    #[test]
+    fn scene_draw_order_places_tiles_before_depth_composed_overlays() {
+        let red = solid([255, 0, 0, 255]);
+        let ctx = RenderContext::headless().expect("headless adapter");
+        let target = Scene3dTarget::new(ctx.clone(), 64, 64);
+        let mut tiles = MapTilePipeline::new(
+            &ctx,
+            target.color_format(),
+            target.depth_format(),
+            target.sample_count(),
+        );
+        tiles
+            .upload(MapTileUpload {
+                key: 1,
+                rgba: &red,
+                corners: [
+                    [-1.0, -1.0, 0.8],
+                    [1.0, -1.0, 0.8],
+                    [1.0, 1.0, 0.8],
+                    [-1.0, 1.0, 0.8],
+                ],
+            })
+            .unwrap();
+        tiles.set_view_proj(glam::Mat4::IDENTITY.to_cols_array_2d());
+        let trajectory_or_vehicle = NearTrianglePipeline::new(&ctx);
+        let mut encoder = ctx.device().create_command_encoder(&Default::default());
+        {
+            let mut pass = target.begin_pass(&mut encoder, wgpu::Color::BLACK);
+            // Scene contract: map first, then the grid, then trajectories/vehicles.
+            // The grid is omitted here because its ground depth equals the map;
+            // the near triangle proves the later overlay still wins depth.
+            tiles.draw(&mut pass);
+            trajectory_or_vehicle.draw(&mut pass);
+        }
+        ctx.queue().submit([encoder.finish()]);
+        ctx.device()
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
+        let image = target.read_rgba();
+        assert!(image.matches(32, 32, [0, 255, 0, 255], 4));
+        assert!(image.matches(8, 32, [255, 0, 0, 255], 4));
+    }
 }
