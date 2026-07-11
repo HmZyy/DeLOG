@@ -1,4 +1,9 @@
-use std::{collections::HashSet, f64::consts::PI, ops::RangeInclusive};
+use std::{
+    cmp::Reverse,
+    collections::{BinaryHeap, HashSet},
+    f64::consts::PI,
+    ops::RangeInclusive,
+};
 
 use glam::{DMat4, DVec3, DVec4};
 
@@ -13,7 +18,8 @@ pub struct VisibleSet {
 }
 
 fn world_size(zoom: u8) -> u32 {
-    1_u32.checked_shl(zoom.into()).unwrap_or(u32::MAX)
+    assert!(zoom <= 31, "Web Mercator zoom must be at most 31");
+    1_u32 << zoom
 }
 
 fn normalized_xy(lat_rad: f64, lon_rad: f64) -> (f64, f64) {
@@ -36,6 +42,9 @@ pub fn lat_lon_to_tile(lat_rad: f64, lon_rad: f64, zoom: u8) -> TileId {
 
 /// Returns `[north, west, south, east]` in radians.
 pub fn tile_bounds(tile: TileId) -> Option<[f64; 4]> {
+    if tile.zoom > 31 {
+        return None;
+    }
     let size = world_size(tile.zoom);
     if tile.x >= size || tile.y >= size {
         return None;
@@ -66,8 +75,11 @@ pub fn visible_tiles(
     anchor_rad: [f64; 2],
     zoom: RangeInclusive<u8>,
 ) -> VisibleSet {
+    if *zoom.start() > 31 || *zoom.end() > 31 {
+        return VisibleSet::default();
+    }
     let min_zoom = *zoom.start();
-    let max_zoom = (*zoom.end()).min(31);
+    let max_zoom = *zoom.end();
     if min_zoom > max_zoom {
         return VisibleSet::default();
     }
@@ -126,49 +138,52 @@ pub fn visible_tiles(
     let max_x = hit_tiles.iter().map(|t| unwrap_x(t.x)).max().unwrap() + 1;
     let min_y = (hit_tiles.iter().map(|t| i64::from(t.y)).min().unwrap() - 1).max(0);
     let max_y = (hit_tiles.iter().map(|t| i64::from(t.y)).max().unwrap() + 1).min(size - 1);
+    VisibleSet {
+        tiles: nearest_tiles(selected_zoom, min_x, max_x, min_y, max_y),
+    }
+}
+
+fn nearest_tiles(zoom: u8, min_x: i64, max_x: i64, min_y: i64, max_y: i64) -> Vec<TileId> {
+    let size = i64::from(world_size(zoom));
     let center_x = (min_x + max_x) / 2;
     let center_y = (min_y + max_y) / 2;
-
-    // Walk outward from the footprint center. Memory and emitted work are both
-    // bounded by TILE_LIMIT, even when a near-horizon footprint spans the world.
+    let mut frontier = BinaryHeap::new();
+    let mut visited = HashSet::new();
+    let mut emitted = HashSet::with_capacity(TILE_LIMIT);
     let mut tiles = Vec::with_capacity(TILE_LIMIT);
-    let mut seen = HashSet::with_capacity(TILE_LIMIT);
-    let mut radius = 0_i64;
-    while tiles.len() < TILE_LIMIT {
-        let mut added = false;
-        for y in (center_y - radius).max(min_y)..=(center_y + radius).min(max_y) {
-            for x in (center_x - radius).max(min_x)..=(center_x + radius).min(max_x) {
-                if radius > 0 && (x - center_x).abs() != radius && (y - center_y).abs() != radius {
-                    continue;
-                }
-                let tile = TileId {
-                    zoom: selected_zoom,
-                    x: x.rem_euclid(size) as u32,
-                    y: y as u32,
-                };
-                if seen.insert(tile) {
-                    tiles.push(tile);
-                    if tiles.len() == TILE_LIMIT {
-                        break;
-                    }
-                }
-                added = true;
-            }
+    let key = |x: i64, y: i64| {
+        // Doubled coordinates preserve exact distances from half-tile midpoints.
+        let dx = 2 * x - (min_x + max_x);
+        let dy = 2 * y - (min_y + max_y);
+        Reverse((dx * dx + dy * dy, y, x))
+    };
+    frontier.push(key(center_x, center_y));
+    visited.insert((center_x, center_y));
+
+    while let Some(Reverse((_, y, x))) = frontier.pop() {
+        let tile = TileId {
+            zoom,
+            x: x.rem_euclid(size) as u32,
+            y: y as u32,
+        };
+        if emitted.insert(tile) {
+            tiles.push(tile);
             if tiles.len() == TILE_LIMIT {
                 break;
             }
         }
-        if !added
-            || (center_x - radius <= min_x
-                && center_x + radius >= max_x
-                && center_y - radius <= min_y
-                && center_y + radius >= max_y)
-        {
-            break;
+        for (next_x, next_y) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)] {
+            if next_x >= min_x
+                && next_x <= max_x
+                && next_y >= min_y
+                && next_y <= max_y
+                && visited.insert((next_x, next_y))
+            {
+                frontier.push(key(next_x, next_y));
+            }
         }
-        radius += 1;
     }
-    VisibleSet { tiles }
+    tiles
 }
 
 pub fn tile_corners_render(tile: TileId, anchor_rad_alt: [f64; 3]) -> [[f32; 3]; 4] {
@@ -296,6 +311,55 @@ mod tests {
         assert!(set.tiles.len() <= TILE_LIMIT);
         let unique: std::collections::HashSet<_> = set.tiles.iter().copied().collect();
         assert_eq!(unique.len(), set.tiles.len());
+    }
+
+    #[test]
+    fn truncated_selection_contains_the_256_nearest_tiles() {
+        let tiles = nearest_tiles(10, 0, 39, 0, 39);
+        let mut expected: Vec<_> = (0_i64..=39)
+            .flat_map(|y| {
+                (0_i64..=39).map(move |x| ((2 * x - 39).pow(2) + (2 * y - 39).pow(2), y, x))
+            })
+            .collect();
+        expected.sort_unstable();
+        let expected: Vec<_> = expected
+            .into_iter()
+            .take(TILE_LIMIT)
+            .map(|(_, y, x)| TileId {
+                zoom: 10,
+                x: x.rem_euclid(1 << 10) as u32,
+                y: y as u32,
+            })
+            .collect();
+
+        assert_eq!(tiles, expected);
+    }
+
+    #[test]
+    #[should_panic(expected = "Web Mercator zoom must be at most 31")]
+    fn lat_lon_to_tile_rejects_zoom_32() {
+        let _ = lat_lon_to_tile(0.0, 0.0, 32);
+    }
+
+    #[test]
+    fn tile_bounds_rejects_zoom_32() {
+        assert!(
+            tile_bounds(TileId {
+                zoom: 32,
+                x: 0,
+                y: 0
+            })
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn visible_tiles_rejects_a_range_containing_zoom_32() {
+        assert!(
+            visible_tiles(DMat4::IDENTITY, [1, 1], [0.0, 0.0], 31..=32)
+                .tiles
+                .is_empty()
+        );
     }
 
     #[test]
