@@ -41,6 +41,8 @@ pub struct Scene3dPane {
     pub(crate) map_generation: u64,
     pub(crate) map_zoom: Option<u8>,
     pub(crate) map_previous_zoom: Option<u8>,
+    pub(crate) map_tiles: Vec<(crate::map::provider::TileId, i32)>,
+    pub(crate) map_previous_tiles: Vec<crate::map::provider::TileId>,
 }
 
 impl Scene3dPane {
@@ -65,6 +67,8 @@ impl Default for Scene3dPane {
             map_generation: 0,
             map_zoom: None,
             map_previous_zoom: None,
+            map_tiles: Vec::new(),
+            map_previous_tiles: Vec::new(),
         }
     }
 }
@@ -741,15 +745,25 @@ impl Behavior<'_> {
                 let requested_zoom = visible.tiles.first().map(|id| id.zoom);
                 if requested_zoom != pane.map_zoom {
                     pane.map_previous_zoom = pane.map_zoom;
+                    pane.map_previous_tiles = std::mem::take(&mut pane.map_tiles)
+                        .into_iter()
+                        .map(|(id, _)| id)
+                        .collect();
                     pane.map_zoom = requested_zoom;
                 }
-                for (priority, id) in visible.tiles.into_iter().enumerate() {
+                pane.map_tiles = visible
+                    .tiles
+                    .into_iter()
+                    .enumerate()
+                    .map(|(priority, id)| (id, priority as i32))
+                    .collect();
+                for (id, priority) in pane.map_tiles.iter().copied() {
                     manager.request(TileRequest {
                         scope: pane.map_scope,
                         provider: provider_id,
                         id,
                         corners: mercator::tile_corners_render(id, anchor),
-                        priority: priority as i32,
+                        priority,
                         generation: pane.map_generation,
                     });
                 }
@@ -758,6 +772,8 @@ impl Behavior<'_> {
                 pane.update_map_selection(None);
                 pane.map_zoom = None;
                 pane.map_previous_zoom = None;
+                pane.map_tiles.clear();
+                pane.map_previous_tiles.clear();
                 Vec::new()
             };
 
@@ -810,8 +826,8 @@ impl Behavior<'_> {
                         .map_or(0, |manager| manager.status().epoch),
                     provider: provider_id,
                     generation: pane.map_generation,
-                    current_zoom: pane.map_zoom,
-                    previous_zoom: pane.map_previous_zoom,
+                    current_tiles: pane.map_tiles.clone(),
+                    previous_tiles: pane.map_previous_tiles.clone(),
                     enabled: pane.map_selection.is_some(),
                 },
                 &ready_tiles,
@@ -2266,9 +2282,7 @@ mod tests {
             pane.update_map_selection(Some((0, MapProviderId::BingSatellite, [0; 3]))),
             first
         );
-        assert!(
-            pane.update_map_selection(Some((1, MapProviderId::BingSatellite, [0; 3]))) > first
-        );
+        assert!(pane.update_map_selection(Some((1, MapProviderId::BingSatellite, [0; 3]))) > first);
     }
 
     #[test]
