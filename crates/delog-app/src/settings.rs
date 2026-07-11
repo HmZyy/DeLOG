@@ -1,6 +1,15 @@
 //! Settings dialog state and tab rendering.
 
+use crate::map::provider::{MapProviderId, provider};
 use crate::theme::ThemeChoice;
+
+const DEFAULT_TILE_CACHE_LIMIT_BYTES: u64 = 1024 * 1024 * 1024;
+const MIN_TILE_CACHE_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_TILE_CACHE_LIMIT_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+
+fn default_tile_cache_limit_bytes() -> u64 {
+    DEFAULT_TILE_CACHE_LIMIT_BYTES
+}
 
 fn default_decimate_threshold() -> f32 {
     8.0
@@ -394,6 +403,10 @@ fn finite_or(value: f32, fallback: f32) -> f32 {
 /// Distances are render-space metres.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Scene3dSettings {
+    #[serde(default)]
+    pub map_provider: MapProviderId,
+    #[serde(default = "default_tile_cache_limit_bytes")]
+    pub tile_cache_limit_bytes: u64,
     #[serde(default = "default_scene_far_clip_m")]
     pub far_clip_m: f32,
     #[serde(default = "default_scene_max_camera_distance_m")]
@@ -418,6 +431,8 @@ pub struct Scene3dSettings {
 impl Default for Scene3dSettings {
     fn default() -> Self {
         Self {
+            map_provider: MapProviderId::None,
+            tile_cache_limit_bytes: default_tile_cache_limit_bytes(),
             far_clip_m: default_scene_far_clip_m(),
             max_camera_distance_m: default_scene_max_camera_distance_m(),
             show_grid: true,
@@ -528,7 +543,12 @@ impl SettingsDialog {
         self.open = true;
     }
 
-    pub fn show(&mut self, ctx: &egui::Context, settings: &mut AppSettings) -> SettingsChange {
+    pub fn show(
+        &mut self,
+        ctx: &egui::Context,
+        settings: &mut AppSettings,
+        tile_cache: TileCacheUiState,
+    ) -> SettingsChange {
         if !self.open {
             return SettingsChange::default();
         }
@@ -547,6 +567,7 @@ impl SettingsDialog {
                 let mut viewer = SettingsTabViewer {
                     settings,
                     change: &mut change,
+                    tile_cache,
                 };
                 egui_dock::DockArea::new(&mut self.dock_state)
                     .id(egui::Id::new("settings_dock_area"))
@@ -567,6 +588,7 @@ impl SettingsDialog {
 struct SettingsTabViewer<'a> {
     settings: &'a mut AppSettings,
     change: &'a mut SettingsChange,
+    tile_cache: TileCacheUiState,
 }
 
 impl egui_dock::TabViewer for SettingsTabViewer<'_> {
@@ -589,7 +611,7 @@ impl egui_dock::TabViewer for SettingsTabViewer<'_> {
                 rendering_tab(ui, self.settings);
             }
             SettingsTab::Scene3d => {
-                scene3d_tab(ui, self.settings);
+                *self.change |= scene3d_tab(ui, self.settings, self.tile_cache);
             }
             SettingsTab::Scripting => {
                 scripting_tab(ui, self.settings);
@@ -605,12 +627,24 @@ impl egui_dock::TabViewer for SettingsTabViewer<'_> {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct SettingsChange {
     pub theme_changed: bool,
+    pub map_provider_changed: bool,
+    pub tile_cache_limit_changed: bool,
+    pub clear_tile_cache: bool,
 }
 
 impl std::ops::BitOrAssign for SettingsChange {
     fn bitor_assign(&mut self, rhs: Self) {
         self.theme_changed |= rhs.theme_changed;
+        self.map_provider_changed |= rhs.map_provider_changed;
+        self.tile_cache_limit_changed |= rhs.tile_cache_limit_changed;
+        self.clear_tile_cache |= rhs.clear_tile_cache;
     }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct TileCacheUiState {
+    pub usage_bytes: u64,
+    pub clearing: bool,
 }
 
 fn general_tab(ui: &mut egui::Ui, settings: &mut AppSettings) -> SettingsChange {
@@ -684,6 +718,7 @@ fn general_tab(ui: &mut egui::Ui, settings: &mut AppSettings) -> SettingsChange 
 
     SettingsChange {
         theme_changed: settings.theme != before,
+        ..Default::default()
     }
 }
 
@@ -831,12 +866,64 @@ fn rendering_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
     }
 }
 
-fn scene3d_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
+fn scene3d_tab(
+    ui: &mut egui::Ui,
+    settings: &mut AppSettings,
+    tile_cache: TileCacheUiState,
+) -> SettingsChange {
+    let before_provider = settings.scene3d.map_provider;
+    let before_limit = settings.scene3d.tile_cache_limit_bytes;
+    let mut clear_tile_cache = false;
     let s = &mut settings.scene3d;
     egui::Grid::new("settings-scene3d-grid")
         .num_columns(2)
         .spacing(egui::vec2(16.0, 10.0))
         .show(ui, |ui| {
+            ui.label("Map provider");
+            egui::ComboBox::from_id_salt("settings-map-provider")
+                .selected_text(map_provider_label(s.map_provider))
+                .show_ui(ui, |ui| {
+                    for id in [MapProviderId::None, MapProviderId::BingSatellite] {
+                        ui.selectable_value(&mut s.map_provider, id, map_provider_label(id));
+                    }
+                });
+            ui.end_row();
+
+            ui.label("Tile cache limit");
+            ui.add(
+                egui::Slider::new(
+                    &mut s.tile_cache_limit_bytes,
+                    MIN_TILE_CACHE_LIMIT_BYTES..=MAX_TILE_CACHE_LIMIT_BYTES,
+                )
+                .logarithmic(true)
+                .custom_formatter(|value, _| format_bytes(value as u64)),
+            );
+            ui.end_row();
+
+            ui.label("Cache usage");
+            ui.horizontal(|ui| {
+                ui.label(format_bytes(tile_cache.usage_bytes));
+                if ui
+                    .add_enabled(!tile_cache.clearing, egui::Button::new("Clear tile cache"))
+                    .clicked()
+                {
+                    clear_tile_cache = true;
+                }
+                if tile_cache.clearing {
+                    ui.spinner();
+                }
+            });
+            ui.end_row();
+
+            ui.label("Attribution");
+            if let Some(provider) = provider(s.map_provider) {
+                let (label, url) = provider.attribution();
+                ui.hyperlink_to(label, url);
+            } else {
+                ui.label("No map provider selected");
+            }
+            ui.end_row();
+
             ui.label("Render distance")
                 .on_hover_text("Far clipping plane for vehicles, paths, and grid rays.");
             ui.add(
@@ -903,6 +990,26 @@ fn scene3d_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
     if reset_to_defaults_button(ui) {
         settings.scene3d = Scene3dSettings::default();
     }
+    SettingsChange {
+        map_provider_changed: settings.scene3d.map_provider != before_provider,
+        tile_cache_limit_changed: settings.scene3d.tile_cache_limit_bytes != before_limit,
+        clear_tile_cache,
+        ..Default::default()
+    }
+}
+
+fn map_provider_label(id: MapProviderId) -> &'static str {
+    provider(id).map_or("None", |provider| provider.label())
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    const MIB: f64 = 1024.0 * 1024.0;
+    if bytes >= 1024 * 1024 * 1024 {
+        format!("{:.1} GiB", bytes as f64 / GIB)
+    } else {
+        format!("{:.0} MiB", bytes as f64 / MIB)
+    }
 }
 
 fn scripting_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
@@ -950,6 +1057,59 @@ fn reset_to_defaults_button(ui: &mut egui::Ui) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::map::provider::MapProviderId;
+
+    #[test]
+    fn legacy_empty_settings_default_map_and_cache() {
+        let settings: AppSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(settings.scene3d.map_provider, MapProviderId::None);
+        assert_eq!(settings.scene3d.tile_cache_limit_bytes, 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn map_and_cache_settings_round_trip_with_stable_provider_name() {
+        let mut settings = AppSettings::default();
+        settings.scene3d.map_provider = MapProviderId::BingSatellite;
+        settings.scene3d.tile_cache_limit_bytes = 4 * 1024 * 1024 * 1024;
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(json.contains("\"map_provider\":\"bing_satellite\""));
+        assert_eq!(
+            serde_json::from_str::<AppSettings>(&json).unwrap(),
+            settings
+        );
+    }
+
+    #[test]
+    fn scene_defaults_reset_map_and_cache() {
+        let defaults = Scene3dSettings::default();
+        assert_eq!(defaults.map_provider, MapProviderId::None);
+        assert_eq!(defaults.tile_cache_limit_bytes, 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn scene_ui_exposes_map_provider_cache_usage_attribution_and_clear() {
+        let source = include_str!("settings.rs");
+        for expected in [
+            "settings-map-provider",
+            "Tile cache limit",
+            "Cache usage",
+            "hyperlink_to",
+            "Clear tile cache",
+            "TileCacheUiState",
+        ] {
+            assert!(source.contains(expected), "missing {expected}");
+        }
+    }
+
+    #[test]
+    fn app_wires_cache_controls_without_blocking_the_ui() {
+        let source = include_str!("app.rs");
+        assert!(source.contains("TileManager::new"));
+        assert!(source.contains("manager.set_limit"));
+        assert!(source.contains("manager.clear_cache"));
+        assert!(source.contains("CacheActionStatus::Pending"));
+        assert!(!source.contains("block_on"));
+    }
 
     #[test]
     fn settings_tabs_are_named_for_stable_navigation() {
@@ -1002,7 +1162,10 @@ mod tests {
 
         assert!(source.contains("fn reset_to_defaults_button"));
         assert!(source.contains("egui::Layout::right_to_left"));
-        assert_eq!(production.matches("reset_to_defaults_button(ui)").count(), 4);
+        assert_eq!(
+            production.matches("reset_to_defaults_button(ui)").count(),
+            4
+        );
     }
 
     #[test]
@@ -1130,6 +1293,8 @@ mod tests {
     fn app_settings_persist_scene3d_settings() {
         let settings = AppSettings {
             scene3d: Scene3dSettings {
+                map_provider: MapProviderId::BingSatellite,
+                tile_cache_limit_bytes: 2 * 1024 * 1024 * 1024,
                 far_clip_m: 25_000.0,
                 max_camera_distance_m: 12_000.0,
                 show_grid: false,
