@@ -14,6 +14,7 @@ use delog_render::{
 use eframe::{egui_wgpu, wgpu};
 
 use crate::camera::OrbitCamera;
+use crate::map::provider::MapProviderId;
 use crate::map::worker::{MapScopeId, ReadyTile};
 use crate::models;
 use crate::plot::{PlotPane, TraceMode, ViewX};
@@ -24,6 +25,7 @@ use crate::vehicle::ModelKind;
 pub struct MapTileSelection {
     pub scope: MapScopeId,
     pub epoch: u64,
+    pub provider: MapProviderId,
     pub generation: u64,
     pub current_zoom: Option<u8>,
     pub previous_zoom: Option<u8>,
@@ -402,7 +404,7 @@ impl GpuBridge {
                 bytemuck::bytes_of(&Traj3dUniform::new(vp_cols, res.axis_gizmo.color)),
             );
             res.prepare_vehicles(vp_cols, camera.eye().to_array(), vehicles);
-            res.prepare_map_tiles(vp_cols, map_selection, ready_tiles);
+            let visible_map_tiles = res.prepare_map_tiles(vp_cols, map_selection, ready_tiles);
 
             let clear = wgpu::Color {
                 r: 0.07,
@@ -418,7 +420,7 @@ impl GpuBridge {
                     });
             {
                 let mut pass = res.target.begin_pass(&mut enc, clear);
-                res.map_tiles.draw(&mut pass);
+                res.map_tiles.draw(&mut pass, &visible_map_tiles);
                 if scene3d.show_grid {
                     res.grid.draw(&mut pass);
                 }
@@ -914,31 +916,49 @@ impl SceneResources {
         vp: [[f32; 4]; 4],
         selection: MapTileSelection,
         ready: &[ReadyTile],
-    ) {
+    ) -> Vec<u64> {
         self.map_tiles.set_view_proj(vp);
         if self.map_tile_epoch != selection.epoch {
             self.map_tile_epoch = selection.epoch;
             self.map_tile_cache.clear();
             self.map_tile_resident_signatures.clear();
         }
-        let cache = self.map_tile_cache.entry(selection.scope).or_default();
-        let mut changed = std::collections::HashSet::new();
-        for tile in ready.iter().filter(|tile| tile.scope == selection.scope) {
-            let key = map_tile_key(tile);
-            let signature = map_tile_signature(tile);
-            if self.map_tile_resident_signatures.get(&key) != Some(&signature) {
-                changed.insert(key);
-            }
-            cache.insert(key, tile.clone());
-        }
-        cache.retain(|_, tile| map_tile_matches(selection, tile));
-        let desired: Vec<_> = cache.keys().copied().collect();
-        self.map_tiles.retain(desired.iter().copied());
-        self.map_tile_resident_signatures
-            .retain(|key, _| desired.contains(key));
         if !selection.enabled {
-            return;
+            self.map_tile_cache.remove(&selection.scope);
+            self.retain_map_tile_union();
+            return Vec::new();
         }
+        let selection_changed = self
+            .map_tile_cache
+            .get(&selection.scope)
+            .into_iter()
+            .flat_map(HashMap::values)
+            .any(|tile| {
+                tile.provider != selection.provider || tile.generation != selection.generation
+            });
+        if selection_changed {
+            self.map_tile_cache.remove(&selection.scope);
+        }
+        let (mut visible, changed) = {
+            let cache = self.map_tile_cache.entry(selection.scope).or_default();
+            let mut changed = std::collections::HashSet::new();
+            for tile in ready.iter().filter(|tile| tile.scope == selection.scope) {
+                let key = map_tile_key(tile);
+                let signature = map_tile_signature(tile);
+                if self.map_tile_resident_signatures.get(&key) != Some(&signature) {
+                    changed.insert(key);
+                }
+                cache.insert(key, tile.clone());
+            }
+            cache.retain(|_, tile| map_tile_matches(selection, tile));
+            (cache.keys().copied().collect::<Vec<_>>(), changed)
+        };
+        visible.sort_unstable();
+        // Free stale layers before uploading replacements. This retains the
+        // union across scopes, while making provider/generation/zoom changes
+        // release this scope's obsolete layers even when the atlas was full.
+        self.retain_map_tile_union();
+        let cache = &self.map_tile_cache[&selection.scope];
         let mut tiles: Vec<_> = cache.iter().collect();
         tiles.sort_by_key(|(key, _)| **key);
         for (key, tile) in tiles {
@@ -956,6 +976,19 @@ impl SceneResources {
                     .insert(*key, map_tile_signature(tile));
             }
         }
+        visible
+    }
+
+    fn retain_map_tile_union(&mut self) {
+        let resident: std::collections::HashSet<_> = self
+            .map_tile_cache
+            .values()
+            .flat_map(HashMap::keys)
+            .copied()
+            .collect();
+        self.map_tiles.retain(resident.iter().copied());
+        self.map_tile_resident_signatures
+            .retain(|key, _| resident.contains(key));
     }
 }
 
@@ -963,6 +996,7 @@ fn map_tile_matches(selection: MapTileSelection, tile: &ReadyTile) -> bool {
     selection.enabled
         && tile.scope == selection.scope
         && tile.epoch == selection.epoch
+        && tile.provider == selection.provider
         && tile.generation == selection.generation
         && (Some(tile.id.zoom) == selection.current_zoom
             || Some(tile.id.zoom) == selection.previous_zoom)
@@ -1400,6 +1434,7 @@ mod tests {
         let selection = MapTileSelection {
             scope: MapScopeId(4),
             epoch: 3,
+            provider: crate::map::provider::MapProviderId::BingSatellite,
             generation: 9,
             current_zoom: Some(12),
             previous_zoom: Some(11),
@@ -1435,6 +1470,7 @@ mod tests {
         let selection = MapTileSelection {
             scope: MapScopeId(7),
             epoch: 0,
+            provider: crate::map::provider::MapProviderId::BingSatellite,
             generation: 1,
             current_zoom: Some(3),
             previous_zoom: None,
@@ -1480,6 +1516,7 @@ mod tests {
         let selection = MapTileSelection {
             scope: MapScopeId(8),
             epoch: 2,
+            provider: crate::map::provider::MapProviderId::BingSatellite,
             generation: 5,
             current_zoom: Some(4),
             previous_zoom: None,
@@ -1535,6 +1572,80 @@ mod tests {
             3,
             "changed content uploads"
         );
+    }
+
+    #[test]
+    fn alternating_map_scopes_keep_union_resident_without_cross_pane_draws() {
+        let Some(ctx) = RenderContext::headless() else {
+            eprintln!("no wgpu adapter — skipping multi-pane map residency test");
+            return;
+        };
+        let mut resources = SceneResources::new(ctx);
+        let selection = |scope| MapTileSelection {
+            scope: MapScopeId(scope),
+            epoch: 4,
+            provider: crate::map::provider::MapProviderId::BingSatellite,
+            generation: 1,
+            current_zoom: Some(6),
+            previous_zoom: None,
+            enabled: true,
+        };
+        let tile = |scope, x, color: [u8; 4]| ReadyTile {
+            scope: MapScopeId(scope),
+            epoch: 4,
+            provider: crate::map::provider::MapProviderId::BingSatellite,
+            id: crate::map::provider::TileId { zoom: 6, x, y: 2 },
+            generation: 1,
+            rgba: color.repeat(256 * 256),
+            corners: [[x as f32, 0.0, 0.0]; 4],
+        };
+        let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+        let tile_a = tile(10, 1, [10, 20, 30, 255]);
+        let tile_b = tile(20, 2, [40, 50, 60, 255]);
+        let key_a = map_tile_key(&tile_a);
+        let key_b = map_tile_key(&tile_b);
+
+        let draw_a = resources.prepare_map_tiles(identity, selection(10), &[tile_a]);
+        assert_eq!(draw_a, vec![key_a], "pane A draws only A");
+        let draw_b = resources.prepare_map_tiles(identity, selection(20), &[tile_b]);
+        assert_eq!(draw_b, vec![key_b], "pane B draws only B");
+        let draw_a_again = resources.prepare_map_tiles(identity, selection(10), &[]);
+        assert_eq!(draw_a_again, vec![key_a], "pane A still draws only A");
+        assert_eq!(resources.map_tiles.resident_tile_count(), 2);
+        assert_eq!(
+            resources.map_tiles.upload_count(),
+            2,
+            "each scope uploads once"
+        );
+
+        let draw_disabled_b = resources.prepare_map_tiles(
+            identity,
+            MapTileSelection {
+                enabled: false,
+                ..selection(20)
+            },
+            &[],
+        );
+        assert!(draw_disabled_b.is_empty());
+        assert!(!resources.map_tile_cache.contains_key(&MapScopeId(20)));
+        assert_eq!(resources.map_tiles.resident_tile_count(), 1);
+        assert!(resources.map_tiles.contains(key_a), "disabling B retains A");
+
+        let draw_a_after_b_disabled = resources.prepare_map_tiles(identity, selection(10), &[]);
+        assert_eq!(draw_a_after_b_disabled, vec![key_a]);
+        assert_eq!(resources.map_tiles.upload_count(), 2, "A is not reuploaded");
+
+        let draw_after_epoch = resources.prepare_map_tiles(
+            identity,
+            MapTileSelection {
+                epoch: 5,
+                ..selection(10)
+            },
+            &[],
+        );
+        assert!(draw_after_epoch.is_empty());
+        assert!(resources.map_tile_cache.values().all(HashMap::is_empty));
+        assert_eq!(resources.map_tiles.resident_tile_count(), 0);
     }
 
     #[test]
