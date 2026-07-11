@@ -93,6 +93,7 @@ fn sample_ground(inv_vp: DMat4) -> Vec<Option<ScreenHit>> {
 fn select_zoom(
     samples: &[Option<ScreenHit>],
     viewport_px: [u32; 2],
+    anchor_rad: [f64; 2],
     min_zoom: u8,
     max_zoom: u8,
 ) -> u8 {
@@ -132,7 +133,23 @@ fn select_zoom(
     }
     values.sort_by(f64::total_cmp);
     let metres_per_pixel = values[values.len() / 4];
-    let earth_circumference = 2.0 * PI * 6_378_137.0;
+    let mut latitudes = samples
+        .iter()
+        .flatten()
+        .map(|hit| {
+            crate::geo::ned_to_geodetic(
+                DVec3::new(-hit.world.z, hit.world.x, 0.0),
+                anchor_rad[0],
+                anchor_rad[1],
+                0.0,
+            )
+            .0
+            .clamp(-MAX_LAT_RAD, MAX_LAT_RAD)
+        })
+        .collect::<Vec<_>>();
+    latitudes.sort_by(f64::total_cmp);
+    let representative_latitude = latitudes[latitudes.len() / 2];
+    let earth_circumference = 2.0 * PI * 6_378_137.0 * representative_latitude.cos();
     let ideal = (earth_circumference / (metres_per_pixel * 256.0))
         .log2()
         .floor() as i32;
@@ -210,14 +227,15 @@ fn ranked_tiles(
         }
     }
     for (index, hit) in samples.iter().enumerate() {
-        if let (Some(_), Some((x, y))) = (hit, coordinates[index]) {
+        if let (Some(hit), Some((x, y))) = (hit, coordinates[index]) {
             insert_rect(
                 x - 1,
                 x + 1,
                 (y - 1).max(0),
                 (y + 1).min(size - 1),
-                SAMPLE_ROWS,
+                SAMPLE_ROWS - hit.row,
             );
+            insert_rect(x, x, y, y, SAMPLE_ROWS + 1);
         }
     }
     let mut ranked: Vec<_> = priorities.into_iter().collect();
@@ -253,7 +271,7 @@ pub fn visible_tiles(
         return VisibleSet::default();
     }
     let samples = sample_ground(inv_vp);
-    let selected_zoom = select_zoom(&samples, viewport_px, min_zoom, max_zoom);
+    let selected_zoom = select_zoom(&samples, viewport_px, anchor_rad, min_zoom, max_zoom);
     VisibleSet {
         tiles: ranked_tiles(&samples, selected_zoom, anchor_rad),
     }
@@ -346,6 +364,23 @@ mod tests {
         let (lat, lon, _) =
             crate::geo::ned_to_geodetic(DVec3::new(-hit.z, hit.x, 0.0), anchor[0], anchor[1], 0.0);
         Some(lat_lon_to_tile(lat, lon, zoom))
+    }
+
+    fn screen_hit_at_tile(col: usize, row: usize, tile: TileId) -> ScreenHit {
+        let [north, west, south, east] = tile_bounds(tile).unwrap();
+        let ned = crate::geo::geodetic_to_ned(
+            (north + south) / 2.0,
+            (west + east) / 2.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        );
+        ScreenHit {
+            col,
+            row,
+            world: DVec3::new(ned.y, 0.0, -ned.x),
+        }
     }
 
     #[test]
@@ -519,6 +554,60 @@ mod tests {
         assert_eq!(
             set.tiles.iter().copied().collect::<HashSet<_>>().len(),
             set.tiles.len()
+        );
+    }
+
+    #[test]
+    fn high_latitude_uses_local_web_mercator_scale_for_zoom() {
+        let inv_vp = inverse_view_projection(
+            DVec3::new(0.0, 10_000.0, 0.0),
+            DVec3::new(0.0, 0.0, -20_000.0),
+            16.0 / 9.0,
+        );
+        let equator = visible_tiles(inv_vp, [1920, 1080], [0.0, 0.0], 0..=19)
+            .tiles
+            .first()
+            .unwrap()
+            .zoom;
+        let high_latitude = visible_tiles(inv_vp, [1920, 1080], [70_f64.to_radians(), 0.0], 0..=19)
+            .tiles
+            .first()
+            .unwrap()
+            .zoom;
+
+        assert!(high_latitude < equator, "{high_latitude} vs {equator}");
+    }
+
+    #[test]
+    fn cap_pressure_preserves_foreground_cell_interior() {
+        let zoom = 19;
+        let samples = (0..SAMPLE_ROWS)
+            .flat_map(|row| {
+                (0..SAMPLE_COLS).map(move |col| {
+                    Some(screen_hit_at_tile(
+                        col,
+                        row,
+                        TileId {
+                            zoom,
+                            x: 262_000 + col as u32 * 10,
+                            y: 262_000 + row as u32 * 10,
+                        },
+                    ))
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let tiles = ranked_tiles(&samples, zoom, [0.0, 0.0]);
+        let foreground_interior = TileId {
+            zoom,
+            x: 262_042,
+            y: 262_002,
+        };
+
+        assert_eq!(tiles.len(), TILE_LIMIT);
+        assert!(
+            tiles.contains(&foreground_interior),
+            "sample borders exhausted the cap before {foreground_interior:?}"
         );
     }
 
