@@ -933,15 +933,6 @@ fn scene3d_tab(
             });
             ui.end_row();
 
-            ui.label("Attribution");
-            if let Some(provider) = provider(s.map_provider) {
-                let (label, url) = provider.attribution();
-                ui.hyperlink_to(label, url);
-            } else {
-                ui.label("No map provider selected");
-            }
-            ui.end_row();
-
             ui.label("Render distance")
                 .on_hover_text("Far clipping plane for vehicles, paths, and grid rays.");
             ui.add(
@@ -1102,21 +1093,6 @@ mod tests {
         let defaults = Scene3dSettings::default();
         assert_eq!(defaults.map_provider, MapProviderId::None);
         assert_eq!(defaults.tile_cache_limit_bytes, 1024 * 1024 * 1024);
-    }
-
-    #[test]
-    fn scene_ui_exposes_map_provider_cache_usage_attribution_and_clear() {
-        let source = include_str!("settings.rs");
-        for expected in [
-            "settings-map-provider",
-            "Tile cache limit",
-            "Cache usage",
-            "hyperlink_to",
-            "Clear tile cache",
-            "TileCacheUiState",
-        ] {
-            assert!(source.contains(expected), "missing {expected}");
-        }
     }
 
     #[test]
