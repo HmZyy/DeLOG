@@ -100,6 +100,10 @@ pub fn info() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/info.svg")
 }
 
+pub fn circle_alert() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/circle-alert.svg")
+}
+
 pub fn clock() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/clock-3.svg")
 }
