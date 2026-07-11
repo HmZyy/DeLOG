@@ -81,6 +81,10 @@ pub struct TileManagerStatus {
     pub in_flight: usize,
     pub ready: usize,
     pub failed: usize,
+    /// Worker responses observed by the controller, including stale responses.
+    pub completions_processed: u64,
+    /// Worker responses rejected after their request was invalidated.
+    pub stale_completions_discarded: u64,
     pub cache_bytes: u64,
     pub cache_action: CacheActionStatus,
 }
@@ -455,7 +459,7 @@ fn controller_loop(
             recv(shutdown_rx) -> _ => shutdown = true,
             recv(wake_rx) -> _ => { wake_pending.store(false, AtomicOrdering::Release); },
             recv(completion_rx) -> completion => if let Ok(completion) = completion {
-                process_completion(completion, &mut idle, &mut states, &mut ready_order, &mut failed_order, &mut cache, &ready_tx, &ready_evict_rx, &repaint, epoch, &latest_generations);
+                process_completion(completion, &mut idle, &mut states, &mut ready_order, &mut failed_order, &mut cache, &ready_tx, &ready_evict_rx, &repaint, epoch, &latest_generations, &status_snapshot);
             }
         }
         for command in controls.lock().unwrap().take() {
@@ -691,6 +695,7 @@ fn process_completion(
     repaint: &Arc<dyn Fn() + Send + Sync>,
     epoch: u64,
     latest_generations: &HashMap<MapScopeId, u64>,
+    status_snapshot: &Mutex<TileManagerStatus>,
 ) {
     idle.push(std::cmp::Reverse(completion.worker));
     let work = completion.work;
@@ -703,10 +708,18 @@ fn process_completion(
     let current = states
         .get(&key)
         .is_some_and(|(_, token)| *token == work.sequence);
-    if current
+    let accepted = current
         && work.epoch == epoch
-        && latest_generations.get(&work.request.scope).copied() == Some(work.request.generation)
+        && latest_generations.get(&work.request.scope).copied() == Some(work.request.generation);
     {
+        let mut status = status_snapshot.lock().unwrap();
+        status.completions_processed = status.completions_processed.saturating_add(1);
+        if !accepted {
+            status.stale_completions_discarded =
+                status.stale_completions_discarded.saturating_add(1);
+        }
+    }
+    if accepted {
         match completion.result {
             Ok((bytes, rgba)) => {
                 if cache
