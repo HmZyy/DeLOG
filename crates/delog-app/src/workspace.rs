@@ -1708,8 +1708,8 @@ fn scene_map_overlay(
 ) -> Option<std::borrow::Cow<'static, str>> {
     if !reference_available {
         Some("Map unavailable: no georeference".into())
-    } else if let Some(error) = manager_error {
-        Some(format!("Map cache error: {error}").into())
+    } else if manager_error.is_some() {
+        Some("Map cache error".into())
     } else if failure == Some(TileFailureClass::Cache) {
         Some("Map cache error".into())
     } else if failure == Some(TileFailureClass::NetworkTransient) && cached {
@@ -2303,7 +2303,7 @@ mod tests {
         assert_eq!(scene_map_overlay(true, None, None, true), None);
         assert_eq!(
             scene_map_overlay(true, Some("permission denied"), None, false).as_deref(),
-            Some("Map cache error: permission denied")
+            Some("Map cache error")
         );
         assert_eq!(
             scene_map_overlay(true, None, Some(TileFailureClass::NetworkTransient), false),
