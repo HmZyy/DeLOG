@@ -152,6 +152,25 @@ impl GpuBridge {
         }
     }
 
+    /// Whether the exact current selection has imagery resident for drawing.
+    pub fn map_selection_has_current_imagery(
+        &self,
+        frame: &eframe::Frame,
+        selection: &MapTileSelection,
+    ) -> bool {
+        if !self.available {
+            return false;
+        }
+        let Some(render_state) = frame.wgpu_render_state() else {
+            return false;
+        };
+        let renderer = render_state.renderer.read();
+        renderer
+            .callback_resources
+            .get::<SceneResources>()
+            .is_some_and(|resources| resources.selection_has_current_imagery(selection))
+    }
+
     /// Call once per frame.
     pub fn drain_gpu_errors(&self, frame: &eframe::Frame) -> Vec<String> {
         if !self.available {
@@ -822,6 +841,18 @@ impl SceneResources {
         // signatures for dead scopes and lets the surviving panes consume any
         // quota released by them before the first scene render of this frame.
         self.admit_map_tiles(&std::collections::HashSet::new(), None);
+    }
+
+    fn selection_has_current_imagery(&self, selection: &MapTileSelection) -> bool {
+        self.map_tile_cache
+            .get(&selection.scope)
+            .into_iter()
+            .flat_map(HashMap::iter)
+            .any(|(key, tile)| {
+                self.map_tiles.contains(*key)
+                    && map_tile_matches(selection, tile)
+                    && map_tile_is_current(selection, tile)
+            })
     }
 
     /// Prepare GPU buffers + uniforms for the frame's vehicles (before the
@@ -1649,6 +1680,15 @@ mod tests {
         assert_eq!(first.previous, expected_previous);
         assert_eq!(first.current, expected_current);
         assert_eq!(reversed, first, "ready insertion order cannot affect draws");
+        assert!(resources.selection_has_current_imagery(&selection));
+
+        let mut other_pane = selection.clone();
+        other_pane.scope = MapScopeId(45);
+        assert!(!resources.selection_has_current_imagery(&other_pane));
+
+        let mut switched_generation = selection.clone();
+        switched_generation.generation += 1;
+        assert!(!resources.selection_has_current_imagery(&switched_generation));
     }
 
     #[test]

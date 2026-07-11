@@ -299,6 +299,7 @@ pub struct DelogApp {
     settings: AppSettings,
     settings_dialog: SettingsDialog,
     tile_manager: Option<TileManager>,
+    tile_manager_error: Option<String>,
     theme_needs_apply: bool,
     pending_layout: Option<PendingLayout>,
     deferred_layout_doc: Option<LayoutDoc>,
@@ -326,22 +327,25 @@ impl DelogApp {
         settings.theme.apply(&cc.egui_ctx);
         settings.font.apply(&cc.egui_ctx);
         let connection_dialog = ConnectionDialog::from_settings(&settings.live_connection);
-        let tile_manager = directories::ProjectDirs::from("org", "hmzyy", "DeLOG")
-            .map(|dirs| dirs.cache_dir().join("map-tiles"))
-            .and_then(|cache_dir| {
-                let repaint = cc.egui_ctx.clone();
-                match TileManager::new(
-                    cache_dir,
-                    settings.scene3d.tile_cache_limit_bytes,
-                    move || repaint.request_repaint(),
-                ) {
-                    Ok(manager) => Some(manager),
-                    Err(error) => {
-                        tracing::warn!(%error, "map tile cache unavailable");
-                        None
+        let (tile_manager, tile_manager_error) =
+            match directories::ProjectDirs::from("org", "hmzyy", "DeLOG") {
+                Some(dirs) => {
+                    let cache_dir = dirs.cache_dir().join("map-tiles");
+                    let repaint = cc.egui_ctx.clone();
+                    match TileManager::new(
+                        cache_dir,
+                        settings.scene3d.tile_cache_limit_bytes,
+                        move || repaint.request_repaint(),
+                    ) {
+                        Ok(manager) => (Some(manager), None),
+                        Err(error) => {
+                            tracing::warn!(%error, "map tile cache unavailable");
+                            (None, Some(error.to_string()))
+                        }
                     }
                 }
-            });
+                None => (None, Some("cache directory unavailable".to_owned())),
+            };
         let (picked_files_tx, picked_files) = mpsc::channel();
         let (traj_results_tx, traj_results) = mpsc::channel();
         let (imported_layouts_tx, imported_layouts) = mpsc::channel();
@@ -435,6 +439,7 @@ impl DelogApp {
             settings,
             settings_dialog: SettingsDialog::default(),
             tile_manager,
+            tile_manager_error,
             theme_needs_apply: false,
             pending_layout: None,
             deferred_layout_doc: None,
@@ -2745,6 +2750,7 @@ impl eframe::App for DelogApp {
                         metrics: self.session.metrics(),
                         gpu: &mut self.gpu,
                         tile_manager: self.tile_manager.as_mut(),
+                        tile_manager_error: self.tile_manager_error.as_deref(),
                         caches: &mut self.caches,
                         view: &mut self.view,
                         origin_us: self.origin_us,

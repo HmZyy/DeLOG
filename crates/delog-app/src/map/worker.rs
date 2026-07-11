@@ -914,7 +914,9 @@ fn publish_status(
 }
 
 fn classify_http_failure(status: reqwest::StatusCode) -> TileFailure {
-    let retryable = status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS;
+    let retryable = status.is_server_error()
+        || status == reqwest::StatusCode::REQUEST_TIMEOUT
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS;
     TileFailure {
         class: if retryable {
             TileFailureClass::NetworkTransient
@@ -1144,6 +1146,13 @@ mod tests {
             assert_eq!(failure.class, TileFailureClass::Permanent);
         }
         assert!(classify_http_failure(reqwest::StatusCode::INTERNAL_SERVER_ERROR).retryable);
+    }
+
+    #[test]
+    fn request_timeout_is_transient_and_retryable() {
+        let failure = classify_http_failure(reqwest::StatusCode::REQUEST_TIMEOUT);
+        assert!(failure.retryable);
+        assert_eq!(failure.class, TileFailureClass::NetworkTransient);
     }
 
     #[test]
