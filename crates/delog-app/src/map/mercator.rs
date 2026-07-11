@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, f64::consts::PI, ops::RangeInclusive};
+use std::{collections::HashSet, f64::consts::PI, ops::RangeInclusive};
 
 use glam::{DMat4, DVec3, DVec4};
 
@@ -71,18 +71,25 @@ pub fn visible_tiles(
     if min_zoom > max_zoom {
         return VisibleSet::default();
     }
-    let samples = [
-        (-1.0, -1.0),
-        (-1.0, 1.0),
-        (1.0, -1.0),
-        (1.0, 1.0),
-        (0.0, 0.0),
-    ];
-    let hits: Vec<_> = samples
-        .into_iter()
-        .filter_map(|(x, y)| ground_hit(inv_vp, x, y))
-        .collect();
-    let span = hits.iter().map(|p| p.x.hypot(p.z)).fold(0.0_f64, f64::max) * 2.0;
+    let mut hits = Vec::new();
+    for sample_y in 0..=4 {
+        for sample_x in 0..=4 {
+            let x = -1.0 + sample_x as f64 * 0.5;
+            let y = -1.0 + sample_y as f64 * 0.5;
+            if let Some(hit) = ground_hit(inv_vp, x, y) {
+                hits.push(hit);
+            }
+        }
+    }
+    let extent = |coordinate: fn(&DVec3) -> f64| {
+        let min = hits.iter().map(coordinate).fold(f64::INFINITY, f64::min);
+        let max = hits
+            .iter()
+            .map(coordinate)
+            .fold(f64::NEG_INFINITY, f64::max);
+        (max - min).max(0.0)
+    };
+    let span = extent(|p| p.x).max(extent(|p| p.z));
     let pixels = viewport_px[0].max(viewport_px[1]).max(1) as f64;
     let earth_circumference = 2.0 * PI * 6_378_137.0;
     let ideal = if span > 0.0 {
@@ -93,45 +100,75 @@ pub fn visible_tiles(
         max_zoom as i32
     };
     let selected_zoom = ideal.clamp(min_zoom as i32, max_zoom as i32) as u8;
-    let center = lat_lon_to_tile(anchor_rad[0], anchor_rad[1], selected_zoom);
     let size = world_size(selected_zoom) as i64;
-    let mut radius = 1_i64;
-    if span > 0.0 {
-        let metres_per_tile =
-            earth_circumference * anchor_rad[0].cos().abs().max(0.01) / size as f64;
-        radius = ((span / metres_per_tile / 2.0).ceil() as i64 + 1).max(1);
+    let anchor_tile = lat_lon_to_tile(anchor_rad[0], anchor_rad[1], selected_zoom);
+    let mut hit_tiles: Vec<_> = hits
+        .iter()
+        .map(|hit| {
+            let (lat, lon, _) = crate::geo::ned_to_geodetic(
+                DVec3::new(-hit.z, hit.x, 0.0),
+                anchor_rad[0],
+                anchor_rad[1],
+                0.0,
+            );
+            lat_lon_to_tile(lat, lon, selected_zoom)
+        })
+        .collect();
+    if hit_tiles.is_empty() {
+        hit_tiles.push(anchor_tile);
     }
-    let mut candidates = Vec::new();
-    for dy in -radius..=radius {
-        let y = center.y as i64 + dy;
-        if !(0..size).contains(&y) {
-            continue;
-        }
-        for dx in -radius..=radius {
-            candidates.push((
-                dx * dx + dy * dy,
-                TileId {
+
+    // Unwrap X around the first hit so an antimeridian footprint stays narrow.
+    let reference_x = i64::from(hit_tiles[0].x);
+    let unwrap_x =
+        |x: u32| reference_x + (i64::from(x) - reference_x + size / 2).rem_euclid(size) - size / 2;
+    let min_x = hit_tiles.iter().map(|t| unwrap_x(t.x)).min().unwrap() - 1;
+    let max_x = hit_tiles.iter().map(|t| unwrap_x(t.x)).max().unwrap() + 1;
+    let min_y = (hit_tiles.iter().map(|t| i64::from(t.y)).min().unwrap() - 1).max(0);
+    let max_y = (hit_tiles.iter().map(|t| i64::from(t.y)).max().unwrap() + 1).min(size - 1);
+    let center_x = (min_x + max_x) / 2;
+    let center_y = (min_y + max_y) / 2;
+
+    // Walk outward from the footprint center. Memory and emitted work are both
+    // bounded by TILE_LIMIT, even when a near-horizon footprint spans the world.
+    let mut tiles = Vec::with_capacity(TILE_LIMIT);
+    let mut seen = HashSet::with_capacity(TILE_LIMIT);
+    let mut radius = 0_i64;
+    while tiles.len() < TILE_LIMIT {
+        let mut added = false;
+        for y in (center_y - radius).max(min_y)..=(center_y + radius).min(max_y) {
+            for x in (center_x - radius).max(min_x)..=(center_x + radius).min(max_x) {
+                if radius > 0 && (x - center_x).abs() != radius && (y - center_y).abs() != radius {
+                    continue;
+                }
+                let tile = TileId {
                     zoom: selected_zoom,
-                    x: (center.x as i64 + dx).rem_euclid(size) as u32,
+                    x: x.rem_euclid(size) as u32,
                     y: y as u32,
-                },
-            ));
+                };
+                if seen.insert(tile) {
+                    tiles.push(tile);
+                    if tiles.len() == TILE_LIMIT {
+                        break;
+                    }
+                }
+                added = true;
+            }
+            if tiles.len() == TILE_LIMIT {
+                break;
+            }
         }
+        if !added
+            || (center_x - radius <= min_x
+                && center_x + radius >= max_x
+                && center_y - radius <= min_y
+                && center_y + radius >= max_y)
+        {
+            break;
+        }
+        radius += 1;
     }
-    candidates.sort_unstable_by(|a, b| {
-        a.0.cmp(&b.0)
-            .then_with(|| a.1.y.cmp(&b.1.y))
-            .then_with(|| a.1.x.cmp(&b.1.x))
-            .then(Ordering::Equal)
-    });
-    candidates.dedup_by_key(|(_, tile)| *tile);
-    VisibleSet {
-        tiles: candidates
-            .into_iter()
-            .take(TILE_LIMIT)
-            .map(|(_, tile)| tile)
-            .collect(),
-    }
+    VisibleSet { tiles }
 }
 
 pub fn tile_corners_render(tile: TileId, anchor_rad_alt: [f64; 3]) -> [[f32; 3]; 4] {
@@ -156,6 +193,12 @@ mod tests {
     use super::*;
 
     const MAX_LAT: f64 = 85.051_128_78_f64;
+
+    fn inverse_view_projection(eye: DVec3, target: DVec3, aspect: f64) -> DMat4 {
+        let projection = DMat4::perspective_rh(60_f64.to_radians(), aspect, 1.0, 1_000_000.0);
+        let view = DMat4::look_at_rh(eye, target, DVec3::Y);
+        (projection * view).inverse()
+    }
 
     #[test]
     fn latitude_is_clamped_to_web_mercator_limits() {
@@ -204,9 +247,55 @@ mod tests {
     }
 
     #[test]
-    fn horizon_selection_is_bounded() {
-        let set = visible_tiles(glam::DMat4::IDENTITY, [3840, 2160], [0.0, 0.0], 0..=23);
-        assert!(set.tiles.len() <= 256);
+    fn asymmetric_footprint_includes_intersected_ground_and_border() {
+        let anchor = [0.0, 0.0];
+        let inv_vp = inverse_view_projection(
+            DVec3::new(500_000.0, 20_000.0, 10_000.0),
+            DVec3::new(500_000.0, 0.0, 0.0),
+            16.0 / 9.0,
+        );
+        let set = visible_tiles(inv_vp, [1920, 1080], anchor, 13..=13);
+        assert!(!set.tiles.is_empty());
+        let zoom = set.tiles[0].zoom;
+        let size = i64::from(world_size(zoom));
+
+        for (clip_x, clip_y) in [(-1.0, -1.0), (1.0, -1.0)] {
+            let hit = ground_hit(inv_vp, clip_x, clip_y).expect("bottom corner hits ground");
+            let (lat, lon, _) = crate::geo::ned_to_geodetic(
+                DVec3::new(-hit.z, hit.x, 0.0),
+                anchor[0],
+                anchor[1],
+                0.0,
+            );
+            let tile = lat_lon_to_tile(lat, lon, zoom);
+            assert!(
+                set.tiles.contains(&tile),
+                "missing ground-hit tile {tile:?}"
+            );
+            let border_x =
+                (i64::from(tile.x) + if clip_x < 0.0 { -1 } else { 1 }).rem_euclid(size) as u32;
+            assert!(
+                set.tiles.contains(&TileId {
+                    x: border_x,
+                    ..tile
+                }),
+                "missing one-tile footprint border"
+            );
+        }
+    }
+
+    #[test]
+    fn near_horizon_selection_is_nonempty_unique_and_bounded() {
+        let inv_vp = inverse_view_projection(
+            DVec3::new(0.0, 2_000.0, 0.0),
+            DVec3::new(0.0, 0.0, -200_000.0),
+            16.0 / 9.0,
+        );
+        let set = visible_tiles(inv_vp, [3840, 2160], [0.0, 179.9_f64.to_radians()], 0..=0);
+        assert!(!set.tiles.is_empty());
+        assert!(set.tiles.len() <= TILE_LIMIT);
+        let unique: std::collections::HashSet<_> = set.tiles.iter().copied().collect();
+        assert_eq!(unique.len(), set.tiles.len());
     }
 
     #[test]
