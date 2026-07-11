@@ -50,6 +50,47 @@ pub fn geodetic_to_ned(
     ecef_to_ned(ecef, ref_ecef, ref_lat_rad, ref_lon_rad)
 }
 
+/// ECEF metres → geodetic `(lat rad, lon rad, alt m)`. Iterative; converges to
+/// sub-millimetre in a few rounds for terrestrial points.
+pub fn ecef_to_geodetic(ecef: DVec3) -> (f64, f64, f64) {
+    let p = ecef.x.hypot(ecef.y);
+    let lon = ecef.y.atan2(ecef.x);
+    if p < 1e-9 {
+        let b = WGS84_A * (1.0 - WGS84_F);
+        let lat = std::f64::consts::FRAC_PI_2.copysign(ecef.z);
+        return (lat, lon, ecef.z.abs() - b);
+    }
+    let mut lat = (ecef.z / (p * (1.0 - WGS84_E2))).atan();
+    let mut alt = 0.0;
+    for _ in 0..5 {
+        let (sin_lat, cos_lat) = lat.sin_cos();
+        let n = WGS84_A / (1.0 - WGS84_E2 * sin_lat * sin_lat).sqrt();
+        alt = p / cos_lat - n;
+        lat = (ecef.z / (p * (1.0 - WGS84_E2 * n / (n + alt)))).atan();
+    }
+    (lat, lon, alt)
+}
+
+/// NED metres about a geodetic reference origin → geodetic
+/// `(lat rad, lon rad, alt m)`. Inverse of `geodetic_to_ned`.
+pub fn ned_to_geodetic(
+    ned: DVec3,
+    ref_lat_rad: f64,
+    ref_lon_rad: f64,
+    ref_alt_m: f64,
+) -> (f64, f64, f64) {
+    let ref_ecef = geodetic_to_ecef(ref_lat_rad, ref_lon_rad, ref_alt_m);
+    let (sl, cl) = ref_lat_rad.sin_cos();
+    let (so, co) = ref_lon_rad.sin_cos();
+    let ecef = ref_ecef
+        + DVec3::new(
+            -sl * co * ned.x - so * ned.y - cl * co * ned.z,
+            -sl * so * ned.x + co * ned.y - cl * so * ned.z,
+            cl * ned.x - sl * ned.z,
+        );
+    ecef_to_geodetic(ecef)
+}
+
 /// NED metres → render space `(E, −D, −N)`.
 pub fn ned_to_render(ned: Vec3) -> Vec3 {
     Vec3::new(ned.y, -ned.z, -ned.x)
@@ -155,5 +196,37 @@ mod tests {
             (fwd - Vec3::new(0.0, 0.0, -1.0)).length() < 1e-5,
             "got {fwd:?}"
         );
+    }
+
+    #[test]
+    fn ecef_to_geodetic_round_trips_geodetic_to_ecef() {
+        for &(lat_deg, lon_deg, alt) in &[
+            (0.0, 0.0, 0.0),
+            (47.397_741_8, 8.550_358, 408.0),
+            (-33.9, 151.2, 15.0),
+            (89.9, -45.0, 1000.0),
+            (-89.9, 120.0, -50.0),
+        ] {
+            let (lat, lon) = (lat_deg * DEG, lon_deg * DEG);
+            let (rlat, rlon, ralt) = ecef_to_geodetic(geodetic_to_ecef(lat, lon, alt));
+            assert!((rlat - lat).abs() < 1e-8, "lat {lat_deg}: got {rlat}");
+            assert!((rlon - lon).abs() < 1e-8, "lon {lon_deg}: got {rlon}");
+            assert!((ralt - alt).abs() < 1e-2, "alt {alt}: got {ralt}");
+        }
+    }
+
+    #[test]
+    fn ned_to_geodetic_round_trips_geodetic_to_ned() {
+        let (rlat, rlon, ralt) = (47.0 * DEG, 8.0 * DEG, 400.0);
+        for &(n, e, d) in &[
+            (0.0, 0.0, 0.0),
+            (100.0, -250.0, -30.0),
+            (-5000.0, 3000.0, 120.0),
+        ] {
+            let ned = DVec3::new(n, e, d);
+            let (lat, lon, alt) = ned_to_geodetic(ned, rlat, rlon, ralt);
+            let back = geodetic_to_ned(lat, lon, alt, rlat, rlon, ralt);
+            assert!((back - ned).length() < 1e-5, "{ned:?} came back as {back:?}");
+        }
     }
 }
