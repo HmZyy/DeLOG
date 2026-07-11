@@ -250,6 +250,9 @@ pub struct DelogApp {
     exported_layouts_tx: mpsc::Sender<LayoutExportResult>,
     exported_diagnostics: mpsc::Receiver<DiagnosticsExportResult>,
     exported_diagnostics_tx: mpsc::Sender<DiagnosticsExportResult>,
+    exported_kml: mpsc::Receiver<Result<String, String>>,
+    exported_kml_tx: mpsc::Sender<Result<String, String>>,
+    message_popups: Vec<crate::message_popup::MessagePopup>,
     exported_profiling: mpsc::Receiver<ProfilingExportResult>,
     exported_profiling_tx: mpsc::Sender<ProfilingExportResult>,
     csv_export: crate::csv_export::CsvExportState,
@@ -322,6 +325,7 @@ impl DelogApp {
         let (imported_layouts_tx, imported_layouts) = mpsc::channel();
         let (exported_layouts_tx, exported_layouts) = mpsc::channel();
         let (exported_diagnostics_tx, exported_diagnostics) = mpsc::channel();
+        let (exported_kml_tx, exported_kml) = mpsc::channel();
         let (exported_profiling_tx, exported_profiling) = mpsc::channel();
         let (csv_export_tx, csv_export_rx) = mpsc::channel();
         let (image_export_writes_tx, image_export_writes) = mpsc::channel();
@@ -364,6 +368,9 @@ impl DelogApp {
             exported_layouts_tx,
             exported_diagnostics,
             exported_diagnostics_tx,
+            exported_kml,
+            exported_kml_tx,
+            message_popups: Vec::new(),
             exported_profiling,
             exported_profiling_tx,
             csv_export: crate::csv_export::CsvExportState::default(),
@@ -798,6 +805,35 @@ impl DelogApp {
                         "diagnostics-export",
                         err,
                     )),
+            }
+        }
+
+        while let Ok(result) = self.exported_kml.try_recv() {
+            match result {
+                Ok(msg) => {
+                    self.push_log(PendingLog::with_target(
+                        LogLevel::Info,
+                        "kml-export",
+                        msg.clone(),
+                    ));
+                    self.message_popups
+                        .push(crate::message_popup::MessagePopup::info(
+                            "Export trajectories KML",
+                            msg,
+                        ));
+                }
+                Err(err) => {
+                    self.push_log(PendingLog::with_target(
+                        LogLevel::Error,
+                        "kml-export",
+                        err.clone(),
+                    ));
+                    self.message_popups
+                        .push(crate::message_popup::MessagePopup::error(
+                            "Export trajectories KML",
+                            err,
+                        ));
+                }
             }
         }
 
@@ -1241,6 +1277,61 @@ impl DelogApp {
                 }
             })
             .expect("spawn diagnostics export dialog thread");
+    }
+
+    /// KML is built on the UI thread (needs snapshot + vehicle state); only the
+    /// file dialog and write run on the worker. Results flow back through
+    /// `exported_kml` and surface as a diagnostic plus a message popup.
+    fn spawn_export_kml_dialog(
+        &self,
+        ctx: &egui::Context,
+        snapshot: &delog_core::snapshot::StoreSnapshot,
+    ) {
+        let export =
+            crate::kml_export::build_kml(snapshot, &self.vehicles, &self.vehicle_trajectories);
+        if export.exported == 0 {
+            let _ = self
+                .exported_kml_tx
+                .send(Err("no georeferenced trajectories to export".into()));
+            ctx.request_repaint();
+            return;
+        }
+        let noun = if export.exported == 1 {
+            "trajectory"
+        } else {
+            "trajectories"
+        };
+        let summary = if export.skipped.is_empty() {
+            format!("exported {} vehicle {noun}", export.exported)
+        } else {
+            format!(
+                "exported {} vehicle {noun}, skipped {} (no geo reference): {}",
+                export.exported,
+                export.skipped.len(),
+                export.skipped.join(", ")
+            )
+        };
+        let xml = export.xml;
+        let tx = self.exported_kml_tx.clone();
+        let ctx = ctx.clone();
+        std::thread::Builder::new()
+            .name("delog-kml-export-dialog".into())
+            .spawn(move || {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("KML", &["kml"])
+                    .add_filter("All files", &["*"])
+                    .set_title("Export trajectories KML")
+                    .set_file_name("trajectories.kml")
+                    .save_file()
+                {
+                    let result = std::fs::write(&path, xml.as_bytes())
+                        .map(|_| format!("{summary} to {}", path.display()))
+                        .map_err(|err| format!("failed to write {}: {err}", path.display()));
+                    let _ = tx.send(result);
+                    ctx.request_repaint();
+                }
+            })
+            .expect("spawn kml export dialog thread");
     }
 
     /// Export the current profiling snapshot (metric rings + resources + traces)
@@ -2722,6 +2813,9 @@ impl eframe::App for DelogApp {
                     if actions.open_vehicle_config {
                         self.vehicle_dialog.open = true;
                     }
+                    if actions.export_kml {
+                        self.spawn_export_kml_dialog(ui.ctx(), &snapshot);
+                    }
                     if let Some(field) = actions.inspect_field_stats {
                         self.field_stats.open(field);
                     }
@@ -2769,6 +2863,7 @@ impl eframe::App for DelogApp {
         // inside `frame_total`, after every other section).
         let _ui_windows_timer = self.session.metrics().scope("ui_windows");
         self.show_layout_windows(ui.ctx());
+        crate::message_popup::show_all(&mut self.message_popups, ui.ctx());
         let settings_before = self.settings.clone();
         let settings_change = self.settings_dialog.show(ui.ctx(), &mut self.settings);
         if settings_change.theme_changed || self.theme_needs_apply {
