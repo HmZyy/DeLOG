@@ -55,16 +55,7 @@ impl Scene3dPane {
         self.map_generation
     }
 
-    fn update_visible_map_tiles(
-        &mut self,
-        desired: Vec<crate::map::provider::TileId>,
-    ) -> Vec<crate::map::provider::TileId> {
-        let old_retained: HashSet<_> = self
-            .map_tiles
-            .iter()
-            .map(|(id, _)| *id)
-            .chain(self.map_previous_tiles.iter().copied())
-            .collect();
+    fn update_visible_map_tiles(&mut self, desired: Vec<crate::map::provider::TileId>) {
         let desired_set: HashSet<_> = desired.iter().copied().collect();
         let current_set: HashSet<_> = self.map_tiles.iter().map(|(id, _)| *id).collect();
         if desired_set != current_set {
@@ -83,15 +74,6 @@ impl Scene3dPane {
             .enumerate()
             .map(|(priority, id)| (id, priority as i32))
             .collect();
-        let retained: HashSet<_> = self
-            .map_tiles
-            .iter()
-            .map(|(id, _)| *id)
-            .chain(self.map_previous_tiles.iter().copied())
-            .collect();
-        let mut released: Vec<_> = old_retained.difference(&retained).copied().collect();
-        released.sort_by_key(|id| (id.zoom, id.y, id.x));
-        released
     }
 }
 
@@ -765,20 +747,6 @@ impl Behavior<'_> {
                 provider(provider_id),
             ) {
                 let selection = (tracked_index, provider_id, anchor.map(f64::to_bits));
-                if pane.map_selection != Some(selection)
-                    && let Some((_, old_provider, _)) = pane.map_selection
-                {
-                    let old_generation = pane.map_generation;
-                    let old_tiles: HashSet<_> = pane
-                        .map_tiles
-                        .iter()
-                        .map(|(id, _)| *id)
-                        .chain(pane.map_previous_tiles.iter().copied())
-                        .collect();
-                    for id in old_tiles {
-                        manager.release(pane.map_scope, old_provider, id, old_generation);
-                    }
-                }
                 pane.update_map_selection(Some(selection));
                 let ppp = ui.ctx().pixels_per_point();
                 let viewport = [
@@ -797,10 +765,14 @@ impl Behavior<'_> {
                     [anchor[0], anchor[1]],
                     map_provider.zoom_range(),
                 );
-                let released = pane.update_visible_map_tiles(visible.tiles);
-                for id in released {
-                    manager.release(pane.map_scope, provider_id, id, pane.map_generation);
-                }
+                pane.update_visible_map_tiles(visible.tiles);
+                let desired: HashSet<_> = pane
+                    .map_tiles
+                    .iter()
+                    .map(|(id, _)| *id)
+                    .chain(pane.map_previous_tiles.iter().copied())
+                    .collect();
+                manager.set_desired(pane.map_scope, provider_id, pane.map_generation, desired);
                 for (id, priority) in pane.map_tiles.iter().copied() {
                     manager.request(TileRequest {
                         scope: pane.map_scope,
@@ -813,19 +785,13 @@ impl Behavior<'_> {
                 }
                 manager.poll(pane.map_scope)
             } else {
-                if let (Some(manager), Some((_, old_provider, _))) = (
-                    self.services.tile_manager.as_deref_mut(),
-                    pane.map_selection,
-                ) {
-                    let old_tiles: HashSet<_> = pane
-                        .map_tiles
-                        .iter()
-                        .map(|(id, _)| *id)
-                        .chain(pane.map_previous_tiles.iter().copied())
-                        .collect();
-                    for id in old_tiles {
-                        manager.release(pane.map_scope, old_provider, id, pane.map_generation);
-                    }
+                if let Some(manager) = self.services.tile_manager.as_deref_mut() {
+                    manager.set_desired(
+                        pane.map_scope,
+                        provider_id,
+                        pane.map_generation,
+                        std::iter::empty(),
+                    );
                 }
                 pane.update_map_selection(None);
                 pane.map_zoom = None;
@@ -2384,26 +2350,17 @@ mod tests {
         let tile = |x| crate::map::provider::TileId { zoom: 8, x, y: 4 };
         let mut pane = Scene3dPane::default();
 
-        assert!(
-            pane.update_visible_map_tiles(vec![tile(1), tile(2), tile(3)])
-                .is_empty()
-        );
+        pane.update_visible_map_tiles(vec![tile(1), tile(2), tile(3)]);
         assert!(pane.map_previous_tiles.is_empty());
 
-        assert!(
-            pane.update_visible_map_tiles(vec![tile(2), tile(3), tile(4)])
-                .is_empty()
-        );
+        pane.update_visible_map_tiles(vec![tile(2), tile(3), tile(4)]);
         assert_eq!(pane.map_previous_tiles, vec![tile(1)]);
         assert_eq!(
             pane.map_tiles.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
             vec![tile(2), tile(3), tile(4)]
         );
 
-        assert_eq!(
-            pane.update_visible_map_tiles(vec![tile(3), tile(4), tile(5)]),
-            vec![tile(1)]
-        );
+        pane.update_visible_map_tiles(vec![tile(3), tile(4), tile(5)]);
         assert_eq!(
             pane.map_previous_tiles,
             vec![tile(2)],

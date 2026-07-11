@@ -2743,6 +2743,9 @@ impl eframe::App for DelogApp {
                     let tree_metrics = self.session.metrics().clone();
                     let live_map_scopes = self.workspace.map_scopes();
                     self.gpu.retain_map_scopes(frame, &live_map_scopes);
+                    if let Some(manager) = self.tile_manager.as_mut() {
+                        manager.retain_scopes(&live_map_scopes);
+                    }
                     self.gpu.begin_plot_frame(frame);
                     let services = PlotServices {
                         frame,

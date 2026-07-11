@@ -23,7 +23,7 @@ const WORKERS: usize = 4;
 const QUEUE_CAPACITY: usize = 256;
 const READY_CAPACITY: usize = 256;
 const FAILURE_CAPACITY: usize = 256;
-const RELEASE_CAPACITY: usize = QUEUE_CAPACITY + READY_CAPACITY + FAILURE_CAPACITY + WORKERS;
+const DESIRED_CAPACITY_PER_SCOPE: usize = 512;
 const MAX_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
@@ -142,6 +142,29 @@ pub struct MapScopeId(pub u64);
 
 type Key = (MapScopeId, MapProviderId, TileId, u64);
 
+#[derive(Clone, Debug)]
+struct DesiredSnapshot {
+    provider: MapProviderId,
+    generation: u64,
+    ids: HashMap<TileId, u64>,
+    revision: u64,
+}
+
+impl DesiredSnapshot {
+    fn contains(&self, key: &Key) -> bool {
+        key.1 == self.provider && key.3 == self.generation && self.ids.contains_key(&key.2)
+    }
+
+    fn accepts(&self, key: &Key, sequence: u64) -> bool {
+        key.1 == self.provider
+            && key.3 == self.generation
+            && self
+                .ids
+                .get(&key.2)
+                .is_some_and(|minimum| sequence >= *minimum)
+    }
+}
+
 struct Pending(Work);
 
 impl PartialEq for Pending {
@@ -212,8 +235,8 @@ pub struct TileManager {
     status: Arc<Mutex<TileManagerStatus>>,
     epoch: Arc<AtomicU64>,
     accepted_generations: Mutex<HashMap<MapScopeId, u64>>,
-    releases: Arc<Mutex<HashSet<Key>>>,
-    suppressed_ready: Mutex<HashMap<Key, u64>>,
+    desired: Arc<Mutex<HashMap<MapScopeId, DesiredSnapshot>>>,
+    desired_revision: AtomicU64,
     request_sequence: AtomicU64,
     next_action: u64,
     shutdown_tx: Sender<()>,
@@ -254,8 +277,8 @@ impl TileManager {
         let controller_ingress = Arc::clone(&ingress);
         let controller_controls = Arc::clone(&controls);
         let controller_wake_pending = Arc::clone(&wake_pending);
-        let releases = Arc::new(Mutex::new(HashSet::with_capacity(RELEASE_CAPACITY)));
-        let controller_releases = Arc::clone(&releases);
+        let desired = Arc::new(Mutex::new(HashMap::new()));
+        let controller_desired = Arc::clone(&desired);
         let ready_evict_rx = ready_rx.clone();
         let controller = thread::spawn(move || {
             controller_loop(
@@ -270,7 +293,7 @@ impl TileManager {
                 repaint,
                 client,
                 controller_ingress,
-                controller_releases,
+                controller_desired,
             )
         });
         Ok(Self {
@@ -283,8 +306,8 @@ impl TileManager {
             status,
             epoch,
             accepted_generations: Mutex::new(HashMap::new()),
-            releases,
-            suppressed_ready: Mutex::new(HashMap::with_capacity(RELEASE_CAPACITY)),
+            desired,
+            desired_revision: AtomicU64::new(0),
             request_sequence: AtomicU64::new(0),
             next_action: 0,
             shutdown_tx,
@@ -300,6 +323,21 @@ impl TileManager {
     }
 
     fn request_with_url(&mut self, request: TileRequest, url: Option<String>) {
+        let key = (
+            request.scope,
+            request.provider,
+            request.id,
+            request.generation,
+        );
+        if self
+            .desired
+            .lock()
+            .unwrap()
+            .get(&request.scope)
+            .is_some_and(|snapshot| !snapshot.contains(&key))
+        {
+            return;
+        }
         let mut ingress = self.ingress.lock().unwrap();
         let mut accepted = self.accepted_generations.lock().unwrap();
         let generation = accepted.entry(request.scope).or_default();
@@ -341,7 +379,7 @@ impl TileManager {
         let epoch = self.epoch.load(AtomicOrdering::Acquire);
         let generations = self.accepted_generations.lock().unwrap().clone();
         let generation = generations.get(&scope).copied().unwrap_or(0);
-        let suppressed = self.suppressed_ready.lock().unwrap();
+        let desired = self.desired.lock().unwrap().clone();
         self.ready_backlog.extend(self.ready_rx.try_iter());
         let mut selected = Vec::new();
         self.ready_backlog.retain(|ready| {
@@ -354,9 +392,9 @@ impl TileManager {
                 ready.tile.id,
                 ready.tile.generation,
             );
-            if suppressed
-                .get(&key)
-                .is_some_and(|released_through| ready.sequence <= *released_through)
+            if desired
+                .get(&ready.tile.scope)
+                .is_some_and(|snapshot| !snapshot.accepts(&key, ready.sequence))
             {
                 return false;
             }
@@ -376,43 +414,114 @@ impl TileManager {
         selected
     }
 
-    /// Releases request ownership for one tile without blocking on worker I/O.
-    /// A later request for the same key may load it again from the disk cache.
-    pub fn release(
+    /// Replaces the complete current/fallback ownership set for one pane.
+    pub fn set_desired(
         &mut self,
         scope: MapScopeId,
         provider: MapProviderId,
-        id: TileId,
         generation: u64,
+        ids: impl IntoIterator<Item = TileId>,
     ) {
-        let key = (scope, provider, id, generation);
+        let previous = self.desired.lock().unwrap().get(&scope).cloned();
+        let next_sequence = self
+            .request_sequence
+            .load(AtomicOrdering::Acquire)
+            .wrapping_add(1);
+        let ids: HashMap<_, _> = ids
+            .into_iter()
+            .take(DESIRED_CAPACITY_PER_SCOPE)
+            .map(|id| {
+                let minimum = previous
+                    .as_ref()
+                    .filter(|old| old.provider == provider && old.generation == generation)
+                    .and_then(|old| old.ids.get(&id).copied())
+                    .unwrap_or(next_sequence);
+                (id, minimum)
+            })
+            .collect();
+        let revision = self
+            .desired_revision
+            .fetch_add(1, AtomicOrdering::AcqRel)
+            .wrapping_add(1);
+        let snapshot = DesiredSnapshot {
+            provider,
+            generation,
+            ids,
+            revision,
+        };
+        self.accepted_generations
+            .lock()
+            .unwrap()
+            .insert(scope, generation);
+        self.desired.lock().unwrap().insert(scope, snapshot.clone());
         self.ingress.lock().unwrap().retain(|item| {
-            (
-                item.request.scope,
-                item.request.provider,
-                item.request.id,
-                item.request.generation,
-            ) != key
+            item.request.scope != scope
+                || snapshot.accepts(
+                    &(
+                        scope,
+                        item.request.provider,
+                        item.request.id,
+                        item.request.generation,
+                    ),
+                    item.sequence,
+                )
         });
         self.ready_backlog.retain(|ready| {
-            (
-                ready.tile.scope,
-                ready.tile.provider,
-                ready.tile.id,
-                ready.tile.generation,
-            ) != key
+            ready.tile.scope != scope
+                || snapshot.accepts(
+                    &(
+                        scope,
+                        ready.tile.provider,
+                        ready.tile.id,
+                        ready.tile.generation,
+                    ),
+                    ready.sequence,
+                )
         });
-        let mut suppressed = self.suppressed_ready.lock().unwrap();
-        if suppressed.len() < RELEASE_CAPACITY || suppressed.contains_key(&key) {
-            suppressed.insert(key, self.request_sequence.load(AtomicOrdering::Acquire));
-        }
-        drop(suppressed);
-        let mut releases = self.releases.lock().unwrap();
-        if releases.len() < RELEASE_CAPACITY || releases.contains(&key) {
-            releases.insert(key);
-        }
-        drop(releases);
         self.wake_controller();
+    }
+
+    pub fn retain_scopes(&mut self, live: &[MapScopeId]) {
+        let live: HashSet<_> = live.iter().copied().collect();
+        self.accepted_generations
+            .lock()
+            .unwrap()
+            .retain(|scope, _| live.contains(scope));
+        self.desired
+            .lock()
+            .unwrap()
+            .retain(|scope, _| live.contains(scope));
+        self.ingress
+            .lock()
+            .unwrap()
+            .retain(|item| live.contains(&item.request.scope));
+        self.ready_backlog
+            .retain(|ready| live.contains(&ready.tile.scope));
+        self.wake_controller();
+    }
+
+    #[cfg(test)]
+    fn test_desired_counts(&self) -> (usize, usize) {
+        let desired = self.desired.lock().unwrap();
+        (
+            desired.len(),
+            desired.values().map(|snapshot| snapshot.ids.len()).sum(),
+        )
+    }
+
+    #[cfg(test)]
+    fn test_is_desired(
+        &self,
+        scope: MapScopeId,
+        provider: MapProviderId,
+        generation: u64,
+        id: TileId,
+    ) -> bool {
+        self.desired
+            .lock()
+            .unwrap()
+            .get(&scope)
+            .is_some_and(|snapshot| snapshot.contains(&(scope, provider, id, generation)))
     }
 
     pub fn status(&self) -> TileManagerStatus {
@@ -512,7 +621,7 @@ fn controller_loop(
     repaint: Arc<dyn Fn() + Send + Sync>,
     client: reqwest::blocking::Client,
     ingress: Arc<Mutex<Vec<IngressRequest>>>,
-    releases: Arc<Mutex<HashSet<Key>>>,
+    desired: Arc<Mutex<HashMap<MapScopeId, DesiredSnapshot>>>,
 ) {
     let (completion_tx, completion_rx) = bounded::<Completion>(WORKERS);
     let mut worker_txs = Vec::new();
@@ -544,6 +653,8 @@ fn controller_loop(
     let mut idle: BinaryHeap<std::cmp::Reverse<usize>> =
         (0..WORKERS).map(std::cmp::Reverse).collect();
     let mut latest_generations = HashMap::new();
+    let mut applied_desired_revisions = HashMap::new();
+    let mut controller_desired = HashMap::new();
     let mut ready_order = VecDeque::with_capacity(READY_CAPACITY);
     let mut failed_order = VecDeque::with_capacity(FAILURE_CAPACITY);
     let mut epoch = 0_u64;
@@ -553,7 +664,7 @@ fn controller_loop(
             recv(shutdown_rx) -> _ => shutdown = true,
             recv(wake_rx) -> _ => { wake_pending.store(false, AtomicOrdering::Release); },
             recv(completion_rx) -> completion => if let Ok(completion) = completion {
-                process_completion(completion, &mut idle, &mut states, &mut ready_order, &mut failed_order, &mut cache, &ready_tx, &ready_evict_rx, &repaint, epoch, &latest_generations, &status_snapshot);
+                process_completion(completion, &mut idle, &mut states, &mut ready_order, &mut failed_order, &mut cache, &ready_tx, &ready_evict_rx, &repaint, epoch, &latest_generations, &controller_desired, &desired, &status_snapshot);
             }
         }
         for command in controls.lock().unwrap().take() {
@@ -566,12 +677,16 @@ fn controller_loop(
                 &status_snapshot,
             );
         }
-        drain_releases(
-            &releases,
+        apply_desired_snapshots(
+            &desired,
+            &ingress,
             &mut states,
             &mut pending,
             &mut ready_order,
             &mut failed_order,
+            &mut latest_generations,
+            &mut applied_desired_revisions,
+            &mut controller_desired,
         );
         drain_ingress(
             &ingress,
@@ -595,6 +710,9 @@ fn controller_loop(
             if work.epoch != epoch
                 || latest_generations.get(&work.request.scope).copied()
                     != Some(work.request.generation)
+                || !controller_desired
+                    .get(&work.request.scope)
+                    .is_none_or(|snapshot| snapshot.accepts(&key, work.sequence))
                 || !states
                     .get(&key)
                     .is_some_and(|(_, token)| *token == work.sequence)
@@ -655,28 +773,78 @@ fn controller_loop(
     }
 }
 
-fn drain_releases(
-    releases: &Mutex<HashSet<Key>>,
+fn apply_desired_snapshots(
+    desired: &Mutex<HashMap<MapScopeId, DesiredSnapshot>>,
+    ingress: &Mutex<Vec<IngressRequest>>,
     states: &mut HashMap<Key, (RequestState, u64)>,
     pending: &mut BinaryHeap<Pending>,
     ready_order: &mut VecDeque<Key>,
     failed_order: &mut VecDeque<(Key, u64)>,
+    latest_generations: &mut HashMap<MapScopeId, u64>,
+    applied_revisions: &mut HashMap<MapScopeId, u64>,
+    controller_desired: &mut HashMap<MapScopeId, DesiredSnapshot>,
 ) {
-    let released = std::mem::take(&mut *releases.lock().unwrap());
-    if released.is_empty() {
+    let snapshots = desired.lock().unwrap().clone();
+    if snapshots.keys().all(|scope| {
+        applied_revisions.get(scope) == snapshots.get(scope).map(|snapshot| &snapshot.revision)
+    }) && applied_revisions.len() == snapshots.len()
+    {
         return;
     }
-    states.retain(|key, _| !released.contains(key));
-    pending.retain(|item| {
-        !released.contains(&(
-            item.0.request.scope,
-            item.0.request.provider,
-            item.0.request.id,
-            item.0.request.generation,
-        ))
+    *controller_desired = snapshots;
+    *applied_revisions = controller_desired
+        .iter()
+        .map(|(scope, snapshot)| (*scope, snapshot.revision))
+        .collect();
+    latest_generations.retain(|scope, _| controller_desired.contains_key(scope));
+    for (scope, snapshot) in controller_desired.iter() {
+        latest_generations.insert(*scope, snapshot.generation);
+    }
+    states.retain(|key, (_, sequence)| {
+        controller_desired
+            .get(&key.0)
+            .is_some_and(|snapshot| snapshot.accepts(key, *sequence))
     });
-    ready_order.retain(|key| !released.contains(key));
-    failed_order.retain(|(key, _)| !released.contains(key));
+    pending.retain(|item| {
+        controller_desired
+            .get(&item.0.request.scope)
+            .is_some_and(|snapshot| {
+                snapshot.accepts(
+                    &(
+                        item.0.request.scope,
+                        item.0.request.provider,
+                        item.0.request.id,
+                        item.0.request.generation,
+                    ),
+                    item.0.sequence,
+                )
+            })
+    });
+    ready_order.retain(|key| {
+        controller_desired
+            .get(&key.0)
+            .is_some_and(|snapshot| snapshot.contains(key))
+    });
+    failed_order.retain(|(key, _)| {
+        controller_desired
+            .get(&key.0)
+            .is_some_and(|snapshot| snapshot.contains(key))
+    });
+    ingress.lock().unwrap().retain(|item| {
+        controller_desired
+            .get(&item.request.scope)
+            .is_some_and(|snapshot| {
+                snapshot.accepts(
+                    &(
+                        item.request.scope,
+                        item.request.provider,
+                        item.request.id,
+                        item.request.generation,
+                    ),
+                    item.sequence,
+                )
+            })
+    });
 }
 
 fn handle_command(
@@ -834,6 +1002,8 @@ fn process_completion(
     repaint: &Arc<dyn Fn() + Send + Sync>,
     epoch: u64,
     latest_generations: &HashMap<MapScopeId, u64>,
+    desired: &HashMap<MapScopeId, DesiredSnapshot>,
+    authoritative_desired: &Mutex<HashMap<MapScopeId, DesiredSnapshot>>,
     _status_snapshot: &Mutex<TileManagerStatus>,
 ) {
     idle.push(std::cmp::Reverse(completion.worker));
@@ -847,9 +1017,21 @@ fn process_completion(
     let current = states
         .get(&key)
         .is_some_and(|(_, token)| *token == work.sequence);
+    let authoritative_accepts = authoritative_desired
+        .lock()
+        .unwrap()
+        .get(&work.request.scope)
+        .map_or_else(
+            || !desired.contains_key(&work.request.scope),
+            |snapshot| snapshot.accepts(&key, work.sequence),
+        );
     let accepted = current
         && work.epoch == epoch
-        && latest_generations.get(&work.request.scope).copied() == Some(work.request.generation);
+        && latest_generations.get(&work.request.scope).copied() == Some(work.request.generation)
+        && desired
+            .get(&work.request.scope)
+            .is_none_or(|snapshot| snapshot.accepts(&key, work.sequence))
+        && authoritative_accepts;
     #[cfg(test)]
     {
         let mut status = _status_snapshot.lock().unwrap();
@@ -1294,16 +1476,28 @@ mod tests {
     }
 
     #[test]
-    fn released_delivered_tile_can_be_requested_again_from_disk() {
+    fn tile_excluded_by_next_desired_snapshot_can_be_requested_again_from_disk() {
         let dir = tempfile::tempdir().unwrap();
         let hits = Arc::new(AtomicUsize::new(0));
         let url = server(jpeg(), "image/jpeg", Arc::clone(&hits));
         let mut manager = TileManager::new(dir.path().to_owned(), u64::MAX, || {}).unwrap();
         let tile_a = request(1);
+        manager.set_desired(
+            tile_a.scope,
+            tile_a.provider,
+            tile_a.generation,
+            [tile_a.id],
+        );
         manager.request_with_url(tile_a.clone(), Some(format!("{url}/a")));
         assert_eq!(await_poll(&mut manager)[0].id, tile_a.id);
 
-        manager.release(tile_a.scope, tile_a.provider, tile_a.id, tile_a.generation);
+        manager.set_desired(tile_a.scope, tile_a.provider, tile_a.generation, []);
+        manager.set_desired(
+            tile_a.scope,
+            tile_a.provider,
+            tile_a.generation,
+            [tile_a.id],
+        );
         manager.request_with_url(tile_a.clone(), Some(format!("{url}/a")));
         assert_eq!(
             await_poll(&mut manager)[0].id,
@@ -1314,7 +1508,7 @@ mod tests {
     }
 
     #[test]
-    fn fallback_tile_stays_ready_until_next_viewport_prunes_it() {
+    fn desired_union_keeps_fallback_ready_until_next_snapshot_prunes_it() {
         let dir = tempfile::tempdir().unwrap();
         let hits = Arc::new(AtomicUsize::new(0));
         let url = server(jpeg(), "image/jpeg", Arc::clone(&hits));
@@ -1323,8 +1517,20 @@ mod tests {
         let mut tile_b = tile_a.clone();
         tile_b.id.x = 1;
 
+        manager.set_desired(
+            tile_a.scope,
+            tile_a.provider,
+            tile_a.generation,
+            [tile_a.id],
+        );
         manager.request_with_url(tile_a.clone(), Some(format!("{url}/a")));
         assert_eq!(await_poll(&mut manager)[0].id, tile_a.id);
+        manager.set_desired(
+            tile_a.scope,
+            tile_a.provider,
+            tile_a.generation,
+            [tile_a.id, tile_b.id],
+        );
         manager.request_with_url(tile_b.clone(), Some(format!("{url}/b")));
         assert_eq!(await_poll(&mut manager)[0].id, tile_b.id);
 
@@ -1336,7 +1542,18 @@ mod tests {
         );
         assert_eq!(hits.load(Ordering::SeqCst), 2);
 
-        manager.release(tile_a.scope, tile_a.provider, tile_a.id, tile_a.generation);
+        manager.set_desired(
+            tile_a.scope,
+            tile_a.provider,
+            tile_a.generation,
+            [tile_b.id],
+        );
+        manager.set_desired(
+            tile_a.scope,
+            tile_a.provider,
+            tile_a.generation,
+            [tile_a.id, tile_b.id],
+        );
         manager.request_with_url(tile_a.clone(), Some(format!("{url}/a")));
         assert_eq!(await_poll(&mut manager)[0].id, tile_a.id);
         assert_eq!(
@@ -1347,34 +1564,84 @@ mod tests {
     }
 
     #[test]
-    fn release_queue_is_coalesced_and_bounded() {
+    fn changing_desired_snapshots_keep_only_latest_bounded_set() {
         let dir = tempfile::tempdir().unwrap();
         let mut manager = TileManager::new(dir.path().to_owned(), u64::MAX, || {}).unwrap();
         let base = request(1);
-        for x in 0..RELEASE_CAPACITY * 2 {
-            let id = TileId {
-                x: x as u32,
-                ..base.id
-            };
-            manager.release(base.scope, base.provider, id, base.generation);
-            manager.release(base.scope, base.provider, id, base.generation);
+        for x in 0..10_000 {
+            manager.set_desired(
+                base.scope,
+                base.provider,
+                base.generation,
+                [TileId { x, ..base.id }],
+            );
         }
-        assert!(manager.releases.lock().unwrap().len() <= RELEASE_CAPACITY);
-        assert!(manager.suppressed_ready.lock().unwrap().len() <= RELEASE_CAPACITY);
+        assert_eq!(manager.test_desired_counts(), (1, 1));
+        assert!(manager.test_is_desired(
+            base.scope,
+            base.provider,
+            base.generation,
+            TileId {
+                x: 9_999,
+                ..base.id
+            }
+        ));
+        assert!(!manager.test_is_desired(
+            base.scope,
+            base.provider,
+            base.generation,
+            TileId { x: 0, ..base.id }
+        ));
     }
 
     #[test]
-    fn release_rejects_an_in_flight_completion() {
+    fn repeated_scope_create_close_leaves_manager_maps_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = TileManager::new(dir.path().to_owned(), u64::MAX, || {}).unwrap();
+        let base = request(1);
+        for scope in 1..=1_000 {
+            manager.set_desired(MapScopeId(scope), base.provider, base.generation, [base.id]);
+            manager.retain_scopes(&[]);
+        }
+        assert!(manager.accepted_generations.lock().unwrap().is_empty());
+        assert_eq!(manager.test_desired_counts(), (0, 0));
+    }
+
+    #[test]
+    fn closing_scope_rejects_in_flight_completion() {
         let dir = tempfile::tempdir().unwrap();
         let (url, observed, release) = gated_server(jpeg());
         let mut manager = TileManager::new(dir.path().to_owned(), u64::MAX, || {}).unwrap();
         let tile = request(1);
+        manager.set_desired(tile.scope, tile.provider, tile.generation, [tile.id]);
+        manager.request_with_url(tile.clone(), Some(format!("{url}/tile")));
+        observed.recv_timeout(Duration::from_secs(2)).unwrap();
+        manager.retain_scopes(&[]);
+        release.send(()).unwrap();
+        for _ in 0..100 {
+            if manager.test_completion_counts().0 == 1 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(manager.test_completion_counts(), (1, 1));
+        assert!(manager.poll(tile.scope).is_empty());
+    }
+
+    #[test]
+    fn desired_snapshot_rejects_an_in_flight_completion() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, observed, release) = gated_server(jpeg());
+        let mut manager = TileManager::new(dir.path().to_owned(), u64::MAX, || {}).unwrap();
+        let tile = request(1);
+        manager.set_desired(tile.scope, tile.provider, tile.generation, [tile.id]);
         manager.request_with_url(tile.clone(), Some(format!("{url}/a")));
         observed.recv_timeout(Duration::from_secs(2)).unwrap();
 
-        manager.release(tile.scope, tile.provider, tile.id, tile.generation);
+        manager.set_desired(tile.scope, tile.provider, tile.generation, []);
         let mut replacement = tile.clone();
         replacement.corners[0][0] = 9.0;
+        manager.set_desired(tile.scope, tile.provider, tile.generation, [tile.id]);
         manager.request_with_url(replacement.clone(), Some(format!("{url}/replacement")));
         release.send(()).unwrap();
         assert_eq!(
