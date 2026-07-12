@@ -14,9 +14,7 @@ use crate::field_stats::{FieldStatsController, StatsRequestKey, StatsTab};
 use crate::gpu::GpuBridge;
 use crate::layout::{LayoutApply, LayoutDoc, LayoutError, LoadOutcome, PendingLayout};
 use crate::live::ConnectionDialog;
-#[cfg(feature = "scripting")]
-use crate::logging::LogLevel;
-use crate::logging::{LogRecord, LoggingDock, PendingLog};
+use crate::logging::{LogLevel, LogRecord, LoggingDock, PendingLog};
 use crate::map::worker::{CacheActionKind, CacheActionStatus, TileManager};
 use crate::performance::{PerformanceDock, PerformanceSnapshot, ResourceSummary, TraceSummary};
 use crate::plot::ViewX;
