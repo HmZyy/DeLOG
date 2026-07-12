@@ -168,7 +168,7 @@ impl GpuBridge {
         renderer
             .callback_resources
             .get::<SceneResources>()
-            .is_some_and(|resources| resources.selection_transition_complete(selection))
+            .is_some_and(|resources| resources.selection_has_current_imagery(selection))
     }
 
     pub fn map_transition_complete(
@@ -883,6 +883,18 @@ impl SceneResources {
             })
     }
 
+    fn selection_has_current_imagery(&self, selection: &MapTileSelection) -> bool {
+        self.map_tile_cache
+            .get(&selection.scope)
+            .is_some_and(|cache| {
+                cache.iter().any(|(key, tile)| {
+                    self.map_tiles.contains(*key)
+                        && map_tile_matches(selection, tile)
+                        && map_tile_is_current(selection, tile)
+                })
+            })
+    }
+
     /// Prepare GPU buffers + uniforms for the frame's vehicles (before the
     /// pass): upload each mesh once, (re)grow trajectory buffers, write uniforms.
     fn prepare_vehicles(
@@ -1130,8 +1142,13 @@ fn prioritize_active_scope(scopes: &mut [MapScopeId], active_scope: Option<MapSc
 fn tiles_overlap_at_different_zooms(a: TileId, b: TileId) -> bool {
     let (coarse, fine) = if a.zoom <= b.zoom { (a, b) } else { (b, a) };
     let delta = fine.zoom - coarse.zoom;
+    let normalize_x = |id: TileId| {
+        1_u32
+            .checked_shl(u32::from(id.zoom))
+            .map_or(id.x, |world_width| id.x % world_width)
+    };
     delta < 32
-        && fine.x.checked_shr(delta as u32) == Some(coarse.x)
+        && normalize_x(fine).checked_shr(delta as u32) == Some(normalize_x(coarse))
         && fine.y.checked_shr(delta as u32) == Some(coarse.y)
 }
 
@@ -1824,6 +1841,7 @@ mod tests {
         assert_eq!(first.previous, expected_previous);
         assert_eq!(first.current, expected_current);
         assert_eq!(reversed, first, "ready insertion order cannot affect draws");
+        assert!(resources.selection_has_current_imagery(&selection));
         assert!(!resources.selection_transition_complete(&selection));
 
         let mut other_pane = selection.clone();
@@ -2062,6 +2080,13 @@ mod tests {
             id(8, 3, 5),
             id(10, 16, 21)
         ));
+    }
+
+    #[test]
+    fn xyz_overlap_normalizes_wrapped_x_at_each_zoom() {
+        let id = |zoom, x, y| TileId { zoom, x, y };
+        assert!(tiles_overlap_at_different_zooms(id(2, 3, 1), id(4, 29, 5)));
+        assert!(tiles_overlap_at_different_zooms(id(4, 29, 5), id(2, 3, 1)));
     }
 
     fn transition_selection(
