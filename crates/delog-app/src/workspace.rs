@@ -1,6 +1,10 @@
 //! Tiled plot workspace.
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::Instant;
 
 use delog_cache::CacheManager;
@@ -12,6 +16,9 @@ use crate::camera::OrbitCamera;
 use crate::gpu::{self, GpuBridge, PaneView, VehicleDraw};
 use crate::hover::{self, HoverTarget};
 use crate::legend;
+use crate::map::mercator;
+use crate::map::provider::{MapProviderId, provider};
+use crate::map::worker::{MapScopeId, TileFailureClass, TileManager, TileRequest};
 use crate::plot::{GhostTrace, PlotPane, TraceMode, TraceRef, ViewX};
 use crate::vehicle;
 
@@ -25,19 +32,94 @@ pub enum Pane {
 
 #[derive(Debug)]
 pub struct Scene3dPane {
+    pub(crate) map_scope: MapScopeId,
     pub camera: OrbitCamera,
     pub tracked_vehicle: Option<usize>,
     /// When true, each vehicle's path is clipped to the playhead time; when
     /// false, the full flight path is drawn.
     pub trail_to_playhead: bool,
+    pub(crate) map_selection: Option<(usize, MapProviderId, [u64; 3])>,
+    pub(crate) map_generation: u64,
+    pub(crate) map_zoom: Option<u8>,
+    pub(crate) map_zoom_transition: bool,
+    pub(crate) map_previous_zoom: Option<u8>,
+    pub(crate) map_tiles: Vec<(crate::map::provider::TileId, i32)>,
+    pub(crate) map_previous_tiles: Vec<crate::map::provider::TileId>,
+}
+
+impl Scene3dPane {
+    fn update_map_selection(&mut self, selection: Option<(usize, MapProviderId, [u64; 3])>) -> u64 {
+        if self.map_selection != selection {
+            self.map_selection = selection;
+            self.map_generation = self.map_generation.wrapping_add(1).max(1);
+            self.map_zoom = None;
+            self.map_zoom_transition = false;
+            self.map_previous_zoom = None;
+            self.map_tiles.clear();
+            self.map_previous_tiles.clear();
+        } else if selection.is_none() {
+            self.map_zoom = None;
+            self.map_zoom_transition = false;
+            self.map_previous_zoom = None;
+            self.map_tiles.clear();
+            self.map_previous_tiles.clear();
+        }
+        self.map_generation
+    }
+
+    fn update_visible_map_tiles(&mut self, desired: Vec<crate::map::provider::TileId>) {
+        let next_zoom = desired.first().map(|id| id.zoom);
+        let desired_set: HashSet<_> = desired.iter().copied().collect();
+        let current_set: HashSet<_> = self.map_tiles.iter().map(|(id, _)| *id).collect();
+        let zoom_changed = self
+            .map_zoom
+            .zip(next_zoom)
+            .is_some_and(|(old, new)| old != new);
+
+        if zoom_changed && !self.map_zoom_transition {
+            self.map_previous_zoom = self.map_zoom;
+            self.map_previous_tiles = self.map_tiles.iter().map(|(id, _)| *id).take(256).collect();
+            self.map_zoom_transition = !self.map_previous_tiles.is_empty();
+        } else if !self.map_zoom_transition && desired_set != current_set {
+            self.map_previous_zoom = self.map_zoom;
+            self.map_previous_tiles = self
+                .map_tiles
+                .iter()
+                .map(|(id, _)| *id)
+                .filter(|id| !desired_set.contains(id))
+                .take(256)
+                .collect();
+        }
+        self.map_zoom = next_zoom;
+        self.map_tiles = desired
+            .into_iter()
+            .enumerate()
+            .map(|(priority, id)| (id, priority as i32))
+            .collect();
+    }
+
+    fn finish_map_zoom_transition(&mut self) {
+        self.map_zoom_transition = false;
+        self.map_previous_zoom = None;
+        self.map_previous_tiles.clear();
+    }
 }
 
 impl Default for Scene3dPane {
     fn default() -> Self {
+        static NEXT_SCOPE: AtomicU64 = AtomicU64::new(1);
         Self {
+            map_scope: MapScopeId(NEXT_SCOPE.fetch_add(1, Ordering::Relaxed)),
             camera: OrbitCamera::default(),
             tracked_vehicle: None,
             trail_to_playhead: true,
+            map_selection: None,
+            map_generation: 0,
+            map_zoom: None,
+            map_zoom_transition: false,
+            map_previous_zoom: None,
+            map_tiles: Vec::new(),
+            map_previous_tiles: Vec::new(),
         }
     }
 }
@@ -138,6 +220,17 @@ impl Workspace {
 
     pub fn fields(&self) -> impl Iterator<Item = FieldId> + '_ {
         self.plot_panes().flat_map(PlotPane::fields)
+    }
+
+    pub fn map_scopes(&self) -> Vec<MapScopeId> {
+        self.tree
+            .tiles
+            .iter()
+            .filter_map(|(_, tile)| match tile {
+                egui_tiles::Tile::Pane(Pane::Scene3D(pane)) => Some(pane.map_scope),
+                _ => None,
+            })
+            .collect()
     }
 
     pub fn resolve_ghosts(&mut self, snapshot: &StoreSnapshot) -> usize {
@@ -464,6 +557,8 @@ pub struct PlotServices<'a> {
     pub snapshot: &'a Arc<StoreSnapshot>,
     pub metrics: &'a Arc<delog_core::metrics::MetricsRegistry>,
     pub gpu: &'a mut GpuBridge,
+    pub tile_manager: Option<&'a mut TileManager>,
+    pub tile_manager_error: Option<&'a str>,
     pub caches: &'a mut CacheManager,
     pub view: &'a mut Option<ViewX>,
     pub origin_us: i64,
@@ -669,6 +764,73 @@ impl Behavior<'_> {
             .map(|p| p.pos);
         pane.camera.target = tracked.unwrap_or(glam::Vec3::ZERO);
 
+        let tracked_reference = pane
+            .tracked_vehicle
+            .and_then(|i| self.services.vehicles.get(i).map(|v| (i, v)))
+            .and_then(|(i, v)| vehicle::geodetic_reference(snapshot, v).map(|r| (i, r)));
+        let provider_id = self.services.scene3d.map_provider;
+        let ready_tiles =
+            if let (Some(manager), Some((tracked_index, anchor)), Some(map_provider)) = (
+                self.services.tile_manager.as_deref_mut(),
+                tracked_reference,
+                provider(provider_id),
+            ) {
+                let selection = (tracked_index, provider_id, anchor.map(f64::to_bits));
+                pane.update_map_selection(Some(selection));
+                let ppp = ui.ctx().pixels_per_point();
+                let viewport = [
+                    (rect.width() * ppp).round().max(1.0) as u32,
+                    (rect.height() * ppp).round().max(1.0) as u32,
+                ];
+                let aspect = viewport[0] as f32 / viewport[1] as f32;
+                let (_, inverse_relative) = pane
+                    .camera
+                    .view_proj_and_inverse(aspect, self.services.scene3d.resolved_far_clip_m());
+                let inverse = glam::DMat4::from_translation(pane.camera.eye().as_dvec3())
+                    * inverse_relative.as_dmat4();
+                let visible = mercator::visible_tiles(
+                    inverse,
+                    viewport,
+                    [anchor[0], anchor[1]],
+                    map_provider.zoom_range(),
+                );
+                pane.update_visible_map_tiles(visible.tiles);
+                let desired: HashSet<_> = pane
+                    .map_tiles
+                    .iter()
+                    .map(|(id, _)| *id)
+                    .chain(pane.map_previous_tiles.iter().copied())
+                    .collect();
+                manager.set_desired(pane.map_scope, provider_id, pane.map_generation, desired);
+                for (id, priority) in pane.map_tiles.iter().copied() {
+                    manager.request(TileRequest {
+                        scope: pane.map_scope,
+                        provider: provider_id,
+                        id,
+                        corners: mercator::tile_corners_render(id, anchor),
+                        priority,
+                        generation: pane.map_generation,
+                    });
+                }
+                manager.poll(pane.map_scope)
+            } else {
+                if let Some(manager) = self.services.tile_manager.as_deref_mut() {
+                    manager.set_desired(
+                        pane.map_scope,
+                        provider_id,
+                        pane.map_generation,
+                        std::iter::empty(),
+                    );
+                }
+                pane.update_map_selection(None);
+                pane.map_zoom = None;
+                pane.map_zoom_transition = false;
+                pane.map_previous_zoom = None;
+                pane.map_tiles.clear();
+                pane.map_previous_tiles.clear();
+                Vec::new()
+            };
+
         let draws: Vec<VehicleDraw> = self
             .services
             .vehicles
@@ -701,6 +863,19 @@ impl Behavior<'_> {
             })
             .collect();
 
+        let map_tile_selection = gpu::MapTileSelection {
+            scope: pane.map_scope,
+            epoch: self
+                .services
+                .tile_manager
+                .as_deref()
+                .map_or(0, |manager| manager.status().epoch),
+            provider: provider_id,
+            generation: pane.map_generation,
+            current_tiles: pane.map_tiles.clone(),
+            previous_tiles: pane.map_previous_tiles.clone(),
+            enabled: pane.map_selection.is_some(),
+        };
         let rendered = {
             let _t = self.services.metrics.scope("3d_frame");
             self.services.gpu.render_scene(
@@ -709,9 +884,19 @@ impl Behavior<'_> {
                 rect,
                 &pane.camera,
                 self.services.scene3d,
+                map_tile_selection.clone(),
+                &ready_tiles,
                 &draws,
             )
         };
+        if pane.map_zoom_transition
+            && self
+                .services
+                .gpu
+                .map_transition_complete(self.services.frame, &map_tile_selection)
+        {
+            pane.finish_map_zoom_transition();
+        }
         if let Some(tex) = rendered {
             ui.painter().image(
                 tex,
@@ -731,6 +916,25 @@ impl Behavior<'_> {
 
         if vehicle_count >= 2 {
             tracked_vehicle_picker(ui, rect, pane, self.services.vehicles);
+        }
+
+        if provider_id != MapProviderId::None {
+            let map_status = self
+                .services
+                .tile_manager
+                .as_deref()
+                .map(TileManager::status);
+            let message = scene_map_overlay(
+                tracked_reference.is_some(),
+                self.services.tile_manager_error,
+                map_status
+                    .as_ref()
+                    .and_then(|status| status.failure.as_ref().map(|failure| failure.class)),
+                self.services
+                    .gpu
+                    .map_selection_has_current_imagery(self.services.frame, &map_tile_selection),
+            );
+            scene_map_status(ui, rect, message.as_deref());
         }
 
         let overlay = scene_overlay_buttons(ui, rect, pane.trail_to_playhead, self.services.accent);
@@ -1547,6 +1751,37 @@ impl Behavior<'_> {
     }
 }
 
+fn scene_map_overlay(
+    reference_available: bool,
+    manager_error: Option<&str>,
+    failure: Option<TileFailureClass>,
+    cached: bool,
+) -> Option<std::borrow::Cow<'static, str>> {
+    if !reference_available {
+        Some("Map unavailable: no georeference".into())
+    } else if manager_error.is_some() {
+        Some("Map cache error".into())
+    } else if failure == Some(TileFailureClass::Cache) {
+        Some("Map cache error".into())
+    } else if failure == Some(TileFailureClass::NetworkTransient) && cached {
+        Some("Map tiles offline — showing cached imagery".into())
+    } else {
+        None
+    }
+}
+
+fn scene_map_status(ui: &egui::Ui, rect: egui::Rect, message: Option<&str>) {
+    if let Some(message) = message {
+        ui.painter().text(
+            rect.center_bottom() - egui::vec2(0.0, 12.0),
+            egui::Align2::CENTER_BOTTOM,
+            message,
+            egui::FontId::proportional(13.0),
+            ui.visuals().warn_fg_color,
+        );
+    }
+}
+
 fn apply_ghost_text_state(pane: &mut PlotPane, ghost: &GhostTrace, field: FieldId) {
     if let Some(filter) = ghost.text_filter.as_ref() {
         pane.text_filters.insert(field, filter.clone());
@@ -2099,6 +2334,169 @@ mod tests {
 
         assert_eq!(first_visible_vehicle(&poses), Some(1));
         assert_eq!(first_visible_vehicle(&[None, None]), None);
+    }
+
+    #[test]
+    fn scene_map_overlay_only_reports_actionable_states() {
+        assert_eq!(
+            scene_map_overlay(false, None, None, false).as_deref(),
+            Some("Map unavailable: no georeference")
+        );
+        assert_eq!(
+            scene_map_overlay(true, None, Some(TileFailureClass::Cache), true).as_deref(),
+            Some("Map cache error")
+        );
+        assert_eq!(
+            scene_map_overlay(true, None, Some(TileFailureClass::NetworkTransient), true)
+                .as_deref(),
+            Some("Map tiles offline — showing cached imagery")
+        );
+        assert_eq!(scene_map_overlay(true, None, None, true), None);
+        assert_eq!(
+            scene_map_overlay(true, Some("permission denied"), None, false).as_deref(),
+            Some("Map cache error")
+        );
+        assert_eq!(
+            scene_map_overlay(true, None, Some(TileFailureClass::NetworkTransient), false),
+            None
+        );
+    }
+
+    #[test]
+    fn scene_map_tracked_vehicle_switch_changes_generation() {
+        let mut pane = Scene3dPane::default();
+        let first = pane.update_map_selection(Some((0, MapProviderId::BingSatellite, [0; 3])));
+        assert_eq!(
+            pane.update_map_selection(Some((0, MapProviderId::BingSatellite, [0; 3]))),
+            first
+        );
+        assert!(pane.update_map_selection(Some((1, MapProviderId::BingSatellite, [0; 3]))) > first);
+    }
+
+    #[test]
+    fn scene_map_selection_change_clears_current_and_fallback_tiles() {
+        let tile = |zoom, x| crate::map::provider::TileId { zoom, x, y: 4 };
+        let selection = Some((0, MapProviderId::BingSatellite, [0; 3]));
+        let mut pane = Scene3dPane::default();
+        let generation = pane.update_map_selection(selection);
+        pane.update_visible_map_tiles(vec![tile(8, 1)]);
+        pane.update_visible_map_tiles(vec![tile(9, 2)]);
+        assert!(pane.map_zoom_transition);
+
+        assert_eq!(pane.update_map_selection(selection), generation);
+        assert!(pane.map_zoom_transition);
+        assert_eq!(pane.map_previous_tiles, vec![tile(8, 1)]);
+        assert_eq!(pane.map_tiles, vec![(tile(9, 2), 0)]);
+
+        assert!(
+            pane.update_map_selection(Some((1, MapProviderId::BingSatellite, [1; 3]))) > generation
+        );
+        assert_eq!(pane.map_zoom, None);
+        assert_eq!(pane.map_previous_zoom, None);
+        assert!(!pane.map_zoom_transition);
+        assert!(pane.map_tiles.is_empty());
+        assert!(pane.map_previous_tiles.is_empty());
+    }
+
+    #[test]
+    fn same_zoom_pan_keeps_one_nonoverlapping_previous_viewport() {
+        let tile = |x| crate::map::provider::TileId { zoom: 8, x, y: 4 };
+        let mut pane = Scene3dPane::default();
+
+        pane.update_visible_map_tiles(vec![tile(1), tile(2), tile(3)]);
+        assert!(pane.map_previous_tiles.is_empty());
+
+        pane.update_visible_map_tiles(vec![tile(2), tile(3), tile(4)]);
+        assert_eq!(pane.map_previous_tiles, vec![tile(1)]);
+        assert_eq!(
+            pane.map_tiles.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![tile(2), tile(3), tile(4)]
+        );
+
+        pane.update_visible_map_tiles(vec![tile(3), tile(4), tile(5)]);
+        assert_eq!(
+            pane.map_previous_tiles,
+            vec![tile(2)],
+            "the next movement replaces the older fallback ring"
+        );
+        assert!(pane.map_previous_tiles.len() <= 256);
+    }
+
+    #[test]
+    fn zoom_transition_keeps_original_fallback_during_same_zoom_motion() {
+        let tile = |zoom, x| crate::map::provider::TileId { zoom, x, y: 4 };
+        let mut pane = Scene3dPane::default();
+        pane.update_visible_map_tiles(vec![tile(8, 1), tile(8, 2)]);
+        pane.update_visible_map_tiles(vec![tile(9, 2), tile(9, 3)]);
+        assert!(pane.map_zoom_transition);
+        assert_eq!(pane.map_previous_tiles, vec![tile(8, 1), tile(8, 2)]);
+
+        pane.update_visible_map_tiles(vec![tile(9, 3), tile(9, 4)]);
+        assert_eq!(pane.map_previous_tiles, vec![tile(8, 1), tile(8, 2)]);
+    }
+
+    #[test]
+    fn repeated_zoom_while_loading_keeps_last_stable_fallback() {
+        let tile = |zoom, x| crate::map::provider::TileId { zoom, x, y: 4 };
+        let mut pane = Scene3dPane::default();
+        pane.update_visible_map_tiles(vec![tile(8, 1)]);
+        pane.update_visible_map_tiles(vec![tile(9, 2)]);
+        pane.update_visible_map_tiles(vec![tile(11, 8)]);
+        assert_eq!(pane.map_previous_tiles, vec![tile(8, 1)]);
+    }
+
+    #[test]
+    fn completed_zoom_transition_clears_fallback_and_restores_pan_ring() {
+        let tile = |zoom, x| crate::map::provider::TileId { zoom, x, y: 4 };
+        let mut pane = Scene3dPane::default();
+        pane.update_visible_map_tiles(vec![tile(8, 1)]);
+        pane.update_visible_map_tiles(vec![tile(9, 2)]);
+        pane.finish_map_zoom_transition();
+        assert!(!pane.map_zoom_transition);
+        assert!(pane.map_previous_tiles.is_empty());
+        assert_eq!(pane.map_previous_zoom, None);
+
+        pane.update_visible_map_tiles(vec![tile(9, 3)]);
+        assert_eq!(pane.map_previous_tiles, vec![tile(9, 2)]);
+    }
+
+    #[test]
+    fn scene_map_none_provider_or_reference_produces_no_selection() {
+        let mut pane = Scene3dPane::default();
+        pane.update_visible_map_tiles(vec![crate::map::provider::TileId {
+            zoom: 8,
+            x: 1,
+            y: 1,
+        }]);
+        pane.update_visible_map_tiles(vec![crate::map::provider::TileId {
+            zoom: 9,
+            x: 2,
+            y: 2,
+        }]);
+        assert!(pane.map_zoom_transition);
+        assert_eq!(pane.update_map_selection(None), 0);
+        assert!(pane.map_selection.is_none());
+        assert!(!pane.map_zoom_transition);
+        assert!(pane.map_previous_tiles.is_empty());
+    }
+
+    #[test]
+    fn scene_retires_completed_map_transition_after_render_before_status() {
+        let source = include_str!("workspace.rs");
+        let scene_ui = source.split("fn scene_ui").nth(1).expect("scene_ui");
+        let render = scene_ui.find(".render_scene(").expect("scene render");
+        let complete = scene_ui[render..]
+            .find(".map_transition_complete(")
+            .map(|offset| render + offset)
+            .expect("transition completion query");
+        let finish = scene_ui[complete..]
+            .find("pane.finish_map_zoom_transition()")
+            .map(|offset| complete + offset)
+            .expect("pane transition cleanup");
+        let status = scene_ui
+            .find("scene_map_overlay(")
+            .expect("map status overlay");
+        assert!(render < complete && complete < finish && finish < status);
     }
 
     #[test]

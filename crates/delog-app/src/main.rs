@@ -21,6 +21,7 @@ mod layout;
 mod legend;
 mod live;
 mod logging;
+mod map;
 mod markers;
 mod message_popup;
 mod models;
