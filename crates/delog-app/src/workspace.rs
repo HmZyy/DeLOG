@@ -41,6 +41,7 @@ pub struct Scene3dPane {
     pub(crate) map_selection: Option<(usize, MapProviderId, [u64; 3])>,
     pub(crate) map_generation: u64,
     pub(crate) map_zoom: Option<u8>,
+    pub(crate) map_zoom_transition: bool,
     pub(crate) map_previous_zoom: Option<u8>,
     pub(crate) map_tiles: Vec<(crate::map::provider::TileId, i32)>,
     pub(crate) map_previous_tiles: Vec<crate::map::provider::TileId>,
@@ -56,9 +57,19 @@ impl Scene3dPane {
     }
 
     fn update_visible_map_tiles(&mut self, desired: Vec<crate::map::provider::TileId>) {
+        let next_zoom = desired.first().map(|id| id.zoom);
         let desired_set: HashSet<_> = desired.iter().copied().collect();
         let current_set: HashSet<_> = self.map_tiles.iter().map(|(id, _)| *id).collect();
-        if desired_set != current_set {
+        let zoom_changed = self
+            .map_zoom
+            .zip(next_zoom)
+            .is_some_and(|(old, new)| old != new);
+
+        if zoom_changed && !self.map_zoom_transition {
+            self.map_previous_zoom = self.map_zoom;
+            self.map_previous_tiles = self.map_tiles.iter().map(|(id, _)| *id).take(256).collect();
+            self.map_zoom_transition = !self.map_previous_tiles.is_empty();
+        } else if !self.map_zoom_transition && desired_set != current_set {
             self.map_previous_zoom = self.map_zoom;
             self.map_previous_tiles = self
                 .map_tiles
@@ -68,12 +79,18 @@ impl Scene3dPane {
                 .take(256)
                 .collect();
         }
-        self.map_zoom = desired.first().map(|id| id.zoom);
+        self.map_zoom = next_zoom;
         self.map_tiles = desired
             .into_iter()
             .enumerate()
             .map(|(priority, id)| (id, priority as i32))
             .collect();
+    }
+
+    fn finish_map_zoom_transition(&mut self) {
+        self.map_zoom_transition = false;
+        self.map_previous_zoom = None;
+        self.map_previous_tiles.clear();
     }
 }
 
@@ -88,6 +105,7 @@ impl Default for Scene3dPane {
             map_selection: None,
             map_generation: 0,
             map_zoom: None,
+            map_zoom_transition: false,
             map_previous_zoom: None,
             map_tiles: Vec::new(),
             map_previous_tiles: Vec::new(),
@@ -795,6 +813,7 @@ impl Behavior<'_> {
                 }
                 pane.update_map_selection(None);
                 pane.map_zoom = None;
+                pane.map_zoom_transition = false;
                 pane.map_previous_zoom = None;
                 pane.map_tiles.clear();
                 pane.map_previous_tiles.clear();
@@ -2357,6 +2376,44 @@ mod tests {
             "the next movement replaces the older fallback ring"
         );
         assert!(pane.map_previous_tiles.len() <= 256);
+    }
+
+    #[test]
+    fn zoom_transition_keeps_original_fallback_during_same_zoom_motion() {
+        let tile = |zoom, x| crate::map::provider::TileId { zoom, x, y: 4 };
+        let mut pane = Scene3dPane::default();
+        pane.update_visible_map_tiles(vec![tile(8, 1), tile(8, 2)]);
+        pane.update_visible_map_tiles(vec![tile(9, 2), tile(9, 3)]);
+        assert!(pane.map_zoom_transition);
+        assert_eq!(pane.map_previous_tiles, vec![tile(8, 1), tile(8, 2)]);
+
+        pane.update_visible_map_tiles(vec![tile(9, 3), tile(9, 4)]);
+        assert_eq!(pane.map_previous_tiles, vec![tile(8, 1), tile(8, 2)]);
+    }
+
+    #[test]
+    fn repeated_zoom_while_loading_keeps_last_stable_fallback() {
+        let tile = |zoom, x| crate::map::provider::TileId { zoom, x, y: 4 };
+        let mut pane = Scene3dPane::default();
+        pane.update_visible_map_tiles(vec![tile(8, 1)]);
+        pane.update_visible_map_tiles(vec![tile(9, 2)]);
+        pane.update_visible_map_tiles(vec![tile(11, 8)]);
+        assert_eq!(pane.map_previous_tiles, vec![tile(8, 1)]);
+    }
+
+    #[test]
+    fn completed_zoom_transition_clears_fallback_and_restores_pan_ring() {
+        let tile = |zoom, x| crate::map::provider::TileId { zoom, x, y: 4 };
+        let mut pane = Scene3dPane::default();
+        pane.update_visible_map_tiles(vec![tile(8, 1)]);
+        pane.update_visible_map_tiles(vec![tile(9, 2)]);
+        pane.finish_map_zoom_transition();
+        assert!(!pane.map_zoom_transition);
+        assert!(pane.map_previous_tiles.is_empty());
+        assert_eq!(pane.map_previous_zoom, None);
+
+        pane.update_visible_map_tiles(vec![tile(9, 3)]);
+        assert_eq!(pane.map_previous_tiles, vec![tile(9, 2)]);
     }
 
     #[test]
