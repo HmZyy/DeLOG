@@ -330,6 +330,33 @@ fn bridge_empty_columns(mins: &mut [f32], maxs: &mut [f32]) {
     }
 }
 
+/// Dotted-gap bridges for `minmax_columns` output: one straight segment per
+/// maximal run of empty columns strictly between two finite columns, anchored
+/// at the neighbours' span midpoints. Segments are NaN-separated so the line
+/// shader draws them disjoint.
+pub fn gap_bridge_xy(cols: &[f32]) -> Vec<f32> {
+    let width = cols.len() / 3;
+    let mut out = Vec::new();
+    let mut left: Option<usize> = None;
+    for c in 0..width {
+        let (lo, hi) = (cols[3 * c + 1], cols[3 * c + 2]);
+        if !(lo.is_finite() && hi.is_finite()) {
+            continue;
+        }
+        if let Some(l) = left
+            && c > l + 1
+        {
+            if !out.is_empty() {
+                out.extend_from_slice(&[f32::NAN, f32::NAN]);
+            }
+            let ly = (cols[3 * l + 1] + cols[3 * l + 2]) * 0.5;
+            out.extend_from_slice(&[cols[3 * l], ly, cols[3 * c], (lo + hi) * 0.5]);
+        }
+        left = Some(c);
+    }
+    out
+}
+
 /// Median of consecutive x-deltas over a strided sample (capped so huge traces
 /// never pay for a full pass); 0.0 when no positive finite delta exists.
 fn median_dt(xy: &[f32]) -> f32 {
@@ -672,5 +699,50 @@ mod tests {
         let (snap, field) = snapshot_with(vec![5_000_000; 3], vec![Some(0); 3], 0);
         let cache = TraceCache::build(&snap, field, 0, 0, &MetricsRegistry::new()).unwrap();
         assert_eq!(cache.median_dt, 0.0);
+    }
+
+    #[test]
+    fn gap_bridge_xy_bridges_interior_empty_runs_only() {
+        let nan = f32::NAN;
+        // cols: [x, min, max] per column. Finite at 0,1; empty 2,3; finite 4.
+        let cols = [
+            0.5, 1.0, 2.0, //
+            1.5, 2.0, 3.0, //
+            2.5, nan, nan, //
+            3.5, nan, nan, //
+            4.5, 4.0, 6.0,
+        ];
+        let out = gap_bridge_xy(&cols);
+        // One bridge: (1.5, midpoint 2.5) -> (4.5, midpoint 5.0).
+        assert_eq!(out, vec![1.5, 2.5, 4.5, 5.0]);
+    }
+
+    #[test]
+    fn gap_bridge_xy_separates_multiple_bridges_with_nan() {
+        let nan = f32::NAN;
+        let cols = [
+            0.5, 1.0, 1.0, //
+            1.5, nan, nan, //
+            2.5, 2.0, 2.0, //
+            3.5, nan, nan, //
+            4.5, 3.0, 3.0,
+        ];
+        let out = gap_bridge_xy(&cols);
+        assert_eq!(out.len(), 10);
+        assert_eq!(&out[0..4], &[0.5, 1.0, 2.5, 2.0]);
+        assert!(out[4].is_nan() && out[5].is_nan());
+        assert_eq!(&out[6..10], &[2.5, 2.0, 4.5, 3.0]);
+    }
+
+    #[test]
+    fn gap_bridge_xy_skips_leading_trailing_and_all_empty() {
+        let nan = f32::NAN;
+        let leading = [0.5, nan, nan, 1.5, 1.0, 1.0, 2.5, 2.0, 2.0];
+        assert!(gap_bridge_xy(&leading).is_empty());
+        let trailing = [0.5, 1.0, 1.0, 1.5, 2.0, 2.0, 2.5, nan, nan];
+        assert!(gap_bridge_xy(&trailing).is_empty());
+        let all_empty = [0.5, nan, nan, 1.5, nan, nan];
+        assert!(gap_bridge_xy(&all_empty).is_empty());
+        assert!(gap_bridge_xy(&[]).is_empty());
     }
 }
