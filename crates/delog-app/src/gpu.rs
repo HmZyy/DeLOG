@@ -168,7 +168,7 @@ impl GpuBridge {
         renderer
             .callback_resources
             .get::<SceneResources>()
-            .is_some_and(|resources| resources.selection_has_current_imagery(selection))
+            .is_some_and(|resources| resources.selection_transition_complete(selection))
     }
 
     /// Call once per frame.
@@ -843,15 +843,25 @@ impl SceneResources {
         self.admit_map_tiles(&std::collections::HashSet::new(), None);
     }
 
-    fn selection_has_current_imagery(&self, selection: &MapTileSelection) -> bool {
+    fn selection_transition_complete(&self, selection: &MapTileSelection) -> bool {
+        if selection.previous_tiles.is_empty() {
+            return false;
+        }
         self.map_tile_cache
             .get(&selection.scope)
-            .into_iter()
-            .flat_map(HashMap::iter)
-            .any(|(key, tile)| {
-                self.map_tiles.contains(*key)
-                    && map_tile_matches(selection, tile)
-                    && map_tile_is_current(selection, tile)
+            .is_some_and(|cache| {
+                let resident_ids: std::collections::HashSet<_> = cache
+                    .iter()
+                    .filter_map(|(key, tile)| self.map_tiles.contains(*key).then_some(tile.id))
+                    .collect();
+                selection
+                    .current_tiles
+                    .iter()
+                    .all(|(id, _)| resident_ids.contains(id))
+                    && selection
+                        .previous_tiles
+                        .iter()
+                        .all(|id| !resident_ids.contains(id))
             })
     }
 
@@ -1054,57 +1064,15 @@ impl SceneResources {
         let scope_count = scopes.len().max(1);
         let base_quota = MAP_TILE_CAPACITY / scope_count;
         let remainder = MAP_TILE_CAPACITY % scope_count;
-        let ranked = |scope: MapScopeId, current: bool| {
-            let selection = &self.map_tile_selections[&scope];
-            let ids: Vec<_> = if current {
-                let mut ids = selection.current_tiles.clone();
-                ids.sort_by_key(|(id, priority)| (*priority, id.zoom, id.y, id.x));
-                ids.into_iter().map(|(id, _)| id).collect()
-            } else {
-                selection.previous_tiles.clone()
-            };
-            ids.into_iter()
-                .filter_map(|id| {
-                    self.map_tile_cache
-                        .get(&scope)?
-                        .iter()
-                        .find_map(|(key, tile)| (tile.id == id).then_some(*key))
-                })
-                .collect::<Vec<_>>()
-        };
-        let current: HashMap<_, _> = scopes
-            .iter()
-            .map(|scope| (*scope, ranked(*scope, true)))
-            .collect();
-        let previous: HashMap<_, _> = scopes
-            .iter()
-            .map(|scope| (*scope, ranked(*scope, false)))
-            .collect();
         let mut order = Vec::with_capacity(MAP_TILE_CAPACITY);
-        let mut admitted = std::collections::HashSet::new();
-        let mut push = |key| {
-            if order.len() < MAP_TILE_CAPACITY && admitted.insert(key) {
-                order.push(key);
-            }
-        };
-        // Every active scope first receives a bounded current-zoom reservation.
         for (index, scope) in scopes.iter().enumerate() {
             let quota = base_quota + usize::from(index < remainder);
-            for key in current[scope].iter().take(quota) {
-                push(*key);
-            }
+            let selection = &self.map_tile_selections[scope];
+            let empty = HashMap::new();
+            let cache = self.map_tile_cache.get(scope).unwrap_or(&empty);
+            order.extend(coverage_aware_scope_order(selection, cache, quota));
         }
-        // Spare capacity is distributed in scope order, current before fallback.
-        for scope in &scopes {
-            for key in &current[scope] {
-                push(*key);
-            }
-        }
-        for scope in &scopes {
-            for key in &previous[scope] {
-                push(*key);
-            }
-        }
+        let admitted: std::collections::HashSet<_> = order.iter().copied().collect();
 
         self.map_tiles.retain(order.iter().copied());
         self.map_tile_resident_signatures
@@ -1139,6 +1107,164 @@ fn prioritize_active_scope(scopes: &mut [MapScopeId], active_scope: Option<MapSc
     {
         scopes.swap(0, index);
     }
+}
+
+fn tiles_overlap_at_different_zooms(a: TileId, b: TileId) -> bool {
+    let (coarse, fine) = if a.zoom <= b.zoom { (a, b) } else { (b, a) };
+    let delta = fine.zoom - coarse.zoom;
+    delta < 32
+        && fine.x.checked_shr(delta as u32) == Some(coarse.x)
+        && fine.y.checked_shr(delta as u32) == Some(coarse.y)
+}
+
+fn coverage_aware_scope_order(
+    selection: &MapTileSelection,
+    cache: &HashMap<u64, ReadyTile>,
+    quota: usize,
+) -> Vec<u64> {
+    let ready_by_id: HashMap<_, _> = cache
+        .iter()
+        .filter_map(|(key, tile)| map_tile_matches(selection, tile).then_some((tile.id, *key)))
+        .collect();
+    let mut order = Vec::with_capacity(quota);
+    let mut admitted = std::collections::HashSet::new();
+    let mut replaced_previous = std::collections::HashSet::new();
+    for id in &selection.previous_tiles {
+        if order.len() == quota {
+            break;
+        }
+        if let Some(key) = ready_by_id.get(id)
+            && admitted.insert(*key)
+        {
+            order.push(*key);
+        }
+    }
+
+    struct Group {
+        current: Vec<(TileId, i32)>,
+        previous: Vec<TileId>,
+    }
+    let mut groups: Vec<Group> = Vec::new();
+    for &(current_id, priority) in &selection.current_tiles {
+        let overlaps: Vec<_> = selection
+            .previous_tiles
+            .iter()
+            .copied()
+            .filter(|previous_id| tiles_overlap_at_different_zooms(current_id, *previous_id))
+            .collect();
+        let matching: Vec<_> = groups
+            .iter()
+            .enumerate()
+            .filter_map(|(index, group)| {
+                group
+                    .previous
+                    .iter()
+                    .any(|id| overlaps.contains(id))
+                    .then_some(index)
+            })
+            .collect();
+        if let Some(&first) = matching.first() {
+            groups[first].current.push((current_id, priority));
+            for id in overlaps {
+                if !groups[first].previous.contains(&id) {
+                    groups[first].previous.push(id);
+                }
+            }
+            for &index in matching.iter().skip(1).rev() {
+                let merged = groups.remove(index);
+                groups[first].current.extend(merged.current);
+                for id in merged.previous {
+                    if !groups[first].previous.contains(&id) {
+                        groups[first].previous.push(id);
+                    }
+                }
+            }
+        } else {
+            groups.push(Group {
+                current: vec![(current_id, priority)],
+                previous: overlaps,
+            });
+        }
+    }
+    groups.sort_by_key(|group| {
+        let priority = group
+            .current
+            .iter()
+            .map(|(_, priority)| *priority)
+            .min()
+            .unwrap_or(i32::MAX);
+        let coarse = group
+            .current
+            .iter()
+            .map(|(id, _)| *id)
+            .chain(group.previous.iter().copied())
+            .min_by_key(|id| (id.zoom, id.y, id.x))
+            .unwrap();
+        (priority, coarse.zoom, coarse.y, coarse.x)
+    });
+    for group in &mut groups {
+        group
+            .current
+            .sort_by_key(|(id, priority)| (*priority, id.zoom, id.y, id.x));
+        if group.current.is_empty()
+            || !group
+                .current
+                .iter()
+                .all(|(id, _)| ready_by_id.contains_key(id))
+        {
+            continue;
+        }
+        let previous_keys: std::collections::HashSet<_> = group
+            .previous
+            .iter()
+            .filter_map(|id| ready_by_id.get(id).copied())
+            .collect();
+        let admitted_previous_count = order
+            .iter()
+            .filter(|key| previous_keys.contains(key))
+            .count();
+        let current_keys: Vec<_> = group
+            .current
+            .iter()
+            .filter_map(|(id, _)| ready_by_id.get(id).copied())
+            .collect();
+        let candidate_len = order.len() - admitted_previous_count + current_keys.len();
+        if candidate_len <= quota {
+            order.retain(|key| !previous_keys.contains(key));
+            admitted.retain(|key| !previous_keys.contains(key));
+            replaced_previous.extend(previous_keys);
+            for key in current_keys {
+                if admitted.insert(key) {
+                    order.push(key);
+                }
+            }
+        }
+    }
+
+    let mut current = selection.current_tiles.clone();
+    current.sort_by_key(|(id, priority)| (*priority, id.zoom, id.y, id.x));
+    for (id, _) in current {
+        if order.len() == quota {
+            break;
+        }
+        if let Some(key) = ready_by_id.get(&id)
+            && admitted.insert(*key)
+        {
+            order.push(*key);
+        }
+    }
+    for id in &selection.previous_tiles {
+        if order.len() == quota {
+            break;
+        }
+        if let Some(key) = ready_by_id.get(id)
+            && !replaced_previous.contains(key)
+            && admitted.insert(*key)
+        {
+            order.push(*key);
+        }
+    }
+    order
 }
 
 fn map_tile_matches(selection: &MapTileSelection, tile: &ReadyTile) -> bool {
@@ -1680,15 +1806,15 @@ mod tests {
         assert_eq!(first.previous, expected_previous);
         assert_eq!(first.current, expected_current);
         assert_eq!(reversed, first, "ready insertion order cannot affect draws");
-        assert!(resources.selection_has_current_imagery(&selection));
+        assert!(!resources.selection_transition_complete(&selection));
 
         let mut other_pane = selection.clone();
         other_pane.scope = MapScopeId(45);
-        assert!(!resources.selection_has_current_imagery(&other_pane));
+        assert!(!resources.selection_transition_complete(&other_pane));
 
         let mut switched_generation = selection.clone();
         switched_generation.generation += 1;
-        assert!(!resources.selection_has_current_imagery(&switched_generation));
+        assert!(!resources.selection_transition_complete(&switched_generation));
     }
 
     #[test]
@@ -1893,42 +2019,274 @@ mod tests {
     }
 
     #[test]
-    fn saturated_previous_zoom_is_displaced_by_current_zoom() {
-        let Some(ctx) = RenderContext::headless() else {
-            return;
-        };
-        let mut resources = SceneResources::new(ctx);
-        let selection = MapTileSelection {
+    fn xyz_overlap_handles_zoom_in_out_and_jumps() {
+        let id = |zoom, x, y| TileId { zoom, x, y };
+        assert!(tiles_overlap_at_different_zooms(
+            id(8, 3, 5),
+            id(10, 13, 21)
+        ));
+        assert!(tiles_overlap_at_different_zooms(
+            id(10, 13, 21),
+            id(8, 3, 5)
+        ));
+        assert!(!tiles_overlap_at_different_zooms(
+            id(8, 3, 5),
+            id(10, 16, 21)
+        ));
+    }
+
+    fn transition_selection(
+        current: Vec<(TileId, i32)>,
+        previous: Vec<TileId>,
+    ) -> MapTileSelection {
+        MapTileSelection {
             scope: MapScopeId(31),
             epoch: 1,
             provider: crate::map::provider::MapProviderId::BingSatellite,
             generation: 1,
-            current_tiles: live_zoom(8),
-            previous_tiles: live_zoom_ids(7),
+            current_tiles: current,
+            previous_tiles: previous,
             enabled: true,
-        };
-        let tile = |zoom, x| ReadyTile {
+        }
+    }
+
+    fn transition_tile(selection: &MapTileSelection, id: TileId, priority: i32) -> ReadyTile {
+        ReadyTile {
             scope: selection.scope,
-            epoch: 1,
+            epoch: selection.epoch,
             provider: selection.provider,
-            id: crate::map::provider::TileId { zoom, x, y: 0 },
-            generation: 1,
-            priority: x as i32,
-            rgba: [x as u8, zoom, 0, 255].repeat(256 * 256),
-            corners: [[x as f32, 0.0, 0.0]; 4],
+            id,
+            generation: selection.generation,
+            priority,
+            rgba: [id.x as u8, id.zoom, id.y as u8, 255].repeat(256 * 256),
+            corners: [[id.x as f32, id.y as f32, 0.0]; 4],
+        }
+    }
+
+    #[test]
+    fn partial_children_keep_saturated_fallback_coverage() {
+        let Some(ctx) = RenderContext::headless() else {
+            return;
         };
-        let previous: Vec<_> = (0..128).map(|x| tile(7, x)).collect();
+        let mut resources = SceneResources::new(ctx);
+        let parent_ids: Vec<_> = (0..128).map(|x| TileId { zoom: 7, x, y: 5 }).collect();
+        let child_ids = [
+            TileId {
+                zoom: 8,
+                x: 6,
+                y: 10,
+            },
+            TileId {
+                zoom: 8,
+                x: 7,
+                y: 10,
+            },
+            TileId {
+                zoom: 8,
+                x: 6,
+                y: 11,
+            },
+            TileId {
+                zoom: 8,
+                x: 7,
+                y: 11,
+            },
+        ];
+        let selection = transition_selection(
+            child_ids
+                .iter()
+                .enumerate()
+                .map(|(p, id)| (*id, p as i32))
+                .collect(),
+            parent_ids.clone(),
+        );
+        let previous: Vec<_> = parent_ids
+            .iter()
+            .copied()
+            .map(|id| transition_tile(&selection, id, id.x as i32))
+            .collect();
         let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
         let first = resources.prepare_map_tiles(identity, &selection, &previous);
         assert_eq!(first.previous.len(), 128);
 
-        let current = tile(8, 0);
-        let current_key = map_tile_key(&current);
-        let draw = resources.prepare_map_tiles(identity, &selection, &[current]);
-        assert!(draw.current.contains(&current_key));
-        assert!(resources.map_tiles.contains(current_key));
-        assert_eq!(draw.previous.len(), 127);
+        let child = transition_tile(&selection, child_ids[0], 0);
+        let child_key = map_tile_key(&child);
+        let draw = resources.prepare_map_tiles(identity, &selection, &[child]);
+        assert!(!draw.current.contains(&child_key));
+        assert!(!resources.map_tiles.contains(child_key));
+        assert_eq!(draw.previous.len(), 128);
         assert_eq!(resources.map_tiles.resident_tile_count(), 128);
+    }
+
+    #[test]
+    fn partial_child_uses_spare_slot_over_retained_parent() {
+        let Some(ctx) = RenderContext::headless() else {
+            return;
+        };
+        let mut resources = SceneResources::new(ctx);
+        let parent_ids: Vec<_> = (0..127).map(|x| TileId { zoom: 7, x, y: 5 }).collect();
+        let child_ids = [
+            TileId {
+                zoom: 8,
+                x: 6,
+                y: 10,
+            },
+            TileId {
+                zoom: 8,
+                x: 7,
+                y: 10,
+            },
+            TileId {
+                zoom: 8,
+                x: 6,
+                y: 11,
+            },
+            TileId {
+                zoom: 8,
+                x: 7,
+                y: 11,
+            },
+        ];
+        let selection = transition_selection(
+            child_ids
+                .iter()
+                .enumerate()
+                .map(|(p, id)| (*id, p as i32))
+                .collect(),
+            parent_ids.clone(),
+        );
+        let previous: Vec<_> = parent_ids
+            .iter()
+            .copied()
+            .map(|id| transition_tile(&selection, id, id.x as i32))
+            .collect();
+        let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+        resources.prepare_map_tiles(identity, &selection, &previous);
+        let child = transition_tile(&selection, child_ids[0], 0);
+        let draw = resources.prepare_map_tiles(identity, &selection, &[child.clone()]);
+        assert_eq!(draw.previous.len(), 127);
+        assert!(draw.current.contains(&map_tile_key(&child)));
+        assert!(resources.map_tiles.contains(map_tile_key(&transition_tile(
+            &selection,
+            parent_ids[3],
+            3
+        ))));
+    }
+
+    #[test]
+    fn complete_children_replace_parent_atomically_when_quota_fits() {
+        let Some(ctx) = RenderContext::headless() else {
+            return;
+        };
+        let mut resources = SceneResources::new(ctx);
+        let parent_ids: Vec<_> = (0..125).map(|x| TileId { zoom: 7, x, y: 5 }).collect();
+        let children = [
+            TileId {
+                zoom: 8,
+                x: 6,
+                y: 10,
+            },
+            TileId {
+                zoom: 8,
+                x: 7,
+                y: 10,
+            },
+            TileId {
+                zoom: 8,
+                x: 6,
+                y: 11,
+            },
+            TileId {
+                zoom: 8,
+                x: 7,
+                y: 11,
+            },
+        ];
+        let selection = transition_selection(
+            children
+                .iter()
+                .enumerate()
+                .map(|(priority, id)| (*id, priority as i32))
+                .collect(),
+            parent_ids.clone(),
+        );
+        let previous: Vec<_> = parent_ids
+            .iter()
+            .copied()
+            .map(|id| transition_tile(&selection, id, id.x as i32))
+            .collect();
+        let ready_children: Vec<_> = children
+            .iter()
+            .enumerate()
+            .map(|(priority, id)| transition_tile(&selection, *id, priority as i32))
+            .collect();
+        let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+        resources.prepare_map_tiles(identity, &selection, &previous);
+        let draw = resources.prepare_map_tiles(identity, &selection, &ready_children);
+        assert_eq!(draw.previous.len(), 124);
+        assert_eq!(draw.current.len(), 4);
+        assert!(!resources.map_tiles.contains(map_tile_key(&transition_tile(
+            &selection,
+            parent_ids[3],
+            3
+        ))));
+        let reversed = resources.prepare_map_tiles(
+            identity,
+            &selection,
+            &ready_children.iter().rev().cloned().collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            reversed, draw,
+            "ready arrival order cannot affect atomic replacement"
+        );
+    }
+
+    #[test]
+    fn zoom_out_parent_replaces_fallback_children_atomically() {
+        let Some(ctx) = RenderContext::headless() else {
+            return;
+        };
+        let mut resources = SceneResources::new(ctx);
+        let parent = TileId {
+            zoom: 7,
+            x: 3,
+            y: 5,
+        };
+        let children = vec![
+            TileId {
+                zoom: 8,
+                x: 6,
+                y: 10,
+            },
+            TileId {
+                zoom: 8,
+                x: 7,
+                y: 10,
+            },
+            TileId {
+                zoom: 8,
+                x: 6,
+                y: 11,
+            },
+            TileId {
+                zoom: 8,
+                x: 7,
+                y: 11,
+            },
+        ];
+        let selection = transition_selection(vec![(parent, 0)], children.clone());
+        let fallback: Vec<_> = children
+            .iter()
+            .copied()
+            .map(|id| transition_tile(&selection, id, 0))
+            .collect();
+        let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+        resources.prepare_map_tiles(identity, &selection, &fallback);
+        let current = transition_tile(&selection, parent, 0);
+        let draw = resources.prepare_map_tiles(identity, &selection, &[current.clone()]);
+        assert_eq!(draw.current, vec![map_tile_key(&current)]);
+        assert!(draw.previous.is_empty());
+        assert!(resources.selection_transition_complete(&selection));
     }
 
     #[test]
@@ -2169,14 +2527,14 @@ mod tests {
                 .all(|key| resources.map_tiles.contains(*key))
         );
         let draw_a = resources.prepare_map_tiles(identity, &selection(41), &[]);
-        assert_eq!(draw_a.current.len(), 127);
+        assert_eq!(draw_a.current.len(), 64);
         assert!(
             resources.map_tiles.contains(b_key),
             "alternating panes stabilizes without evicting B"
         );
         let draw_b_again = resources.prepare_map_tiles(identity, &selection(42), &[]);
         assert_eq!(draw_b_again.current, vec![b_key]);
-        assert_eq!(resources.map_tiles.resident_tile_count(), 128);
+        assert_eq!(resources.map_tiles.resident_tile_count(), 65);
     }
 
     #[test]
