@@ -11,7 +11,14 @@ pub struct PlotUniform {
     pub transform: [f32; 4],
     pub view: [f32; 4],
     pub color: [f32; 4],
+    /// x: gap mode (`GAP_*`), y: x-units gap threshold (0 = off), z/w unused.
+    pub gap: [f32; 4],
 }
+
+pub const GAP_CONNECT: u32 = 0;
+pub const GAP_CUT: u32 = 1;
+pub const GAP_DOTTED: u32 = 2;
+pub const GAP_FORCE_DASH: u32 = 3;
 
 impl PlotUniform {
     pub fn new(
@@ -27,6 +34,7 @@ impl PlotUniform {
             transform: [x_scale, x_offset, y_scale, y_offset],
             view: [viewport[0], viewport[1], width_px, 0.0],
             color,
+            gap: [0.0; 4],
         }
     }
 
@@ -47,6 +55,13 @@ impl PlotUniform {
     /// Edge anti-alias feather, stored in `view.w`.
     pub fn with_aa(mut self, aa: f32) -> Self {
         self.view[3] = aa.max(0.0);
+        self
+    }
+
+    /// Gap mode and x-units delta threshold, stored in `gap.xy`.
+    pub fn with_gap(mut self, mode: u32, threshold: f32) -> Self {
+        self.gap[0] = mode as f32;
+        self.gap[1] = threshold.max(0.0);
         self
     }
 }
@@ -176,8 +191,8 @@ mod tests {
     }
 
     #[test]
-    fn uniform_is_three_vec4s() {
-        assert_eq!(UNIFORM_SIZE, 48);
+    fn uniform_is_four_vec4s() {
+        assert_eq!(UNIFORM_SIZE, 64);
     }
 
     #[test]

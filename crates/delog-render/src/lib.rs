@@ -36,4 +36,6 @@ pub use scene_target::{COLOR_FORMAT, DEPTH_FORMAT, SAMPLE_COUNT, Scene3dTarget};
 pub use step::StepPipeline;
 pub use target::{OffscreenTarget, RgbaImage};
 pub use traj3d::{Traj3dPipeline, Traj3dUniform};
-pub use uniforms::{PlotUniform, UniformRing};
+pub use uniforms::{
+    GAP_CONNECT, GAP_CUT, GAP_DOTTED, GAP_FORCE_DASH, PlotUniform, UniformRing,
+};
