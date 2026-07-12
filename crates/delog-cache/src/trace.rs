@@ -26,6 +26,9 @@ pub struct TraceCache {
     /// Source offset baked into the x values; a different offset makes this
     /// cache stale (rebuild, not append).
     pub offset_us: i64,
+    /// Typical (median) x-delta in seconds; 0 when unknowable (fewer than two
+    /// samples, or no positive delta). Drives delta-gap detection.
+    pub median_dt: f32,
 }
 
 struct Resolved<'a> {
@@ -78,6 +81,7 @@ impl TraceCache {
             let _t = metrics.scope("minmax_build");
             MinMaxPyramid::build_strided(&xy, 2, 1)
         };
+        let median_dt = median_dt(&xy);
         Some(Self {
             xy,
             origin_us,
@@ -85,6 +89,7 @@ impl TraceCache {
             pyramid,
             last_used_frame: frame,
             offset_us: r.offset_us,
+            median_dt,
         })
     }
 
@@ -130,6 +135,7 @@ impl TraceCache {
             self.pyramid.extend(&self.xy);
         }
         self.built_rows = r.store.rows;
+        self.median_dt = median_dt(&self.xy);
         true
     }
 
@@ -322,6 +328,30 @@ fn bridge_empty_columns(mins: &mut [f32], maxs: &mut [f32]) {
         }
         left = Some(right);
     }
+}
+
+/// Median of consecutive x-deltas over a strided sample (capped so huge traces
+/// never pay for a full pass); 0.0 when no positive finite delta exists.
+fn median_dt(xy: &[f32]) -> f32 {
+    let n = xy.len() / 2;
+    if n < 2 {
+        return 0.0;
+    }
+    const CAP: usize = 4096;
+    let total = n - 1;
+    let stride = total.div_ceil(CAP).max(1);
+    let mut deltas: Vec<f32> = (0..total)
+        .step_by(stride)
+        .map(|i| xy[2 * (i + 1)] - xy[2 * i])
+        .filter(|d| d.is_finite() && *d > 0.0)
+        .collect();
+    if deltas.is_empty() {
+        return 0.0;
+    }
+    let mid = deltas.len() / 2;
+    *deltas
+        .select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap())
+        .1
 }
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
@@ -606,5 +636,41 @@ mod tests {
         let q = cache.pyramid.query(&cache.xy, 0, 4);
         assert_eq!(q.min, 0.5);
         assert_eq!(q.max, 4.0);
+    }
+
+    #[test]
+    fn median_dt_is_the_typical_sample_interval() {
+        let (snap, field) = snapshot_with(
+            vec![0, 1_000_000, 2_000_000, 3_000_000, 4_000_000],
+            vec![Some(0), Some(100), Some(200), Some(300), Some(400)],
+            0,
+        );
+        let cache = TraceCache::build(&snap, field, 0, 0, &MetricsRegistry::new()).unwrap();
+        assert!((cache.median_dt - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn median_dt_ignores_a_large_dropout() {
+        // Four 1s deltas and one 60s dropout: the median must stay 1s.
+        let (snap, field) = snapshot_with(
+            vec![0, 1_000_000, 2_000_000, 62_000_000, 63_000_000, 64_000_000],
+            vec![Some(0); 6],
+            0,
+        );
+        let cache = TraceCache::build(&snap, field, 0, 0, &MetricsRegistry::new()).unwrap();
+        assert!((cache.median_dt - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn median_dt_is_zero_when_unknowable() {
+        // Single sample: no deltas.
+        let (snap, field) = snapshot_with(vec![0], vec![Some(0)], 0);
+        let cache = TraceCache::build(&snap, field, 0, 0, &MetricsRegistry::new()).unwrap();
+        assert_eq!(cache.median_dt, 0.0);
+
+        // Duplicate timestamps: only zero deltas.
+        let (snap, field) = snapshot_with(vec![5_000_000; 3], vec![Some(0); 3], 0);
+        let cache = TraceCache::build(&snap, field, 0, 0, &MetricsRegistry::new()).unwrap();
+        assert_eq!(cache.median_dt, 0.0);
     }
 }
