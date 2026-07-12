@@ -6,10 +6,10 @@ use delog_cache::{CacheManager, MinMax};
 use delog_core::identity::FieldId;
 use delog_core::metrics::MetricsRegistry;
 use delog_render::{
-    BufferManager, GpuErrorHub, Grid3dPipeline, GridUniform, LinePipeline, MAP_TILE_CAPACITY,
-    MapTileDrawGroups, MapTilePipeline, MapTileUpload, MeshGpu, MeshPipeline, MeshUniform,
-    MinMaxColPipeline, PlotUniform, RenderContext, ScatterPipeline, Scene3dTarget, StepPipeline,
-    Traj3dPipeline, Traj3dUniform, UniformRing,
+    BufferManager, GAP_CONNECT, GAP_CUT, GAP_DOTTED, GpuErrorHub, Grid3dPipeline, GridUniform,
+    LinePipeline, MAP_TILE_CAPACITY, MapTileDrawGroups, MapTilePipeline, MapTileUpload, MeshGpu,
+    MeshPipeline, MeshUniform, MinMaxColPipeline, PlotUniform, RenderContext, ScatterPipeline,
+    Scene3dTarget, StepPipeline, Traj3dPipeline, Traj3dUniform, UniformRing,
 };
 use eframe::{egui_wgpu, wgpu};
 
@@ -18,7 +18,7 @@ use crate::map::provider::{MapProviderId, TileId};
 use crate::map::worker::{MapScopeId, ReadyTile};
 use crate::models;
 use crate::plot::{PlotPane, TraceMode, ViewX};
-use crate::settings::Scene3dSettings;
+use crate::settings::{GapMode, Scene3dSettings};
 use crate::vehicle::ModelKind;
 
 #[derive(Clone, Debug)]
@@ -278,6 +278,12 @@ impl GpuBridge {
                 let Some(cache) = caches.get(trace.field) else {
                     continue;
                 };
+                let gap_threshold = if tuning.gap_mode == GapMode::Connect || cache.median_dt <= 0.0
+                {
+                    0.0
+                } else {
+                    tuning.gap_factor * cache.median_dt
+                };
                 res.uniforms.write(
                     slot,
                     &PlotUniform::from_view(
@@ -287,7 +293,8 @@ impl GpuBridge {
                         trace.width_px,
                         shader_color(trace.color, self.srgb_target),
                     )
-                    .with_aa(tuning.line_aa_px),
+                    .with_aa(tuning.line_aa_px)
+                    .with_gap(gap_mode_u32(tuning.gap_mode), gap_threshold),
                 );
 
                 let kind = match trace.mode {
@@ -304,7 +311,7 @@ impl GpuBridge {
                                 x0: x0.to_bits(),
                                 x1: x1.to_bits(),
                                 width: width as u32,
-                                bridge: tuning.gap_mode == crate::settings::GapMode::Connect,
+                                bridge: tuning.gap_mode == GapMode::Connect,
                                 len: cache.samples(),
                             };
                             if res.col_params.get(&trace.field) != Some(&key) {
@@ -312,7 +319,7 @@ impl GpuBridge {
                                     x0,
                                     x1,
                                     width,
-                                    tuning.gap_mode == crate::settings::GapMode::Connect,
+                                    tuning.gap_mode == GapMode::Connect,
                                 );
                                 let stat = res.col_buffers.sync(trace.field, &cols, true);
                                 upload_bytes += stat.bytes;
@@ -328,9 +335,15 @@ impl GpuBridge {
                                 a: aw,
                                 b: bw,
                                 len: cache.samples(),
+                                mode: gap_mode_u32(tuning.gap_mode),
                             };
                             if res.win_params.get(&trace.field) != Some(&key) {
-                                let line_xy = line_window_xy(&cache.xy, aw, bw);
+                                let line_xy = line_window_xy(
+                                    &cache.xy,
+                                    aw,
+                                    bw,
+                                    tuning.gap_mode != GapMode::Connect,
+                                );
                                 let stat = res.win_buffers.sync(trace.field, &line_xy, true);
                                 if line_xy.is_empty() {
                                     res.win_buffers.remove(trace.field);
@@ -572,12 +585,15 @@ fn pad_window(a: usize, b: usize, n: usize) -> (usize, usize) {
     (a.saturating_sub(1), (b + 1).min(n))
 }
 
-fn line_window_xy(xy: &[f32], a: usize, b: usize) -> Vec<f32> {
+fn line_window_xy(xy: &[f32], a: usize, b: usize, keep_gaps: bool) -> Vec<f32> {
     let samples = xy.len() / 2;
     let a = a.min(samples);
     let b = b.min(samples);
     if a >= b {
         return Vec::new();
+    }
+    if keep_gaps {
+        return xy[2 * a..2 * b].to_vec();
     }
 
     let mut out = Vec::with_capacity((b - a) * 2);
@@ -587,6 +603,14 @@ fn line_window_xy(xy: &[f32], a: usize, b: usize) -> Vec<f32> {
         }
     }
     out
+}
+
+fn gap_mode_u32(mode: GapMode) -> u32 {
+    match mode {
+        GapMode::Connect => GAP_CONNECT,
+        GapMode::Cut => GAP_CUT,
+        GapMode::Dotted => GAP_DOTTED,
+    }
 }
 
 /// Consecutive same-pipeline runs in draw order (one `set_pipeline` each).
@@ -678,6 +702,7 @@ struct WinKey {
     a: usize,
     b: usize,
     len: usize,
+    mode: u32,
 }
 
 impl PlotCallbackResources {
@@ -1548,7 +1573,7 @@ mod tests {
     }
 
     #[test]
-    fn line_window_upload_skips_nan_points_so_finite_samples_connect() {
+    fn line_window_strips_nan_points_in_connect_mode() {
         let xy = [
             0.0,
             10.0, //
@@ -1561,10 +1586,18 @@ mod tests {
             4.0,
             14.0,
         ];
-
-        let line_xy = line_window_xy(&xy, 0, 5);
-
+        let line_xy = line_window_xy(&xy, 0, 5, false);
         assert_eq!(line_xy, vec![0.0, 10.0, 2.0, 12.0, 4.0, 14.0]);
+    }
+
+    #[test]
+    fn line_window_keeps_nan_points_when_gaps_are_kept() {
+        let xy = [0.0, 10.0, 1.0, f32::NAN, 2.0, 12.0];
+        let line_xy = line_window_xy(&xy, 0, 3, true);
+        assert_eq!(line_xy.len(), 6);
+        assert_eq!(line_xy[0..2], [0.0, 10.0]);
+        assert!(line_xy[3].is_nan());
+        assert_eq!(line_xy[4..6], [2.0, 12.0]);
     }
 
     #[test]
