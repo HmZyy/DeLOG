@@ -299,7 +299,7 @@ impl GpuBridge {
                     .with_aa(tuning.line_aa_px)
                     .with_gap(gap_mode_u32(tuning.gap_mode), gap_threshold),
                 );
-                if dotted {
+                if dotted && trace.mode == TraceMode::Line {
                     res.uniforms.write(
                         slot + 1,
                         &PlotUniform::from_view(
@@ -399,6 +399,8 @@ impl GpuBridge {
                     }
                     TraceMode::Scatter => {
                         res.bridge_buffers.remove(trace.field);
+                        res.col_params.remove(&trace.field);
+                        res.win_params.remove(&trace.field);
                         res.buffers.sync(trace.field, &cache.xy, false);
                         DrawKind::Scatter {
                             samples: res.buffers.samples(trace.field) as u32,
@@ -406,6 +408,8 @@ impl GpuBridge {
                     }
                     TraceMode::Step => {
                         res.bridge_buffers.remove(trace.field);
+                        res.col_params.remove(&trace.field);
+                        res.win_params.remove(&trace.field);
                         res.buffers.sync(trace.field, &cache.xy, false);
                         DrawKind::Step {
                             samples: res.buffers.samples(trace.field) as u32,
@@ -664,27 +668,42 @@ fn line_window_xy(xy: &[f32], a: usize, b: usize, keep_gaps: bool) -> Vec<f32> {
 }
 
 /// Dotted-gap bridges across NaN runs in `xy[2a..2b)`: one straight segment
-/// per maximal run of non-finite points bounded by finite points either side.
-/// Segments are NaN-separated so the line shader draws them disjoint.
+/// per maximal run of non-finite points, anchored at the nearest finite
+/// samples on each side. Anchors are looked up outside the window (bounded
+/// scan) when a run straddles the window edge, so bridges stay stable while
+/// panning.
 fn nan_bridge_xy(xy: &[f32], a: usize, b: usize) -> Vec<f32> {
+    const ANCHOR_SCAN: usize = 65_536;
     let samples = xy.len() / 2;
     let (a, b) = (a.min(samples), b.min(samples));
+    let finite_at = |i: usize| xy[2 * i].is_finite() && xy[2 * i + 1].is_finite();
+
+    let left_outside = (0..a).rev().take(ANCHOR_SCAN).find(|&i| finite_at(i));
+    let right_outside = (b..samples).take(ANCHOR_SCAN).find(|&i| finite_at(i));
+
     let mut out = Vec::new();
-    let mut left: Option<usize> = None;
+    let push = |l: usize, r: usize, out: &mut Vec<f32>| {
+        if !out.is_empty() {
+            out.extend_from_slice(&[f32::NAN, f32::NAN]);
+        }
+        out.extend_from_slice(&[xy[2 * l], xy[2 * l + 1], xy[2 * r], xy[2 * r + 1]]);
+    };
+
+    let mut left = left_outside;
     let mut in_run = false;
     for i in a..b {
-        if xy[2 * i].is_finite() && xy[2 * i + 1].is_finite() {
+        if finite_at(i) {
             if in_run && let Some(l) = left {
-                if !out.is_empty() {
-                    out.extend_from_slice(&[f32::NAN, f32::NAN]);
-                }
-                out.extend_from_slice(&[xy[2 * l], xy[2 * l + 1], xy[2 * i], xy[2 * i + 1]]);
+                push(l, i, &mut out);
             }
             left = Some(i);
             in_run = false;
         } else if left.is_some() {
             in_run = true;
         }
+    }
+    if in_run && let (Some(l), Some(r)) = (left, right_outside) {
+        push(l, r, &mut out);
     }
     out
 }
@@ -1731,6 +1750,33 @@ mod tests {
         assert!(nan_bridge_xy(&[0.0, 1.0, 1.0, 2.0, 2.0, nan], 0, 3).is_empty());
         assert!(nan_bridge_xy(&[0.0, 1.0, 1.0, 2.0], 0, 2).is_empty());
         assert!(nan_bridge_xy(&[], 0, 0).is_empty());
+    }
+
+    #[test]
+    fn nan_bridge_xy_anchors_runs_straddling_the_window_edges() {
+        let nan = f32::NAN;
+        let xy = [
+            0.0, 1.0, //
+            1.0, nan, //
+            2.0, nan, //
+            3.0, 3.0, //
+            4.0, nan, //
+            5.0, nan, //
+            6.0, 6.0,
+        ];
+        // Window [2, 5): starts and ends inside NaN runs; anchors live outside.
+        let out = nan_bridge_xy(&xy, 2, 5);
+        assert_eq!(out.len(), 10);
+        assert_eq!(&out[0..4], &[0.0, 1.0, 3.0, 3.0]);
+        assert!(out[4].is_nan() && out[5].is_nan());
+        assert_eq!(&out[6..10], &[3.0, 3.0, 6.0, 6.0]);
+
+        // Window entirely inside one NaN run bridges across the whole view.
+        let mid = [0.0, 1.0, 1.0, nan, 2.0, nan, 3.0, nan, 4.0, 4.0];
+        assert_eq!(nan_bridge_xy(&mid, 2, 3), vec![0.0, 1.0, 4.0, 4.0]);
+
+        // No outside anchor on one side: still no bridge for that run.
+        assert!(nan_bridge_xy(&[0.0, nan, 1.0, nan, 2.0, 2.0], 0, 1).is_empty());
     }
 
     #[test]

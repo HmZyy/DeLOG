@@ -946,7 +946,7 @@ fn rendering_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
                     egui::DragValue::new(&mut r.gap_factor)
                         .range(1.5..=1000.0)
                         .speed(0.5)
-                        .suffix("x typical interval"),
+                        .suffix(" x typical interval"),
                 );
                 ui.end_row();
             }
