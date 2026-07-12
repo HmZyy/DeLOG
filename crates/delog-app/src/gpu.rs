@@ -349,6 +349,8 @@ impl GpuBridge {
                                     } else {
                                         res.bridge_buffers.sync(trace.field, &bxy, true);
                                     }
+                                    // The shared bridge buffer now belongs to this branch; make the other branch refresh it on return.
+                                    res.win_params.remove(&trace.field);
                                 } else {
                                     res.bridge_buffers.remove(trace.field);
                                 }
@@ -385,6 +387,7 @@ impl GpuBridge {
                                     } else {
                                         res.bridge_buffers.sync(trace.field, &bxy, true);
                                     }
+                                    res.col_params.remove(&trace.field);
                                 } else {
                                     res.bridge_buffers.remove(trace.field);
                                 }
