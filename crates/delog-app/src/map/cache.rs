@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 
 use super::provider::{MapProviderId, TileId};
 
-pub const DEFAULT_TILE_CACHE_BYTES: u64 = 1_073_741_824;
 const MIN_CACHE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_CACHE_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const INDEX_FILE: &str = "index.json";
