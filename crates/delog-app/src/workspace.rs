@@ -52,6 +52,11 @@ impl Scene3dPane {
         if self.map_selection != selection {
             self.map_selection = selection;
             self.map_generation = self.map_generation.wrapping_add(1).max(1);
+            self.map_zoom = None;
+            self.map_zoom_transition = false;
+            self.map_previous_zoom = None;
+            self.map_tiles.clear();
+            self.map_previous_tiles.clear();
         }
         self.map_generation
     }
@@ -2352,6 +2357,31 @@ mod tests {
             first
         );
         assert!(pane.update_map_selection(Some((1, MapProviderId::BingSatellite, [0; 3]))) > first);
+    }
+
+    #[test]
+    fn scene_map_selection_change_clears_current_and_fallback_tiles() {
+        let tile = |zoom, x| crate::map::provider::TileId { zoom, x, y: 4 };
+        let selection = Some((0, MapProviderId::BingSatellite, [0; 3]));
+        let mut pane = Scene3dPane::default();
+        let generation = pane.update_map_selection(selection);
+        pane.update_visible_map_tiles(vec![tile(8, 1)]);
+        pane.update_visible_map_tiles(vec![tile(9, 2)]);
+        assert!(pane.map_zoom_transition);
+
+        assert_eq!(pane.update_map_selection(selection), generation);
+        assert!(pane.map_zoom_transition);
+        assert_eq!(pane.map_previous_tiles, vec![tile(8, 1)]);
+        assert_eq!(pane.map_tiles, vec![(tile(9, 2), 0)]);
+
+        assert!(
+            pane.update_map_selection(Some((1, MapProviderId::BingSatellite, [1; 3]))) > generation
+        );
+        assert_eq!(pane.map_zoom, None);
+        assert_eq!(pane.map_previous_zoom, None);
+        assert!(!pane.map_zoom_transition);
+        assert!(pane.map_tiles.is_empty());
+        assert!(pane.map_previous_tiles.is_empty());
     }
 
     #[test]
