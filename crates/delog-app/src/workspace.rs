@@ -41,7 +41,6 @@ pub struct Scene3dPane {
     pub(crate) map_selection: Option<(usize, MapProviderId, [u64; 3])>,
     pub(crate) map_generation: u64,
     pub(crate) map_tiles: Vec<(crate::map::provider::TileId, i32)>,
-    pub(crate) map_fallback_tiles: Vec<crate::map::provider::TileId>,
 }
 
 impl Scene3dPane {
@@ -50,36 +49,18 @@ impl Scene3dPane {
             self.map_selection = selection;
             self.map_generation = self.map_generation.wrapping_add(1).max(1);
             self.map_tiles.clear();
-            self.map_fallback_tiles.clear();
         } else if selection.is_none() {
             self.map_tiles.clear();
-            self.map_fallback_tiles.clear();
         }
         self.map_generation
     }
 
     fn update_visible_map_tiles(&mut self, desired: Vec<crate::map::provider::TileId>) {
-        let desired_set: HashSet<_> = desired.iter().copied().collect();
-        if self.map_fallback_tiles.is_empty() {
-            self.map_fallback_tiles = self
-                .map_tiles
-                .iter()
-                .map(|(id, _)| *id)
-                .filter(|id| !desired_set.contains(id))
-                .collect();
-        } else {
-            self.map_fallback_tiles
-                .retain(|id| !desired_set.contains(id));
-        }
         self.map_tiles = desired
             .into_iter()
             .enumerate()
             .map(|(priority, id)| (id, priority as i32))
             .collect();
-    }
-
-    fn clear_map_fallback(&mut self) {
-        self.map_fallback_tiles.clear();
     }
 }
 
@@ -94,7 +75,6 @@ impl Default for Scene3dPane {
             map_selection: None,
             map_generation: 0,
             map_tiles: Vec::new(),
-            map_fallback_tiles: Vec::new(),
         }
     }
 }
@@ -771,12 +751,7 @@ impl Behavior<'_> {
                     delog_render::MAP_TILE_CAPACITY,
                 );
                 pane.update_visible_map_tiles(visible.tiles);
-                let desired: HashSet<_> = pane
-                    .map_tiles
-                    .iter()
-                    .map(|(id, _)| *id)
-                    .chain(pane.map_fallback_tiles.iter().copied())
-                    .collect();
+                let desired: HashSet<_> = pane.map_tiles.iter().map(|(id, _)| *id).collect();
                 manager.set_desired(pane.map_scope, provider_id, pane.map_generation, desired);
                 for (id, priority) in pane.map_tiles.iter().copied() {
                     manager.request(TileRequest {
@@ -844,7 +819,6 @@ impl Behavior<'_> {
             provider: provider_id,
             generation: pane.map_generation,
             current_tiles: pane.map_tiles.clone(),
-            fallback_tiles: pane.map_fallback_tiles.clone(),
             enabled: pane.map_selection.is_some(),
         };
         let rendered = {
@@ -860,14 +834,6 @@ impl Behavior<'_> {
                 &draws,
             )
         };
-        if !pane.map_fallback_tiles.is_empty()
-            && self
-                .services
-                .gpu
-                .map_coverage_complete(self.services.frame, &map_tile_selection)
-        {
-            pane.clear_map_fallback();
-        }
         if let Some(tex) = rendered {
             ui.painter().image(
                 tex,
@@ -2345,7 +2311,7 @@ mod tests {
     }
 
     #[test]
-    fn scene_map_selection_change_clears_current_and_fallback_tiles() {
+    fn scene_map_selection_change_clears_current_tiles() {
         let tile = |zoom, x| crate::map::provider::TileId { zoom, x, y: 4 };
         let selection = Some((0, MapProviderId::BingSatellite, [0; 3]));
         let mut pane = Scene3dPane::default();
@@ -2354,78 +2320,23 @@ mod tests {
         pane.update_visible_map_tiles(vec![tile(9, 2)]);
 
         assert_eq!(pane.update_map_selection(selection), generation);
-        assert_eq!(pane.map_fallback_tiles, vec![tile(8, 1)]);
         assert_eq!(pane.map_tiles, vec![(tile(9, 2), 0)]);
 
         assert!(
             pane.update_map_selection(Some((1, MapProviderId::BingSatellite, [1; 3]))) > generation
         );
         assert!(pane.map_tiles.is_empty());
-        assert!(pane.map_fallback_tiles.is_empty());
     }
 
     #[test]
-    fn fallback_ring_freezes_during_motion_until_cleared() {
+    fn visible_map_tiles_are_stored_in_priority_order() {
         let tile = |x| crate::map::provider::TileId { zoom: 8, x, y: 4 };
         let mut pane = Scene3dPane::default();
-
-        pane.update_visible_map_tiles(vec![tile(1), tile(2), tile(3)]);
-        assert!(pane.map_fallback_tiles.is_empty());
-
-        pane.update_visible_map_tiles(vec![tile(2), tile(3), tile(4)]);
-        assert_eq!(pane.map_fallback_tiles, vec![tile(1)]);
+        pane.update_visible_map_tiles(vec![tile(3), tile(1), tile(2)]);
         assert_eq!(
-            pane.map_tiles.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-            vec![tile(2), tile(3), tile(4)]
+            pane.map_tiles,
+            vec![(tile(3), 0), (tile(1), 1), (tile(2), 2)]
         );
-
-        pane.update_visible_map_tiles(vec![tile(3), tile(4), tile(5)]);
-        assert_eq!(
-            pane.map_fallback_tiles,
-            vec![tile(1)],
-            "the ring stays frozen while coverage is incomplete"
-        );
-
-        pane.update_visible_map_tiles(vec![tile(1), tile(2)]);
-        assert!(
-            pane.map_fallback_tiles.is_empty(),
-            "ring tiles that become current leave the ring"
-        );
-    }
-
-    #[test]
-    fn zoom_change_keeps_original_fallback_during_further_motion() {
-        let tile = |zoom, x| crate::map::provider::TileId { zoom, x, y: 4 };
-        let mut pane = Scene3dPane::default();
-        pane.update_visible_map_tiles(vec![tile(8, 1), tile(8, 2)]);
-        pane.update_visible_map_tiles(vec![tile(9, 2), tile(9, 3)]);
-        assert_eq!(pane.map_fallback_tiles, vec![tile(8, 1), tile(8, 2)]);
-
-        pane.update_visible_map_tiles(vec![tile(9, 3), tile(9, 4)]);
-        assert_eq!(pane.map_fallback_tiles, vec![tile(8, 1), tile(8, 2)]);
-    }
-
-    #[test]
-    fn repeated_zoom_while_loading_keeps_last_stable_fallback() {
-        let tile = |zoom, x| crate::map::provider::TileId { zoom, x, y: 4 };
-        let mut pane = Scene3dPane::default();
-        pane.update_visible_map_tiles(vec![tile(8, 1)]);
-        pane.update_visible_map_tiles(vec![tile(9, 2)]);
-        pane.update_visible_map_tiles(vec![tile(11, 8)]);
-        assert_eq!(pane.map_fallback_tiles, vec![tile(8, 1)]);
-    }
-
-    #[test]
-    fn completed_coverage_clears_fallback_and_restores_ring() {
-        let tile = |zoom, x| crate::map::provider::TileId { zoom, x, y: 4 };
-        let mut pane = Scene3dPane::default();
-        pane.update_visible_map_tiles(vec![tile(8, 1)]);
-        pane.update_visible_map_tiles(vec![tile(9, 2)]);
-        pane.clear_map_fallback();
-        assert!(pane.map_fallback_tiles.is_empty());
-
-        pane.update_visible_map_tiles(vec![tile(9, 3)]);
-        assert_eq!(pane.map_fallback_tiles, vec![tile(9, 2)]);
     }
 
     #[test]
@@ -2436,35 +2347,9 @@ mod tests {
             x: 1,
             y: 1,
         }]);
-        pane.update_visible_map_tiles(vec![crate::map::provider::TileId {
-            zoom: 9,
-            x: 2,
-            y: 2,
-        }]);
-        assert!(!pane.map_fallback_tiles.is_empty());
         assert_eq!(pane.update_map_selection(None), 0);
         assert!(pane.map_selection.is_none());
         assert!(pane.map_tiles.is_empty());
-        assert!(pane.map_fallback_tiles.is_empty());
-    }
-
-    #[test]
-    fn scene_retires_completed_map_fallback_after_render_before_status() {
-        let source = include_str!("workspace.rs");
-        let scene_ui = source.split("fn scene_ui").nth(1).expect("scene_ui");
-        let render = scene_ui.find(".render_scene(").expect("scene render");
-        let complete = scene_ui[render..]
-            .find(".map_coverage_complete(")
-            .map(|offset| render + offset)
-            .expect("coverage completion query");
-        let finish = scene_ui[complete..]
-            .find("pane.clear_map_fallback()")
-            .map(|offset| complete + offset)
-            .expect("pane fallback cleanup");
-        let status = scene_ui
-            .find("scene_map_overlay(")
-            .expect("map status overlay");
-        assert!(render < complete && complete < finish && finish < status);
     }
 
     #[test]

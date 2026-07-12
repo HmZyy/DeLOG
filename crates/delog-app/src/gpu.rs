@@ -29,8 +29,6 @@ pub struct MapTileSelection {
     pub generation: u64,
     /// Exactly the tiles visible in the current camera footprint, in priority order.
     pub current_tiles: Vec<(TileId, i32)>,
-    /// Tiles retained from earlier selections as a visual fallback while current tiles load.
-    pub fallback_tiles: Vec<TileId>,
     pub enabled: bool,
 }
 
@@ -169,24 +167,6 @@ impl GpuBridge {
             .callback_resources
             .get::<SceneResources>()
             .is_some_and(|resources| resources.selection_has_current_imagery(selection))
-    }
-
-    pub fn map_coverage_complete(
-        &self,
-        frame: &eframe::Frame,
-        selection: &MapTileSelection,
-    ) -> bool {
-        if !self.available {
-            return false;
-        }
-        let Some(render_state) = frame.wgpu_render_state() else {
-            return false;
-        };
-        let renderer = render_state.renderer.read();
-        renderer
-            .callback_resources
-            .get::<SceneResources>()
-            .is_some_and(|resources| resources.selection_coverage_complete(selection))
     }
 
     /// Call once per frame.
@@ -781,6 +761,8 @@ struct SceneResources {
     map_tile_cache: HashMap<MapScopeId, HashMap<u64, ReadyTile>>,
     map_tile_selections: HashMap<MapScopeId, MapTileSelection>,
     map_tile_resident_signatures: HashMap<u64, u64>,
+    map_tile_last_seen: HashMap<u64, u64>,
+    map_tile_clock: u64,
     map_tile_epoch: u64,
     traj: Traj3dPipeline,
     mesh: MeshPipeline,
@@ -833,6 +815,8 @@ impl SceneResources {
             map_tile_cache: HashMap::new(),
             map_tile_selections: HashMap::new(),
             map_tile_resident_signatures: HashMap::new(),
+            map_tile_last_seen: HashMap::new(),
+            map_tile_clock: 0,
             map_tile_epoch: 0,
             traj,
             mesh,
@@ -859,23 +843,6 @@ impl SceneResources {
         // signatures for dead scopes and lets the surviving panes consume any
         // quota released by them before the first scene render of this frame.
         self.admit_map_tiles(&std::collections::HashSet::new(), None);
-    }
-
-    fn selection_coverage_complete(&self, selection: &MapTileSelection) -> bool {
-        !selection.current_tiles.is_empty()
-            && self
-                .map_tile_cache
-                .get(&selection.scope)
-                .is_some_and(|cache| {
-                    let resident_ids: std::collections::HashSet<_> = cache
-                        .iter()
-                        .filter_map(|(key, tile)| self.map_tiles.contains(*key).then_some(tile.id))
-                        .collect();
-                    selection
-                        .current_tiles
-                        .iter()
-                        .all(|(id, _)| resident_ids.contains(id))
-                })
     }
 
     fn selection_has_current_imagery(&self, selection: &MapTileSelection) -> bool {
@@ -1020,6 +987,7 @@ impl SceneResources {
             self.map_tile_cache.clear();
             self.map_tile_selections.clear();
             self.map_tile_resident_signatures.clear();
+            self.map_tile_last_seen.clear();
         }
         if !selection.enabled {
             self.map_tile_cache.remove(&selection.scope);
@@ -1040,6 +1008,8 @@ impl SceneResources {
         if selection_changed {
             self.map_tile_cache.remove(&selection.scope);
         }
+        self.map_tile_clock += 1;
+        let clock = self.map_tile_clock;
         let changed = {
             let cache = self.map_tile_cache.entry(selection.scope).or_default();
             let mut changed = std::collections::HashSet::new();
@@ -1055,6 +1025,23 @@ impl SceneResources {
                 cache.insert(key, tile.clone());
             }
             cache.retain(|_, tile| map_tile_matches(selection, tile));
+            for (key, tile) in cache.iter() {
+                if map_tile_is_current(selection, tile) {
+                    self.map_tile_last_seen.insert(*key, clock);
+                }
+            }
+            let mut stale: Vec<(u64, u64)> = cache
+                .iter()
+                .filter(|(_, tile)| !map_tile_is_current(selection, tile))
+                .map(|(key, _)| (self.map_tile_last_seen.get(key).copied().unwrap_or(0), *key))
+                .collect();
+            if stale.len() > MAP_TILE_CAPACITY {
+                stale.sort_unstable();
+                for (_, key) in stale.drain(..stale.len() - MAP_TILE_CAPACITY) {
+                    cache.remove(&key);
+                    self.map_tile_last_seen.remove(&key);
+                }
+            }
             changed
         };
         self.admit_map_tiles(&changed, Some(selection.scope));
@@ -1066,7 +1053,7 @@ impl SceneResources {
             }
             if map_tile_is_current(selection, tile) {
                 visible.current.push(*key);
-            } else if map_tile_is_fallback(selection, tile) {
+            } else {
                 visible.fallback.push(*key);
             }
         }
@@ -1095,9 +1082,17 @@ impl SceneResources {
             let selection = &self.map_tile_selections[scope];
             let empty = HashMap::new();
             let cache = self.map_tile_cache.get(scope).unwrap_or(&empty);
-            order.extend(scope_admission_order(selection, cache, quota));
+            order.extend(scope_admission_order(
+                selection,
+                cache,
+                &self.map_tile_last_seen,
+                quota,
+            ));
         }
         let admitted: std::collections::HashSet<_> = order.iter().copied().collect();
+        let caches = &self.map_tile_cache;
+        self.map_tile_last_seen
+            .retain(|key, _| caches.values().any(|cache| cache.contains_key(key)));
 
         self.map_tiles.retain(order.iter().copied());
         self.map_tile_resident_signatures
@@ -1137,21 +1132,15 @@ fn prioritize_active_scope(scopes: &mut [MapScopeId], active_scope: Option<MapSc
 fn scope_admission_order(
     selection: &MapTileSelection,
     cache: &HashMap<u64, ReadyTile>,
+    last_seen: &HashMap<u64, u64>,
     quota: usize,
 ) -> Vec<u64> {
-    let ready_by_id: HashMap<_, _> = cache
-        .iter()
-        .filter_map(|(key, tile)| map_tile_matches(selection, tile).then_some((tile.id, *key)))
-        .collect();
+    let ready_by_id: HashMap<_, _> = cache.iter().map(|(key, tile)| (tile.id, *key)).collect();
     let mut current = selection.current_tiles.clone();
     current.sort_by_key(|(id, priority)| (*priority, id.zoom, id.y, id.x));
     let mut order = Vec::with_capacity(quota);
     let mut admitted = std::collections::HashSet::new();
-    let ids = current
-        .iter()
-        .map(|(id, _)| *id)
-        .chain(selection.fallback_tiles.iter().copied());
-    for id in ids {
+    for (id, _) in current {
         if order.len() == quota {
             break;
         }
@@ -1161,7 +1150,46 @@ fn scope_admission_order(
             order.push(*key);
         }
     }
+    let mut stale: Vec<_> = cache
+        .iter()
+        .filter(|(key, tile)| !admitted.contains(*key) && !map_tile_is_current(selection, tile))
+        .collect();
+    stale.sort_by_key(|(key, _)| {
+        (
+            std::cmp::Reverse(last_seen.get(key).copied().unwrap_or(0)),
+            **key,
+        )
+    });
+    let mut covered: Vec<TileId> = Vec::new();
+    for (key, tile) in stale {
+        if order.len() == quota {
+            break;
+        }
+        if covered
+            .iter()
+            .any(|other| tiles_overlap_at_different_zooms(*other, tile.id))
+        {
+            continue;
+        }
+        covered.push(tile.id);
+        if admitted.insert(*key) {
+            order.push(*key);
+        }
+    }
     order
+}
+
+fn tiles_overlap_at_different_zooms(a: TileId, b: TileId) -> bool {
+    let (coarse, fine) = if a.zoom <= b.zoom { (a, b) } else { (b, a) };
+    let delta = fine.zoom - coarse.zoom;
+    let normalize_x = |id: TileId| {
+        1_u32
+            .checked_shl(u32::from(id.zoom))
+            .map_or(id.x, |world_width| id.x % world_width)
+    };
+    delta < 32
+        && normalize_x(fine).checked_shr(delta as u32) == Some(normalize_x(coarse))
+        && fine.y.checked_shr(delta as u32) == Some(coarse.y)
 }
 
 fn map_tile_matches(selection: &MapTileSelection, tile: &ReadyTile) -> bool {
@@ -1170,15 +1198,10 @@ fn map_tile_matches(selection: &MapTileSelection, tile: &ReadyTile) -> bool {
         && tile.epoch == selection.epoch
         && tile.provider == selection.provider
         && tile.generation == selection.generation
-        && (map_tile_is_current(selection, tile) || map_tile_is_fallback(selection, tile))
 }
 
 fn map_tile_is_current(selection: &MapTileSelection, tile: &ReadyTile) -> bool {
     selection.current_tiles.iter().any(|(id, _)| *id == tile.id)
-}
-
-fn map_tile_is_fallback(selection: &MapTileSelection, tile: &ReadyTile) -> bool {
-    selection.fallback_tiles.contains(&tile.id)
 }
 
 fn map_tile_key(tile: &ReadyTile) -> u64 {
@@ -1630,34 +1653,29 @@ mod tests {
     }
 
     #[test]
-    fn mixed_ready_batch_keeps_requested_current_and_fallback_zoom_independent_of_order() {
+    fn mixed_ready_batch_classifies_current_and_stale_independent_of_order() {
         let selection = MapTileSelection {
             scope: MapScopeId(4),
             epoch: 3,
             provider: crate::map::provider::MapProviderId::BingSatellite,
             generation: 9,
             current_tiles: live_zoom(12),
-            fallback_tiles: live_zoom_ids(11),
             enabled: true,
         };
-        let tile = |zoom| ReadyTile {
+        let tile = |zoom, generation| ReadyTile {
             scope: MapScopeId(4),
             epoch: 3,
             provider: crate::map::provider::MapProviderId::BingSatellite,
             id: crate::map::provider::TileId { zoom, x: 0, y: 0 },
-            generation: 9,
+            generation,
             rgba: Vec::new(),
             corners: [[0.0; 3]; 4],
         };
-        let mixed = [tile(11), tile(12)];
+        let mixed = [tile(11, 9), tile(12, 9)];
         assert!(mixed.iter().all(|tile| map_tile_matches(&selection, tile)));
-        assert!(
-            mixed
-                .iter()
-                .rev()
-                .all(|tile| map_tile_matches(&selection, tile))
-        );
-        assert!(!map_tile_matches(&selection, &tile(10)));
+        assert!(map_tile_is_current(&selection, &mixed[1]));
+        assert!(!map_tile_is_current(&selection, &mixed[0]));
+        assert!(!map_tile_matches(&selection, &tile(12, 8)));
     }
 
     #[test]
@@ -1673,7 +1691,6 @@ mod tests {
             provider: crate::map::provider::MapProviderId::BingSatellite,
             generation: 7,
             current_tiles: live_zoom(8),
-            fallback_tiles: live_zoom_ids(7),
             enabled: true,
         };
         let tile = |zoom, x| ReadyTile {
@@ -1702,15 +1719,12 @@ mod tests {
         assert_eq!(first.current, expected_current);
         assert_eq!(reversed, first, "ready insertion order cannot affect draws");
         assert!(resources.selection_has_current_imagery(&selection));
-        assert!(!resources.selection_coverage_complete(&selection));
 
         let mut other_pane = selection.clone();
         other_pane.scope = MapScopeId(45);
-        assert!(!resources.selection_coverage_complete(&other_pane));
 
         let mut switched_generation = selection.clone();
         switched_generation.generation += 1;
-        assert!(!resources.selection_coverage_complete(&switched_generation));
     }
 
     #[test]
@@ -1733,7 +1747,6 @@ mod tests {
                 },
                 0,
             )],
-            fallback_tiles: live_zoom(2).into_iter().map(|(id, _)| id).collect(),
             enabled: true,
         };
         let tile = ReadyTile {
@@ -1753,7 +1766,6 @@ mod tests {
         resources.prepare_map_tiles(identity, &selection, &[tile]);
         assert_eq!(resources.map_tile_cache[&selection.scope].len(), 1);
         assert_eq!(resources.map_tiles.resident_tile_count(), 1);
-        assert!(resources.selection_coverage_complete(&selection));
 
         resources.prepare_map_tiles(
             identity,
@@ -1765,7 +1777,6 @@ mod tests {
         );
         assert_eq!(resources.map_tile_cache[&selection.scope].len(), 0);
         assert_eq!(resources.map_tiles.resident_tile_count(), 0);
-        assert!(!resources.selection_coverage_complete(&selection));
     }
 
     #[test]
@@ -1781,7 +1792,6 @@ mod tests {
             provider: crate::map::provider::MapProviderId::BingSatellite,
             generation: 5,
             current_tiles: live_zoom(4),
-            fallback_tiles: Vec::new(),
             enabled: true,
         };
         let tile = |zoom, x, color: [u8; 4]| ReadyTile {
@@ -1812,7 +1822,6 @@ mod tests {
 
         let zoomed = MapTileSelection {
             current_tiles: live_zoom(5),
-            fallback_tiles: live_zoom_ids(4),
             ..selection
         };
         resources.prepare_map_tiles(identity, &zoomed, &[tile(5, 2, [4, 5, 6, 255])]);
@@ -1849,7 +1858,6 @@ mod tests {
             provider: crate::map::provider::MapProviderId::BingSatellite,
             generation: 1,
             current_tiles: live_zoom(6),
-            fallback_tiles: Vec::new(),
             enabled: true,
         };
         let tile = |scope, x, color: [u8; 4]| ReadyTile {
@@ -1889,17 +1897,11 @@ mod tests {
 
         let disabled_b = MapTileSelection {
             current_tiles: Vec::new(),
-            fallback_tiles: vec![crate::map::provider::TileId {
-                zoom: 5,
-                x: 0,
-                y: 0,
-            }],
             enabled: false,
             ..selection(20)
         };
         let draw_disabled_b = resources.prepare_map_tiles(identity, &disabled_b, &[]);
         assert!(draw_disabled_b.is_empty());
-        assert!(!resources.selection_coverage_complete(&disabled_b));
         assert!(!resources.map_tile_cache.contains_key(&MapScopeId(20)));
         assert_eq!(resources.map_tiles.resident_tile_count(), 1);
         assert!(resources.map_tiles.contains(key_a), "disabling B retains A");
@@ -1922,17 +1924,13 @@ mod tests {
         assert_eq!(resources.map_tiles.resident_tile_count(), 0);
     }
 
-    fn transition_selection(
-        current: Vec<(TileId, i32)>,
-        fallback: Vec<TileId>,
-    ) -> MapTileSelection {
+    fn transition_selection(current: Vec<(TileId, i32)>) -> MapTileSelection {
         MapTileSelection {
             scope: MapScopeId(31),
             epoch: 1,
             provider: crate::map::provider::MapProviderId::BingSatellite,
             generation: 1,
             current_tiles: current,
-            fallback_tiles: fallback,
             enabled: true,
         }
     }
@@ -1947,6 +1945,102 @@ mod tests {
             rgba: [id.x as u8, id.zoom, id.y as u8, 255].repeat(256 * 256),
             corners: [[id.x as f32, id.y as f32, 0.0]; 4],
         }
+    }
+
+    #[test]
+    fn stale_resident_tiles_fall_back_while_replacements_load() {
+        let Some(ctx) = RenderContext::headless() else {
+            return;
+        };
+        let mut resources = SceneResources::new(ctx);
+        let id = |x| TileId { zoom: 8, x, y: 4 };
+        let shown = transition_selection(vec![(id(1), 0)]);
+        let tile = transition_tile(&shown, id(1));
+        let stale_key = map_tile_key(&tile);
+        let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+        resources.prepare_map_tiles(identity, &shown, &[tile]);
+
+        let moved = transition_selection(vec![(id(2), 0)]);
+        let draw = resources.prepare_map_tiles(identity, &moved, &[]);
+        assert!(draw.current.is_empty());
+        assert_eq!(draw.fallback, vec![stale_key]);
+        assert!(resources.map_tiles.contains(stale_key));
+
+        let replacement = transition_tile(&moved, id(2));
+        let replaced = resources.prepare_map_tiles(identity, &moved, &[replacement.clone()]);
+        assert_eq!(replaced.current, vec![map_tile_key(&replacement)]);
+        assert_eq!(replaced.fallback, vec![stale_key]);
+    }
+
+    #[test]
+    fn stale_fallback_prefers_recent_and_skips_overlapping_older_tiles() {
+        let Some(ctx) = RenderContext::headless() else {
+            return;
+        };
+        let mut resources = SceneResources::new(ctx);
+        let parent = TileId {
+            zoom: 7,
+            x: 3,
+            y: 5,
+        };
+        let child = TileId {
+            zoom: 8,
+            x: 6,
+            y: 10,
+        };
+        let far = TileId {
+            zoom: 8,
+            x: 40,
+            y: 4,
+        };
+        let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+
+        let first = transition_selection(vec![(parent, 0)]);
+        resources.prepare_map_tiles(identity, &first, &[transition_tile(&first, parent)]);
+        let second = transition_selection(vec![(child, 0)]);
+        let child_tile = transition_tile(&second, child);
+        resources.prepare_map_tiles(identity, &second, &[child_tile.clone()]);
+
+        let third = transition_selection(vec![(far, 0)]);
+        let draw = resources.prepare_map_tiles(identity, &third, &[]);
+        assert!(draw.current.is_empty());
+        assert_eq!(
+            draw.fallback,
+            vec![map_tile_key(&child_tile)],
+            "the newer child covers its area; the stale parent must not z-fight it"
+        );
+    }
+
+    #[test]
+    fn stale_cache_is_bounded_per_scope() {
+        let Some(ctx) = RenderContext::headless() else {
+            return;
+        };
+        let mut resources = SceneResources::new(ctx);
+        let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+        for round in 0..3_u32 {
+            let ids: Vec<_> = (0..128)
+                .map(|x| TileId {
+                    zoom: 8,
+                    x: round * 128 + x,
+                    y: 4,
+                })
+                .collect();
+            let selection = transition_selection(
+                ids.iter()
+                    .enumerate()
+                    .map(|(p, id)| (*id, p as i32))
+                    .collect(),
+            );
+            let ready: Vec<_> = ids
+                .iter()
+                .map(|id| transition_tile(&selection, *id))
+                .collect();
+            resources.prepare_map_tiles(identity, &selection, &ready);
+        }
+        let cached = resources.map_tile_cache[&MapScopeId(31)].len();
+        assert!(cached <= 2 * MAP_TILE_CAPACITY, "cache holds {cached}");
+        assert_eq!(resources.map_tiles.resident_tile_count(), MAP_TILE_CAPACITY);
     }
 
     #[test]
@@ -1984,7 +2078,6 @@ mod tests {
                 .enumerate()
                 .map(|(p, id)| (*id, p as i32))
                 .collect(),
-            parent_ids.clone(),
         );
         let fallback: Vec<_> = parent_ids
             .iter()
@@ -2039,7 +2132,6 @@ mod tests {
                 .enumerate()
                 .map(|(p, id)| (*id, p as i32))
                 .collect(),
-            parent_ids.clone(),
         );
         let previous: Vec<_> = parent_ids
             .iter()
@@ -2094,7 +2186,6 @@ mod tests {
                 .enumerate()
                 .map(|(priority, id)| (*id, priority as i32))
                 .collect(),
-            parent_ids.clone(),
         );
         let fallback: Vec<_> = parent_ids
             .iter()
@@ -2110,7 +2201,6 @@ mod tests {
         let draw = resources.prepare_map_tiles(identity, &selection, &ready_children);
         assert_eq!(draw.current.len(), 4);
         assert_eq!(draw.fallback.len(), 124);
-        assert!(resources.selection_coverage_complete(&selection));
         assert!(
             resources
                 .map_tiles
@@ -2160,7 +2250,7 @@ mod tests {
                 y: 11,
             },
         ];
-        let selection = transition_selection(vec![(parent, 0)], children.clone());
+        let selection = transition_selection(vec![(parent, 0)]);
         let fallback: Vec<_> = children
             .iter()
             .copied()
@@ -2172,7 +2262,6 @@ mod tests {
         let draw = resources.prepare_map_tiles(identity, &selection, &[current.clone()]);
         assert_eq!(draw.current, vec![map_tile_key(&current)]);
         assert_eq!(draw.fallback.len(), 4);
-        assert!(resources.selection_coverage_complete(&selection));
     }
 
     #[test]
@@ -2187,7 +2276,6 @@ mod tests {
             provider: crate::map::provider::MapProviderId::BingSatellite,
             generation: 1,
             current_tiles: live_zoom(8),
-            fallback_tiles: Vec::new(),
             enabled: true,
         };
         let tile = |x| ReadyTile {
@@ -2228,7 +2316,7 @@ mod tests {
     }
 
     #[test]
-    fn saturated_same_zoom_pan_replaces_disjoint_old_tiles_and_bounds_cpu_cache() {
+    fn saturated_same_zoom_pan_prefers_current_and_keeps_bounded_stale() {
         let Some(ctx) = RenderContext::headless() else {
             return;
         };
@@ -2239,7 +2327,6 @@ mod tests {
             provider: crate::map::provider::MapProviderId::BingSatellite,
             generation: 1,
             current_tiles: live_zoom(8),
-            fallback_tiles: Vec::new(),
             enabled: true,
         };
         let tile = |x| ReadyTile {
@@ -2273,7 +2360,15 @@ mod tests {
                 .collect::<std::collections::HashSet<_>>(),
             expected
         );
-        assert_eq!(resources.map_tile_cache[&selection.scope].len(), 128);
+        assert!(
+            draw.fallback.is_empty(),
+            "saturated current leaves no stale slots"
+        );
+        assert_eq!(
+            resources.map_tile_cache[&selection.scope].len(),
+            256,
+            "displaced tiles stay cached as bounded stale fallback"
+        );
         assert_eq!(resources.map_tiles.resident_tile_count(), 128);
     }
 
@@ -2290,7 +2385,6 @@ mod tests {
             provider: crate::map::provider::MapProviderId::BingSatellite,
             generation: 1,
             current_tiles: vec![(id(1), 0), (id(2), 1)],
-            fallback_tiles: Vec::new(),
             enabled: true,
         };
         let tile = |x| ReadyTile {
@@ -2308,7 +2402,6 @@ mod tests {
         resources.prepare_map_tiles(identity, &selection, &old);
 
         selection.current_tiles = vec![(id(2), 0), (id(3), 1)];
-        selection.fallback_tiles = vec![id(1)];
         let new = tile(3);
         let expected_current = [map_tile_key(&old[1]), map_tile_key(&new)]
             .into_iter()
@@ -2339,7 +2432,6 @@ mod tests {
             current_tiles: (0..128)
                 .map(|x| (crate::map::provider::TileId { zoom: 8, x, y: 0 }, x as i32))
                 .collect(),
-            fallback_tiles: Vec::new(),
             enabled: true,
         };
         let tiles = |scope| {
@@ -2387,7 +2479,6 @@ mod tests {
             provider: crate::map::provider::MapProviderId::BingSatellite,
             generation: 1,
             current_tiles: live_zoom(8),
-            fallback_tiles: Vec::new(),
             enabled: true,
         };
         let tile = |scope, x| ReadyTile {
@@ -2436,7 +2527,6 @@ mod tests {
             provider: crate::map::provider::MapProviderId::BingSatellite,
             generation: 1,
             current_tiles: live_zoom(8),
-            fallback_tiles: Vec::new(),
             enabled: true,
         };
         let tile = |scope, x| ReadyTile {
@@ -2483,7 +2573,6 @@ mod tests {
             identity,
             &MapTileSelection {
                 current_tiles: Vec::new(),
-                fallback_tiles: Vec::new(),
                 enabled: false,
                 ..selection(disabled_scope.0)
             },
