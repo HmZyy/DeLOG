@@ -1454,16 +1454,16 @@ mod tests {
 
     #[test]
     fn old_bridge_columns_false_migrates_to_cut() {
-        let r: RenderTuning =
-            serde_json::from_str(r#"{"decimate_threshold":8.0,"line_aa_px":1.0,"bridge_columns":false}"#)
-                .unwrap();
+        let r: RenderTuning = serde_json::from_str(
+            r#"{"decimate_threshold":8.0,"line_aa_px":1.0,"bridge_columns":false}"#,
+        )
+        .unwrap();
         assert_eq!(r.gap_mode, GapMode::Cut);
     }
 
     #[test]
     fn old_bridge_columns_true_and_absent_migrate_to_connect() {
-        let with_true: RenderTuning =
-            serde_json::from_str(r#"{"bridge_columns":true}"#).unwrap();
+        let with_true: RenderTuning = serde_json::from_str(r#"{"bridge_columns":true}"#).unwrap();
         assert_eq!(with_true.gap_mode, GapMode::Connect);
         let absent: RenderTuning = serde_json::from_str("{}").unwrap();
         assert_eq!(absent.gap_mode, GapMode::Connect);
