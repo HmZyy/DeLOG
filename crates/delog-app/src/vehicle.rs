@@ -583,6 +583,20 @@ pub(crate) fn ned_reference_origin(
     }
 }
 
+/// Resolve the geodetic anchor used to place map imagery for a vehicle.
+/// GPS mappings use their first valid fix; NED mappings use their configured
+/// manual or field-backed reference.
+pub(crate) fn geodetic_reference(
+    snapshot: &StoreSnapshot,
+    config: &VehicleConfig,
+) -> Option<[f64; 3]> {
+    let reference = match config.pos {
+        PosMapping::Gps { .. } => gps_reference(snapshot, config),
+        PosMapping::Ned { .. } => ned_reference_origin(snapshot, config),
+    }?;
+    Some([reference.0, reference.1, reference.2])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -706,6 +720,34 @@ mod tests {
         let (rlat, _, ralt) = resolve_gps_ref(&snap, lat, lon, alt, ll, am, (0, 0)).unwrap();
         assert!((rlat.to_degrees() - 47.397_741_8).abs() < 1e-6);
         assert!((ralt - 408.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn geodetic_reference_uses_gps_first_fix() {
+        let (snap, fields) = gps_snapshot(vec![0], vec![47.0], vec![8.0], vec![400.0]);
+        let reference = geodetic_reference(&snap, &gps_config(fields, 20.0)).unwrap();
+        assert!((reference[0].to_degrees() - 47.0).abs() < 1e-9);
+        assert!((reference[1].to_degrees() - 8.0).abs() < 1e-9);
+        assert!((reference[2] - 400.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn geodetic_reference_uses_manual_ned_origin_and_missing_reference_falls_back_to_none() {
+        let (snap, fields) = ned_snapshot(vec![0], vec![0.0], vec![0.0], vec![0.0]);
+        assert!(geodetic_reference(&snap, &ned_config(fields)).is_none());
+        let mut config = ned_config(fields);
+        let PosMapping::Ned { reference, .. } = &mut config.pos else {
+            unreachable!()
+        };
+        *reference = Some(NedReference::Manual(GeoRef {
+            lat_deg: 48.0,
+            lon_deg: 2.0,
+            alt_m: 35.0,
+        }));
+        let reference = geodetic_reference(&snap, &config).unwrap();
+        assert!((reference[0].to_degrees() - 48.0).abs() < 1e-9);
+        assert!((reference[1].to_degrees() - 2.0).abs() < 1e-9);
+        assert_eq!(reference[2], 35.0);
     }
 
     fn gps_config(fields: [FieldId; 3], alt_offset_m: f64) -> VehicleConfig {

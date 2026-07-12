@@ -972,6 +972,7 @@ fn insert_node(
             },
             tracked_vehicle: scene.tracked_vehicle,
             trail_to_playhead: scene.trail_to_playhead,
+            ..Scene3dPane::default()
         }))),
         LayoutNode::Split { split, children } => {
             let child_ids = children
@@ -1256,6 +1257,8 @@ mod tests {
         settings.show_fps = true;
         settings.render_mode = crate::settings::RenderMode::Continuous;
         settings.theme = crate::theme::ThemeChoice::Light;
+        settings.scene3d.map_provider = crate::map::provider::MapProviderId::BingSatellite;
+        settings.scene3d.tile_cache_limit_bytes = 8 * 1024 * 1024 * 1024;
 
         save_app_settings_at(&path, &settings).expect("save settings");
         let loaded = load_app_settings_at(&path);
