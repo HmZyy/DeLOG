@@ -43,8 +43,6 @@ pub struct ReadyTile {
     pub provider: MapProviderId,
     pub id: TileId,
     pub generation: u64,
-    /// Lower values were requested first (nearest-visible tiles first).
-    pub priority: i32,
     pub rgba: Vec<u8>,
     pub corners: [[f32; 3]; 4],
 }
@@ -736,7 +734,6 @@ fn controller_loop(
                                     provider: work.request.provider,
                                     id: work.request.id,
                                     generation: work.request.generation,
-                                    priority: work.request.priority,
                                     rgba,
                                     corners: work.request.corners,
                                 },
@@ -1072,7 +1069,6 @@ fn process_completion(
                             provider: work.request.provider,
                             id: work.request.id,
                             generation: work.request.generation,
-                            priority: work.request.priority,
                             rgba,
                             corners: work.request.corners,
                         },
