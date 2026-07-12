@@ -171,6 +171,24 @@ impl GpuBridge {
             .is_some_and(|resources| resources.selection_transition_complete(selection))
     }
 
+    pub fn map_transition_complete(
+        &self,
+        frame: &eframe::Frame,
+        selection: &MapTileSelection,
+    ) -> bool {
+        if !self.available {
+            return false;
+        }
+        let Some(render_state) = frame.wgpu_render_state() else {
+            return false;
+        };
+        let renderer = render_state.renderer.read();
+        renderer
+            .callback_resources
+            .get::<SceneResources>()
+            .is_some_and(|resources| resources.selection_transition_complete(selection))
+    }
+
     /// Call once per frame.
     pub fn drain_gpu_errors(&self, frame: &eframe::Frame) -> Vec<String> {
         if !self.available {
@@ -1829,8 +1847,15 @@ mod tests {
             epoch: 0,
             provider: crate::map::provider::MapProviderId::BingSatellite,
             generation: 1,
-            current_tiles: live_zoom(3),
-            previous_tiles: Vec::new(),
+            current_tiles: vec![(
+                crate::map::provider::TileId {
+                    zoom: 3,
+                    x: 1,
+                    y: 2,
+                },
+                0,
+            )],
+            previous_tiles: live_zoom(2).into_iter().map(|(id, _)| id).collect(),
             enabled: true,
         };
         let tile = ReadyTile {
@@ -1851,17 +1876,19 @@ mod tests {
         resources.prepare_map_tiles(identity, &selection, &[tile]);
         assert_eq!(resources.map_tile_cache[&selection.scope].len(), 1);
         assert_eq!(resources.map_tiles.resident_tile_count(), 1);
+        assert!(resources.selection_transition_complete(&selection));
 
         resources.prepare_map_tiles(
             identity,
             &MapTileSelection {
                 epoch: 1,
-                ..selection
+                ..selection.clone()
             },
             &[],
         );
         assert_eq!(resources.map_tile_cache[&selection.scope].len(), 0);
         assert_eq!(resources.map_tiles.resident_tile_count(), 0);
+        assert!(!resources.selection_transition_complete(&selection));
     }
 
     #[test]
@@ -1985,17 +2012,19 @@ mod tests {
             "each scope uploads once"
         );
 
-        let draw_disabled_b = resources.prepare_map_tiles(
-            identity,
-            &MapTileSelection {
-                current_tiles: Vec::new(),
-                previous_tiles: Vec::new(),
-                enabled: false,
-                ..selection(20)
-            },
-            &[],
-        );
+        let disabled_b = MapTileSelection {
+            current_tiles: Vec::new(),
+            previous_tiles: vec![crate::map::provider::TileId {
+                zoom: 5,
+                x: 0,
+                y: 0,
+            }],
+            enabled: false,
+            ..selection(20)
+        };
+        let draw_disabled_b = resources.prepare_map_tiles(identity, &disabled_b, &[]);
         assert!(draw_disabled_b.is_empty());
+        assert!(!resources.selection_transition_complete(&disabled_b));
         assert!(!resources.map_tile_cache.contains_key(&MapScopeId(20)));
         assert_eq!(resources.map_tiles.resident_tile_count(), 1);
         assert!(resources.map_tiles.contains(key_a), "disabling B retains A");

@@ -57,6 +57,12 @@ impl Scene3dPane {
             self.map_previous_zoom = None;
             self.map_tiles.clear();
             self.map_previous_tiles.clear();
+        } else if selection.is_none() {
+            self.map_zoom = None;
+            self.map_zoom_transition = false;
+            self.map_previous_zoom = None;
+            self.map_tiles.clear();
+            self.map_previous_tiles.clear();
         }
         self.map_generation
     }
@@ -883,6 +889,14 @@ impl Behavior<'_> {
                 &draws,
             )
         };
+        if pane.map_zoom_transition
+            && self
+                .services
+                .gpu
+                .map_transition_complete(self.services.frame, &map_tile_selection)
+        {
+            pane.finish_map_zoom_transition();
+        }
         if let Some(tex) = rendered {
             ui.painter().image(
                 tex,
@@ -2449,8 +2463,40 @@ mod tests {
     #[test]
     fn scene_map_none_provider_or_reference_produces_no_selection() {
         let mut pane = Scene3dPane::default();
+        pane.update_visible_map_tiles(vec![crate::map::provider::TileId {
+            zoom: 8,
+            x: 1,
+            y: 1,
+        }]);
+        pane.update_visible_map_tiles(vec![crate::map::provider::TileId {
+            zoom: 9,
+            x: 2,
+            y: 2,
+        }]);
+        assert!(pane.map_zoom_transition);
         assert_eq!(pane.update_map_selection(None), 0);
         assert!(pane.map_selection.is_none());
+        assert!(!pane.map_zoom_transition);
+        assert!(pane.map_previous_tiles.is_empty());
+    }
+
+    #[test]
+    fn scene_retires_completed_map_transition_after_render_before_status() {
+        let source = include_str!("workspace.rs");
+        let scene_ui = source.split("fn scene_ui").nth(1).expect("scene_ui");
+        let render = scene_ui.find(".render_scene(").expect("scene render");
+        let complete = scene_ui[render..]
+            .find(".map_transition_complete(")
+            .map(|offset| render + offset)
+            .expect("transition completion query");
+        let finish = scene_ui[complete..]
+            .find("pane.finish_map_zoom_transition()")
+            .map(|offset| complete + offset)
+            .expect("pane transition cleanup");
+        let status = scene_ui
+            .find("scene_map_overlay(")
+            .expect("map status overlay");
+        assert!(render < complete && complete < finish && finish < status);
     }
 
     #[test]
