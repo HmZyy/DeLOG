@@ -16,17 +16,17 @@ pub struct MapTileUpload<'a> {
     pub corners: [[f32; 3]; 4],
 }
 
-/// Visible tiles in painter order. Previous-zoom fallback is drawn first so
-/// coplanar current-zoom imagery deterministically replaces it where ready.
+/// Visible tiles in painter order. Fallback imagery is drawn first so
+/// coplanar current imagery deterministically replaces it where ready.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MapTileDrawGroups {
-    pub previous: Vec<u64>,
+    pub fallback: Vec<u64>,
     pub current: Vec<u64>,
 }
 
 impl MapTileDrawGroups {
     pub fn is_empty(&self) -> bool {
-        self.previous.is_empty() && self.current.is_empty()
+        self.fallback.is_empty() && self.current.is_empty()
     }
 }
 
@@ -371,7 +371,7 @@ impl MapTilePipeline {
         pass: &mut wgpu::RenderPass<'a>,
         visible: &MapTileDrawGroups,
     ) {
-        self.draw_with_pipeline(pass, &visible.previous, &self.fallback_pipeline);
+        self.draw_with_pipeline(pass, &visible.fallback, &self.fallback_pipeline);
         self.draw_with_pipeline(pass, &visible.current, &self.current_pipeline);
     }
 
@@ -695,7 +695,7 @@ fn fs() -> @location(0) vec4<f32> {
     }
 
     #[test]
-    fn current_zoom_overwrites_coplanar_previous_while_previous_fills_gaps() {
+    fn current_overwrites_coplanar_fallback_while_fallback_fills_gaps() {
         let coarse = solid([255, 0, 0, 255]);
         let current = solid([0, 0, 255, 255]);
         let full_screen = [
@@ -738,7 +738,7 @@ fn fs() -> @location(0) vec4<f32> {
             }
             tiles.set_view_proj(glam::Mat4::IDENTITY.to_cols_array_2d());
             let visible = MapTileDrawGroups {
-                previous: vec![90],
+                fallback: vec![90],
                 current: vec![10],
             };
 
@@ -878,7 +878,7 @@ fn fs() -> @location(0) vec4<f32> {
             "fallback must be biased farther than current; equal or reversed bias breaks overlap"
         );
         let visible = MapTileDrawGroups {
-            previous: vec![1],
+            fallback: vec![1],
             current: vec![2],
         };
         let grid = Grid3dPipeline::new(

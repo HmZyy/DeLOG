@@ -40,11 +40,8 @@ pub struct Scene3dPane {
     pub trail_to_playhead: bool,
     pub(crate) map_selection: Option<(usize, MapProviderId, [u64; 3])>,
     pub(crate) map_generation: u64,
-    pub(crate) map_zoom: Option<u8>,
-    pub(crate) map_zoom_transition: bool,
-    pub(crate) map_previous_zoom: Option<u8>,
     pub(crate) map_tiles: Vec<(crate::map::provider::TileId, i32)>,
-    pub(crate) map_previous_tiles: Vec<crate::map::provider::TileId>,
+    pub(crate) map_fallback_tiles: Vec<crate::map::provider::TileId>,
 }
 
 impl Scene3dPane {
@@ -52,45 +49,28 @@ impl Scene3dPane {
         if self.map_selection != selection {
             self.map_selection = selection;
             self.map_generation = self.map_generation.wrapping_add(1).max(1);
-            self.map_zoom = None;
-            self.map_zoom_transition = false;
-            self.map_previous_zoom = None;
             self.map_tiles.clear();
-            self.map_previous_tiles.clear();
+            self.map_fallback_tiles.clear();
         } else if selection.is_none() {
-            self.map_zoom = None;
-            self.map_zoom_transition = false;
-            self.map_previous_zoom = None;
             self.map_tiles.clear();
-            self.map_previous_tiles.clear();
+            self.map_fallback_tiles.clear();
         }
         self.map_generation
     }
 
     fn update_visible_map_tiles(&mut self, desired: Vec<crate::map::provider::TileId>) {
-        let next_zoom = desired.first().map(|id| id.zoom);
         let desired_set: HashSet<_> = desired.iter().copied().collect();
-        let current_set: HashSet<_> = self.map_tiles.iter().map(|(id, _)| *id).collect();
-        let zoom_changed = self
-            .map_zoom
-            .zip(next_zoom)
-            .is_some_and(|(old, new)| old != new);
-
-        if zoom_changed && !self.map_zoom_transition {
-            self.map_previous_zoom = self.map_zoom;
-            self.map_previous_tiles = self.map_tiles.iter().map(|(id, _)| *id).take(256).collect();
-            self.map_zoom_transition = !self.map_previous_tiles.is_empty();
-        } else if !self.map_zoom_transition && desired_set != current_set {
-            self.map_previous_zoom = self.map_zoom;
-            self.map_previous_tiles = self
+        if self.map_fallback_tiles.is_empty() {
+            self.map_fallback_tiles = self
                 .map_tiles
                 .iter()
                 .map(|(id, _)| *id)
                 .filter(|id| !desired_set.contains(id))
-                .take(256)
                 .collect();
+        } else {
+            self.map_fallback_tiles
+                .retain(|id| !desired_set.contains(id));
         }
-        self.map_zoom = next_zoom;
         self.map_tiles = desired
             .into_iter()
             .enumerate()
@@ -98,10 +78,8 @@ impl Scene3dPane {
             .collect();
     }
 
-    fn finish_map_zoom_transition(&mut self) {
-        self.map_zoom_transition = false;
-        self.map_previous_zoom = None;
-        self.map_previous_tiles.clear();
+    fn clear_map_fallback(&mut self) {
+        self.map_fallback_tiles.clear();
     }
 }
 
@@ -115,11 +93,8 @@ impl Default for Scene3dPane {
             trail_to_playhead: true,
             map_selection: None,
             map_generation: 0,
-            map_zoom: None,
-            map_zoom_transition: false,
-            map_previous_zoom: None,
             map_tiles: Vec::new(),
-            map_previous_tiles: Vec::new(),
+            map_fallback_tiles: Vec::new(),
         }
     }
 }
@@ -793,13 +768,14 @@ impl Behavior<'_> {
                     viewport,
                     [anchor[0], anchor[1]],
                     map_provider.zoom_range(),
+                    delog_render::MAP_TILE_CAPACITY,
                 );
                 pane.update_visible_map_tiles(visible.tiles);
                 let desired: HashSet<_> = pane
                     .map_tiles
                     .iter()
                     .map(|(id, _)| *id)
-                    .chain(pane.map_previous_tiles.iter().copied())
+                    .chain(pane.map_fallback_tiles.iter().copied())
                     .collect();
                 manager.set_desired(pane.map_scope, provider_id, pane.map_generation, desired);
                 for (id, priority) in pane.map_tiles.iter().copied() {
@@ -823,11 +799,6 @@ impl Behavior<'_> {
                     );
                 }
                 pane.update_map_selection(None);
-                pane.map_zoom = None;
-                pane.map_zoom_transition = false;
-                pane.map_previous_zoom = None;
-                pane.map_tiles.clear();
-                pane.map_previous_tiles.clear();
                 Vec::new()
             };
 
@@ -873,7 +844,7 @@ impl Behavior<'_> {
             provider: provider_id,
             generation: pane.map_generation,
             current_tiles: pane.map_tiles.clone(),
-            previous_tiles: pane.map_previous_tiles.clone(),
+            fallback_tiles: pane.map_fallback_tiles.clone(),
             enabled: pane.map_selection.is_some(),
         };
         let rendered = {
@@ -889,13 +860,13 @@ impl Behavior<'_> {
                 &draws,
             )
         };
-        if pane.map_zoom_transition
+        if !pane.map_fallback_tiles.is_empty()
             && self
                 .services
                 .gpu
-                .map_transition_complete(self.services.frame, &map_tile_selection)
+                .map_coverage_complete(self.services.frame, &map_tile_selection)
         {
-            pane.finish_map_zoom_transition();
+            pane.clear_map_fallback();
         }
         if let Some(tex) = rendered {
             ui.painter().image(
@@ -2381,33 +2352,28 @@ mod tests {
         let generation = pane.update_map_selection(selection);
         pane.update_visible_map_tiles(vec![tile(8, 1)]);
         pane.update_visible_map_tiles(vec![tile(9, 2)]);
-        assert!(pane.map_zoom_transition);
 
         assert_eq!(pane.update_map_selection(selection), generation);
-        assert!(pane.map_zoom_transition);
-        assert_eq!(pane.map_previous_tiles, vec![tile(8, 1)]);
+        assert_eq!(pane.map_fallback_tiles, vec![tile(8, 1)]);
         assert_eq!(pane.map_tiles, vec![(tile(9, 2), 0)]);
 
         assert!(
             pane.update_map_selection(Some((1, MapProviderId::BingSatellite, [1; 3]))) > generation
         );
-        assert_eq!(pane.map_zoom, None);
-        assert_eq!(pane.map_previous_zoom, None);
-        assert!(!pane.map_zoom_transition);
         assert!(pane.map_tiles.is_empty());
-        assert!(pane.map_previous_tiles.is_empty());
+        assert!(pane.map_fallback_tiles.is_empty());
     }
 
     #[test]
-    fn same_zoom_pan_keeps_one_nonoverlapping_previous_viewport() {
+    fn fallback_ring_freezes_during_motion_until_cleared() {
         let tile = |x| crate::map::provider::TileId { zoom: 8, x, y: 4 };
         let mut pane = Scene3dPane::default();
 
         pane.update_visible_map_tiles(vec![tile(1), tile(2), tile(3)]);
-        assert!(pane.map_previous_tiles.is_empty());
+        assert!(pane.map_fallback_tiles.is_empty());
 
         pane.update_visible_map_tiles(vec![tile(2), tile(3), tile(4)]);
-        assert_eq!(pane.map_previous_tiles, vec![tile(1)]);
+        assert_eq!(pane.map_fallback_tiles, vec![tile(1)]);
         assert_eq!(
             pane.map_tiles.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
             vec![tile(2), tile(3), tile(4)]
@@ -2415,24 +2381,28 @@ mod tests {
 
         pane.update_visible_map_tiles(vec![tile(3), tile(4), tile(5)]);
         assert_eq!(
-            pane.map_previous_tiles,
-            vec![tile(2)],
-            "the next movement replaces the older fallback ring"
+            pane.map_fallback_tiles,
+            vec![tile(1)],
+            "the ring stays frozen while coverage is incomplete"
         );
-        assert!(pane.map_previous_tiles.len() <= 256);
+
+        pane.update_visible_map_tiles(vec![tile(1), tile(2)]);
+        assert!(
+            pane.map_fallback_tiles.is_empty(),
+            "ring tiles that become current leave the ring"
+        );
     }
 
     #[test]
-    fn zoom_transition_keeps_original_fallback_during_same_zoom_motion() {
+    fn zoom_change_keeps_original_fallback_during_further_motion() {
         let tile = |zoom, x| crate::map::provider::TileId { zoom, x, y: 4 };
         let mut pane = Scene3dPane::default();
         pane.update_visible_map_tiles(vec![tile(8, 1), tile(8, 2)]);
         pane.update_visible_map_tiles(vec![tile(9, 2), tile(9, 3)]);
-        assert!(pane.map_zoom_transition);
-        assert_eq!(pane.map_previous_tiles, vec![tile(8, 1), tile(8, 2)]);
+        assert_eq!(pane.map_fallback_tiles, vec![tile(8, 1), tile(8, 2)]);
 
         pane.update_visible_map_tiles(vec![tile(9, 3), tile(9, 4)]);
-        assert_eq!(pane.map_previous_tiles, vec![tile(8, 1), tile(8, 2)]);
+        assert_eq!(pane.map_fallback_tiles, vec![tile(8, 1), tile(8, 2)]);
     }
 
     #[test]
@@ -2442,22 +2412,20 @@ mod tests {
         pane.update_visible_map_tiles(vec![tile(8, 1)]);
         pane.update_visible_map_tiles(vec![tile(9, 2)]);
         pane.update_visible_map_tiles(vec![tile(11, 8)]);
-        assert_eq!(pane.map_previous_tiles, vec![tile(8, 1)]);
+        assert_eq!(pane.map_fallback_tiles, vec![tile(8, 1)]);
     }
 
     #[test]
-    fn completed_zoom_transition_clears_fallback_and_restores_pan_ring() {
+    fn completed_coverage_clears_fallback_and_restores_ring() {
         let tile = |zoom, x| crate::map::provider::TileId { zoom, x, y: 4 };
         let mut pane = Scene3dPane::default();
         pane.update_visible_map_tiles(vec![tile(8, 1)]);
         pane.update_visible_map_tiles(vec![tile(9, 2)]);
-        pane.finish_map_zoom_transition();
-        assert!(!pane.map_zoom_transition);
-        assert!(pane.map_previous_tiles.is_empty());
-        assert_eq!(pane.map_previous_zoom, None);
+        pane.clear_map_fallback();
+        assert!(pane.map_fallback_tiles.is_empty());
 
         pane.update_visible_map_tiles(vec![tile(9, 3)]);
-        assert_eq!(pane.map_previous_tiles, vec![tile(9, 2)]);
+        assert_eq!(pane.map_fallback_tiles, vec![tile(9, 2)]);
     }
 
     #[test]
@@ -2473,26 +2441,26 @@ mod tests {
             x: 2,
             y: 2,
         }]);
-        assert!(pane.map_zoom_transition);
+        assert!(!pane.map_fallback_tiles.is_empty());
         assert_eq!(pane.update_map_selection(None), 0);
         assert!(pane.map_selection.is_none());
-        assert!(!pane.map_zoom_transition);
-        assert!(pane.map_previous_tiles.is_empty());
+        assert!(pane.map_tiles.is_empty());
+        assert!(pane.map_fallback_tiles.is_empty());
     }
 
     #[test]
-    fn scene_retires_completed_map_transition_after_render_before_status() {
+    fn scene_retires_completed_map_fallback_after_render_before_status() {
         let source = include_str!("workspace.rs");
         let scene_ui = source.split("fn scene_ui").nth(1).expect("scene_ui");
         let render = scene_ui.find(".render_scene(").expect("scene render");
         let complete = scene_ui[render..]
-            .find(".map_transition_complete(")
+            .find(".map_coverage_complete(")
             .map(|offset| render + offset)
-            .expect("transition completion query");
+            .expect("coverage completion query");
         let finish = scene_ui[complete..]
-            .find("pane.finish_map_zoom_transition()")
+            .find("pane.clear_map_fallback()")
             .map(|offset| complete + offset)
-            .expect("pane transition cleanup");
+            .expect("pane fallback cleanup");
         let status = scene_ui
             .find("scene_map_overlay(")
             .expect("map status overlay");
