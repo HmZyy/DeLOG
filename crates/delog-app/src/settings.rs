@@ -1473,9 +1473,11 @@ mod tests {
 
     #[test]
     fn new_gap_fields_round_trip() {
-        let mut r = RenderTuning::default();
-        r.gap_mode = GapMode::Dotted;
-        r.gap_factor = 12.5;
+        let r = RenderTuning {
+            gap_mode: GapMode::Dotted,
+            gap_factor: 12.5,
+            ..RenderTuning::default()
+        };
         let json = serde_json::to_string(&r).unwrap();
         let back: RenderTuning = serde_json::from_str(&json).unwrap();
         assert_eq!(back, r);
