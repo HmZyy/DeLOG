@@ -304,12 +304,16 @@ impl GpuBridge {
                                 x0: x0.to_bits(),
                                 x1: x1.to_bits(),
                                 width: width as u32,
-                                bridge: tuning.bridge_columns,
+                                bridge: tuning.gap_mode == crate::settings::GapMode::Connect,
                                 len: cache.samples(),
                             };
                             if res.col_params.get(&trace.field) != Some(&key) {
-                                let cols =
-                                    cache.minmax_columns(x0, x1, width, tuning.bridge_columns);
+                                let cols = cache.minmax_columns(
+                                    x0,
+                                    x1,
+                                    width,
+                                    tuning.gap_mode == crate::settings::GapMode::Connect,
+                                );
                                 let stat = res.col_buffers.sync(trace.field, &cols, true);
                                 upload_bytes += stat.bytes;
                                 full_uploads += stat.full_upload as u64;

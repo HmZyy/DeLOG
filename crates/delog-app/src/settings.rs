@@ -17,6 +17,9 @@ fn default_decimate_threshold() -> f32 {
 fn default_line_aa_px() -> f32 {
     1.0
 }
+fn default_gap_factor() -> f32 {
+    5.0
+}
 fn default_true() -> bool {
     true
 }
@@ -228,15 +231,38 @@ impl Default for PlotDisplay {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum GapMode {
+    /// Always a single line: bridge decimated columns, drop NaNs in the raw path.
+    #[default]
+    Connect,
+    /// Break the line at gaps; draw nothing across them.
+    Cut,
+    /// Break the line at gaps; bridge each gap with a dotted segment.
+    Dotted,
+}
+
+impl GapMode {
+    pub const ALL: [GapMode; 3] = [GapMode::Connect, GapMode::Cut, GapMode::Dotted];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            GapMode::Connect => "Connect (single line)",
+            GapMode::Cut => "Cut",
+            GapMode::Dotted => "Dotted",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(from = "RenderTuningDe")]
 pub struct RenderTuning {
-    #[serde(default = "default_decimate_threshold")]
     pub decimate_threshold: f32,
     /// pixels (0 = hard edges)
-    #[serde(default = "default_line_aa_px")]
     pub line_aa_px: f32,
-    #[serde(default = "default_true")]
-    pub bridge_columns: bool,
+    pub gap_mode: GapMode,
+    /// A time jump larger than this many median sample intervals is a gap.
+    pub gap_factor: f32,
 }
 
 impl Default for RenderTuning {
@@ -244,7 +270,39 @@ impl Default for RenderTuning {
         Self {
             decimate_threshold: default_decimate_threshold(),
             line_aa_px: default_line_aa_px(),
-            bridge_columns: true,
+            gap_mode: GapMode::default(),
+            gap_factor: default_gap_factor(),
+        }
+    }
+}
+
+/// Deserialization shim: carries the field defaults and migrates the removed
+/// `bridge_columns` flag (`false` meant "leave gaps" — now `Cut`).
+#[derive(serde::Deserialize)]
+struct RenderTuningDe {
+    #[serde(default = "default_decimate_threshold")]
+    decimate_threshold: f32,
+    #[serde(default = "default_line_aa_px")]
+    line_aa_px: f32,
+    #[serde(default)]
+    bridge_columns: Option<bool>,
+    #[serde(default)]
+    gap_mode: Option<GapMode>,
+    #[serde(default = "default_gap_factor")]
+    gap_factor: f32,
+}
+
+impl From<RenderTuningDe> for RenderTuning {
+    fn from(de: RenderTuningDe) -> Self {
+        let gap_mode = de.gap_mode.unwrap_or(match de.bridge_columns {
+            Some(false) => GapMode::Cut,
+            _ => GapMode::Connect,
+        });
+        Self {
+            decimate_threshold: de.decimate_threshold,
+            line_aa_px: de.line_aa_px,
+            gap_mode,
+            gap_factor: de.gap_factor,
         }
     }
 }
@@ -870,10 +928,28 @@ fn rendering_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
             ui.add(egui::Slider::new(&mut r.line_aa_px, 0.0..=3.0).suffix(" px"));
             ui.end_row();
 
-            ui.label("Bridge decimated columns")
-                .on_hover_text("Connect adjacent min/max columns so smooth slopes read as a continuous line instead of disjoint bars.");
-            ui.checkbox(&mut r.bridge_columns, "");
+            ui.label("Missing data")
+                .on_hover_text("How gaps (null samples, or time jumps larger than the gap threshold) are drawn. Connect interpolates a single line across them; Cut breaks the line; Dotted bridges them with a dotted segment.");
+            egui::ComboBox::from_id_salt("settings-gap-mode")
+                .selected_text(r.gap_mode.label())
+                .show_ui(ui, |ui| {
+                    for mode in GapMode::ALL {
+                        ui.selectable_value(&mut r.gap_mode, mode, mode.label());
+                    }
+                });
             ui.end_row();
+
+            if r.gap_mode != GapMode::Connect {
+                ui.label("Gap threshold")
+                    .on_hover_text("A time jump larger than this many typical sample intervals counts as missing data.");
+                ui.add(
+                    egui::DragValue::new(&mut r.gap_factor)
+                        .range(1.5..=1000.0)
+                        .speed(0.5)
+                        .suffix("x typical interval"),
+                );
+                ui.end_row();
+            }
         });
 
     if reset_to_defaults_button(ui) {
@@ -1374,6 +1450,35 @@ mod tests {
     fn render_mode_labels_are_stable() {
         let labels: Vec<_> = RenderMode::ALL.into_iter().map(RenderMode::label).collect();
         assert_eq!(labels, ["Reactive", "Continuous"]);
+    }
+
+    #[test]
+    fn old_bridge_columns_false_migrates_to_cut() {
+        let r: RenderTuning =
+            serde_json::from_str(r#"{"decimate_threshold":8.0,"line_aa_px":1.0,"bridge_columns":false}"#)
+                .unwrap();
+        assert_eq!(r.gap_mode, GapMode::Cut);
+    }
+
+    #[test]
+    fn old_bridge_columns_true_and_absent_migrate_to_connect() {
+        let with_true: RenderTuning =
+            serde_json::from_str(r#"{"bridge_columns":true}"#).unwrap();
+        assert_eq!(with_true.gap_mode, GapMode::Connect);
+        let absent: RenderTuning = serde_json::from_str("{}").unwrap();
+        assert_eq!(absent.gap_mode, GapMode::Connect);
+        assert_eq!(absent.gap_factor, 5.0);
+        assert_eq!(absent, RenderTuning::default());
+    }
+
+    #[test]
+    fn new_gap_fields_round_trip() {
+        let mut r = RenderTuning::default();
+        r.gap_mode = GapMode::Dotted;
+        r.gap_factor = 12.5;
+        let json = serde_json::to_string(&r).unwrap();
+        let back: RenderTuning = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, r);
     }
 }
 
