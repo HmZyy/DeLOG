@@ -6,10 +6,11 @@ use delog_cache::{CacheManager, MinMax};
 use delog_core::identity::FieldId;
 use delog_core::metrics::MetricsRegistry;
 use delog_render::{
-    BufferManager, GAP_CONNECT, GAP_CUT, GAP_DOTTED, GpuErrorHub, Grid3dPipeline, GridUniform,
-    LinePipeline, MAP_TILE_CAPACITY, MapTileDrawGroups, MapTilePipeline, MapTileUpload, MeshGpu,
-    MeshPipeline, MeshUniform, MinMaxColPipeline, PlotUniform, RenderContext, ScatterPipeline,
-    Scene3dTarget, StepPipeline, Traj3dPipeline, Traj3dUniform, UniformRing,
+    BufferManager, GAP_CONNECT, GAP_CUT, GAP_DOTTED, GAP_FORCE_DASH, GpuErrorHub, Grid3dPipeline,
+    GridUniform, LinePipeline, MAP_TILE_CAPACITY, MapTileDrawGroups, MapTilePipeline,
+    MapTileUpload, MeshGpu, MeshPipeline, MeshUniform, MinMaxColPipeline, PlotUniform,
+    RenderContext, ScatterPipeline, Scene3dTarget, StepPipeline, Traj3dPipeline, Traj3dUniform,
+    UniformRing,
 };
 use eframe::{egui_wgpu, wgpu};
 
@@ -268,13 +269,15 @@ impl GpuBridge {
             if res.metrics.is_none() {
                 res.metrics = Some(Arc::clone(metrics));
             }
+            let dotted = tuning.gap_mode == GapMode::Dotted;
+            let slots_per_trace: u32 = if dotted { 2 } else { 1 };
             let base_slot = res.next_uniform_slot;
-            res.next_uniform_slot += pane.traces.len() as u32;
+            res.next_uniform_slot += pane.traces.len() as u32 * slots_per_trace;
             res.ensure_uniform_capacity(res.next_uniform_slot);
             let plot_w = viewport_px[0];
 
             for (slot, trace) in pane.visible_traces().enumerate() {
-                let slot = base_slot + slot as u32;
+                let slot = base_slot + slot as u32 * slots_per_trace;
                 let Some(cache) = caches.get(trace.field) else {
                     continue;
                 };
@@ -296,6 +299,20 @@ impl GpuBridge {
                     .with_aa(tuning.line_aa_px)
                     .with_gap(gap_mode_u32(tuning.gap_mode), gap_threshold),
                 );
+                if dotted {
+                    res.uniforms.write(
+                        slot + 1,
+                        &PlotUniform::from_view(
+                            (x0, x1),
+                            (y0, y1),
+                            viewport_px,
+                            trace.width_px,
+                            shader_color(trace.color, self.srgb_target),
+                        )
+                        .with_aa(tuning.line_aa_px)
+                        .with_gap(GAP_FORCE_DASH, 0.0),
+                    );
+                }
 
                 let kind = match trace.mode {
                     TraceMode::Line => {
@@ -311,7 +328,7 @@ impl GpuBridge {
                                 x0: x0.to_bits(),
                                 x1: x1.to_bits(),
                                 width: width as u32,
-                                bridge: tuning.gap_mode == GapMode::Connect,
+                                mode: gap_mode_u32(tuning.gap_mode),
                                 len: cache.samples(),
                             };
                             if res.col_params.get(&trace.field) != Some(&key) {
@@ -325,6 +342,16 @@ impl GpuBridge {
                                 upload_bytes += stat.bytes;
                                 full_uploads += stat.full_upload as u64;
                                 res.col_params.insert(trace.field, key);
+                                if dotted {
+                                    let bxy = delog_cache::trace::gap_bridge_xy(&cols);
+                                    if bxy.is_empty() {
+                                        res.bridge_buffers.remove(trace.field);
+                                    } else {
+                                        res.bridge_buffers.sync(trace.field, &bxy, true);
+                                    }
+                                } else {
+                                    res.bridge_buffers.remove(trace.field);
+                                }
                             }
                             DrawKind::Columns {
                                 count: width as u32,
@@ -351,6 +378,16 @@ impl GpuBridge {
                                 upload_bytes += stat.bytes;
                                 full_uploads += stat.full_upload as u64;
                                 res.win_params.insert(trace.field, key);
+                                if dotted {
+                                    let bxy = nan_bridge_xy(&cache.xy, aw, bw);
+                                    if bxy.is_empty() {
+                                        res.bridge_buffers.remove(trace.field);
+                                    } else {
+                                        res.bridge_buffers.sync(trace.field, &bxy, true);
+                                    }
+                                } else {
+                                    res.bridge_buffers.remove(trace.field);
+                                }
                             }
                             DrawKind::Line {
                                 samples: res.win_buffers.samples(trace.field) as u32,
@@ -358,12 +395,14 @@ impl GpuBridge {
                         }
                     }
                     TraceMode::Scatter => {
+                        res.bridge_buffers.remove(trace.field);
                         res.buffers.sync(trace.field, &cache.xy, false);
                         DrawKind::Scatter {
                             samples: res.buffers.samples(trace.field) as u32,
                         }
                     }
                     TraceMode::Step => {
+                        res.bridge_buffers.remove(trace.field);
                         res.buffers.sync(trace.field, &cache.xy, false);
                         DrawKind::Step {
                             samples: res.buffers.samples(trace.field) as u32,
@@ -377,6 +416,18 @@ impl GpuBridge {
                         slot,
                         kind,
                     });
+                    if dotted && matches!(kind, DrawKind::Line { .. } | DrawKind::Columns { .. }) {
+                        let bridge = DrawKind::Bridge {
+                            samples: res.bridge_buffers.samples(trace.field) as u32,
+                        };
+                        if bridge.is_drawable() {
+                            items.push(DrawItem {
+                                field: trace.field,
+                                slot: slot + 1,
+                                kind: bridge,
+                            });
+                        }
+                    }
                 }
             }
             res.errors.get_mut().unwrap().close(scope);
@@ -568,6 +619,10 @@ enum DrawKind {
     Columns {
         count: u32,
     },
+    /// Dotted-gap bridge segments, drawn through the line pipeline.
+    Bridge {
+        samples: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -605,6 +660,32 @@ fn line_window_xy(xy: &[f32], a: usize, b: usize, keep_gaps: bool) -> Vec<f32> {
     out
 }
 
+/// Dotted-gap bridges across NaN runs in `xy[2a..2b)`: one straight segment
+/// per maximal run of non-finite points bounded by finite points either side.
+/// Segments are NaN-separated so the line shader draws them disjoint.
+fn nan_bridge_xy(xy: &[f32], a: usize, b: usize) -> Vec<f32> {
+    let samples = xy.len() / 2;
+    let (a, b) = (a.min(samples), b.min(samples));
+    let mut out = Vec::new();
+    let mut left: Option<usize> = None;
+    let mut in_run = false;
+    for i in a..b {
+        if xy[2 * i].is_finite() && xy[2 * i + 1].is_finite() {
+            if in_run && let Some(l) = left {
+                if !out.is_empty() {
+                    out.extend_from_slice(&[f32::NAN, f32::NAN]);
+                }
+                out.extend_from_slice(&[xy[2 * l], xy[2 * l + 1], xy[2 * i], xy[2 * i + 1]]);
+            }
+            left = Some(i);
+            in_run = false;
+        } else if left.is_some() {
+            in_run = true;
+        }
+    }
+    out
+}
+
 fn gap_mode_u32(mode: GapMode) -> u32 {
     match mode {
         GapMode::Connect => GAP_CONNECT,
@@ -633,6 +714,7 @@ impl DrawKind {
             DrawKind::Scatter { .. } => PipelineKind::Scatter,
             DrawKind::Step { .. } => PipelineKind::Step,
             DrawKind::Columns { .. } => PipelineKind::Columns,
+            DrawKind::Bridge { .. } => PipelineKind::Line,
         }
     }
 
@@ -642,6 +724,7 @@ impl DrawKind {
             DrawKind::Scatter { samples } => samples >= 1,
             DrawKind::Step { samples } => samples >= 2,
             DrawKind::Columns { count } => count >= 1,
+            DrawKind::Bridge { samples } => samples >= 2,
         }
     }
 }
@@ -665,12 +748,15 @@ struct PlotCallbackResources {
     /// Interleaved `[x,y]` buffers holding only the visible window per field
     /// (raw `Line` path); sized to what's on screen, not the full trace.
     win_buffers: BufferManager,
+    /// NaN-separated dotted-gap bridge segments per field (Dotted mode only).
+    bridge_buffers: BufferManager,
     uniforms: UniformRing,
     next_uniform_slot: u32,
     line_binds: HashMap<FieldId, wgpu::BindGroup>,
     scatter_binds: HashMap<FieldId, wgpu::BindGroup>,
     step_binds: HashMap<FieldId, wgpu::BindGroup>,
     col_binds: HashMap<FieldId, wgpu::BindGroup>,
+    bridge_binds: HashMap<FieldId, wgpu::BindGroup>,
     /// Memoizes the decimated columns resident in `col_buffers` per field, so a
     /// static view skips the per-frame `minmax_columns` recompute and upload.
     col_params: HashMap<FieldId, ColKey>,
@@ -690,7 +776,7 @@ struct ColKey {
     x0: u32,
     x1: u32,
     width: u32,
-    bridge: bool,
+    mode: u32,
     len: usize,
 }
 
@@ -714,6 +800,7 @@ impl PlotCallbackResources {
         let buffers = BufferManager::new(ctx.clone());
         let col_buffers = BufferManager::new(ctx.clone());
         let win_buffers = BufferManager::new(ctx.clone());
+        let bridge_buffers = BufferManager::new(ctx.clone());
         let uniforms = UniformRing::new(ctx.clone(), 8);
         Self {
             ctx,
@@ -724,12 +811,14 @@ impl PlotCallbackResources {
             buffers,
             col_buffers,
             win_buffers,
+            bridge_buffers,
             uniforms,
             next_uniform_slot: 0,
             line_binds: HashMap::new(),
             scatter_binds: HashMap::new(),
             step_binds: HashMap::new(),
             col_binds: HashMap::new(),
+            bridge_binds: HashMap::new(),
             col_params: HashMap::new(),
             win_params: HashMap::new(),
             errors: Mutex::new(GpuErrorHub::new()),
@@ -749,6 +838,7 @@ impl PlotCallbackResources {
             .fields()
             .chain(self.col_buffers.fields())
             .chain(self.win_buffers.fields())
+            .chain(self.bridge_buffers.fields())
             .filter(|f| !plotted.contains(f))
             .collect();
         for field in stale {
@@ -757,6 +847,7 @@ impl PlotCallbackResources {
             self.col_params.remove(&field);
             self.win_buffers.remove(field);
             self.win_params.remove(&field);
+            self.bridge_buffers.remove(field);
         }
     }
 }
@@ -1334,12 +1425,14 @@ impl egui_wgpu::CallbackTrait for ScenePaintCallback {
                 buffers,
                 col_buffers,
                 win_buffers,
+                bridge_buffers,
                 uniforms,
                 next_uniform_slot: _,
                 line_binds,
                 scatter_binds,
                 step_binds,
                 col_binds,
+                bridge_binds,
                 col_params: _,
                 win_params: _,
                 errors,
@@ -1368,6 +1461,11 @@ impl egui_wgpu::CallbackTrait for ScenePaintCallback {
                     DrawKind::Columns { .. } => {
                         if let Some(buf) = col_buffers.buffer(item.field) {
                             col_binds.insert(item.field, minmax.bind_group(ctx, buf, uniforms));
+                        }
+                    }
+                    DrawKind::Bridge { .. } => {
+                        if let Some(buf) = bridge_buffers.buffer(item.field) {
+                            bridge_binds.insert(item.field, line.bind_group(ctx, buf, uniforms));
                         }
                     }
                 }
@@ -1452,6 +1550,11 @@ impl egui_wgpu::CallbackTrait for ScenePaintCallback {
                     DrawKind::Columns { count } => {
                         if let Some(bind) = res.col_binds.get(&item.field) {
                             res.minmax.draw_trace(render_pass, bind, offset, count);
+                        }
+                    }
+                    DrawKind::Bridge { samples } => {
+                        if let Some(bind) = res.bridge_binds.get(&item.field) {
+                            res.line.draw_trace(render_pass, bind, offset, samples);
                         }
                     }
                 }
@@ -1598,6 +1701,48 @@ mod tests {
         assert_eq!(line_xy[0..2], [0.0, 10.0]);
         assert!(line_xy[3].is_nan());
         assert_eq!(line_xy[4..6], [2.0, 12.0]);
+    }
+
+    #[test]
+    fn nan_bridge_xy_bridges_each_nan_run_once() {
+        let nan = f32::NAN;
+        let xy = [
+            0.0, 1.0, //
+            1.0, nan, //
+            2.0, nan, //
+            3.0, 4.0, //
+            4.0, nan, //
+            5.0, 6.0,
+        ];
+        let out = nan_bridge_xy(&xy, 0, 6);
+        assert_eq!(out.len(), 10);
+        assert_eq!(&out[0..4], &[0.0, 1.0, 3.0, 4.0]);
+        assert!(out[4].is_nan() && out[5].is_nan());
+        assert_eq!(&out[6..10], &[3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn nan_bridge_xy_ignores_leading_trailing_runs_and_gapless_windows() {
+        let nan = f32::NAN;
+        assert!(nan_bridge_xy(&[0.0, nan, 1.0, 2.0, 2.0, 3.0], 0, 3).is_empty());
+        assert!(nan_bridge_xy(&[0.0, 1.0, 1.0, 2.0, 2.0, nan], 0, 3).is_empty());
+        assert!(nan_bridge_xy(&[0.0, 1.0, 1.0, 2.0], 0, 2).is_empty());
+        assert!(nan_bridge_xy(&[], 0, 0).is_empty());
+    }
+
+    #[test]
+    fn bridge_draws_batch_with_line_pipeline_runs() {
+        use PipelineKind::{Columns, Line};
+        let kinds = [
+            DrawKind::Columns { count: 100 },
+            DrawKind::Bridge { samples: 5 },
+            DrawKind::Line { samples: 10 },
+            DrawKind::Bridge { samples: 5 },
+        ];
+        let runs = pipeline_runs(kinds.iter().map(|k| k.pipeline()));
+        assert_eq!(runs, vec![(Columns, 1), (Line, 3)]);
+        assert!(!DrawKind::Bridge { samples: 1 }.is_drawable());
+        assert!(DrawKind::Bridge { samples: 2 }.is_drawable());
     }
 
     #[test]
