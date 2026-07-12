@@ -1784,7 +1784,6 @@ mod tests {
             provider: crate::map::provider::MapProviderId::BingSatellite,
             id: crate::map::provider::TileId { zoom, x: 0, y: 0 },
             generation: 9,
-            priority: 0,
             rgba: Vec::new(),
             corners: [[0.0; 3]; 4],
         };
@@ -1821,7 +1820,6 @@ mod tests {
             provider: selection.provider,
             id: crate::map::provider::TileId { zoom, x, y: 3 },
             generation: selection.generation,
-            priority: x as i32,
             rgba: [x as u8, zoom, 0, 255].repeat(256 * 256),
             corners: [[x as f32, 0.0, 0.0]; 4],
         };
@@ -1886,7 +1884,6 @@ mod tests {
                 y: 2,
             },
             generation: 1,
-            priority: 0,
             rgba: [40, 80, 120, 255].repeat(256 * 256),
             corners: [[0.0, 0.0, 0.0]; 4],
         };
@@ -1931,7 +1928,6 @@ mod tests {
             provider: crate::map::provider::MapProviderId::BingSatellite,
             id: crate::map::provider::TileId { zoom, x, y: 1 },
             generation: selection.generation,
-            priority: x as i32,
             rgba: color.repeat(256 * 256),
             corners: [[x as f32, 0.0, 0.0]; 4],
         };
@@ -2000,7 +1996,6 @@ mod tests {
             provider: crate::map::provider::MapProviderId::BingSatellite,
             id: crate::map::provider::TileId { zoom: 6, x, y: 2 },
             generation: 1,
-            priority: x as i32,
             rgba: color.repeat(256 * 256),
             corners: [[x as f32, 0.0, 0.0]; 4],
         };
@@ -2104,14 +2099,13 @@ mod tests {
         }
     }
 
-    fn transition_tile(selection: &MapTileSelection, id: TileId, priority: i32) -> ReadyTile {
+    fn transition_tile(selection: &MapTileSelection, id: TileId) -> ReadyTile {
         ReadyTile {
             scope: selection.scope,
             epoch: selection.epoch,
             provider: selection.provider,
             id,
             generation: selection.generation,
-            priority,
             rgba: [id.x as u8, id.zoom, id.y as u8, 255].repeat(256 * 256),
             corners: [[id.x as f32, id.y as f32, 0.0]; 4],
         }
@@ -2157,13 +2151,13 @@ mod tests {
         let previous: Vec<_> = parent_ids
             .iter()
             .copied()
-            .map(|id| transition_tile(&selection, id, id.x as i32))
+            .map(|id| transition_tile(&selection, id))
             .collect();
         let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
         let first = resources.prepare_map_tiles(identity, &selection, &previous);
         assert_eq!(first.previous.len(), 128);
 
-        let child = transition_tile(&selection, child_ids[0], 0);
+        let child = transition_tile(&selection, child_ids[0]);
         let child_key = map_tile_key(&child);
         let draw = resources.prepare_map_tiles(identity, &selection, &[child]);
         assert!(!draw.current.contains(&child_key));
@@ -2212,19 +2206,19 @@ mod tests {
         let previous: Vec<_> = parent_ids
             .iter()
             .copied()
-            .map(|id| transition_tile(&selection, id, id.x as i32))
+            .map(|id| transition_tile(&selection, id))
             .collect();
         let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
         resources.prepare_map_tiles(identity, &selection, &previous);
-        let child = transition_tile(&selection, child_ids[0], 0);
+        let child = transition_tile(&selection, child_ids[0]);
         let draw = resources.prepare_map_tiles(identity, &selection, &[child.clone()]);
         assert_eq!(draw.previous.len(), 127);
         assert!(draw.current.contains(&map_tile_key(&child)));
-        assert!(resources.map_tiles.contains(map_tile_key(&transition_tile(
-            &selection,
-            parent_ids[3],
-            3
-        ))));
+        assert!(
+            resources
+                .map_tiles
+                .contains(map_tile_key(&transition_tile(&selection, parent_ids[3])))
+        );
     }
 
     #[test]
@@ -2267,23 +2261,23 @@ mod tests {
         let previous: Vec<_> = parent_ids
             .iter()
             .copied()
-            .map(|id| transition_tile(&selection, id, id.x as i32))
+            .map(|id| transition_tile(&selection, id))
             .collect();
         let ready_children: Vec<_> = children
             .iter()
             .enumerate()
-            .map(|(priority, id)| transition_tile(&selection, *id, priority as i32))
+            .map(|(_, id)| transition_tile(&selection, *id))
             .collect();
         let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
         resources.prepare_map_tiles(identity, &selection, &previous);
         let draw = resources.prepare_map_tiles(identity, &selection, &ready_children);
         assert_eq!(draw.previous.len(), 124);
         assert_eq!(draw.current.len(), 4);
-        assert!(!resources.map_tiles.contains(map_tile_key(&transition_tile(
-            &selection,
-            parent_ids[3],
-            3
-        ))));
+        assert!(
+            !resources
+                .map_tiles
+                .contains(map_tile_key(&transition_tile(&selection, parent_ids[3])))
+        );
         let reversed = resources.prepare_map_tiles(
             identity,
             &selection,
@@ -2332,11 +2326,11 @@ mod tests {
         let fallback: Vec<_> = children
             .iter()
             .copied()
-            .map(|id| transition_tile(&selection, id, 0))
+            .map(|id| transition_tile(&selection, id))
             .collect();
         let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
         resources.prepare_map_tiles(identity, &selection, &fallback);
-        let current = transition_tile(&selection, parent, 0);
+        let current = transition_tile(&selection, parent);
         let draw = resources.prepare_map_tiles(identity, &selection, &[current.clone()]);
         assert_eq!(draw.current, vec![map_tile_key(&current)]);
         assert!(draw.previous.is_empty());
@@ -2364,7 +2358,6 @@ mod tests {
             provider: selection.provider,
             id: crate::map::provider::TileId { zoom: 8, x, y: 0 },
             generation: 1,
-            priority: x as i32,
             rgba: [x as u8, 8, 0, 255].repeat(256 * 256),
             corners: [[x as f32, 0.0, 0.0]; 4],
         };
@@ -2417,7 +2410,6 @@ mod tests {
             provider: selection.provider,
             id: crate::map::provider::TileId { zoom: 8, x, y: 0 },
             generation: selection.generation,
-            priority: (x % 128) as i32,
             rgba: [x as u8, 8, 0, 255].repeat(256 * 256),
             corners: [[x as f32, 0.0, 0.0]; 4],
         };
@@ -2425,9 +2417,15 @@ mod tests {
         let new: Vec<_> = (128..256).map(tile).collect();
         let expected: std::collections::HashSet<_> = new.iter().map(map_tile_key).collect();
         let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
-        selection.current_tiles = old.iter().map(|tile| (tile.id, tile.priority)).collect();
+        selection.current_tiles = old
+            .iter()
+            .map(|tile| (tile.id, (tile.id.x % 128) as i32))
+            .collect();
         resources.prepare_map_tiles(identity, &selection, &old);
-        selection.current_tiles = new.iter().map(|tile| (tile.id, tile.priority)).collect();
+        selection.current_tiles = new
+            .iter()
+            .map(|tile| (tile.id, (tile.id.x % 128) as i32))
+            .collect();
         let draw = resources.prepare_map_tiles(identity, &selection, &new);
 
         assert_eq!(
@@ -2457,24 +2455,23 @@ mod tests {
             previous_tiles: Vec::new(),
             enabled: true,
         };
-        let tile = |x, priority| ReadyTile {
+        let tile = |x| ReadyTile {
             scope: selection.scope,
             epoch: selection.epoch,
             provider: selection.provider,
             id: id(x),
             generation: selection.generation,
-            priority,
             rgba: [x as u8, 8, 0, 255].repeat(256 * 256),
             corners: [[x as f32, 0.0, 0.0]; 4],
         };
-        let old = vec![tile(1, 0), tile(2, 1)];
+        let old = vec![tile(1), tile(2)];
         let old_key = map_tile_key(&old[0]);
         let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
         resources.prepare_map_tiles(identity, &selection, &old);
 
         selection.current_tiles = vec![(id(2), 0), (id(3), 1)];
         selection.previous_tiles = vec![id(1)];
-        let new = tile(3, 1);
+        let new = tile(3);
         let expected_current = [map_tile_key(&old[1]), map_tile_key(&new)]
             .into_iter()
             .collect::<std::collections::HashSet<_>>();
@@ -2515,7 +2512,6 @@ mod tests {
                     provider: crate::map::provider::MapProviderId::BingSatellite,
                     id: crate::map::provider::TileId { zoom: 8, x, y: 0 },
                     generation: 1,
-                    priority: x as i32,
                     rgba: [scope as u8, x as u8, 0, 255].repeat(256 * 256),
                     corners: [[x as f32, 0.0, 0.0]; 4],
                 })
@@ -2562,7 +2558,6 @@ mod tests {
             provider: crate::map::provider::MapProviderId::BingSatellite,
             id: crate::map::provider::TileId { zoom: 8, x, y: 0 },
             generation: 1,
-            priority: x as i32,
             rgba: [scope as u8, x as u8, 0, 255].repeat(256 * 256),
             corners: [[x as f32, 0.0, 0.0]; 4],
         };
@@ -2612,7 +2607,6 @@ mod tests {
             provider: crate::map::provider::MapProviderId::BingSatellite,
             id: crate::map::provider::TileId { zoom: 8, x, y: 0 },
             generation: 1,
-            priority: x as i32,
             rgba: [scope as u8, x as u8, 0, 255].repeat(256 * 256),
             corners: [[x as f32, 0.0, 0.0]; 4],
         };

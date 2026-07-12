@@ -30,7 +30,6 @@ pub enum MapProviderId {
 }
 
 pub trait MapProvider: Send + Sync {
-    fn id(&self) -> MapProviderId;
     fn label(&self) -> &'static str;
     fn zoom_range(&self) -> RangeInclusive<u8>;
     fn url(&self, tile: TileId) -> String;
@@ -39,9 +38,6 @@ pub trait MapProvider: Send + Sync {
 struct BingSatellite;
 
 impl MapProvider for BingSatellite {
-    fn id(&self) -> MapProviderId {
-        MapProviderId::BingSatellite
-    }
     fn label(&self) -> &'static str {
         "Bing Satellite"
     }
