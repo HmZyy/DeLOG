@@ -8,6 +8,10 @@ use crate::context::RenderContext;
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct PlotUniform {
+    /// `[x_scale, x_min, y_scale, y_min]`. Clip = `(data - min) * scale - 1`.
+    /// Subtracting the view min first keeps full f32 precision for
+    /// large-magnitude coordinates (e.g. lat/lon in 1e-7 deg), where the old
+    /// `data * scale + offset` form catastrophically cancelled.
     pub transform: [f32; 4],
     pub view: [f32; 4],
     pub color: [f32; 4],
@@ -23,15 +27,15 @@ pub const GAP_FORCE_DASH: u32 = 3;
 impl PlotUniform {
     pub fn new(
         x_scale: f32,
-        x_offset: f32,
+        x_min: f32,
         y_scale: f32,
-        y_offset: f32,
+        y_min: f32,
         viewport: [f32; 2],
         width_px: f32,
         color: [f32; 4],
     ) -> Self {
         Self {
-            transform: [x_scale, x_offset, y_scale, y_offset],
+            transform: [x_scale, x_min, y_scale, y_min],
             view: [viewport[0], viewport[1], width_px, 0.0],
             color,
             gap: [0.0; 4],
@@ -45,11 +49,9 @@ impl PlotUniform {
         width_px: f32,
         color: [f32; 4],
     ) -> Self {
-        let (x_scale, x_offset) = axis(x.0, x.1);
-        let (y_scale, y_offset) = axis(y.0, y.1);
-        Self::new(
-            x_scale, x_offset, y_scale, y_offset, viewport, width_px, color,
-        )
+        let (x_scale, x_min) = axis(x.0, x.1);
+        let (y_scale, y_min) = axis(y.0, y.1);
+        Self::new(x_scale, x_min, y_scale, y_min, viewport, width_px, color)
     }
 
     /// Edge anti-alias feather, stored in `view.w`.
@@ -66,13 +68,15 @@ impl PlotUniform {
     }
 }
 
+/// Returns `(scale, min)`: clip = `(data - min) * scale - 1`, mapping
+/// `[min, max]` onto `[-1, 1]`. Keeping `min` (rather than the pre-multiplied
+/// offset `-1 - min*scale`) avoids f32 cancellation at large magnitudes.
 fn axis(min: f32, max: f32) -> (f32, f32) {
     let span = max - min;
     if span.abs() <= f32::EPSILON {
         return (0.0, 0.0);
     }
-    let scale = 2.0 / span;
-    (scale, -1.0 - min * scale)
+    (2.0 / span, min)
 }
 
 const UNIFORM_SIZE: u64 = std::mem::size_of::<PlotUniform>() as u64;
@@ -195,15 +199,46 @@ mod tests {
         assert_eq!(UNIFORM_SIZE, 64);
     }
 
+    // Mirrors the shader's data_to_clip: (data - min) * scale - 1.
+    fn clip(data: f32, scale: f32, min: f32) -> f32 {
+        (data - min) * scale - 1.0
+    }
+
     #[test]
     fn from_view_maps_window_corners_to_clip() {
         let u = PlotUniform::from_view((0.0, 10.0), (-100.0, 100.0), [1.0, 1.0], 1.0, [0.0; 4]);
-        let clip = |data: f32, scale: f32, offset: f32| data * scale + offset;
         assert!((clip(0.0, u.transform[0], u.transform[1]) + 1.0).abs() < 1e-5);
         assert!((clip(10.0, u.transform[0], u.transform[1]) - 1.0).abs() < 1e-5);
         assert!((clip(-100.0, u.transform[2], u.transform[3]) + 1.0).abs() < 1e-5);
         assert!((clip(100.0, u.transform[2], u.transform[3]) - 1.0).abs() < 1e-5);
         assert!(clip(0.0, u.transform[2], u.transform[3]).abs() < 1e-5);
+    }
+
+    #[test]
+    fn transform_keeps_precision_at_large_magnitude() {
+        // Latitude scale (~4.37e8): the old data*scale+offset form cancelled to
+        // ~0 (everything at the view middle); (data-min)*scale-1 stays precise.
+        let u = PlotUniform::from_view(
+            (0.0, 1.0),
+            (437129280.0, 437129380.0),
+            [1.0, 1.0],
+            0.0,
+            [0.0; 4],
+        );
+        let (ys, ymin) = (u.transform[2], u.transform[3]);
+        let v = 437129312.0f32; // representable; 32 above the view min
+        // (v - min) is exact in f32, so the mapping is the true rebased clip,
+        // placing v in the lower third — not cancelled toward the middle (0).
+        let got = clip(v, ys, ymin);
+        assert!((got - (32.0f32 * ys - 1.0)).abs() < 1e-5);
+        assert!(
+            (-0.5..-0.2).contains(&got),
+            "not cancelled to middle: {got}"
+        );
+
+        // The old formula cancelled: value*scale + (-1 - min*scale) ~ 0.
+        let old = v * ys + (-1.0f32 - 437129280.0f32 * ys);
+        assert!(old.abs() < 0.1, "old form should cancel to ~0, was {old}");
     }
 
     #[test]
