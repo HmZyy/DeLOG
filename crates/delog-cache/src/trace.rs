@@ -708,22 +708,34 @@ mod tests {
     }
 
     #[test]
-    fn y_origin_skips_leading_nulls_and_survives_append() {
-        // First rows null: origin unset (accessor 0.0), stored NaN.
-        let (snap1, field) = snapshot_with(vec![0, 1_000_000], vec![None, Some(500)], 0);
+    fn all_null_cache_establishes_y_origin_on_first_finite_append() {
+        let (snap1, field) = snapshot_with(vec![0, 1_000_000], vec![None, None], 0);
         let mut cache = TraceCache::build(&snap1, field, 0, 0, &MetricsRegistry::new()).unwrap();
         assert!(cache.xy[1].is_nan());
-        assert!((cache.y_origin() - 5.0).abs() < 1e-4); // 500 * 0.01, from row 1
+        assert!(cache.xy[3].is_nan());
+        assert_eq!(cache.y_origin(), 0.0);
 
-        // Append keeps the established origin (rebased against 5.0).
         let (snap2, _) = snapshot_with(
             vec![0, 1_000_000, 2_000_000],
-            vec![None, Some(500), Some(600)],
+            vec![None, None, Some(500)],
             0,
         );
         assert!(cache.append(&snap2, field, &MetricsRegistry::new()));
         assert!((cache.y_origin() - 5.0).abs() < 1e-4);
-        assert!((cache.xy[5] - 1.0).abs() < 1e-4); // (600*0.01 - 5.0) = 1.0
+        assert!((cache.xy[5] - 0.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn legitimate_zero_y_origin_survives_append() {
+        let (snap1, field) = snapshot_with(vec![0], vec![Some(0)], 0);
+        let mut cache = TraceCache::build(&snap1, field, 0, 0, &MetricsRegistry::new()).unwrap();
+        assert_eq!(cache.y_origin(), 0.0);
+        assert_eq!(cache.xy[1], 0.0);
+
+        let (snap2, _) = snapshot_with(vec![0, 1_000_000], vec![Some(0), Some(100)], 0);
+        assert!(cache.append(&snap2, field, &MetricsRegistry::new()));
+        assert_eq!(cache.y_origin(), 0.0);
+        assert_eq!(cache.xy[3], 1.0);
     }
 
     #[test]

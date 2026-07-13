@@ -1671,7 +1671,66 @@ pub fn zoom_drag_view(
 
 #[cfg(test)]
 mod tests {
+    use arrow::array::{ArrayRef, Int32Array, Int64Array};
+    use arrow::datatypes::DataType;
+    use delog_core::chunk::Chunk;
+    use delog_core::identity::IdentityRegistry;
+    use delog_core::schema::{FieldSchema, TopicSchema};
+    use delog_core::snapshot::StoreSnapshot;
+    use delog_core::store::TopicStore;
+
     use super::*;
+
+    #[test]
+    fn visible_y_range_merges_distinct_trace_origins_as_absolute_values() {
+        let mut identity = IdentityRegistry::new();
+        let source = identity.add_source("flight");
+        let topic = identity.add_topic(source, "DATA").unwrap();
+        let low = identity.add_field(topic, "Low").unwrap();
+        let high = identity.add_field(topic, "High").unwrap();
+        let schema = Arc::new(
+            TopicSchema::new(
+                "DATA",
+                [
+                    FieldSchema::new("Low", DataType::Int32, None::<String>, 0.01).unwrap(),
+                    FieldSchema::new("High", DataType::Int32, None::<String>, 0.01).unwrap(),
+                ],
+            )
+            .unwrap(),
+        );
+        let chunk = Arc::new(
+            Chunk::try_new(
+                Int64Array::from(vec![0, 1_000_000]),
+                vec![
+                    Arc::new(Int32Array::from(vec![10_000, 10_100])) as ArrayRef,
+                    Arc::new(Int32Array::from(vec![100_000, 100_200])) as ArrayRef,
+                ],
+                &schema,
+            )
+            .unwrap(),
+        );
+        let store = Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap());
+        let snapshot =
+            Arc::new(StoreSnapshot::from_registry(&identity, [(topic, store)], 0).unwrap());
+        let mut caches = CacheManager::new();
+        caches.request(low, &snapshot);
+        caches.request(high, &snapshot);
+        for _ in 0..2_000 {
+            caches.poll_builds();
+            if caches.is_ready(low) && caches.is_ready(high) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(caches.is_ready(low) && caches.is_ready(high));
+
+        let mut pane = PlotPane::default();
+        pane.add_trace(low);
+        pane.add_trace(high);
+        let (min, max) = visible_y_range(&mut caches, &pane, 0.0, 1.0);
+        assert!((min - 54.9).abs() < 1e-9, "min was {min}");
+        assert!((max - 1_047.1).abs() < 1e-9, "max was {max}");
+    }
 
     #[test]
     fn active_scope_is_first_only_when_scope_count_exceeds_capacity() {
