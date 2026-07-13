@@ -1816,6 +1816,54 @@ mod tests {
     }
 
     #[test]
+    fn visible_y_range_line_connect_singleton_uses_empty_fallback() {
+        let mut identity = IdentityRegistry::new();
+        let source = identity.add_source("flight");
+        let topic = identity.add_topic(source, "DATA").unwrap();
+        let field = identity.add_field(topic, "Value").unwrap();
+        let schema = Arc::new(
+            TopicSchema::new(
+                "DATA",
+                [FieldSchema::new("Value", DataType::Int32, None::<String>, 0.01).unwrap()],
+            )
+            .unwrap(),
+        );
+        let chunk = Arc::new(
+            Chunk::try_new(
+                Int64Array::from(vec![1_000_000]),
+                vec![Arc::new(Int32Array::from(vec![4_200])) as ArrayRef],
+                &schema,
+            )
+            .unwrap(),
+        );
+        let store = Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap());
+        let snapshot =
+            Arc::new(StoreSnapshot::from_registry(&identity, [(topic, store)], 0).unwrap());
+        let mut caches = CacheManager::new();
+        caches.request(field, &snapshot);
+        for _ in 0..2_000 {
+            caches.poll_builds();
+            if caches.is_ready(field) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(caches.is_ready(field));
+
+        let mut pane = PlotPane::default();
+        pane.add_trace(field);
+        let tuning = RenderTuning {
+            gap_mode: GapMode::Connect,
+            ..RenderTuning::default()
+        };
+
+        assert_eq!(
+            visible_y_range(&mut caches, &pane, 0.0, 2.0, tuning),
+            (-1.0, 1.0)
+        );
+    }
+
+    #[test]
     fn active_scope_is_first_only_when_scope_count_exceeds_capacity() {
         let mut saturated: Vec<_> = (0..=MAP_TILE_CAPACITY as u64).map(MapScopeId).collect();
         prioritize_active_scope(&mut saturated, Some(MapScopeId(128)));
