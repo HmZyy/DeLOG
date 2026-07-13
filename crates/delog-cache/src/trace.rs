@@ -333,6 +333,9 @@ impl TraceCache {
     /// window with line/bridge intersections at its edges. Off-screen anchors
     /// determine those intersections but their full y values are not included.
     pub fn y_range(&self, x0: f32, x1: f32) -> MinMax {
+        if !x0.is_finite() || !x1.is_finite() || x1 < x0 {
+            return MinMax::EMPTY;
+        }
         let (a, b) = self.index_range(x0, x1);
         let mut range = self.pyramid.query(&self.xy, a, b);
         let left = a.checked_sub(1).and_then(|i| self.finite_at_or_before(i));
@@ -558,7 +561,8 @@ fn median_dt(xy: &[f32]) -> f32 {
 }
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
-    a + (b - a) * t
+    let t = f64::from(t);
+    (f64::from(a) * (1.0 - t) + f64::from(b) * t) as f32
 }
 
 fn col_index(x: f32, x0: f32, inv: f32, width: usize) -> usize {
@@ -923,6 +927,76 @@ mod tests {
         assert!(mm.is_finite(), "void view must not collapse to empty");
         assert!((mm.min - 2.0).abs() < 0.05, "min was {}", mm.min);
         assert!((mm.max - 2.0).abs() < 0.05, "max was {}", mm.max);
+    }
+
+    #[test]
+    fn y_range_interpolates_opposite_sign_large_anchors_without_overflow() {
+        let mut xy = Vec::new();
+        for i in 0..=10 {
+            xy.push(i as f32);
+            xy.push(match i {
+                0 => -2.0e38,
+                10 => 2.0e38,
+                _ => f32::NAN,
+            });
+        }
+        let cache = TraceCache {
+            pyramid: MinMaxPyramid::build_strided(&xy, 2, 1),
+            xy,
+            origin_us: 0,
+            built_rows: 11,
+            last_used_frame: 0,
+            offset_us: 0,
+            median_dt: 10.0,
+            y_origin: None,
+        };
+
+        let mm = cache.y_range(4.0, 6.0);
+        assert!(mm.min.is_finite(), "min was {}", mm.min);
+        assert!(mm.max.is_finite(), "max was {}", mm.max);
+        assert!(
+            ((mm.min - -4.0e37) / 4.0e37).abs() < 1e-6,
+            "min was {}",
+            mm.min
+        );
+        assert!(
+            ((mm.max - 4.0e37) / 4.0e37).abs() < 1e-6,
+            "max was {}",
+            mm.max
+        );
+    }
+
+    #[test]
+    fn y_range_rejects_reversed_bounds_but_preserves_equal_bounds() {
+        let (snap, field) = snapshot_with(
+            vec![0, 1_000_000, 2_000_000, 3_000_000],
+            vec![Some(0), Some(100), Some(200), Some(300)],
+            0,
+        );
+        let cache = TraceCache::build(&snap, field, 0, 0, &MetricsRegistry::new()).unwrap();
+
+        let reversed = cache.y_range(3.0, 1.0);
+        assert!(reversed.min.is_nan() && reversed.max.is_nan());
+        assert!(cache.y_range(2.0, 2.0).is_finite());
+    }
+
+    #[test]
+    fn y_range_rejects_non_finite_bounds() {
+        let (snap, field) = snapshot_with(
+            vec![0, 1_000_000, 2_000_000],
+            vec![Some(0), Some(100), Some(200)],
+            0,
+        );
+        let cache = TraceCache::build(&snap, field, 0, 0, &MetricsRegistry::new()).unwrap();
+
+        for mm in [
+            cache.y_range(f32::NAN, 2.0),
+            cache.y_range(0.0, f32::NAN),
+            cache.y_range(f32::NEG_INFINITY, 2.0),
+            cache.y_range(0.0, f32::INFINITY),
+        ] {
+            assert!(mm.min.is_nan() && mm.max.is_nan());
+        }
     }
 
     #[test]
