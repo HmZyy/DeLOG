@@ -179,30 +179,136 @@ impl TraceCache {
         lo
     }
 
-    /// Min/max y over the visible x window `[x0, x1]` (seconds), extended to the
-    /// nearest sample with a finite y on each side. Skipping null rows keeps a
-    /// view that sits inside a gap (all-NaN rows on a merged timeline) scaled to
-    /// the surrounding real samples instead of collapsing to an empty range —
-    /// which would drop the whole trace off-screen and make the scale flicker
-    /// as the window slides across null rows.
-    pub fn y_range(&self, x0: f32, x1: f32) -> MinMax {
+    /// Largest index `<= i` with a finite y, or `None`. Skips all-NaN pyramid
+    /// blocks so it crosses a large void without scanning every null row.
+    pub fn finite_at_or_before(&self, i: usize) -> Option<usize> {
+        let n = self.samples();
+        if n == 0 {
+            return None;
+        }
+        let i = i.min(n - 1);
+        let l0 = self.pyramid.l0();
+        let mut block = i / BRANCH;
+        for j in (block * BRANCH..=i).rev() {
+            if self.xy[2 * j + 1].is_finite() {
+                return Some(j);
+            }
+        }
+        while block > 0 {
+            block -= 1;
+            if l0.get(block).is_some_and(MinMax::is_finite) {
+                let start = block * BRANCH;
+                for j in (start..start + BRANCH).rev() {
+                    if self.xy[2 * j + 1].is_finite() {
+                        return Some(j);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Smallest index `>= i` with a finite y, or `None`. Forward counterpart of
+    /// [`Self::finite_at_or_before`].
+    pub fn finite_at_or_after(&self, i: usize) -> Option<usize> {
+        let n = self.samples();
+        if i >= n {
+            return None;
+        }
+        let l0 = self.pyramid.l0();
+        let mut block = i / BRANCH;
+        for j in i..(block * BRANCH + BRANCH).min(n) {
+            if self.xy[2 * j + 1].is_finite() {
+                return Some(j);
+            }
+        }
+        loop {
+            block += 1;
+            if block >= l0.len() {
+                return None;
+            }
+            if l0[block].is_finite() {
+                let start = block * BRANCH;
+                for j in start..(start + BRANCH).min(n) {
+                    if self.xy[2 * j + 1].is_finite() {
+                        return Some(j);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Visible index range for `[x0, x1]` widened to the nearest finite sample
+    /// each side, so a view inside a gap is still bounded by real samples;
+    /// falls back to one row of context when a side has none.
+    pub fn finite_window(&self, x0: f32, x1: f32) -> (usize, usize) {
         let (a, b) = self.index_range(x0, x1);
         let n = self.samples();
-        const SCAN: usize = 65_536;
-        let finite = |i: usize| self.xy[2 * i + 1].is_finite();
-
-        let start_lo = a.saturating_sub(1);
-        let lo = (0..=start_lo.min(n.saturating_sub(1)))
-            .rev()
-            .take(SCAN)
-            .find(|&i| finite(i))
-            .unwrap_or(start_lo);
-        let hi = (b.min(n)..n)
-            .take(SCAN)
-            .find(|&i| finite(i))
+        let lo = self
+            .finite_at_or_before(a.saturating_sub(1))
+            .unwrap_or(a.saturating_sub(1));
+        let hi = self
+            .finite_at_or_after(b.min(n))
             .map_or((b + 1).min(n), |i| i + 1);
+        (lo.min(hi), hi)
+    }
 
-        self.pyramid.query(&self.xy, lo.min(hi), hi)
+    /// Dotted-gap bridge segments (`[x,y]`, NaN-separated) for a decimated view
+    /// over `[x0, x1]` with per-pixel `cols`. Extends `gap_bridge_xy`'s interior
+    /// runs with bridges to the nearest real sample outside the view, so a gap
+    /// wider than the screen still draws a dotted line instead of nothing.
+    pub fn dotted_bridge_xy(&self, x0: f32, x1: f32, cols: &[f32]) -> Vec<f32> {
+        let width = cols.len() / 3;
+        let mut out = gap_bridge_xy(cols);
+
+        let (a, b) = self.index_range(x0, x1);
+        let anchor = |idx: Option<usize>| idx.map(|i| (self.xy[2 * i], self.xy[2 * i + 1]));
+        let left = anchor(self.finite_at_or_before(a.saturating_sub(1)));
+        let right = anchor(self.finite_at_or_after(b.min(self.samples())));
+
+        let mut push = |lx: f32, ly: f32, rx: f32, ry: f32| {
+            if !out.is_empty() {
+                out.extend_from_slice(&[f32::NAN, f32::NAN]);
+            }
+            out.extend_from_slice(&[lx, ly, rx, ry]);
+        };
+        let col_mid = |c: usize| (cols[3 * c], (cols[3 * c + 1] + cols[3 * c + 2]) * 0.5);
+
+        let first = (0..width).find(|&c| cols[3 * c + 1].is_finite());
+        let last = (0..width).rev().find(|&c| cols[3 * c + 1].is_finite());
+        match (first, last) {
+            (Some(f), Some(l)) => {
+                if f > 0
+                    && let Some((lx, ly)) = left
+                {
+                    let (fx, fy) = col_mid(f);
+                    push(lx, ly, fx, fy);
+                }
+                if l < width - 1
+                    && let Some((rx, ry)) = right
+                {
+                    let (lx2, ly2) = col_mid(l);
+                    push(lx2, ly2, rx, ry);
+                }
+            }
+            // No finite column in view: one bridge straight across the void.
+            _ => {
+                if let (Some((lx, ly)), Some((rx, ry))) = (left, right) {
+                    push(lx, ly, rx, ry);
+                }
+            }
+        }
+        out
+    }
+
+    /// Min/max y over `[x0, x1]` (seconds), scaled to the nearest real samples
+    /// so a view inside a gap keeps a sensible range instead of collapsing.
+    pub fn y_range(&self, x0: f32, x1: f32) -> MinMax {
+        let (lo, hi) = self.finite_window(x0, x1);
+        if lo >= hi {
+            return MinMax::EMPTY;
+        }
+        self.pyramid.query(&self.xy, lo, hi)
     }
 
     /// Per-column `[x, min, max]` triples over `[x0, x1)` split into `width`
@@ -365,7 +471,7 @@ fn bridge_empty_columns(mins: &mut [f32], maxs: &mut [f32], max_run: usize) {
 /// maximal run of empty columns strictly between two finite columns, anchored
 /// at the neighbours' span midpoints. Segments are NaN-separated so the line
 /// shader draws them disjoint.
-pub fn gap_bridge_xy(cols: &[f32]) -> Vec<f32> {
+fn gap_bridge_xy(cols: &[f32]) -> Vec<f32> {
     let width = cols.len() / 3;
     let mut out = Vec::new();
     let mut left: Option<usize> = None;
@@ -640,6 +746,68 @@ mod tests {
     }
 
     #[test]
+    fn y_range_reaches_anchors_across_a_void_larger_than_one_block() {
+        // Merged-timeline field active only early and late, with a null void in
+        // the middle longer than the pyramid block size — the case where a
+        // capped/naive walk gave up and the autoscale collapsed. 5 * BRANCH
+        // samples: finite only at index 0 (y=1.0) and the last index (y=5.0).
+        let n = 5 * BRANCH;
+        let times: Vec<i64> = (0..n as i64).map(|i| i * 1_000_000).collect();
+        let vals: Vec<Option<i32>> = (0..n)
+            .map(|i| match i {
+                0 => Some(100),
+                x if x == n - 1 => Some(500),
+                _ => None,
+            })
+            .collect();
+        let (snap, field) = snapshot_with(times, vals, 0);
+        let cache = TraceCache::build(&snap, field, 0, 0, &MetricsRegistry::new()).unwrap();
+
+        // Deep inside the void, x well away from either finite sample.
+        let mid = (n as f32) / 2.0;
+        let mm = cache.y_range(mid - 0.5, mid + 0.5);
+        assert!(mm.is_finite(), "void view must not collapse to empty");
+        assert!((mm.min - 1.0).abs() < 1e-6);
+        assert!((mm.max - 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn finite_at_or_before_after_skip_null_rows() {
+        let n = 3 * BRANCH;
+        let times: Vec<i64> = (0..n as i64).map(|i| i * 1_000_000).collect();
+        // Finite only at index 5 and index 2*BRANCH + 7.
+        let hi_idx = 2 * BRANCH + 7;
+        let vals: Vec<Option<i32>> = (0..n)
+            .map(|i| (i == 5 || i == hi_idx).then_some(i as i32))
+            .collect();
+        let (snap, field) = snapshot_with(times, vals, 0);
+        let cache = TraceCache::build(&snap, field, 0, 0, &MetricsRegistry::new()).unwrap();
+
+        assert_eq!(cache.finite_at_or_before(n - 1), Some(hi_idx));
+        assert_eq!(cache.finite_at_or_before(hi_idx - 1), Some(5));
+        assert_eq!(cache.finite_at_or_before(4), None);
+        assert_eq!(cache.finite_at_or_after(0), Some(5));
+        assert_eq!(cache.finite_at_or_after(6), Some(hi_idx));
+        assert_eq!(cache.finite_at_or_after(hi_idx + 1), None);
+    }
+
+    #[test]
+    fn finite_window_widens_to_real_samples() {
+        // Dense finite data: one row of context each side.
+        let (snap, field) = snapshot_with(
+            (0..100).map(|i| i * 1_000_000).collect(),
+            (0..100).map(Some).collect(),
+            0,
+        );
+        let cache = TraceCache::build(&snap, field, 0, 0, &MetricsRegistry::new()).unwrap();
+        // Visible [10,20] plus one real sample of context each side.
+        assert_eq!(cache.finite_window(10.0, 20.0), (9, 22));
+
+        // A view between two samples (no sample in range) still brackets them.
+        assert_eq!(cache.finite_window(10.5, 10.9), (10, 12));
+    }
+
+    #[test]
     fn minmax_columns_split_by_time_into_triples() {
         let (snap, field) = snapshot_with(
             vec![0, 1_000_000, 2_000_000, 3_000_000, 4_000_000],
@@ -811,6 +979,71 @@ mod tests {
         let all_empty = [0.5, nan, nan, 1.5, nan, nan];
         assert!(gap_bridge_xy(&all_empty).is_empty());
         assert!(gap_bridge_xy(&[]).is_empty());
+    }
+
+    #[test]
+    fn dotted_bridge_spans_a_void_wider_than_the_view() {
+        // Finite only at the ends; a decimated view sitting in the middle void
+        // has no finite columns, so the bridge must come from the off-screen
+        // anchors instead of drawing nothing.
+        let n = 5 * BRANCH;
+        let times: Vec<i64> = (0..n as i64).map(|i| i * 1_000_000).collect();
+        let vals: Vec<Option<i32>> = (0..n)
+            .map(|i| match i {
+                0 => Some(100),
+                x if x == n - 1 => Some(500),
+                _ => None,
+            })
+            .collect();
+        let (snap, field) = snapshot_with(times, vals, 0);
+        let cache = TraceCache::build(&snap, field, 0, 0, &MetricsRegistry::new()).unwrap();
+
+        let mid = (n as f32) / 2.0;
+        let (x0, x1) = (mid - 5.0, mid + 5.0);
+        let cols = cache.minmax_columns(x0, x1, 64, 0);
+        assert!(
+            cols.chunks_exact(3).all(|c| c[1].is_nan()),
+            "sanity: the view is entirely void"
+        );
+
+        let bridge = cache.dotted_bridge_xy(x0, x1, &cols);
+        assert_eq!(bridge.len(), 4, "one straight bridge across the void");
+        assert!((bridge[1] - 1.0).abs() < 1e-6, "left anchor y");
+        assert!((bridge[3] - 5.0).abs() < 1e-6, "right anchor y");
+    }
+
+    #[test]
+    fn dotted_bridge_reaches_off_screen_anchor_from_one_visible_cluster() {
+        // Finite in an early cluster [0, BRANCH) and at the last sample; a view
+        // showing the early cluster plus trailing void must bridge from the
+        // last visible finite column out to the off-screen late anchor.
+        let n = 5 * BRANCH;
+        let times: Vec<i64> = (0..n as i64).map(|i| i * 1_000_000).collect();
+        let vals: Vec<Option<i32>> = (0..n)
+            .map(|i| {
+                if i < BRANCH {
+                    Some(100)
+                } else if i == n - 1 {
+                    Some(500)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let (snap, field) = snapshot_with(times, vals, 0);
+        let cache = TraceCache::build(&snap, field, 0, 0, &MetricsRegistry::new()).unwrap();
+
+        // View covers the early cluster and part of the void, late anchor off-screen.
+        let (x0, x1) = (0.0, (2 * BRANCH) as f32);
+        let cols = cache.minmax_columns(x0, x1, 64, 0);
+        let bridge = cache.dotted_bridge_xy(x0, x1, &cols);
+        assert!(
+            !bridge.is_empty(),
+            "trailing void must bridge to late anchor"
+        );
+        // The final endpoint is the off-screen late anchor (y = 5.0).
+        let last_y = bridge[bridge.len() - 1];
+        assert!((last_y - 5.0).abs() < 1e-6);
     }
 
     #[test]

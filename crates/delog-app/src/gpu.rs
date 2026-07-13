@@ -346,7 +346,7 @@ impl GpuBridge {
                                 full_uploads += stat.full_upload as u64;
                                 res.col_params.insert(trace.field, key);
                                 if dotted {
-                                    let bxy = delog_cache::trace::gap_bridge_xy(&cols);
+                                    let bxy = cache.dotted_bridge_xy(x0, x1, &cols);
                                     if bxy.is_empty() {
                                         res.bridge_buffers.remove(trace.field);
                                     } else {
@@ -358,7 +358,7 @@ impl GpuBridge {
                                 count: width as u32,
                             }
                         } else {
-                            let (aw, bw) = finite_window(&cache.xy, a, b);
+                            let (aw, bw) = cache.finite_window(x0, x1);
                             let key = WinKey {
                                 a: aw,
                                 b: bw,
@@ -638,27 +638,6 @@ enum PipelineKind {
     Scatter,
     Step,
     Columns,
-}
-
-/// Extend a visible index range `[a, b)` to the nearest FINITE sample on each
-/// side (bounded walk) so the segments entering/leaving the viewport are
-/// drawn even when the rows next to the window are null cells — a view inside
-/// a gap must still span its anchors. Falls back to one row of context when
-/// no finite sample is found within the bound. Clamps to `[0, n]`.
-fn finite_window(xy: &[f32], a: usize, b: usize) -> (usize, usize) {
-    const SCAN: usize = 65_536;
-    let n = xy.len() / 2;
-    let finite = |i: usize| xy[2 * i].is_finite() && xy[2 * i + 1].is_finite();
-    let aw = (0..a.min(n))
-        .rev()
-        .take(SCAN)
-        .find(|&i| finite(i))
-        .unwrap_or(a.saturating_sub(1));
-    let bw = (b..n)
-        .take(SCAN)
-        .find(|&i| finite(i))
-        .map_or((b + 1).min(n), |i| i + 1);
-    (aw, bw)
 }
 
 fn line_window_xy(xy: &[f32], a: usize, b: usize) -> Vec<f32> {
@@ -1692,47 +1671,6 @@ mod tests {
 
     fn live_zoom_ids(zoom: u8) -> Vec<TileId> {
         live_zoom(zoom).into_iter().map(|(id, _)| id).collect()
-    }
-
-    #[test]
-    fn finite_window_adds_one_sample_of_context_each_side() {
-        let xy: Vec<f32> = (0..100).flat_map(|i| [i as f32, 1.0]).collect();
-        assert_eq!(finite_window(&xy, 10, 20), (9, 21));
-    }
-
-    #[test]
-    fn finite_window_clamps_at_buffer_ends() {
-        let xy: Vec<f32> = (0..100).flat_map(|i| [i as f32, 1.0]).collect();
-        assert_eq!(finite_window(&xy, 0, 100), (0, 100)); // both ends clamp
-        assert_eq!(finite_window(&xy, 0, 5), (0, 6)); // low clamps, high pads
-        assert_eq!(finite_window(&xy, 95, 100), (94, 100)); // low pads, high clamps
-    }
-
-    #[test]
-    fn finite_window_handles_empty() {
-        assert_eq!(finite_window(&[], 0, 0), (0, 0));
-    }
-
-    #[test]
-    fn finite_window_reaches_anchors_across_null_rows() {
-        let nan = f32::NAN;
-        // Finite at 0 and 6; null rows between and at the edges of the view.
-        let xy = [
-            0.0, 1.0, //
-            1.0, nan, //
-            2.0, nan, //
-            3.0, nan, //
-            4.0, nan, //
-            5.0, nan, //
-            6.0, 7.0, //
-            7.0, nan,
-        ];
-        // View fully inside the gap (rows 2..5): anchors are 0 and 6.
-        assert_eq!(finite_window(&xy, 2, 5), (0, 7));
-        // Empty in-window range (zoomed between rows) still spans the anchors.
-        assert_eq!(finite_window(&xy, 3, 3), (0, 7));
-        // No finite sample after the view: fall back to one row of context.
-        assert_eq!(finite_window(&xy, 7, 8), (6, 8));
     }
 
     #[test]
