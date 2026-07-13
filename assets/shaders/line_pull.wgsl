@@ -16,11 +16,10 @@ struct VsOut {
     // and the line's half-width — together they drive the edge AA ramp.
     @location(1) dist: f32,
     @location(2) half_w: f32,
-    // Unit segment direction (screen space) and the dash flag, both constant
-    // per quad. The dash phase is the fragment position projected on the
-    // direction, so the pattern is anchored to the screen and stays still
-    // while zooming instead of stretching from each segment's start.
-    @location(3) dir: vec2<f32>,
+    // Distance along the segment from its start (screen pixels) and the dash
+    // flag. Phase measured from the start keeps the dashes locked to the line
+    // as the view pans; only zoom rescales the pattern.
+    @location(3) along: f32,
     @location(4) dash: f32,
 };
 
@@ -59,7 +58,7 @@ fn degenerate() -> VsOut {
     out.color = vec4<f32>(0.0);
     out.dist = 0.0;
     out.half_w = 0.0;
-    out.dir = vec2<f32>(0.0, 0.0);
+    out.along = 0.0;
     out.dash = 0.0;
     return out;
 }
@@ -104,8 +103,10 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
     let off_mag = half_w + aa;
 
     var base = b;
+    var along = len;
     if (corner == 0u || corner == 1u || corner == 4u) {
         base = a;
+        along = 0.0;
     }
 
     var signed = -off_mag;
@@ -118,7 +119,7 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
     out.color = u.color;
     out.dist = signed;
     out.half_w = half_w;
-    out.dir = delta / len;
+    out.along = along;
     out.dash = dash;
     return out;
 }
@@ -127,8 +128,7 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Coverage falls from 1 inside the core to 0 across a ~1px edge ramp.
     var cov = clamp(in.half_w + 0.5 - abs(in.dist), 0.0, 1.0);
-    let phase = dot(in.pos.xy, in.dir) / DASH_PERIOD_PX;
-    if (in.dash > 0.5 && fract(phase) >= DASH_ON_PX / DASH_PERIOD_PX) {
+    if (in.dash > 0.5 && fract(in.along / DASH_PERIOD_PX) >= DASH_ON_PX / DASH_PERIOD_PX) {
         cov = 0.0;
     }
     return vec4<f32>(in.color.rgb, in.color.a * cov);
