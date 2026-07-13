@@ -11,6 +11,8 @@ struct PlotUniform {
     transform: vec4<f32>,
     view: vec4<f32>,
     color: vec4<f32>,
+    // x: gap mode (0 connect, 1 cut, 2 dotted, 3 force-dash), y: x-units gap threshold (0 = off).
+    gap: vec4<f32>,
 };
 
 struct VsOut {

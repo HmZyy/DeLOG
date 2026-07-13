@@ -2,7 +2,12 @@ struct PlotUniform {
     transform: vec4<f32>,
     view: vec4<f32>,
     color: vec4<f32>,
+    // x: gap mode (0 connect, 1 cut, 2 dotted, 3 force-dash), y: x-units gap threshold (0 = off).
+    gap: vec4<f32>,
 };
+
+const DASH_PERIOD_PX: f32 = 8.0;
+const DASH_ON_PX: f32 = 4.0;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -11,6 +16,11 @@ struct VsOut {
     // and the line's half-width — together they drive the edge AA ramp.
     @location(1) dist: f32,
     @location(2) half_w: f32,
+    // Distance along the segment from its start (screen pixels) and the dash
+    // flag. Phase measured from the start keeps the dashes locked to the line
+    // as the view pans; only zoom rescales the pattern.
+    @location(3) along: f32,
+    @location(4) dash: f32,
 };
 
 @group(0) @binding(0) var<storage, read> xy: array<vec2<f32>>;
@@ -48,6 +58,8 @@ fn degenerate() -> VsOut {
     out.color = vec4<f32>(0.0);
     out.dist = 0.0;
     out.half_w = 0.0;
+    out.along = 0.0;
+    out.dash = 0.0;
     return out;
 }
 
@@ -60,6 +72,16 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
 
     if (!(finite2(p0) && finite2(p1))) {
         return degenerate();
+    }
+
+    let gap_mode = u32(u.gap.x);
+    let is_gap = u.gap.y > 0.0 && (p1.x - p0.x) > u.gap.y;
+    if (gap_mode == 1u && is_gap) {
+        return degenerate();
+    }
+    var dash = 0.0;
+    if (gap_mode == 3u || (gap_mode == 2u && is_gap)) {
+        dash = 1.0;
     }
 
     let viewport = max(u.view.xy, vec2<f32>(1.0, 1.0));
@@ -81,8 +103,10 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
     let off_mag = half_w + aa;
 
     var base = b;
+    var along = len;
     if (corner == 0u || corner == 1u || corner == 4u) {
         base = a;
+        along = 0.0;
     }
 
     var signed = -off_mag;
@@ -95,12 +119,17 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
     out.color = u.color;
     out.dist = signed;
     out.half_w = half_w;
+    out.along = along;
+    out.dash = dash;
     return out;
 }
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Coverage falls from 1 inside the core to 0 across a ~1px edge ramp.
-    let cov = clamp(in.half_w + 0.5 - abs(in.dist), 0.0, 1.0);
+    var cov = clamp(in.half_w + 0.5 - abs(in.dist), 0.0, 1.0);
+    if (in.dash > 0.5 && fract(in.along / DASH_PERIOD_PX) >= DASH_ON_PX / DASH_PERIOD_PX) {
+        cov = 0.0;
+    }
     return vec4<f32>(in.color.rgb, in.color.a * cov);
 }
