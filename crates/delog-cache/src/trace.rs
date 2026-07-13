@@ -78,9 +78,11 @@ impl TraceCache {
                 &mut xy,
                 &chunk.t,
                 chunk.cols[r.col_index].as_ref(),
-                r.offset_us,
-                origin_us,
-                r.multiplier,
+                SampleTransform {
+                    offset_us: r.offset_us,
+                    origin_us,
+                    multiplier: r.multiplier,
+                },
                 0,
                 &mut y_origin,
             );
@@ -131,9 +133,11 @@ impl TraceCache {
                     &mut self.xy,
                     &chunk.t,
                     chunk.cols[r.col_index].as_ref(),
-                    r.offset_us,
-                    self.origin_us,
-                    r.multiplier,
+                    SampleTransform {
+                        offset_us: r.offset_us,
+                        origin_us: self.origin_us,
+                        multiplier: r.multiplier,
+                    },
                     start,
                     &mut y_origin,
                 );
@@ -555,21 +559,26 @@ fn col_index(x: f32, x0: f32, inv: f32, width: usize) -> usize {
     c.clamp(0, width as i64 - 1) as usize
 }
 
+#[derive(Clone, Copy)]
+struct SampleTransform {
+    offset_us: i64,
+    origin_us: i64,
+    multiplier: f64,
+}
+
 fn append_chunk(
     xy: &mut Vec<f32>,
     t: &Int64Array,
     col: &dyn Array,
-    offset_us: i64,
-    origin_us: i64,
-    multiplier: f64,
+    transform: SampleTransform,
     start: usize,
     y_origin: &mut Option<f64>,
 ) {
     let reader = ColReader::new(col);
     for i in start..t.len() {
-        let eff = t.value(i).saturating_add(offset_us);
-        let x = ((eff.saturating_sub(origin_us)) as f64 * 1e-6) as f32;
-        let y_abs = reader.value(i) * multiplier;
+        let eff = t.value(i).saturating_add(transform.offset_us);
+        let x = ((eff.saturating_sub(transform.origin_us)) as f64 * 1e-6) as f32;
+        let y_abs = reader.value(i) * transform.multiplier;
         if y_origin.is_none() && y_abs.is_finite() {
             *y_origin = Some(y_abs);
         }
