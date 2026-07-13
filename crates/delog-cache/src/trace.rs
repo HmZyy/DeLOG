@@ -319,38 +319,45 @@ impl TraceCache {
         out
     }
 
-    /// Min/max y over `[x0, x1]` (seconds). With real samples in the window it
-    /// is their range plus one sample of context each side. With none — a view
-    /// sitting inside a gap — it fits the bridge line's values at the window
-    /// edges (interpolated between the bracketing samples) so the bridge fills
-    /// the view instead of the whole gap's span or an empty range.
+    fn interpolated_y(&self, left: usize, right: usize, x: f32) -> f32 {
+        let (xl, yl) = (self.x_at(left), self.xy[2 * left + 1]);
+        let (xr, yr) = (self.x_at(right), self.xy[2 * right + 1]);
+        if xr > xl {
+            lerp(yl, yr, (x - xl) / (xr - xl))
+        } else {
+            yl
+        }
+    }
+
+    /// Min/max y over `[x0, x1]` (seconds), combining real samples in the
+    /// window with line/bridge intersections at its edges. Off-screen anchors
+    /// determine those intersections but their full y values are not included.
     pub fn y_range(&self, x0: f32, x1: f32) -> MinMax {
         let (a, b) = self.index_range(x0, x1);
-        if a < b {
-            let in_window = self.pyramid.query(&self.xy, a, b);
-            if in_window.is_finite() {
-                let (lo, hi) = self.finite_window(x0, x1);
-                return self.pyramid.query(&self.xy, lo, hi);
-            }
+        let mut range = self.pyramid.query(&self.xy, a, b);
+        let left = a.checked_sub(1).and_then(|i| self.finite_at_or_before(i));
+        let first = self.finite_at_or_after(a);
+        if let (Some(l), Some(r)) = (left, first) {
+            let y = self.interpolated_y(l, r, x0);
+            range = range.merge(MinMax { min: y, max: y });
         }
 
-        let left = self.finite_at_or_before(a.saturating_sub(1));
-        let right = self.finite_at_or_after(b.min(self.samples()));
-        match (left, right) {
+        let last = b.checked_sub(1).and_then(|i| self.finite_at_or_before(i));
+        let right = self.finite_at_or_after(b);
+        if let (Some(l), Some(r)) = (last, right) {
+            let y = self.interpolated_y(l, r, x1);
+            range = range.merge(MinMax { min: y, max: y });
+        }
+        if range.is_finite() {
+            return range;
+        }
+
+        match (left.or(last), right.or(first)) {
             (Some(l), Some(r)) => {
-                let (xl, yl) = (self.x_at(l), self.xy[2 * l + 1]);
-                let (xr, yr) = (self.x_at(r), self.xy[2 * r + 1]);
-                let at = |x: f32| {
-                    if xr > xl {
-                        yl + (yr - yl) * ((x - xl) / (xr - xl))
-                    } else {
-                        yl
-                    }
-                };
-                let (v0, v1) = (at(x0), at(x1));
+                let (yl, yr) = (self.xy[2 * l + 1], self.xy[2 * r + 1]);
                 MinMax {
-                    min: v0.min(v1),
-                    max: v0.max(v1),
+                    min: yl.min(yr),
+                    max: yl.max(yr),
                 }
             }
             (Some(i), None) | (None, Some(i)) => {
@@ -811,8 +818,10 @@ mod tests {
         assert_eq!((a, b), (1, 4));
 
         let mm = cache.y_range(1.0, 3.0);
-        assert_eq!(mm.min, 0.0);
-        assert_eq!(mm.max, 4.0);
+        // Exact-edge samples are visible, while the samples at x=0 and x=4
+        // are not part of any line segment inside this viewport.
+        assert_eq!(mm.min, 1.0);
+        assert_eq!(mm.max, 3.0);
 
         let mm = cache.y_range(2.0, 2.0);
         assert!(mm.is_finite());
@@ -842,6 +851,53 @@ mod tests {
         // Past the last sample: only the left anchor exists, so a flat range.
         let mm = cache.y_range(10.5, 11.0);
         assert!((mm.min - 4.0).abs() < 1e-6 && (mm.max - 4.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn y_range_with_visible_data_fits_trailing_bridge_at_right_edge() {
+        // Real samples occupy the first half of the view, followed by nulls.
+        // The next finite anchor is far beyond the right edge and much higher,
+        // so autoscale must stop at the bridge's intersection with that edge.
+        let times: Vec<i64> = (0..=10).map(|i| i * 1_000_000).collect();
+        let vals: Vec<Option<i32>> = (0..=10)
+            .map(|i| match i {
+                0 => Some(100),
+                1 => Some(200),
+                10 => Some(10_100),
+                _ => None,
+            })
+            .collect();
+        let (snap, field) = snapshot_with(times, vals, 0);
+        let cache = TraceCache::build(&snap, field, 0, 0, &MetricsRegistry::new()).unwrap();
+
+        // Rebasing makes the visible samples y=0 and y=1. The trailing bridge
+        // runs from (1, 1) to (10, 100), intersecting x=5 at y=45.
+        let mm = cache.y_range(0.0, 5.0);
+        assert!((mm.min - 0.0).abs() < 1e-6, "min was {}", mm.min);
+        assert!((mm.max - 45.0).abs() < 1e-5, "max was {}", mm.max);
+    }
+
+    #[test]
+    fn y_range_with_visible_data_fits_leading_bridge_at_left_edge() {
+        // Symmetric case: the low anchor is far left of the viewport, followed
+        // by a leading null gap and real samples in the second half.
+        let times: Vec<i64> = (0..=10).map(|i| i * 1_000_000).collect();
+        let vals: Vec<Option<i32>> = (0..=10)
+            .map(|i| match i {
+                0 => Some(100),
+                9 => Some(10_000),
+                10 => Some(10_100),
+                _ => None,
+            })
+            .collect();
+        let (snap, field) = snapshot_with(times, vals, 0);
+        let cache = TraceCache::build(&snap, field, 0, 0, &MetricsRegistry::new()).unwrap();
+
+        // In rebased coordinates, the bridge from (0, 0) to (9, 99)
+        // intersects the visible left edge x=5 at y=55.
+        let mm = cache.y_range(5.0, 10.0);
+        assert!((mm.min - 55.0).abs() < 1e-5, "min was {}", mm.min);
+        assert!((mm.max - 100.0).abs() < 1e-5, "max was {}", mm.max);
     }
 
     #[test]
