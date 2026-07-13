@@ -46,10 +46,6 @@ impl GapBehavior {
         };
         threshold > 0.0 && dx > threshold
     }
-
-    fn cuts(self, dx: f32) -> bool {
-        matches!(self, Self::Cut { .. }) && self.is_gap(dx)
-    }
 }
 
 #[derive(Debug)]
@@ -391,55 +387,102 @@ impl TraceCache {
     }
 
     fn linear_y_range(&self, x0: f32, x1: f32, gaps: GapBehavior) -> MinMax {
-        let indices = self.finite_line_window(x0, x1);
-        let mut range = MinMax::EMPTY;
-        for pair in indices.windows(2) {
-            let (left, right) = (pair[0], pair[1]);
-            let (left_x, right_x) = (self.x_at(left), self.x_at(right));
-            if !gaps.cuts(right_x - left_x) {
-                range = merge_linear_segment(
-                    range,
-                    left_x,
-                    self.xy[2 * left + 1],
-                    right_x,
-                    self.xy[2 * right + 1],
-                    x0,
-                    x1,
-                );
+        match gaps {
+            GapBehavior::Connect | GapBehavior::Dotted { .. } => {
+                self.connected_linear_y_range(x0, x1)
             }
+            GapBehavior::Cut { threshold } if threshold <= 0.0 => {
+                self.connected_linear_y_range(x0, x1)
+            }
+            GapBehavior::Cut { threshold } => self.cut_linear_y_range(x0, x1, threshold),
         }
+    }
 
-        if let GapBehavior::Cut { threshold } = gaps
-            && threshold > 0.0
-        {
-            for (position, &index) in indices.iter().enumerate() {
-                let gap_left = position == 0
-                    || self.x_at(index) - self.x_at(indices[position - 1]) > threshold;
-                let gap_right = position + 1 == indices.len()
-                    || self.x_at(indices[position + 1]) - self.x_at(index) > threshold;
-                let x = self.x_at(index);
-                if gap_left && gap_right && x >= x0 && x <= x1 {
-                    range = observe(range, self.xy[2 * index + 1]);
-                }
+    fn connected_linear_y_range(&self, x0: f32, x1: f32) -> MinMax {
+        if !self.has_intersecting_finite_pair(x0, x1) {
+            return MinMax::EMPTY;
+        }
+        let (a, b) = self.index_range(x0, x1);
+        let mut range = self.pyramid.query(&self.xy, a, b);
+        for x in [x0, x1] {
+            let insertion = self.index_range(x, x).0;
+            let left = insertion
+                .checked_sub(1)
+                .and_then(|i| self.finite_at_or_before(i));
+            let right = self.finite_at_or_after(insertion);
+            if let (Some(left), Some(right)) = (left, right)
+                && self.x_at(left) <= x
+                && x <= self.x_at(right)
+            {
+                range = observe(range, self.interpolated_y(left, right, x));
             }
         }
         range
     }
 
-    /// Finite samples consumed by the raw line path: visible samples plus the
-    /// nearest finite context sample on each side, with NaNs stripped. Pyramid
-    /// jumps keep long null runs from turning this into a full-cache scan.
-    fn finite_line_window(&self, x0: f32, x1: f32) -> Vec<usize> {
+    /// Whether the NaN-stripped raw line window contains a pair intersecting
+    /// the viewport. Uses only nearest-neighbour pyramid searches.
+    fn has_intersecting_finite_pair(&self, x0: f32, x1: f32) -> bool {
+        let insertion = self.index_range(x0, x0).0;
+        let before = insertion
+            .checked_sub(1)
+            .and_then(|i| self.finite_at_or_before(i));
+        let at_or_after = self.finite_at_or_after(insertion);
+        if let (Some(left), Some(right)) = (before, at_or_after)
+            && self.x_at(left) <= x1
+            && self.x_at(right) >= x0
+        {
+            return true;
+        }
+        let Some(first) = at_or_after.filter(|&i| self.x_at(i) <= x1) else {
+            return false;
+        };
+        self.finite_at_or_after(first + 1).is_some()
+    }
+
+    /// Positive-threshold Cut needs exact per-pair acceptance and the same
+    /// both-neighbours isolation rule as `isolated_points_xy`. Stream the
+    /// viewport-local NaN-stripped line window without allocating.
+    fn cut_linear_y_range(&self, x0: f32, x1: f32, threshold: f32) -> MinMax {
         let (lo, hi) = self.finite_window(x0, x1);
-        let mut indices = Vec::new();
+        let mut range = MinMax::EMPTY;
+        let mut previous = None;
+        let mut previous_gap_left = true;
         let mut next = self.finite_at_or_after(lo);
         while let Some(index) = next.filter(|&index| index < hi) {
             if self.x_at(index).is_finite() {
-                indices.push(index);
+                if let Some(left) = previous {
+                    let dx = self.x_at(index) - self.x_at(left);
+                    let gap_right = dx > threshold;
+                    if gap_right {
+                        let x = self.x_at(left);
+                        if previous_gap_left && x >= x0 && x <= x1 {
+                            range = observe(range, self.xy[2 * left + 1]);
+                        }
+                    } else {
+                        range = merge_linear_segment(
+                            range,
+                            self.x_at(left),
+                            self.xy[2 * left + 1],
+                            self.x_at(index),
+                            self.xy[2 * index + 1],
+                            x0,
+                            x1,
+                        );
+                    }
+                    previous_gap_left = gap_right;
+                }
+                previous = Some(index);
             }
             next = self.finite_at_or_after(index + 1);
         }
-        indices
+        if let Some(last) = previous {
+            let x = self.x_at(last);
+            if previous_gap_left && x >= x0 && x <= x1 {
+                range = observe(range, self.xy[2 * last + 1]);
+            }
+        }
+        range
     }
 
     fn step_y_range(&self, x0: f32, x1: f32, gaps: GapBehavior) -> MinMax {
@@ -894,6 +937,16 @@ mod tests {
     }
 
     #[test]
+    fn line_connect_pair_crossing_view_uses_clipped_intersections() {
+        let cache = cache_from_xy(&[(0.0, 0.0), (10.0, 100.0)]);
+
+        let mm = cache.visible_y_range(4.0, 6.0, TraceGeometry::Linear, GapBehavior::Connect);
+
+        assert!((mm.min - 40.0).abs() < 1e-4, "min was {}", mm.min);
+        assert!((mm.max - 60.0).abs() < 1e-4, "max was {}", mm.max);
+    }
+
+    #[test]
     fn line_dotted_singleton_has_no_drawable_geometry() {
         let cache = cache_from_xy(&[(1.0, 7.0)]);
 
@@ -905,6 +958,20 @@ mod tests {
         );
 
         assert!(!mm.is_finite());
+    }
+
+    #[test]
+    fn line_dotted_two_visible_points_contribute_endpoint_extrema() {
+        let cache = cache_from_xy(&[(0.0, 1.0), (1.0, 9.0)]);
+
+        let mm = cache.visible_y_range(
+            0.0,
+            1.0,
+            TraceGeometry::Linear,
+            GapBehavior::Dotted { threshold: 0.5 },
+        );
+
+        assert_eq!(mm, MinMax { min: 1.0, max: 9.0 });
     }
 
     #[test]
@@ -926,6 +993,21 @@ mod tests {
 
         assert_eq!(isolated, MinMax { min: 7.0, max: 7.0 });
         assert!(!disabled.is_finite());
+    }
+
+    #[test]
+    fn line_cut_disabled_threshold_accepts_pair_crossing_view() {
+        let cache = cache_from_xy(&[(0.0, 0.0), (10.0, 100.0)]);
+
+        let mm = cache.visible_y_range(
+            4.0,
+            6.0,
+            TraceGeometry::Linear,
+            GapBehavior::Cut { threshold: 0.0 },
+        );
+
+        assert!((mm.min - 40.0).abs() < 1e-4, "min was {}", mm.min);
+        assert!((mm.max - 60.0).abs() < 1e-4, "max was {}", mm.max);
     }
 
     #[test]
