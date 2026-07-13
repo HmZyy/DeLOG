@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
-use delog_cache::CacheManager;
+use delog_cache::{CacheManager, GapBehavior, TraceGeometry};
 use delog_core::identity::FieldId;
 use delog_core::metrics::MetricsRegistry;
 use delog_render::{
@@ -19,7 +19,7 @@ use crate::map::provider::{MapProviderId, TileId};
 use crate::map::worker::{MapScopeId, ReadyTile};
 use crate::models;
 use crate::plot::{PlotPane, TraceMode, ViewX};
-use crate::settings::{GapMode, Scene3dSettings};
+use crate::settings::{GapMode, RenderTuning, Scene3dSettings};
 use crate::vehicle::ModelKind;
 
 #[derive(Clone, Debug)]
@@ -577,12 +577,37 @@ impl GpuBridge {
     }
 }
 
-pub fn visible_y_range(caches: &mut CacheManager, pane: &PlotPane, x0: f32, x1: f32) -> (f64, f64) {
+pub fn visible_y_range(
+    caches: &mut CacheManager,
+    pane: &PlotPane,
+    x0: f32,
+    x1: f32,
+    tuning: RenderTuning,
+) -> (f64, f64) {
     let mut min = f64::INFINITY;
     let mut max = f64::NEG_INFINITY;
     for trace in pane.visible_traces() {
         if let Some(cache) = caches.get(trace.field) {
-            let mm = cache.y_range(x0, x1);
+            let geometry = match trace.mode {
+                TraceMode::Line => TraceGeometry::Linear,
+                TraceMode::Scatter => TraceGeometry::Points,
+                TraceMode::Step => TraceGeometry::Step,
+            };
+            let gap_threshold = if cache.median_dt <= 0.0 {
+                0.0
+            } else {
+                tuning.gap_factor * cache.median_dt
+            };
+            let gaps = match tuning.gap_mode {
+                GapMode::Connect => GapBehavior::Connect,
+                GapMode::Cut => GapBehavior::Cut {
+                    threshold: gap_threshold,
+                },
+                GapMode::Dotted => GapBehavior::Dotted {
+                    threshold: gap_threshold,
+                },
+            };
+            let mm = cache.visible_y_range(x0, x1, geometry, gaps);
             if mm.is_finite() {
                 let origin = cache.y_origin();
                 min = min.min(mm.min as f64 + origin);
@@ -1727,9 +1752,67 @@ mod tests {
         let mut pane = PlotPane::default();
         pane.add_trace(low);
         pane.add_trace(high);
-        let (min, max) = visible_y_range(&mut caches, &pane, 0.0, 1.0);
+        let (min, max) = visible_y_range(&mut caches, &pane, 0.0, 1.0, RenderTuning::default());
         assert!((min - 54.9).abs() < 1e-9, "min was {min}");
         assert!((max - 1_047.1).abs() < 1e-9, "max was {max}");
+    }
+
+    #[test]
+    fn visible_y_range_threads_tuning_and_trace_mode_to_cache_geometry() {
+        let mut identity = IdentityRegistry::new();
+        let source = identity.add_source("flight");
+        let topic = identity.add_topic(source, "DATA").unwrap();
+        let field = identity.add_field(topic, "Value").unwrap();
+        let schema = Arc::new(
+            TopicSchema::new(
+                "DATA",
+                [FieldSchema::new("Value", DataType::Int32, None::<String>, 0.01).unwrap()],
+            )
+            .unwrap(),
+        );
+        let chunk = Arc::new(
+            Chunk::try_new(
+                Int64Array::from(vec![0, 1_000_000, 10_000_000, 11_000_000]),
+                vec![Arc::new(Int32Array::from(vec![0, 100, 10_000, 10_100])) as ArrayRef],
+                &schema,
+            )
+            .unwrap(),
+        );
+        let store = Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap());
+        let snapshot =
+            Arc::new(StoreSnapshot::from_registry(&identity, [(topic, store)], 0).unwrap());
+        let mut caches = CacheManager::new();
+        caches.request(field, &snapshot);
+        for _ in 0..2_000 {
+            caches.poll_builds();
+            if caches.is_ready(field) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(caches.is_ready(field));
+
+        let mut pane = PlotPane::default();
+        pane.add_trace(field);
+        let tuning = RenderTuning {
+            gap_mode: GapMode::Cut,
+            gap_factor: 2.0,
+            ..RenderTuning::default()
+        };
+
+        let (min, max) = visible_y_range(&mut caches, &pane, 0.0, 5.0, tuning);
+
+        assert!((min - -0.05).abs() < 1e-9, "min was {min}");
+        assert!((max - 1.05).abs() < 1e-9, "max was {max}");
+
+        pane.traces[0].mode = TraceMode::Step;
+        let tuning = RenderTuning {
+            gap_mode: GapMode::Connect,
+            ..tuning
+        };
+        let (min, max) = visible_y_range(&mut caches, &pane, 5.0, 11.0, tuning);
+        assert!((min - -4.0).abs() < 1e-9, "min was {min}");
+        assert!((max - 106.0).abs() < 1e-9, "max was {max}");
     }
 
     #[test]

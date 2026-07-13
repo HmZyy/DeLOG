@@ -16,6 +16,42 @@ use delog_core::store::TopicStore;
 
 use crate::pyramid::{BRANCH, MinMax, MinMaxPyramid};
 
+/// Primitive geometry used to turn cached samples into a visible Y range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceGeometry {
+    /// Independent sample markers; no off-screen segment context contributes.
+    Points,
+    /// Straight segments between consecutive finite samples.
+    Linear,
+    /// Previous-value horizontal holds followed by vertical transitions.
+    Step,
+}
+
+/// How threshold-classified gaps affect line or step geometry.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GapBehavior {
+    /// Every eligible segment is rendered normally.
+    Connect,
+    /// Segments longer than `threshold` are omitted.
+    Cut { threshold: f32 },
+    /// Segments longer than `threshold` are rendered as straight dotted lines.
+    Dotted { threshold: f32 },
+}
+
+impl GapBehavior {
+    fn is_gap(self, dx: f32) -> bool {
+        let threshold = match self {
+            Self::Connect => return false,
+            Self::Cut { threshold } | Self::Dotted { threshold } => threshold,
+        };
+        threshold > 0.0 && dx > threshold
+    }
+
+    fn cuts(self, dx: f32) -> bool {
+        matches!(self, Self::Cut { .. }) && self.is_gap(dx)
+    }
+}
+
 #[derive(Debug)]
 pub struct TraceCache {
     /// Interleaved `[x0,y0,x1,y1,…]`.
@@ -329,6 +365,87 @@ impl TraceCache {
         }
     }
 
+    /// Min/max Y of the selected geometry clipped to `[x0, x1]`.
+    ///
+    /// Values remain relative to [`Self::y_origin`]. The gap test deliberately
+    /// matches the shaders: a gap exists only when the threshold is positive
+    /// and the sample delta is strictly greater than it.
+    pub fn visible_y_range(
+        &self,
+        x0: f32,
+        x1: f32,
+        geometry: TraceGeometry,
+        gaps: GapBehavior,
+    ) -> MinMax {
+        if !x0.is_finite() || !x1.is_finite() || x1 < x0 {
+            return MinMax::EMPTY;
+        }
+        match geometry {
+            TraceGeometry::Points => {
+                let (a, b) = self.index_range(x0, x1);
+                self.pyramid.query(&self.xy, a, b)
+            }
+            TraceGeometry::Linear => self.linear_y_range(x0, x1, gaps),
+            TraceGeometry::Step => self.step_y_range(x0, x1, gaps),
+        }
+    }
+
+    fn linear_y_range(&self, x0: f32, x1: f32, gaps: GapBehavior) -> MinMax {
+        let (a, b) = self.index_range(x0, x1);
+        let mut range = self.pyramid.query(&self.xy, a, b);
+        for x in [x0, x1] {
+            let insertion = self.index_range(x, x).0;
+            let left = insertion
+                .checked_sub(1)
+                .and_then(|i| self.finite_at_or_before(i));
+            let right = self.finite_at_or_after(insertion);
+            if let (Some(left), Some(right)) = (left, right) {
+                let dx = self.x_at(right) - self.x_at(left);
+                if self.x_at(left) <= x && x <= self.x_at(right) && !gaps.cuts(dx) {
+                    range = observe(range, self.interpolated_y(left, right, x));
+                }
+            }
+        }
+        range
+    }
+
+    fn step_y_range(&self, x0: f32, x1: f32, gaps: GapBehavior) -> MinMax {
+        let n = self.samples();
+        if n < 2 {
+            return MinMax::EMPTY;
+        }
+        let (a, b) = self.index_range(x0, x1);
+        let start = a.saturating_sub(1);
+        let end = b.min(n - 1);
+        let mut range = MinMax::EMPTY;
+        for i in start..end {
+            let (p0x, p0y) = (self.x_at(i), self.xy[2 * i + 1]);
+            let (p1x, p1y) = (self.x_at(i + 1), self.xy[2 * (i + 1) + 1]);
+            if !(p0x.is_finite() && p0y.is_finite() && p1x.is_finite() && p1y.is_finite())
+                || p1x < x0
+                || p0x > x1
+            {
+                continue;
+            }
+            let is_gap = gaps.is_gap(p1x - p0x);
+            if is_gap && matches!(gaps, GapBehavior::Cut { .. }) {
+                continue;
+            }
+            if is_gap && matches!(gaps, GapBehavior::Dotted { .. }) {
+                range = merge_linear_segment(range, p0x, p0y, p1x, p1y, x0, x1);
+                continue;
+            }
+
+            if p1x >= x0 && p0x <= x1 {
+                range = observe(range, p0y);
+            }
+            if p1x >= x0 && p1x <= x1 {
+                range = observe(observe(range, p0y), p1y);
+            }
+        }
+        range
+    }
+
     /// Min/max y over `[x0, x1]` (seconds), combining real samples in the
     /// window with line/bridge intersections at its edges. Off-screen anchors
     /// determine those intersections but their full y values are not included.
@@ -565,6 +682,31 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
     (f64::from(a) * (1.0 - t) + f64::from(b) * t) as f32
 }
 
+fn observe(range: MinMax, y: f32) -> MinMax {
+    range.merge(MinMax { min: y, max: y })
+}
+
+fn merge_linear_segment(
+    mut range: MinMax,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    view_x0: f32,
+    view_x1: f32,
+) -> MinMax {
+    if x1 > x0 {
+        for x in [view_x0.max(x0), view_x1.min(x1)] {
+            if x >= x0 && x <= x1 {
+                range = observe(range, lerp(y0, y1, (x - x0) / (x1 - x0)));
+            }
+        }
+    } else if x0 >= view_x0 && x0 <= view_x1 {
+        range = observe(observe(range, y0), y1);
+    }
+    range
+}
+
 fn col_index(x: f32, x0: f32, inv: f32, width: usize) -> usize {
     let c = ((x - x0) * inv * width as f32) as i64;
     c.clamp(0, width as i64 - 1) as usize
@@ -680,6 +822,152 @@ mod tests {
     use delog_core::schema::{FieldSchema, TopicSchema};
 
     use super::*;
+
+    fn cache_from_xy(points: &[(f32, f32)]) -> TraceCache {
+        let xy: Vec<f32> = points.iter().flat_map(|&(x, y)| [x, y]).collect();
+        TraceCache {
+            pyramid: MinMaxPyramid::build_strided(&xy, 2, 1),
+            built_rows: points.len() as u64,
+            xy,
+            origin_us: 0,
+            last_used_frame: 0,
+            offset_us: 0,
+            median_dt: 1.0,
+            y_origin: None,
+        }
+    }
+
+    #[test]
+    fn line_cut_excludes_trailing_gap_edge_intersection() {
+        let cache = cache_from_xy(&[(0.0, 0.0), (1.0, 1.0), (10.0, 100.0)]);
+
+        let mm = cache.visible_y_range(
+            0.0,
+            5.0,
+            TraceGeometry::Linear,
+            GapBehavior::Cut { threshold: 2.0 },
+        );
+
+        assert_eq!(mm, MinMax { min: 0.0, max: 1.0 });
+    }
+
+    #[test]
+    fn line_dotted_preserves_mixed_data_and_trailing_bridge_slice() {
+        let cache = cache_from_xy(&[(0.0, 0.0), (1.0, 1.0), (10.0, 100.0)]);
+
+        let mm = cache.visible_y_range(
+            0.0,
+            5.0,
+            TraceGeometry::Linear,
+            GapBehavior::Dotted { threshold: 2.0 },
+        );
+
+        assert_eq!(
+            mm,
+            MinMax {
+                min: 0.0,
+                max: 45.0
+            }
+        );
+    }
+
+    #[test]
+    fn non_positive_gap_threshold_matches_renderer_gap_disabled_rule() {
+        let cache = cache_from_xy(&[(0.0, 100.0), (10.0, 0.0)]);
+
+        for gaps in [
+            GapBehavior::Cut { threshold: 0.0 },
+            GapBehavior::Dotted { threshold: -1.0 },
+        ] {
+            let mm = cache.visible_y_range(5.0, 6.0, TraceGeometry::Step, gaps);
+            assert_eq!(
+                mm,
+                MinMax {
+                    min: 100.0,
+                    max: 100.0
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn geometry_range_preserves_equal_bounds_and_rejects_invalid_bounds() {
+        let cache = cache_from_xy(&[(0.0, 0.0), (1.0, 1.0), (2.0, 2.0)]);
+
+        for geometry in [
+            TraceGeometry::Points,
+            TraceGeometry::Linear,
+            TraceGeometry::Step,
+        ] {
+            assert!(
+                cache
+                    .visible_y_range(1.0, 1.0, geometry, GapBehavior::Connect)
+                    .is_finite()
+            );
+            for (x0, x1) in [(2.0, 1.0), (f32::NAN, 1.0), (0.0, f32::INFINITY)] {
+                let mm = cache.visible_y_range(x0, x1, geometry, GapBehavior::Connect);
+                assert!(!mm.is_finite());
+            }
+        }
+    }
+
+    #[test]
+    fn step_connect_includes_offscreen_previous_value_held_into_view() {
+        let cache = cache_from_xy(&[(0.0, 100.0), (10.0, 0.0), (11.0, 1.0)]);
+
+        let mm = cache.visible_y_range(5.0, 11.0, TraceGeometry::Step, GapBehavior::Connect);
+
+        assert_eq!(
+            mm,
+            MinMax {
+                min: 0.0,
+                max: 100.0
+            }
+        );
+    }
+
+    #[test]
+    fn step_cut_excludes_long_gap_geometry() {
+        let cache = cache_from_xy(&[(0.0, 100.0), (10.0, 0.0), (11.0, 1.0)]);
+
+        let mm = cache.visible_y_range(
+            5.0,
+            11.0,
+            TraceGeometry::Step,
+            GapBehavior::Cut { threshold: 2.0 },
+        );
+
+        assert_eq!(mm, MinMax { min: 0.0, max: 1.0 });
+    }
+
+    #[test]
+    fn step_dotted_long_gap_uses_linear_edge_intersection() {
+        let cache = cache_from_xy(&[(0.0, 100.0), (10.0, 0.0), (11.0, 1.0)]);
+
+        let mm = cache.visible_y_range(
+            5.0,
+            11.0,
+            TraceGeometry::Step,
+            GapBehavior::Dotted { threshold: 2.0 },
+        );
+
+        assert_eq!(
+            mm,
+            MinMax {
+                min: 0.0,
+                max: 50.0
+            }
+        );
+    }
+
+    #[test]
+    fn point_geometry_excludes_offscreen_edge_context() {
+        let cache = cache_from_xy(&[(0.0, 100.0), (10.0, 0.0), (11.0, 1.0)]);
+
+        let mm = cache.visible_y_range(5.0, 11.0, TraceGeometry::Points, GapBehavior::Connect);
+
+        assert_eq!(mm, MinMax { min: 0.0, max: 1.0 });
+    }
 
     fn snapshot_with(
         times: Vec<i64>,
