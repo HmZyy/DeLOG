@@ -18,7 +18,7 @@ fn default_line_aa_px() -> f32 {
     1.0
 }
 fn default_gap_factor() -> f32 {
-    5.0
+    2.5
 }
 fn default_true() -> bool {
     true
@@ -1467,7 +1467,7 @@ mod tests {
         assert_eq!(with_true.gap_mode, GapMode::Connect);
         let absent: RenderTuning = serde_json::from_str("{}").unwrap();
         assert_eq!(absent.gap_mode, GapMode::Connect);
-        assert_eq!(absent.gap_factor, 5.0);
+        assert_eq!(absent.gap_factor, 2.5);
         assert_eq!(absent, RenderTuning::default());
     }
 
