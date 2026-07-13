@@ -48,8 +48,10 @@ impl PerformanceDock {
         });
         ui.add_space(4.0);
 
-        let row_height =
-            egui::TextStyle::Body.resolve(ui.style()).size.max(ui.spacing().interact_size.y);
+        let row_height = egui::TextStyle::Body
+            .resolve(ui.style())
+            .size
+            .max(ui.spacing().interact_size.y);
         match self.tab {
             PerfTab::Resources => {
                 let rows = [

@@ -68,11 +68,7 @@ fn vehicle_geo_segments(
                     if p.iter().any(|c| !c.is_finite()) {
                         return None;
                     }
-                    let ned = glam::DVec3::new(
-                        -f64::from(p[2]),
-                        f64::from(p[0]),
-                        -f64::from(p[1]),
-                    );
+                    let ned = glam::DVec3::new(-f64::from(p[2]), f64::from(p[0]), -f64::from(p[1]));
                     let (lat, lon, alt) = crate::geo::ned_to_geodetic(ned, rlat, rlon, ralt);
                     Some(GeodeticSample {
                         t_us,
@@ -162,8 +158,7 @@ mod tests {
     use delog_core::store::TopicStore;
 
     use crate::vehicle::{
-        GeoRef, ModelKind, NedReference, OriMapping, PosMapping, VehicleConfig,
-        VehicleTrajectory,
+        GeoRef, ModelKind, NedReference, OriMapping, PosMapping, VehicleConfig, VehicleTrajectory,
     };
 
     use super::*;
@@ -234,7 +229,10 @@ mod tests {
 
     #[test]
     fn xml_escape_replaces_markup_characters() {
-        assert_eq!(xml_escape("<A & \"B's\">"), "&lt;A &amp; &quot;B&apos;s&quot;&gt;");
+        assert_eq!(
+            xml_escape("<A & \"B's\">"),
+            "&lt;A &amp; &quot;B&apos;s&quot;&gt;"
+        );
     }
 
     #[test]
@@ -245,7 +243,14 @@ mod tests {
 
     #[test]
     fn split_segments_breaks_on_gaps_and_drops_empty_runs() {
-        let pts = vec![None, Some(sample(0)), None, Some(sample(1)), Some(sample(2)), None];
+        let pts = vec![
+            None,
+            Some(sample(0)),
+            None,
+            Some(sample(1)),
+            Some(sample(2)),
+            None,
+        ];
         let segs = split_segments(pts);
         assert_eq!(segs.len(), 2);
         assert_eq!(segs[0].len(), 1);
@@ -265,7 +270,11 @@ mod tests {
         let out = build_kml(&snap, &[gps_vehicle(f)], std::slice::from_ref(&traj));
         assert_eq!(out.exported, 1);
         assert!(out.skipped.is_empty());
-        assert!(out.xml.contains("<name>Drone &lt;1&gt;</name>"), "{}", out.xml);
+        assert!(
+            out.xml.contains("<name>Drone &lt;1&gt;</name>"),
+            "{}",
+            out.xml
+        );
         assert!(out.xml.contains("ff332211"));
         assert!(out.xml.contains("<MultiGeometry>"), "{}", out.xml);
         assert_eq!(count(&out.xml, "<LineString>"), 1);

@@ -6,10 +6,11 @@ use delog_cache::{CacheManager, MinMax};
 use delog_core::identity::FieldId;
 use delog_core::metrics::MetricsRegistry;
 use delog_render::{
-    BufferManager, GpuErrorHub, Grid3dPipeline, GridUniform, LinePipeline, MAP_TILE_CAPACITY,
-    MapTileDrawGroups, MapTilePipeline, MapTileUpload, MeshGpu, MeshPipeline, MeshUniform,
-    MinMaxColPipeline, PlotUniform, RenderContext, ScatterPipeline, Scene3dTarget, StepPipeline,
-    Traj3dPipeline, Traj3dUniform, UniformRing,
+    BufferManager, GAP_CONNECT, GAP_CUT, GAP_DOTTED, GAP_FORCE_DASH, GpuErrorHub, Grid3dPipeline,
+    GridUniform, LinePipeline, MAP_TILE_CAPACITY, MapTileDrawGroups, MapTilePipeline,
+    MapTileUpload, MeshGpu, MeshPipeline, MeshUniform, MinMaxColPipeline, PlotUniform,
+    RenderContext, ScatterPipeline, Scene3dTarget, StepPipeline, Traj3dPipeline, Traj3dUniform,
+    UniformRing,
 };
 use eframe::{egui_wgpu, wgpu};
 
@@ -18,7 +19,7 @@ use crate::map::provider::{MapProviderId, TileId};
 use crate::map::worker::{MapScopeId, ReadyTile};
 use crate::models;
 use crate::plot::{PlotPane, TraceMode, ViewX};
-use crate::settings::Scene3dSettings;
+use crate::settings::{GapMode, Scene3dSettings};
 use crate::vehicle::ModelKind;
 
 #[derive(Clone, Debug)]
@@ -268,15 +269,25 @@ impl GpuBridge {
             if res.metrics.is_none() {
                 res.metrics = Some(Arc::clone(metrics));
             }
+            let dotted = tuning.gap_mode == GapMode::Dotted;
+            // Connect and Dotted both draw a bridge across gaps in the decimated
+            // path (solid vs dashed); Cut leaves them blank.
+            let bridged = tuning.gap_mode != GapMode::Cut;
+            let slots_per_trace: u32 = if bridged { 2 } else { 1 };
             let base_slot = res.next_uniform_slot;
-            res.next_uniform_slot += pane.traces.len() as u32;
+            res.next_uniform_slot += pane.traces.len() as u32 * slots_per_trace;
             res.ensure_uniform_capacity(res.next_uniform_slot);
             let plot_w = viewport_px[0];
 
             for (slot, trace) in pane.visible_traces().enumerate() {
-                let slot = base_slot + slot as u32;
+                let slot = base_slot + slot as u32 * slots_per_trace;
                 let Some(cache) = caches.get(trace.field) else {
                     continue;
+                };
+                let gap_threshold = if cache.median_dt <= 0.0 {
+                    0.0
+                } else {
+                    tuning.gap_factor * cache.median_dt
                 };
                 res.uniforms.write(
                     slot,
@@ -287,8 +298,24 @@ impl GpuBridge {
                         trace.width_px,
                         shader_color(trace.color, self.srgb_target),
                     )
-                    .with_aa(tuning.line_aa_px),
+                    .with_aa(tuning.line_aa_px)
+                    .with_gap(gap_mode_u32(tuning.gap_mode), gap_threshold),
                 );
+                if bridged && trace.mode == TraceMode::Line {
+                    let bridge_mode = if dotted { GAP_FORCE_DASH } else { GAP_CONNECT };
+                    res.uniforms.write(
+                        slot + 1,
+                        &PlotUniform::from_view(
+                            (x0, x1),
+                            (y0, y1),
+                            viewport_px,
+                            trace.width_px,
+                            shader_color(trace.color, self.srgb_target),
+                        )
+                        .with_aa(tuning.line_aa_px)
+                        .with_gap(bridge_mode, 0.0),
+                    );
+                }
 
                 let kind = match trace.mode {
                     TraceMode::Line => {
@@ -297,6 +324,13 @@ impl GpuBridge {
                         let visible = b.saturating_sub(a) as f32;
                         if plot_w >= 1.0 && visible / plot_w > tuning.decimate_threshold {
                             let width = plot_w as usize;
+                            // Empty-column runs spanning at most the gap threshold
+                            // are slow sampling, not missing data; bridge them.
+                            let max_bridge_run = if gap_threshold <= 0.0 {
+                                usize::MAX
+                            } else {
+                                (gap_threshold * width as f32 / (x1 - x0)) as usize
+                            };
                             // Skip the per-frame decimation + upload when the same
                             // view over unchanged data already produced the
                             // resident columns (static/paused views go ~free).
@@ -304,26 +338,35 @@ impl GpuBridge {
                                 x0: x0.to_bits(),
                                 x1: x1.to_bits(),
                                 width: width as u32,
-                                bridge: tuning.bridge_columns,
+                                mode: gap_mode_u32(tuning.gap_mode),
+                                threshold: gap_threshold.to_bits(),
                                 len: cache.samples(),
                             };
                             if res.col_params.get(&trace.field) != Some(&key) {
-                                let cols =
-                                    cache.minmax_columns(x0, x1, width, tuning.bridge_columns);
+                                let cols = cache.minmax_columns(x0, x1, width, max_bridge_run);
                                 let stat = res.col_buffers.sync(trace.field, &cols, true);
                                 upload_bytes += stat.bytes;
                                 full_uploads += stat.full_upload as u64;
                                 res.col_params.insert(trace.field, key);
+                                if bridged {
+                                    let bxy = cache.dotted_bridge_xy(x0, x1, &cols);
+                                    if bxy.is_empty() {
+                                        res.bridge_buffers.remove(trace.field);
+                                    } else {
+                                        res.bridge_buffers.sync(trace.field, &bxy, true);
+                                    }
+                                }
                             }
                             DrawKind::Columns {
                                 count: width as u32,
                             }
                         } else {
-                            let (aw, bw) = pad_window(a, b, cache.samples());
+                            let (aw, bw) = cache.finite_window(x0, x1);
                             let key = WinKey {
                                 a: aw,
                                 b: bw,
                                 len: cache.samples(),
+                                threshold: gap_threshold.to_bits(),
                             };
                             if res.win_params.get(&trace.field) != Some(&key) {
                                 let line_xy = line_window_xy(&cache.xy, aw, bw);
@@ -334,6 +377,19 @@ impl GpuBridge {
                                 upload_bytes += stat.bytes;
                                 full_uploads += stat.full_upload as u64;
                                 res.win_params.insert(trace.field, key);
+                                // Only Cut removes gap segments, so only Cut can
+                                // strand a lone sample; Connect/Dotted keep it on
+                                // the (solid/dashed) line.
+                                let iso = if tuning.gap_mode == GapMode::Cut {
+                                    isolated_points_xy(&line_xy, gap_threshold)
+                                } else {
+                                    Vec::new()
+                                };
+                                if iso.is_empty() {
+                                    res.iso_buffers.remove(trace.field);
+                                } else {
+                                    res.iso_buffers.sync(trace.field, &iso, true);
+                                }
                             }
                             DrawKind::Line {
                                 samples: res.win_buffers.samples(trace.field) as u32,
@@ -360,6 +416,30 @@ impl GpuBridge {
                         slot,
                         kind,
                     });
+                    if bridged && matches!(kind, DrawKind::Columns { .. }) {
+                        let bridge = DrawKind::Bridge {
+                            samples: res.bridge_buffers.samples(trace.field) as u32,
+                        };
+                        if bridge.is_drawable() {
+                            items.push(DrawItem {
+                                field: trace.field,
+                                slot: slot + 1,
+                                kind: bridge,
+                            });
+                        }
+                    }
+                    if matches!(kind, DrawKind::Line { .. }) {
+                        let points = DrawKind::Points {
+                            samples: res.iso_buffers.samples(trace.field) as u32,
+                        };
+                        if points.is_drawable() {
+                            items.push(DrawItem {
+                                field: trace.field,
+                                slot,
+                                kind: points,
+                            });
+                        }
+                    }
                 }
             }
             res.errors.get_mut().unwrap().close(scope);
@@ -551,6 +631,15 @@ enum DrawKind {
     Columns {
         count: u32,
     },
+    /// Dotted-gap bridge segments, drawn through the line pipeline.
+    Bridge {
+        samples: u32,
+    },
+    /// Gap-isolated samples, drawn through the scatter pipeline so they stay
+    /// visible when every adjacent segment is cut.
+    Points {
+        samples: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -561,13 +650,6 @@ enum PipelineKind {
     Columns,
 }
 
-/// Pad a visible index range `[a, b)` over `n` samples by one sample of context
-/// each side so the line segments entering/leaving the viewport are drawn.
-/// Clamps to `[0, n]`.
-fn pad_window(a: usize, b: usize, n: usize) -> (usize, usize) {
-    (a.saturating_sub(1), (b + 1).min(n))
-}
-
 fn line_window_xy(xy: &[f32], a: usize, b: usize) -> Vec<f32> {
     let samples = xy.len() / 2;
     let a = a.min(samples);
@@ -575,7 +657,6 @@ fn line_window_xy(xy: &[f32], a: usize, b: usize) -> Vec<f32> {
     if a >= b {
         return Vec::new();
     }
-
     let mut out = Vec::with_capacity((b - a) * 2);
     for p in xy[2 * a..2 * b].chunks_exact(2) {
         if p[0].is_finite() && p[1].is_finite() {
@@ -583,6 +664,34 @@ fn line_window_xy(xy: &[f32], a: usize, b: usize) -> Vec<f32> {
         }
     }
     out
+}
+
+/// Samples of a NaN-stripped window whose x-distance to BOTH neighbours
+/// exceeds `threshold` (or that have no neighbour). The line shader cuts every
+/// segment touching such a sample, so without a point draw the data would be
+/// invisible. Threshold 0 means delta detection is off: nothing is isolated.
+fn isolated_points_xy(xy: &[f32], threshold: f32) -> Vec<f32> {
+    if threshold <= 0.0 {
+        return Vec::new();
+    }
+    let n = xy.len() / 2;
+    let mut out = Vec::new();
+    for i in 0..n {
+        let gap_left = i == 0 || xy[2 * i] - xy[2 * (i - 1)] > threshold;
+        let gap_right = i + 1 == n || xy[2 * (i + 1)] - xy[2 * i] > threshold;
+        if gap_left && gap_right {
+            out.extend_from_slice(&[xy[2 * i], xy[2 * i + 1]]);
+        }
+    }
+    out
+}
+
+fn gap_mode_u32(mode: GapMode) -> u32 {
+    match mode {
+        GapMode::Connect => GAP_CONNECT,
+        GapMode::Cut => GAP_CUT,
+        GapMode::Dotted => GAP_DOTTED,
+    }
 }
 
 /// Consecutive same-pipeline runs in draw order (one `set_pipeline` each).
@@ -605,6 +714,8 @@ impl DrawKind {
             DrawKind::Scatter { .. } => PipelineKind::Scatter,
             DrawKind::Step { .. } => PipelineKind::Step,
             DrawKind::Columns { .. } => PipelineKind::Columns,
+            DrawKind::Bridge { .. } => PipelineKind::Line,
+            DrawKind::Points { .. } => PipelineKind::Scatter,
         }
     }
 
@@ -614,6 +725,8 @@ impl DrawKind {
             DrawKind::Scatter { samples } => samples >= 1,
             DrawKind::Step { samples } => samples >= 2,
             DrawKind::Columns { count } => count >= 1,
+            DrawKind::Bridge { samples } => samples >= 2,
+            DrawKind::Points { samples } => samples >= 1,
         }
     }
 }
@@ -637,12 +750,18 @@ struct PlotCallbackResources {
     /// Interleaved `[x,y]` buffers holding only the visible window per field
     /// (raw `Line` path); sized to what's on screen, not the full trace.
     win_buffers: BufferManager,
+    /// NaN-separated dotted-gap bridge segments per field (Dotted mode only).
+    bridge_buffers: BufferManager,
+    /// Gap-isolated samples per field, drawn as points (Cut/Dotted raw path).
+    iso_buffers: BufferManager,
     uniforms: UniformRing,
     next_uniform_slot: u32,
     line_binds: HashMap<FieldId, wgpu::BindGroup>,
     scatter_binds: HashMap<FieldId, wgpu::BindGroup>,
     step_binds: HashMap<FieldId, wgpu::BindGroup>,
     col_binds: HashMap<FieldId, wgpu::BindGroup>,
+    bridge_binds: HashMap<FieldId, wgpu::BindGroup>,
+    iso_binds: HashMap<FieldId, wgpu::BindGroup>,
     /// Memoizes the decimated columns resident in `col_buffers` per field, so a
     /// static view skips the per-frame `minmax_columns` recompute and upload.
     col_params: HashMap<FieldId, ColKey>,
@@ -662,7 +781,9 @@ struct ColKey {
     x0: u32,
     x1: u32,
     width: u32,
-    bridge: bool,
+    mode: u32,
+    /// Effective gap threshold bits; drives the empty-run bridging cap.
+    threshold: u32,
     len: usize,
 }
 
@@ -674,6 +795,8 @@ struct WinKey {
     a: usize,
     b: usize,
     len: usize,
+    /// Effective gap threshold bits; drives isolated-point extraction.
+    threshold: u32,
 }
 
 impl PlotCallbackResources {
@@ -685,6 +808,8 @@ impl PlotCallbackResources {
         let buffers = BufferManager::new(ctx.clone());
         let col_buffers = BufferManager::new(ctx.clone());
         let win_buffers = BufferManager::new(ctx.clone());
+        let bridge_buffers = BufferManager::new(ctx.clone());
+        let iso_buffers = BufferManager::new(ctx.clone());
         let uniforms = UniformRing::new(ctx.clone(), 8);
         Self {
             ctx,
@@ -695,12 +820,16 @@ impl PlotCallbackResources {
             buffers,
             col_buffers,
             win_buffers,
+            bridge_buffers,
+            iso_buffers,
             uniforms,
             next_uniform_slot: 0,
             line_binds: HashMap::new(),
             scatter_binds: HashMap::new(),
             step_binds: HashMap::new(),
             col_binds: HashMap::new(),
+            bridge_binds: HashMap::new(),
+            iso_binds: HashMap::new(),
             col_params: HashMap::new(),
             win_params: HashMap::new(),
             errors: Mutex::new(GpuErrorHub::new()),
@@ -720,6 +849,8 @@ impl PlotCallbackResources {
             .fields()
             .chain(self.col_buffers.fields())
             .chain(self.win_buffers.fields())
+            .chain(self.bridge_buffers.fields())
+            .chain(self.iso_buffers.fields())
             .filter(|f| !plotted.contains(f))
             .collect();
         for field in stale {
@@ -728,6 +859,8 @@ impl PlotCallbackResources {
             self.col_params.remove(&field);
             self.win_buffers.remove(field);
             self.win_params.remove(&field);
+            self.bridge_buffers.remove(field);
+            self.iso_buffers.remove(field);
         }
     }
 }
@@ -1305,12 +1438,16 @@ impl egui_wgpu::CallbackTrait for ScenePaintCallback {
                 buffers,
                 col_buffers,
                 win_buffers,
+                bridge_buffers,
+                iso_buffers,
                 uniforms,
                 next_uniform_slot: _,
                 line_binds,
                 scatter_binds,
                 step_binds,
                 col_binds,
+                bridge_binds,
+                iso_binds,
                 col_params: _,
                 win_params: _,
                 errors,
@@ -1339,6 +1476,16 @@ impl egui_wgpu::CallbackTrait for ScenePaintCallback {
                     DrawKind::Columns { .. } => {
                         if let Some(buf) = col_buffers.buffer(item.field) {
                             col_binds.insert(item.field, minmax.bind_group(ctx, buf, uniforms));
+                        }
+                    }
+                    DrawKind::Bridge { .. } => {
+                        if let Some(buf) = bridge_buffers.buffer(item.field) {
+                            bridge_binds.insert(item.field, line.bind_group(ctx, buf, uniforms));
+                        }
+                    }
+                    DrawKind::Points { .. } => {
+                        if let Some(buf) = iso_buffers.buffer(item.field) {
+                            iso_binds.insert(item.field, scatter.bind_group(ctx, buf, uniforms));
                         }
                     }
                 }
@@ -1423,6 +1570,16 @@ impl egui_wgpu::CallbackTrait for ScenePaintCallback {
                     DrawKind::Columns { count } => {
                         if let Some(bind) = res.col_binds.get(&item.field) {
                             res.minmax.draw_trace(render_pass, bind, offset, count);
+                        }
+                    }
+                    DrawKind::Bridge { samples } => {
+                        if let Some(bind) = res.bridge_binds.get(&item.field) {
+                            res.line.draw_trace(render_pass, bind, offset, samples);
+                        }
+                    }
+                    DrawKind::Points { samples } => {
+                        if let Some(bind) = res.iso_binds.get(&item.field) {
+                            res.scatter.draw_trace(render_pass, bind, offset, samples);
                         }
                     }
                 }
@@ -1527,24 +1684,7 @@ mod tests {
     }
 
     #[test]
-    fn pad_window_adds_one_sample_of_context_each_side() {
-        assert_eq!(pad_window(10, 20, 100), (9, 21));
-    }
-
-    #[test]
-    fn pad_window_clamps_at_buffer_ends() {
-        assert_eq!(pad_window(0, 100, 100), (0, 100)); // both ends clamp
-        assert_eq!(pad_window(0, 5, 100), (0, 6)); // low clamps, high pads
-        assert_eq!(pad_window(95, 100, 100), (94, 100)); // low pads, high clamps
-    }
-
-    #[test]
-    fn pad_window_handles_empty() {
-        assert_eq!(pad_window(0, 0, 0), (0, 0));
-    }
-
-    #[test]
-    fn line_window_upload_skips_nan_points_so_finite_samples_connect() {
+    fn line_window_always_strips_non_finite_points() {
         let xy = [
             0.0,
             10.0, //
@@ -1557,10 +1697,60 @@ mod tests {
             4.0,
             14.0,
         ];
-
         let line_xy = line_window_xy(&xy, 0, 5);
-
         assert_eq!(line_xy, vec![0.0, 10.0, 2.0, 12.0, 4.0, 14.0]);
+    }
+
+    #[test]
+    fn isolated_points_are_the_samples_with_gaps_on_both_sides() {
+        // Regular 1s samples, one lone sample at t=10, more at t=20,21.
+        let xy = [
+            0.0, 1.0, //
+            1.0, 2.0, //
+            2.0, 3.0, //
+            10.0, 4.0, //
+            20.0, 5.0, //
+            21.0, 6.0,
+        ];
+        let iso = isolated_points_xy(&xy, 5.0);
+        assert_eq!(iso, vec![10.0, 4.0]);
+    }
+
+    #[test]
+    fn isolated_points_include_lone_edge_samples_and_need_a_threshold() {
+        // A single sample is isolated by definition.
+        assert_eq!(isolated_points_xy(&[3.0, 7.0], 1.0), vec![3.0, 7.0]);
+        // Every sample farther than threshold from both neighbours is isolated.
+        let sparse = [0.0, 1.0, 10.0, 2.0, 20.0, 3.0];
+        assert_eq!(isolated_points_xy(&sparse, 5.0), sparse.to_vec());
+        // Threshold 0 = delta detection off: nothing is isolated.
+        assert!(isolated_points_xy(&sparse, 0.0).is_empty());
+        assert!(isolated_points_xy(&[], 5.0).is_empty());
+    }
+
+    #[test]
+    fn point_draws_use_the_scatter_pipeline() {
+        assert_eq!(
+            DrawKind::Points { samples: 3 }.pipeline(),
+            PipelineKind::Scatter
+        );
+        assert!(DrawKind::Points { samples: 1 }.is_drawable());
+        assert!(!DrawKind::Points { samples: 0 }.is_drawable());
+    }
+
+    #[test]
+    fn bridge_draws_batch_with_line_pipeline_runs() {
+        use PipelineKind::{Columns, Line};
+        let kinds = [
+            DrawKind::Columns { count: 100 },
+            DrawKind::Bridge { samples: 5 },
+            DrawKind::Line { samples: 10 },
+            DrawKind::Bridge { samples: 5 },
+        ];
+        let runs = pipeline_runs(kinds.iter().map(|k| k.pipeline()));
+        assert_eq!(runs, vec![(Columns, 1), (Line, 3)]);
+        assert!(!DrawKind::Bridge { samples: 1 }.is_drawable());
+        assert!(DrawKind::Bridge { samples: 2 }.is_drawable());
     }
 
     #[test]

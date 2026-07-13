@@ -7,12 +7,21 @@ struct PlotUniform {
     transform: vec4<f32>,
     view: vec4<f32>,
     color: vec4<f32>,
+    // x: gap mode (0 connect, 1 cut, 2 dotted, 3 force-dash), y: x-units gap threshold (0 = off).
+    gap: vec4<f32>,
 };
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) color: vec4<f32>,
+    // Distance along the segment from its start (screen pixels) and the dash
+    // flag; phase from the start keeps the dashes locked to the line on pan.
+    @location(1) along: f32,
+    @location(2) dash: f32,
 };
+
+const DASH_PERIOD_PX: f32 = 8.0;
+const DASH_ON_PX: f32 = 4.0;
 
 @group(0) @binding(0) var<storage, read> xy: array<vec2<f32>>;
 @group(0) @binding(1) var<uniform> u: PlotUniform;
@@ -47,6 +56,8 @@ fn degenerate() -> VsOut {
     var out: VsOut;
     out.pos = vec4<f32>(0.0, 0.0, 0.0, 1.0);
     out.color = vec4<f32>(0.0);
+    out.along = 0.0;
+    out.dash = 0.0;
     return out;
 }
 
@@ -63,12 +74,32 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
         return degenerate();
     }
 
+    let gap_mode = u32(u.gap.x);
+    let is_gap = u.gap.y > 0.0 && (p1.x - p0.x) > u.gap.y;
+    if (gap_mode == 1u && is_gap) {
+        return degenerate();
+    }
+    var dash = 0.0;
+    if (gap_mode == 3u) {
+        dash = 1.0;
+    }
+
     let mid = vec2<f32>(p1.x, p0.y);
     var a_data = p0;
     var b_data = mid;
     if (second_leg) {
         a_data = mid;
         b_data = p1;
+    }
+    if (gap_mode == 2u && is_gap) {
+        // A dotted gap replaces the two step legs with one straight dashed
+        // bridge (drawn as the first leg; the second collapses).
+        if (second_leg) {
+            return degenerate();
+        }
+        a_data = p0;
+        b_data = p1;
+        dash = 1.0;
     }
 
     let viewport = max(u.view.xy, vec2<f32>(1.0, 1.0));
@@ -85,8 +116,10 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
     let n = vec2<f32>(-delta.y, delta.x) * (width_px * 0.5 / len);
 
     var base = b;
+    var along = len;
     if (corner == 0u || corner == 1u || corner == 4u) {
         base = a;
+        along = 0.0;
     }
 
     var offset = -n;
@@ -97,10 +130,15 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
     var out: VsOut;
     out.pos = vec4<f32>(screen_to_clip(base + offset, viewport), 0.0, 1.0);
     out.color = u.color;
+    out.along = along;
+    out.dash = dash;
     return out;
 }
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    if (in.dash > 0.5 && fract(in.along / DASH_PERIOD_PX) >= DASH_ON_PX / DASH_PERIOD_PX) {
+        return vec4<f32>(0.0);
+    }
     return in.color;
 }

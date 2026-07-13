@@ -970,7 +970,11 @@ mod tests {
         assert_eq!(s.t_us, 1_000_000);
         assert!((s.lat_deg - 47.500_1).abs() < 1e-9);
         assert!((s.lon_deg - 8.25).abs() < 1e-9);
-        assert!((s.alt_m - 411.0).abs() < 1e-9, "alt_offset applied, got {}", s.alt_m);
+        assert!(
+            (s.alt_m - 411.0).abs() < 1e-9,
+            "alt_offset applied, got {}",
+            s.alt_m
+        );
     }
 
     #[test]
@@ -1014,8 +1018,7 @@ mod tests {
 
     #[test]
     fn ned_reference_origin_resolves_fields_reference() {
-        let (snap, [flat, flon, falt]) =
-            gps_snapshot(vec![0], vec![47.5], vec![8.25], vec![400.0]);
+        let (snap, [flat, flon, falt]) = gps_snapshot(vec![0], vec![47.5], vec![8.25], vec![400.0]);
         let f = [flat, flon, falt];
         let config = VehicleConfig {
             pos: PosMapping::Ned {

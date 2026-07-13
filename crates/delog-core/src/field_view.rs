@@ -200,9 +200,8 @@ impl<'a> FieldView<'a> {
             let idx = chunks
                 .partition_point(|c| c.t_min <= raw_time)
                 .checked_sub(1)?;
-            let chunk = &chunks[idx];
-            let row = upper_bound(&chunk.t, raw_time).checked_sub(1)?;
-            return self.sample_from_chunk(chunk, row);
+            let row = upper_bound(&chunks[idx].t, raw_time).checked_sub(1)?;
+            return self.prev_valued_from(idx, row);
         }
         let mut best = None;
         for chunk in self.store.chunks.iter() {
@@ -210,7 +209,7 @@ impl<'a> FieldView<'a> {
                 continue;
             }
             let row = upper_bound(&chunk.t, raw_time).checked_sub(1)?;
-            let Some(sample) = self.sample_from_chunk(chunk, row) else {
+            let Some(sample) = self.prev_valued_in_chunk(chunk, row) else {
                 continue;
             };
             if best
@@ -223,14 +222,43 @@ impl<'a> FieldView<'a> {
         best
     }
 
+    /// Walk backward from `(idx, row)` across chunks to the nearest cell that
+    /// holds a value — a merged timeline leaves null cells wherever a slower
+    /// signal has no sample, and those are not samples of this field. Bounded
+    /// so a fully-null column can't degenerate into a per-call full scan.
+    fn prev_valued_from(&'a self, mut idx: usize, mut row: usize) -> Option<Sample<'a>> {
+        let chunks = &self.store.chunks;
+        for _ in 0..VALUED_SCAN {
+            let chunk = &chunks[idx];
+            if !is_valueless(&value_at(chunk.cols[self.col_index].as_ref(), row)) {
+                return self.sample_from_chunk(chunk, row);
+            }
+            if row > 0 {
+                row -= 1;
+            } else {
+                idx = idx.checked_sub(1)?;
+                row = chunks[idx].len().checked_sub(1)?;
+            }
+        }
+        None
+    }
+
+    fn prev_valued_in_chunk(&'a self, chunk: &'a Chunk, mut row: usize) -> Option<Sample<'a>> {
+        loop {
+            if !is_valueless(&value_at(chunk.cols[self.col_index].as_ref(), row)) {
+                return self.sample_from_chunk(chunk, row);
+            }
+            row = row.checked_sub(1)?;
+        }
+    }
+
     fn next_sample(&'a self, raw_time: TimestampUs) -> Option<Sample<'a>> {
         if self.store.is_monotonic() {
             let chunks = &self.store.chunks;
             // Leftmost chunk whose t_max >= raw_time holds the successor.
             let idx = chunks.partition_point(|c| c.t_max < raw_time);
-            let chunk = chunks.get(idx)?;
-            let row = lower_bound(&chunk.t, raw_time);
-            return self.sample_from_chunk(chunk, row);
+            let row = lower_bound(&chunks.get(idx)?.t, raw_time);
+            return self.next_valued_from(idx, row);
         }
         let mut best = None;
         for chunk in self.store.chunks.iter() {
@@ -241,7 +269,7 @@ impl<'a> FieldView<'a> {
             if row == chunk.len() {
                 continue;
             }
-            let Some(sample) = self.sample_from_chunk(chunk, row) else {
+            let Some(sample) = self.next_valued_in_chunk(chunk, row) else {
                 continue;
             };
             if best
@@ -252,6 +280,34 @@ impl<'a> FieldView<'a> {
             }
         }
         best
+    }
+
+    /// Forward counterpart of [`Self::prev_valued_from`].
+    fn next_valued_from(&'a self, mut idx: usize, mut row: usize) -> Option<Sample<'a>> {
+        let chunks = &self.store.chunks;
+        for _ in 0..VALUED_SCAN {
+            let chunk = chunks.get(idx)?;
+            if row >= chunk.len() {
+                idx += 1;
+                row = 0;
+                continue;
+            }
+            if !is_valueless(&value_at(chunk.cols[self.col_index].as_ref(), row)) {
+                return self.sample_from_chunk(chunk, row);
+            }
+            row += 1;
+        }
+        None
+    }
+
+    fn next_valued_in_chunk(&'a self, chunk: &'a Chunk, mut row: usize) -> Option<Sample<'a>> {
+        while row < chunk.len() {
+            if !is_valueless(&value_at(chunk.cols[self.col_index].as_ref(), row)) {
+                return self.sample_from_chunk(chunk, row);
+            }
+            row += 1;
+        }
+        None
     }
 
     fn linear_sample(&'a self, raw_time: TimestampUs) -> Option<Sample<'a>> {
@@ -358,6 +414,20 @@ fn upper_bound(t: &Int64Array, query: TimestampUs) -> usize {
         }
     }
     left
+}
+
+/// Bound on the prev/next valued-cell walk so a fully-null column costs a
+/// fixed amount per lookup instead of a whole-store scan.
+const VALUED_SCAN: usize = 65_536;
+
+/// A cell that is not a sample of the field: a null (merged timelines leave
+/// them wherever a slower signal has no scheduled row) or a NaN float.
+fn is_valueless(v: &SampleValue<'_>) -> bool {
+    match v {
+        SampleValue::Null => true,
+        SampleValue::Float(f) => f.is_nan(),
+        _ => false,
+    }
 }
 
 /// Row `row` of `array` as `f64`; NaN for nulls/non-numeric, and NaN gap
@@ -540,6 +610,56 @@ mod tests {
             alt,
             mode,
         }
+    }
+
+    /// Merged-timeline shape: the field has values only at t=0 and t=400 with
+    /// null cells between, split across two chunks so the skip walk crosses
+    /// chunk boundaries.
+    fn sparse_fixture() -> (StoreSnapshot, FieldId) {
+        let mut identity = IdentityRegistry::new();
+        let source = identity.add_source("flight");
+        let topic = identity.add_topic(source, "GPS").unwrap();
+        let alt = identity.add_field(topic, "Alt").unwrap();
+        let schema = Arc::new(
+            TopicSchema::new(
+                "GPS",
+                [FieldSchema::new("Alt", DataType::Float64, Some("m"), 1.0).unwrap()],
+            )
+            .unwrap(),
+        );
+        let first: Vec<ArrayRef> = vec![Arc::new(Float64Array::from(vec![Some(1.0), None, None]))];
+        let second: Vec<ArrayRef> = vec![Arc::new(Float64Array::from(vec![None, Some(5.0)]))];
+        let c1 =
+            Arc::new(Chunk::try_new(Int64Array::from(vec![0, 100, 200]), first, &schema).unwrap());
+        let c2 =
+            Arc::new(Chunk::try_new(Int64Array::from(vec![300, 400]), second, &schema).unwrap());
+        let store = Arc::new(TopicStore::from_chunks(schema, [c1, c2]).unwrap());
+        let snapshot = StoreSnapshot::from_registry(&identity, [(topic, store)], 0).unwrap();
+        (snapshot, alt)
+    }
+
+    #[test]
+    fn prev_next_samples_skip_valueless_cells() {
+        let (snapshot, alt) = sparse_fixture();
+        let fv = FieldView::new(&snapshot, alt).unwrap();
+
+        // Nearest rows to t=250 are null cells; the real samples are further.
+        let prev = fv.sample_at(250, SampleMode::Prev).unwrap();
+        assert_eq!(prev.raw_time_us, 0);
+        assert_eq!(prev.value.as_f64(), Some(1.0));
+        let next = fv.sample_at(250, SampleMode::Next).unwrap();
+        assert_eq!(next.raw_time_us, 400);
+        assert_eq!(next.value.as_f64(), Some(5.0));
+
+        // The walk crosses chunk boundaries in both directions.
+        let next = fv.sample_at(50, SampleMode::Next).unwrap();
+        assert_eq!(next.raw_time_us, 400);
+        let prev = fv.sample_at(350, SampleMode::Prev).unwrap();
+        assert_eq!(prev.raw_time_us, 0);
+
+        // Linear interpolation runs between the real samples, not null rows.
+        let lin = fv.sample_at(250, SampleMode::Linear).unwrap();
+        assert_eq!(lin.value.as_f64(), Some(3.5));
     }
 
     #[test]

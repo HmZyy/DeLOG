@@ -1335,10 +1335,7 @@ mod tests {
         let _ = engine.send(ScriptCommand::Eval("xylophone = 1".into()));
         drain_until_done(&engine);
         let matches = completions_for(&engine, 7, "xyl");
-        assert!(
-            matches.iter().any(|m| m == "xylophone"),
-            "got {matches:?}"
-        );
+        assert!(matches.iter().any(|m| m == "xylophone"), "got {matches:?}");
     }
 
     #[test]
