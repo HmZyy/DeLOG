@@ -14,10 +14,9 @@ struct PlotUniform {
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) color: vec4<f32>,
-    // Unit segment direction (screen space) and the dash flag, both constant
-    // per quad; the dash phase is the fragment position projected on the
-    // direction so the pattern stays anchored to the screen while zooming.
-    @location(1) dir: vec2<f32>,
+    // Distance along the segment from its start (screen pixels) and the dash
+    // flag; phase from the start keeps the dashes locked to the line on pan.
+    @location(1) along: f32,
     @location(2) dash: f32,
 };
 
@@ -57,7 +56,7 @@ fn degenerate() -> VsOut {
     var out: VsOut;
     out.pos = vec4<f32>(0.0, 0.0, 0.0, 1.0);
     out.color = vec4<f32>(0.0);
-    out.dir = vec2<f32>(0.0, 0.0);
+    out.along = 0.0;
     out.dash = 0.0;
     return out;
 }
@@ -117,8 +116,10 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
     let n = vec2<f32>(-delta.y, delta.x) * (width_px * 0.5 / len);
 
     var base = b;
+    var along = len;
     if (corner == 0u || corner == 1u || corner == 4u) {
         base = a;
+        along = 0.0;
     }
 
     var offset = -n;
@@ -129,15 +130,14 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
     var out: VsOut;
     out.pos = vec4<f32>(screen_to_clip(base + offset, viewport), 0.0, 1.0);
     out.color = u.color;
-    out.dir = delta / len;
+    out.along = along;
     out.dash = dash;
     return out;
 }
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let phase = dot(in.pos.xy, in.dir) / DASH_PERIOD_PX;
-    if (in.dash > 0.5 && fract(phase) >= DASH_ON_PX / DASH_PERIOD_PX) {
+    if (in.dash > 0.5 && fract(in.along / DASH_PERIOD_PX) >= DASH_ON_PX / DASH_PERIOD_PX) {
         return vec4<f32>(0.0);
     }
     return in.color;
