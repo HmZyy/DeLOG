@@ -237,6 +237,22 @@ mod tests {
     }
 
     #[test]
+    fn rebased_y_axis_keeps_a_sub_ulp_latitude_sample_at_its_geometric_position() {
+        let y_origin = 437_129_284.25_f64;
+        let (y0, y1) = (437_129_280.25_f64, 437_129_290.25_f64);
+        let sample = 437_129_286.75_f64;
+        let y_scale = (2.0 / (y1 - y0)) as f32;
+        let y_min_rebased = (y0 - y_origin) as f32;
+        let sample_rebased = (sample - y_origin) as f32;
+
+        let u = PlotUniform::from_view((0.0, 10.0), (0.0, 1.0), [1.0, 1.0], 0.0, [0.0; 4])
+            .with_y_axis(y_scale, y_min_rebased);
+        let expected = (((sample - y0) / (y1 - y0)) * 2.0 - 1.0) as f32;
+
+        assert!((clip(sample_rebased, u.transform[2], u.transform[3]) - expected).abs() < 1e-6);
+    }
+
+    #[test]
     fn transform_keeps_precision_at_large_magnitude() {
         // Latitude scale (~4.37e8): the old data*scale+offset form cancelled to
         // ~0 (everything at the view middle); (data-min)*scale-1 stays precise.
