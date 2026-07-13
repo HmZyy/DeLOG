@@ -179,13 +179,30 @@ impl TraceCache {
         lo
     }
 
-    /// Min/max y over the visible x window `[x0, x1]` (seconds). One sample of
-    /// context is included each side so a line entering/leaving is bounded.
+    /// Min/max y over the visible x window `[x0, x1]` (seconds), extended to the
+    /// nearest sample with a finite y on each side. Skipping null rows keeps a
+    /// view that sits inside a gap (all-NaN rows on a merged timeline) scaled to
+    /// the surrounding real samples instead of collapsing to an empty range —
+    /// which would drop the whole trace off-screen and make the scale flicker
+    /// as the window slides across null rows.
     pub fn y_range(&self, x0: f32, x1: f32) -> MinMax {
         let (a, b) = self.index_range(x0, x1);
-        let a = a.saturating_sub(1);
-        let b = (b + 1).min(self.samples());
-        self.pyramid.query(&self.xy, a, b)
+        let n = self.samples();
+        const SCAN: usize = 65_536;
+        let finite = |i: usize| self.xy[2 * i + 1].is_finite();
+
+        let start_lo = a.saturating_sub(1);
+        let lo = (0..=start_lo.min(n.saturating_sub(1)))
+            .rev()
+            .take(SCAN)
+            .find(|&i| finite(i))
+            .unwrap_or(start_lo);
+        let hi = (b.min(n)..n)
+            .take(SCAN)
+            .find(|&i| finite(i))
+            .map_or((b + 1).min(n), |i| i + 1);
+
+        self.pyramid.query(&self.xy, lo.min(hi), hi)
     }
 
     /// Per-column `[x, min, max]` triples over `[x0, x1)` split into `width`
@@ -593,6 +610,33 @@ mod tests {
 
         let mm = cache.y_range(2.0, 2.0);
         assert!(mm.is_finite());
+    }
+
+    #[test]
+    fn y_range_reaches_finite_anchors_across_a_null_gap() {
+        // Merged-timeline shape: values only at t=0 and t=10s, null rows
+        // (NaN) at every second between. A view sitting inside the gap must
+        // autoscale to the surrounding real samples, not collapse to empty.
+        let times: Vec<i64> = (0..=10).map(|i| i * 1_000_000).collect();
+        let vals: Vec<Option<i32>> = (0..=10)
+            .map(|i| match i {
+                0 => Some(100),
+                10 => Some(500),
+                _ => None,
+            })
+            .collect();
+        let (snap, field) = snapshot_with(times, vals, 0);
+        let cache = TraceCache::build(&snap, field, 0, 0, &MetricsRegistry::new()).unwrap();
+
+        let mm = cache.y_range(4.0, 6.0);
+        assert!(mm.is_finite(), "window inside the gap must not be empty");
+        assert!((mm.min - 1.0).abs() < 1e-6);
+        assert!((mm.max - 5.0).abs() < 1e-6);
+
+        // A window with no finite sample after it still finds the left anchor.
+        let mm = cache.y_range(10.5, 11.0);
+        assert!(mm.is_finite());
+        assert!((mm.max - 5.0).abs() < 1e-6);
     }
 
     #[test]
