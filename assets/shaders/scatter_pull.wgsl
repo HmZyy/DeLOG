@@ -27,8 +27,8 @@ fn finite2(p: vec2<f32>) -> bool {
 
 fn data_to_clip(p: vec2<f32>) -> vec2<f32> {
     return vec2<f32>(
-        p.x * u.transform.x + u.transform.y,
-        p.y * u.transform.z + u.transform.w,
+        (p.x - u.transform.y) * u.transform.x - 1.0,
+        (p.y - u.transform.w) * u.transform.z - 1.0,
     );
 }
 

@@ -103,7 +103,7 @@ pub enum DropEdge {
 struct PlotDebug {
     plot_rect: egui::Rect,
     x_range: (f32, f32),
-    y_range: (f32, f32),
+    y_range: (f64, f64),
     y_query_us: f32,
     paint_us: f32,
 }
@@ -943,7 +943,7 @@ impl Behavior<'_> {
         // pane's own need so labels never clip.
         let shared_gutter = self.services.shared_y_gutter;
         let make_plot_rect =
-            |ui: &egui::Ui, y_range: (f32, f32), y_unit: Option<&str>| -> (egui::Rect, f32) {
+            |ui: &egui::Ui, y_range: (f64, f64), y_unit: Option<&str>| -> (egui::Rect, f32) {
                 let plot_height = (outer.height() - axes::X_GUTTER).max(1.0);
                 let own_gutter = axes::y_gutter(ui, y_range, y_unit, plot_height);
                 let gutter = shared_gutter.max(own_gutter);
@@ -985,7 +985,13 @@ impl Behavior<'_> {
         let pane_setup_timer = self.services.metrics.scope("pane_setup");
         let mut x_range = view.seconds(self.services.origin_us);
         let y_start = Instant::now();
-        let mut y_range = gpu::visible_y_range(self.services.caches, pane, x_range.0, x_range.1);
+        let mut y_range = gpu::visible_y_range(
+            self.services.caches,
+            pane,
+            x_range.0,
+            x_range.1,
+            self.services.render_tuning,
+        );
         let mut y_query_us = y_start.elapsed().as_secs_f32() * 1_000_000.0;
         let y_unit = y_unit(self.services.snapshot.as_ref(), pane);
         let (mut plot_rect, own_gutter) = make_plot_rect(ui, y_range, y_unit.as_deref());
@@ -1018,7 +1024,13 @@ impl Behavior<'_> {
         {
             x_range = view.seconds(self.services.origin_us);
             let y_start = Instant::now();
-            y_range = gpu::visible_y_range(self.services.caches, pane, x_range.0, x_range.1);
+            y_range = gpu::visible_y_range(
+                self.services.caches,
+                pane,
+                x_range.0,
+                x_range.1,
+                self.services.render_tuning,
+            );
             y_query_us += y_start.elapsed().as_secs_f32() * 1_000_000.0;
             let (rect, own_gutter) = make_plot_rect(ui, y_range, y_unit.as_deref());
             plot_rect = rect;

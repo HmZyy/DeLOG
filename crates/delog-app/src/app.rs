@@ -3513,11 +3513,7 @@ fn show_field_stats_window(
 
     let provisional = view.and_then(|view| {
         let cache = caches.get(field_id)?;
-        let (x0, x1) = view.seconds(cache.origin_us);
-        let (a, b) = cache.index_range(x0, x1);
-        let mm = cache.pyramid.query(&cache.xy, a, b);
-        mm.is_finite()
-            .then_some((f64::from(mm.min), f64::from(mm.max)))
+        provisional_visible_stats(cache, view)
     });
     let tab = controller.tab();
     let current = controller.result().copied();
@@ -3575,6 +3571,16 @@ fn show_field_stats_window(
     if !open {
         controller.close();
     }
+}
+
+fn provisional_visible_stats(cache: &delog_cache::TraceCache, view: ViewX) -> Option<(f64, f64)> {
+    let (x0, x1) = view.seconds(cache.origin_us);
+    let (a, b) = cache.index_range(x0, x1);
+    let mm = cache.pyramid.query(&cache.xy, a, b);
+    mm.is_finite().then_some((
+        f64::from(mm.min) + cache.y_origin(),
+        f64::from(mm.max) + cache.y_origin(),
+    ))
 }
 
 fn field_stats_dock_state(active_tab: StatsTab) -> egui_dock::DockState<StatsTab> {
@@ -4361,6 +4367,44 @@ mod tests {
         assert_eq!(meta.rows, 3);
         assert_eq!(meta.source_offset_us, 250);
         assert_eq!(meta.range, TimeRange::new(1_250, 3_250));
+    }
+
+    #[test]
+    fn provisional_visible_stats_reconstructs_absolute_minmax() {
+        let mut identity = IdentityRegistry::new();
+        let source = identity.add_source("flight");
+        let topic = identity.add_topic(source, "BARO").unwrap();
+        let field = identity.add_field(topic, "Alt").unwrap();
+        let schema = Arc::new(
+            TopicSchema::new(
+                "BARO",
+                [FieldSchema::new("Alt", DataType::Int32, Some("cm"), 0.01).unwrap()],
+            )
+            .unwrap(),
+        );
+        let chunk = Arc::new(
+            Chunk::try_new(
+                Int64Array::from(vec![0, 1_000_000, 2_000_000]),
+                vec![Arc::new(Int32Array::from(vec![10_000, 10_100, 10_200])) as ArrayRef],
+                &schema,
+            )
+            .unwrap(),
+        );
+        let store = Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap());
+        let snapshot = StoreSnapshot::from_registry(&identity, [(topic, store)], 0).unwrap();
+        let cache = delog_cache::TraceCache::build(
+            &snapshot,
+            field,
+            0,
+            0,
+            &delog_core::metrics::MetricsRegistry::new(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            provisional_visible_stats(&cache, ViewX::new(1_000_000, 2_000_000)),
+            Some((101.0, 102.0))
+        );
     }
 
     #[test]
