@@ -985,7 +985,13 @@ impl Behavior<'_> {
         let pane_setup_timer = self.services.metrics.scope("pane_setup");
         let mut x_range = view.seconds(self.services.origin_us);
         let y_start = Instant::now();
-        let mut y_range = gpu::visible_y_range(self.services.caches, pane, x_range.0, x_range.1);
+        let mut y_range = gpu::visible_y_range(
+            self.services.caches,
+            pane,
+            x_range.0,
+            x_range.1,
+            self.services.render_tuning,
+        );
         let mut y_query_us = y_start.elapsed().as_secs_f32() * 1_000_000.0;
         let y_unit = y_unit(self.services.snapshot.as_ref(), pane);
         let (mut plot_rect, own_gutter) = make_plot_rect(ui, y_range, y_unit.as_deref());
@@ -1018,7 +1024,13 @@ impl Behavior<'_> {
         {
             x_range = view.seconds(self.services.origin_us);
             let y_start = Instant::now();
-            y_range = gpu::visible_y_range(self.services.caches, pane, x_range.0, x_range.1);
+            y_range = gpu::visible_y_range(
+                self.services.caches,
+                pane,
+                x_range.0,
+                x_range.1,
+                self.services.render_tuning,
+            );
             y_query_us += y_start.elapsed().as_secs_f32() * 1_000_000.0;
             let (rect, own_gutter) = make_plot_rect(ui, y_range, y_unit.as_deref());
             plot_rect = rect;
