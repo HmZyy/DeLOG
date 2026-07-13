@@ -289,15 +289,19 @@ impl GpuBridge {
                 } else {
                     tuning.gap_factor * cache.median_dt
                 };
+                let y_span = (y1 - y0).max(f64::MIN_POSITIVE);
+                let y_scale = (2.0 / y_span) as f32;
+                let y_min = (y0 - cache.y_origin()) as f32;
                 res.uniforms.write(
                     slot,
                     &PlotUniform::from_view(
                         (x0, x1),
-                        (y0 as f32, y1 as f32),
+                        (0.0, 1.0),
                         viewport_px,
                         trace.width_px,
                         shader_color(trace.color, self.srgb_target),
                     )
+                    .with_y_axis(y_scale, y_min)
                     .with_aa(tuning.line_aa_px)
                     .with_gap(gap_mode_u32(tuning.gap_mode), gap_threshold),
                 );
@@ -307,11 +311,12 @@ impl GpuBridge {
                         slot + 1,
                         &PlotUniform::from_view(
                             (x0, x1),
-                            (y0 as f32, y1 as f32),
+                            (0.0, 1.0),
                             viewport_px,
                             trace.width_px,
                             shader_color(trace.color, self.srgb_target),
                         )
+                        .with_y_axis(y_scale, y_min)
                         .with_aa(tuning.line_aa_px)
                         .with_gap(bridge_mode, 0.0),
                     );
@@ -579,8 +584,9 @@ pub fn visible_y_range(caches: &mut CacheManager, pane: &PlotPane, x0: f32, x1: 
         if let Some(cache) = caches.get(trace.field) {
             let mm = cache.y_range(x0, x1);
             if mm.is_finite() {
-                min = min.min(mm.min as f64);
-                max = max.max(mm.max as f64);
+                let origin = cache.y_origin();
+                min = min.min(mm.min as f64 + origin);
+                max = max.max(mm.max as f64 + origin);
             }
         }
     }

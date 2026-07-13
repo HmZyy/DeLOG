@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use delog_core::field_view::{FieldView, SampleMode};
 use delog_core::identity::FieldId;
 use delog_core::snapshot::StoreSnapshot;
-use delog_render::PlotUniform;
 
 use crate::gpu::PaneView;
 use crate::legend::trace_label;
@@ -83,32 +82,24 @@ fn draw_sample_circles(ui: &egui::Ui, view: PaneView, origin_us: i64, rows: &[Ro
     if x1 <= x0 || y1 <= y0 {
         return;
     }
-    let transform =
-        PlotUniform::from_view((x0, x1), (y0 as f32, y1 as f32), [1.0, 1.0], 0.0, [0.0; 4])
-            .transform;
     let painter = ui.painter();
     for row in rows {
-        // Match the cache's x formula (trace.rs) exactly so the mark lands on
-        // the same sample the line drew.
-        let x = ((row.effective_time_us - origin_us) as f64 * 1e-6) as f32;
-        let p = plot_to_screen(rect, transform, x, row.value as f32);
+        let x = (row.effective_time_us - origin_us) as f64 * 1e-6;
+        let p = plot_to_screen(rect, (x0 as f64, x1 as f64), (y0, y1), x, row.value);
         if rect.contains(p) {
             painter.circle_stroke(p, 3.5, egui::Stroke::new(1.5, row.color));
         }
     }
 }
 
-/// Map a data point to screen through the same affine transform the trace
-/// shader applies (`PlotUniform`): `clip = (data - min) * scale - 1`. Using the
-/// identical form keeps hover marks on the rendered line even at large
-/// coordinate magnitudes (e.g. lat/lon in 1e-7 deg) where f32 has little
-/// headroom.
-fn plot_to_screen(rect: egui::Rect, transform: [f32; 4], x: f32, y: f32) -> egui::Pos2 {
-    let clip_x = (x - transform[1]) * transform[0] - 1.0;
-    let clip_y = (y - transform[3]) * transform[2] - 1.0;
+/// Map a data point to screen in f64 against the absolute view range, matching
+/// the (now rebased, precise) GPU line at large coordinate magnitudes.
+fn plot_to_screen(rect: egui::Rect, x: (f64, f64), y: (f64, f64), px: f64, py: f64) -> egui::Pos2 {
+    let fx = ((px - x.0) / (x.1 - x.0)) as f32;
+    let fy = ((py - y.0) / (y.1 - y.0)) as f32;
     egui::pos2(
-        rect.left() + (clip_x * 0.5 + 0.5) * rect.width(),
-        rect.bottom() - (clip_y * 0.5 + 0.5) * rect.height(),
+        rect.left() + fx * rect.width(),
+        rect.bottom() - fy * rect.height(),
     )
 }
 
@@ -493,34 +484,21 @@ fn format_value(v: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{format_delta, plot_to_screen};
-    use delog_render::PlotUniform;
 
     #[test]
-    fn sample_circle_maps_through_the_trace_transform_at_large_magnitude() {
-        // Latitude-scale values (~4.37e8): a representable sample 32 above the
-        // view min sits at fraction 0.32; the old f32 forms collapsed it toward
-        // the view middle. plot_to_screen must land it at ~0.32.
+    fn sample_circle_maps_in_f64_at_large_magnitude() {
+        // Latitude-scale value at the true midpoint of the view maps to the
+        // middle of the rect; f64 keeps it exact where f32 would collapse.
         let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 500.0));
-        let (y0, y1) = (437129280.0f32, 437129380.0f32);
-        let transform =
-            PlotUniform::from_view((0.0, 1.0), (y0, y1), [1.0, 1.0], 0.0, [0.0; 4]).transform;
-        let v = 437129312.0f32; // representable; 32/100 of the way up
-
-        let p = plot_to_screen(rect, transform, 0.5, v);
+        let p = plot_to_screen(
+            rect,
+            (0.0, 1.0),
+            (437_129_280.0, 437_129_380.0),
+            0.5,
+            437_129_330.0,
+        );
         let frac = (rect.bottom() - p.y) / rect.height();
-        assert!(
-            (frac - 0.32).abs() < 0.02,
-            "frac was {frac}, expected ~0.32"
-        );
-
-        // The old data*scale+offset form cancelled toward the middle (~0.5).
-        let old_off = -1.0f32 - y0 * transform[2];
-        let old_clip = v * transform[2] + old_off;
-        let old_frac = old_clip * 0.5 + 0.5;
-        assert!(
-            (old_frac - 0.32).abs() > 0.1,
-            "old form should be far off, was {old_frac}"
-        );
+        assert!((frac - 0.5).abs() < 1e-4, "frac was {frac}");
     }
 
     #[test]
