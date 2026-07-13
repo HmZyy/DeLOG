@@ -31,6 +31,10 @@ pub struct TraceCache {
     /// Typical (median) x-delta in seconds; 0 when unknowable (fewer than two
     /// samples, or no positive delta). Drives delta-gap detection.
     pub median_dt: f32,
+    /// Y rebase origin (absolute, f64): stored Y is `value*mult - y_origin`, so
+    /// the f32 buffer keeps full precision for large-magnitude fields. `None`
+    /// until the first finite sample establishes it.
+    y_origin: Option<f64>,
 }
 
 struct Resolved<'a> {
@@ -68,6 +72,7 @@ impl TraceCache {
     ) -> Option<Self> {
         let r = resolve(snapshot, field)?;
         let mut xy = Vec::with_capacity(r.store.rows as usize * 2);
+        let mut y_origin: Option<f64> = None;
         for chunk in r.store.chunks.iter() {
             append_chunk(
                 &mut xy,
@@ -77,6 +82,7 @@ impl TraceCache {
                 origin_us,
                 r.multiplier,
                 0,
+                &mut y_origin,
             );
         }
         let pyramid = {
@@ -92,6 +98,7 @@ impl TraceCache {
             last_used_frame: frame,
             offset_us: r.offset_us,
             median_dt,
+            y_origin,
         })
     }
 
@@ -115,6 +122,7 @@ impl TraceCache {
         }
 
         let mut consumed = 0u64;
+        let mut y_origin = self.y_origin;
         for chunk in r.store.chunks.iter() {
             let len = chunk.len() as u64;
             if consumed + len > self.built_rows {
@@ -127,10 +135,12 @@ impl TraceCache {
                     self.origin_us,
                     r.multiplier,
                     start,
+                    &mut y_origin,
                 );
             }
             consumed += len;
         }
+        self.y_origin = y_origin;
 
         {
             let _t = metrics.scope("minmax_build");
@@ -147,6 +157,11 @@ impl TraceCache {
 
     pub fn samples(&self) -> usize {
         self.xy.len() / 2
+    }
+
+    /// Absolute Y offset baked into the stored (rebased) values; 0.0 if unset.
+    pub fn y_origin(&self) -> f64 {
+        self.y_origin.unwrap_or(0.0)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -548,12 +563,17 @@ fn append_chunk(
     origin_us: i64,
     multiplier: f64,
     start: usize,
+    y_origin: &mut Option<f64>,
 ) {
     let reader = ColReader::new(col);
     for i in start..t.len() {
         let eff = t.value(i).saturating_add(offset_us);
         let x = ((eff.saturating_sub(origin_us)) as f64 * 1e-6) as f32;
-        let y = (reader.value(i) * multiplier) as f32;
+        let y_abs = reader.value(i) * multiplier;
+        if y_origin.is_none() && y_abs.is_finite() {
+            *y_origin = Some(y_abs);
+        }
+        let y = (y_abs - y_origin.unwrap_or(0.0)) as f32;
         xy.push(x);
         xy.push(y);
     }
@@ -667,6 +687,60 @@ mod tests {
     }
 
     #[test]
+    fn y_is_rebased_by_the_first_finite_value() {
+        // Near-constant large-magnitude field: absolute f32 would collapse the
+        // spread to one ulp; rebasing keeps each sample distinct.
+        let (snap, field) = snapshot_with(
+            vec![0, 1_000_000, 2_000_000],
+            vec![Some(43_712_930), Some(43_712_931), Some(43_712_932)],
+            0,
+        );
+        let cache = TraceCache::build(&snap, field, 0, 0, &MetricsRegistry::new()).unwrap();
+
+        // Origin is the first finite value * multiplier (0.01).
+        assert!((cache.y_origin() - 437_129.30).abs() < 1e-3);
+        // Stored (rebased) values are small and DISTINCT: 0.0, 0.01, 0.02.
+        assert!((cache.xy[1] - 0.0).abs() < 1e-4);
+        assert!((cache.xy[3] - 0.01).abs() < 1e-4);
+        assert!((cache.xy[5] - 0.02).abs() < 1e-4);
+        // Absolute reconstruction: stored + origin.
+        assert!((cache.xy[3] as f64 + cache.y_origin() - 437_129.31).abs() < 1e-3);
+    }
+
+    #[test]
+    fn y_origin_skips_leading_nulls_and_survives_append() {
+        // First rows null: origin unset (accessor 0.0), stored NaN.
+        let (snap1, field) = snapshot_with(vec![0, 1_000_000], vec![None, Some(500)], 0);
+        let mut cache = TraceCache::build(&snap1, field, 0, 0, &MetricsRegistry::new()).unwrap();
+        assert!(cache.xy[1].is_nan());
+        assert!((cache.y_origin() - 5.0).abs() < 1e-4); // 500 * 0.01, from row 1
+
+        // Append keeps the established origin (rebased against 5.0).
+        let (snap2, _) = snapshot_with(
+            vec![0, 1_000_000, 2_000_000],
+            vec![None, Some(500), Some(600)],
+            0,
+        );
+        assert!(cache.append(&snap2, field, &MetricsRegistry::new()));
+        assert!((cache.y_origin() - 5.0).abs() < 1e-4);
+        assert!((cache.xy[5] - 1.0).abs() < 1e-4); // (600*0.01 - 5.0) = 1.0
+    }
+
+    #[test]
+    fn y_range_is_rebased_relative_to_origin() {
+        let (snap, field) = snapshot_with(
+            vec![0, 1_000_000, 2_000_000],
+            vec![Some(43_712_930), Some(43_712_940), Some(43_712_935)],
+            0,
+        );
+        let cache = TraceCache::build(&snap, field, 0, 0, &MetricsRegistry::new()).unwrap();
+        // y_range is in REBASED units (add y_origin for absolute).
+        let mm = cache.y_range(0.0, 2.0);
+        assert!((mm.min - 0.0).abs() < 1e-4);
+        assert!((mm.max - 0.1).abs() < 1e-4); // (43712940-43712930)*0.01 = 0.1
+    }
+
+    #[test]
     fn build_applies_multiplier_offset_and_rebase() {
         let (snap, field) = snapshot_with(
             vec![1_000_000, 2_000_000, 3_000_000],
@@ -681,25 +755,26 @@ mod tests {
         assert_eq!(cache.xy[0], 0.0);
         assert_eq!(cache.xy[2], 1.0);
         assert_eq!(cache.xy[4], 2.0);
-        assert_eq!(cache.xy[1], 1.0);
-        assert_eq!(cache.xy[3], 2.0);
-        assert_eq!(cache.xy[5], 3.0);
+        assert_eq!(cache.xy[1], 0.0);
+        assert_eq!(cache.xy[3], 1.0);
+        assert_eq!(cache.xy[5], 2.0);
+        assert!((cache.y_origin() - 1.0).abs() < 1e-6);
 
         let q = cache.pyramid.query(&cache.xy, 0, 3);
-        assert_eq!(q.min, 1.0);
-        assert_eq!(q.max, 3.0);
+        assert_eq!(q.min, 0.0);
+        assert_eq!(q.max, 2.0);
     }
 
     #[test]
     fn null_cells_become_nan_gaps() {
         let (snap, field) = snapshot_with(vec![0, 1, 2], vec![Some(100), None, Some(300)], 0);
         let cache = TraceCache::build(&snap, field, 0, 0, &MetricsRegistry::new()).unwrap();
-        assert_eq!(cache.xy[1], 1.0);
+        assert_eq!(cache.xy[1], 0.0);
         assert!(cache.xy[3].is_nan());
-        assert_eq!(cache.xy[5], 3.0);
+        assert_eq!(cache.xy[5], 2.0);
         let q = cache.pyramid.query(&cache.xy, 0, 3);
-        assert_eq!(q.min, 1.0);
-        assert_eq!(q.max, 3.0);
+        assert_eq!(q.min, 0.0);
+        assert_eq!(q.max, 2.0);
     }
 
     #[test]
@@ -740,12 +815,12 @@ mod tests {
 
         // Bridge y = 1 + 4*(x/10): at x=4 -> 2.6, at x=6 -> 3.4.
         let mm = cache.y_range(4.0, 6.0);
-        assert!((mm.min - 2.6).abs() < 1e-5, "min was {}", mm.min);
-        assert!((mm.max - 3.4).abs() < 1e-5, "max was {}", mm.max);
+        assert!((mm.min - 1.6).abs() < 1e-5, "min was {}", mm.min);
+        assert!((mm.max - 2.4).abs() < 1e-5, "max was {}", mm.max);
 
         // Past the last sample: only the left anchor exists, so a flat range.
         let mm = cache.y_range(10.5, 11.0);
-        assert!((mm.min - 5.0).abs() < 1e-6 && (mm.max - 5.0).abs() < 1e-6);
+        assert!((mm.min - 4.0).abs() < 1e-6 && (mm.max - 4.0).abs() < 1e-6);
     }
 
     #[test]
@@ -769,8 +844,8 @@ mod tests {
         let mid = (n as f32) / 2.0;
         let mm = cache.y_range(mid - 0.5, mid + 0.5);
         assert!(mm.is_finite(), "void view must not collapse to empty");
-        assert!((mm.min - 3.0).abs() < 0.05, "min was {}", mm.min);
-        assert!((mm.max - 3.0).abs() < 0.05, "max was {}", mm.max);
+        assert!((mm.min - 2.0).abs() < 0.05, "min was {}", mm.min);
+        assert!((mm.max - 2.0).abs() < 0.05, "max was {}", mm.max);
     }
 
     #[test]
@@ -849,10 +924,10 @@ mod tests {
                 "column {c} max should be finite"
             );
         }
-        assert_eq!(cols[1], 1.0);
-        assert_eq!(cols[11], 5.0);
-        assert!((cols[4] - 2.0).abs() < 1e-6);
-        assert!((cols[7] - 3.0).abs() < 1e-6);
+        assert_eq!(cols[1], 0.0);
+        assert_eq!(cols[11], 4.0);
+        assert!((cols[4] - 1.0).abs() < 1e-6);
+        assert!((cols[7] - 2.0).abs() < 1e-6);
     }
 
     #[test]
@@ -893,13 +968,13 @@ mod tests {
         assert_eq!(cache.samples(), 4);
         assert_eq!(cache.built_rows, 4);
         assert_eq!(cache.xy[4], 2.0);
-        assert_eq!(cache.xy[5], 0.5);
+        assert_eq!(cache.xy[5], -0.5);
 
         assert!(!cache.append(&snap2, field, &MetricsRegistry::new()));
 
         let q = cache.pyramid.query(&cache.xy, 0, 4);
-        assert_eq!(q.min, 0.5);
-        assert_eq!(q.max, 4.0);
+        assert_eq!(q.min, -0.5);
+        assert_eq!(q.max, 3.0);
     }
 
     #[test]
@@ -952,7 +1027,7 @@ mod tests {
         let cols = cache.minmax_columns(x0, x1, 10, 3);
         let bridge = cache.dotted_bridge_xy(x0, x1, &cols);
         // Exact endpoints: sample at t=1 (y=2.0) -> sample at t=8 (y=3.0).
-        assert_eq!(bridge, vec![1.0, 2.0, 8.0, 3.0]);
+        assert_eq!(bridge, vec![1.0, 1.0, 8.0, 2.0]);
     }
 
     #[test]
@@ -982,8 +1057,8 @@ mod tests {
 
         let bridge = cache.dotted_bridge_xy(x0, x1, &cols);
         assert_eq!(bridge.len(), 4, "one straight bridge across the void");
-        assert!((bridge[1] - 1.0).abs() < 1e-6, "left anchor y");
-        assert!((bridge[3] - 5.0).abs() < 1e-6, "right anchor y");
+        assert!((bridge[1] - 0.0).abs() < 1e-6, "left anchor y");
+        assert!((bridge[3] - 4.0).abs() < 1e-6, "right anchor y");
     }
 
     #[test]
@@ -1017,7 +1092,7 @@ mod tests {
         );
         // The final endpoint is the off-screen late anchor (y = 5.0).
         let last_y = bridge[bridge.len() - 1];
-        assert!((last_y - 5.0).abs() < 1e-6);
+        assert!((last_y - 4.0).abs() < 1e-6);
     }
 
     #[test]

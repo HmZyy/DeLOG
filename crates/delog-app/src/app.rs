@@ -3516,8 +3516,10 @@ fn show_field_stats_window(
         let (x0, x1) = view.seconds(cache.origin_us);
         let (a, b) = cache.index_range(x0, x1);
         let mm = cache.pyramid.query(&cache.xy, a, b);
-        mm.is_finite()
-            .then_some((f64::from(mm.min), f64::from(mm.max)))
+        mm.is_finite().then_some((
+            f64::from(mm.min) + cache.y_origin(),
+            f64::from(mm.max) + cache.y_origin(),
+        ))
     });
     let tab = controller.tab();
     let current = controller.result().copied();
