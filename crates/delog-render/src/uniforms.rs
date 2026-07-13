@@ -66,6 +66,14 @@ impl PlotUniform {
         self.gap[1] = threshold.max(0.0);
         self
     }
+
+    /// Overwrite the Y transform with a precomputed scale and rebased min, so
+    /// the caller can subtract a per-trace origin in f64 before narrowing.
+    pub fn with_y_axis(mut self, y_scale: f32, y_min: f32) -> Self {
+        self.transform[2] = y_scale;
+        self.transform[3] = y_min;
+        self
+    }
 }
 
 /// Returns `(scale, min)`: clip = `(data - min) * scale - 1`, mapping
@@ -212,6 +220,20 @@ mod tests {
         assert!((clip(-100.0, u.transform[2], u.transform[3]) + 1.0).abs() < 1e-5);
         assert!((clip(100.0, u.transform[2], u.transform[3]) - 1.0).abs() < 1e-5);
         assert!(clip(0.0, u.transform[2], u.transform[3]).abs() < 1e-5);
+    }
+
+    #[test]
+    fn with_y_axis_overrides_only_the_y_transform() {
+        let base = PlotUniform::from_view((0.0, 10.0), (0.0, 1.0), [1.0, 1.0], 0.0, [0.0; 4]);
+        let u = base.with_y_axis(0.5, -3.0);
+        // x transform untouched
+        assert_eq!(u.transform[0], base.transform[0]);
+        assert_eq!(u.transform[1], base.transform[1]);
+        // y transform replaced; clip = (data - min) * scale - 1
+        assert_eq!(u.transform[2], 0.5);
+        assert_eq!(u.transform[3], -3.0);
+        assert!((clip(-3.0, u.transform[2], u.transform[3]) + 1.0).abs() < 1e-6);
+        assert!((clip(1.0, u.transform[2], u.transform[3]) - 1.0).abs() < 1e-6);
     }
 
     #[test]
