@@ -234,11 +234,11 @@ impl Default for PlotDisplay {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum GapMode {
     /// Always a single line: bridge decimated columns, drop NaNs in the raw path.
-    #[default]
     Connect,
     /// Break the line at gaps; draw nothing across them.
     Cut,
     /// Break the line at gaps; bridge each gap with a dotted segment.
+    #[default]
     Dotted,
 }
 
@@ -295,8 +295,9 @@ struct RenderTuningDe {
 impl From<RenderTuningDe> for RenderTuning {
     fn from(de: RenderTuningDe) -> Self {
         let gap_mode = de.gap_mode.unwrap_or(match de.bridge_columns {
+            // The removed flag's `false` was an explicit "leave gaps" choice.
             Some(false) => GapMode::Cut,
-            _ => GapMode::Connect,
+            _ => GapMode::default(),
         });
         Self {
             decimate_threshold: de.decimate_threshold,
@@ -1462,11 +1463,11 @@ mod tests {
     }
 
     #[test]
-    fn old_bridge_columns_true_and_absent_migrate_to_connect() {
+    fn old_bridge_columns_true_and_absent_migrate_to_the_default() {
         let with_true: RenderTuning = serde_json::from_str(r#"{"bridge_columns":true}"#).unwrap();
-        assert_eq!(with_true.gap_mode, GapMode::Connect);
+        assert_eq!(with_true.gap_mode, GapMode::Dotted);
         let absent: RenderTuning = serde_json::from_str("{}").unwrap();
-        assert_eq!(absent.gap_mode, GapMode::Connect);
+        assert_eq!(absent.gap_mode, GapMode::Dotted);
         assert_eq!(absent.gap_factor, 2.5);
         assert_eq!(absent, RenderTuning::default());
     }
