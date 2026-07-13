@@ -270,7 +270,10 @@ impl GpuBridge {
                 res.metrics = Some(Arc::clone(metrics));
             }
             let dotted = tuning.gap_mode == GapMode::Dotted;
-            let slots_per_trace: u32 = if dotted { 2 } else { 1 };
+            // Connect and Dotted both draw a bridge across gaps in the decimated
+            // path (solid vs dashed); Cut leaves them blank.
+            let bridged = tuning.gap_mode != GapMode::Cut;
+            let slots_per_trace: u32 = if bridged { 2 } else { 1 };
             let base_slot = res.next_uniform_slot;
             res.next_uniform_slot += pane.traces.len() as u32 * slots_per_trace;
             res.ensure_uniform_capacity(res.next_uniform_slot);
@@ -281,8 +284,7 @@ impl GpuBridge {
                 let Some(cache) = caches.get(trace.field) else {
                     continue;
                 };
-                let gap_threshold = if tuning.gap_mode == GapMode::Connect || cache.median_dt <= 0.0
-                {
+                let gap_threshold = if cache.median_dt <= 0.0 {
                     0.0
                 } else {
                     tuning.gap_factor * cache.median_dt
@@ -299,7 +301,8 @@ impl GpuBridge {
                     .with_aa(tuning.line_aa_px)
                     .with_gap(gap_mode_u32(tuning.gap_mode), gap_threshold),
                 );
-                if dotted && trace.mode == TraceMode::Line {
+                if bridged && trace.mode == TraceMode::Line {
+                    let bridge_mode = if dotted { GAP_FORCE_DASH } else { GAP_CONNECT };
                     res.uniforms.write(
                         slot + 1,
                         &PlotUniform::from_view(
@@ -310,7 +313,7 @@ impl GpuBridge {
                             shader_color(trace.color, self.srgb_target),
                         )
                         .with_aa(tuning.line_aa_px)
-                        .with_gap(GAP_FORCE_DASH, 0.0),
+                        .with_gap(bridge_mode, 0.0),
                     );
                 }
 
@@ -345,7 +348,7 @@ impl GpuBridge {
                                 upload_bytes += stat.bytes;
                                 full_uploads += stat.full_upload as u64;
                                 res.col_params.insert(trace.field, key);
-                                if dotted {
+                                if bridged {
                                     let bxy = cache.dotted_bridge_xy(x0, x1, &cols);
                                     if bxy.is_empty() {
                                         res.bridge_buffers.remove(trace.field);
@@ -374,7 +377,14 @@ impl GpuBridge {
                                 upload_bytes += stat.bytes;
                                 full_uploads += stat.full_upload as u64;
                                 res.win_params.insert(trace.field, key);
-                                let iso = isolated_points_xy(&line_xy, gap_threshold);
+                                // Only Cut removes gap segments, so only Cut can
+                                // strand a lone sample; Connect/Dotted keep it on
+                                // the (solid/dashed) line.
+                                let iso = if tuning.gap_mode == GapMode::Cut {
+                                    isolated_points_xy(&line_xy, gap_threshold)
+                                } else {
+                                    Vec::new()
+                                };
                                 if iso.is_empty() {
                                     res.iso_buffers.remove(trace.field);
                                 } else {
@@ -406,7 +416,7 @@ impl GpuBridge {
                         slot,
                         kind,
                     });
-                    if dotted && matches!(kind, DrawKind::Columns { .. }) {
+                    if bridged && matches!(kind, DrawKind::Columns { .. }) {
                         let bridge = DrawKind::Bridge {
                             samples: res.bridge_buffers.samples(trace.field) as u32,
                         };
