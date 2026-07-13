@@ -183,12 +183,7 @@ impl ReplCompletion {
     /// Apply a completion response. Ignores stale responses (wrong `seq`) and
     /// responses whose token span no longer matches the buffer. Returns whether
     /// the buffer changed.
-    pub fn on_completions(
-        &mut self,
-        seq: u64,
-        matches: Vec<String>,
-        buffer: &mut String,
-    ) -> bool {
+    pub fn on_completions(&mut self, seq: u64, matches: Vec<String>, buffer: &mut String) -> bool {
         let pending = match self.pending.take() {
             Some(p) if p.seq == seq => p,
             other => {
