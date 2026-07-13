@@ -185,7 +185,15 @@ mod tests {
         let uniforms = UniformRing::new(ctx.clone(), 1);
         uniforms.write(
             0,
-            &PlotUniform::new(1.0, 0.0, 1.0, 0.0, [64.0, 64.0], 4.0, [1.0, 0.0, 0.0, 1.0]),
+            &PlotUniform::new(
+                1.0,
+                -1.0,
+                1.0,
+                -1.0,
+                [64.0, 64.0],
+                4.0,
+                [1.0, 0.0, 0.0, 1.0],
+            ),
         );
         let bind = pipeline.bind_group(&ctx, &xy, &uniforms);
 
