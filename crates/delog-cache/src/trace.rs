@@ -254,48 +254,47 @@ impl TraceCache {
     }
 
     /// Dotted-gap bridge segments (`[x,y]`, NaN-separated) for a decimated view
-    /// over `[x0, x1]` with per-pixel `cols`. Extends `gap_bridge_xy`'s interior
-    /// runs with bridges to the nearest real sample outside the view, so a gap
-    /// wider than the screen still draws a dotted line instead of nothing.
+    /// over `[x0, x1]` with per-pixel `cols`. Each empty column run bridges the
+    /// exact real samples bracketing it, so a gap wider than the screen still
+    /// draws a dotted line and the slope stays put under zoom/pan.
     pub fn dotted_bridge_xy(&self, x0: f32, x1: f32, cols: &[f32]) -> Vec<f32> {
         let width = cols.len() / 3;
-        let mut out = gap_bridge_xy(cols);
-
-        let (a, b) = self.index_range(x0, x1);
-        let anchor = |idx: Option<usize>| idx.map(|i| (self.xy[2 * i], self.xy[2 * i + 1]));
-        let left = anchor(self.finite_at_or_before(a.saturating_sub(1)));
-        let right = anchor(self.finite_at_or_after(b.min(self.samples())));
-
-        let mut push = |lx: f32, ly: f32, rx: f32, ry: f32| {
-            if !out.is_empty() {
-                out.extend_from_slice(&[f32::NAN, f32::NAN]);
+        if width == 0 {
+            return Vec::new();
+        }
+        let span = (x1 - x0) / width as f32;
+        let empty = |c: usize| !(cols[3 * c + 1].is_finite() && cols[3 * c + 2].is_finite());
+        let mut out = Vec::new();
+        let mut c = 0;
+        while c < width {
+            if !empty(c) {
+                c += 1;
+                continue;
             }
-            out.extend_from_slice(&[lx, ly, rx, ry]);
-        };
-        let col_mid = |c: usize| (cols[3 * c], (cols[3 * c + 1] + cols[3 * c + 2]) * 0.5);
-
-        let first = (0..width).find(|&c| cols[3 * c + 1].is_finite());
-        let last = (0..width).rev().find(|&c| cols[3 * c + 1].is_finite());
-        match (first, last) {
-            (Some(f), Some(l)) => {
-                if f > 0
-                    && let Some((lx, ly)) = left
-                {
-                    let (fx, fy) = col_mid(f);
-                    push(lx, ly, fx, fy);
-                }
-                if l < width - 1
-                    && let Some((rx, ry)) = right
-                {
-                    let (lx2, ly2) = col_mid(l);
-                    push(lx2, ly2, rx, ry);
-                }
+            let lo = c;
+            while c < width && empty(c) {
+                c += 1;
             }
-            // No finite column in view: one bridge straight across the void.
-            _ => {
-                if let (Some((lx, ly)), Some((rx, ry))) = (left, right) {
-                    push(lx, ly, rx, ry);
+            // Empty column run [lo, c); bridge the exact real samples bracketing
+            // it (not the moving column midpoints) so the slope stays put under
+            // zoom/pan. A run reaching an edge brackets to an off-screen sample.
+            let x_left = x0 + lo as f32 * span;
+            let x_right = x0 + c as f32 * span;
+            let before = self.index_range(x_left, x_left).0.saturating_sub(1);
+            let after = self.index_range(x_right, x_right).0;
+            if let (Some(l), Some(r)) = (
+                self.finite_at_or_before(before),
+                self.finite_at_or_after(after),
+            ) {
+                if !out.is_empty() {
+                    out.extend_from_slice(&[f32::NAN, f32::NAN]);
                 }
+                out.extend_from_slice(&[
+                    self.xy[2 * l],
+                    self.xy[2 * l + 1],
+                    self.xy[2 * r],
+                    self.xy[2 * r + 1],
+                ]);
             }
         }
         out
@@ -465,33 +464,6 @@ fn bridge_empty_columns(mins: &mut [f32], maxs: &mut [f32], max_run: usize) {
         }
         left = Some(right);
     }
-}
-
-/// Dotted-gap bridges for `minmax_columns` output: one straight segment per
-/// maximal run of empty columns strictly between two finite columns, anchored
-/// at the neighbours' span midpoints. Segments are NaN-separated so the line
-/// shader draws them disjoint.
-fn gap_bridge_xy(cols: &[f32]) -> Vec<f32> {
-    let width = cols.len() / 3;
-    let mut out = Vec::new();
-    let mut left: Option<usize> = None;
-    for c in 0..width {
-        let (lo, hi) = (cols[3 * c + 1], cols[3 * c + 2]);
-        if !(lo.is_finite() && hi.is_finite()) {
-            continue;
-        }
-        if let Some(l) = left
-            && c > l + 1
-        {
-            if !out.is_empty() {
-                out.extend_from_slice(&[f32::NAN, f32::NAN]);
-            }
-            let ly = (cols[3 * l + 1] + cols[3 * l + 2]) * 0.5;
-            out.extend_from_slice(&[cols[3 * l], ly, cols[3 * c], (lo + hi) * 0.5]);
-        }
-        left = Some(c);
-    }
-    out
 }
 
 /// Median x-delta between consecutive *finite* samples — null rows on a merged
@@ -937,48 +909,20 @@ mod tests {
     }
 
     #[test]
-    fn gap_bridge_xy_bridges_interior_empty_runs_only() {
-        let nan = f32::NAN;
-        // cols: [x, min, max] per column. Finite at 0,1; empty 2,3; finite 4.
-        let cols = [
-            0.5, 1.0, 2.0, //
-            1.5, 2.0, 3.0, //
-            2.5, nan, nan, //
-            3.5, nan, nan, //
-            4.5, 4.0, 6.0,
-        ];
-        let out = gap_bridge_xy(&cols);
-        // One bridge: (1.5, midpoint 2.5) -> (4.5, midpoint 5.0).
-        assert_eq!(out, vec![1.5, 2.5, 4.5, 5.0]);
-    }
-
-    #[test]
-    fn gap_bridge_xy_separates_multiple_bridges_with_nan() {
-        let nan = f32::NAN;
-        let cols = [
-            0.5, 1.0, 1.0, //
-            1.5, nan, nan, //
-            2.5, 2.0, 2.0, //
-            3.5, nan, nan, //
-            4.5, 3.0, 3.0,
-        ];
-        let out = gap_bridge_xy(&cols);
-        assert_eq!(out.len(), 10);
-        assert_eq!(&out[0..4], &[0.5, 1.0, 2.5, 2.0]);
-        assert!(out[4].is_nan() && out[5].is_nan());
-        assert_eq!(&out[6..10], &[2.5, 2.0, 4.5, 3.0]);
-    }
-
-    #[test]
-    fn gap_bridge_xy_skips_leading_trailing_and_all_empty() {
-        let nan = f32::NAN;
-        let leading = [0.5, nan, nan, 1.5, 1.0, 1.0, 2.5, 2.0, 2.0];
-        assert!(gap_bridge_xy(&leading).is_empty());
-        let trailing = [0.5, 1.0, 1.0, 1.5, 2.0, 2.0, 2.5, nan, nan];
-        assert!(gap_bridge_xy(&trailing).is_empty());
-        let all_empty = [0.5, nan, nan, 1.5, nan, nan];
-        assert!(gap_bridge_xy(&all_empty).is_empty());
-        assert!(gap_bridge_xy(&[]).is_empty());
+    fn dotted_bridge_uses_exact_samples_for_an_interior_gap() {
+        // Two 1s-spaced samples, a multi-second dropout, then two more. The
+        // bridge across the dropout must land on the real sample coordinates.
+        let (snap, field) = snapshot_with(
+            vec![0, 1_000_000, 8_000_000, 9_000_000],
+            vec![Some(100), Some(200), Some(300), Some(400)],
+            0,
+        );
+        let cache = TraceCache::build(&snap, field, 0, 0, &MetricsRegistry::new()).unwrap();
+        let (x0, x1) = (0.0, 10.0);
+        let cols = cache.minmax_columns(x0, x1, 10, 3);
+        let bridge = cache.dotted_bridge_xy(x0, x1, &cols);
+        // Exact endpoints: sample at t=1 (y=2.0) -> sample at t=8 (y=3.0).
+        assert_eq!(bridge, vec![1.0, 2.0, 8.0, 3.0]);
     }
 
     #[test]
