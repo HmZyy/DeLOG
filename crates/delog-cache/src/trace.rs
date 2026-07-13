@@ -300,14 +300,46 @@ impl TraceCache {
         out
     }
 
-    /// Min/max y over `[x0, x1]` (seconds), scaled to the nearest real samples
-    /// so a view inside a gap keeps a sensible range instead of collapsing.
+    /// Min/max y over `[x0, x1]` (seconds). With real samples in the window it
+    /// is their range plus one sample of context each side. With none — a view
+    /// sitting inside a gap — it fits the bridge line's values at the window
+    /// edges (interpolated between the bracketing samples) so the bridge fills
+    /// the view instead of the whole gap's span or an empty range.
     pub fn y_range(&self, x0: f32, x1: f32) -> MinMax {
-        let (lo, hi) = self.finite_window(x0, x1);
-        if lo >= hi {
-            return MinMax::EMPTY;
+        let (a, b) = self.index_range(x0, x1);
+        if a < b {
+            let in_window = self.pyramid.query(&self.xy, a, b);
+            if in_window.is_finite() {
+                let (lo, hi) = self.finite_window(x0, x1);
+                return self.pyramid.query(&self.xy, lo, hi);
+            }
         }
-        self.pyramid.query(&self.xy, lo, hi)
+
+        let left = self.finite_at_or_before(a.saturating_sub(1));
+        let right = self.finite_at_or_after(b.min(self.samples()));
+        match (left, right) {
+            (Some(l), Some(r)) => {
+                let (xl, yl) = (self.x_at(l), self.xy[2 * l + 1]);
+                let (xr, yr) = (self.x_at(r), self.xy[2 * r + 1]);
+                let at = |x: f32| {
+                    if xr > xl {
+                        yl + (yr - yl) * ((x - xl) / (xr - xl))
+                    } else {
+                        yl
+                    }
+                };
+                let (v0, v1) = (at(x0), at(x1));
+                MinMax {
+                    min: v0.min(v1),
+                    max: v0.max(v1),
+                }
+            }
+            (Some(i), None) | (None, Some(i)) => {
+                let y = self.xy[2 * i + 1];
+                MinMax { min: y, max: y }
+            }
+            (None, None) => MinMax::EMPTY,
+        }
     }
 
     /// Per-column `[x, min, max]` triples over `[x0, x1)` split into `width`
@@ -691,10 +723,10 @@ mod tests {
     }
 
     #[test]
-    fn y_range_reaches_finite_anchors_across_a_null_gap() {
-        // Merged-timeline shape: values only at t=0 and t=10s, null rows
-        // (NaN) at every second between. A view sitting inside the gap must
-        // autoscale to the surrounding real samples, not collapse to empty.
+    fn y_range_in_a_gap_fits_the_bridge_slice() {
+        // Merged-timeline shape: values only at t=0 (y=1) and t=10s (y=5), null
+        // rows between. A view inside the gap fits the bridge's interpolated
+        // values at the window edges, not the whole gap's span.
         let times: Vec<i64> = (0..=10).map(|i| i * 1_000_000).collect();
         let vals: Vec<Option<i32>> = (0..=10)
             .map(|i| match i {
@@ -706,23 +738,21 @@ mod tests {
         let (snap, field) = snapshot_with(times, vals, 0);
         let cache = TraceCache::build(&snap, field, 0, 0, &MetricsRegistry::new()).unwrap();
 
+        // Bridge y = 1 + 4*(x/10): at x=4 -> 2.6, at x=6 -> 3.4.
         let mm = cache.y_range(4.0, 6.0);
-        assert!(mm.is_finite(), "window inside the gap must not be empty");
-        assert!((mm.min - 1.0).abs() < 1e-6);
-        assert!((mm.max - 5.0).abs() < 1e-6);
+        assert!((mm.min - 2.6).abs() < 1e-5, "min was {}", mm.min);
+        assert!((mm.max - 3.4).abs() < 1e-5, "max was {}", mm.max);
 
-        // A window with no finite sample after it still finds the left anchor.
+        // Past the last sample: only the left anchor exists, so a flat range.
         let mm = cache.y_range(10.5, 11.0);
-        assert!(mm.is_finite());
-        assert!((mm.max - 5.0).abs() < 1e-6);
+        assert!((mm.min - 5.0).abs() < 1e-6 && (mm.max - 5.0).abs() < 1e-6);
     }
 
     #[test]
-    fn y_range_reaches_anchors_across_a_void_larger_than_one_block() {
-        // Merged-timeline field active only early and late, with a null void in
-        // the middle longer than the pyramid block size — the case where a
-        // capped/naive walk gave up and the autoscale collapsed. 5 * BRANCH
-        // samples: finite only at index 0 (y=1.0) and the last index (y=5.0).
+    fn y_range_fits_the_bridge_across_a_void_larger_than_one_block() {
+        // Field active only at the ends with a null void longer than a pyramid
+        // block between; a view mid-void fits the (near-flat) bridge slice, not
+        // an empty range.
         let n = 5 * BRANCH;
         let times: Vec<i64> = (0..n as i64).map(|i| i * 1_000_000).collect();
         let vals: Vec<Option<i32>> = (0..n)
@@ -735,12 +765,12 @@ mod tests {
         let (snap, field) = snapshot_with(times, vals, 0);
         let cache = TraceCache::build(&snap, field, 0, 0, &MetricsRegistry::new()).unwrap();
 
-        // Deep inside the void, x well away from either finite sample.
+        // Mid-void the bridge (y = 1 + 4*x/(n-1)) sits near its midpoint, 3.0.
         let mid = (n as f32) / 2.0;
         let mm = cache.y_range(mid - 0.5, mid + 0.5);
         assert!(mm.is_finite(), "void view must not collapse to empty");
-        assert!((mm.min - 1.0).abs() < 1e-6);
-        assert!((mm.max - 5.0).abs() < 1e-6);
+        assert!((mm.min - 3.0).abs() < 0.05, "min was {}", mm.min);
+        assert!((mm.max - 3.0).abs() < 0.05, "max was {}", mm.max);
     }
 
     #[test]
