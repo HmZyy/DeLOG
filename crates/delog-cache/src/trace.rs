@@ -1,5 +1,7 @@
 //! Per-trace f32 render cache: one interleaved `[x0,y0,…]` buffer per field.
-//! NaN stays NaN so the shader breaks the segment (gaps render as gaps).
+//! Null cells stay NaN so consumers can tell real samples apart (a merged
+//! timeline leaves NaN rows wherever a slower signal has no sample); the
+//! render path strips them and detects gaps by time distance instead.
 
 use arrow::array::{
     Array, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
@@ -135,7 +137,11 @@ impl TraceCache {
             self.pyramid.extend(&self.xy);
         }
         self.built_rows = r.store.rows;
-        self.median_dt = median_dt(&self.xy);
+        // A signal's rate doesn't change mid-flight; only fill in a median the
+        // build couldn't determine (the recompute walks the whole trace).
+        if self.median_dt <= 0.0 {
+            self.median_dt = median_dt(&self.xy);
+        }
         true
     }
 
@@ -186,7 +192,16 @@ impl TraceCache {
     /// equal half-open time columns; an empty column reports `NaN` (skipped by
     /// the shader). Splitting by time, not index, keeps columns aligned to
     /// screen pixels even for irregularly-sampled data.
-    pub fn minmax_columns(&self, x0: f32, x1: f32, width: usize, bridge: bool) -> Vec<f32> {
+    /// `max_bridge_run` caps how many consecutive empty columns get
+    /// interpolated: runs at most that long are treated as slow sampling and
+    /// filled; longer runs stay NaN gaps. `usize::MAX` bridges everything.
+    pub fn minmax_columns(
+        &self,
+        x0: f32,
+        x1: f32,
+        width: usize,
+        max_bridge_run: usize,
+    ) -> Vec<f32> {
         if width == 0 || x1 <= x0 {
             return Vec::new();
         }
@@ -200,9 +215,7 @@ impl TraceCache {
             self.sweep_columns(x0, x1, a, b, &mut mins, &mut maxs);
         }
 
-        if bridge {
-            bridge_columns(&mut mins, &mut maxs);
-        }
+        bridge_columns(&mut mins, &mut maxs, max_bridge_run);
 
         let span = (x1 - x0) / width as f32;
         let mut out = Vec::with_capacity(width * 3);
@@ -289,11 +302,11 @@ impl TraceCache {
 
 /// Stretch each finite column's span to meet its right neighbour's so the
 /// shader's disjoint per-column bars touch (else a sloped signal reads dashed).
-/// Only ever grows a span (no transient hidden). Bounded empty columns are
-/// interpolated so sparse samples still render as a connected line; leading and
-/// trailing empties stay gaps because there is no finite neighbour to bridge to.
-fn bridge_columns(mins: &mut [f32], maxs: &mut [f32]) {
-    bridge_empty_columns(mins, maxs);
+/// Only ever grows a span (no transient hidden). Empty runs up to
+/// `max_run` columns are interpolated so sparse samples still render as a
+/// connected line; longer runs, and leading/trailing empties, stay gaps.
+fn bridge_columns(mins: &mut [f32], maxs: &mut [f32], max_run: usize) {
+    bridge_empty_columns(mins, maxs, max_run);
     for c in 0..mins.len().saturating_sub(1) {
         let (cur_min, cur_max) = (mins[c], maxs[c]);
         let (nxt_min, nxt_max) = (mins[c + 1], maxs[c + 1]);
@@ -308,7 +321,7 @@ fn bridge_columns(mins: &mut [f32], maxs: &mut [f32]) {
     }
 }
 
-fn bridge_empty_columns(mins: &mut [f32], maxs: &mut [f32]) {
+fn bridge_empty_columns(mins: &mut [f32], maxs: &mut [f32], max_run: usize) {
     let mut left = None;
     for right in 0..mins.len() {
         if !(mins[right].is_finite() && maxs[right].is_finite()) {
@@ -316,6 +329,7 @@ fn bridge_empty_columns(mins: &mut [f32], maxs: &mut [f32]) {
         }
         if let Some(left) = left
             && right > left + 1
+            && right - left - 1 <= max_run
         {
             let span = (right - left) as f32;
             for c in left + 1..right {
@@ -357,23 +371,32 @@ pub fn gap_bridge_xy(cols: &[f32]) -> Vec<f32> {
     out
 }
 
-/// Median of consecutive x-deltas over a strided sample (capped so huge traces
-/// never pay for a full pass); 0.0 when no positive finite delta exists.
+/// Median x-delta between consecutive *finite* samples — null rows on a merged
+/// timeline must not drag the estimate down to the row rate. The median is
+/// taken over a strided subsample (capped) so the sort stays bounded; 0.0 when
+/// no positive finite delta exists.
 fn median_dt(xy: &[f32]) -> f32 {
-    let n = xy.len() / 2;
-    if n < 2 {
-        return 0.0;
-    }
     const CAP: usize = 4096;
-    let total = n - 1;
-    let stride = total.div_ceil(CAP).max(1);
-    let mut deltas: Vec<f32> = (0..total)
-        .step_by(stride)
-        .map(|i| xy[2 * (i + 1)] - xy[2 * i])
-        .filter(|d| d.is_finite() && *d > 0.0)
-        .collect();
+    let mut deltas = Vec::new();
+    let mut last_x: Option<f32> = None;
+    for p in xy.chunks_exact(2) {
+        if !p[1].is_finite() {
+            continue;
+        }
+        if let Some(lx) = last_x {
+            let d = p[0] - lx;
+            if d.is_finite() && d > 0.0 {
+                deltas.push(d);
+            }
+        }
+        last_x = Some(p[0]);
+    }
     if deltas.is_empty() {
         return 0.0;
+    }
+    if deltas.len() > CAP {
+        let stride = deltas.len().div_ceil(CAP);
+        deltas = deltas.into_iter().step_by(stride).collect();
     }
     let mid = deltas.len() / 2;
     *deltas
@@ -581,7 +604,7 @@ mod tests {
         );
         let cache = TraceCache::build(&snap, field, 0, 0, &MetricsRegistry::new()).unwrap();
 
-        let cols = cache.minmax_columns(0.0, 4.0, 4, true);
+        let cols = cache.minmax_columns(0.0, 4.0, 4, usize::MAX);
         assert_eq!(cols.len(), 4 * 3);
         assert_eq!(cols[0], 0.5);
         assert_eq!(cols[1], 0.0);
@@ -599,7 +622,7 @@ mod tests {
         let (snap, field) = snapshot_with(vec![0, 4_000_000], vec![Some(100), Some(500)], 0);
         let cache = TraceCache::build(&snap, field, 0, 0, &MetricsRegistry::new()).unwrap();
 
-        let cols = cache.minmax_columns(0.0, 5.0, 5, true);
+        let cols = cache.minmax_columns(0.0, 5.0, 5, usize::MAX);
 
         assert_eq!(cols.len(), 15);
         for c in 0..4 {
@@ -628,7 +651,7 @@ mod tests {
         let cache = TraceCache::build(&snap, field, 0, 0, &MetricsRegistry::new()).unwrap();
 
         let x1 = 999.0 * 1e-6;
-        let cols = cache.minmax_columns(0.0, x1, 4, true);
+        let cols = cache.minmax_columns(0.0, x1, 4, usize::MAX);
         assert_eq!(cols.len(), 12);
         assert_eq!(cols[1], 0.0);
         assert!(cols[11] >= 990.0);
@@ -744,5 +767,69 @@ mod tests {
         let all_empty = [0.5, nan, nan, 1.5, nan, nan];
         assert!(gap_bridge_xy(&all_empty).is_empty());
         assert!(gap_bridge_xy(&[]).is_empty());
+    }
+
+    #[test]
+    fn median_dt_measures_the_signal_not_the_merged_timeline() {
+        // A 100ms signal exported onto a 10ms merged timeline: nine null rows
+        // between real samples must not drag the median down to the row rate.
+        let times: Vec<i64> = (0..100).map(|i| i * 10_000).collect();
+        let vals: Vec<Option<i32>> = (0..100).map(|i| (i % 10 == 0).then_some(i)).collect();
+        let (snap, field) = snapshot_with(times, vals, 0);
+        let cache = TraceCache::build(&snap, field, 0, 0, &MetricsRegistry::new()).unwrap();
+        assert!((cache.median_dt - 0.1).abs() < 1e-4);
+    }
+
+    #[test]
+    fn append_fills_in_an_unknown_median() {
+        let (snap1, field) = snapshot_with(vec![0], vec![Some(0)], 0);
+        let mut cache = TraceCache::build(&snap1, field, 0, 0, &MetricsRegistry::new()).unwrap();
+        assert_eq!(cache.median_dt, 0.0);
+
+        let (snap2, _) = snapshot_with(
+            vec![0, 1_000_000, 2_000_000],
+            vec![Some(0), Some(100), Some(200)],
+            0,
+        );
+        assert!(cache.append(&snap2, field, &MetricsRegistry::new()));
+        assert!((cache.median_dt - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn short_empty_runs_bridge_but_long_runs_stay_gaps() {
+        // Samples at t=0,1 then a dropout until t=8,9 (seconds).
+        let (snap, field) = snapshot_with(
+            vec![0, 1_000_000, 8_000_000, 9_000_000],
+            vec![Some(100), Some(200), Some(300), Some(400)],
+            0,
+        );
+        let cache = TraceCache::build(&snap, field, 0, 0, &MetricsRegistry::new()).unwrap();
+
+        // 10 columns of 1s each; empty run of 6 columns (t=2..8).
+        let bridged = cache.minmax_columns(0.0, 10.0, 10, usize::MAX);
+        assert!(bridged[3 * 4 + 1].is_finite(), "unbounded bridging fills");
+
+        let capped = cache.minmax_columns(0.0, 10.0, 10, 3);
+        assert!(
+            capped[3 * 4 + 1].is_nan(),
+            "run longer than max_run stays a gap"
+        );
+        // Finite columns still get the neighbour-touch span stretch.
+        assert!(capped[1].is_finite() && capped[3 + 1].is_finite());
+    }
+
+    #[test]
+    fn sub_threshold_empty_runs_interpolate_even_when_capped() {
+        // One-column hole between finite columns bridges when max_run >= 1.
+        let (snap, field) = snapshot_with(
+            vec![0, 2_000_000, 3_000_000],
+            vec![Some(100), Some(300), Some(400)],
+            0,
+        );
+        let cache = TraceCache::build(&snap, field, 0, 0, &MetricsRegistry::new()).unwrap();
+        let cols = cache.minmax_columns(0.0, 4.0, 4, 1);
+        assert!(cols[3 + 1].is_finite(), "1-column run bridges");
+        let cols = cache.minmax_columns(0.0, 4.0, 4, 0);
+        assert!(cols[3 + 1].is_nan(), "max_run 0 bridges nothing");
     }
 }
