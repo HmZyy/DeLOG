@@ -103,7 +103,7 @@ pub enum DropEdge {
 struct PlotDebug {
     plot_rect: egui::Rect,
     x_range: (f32, f32),
-    y_range: (f32, f32),
+    y_range: (f64, f64),
     y_query_us: f32,
     paint_us: f32,
 }
@@ -943,7 +943,7 @@ impl Behavior<'_> {
         // pane's own need so labels never clip.
         let shared_gutter = self.services.shared_y_gutter;
         let make_plot_rect =
-            |ui: &egui::Ui, y_range: (f32, f32), y_unit: Option<&str>| -> (egui::Rect, f32) {
+            |ui: &egui::Ui, y_range: (f64, f64), y_unit: Option<&str>| -> (egui::Rect, f32) {
                 let plot_height = (outer.height() - axes::X_GUTTER).max(1.0);
                 let own_gutter = axes::y_gutter(ui, y_range, y_unit, plot_height);
                 let gutter = shared_gutter.max(own_gutter);

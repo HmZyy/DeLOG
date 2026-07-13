@@ -56,8 +56,8 @@ pub fn format_tick(value: f64, step: f64) -> String {
     format!("{value:.*}", decimals_for_step(step))
 }
 
-pub fn y_gutter(ui: &egui::Ui, y_range: (f32, f32), y_unit: Option<&str>, plot_height: f32) -> f32 {
-    let (y0, y1) = (y_range.0 as f64, y_range.1 as f64);
+pub fn y_gutter(ui: &egui::Ui, y_range: (f64, f64), y_unit: Option<&str>, plot_height: f32) -> f32 {
+    let (y0, y1) = y_range;
     let y_target = (plot_height / 48.0).round().max(2.0) as usize;
     let y_step = step_for(y0, y1, y_target);
     let font = egui::FontId::proportional(AXIS_FONT_SIZE);
@@ -91,7 +91,7 @@ pub fn draw(
     ui: &egui::Ui,
     plot_rect: egui::Rect,
     x_range: (f32, f32),
-    y_range: (f32, f32),
+    y_range: (f64, f64),
     y_unit: Option<&str>,
 ) {
     let painter = ui.painter();
@@ -106,7 +106,7 @@ pub fn draw(
         .gamma_multiply(0.5);
 
     let (x0, x1) = (x_range.0 as f64, x_range.1 as f64);
-    let (y0, y1) = (y_range.0 as f64, y_range.1 as f64);
+    let (y0, y1) = y_range;
     let x_target = (plot_rect.width() / 90.0).round().max(2.0) as usize;
     let y_target = (plot_rect.height() / 48.0).round().max(2.0) as usize;
     let x_step = step_for(x0, x1, x_target);

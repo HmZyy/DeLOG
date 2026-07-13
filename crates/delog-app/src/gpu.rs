@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
-use delog_cache::{CacheManager, MinMax};
+use delog_cache::CacheManager;
 use delog_core::identity::FieldId;
 use delog_core::metrics::MetricsRegistry;
 use delog_render::{
@@ -55,7 +55,7 @@ pub struct VehicleDraw<'a> {
 pub struct PaneView {
     pub rect: egui::Rect,
     pub x_range: (f32, f32),
-    pub y_range: (f32, f32),
+    pub y_range: (f64, f64),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -293,7 +293,7 @@ impl GpuBridge {
                     slot,
                     &PlotUniform::from_view(
                         (x0, x1),
-                        (y0, y1),
+                        (y0 as f32, y1 as f32),
                         viewport_px,
                         trace.width_px,
                         shader_color(trace.color, self.srgb_target),
@@ -307,7 +307,7 @@ impl GpuBridge {
                         slot + 1,
                         &PlotUniform::from_view(
                             (x0, x1),
-                            (y0, y1),
+                            (y0 as f32, y1 as f32),
                             viewport_px,
                             trace.width_px,
                             shader_color(trace.color, self.srgb_target),
@@ -572,21 +572,26 @@ impl GpuBridge {
     }
 }
 
-pub fn visible_y_range(caches: &mut CacheManager, pane: &PlotPane, x0: f32, x1: f32) -> (f32, f32) {
-    let mut mm = MinMax::EMPTY;
+pub fn visible_y_range(caches: &mut CacheManager, pane: &PlotPane, x0: f32, x1: f32) -> (f64, f64) {
+    let mut min = f64::INFINITY;
+    let mut max = f64::NEG_INFINITY;
     for trace in pane.visible_traces() {
         if let Some(cache) = caches.get(trace.field) {
-            mm = mm.merge(cache.y_range(x0, x1));
+            let mm = cache.y_range(x0, x1);
+            if mm.is_finite() {
+                min = min.min(mm.min as f64);
+                max = max.max(mm.max as f64);
+            }
         }
     }
-    if !mm.is_finite() {
+    if !(min.is_finite() && max.is_finite()) {
         return (-1.0, 1.0);
     }
-    padded(mm.min, mm.max)
+    padded(min, max)
 }
 
-fn padded(min: f32, max: f32) -> (f32, f32) {
-    if (max - min).abs() <= f32::EPSILON {
+fn padded(min: f64, max: f64) -> (f64, f64) {
+    if (max - min).abs() <= f64::EPSILON {
         return (min - 1.0, max + 1.0);
     }
     let pad = (max - min) * 0.05;

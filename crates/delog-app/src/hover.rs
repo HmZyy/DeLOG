@@ -83,7 +83,9 @@ fn draw_sample_circles(ui: &egui::Ui, view: PaneView, origin_us: i64, rows: &[Ro
     if x1 <= x0 || y1 <= y0 {
         return;
     }
-    let transform = PlotUniform::from_view((x0, x1), (y0, y1), [1.0, 1.0], 0.0, [0.0; 4]).transform;
+    let transform =
+        PlotUniform::from_view((x0, x1), (y0 as f32, y1 as f32), [1.0, 1.0], 0.0, [0.0; 4])
+            .transform;
     let painter = ui.painter();
     for row in rows {
         // Match the cache's x formula (trace.rs) exactly so the mark lands on
