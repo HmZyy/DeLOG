@@ -34,8 +34,13 @@ fn embed_windows_icon(logo: &image::DynamicImage, out_dir: &std::path::Path) {
             let rgba = logo
                 .resize_exact(s, s, image::imageops::FilterType::Lanczos3)
                 .to_rgba8();
-            image::codecs::ico::IcoFrame::as_png(rgba.as_raw(), s, s, image::ExtendedColorType::Rgba8)
-                .expect("encode ico frame")
+            image::codecs::ico::IcoFrame::as_png(
+                rgba.as_raw(),
+                s,
+                s,
+                image::ExtendedColorType::Rgba8,
+            )
+            .expect("encode ico frame")
         })
         .collect();
 
