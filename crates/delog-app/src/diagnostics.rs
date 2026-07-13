@@ -93,8 +93,10 @@ impl DiagnosticsDock {
             ui.weak("No diagnostics match the current filters.");
             return action;
         }
-        let row_height =
-            egui::TextStyle::Body.resolve(ui.style()).size.max(ui.spacing().interact_size.y);
+        let row_height = egui::TextStyle::Body
+            .resolve(ui.style())
+            .size
+            .max(ui.spacing().interact_size.y);
         TableBuilder::new(ui)
             .id_salt("diagnostics-table")
             .striped(true)

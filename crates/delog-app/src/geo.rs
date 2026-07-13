@@ -226,7 +226,10 @@ mod tests {
             let ned = DVec3::new(n, e, d);
             let (lat, lon, alt) = ned_to_geodetic(ned, rlat, rlon, ralt);
             let back = geodetic_to_ned(lat, lon, alt, rlat, rlon, ralt);
-            assert!((back - ned).length() < 1e-5, "{ned:?} came back as {back:?}");
+            assert!(
+                (back - ned).length() < 1e-5,
+                "{ned:?} came back as {back:?}"
+            );
         }
     }
 }
