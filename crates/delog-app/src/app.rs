@@ -1974,6 +1974,7 @@ impl eframe::App for DelogApp {
                         ui.close();
                     }
                 });
+                ui.separator();
                 ui.menu_button("View", |ui| {
                     self.dock_open_checkbox(ui, AppDockTab::Diagnostics, "Diagnostic (F1)");
                     self.dock_open_checkbox(ui, AppDockTab::Performance, "Performance (F2)");
@@ -1982,6 +1983,7 @@ impl eframe::App for DelogApp {
                     self.dock_open_checkbox(ui, AppDockTab::ScriptingConsole, "Scripting (F9)");
                     self.dock_open_checkbox(ui, AppDockTab::Logging, "Logging (F12)");
                 });
+                ui.separator();
                 ui.menu_button("Layout", |ui| {
                     if ui.button("Save Layout...").clicked() {
                         self.save_layout_dialog.open = true;
@@ -2019,71 +2021,74 @@ impl eframe::App for DelogApp {
                     }
                 });
                 #[cfg(feature = "scripting")]
-                ui.menu_button("Scripts", |ui| {
-                    if ui.button("Editor...").clicked() {
-                        self.scripts.open = true;
-                        ui.close();
-                    }
-                    if ui.button("Variables...").clicked() {
-                        self.scripts.variables_open = true;
-                        ui.close();
-                    }
+                {
                     ui.separator();
-                    ui.menu_button("Run", |ui| {
-                        let names = self.scripts.script_names();
-                        if names.is_empty() {
-                            ui.add_enabled(false, egui::Button::new("No saved scripts"));
-                        } else {
-                            let run_enabled = self.scripts.ordinary_dispatch_enabled();
-                            for name in names {
-                                if ui
-                                    .add_enabled(run_enabled, egui::Button::new(name.as_str()))
-                                    .clicked()
-                                {
-                                    let _ = self.scripts.run_named(
-                                        &name,
-                                        self.session.store(),
-                                        self.session.ingest_sender(),
-                                        Arc::clone(self.session.metrics()),
-                                    );
-                                    ui.close();
+                    ui.menu_button("Scripts", |ui| {
+                        if ui.button("Editor...").clicked() {
+                            self.scripts.open = true;
+                            ui.close();
+                        }
+                        if ui.button("Variables...").clicked() {
+                            self.scripts.variables_open = true;
+                            ui.close();
+                        }
+                        ui.separator();
+                        ui.menu_button("Run", |ui| {
+                            let names = self.scripts.script_names();
+                            if names.is_empty() {
+                                ui.add_enabled(false, egui::Button::new("No saved scripts"));
+                            } else {
+                                let run_enabled = self.scripts.ordinary_dispatch_enabled();
+                                for name in names {
+                                    if ui
+                                        .add_enabled(run_enabled, egui::Button::new(name.as_str()))
+                                        .clicked()
+                                    {
+                                        let _ = self.scripts.run_named(
+                                            &name,
+                                            self.session.store(),
+                                            self.session.ingest_sender(),
+                                            Arc::clone(self.session.metrics()),
+                                        );
+                                        ui.close();
+                                    }
                                 }
                             }
-                        }
+                        });
                     });
-                });
-                #[cfg(feature = "scripting")]
-                ui.menu_button("Parsers", |ui| {
-                    if ui.button("Editor...").clicked() {
-                        self.scripts.open_parser_editor();
-                        ui.close();
-                    }
                     ui.separator();
-                    ui.menu_button("Parse File", |ui| match self.scripts.parser_names() {
-                        Ok(names) if names.is_empty() => {
-                            ui.add_enabled(false, egui::Button::new("No saved parsers"));
+                    ui.menu_button("Parsers", |ui| {
+                        if ui.button("Editor...").clicked() {
+                            self.scripts.open_parser_editor();
+                            ui.close();
                         }
-                        Ok(names) => {
-                            let parser_open_enabled = self.scripts.parser_dispatch_enabled();
-                            for name in names {
-                                if ui
-                                    .add_enabled(
-                                        parser_open_enabled,
-                                        egui::Button::new(name.as_str()),
-                                    )
-                                    .on_hover_text("Open file with parser")
-                                    .clicked()
-                                {
-                                    let _ = self.scripts.request_open(ui.ctx(), &name);
-                                    ui.close();
+                        ui.separator();
+                        ui.menu_button("Parse File", |ui| match self.scripts.parser_names() {
+                            Ok(names) if names.is_empty() => {
+                                ui.add_enabled(false, egui::Button::new("No saved parsers"));
+                            }
+                            Ok(names) => {
+                                let parser_open_enabled = self.scripts.parser_dispatch_enabled();
+                                for name in names {
+                                    if ui
+                                        .add_enabled(
+                                            parser_open_enabled,
+                                            egui::Button::new(name.as_str()),
+                                        )
+                                        .on_hover_text("Open file with parser")
+                                        .clicked()
+                                    {
+                                        let _ = self.scripts.request_open(ui.ctx(), &name);
+                                        ui.close();
+                                    }
                                 }
                             }
-                        }
-                        Err(_) => {
-                            ui.add_enabled(false, egui::Button::new("Could not list parsers"));
-                        }
+                            Err(_) => {
+                                ui.add_enabled(false, egui::Button::new("Could not list parsers"));
+                            }
+                        });
                     });
-                });
+                }
                 if self.settings.show_fps {
                     ui.with_layout(
                         egui::Layout::right_to_left(egui::Align::Center),
