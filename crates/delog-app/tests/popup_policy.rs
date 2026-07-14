@@ -11,6 +11,7 @@ const POPUP_SOURCES: &[&str] = &[
     include_str!("../src/workspace.rs"),
 ];
 const APP_SOURCE: &str = include_str!("../src/app.rs");
+const DATA_EXPORT_SOURCE: &str = include_str!("../src/data_export.rs");
 const DOCKS_SOURCE: &str = include_str!("../src/docks.rs");
 const SCRIPTS_SOURCE: &str = include_str!("../src/scripts.rs");
 const WORKSPACE_SOURCE: &str = include_str!("../src/workspace.rs");
@@ -415,6 +416,168 @@ fn kml_export_results_surface_message_popups() {
     assert!(APP_SOURCE.contains("MessagePopup::info("));
     assert!(APP_SOURCE.contains("MessagePopup::error("));
     assert!(!APP_SOURCE.contains("rfd::MessageDialog"));
+}
+
+#[test]
+fn file_menu_nests_exports_in_the_requested_order() {
+    let file_menu = between(
+        APP_SOURCE,
+        "ui.menu_button(\"File\"",
+        "\n                ui.separator();\n                ui.menu_button(\"View\"",
+    );
+    let open = file_menu.find("ui.button(\"Open\")").unwrap();
+    let export_menu = file_menu.find("ui.menu_button(\"Export\", |ui|").unwrap();
+    let data = file_menu.find("ui.button(\"Export Data\")").unwrap();
+    let diagnostics = file_menu.find("ui.button(\"Export Diagnostics\")").unwrap();
+    let profiling = file_menu.find("ui.button(\"Export Profiling\")").unwrap();
+    let settings = file_menu.find("ui.button(\"Settings\")").unwrap();
+    let exit = file_menu.find("ui.button(\"Exit\")").unwrap();
+
+    assert!(open < export_menu);
+    assert!(export_menu < data && data < diagnostics && diagnostics < profiling);
+    assert!(profiling < settings && settings < exit);
+    assert_eq!(file_menu.matches("ui.separator();").count(), 3);
+    assert!(file_menu.contains("self.settings_dialog.open();"));
+    assert!(!file_menu.contains("Open File"));
+    assert!(!file_menu.contains("JSON..."));
+}
+
+#[test]
+fn main_menu_omits_edit_and_orders_the_remaining_menus() {
+    let menu_bar = between(
+        APP_SOURCE,
+        "egui::MenuBar::new().ui(ui, |ui|",
+        "drop(ui_menu_timer);",
+    );
+    let expected_order = ["File", "View", "Layout", "Scripts", "Parsers"];
+    let mut previous = 0;
+
+    for label in expected_order {
+        let needle = format!("ui.menu_button(\"{label}\"");
+        let index = menu_bar[previous..]
+            .find(&needle)
+            .unwrap_or_else(|| panic!("{label} should be in the main menu"))
+            + previous;
+        previous = index + needle.len();
+    }
+
+    assert!(!menu_bar.contains("ui.menu_button(\"Edit\""));
+    assert!(menu_bar.contains(
+        "                });\n                ui.separator();\n                ui.menu_button(\"View\""
+    ));
+    assert!(menu_bar.contains(
+        "                });\n                ui.separator();\n                ui.menu_button(\"Layout\""
+    ));
+    assert!(menu_bar.contains(
+        "                });\n                #[cfg(feature = \"scripting\")]\n                {\n                    ui.separator();\n                    ui.menu_button(\"Scripts\""
+    ));
+    assert!(menu_bar.contains(
+        "                    });\n                    ui.separator();\n                    ui.menu_button(\"Parsers\""
+    ));
+}
+
+#[test]
+fn file_menu_and_results_use_unified_data_export_path() {
+    assert!(APP_SOURCE.contains("Export Data"));
+    assert!(APP_SOURCE.contains("self.data_export.open();"));
+    assert!(APP_SOURCE.contains("fn spawn_data_export("));
+    assert!(APP_SOURCE.contains("\"data-export\""));
+    assert!(!APP_SOURCE.contains(concat!("Export ", "CSV...")));
+    assert!(!APP_SOURCE.contains(concat!("csv_", "export")));
+    assert!(!APP_SOURCE.contains(concat!("csv_", "cancel")));
+}
+
+#[test]
+fn data_export_rejects_stale_fields_before_opening_save_dialog() {
+    let worker = between(APP_SOURCE, "fn spawn_data_export(", "fn load_layout(");
+    let resolution = worker
+        .find("resolve_export_fields")
+        .expect("the complete selection should be resolved exactly");
+    let spawn = worker
+        .find(".spawn(move ||")
+        .expect("the save dialog should run on a worker");
+    let save_dialog = worker
+        .find(".save_file()")
+        .expect("the worker should open a save dialog");
+
+    assert!(resolution < spawn);
+    assert!(spawn < save_dialog);
+    assert!(worker.contains("data_export_tx.send(Err"));
+}
+
+#[test]
+fn export_picker_controls_scrollbars_divider_and_add_hitbox_are_stable() {
+    let dialog_body = between(DATA_EXPORT_SOURCE, "pub fn dialog_ui(", "pub const MODES");
+    let format = dialog_body.find("ui.label(\"Format:\")").unwrap();
+    let range = dialog_body.find("ui.label(\"Range:\")").unwrap();
+    let resample = dialog_body.find("ui.label(\"Resample:\")").unwrap();
+    let picker = dialog_body
+        .find("field_picker_ui(ui, state, available)")
+        .unwrap();
+    assert!(format < range && range < resample && resample < picker);
+
+    assert!(DATA_EXPORT_SOURCE.contains("id_salt(\"data_export_available_fields\")"));
+    assert!(DATA_EXPORT_SOURCE.contains("id_salt(\"data_export_selected_fields\")"));
+    assert_eq!(
+        DATA_EXPORT_SOURCE
+            .matches("ScrollBarVisibility::AlwaysVisible")
+            .count(),
+        2
+    );
+
+    let picker_body = between(
+        DATA_EXPORT_SOURCE,
+        "fn field_picker_ui(",
+        "/// `visible` is the current ViewX",
+    );
+    assert!(picker_body.contains("ui.separator();"));
+    assert!(picker_body.contains(".add_sized([24.0, 24.0], egui::Button::new(\"+\"))"));
+    assert!(picker_body.contains("let already_selected = state.selected.contains(&field.id);"));
+    assert!(picker_body.contains(".add_enabled_ui(!already_selected, |ui|"));
+    assert!(picker_body.contains("let source_fully_selected = available"));
+    assert!(picker_body.contains("!source_fully_selected,"));
+    assert!(picker_body.contains("egui::Button::new(\"Add all\")"));
+    assert!(picker_body.contains("add_source = Some(field.source.clone());"));
+    assert!(!DATA_EXPORT_SOURCE.contains("ui.small_button(\"+\")"));
+
+    assert!(DATA_EXPORT_SOURCE.contains(".default_height(440.0)"));
+    assert!(DATA_EXPORT_SOURCE.contains(".min_height(300.0)"));
+    assert!(DATA_EXPORT_SOURCE.contains(".resizable([true, true])"));
+    assert!(DATA_EXPORT_SOURCE.contains("Panel::top(\"data_export_controls\")"));
+    assert!(DATA_EXPORT_SOURCE.contains("Panel::bottom(\"data_export_actions\")"));
+    assert!(DATA_EXPORT_SOURCE.contains("CentralPanel::default()"));
+    assert!(picker_body.contains(".horizontal_top(|ui|"));
+    assert_eq!(picker_body.matches(".allocate_ui_with_layout(").count(), 2);
+    assert!(!DATA_EXPORT_SOURCE.contains("ui.set_height(ui.available_height())"));
+    assert!(!DATA_EXPORT_SOURCE.contains("let footer_height ="));
+    assert!(!DATA_EXPORT_SOURCE.contains("let picker_height ="));
+    assert_eq!(
+        DATA_EXPORT_SOURCE
+            .matches(".auto_shrink([false, false])")
+            .count(),
+        2
+    );
+    assert_eq!(
+        DATA_EXPORT_SOURCE
+            .matches(".max_height(ui.available_height())")
+            .count(),
+        2
+    );
+    assert!(!DATA_EXPORT_SOURCE.contains(".max_height(280.0)"));
+}
+
+#[test]
+fn export_footer_keeps_cancel_left_and_export_right() {
+    let actions = between(
+        DATA_EXPORT_SOURCE,
+        "Panel::bottom(\"data_export_actions\")",
+        "CentralPanel::default()",
+    );
+    let cancel = actions.find("ui.button(\"Cancel\")").unwrap();
+    let right_layout = actions.find("Layout::right_to_left").unwrap();
+    let export = actions.find("state.format.action_label()").unwrap();
+
+    assert!(cancel < right_layout && right_layout < export);
 }
 
 #[test]
