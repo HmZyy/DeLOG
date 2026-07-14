@@ -269,6 +269,7 @@ fn field_picker_ui(
     available: &[ExportField],
 ) -> FieldPickerRects {
     let mut add_one = None;
+    let mut add_source = None;
     let mut remove_one = None;
     let mut add_filtered = false;
     let mut clear = false;
@@ -302,7 +303,24 @@ fn field_picker_ui(
                                 let mut previous_topic = None::<&str>;
                                 for field in available.iter().filter(|field| state.matches(field)) {
                                     if previous_source != Some(field.source.as_str()) {
-                                        ui.strong(&field.source);
+                                        let source_fully_selected = available
+                                            .iter()
+                                            .filter(|candidate| candidate.source == field.source)
+                                            .all(|candidate| {
+                                                state.selected.contains(&candidate.id)
+                                            });
+                                        ui.horizontal(|ui| {
+                                            ui.strong(&field.source);
+                                            if ui
+                                                .add_enabled(
+                                                    !source_fully_selected,
+                                                    egui::Button::new("Add all"),
+                                                )
+                                                .clicked()
+                                            {
+                                                add_source = Some(field.source.clone());
+                                            }
+                                        });
                                         previous_source = Some(&field.source);
                                         previous_topic = None;
                                     }
@@ -388,6 +406,9 @@ fn field_picker_ui(
     }
     if let Some(id) = add_one {
         state.add(id);
+    }
+    if let Some(source) = add_source {
+        state.add_source_fields(&source, available);
     }
     if let Some(id) = remove_one {
         state.remove(id);
@@ -532,6 +553,16 @@ impl DataExportState {
             .map(|field| field.id)
             .collect::<Vec<_>>();
         for id in ids {
+            self.add(id);
+        }
+    }
+
+    pub fn add_source_fields(&mut self, source: &str, available: &[ExportField]) {
+        for id in available
+            .iter()
+            .filter(|field| field.source == source)
+            .map(|field| field.id)
+        {
             self.add(id);
         }
     }
@@ -1401,5 +1432,23 @@ mod tests {
         state.add_filtered(&fields);
 
         assert_eq!(state.selected, vec![fields[0].id, fields[2].id]);
+    }
+
+    #[test]
+    fn add_source_fields_adds_the_whole_log_once_in_available_order() {
+        let mut flight_roll = export_field(1, "Roll");
+        flight_roll.source = "flight".into();
+        let mut telemetry_altitude = export_field(2, "Altitude");
+        telemetry_altitude.source = "telemetry".into();
+        let mut flight_pitch = export_field(3, "Pitch");
+        flight_pitch.source = "flight".into();
+        let fields = vec![flight_roll, telemetry_altitude, flight_pitch];
+        let mut state = DataExportState::default();
+        state.add(fields[2].id);
+
+        state.add_source_fields("flight", &fields);
+        state.add_source_fields("flight", &fields);
+
+        assert_eq!(state.selected, vec![fields[2].id, fields[0].id]);
     }
 }
