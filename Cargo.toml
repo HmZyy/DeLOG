@@ -20,7 +20,7 @@ rust-version = "1.92"
 # Every third-party version is pinned here, once; member crates inherit with
 # `workspace = true`. Cargo.lock is committed.
 [workspace.dependencies]
-tempfile = "3"
+tempfile = "3.27.0"
 # intra-workspace
 delog-core = { path = "crates/delog-core" }
 delog-parsers = { path = "crates/delog-parsers" }
@@ -32,6 +32,7 @@ delog-script = { path = "crates/delog-script" }
 # columnar data
 arrow = "59.0.0"
 arrow-ipc = "59.0.0"
+parquet = "59.0.0"
 
 # GUI / GPU
 arboard = { version = "3.6.1", features = ["wayland-data-control"] }

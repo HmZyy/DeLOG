@@ -418,6 +418,35 @@ fn kml_export_results_surface_message_popups() {
 }
 
 #[test]
+fn file_menu_and_results_use_unified_data_export_path() {
+    assert!(APP_SOURCE.contains("Export Data..."));
+    assert!(APP_SOURCE.contains("self.data_export.open();"));
+    assert!(APP_SOURCE.contains("fn spawn_data_export("));
+    assert!(APP_SOURCE.contains("\"data-export\""));
+    assert!(!APP_SOURCE.contains(concat!("Export ", "CSV...")));
+    assert!(!APP_SOURCE.contains(concat!("csv_", "export")));
+    assert!(!APP_SOURCE.contains(concat!("csv_", "cancel")));
+}
+
+#[test]
+fn data_export_rejects_stale_fields_before_opening_save_dialog() {
+    let worker = between(APP_SOURCE, "fn spawn_data_export(", "fn load_layout(");
+    let resolution = worker
+        .find("resolve_export_fields")
+        .expect("the complete selection should be resolved exactly");
+    let spawn = worker
+        .find(".spawn(move ||")
+        .expect("the save dialog should run on a worker");
+    let save_dialog = worker
+        .find(".save_file()")
+        .expect("the worker should open a save dialog");
+
+    assert!(resolution < spawn);
+    assert!(spawn < save_dialog);
+    assert!(worker.contains("data_export_tx.send(Err"));
+}
+
+#[test]
 fn every_popup_is_non_collapsible_and_centered_by_default() {
     let popup_count = occurrence_count("egui::Window::new(");
 
