@@ -476,6 +476,10 @@ fn export_picker_controls_scrollbars_divider_and_add_hitbox_are_stable() {
     assert!(picker_body.contains(".add_sized([24.0, 24.0], egui::Button::new(\"+\"))"));
     assert!(picker_body.contains("let already_selected = state.selected.contains(&field.id);"));
     assert!(picker_body.contains(".add_enabled_ui(!already_selected, |ui|"));
+    assert!(picker_body.contains("let source_fully_selected = available"));
+    assert!(picker_body.contains("!source_fully_selected,"));
+    assert!(picker_body.contains("egui::Button::new(\"Add all\")"));
+    assert!(picker_body.contains("add_source = Some(field.source.clone());"));
     assert!(!DATA_EXPORT_SOURCE.contains("ui.small_button(\"+\")"));
 
     assert!(DATA_EXPORT_SOURCE.contains(".default_height(440.0)"));
