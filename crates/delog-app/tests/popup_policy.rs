@@ -303,6 +303,26 @@ fn moved_plot_controls_live_on_icon_toolbar_not_plot_context_menu() {
 }
 
 #[test]
+fn plot_field_stats_is_one_direct_action_for_all_pane_traces() {
+    let context_menu = between(
+        WORKSPACE_SOURCE,
+        "fn plot_context_menu(",
+        "fn plot_info_window(",
+    );
+    let stats = between(
+        context_menu,
+        "let fields: Vec<FieldId>",
+        "ui.menu_image_text_button(menu_icon(ui, crate::icons::pencil())",
+    );
+
+    assert!(stats.contains("pane.traces.iter().map(|trace| trace.field).collect"));
+    assert!(stats.contains("Button::image_and_text"));
+    assert!(stats.contains("self.actions.inspect_field_stats = Some(fields)"));
+    assert!(!stats.contains("menu_image_text_button"));
+    assert!(!stats.contains("ui.button(label)"));
+}
+
+#[test]
 fn measuring_marker_scope_is_not_a_runtime_plot_setting() {
     assert!(!WORKSPACE_SOURCE.contains("marker_scope"));
     assert!(!WORKSPACE_SOURCE.contains("MarkerScope"));

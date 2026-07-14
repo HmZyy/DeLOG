@@ -2833,8 +2833,8 @@ impl eframe::App for DelogApp {
                     if actions.export_kml {
                         self.spawn_export_kml_dialog(ui.ctx(), &snapshot);
                     }
-                    if let Some(field) = actions.inspect_field_stats {
-                        self.field_stats.open(field);
+                    if let Some(fields) = actions.inspect_field_stats {
+                        self.field_stats.open_fields(fields);
                     }
                     if let Some(action) = actions.image {
                         match action {

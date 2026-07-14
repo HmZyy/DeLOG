@@ -502,7 +502,7 @@ pub struct WorkspaceActions {
     pub view_changed: bool,
     pub open_vehicle_config: bool,
     pub export_kml: bool,
-    pub inspect_field_stats: Option<FieldId>,
+    pub inspect_field_stats: Option<Vec<FieldId>>,
     /// Widest Y gutter any pane needed; fed into `Workspace::shared_y_gutter`.
     pub max_y_gutter: f32,
 }
@@ -1324,34 +1324,20 @@ impl Behavior<'_> {
                 }
             });
 
-            ui.menu_image_text_button(menu_icon(ui, crate::icons::info()), "Field stats", |ui| {
-                let entries: Vec<_> = pane
-                    .traces
-                    .iter()
-                    .map(|t| {
-                        (
-                            t.field,
-                            legend::trace_label(self.services.snapshot.as_ref(), t.field),
-                            t.color32(),
-                        )
-                    })
-                    .collect();
-                if entries.is_empty() {
-                    ui.add_enabled(false, egui::Button::new("No traces"));
-                }
-                for (field, label, color) in entries {
-                    let clicked = ui
-                        .horizontal(|ui| {
-                            color_swatch(ui, color);
-                            ui.button(label).clicked()
-                        })
-                        .inner;
-                    if clicked {
-                        self.actions.inspect_field_stats = Some(field);
-                        ui.close();
-                    }
-                }
-            });
+            let fields: Vec<FieldId> = pane.traces.iter().map(|trace| trace.field).collect();
+            let stats_info = egui::Image::new(crate::icons::info())
+                .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
+                .tint(ui.visuals().text_color());
+            if ui
+                .add_enabled(
+                    !fields.is_empty(),
+                    egui::Button::image_and_text(stats_info, "Field stats"),
+                )
+                .clicked()
+            {
+                self.actions.inspect_field_stats = Some(fields);
+                ui.close();
+            }
 
             ui.menu_image_text_button(menu_icon(ui, crate::icons::pencil()), "Edit trace", |ui| {
                 let entries: Vec<_> = pane
