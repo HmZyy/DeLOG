@@ -105,10 +105,6 @@ impl FieldStatsController {
         self.errors.clear();
     }
 
-    pub fn selected(&self) -> Option<FieldId> {
-        self.fields.first().copied()
-    }
-
     pub fn fields(&self) -> &[FieldId] {
         &self.fields
     }
@@ -123,10 +119,6 @@ impl FieldStatsController {
 
     pub fn set_tab(&mut self, tab: StatsTab) {
         self.tab = tab;
-    }
-
-    pub fn request(&mut self, key: StatsRequestKey, snapshot: Arc<StoreSnapshot>, now: Instant) {
-        self.request_keys(vec![key], snapshot, now);
     }
 
     pub fn request_all(
@@ -200,35 +192,17 @@ impl FieldStatsController {
         self.maybe_launch(now);
     }
 
-    pub fn result(&self) -> Option<&FieldStats> {
-        self.selected().and_then(|field| self.result_for(field))
-    }
-
     pub fn result_for(&self, field: FieldId) -> Option<&FieldStats> {
         let (key, stats) = self.displayed.get(&field)?;
         (Some(*key) == self.current_key(field)).then_some(stats)
-    }
-
-    pub fn stale_result(&self) -> Option<&FieldStats> {
-        self.selected()
-            .and_then(|field| self.stale_result_for(field))
     }
 
     pub fn stale_result_for(&self, field: FieldId) -> Option<&FieldStats> {
         self.displayed.get(&field).map(|(_, stats)| stats)
     }
 
-    pub fn error(&self) -> Option<&str> {
-        self.selected().and_then(|field| self.error_for(field))
-    }
-
     pub fn error_for(&self, field: FieldId) -> Option<&str> {
         self.errors.get(&field).map(String::as_str)
-    }
-
-    pub fn is_updating(&self) -> bool {
-        self.selected()
-            .is_some_and(|field| self.is_updating_for(field))
     }
 
     pub fn is_updating_for(&self, field: FieldId) -> bool {
