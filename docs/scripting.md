@@ -12,6 +12,7 @@ This is an **optional, build-time feature**. It is off by default.
 - [The Scripts UI](#the-scripts-ui)
 - [Custom file parsers](#custom-file-parsers)
 - [How scripts produce data](#how-scripts-produce-data)
+- [Declarative operations](#declarative-operations)
 - [Live transforms](#live-transforms)
 - [Runtime variables](#runtime-variables)
 - [API reference](#api-reference)
@@ -174,10 +175,148 @@ Key behaviors:
 
 ---
 
+## Declarative operations
+
+For common conversions, splits, and joins, declare the operation instead of
+writing separate snapshot and live callbacks. These are the exact signatures:
+
+```python
+delog.transform(topic, *, multiplier=1.0, offset=0.0, fields=None,
+                unit=None, units=None, output_topic=None, source=None,
+                instance=None, mode="both")
+delog.group_by(topic, field, *, fields=None, output_topic=None, source=None,
+               instance=None, mode="both")
+delog.merge(topics, *, base_topic, output_topic, source=None, mode="both")
+```
+
+`mode` is `"snapshot"`, `"live"`, or `"both"` (the default). Snapshot mode
+processes the data visible when the script runs. Live mode processes only
+future live batches. Both mode backfills the current snapshot and then
+continues on the same appendable `script:<name>` source. Per-input watermarks
+discard a mirrored or late batch row whose timestamp is at or before the last
+snapshot row, so the backfill is not duplicated. Re-running still replaces the
+previous generation.
+
+Declarative calls entered in the scripting console follow the same snapshot
+and live behavior and publish under `script:console`. A later declarative
+console call replaces the previous console generation; ordinary console input
+does not remove it.
+
+`source=` is an exact source-label filter, using the labels shown by
+`delog.catalog()` (for example, `"flight"` or a live connection's label).
+It applies to both the snapshot and future batches, including the first live
+batch before its raw source is visible in the browser. `instance=` disambiguates
+topic instances for `transform` and `group_by`. Without those selectors, an
+ambiguous snapshot topic is an error. Generated topics from all declarations in
+one run share the run's `script:<name>` source; declarations do not consume
+their own derived output as live input. Each generated topic name has exactly
+one owning declaration per run. Static collisions fail before the source is
+opened; dynamic `group_by` names are claimed atomically on first output. The
+owner must keep the exact field order, names, types, and units thereafter.
+
+### Transform
+
+`transform` copies the input topic and applies this arithmetic, in this order,
+to every selected numeric field:
+
+```text
+output = input * multiplier + offset
+```
+
+With `fields=None`, all numeric fields are selected. An explicit `fields=[...]`
+limits the arithmetic to those names; every other field still passes through.
+Utf8 fields also pass through unchanged as Utf8 values, including when selected
+(they are not converted to numeric data). Numeric output is Float64. Existing
+units are retained unless `unit="..."` overrides every transformed numeric
+field or `units={"field": "..."}` overrides named fields; `unit` and `units`
+cannot be combined. The output topic defaults to the input topic name.
+
+```python
+delog.transform("NAV_CONTROLLER_OUTPUT", multiplier=0.017453292519943295,
+                fields=["nav_roll", "nav_pitch", "nav_bearing"],
+                unit="rad", output_topic="NAV_CONTROLLER_OUTPUT_RAD")
+```
+
+The multiplier and offset must be finite, `fields` cannot be empty, requested
+fields must exist when the input schema is available, and an explicitly empty
+`output_topic` is rejected.
+
+### Group by a field
+
+`group_by` emits one topic per distinct key and removes the grouping field from
+the emitted fields. With `fields=None`, it copies every other field; an explicit
+`fields=[...]` copies only those fields (and still omits the key). Utf8 keys must
+be non-empty. Numeric keys must be finite; integral values are formatted without
+a decimal suffix. Rows with `""`, NaN, or infinite keys are skipped.
+
+The default output template is `"{topic}/{value}"`. A custom `output_topic`
+must contain `{value}`; `{topic}` is optional. Both placeholders are replaced
+for each group. Units and the string-versus-numeric kind are preserved; numeric
+fields are normalized to Arrow Float64, while string fields remain Arrow Utf8.
+
+```python
+delog.group_by("PARAM_VALUE", "param_id")
+```
+
+For example, keys `SYS_ID` and `RATE` produce `PARAM_VALUE/SYS_ID` and
+`PARAM_VALUE/RATE`. A missing key or selected field is an error once a matching
+schema is available.
+
+### Merge topics
+
+`topics` is an insertion-ordered mapping from topic names to non-empty lists of
+fields. `base_topic` must be one of its keys and supplies the output timeline.
+Every other input is aligned by previous-sample hold: at each base timestamp,
+the merge uses that field's latest sample at or before the base time. Before a
+secondary field's first sample, numeric values are NaN and Utf8 values are
+`""`. Units and the string-versus-numeric kind are preserved; numeric fields
+are normalized to Arrow Float64, while string fields remain Arrow Utf8.
+
+```python
+delog.merge({"NAV_CONTROLLER_OUTPUT": ["nav_roll"], "GPS": ["alt"]},
+            base_topic="NAV_CONTROLLER_OUTPUT", output_topic="NAV_WITH_ALT")
+```
+
+Output fields retain their requested names when unique. If a name occurs in
+more than one input, every occurrence is prefixed with its configured topic
+name and `_` (for example, `GPS_alt`); a remaining duplicate after prefixing is
+an error. Snapshot inputs must resolve within the same raw source. Live merge
+state is also isolated per raw source, and secondary batches update held
+values. Ordinarily output is emitted when a base-topic batch arrives.
+
+In default `both` mode, the last typed value of every snapshot secondary field
+seeds the live previous-sample history, preserving continuity across the
+snapshot/live boundary. In live-only mode, base batches that arrive before all
+selected secondary fields have supplied type and unit metadata are retained
+without counting as operation errors. When the final secondary schema arrives,
+the buffered base rows are emitted in timestamp order (arrival order breaks
+ties), with typed NaN or empty-string gaps before each secondary's first
+sample. This pending storage is isolated per raw source and grows with early
+base traffic until all selected secondary schemas arrive. A secondary sample
+that arrives late can be sorted into the history and affect a future base row,
+but already emitted base rows are never rewritten.
+
+### Errors and stable live output
+
+Declaration errors (invalid modes, empty selections, bad templates, invalid
+merge shapes, or conflicting unit options) fail the script without registering
+a partial operation. Snapshot preparation is all-or-nothing: a missing topic in
+`mode="snapshot"`, ambiguity, missing field, incompatible source selection, or
+unsupported schema prevents the derived source from opening. In `"live"` and
+`"both"`, a topic absent at run time may appear later.
+
+Once a live output topic is emitted, its field order, names, data types, and
+units are pinned. A later batch that would change that schema is an error. As
+with callback transforms, three consecutive live processing errors disable only
+the failing operation and report it in the Scripting Console.
+
+---
+
 ## Live transforms
 
-Everything above describes **snapshot scripts**: they run once against the data
-that exists the moment you run them. A **live transform** instead registers a
+The manual read/emit APIs describe **snapshot scripts**: they run once against
+the data that exists the moment you run them. Declarative operations can also
+continue live. For custom live processing, a **live transform** registers a
 callback that runs for *future* live batches, continuously appending derived
 fields while telemetry arrives.
 
@@ -276,18 +415,21 @@ Key behaviors:
 - **Re-running replaces.** Re-running a live script removes the previous
   generation's `script:<name>` source and registers the new callbacks against a
   fresh one - no duplicate live sources.
-- **Non-blocking.** Live batches are mirrored to the script engine through a
-  bounded queue; if it fills, batches are dropped (a diagnostic is logged)
-  rather than stalling live ingestion.
+- **Non-blocking and lossless staging.** Live batches are mirrored to the
+  script engine through an unbounded MPSC staging queue. Sending does not wait
+  for script execution or registration, so batches captured at that boundary
+  are retained instead of being dropped. Sustained input faster than script
+  processing can consume memory until the worker catches up.
 - **Self-disabling on errors.** If a callback raises on three consecutive
   batches, that transform is disabled and an error is reported to the console;
   other transforms keep running. Error messages identify the transform as
   `<script>.<function>` (e.g. `named_values_live_split.split_named_floats`).
 
-**Version 1 live transforms are same-topic only.** The callback sees one
+**Version 1 `@delog.live_transform` callbacks are same-topic only.** A callback sees one
 incoming topic batch at a time. It cannot join across topics, resample onto
-another timeline, or keep rolling-window state between batches - for that, use a
-snapshot script after capture.
+another timeline, or keep rolling-window state between batches. Declarative
+`delog.merge(...)` supports previous-sample joins across topics; for custom
+cross-topic logic, use a snapshot script after capture.
 
 ---
 
@@ -389,6 +531,9 @@ session. You never import or construct it.
 | `delog.combo(name, options, *, default=None, label=None)` | `str` | Declare a combo-box variable; returns its current value. |
 | `delog.text(name, default, *, label=None)` | `str` | Declare a text-field variable; returns its current value. |
 | `delog.param(name)` | `float`/`int`/`bool`/`str` | Read the current value of a variable inside a live callback. |
+| `delog.transform(topic, *, multiplier=1.0, offset=0.0, fields=None, unit=None, units=None, output_topic=None, source=None, instance=None, mode="both")` | `None` | Scale/offset selected numeric fields and pass through the topic. |
+| `delog.group_by(topic, field, *, fields=None, output_topic=None, source=None, instance=None, mode="both")` | `None` | Split a topic into stable per-key output topics. |
+| `delog.merge(topics, *, base_topic, output_topic, source=None, mode="both")` | `None` | Previous-sample align selected fields onto a base topic. |
 | `delog.sources()` | `list[str]` | All live field paths, `"source/topic/field"`. |
 | `delog.catalog()` | `Catalog` | Structured source/topic/field catalogue. |
 | `delog.topic(name, *, source=None, instance=None)` | `TopicRef` | Find one topic by name, source, and optional instance. |
@@ -715,22 +860,22 @@ out.add_field("diff", baro.v - gps_on_baro, unit="m")
 The [`scripts/`](../scripts/) directory ships runnable examples you can copy into
 your [script library](#the-script-library) or open in the Console. Snapshot
 examples have two versions: `snapshot/v1` keeps the original path-string style,
-while `snapshot/v2` uses the structured lookup and emit APIs. Live examples
-currently live under `live/v1`.
+while `snapshot/v2` uses the newer structured and declarative APIs. Live
+examples currently live under `live/v1`.
 
 | Script | Kind | What it does |
 | --- | --- | --- |
 | [`snapshot/v2/vehicle_attitude_euler.py`](../scripts/snapshot/v2/vehicle_attitude_euler.py) | snapshot | Converts a PX4 `vehicle_attitude[0]` quaternion to roll/pitch/yaw using `delog.topic(...).read(...)` and `delog.emit(...)`. |
-| [`snapshot/v2/nav_controller_output_radians.py`](../scripts/snapshot/v2/nav_controller_output_radians.py) | snapshot | Re-emits ArduPilot `NAV_CONTROLLER_OUTPUT` angles in radians using structured topic lookup and one-call emit. |
+| [`snapshot/v2/nav_controller_output_radians.py`](../scripts/snapshot/v2/nav_controller_output_radians.py) | snapshot + live | Converts ArduPilot `NAV_CONTROLLER_OUTPUT` angle fields (`nav_roll`, `nav_pitch`, and `nav_bearing`) to radians with one declarative transform. |
 | [`snapshot/v1/vehicle_attitude_euler.py`](../scripts/snapshot/v1/vehicle_attitude_euler.py) | snapshot | Legacy path-string version of the PX4 attitude conversion example. |
 | [`snapshot/v1/nav_controller_output_radians.py`](../scripts/snapshot/v1/nav_controller_output_radians.py) | snapshot | Legacy path-string version of the ArduPilot angle conversion example. |
-| [`live/v1/nav_controller_live_rad.py`](../scripts/live/v1/nav_controller_live_rad.py) | live transform | The live-streaming counterpart: a `@delog.live_transform` that converts `NAV_CONTROLLER_OUTPUT` angles to radians as batches arrive. |
-| [`live/v1/named_values_live_split.py`](../scripts/live/v1/named_values_live_split.py) | live transform | Splits live `NAMED_VALUE_FLOAT`/`NAMED_VALUE_INT` streams into one derived topic per `name` (dynamic output topics), so named values arrive sorted by category. |
-| [`live/v1/param_value_live_split.py`](../scripts/live/v1/param_value_live_split.py) | live transform | Splits a live `PARAM_VALUE` stream into one derived topic per `param_id`, so each parameter's value gets its own trace. |
+| [`live/v1/nav_controller_live_rad.py`](../scripts/live/v1/nav_controller_live_rad.py) | snapshot + live | Converts `NAV_CONTROLLER_OUTPUT` angle fields (`nav_roll`, `nav_pitch`, and `nav_bearing`) to radians with the same declarative transform. |
+| [`live/v1/named_values_live_split.py`](../scripts/live/v1/named_values_live_split.py) | snapshot + live | Uses declarative grouping to split `NAMED_VALUE_FLOAT`/`NAMED_VALUE_INT` into one topic per `name`. |
+| [`live/v1/param_value_live_split.py`](../scripts/live/v1/param_value_live_split.py) | snapshot + live | Uses declarative grouping to split `PARAM_VALUE` into one topic per `param_id`. |
 | [`live/v1/tunable_lowpass.py`](../scripts/live/v1/tunable_lowpass.py) | live transform | An exponential low-pass filter with a slider-controlled smoothing factor. Demonstrates runtime-tweakable variables in a live transform: move the slider to change the filter coefficient live, without re-running. |
 
-The snapshot/live pair (`nav_controller_*`) is a good side-by-side reference for
-the difference between the two execution modes.
+`tunable_lowpass.py` remains the callback escape hatch for algorithms that need
+custom per-batch state or math.
 
 ---
 
@@ -739,17 +884,19 @@ the difference between the two execution modes.
 - **Not sandboxed.** Embedded CPython runs with your full user privileges
   (filesystem, network). Only run scripts you trust. This is a deliberate
   trade-off for the power of real CPython + numpy.
-- **String fields are read-only.** `DelogField.s` and live-transform string
-  batch attributes let you *read* Utf8 fields, but script **output** stays
-  Float64-only - `add_field` and the numeric forms of a live transform's
-  return value always take `float64` arrays. Materialized `DelogField` reads do
-  not carry `.unit` or `.dtype`; use a `FieldRef` when you need unit metadata.
-- **Output is `float64`.** Even if a source field was integer/bool, derived
-  output columns are stored as `Float64`.
+- **Manual and callback string output is unsupported.** `DelogField.s` and
+  live-transform string batch attributes let you *read* Utf8 fields, but
+  `add_field`, `emit`, and callback return values take numeric arrays.
+  Declarative operations are the exception: they preserve pass-through Utf8
+  fields and missing strings as `""`. Materialized `DelogField` reads do not
+  carry `.unit` or `.dtype`; use a `FieldRef` when you need unit metadata.
+- **Numeric output is `float64`.** Even if a source field was integer/bool,
+  derived numeric output columns are stored as `Float64`.
 - **Length must match.** `add_field` values must match the length of the
   topic's `times_us`. Combine differently-sampled inputs with `resample_prev`.
 - **Print-only scripts do not emit a source.** A run that never calls
-  `delog.output(...)` or `delog.emit(...)` only writes console output.
+  `delog.output(...)` or `delog.emit(...)` and declares no operation only writes
+  console output.
 - **Cancellation is cooperative** (see above) - long single C calls can't be
   interrupted mid-call.
 - **Long loops block that script.** Each run/eval executes on the interpreter

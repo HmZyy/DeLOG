@@ -430,7 +430,7 @@ impl ScriptsPanel {
     /// exists if a script already ran (which spawned the engine).
     pub fn live_batch_sender_if_running(
         &self,
-    ) -> Option<std::sync::mpsc::SyncSender<delog_core::ingest::ParsedBatch>> {
+    ) -> Option<std::sync::mpsc::Sender<delog_script::LiveBatchInput>> {
         self.engine.as_ref().map(|e| e.live_batch_sender())
     }
 
