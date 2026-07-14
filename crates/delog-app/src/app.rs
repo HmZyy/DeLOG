@@ -39,7 +39,14 @@ type LayoutImportResult = Result<LayoutDoc, LayoutError>;
 type LayoutExportResult = Result<std::path::PathBuf, LayoutError>;
 type DiagnosticsExportResult = Result<std::path::PathBuf, String>;
 type ProfilingExportResult = Result<std::path::PathBuf, String>;
-type CsvExportResult = Result<(std::path::PathBuf, u64), String>;
+
+struct DataExportSuccess {
+    path: std::path::PathBuf,
+    format: crate::data_export::ExportFormat,
+    rows: u64,
+}
+
+type DataExportResult = Result<DataExportSuccess, String>;
 const SESSION_AUTOSAVE_INTERVAL: Duration = Duration::from_secs(30);
 const PERFORMANCE_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 const LOG_RETENTION: usize = 1_000;
@@ -258,10 +265,9 @@ pub struct DelogApp {
     message_popups: Vec<crate::message_popup::MessagePopup>,
     exported_profiling: mpsc::Receiver<ProfilingExportResult>,
     exported_profiling_tx: mpsc::Sender<ProfilingExportResult>,
-    csv_export: crate::csv_export::CsvExportState,
-    csv_export_tx: mpsc::Sender<CsvExportResult>,
-    csv_export_rx: mpsc::Receiver<CsvExportResult>,
-    csv_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    data_export: crate::data_export::DataExportState,
+    data_export_tx: mpsc::Sender<DataExportResult>,
+    data_export_rx: mpsc::Receiver<DataExportResult>,
     image_export_writes: mpsc::Receiver<crate::image_export::PngWriteRequest>,
     image_export_writes_tx: mpsc::Sender<crate::image_export::PngWriteRequest>,
     pending_image_capture: Option<crate::image_export::PendingImageCapture>,
@@ -351,7 +357,7 @@ impl DelogApp {
         let (exported_diagnostics_tx, exported_diagnostics) = mpsc::channel();
         let (exported_kml_tx, exported_kml) = mpsc::channel();
         let (exported_profiling_tx, exported_profiling) = mpsc::channel();
-        let (csv_export_tx, csv_export_rx) = mpsc::channel();
+        let (data_export_tx, data_export_rx) = mpsc::channel();
         let (image_export_writes_tx, image_export_writes) = mpsc::channel();
         let session = Session::new(cc.egui_ctx.clone());
         // Shared metrics registry so cache metrics land in the same dock.
@@ -397,10 +403,9 @@ impl DelogApp {
             message_popups: Vec::new(),
             exported_profiling,
             exported_profiling_tx,
-            csv_export: crate::csv_export::CsvExportState::default(),
-            csv_export_tx,
-            csv_export_rx,
-            csv_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            data_export: crate::data_export::DataExportState::default(),
+            data_export_tx,
+            data_export_rx,
             image_export_writes,
             image_export_writes_tx,
             pending_image_capture: None,
@@ -880,18 +885,22 @@ impl DelogApp {
             }
         }
 
-        while let Ok(result) = self.csv_export_rx.try_recv() {
+        while let Ok(result) = self.data_export_rx.try_recv() {
             match result {
-                Ok((path, rows)) => {
-                    self.session
-                        .push_diagnostic(delog_core::diagnostics::Diag::info(
-                            "csv-export",
-                            format!("exported {rows} rows to {}", path.display()),
-                        ))
-                }
-                Err(err) => self
+                Ok(success) => self
                     .session
-                    .push_diagnostic(delog_core::diagnostics::Diag::error("csv-export", err)),
+                    .push_diagnostic(delog_core::diagnostics::Diag::info(
+                        "data-export",
+                        format!(
+                            "exported {} rows as {} to {}",
+                            success.rows,
+                            success.format.label(),
+                            success.path.display()
+                        ),
+                    )),
+                Err(error) => self
+                    .session
+                    .push_diagnostic(delog_core::diagnostics::Diag::error("data-export", error)),
             }
         }
     }
@@ -1387,64 +1396,54 @@ impl DelogApp {
             .expect("spawn profiling export dialog thread");
     }
 
-    fn spawn_csv_export(
+    fn spawn_data_export(
         &mut self,
         ctx: &egui::Context,
         snapshot: &std::sync::Arc<delog_core::snapshot::StoreSnapshot>,
-        all_fields: &[crate::csv_export::CsvField],
-        req: crate::csv_export::CsvExportRequest,
+        all_fields: &[crate::data_export::ExportField],
+        request: crate::data_export::DataExportRequest,
     ) {
-        use std::sync::atomic::Ordering;
-        let chosen: Vec<crate::csv_export::CsvField> = req
-            .fields
-            .iter()
-            .filter_map(|id| all_fields.iter().find(|f| f.id == *id))
-            .map(|f| crate::csv_export::CsvField {
-                id: f.id,
-                label: f.label.clone(),
-                unit: f.unit.clone(),
-            })
-            .collect();
-        let origin_us = snapshot.global_time_range().map(|r| r.min_us).unwrap_or(0);
+        let chosen = match crate::data_export::resolve_export_fields(&request.fields, all_fields) {
+            Ok(chosen) => chosen,
+            Err(error) => {
+                let _ = self.data_export_tx.send(Err(error.to_string()));
+                ctx.request_repaint();
+                return;
+            }
+        };
+        let origin_us = snapshot
+            .global_time_range()
+            .map(|range| range.min_us)
+            .unwrap_or(0);
         let snapshot = std::sync::Arc::clone(snapshot);
-        let tx = self.csv_export_tx.clone();
+        let tx = self.data_export_tx.clone();
         let ctx = ctx.clone();
-        self.csv_cancel.store(false, Ordering::Relaxed);
-        let cancel = std::sync::Arc::clone(&self.csv_cancel);
-        let mode = req.mode;
-        let window = req.window;
         std::thread::Builder::new()
-            .name("delog-csv-export".into())
+            .name("delog-data-export".into())
             .spawn(move || {
+                let format = request.format;
                 let picked = rfd::FileDialog::new()
-                    .add_filter("CSV", &["csv"])
+                    .add_filter(format.filter_name(), &[format.extension()])
                     .add_filter("All files", &["*"])
-                    .set_title("Export CSV")
-                    .set_file_name("export.csv")
+                    .set_title(format.dialog_title())
+                    .set_file_name(format.default_file_name())
                     .save_file();
                 let Some(path) = picked else { return };
-                let result = (|| {
-                    let file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
-                    let mut w = std::io::BufWriter::new(file);
-                    let rows = crate::csv_export::write_csv(
-                        &mut w,
-                        &snapshot,
-                        &chosen,
-                        window,
-                        mode,
-                        origin_us,
-                        &cancel,
-                        |_frac| {},
-                    )
-                    .map_err(|e| e.to_string())?;
-                    use std::io::Write;
-                    w.flush().map_err(|e| e.to_string())?;
-                    Ok::<_, String>((path, rows))
-                })();
+                let result = crate::data_export::write_export_file(
+                    &path,
+                    format,
+                    &snapshot,
+                    &chosen,
+                    request.window,
+                    request.mode,
+                    origin_us,
+                )
+                .map(|rows| DataExportSuccess { path, format, rows })
+                .map_err(|error| error.to_string());
                 let _ = tx.send(result);
                 ctx.request_repaint();
             })
-            .expect("spawn csv export thread");
+            .expect("spawn data export thread");
     }
 
     fn load_layout(&mut self, name: &str, snapshot: &delog_core::snapshot::StoreSnapshot) {
@@ -1958,8 +1957,8 @@ impl eframe::App for DelogApp {
                         self.spawn_export_profiling_dialog(ui.ctx(), frame, &snapshot);
                         ui.close();
                     }
-                    if ui.button("Export CSV...").clicked() {
-                        self.csv_export.open = true;
+                    if ui.button("Export Data...").clicked() {
+                        self.data_export.open();
                         ui.close();
                     }
                     ui.separator();
@@ -2703,23 +2702,27 @@ impl eframe::App for DelogApp {
             self.markers.push_loaded(t_us, name, color, String::new());
         }
 
-        if self.csv_export.open {
+        if self.data_export.open {
             let model = self
                 .browser_model
                 .as_ref()
                 .map(|(_, m)| m.clone())
                 .unwrap_or_default();
-            let fields = crate::csv_export::numeric_fields(&snapshot, &model);
+            let fields = crate::data_export::numeric_fields(&snapshot, &model);
             let full = snapshot
                 .global_time_range()
                 .map(|r| (r.min_us, r.max_us))
                 .unwrap_or((0, 1));
             let visible = self.view.map(|v| (v.min_us, v.max_us)).unwrap_or(full);
-            if let Some(req) =
-                crate::csv_export::dialog_ui(ui.ctx(), &mut self.csv_export, &fields, visible, full)
-            {
-                self.spawn_csv_export(ui.ctx(), &snapshot, &fields, req);
-                self.csv_export.open = false;
+            if let Some(req) = crate::data_export::dialog_ui(
+                ui.ctx(),
+                &mut self.data_export,
+                &fields,
+                visible,
+                full,
+            ) {
+                self.spawn_data_export(ui.ctx(), &snapshot, &fields, req);
+                self.data_export.open = false;
             }
         }
 
@@ -4202,6 +4205,21 @@ mod tests {
             field_stats_window_title("flight / ATT.Roll"),
             "flight / ATT.Roll"
         );
+    }
+
+    #[test]
+    fn file_menu_opens_data_export_through_resetting_api() {
+        let source = include_str!("app.rs");
+        let export_action = source
+            .split("if ui.button(\"Export Data...\").clicked()")
+            .nth(1)
+            .expect("File menu should expose data export")
+            .split("ui.separator();")
+            .next()
+            .expect("data export should precede the File menu separator");
+
+        assert!(export_action.contains("self.data_export.open();"));
+        assert!(!export_action.contains("self.data_export.open = true;"));
     }
 
     #[test]
