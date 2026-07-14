@@ -1,12 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::{Receiver, Sender, SyncSender, channel, sync_channel};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use delog_core::identity::SourceId;
-use delog_core::ingest::{IngestSender, IngestSink, ParsedBatch, SourceKind};
+use delog_core::ingest::{IngestSender, IngestSink, ParseSummary, ParsedBatch, SourceKind};
 use delog_core::metrics::MetricsRegistry;
 use delog_core::snapshot::DataStore;
 use numpy::IntoPyArray;
@@ -21,11 +21,26 @@ use crate::custom_parser::{
 use crate::live::{
     LiveBatchPy, LiveTransformBatch, LiveTransformSpec, parse_transform_result, result_to_batch,
 };
+use crate::operations::live::ActiveOperation;
 use crate::params::{self, SharedParams};
 
-pub const LIVE_TRANSFORM_QUEUE_CAP: usize = 128;
-
 const LIVE_TRANSFORM_ERROR_LIMIT: u8 = 3;
+const CONSOLE_SCRIPT_NAME: &str = "console";
+
+#[derive(Debug, Clone)]
+pub struct LiveBatchInput {
+    pub source_label: String,
+    pub batch: ParsedBatch,
+}
+
+impl LiveBatchInput {
+    pub fn new(source_label: impl Into<String>, batch: ParsedBatch) -> Self {
+        Self {
+            source_label: source_label.into(),
+            batch,
+        }
+    }
+}
 
 struct ActiveTransform {
     spec: LiveTransformSpec,
@@ -293,12 +308,13 @@ pub enum ScriptEvent {
 /// Dropping it shuts the worker down.
 pub struct ScriptEngine {
     tx: Sender<EngineCommand>,
-    live_tx: SyncSender<ParsedBatch>,
+    live_tx: Sender<LiveBatchInput>,
     events: Receiver<ScriptEvent>,
     handle: Option<JoinHandle<()>>,
     /// Mirrors the worker's `active_transforms`, shared so it stays current as
     /// scripts register/unregister.
     active_live: Arc<Mutex<HashMap<String, Vec<LiveTransformSpec>>>>,
+    active_declarative: Arc<Mutex<HashSet<String>>>,
     parser_cancellation: Arc<Mutex<ParserCancellationState>>,
     params: SharedParams,
 }
@@ -314,10 +330,12 @@ impl ScriptEngine {
     ) -> Self {
         let (cmd_tx, cmd_rx) = channel::<EngineCommand>();
         let (evt_tx, evt_rx) = channel::<ScriptEvent>();
-        let (live_tx, live_rx) = sync_channel::<ParsedBatch>(LIVE_TRANSFORM_QUEUE_CAP);
+        let (live_tx, live_rx) = channel::<LiveBatchInput>();
         let active_live: Arc<Mutex<HashMap<String, Vec<LiveTransformSpec>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let active_live_worker = Arc::clone(&active_live);
+        let active_declarative = Arc::new(Mutex::new(HashSet::new()));
+        let active_declarative_worker = Arc::clone(&active_declarative);
         let parser_cancellation = Arc::new(Mutex::new(ParserCancellationState::default()));
         let parser_cancellation_worker = Arc::clone(&parser_cancellation);
         let params_worker = Arc::clone(&params);
@@ -332,6 +350,7 @@ impl ScriptEngine {
                     live_rx,
                     evt_tx,
                     active_live_worker,
+                    active_declarative_worker,
                     parser_cancellation_worker,
                     params_worker,
                 )
@@ -343,6 +362,7 @@ impl ScriptEngine {
             events: evt_rx,
             handle: Some(handle),
             active_live,
+            active_declarative,
             parser_cancellation,
             params,
         }
@@ -387,22 +407,26 @@ impl ScriptEngine {
         }
     }
 
-    /// A cloneable sender for raw live batches (the app's live-decoder side
-    /// forwards each batch here so registered transforms can run on it).
-    pub fn live_batch_sender(&self) -> SyncSender<ParsedBatch> {
+    /// A cloneable sender for labeled raw live batches. The app forwards the
+    /// identity-registry label with each batch because the corresponding store
+    /// snapshot may not be published yet.
+    pub fn live_batch_sender(&self) -> Sender<LiveBatchInput> {
         self.live_tx.clone()
     }
 
-    /// Non-blocking submit of one raw live batch. Returns the batch back if the
-    /// queue is full or the worker is gone — live data is droppable.
+    /// Non-blocking submit of one raw live batch to the unbounded staging queue.
+    /// Returns the batch only if the worker is gone.
     // The Err variant hands the (large) batch back so the caller can drop or
     // count it; boxing would defeat the give-back-without-copy purpose.
     #[allow(clippy::result_large_err)]
-    pub fn try_send_live_batch(&self, batch: ParsedBatch) -> Result<(), ParsedBatch> {
-        match self.live_tx.try_send(batch) {
+    pub fn try_send_live_batch(
+        &self,
+        source_label: impl Into<String>,
+        batch: ParsedBatch,
+    ) -> Result<(), ParsedBatch> {
+        match self.live_tx.send(LiveBatchInput::new(source_label, batch)) {
             Ok(()) => Ok(()),
-            Err(std::sync::mpsc::TrySendError::Full(batch)) => Err(batch),
-            Err(std::sync::mpsc::TrySendError::Disconnected(batch)) => Err(batch),
+            Err(std::sync::mpsc::SendError(input)) => Err(input.batch),
         }
     }
 
@@ -422,6 +446,7 @@ impl ScriptEngine {
     /// transform. The UI uses this to enable/disable the Unregister button.
     pub fn has_live_transform(&self, name: &str) -> bool {
         self.active_live.lock().unwrap().contains_key(name)
+            || self.active_declarative.lock().unwrap().contains(name)
     }
 
     /// Shared param store, for the Variables UI to read specs / write edits.
@@ -499,9 +524,10 @@ fn worker_loop(
     sender: IngestSender,
     metrics: Arc<MetricsRegistry>,
     cmd_rx: Receiver<EngineCommand>,
-    live_rx: Receiver<ParsedBatch>,
+    live_rx: Receiver<LiveBatchInput>,
     evt_tx: Sender<ScriptEvent>,
     active_live: Arc<Mutex<HashMap<String, Vec<LiveTransformSpec>>>>,
+    active_declarative: Arc<Mutex<HashSet<String>>>,
     parser_cancellation: Arc<Mutex<ParserCancellationState>>,
     params: SharedParams,
 ) {
@@ -519,6 +545,8 @@ fn worker_loop(
     // Live transforms currently active, keyed by the registering script name. A
     // re-run replaces that script's set.
     let mut active_transforms: HashMap<String, Vec<ActiveTransform>> = HashMap::new();
+    let mut declarative_sources: HashMap<String, SourceId> = HashMap::new();
+    let mut active_operations: HashMap<String, Vec<ActiveOperation>> = HashMap::new();
     let mut run_counter: u64 = 0;
 
     Python::attach(|py| {
@@ -547,9 +575,12 @@ fn worker_loop(
                     &globals,
                     &evt_tx,
                     &active_live,
+                    &active_declarative,
                     &mut prev_sources,
                     &mut live_sources,
                     &mut active_transforms,
+                    &mut declarative_sources,
+                    &mut active_operations,
                     &mut run_counter,
                     &parser_cancellation,
                     &params,
@@ -563,8 +594,15 @@ fn worker_loop(
         }
 
         match live_rx.try_recv() {
-            Ok(batch) => {
-                run_live_transforms(&sender, &evt_tx, &mut active_transforms, batch);
+            Ok(input) => {
+                run_live_transforms(&sender, &evt_tx, &mut active_transforms, &input.batch);
+                run_declarative_operations(
+                    &sender,
+                    &evt_tx,
+                    &mut active_operations,
+                    &input.source_label,
+                    &input.batch,
+                );
                 let _ = evt_tx.send(ScriptEvent::LiveBatchProcessed);
                 continue;
             }
@@ -585,14 +623,14 @@ fn run_live_transforms(
     sender: &IngestSender,
     evt_tx: &Sender<ScriptEvent>,
     active_transforms: &mut HashMap<String, Vec<ActiveTransform>>,
-    batch: ParsedBatch,
+    batch: &ParsedBatch,
 ) {
     for transforms in active_transforms.values_mut() {
         for transform in transforms.iter_mut() {
-            if transform.disabled || !transform.spec.matches(&batch) {
+            if transform.disabled || !transform.spec.matches(batch) {
                 continue;
             }
-            match run_one_transform(transform, &batch) {
+            match run_one_transform(transform, batch) {
                 Ok(derived) => {
                     transform.consecutive_errors = 0;
                     let mut sink = sender.file_sink();
@@ -614,6 +652,176 @@ fn run_live_transforms(
             }
         }
     }
+}
+
+fn run_declarative_operations(
+    sender: &IngestSender,
+    evt_tx: &Sender<ScriptEvent>,
+    active_operations: &mut HashMap<String, Vec<ActiveOperation>>,
+    source_label: &str,
+    batch: &ParsedBatch,
+) {
+    if source_label.starts_with("script:") {
+        return;
+    }
+
+    for (script, operations) in active_operations.iter_mut() {
+        for operation in operations {
+            if !operation.matches(batch, source_label) {
+                continue;
+            }
+            match operation.process(batch, source_label) {
+                Ok(derived) => {
+                    let mut sink = sender.file_sink();
+                    for batch in derived {
+                        sink.submit(batch);
+                    }
+                }
+                Err(message) => {
+                    if operation.consecutive_errors() >= LIVE_TRANSFORM_ERROR_LIMIT {
+                        operation.disable();
+                        let _ = evt_tx.send(ScriptEvent::Error(format!(
+                            "declarative operation '{}.{}' disabled after 3 consecutive errors; last: {message}",
+                            script,
+                            operation.description(),
+                        )));
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn snapshot_without_sources(
+    snapshot: &delog_core::snapshot::StoreSnapshot,
+    excluded: &HashSet<SourceId>,
+) -> delog_core::snapshot::StoreSnapshot {
+    let mut filtered = snapshot.clone();
+    filtered.sources = snapshot
+        .sources
+        .iter()
+        .cloned()
+        .map(|mut source| {
+            if excluded.contains(&source.entry.id) {
+                source.entry.removed = true;
+            }
+            source
+        })
+        .collect::<Vec<_>>()
+        .into();
+    filtered
+}
+
+fn operation_modes(specs: &[crate::operations::OperationSpec]) -> (bool, bool) {
+    let wants_live = specs.iter().any(|spec| match spec {
+        crate::operations::OperationSpec::Transform(spec) => spec.mode.wants_live(),
+        crate::operations::OperationSpec::Merge(spec) => spec.mode.wants_live(),
+        crate::operations::OperationSpec::GroupBy(spec) => spec.mode.wants_live(),
+    });
+    let wants_snapshot = specs.iter().any(|spec| match spec {
+        crate::operations::OperationSpec::Transform(spec) => spec.mode.wants_snapshot(),
+        crate::operations::OperationSpec::Merge(spec) => spec.mode.wants_snapshot(),
+        crate::operations::OperationSpec::GroupBy(spec) => spec.mode.wants_snapshot(),
+    });
+    (wants_live, wants_snapshot)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn install_declarative_generation(
+    name: &str,
+    snapshot: &delog_core::snapshot::StoreSnapshot,
+    specs: &[crate::operations::OperationSpec],
+    sender: &IngestSender,
+    active_live: &Arc<Mutex<HashMap<String, Vec<LiveTransformSpec>>>>,
+    active_declarative: &Arc<Mutex<HashSet<String>>>,
+    prev_sources: &mut HashMap<String, SourceId>,
+    live_sources: &mut HashMap<String, SourceId>,
+    active_transforms: &mut HashMap<String, Vec<ActiveTransform>>,
+    declarative_sources: &mut HashMap<String, SourceId>,
+    active_operations: &mut HashMap<String, Vec<ActiveOperation>>,
+) -> Result<(), String> {
+    let (operation_wants_live, _) = operation_modes(specs);
+    let prior_generated_sources = [
+        declarative_sources.get(name).copied(),
+        live_sources.get(name).copied(),
+        prev_sources.get(name).copied(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<HashSet<_>>();
+    let operation_snapshot = snapshot_without_sources(snapshot, &prior_generated_sources);
+    let snapshot_output =
+        crate::operations::snapshot::prepare_snapshot(&operation_snapshot, specs)?;
+    let prepared = crate::emit::prepare_topics(&snapshot_output.topics)?;
+    let topic_registry = std::rc::Rc::new(std::cell::RefCell::new(snapshot_output.registry));
+    let mut operations = specs
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(index, spec)| {
+            let merge_seeds = snapshot_output
+                .merge_seeds
+                .iter()
+                .filter_map(|(&(operation_index, source), seed)| {
+                    (operation_index == index).then_some((source, seed.clone()))
+                })
+                .collect();
+            ActiveOperation::with_registry(
+                index,
+                spec,
+                SourceId(0),
+                snapshot_output.watermarks.clone(),
+                merge_seeds,
+                std::rc::Rc::clone(&topic_registry),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    active_operations.remove(name);
+    active_declarative.lock().unwrap().remove(name);
+    if let Some(previous) = declarative_sources.remove(name) {
+        sender.remove_source(previous);
+    }
+
+    if !specs.is_empty() {
+        // The declarative generation owns the unsuffixed label. Clear older
+        // legacy generations before opening it; any legacy sources declared
+        // by this run are opened afterwards and stay separate.
+        active_transforms.remove(name);
+        active_live.lock().unwrap().remove(name);
+        if let Some(previous) = live_sources.remove(name) {
+            sender.remove_source(previous);
+        }
+        if let Some(previous) = prev_sources.remove(name) {
+            sender.remove_source(previous);
+        }
+
+        let kind = if operation_wants_live {
+            SourceKind::LiveDerived
+        } else {
+            SourceKind::Derived
+        };
+        let source = {
+            let mut sink = sender.file_sink();
+            let source = sink.open_source(&format!("script:{name}"), kind);
+            for batch in prepared.into_batches(source) {
+                sink.submit(batch);
+            }
+            if !operation_wants_live {
+                sink.close_source(source, ParseSummary::default());
+            }
+            source
+        };
+        for operation in &mut operations {
+            operation.set_source(source);
+        }
+        declarative_sources.insert(name.to_owned(), source);
+        if operation_wants_live {
+            active_operations.insert(name.to_owned(), operations);
+            active_declarative.lock().unwrap().insert(name.to_owned());
+        }
+    }
+    Ok(())
 }
 
 fn run_one_transform(
@@ -686,9 +894,12 @@ fn handle_command(
     globals: &Py<PyDict>,
     evt_tx: &Sender<ScriptEvent>,
     active_live: &Arc<Mutex<HashMap<String, Vec<LiveTransformSpec>>>>,
+    active_declarative: &Arc<Mutex<HashSet<String>>>,
     prev_sources: &mut HashMap<String, SourceId>,
     live_sources: &mut HashMap<String, SourceId>,
     active_transforms: &mut HashMap<String, Vec<ActiveTransform>>,
+    declarative_sources: &mut HashMap<String, SourceId>,
+    active_operations: &mut HashMap<String, Vec<ActiveOperation>>,
     run_counter: &mut u64,
     parser_cancellation: &Arc<Mutex<ParserCancellationState>>,
     params: &SharedParams,
@@ -707,6 +918,7 @@ fn handle_command(
                 let snapshot = store.load();
                 let emit: crate::api::EmitBuffer = std::rc::Rc::default();
                 let live: crate::api::LiveTransformBuffer = std::rc::Rc::default();
+                let operations: crate::operations::OperationBuffer = std::rc::Rc::default();
                 let generation = *run_counter;
                 *run_counter += 1;
                 let run_result: Result<(), String> = Python::attach(|py| {
@@ -717,6 +929,7 @@ fn handle_command(
                             snapshot.clone(),
                             std::rc::Rc::clone(&emit),
                             std::rc::Rc::clone(&live),
+                            std::rc::Rc::clone(&operations),
                             name.clone(),
                             generation,
                             Arc::clone(params),
@@ -734,8 +947,30 @@ fn handle_command(
                 });
                 match run_result {
                     Ok(()) => {
-                        let declared_live = !live.borrow().is_empty();
-                        let declared_snapshot = !emit.borrow().is_empty();
+                        let specs = operations.borrow().clone();
+                        let (operation_wants_live, operation_wants_snapshot) =
+                            operation_modes(&specs);
+                        let declared_live = !live.borrow().is_empty() || operation_wants_live;
+                        let declared_snapshot =
+                            !emit.borrow().is_empty() || operation_wants_snapshot;
+                        if let Err(error) = install_declarative_generation(
+                            &name,
+                            &snapshot,
+                            &specs,
+                            sender,
+                            active_live,
+                            active_declarative,
+                            prev_sources,
+                            live_sources,
+                            active_transforms,
+                            declarative_sources,
+                            active_operations,
+                        ) {
+                            // Preparation is deliberately before teardown/open so a bad rerun
+                            // leaves the prior declarative generation intact.
+                            let _ = evt_tx.send(ScriptEvent::Error(error));
+                        }
+
                         // Replace this script-name's prior live-derived source.
                         // These are appendable (never `close_source`d); the prior
                         // generation is torn down with `remove_source`, which
@@ -869,6 +1104,11 @@ fn handle_command(
                 if let Some(prev) = live_sources.remove(&name) {
                     sender.remove_source(prev);
                 }
+                active_operations.remove(&name);
+                active_declarative.lock().unwrap().remove(&name);
+                if let Some(previous) = declarative_sources.remove(&name) {
+                    sender.remove_source(previous);
+                }
                 // Console confirmation; carries no command-completion semantics.
                 let _ = evt_tx.send(ScriptEvent::Output(format!(
                     "# unregistered live transform '{name}'\n"
@@ -878,6 +1118,7 @@ fn handle_command(
                 let snapshot = store.load();
                 let emit: crate::api::EmitBuffer = std::rc::Rc::default();
                 let live: crate::api::LiveTransformBuffer = std::rc::Rc::default();
+                let operations: crate::operations::OperationBuffer = std::rc::Rc::default();
                 let generation = *run_counter;
                 *run_counter += 1;
                 Python::attach(|py| {
@@ -888,6 +1129,7 @@ fn handle_command(
                             snapshot.clone(),
                             std::rc::Rc::clone(&emit),
                             std::rc::Rc::clone(&live),
+                            std::rc::Rc::clone(&operations),
                             String::new(),
                             generation,
                             Arc::clone(params),
@@ -899,6 +1141,24 @@ fn handle_command(
                 params::set_current_script(Some(String::new()));
                 eval_line(globals, &src, evt_tx);
                 params::set_current_script(None);
+                let specs = operations.borrow().clone();
+                if !specs.is_empty()
+                    && let Err(error) = install_declarative_generation(
+                        CONSOLE_SCRIPT_NAME,
+                        &snapshot,
+                        &specs,
+                        sender,
+                        active_live,
+                        active_declarative,
+                        prev_sources,
+                        live_sources,
+                        active_transforms,
+                        declarative_sources,
+                        active_operations,
+                    )
+                {
+                    let _ = evt_tx.send(ScriptEvent::Error(error));
+                }
                 let _ = evt_tx.send(ScriptEvent::Done);
             }
             ScriptCommand::Complete { seq, text } => {
@@ -1140,12 +1400,14 @@ fn ensure_delog_present(
         let snapshot = store.load();
         let emit: crate::api::EmitBuffer = std::rc::Rc::default();
         let live: crate::api::LiveTransformBuffer = std::rc::Rc::default();
+        let operations: crate::operations::OperationBuffer = std::rc::Rc::default();
         if let Ok(delog) = Bound::new(
             py,
             Delog::new(
                 snapshot,
                 std::rc::Rc::clone(&emit),
                 std::rc::Rc::clone(&live),
+                std::rc::Rc::clone(&operations),
                 String::new(),
                 *run_counter,
                 Arc::clone(params),
@@ -1646,7 +1908,7 @@ def split(batch):
         };
 
         // First batch: {a, b} is recorded as topic T's field set.
-        engine.try_send_live_batch(make_batch()).unwrap();
+        engine.try_send_live_batch("live", make_batch()).unwrap();
         assert_eq!(engine.recv_blocking(), ScriptEvent::LiveBatchProcessed);
 
         // The next LIVE_TRANSFORM_ERROR_LIMIT batches each emit only {a},
@@ -1654,7 +1916,7 @@ def split(batch):
         // and the last one disables the transform.
         let mut disabled_message = None;
         for _ in 0..LIVE_TRANSFORM_ERROR_LIMIT {
-            engine.try_send_live_batch(make_batch()).unwrap();
+            engine.try_send_live_batch("live", make_batch()).unwrap();
             loop {
                 match engine.recv_blocking() {
                     ScriptEvent::LiveBatchProcessed => break,
@@ -2257,7 +2519,7 @@ def f(batch):
     #[test]
     fn failed_active_cancel_can_retry_without_a_second_reset_marker() {
         let (command_tx, command_rx) = channel();
-        let (live_tx, _live_rx) = sync_channel(LIVE_TRANSFORM_QUEUE_CAP);
+        let (live_tx, _live_rx) = channel();
         let (_event_tx, events) = channel();
         let cancellation = Arc::new(Mutex::new(ParserCancellationState::default()));
         cancellation.lock().unwrap().active = true;
@@ -2267,6 +2529,7 @@ def f(batch):
             events,
             handle: None,
             active_live: Arc::new(Mutex::new(HashMap::new())),
+            active_declarative: Arc::new(Mutex::new(HashSet::new())),
             parser_cancellation: Arc::clone(&cancellation),
             params: crate::params::shared_empty(),
         };
@@ -2337,7 +2600,7 @@ def f(batch):
     #[test]
     fn inactive_parser_cancel_succeeds_without_scheduling_an_interrupt() {
         let (command_tx, command_rx) = channel();
-        let (live_tx, _live_rx) = sync_channel(LIVE_TRANSFORM_QUEUE_CAP);
+        let (live_tx, _live_rx) = channel();
         let (_event_tx, events) = channel();
         let cancellation = Arc::new(Mutex::new(ParserCancellationState::default()));
         let engine = ScriptEngine {
@@ -2346,6 +2609,7 @@ def f(batch):
             events,
             handle: None,
             active_live: Arc::new(Mutex::new(HashMap::new())),
+            active_declarative: Arc::new(Mutex::new(HashSet::new())),
             parser_cancellation: Arc::clone(&cancellation),
             params: crate::params::shared_empty(),
         };
@@ -2389,7 +2653,7 @@ def f(batch):
             let (event_tx, event_rx) = channel();
             let cancellation = Arc::new(Mutex::new(ParserCancellationState::default()));
             let (command_tx, command_rx) = channel();
-            let (live_tx, _live_rx) = sync_channel(LIVE_TRANSFORM_QUEUE_CAP);
+            let (live_tx, _live_rx) = channel();
             let (_unused_event_tx, unused_events) = channel();
             let cancel_engine = ScriptEngine {
                 tx: command_tx,
@@ -2397,6 +2661,7 @@ def f(batch):
                 events: unused_events,
                 handle: None,
                 active_live: Arc::new(Mutex::new(HashMap::new())),
+                active_declarative: Arc::new(Mutex::new(HashSet::new())),
                 parser_cancellation: Arc::clone(&cancellation),
                 params: crate::params::shared_empty(),
             };
@@ -2475,7 +2740,7 @@ def f(batch):
     fn send_reports_a_disconnected_worker() {
         let (tx, rx) = channel();
         drop(rx);
-        let (live_tx, _live_rx) = sync_channel(LIVE_TRANSFORM_QUEUE_CAP);
+        let (live_tx, _live_rx) = channel();
         let (_event_tx, events) = channel();
         let engine = ScriptEngine {
             tx,
@@ -2483,6 +2748,7 @@ def f(batch):
             events,
             handle: None,
             active_live: Arc::new(Mutex::new(HashMap::new())),
+            active_declarative: Arc::new(Mutex::new(HashSet::new())),
             parser_cancellation: Arc::new(Mutex::new(ParserCancellationState::default())),
             params: crate::params::shared_empty(),
         };

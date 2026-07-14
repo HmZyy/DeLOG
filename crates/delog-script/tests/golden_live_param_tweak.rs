@@ -69,7 +69,9 @@ def scale(batch):
     };
 
     // Batch 1 with default gain=2.0 -> 5.0 * 2.0 = 10.0
-    engine.try_send_live_batch(imu_batch(raw, 1, 5.0)).unwrap();
+    engine
+        .try_send_live_batch("live", imu_batch(raw, 1, 5.0))
+        .unwrap();
     wait_for(
         &engine,
         ScriptEvent::LiveBatchProcessed,
@@ -83,7 +85,9 @@ def scale(batch):
         .set_value("scaler", "gain", ParamValue::Float(3.0));
 
     // Batch 2 with gain=3.0 -> 5.0 * 3.0 = 15.0
-    engine.try_send_live_batch(imu_batch(raw, 2, 5.0)).unwrap();
+    engine
+        .try_send_live_batch("live", imu_batch(raw, 2, 5.0))
+        .unwrap();
     wait_for(
         &engine,
         ScriptEvent::LiveBatchProcessed,

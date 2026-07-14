@@ -66,7 +66,7 @@ fn named_value_split_creates_one_topic_per_name() {
         sink.open_source("live", delog_core::ingest::SourceKind::Live)
     };
     engine
-        .try_send_live_batch(named_value_batch(raw_source))
+        .try_send_live_batch("live", named_value_batch(raw_source))
         .unwrap();
     wait_live_processed(&engine);
 

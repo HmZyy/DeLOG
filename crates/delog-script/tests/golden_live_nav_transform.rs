@@ -74,7 +74,9 @@ def convert(batch):
         let mut sink = sender.file_sink();
         sink.open_source("live", delog_core::ingest::SourceKind::Live)
     };
-    engine.try_send_live_batch(nav_batch(raw_source)).unwrap();
+    engine
+        .try_send_live_batch("live", nav_batch(raw_source))
+        .unwrap();
     wait_live_processed(&engine);
 
     let snap = wait_for_topic(&write_store, "NAV_CONTROLLER_OUTPUT_RAD");

@@ -14,8 +14,13 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use pyo3::types::PyList;
 use pyo3::types::PyTuple;
+use pyo3::types::{PyMapping, PyMappingMethods};
 
 use crate::live::LiveTransformSpec;
+use crate::operations::{
+    GroupBySpec, MergeSpec, OperationBuffer, OperationMode, OperationSpec, TopicSelector,
+    TransformSpec, merged_field_names, validate_group_template, validate_transform,
+};
 use crate::params::{ParamKind, ParamSpec, ParamValue, SharedParams};
 use pyo3::types::{PyBool, PyInt};
 
@@ -46,29 +51,29 @@ pub fn resample_prev(src_t: &[i64], src_v: &[f64], base: &[i64]) -> Vec<f64> {
 pub type MaterializedField = (Vec<i64>, Vec<f64>, Option<Vec<String>>);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct TopicMatch {
-    source_id: SourceId,
-    source_label: String,
-    topic_id: TopicId,
-    topic_name: String,
-    base_name: String,
-    instance: Option<u32>,
+pub(crate) struct TopicMatch {
+    pub(crate) source_id: SourceId,
+    pub(crate) source_label: String,
+    pub(crate) topic_id: TopicId,
+    pub(crate) topic_name: String,
+    pub(crate) base_name: String,
+    pub(crate) instance: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct FieldMatch {
-    source_id: SourceId,
-    source_label: String,
-    topic_id: TopicId,
-    topic_name: String,
-    base_name: String,
-    instance: Option<u32>,
-    field_id: FieldId,
-    field_name: String,
-    unit: Option<String>,
+pub(crate) struct FieldMatch {
+    pub(crate) source_id: SourceId,
+    pub(crate) source_label: String,
+    pub(crate) topic_id: TopicId,
+    pub(crate) topic_name: String,
+    pub(crate) base_name: String,
+    pub(crate) instance: Option<u32>,
+    pub(crate) field_id: FieldId,
+    pub(crate) field_name: String,
+    pub(crate) unit: Option<String>,
 }
 
-fn parse_topic_instance(name: &str) -> (String, Option<u32>) {
+pub(crate) fn parse_topic_instance(name: &str) -> (String, Option<u32>) {
     let Some(open) = name.rfind('[') else {
         return (name.to_owned(), None);
     };
@@ -85,7 +90,7 @@ fn parse_topic_instance(name: &str) -> (String, Option<u32>) {
     }
 }
 
-fn topic_matches(
+pub(crate) fn topic_matches(
     topic_name: &str,
     base_name: &str,
     parsed_instance: Option<u32>,
@@ -105,7 +110,7 @@ fn topic_matches(
     true
 }
 
-fn find_topics(
+pub(crate) fn find_topics(
     snapshot: &StoreSnapshot,
     topic: Option<&str>,
     source: Option<&str>,
@@ -190,7 +195,7 @@ fn find_fields(
     out
 }
 
-fn find_fields_in_topic(
+pub(crate) fn find_fields_in_topic(
     snapshot: &StoreSnapshot,
     topic_id: TopicId,
     field: Option<&str>,
@@ -287,10 +292,44 @@ fn materialized_values_to_py(
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum PendingColumn {
+    F64(Vec<f64>),
+    Utf8(Vec<String>),
+}
+
+impl PendingColumn {
+    pub fn len(&self) -> usize {
+        match self {
+            Self::F64(v) => v.len(),
+            Self::Utf8(v) => v.len(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct PendingField {
     pub name: String,
-    pub values: Vec<f64>,
+    pub values: PendingColumn,
     pub unit: Option<String>,
+}
+
+impl PendingField {
+    pub fn numeric(name: impl Into<String>, values: Vec<f64>, unit: Option<String>) -> Self {
+        Self {
+            name: name.into(),
+            values: PendingColumn::F64(values),
+            unit,
+        }
+    }
+
+    pub fn utf8(name: impl Into<String>, values: Vec<String>) -> Self {
+        Self {
+            name: name.into(),
+            values: PendingColumn::Utf8(values),
+            unit: None,
+        }
+    }
 }
 
 /// One derived topic the script is building. Every field shares `times`.
@@ -309,21 +348,17 @@ impl PendingTopic {
         }
     }
 
-    pub fn add_field(
-        &mut self,
-        name: String,
-        values: Vec<f64>,
-        unit: Option<String>,
-    ) -> Result<(), String> {
-        if values.len() != self.times.len() {
+    pub fn add_field(&mut self, field: PendingField) -> Result<(), String> {
+        if field.values.len() != self.times.len() {
             return Err(format!(
-                "field '{name}': {} values but topic '{}' has {} timestamps",
-                values.len(),
+                "field '{}': {} values but topic '{}' has {} timestamps",
+                field.name,
+                field.values.len(),
                 self.name,
                 self.times.len()
             ));
         }
-        self.fields.push(PendingField { name, values, unit });
+        self.fields.push(field);
         Ok(())
     }
 }
@@ -382,6 +417,7 @@ pub struct Delog {
     snapshot: Arc<StoreSnapshot>,
     emit: EmitBuffer,
     live: LiveTransformBuffer,
+    operations: OperationBuffer,
     script_name: String,
     generation: u64,
     params: SharedParams,
@@ -392,6 +428,7 @@ impl Delog {
         snapshot: Arc<StoreSnapshot>,
         emit: EmitBuffer,
         live: LiveTransformBuffer,
+        operations: OperationBuffer,
         script_name: String,
         generation: u64,
         params: SharedParams,
@@ -400,6 +437,7 @@ impl Delog {
             snapshot,
             emit,
             live,
+            operations,
             script_name,
             generation,
             params,
@@ -412,6 +450,10 @@ impl Delog {
 
     pub fn live_buffer(&self) -> LiveTransformBuffer {
         Rc::clone(&self.live)
+    }
+
+    pub fn operation_buffer(&self) -> OperationBuffer {
+        Rc::clone(&self.operations)
     }
 
     fn resolve_path(&self, path: &str) -> Result<FieldId, String> {
@@ -743,6 +785,165 @@ impl CatalogPy {
 
 #[pymethods]
 impl Delog {
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (topic, *, multiplier=1.0, offset=0.0, fields=None, unit=None, units=None, output_topic=None, source=None, instance=None, mode="both"))]
+    fn transform(
+        &self,
+        topic: String,
+        multiplier: f64,
+        offset: f64,
+        fields: Option<Vec<String>>,
+        unit: Option<String>,
+        units: Option<std::collections::HashMap<String, String>>,
+        output_topic: Option<String>,
+        source: Option<String>,
+        instance: Option<u32>,
+        mode: &str,
+    ) -> PyResult<()> {
+        let units = units.unwrap_or_default();
+        validate_transform(multiplier, offset, unit.as_deref(), &units)
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        if matches!(&fields, Some(fields) if fields.is_empty()) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "transform fields must not be empty",
+            ));
+        }
+        if output_topic.as_deref() == Some("") {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "transform output_topic must not be empty",
+            ));
+        }
+        let output_topic = output_topic.unwrap_or_else(|| topic.clone());
+        let mode = Some(mode);
+        let mode = OperationMode::parse(mode.as_deref())
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        self.operations
+            .borrow_mut()
+            .push(OperationSpec::Transform(TransformSpec {
+                input: TopicSelector {
+                    topic,
+                    source,
+                    instance,
+                },
+                multiplier,
+                offset,
+                fields,
+                unit,
+                units,
+                output_topic,
+                mode,
+            }));
+        Ok(())
+    }
+
+    #[pyo3(signature = (topics, *, base_topic, output_topic, source=None, mode="both"))]
+    fn merge(
+        &self,
+        topics: &Bound<'_, PyMapping>,
+        base_topic: String,
+        output_topic: String,
+        source: Option<String>,
+        mode: &str,
+    ) -> PyResult<()> {
+        if topics.is_empty()? {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "merge topics must not be empty",
+            ));
+        }
+        let mut ordered_topics = Vec::with_capacity(topics.len()?);
+        for item in topics.items()?.iter() {
+            let item = item.cast::<PyTuple>()?;
+            let topic = item.get_item(0)?.extract::<String>().map_err(|_| {
+                pyo3::exceptions::PyValueError::new_err("merge topic names must be strings")
+            })?;
+            let fields = item.get_item(1)?.extract::<Vec<String>>().map_err(|_| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "merge topic '{topic}' fields must be a list of strings"
+                ))
+            })?;
+            if fields.is_empty() {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "merge topic '{topic}' fields must not be empty"
+                )));
+            }
+            ordered_topics.push((topic, fields));
+        }
+        if !ordered_topics.iter().any(|(topic, _)| topic == &base_topic) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "merge base_topic '{base_topic}' must be present in topics"
+            )));
+        }
+        let borrowed = ordered_topics
+            .iter()
+            .map(|(topic, fields)| {
+                (
+                    topic.as_str(),
+                    fields.iter().map(String::as_str).collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let flat_names =
+            merged_field_names(&borrowed).map_err(pyo3::exceptions::PyValueError::new_err)?;
+        let mut names = flat_names.into_iter();
+        let output_names = ordered_topics
+            .iter()
+            .map(|(_, fields)| names.by_ref().take(fields.len()).collect::<Vec<_>>())
+            .collect();
+        let mode = Some(mode);
+        let mode = OperationMode::parse(mode.as_deref())
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        self.operations
+            .borrow_mut()
+            .push(OperationSpec::Merge(MergeSpec {
+                topics: ordered_topics,
+                base_topic,
+                output_topic,
+                source,
+                output_names,
+                mode,
+            }));
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (topic, field, *, fields=None, output_topic=None, source=None, instance=None, mode="both"))]
+    fn group_by(
+        &self,
+        topic: String,
+        field: String,
+        fields: Option<Vec<String>>,
+        output_topic: Option<String>,
+        source: Option<String>,
+        instance: Option<u32>,
+        mode: &str,
+    ) -> PyResult<()> {
+        if matches!(&fields, Some(fields) if fields.is_empty()) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "group_by fields must not be empty",
+            ));
+        }
+        let output_template = output_topic.unwrap_or_else(|| "{topic}/{value}".to_owned());
+        validate_group_template(&output_template)
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        let mode = Some(mode);
+        let mode = OperationMode::parse(mode.as_deref())
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        self.operations
+            .borrow_mut()
+            .push(OperationSpec::GroupBy(GroupBySpec {
+                input: TopicSelector {
+                    topic,
+                    source,
+                    instance,
+                },
+                field,
+                fields,
+                output_template,
+                mode,
+            }));
+        Ok(())
+    }
+
     fn catalog(&self) -> CatalogPy {
         CatalogPy {
             snapshot: Arc::clone(&self.snapshot),
@@ -931,7 +1132,7 @@ impl Delog {
             })?;
             let (values, unit) = parse_emit_field_entry(&field_name, &value, topic.times.len())?;
             topic
-                .add_field(field_name, values, unit)
+                .add_field(PendingField::numeric(field_name, values, unit))
                 .map_err(pyo3::exceptions::PyValueError::new_err)?;
         }
         self.emit.borrow_mut().push(topic);
@@ -1237,7 +1438,7 @@ impl DelogOutput {
     ) -> PyResult<()> {
         let vals = values.as_slice()?.to_vec();
         self.emit.borrow_mut()[self.index]
-            .add_field(name.to_string(), vals, unit)
+            .add_field(PendingField::numeric(name, vals, unit))
             .map_err(pyo3::exceptions::PyValueError::new_err)
     }
 }
@@ -1245,18 +1446,197 @@ impl DelogOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::operations::{OperationBuffer, OperationMode, OperationSpec};
     use arrow::array::{ArrayRef, Float64Array, Int64Array};
+
+    #[test]
+    fn declarative_methods_expose_both_as_the_mode_default() {
+        Python::attach(|py| {
+            let delog = Bound::new(
+                py,
+                Delog::new(
+                    Arc::new(StoreSnapshot::empty()),
+                    EmitBuffer::default(),
+                    LiveTransformBuffer::default(),
+                    OperationBuffer::default(),
+                    String::new(),
+                    0,
+                    crate::params::shared_empty(),
+                ),
+            )
+            .unwrap();
+            let inspect = py.import("inspect").unwrap();
+            for method in ["transform", "merge", "group_by"] {
+                let signature = inspect
+                    .call_method1("signature", (delog.getattr(method).unwrap(),))
+                    .unwrap();
+                let default: String = signature
+                    .getattr("parameters")
+                    .unwrap()
+                    .get_item("mode")
+                    .unwrap()
+                    .getattr("default")
+                    .unwrap()
+                    .extract()
+                    .unwrap();
+                assert_eq!(default, "both", "wrong mode default for {method}");
+            }
+        });
+    }
+
+    #[test]
+    fn declarative_methods_register_validated_specs_in_python_order() {
+        Python::attach(|py| {
+            let operations = OperationBuffer::default();
+            let delog = Bound::new(
+                py,
+                Delog::new(
+                    Arc::new(StoreSnapshot::empty()),
+                    EmitBuffer::default(),
+                    LiveTransformBuffer::default(),
+                    Rc::clone(&operations),
+                    String::new(),
+                    0,
+                    crate::params::shared_empty(),
+                ),
+            )
+            .unwrap();
+            let locals = PyDict::new(py);
+            locals.set_item("delog", delog).unwrap();
+            let code = std::ffi::CString::new(
+                r#"
+from collections import UserDict
+delog.transform("ATTITUDE", multiplier=57.29577951308232)
+delog.merge(UserDict({"ATTITUDE": ["roll"], "GPS": ["alt"]}),
+            base_topic="ATTITUDE", output_topic="STATE")
+delog.group_by("PARAM_VALUE", "param_id")
+"#,
+            )
+            .unwrap();
+            py.run(&code, None, Some(&locals)).unwrap();
+
+            let specs = operations.borrow();
+            assert_eq!(specs.len(), 3);
+            let OperationSpec::Transform(transform) = &specs[0] else {
+                panic!("first operation was not transform")
+            };
+            assert_eq!(transform.input.topic, "ATTITUDE");
+            assert_eq!(transform.output_topic, "ATTITUDE");
+            assert_eq!(transform.mode, OperationMode::Both);
+
+            let OperationSpec::Merge(merge) = &specs[1] else {
+                panic!("second operation was not merge")
+            };
+            assert_eq!(
+                merge
+                    .topics
+                    .iter()
+                    .map(|(topic, _)| topic.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["ATTITUDE", "GPS"]
+            );
+            assert_eq!(merge.output_names, vec![vec!["roll"], vec!["alt"]]);
+
+            let OperationSpec::GroupBy(group) = &specs[2] else {
+                panic!("third operation was not group_by")
+            };
+            assert_eq!(group.output_template, "{topic}/{value}");
+            assert_eq!(group.mode, OperationMode::Both);
+        });
+    }
+
+    #[test]
+    fn invalid_declarative_calls_do_not_register_partial_specs() {
+        Python::attach(|py| {
+            let operations = OperationBuffer::default();
+            let delog = Bound::new(
+                py,
+                Delog::new(
+                    Arc::new(StoreSnapshot::empty()),
+                    EmitBuffer::default(),
+                    LiveTransformBuffer::default(),
+                    Rc::clone(&operations),
+                    String::new(),
+                    0,
+                    crate::params::shared_empty(),
+                ),
+            )
+            .unwrap();
+            let locals = PyDict::new(py);
+            locals.set_item("delog", delog).unwrap();
+            let invalid_calls = [
+                r#"delog.transform("A", multiplier=float("nan"))"#,
+                r#"delog.transform("A", unit="deg", units={"x": "rad"})"#,
+                r#"delog.transform("A", fields=[])"#,
+                r#"delog.transform("A", mode="stream")"#,
+                r#"delog.transform("A", mode=None)"#,
+                r#"delog.merge({}, base_topic="A", output_topic="OUT")"#,
+                r#"delog.merge({"A": ["x"]}, base_topic="B", output_topic="OUT")"#,
+                r#"delog.group_by("A", "key", fields=[])"#,
+                r#"delog.group_by("A", "key", output_topic="{topic}/fixed")"#,
+            ];
+            for call in invalid_calls {
+                let code = std::ffi::CString::new(call).unwrap();
+                let err = py.run(&code, None, Some(&locals)).unwrap_err();
+                assert!(
+                    err.is_instance_of::<pyo3::exceptions::PyTypeError>(py)
+                        || err.is_instance_of::<pyo3::exceptions::PyValueError>(py),
+                    "unexpected error for {call}: {err}"
+                );
+                assert!(operations.borrow().is_empty());
+            }
+        });
+    }
+
+    #[test]
+    fn transform_rejects_explicit_empty_output_topic_without_registering() {
+        Python::attach(|py| {
+            let operations = OperationBuffer::default();
+            let delog = Bound::new(
+                py,
+                Delog::new(
+                    Arc::new(StoreSnapshot::empty()),
+                    EmitBuffer::default(),
+                    LiveTransformBuffer::default(),
+                    Rc::clone(&operations),
+                    String::new(),
+                    0,
+                    crate::params::shared_empty(),
+                ),
+            )
+            .unwrap();
+            let locals = PyDict::new(py);
+            locals.set_item("delog", delog).unwrap();
+            let code = std::ffi::CString::new(r#"delog.transform("A", output_topic="")"#).unwrap();
+
+            let error = py.run(&code, None, Some(&locals)).unwrap_err();
+            assert!(error.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+            assert!(
+                error.to_string().contains("output_topic must not be empty"),
+                "{error}"
+            );
+            assert!(operations.borrow().is_empty());
+        });
+    }
 
     #[test]
     fn output_builder_collects_topics_and_fields() {
         let mut topic = super::PendingTopic::new("Mag".into(), vec![0, 100, 200]);
         topic
-            .add_field("x".into(), vec![1.0, 2.0, 3.0], Some("m".into()))
+            .add_field(PendingField::numeric(
+                "x",
+                vec![1.0, 2.0, 3.0],
+                Some("m".into()),
+            ))
             .unwrap();
         topic
-            .add_field("y".into(), vec![4.0, 5.0, 6.0], None)
+            .add_field(PendingField::numeric("y", vec![4.0, 5.0, 6.0], None))
             .unwrap();
-        assert!(topic.add_field("bad".into(), vec![1.0], None).is_err());
+        assert!(
+            topic
+                .add_field(PendingField::numeric("bad", vec![1.0], None))
+                .is_err()
+        );
         assert_eq!(topic.fields.len(), 2);
         assert_eq!(topic.times.len(), 3);
     }
@@ -1511,6 +1891,7 @@ mod tests {
             snap,
             EmitBuffer::default(),
             LiveTransformBuffer::default(),
+            OperationBuffer::default(),
             String::new(),
             0,
             crate::params::shared_empty(),
