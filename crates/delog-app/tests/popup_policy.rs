@@ -419,8 +419,54 @@ fn kml_export_results_surface_message_popups() {
 }
 
 #[test]
+fn file_menu_nests_exports_in_the_requested_order() {
+    let file_menu = between(
+        APP_SOURCE,
+        "ui.menu_button(\"File\"",
+        "ui.menu_button(\"View\"",
+    );
+    let open = file_menu.find("ui.button(\"Open\")").unwrap();
+    let export_menu = file_menu.find("ui.menu_button(\"Export\", |ui|").unwrap();
+    let data = file_menu.find("ui.button(\"Export Data\")").unwrap();
+    let diagnostics = file_menu.find("ui.button(\"Export Diagnostics\")").unwrap();
+    let profiling = file_menu.find("ui.button(\"Export Profiling\")").unwrap();
+    let settings = file_menu.find("ui.button(\"Settings\")").unwrap();
+    let exit = file_menu.find("ui.button(\"Exit\")").unwrap();
+
+    assert!(open < export_menu);
+    assert!(export_menu < data && data < diagnostics && diagnostics < profiling);
+    assert!(profiling < settings && settings < exit);
+    assert_eq!(file_menu.matches("ui.separator();").count(), 3);
+    assert!(file_menu.contains("self.settings_dialog.open();"));
+    assert!(!file_menu.contains("Open File"));
+    assert!(!file_menu.contains("JSON..."));
+}
+
+#[test]
+fn main_menu_omits_edit_and_orders_the_remaining_menus() {
+    let menu_bar = between(
+        APP_SOURCE,
+        "egui::MenuBar::new().ui(ui, |ui|",
+        "drop(ui_menu_timer);",
+    );
+    let expected_order = ["File", "View", "Layout", "Scripts", "Parsers"];
+    let mut previous = 0;
+
+    for label in expected_order {
+        let needle = format!("ui.menu_button(\"{label}\"");
+        let index = menu_bar[previous..]
+            .find(&needle)
+            .unwrap_or_else(|| panic!("{label} should be in the main menu"))
+            + previous;
+        previous = index + needle.len();
+    }
+
+    assert!(!menu_bar.contains("ui.menu_button(\"Edit\""));
+}
+
+#[test]
 fn file_menu_and_results_use_unified_data_export_path() {
-    assert!(APP_SOURCE.contains("Export Data..."));
+    assert!(APP_SOURCE.contains("Export Data"));
     assert!(APP_SOURCE.contains("self.data_export.open();"));
     assert!(APP_SOURCE.contains("fn spawn_data_export("));
     assert!(APP_SOURCE.contains("\"data-export\""));

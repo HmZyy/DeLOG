@@ -1940,36 +1940,37 @@ impl eframe::App for DelogApp {
         egui::Panel::top("main_menu").show_inside(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
-                    if ui.button("Open File").clicked() {
+                    if ui.button("Open").clicked() {
                         self.spawn_open_dialog(ui.ctx());
                         ui.close();
                     }
+                    ui.menu_button("Export", |ui| {
+                        if ui.button("Export Data").clicked() {
+                            self.data_export.open();
+                            ui.close();
+                        }
+                        ui.separator();
+                        if ui.button("Export Diagnostics").clicked() {
+                            self.spawn_export_diagnostics_dialog(
+                                ui.ctx(),
+                                self.session.diagnostic_records(),
+                                &snapshot,
+                            );
+                            ui.close();
+                        }
+                        if ui.button("Export Profiling").clicked() {
+                            self.spawn_export_profiling_dialog(ui.ctx(), frame, &snapshot);
+                            ui.close();
+                        }
+                    });
                     ui.separator();
-                    if ui.button("Export Diagnostics JSON...").clicked() {
-                        self.spawn_export_diagnostics_dialog(
-                            ui.ctx(),
-                            self.session.diagnostic_records(),
-                            &snapshot,
-                        );
-                        ui.close();
-                    }
-                    if ui.button("Export Profiling JSON...").clicked() {
-                        self.spawn_export_profiling_dialog(ui.ctx(), frame, &snapshot);
-                        ui.close();
-                    }
-                    if ui.button("Export Data...").clicked() {
-                        self.data_export.open();
+                    if ui.button("Settings").clicked() {
+                        self.settings_dialog.open();
                         ui.close();
                     }
                     ui.separator();
                     if ui.button("Exit").clicked() {
                         ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-                        ui.close();
-                    }
-                });
-                ui.menu_button("Edit", |ui| {
-                    if ui.button("Settings...").clicked() {
-                        self.settings_dialog.open();
                         ui.close();
                     }
                 });
@@ -4211,9 +4212,9 @@ mod tests {
     fn file_menu_opens_data_export_through_resetting_api() {
         let source = include_str!("app.rs");
         let export_action = source
-            .split("if ui.button(\"Export Data...\").clicked()")
+            .split("if ui.button(\"Export Data\").clicked()")
             .nth(1)
-            .expect("File menu should expose data export")
+            .expect("Export submenu should expose data export")
             .split("ui.separator();")
             .next()
             .expect("data export should precede the File menu separator");
