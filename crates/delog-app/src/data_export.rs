@@ -261,6 +261,144 @@ fn resolve_export_field_refs<'a>(
         .collect()
 }
 
+type FieldPickerRects = (egui::Rect, egui::Rect);
+
+fn field_picker_ui(
+    ui: &mut egui::Ui,
+    state: &mut DataExportState,
+    available: &[ExportField],
+) -> FieldPickerRects {
+    let mut add_one = None;
+    let mut remove_one = None;
+    let mut add_filtered = false;
+    let mut clear = false;
+    let picker_width = (ui.available_width() - ui.spacing().item_spacing.x * 3.0) * 0.5;
+    let pane_size = egui::vec2(picker_width, ui.available_height());
+
+    let rects = ui
+        .horizontal_top(|ui| {
+            let available_rect = ui
+                .allocate_ui_with_layout(
+                    pane_size,
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.heading("Available fields");
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut state.search)
+                                    .hint_text("Search fields…"),
+                            );
+                            add_filtered = ui.button("Add filtered").clicked();
+                        });
+                        egui::ScrollArea::vertical()
+                            .id_salt("data_export_available_fields")
+                            .scroll_bar_visibility(
+                                egui::scroll_area::ScrollBarVisibility::AlwaysVisible,
+                            )
+                            .auto_shrink([false, false])
+                            .max_height(ui.available_height())
+                            .show(ui, |ui| {
+                                let mut previous_source = None::<&str>;
+                                let mut previous_topic = None::<&str>;
+                                for field in available.iter().filter(|field| state.matches(field)) {
+                                    if previous_source != Some(field.source.as_str()) {
+                                        ui.strong(&field.source);
+                                        previous_source = Some(&field.source);
+                                        previous_topic = None;
+                                    }
+                                    if previous_topic != Some(field.topic.as_str()) {
+                                        ui.label(egui::RichText::new(&field.topic).strong());
+                                        previous_topic = Some(&field.topic);
+                                    }
+                                    ui.horizontal(|ui| {
+                                        ui.add_space(12.0);
+                                        ui.label(&field.name);
+                                        if let Some(unit) =
+                                            field.unit.as_deref().filter(|unit| !unit.is_empty())
+                                        {
+                                            ui.weak(format!("[{unit}]"));
+                                        }
+                                        let already_selected = state.selected.contains(&field.id);
+                                        if ui
+                                            .add_enabled_ui(!already_selected, |ui| {
+                                                ui.add_sized([24.0, 24.0], egui::Button::new("+"))
+                                            })
+                                            .inner
+                                            .clicked()
+                                        {
+                                            add_one = Some(field.id);
+                                        }
+                                    });
+                                }
+                            })
+                            .inner_rect
+                    },
+                )
+                .inner;
+
+            ui.separator();
+
+            let selected_rect = ui
+                .allocate_ui_with_layout(
+                    pane_size,
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.horizontal(|ui| {
+                            ui.heading(format!("Selected fields ({})", state.selected.len()));
+                            if ui.button("Clear").clicked() {
+                                clear = true;
+                            }
+                        });
+                        egui::ScrollArea::vertical()
+                            .id_salt("data_export_selected_fields")
+                            .scroll_bar_visibility(
+                                egui::scroll_area::ScrollBarVisibility::AlwaysVisible,
+                            )
+                            .auto_shrink([false, false])
+                            .max_height(ui.available_height())
+                            .show(ui, |ui| match state.selected_fields(available) {
+                                Ok(fields) => {
+                                    for field in fields {
+                                        ui.horizontal(|ui| {
+                                            ui.label(column_name(field));
+                                            if ui.small_button("×").clicked() {
+                                                remove_one = Some(field.id);
+                                            }
+                                        });
+                                    }
+                                }
+                                Err(error) => {
+                                    ui.colored_label(
+                                        ui.visuals().error_fg_color,
+                                        error.to_string(),
+                                    );
+                                }
+                            })
+                            .inner_rect
+                    },
+                )
+                .inner;
+
+            (available_rect, selected_rect)
+        })
+        .inner;
+
+    if add_filtered {
+        state.add_filtered(available);
+    }
+    if let Some(id) = add_one {
+        state.add(id);
+    }
+    if let Some(id) = remove_one {
+        state.remove(id);
+    }
+    if clear {
+        state.clear();
+    }
+
+    rects
+}
+
 /// `visible` is the current ViewX (min,max); `full` is the global range.
 pub fn dialog_ui(
     ctx: &egui::Context,
@@ -274,136 +412,74 @@ pub fn dialog_ui(
     egui::Window::new("Export Data")
         .open(&mut open)
         .collapsible(false)
-        .resizable(true)
+        .resizable([true, true])
         .default_width(760.0)
+        .default_height(440.0)
+        .min_height(300.0)
         .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("Format:");
-                ui.radio_value(&mut state.format, ExportFormat::Csv, "CSV");
-                ui.radio_value(&mut state.format, ExportFormat::Parquet, "Parquet");
-            });
-            ui.separator();
-
-            let mut add_one = None;
-            let mut remove_one = None;
-            let mut add_filtered = false;
-            let mut clear = false;
-            ui.columns(2, |columns| {
-                columns[0].heading("Available fields");
-                columns[0].horizontal(|ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut state.search).hint_text("Search fields…"),
-                    );
-                    add_filtered = ui.button("Add filtered").clicked();
-                });
-                egui::ScrollArea::vertical()
-                    .max_height(280.0)
-                    .show(&mut columns[0], |ui| {
-                        let mut previous_source = None::<&str>;
-                        let mut previous_topic = None::<&str>;
-                        for field in available.iter().filter(|field| state.matches(field)) {
-                            if previous_source != Some(field.source.as_str()) {
-                                ui.strong(&field.source);
-                                previous_source = Some(&field.source);
-                                previous_topic = None;
-                            }
-                            if previous_topic != Some(field.topic.as_str()) {
-                                ui.label(egui::RichText::new(&field.topic).strong());
-                                previous_topic = Some(&field.topic);
-                            }
-                            ui.horizontal(|ui| {
-                                ui.add_space(12.0);
-                                ui.label(&field.name);
-                                if let Some(unit) =
-                                    field.unit.as_deref().filter(|unit| !unit.is_empty())
-                                {
-                                    ui.weak(format!("[{unit}]"));
-                                }
-                                if ui.small_button("+").clicked() {
-                                    add_one = Some(field.id);
+            egui::Panel::top("data_export_controls")
+                .frame(egui::Frame::NONE)
+                .show_separator_line(false)
+                .show_inside(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Format:");
+                        ui.radio_value(&mut state.format, ExportFormat::Csv, "CSV");
+                        ui.radio_value(&mut state.format, ExportFormat::Parquet, "Parquet");
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Range:");
+                        ui.radio_value(&mut state.visible_range, true, "Visible window");
+                        ui.radio_value(&mut state.visible_range, false, "Full");
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Resample:");
+                        egui::ComboBox::from_id_salt("data_export_mode")
+                            .selected_text(MODES[state.mode_ix])
+                            .show_ui(ui, |ui| {
+                                for (index, mode) in MODES.iter().enumerate() {
+                                    ui.selectable_value(&mut state.mode_ix, index, *mode);
                                 }
                             });
+                        if state.mode_ix == 2 {
+                            ui.label("dt (s):");
+                            ui.add(
+                                egui::DragValue::new(&mut state.dt_s)
+                                    .speed(0.001)
+                                    .range(1e-4..=3600.0),
+                            );
                         }
                     });
-
-                columns[1].horizontal(|ui| {
-                    ui.heading(format!("Selected fields ({})", state.selected.len()));
-                    if ui.button("Clear").clicked() {
-                        clear = true;
-                    }
+                    ui.separator();
                 });
-                egui::ScrollArea::vertical()
-                    .max_height(280.0)
-                    .show(&mut columns[1], |ui| {
-                        match state.selected_fields(available) {
-                            Ok(fields) => {
-                                for field in fields {
-                                    ui.horizontal(|ui| {
-                                        ui.label(column_name(field));
-                                        if ui.small_button("×").clicked() {
-                                            remove_one = Some(field.id);
-                                        }
-                                    });
-                                }
-                            }
-                            Err(error) => {
-                                ui.colored_label(ui.visuals().error_fg_color, error.to_string());
-                            }
-                        }
-                    });
-            });
-            if add_filtered {
-                state.add_filtered(available);
-            }
-            if let Some(id) = add_one {
-                state.add(id);
-            }
-            if let Some(id) = remove_one {
-                state.remove(id);
-            }
-            if clear {
-                state.clear();
-            }
 
-            ui.separator();
-            ui.horizontal(|ui| {
-                ui.label("Range:");
-                ui.radio_value(&mut state.visible_range, true, "Visible window");
-                ui.radio_value(&mut state.visible_range, false, "Full");
-            });
-            ui.horizontal(|ui| {
-                ui.label("Resample:");
-                egui::ComboBox::from_id_salt("data_export_mode")
-                    .selected_text(MODES[state.mode_ix])
-                    .show_ui(ui, |ui| {
-                        for (index, mode) in MODES.iter().enumerate() {
-                            ui.selectable_value(&mut state.mode_ix, index, *mode);
+            egui::Panel::bottom("data_export_actions")
+                .frame(egui::Frame::NONE)
+                .show_separator_line(false)
+                .show_inside(ui, |ui| {
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.button("Cancel").clicked() {
+                            state.open = false;
                         }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .add_enabled(
+                                    !state.selected.is_empty(),
+                                    egui::Button::new(state.format.action_label()),
+                                )
+                                .clicked()
+                            {
+                                request = state.request(visible, full);
+                            }
+                        });
                     });
-                if state.mode_ix == 2 {
-                    ui.label("dt (s):");
-                    ui.add(
-                        egui::DragValue::new(&mut state.dt_s)
-                            .speed(0.001)
-                            .range(1e-4..=3600.0),
-                    );
-                }
-            });
-            ui.separator();
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(
-                        !state.selected.is_empty(),
-                        egui::Button::new(state.format.action_label()),
-                    )
-                    .clicked()
-                {
-                    request = state.request(visible, full);
-                }
-                if ui.button("Cancel").clicked() {
-                    state.open = false;
-                }
-            });
+                });
+
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE)
+                .show_inside(ui, |ui| {
+                    let _ = field_picker_ui(ui, state, available);
+                });
         });
     state.open = open && state.open;
     request
@@ -1126,6 +1202,141 @@ mod tests {
                 .request((10, 20), (0, 100))
                 .is_none()
         );
+    }
+
+    fn run_dialog_frame(
+        ctx: &egui::Context,
+        state: &mut DataExportState,
+        available: &[ExportField],
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1_200.0, 600.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        ctx.run_ui(input, |ui| {
+            let _ = dialog_ui(ui.ctx(), state, available, (0, 1), (0, 1));
+        })
+    }
+
+    fn find_text_rect(shape: &egui::epaint::Shape, expected: &str) -> Option<egui::Rect> {
+        match shape {
+            egui::epaint::Shape::Text(text) if text.galley.job.text == expected => {
+                Some(text.visual_bounding_rect())
+            }
+            egui::epaint::Shape::Vec(shapes) => shapes
+                .iter()
+                .find_map(|shape| find_text_rect(shape, expected)),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn export_dialog_keeps_compact_height_and_footer_inside_window() {
+        let ctx = egui::Context::default();
+        let mut state = DataExportState::default();
+        state.open();
+        let fields = (0..200)
+            .map(|id| export_field(id, &format!("Field {id}")))
+            .collect::<Vec<_>>();
+        for field in fields.iter().take(20) {
+            state.add(field.id);
+        }
+
+        let _ = run_dialog_frame(&ctx, &mut state, &fields, vec![]);
+        let _ = run_dialog_frame(&ctx, &mut state, &fields, vec![]);
+        let initial_window = ctx
+            .memory(|memory| memory.area_rect(egui::Id::new("Export Data")))
+            .expect("export window should have a persisted area");
+        let resize_start = initial_window.right_bottom() - egui::vec2(2.0, 2.0);
+        let resize_end = resize_start - egui::vec2(0.0, 140.0);
+
+        let _ = run_dialog_frame(
+            &ctx,
+            &mut state,
+            &fields,
+            vec![
+                egui::Event::PointerMoved(resize_start),
+                egui::Event::PointerButton {
+                    pos: resize_start,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        let _ = run_dialog_frame(
+            &ctx,
+            &mut state,
+            &fields,
+            vec![egui::Event::PointerMoved(resize_end)],
+        );
+        let _ = run_dialog_frame(
+            &ctx,
+            &mut state,
+            &fields,
+            vec![egui::Event::PointerButton {
+                pos: resize_end,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        let output = run_dialog_frame(&ctx, &mut state, &fields, vec![]);
+        let resized_window = ctx
+            .memory(|memory| memory.area_rect(egui::Id::new("Export Data")))
+            .expect("export window should retain its area after resizing");
+        let export_text = output
+            .shapes
+            .iter()
+            .find_map(|shape| find_text_rect(&shape.shape, "Export CSV…"))
+            .expect("export action should be painted");
+
+        assert!(
+            initial_window.height() < 540.0,
+            "window consumed the viewport height: {initial_window:?}"
+        );
+        assert!(
+            resized_window.height() < initial_window.height() - 80.0,
+            "window rebounded from {initial_window:?} to {resized_window:?}"
+        );
+        assert!(resized_window.contains_rect(export_text));
+    }
+
+    #[test]
+    fn field_picker_scroll_viewports_fill_allocated_height() {
+        let ctx = egui::Context::default();
+        let fields = vec![export_field(1, "Roll")];
+        let mut state = DataExportState::default();
+        let mut rects = None;
+
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 500.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                rects = Some(
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(760.0, 400.0),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| field_picker_ui(ui, &mut state, &fields),
+                    )
+                    .inner,
+                );
+            },
+        );
+
+        let rects = rects.expect("picker should report both viewports");
+        assert!(rects.0.height() > 300.0);
+        assert!(rects.1.height() > 300.0);
     }
 
     #[test]
