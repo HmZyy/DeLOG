@@ -10,7 +10,7 @@ use serde::Serialize;
 use crate::browser::{self, BrowserFilterCache, BrowserModel};
 use crate::diagnostics::DiagnosticsDock;
 use crate::docks::{AppDockController, AppDockTab};
-use crate::field_stats::{FieldStatsController, StatsRequestKey, StatsTab};
+use crate::field_stats::{FieldStatsController, StatsTab};
 use crate::gpu::GpuBridge;
 use crate::layout::{LayoutApply, LayoutDoc, LayoutError, LoadOutcome, PendingLayout};
 use crate::live::ConnectionDialog;
@@ -3500,72 +3500,56 @@ fn show_field_stats_window(
     caches: &mut CacheManager,
     controller: &mut FieldStatsController,
 ) {
-    let Some(field_id) = controller.selected() else {
+    if controller.fields().is_empty() {
         return;
-    };
-    let Some((title, unit)) = field_label_and_unit(snapshot, field_id) else {
-        controller.close();
-        return;
-    };
+    }
 
     let now = Instant::now();
     if controller.tab() == StatsTab::Visible
         && let Some(view) = view
     {
-        controller.request(
-            StatsRequestKey::new(field_id, snapshot.epoch, view.min_us, view.max_us),
+        controller.request_all(
+            snapshot.epoch,
+            view.min_us,
+            view.max_us,
             Arc::clone(snapshot),
             now,
         );
     }
     controller.poll(now);
 
-    let provisional = view.and_then(|view| {
-        let cache = caches.get(field_id)?;
-        provisional_visible_stats(cache, view)
-    });
     let tab = controller.tab();
-    let current = controller.result().copied();
-    let displayed = current.or_else(|| controller.stale_result().copied());
+    let rows = field_stats_rows(snapshot, caches, view, controller);
     let visible_range = view.map(|view| TimeRange {
         min_us: view.min_us,
         max_us: view.max_us,
     });
-    let global_range = field_time_range(snapshot, field_id);
-    let updating = controller.is_updating();
+    let global_range = snapshot.global_time_range();
+    let updating = controller.is_any_updating();
     if updating {
         ctx.request_repaint_after(Duration::from_millis(100));
     }
-    let error = controller.error().map(str::to_owned);
-    let suffix = unit
-        .as_ref()
-        .map(|unit| format!(" {unit}"))
-        .unwrap_or_default();
 
     let mut open = true;
-    egui::Window::new(field_stats_window_title(&title))
-        .id(egui::Id::new(("field_stats", field_id.0)))
+    egui::Window::new("Field stats")
+        .id(egui::Id::new("field_stats"))
         .open(&mut open)
         .collapsible(false)
         .default_pos(ctx.content_rect().center())
         .pivot(egui::Align2::CENTER_CENTER)
-        .default_width(320.0)
-        .resizable(false)
+        .default_width(900.0)
+        .resizable(true)
         .show(ctx, |ui| {
             let mut dock_state = field_stats_dock_state(tab);
             let mut viewer = FieldStatsTabViewer {
                 snapshot,
-                field_id,
+                rows: &rows,
                 visible_range,
                 global_range,
-                displayed,
-                provisional,
                 updating,
-                error: error.as_deref(),
-                suffix: &suffix,
             };
             egui_dock::DockArea::new(&mut dock_state)
-                .id(egui::Id::new(("field_stats_dock_area", field_id.0)))
+                .id(egui::Id::new("field_stats_dock_area"))
                 .style(egui_dock::Style::from_egui(ui.style().as_ref()))
                 .allowed_splits(egui_dock::AllowedSplits::None)
                 .draggable_tabs(false)
@@ -3580,6 +3564,58 @@ fn show_field_stats_window(
     if !open {
         controller.close();
     }
+}
+
+#[derive(Clone)]
+struct FieldStatsRow {
+    field: delog_core::identity::FieldId,
+    name: String,
+    suffix: String,
+    stats: Option<delog_core::analysis::FieldStats>,
+    provisional: Option<(f64, f64)>,
+    updating: bool,
+    state: Option<String>,
+}
+
+fn field_stats_rows(
+    snapshot: &delog_core::snapshot::StoreSnapshot,
+    caches: &mut CacheManager,
+    view: Option<ViewX>,
+    controller: &FieldStatsController,
+) -> Vec<FieldStatsRow> {
+    controller
+        .fields()
+        .iter()
+        .copied()
+        .map(|field| {
+            let name = crate::legend::trace_label(snapshot, field);
+            let (suffix, unavailable) = match field_unit(snapshot, field) {
+                Some(Some(unit)) => (format!(" {unit}"), false),
+                Some(None) => (String::new(), false),
+                None => (String::new(), true),
+            };
+            let stats = controller
+                .result_for(field)
+                .copied()
+                .or_else(|| controller.stale_result_for(field).copied());
+            let provisional = view.and_then(|view| {
+                let cache = caches.get(field)?;
+                provisional_visible_stats(cache, view)
+            });
+            let state = unavailable
+                .then(|| "Unavailable".to_owned())
+                .or_else(|| controller.error_for(field).map(str::to_owned));
+            FieldStatsRow {
+                field,
+                name,
+                suffix,
+                stats,
+                provisional,
+                updating: controller.is_updating_for(field),
+                state,
+            }
+        })
+        .collect()
 }
 
 fn provisional_visible_stats(cache: &delog_cache::TraceCache, view: ViewX) -> Option<(f64, f64)> {
@@ -3610,14 +3646,10 @@ fn active_field_stats_tab(dock_state: &mut egui_dock::DockState<StatsTab>) -> St
 
 struct FieldStatsTabViewer<'a> {
     snapshot: &'a delog_core::snapshot::StoreSnapshot,
-    field_id: delog_core::identity::FieldId,
+    rows: &'a [FieldStatsRow],
     visible_range: Option<TimeRange>,
     global_range: Option<TimeRange>,
-    displayed: Option<delog_core::analysis::FieldStats>,
-    provisional: Option<(f64, f64)>,
     updating: bool,
-    error: Option<&'a str>,
-    suffix: &'a str,
 }
 
 impl egui_dock::TabViewer for FieldStatsTabViewer<'_> {
@@ -3629,22 +3661,12 @@ impl egui_dock::TabViewer for FieldStatsTabViewer<'_> {
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
         match tab {
-            StatsTab::Visible => show_visible_field_stats_tab(
-                ui,
-                self.visible_range,
-                self.displayed,
-                self.provisional,
-                self.updating,
-                self.error,
-                self.suffix,
-            ),
-            StatsTab::Global => show_global_field_stats_tab(
-                ui,
-                self.snapshot,
-                self.field_id,
-                self.global_range,
-                self.suffix,
-            ),
+            StatsTab::Visible => {
+                show_visible_field_stats_tab(ui, self.visible_range, self.rows, self.updating)
+            }
+            StatsTab::Global => {
+                show_global_field_stats_tab(ui, self.snapshot, self.global_range, self.rows)
+            }
         }
     }
 
@@ -3656,49 +3678,175 @@ impl egui_dock::TabViewer for FieldStatsTabViewer<'_> {
 fn show_visible_field_stats_tab(
     ui: &mut egui::Ui,
     range: Option<TimeRange>,
-    displayed: Option<delog_core::analysis::FieldStats>,
-    provisional: Option<(f64, f64)>,
+    rows: &[FieldStatsRow],
     updating: bool,
-    error: Option<&str>,
-    suffix: &str,
 ) {
     stats_range_header(ui, range, updating);
-    if let Some(error) = error {
-        if error == "This field is not numeric." {
-            ui.weak(error);
-        } else {
-            ui.colored_label(ui.visuals().error_fg_color, error);
-        }
-    } else {
-        ui.add_enabled_ui(!updating || displayed.is_none(), |ui| {
-            stats_grid(
-                ui,
-                "visible_field_stats_grid",
-                displayed,
-                provisional,
-                suffix,
-            );
-        });
-    }
+    stats_table(ui, "visible_field_stats_table", rows);
 }
 
 fn show_global_field_stats_tab(
     ui: &mut egui::Ui,
     snapshot: &delog_core::snapshot::StoreSnapshot,
-    field_id: delog_core::identity::FieldId,
     range: Option<TimeRange>,
-    suffix: &str,
+    visible_rows: &[FieldStatsRow],
 ) {
     stats_range_header(ui, range, false);
-    match delog_core::analysis::global_field_stats(snapshot, field_id) {
-        Ok(Some(stats)) => stats_grid(ui, "global_field_stats_grid", Some(stats), None, suffix),
-        Ok(None) => {
-            ui.weak("This field is not numeric.");
-        }
-        Err(err) => {
-            ui.colored_label(ui.visuals().error_fg_color, err.to_string());
-        }
+    let rows: Vec<_> = visible_rows
+        .iter()
+        .cloned()
+        .map(|mut row| {
+            row.provisional = None;
+            row.updating = false;
+            if row.state.as_deref() != Some("Unavailable") {
+                match delog_core::analysis::global_field_stats(snapshot, row.field) {
+                    Ok(Some(stats)) => {
+                        row.stats = Some(stats);
+                        row.state = None;
+                    }
+                    Ok(None) => {
+                        row.stats = None;
+                        row.state = Some("Not numeric".into());
+                    }
+                    Err(err) => {
+                        row.stats = None;
+                        row.state = Some(err.to_string());
+                    }
+                }
+            }
+            row
+        })
+        .collect();
+    stats_table(ui, "global_field_stats_table", &rows);
+}
+
+fn stats_table(ui: &mut egui::Ui, id: &'static str, rows: &[FieldStatsRow]) {
+    let row_height = table_row_height(ui);
+    egui::ScrollArea::horizontal()
+        .id_salt((id, "horizontal"))
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.set_min_width(880.0);
+            TableBuilder::new(ui)
+                .id_salt(id)
+                .striped(true)
+                .resizable(true)
+                .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                .auto_shrink([false, false])
+                .column(Column::initial(180.0).at_least(120.0).clip(true))
+                .column(Column::initial(80.0).at_least(64.0))
+                .column(Column::initial(96.0).at_least(72.0))
+                .column(Column::initial(96.0).at_least(72.0))
+                .column(Column::initial(96.0).at_least(72.0))
+                .column(Column::initial(96.0).at_least(72.0))
+                .column(Column::initial(80.0).at_least(64.0))
+                .column(Column::remainder().at_least(80.0))
+                .header(row_height, |mut header| {
+                    header.col(|ui| {
+                        ui.strong("Name");
+                    });
+                    header.col(|ui| {
+                        ui.strong("Samples");
+                    });
+                    header.col(|ui| {
+                        ui.strong("Min");
+                    });
+                    header.col(|ui| {
+                        ui.strong("Max");
+                    });
+                    header.col(|ui| {
+                        ui.strong("Mean");
+                    });
+                    header.col(|ui| {
+                        ui.strong("Std dev");
+                    });
+                    header.col(|ui| {
+                        ui.strong("Missing");
+                    });
+                    header.col(|ui| {
+                        ui.strong("Rate");
+                    });
+                })
+                .body(|body| {
+                    body.rows(row_height, rows.len(), |mut table_row| {
+                        let row = &rows[table_row.index()];
+                        let values = stats_row_values(row);
+                        table_row.col(|ui| {
+                            ui.label(&row.name);
+                            if row.updating {
+                                ui.weak("updating...");
+                            }
+                        });
+                        table_row.col(|ui| {
+                            ui.label(&values[0]);
+                        });
+                        for value in &values[1..] {
+                            table_row.col(|ui| {
+                                ui.label(value);
+                            });
+                        }
+                    });
+                });
+        });
+}
+
+fn stats_row_values(row: &FieldStatsRow) -> [String; 7] {
+    if let Some(state) = &row.state {
+        return [
+            state.clone(),
+            "-".into(),
+            "-".into(),
+            "-".into(),
+            "-".into(),
+            "-".into(),
+            "-".into(),
+        ];
     }
+
+    let min = row
+        .stats
+        .map(|stats| stats.min)
+        .or(row.provisional.map(|p| p.0));
+    let max = row
+        .stats
+        .map(|stats| stats.max)
+        .or(row.provisional.map(|p| p.1));
+    [
+        row.stats
+            .map(|stats| stats.count.to_string())
+            .unwrap_or_else(|| "-".into()),
+        stat_with_unit(min, &row.suffix),
+        stat_with_unit(max, &row.suffix),
+        stat_with_unit(row.stats.map(|stats| stats.mean), &row.suffix),
+        stat_with_unit(row.stats.map(|stats| stats.stddev), &row.suffix),
+        row.stats
+            .map(|stats| stats.missing_count.to_string())
+            .unwrap_or_else(|| "-".into()),
+        row.stats
+            .and_then(|stats| stats.rate_hz)
+            .map(|rate| format!("{} Hz", format_stat(rate)))
+            .unwrap_or_else(|| "-".into()),
+    ]
+}
+
+fn field_unit(
+    snapshot: &delog_core::snapshot::StoreSnapshot,
+    field_id: delog_core::identity::FieldId,
+) -> Option<Option<String>> {
+    let field = snapshot
+        .fields
+        .get(field_id.index())
+        .filter(|field| field.id == field_id && !field.removed)?;
+    let topic = snapshot
+        .topic(field.topic)
+        .filter(|topic| !topic.entry.removed)?;
+    Some(
+        topic
+            .store
+            .as_ref()
+            .and_then(|store| store.schema.field_by_name(&field.name))
+            .and_then(|schema| schema.unit.clone()),
+    )
 }
 
 fn stats_range_header(ui: &mut egui::Ui, range: Option<TimeRange>, updating: bool) {
@@ -3722,84 +3870,6 @@ fn stats_range_header(ui: &mut egui::Ui, range: Option<TimeRange>, updating: boo
     ui.add_space(6.0);
 }
 
-fn stats_grid(
-    ui: &mut egui::Ui,
-    id: &'static str,
-    stats: Option<delog_core::analysis::FieldStats>,
-    provisional: Option<(f64, f64)>,
-    suffix: &str,
-) {
-    let min = stats.map(|s| s.min).or(provisional.map(|p| p.0));
-    let max = stats.map(|s| s.max).or(provisional.map(|p| p.1));
-    let rows = [
-        ("Min", stat_with_unit(min, suffix)),
-        ("Max", stat_with_unit(max, suffix)),
-        ("Mean", stat_with_unit(stats.map(|s| s.mean), suffix)),
-        ("Std dev", stat_with_unit(stats.map(|s| s.stddev), suffix)),
-        (
-            "Samples",
-            stats.map_or_else(|| "-".into(), |s| s.count.to_string()),
-        ),
-        (
-            "Missing",
-            stats.map_or_else(|| "-".into(), |s| s.missing_count.to_string()),
-        ),
-        (
-            "Rate",
-            stats
-                .and_then(|s| s.rate_hz)
-                .map(|rate| format!("{} Hz", format_stat(rate)))
-                .unwrap_or_else(|| "-".into()),
-        ),
-    ];
-    let row_height = table_row_height(ui);
-    TableBuilder::new(ui)
-        .id_salt(id)
-        .striped(true)
-        .resizable(true)
-        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-        .auto_shrink([false, false])
-        .column(Column::auto().at_least(72.0))
-        .column(Column::remainder().clip(true))
-        .body(|mut body| {
-            for (key, value) in rows {
-                body.row(row_height, |mut row| {
-                    row.col(|ui| {
-                        ui.strong(key);
-                    });
-                    row.col(|ui| {
-                        ui.label(value);
-                    });
-                });
-            }
-        });
-}
-
-fn field_stats_window_title(field_label: &str) -> String {
-    field_label.to_owned()
-}
-
-fn field_time_range(
-    snapshot: &delog_core::snapshot::StoreSnapshot,
-    field_id: delog_core::identity::FieldId,
-) -> Option<TimeRange> {
-    let field = snapshot
-        .fields
-        .get(field_id.index())
-        .filter(|field| field.id == field_id && !field.removed)?;
-    let topic = snapshot
-        .topic(field.topic)
-        .filter(|topic| !topic.entry.removed)?;
-    let source = snapshot
-        .source(topic.entry.source)
-        .filter(|source| !source.entry.removed)?;
-    topic
-        .store
-        .as_ref()?
-        .time_range()
-        .and_then(|range| range.offset(source.entry.offset_us))
-}
-
 fn table_row_height(ui: &egui::Ui) -> f32 {
     egui::TextStyle::Body
         .resolve(ui.style())
@@ -3815,30 +3885,6 @@ fn stat_with_unit(value: Option<f64>, suffix: &str) -> String {
 
 fn format_time_us(value: i64) -> String {
     format!("{:.3} s", value as f64 / 1e6)
-}
-
-fn field_label_and_unit(
-    snapshot: &delog_core::snapshot::StoreSnapshot,
-    field_id: delog_core::identity::FieldId,
-) -> Option<(String, Option<String>)> {
-    let field = snapshot
-        .fields
-        .get(field_id.index())
-        .filter(|field| field.id == field_id && !field.removed)?;
-    let topic = snapshot.topic(field.topic)?;
-    let source = snapshot.source(topic.entry.source)?;
-    let unit = topic
-        .store
-        .as_ref()
-        .and_then(|store| store.schema.field_by_name(&field.name))
-        .and_then(|schema| schema.unit.clone());
-    Some((
-        format!(
-            "{} / {}.{}",
-            source.entry.label, topic.entry.name, field.name
-        ),
-        unit,
-    ))
 }
 
 fn format_stat(value: f64) -> String {
@@ -4206,14 +4252,6 @@ mod tests {
     }
 
     #[test]
-    fn stats_window_title_is_only_the_field_label() {
-        assert_eq!(
-            field_stats_window_title("flight / ATT.Roll"),
-            "flight / ATT.Roll"
-        );
-    }
-
-    #[test]
     fn file_menu_opens_data_export_through_resetting_api() {
         let source = include_str!("app.rs");
         let export_action = source
@@ -4245,23 +4283,43 @@ mod tests {
     }
 
     #[test]
-    fn field_stats_window_is_compact_and_uses_resizable_tables() {
+    fn field_stats_window_is_a_resizable_multi_field_table() {
         let source = include_str!("app.rs");
         let field_stats = source
             .split("fn show_field_stats_window")
             .nth(1)
             .expect("field stats window should exist")
-            .split("fn field_stats_window_title")
+            .split("fn field_time_range")
             .next()
-            .expect("field stats helpers should precede title helper");
+            .expect("field stats helpers should precede field range helper");
 
-        assert!(field_stats.contains(".default_width(320.0)"));
-        assert!(field_stats.contains("fn stats_range_header"));
-        assert_eq!(field_stats.matches("stats_range_header(ui,").count(), 2);
-        assert!(field_stats.contains("TableBuilder::new(ui)"));
+        let window_constructor = ["egui::Window", "::new(\"Field stats\")"].concat();
+        assert!(field_stats.contains(&window_constructor));
+        assert!(field_stats.contains(".default_width(900.0)"));
         assert!(field_stats.contains(".resizable(true)"));
-        assert!(field_stats.contains("Column::remainder()"));
-        assert!(!field_stats.contains("egui::Grid::new(id)"));
+        assert!(field_stats.contains("fn stats_table"));
+        assert!(field_stats.contains("ScrollArea::horizontal"));
+        for heading in [
+            "Name", "Samples", "Min", "Max", "Mean", "Std dev", "Missing", "Rate",
+        ] {
+            assert!(field_stats.contains(&format!("ui.strong(\"{heading}\")")));
+        }
+    }
+
+    #[test]
+    fn field_stats_rows_use_topic_dot_field_labels_and_per_field_state() {
+        let source = include_str!("app.rs");
+        let rows = source
+            .split("fn field_stats_rows")
+            .nth(1)
+            .expect("field stats row builder should exist")
+            .split("fn stats_table")
+            .next()
+            .expect("row builder should precede table renderer");
+
+        assert!(rows.contains("crate::legend::trace_label(snapshot, field)"));
+        assert!(rows.contains(".result_for(field)"));
+        assert!(rows.contains(".error_for(field)"));
     }
 
     #[test]
