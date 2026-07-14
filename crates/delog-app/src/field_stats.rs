@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
@@ -48,18 +48,19 @@ impl StatsRequestKey {
 }
 
 type WorkerResult = (StatsRequestKey, Result<Option<FieldStats>, FieldViewError>);
+type WorkerBatch = (Vec<StatsRequestKey>, Vec<WorkerResult>);
 
 pub struct FieldStatsController {
-    selected: Option<FieldId>,
+    fields: Vec<FieldId>,
     tab: StatsTab,
-    current: Option<StatsRequestKey>,
-    running: Option<StatsRequestKey>,
-    pending: Option<(StatsRequestKey, Arc<StoreSnapshot>)>,
-    displayed: Option<(StatsRequestKey, FieldStats)>,
-    error: Option<String>,
+    current: Vec<StatsRequestKey>,
+    running: Option<Vec<StatsRequestKey>>,
+    pending: Option<(Vec<StatsRequestKey>, Arc<StoreSnapshot>)>,
+    displayed: HashMap<FieldId, (StatsRequestKey, FieldStats)>,
+    errors: HashMap<FieldId, String>,
     recent: VecDeque<(StatsRequestKey, FieldStats)>,
-    tx: mpsc::Sender<WorkerResult>,
-    rx: mpsc::Receiver<WorkerResult>,
+    tx: mpsc::Sender<WorkerBatch>,
+    rx: mpsc::Receiver<WorkerBatch>,
     last_launch: Option<Instant>,
 }
 
@@ -67,13 +68,13 @@ impl Default for FieldStatsController {
     fn default() -> Self {
         let (tx, rx) = mpsc::channel();
         Self {
-            selected: None,
+            fields: Vec::new(),
             tab: StatsTab::Visible,
-            current: None,
+            current: Vec::new(),
             running: None,
             pending: None,
-            displayed: None,
-            error: None,
+            displayed: HashMap::new(),
+            errors: HashMap::new(),
             recent: VecDeque::new(),
             tx,
             rx,
@@ -84,23 +85,36 @@ impl Default for FieldStatsController {
 
 impl FieldStatsController {
     pub fn open(&mut self, field: FieldId) {
-        self.selected = Some(field);
+        self.open_fields(vec![field]);
+    }
+
+    pub fn open_fields(&mut self, fields: Vec<FieldId>) {
+        self.fields = fields;
         self.tab = StatsTab::Visible;
-        self.current = None;
-        self.displayed = None;
-        self.error = None;
+        self.current.clear();
+        self.pending = None;
+        self.displayed.clear();
+        self.errors.clear();
     }
 
     pub fn close(&mut self) {
-        self.selected = None;
-        self.current = None;
+        self.fields.clear();
+        self.current.clear();
         self.pending = None;
-        self.displayed = None;
-        self.error = None;
+        self.displayed.clear();
+        self.errors.clear();
     }
 
     pub fn selected(&self) -> Option<FieldId> {
-        self.selected
+        self.fields.first().copied()
+    }
+
+    pub fn fields(&self) -> &[FieldId] {
+        &self.fields
+    }
+
+    fn current_key(&self, field: FieldId) -> Option<StatsRequestKey> {
+        self.current.iter().copied().find(|key| key.field == field)
     }
 
     pub fn tab(&self) -> StatsTab {
@@ -112,41 +126,73 @@ impl FieldStatsController {
     }
 
     pub fn request(&mut self, key: StatsRequestKey, snapshot: Arc<StoreSnapshot>, now: Instant) {
-        if self.current == Some(key) {
+        self.request_keys(vec![key], snapshot, now);
+    }
+
+    pub fn request_all(
+        &mut self,
+        epoch: u64,
+        t0_us: i64,
+        t1_us: i64,
+        snapshot: Arc<StoreSnapshot>,
+        now: Instant,
+    ) {
+        let keys = self
+            .fields
+            .iter()
+            .copied()
+            .map(|field| StatsRequestKey::new(field, epoch, t0_us, t1_us))
+            .collect();
+        self.request_keys(keys, snapshot, now);
+    }
+
+    fn request_keys(
+        &mut self,
+        keys: Vec<StatsRequestKey>,
+        snapshot: Arc<StoreSnapshot>,
+        now: Instant,
+    ) {
+        if self.current == keys {
             self.poll(now);
             return;
         }
-        self.current = Some(key);
-        self.error = None;
-        if let Some(index) = self.recent.iter().position(|(cached, _)| *cached == key) {
-            let (_, stats) = self
-                .recent
-                .remove(index)
-                .expect("index came from the deque");
-            self.recent.push_back((key, stats));
-            self.displayed = Some((key, stats));
-            self.pending = None;
-            return;
+        self.current = keys.clone();
+        self.errors.clear();
+        let mut uncached = Vec::new();
+        for key in keys {
+            if let Some(index) = self.recent.iter().position(|(cached, _)| *cached == key) {
+                let (_, stats) = self
+                    .recent
+                    .remove(index)
+                    .expect("index came from the deque");
+                self.recent.push_back((key, stats));
+                self.displayed.insert(key.field, (key, stats));
+            } else {
+                uncached.push(key);
+            }
         }
-        self.queue(key, snapshot);
+        self.pending = (!uncached.is_empty()).then_some((uncached, snapshot));
         self.maybe_launch(now);
     }
 
     pub fn poll(&mut self, now: Instant) {
-        while let Ok((key, result)) = self.rx.try_recv() {
-            if self.running == Some(key) {
+        while let Ok((keys, results)) = self.rx.try_recv() {
+            if self.running.as_ref() == Some(&keys) {
                 self.running = None;
             }
-            match result {
-                Ok(Some(stats)) => self.accept(key, stats),
-                Ok(None) => {
-                    if self.current == Some(key) {
-                        self.error = Some("This field is not numeric.".into());
+            for (key, result) in results {
+                match result {
+                    Ok(Some(stats)) => self.accept(key, stats),
+                    Ok(None) => {
+                        if self.current_key(key.field) == Some(key) {
+                            self.errors
+                                .insert(key.field, "This field is not numeric.".into());
+                        }
                     }
-                }
-                Err(err) => {
-                    if self.current == Some(key) {
-                        self.error = Some(err.to_string());
+                    Err(err) => {
+                        if self.current_key(key.field) == Some(key) {
+                            self.errors.insert(key.field, err.to_string());
+                        }
                     }
                 }
             }
@@ -155,30 +201,58 @@ impl FieldStatsController {
     }
 
     pub fn result(&self) -> Option<&FieldStats> {
-        let (key, stats) = self.displayed.as_ref()?;
-        (Some(*key) == self.current).then_some(stats)
+        self.selected().and_then(|field| self.result_for(field))
+    }
+
+    pub fn result_for(&self, field: FieldId) -> Option<&FieldStats> {
+        let (key, stats) = self.displayed.get(&field)?;
+        (Some(*key) == self.current_key(field)).then_some(stats)
     }
 
     pub fn stale_result(&self) -> Option<&FieldStats> {
-        self.displayed.as_ref().map(|(_, stats)| stats)
+        self.selected()
+            .and_then(|field| self.stale_result_for(field))
+    }
+
+    pub fn stale_result_for(&self, field: FieldId) -> Option<&FieldStats> {
+        self.displayed.get(&field).map(|(_, stats)| stats)
     }
 
     pub fn error(&self) -> Option<&str> {
-        self.error.as_deref()
+        self.selected().and_then(|field| self.error_for(field))
+    }
+
+    pub fn error_for(&self, field: FieldId) -> Option<&str> {
+        self.errors.get(&field).map(String::as_str)
     }
 
     pub fn is_updating(&self) -> bool {
-        self.current.is_some()
-            && self.result().is_none()
-            && (self.running.is_some() || self.pending.is_some())
+        self.selected()
+            .is_some_and(|field| self.is_updating_for(field))
     }
 
-    fn queue(&mut self, key: StatsRequestKey, snapshot: Arc<StoreSnapshot>) {
-        self.pending = Some((key, snapshot));
+    pub fn is_updating_for(&self, field: FieldId) -> bool {
+        self.current_key(field).is_some()
+            && self.result_for(field).is_none()
+            && (self
+                .running
+                .as_ref()
+                .is_some_and(|keys| keys.iter().any(|key| key.field == field))
+                || self
+                    .pending
+                    .as_ref()
+                    .is_some_and(|(keys, _)| keys.iter().any(|key| key.field == field)))
+    }
+
+    pub fn is_any_updating(&self) -> bool {
+        self.fields
+            .iter()
+            .copied()
+            .any(|field| self.is_updating_for(field))
     }
 
     fn maybe_launch(&mut self, now: Instant) {
-        if self.running.is_some() || self.selected.is_none() {
+        if self.running.is_some() || self.fields.is_empty() {
             return;
         }
         if self
@@ -187,15 +261,22 @@ impl FieldStatsController {
         {
             return;
         }
-        let Some((key, snapshot)) = self.pending.take() else {
+        let Some((keys, snapshot)) = self.pending.take() else {
             return;
         };
-        self.running = Some(key);
+        self.running = Some(keys.clone());
         self.last_launch = Some(now);
         let tx = self.tx.clone();
         std::thread::spawn(move || {
-            let result = visible_field_stats(&snapshot, key.field, key.t0_us, key.t1_us);
-            let _ = tx.send((key, result));
+            let results = keys
+                .iter()
+                .copied()
+                .map(|key| {
+                    let result = visible_field_stats(&snapshot, key.field, key.t0_us, key.t1_us);
+                    (key, result)
+                })
+                .collect();
+            let _ = tx.send((keys, results));
         });
     }
 
@@ -207,9 +288,9 @@ impl FieldStatsController {
         while self.recent.len() > LRU_CAPACITY {
             self.recent.pop_front();
         }
-        if self.current == Some(key) {
-            self.displayed = Some((key, stats));
-            self.error = None;
+        if self.current_key(key.field) == Some(key) {
+            self.displayed.insert(key.field, (key, stats));
+            self.errors.remove(&key.field);
         }
     }
 }
@@ -219,35 +300,56 @@ mod tests {
     use super::*;
 
     #[test]
-    fn opens_on_visible_tab_and_coalesces_pending_requests() {
+    fn open_captures_fields_in_order_and_resets_to_visible_tab() {
         let mut controller = FieldStatsController::default();
-        let field = delog_core::identity::FieldId(4);
-        controller.open(field);
+        let fields = vec![FieldId(4), FieldId(2)];
+
+        controller.set_tab(StatsTab::Global);
+        controller.open_fields(fields.clone());
+
+        assert_eq!(controller.fields(), fields.as_slice());
         assert_eq!(controller.tab(), StatsTab::Visible);
-
-        let a = StatsRequestKey::new(field, 1, 0, 10);
-        let b = StatsRequestKey::new(field, 1, 10, 20);
-        controller.running = Some(a);
-        controller.queue(a, Arc::new(StoreSnapshot::empty()));
-        controller.queue(b, Arc::new(StoreSnapshot::empty()));
-        assert_eq!(controller.pending.as_ref().map(|(key, _)| *key), Some(b));
     }
 
     #[test]
-    fn stale_results_never_replace_the_current_window() {
+    fn a_new_range_coalesces_all_pending_fields_into_one_batch() {
         let mut controller = FieldStatsController::default();
-        let field = delog_core::identity::FieldId(2);
-        let old = StatsRequestKey::new(field, 3, 0, 10);
-        let current = StatsRequestKey::new(field, 4, 10, 20);
-        controller.current = Some(current);
-        controller.accept(old, test_stats(1.0));
-        assert!(controller.result().is_none());
-        controller.accept(current, test_stats(2.0));
-        assert_eq!(controller.result().unwrap().min, 2.0);
+        let fields = vec![FieldId(1), FieldId(2)];
+        controller.open_fields(fields.clone());
+        controller.running = Some(vec![
+            StatsRequestKey::new(fields[0], 1, 0, 10),
+            StatsRequestKey::new(fields[1], 1, 0, 10),
+        ]);
+
+        controller.request_all(1, 10, 20, Arc::new(StoreSnapshot::empty()), Instant::now());
+
+        let pending = &controller.pending.as_ref().unwrap().0;
+        assert_eq!(pending.len(), 2);
+        assert!(pending.iter().all(|key| key.t0_us == 10 && key.t1_us == 20));
     }
 
     #[test]
-    fn recent_results_are_lru_bounded_and_close_discards_display_state() {
+    fn stale_results_never_replace_current_results_for_either_field() {
+        let mut controller = FieldStatsController::default();
+        let first = FieldId(2);
+        let second = FieldId(3);
+        controller.open_fields(vec![first, second]);
+        controller.current = vec![StatsRequestKey::new(first, 3, 0, 10)];
+        controller.accept(StatsRequestKey::new(first, 3, 0, 10), test_stats(1.0));
+        controller.current = vec![
+            StatsRequestKey::new(first, 4, 10, 20),
+            StatsRequestKey::new(second, 4, 10, 20),
+        ];
+
+        controller.accept(StatsRequestKey::new(second, 4, 10, 20), test_stats(2.0));
+
+        assert!(controller.result_for(first).is_none());
+        assert_eq!(controller.result_for(second).unwrap().min, 2.0);
+        assert_eq!(controller.stale_result_for(first).unwrap().min, 1.0);
+    }
+
+    #[test]
+    fn recent_results_are_lru_bounded() {
         let mut controller = FieldStatsController::default();
         let field = FieldId(1);
         for epoch in 0..=LRU_CAPACITY as u64 {
@@ -258,15 +360,27 @@ mod tests {
         }
         assert_eq!(controller.recent.len(), LRU_CAPACITY);
         assert!(controller.recent.iter().all(|(key, _)| key.epoch != 0));
+    }
 
-        controller.current = Some(StatsRequestKey::new(field, 8, 0, 10));
-        controller.displayed = Some((StatsRequestKey::new(field, 8, 0, 10), test_stats(8.0)));
+    #[test]
+    fn close_discards_all_captured_and_displayed_state() {
+        let mut controller = FieldStatsController::default();
+        let field = FieldId(1);
+        controller.open_fields(vec![field]);
+        controller.current = vec![StatsRequestKey::new(field, 8, 0, 10)];
+        controller.displayed.insert(
+            field,
+            (StatsRequestKey::new(field, 8, 0, 10), test_stats(8.0)),
+        );
         controller.pending = Some((
-            StatsRequestKey::new(field, 9, 0, 10),
+            vec![StatsRequestKey::new(field, 9, 0, 10)],
             Arc::new(StoreSnapshot::empty()),
         ));
+
         controller.close();
-        assert!(controller.result().is_none());
+
+        assert!(controller.fields().is_empty());
+        assert!(controller.result_for(field).is_none());
         assert!(controller.pending.is_none());
     }
 
@@ -274,16 +388,16 @@ mod tests {
     fn launch_rate_is_capped_at_ten_hz() {
         let mut controller = FieldStatsController::default();
         let field = FieldId(1);
-        controller.open(field);
+        controller.open_fields(vec![field]);
         let key = StatsRequestKey::new(field, 1, 0, 10);
-        controller.queue(key, Arc::new(StoreSnapshot::empty()));
+        controller.pending = Some((vec![key], Arc::new(StoreSnapshot::empty())));
         let now = Instant::now();
         controller.last_launch = Some(now);
         controller.maybe_launch(now + Duration::from_millis(99));
         assert!(controller.running.is_none());
         assert!(controller.pending.is_some());
         controller.maybe_launch(now + Duration::from_millis(100));
-        assert_eq!(controller.running, Some(key));
+        assert_eq!(controller.running, Some(vec![key]));
         assert!(controller.pending.is_none());
     }
 
