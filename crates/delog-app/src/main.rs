@@ -6,7 +6,7 @@ mod app;
 mod axes;
 mod browser;
 mod camera;
-mod csv_export;
+mod data_export;
 mod diagnostics;
 mod docks;
 mod field_stats;
