@@ -11,6 +11,7 @@ const POPUP_SOURCES: &[&str] = &[
     include_str!("../src/workspace.rs"),
 ];
 const APP_SOURCE: &str = include_str!("../src/app.rs");
+const DATA_EXPORT_SOURCE: &str = include_str!("../src/data_export.rs");
 const DOCKS_SOURCE: &str = include_str!("../src/docks.rs");
 const SCRIPTS_SOURCE: &str = include_str!("../src/scripts.rs");
 const WORKSPACE_SOURCE: &str = include_str!("../src/workspace.rs");
@@ -444,6 +445,77 @@ fn data_export_rejects_stale_fields_before_opening_save_dialog() {
     assert!(resolution < spawn);
     assert!(spawn < save_dialog);
     assert!(worker.contains("data_export_tx.send(Err"));
+}
+
+#[test]
+fn export_picker_controls_scrollbars_divider_and_add_hitbox_are_stable() {
+    let dialog_body = between(DATA_EXPORT_SOURCE, "pub fn dialog_ui(", "pub const MODES");
+    let format = dialog_body.find("ui.label(\"Format:\")").unwrap();
+    let range = dialog_body.find("ui.label(\"Range:\")").unwrap();
+    let resample = dialog_body.find("ui.label(\"Resample:\")").unwrap();
+    let picker = dialog_body
+        .find("field_picker_ui(ui, state, available)")
+        .unwrap();
+    assert!(format < range && range < resample && resample < picker);
+
+    assert!(DATA_EXPORT_SOURCE.contains("id_salt(\"data_export_available_fields\")"));
+    assert!(DATA_EXPORT_SOURCE.contains("id_salt(\"data_export_selected_fields\")"));
+    assert_eq!(
+        DATA_EXPORT_SOURCE
+            .matches("ScrollBarVisibility::AlwaysVisible")
+            .count(),
+        2
+    );
+
+    let picker_body = between(
+        DATA_EXPORT_SOURCE,
+        "fn field_picker_ui(",
+        "/// `visible` is the current ViewX",
+    );
+    assert!(picker_body.contains("ui.separator();"));
+    assert!(picker_body.contains(".add_sized([24.0, 24.0], egui::Button::new(\"+\"))"));
+    assert!(picker_body.contains("let already_selected = state.selected.contains(&field.id);"));
+    assert!(picker_body.contains(".add_enabled_ui(!already_selected, |ui|"));
+    assert!(!DATA_EXPORT_SOURCE.contains("ui.small_button(\"+\")"));
+
+    assert!(DATA_EXPORT_SOURCE.contains(".default_height(440.0)"));
+    assert!(DATA_EXPORT_SOURCE.contains(".min_height(300.0)"));
+    assert!(DATA_EXPORT_SOURCE.contains(".resizable([true, true])"));
+    assert!(DATA_EXPORT_SOURCE.contains("Panel::top(\"data_export_controls\")"));
+    assert!(DATA_EXPORT_SOURCE.contains("Panel::bottom(\"data_export_actions\")"));
+    assert!(DATA_EXPORT_SOURCE.contains("CentralPanel::default()"));
+    assert!(picker_body.contains(".horizontal_top(|ui|"));
+    assert_eq!(picker_body.matches(".allocate_ui_with_layout(").count(), 2);
+    assert!(!DATA_EXPORT_SOURCE.contains("ui.set_height(ui.available_height())"));
+    assert!(!DATA_EXPORT_SOURCE.contains("let footer_height ="));
+    assert!(!DATA_EXPORT_SOURCE.contains("let picker_height ="));
+    assert_eq!(
+        DATA_EXPORT_SOURCE
+            .matches(".auto_shrink([false, false])")
+            .count(),
+        2
+    );
+    assert_eq!(
+        DATA_EXPORT_SOURCE
+            .matches(".max_height(ui.available_height())")
+            .count(),
+        2
+    );
+    assert!(!DATA_EXPORT_SOURCE.contains(".max_height(280.0)"));
+}
+
+#[test]
+fn export_footer_keeps_cancel_left_and_export_right() {
+    let actions = between(
+        DATA_EXPORT_SOURCE,
+        "Panel::bottom(\"data_export_actions\")",
+        "CentralPanel::default()",
+    );
+    let cancel = actions.find("ui.button(\"Cancel\")").unwrap();
+    let right_layout = actions.find("Layout::right_to_left").unwrap();
+    let export = actions.find("state.format.action_label()").unwrap();
+
+    assert!(cancel < right_layout && right_layout < export);
 }
 
 #[test]
