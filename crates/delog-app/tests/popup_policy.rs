@@ -423,7 +423,7 @@ fn file_menu_nests_exports_in_the_requested_order() {
     let file_menu = between(
         APP_SOURCE,
         "ui.menu_button(\"File\"",
-        "ui.menu_button(\"View\"",
+        "\n                ui.separator();\n                ui.menu_button(\"View\"",
     );
     let open = file_menu.find("ui.button(\"Open\")").unwrap();
     let export_menu = file_menu.find("ui.menu_button(\"Export\", |ui|").unwrap();
@@ -462,6 +462,18 @@ fn main_menu_omits_edit_and_orders_the_remaining_menus() {
     }
 
     assert!(!menu_bar.contains("ui.menu_button(\"Edit\""));
+    assert!(menu_bar.contains(
+        "                });\n                ui.separator();\n                ui.menu_button(\"View\""
+    ));
+    assert!(menu_bar.contains(
+        "                });\n                ui.separator();\n                ui.menu_button(\"Layout\""
+    ));
+    assert!(menu_bar.contains(
+        "                });\n                #[cfg(feature = \"scripting\")]\n                {\n                    ui.separator();\n                    ui.menu_button(\"Scripts\""
+    ));
+    assert!(menu_bar.contains(
+        "                    });\n                    ui.separator();\n                    ui.menu_button(\"Parsers\""
+    ));
 }
 
 #[test]
