@@ -299,7 +299,7 @@ print(float(accx.v[0]))
 }
 
 #[test]
-fn field_align_prev_uses_previous_sample_hold() {
+fn field_align_supports_modes_base_forms_and_validation() {
     let _guard = SCRIPT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let ingestor = Ingestor::new(NullObserver);
     let (sender, receiver) = ingest_channel();
@@ -313,16 +313,49 @@ fn field_align_prev_uses_previous_sample_hold() {
     );
     let output = run_script_capture_output(
         &engine,
-        "align_prev",
+        "align",
         r#"
+import numpy as np
+
 baro = delog.topic("BARO").field("Alt").read()
+baro_table = delog.topic("BARO").read("Alt")
 gps = delog.topic("GPS").field("Alt").read()
-aligned = gps.align_prev(baro)
-print(",".join(str(float(v)) for v in aligned))
+
+assert np.allclose(gps.align(baro), [90.0, 90.0, 95.0])
+assert np.allclose(gps.align(baro_table, mode="nearest"), [90.0, 95.0, 95.0])
+assert np.allclose(
+    gps.align(baro, mode="linear"),
+    [90.0, 90.0 + 10.0 / 3.0, np.nan],
+    equal_nan=True,
+)
+
+timeline = np.array([20, -5, 15, 7], dtype=np.int64)
+assert np.allclose(
+    gps.align(timeline),
+    [95.0, np.nan, 95.0, 90.0],
+    equal_nan=True,
+)
+
+try:
+    gps.align(baro, mode="future")
+except ValueError as error:
+    assert str(error) == "align mode must be 'prev', 'nearest', or 'linear'"
+else:
+    raise AssertionError("invalid align mode was accepted")
+
+try:
+    gps.align([0, 10])
+except TypeError as error:
+    assert str(error) == "align base must be a DelogField, DelogTable, or int64 numpy array"
+else:
+    raise AssertionError("invalid align base was accepted")
+
+assert not hasattr(gps, "align_prev")
+print("alignment assertions passed")
 "#,
     );
 
-    assert!(output.contains("90.0,90.0,95.0"));
+    assert!(output.contains("alignment assertions passed"));
 
     drop(engine);
     drop(sender);
