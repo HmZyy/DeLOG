@@ -455,72 +455,6 @@ impl Delog {
     pub fn operation_buffer(&self) -> OperationBuffer {
         Rc::clone(&self.operations)
     }
-
-    fn resolve_path(&self, path: &str) -> Result<FieldId, String> {
-        if let Some(id) = self.resolve_path_fast(path) {
-            return Ok(id);
-        }
-        if let Some(id) = self.resolve_path_scan(path) {
-            return Ok(id);
-        }
-        Err(format!("field path '{path}' not found"))
-    }
-
-    /// Fast path: split on the first two `/` and assume the remainder is the
-    /// field name. Correct as long as the topic name contains no `/`, which
-    /// covers the overwhelming majority of paths without an O(n) scan.
-    fn resolve_path_fast(&self, path: &str) -> Option<FieldId> {
-        let mut parts = path.splitn(3, '/');
-        let (s, t, f) = (parts.next()?, parts.next()?, parts.next()?);
-        for src in self.snapshot.sources.iter() {
-            if src.entry.removed || src.entry.label != s {
-                continue;
-            }
-            for &topic_id in src.topics.iter() {
-                let Some(topic) = self.snapshot.topic(topic_id) else {
-                    continue;
-                };
-                if topic.entry.removed || topic.entry.name != t {
-                    continue;
-                }
-                for fe in self.snapshot.fields.iter() {
-                    if !fe.removed && fe.topic == topic_id && fe.name == f {
-                        return Some(fe.id);
-                    }
-                }
-            }
-        }
-        None
-    }
-
-    /// Fallback for topics containing `/` (e.g. dynamic live-transform output
-    /// topics such as "NAMED_VALUE_FLOAT/airspd"), which `resolve_path_fast`
-    /// mis-splits. Scans every live field and matches the exact path
-    /// `sources()` builds for it, guaranteeing a round-trip.
-    fn resolve_path_scan(&self, path: &str) -> Option<FieldId> {
-        for src in self.snapshot.sources.iter() {
-            if src.entry.removed {
-                continue;
-            }
-            for &topic_id in src.topics.iter() {
-                let Some(topic) = self.snapshot.topic(topic_id) else {
-                    continue;
-                };
-                if topic.entry.removed {
-                    continue;
-                }
-                for fe in self.snapshot.fields.iter() {
-                    if !fe.removed
-                        && fe.topic == topic_id
-                        && path == format!("{}/{}/{}", src.entry.label, topic.entry.name, fe.name)
-                    {
-                        return Some(fe.id);
-                    }
-                }
-            }
-        }
-        None
-    }
 }
 
 #[pyclass(unsendable, name = "SourceRef", skip_from_py_object)]
@@ -1037,82 +971,6 @@ impl Delog {
         Ok(out.unbind())
     }
 
-    fn sources(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
-        let mut paths: Vec<String> = Vec::new();
-        for src in self.snapshot.sources.iter() {
-            if src.entry.removed {
-                continue;
-            }
-            for &topic_id in src.topics.iter() {
-                let Some(topic) = self.snapshot.topic(topic_id) else {
-                    continue;
-                };
-                if topic.entry.removed {
-                    continue;
-                }
-                for fe in self.snapshot.fields.iter() {
-                    if !fe.removed && fe.topic == topic_id {
-                        paths.push(format!(
-                            "{}/{}/{}",
-                            src.entry.label, topic.entry.name, fe.name
-                        ));
-                    }
-                }
-            }
-        }
-        Ok(PyList::new(py, paths)?.unbind())
-    }
-
-    fn field(&self, py: Python<'_>, path: &Bound<'_, PyAny>) -> PyResult<DelogField> {
-        if let Ok(field_ref) = path.extract::<PyRef<'_, FieldRefPy>>() {
-            let (t, v, s) = materialize_field(&field_ref.snapshot, field_ref.field_id)
-                .map_err(pyo3::exceptions::PyValueError::new_err)?;
-            let s = s.map(|vals| numpy_str_array(py, vals)).transpose()?;
-            return Ok(DelogField {
-                t: t.into_pyarray(py).unbind(),
-                v: v.into_pyarray(py).unbind(),
-                s,
-            });
-        }
-        let path: String = path.extract()?;
-        let id = self
-            .resolve_path(&path)
-            .map_err(pyo3::exceptions::PyKeyError::new_err)?;
-        let (t, v, s) = materialize_field(&self.snapshot, id)
-            .map_err(pyo3::exceptions::PyValueError::new_err)?;
-        let s = s.map(|vals| numpy_str_array(py, vals)).transpose()?;
-        Ok(DelogField {
-            t: t.into_pyarray(py).unbind(),
-            v: v.into_pyarray(py).unbind(),
-            s,
-        })
-    }
-
-    fn resample_prev(
-        &self,
-        py: Python<'_>,
-        field: &DelogField,
-        base_times: numpy::PyReadonlyArray1<i64>,
-    ) -> PyResult<Py<numpy::PyArray1<f64>>> {
-        let t = field.t.bind(py).readonly();
-        let v = field.v.bind(py).readonly();
-        let out = resample_prev(t.as_slice()?, v.as_slice()?, base_times.as_slice()?);
-        Ok(out.into_pyarray(py).unbind())
-    }
-
-    fn output(&self, times_us: numpy::PyReadonlyArray1<i64>, name: &str) -> PyResult<DelogOutput> {
-        let times = times_us.as_slice()?.to_vec();
-        let idx = {
-            let mut buf = self.emit.borrow_mut();
-            buf.push(PendingTopic::new(name.to_string(), times));
-            buf.len() - 1
-        };
-        Ok(DelogOutput {
-            emit: Rc::clone(&self.emit),
-            index: idx,
-        })
-    }
-
     fn emit(
         &self,
         name: &str,
@@ -1421,28 +1279,6 @@ impl DelogField {
     }
 }
 
-#[pyclass(unsendable, name = "DelogOutput")]
-pub struct DelogOutput {
-    emit: EmitBuffer,
-    index: usize,
-}
-
-#[pymethods]
-impl DelogOutput {
-    #[pyo3(signature = (name, values, unit=None))]
-    fn add_field(
-        &self,
-        name: &str,
-        values: numpy::PyReadonlyArray1<f64>,
-        unit: Option<String>,
-    ) -> PyResult<()> {
-        let vals = values.as_slice()?.to_vec();
-        self.emit.borrow_mut()[self.index]
-            .add_field(PendingField::numeric(name, vals, unit))
-            .map_err(pyo3::exceptions::PyValueError::new_err)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1480,6 +1316,35 @@ mod tests {
                     .extract()
                     .unwrap();
                 assert_eq!(default, "both", "wrong mode default for {method}");
+            }
+        });
+    }
+
+    #[test]
+    fn legacy_methods_are_not_exposed() {
+        Python::attach(|py| {
+            let delog = Bound::new(
+                py,
+                Delog::new(
+                    Arc::new(StoreSnapshot::empty()),
+                    EmitBuffer::default(),
+                    LiveTransformBuffer::default(),
+                    OperationBuffer::default(),
+                    String::new(),
+                    0,
+                    crate::params::shared_empty(),
+                ),
+            )
+            .unwrap();
+
+            for removed in ["sources", "field", "resample_prev", "output"] {
+                assert!(
+                    !delog.hasattr(removed).unwrap(),
+                    "{removed} is still exposed"
+                );
+            }
+            for retained in ["catalog", "topic", "find", "find_all", "emit"] {
+                assert!(delog.hasattr(retained).unwrap(), "{retained} is missing");
             }
         });
     }
@@ -1620,7 +1485,7 @@ delog.group_by("PARAM_VALUE", "param_id")
     }
 
     #[test]
-    fn output_builder_collects_topics_and_fields() {
+    fn pending_topic_validates_field_lengths() {
         let mut topic = super::PendingTopic::new("Mag".into(), vec![0, 100, 200]);
         topic
             .add_field(PendingField::numeric(
@@ -1863,50 +1728,6 @@ delog.group_by("PARAM_VALUE", "param_id")
         assert_eq!(t, vec![10, 20, 30]);
         assert_eq!(v, vec![1.0, 2.0, 3.0]);
         assert_eq!(s, None);
-    }
-
-    #[test]
-    fn resolve_path_falls_back_to_scanning_when_the_topic_name_contains_a_slash() {
-        // A dynamic live-transform output topic (e.g. "NAMED_VALUE_FLOAT/airspd")
-        // makes the fast splitn(3, '/') path mis-split into topic
-        // "NAMED_VALUE_FLOAT" and field "airspd/value". The scan fallback must
-        // still resolve it, matching exactly the path `sources()` would build.
-        let mut id = IdentityRegistry::new();
-        let src = id.add_source("live");
-        let topic = id.add_topic(src, "NAMED_VALUE_FLOAT/airspd").unwrap();
-        let value = id.add_field(topic, "value").unwrap();
-        let schema = Arc::new(
-            TopicSchema::new(
-                "NAMED_VALUE_FLOAT/airspd",
-                [FieldSchema::new("value", DataType::Float64, None::<String>, 1.0).unwrap()],
-            )
-            .unwrap(),
-        );
-        let cols: Vec<ArrayRef> = vec![Arc::new(Float64Array::from(vec![1.5]))];
-        let chunk = Arc::new(Chunk::try_new(Int64Array::from(vec![100]), cols, &schema).unwrap());
-        let store = Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap());
-        let snap = Arc::new(StoreSnapshot::from_registry(&id, [(topic, store)], 0).unwrap());
-
-        let delog = Delog::new(
-            snap,
-            EmitBuffer::default(),
-            LiveTransformBuffer::default(),
-            OperationBuffer::default(),
-            String::new(),
-            0,
-            crate::params::shared_empty(),
-        );
-        assert_eq!(
-            delog
-                .resolve_path("live/NAMED_VALUE_FLOAT/airspd/value")
-                .unwrap(),
-            value
-        );
-        assert!(
-            delog
-                .resolve_path("live/NAMED_VALUE_FLOAT/airspd/missing")
-                .is_err()
-        );
     }
 
     #[test]
