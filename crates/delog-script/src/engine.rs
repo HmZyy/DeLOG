@@ -1517,11 +1517,7 @@ fn complete_line(globals: &Py<PyDict>, text: &str) -> Vec<String> {
         loop {
             match completer.call_method1("complete", (text, state)) {
                 Ok(obj) if !obj.is_none() => {
-                    if let Ok(mut s) = obj.extract::<String>() {
-                        // rlcompleter appends "(" to callables; drop it.
-                        if s.ends_with('(') {
-                            s.pop();
-                        }
+                    if let Ok(s) = obj.extract::<String>() {
                         if !matches.contains(&s) {
                             matches.push(s);
                         }
@@ -2049,13 +2045,60 @@ def mark(batch):
             crate::params::shared_empty(),
         );
         let matches = completions_for(&engine, 1, "delog.fi");
-        assert!(matches.iter().any(|m| m == "delog.find"), "got {matches:?}");
         assert!(
-            matches.iter().any(|m| m == "delog.find_all"),
+            matches.iter().any(|m| m == "delog.find("),
+            "got {matches:?}"
+        );
+        assert!(
+            matches.iter().any(|m| m == "delog.find_all("),
             "got {matches:?}"
         );
         assert!(
             !matches.iter().any(|m| m == "delog.field"),
+            "got {matches:?}"
+        );
+    }
+
+    #[test]
+    fn completion_lists_add_marker_without_bulk_alias() {
+        let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let engine = ScriptEngine::spawn(
+            Arc::new(DataStore::new()),
+            dummy_sender(),
+            test_metrics(),
+            crate::params::shared_empty(),
+        );
+        let matches = completions_for(&engine, 1, "delog.add_m");
+        assert!(
+            matches.iter().any(|m| m == "delog.add_marker("),
+            "got {matches:?}"
+        );
+        assert!(
+            !matches.iter().any(|m| m.contains("add_markers")),
+            "got {matches:?}"
+        );
+    }
+
+    #[test]
+    fn completion_lists_align_without_old_spelling_for_materialized_field() {
+        let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let engine = ScriptEngine::spawn(
+            test_store_with_baro_alt(),
+            dummy_sender(),
+            test_metrics(),
+            crate::params::shared_empty(),
+        );
+        let _ = engine.send(ScriptCommand::Eval(
+            "field = delog.topic('BARO').field('Alt').read()".into(),
+        ));
+        drain_until_done(&engine);
+        let matches = completions_for(&engine, 1, "field.al");
+        assert!(
+            matches.iter().any(|m| m == "field.align("),
+            "got {matches:?}"
+        );
+        assert!(
+            !matches.iter().any(|m| m.contains("align_prev")),
             "got {matches:?}"
         );
     }
