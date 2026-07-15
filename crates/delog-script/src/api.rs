@@ -31,19 +31,72 @@ pub struct PendingLiveTransform {
 
 pub type LiveTransformBuffer = Rc<RefCell<Vec<PendingLiveTransform>>>;
 
-/// For each `base` time, the source value at the latest source timestamp
-/// `<= base` (NaN before the first sample). `src_t` must be sorted ascending.
-pub fn resample_prev(src_t: &[i64], src_v: &[f64], base: &[i64]) -> Vec<f64> {
-    let mut out = Vec::with_capacity(base.len());
-    for &bt in base {
-        let idx = match src_t.binary_search(&bt) {
-            Ok(i) => Some(i),
-            Err(0) => None,
-            Err(i) => Some(i - 1),
-        };
-        out.push(idx.map(|i| src_v[i]).unwrap_or(f64::NAN));
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AlignMode {
+    Prev,
+    Nearest,
+    Linear,
+}
+
+impl AlignMode {
+    fn parse(mode: &str) -> PyResult<Self> {
+        match mode {
+            "prev" => Ok(Self::Prev),
+            "nearest" => Ok(Self::Nearest),
+            "linear" => Ok(Self::Linear),
+            _ => Err(pyo3::exceptions::PyValueError::new_err(
+                "align mode must be 'prev', 'nearest', or 'linear'",
+            )),
+        }
     }
-    out
+}
+
+fn align_values(src_t: &[i64], src_v: &[f64], base: &[i64], mode: AlignMode) -> Vec<f64> {
+    let mut times = Vec::with_capacity(src_t.len());
+    let mut values = Vec::with_capacity(src_v.len());
+    for (&time, &value) in src_t.iter().zip(src_v) {
+        if times.last() == Some(&time) {
+            *values.last_mut().unwrap() = value;
+        } else {
+            times.push(time);
+            values.push(value);
+        }
+    }
+
+    base.iter()
+        .map(|&bt| match times.binary_search(&bt) {
+            Ok(index) => values[index],
+            Err(index) => match mode {
+                AlignMode::Prev => index
+                    .checked_sub(1)
+                    .map_or(f64::NAN, |previous| values[previous]),
+                AlignMode::Nearest => match (index.checked_sub(1), times.get(index)) {
+                    (None, None) => f64::NAN,
+                    (None, Some(_)) => values[index],
+                    (Some(previous), None) => values[previous],
+                    (Some(previous), Some(&next_time)) => {
+                        let previous_distance =
+                            (i128::from(bt) - i128::from(times[previous])).abs();
+                        let next_distance = (i128::from(next_time) - i128::from(bt)).abs();
+                        if previous_distance <= next_distance {
+                            values[previous]
+                        } else {
+                            values[index]
+                        }
+                    }
+                },
+                AlignMode::Linear => match (index.checked_sub(1), times.get(index)) {
+                    (Some(previous), Some(&next_time)) => {
+                        let span = i128::from(next_time) - i128::from(times[previous]);
+                        let offset = i128::from(bt) - i128::from(times[previous]);
+                        let fraction = offset as f64 / span as f64;
+                        values[previous] + fraction * (values[index] - values[previous])
+                    }
+                    _ => f64::NAN,
+                },
+            },
+        })
+        .collect()
 }
 
 /// `(times_us, values, strings)`; `strings` is `Some` only for Utf8/LargeUtf8
@@ -1223,7 +1276,7 @@ fn extract_base_times(py: Python<'_>, base: &Bound<'_, PyAny>) -> PyResult<Vec<i
     }
     let arr: numpy::PyReadonlyArray1<i64> = base.extract().map_err(|_| {
         pyo3::exceptions::PyTypeError::new_err(
-            "align_prev base must be a DelogField, DelogTable, or int64 numpy array",
+            "align base must be a DelogField, DelogTable, or int64 numpy array",
         )
     })?;
     Ok(arr.as_slice()?.to_vec())
@@ -1270,11 +1323,22 @@ pub struct DelogField {
 
 #[pymethods]
 impl DelogField {
-    fn align_prev(&self, py: Python<'_>, base: &Bound<'_, PyAny>) -> PyResult<Py<PyArray1<f64>>> {
+    #[pyo3(signature = (base, mode="prev"))]
+    fn align(
+        &self,
+        py: Python<'_>,
+        base: &Bound<'_, PyAny>,
+        mode: &str,
+    ) -> PyResult<Py<PyArray1<f64>>> {
         let src_t = self.t.bind(py).readonly();
         let src_v = self.v.bind(py).readonly();
         let base_times = extract_base_times(py, base)?;
-        let out = resample_prev(src_t.as_slice()?, src_v.as_slice()?, &base_times);
+        let out = align_values(
+            src_t.as_slice()?,
+            src_v.as_slice()?,
+            &base_times,
+            AlignMode::parse(mode)?,
+        );
         Ok(out.into_pyarray(py).unbind())
     }
 }
@@ -1507,36 +1571,128 @@ delog.group_by("PARAM_VALUE", "param_id")
     }
 
     #[test]
-    fn resample_prev_picks_the_last_value_at_or_before_each_base_time() {
-        let src_t = vec![0_i64, 100, 200];
-        let src_v = vec![10.0_f64, 20.0, 30.0];
-        let base = vec![-5_i64, 0, 50, 100, 250];
-        let out = super::resample_prev(&src_t, &src_v, &base);
-        assert!(out[0].is_nan());
-        assert_eq!(out[1], 10.0);
-        assert_eq!(out[2], 10.0);
-        assert_eq!(out[3], 20.0);
-        assert_eq!(out[4], 30.0);
+    fn align_prev_uses_last_duplicate_and_preserves_unsorted_base() {
+        let got = align_values(
+            &[10, 20, 20, 30],
+            &[1.0, 2.0, 22.0, 3.0],
+            &[25, 5, 20, 40],
+            AlignMode::Prev,
+        );
+        assert_eq!(got[0], 22.0);
+        assert!(got[1].is_nan());
+        assert_eq!(&got[2..], &[22.0, 3.0]);
+    }
+
+    #[test]
+    fn align_nearest_prefers_earlier_time_on_ties() {
+        let got = align_values(
+            &[10, 20, 20, 30],
+            &[1.0, 2.0, 22.0, 3.0],
+            &[0, 15, 20, 25, 40],
+            AlignMode::Nearest,
+        );
+        assert_eq!(got, vec![1.0, 1.0, 22.0, 22.0, 3.0]);
+    }
+
+    #[test]
+    fn align_linear_interpolates_only_between_distinct_times() {
+        let got = align_values(
+            &[10, 20, 20, 30],
+            &[1.0, 2.0, 4.0, 8.0],
+            &[5, 10, 15, 20, 25, 30, 35],
+            AlignMode::Linear,
+        );
+        assert!(got[0].is_nan());
+        assert_eq!(&got[1..6], &[1.0, 2.5, 4.0, 6.0, 8.0]);
+        assert!(got[6].is_nan());
+    }
+
+    fn reference_align(src_t: &[i64], src_v: &[f64], base: &[i64], mode: AlignMode) -> Vec<f64> {
+        let mut canonical: Vec<(i64, f64)> = Vec::new();
+        for (&time, &value) in src_t.iter().zip(src_v) {
+            if canonical
+                .last()
+                .is_some_and(|(last_time, _)| *last_time == time)
+            {
+                canonical.last_mut().unwrap().1 = value;
+            } else {
+                canonical.push((time, value));
+            }
+        }
+
+        base.iter()
+            .map(|&bt| match mode {
+                AlignMode::Prev => canonical
+                    .iter()
+                    .rev()
+                    .find(|(time, _)| *time <= bt)
+                    .map_or(f64::NAN, |(_, value)| *value),
+                AlignMode::Nearest => canonical
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(index, (time, _))| {
+                        ((i128::from(*time) - i128::from(bt)).abs(), *index)
+                    })
+                    .map_or(f64::NAN, |(_, (_, value))| *value),
+                AlignMode::Linear => {
+                    if let Some((_, value)) = canonical.iter().find(|(time, _)| *time == bt) {
+                        *value
+                    } else {
+                        let lower = canonical.iter().rev().find(|(time, _)| *time < bt);
+                        let upper = canonical.iter().find(|(time, _)| *time > bt);
+                        match (lower, upper) {
+                            (Some((t0, v0)), Some((t1, v1))) => {
+                                let fraction = (i128::from(bt) - i128::from(*t0)) as f64
+                                    / (i128::from(*t1) - i128::from(*t0)) as f64;
+                                v0 + fraction * (v1 - v0)
+                            }
+                            _ => f64::NAN,
+                        }
+                    }
+                }
+            })
+            .collect()
+    }
+
+    fn prop_assert_float_vectors_eq(
+        got: &[f64],
+        expected: &[f64],
+    ) -> Result<(), proptest::test_runner::TestCaseError> {
+        proptest::prop_assert_eq!(got.len(), expected.len());
+        for (&actual, &reference) in got.iter().zip(expected) {
+            if reference.is_nan() {
+                proptest::prop_assert!(actual.is_nan());
+            } else {
+                proptest::prop_assert_eq!(actual, reference);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn align_modes_propagate_nan_values() {
+        let src_t = [0, 10, 20];
+        let src_v = [1.0, f64::NAN, 3.0];
+        assert!(align_values(&src_t, &src_v, &[15], AlignMode::Prev)[0].is_nan());
+        assert!(align_values(&src_t, &src_v, &[10], AlignMode::Nearest)[0].is_nan());
+        assert!(align_values(&src_t, &src_v, &[15], AlignMode::Linear)[0].is_nan());
     }
 
     proptest::proptest! {
         #[test]
-        fn resample_prev_matches_naive_scan(
-            src in proptest::collection::vec((0i64..1000, -1e6f64..1e6), 1..50),
-            base in proptest::collection::vec(0i64..1000, 1..50),
+        fn align_modes_match_linear_scan_reference(
+            src in proptest::collection::vec((-50i64..50, -1e6f64..1e6), 0..50),
+            base in proptest::collection::vec(proptest::num::i64::ANY, 0..50),
         ) {
             let mut src = src;
-            src.sort_by_key(|(t, _)| *t);
-            src.dedup_by_key(|(t, _)| *t);
-            let st: Vec<i64> = src.iter().map(|(t, _)| *t).collect();
-            let sv: Vec<f64> = src.iter().map(|(_, v)| *v).collect();
-            let got = super::resample_prev(&st, &sv, &base);
-            for (i, &bt) in base.iter().enumerate() {
-                let naive = st.iter().rposition(|&t| t <= bt).map(|idx| sv[idx]);
-                match naive {
-                    Some(v) => proptest::prop_assert_eq!(got[i], v),
-                    None => proptest::prop_assert!(got[i].is_nan()),
-                }
+            src.sort_by_key(|(time, _)| *time);
+            let src_t: Vec<i64> = src.iter().map(|(time, _)| *time).collect();
+            let src_v: Vec<f64> = src.iter().map(|(_, value)| *value).collect();
+
+            for mode in [AlignMode::Prev, AlignMode::Nearest, AlignMode::Linear] {
+                let got = align_values(&src_t, &src_v, &base, mode);
+                let expected = reference_align(&src_t, &src_v, &base, mode);
+                prop_assert_float_vectors_eq(&got, &expected)?;
             }
         }
     }
