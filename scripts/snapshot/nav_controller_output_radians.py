@@ -6,4 +6,5 @@ delog.transform(
     fields=["nav_roll", "nav_pitch", "nav_bearing"],
     unit="rad",
     output_topic="NAV_CONTROLLER_OUTPUT_RAD",
+    mode="snapshot",
 )
