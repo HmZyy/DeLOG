@@ -12,7 +12,7 @@ use delog_core::metrics::MetricsRegistry;
 use delog_core::schema::{FieldSchema, TopicSchema};
 use delog_core::snapshot::{DataStore, StoreSnapshot};
 use delog_core::store::TopicStore;
-use delog_script::{ScriptCommand, ScriptEngine, ScriptEvent};
+use delog_script::{MarkerCommand, PendingMarker, ScriptCommand, ScriptEngine, ScriptEvent};
 
 static SCRIPT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -169,6 +169,62 @@ fn wait_done(engine: &ScriptEngine) {
             std::time::Instant::now() < deadline,
             "timed out waiting for ScriptEvent::Done"
         );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn marker_command_is_exported_and_delivered_before_done() {
+    let _guard = SCRIPT_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let ingestor = Ingestor::new(NullObserver);
+    let (sender, receiver) = ingest_channel();
+    let ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
+    let engine = ScriptEngine::spawn(
+        read_store(),
+        sender.clone(),
+        Arc::new(MetricsRegistry::new()),
+        delog_script::params::shared_empty(),
+    );
+
+    engine
+        .send(ScriptCommand::RunScript {
+            name: "analysis".into(),
+            source: "delog.add_marker(123, 'golden')".into(),
+        })
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut commands = Vec::new();
+    loop {
+        for event in engine.drain_events() {
+            match event {
+                ScriptEvent::Markers(command) => commands.push(command),
+                ScriptEvent::Done => {
+                    assert_eq!(
+                        commands,
+                        vec![MarkerCommand::Replace {
+                            owner: "analysis".into(),
+                            generation: 0,
+                            markers: vec![PendingMarker {
+                                time_us: 123,
+                                label: "golden".into(),
+                                color: None,
+                                note: String::new(),
+                            }],
+                        }]
+                    );
+                    drop(engine);
+                    drop(sender);
+                    ingest_thread.join().unwrap();
+                    return;
+                }
+                ScriptEvent::Error(error) => panic!("script error: {error}"),
+                _ => {}
+            }
+        }
+        assert!(std::time::Instant::now() < deadline, "timed out");
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
 }

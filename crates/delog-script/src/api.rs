@@ -27,9 +27,73 @@ use pyo3::types::{PyBool, PyInt};
 pub struct PendingLiveTransform {
     pub spec: LiveTransformSpec,
     pub callable: Py<PyAny>,
+    pub markers: MarkerBuffer,
 }
 
 pub type LiveTransformBuffer = Rc<RefCell<Vec<PendingLiveTransform>>>;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingMarker {
+    pub time_us: i64,
+    pub label: String,
+    pub color: Option<[f32; 4]>,
+    pub note: String,
+}
+
+pub type MarkerBuffer = Rc<RefCell<Vec<PendingMarker>>>;
+
+thread_local! {
+    static MARKER_BUFFER_OVERRIDE: RefCell<Option<MarkerBuffer>> = const { RefCell::new(None) };
+}
+
+pub(crate) struct MarkerBufferOverride {
+    previous: Option<MarkerBuffer>,
+}
+
+pub(crate) fn override_marker_buffer(markers: MarkerBuffer) -> MarkerBufferOverride {
+    let previous = MARKER_BUFFER_OVERRIDE.with(|current| current.replace(Some(markers)));
+    MarkerBufferOverride { previous }
+}
+
+impl Drop for MarkerBufferOverride {
+    fn drop(&mut self) {
+        MARKER_BUFFER_OVERRIDE.with(|current| {
+            current.replace(self.previous.take());
+        });
+    }
+}
+
+fn active_marker_buffer() -> Option<MarkerBuffer> {
+    MARKER_BUFFER_OVERRIDE.with(|current| current.borrow().clone())
+}
+
+fn parse_marker_color(color: &str) -> PyResult<[f32; 4]> {
+    let invalid =
+        || pyo3::exceptions::PyValueError::new_err("marker color must be #RRGGBB or #RRGGBBAA");
+    let digits = color.as_bytes().strip_prefix(b"#").ok_or_else(invalid)?;
+    if !matches!(digits.len(), 6 | 8) || !digits.iter().all(u8::is_ascii_hexdigit) {
+        return Err(invalid());
+    }
+    let parse_byte = |start| {
+        let nibble = |digit| match digit {
+            b'0'..=b'9' => digit - b'0',
+            b'a'..=b'f' => digit - b'a' + 10,
+            b'A'..=b'F' => digit - b'A' + 10,
+            _ => unreachable!("hex digits validated above"),
+        };
+        nibble(digits[start]) * 16 + nibble(digits[start + 1])
+    };
+    Ok([
+        parse_byte(0) as f32 / 255.0,
+        parse_byte(2) as f32 / 255.0,
+        parse_byte(4) as f32 / 255.0,
+        if digits.len() == 8 {
+            parse_byte(6) as f32 / 255.0
+        } else {
+            1.0
+        },
+    ])
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AlignMode {
@@ -471,6 +535,7 @@ pub struct Delog {
     emit: EmitBuffer,
     live: LiveTransformBuffer,
     operations: OperationBuffer,
+    markers: MarkerBuffer,
     script_name: String,
     generation: u64,
     params: SharedParams,
@@ -482,6 +547,7 @@ impl Delog {
         emit: EmitBuffer,
         live: LiveTransformBuffer,
         operations: OperationBuffer,
+        markers: MarkerBuffer,
         script_name: String,
         generation: u64,
         params: SharedParams,
@@ -491,6 +557,7 @@ impl Delog {
             emit,
             live,
             operations,
+            markers,
             script_name,
             generation,
             params,
@@ -507,6 +574,10 @@ impl Delog {
 
     pub fn operation_buffer(&self) -> OperationBuffer {
         Rc::clone(&self.operations)
+    }
+
+    pub fn marker_buffer(&self) -> MarkerBuffer {
+        Rc::clone(&self.markers)
     }
 }
 
@@ -772,6 +843,30 @@ impl CatalogPy {
 
 #[pymethods]
 impl Delog {
+    #[pyo3(signature = (time_us, label, *, color=None, note=None))]
+    fn add_marker(
+        &self,
+        time_us: i64,
+        label: String,
+        color: Option<String>,
+        note: Option<String>,
+    ) -> PyResult<()> {
+        if label.is_empty() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "marker label must not be empty",
+            ));
+        }
+        let marker = PendingMarker {
+            time_us,
+            label,
+            color: color.as_deref().map(parse_marker_color).transpose()?,
+            note: note.unwrap_or_default(),
+        };
+        let markers = active_marker_buffer().unwrap_or_else(|| Rc::clone(&self.markers));
+        markers.borrow_mut().push(marker);
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (topic, *, multiplier=1.0, offset=0.0, fields=None, unit=None, units=None, output_topic=None, source=None, instance=None, mode="both"))]
     fn transform(
@@ -1073,6 +1168,7 @@ impl Delog {
         struct Decorator {
             spec: LiveTransformSpec,
             live: LiveTransformBuffer,
+            markers: MarkerBuffer,
         }
 
         #[pymethods]
@@ -1087,6 +1183,7 @@ impl Delog {
                 self.live.borrow_mut().push(PendingLiveTransform {
                     spec,
                     callable: func.clone_ref(py),
+                    markers: Rc::clone(&self.markers),
                 });
                 Ok(func)
             }
@@ -1097,6 +1194,7 @@ impl Delog {
             Decorator {
                 spec,
                 live: Rc::clone(&self.live),
+                markers: self.marker_buffer(),
             },
         )?
         .into_any()
@@ -1349,6 +1447,148 @@ mod tests {
     use crate::operations::{OperationBuffer, OperationMode, OperationSpec};
     use arrow::array::{ArrayRef, Float64Array, Int64Array};
 
+    fn test_delog_with_markers(markers: MarkerBuffer) -> Delog {
+        Delog::new(
+            Arc::new(StoreSnapshot::empty()),
+            EmitBuffer::default(),
+            LiveTransformBuffer::default(),
+            OperationBuffer::default(),
+            markers,
+            String::new(),
+            0,
+            crate::params::shared_empty(),
+        )
+    }
+
+    #[test]
+    fn add_marker_validates_and_stages_values() {
+        Python::attach(|py| {
+            let markers = MarkerBuffer::default();
+            let delog = Bound::new(py, test_delog_with_markers(Rc::clone(&markers))).unwrap();
+            let locals = PyDict::new(py);
+            locals.set_item("delog", delog).unwrap();
+            let code = std::ffi::CString::new(
+                r##"
+delog.add_marker(42, "launch")
+delog.add_marker(43, "rgb", color="#112233", note="opaque")
+delog.add_marker(44, "rgba", color="#11223344")
+"##,
+            )
+            .unwrap();
+            py.run(&code, None, Some(&locals)).unwrap();
+
+            assert_eq!(
+                *markers.borrow(),
+                vec![
+                    PendingMarker {
+                        time_us: 42,
+                        label: "launch".into(),
+                        color: None,
+                        note: String::new(),
+                    },
+                    PendingMarker {
+                        time_us: 43,
+                        label: "rgb".into(),
+                        color: Some([17.0 / 255.0, 34.0 / 255.0, 51.0 / 255.0, 1.0]),
+                        note: "opaque".into(),
+                    },
+                    PendingMarker {
+                        time_us: 44,
+                        label: "rgba".into(),
+                        color: Some([17.0 / 255.0, 34.0 / 255.0, 51.0 / 255.0, 68.0 / 255.0,]),
+                        note: String::new(),
+                    },
+                ]
+            );
+        });
+    }
+
+    #[test]
+    fn add_marker_rejects_invalid_values_without_staging() {
+        Python::attach(|py| {
+            let markers = MarkerBuffer::default();
+            let delog = Bound::new(py, test_delog_with_markers(Rc::clone(&markers))).unwrap();
+            let locals = PyDict::new(py);
+            locals.set_item("delog", delog).unwrap();
+            let invalid_calls = [
+                (r#"delog.add_marker(1, "")"#, "ValueError"),
+                (
+                    r#"delog.add_marker(1, "bad", color="112233")"#,
+                    "ValueError",
+                ),
+                (
+                    r##"delog.add_marker(1, "bad", color="#123")"##,
+                    "ValueError",
+                ),
+                (
+                    r##"delog.add_marker(1, "bad", color="#GG2233")"##,
+                    "ValueError",
+                ),
+                (
+                    r##"delog.add_marker(1, "bad", color="#aéaaa")"##,
+                    "ValueError",
+                ),
+                (r#"delog.add_marker(1.5, "bad")"#, "TypeError"),
+                (r#"delog.add_marker(1, 2)"#, "TypeError"),
+                (r#"delog.add_marker(1, "bad", color=2)"#, "TypeError"),
+                (r#"delog.add_marker(1, "bad", note=2)"#, "TypeError"),
+            ];
+            for (call, expected_type) in invalid_calls {
+                let code = std::ffi::CString::new(call).unwrap();
+                let error = py.run(&code, None, Some(&locals)).unwrap_err();
+                match expected_type {
+                    "ValueError" => {
+                        assert!(error.is_instance_of::<pyo3::exceptions::PyValueError>(py))
+                    }
+                    "TypeError" => {
+                        assert!(error.is_instance_of::<pyo3::exceptions::PyTypeError>(py))
+                    }
+                    _ => unreachable!(),
+                }
+                assert!(markers.borrow().is_empty(), "staged rejected call: {call}");
+            }
+        });
+    }
+
+    #[test]
+    fn add_marker_has_no_aliases_and_live_transforms_capture_its_buffer() {
+        Python::attach(|py| {
+            let markers = MarkerBuffer::default();
+            let live = LiveTransformBuffer::default();
+            let delog = Bound::new(
+                py,
+                Delog::new(
+                    Arc::new(StoreSnapshot::empty()),
+                    EmitBuffer::default(),
+                    Rc::clone(&live),
+                    OperationBuffer::default(),
+                    Rc::clone(&markers),
+                    String::new(),
+                    0,
+                    crate::params::shared_empty(),
+                ),
+            )
+            .unwrap();
+            for alias in ["add_markers", "marker", "markers"] {
+                assert!(!delog.hasattr(alias).unwrap(), "unexpected alias: {alias}");
+            }
+            let locals = PyDict::new(py);
+            locals.set_item("delog", delog).unwrap();
+            let code = std::ffi::CString::new(
+                r#"
+@delog.live_transform(topic="A", fields=["x"])
+def callback(batch):
+    return None
+"#,
+            )
+            .unwrap();
+            py.run(&code, None, Some(&locals)).unwrap();
+
+            assert_eq!(live.borrow().len(), 1);
+            assert!(Rc::ptr_eq(&live.borrow()[0].markers, &markers));
+        });
+    }
+
     #[test]
     fn declarative_methods_expose_both_as_the_mode_default() {
         Python::attach(|py| {
@@ -1359,6 +1599,7 @@ mod tests {
                     EmitBuffer::default(),
                     LiveTransformBuffer::default(),
                     OperationBuffer::default(),
+                    MarkerBuffer::default(),
                     String::new(),
                     0,
                     crate::params::shared_empty(),
@@ -1394,6 +1635,7 @@ mod tests {
                     EmitBuffer::default(),
                     LiveTransformBuffer::default(),
                     OperationBuffer::default(),
+                    MarkerBuffer::default(),
                     String::new(),
                     0,
                     crate::params::shared_empty(),
@@ -1424,6 +1666,7 @@ mod tests {
                     EmitBuffer::default(),
                     LiveTransformBuffer::default(),
                     Rc::clone(&operations),
+                    MarkerBuffer::default(),
                     String::new(),
                     0,
                     crate::params::shared_empty(),
@@ -1485,6 +1728,7 @@ delog.group_by("PARAM_VALUE", "param_id")
                     EmitBuffer::default(),
                     LiveTransformBuffer::default(),
                     Rc::clone(&operations),
+                    MarkerBuffer::default(),
                     String::new(),
                     0,
                     crate::params::shared_empty(),
@@ -1528,6 +1772,7 @@ delog.group_by("PARAM_VALUE", "param_id")
                     EmitBuffer::default(),
                     LiveTransformBuffer::default(),
                     Rc::clone(&operations),
+                    MarkerBuffer::default(),
                     String::new(),
                     0,
                     crate::params::shared_empty(),
