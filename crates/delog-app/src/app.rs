@@ -2987,6 +2987,9 @@ impl eframe::App for DelogApp {
                 self.settings.scripting.auto_open_variables,
                 self.settings.scripting.auto_open_console,
             );
+            for command in self.scripts.take_marker_commands() {
+                self.markers.apply_script_command(command);
+            }
             for message in self.scripts.take_parser_diagnostics() {
                 self.push_log(PendingLog::with_target(
                     LogLevel::Error,
