@@ -13,6 +13,8 @@ use delog_script::{ScriptCommand, ScriptEngine, ScriptEvent};
 
 const SNAPSHOT_RADIANS_SCRIPT: &str =
     include_str!("../../../scripts/snapshot/nav_controller_output_radians.py");
+const SNAPSHOT_EULER_SCRIPT: &str =
+    include_str!("../../../scripts/snapshot/vehicle_attitude_euler.py");
 
 #[test]
 fn console_eval_executes_declarative_transform() {
@@ -288,6 +290,72 @@ fn bundled_snapshot_radians_script_emits_without_registering_live_operation() {
     assert!(
         !engine.has_live_transform("snapshot_radians"),
         "snapshot script must not register a live operation"
+    );
+
+    drop(engine);
+    drop(sender);
+    ingest_thread.join().unwrap();
+}
+
+#[test]
+fn bundled_snapshot_attitude_script_emits_euler_angles() {
+    let (store, sender, ingest_thread) = start_ingestor();
+    let raw_source = {
+        let mut sink = sender.file_sink();
+        let source = sink.open_source("flight", SourceKind::File);
+        sink.submit(vehicle_attitude_batch(source));
+        sink.close_source(source, ParseSummary::default());
+        source
+    };
+    wait_until(|| {
+        store
+            .load()
+            .topic_store_by_name(raw_source, "vehicle_attitude[0]")
+            .is_some()
+    });
+
+    let engine = spawn_engine(Arc::clone(&store), sender.clone());
+    engine
+        .send(ScriptCommand::RunScript {
+            name: "snapshot_attitude".into(),
+            source: SNAPSHOT_EULER_SCRIPT.into(),
+        })
+        .unwrap();
+    let errors = wait_done(&engine);
+    assert!(errors.is_empty(), "snapshot attitude failed: {errors:?}");
+
+    let snapshot = wait_for_source_topics(
+        &store,
+        "script:snapshot_attitude",
+        &["vehicle_attitude_euler"],
+    );
+    let source = snapshot
+        .sources
+        .iter()
+        .find(|source| source.entry.label == "script:snapshot_attitude" && !source.entry.removed)
+        .unwrap()
+        .entry
+        .id;
+    assert_f64_close(
+        &snapshot,
+        source,
+        "vehicle_attitude_euler",
+        "roll",
+        &[0.0, 90.0, 0.0, 0.0],
+    );
+    assert_f64_close(
+        &snapshot,
+        source,
+        "vehicle_attitude_euler",
+        "pitch",
+        &[0.0, 0.0, 45.0, 0.0],
+    );
+    assert_f64_close(
+        &snapshot,
+        source,
+        "vehicle_attitude_euler",
+        "yaw",
+        &[0.0, 0.0, 0.0, 90.0],
     );
 
     drop(engine);
@@ -589,6 +657,35 @@ fn nav_controller_batch(source: delog_core::identity::SourceId) -> ParsedBatch {
     )
 }
 
+fn vehicle_attitude_batch(source: delog_core::identity::SourceId) -> ParsedBatch {
+    let schema = Arc::new(
+        TopicSchema::new(
+            "vehicle_attitude[0]",
+            [
+                FieldSchema::new("q[0]", DataType::Float64, None::<String>, 1.0).unwrap(),
+                FieldSchema::new("q[1]", DataType::Float64, None::<String>, 1.0).unwrap(),
+                FieldSchema::new("q[2]", DataType::Float64, None::<String>, 1.0).unwrap(),
+                FieldSchema::new("q[3]", DataType::Float64, None::<String>, 1.0).unwrap(),
+            ],
+        )
+        .unwrap(),
+    );
+    let half_sqrt = std::f64::consts::FRAC_1_SQRT_2;
+    let pitch_w = (std::f64::consts::FRAC_PI_4 / 2.0).cos();
+    let pitch_y = (std::f64::consts::FRAC_PI_4 / 2.0).sin();
+    ParsedBatch::new(
+        source,
+        schema,
+        Int64Array::from(vec![100, 200, 300, 400]),
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, half_sqrt, pitch_w, half_sqrt])) as ArrayRef,
+            Arc::new(Float64Array::from(vec![0.0, half_sqrt, 0.0, 0.0])) as ArrayRef,
+            Arc::new(Float64Array::from(vec![0.0, 0.0, pitch_y, 0.0])) as ArrayRef,
+            Arc::new(Float64Array::from(vec![0.0, 0.0, 0.0, half_sqrt])) as ArrayRef,
+        ],
+    )
+}
+
 fn ctun_batch(
     source: delog_core::identity::SourceId,
     times: &[i64],
@@ -704,6 +801,37 @@ fn assert_f64(
         })
         .collect::<Vec<_>>();
     assert_eq!(values, expected);
+}
+
+fn assert_f64_close(
+    snapshot: &StoreSnapshot,
+    source: delog_core::identity::SourceId,
+    topic: &str,
+    field: &str,
+    expected: &[f64],
+) {
+    let store = snapshot.topic_store_by_name(source, topic).unwrap();
+    let index = store.schema.field_index(field).unwrap();
+    let values = store
+        .chunks
+        .iter()
+        .flat_map(|chunk| {
+            chunk.cols[index]
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .values()
+                .iter()
+                .copied()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(values.len(), expected.len());
+    for (actual, expected) in values.iter().zip(expected) {
+        assert!(
+            (actual - expected).abs() < 1e-10,
+            "{topic}.{field}: expected {expected}, got {actual}"
+        );
+    }
 }
 
 fn assert_unit(
