@@ -387,6 +387,10 @@ mod tests {
             longest_common_prefix(&s(&["delog.find", "delog.find_all"])),
             "delog.find"
         );
+        assert_eq!(
+            longest_common_prefix(&s(&["alpha.beta", "alpha.gamma"])),
+            "alpha."
+        );
         assert_eq!(longest_common_prefix(&s(&["abc"])), "abc");
         assert_eq!(longest_common_prefix(&s(&[])), "");
         assert_eq!(longest_common_prefix(&s(&["ab", "cd"])), "");
