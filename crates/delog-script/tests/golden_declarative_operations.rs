@@ -11,6 +11,9 @@ use delog_core::schema::{FieldSchema, TopicSchema};
 use delog_core::snapshot::{DataStore, StoreSnapshot};
 use delog_script::{ScriptCommand, ScriptEngine, ScriptEvent};
 
+const SNAPSHOT_RADIANS_SCRIPT: &str =
+    include_str!("../../../scripts/snapshot/nav_controller_output_radians.py");
+
 #[test]
 fn console_eval_executes_declarative_transform() {
     let (store, sender, ingest_thread) = start_ingestor();
@@ -230,6 +233,62 @@ delog.merge({"NAV_CONTROLLER_OUTPUT": ["nav_roll"], "GPS": ["alt"]},
         &[90.0, 180.0],
     );
     assert_f64(&snapshot, source, "NAV_WITH_ALT", "alt", &[10.0, 20.0]);
+
+    drop(engine);
+    drop(sender);
+    ingest_thread.join().unwrap();
+}
+
+#[test]
+fn bundled_snapshot_radians_script_emits_without_registering_live_operation() {
+    let (store, sender, ingest_thread) = start_ingestor();
+    let raw_source = {
+        let mut sink = sender.file_sink();
+        let source = sink.open_source("flight", SourceKind::File);
+        sink.submit(nav_controller_batch(source));
+        sink.close_source(source, ParseSummary::default());
+        source
+    };
+    wait_until(|| {
+        store
+            .load()
+            .topic_store_by_name(raw_source, "NAV_CONTROLLER_OUTPUT")
+            .is_some()
+    });
+
+    let engine = spawn_engine(Arc::clone(&store), sender.clone());
+    engine
+        .send(ScriptCommand::RunScript {
+            name: "snapshot_radians".into(),
+            source: SNAPSHOT_RADIANS_SCRIPT.into(),
+        })
+        .unwrap();
+    let errors = wait_done(&engine);
+    assert!(errors.is_empty(), "snapshot radians failed: {errors:?}");
+
+    let snapshot = wait_for_source_topics(
+        &store,
+        "script:snapshot_radians",
+        &["NAV_CONTROLLER_OUTPUT_RAD"],
+    );
+    let source = snapshot
+        .sources
+        .iter()
+        .find(|source| source.entry.label == "script:snapshot_radians" && !source.entry.removed)
+        .unwrap()
+        .entry
+        .id;
+    assert_f64(
+        &snapshot,
+        source,
+        "NAV_CONTROLLER_OUTPUT_RAD",
+        "nav_roll",
+        &[std::f64::consts::FRAC_PI_2, std::f64::consts::PI],
+    );
+    assert!(
+        !engine.has_live_transform("snapshot_radians"),
+        "snapshot script must not register a live operation"
+    );
 
     drop(engine);
     drop(sender);
