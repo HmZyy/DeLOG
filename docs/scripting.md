@@ -425,10 +425,11 @@ Key behaviors:
   other transforms keep running. Error messages identify the transform as
   `<script>.<function>` (e.g. `named_values_live_split.split_named_floats`).
 
-**Version 1 `@delog.live_transform` callbacks are same-topic only.** A callback sees one
-incoming topic batch at a time. It cannot join across topics, resample onto
-another timeline, or keep rolling-window state between batches. Declarative
-`delog.merge(...)` supports previous-sample joins across topics; for custom
+**`@delog.live_transform` callbacks receive one matching topic batch per
+invocation.** Registered Python callables persist, so module or closure mutable
+state can retain rolling-window history between batches. An invocation cannot
+directly read, join, or align another topic input, however. Use declarative
+`delog.merge(...)` for cross-topic previous-sample joins; for other custom
 cross-topic logic, use a snapshot script after capture.
 
 ---
@@ -664,11 +665,10 @@ print(f"emitted {len(f.t)} samples")
 
 - **Time is `int64` microseconds**, end to end. Field `.t` and `emit(...)`
   `times_us` are both raw log-time microseconds.
-- **Values are `float64`** on numeric reads (`.v`) and manual snapshot output
-  through `emit` is numeric-only. String fields are the one exception on the
-  read side: `.s` on a materialized `DelogField` and a live
-  transform's numpy unicode `batch.<name>` attribute expose Utf8 fields as
-  strings, but output stays `float64`-only.
+- **Numeric values are `float64`.** Numeric reads use `.v`; manual snapshot
+  fields emitted by `delog.emit` and live-transform callback result values are
+  numeric Float64. Structured reads and live-transform batch inputs can expose
+  Utf8 strings, and declarative operations preserve pass-through Utf8 fields.
 - **NaN means "gap"** - it is never interpolated away. Reads preserve NaN;
   emit preserves NaN; plots render NaN as a line break. Propagate it naturally
   (most numpy ops do).
