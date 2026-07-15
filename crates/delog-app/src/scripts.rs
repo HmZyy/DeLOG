@@ -8,7 +8,7 @@ use delog_core::metrics::MetricsRegistry;
 use delog_core::snapshot::DataStore;
 use delog_script::library::ScriptLibrary;
 use delog_script::params::{ParamSpec, ParamValue};
-use delog_script::{ScriptCommand, ScriptEngine, ScriptEvent};
+use delog_script::{MarkerCommand, ScriptCommand, ScriptEngine, ScriptEvent};
 use egui_code_editor::{CodeEditor, ColorTheme, Syntax};
 
 use crate::parsers::{ParserUiAction, ParsersPanel};
@@ -115,6 +115,7 @@ pub struct ScriptsPanel {
     pending_auto_open: Option<PendingAutoOpen>,
     auto_open_mode: AutoOpenVariables,
     pending_logs: Vec<PendingLog>,
+    pending_marker_commands: Vec<MarkerCommand>,
     completion: ReplCompletion,
     history: ReplHistory,
 }
@@ -153,6 +154,7 @@ impl ScriptsPanel {
             pending_auto_open: None,
             auto_open_mode: AutoOpenVariables::default(),
             pending_logs: Vec::new(),
+            pending_marker_commands: Vec::new(),
             completion: ReplCompletion::new(),
             history: ReplHistory::new(),
         }
@@ -216,6 +218,10 @@ impl ScriptsPanel {
 
     pub fn take_logs(&mut self) -> Vec<PendingLog> {
         std::mem::take(&mut self.pending_logs)
+    }
+
+    pub fn take_marker_commands(&mut self) -> Vec<MarkerCommand> {
+        std::mem::take(&mut self.pending_marker_commands)
     }
 
     pub fn request_interrupt(&self) {
@@ -504,6 +510,7 @@ impl ScriptsPanel {
                     }
                 }
             }
+            ScriptEvent::Markers(command) => self.pending_marker_commands.push(command),
             ScriptEvent::LiveBatchProcessed => {}
             ScriptEvent::Parser(event) => self.parsers.handle_event(event),
             ScriptEvent::Completions { seq, matches } => {
@@ -1305,6 +1312,48 @@ mod tests {
         assert_eq!(logs[0].level, crate::logging::LogLevel::Error);
         assert!(logs[0].message.contains("python exploded"));
         assert!(panel.take_logs().is_empty());
+    }
+
+    #[test]
+    fn marker_events_are_buffered_without_console_or_completion_side_effects() {
+        let root =
+            std::env::temp_dir().join(format!("delog-scripts-marker-event-{}", std::process::id()));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
+        panel.running = true;
+        panel.status = "running console script".into();
+        panel.console = "existing output\n".into();
+        panel.console_open = false;
+        panel.variables_open = false;
+        panel.refocus_repl_input = false;
+        panel.repl_input = "ma".into();
+        let completion_seq = panel.completion.begin_request(0, 2, "ma".into());
+        let command = delog_script::MarkerCommand::Append {
+            owner: "console".into(),
+            generation: 7,
+            markers: vec![],
+        };
+
+        panel.handle_event(ScriptEvent::Markers(command.clone()));
+
+        assert!(panel.running);
+        assert_eq!(panel.status, "running console script");
+        assert_eq!(panel.console, "existing output\n");
+        assert!(!panel.console_open);
+        assert!(!panel.variables_open);
+        assert!(!panel.refocus_repl_input);
+        assert_eq!(panel.repl_input, "ma");
+        assert_eq!(panel.take_marker_commands(), vec![command]);
+        assert!(panel.take_marker_commands().is_empty());
+
+        panel.handle_event(ScriptEvent::Completions {
+            seq: completion_seq,
+            matches: vec!["marker".into()],
+        });
+        assert_eq!(panel.repl_input, "marker");
     }
 
     #[test]

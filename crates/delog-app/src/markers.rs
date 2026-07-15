@@ -1,4 +1,26 @@
+#[cfg(feature = "scripting")]
+use std::collections::HashMap;
 use std::collections::HashSet;
+
+#[cfg(feature = "scripting")]
+use delog_script::{MarkerCommand, PendingMarker};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MarkerOrigin {
+    Manual,
+    #[cfg(feature = "scripting")]
+    Script {
+        owner: String,
+        generation: u64,
+    },
+}
+
+#[cfg(feature = "scripting")]
+#[derive(Debug, Clone, Copy)]
+struct ScriptMarkerState {
+    generation: u64,
+    next_palette_index: usize,
+}
 
 /// `id` is a stable identity so the dock and timeline can address a marker for
 /// edit/delete/drag even as the time-sorted display order shifts.
@@ -10,6 +32,7 @@ pub struct Marker {
     /// sRGB straight RGBA.
     pub color: [f32; 4],
     pub note: String,
+    origin: MarkerOrigin,
 }
 
 impl Marker {
@@ -30,6 +53,8 @@ impl Marker {
 pub struct Markers {
     items: Vec<Marker>,
     next_id: u64,
+    #[cfg(feature = "scripting")]
+    script_states: HashMap<String, ScriptMarkerState>,
 }
 
 impl Markers {
@@ -47,6 +72,7 @@ impl Markers {
             label: format!("Marker {}", id + 1),
             color,
             note: String::new(),
+            origin: MarkerOrigin::Manual,
         });
         id
     }
@@ -60,6 +86,85 @@ impl Markers {
             label,
             color,
             note,
+            origin: MarkerOrigin::Manual,
+        });
+    }
+
+    #[cfg(feature = "scripting")]
+    pub fn apply_script_command(&mut self, command: MarkerCommand) {
+        match command {
+            MarkerCommand::Replace {
+                owner,
+                generation,
+                markers,
+            } => {
+                self.remove_script_markers(&owner);
+                let mut state = ScriptMarkerState {
+                    generation,
+                    next_palette_index: 0,
+                };
+                self.insert_script_markers(&owner, generation, markers, &mut state);
+                self.script_states.insert(owner, state);
+            }
+            MarkerCommand::Append {
+                owner,
+                generation,
+                markers,
+            } => {
+                let mut state = match self.script_states.get(&owner).copied() {
+                    Some(state) if generation < state.generation => return,
+                    Some(mut state) => {
+                        state.generation = generation;
+                        state
+                    }
+                    None => ScriptMarkerState {
+                        generation,
+                        next_palette_index: 0,
+                    },
+                };
+                self.insert_script_markers(&owner, generation, markers, &mut state);
+                self.script_states.insert(owner, state);
+            }
+            MarkerCommand::Remove { owner } => {
+                self.script_states.remove(&owner);
+                self.remove_script_markers(&owner);
+            }
+        }
+    }
+
+    #[cfg(feature = "scripting")]
+    fn insert_script_markers(
+        &mut self,
+        owner: &str,
+        generation: u64,
+        markers: Vec<PendingMarker>,
+        state: &mut ScriptMarkerState,
+    ) {
+        for marker in markers {
+            let id = self.next_id;
+            self.next_id += 1;
+            let color = marker.color.unwrap_or_else(|| {
+                delog_render::palette::trace_color(state.next_palette_index).to_srgb_f32()
+            });
+            state.next_palette_index += 1;
+            self.items.push(Marker {
+                id,
+                t_us: marker.time_us,
+                label: marker.label,
+                color,
+                note: marker.note,
+                origin: MarkerOrigin::Script {
+                    owner: owner.to_owned(),
+                    generation,
+                },
+            });
+        }
+    }
+
+    #[cfg(feature = "scripting")]
+    fn remove_script_markers(&mut self, owner: &str) {
+        self.items.retain(|marker| {
+            !matches!(&marker.origin, MarkerOrigin::Script { owner: marker_owner, .. } if marker_owner == owner)
         });
     }
 
@@ -228,6 +333,25 @@ fn fmt_rel(t_us: i64, origin_us: i64) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "scripting")]
+    fn pending(time_us: i64, label: &str, color: Option<[f32; 4]>) -> PendingMarker {
+        PendingMarker {
+            time_us,
+            label: label.into(),
+            color,
+            note: format!("note for {label}"),
+        }
+    }
+
+    #[cfg(feature = "scripting")]
+    fn labels(markers: &Markers) -> Vec<&str> {
+        markers
+            .as_slice()
+            .iter()
+            .map(|marker| marker.label.as_str())
+            .collect()
+    }
+
     #[test]
     fn add_assigns_increasing_ids_labels_and_distinct_colors() {
         let mut m = Markers::new();
@@ -275,5 +399,174 @@ mod tests {
         assert_eq!(super::fmt_rel(3_210_000, 0), "0:03.21");
         assert_eq!(super::fmt_rel(62_000_000, 0), "1:02.00");
         assert_eq!(super::fmt_rel(0, 1_000_000), "-0:01.00");
+    }
+
+    #[test]
+    #[cfg(feature = "scripting")]
+    fn script_replace_preserves_manual_and_replaces_only_owner_generation() {
+        let mut markers = Markers::new();
+        markers.add_at(5);
+        markers.push_loaded(6, "generated".into(), [0.1, 0.2, 0.3, 1.0], String::new());
+        markers.apply_script_command(MarkerCommand::Replace {
+            owner: "flight.py".into(),
+            generation: 1,
+            markers: vec![pending(10, "old", None)],
+        });
+        markers.apply_script_command(MarkerCommand::Replace {
+            owner: "other.py".into(),
+            generation: 1,
+            markers: vec![pending(15, "other", None)],
+        });
+        markers.apply_script_command(MarkerCommand::Replace {
+            owner: "flight.py".into(),
+            generation: 2,
+            markers: vec![pending(20, "new", None)],
+        });
+
+        assert_eq!(labels(&markers), ["Marker 1", "generated", "other", "new"]);
+        assert_eq!(markers.as_slice()[0].origin, MarkerOrigin::Manual);
+        assert_eq!(markers.as_slice()[1].origin, MarkerOrigin::Manual);
+        assert_eq!(
+            markers.as_slice()[3].origin,
+            MarkerOrigin::Script {
+                owner: "flight.py".into(),
+                generation: 2,
+            }
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "scripting")]
+    fn script_append_rejects_lower_generation() {
+        let mut markers = Markers::new();
+        markers.apply_script_command(MarkerCommand::Append {
+            owner: "console".into(),
+            generation: 2,
+            markers: vec![pending(10, "current", None)],
+        });
+        markers.apply_script_command(MarkerCommand::Append {
+            owner: "console".into(),
+            generation: 1,
+            markers: vec![pending(20, "stale", None)],
+        });
+
+        assert_eq!(labels(&markers), ["current"]);
+    }
+
+    #[test]
+    #[cfg(feature = "scripting")]
+    fn script_append_accumulates_at_equal_generation() {
+        let mut markers = Markers::new();
+        for label in ["first", "second"] {
+            markers.apply_script_command(MarkerCommand::Append {
+                owner: "console".into(),
+                generation: 3,
+                markers: vec![pending(10, label, None)],
+            });
+        }
+
+        assert_eq!(labels(&markers), ["first", "second"]);
+    }
+
+    #[test]
+    #[cfg(feature = "scripting")]
+    fn script_append_advances_generation_without_clearing_history() {
+        let mut markers = Markers::new();
+        markers.apply_script_command(MarkerCommand::Append {
+            owner: "console".into(),
+            generation: 1,
+            markers: vec![pending(10, "history", None)],
+        });
+        markers.apply_script_command(MarkerCommand::Append {
+            owner: "console".into(),
+            generation: 2,
+            markers: vec![pending(20, "latest", None)],
+        });
+
+        assert_eq!(labels(&markers), ["history", "latest"]);
+        assert_eq!(
+            markers.as_slice()[0].origin,
+            MarkerOrigin::Script {
+                owner: "console".into(),
+                generation: 1,
+            }
+        );
+        assert_eq!(
+            markers.as_slice()[1].origin,
+            MarkerOrigin::Script {
+                owner: "console".into(),
+                generation: 2,
+            }
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "scripting")]
+    fn script_remove_deletes_only_requested_owner() {
+        let mut markers = Markers::new();
+        markers.add_at(1);
+        for owner in ["one", "two"] {
+            markers.apply_script_command(MarkerCommand::Replace {
+                owner: owner.into(),
+                generation: 1,
+                markers: vec![pending(10, owner, None)],
+            });
+        }
+        markers.apply_script_command(MarkerCommand::Remove {
+            owner: "one".into(),
+        });
+
+        assert_eq!(labels(&markers), ["Marker 1", "two"]);
+    }
+
+    #[test]
+    #[cfg(feature = "scripting")]
+    fn script_markers_keep_duplicate_timestamps_and_explicit_colors() {
+        let explicit = [0.1, 0.2, 0.3, 0.4];
+        let mut markers = Markers::new();
+        markers.apply_script_command(MarkerCommand::Replace {
+            owner: "flight.py".into(),
+            generation: 1,
+            markers: vec![pending(42, "a", Some(explicit)), pending(42, "b", None)],
+        });
+
+        assert_eq!(markers.as_slice().len(), 2);
+        assert_eq!(markers.as_slice()[0].t_us, 42);
+        assert_eq!(markers.as_slice()[1].t_us, 42);
+        assert_eq!(markers.as_slice()[0].color, explicit);
+        assert_eq!(
+            markers.as_slice()[1].color,
+            delog_render::palette::trace_color(1).to_srgb_f32()
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "scripting")]
+    fn script_replace_resets_automatic_palette_ordinal() {
+        let explicit = [0.9, 0.8, 0.7, 0.6];
+        let mut markers = Markers::new();
+        markers.apply_script_command(MarkerCommand::Replace {
+            owner: "flight.py".into(),
+            generation: 1,
+            markers: vec![
+                pending(1, "colored", Some(explicit)),
+                pending(2, "auto", None),
+            ],
+        });
+        assert_eq!(markers.as_slice()[0].color, explicit);
+        assert_eq!(
+            markers.as_slice()[1].color,
+            delog_render::palette::trace_color(1).to_srgb_f32()
+        );
+
+        markers.apply_script_command(MarkerCommand::Replace {
+            owner: "flight.py".into(),
+            generation: 2,
+            markers: vec![pending(3, "reset", None)],
+        });
+        assert_eq!(
+            markers.as_slice()[0].color,
+            delog_render::palette::trace_color(0).to_srgb_f32()
+        );
     }
 }
