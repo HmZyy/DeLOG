@@ -105,12 +105,9 @@ fn accel_magnitude_script_emits_expected_values() {
     );
     let script = r#"
 import numpy as np
-x = delog.field('flight/IMU/AccX').v
-y = delog.field('flight/IMU/AccY').v
-z = delog.field('flight/IMU/AccZ').v
-t = delog.field('flight/IMU/AccX').t
-out = delog.output(t, "AccMag")
-out.add_field("mag", np.sqrt(x*x + y*y + z*z), unit="m/s^2")
+imu = delog.topic("IMU").read("AccX", "AccY", "AccZ")
+mag = np.sqrt(imu.AccX * imu.AccX + imu.AccY * imu.AccY + imu.AccZ * imu.AccZ)
+delog.emit("AccMag", imu.t, {"mag": (mag, "m/s^2")})
 "#;
     let _ = engine.send(ScriptCommand::RunScript {
         name: "accel_mag".into(),
@@ -282,20 +279,18 @@ fn topic_ref_reads_table_columns() {
 imu = delog.topic("IMU").read("AccX", "AccY", "AccZ")
 accx_ref = delog.topic("IMU").field("AccX")
 accx = accx_ref.read()
-accx_again = delog.field(accx_ref)
 print(list(imu.fields()))
 print(float(imu.AccX[0]))
 print(float(imu["AccY"][0]))
 print(int(imu.t[0]))
 print(float(accx.v[0]))
-print(float(accx_again.v[0]))
 "#,
     );
 
     let lines = output.lines().collect::<Vec<_>>();
     assert_eq!(
         lines,
-        ["['AccX', 'AccY', 'AccZ']", "3.0", "4.0", "0", "3.0", "3.0"]
+        ["['AccX', 'AccY', 'AccZ']", "3.0", "4.0", "0", "3.0"]
     );
 
     drop(engine);
@@ -304,7 +299,7 @@ print(float(accx_again.v[0]))
 }
 
 #[test]
-fn field_align_prev_matches_resample_prev() {
+fn field_align_prev_uses_previous_sample_hold() {
     let _guard = SCRIPT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let ingestor = Ingestor::new(NullObserver);
     let (sender, receiver) = ingest_channel();

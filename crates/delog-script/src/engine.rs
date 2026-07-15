@@ -1610,14 +1610,19 @@ mod tests {
             crate::params::shared_empty(),
         );
         let matches = completions_for(&engine, 1, "delog.fi");
+        assert!(matches.iter().any(|m| m == "delog.find"), "got {matches:?}");
         assert!(
-            matches.iter().any(|m| m == "delog.field"),
+            matches.iter().any(|m| m == "delog.find_all"),
+            "got {matches:?}"
+        );
+        assert!(
+            !matches.iter().any(|m| m == "delog.field"),
             "got {matches:?}"
         );
     }
 
     #[test]
-    fn python_can_read_a_field_via_delog() {
+    fn python_can_read_a_field_via_structured_refs() {
         let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let store = test_store_with_baro_alt();
         let engine = ScriptEngine::spawn(
@@ -1627,7 +1632,7 @@ mod tests {
             crate::params::shared_empty(),
         );
         let _ = engine.send(ScriptCommand::Eval(
-            "float(delog.field('flight/BARO/Alt').v[0])".into(),
+            "float(delog.topic('BARO').field('Alt').read().v[0])".into(),
         ));
         let mut result = None;
         loop {
@@ -1665,8 +1670,7 @@ mod tests {
         let script = r#"
 import numpy as np
 t = np.array([0, 100, 200], dtype=np.int64)
-out = delog.output(t, "Mag")
-out.add_field("v", np.array([1.0, 2.0, 3.0]), unit="m")
+delog.emit("Mag", t, {"v": (np.array([1.0, 2.0, 3.0]), "m")})
 "#;
         let _ = engine.send(ScriptCommand::RunScript {
             name: "test".into(),
@@ -1719,8 +1723,7 @@ out.add_field("v", np.array([1.0, 2.0, 3.0]), unit="m")
         let script = r#"
 import numpy as np
 t = np.array([0, 100, 200], dtype=np.int64)
-out = delog.output(t, "Mag")
-out.add_field("v", np.array([1.0, 2.0, 3.0]), unit="m")
+delog.emit("Mag", t, {"v": (np.array([1.0, 2.0, 3.0]), "m")})
 "#;
 
         for _ in 0..2 {
@@ -2133,7 +2136,7 @@ def f(batch):
             test_metrics(),
             crate::params::shared_empty(),
         );
-        let script = "import numpy as np\nout = delog.output(np.array([0],dtype=np.int64),'X')\nout.add_field('v', np.array([1.0]))\nraise ValueError('boom')\n";
+        let script = "import numpy as np\ndelog.emit('X', np.array([0],dtype=np.int64), {'v': np.array([1.0])})\nraise ValueError('boom')\n";
         let _ = engine.send(ScriptCommand::RunScript {
             name: "bad".into(),
             source: script.into(),
