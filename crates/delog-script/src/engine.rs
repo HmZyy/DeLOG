@@ -14,7 +14,7 @@ use pyo3::exceptions::{PyKeyboardInterrupt, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use crate::api::Delog;
+use crate::api::{Delog, PendingMarker};
 use crate::custom_parser::{
     ParserOutput, emit_parser_output, parse_python_result, read_float32_file,
 };
@@ -46,6 +46,8 @@ struct ActiveTransform {
     spec: LiveTransformSpec,
     callable: Py<PyAny>,
     source: SourceId,
+    markers: crate::api::MarkerBuffer,
+    generation: u64,
     consecutive_errors: u8,
     disabled: bool,
     /// Sorted field names of the first successful emission per output topic;
@@ -289,11 +291,30 @@ pub enum ParserEvent {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum MarkerCommand {
+    Replace {
+        owner: String,
+        generation: u64,
+        markers: Vec<PendingMarker>,
+    },
+    Append {
+        owner: String,
+        generation: u64,
+        markers: Vec<PendingMarker>,
+    },
+    Remove {
+        owner: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum ScriptEvent {
     Output(String),
     Result(String),
     Error(String),
     Done,
+    /// Publishes marker state without carrying command-completion semantics.
+    Markers(MarkerCommand),
     /// Carries no command-completion semantics; the UI ignores it.
     LiveBatchProcessed,
     /// Completion candidates for a prior `ScriptCommand::Complete`.
@@ -631,11 +652,19 @@ fn run_live_transforms(
                 continue;
             }
             match run_one_transform(transform, batch) {
-                Ok(derived) => {
+                Ok((derived, markers)) => {
                     transform.consecutive_errors = 0;
                     let mut sink = sender.file_sink();
                     for batch in derived {
                         sink.submit(batch);
+                    }
+                    drop(sink);
+                    if !markers.is_empty() {
+                        let _ = evt_tx.send(ScriptEvent::Markers(MarkerCommand::Append {
+                            owner: transform.spec.script_name.clone(),
+                            generation: transform.generation,
+                            markers,
+                        }));
                     }
                 }
                 Err(msg) => {
@@ -827,61 +856,71 @@ fn install_declarative_generation(
 fn run_one_transform(
     transform: &mut ActiveTransform,
     batch: &ParsedBatch,
-) -> Result<Vec<ParsedBatch>, String> {
-    let materialized = LiveTransformBatch::from_parsed(&transform.spec, batch)?;
-    let input_times = materialized.times.clone();
-    crate::params::set_current_script(Some(transform.spec.script_name.clone()));
-    let results = Python::attach(
-        |py| -> Result<Vec<crate::live::LiveTransformResult>, String> {
-            let py_batch = LiveBatchPy::from_materialized(py, materialized)
-                .and_then(|b| Bound::new(py, b))
-                .map_err(|e| format_pyerr(py, &e))?;
-            let ret = transform
-                .callable
-                .bind(py)
-                .call1((py_batch,))
-                .map_err(|e| format_pyerr(py, &e))?;
-            parse_transform_result(py, &transform.spec, &input_times, &ret)
-                .map_err(|e| format_pyerr(py, &e))
-        },
-    );
-    crate::params::set_current_script(None);
-    let results = results?;
+) -> Result<(Vec<ParsedBatch>, Vec<PendingMarker>), String> {
+    transform.markers.borrow_mut().clear();
+    let _marker_override =
+        crate::api::override_marker_buffer(std::rc::Rc::clone(&transform.markers));
+    let result = (|| {
+        let materialized = LiveTransformBatch::from_parsed(&transform.spec, batch)?;
+        let input_times = materialized.times.clone();
+        crate::params::set_current_script(Some(transform.spec.script_name.clone()));
+        let results = Python::attach(
+            |py| -> Result<Vec<crate::live::LiveTransformResult>, String> {
+                let py_batch = LiveBatchPy::from_materialized(py, materialized)
+                    .and_then(|b| Bound::new(py, b))
+                    .map_err(|e| format_pyerr(py, &e))?;
+                let ret = transform
+                    .callable
+                    .bind(py)
+                    .call1((py_batch,))
+                    .map_err(|e| format_pyerr(py, &e))?;
+                parse_transform_result(py, &transform.spec, &input_times, &ret)
+                    .map_err(|e| format_pyerr(py, &e))
+            },
+        );
+        crate::params::set_current_script(None);
+        let results = results?;
 
-    // A dynamic transform can pick a topic's field set per batch; a change
-    // between batches (different names, count, a rename, or a reorder) would
-    // otherwise reach the ingest thread as an inconsistent-schema append.
-    // Reject it here instead, as a normal transform error, before any batch is
-    // built. Order matters: ingest appends columns positionally, so names are
-    // compared in emission order (dicts iterate in insertion order).
-    let mut emitted_names: Vec<(String, Vec<String>)> = Vec::with_capacity(results.len());
-    for result in &results {
-        let names: Vec<String> = result.fields.iter().map(|f| f.name.clone()).collect();
-        if let Some(expected) = transform.emitted_fields.get(&result.topic)
-            && *expected != names
-        {
-            return Err(format!(
-                "live transform '{}' changed fields of topic '{}': expected [{}], got [{}]",
-                transform.spec.label(),
-                result.topic,
-                expected.join(", "),
-                names.join(", ")
-            ));
+        // A dynamic transform can pick a topic's field set per batch; a change
+        // between batches (different names, count, a rename, or a reorder) would
+        // otherwise reach the ingest thread as an inconsistent-schema append.
+        // Reject it here instead, as a normal transform error, before any batch is
+        // built. Order matters: ingest appends columns positionally, so names are
+        // compared in emission order (dicts iterate in insertion order).
+        let mut emitted_names: Vec<(String, Vec<String>)> = Vec::with_capacity(results.len());
+        for result in &results {
+            let names: Vec<String> = result.fields.iter().map(|f| f.name.clone()).collect();
+            if let Some(expected) = transform.emitted_fields.get(&result.topic)
+                && *expected != names
+            {
+                return Err(format!(
+                    "live transform '{}' changed fields of topic '{}': expected [{}], got [{}]",
+                    transform.spec.label(),
+                    result.topic,
+                    expected.join(", "),
+                    names.join(", ")
+                ));
+            }
+            emitted_names.push((result.topic.clone(), names));
         }
-        emitted_names.push((result.topic.clone(), names));
-    }
 
-    let batches = results
-        .into_iter()
-        .map(|r| result_to_batch(transform.source, r))
-        .collect::<Result<Vec<_>, _>>()?;
+        let batches = results
+            .into_iter()
+            .map(|r| result_to_batch(transform.source, r))
+            .collect::<Result<Vec<_>, _>>()?;
 
-    // Record only now that the whole batch validated: a failed batch must not
-    // pin a topic's field set from a partial or since-rejected result.
-    for (topic, names) in emitted_names {
-        transform.emitted_fields.entry(topic).or_insert(names);
+        // Record only now that the whole batch validated: a failed batch must not
+        // pin a topic's field set from a partial or since-rejected result.
+        for (topic, names) in emitted_names {
+            transform.emitted_fields.entry(topic).or_insert(names);
+        }
+        let markers = std::mem::take(&mut *transform.markers.borrow_mut());
+        Ok((batches, markers))
+    })();
+    if result.is_err() {
+        transform.markers.borrow_mut().clear();
     }
-    Ok(batches)
+    result
 }
 
 /// Handle one command. Returns `true` if the worker should shut down.
@@ -919,6 +958,7 @@ fn handle_command(
                 let emit: crate::api::EmitBuffer = std::rc::Rc::default();
                 let live: crate::api::LiveTransformBuffer = std::rc::Rc::default();
                 let operations: crate::operations::OperationBuffer = std::rc::Rc::default();
+                let markers: crate::api::MarkerBuffer = std::rc::Rc::default();
                 let generation = *run_counter;
                 *run_counter += 1;
                 let run_result: Result<(), String> = Python::attach(|py| {
@@ -930,6 +970,7 @@ fn handle_command(
                             std::rc::Rc::clone(&emit),
                             std::rc::Rc::clone(&live),
                             std::rc::Rc::clone(&operations),
+                            std::rc::Rc::clone(&markers),
                             name.clone(),
                             generation,
                             Arc::clone(params),
@@ -953,104 +994,120 @@ fn handle_command(
                         let declared_live = !live.borrow().is_empty() || operation_wants_live;
                         let declared_snapshot =
                             !emit.borrow().is_empty() || operation_wants_snapshot;
-                        if let Err(error) = install_declarative_generation(
-                            &name,
-                            &snapshot,
-                            &specs,
-                            sender,
-                            active_live,
-                            active_declarative,
-                            prev_sources,
-                            live_sources,
-                            active_transforms,
-                            declarative_sources,
-                            active_operations,
-                        ) {
-                            // Preparation is deliberately before teardown/open so a bad rerun
-                            // leaves the prior declarative generation intact.
-                            let _ = evt_tx.send(ScriptEvent::Error(error));
-                        }
+                        let has_topics = !emit.borrow().is_empty();
+                        let prepared_topics = crate::emit::prepare_topics(&emit.borrow());
+                        let installation = prepared_topics.and_then(|prepared_topics| {
+                            install_declarative_generation(
+                                &name,
+                                &snapshot,
+                                &specs,
+                                sender,
+                                active_live,
+                                active_declarative,
+                                prev_sources,
+                                live_sources,
+                                active_transforms,
+                                declarative_sources,
+                                active_operations,
+                            )?;
+                            Ok(prepared_topics)
+                        });
 
-                        // Replace this script-name's prior live-derived source.
-                        // These are appendable (never `close_source`d); the prior
-                        // generation is torn down with `remove_source`, which
-                        // tombstones it so existing readers stay valid. Order:
-                        // remove old -> open new (fresh id) -> record the new id.
-                        let pending = live.borrow();
-                        if pending.is_empty() {
-                            active_transforms.remove(&name);
-                            active_live.lock().unwrap().remove(&name);
-                            // A script that previously registered a live
-                            // transform and now registers none must not leave
-                            // its old live-derived source active.
-                            if let Some(prev) = live_sources.remove(&name) {
-                                sender.remove_source(prev);
-                            }
-                        } else {
-                            if let Some(prev) = live_sources.remove(&name) {
-                                sender.remove_source(prev);
-                            }
-                            let derived_source = {
-                                let mut sink = sender.file_sink();
-                                sink.open_source(&format!("script:{name}"), SourceKind::LiveDerived)
-                            };
-                            live_sources.insert(name.clone(), derived_source);
-                            let transforms = Python::attach(|py| {
-                                pending
-                                    .iter()
-                                    .map(|p| ActiveTransform {
-                                        spec: p.spec.clone(),
-                                        callable: p.callable.clone_ref(py),
-                                        source: derived_source,
-                                        consecutive_errors: 0,
-                                        disabled: false,
-                                        emitted_fields: HashMap::new(),
-                                    })
-                                    .collect::<Vec<_>>()
-                            });
-                            active_transforms.insert(name.clone(), transforms);
-                            // Mirror the active specs to the shared map so the UI
-                            // can tell this script has a live transform.
-                            let specs: Vec<LiveTransformSpec> =
-                                pending.iter().map(|p| p.spec.clone()).collect();
-                            active_live.lock().unwrap().insert(name.clone(), specs);
-                        }
-                        drop(pending);
+                        match installation {
+                            Ok(prepared_topics) => {
+                                // Replace this script-name's prior live-derived source.
+                                // These are appendable (never `close_source`d); the prior
+                                // generation is torn down with `remove_source`, which
+                                // tombstones it so existing readers stay valid. Order:
+                                // remove old -> open new (fresh id) -> record the new id.
+                                let pending = live.borrow();
+                                if pending.is_empty() {
+                                    active_transforms.remove(&name);
+                                    active_live.lock().unwrap().remove(&name);
+                                    // A script that previously registered a live
+                                    // transform and now registers none must not leave
+                                    // its old live-derived source active.
+                                    if let Some(prev) = live_sources.remove(&name) {
+                                        sender.remove_source(prev);
+                                    }
+                                } else {
+                                    if let Some(prev) = live_sources.remove(&name) {
+                                        sender.remove_source(prev);
+                                    }
+                                    let derived_source = {
+                                        let mut sink = sender.file_sink();
+                                        sink.open_source(
+                                            &format!("script:{name}"),
+                                            SourceKind::LiveDerived,
+                                        )
+                                    };
+                                    live_sources.insert(name.clone(), derived_source);
+                                    let transforms = Python::attach(|py| {
+                                        pending
+                                            .iter()
+                                            .map(|p| ActiveTransform {
+                                                spec: p.spec.clone(),
+                                                callable: p.callable.clone_ref(py),
+                                                source: derived_source,
+                                                markers: std::rc::Rc::clone(&p.markers),
+                                                generation,
+                                                consecutive_errors: 0,
+                                                disabled: false,
+                                                emitted_fields: HashMap::new(),
+                                            })
+                                            .collect::<Vec<_>>()
+                                    });
+                                    active_transforms.insert(name.clone(), transforms);
+                                    // Mirror the active specs to the shared map so the UI
+                                    // can tell this script has a live transform.
+                                    let specs: Vec<LiveTransformSpec> =
+                                        pending.iter().map(|p| p.spec.clone()).collect();
+                                    active_live.lock().unwrap().insert(name.clone(), specs);
+                                }
+                                drop(pending);
 
-                        let topics = emit.borrow();
-                        // A pure live-transform script emits no snapshot topics;
-                        // an empty Derived source would be a phantom browser entry,
-                        // so skip the open but still tear down any prior emit source.
-                        if topics.is_empty() {
-                            if let Some(prev) = prev_sources.remove(&name) {
-                                sender.remove_source(prev);
-                            }
-                        } else {
-                            match crate::emit::prepare_topics(&topics) {
-                                Ok(prepared) => {
+                                // A pure live-transform script emits no snapshot topics;
+                                // an empty Derived source would be a phantom browser entry,
+                                // so skip the open but still tear down any prior emit source.
+                                if has_topics {
                                     if let Some(prev) = prev_sources.remove(&name) {
                                         sender.remove_source(prev);
                                     }
                                     let mut sink = sender.file_sink();
                                     let new_id = crate::emit::emit_prepared_topics(
-                                        &mut sink, &name, prepared,
+                                        &mut sink,
+                                        &name,
+                                        prepared_topics,
                                     );
                                     prev_sources.insert(name.clone(), new_id);
+                                } else if let Some(prev) = prev_sources.remove(&name) {
+                                    sender.remove_source(prev);
                                 }
-                                Err(e) => {
-                                    let _ = evt_tx.send(ScriptEvent::Error(e));
-                                }
+
+                                let published_markers = std::mem::take(&mut *markers.borrow_mut());
+                                let _ = evt_tx.send(ScriptEvent::Markers(MarkerCommand::Replace {
+                                    owner: name.clone(),
+                                    generation,
+                                    markers: published_markers,
+                                }));
+                                params.lock().unwrap().finalize(
+                                    &name,
+                                    generation,
+                                    declared_snapshot,
+                                    declared_live,
+                                );
+                            }
+                            Err(error) => {
+                                markers.borrow_mut().clear();
+                                // Preparation is deliberately before teardown/open so a bad
+                                // rerun leaves the prior generation intact.
+                                let _ = evt_tx.send(ScriptEvent::Error(error));
                             }
                         }
-                        params.lock().unwrap().finalize(
-                            &name,
-                            generation,
-                            declared_snapshot,
-                            declared_live,
-                        );
                     }
                     Err(msg) => {
                         // No partial source on failure.
+                        markers.borrow_mut().clear();
                         let _ = evt_tx.send(ScriptEvent::Error(msg));
                     }
                 }
@@ -1109,6 +1166,9 @@ fn handle_command(
                 if let Some(previous) = declarative_sources.remove(&name) {
                     sender.remove_source(previous);
                 }
+                let _ = evt_tx.send(ScriptEvent::Markers(MarkerCommand::Remove {
+                    owner: name.clone(),
+                }));
                 // Console confirmation; carries no command-completion semantics.
                 let _ = evt_tx.send(ScriptEvent::Output(format!(
                     "# unregistered live transform '{name}'\n"
@@ -1119,6 +1179,7 @@ fn handle_command(
                 let emit: crate::api::EmitBuffer = std::rc::Rc::default();
                 let live: crate::api::LiveTransformBuffer = std::rc::Rc::default();
                 let operations: crate::operations::OperationBuffer = std::rc::Rc::default();
+                let markers: crate::api::MarkerBuffer = std::rc::Rc::default();
                 let generation = *run_counter;
                 *run_counter += 1;
                 Python::attach(|py| {
@@ -1130,6 +1191,7 @@ fn handle_command(
                             std::rc::Rc::clone(&emit),
                             std::rc::Rc::clone(&live),
                             std::rc::Rc::clone(&operations),
+                            std::rc::Rc::clone(&markers),
                             String::new(),
                             generation,
                             Arc::clone(params),
@@ -1139,11 +1201,13 @@ fn handle_command(
                     g.set_item("delog", delog).unwrap();
                 });
                 params::set_current_script(Some(String::new()));
-                eval_line(globals, &src, evt_tx);
+                let evaluation_succeeded = eval_line(globals, &src, evt_tx);
                 params::set_current_script(None);
                 let specs = operations.borrow().clone();
-                if !specs.is_empty()
-                    && let Err(error) = install_declarative_generation(
+                let installation_succeeded = if !evaluation_succeeded || specs.is_empty() {
+                    evaluation_succeeded
+                } else {
+                    match install_declarative_generation(
                         CONSOLE_SCRIPT_NAME,
                         &snapshot,
                         &specs,
@@ -1155,9 +1219,23 @@ fn handle_command(
                         active_transforms,
                         declarative_sources,
                         active_operations,
-                    )
-                {
-                    let _ = evt_tx.send(ScriptEvent::Error(error));
+                    ) {
+                        Ok(()) => true,
+                        Err(error) => {
+                            let _ = evt_tx.send(ScriptEvent::Error(error));
+                            false
+                        }
+                    }
+                };
+                if installation_succeeded {
+                    let published_markers = std::mem::take(&mut *markers.borrow_mut());
+                    let _ = evt_tx.send(ScriptEvent::Markers(MarkerCommand::Append {
+                        owner: CONSOLE_SCRIPT_NAME.into(),
+                        generation,
+                        markers: published_markers,
+                    }));
+                } else {
+                    markers.borrow_mut().clear();
                 }
                 let _ = evt_tx.send(ScriptEvent::Done);
             }
@@ -1355,14 +1433,14 @@ fn finish_parser_cancelled(
 }
 
 /// Evaluate one line: try as an expression (to report its repr), else exec it.
-fn eval_line(globals: &Py<PyDict>, src: &str, evt_tx: &Sender<ScriptEvent>) {
+fn eval_line(globals: &Py<PyDict>, src: &str, evt_tx: &Sender<ScriptEvent>) -> bool {
     Python::attach(|py| {
         let g = globals.bind(py);
         let code = match std::ffi::CString::new(src) {
             Ok(c) => c,
             Err(_) => {
                 let _ = evt_tx.send(ScriptEvent::Error("source contains a NUL byte".into()));
-                return;
+                return false;
             }
         };
         match py.eval(&code, Some(g), None) {
@@ -1371,15 +1449,20 @@ fn eval_line(globals: &Py<PyDict>, src: &str, evt_tx: &Sender<ScriptEvent>) {
                     let repr = value.repr().map(|r| r.to_string()).unwrap_or_default();
                     let _ = evt_tx.send(ScriptEvent::Result(repr));
                 }
+                true
             }
             Err(_) => {
                 // Not an expression — run as a statement.
-                if let Err(err) = py.run(&code, Some(g), None) {
-                    let _ = evt_tx.send(ScriptEvent::Error(format_pyerr(py, &err)));
+                match py.run(&code, Some(g), None) {
+                    Ok(()) => true,
+                    Err(err) => {
+                        let _ = evt_tx.send(ScriptEvent::Error(format_pyerr(py, &err)));
+                        false
+                    }
                 }
             }
         }
-    });
+    })
 }
 
 /// Guarantee a `delog` object exists in `globals` so attribute completion of
@@ -1401,6 +1484,7 @@ fn ensure_delog_present(
         let emit: crate::api::EmitBuffer = std::rc::Rc::default();
         let live: crate::api::LiveTransformBuffer = std::rc::Rc::default();
         let operations: crate::operations::OperationBuffer = std::rc::Rc::default();
+        let markers: crate::api::MarkerBuffer = std::rc::Rc::default();
         if let Ok(delog) = Bound::new(
             py,
             Delog::new(
@@ -1408,6 +1492,7 @@ fn ensure_delog_present(
                 std::rc::Rc::clone(&emit),
                 std::rc::Rc::clone(&live),
                 std::rc::Rc::clone(&operations),
+                std::rc::Rc::clone(&markers),
                 String::new(),
                 *run_counter,
                 Arc::clone(params),
@@ -1525,6 +1610,7 @@ mod tests {
                 ScriptEvent::Done => break,
                 ScriptEvent::Error(e) => panic!("{e}"),
                 ScriptEvent::Result(_)
+                | ScriptEvent::Markers(_)
                 | ScriptEvent::LiveBatchProcessed
                 | ScriptEvent::Completions { .. }
                 | ScriptEvent::Parser(_) => {}
@@ -1550,6 +1636,7 @@ mod tests {
                 ScriptEvent::Done => break,
                 ScriptEvent::Error(e) => panic!("unexpected error: {e}"),
                 ScriptEvent::Output(_)
+                | ScriptEvent::Markers(_)
                 | ScriptEvent::LiveBatchProcessed
                 | ScriptEvent::Completions { .. }
                 | ScriptEvent::Parser(_) => {}
@@ -1564,6 +1651,358 @@ mod tests {
                 ScriptEvent::Done => break,
                 ScriptEvent::Error(e) => panic!("unexpected error: {e}"),
                 _ => {}
+            }
+        }
+    }
+
+    fn marker_commands_until_done(engine: &ScriptEngine) -> Vec<MarkerCommand> {
+        let mut commands = Vec::new();
+        loop {
+            match engine.recv_blocking() {
+                ScriptEvent::Markers(command) => commands.push(command),
+                ScriptEvent::Done => return commands,
+                ScriptEvent::Error(_) => {}
+                _ => {}
+            }
+        }
+    }
+
+    fn marker_commands_until_live_processed(engine: &ScriptEngine) -> Vec<MarkerCommand> {
+        let mut commands = Vec::new();
+        loop {
+            match engine.recv_blocking() {
+                ScriptEvent::Markers(command) => commands.push(command),
+                ScriptEvent::LiveBatchProcessed => return commands,
+                _ => {}
+            }
+        }
+    }
+
+    fn expected_marker(time_us: i64, label: &str) -> crate::api::PendingMarker {
+        crate::api::PendingMarker {
+            time_us,
+            label: label.into(),
+            color: None,
+            note: String::new(),
+        }
+    }
+
+    #[test]
+    fn marker_named_runs_replace_only_after_complete_success_and_unregister_removes() {
+        let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let engine = ScriptEngine::spawn(
+            Arc::new(DataStore::new()),
+            dummy_sender(),
+            test_metrics(),
+            crate::params::shared_empty(),
+        );
+
+        engine
+            .send(ScriptCommand::RunScript {
+                name: "analysis".into(),
+                source: "delog.add_marker(42, 'launch')".into(),
+            })
+            .unwrap();
+        assert_eq!(
+            marker_commands_until_done(&engine),
+            vec![MarkerCommand::Replace {
+                owner: "analysis".into(),
+                generation: 0,
+                markers: vec![expected_marker(42, "launch")],
+            }]
+        );
+
+        engine
+            .send(ScriptCommand::RunScript {
+                name: "analysis".into(),
+                source: "delog.add_marker(43, 'discarded')\nraise RuntimeError('boom')".into(),
+            })
+            .unwrap();
+        assert!(marker_commands_until_done(&engine).is_empty());
+
+        engine
+            .send(ScriptCommand::RunScript {
+                name: "analysis".into(),
+                source: "value = 1".into(),
+            })
+            .unwrap();
+        assert_eq!(
+            marker_commands_until_done(&engine),
+            vec![MarkerCommand::Replace {
+                owner: "analysis".into(),
+                generation: 2,
+                markers: vec![],
+            }]
+        );
+
+        engine
+            .send(ScriptCommand::UnregisterLive {
+                name: "analysis".into(),
+            })
+            .unwrap();
+        loop {
+            match engine.recv_blocking() {
+                ScriptEvent::Markers(command) => {
+                    assert_eq!(
+                        command,
+                        MarkerCommand::Remove {
+                            owner: "analysis".into()
+                        }
+                    );
+                    break;
+                }
+                ScriptEvent::Error(error) => panic!("unexpected error: {error}"),
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn marker_failed_named_install_does_not_activate_callbacks_or_publish_markers() {
+        let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let ingestor = delog_core::ingestor::Ingestor::new(delog_core::ingestor::NullObserver);
+        let store = ingestor.store();
+        let (sender, receiver) = delog_core::ingest::ingest_channel();
+        let _ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
+        let engine =
+            ScriptEngine::spawn(store, sender, test_metrics(), crate::params::shared_empty());
+
+        engine
+            .send(ScriptCommand::RunScript {
+                name: "analysis".into(),
+                source: r#"
+delog.add_marker(7, "discarded")
+@delog.live_transform(topic="A", fields=["v"], output_topic="B")
+def should_not_install(batch):
+    return {"x": batch.v}
+delog.transform("MISSING", mode="snapshot")
+"#
+                .into(),
+            })
+            .unwrap();
+        assert!(marker_commands_until_done(&engine).is_empty());
+        assert!(!engine.has_live_transform("analysis"));
+    }
+
+    #[test]
+    fn marker_callable_object_survives_failed_named_reruns_with_prior_marker_buffer() {
+        let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let ingestor = delog_core::ingestor::Ingestor::new(delog_core::ingestor::NullObserver);
+        let store = ingestor.store();
+        let (sender, receiver) = delog_core::ingest::ingest_channel();
+        let _ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
+        let engine = ScriptEngine::spawn(
+            store,
+            sender.clone(),
+            test_metrics(),
+            crate::params::shared_empty(),
+        );
+
+        engine
+            .send(ScriptCommand::RunScript {
+                name: "analysis".into(),
+                source: r#"
+class MarkerCallable:
+    def __call__(self, batch):
+        delog.add_marker(42, "still active")
+        return {"x": batch.v}
+
+mark = delog.live_transform(topic="A", fields=["v"], output_topic="B")(MarkerCallable())
+"#
+                .into(),
+            })
+            .unwrap();
+        assert_eq!(
+            marker_commands_until_done(&engine),
+            vec![MarkerCommand::Replace {
+                owner: "analysis".into(),
+                generation: 0,
+                markers: vec![],
+            }]
+        );
+
+        let schema = Arc::new(
+            TopicSchema::new(
+                "A",
+                [FieldSchema::new("v", DataType::Float64, None::<String>, 1.0).unwrap()],
+            )
+            .unwrap(),
+        );
+        let source = {
+            let mut sink = sender.file_sink();
+            sink.open_source("live", SourceKind::Live)
+        };
+        let make_batch = || {
+            ParsedBatch::new(
+                source,
+                Arc::clone(&schema),
+                Int64Array::from(vec![0]),
+                vec![Arc::new(Float64Array::from(vec![1.0])) as ArrayRef],
+            )
+        };
+
+        for failed_source in [
+            "raise RuntimeError('rerun failed')",
+            "delog.transform('MISSING', mode='snapshot')",
+        ] {
+            engine
+                .send(ScriptCommand::RunScript {
+                    name: "analysis".into(),
+                    source: failed_source.into(),
+                })
+                .unwrap();
+            assert!(marker_commands_until_done(&engine).is_empty());
+
+            let mut commands = Vec::new();
+            let mut errors = Vec::new();
+            for _ in 0..LIVE_TRANSFORM_ERROR_LIMIT {
+                engine.try_send_live_batch("live", make_batch()).unwrap();
+                loop {
+                    match engine.recv_blocking() {
+                        ScriptEvent::Markers(command) => commands.push(command),
+                        ScriptEvent::Error(error) => errors.push(error),
+                        ScriptEvent::LiveBatchProcessed => break,
+                        _ => {}
+                    }
+                }
+            }
+            assert!(errors.is_empty(), "generic callback failed: {errors:?}");
+            assert_eq!(
+                commands,
+                vec![
+                    MarkerCommand::Append {
+                        owner: "analysis".into(),
+                        generation: 0,
+                        markers: vec![expected_marker(42, "still active")],
+                    };
+                    usize::from(LIVE_TRANSFORM_ERROR_LIMIT)
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn marker_console_appends_each_success_and_rolls_back_failures() {
+        let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let engine = ScriptEngine::spawn(
+            Arc::new(DataStore::new()),
+            dummy_sender(),
+            test_metrics(),
+            crate::params::shared_empty(),
+        );
+
+        for (source, expected) in [
+            (
+                "delog.add_marker(10, 'console marker')",
+                vec![MarkerCommand::Append {
+                    owner: CONSOLE_SCRIPT_NAME.into(),
+                    generation: 0,
+                    markers: vec![expected_marker(10, "console marker")],
+                }],
+            ),
+            (
+                "unrelated = 1",
+                vec![MarkerCommand::Append {
+                    owner: CONSOLE_SCRIPT_NAME.into(),
+                    generation: 1,
+                    markers: vec![],
+                }],
+            ),
+            (
+                "delog.add_marker(20, 'discarded'); raise RuntimeError('boom')",
+                vec![],
+            ),
+            (
+                "delog.add_marker(30, 'discarded install'); delog.transform('MISSING', mode='snapshot')",
+                vec![],
+            ),
+        ] {
+            engine.send(ScriptCommand::Eval(source.into())).unwrap();
+            assert_eq!(marker_commands_until_done(&engine), expected);
+        }
+    }
+
+    #[test]
+    fn marker_live_callback_commits_success_and_clears_every_failed_invocation() {
+        let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let ingestor = delog_core::ingestor::Ingestor::new(delog_core::ingestor::NullObserver);
+        let store = ingestor.store();
+        let (sender, receiver) = delog_core::ingest::ingest_channel();
+        let _ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
+        let engine = ScriptEngine::spawn(
+            store,
+            sender.clone(),
+            test_metrics(),
+            crate::params::shared_empty(),
+        );
+
+        engine
+            .send(ScriptCommand::RunScript {
+                name: "live_markers".into(),
+                source: r#"
+calls = [0]
+@delog.live_transform(topic="A", fields=["v"], output_topic="B")
+def mark(batch):
+    calls[0] += 1
+    delog.add_marker(calls[0] * 100, f"call {calls[0]}")
+    if calls[0] == 2:
+        raise RuntimeError("callback boom")
+    if calls[0] == 3:
+        return {"changed": batch.v}
+    return {"x": batch.v}
+"#
+                .into(),
+            })
+            .unwrap();
+        assert_eq!(
+            marker_commands_until_done(&engine),
+            vec![MarkerCommand::Replace {
+                owner: "live_markers".into(),
+                generation: 0,
+                markers: vec![],
+            }]
+        );
+
+        let schema = Arc::new(
+            TopicSchema::new(
+                "A",
+                [FieldSchema::new("v", DataType::Float64, None::<String>, 1.0).unwrap()],
+            )
+            .unwrap(),
+        );
+        let source = {
+            let mut sink = sender.file_sink();
+            sink.open_source("live", SourceKind::Live)
+        };
+        let make_batch = || {
+            ParsedBatch::new(
+                source,
+                Arc::clone(&schema),
+                Int64Array::from(vec![0]),
+                vec![Arc::new(Float64Array::from(vec![1.0])) as ArrayRef],
+            )
+        };
+
+        for (expected_time, expected) in [
+            (Some(100), true),
+            (None, false),
+            (None, false),
+            (Some(400), true),
+        ] {
+            engine.try_send_live_batch("live", make_batch()).unwrap();
+            let commands = marker_commands_until_live_processed(&engine);
+            if expected {
+                let time_us = expected_time.unwrap();
+                assert_eq!(
+                    commands,
+                    vec![MarkerCommand::Append {
+                        owner: "live_markers".into(),
+                        generation: 0,
+                        markers: vec![expected_marker(time_us, &format!("call {}", time_us / 100))],
+                    }]
+                );
+            } else {
+                assert!(commands.is_empty());
             }
         }
     }
@@ -1641,6 +2080,7 @@ mod tests {
                 ScriptEvent::Done => break,
                 ScriptEvent::Error(e) => panic!("{e}"),
                 ScriptEvent::Output(_)
+                | ScriptEvent::Markers(_)
                 | ScriptEvent::LiveBatchProcessed
                 | ScriptEvent::Completions { .. }
                 | ScriptEvent::Parser(_) => {}
