@@ -119,13 +119,13 @@ life of the app session.
 Press <kbd>Tab</kbd> to autocomplete the token at the cursor. Completions are
 drawn live from the interpreter session, so they cover Python keywords and
 builtins, names you have defined, imported modules, attribute chains on live
-objects (`f.` after `f = delog.field(...)`), and the whole `delog` API. A single
+objects (`f.` after `f = delog.topic("IMU").field("AccX").read()`), and the whole `delog` API. A single
 match is inserted directly; several open a dropdown - <kbd>Up</kbd>/<kbd>Down</kbd>
 (or <kbd>Ctrl</kbd>+<kbd>P</kbd>/<kbd>Ctrl</kbd>+<kbd>N</kbd>, or repeated
 <kbd>Tab</kbd>) move the highlight, <kbd>Enter</kbd> accepts, and <kbd>Esc</kbd>
 dismisses. <kbd>Ctrl</kbd>+<kbd>N</kbd> also opens the dropdown when it is closed,
 like <kbd>Tab</kbd>. Because completion introspects real objects, Tab on an
-attribute of a call expression (e.g. `delog.field("x").`) evaluates that call.
+attribute of a call expression (e.g. `delog.topic("IMU").`) evaluates that call.
 
 With no completion dropdown open, <kbd>Up</kbd>/<kbd>Down</kbd> walk the command
 history: <kbd>Up</kbd> recalls older submitted lines, <kbd>Down</kbd> moves back
@@ -534,63 +534,20 @@ session. You never import or construct it.
 | `delog.transform(topic, *, multiplier=1.0, offset=0.0, fields=None, unit=None, units=None, output_topic=None, source=None, instance=None, mode="both")` | `None` | Scale/offset selected numeric fields and pass through the topic. |
 | `delog.group_by(topic, field, *, fields=None, output_topic=None, source=None, instance=None, mode="both")` | `None` | Split a topic into stable per-key output topics. |
 | `delog.merge(topics, *, base_topic, output_topic, source=None, mode="both")` | `None` | Previous-sample align selected fields onto a base topic. |
-| `delog.sources()` | `list[str]` | All live field paths, `"source/topic/field"`. |
+| `delog.live_transform(*, topic, fields, output_topic=None)` | decorator | Register custom processing for future batches. |
 | `delog.catalog()` | `Catalog` | Structured source/topic/field catalogue. |
 | `delog.topic(name, *, source=None, instance=None)` | `TopicRef` | Find one topic by name, source, and optional instance. |
 | `delog.find(topic, field=None, *, source=None, instance=None)` | `TopicRef`/`FieldRef` | Find one topic or field, raising on ambiguity. |
 | `delog.find_all(topic=None, field=None, *, source=None, instance=None)` | `list` | Return all matching topic or field refs. |
-| `delog.field(path)` | `DelogField` | Read one field as numpy arrays. |
 | `FieldRef.read()` | `DelogField` | Read a referenced field. |
 | `TopicRef.read(*fields)` | `DelogTable` | Read several fields from one topic on a shared timeline. |
-| `delog.resample_prev(field, base_times)` | `np.ndarray[float64]` | Prev-sample align a field onto another timeline. |
 | `DelogField.align_prev(base)` | `np.ndarray[float64]` | Prev-sample align this field onto another field/table/timeline. |
-| `delog.output(times_us, name)` | `DelogOutput` | Begin a new derived topic. |
-| `DelogOutput.add_field(name, values, unit=None)` | `None` | Add a field to that topic. |
 | `delog.emit(name, times_us, fields)` | `None` | Emit one derived topic from a dict of field entries. |
 
-### `delog.sources() -> list[str]`
+### Structured snapshot lookup and reads
 
-Returns every live (non-removed) field as a string path
-`"<source>/<topic>/<field>"`. This is the catalogue you pass to
-`delog.field(...)`. Example entries:
-
-```
-flight_42/IMU[0]/AccX
-flight_42/vehicle_attitude[0]/q[0]
-```
-
-### `delog.field(path) -> DelogField`
-
-Reads one field, materialized as numpy arrays. `path` is a string exactly as it
-appears in `delog.sources()`.
-
-A `DelogField` has three attributes:
-
-| Attribute | Type | Meaning |
-| --- | --- | --- |
-| `.t` | `np.ndarray[int64]` | Timestamps, microseconds (raw log time). |
-| `.v` | `np.ndarray[float64]` | Values, as `float64`. All-`NaN` for string fields. |
-| `.s` | `np.ndarray[str]` or `None` | Numpy unicode array of values, for string (Utf8) fields; `None` for numeric fields. |
-
-```python
-f = delog.field("flight_42/IMU[0]/AccX")
-print(f.t[:3], f.v[:3])   # int64 µs, float64 values
-```
-
-- Raises `KeyError` if the path doesn't resolve, `ValueError` if the field has
-  no data.
-- Numeric fields are always widened to `float64` (ints/bools included). **NaN
-  is preserved** - gaps in the source remain NaN, so you can detect and
-  propagate them.
-- **String fields** (Utf8) additionally populate `.s` with a numpy unicode
-  array; null cells read as `""` - the string analogue of the NaN gap
-  convention. `.v` is still present but all-`NaN` for these fields.
-- All fields **within the same topic** share identical timestamps, so you can
-  read several of them and operate element-wise without aligning.
-
-### Structured snapshot lookup
-
-For reusable scripts, prefer structured lookup over hardcoded source paths:
+Snapshot scripts discover data through structured references rather than
+hardcoded source paths:
 
 ```python
 imu = delog.topic("IMU", instance=0)
@@ -600,6 +557,23 @@ accx = imu.field("AccX").read()
 `delog.topic(...)` returns one `TopicRef` or raises if the match is missing or
 ambiguous. Use `source=` when several logs or derived sources contain the same
 topic, and `instance=` for topics named like `IMU[0]`.
+
+`delog.find(...)` provides the same unambiguous lookup when the topic or field
+name is supplied dynamically. `delog.catalog()` exposes the complete structured
+source/topic/field hierarchy, and `delog.find_all(...)` returns every matching
+reference when more than one result is expected.
+
+`FieldRef.read()` materializes a `DelogField` with these attributes:
+
+| Attribute | Type | Meaning |
+| --- | --- | --- |
+| `.t` | `np.ndarray[int64]` | Timestamps, microseconds (raw log time). |
+| `.v` | `np.ndarray[float64]` | Numeric values as `float64`; all-`NaN` for string fields. |
+| `.s` | `np.ndarray[str]` or `None` | String values for Utf8 fields; `None` for numeric fields. |
+
+Numeric reads preserve NaN gaps. Utf8 reads use `""` for null cells. A missing
+reference raises `KeyError`, and reading a field with no data raises
+`ValueError`.
 
 `TopicRef.read(*fields)` reads several fields from the same topic into a
 `DelogTable`:
@@ -626,60 +600,23 @@ for field in delog.find_all(field="AccX"):
     print(field.path)
 ```
 
-### `delog.resample_prev(field, base_times) -> np.ndarray[float64]`
+### `DelogField.align_prev(base) -> np.ndarray[float64]`
 
-Resamples a `DelogField`'s values onto a different timeline using
-**previous-sample hold** (zero-order hold): for each time in `base_times`, take
-the field's value at the latest sample at or before that time. Times before the
-field's first sample become `NaN`.
+Aligns a `DelogField` onto another field, table, or `int64` microsecond timeline
+using **previous-sample hold** (zero-order hold). For each base timestamp it
+takes the latest input value at or before that time; timestamps before the
+input's first sample become `NaN`.
 
 ```python
-gps  = delog.field("flight_42/GPS[0]/Alt")
-baro = delog.field("flight_42/BARO[0]/Alt")
-# put GPS altitude onto the BARO timeline so they can be compared element-wise:
-gps_on_baro = delog.resample_prev(gps, baro.t)
+gps = delog.topic("GPS", instance=0).field("Alt").read()
+baro = delog.topic("BARO", instance=0).field("Alt").read()
+gps_on_baro = gps.align_prev(baro)
 diff = baro.v - gps_on_baro
 ```
 
-`base_times` is any `int64` numpy array of microsecond timestamps (typically
-another field's `.t`). Use this whenever you combine fields from **different
-topics** (which have independent timelines).
-
-The method form is equivalent and is usually easier to read:
-
-```python
-gps_alt = delog.topic("GPS").field("Alt").read()
-baro_alt = delog.topic("BARO").field("Alt").read()
-gps_on_baro = gps_alt.align_prev(baro_alt)
-```
-
-### `delog.output(times_us, name) -> DelogOutput`
-
-Begins a new derived **topic** called `name`. `times_us` is the `int64`
-microsecond timeline shared by **every field** you add to this topic. Returns a
-`DelogOutput` builder.
-
-```python
-out = delog.output(some_field.t, "my_topic")
-```
-
-You can call `delog.output(...)` more than once in a script to emit several
-topics; they all ship together under the one `script:<name>` source.
-
-### `DelogOutput.add_field(name, values, unit=None) -> None`
-
-Adds one field to the topic. `values` is a `float64` numpy array that must be
-**the same length as the topic's `times_us`** (raises `ValueError` otherwise).
-`unit` is an optional display-unit string.
-
-```python
-out = delog.output(f.t, "derived")
-out.add_field("speed", v_speed, unit="m/s")
-out.add_field("accel", v_accel)            # unit optional
-```
-
-The fields buffer until the script finishes successfully, then publish as
-`script:<name>/<topic>/<field>`.
+Use `align_prev` whenever a calculation combines fields from different topics,
+which have independent timelines. Passing a `DelogTable` uses its shared `.t`;
+passing a numpy timeline uses that array directly.
 
 ### `delog.emit(name, times_us, fields) -> None`
 
@@ -693,9 +630,10 @@ delog.emit("imu_derived", imu.t, {
 ```
 
 Each field entry is either `values` or `(values, unit)`. Values must be a
-1-D `float64`-compatible numpy array with the same length as `times_us`. Like
-the builder API, `emit` buffers until the script finishes successfully, so
-snapshot output remains all-or-nothing.
+1-D numeric, `float64`-compatible numpy array with the same length as
+`times_us`. You may call `emit` more than once to publish several topics under
+the same `script:<name>` source. Output buffers until the script finishes
+successfully, so snapshot output remains all-or-nothing.
 
 ---
 
@@ -706,15 +644,16 @@ Putting the calls together, the canonical shape of a derived-field script is:
 ```python
 import numpy as np
 
-# 1. read inputs (same topic -> shared timeline; else resample_prev)
-f = delog.field("flight_42/IMU[0]/AccX")
+# 1. read inputs through a structured reference
+f = delog.topic("IMU", instance=0).field("AccX").read()
 
 # 2. compute with numpy
 smoothed = np.convolve(f.v, np.ones(5) / 5, mode="same")
 
-# 3. emit on a chosen timeline
-out = delog.output(f.t, "imu_derived")
-out.add_field("AccX_smooth", smoothed, unit="m/s^2")
+# 3. emit numeric output on a chosen timeline
+delog.emit("imu_derived", f.t, {
+    "AccX_smooth": (smoothed, "m/s^2"),
+})
 
 print(f"emitted {len(f.t)} samples")
 ```
@@ -723,21 +662,21 @@ print(f"emitted {len(f.t)} samples")
 
 ## Data model & conventions
 
-- **Time is `int64` microseconds**, end to end. Field `.t` and `output(...)`
+- **Time is `int64` microseconds**, end to end. Field `.t` and `emit(...)`
   `times_us` are both raw log-time microseconds.
-- **Values are `float64`** on the way in (`.v`) and on the way out (`add_field`
-  values). The emitted columns are stored as `Float64`. String fields are the
-  one exception on the read side: `.s` on `delog.field(...)` and a live
+- **Values are `float64`** on numeric reads (`.v`) and manual snapshot output
+  through `emit` is numeric-only. String fields are the one exception on the
+  read side: `.s` on a materialized `DelogField` and a live
   transform's numpy unicode `batch.<name>` attribute expose Utf8 fields as
   strings, but output stays `float64`-only.
 - **NaN means "gap"** - it is never interpolated away. Reads preserve NaN;
   emit preserves NaN; plots render NaN as a line break. Propagate it naturally
   (most numpy ops do).
-- **One timeline per output topic.** Every field in a `delog.output(t, ...)`
-  topic shares `t`. To combine signals with different rates, pick a base
-  timeline and `resample_prev` the others onto it.
+- **One timeline per output topic.** Every field in one `delog.emit(..., t, ...)`
+  call shares `t`. To combine signals with different rates, pick a base
+  timeline and align the others with `DelogField.align_prev`.
 - **Output source naming.** A run named `foo` publishes a source `script:foo`;
-  its topics/fields are whatever you created via `output`/`add_field`.
+  its topics and fields are whatever you created via `emit` or declarative operations.
 
 ---
 
@@ -784,34 +723,27 @@ All three accel axes live in one topic, so they share a timeline - no resampling
 ```python
 import numpy as np
 
-base = "flight_42/IMU[0]"
-x = delog.field(f"{base}/AccX")
-y = delog.field(f"{base}/AccY")
-z = delog.field(f"{base}/AccZ")
+imu = delog.topic("IMU", instance=0).read("AccX", "AccY", "AccZ")
+mag = np.sqrt(imu.AccX**2 + imu.AccY**2 + imu.AccZ**2)
 
-out = delog.output(x.t, "accel_mag")
-out.add_field("mag", np.sqrt(x.v**2 + y.v**2 + z.v**2), unit="m/s^2")
+delog.emit("accel_mag", imu.t, {"mag": (mag, "m/s^2")})
 ```
 
 ### 2. Quaternion → Euler angles (log-agnostic lookup)
 
-Finds the source prefix automatically so the same library script runs on any
-PX4 log. (PX4 stores `q = [w, x, y, z]`.)
+Uses topic name and instance rather than a source path, so the same library
+script runs on any unambiguous PX4 log. (PX4 stores `q = [w, x, y, z]`.)
 
 ```python
 import numpy as np
 
-TOPIC = "vehicle_attitude[0]"
-suffix = f"/{TOPIC}/q[0]"
-prefix = next((p[: -len(suffix)] for p in delog.sources() if p.endswith(suffix)), None)
-if prefix is None:
-    raise RuntimeError(f"{TOPIC}/q[0] not found in this log")
-
-qw = delog.field(f"{prefix}/{TOPIC}/q[0]")
-w, t = qw.v, qw.t
-x = delog.field(f"{prefix}/{TOPIC}/q[1]").v
-y = delog.field(f"{prefix}/{TOPIC}/q[2]").v
-z = delog.field(f"{prefix}/{TOPIC}/q[3]").v
+att = delog.topic("vehicle_attitude", instance=0).read(
+    "q[0]", "q[1]", "q[2]", "q[3]"
+)
+w = att["q[0]"]
+x = att["q[1]"]
+y = att["q[2]"]
+z = att["q[3]"]
 
 n = np.sqrt(w*w + x*x + y*y + z*z)
 n[n == 0] = 1.0
@@ -821,33 +753,32 @@ roll  = np.arctan2(2*(w*x + y*z), 1 - 2*(x*x + y*y))
 pitch = np.arcsin(np.clip(2*(w*y - z*x), -1.0, 1.0))
 yaw   = np.arctan2(2*(w*z + x*y), 1 - 2*(y*y + z*z))
 
-out = delog.output(t, "vehicle_attitude_euler")
-out.add_field("roll",  np.degrees(roll),  unit="deg")
-out.add_field("pitch", np.degrees(pitch), unit="deg")
-out.add_field("yaw",   np.degrees(yaw),   unit="deg")
+delog.emit("vehicle_attitude_euler", att.t, {
+    "roll": (np.degrees(roll), "deg"),
+    "pitch": (np.degrees(pitch), "deg"),
+    "yaw": (np.degrees(yaw), "deg"),
+})
 ```
 
-### 3. Combining two topics (resample)
+### 3. Combining two topics (alignment)
 
 ```python
-import numpy as np
+baro = delog.topic("BARO", instance=0).field("Alt").read()
+gps = delog.topic("GPS", instance=0).field("Alt").read()
+gps_on_baro = gps.align_prev(baro)
 
-baro = delog.field("flight_42/BARO[0]/Alt")          # base timeline
-gps  = delog.field("flight_42/GPS[0]/Alt")
-gps_on_baro = delog.resample_prev(gps, baro.t)        # align onto BARO times
-
-out = delog.output(baro.t, "alt_compare")
-out.add_field("baro", baro.v, unit="m")
-out.add_field("gps",  gps_on_baro, unit="m")
-out.add_field("diff", baro.v - gps_on_baro, unit="m")
+delog.emit("alt_compare", baro.t, {
+    "baro": (baro.v, "m"),
+    "gps": (gps_on_baro, "m"),
+    "diff": (baro.v - gps_on_baro, "m"),
+})
 ```
 
 ### 4. Explore in the REPL
 
 ```python
->>> delog.sources()[:5]
-['flight_42/IMU[0]/AccX', 'flight_42/IMU[0]/AccY', ...]
->>> f = delog.field("flight_42/IMU[0]/AccX")
+>>> [field.path for field in delog.find_all(field="AccX")]
+>>> f = delog.topic("IMU", instance=0).field("AccX").read()
 >>> import numpy as np
 >>> float(np.nanmax(f.v))
 9.81
@@ -859,20 +790,18 @@ out.add_field("diff", baro.v - gps_on_baro, unit="m")
 
 The [`scripts/`](../scripts/) directory ships runnable examples you can copy into
 your [script library](#the-script-library) or open in the Console. Snapshot
-examples have two versions: `snapshot/v1` keeps the original path-string style,
-while `snapshot/v2` uses the newer structured and declarative APIs. Live
-examples currently live under `live/v1`.
+examples run once against current data; live examples register work for future
+batches. The declarative scripts set `mode="snapshot"` or `mode="live"`
+explicitly.
 
 | Script | Kind | What it does |
 | --- | --- | --- |
-| [`snapshot/v2/vehicle_attitude_euler.py`](../scripts/snapshot/v2/vehicle_attitude_euler.py) | snapshot | Converts a PX4 `vehicle_attitude[0]` quaternion to roll/pitch/yaw using `delog.topic(...).read(...)` and `delog.emit(...)`. |
-| [`snapshot/v2/nav_controller_output_radians.py`](../scripts/snapshot/v2/nav_controller_output_radians.py) | snapshot + live | Converts ArduPilot `NAV_CONTROLLER_OUTPUT` angle fields (`nav_roll`, `nav_pitch`, and `nav_bearing`) to radians with one declarative transform. |
-| [`snapshot/v1/vehicle_attitude_euler.py`](../scripts/snapshot/v1/vehicle_attitude_euler.py) | snapshot | Legacy path-string version of the PX4 attitude conversion example. |
-| [`snapshot/v1/nav_controller_output_radians.py`](../scripts/snapshot/v1/nav_controller_output_radians.py) | snapshot | Legacy path-string version of the ArduPilot angle conversion example. |
-| [`live/v1/nav_controller_live_rad.py`](../scripts/live/v1/nav_controller_live_rad.py) | snapshot + live | Converts `NAV_CONTROLLER_OUTPUT` angle fields (`nav_roll`, `nav_pitch`, and `nav_bearing`) to radians with the same declarative transform. |
-| [`live/v1/named_values_live_split.py`](../scripts/live/v1/named_values_live_split.py) | snapshot + live | Uses declarative grouping to split `NAMED_VALUE_FLOAT`/`NAMED_VALUE_INT` into one topic per `name`. |
-| [`live/v1/param_value_live_split.py`](../scripts/live/v1/param_value_live_split.py) | snapshot + live | Uses declarative grouping to split `PARAM_VALUE` into one topic per `param_id`. |
-| [`live/v1/tunable_lowpass.py`](../scripts/live/v1/tunable_lowpass.py) | live transform | An exponential low-pass filter with a slider-controlled smoothing factor. Demonstrates runtime-tweakable variables in a live transform: move the slider to change the filter coefficient live, without re-running. |
+| [`snapshot/vehicle_attitude_euler.py`](../scripts/snapshot/vehicle_attitude_euler.py) | snapshot-only | Converts a PX4 `vehicle_attitude[0]` quaternion to roll/pitch/yaw with structured reads and `delog.emit(...)`. |
+| [`snapshot/nav_controller_output_radians.py`](../scripts/snapshot/nav_controller_output_radians.py) | snapshot-only | Converts ArduPilot `NAV_CONTROLLER_OUTPUT` angle fields to radians with a declarative transform in `mode="snapshot"`. |
+| [`live/nav_controller_live_rad.py`](../scripts/live/nav_controller_live_rad.py) | live-only | Converts future `NAV_CONTROLLER_OUTPUT` angle fields to radians with a declarative transform in `mode="live"`. |
+| [`live/named_values_live_split.py`](../scripts/live/named_values_live_split.py) | live-only | Splits future `NAMED_VALUE_FLOAT` and `NAMED_VALUE_INT` rows into one topic per `name` with declarative grouping. |
+| [`live/param_value_live_split.py`](../scripts/live/param_value_live_split.py) | live-only | Splits future `PARAM_VALUE` rows into one topic per `param_id` with declarative grouping. |
+| [`live/tunable_lowpass.py`](../scripts/live/tunable_lowpass.py) | live-only callback | Applies a slider-controlled exponential low-pass filter to future IMU batches. |
 
 `tunable_lowpass.py` remains the callback escape hatch for algorithms that need
 custom per-batch state or math.
@@ -884,19 +813,18 @@ custom per-batch state or math.
 - **Not sandboxed.** Embedded CPython runs with your full user privileges
   (filesystem, network). Only run scripts you trust. This is a deliberate
   trade-off for the power of real CPython + numpy.
-- **Manual and callback string output is unsupported.** `DelogField.s` and
-  live-transform string batch attributes let you *read* Utf8 fields, but
-  `add_field`, `emit`, and callback return values take numeric arrays.
+- **Manual snapshot and callback string output is unsupported.** `DelogField.s`
+  and live-transform string batch attributes let you *read* Utf8 fields, but
+  manual snapshot output through `emit` and callback return values are numeric-only.
   Declarative operations are the exception: they preserve pass-through Utf8
   fields and missing strings as `""`. Materialized `DelogField` reads do not
   carry `.unit` or `.dtype`; use a `FieldRef` when you need unit metadata.
 - **Numeric output is `float64`.** Even if a source field was integer/bool,
   derived numeric output columns are stored as `Float64`.
-- **Length must match.** `add_field` values must match the length of the
-  topic's `times_us`. Combine differently-sampled inputs with `resample_prev`.
-- **Print-only scripts do not emit a source.** A run that never calls
-  `delog.output(...)` or `delog.emit(...)` and declares no operation only writes
-  console output.
+- **Length must match.** Every `emit` value must match the length of its
+  `times_us`. Combine differently sampled inputs with `DelogField.align_prev`.
+- **Print-only scripts do not emit a source.** A run that neither calls `emit`
+  nor declares an operation only writes console output.
 - **Cancellation is cooperative** (see above) - long single C calls can't be
   interrupted mid-call.
 - **Long loops block that script.** Each run/eval executes on the interpreter
