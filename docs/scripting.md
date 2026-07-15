@@ -532,6 +532,7 @@ session. You never import or construct it.
 | `delog.combo(name, options, *, default=None, label=None)` | `str` | Declare a combo-box variable; returns its current value. |
 | `delog.text(name, default, *, label=None)` | `str` | Declare a text-field variable; returns its current value. |
 | `delog.param(name)` | `float`/`int`/`bool`/`str` | Read the current value of a variable inside a live callback. |
+| `delog.add_marker(time_us, label, *, color=None, note=None)` | `None` | Add a runtime marker after the current script or callback succeeds. |
 | `delog.transform(topic, *, multiplier=1.0, offset=0.0, fields=None, unit=None, units=None, output_topic=None, source=None, instance=None, mode="both")` | `None` | Scale/offset selected numeric fields and pass through the topic. |
 | `delog.group_by(topic, field, *, fields=None, output_topic=None, source=None, instance=None, mode="both")` | `None` | Split a topic into stable per-key output topics. |
 | `delog.merge(topics, *, base_topic, output_topic, source=None, mode="both")` | `None` | Previous-sample align selected fields onto a base topic. |
@@ -542,7 +543,7 @@ session. You never import or construct it.
 | `delog.find_all(topic=None, field=None, *, source=None, instance=None)` | `list` | Return all matching topic or field refs. |
 | `FieldRef.read()` | `DelogField` | Read a referenced field. |
 | `TopicRef.read(*fields)` | `DelogTable` | Read several fields from one topic on a shared timeline. |
-| `DelogField.align_prev(base)` | `np.ndarray[float64]` | Prev-sample align this field onto another field/table/timeline. |
+| `DelogField.align(base, mode="prev")` | `np.ndarray[float64]` | Align this field onto another field, table, or timeline. |
 | `delog.emit(name, times_us, fields)` | `None` | Emit one derived topic from a dict of field entries. |
 
 ### Structured snapshot lookup and reads
@@ -601,23 +602,80 @@ for field in delog.find_all(field="AccX"):
     print(field.path)
 ```
 
-### `DelogField.align_prev(base) -> np.ndarray[float64]`
+### `DelogField.align(base, mode="prev") -> np.ndarray[float64]`
 
-Aligns a `DelogField` onto another field, table, or `int64` microsecond timeline
-using **previous-sample hold** (zero-order hold). For each base timestamp it
-takes the latest input value at or before that time; timestamps before the
-input's first sample become `NaN`.
+Aligns a numeric `DelogField` onto another timeline. `base` may be a
+`DelogField`, a `DelogTable`, or a one-dimensional `int64` numpy array of
+microsecond timestamps. Base timestamps do not need to be sorted: the returned
+`float64` array preserves their original order.
 
 ```python
 gps = delog.topic("GPS", instance=0).field("Alt").read()
 baro = delog.topic("BARO", instance=0).field("Alt").read()
-gps_on_baro = gps.align_prev(baro)
-diff = baro.v - gps_on_baro
+gps_prev = gps.align(baro)                    # default: mode="prev"
+gps_near = gps.align(baro, mode="nearest")
+gps_interp = gps.align(baro, mode="linear")
 ```
 
-Use `align_prev` whenever a calculation combines fields from different topics,
-which have independent timelines. Passing a `DelogTable` uses its shared `.t`;
-passing a numpy timeline uses that array directly.
+The modes have these exact endpoint rules:
+
+- `"prev"` selects the latest source sample at or before each base timestamp.
+  Before the first source sample it returns `NaN`; at and after the last sample
+  it holds the last value.
+- `"nearest"` selects the source sample with the smallest timestamp distance.
+  An equal-distance tie selects the earlier timestamp. Outside the source range
+  it selects the nearest endpoint.
+- `"linear"` returns exact samples at matching timestamps and otherwise
+  interpolates between the distinct samples immediately before and after the
+  base timestamp. It returns `NaN` outside the source range and never
+  extrapolates.
+
+If a source contains duplicate timestamps, every mode uses the last sample at
+that timestamp. Source `NaN` values propagate through selection or interpolation.
+Alignment is numeric-only; a string-backed field's numeric lane is all `NaN`.
+An unsupported mode raises `ValueError`.
+
+Use `align` whenever a calculation combines fields from different topics with
+independent timelines. Passing a `DelogTable` uses its shared `.t`; passing a
+numpy timeline uses that array directly.
+
+### `delog.add_marker(time_us, label, *, color=None, note=None) -> None`
+
+Stages a labeled marker at an `int64` microsecond timestamp. The marker becomes
+visible only after the enclosing script, console evaluation, or live callback
+has completely succeeded:
+
+```python
+delog.add_marker(event_t_us, "motor armed")
+delog.add_marker(landing_t_us, "landing", color="#2ECC71", note="detected")
+```
+
+`label` must be a non-empty string. `color` accepts `None`, `"#RRGGBB"`, or
+`"#RRGGBBAA"`; the six-digit form is opaque and the final byte of the
+eight-digit form is alpha. With `None`, DéLOG chooses a deterministic color
+from its automatic palette based on marker call order. `note` is an optional
+string. Duplicate timestamps are retained as distinct markers. There is no
+bulk `add_markers` API.
+
+Markers from a named run are owned by that script. A successful rerun atomically
+replaces its previous marker set, including clearing it when the rerun adds no
+markers. If execution or snapshot/output preparation fails, newly staged
+markers are discarded and the previous successful set remains visible. A live
+callback likewise appends its markers only after both the callback and its
+output validation succeed; an exception, invalid result, or schema error rolls
+back that invocation's markers. Replaced callbacks cannot append stale markers.
+Unregistering the live script removes all markers owned by that script without
+touching manual markers or markers owned by other scripts.
+
+Successful console evaluations append their staged markers to the existing
+console marker history rather than replacing it. Every successful evaluation
+advances the console generation, even when it adds no marker; this preserves
+the history while preventing callbacks from older console generations from
+appending stale markers. A failed evaluation does not advance the generation
+and discards only the markers staged by that evaluation.
+
+Script markers are runtime-only UI state. They are not written to layouts or
+sessions and do not persist after the application runtime ends.
 
 ### `delog.emit(name, times_us, fields) -> None`
 
@@ -674,7 +732,7 @@ print(f"emitted {len(f.t)} samples")
   (most numpy ops do).
 - **One timeline per output topic.** Every field in one `delog.emit(..., t, ...)`
   call shares `t`. To combine signals with different rates, pick a base
-  timeline and align the others with `DelogField.align_prev`.
+  timeline and align the others with `DelogField.align`.
 - **Output source naming.** A run named `foo` publishes a source `script:foo`;
   its topics and fields are whatever you created via `emit` or declarative operations.
 
@@ -765,7 +823,7 @@ delog.emit("vehicle_attitude_euler", att.t, {
 ```python
 baro = delog.topic("BARO", instance=0).field("Alt").read()
 gps = delog.topic("GPS", instance=0).field("Alt").read()
-gps_on_baro = gps.align_prev(baro)
+gps_on_baro = gps.align(baro)
 
 delog.emit("alt_compare", baro.t, {
     "baro": (baro.v, "m"),
@@ -822,7 +880,7 @@ custom per-batch state or math.
 - **Numeric output is `float64`.** Even if a source field was integer/bool,
   derived numeric output columns are stored as `Float64`.
 - **Length must match.** Every `emit` value must match the length of its
-  `times_us`. Combine differently sampled inputs with `DelogField.align_prev`.
+  `times_us`. Combine differently sampled inputs with `DelogField.align`.
 - **Print-only scripts do not emit a source.** A run that neither calls `emit`
   nor declares an operation only writes console output.
 - **Cancellation is cooperative** (see above) - long single C calls can't be
