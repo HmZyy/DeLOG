@@ -317,19 +317,41 @@ impl Workspace {
 
     pub fn apply_legend_move(&mut self, mv: LegendMove) -> FieldId {
         let field = mv.trace.field;
-        if let Some(egui_tiles::Tile::Pane(Pane::Plot(src))) = self.tree.tiles.get_mut(mv.source) {
-            src.remove_trace(field);
-        }
-        let target = match mv.edge {
+        let mut trace = mv.trace;
+        // Resolve (creating, for an edge drop) the target before touching the
+        // source, so a trace is never removed without a landing pane.
+        let Some(target) = (match mv.edge {
             None => Some(mv.target),
             Some(edge) => {
                 self.split_plot_at(mv.target, edge.split_direction(), edge.insert_before())
             }
+        }) else {
+            return field;
         };
-        if let Some(id) = target
-            && let Some(egui_tiles::Tile::Pane(Pane::Plot(dst))) = self.tree.tiles.get_mut(id)
-        {
-            dst.add_trace_ref(mv.trace);
+        let mut landed = false;
+        if let Some(egui_tiles::Tile::Pane(Pane::Plot(dst))) = self.tree.tiles.get_mut(target) {
+            // A moved trace joins the target's palette sequence rather than
+            // carrying its old color across.
+            trace.color = delog_render::palette::trace_color(dst.traces.len()).to_srgb_f32();
+            dst.add_trace_ref(trace);
+            landed = true;
+        }
+        // Same-pane center drop resolves to the source itself; leave it untouched.
+        if landed && mv.source != target {
+            if let Some(egui_tiles::Tile::Pane(Pane::Plot(src))) =
+                self.tree.tiles.get_mut(mv.source)
+            {
+                src.remove_trace(field);
+            }
+            // Drop the source pane if the move emptied it.
+            if self
+                .tree
+                .tiles
+                .get(mv.source)
+                .is_some_and(|t| matches!(t, egui_tiles::Tile::Pane(Pane::Plot(p)) if p.is_empty()))
+            {
+                self.close_plot(mv.source);
+            }
         }
         field
     }
@@ -929,6 +951,32 @@ impl Behavior<'_> {
     ) -> egui_tiles::UiResponse {
         let frame_style = egui::Frame::default();
         let mut tile_response = egui_tiles::UiResponse::None;
+
+        // A legend middle-drag is in flight: bypass the `Vec<FieldId>` drop zone.
+        // egui's `take_payload` removes the payload before downcasting, so a
+        // `dnd_drop_zone::<Vec<FieldId>>` over the pointer would consume (and
+        // discard) our `LegendTraceDrag` on release before we could read it.
+        if egui::DragAndDrop::has_payload_of_type::<legend::LegendTraceDrag>(ui.ctx()) {
+            let response = ui
+                .scope(|ui| {
+                    tile_response = self.plot_body(ui, tile_id, pane);
+                })
+                .response;
+            if let Some(drag) = response.dnd_release_payload::<legend::LegendTraceDrag>() {
+                let pointer = response.ctx.input(|i| i.pointer.interact_pos());
+                let edge = pointer.and_then(|pos| DropEdge::from_pos(response.rect, pos));
+                if !(drag.source == tile_id && edge.is_none()) {
+                    self.actions.legend_move = Some(LegendMove {
+                        source: drag.source,
+                        target: tile_id,
+                        edge,
+                        trace: drag.trace.clone(),
+                    });
+                }
+            }
+            return tile_response;
+        }
+
         let (response, dropped) = ui.dnd_drop_zone::<Vec<FieldId>, ()>(frame_style, |ui| {
             tile_response = self.plot_body(ui, tile_id, pane);
         });
@@ -1285,6 +1333,7 @@ impl Behavior<'_> {
                 self.services.plot_display.legend_position,
                 self.services.plot_display.legend_opacity,
                 pane,
+                tile_id,
                 &labels,
                 legend_deltas,
                 self.services.snapshot.as_ref(),
@@ -1798,7 +1847,9 @@ fn plot_rename_dialog(ctx: &egui::Context, tile_id: egui_tiles::TileId, pane: &m
     let modal = egui::Modal::new(egui::Id::new(("rename_trace", tile_id))).show(ctx, |ui| {
         ui.set_width(240.0);
         ui.label("Rename trace");
-        let dialog = pane.rename.as_mut().expect("rename dialog present");
+        let Some(dialog) = pane.rename.as_mut() else {
+            return;
+        };
         let edit = ui.add(egui::TextEdit::singleline(&mut dialog.text));
         edit.request_focus();
         if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
@@ -2872,7 +2923,7 @@ mod tests {
     }
 
     #[test]
-    fn legend_move_edge_creates_pane_and_preserves_config() {
+    fn legend_move_edge_recolors_and_removes_emptied_source() {
         let mut ws = Workspace::new();
         let source = ws.tree.root().unwrap();
         seed_trace(
@@ -2897,18 +2948,117 @@ mod tests {
         });
         assert_eq!(returned, FieldId(3));
 
-        assert!(trace_of(&ws, source, FieldId(3)).is_none());
+        // The emptied source pane is dropped.
+        assert!(!plot_tile_ids(&ws).contains(&source));
         let holders: Vec<_> = plot_tile_ids(&ws)
             .into_iter()
             .filter(|id| trace_of(&ws, *id, FieldId(3)).is_some())
             .collect();
         assert_eq!(holders.len(), 1);
-        assert_ne!(holders[0], source);
         let moved = trace_of(&ws, holders[0], FieldId(3)).unwrap();
+        // width/mode/name travel; color is reassigned to the new pane's slot 0.
         assert_eq!(moved.width_px, 5.0);
         assert_eq!(moved.mode, TraceMode::Step);
         assert!(!moved.visible);
         assert_eq!(moved.label_override.as_deref(), Some("renamed"));
+        assert_eq!(
+            moved.color,
+            delog_render::palette::trace_color(0).to_srgb_f32()
+        );
+    }
+
+    #[test]
+    fn legend_move_center_recolors_to_target_palette_slot() {
+        let mut ws = Workspace::new();
+        let source = ws.tree.root().unwrap();
+        seed_trace(
+            &mut ws,
+            source,
+            TraceRef {
+                field: FieldId(5),
+                color: [0.9, 0.1, 0.1, 1.0],
+                width_px: 3.0,
+                mode: TraceMode::Step,
+                visible: true,
+                label_override: Some("keep".to_string()),
+            },
+        );
+        ws.split_plot(source, SplitDirection::Horizontal);
+        let target = plot_tile_ids(&ws)
+            .into_iter()
+            .find(|id| *id != source)
+            .unwrap();
+        for field in [FieldId(1), FieldId(2)] {
+            seed_trace(
+                &mut ws,
+                target,
+                TraceRef {
+                    field,
+                    color: [0.0, 0.0, 0.0, 1.0],
+                    width_px: 1.0,
+                    mode: TraceMode::Line,
+                    visible: true,
+                    label_override: None,
+                },
+            );
+        }
+        let trace = trace_of(&ws, source, FieldId(5)).unwrap();
+
+        ws.apply_legend_move(LegendMove {
+            source,
+            target,
+            edge: None,
+            trace,
+        });
+
+        let moved = trace_of(&ws, target, FieldId(5)).unwrap();
+        // Target already held 2 traces, so the moved one takes palette slot 2.
+        assert_eq!(
+            moved.color,
+            delog_render::palette::trace_color(2).to_srgb_f32()
+        );
+        assert_eq!(moved.width_px, 3.0);
+        assert_eq!(moved.mode, TraceMode::Step);
+        assert_eq!(moved.label_override.as_deref(), Some("keep"));
+    }
+
+    #[test]
+    fn legend_move_keeps_source_when_traces_remain() {
+        let mut ws = Workspace::new();
+        let source = ws.tree.root().unwrap();
+        for field in [FieldId(1), FieldId(2)] {
+            seed_trace(
+                &mut ws,
+                source,
+                TraceRef {
+                    field,
+                    color: [0.1, 0.1, 0.1, 1.0],
+                    width_px: 1.0,
+                    mode: TraceMode::Line,
+                    visible: true,
+                    label_override: None,
+                },
+            );
+        }
+        ws.split_plot(source, SplitDirection::Horizontal);
+        let target = plot_tile_ids(&ws)
+            .into_iter()
+            .find(|id| *id != source)
+            .unwrap();
+        let trace = trace_of(&ws, source, FieldId(1)).unwrap();
+
+        ws.apply_legend_move(LegendMove {
+            source,
+            target,
+            edge: None,
+            trace,
+        });
+
+        // Source still holds its other trace and stays alive.
+        assert!(plot_tile_ids(&ws).contains(&source));
+        assert!(trace_of(&ws, source, FieldId(1)).is_none());
+        assert!(trace_of(&ws, source, FieldId(2)).is_some());
+        assert!(trace_of(&ws, target, FieldId(1)).is_some());
     }
 
     #[test]
