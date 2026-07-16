@@ -25,7 +25,15 @@ pub mod engine;
 pub mod live;
 
 #[cfg(feature = "python")]
-pub use engine::{ParserEvent, ScriptCommand, ScriptEngine, ScriptEvent};
+pub mod operations;
+
+#[cfg(feature = "python")]
+pub use api::PendingMarker;
+
+#[cfg(feature = "python")]
+pub use engine::{
+    LiveBatchInput, MarkerCommand, ParserEvent, ScriptCommand, ScriptEngine, ScriptEvent,
+};
 
 #[cfg(feature = "python")]
 pub const SCRIPTING_PACKAGES: &[(&str, &str)] = &[

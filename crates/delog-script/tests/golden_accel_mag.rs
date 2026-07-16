@@ -12,7 +12,7 @@ use delog_core::metrics::MetricsRegistry;
 use delog_core::schema::{FieldSchema, TopicSchema};
 use delog_core::snapshot::{DataStore, StoreSnapshot};
 use delog_core::store::TopicStore;
-use delog_script::{ScriptCommand, ScriptEngine, ScriptEvent};
+use delog_script::{MarkerCommand, PendingMarker, ScriptCommand, ScriptEngine, ScriptEvent};
 
 static SCRIPT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -105,12 +105,9 @@ fn accel_magnitude_script_emits_expected_values() {
     );
     let script = r#"
 import numpy as np
-x = delog.field('flight/IMU/AccX').v
-y = delog.field('flight/IMU/AccY').v
-z = delog.field('flight/IMU/AccZ').v
-t = delog.field('flight/IMU/AccX').t
-out = delog.output(t, "AccMag")
-out.add_field("mag", np.sqrt(x*x + y*y + z*z), unit="m/s^2")
+imu = delog.topic("IMU").read("AccX", "AccY", "AccZ")
+mag = np.sqrt(imu.AccX * imu.AccX + imu.AccY * imu.AccY + imu.AccZ * imu.AccZ)
+delog.emit("AccMag", imu.t, {"mag": (mag, "m/s^2")})
 "#;
     let _ = engine.send(ScriptCommand::RunScript {
         name: "accel_mag".into(),
@@ -172,6 +169,62 @@ fn wait_done(engine: &ScriptEngine) {
             std::time::Instant::now() < deadline,
             "timed out waiting for ScriptEvent::Done"
         );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn marker_command_is_exported_and_delivered_before_done() {
+    let _guard = SCRIPT_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let ingestor = Ingestor::new(NullObserver);
+    let (sender, receiver) = ingest_channel();
+    let ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
+    let engine = ScriptEngine::spawn(
+        read_store(),
+        sender.clone(),
+        Arc::new(MetricsRegistry::new()),
+        delog_script::params::shared_empty(),
+    );
+
+    engine
+        .send(ScriptCommand::RunScript {
+            name: "analysis".into(),
+            source: "delog.add_marker(123, 'golden')".into(),
+        })
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut commands = Vec::new();
+    loop {
+        for event in engine.drain_events() {
+            match event {
+                ScriptEvent::Markers(command) => commands.push(command),
+                ScriptEvent::Done => {
+                    assert_eq!(
+                        commands,
+                        vec![MarkerCommand::Replace {
+                            owner: "analysis".into(),
+                            generation: 0,
+                            markers: vec![PendingMarker {
+                                time_us: 123,
+                                label: "golden".into(),
+                                color: None,
+                                note: String::new(),
+                            }],
+                        }]
+                    );
+                    drop(engine);
+                    drop(sender);
+                    ingest_thread.join().unwrap();
+                    return;
+                }
+                ScriptEvent::Error(error) => panic!("script error: {error}"),
+                _ => {}
+            }
+        }
+        assert!(std::time::Instant::now() < deadline, "timed out");
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
 }
@@ -282,20 +335,18 @@ fn topic_ref_reads_table_columns() {
 imu = delog.topic("IMU").read("AccX", "AccY", "AccZ")
 accx_ref = delog.topic("IMU").field("AccX")
 accx = accx_ref.read()
-accx_again = delog.field(accx_ref)
 print(list(imu.fields()))
 print(float(imu.AccX[0]))
 print(float(imu["AccY"][0]))
 print(int(imu.t[0]))
 print(float(accx.v[0]))
-print(float(accx_again.v[0]))
 "#,
     );
 
     let lines = output.lines().collect::<Vec<_>>();
     assert_eq!(
         lines,
-        ["['AccX', 'AccY', 'AccZ']", "3.0", "4.0", "0", "3.0", "3.0"]
+        ["['AccX', 'AccY', 'AccZ']", "3.0", "4.0", "0", "3.0"]
     );
 
     drop(engine);
@@ -304,7 +355,7 @@ print(float(accx_again.v[0]))
 }
 
 #[test]
-fn field_align_prev_matches_resample_prev() {
+fn field_align_supports_modes_base_forms_and_validation() {
     let _guard = SCRIPT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let ingestor = Ingestor::new(NullObserver);
     let (sender, receiver) = ingest_channel();
@@ -318,16 +369,49 @@ fn field_align_prev_matches_resample_prev() {
     );
     let output = run_script_capture_output(
         &engine,
-        "align_prev",
+        "align",
         r#"
+import numpy as np
+
 baro = delog.topic("BARO").field("Alt").read()
+baro_table = delog.topic("BARO").read("Alt")
 gps = delog.topic("GPS").field("Alt").read()
-aligned = gps.align_prev(baro)
-print(",".join(str(float(v)) for v in aligned))
+
+assert np.allclose(gps.align(baro), [90.0, 90.0, 95.0])
+assert np.allclose(gps.align(baro_table, mode="nearest"), [90.0, 95.0, 95.0])
+assert np.allclose(
+    gps.align(baro, mode="linear"),
+    [90.0, 90.0 + 10.0 / 3.0, np.nan],
+    equal_nan=True,
+)
+
+timeline = np.array([20, -5, 15, 7], dtype=np.int64)
+assert np.allclose(
+    gps.align(timeline),
+    [95.0, np.nan, 95.0, 90.0],
+    equal_nan=True,
+)
+
+try:
+    gps.align(baro, mode="future")
+except ValueError as error:
+    assert str(error) == "align mode must be 'prev', 'nearest', or 'linear'"
+else:
+    raise AssertionError("invalid align mode was accepted")
+
+try:
+    gps.align([0, 10])
+except TypeError as error:
+    assert str(error) == "align base must be a DelogField, DelogTable, or int64 numpy array"
+else:
+    raise AssertionError("invalid align base was accepted")
+
+assert not hasattr(gps, "align_prev")
+print("alignment assertions passed")
 "#,
     );
 
-    assert!(output.contains("90.0,90.0,95.0"));
+    assert!(output.contains("alignment assertions passed"));
 
     drop(engine);
     drop(sender);

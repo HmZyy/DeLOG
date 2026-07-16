@@ -384,8 +384,12 @@ mod tests {
     #[test]
     fn lcp_finds_shared_prefix() {
         assert_eq!(
-            longest_common_prefix(&s(&["delog.field", "delog.find", "delog.find_all"])),
-            "delog.fi"
+            longest_common_prefix(&s(&["delog.find", "delog.find_all"])),
+            "delog.find"
+        );
+        assert_eq!(
+            longest_common_prefix(&s(&["alpha.beta", "alpha.gamma"])),
+            "alpha."
         );
         assert_eq!(longest_common_prefix(&s(&["abc"])), "abc");
         assert_eq!(longest_common_prefix(&s(&[])), "");
@@ -408,8 +412,8 @@ mod tests {
         let mut c = ReplCompletion::new();
         let mut buf = String::from("delog.f");
         let seq = c.begin_request(0, 7, "delog.f".into());
-        c.on_completions(seq, s(&["delog.field", "delog.find"]), &mut buf);
-        assert_eq!(buf, "delog.fi"); // extended to the common prefix
+        c.on_completions(seq, s(&["delog.find", "delog.find_all"]), &mut buf);
+        assert_eq!(buf, "delog.find"); // extended to the common prefix
         assert!(c.is_open());
         assert_eq!(c.popup().unwrap().matches.len(), 2);
         assert_eq!(c.popup().unwrap().selected, 0);
@@ -441,10 +445,10 @@ mod tests {
         let mut c = ReplCompletion::new();
         let mut buf = String::from("delog.fi");
         let seq = c.begin_request(0, 8, "delog.fi".into());
-        c.on_completions(seq, s(&["delog.field", "delog.find"]), &mut buf);
+        c.on_completions(seq, s(&["delog.find", "delog.find_all"]), &mut buf);
         c.move_selection(1);
         c.accept_selected(&mut buf);
-        assert_eq!(buf, "delog.find");
+        assert_eq!(buf, "delog.find_all");
         assert!(!c.is_open());
     }
 
@@ -462,10 +466,10 @@ mod tests {
         let mut c = ReplCompletion::new();
         let mut buf = String::from("delog.fi");
         let seq = c.begin_request(0, 8, "delog.fi".into());
-        c.on_completions(seq, s(&["delog.field", "delog.find"]), &mut buf);
+        c.on_completions(seq, s(&["delog.find", "delog.find_all"]), &mut buf);
         c.move_selection(1);
         c.accept_selected(&mut buf);
-        assert_eq!(c.take_pending_cursor(), Some("delog.find".len()));
+        assert_eq!(c.take_pending_cursor(), Some("delog.find_all".len()));
     }
 
     #[test]
@@ -473,7 +477,7 @@ mod tests {
         let mut c = ReplCompletion::new();
         let mut buf = String::from("delog.fi");
         let seq = c.begin_request(0, 8, "delog.fi".into());
-        c.on_completions(seq, s(&["delog.field", "delog.find"]), &mut buf);
+        c.on_completions(seq, s(&["delog.find", "delog.find_all"]), &mut buf);
         c.move_selection(-1);
         assert_eq!(c.popup().unwrap().selected, 0);
         c.move_selection(5);
@@ -485,7 +489,7 @@ mod tests {
         let mut c = ReplCompletion::new();
         let mut buf = String::from("delog.fi");
         let seq = c.begin_request(0, 8, "delog.fi".into());
-        c.on_completions(seq, s(&["delog.field", "delog.find"]), &mut buf);
+        c.on_completions(seq, s(&["delog.find", "delog.find_all"]), &mut buf);
         assert!(c.is_open());
         c.dismiss();
         assert!(!c.is_open());
