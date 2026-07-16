@@ -201,6 +201,7 @@ impl Workspace {
                             width_px: ghost.width_px,
                             mode: ghost.mode,
                             visible: ghost.visible,
+                            label_override: None,
                         });
                         apply_ghost_text_state(pane, &ghost, field);
                         resolved += 1;
@@ -1769,7 +1770,7 @@ fn script_ghost_from_removed_trace(
     pane: &mut PlotPane,
     trace_index: usize,
 ) -> Option<GhostTrace> {
-    let trace = pane.traces.get(trace_index).copied()?;
+    let trace = pane.traces.get(trace_index).cloned()?;
     let field = snapshot
         .fields
         .get(trace.field.index())
@@ -2121,6 +2122,7 @@ mod tests {
                 width_px: 3.0,
                 mode: TraceMode::Step,
                 visible: false,
+                label_override: None,
             }
         );
         assert_eq!(pane.text_filters.get(&new_field).unwrap(), "armed");
@@ -2192,6 +2194,7 @@ mod tests {
                 width_px: 4.0,
                 mode: TraceMode::Scatter,
                 visible: false,
+                label_override: None,
             }
         );
         assert_eq!(pane.text_filters.get(&new_field).unwrap(), "armed");
