@@ -1005,6 +1005,7 @@ fn trace_from_layout(trace: &TraceLayout, resolver: &mut Resolver<'_>) -> Option
         width_px: trace.width_px,
         mode: trace.mode.into(),
         visible: trace.visible,
+        label_override: None,
     })
 }
 
