@@ -61,7 +61,7 @@ impl ViewX {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TraceRef {
     pub field: FieldId,
     /// sRGB straight RGBA; the renderer converts to the target's colour space.
@@ -69,6 +69,8 @@ pub struct TraceRef {
     pub width_px: f32,
     pub mode: TraceMode,
     pub visible: bool,
+    /// Session-only, per-plot rename. `None` = derived `topic.field` label.
+    pub label_override: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -94,6 +96,10 @@ impl TraceRef {
             u(self.color[3]),
         )
     }
+
+    pub fn display_label<'a>(&'a self, canonical: &'a str) -> &'a str {
+        self.label_override.as_deref().unwrap_or(canonical)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,6 +121,17 @@ impl TraceMode {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct RenameDialog {
+    pub field: FieldId,
+    pub text: String,
+}
+
+pub fn rename_value(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
 #[derive(Debug)]
 pub struct PlotPane {
     pub traces: Vec<TraceRef>,
@@ -129,6 +146,8 @@ pub struct PlotPane {
     pub text_filters: HashMap<FieldId, String>,
     /// Anchor time (µs) of an in-progress right-drag zoom; None when not dragging.
     pub zoom_drag_anchor_us: Option<i64>,
+    /// Transient rename-dialog state; `Some` while the dialog is open.
+    pub rename: Option<RenameDialog>,
 }
 
 impl Default for PlotPane {
@@ -143,6 +162,7 @@ impl Default for PlotPane {
             text_offsets: HashMap::new(),
             text_filters: HashMap::new(),
             zoom_drag_anchor_us: None,
+            rename: None,
         }
     }
 }
@@ -159,7 +179,16 @@ impl PlotPane {
             width_px: 1.5,
             mode: TraceMode::Line,
             visible: true,
+            label_override: None,
         });
+        true
+    }
+
+    pub fn add_trace_ref(&mut self, trace: TraceRef) -> bool {
+        if self.traces.iter().any(|t| t.field == trace.field) {
+            return false;
+        }
+        self.traces.push(trace);
         true
     }
 
@@ -254,6 +283,16 @@ mod tests {
     }
 
     #[test]
+    fn add_trace_has_no_label_override_and_display_label_prefers_override() {
+        let mut pane = PlotPane::default();
+        pane.add_trace(FieldId(0));
+        assert_eq!(pane.traces[0].label_override, None);
+        assert_eq!(pane.traces[0].display_label("topic.field"), "topic.field");
+        pane.traces[0].label_override = Some("renamed".to_string());
+        assert_eq!(pane.traces[0].display_label("topic.field"), "renamed");
+    }
+
+    #[test]
     fn traces_default_visible_and_toggle_via_trace_mut() {
         let mut pane = PlotPane::default();
         pane.add_trace(FieldId(0));
@@ -293,5 +332,34 @@ mod tests {
             ViewX::locked_to_tail(range, 10_000),
             ViewX::new(1_000, 3_000)
         );
+    }
+
+    #[test]
+    fn add_trace_ref_inserts_full_trace_and_dedups_without_overwrite() {
+        let mut pane = PlotPane::default();
+        let t = TraceRef {
+            field: FieldId(7),
+            color: [0.1, 0.2, 0.3, 1.0],
+            width_px: 4.0,
+            mode: TraceMode::Step,
+            visible: false,
+            label_override: Some("v".to_string()),
+        };
+        assert!(pane.add_trace_ref(t.clone()));
+        assert_eq!(pane.traces.len(), 1);
+        assert_eq!(pane.traces[0].width_px, 4.0);
+        assert_eq!(pane.traces[0].label_override.as_deref(), Some("v"));
+
+        let dup = TraceRef { width_px: 9.0, ..t };
+        assert!(!pane.add_trace_ref(dup));
+        assert_eq!(pane.traces.len(), 1);
+        assert_eq!(pane.traces[0].width_px, 4.0);
+    }
+
+    #[test]
+    fn rename_value_trims_and_clears_on_empty() {
+        assert_eq!(rename_value("  hi "), Some("hi".to_string()));
+        assert_eq!(rename_value("   "), None);
+        assert_eq!(rename_value(""), None);
     }
 }

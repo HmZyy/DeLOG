@@ -2808,6 +2808,11 @@ impl eframe::App for DelogApp {
                             }
                         }
                     }
+                    if let Some(mv) = actions.legend_move {
+                        let field = self.workspace.apply_legend_move(mv);
+                        self.caches.request(field, &snapshot);
+                        handled_workspace_drop = true;
+                    }
                     if let Some(tile_id) = actions.close {
                         for field in self.workspace.close_plot(tile_id) {
                             self.caches.unpin(field);
