@@ -20,8 +20,7 @@ use delog_parsers::{
 };
 
 #[cfg(feature = "scripting")]
-type LiveScriptSink =
-    Arc<Mutex<Option<std::sync::mpsc::SyncSender<delog_core::ingest::ParsedBatch>>>>;
+type LiveScriptSink = Arc<Mutex<Option<std::sync::mpsc::Sender<delog_script::LiveBatchInput>>>>;
 
 #[derive(Debug, Clone, Copy, Default)]
 struct LoadState {
@@ -65,22 +64,24 @@ impl IngestObserver for AppObserver {
     }
 
     #[cfg(feature = "scripting")]
-    fn on_batch(&mut self, kind: SourceKind, batch: &delog_core::ingest::ParsedBatch) {
+    fn on_batch(
+        &mut self,
+        kind: SourceKind,
+        source_label: &str,
+        batch: &delog_core::ingest::ParsedBatch,
+    ) {
         if kind != SourceKind::Live {
             return;
         }
         let Some(tx) = self.live_scripts.lock().unwrap().clone() else {
             return;
         };
-        match tx.try_send(batch.clone()) {
+        match tx.send(delog_script::LiveBatchInput::new(
+            source_label,
+            batch.clone(),
+        )) {
             Ok(()) => {}
-            Err(std::sync::mpsc::TrySendError::Full(_)) => {
-                self.diagnostics.emit(Diag::warning(
-                    "script-live-drop",
-                    "live transform queue full; dropped batch",
-                ));
-            }
-            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+            Err(std::sync::mpsc::SendError(_)) => {
                 *self.live_scripts.lock().unwrap() = None;
             }
         }
@@ -184,7 +185,7 @@ impl Session {
     #[cfg(feature = "scripting")]
     pub fn set_live_script_sink(
         &self,
-        sink: Option<std::sync::mpsc::SyncSender<delog_core::ingest::ParsedBatch>>,
+        sink: Option<std::sync::mpsc::Sender<delog_script::LiveBatchInput>>,
     ) {
         *self.live_scripts.lock().unwrap() = sink;
     }
@@ -491,14 +492,14 @@ mod tests {
     #[cfg(feature = "scripting")]
     #[test]
     fn app_observer_mirrors_only_live_batches_without_blocking() {
-        use std::sync::mpsc::sync_channel;
+        use std::sync::mpsc::channel;
 
         use arrow::array::{ArrayRef, Float64Array, Int64Array};
         use arrow::datatypes::DataType;
         use delog_core::ingest::{ParsedBatch, SourceKind};
         use delog_core::schema::{FieldSchema, TopicSchema};
 
-        let (tx, rx) = sync_channel(1);
+        let (tx, rx) = channel();
         let live_scripts = Arc::new(Mutex::new(Some(tx)));
         let mut observer = AppObserver {
             loads: Arc::default(),
@@ -520,11 +521,13 @@ mod tests {
             vec![Arc::new(Float64Array::from(vec![2.0])) as ArrayRef],
         );
 
-        observer.on_batch(SourceKind::File, &batch);
+        observer.on_batch(SourceKind::File, "flight", &batch);
         assert!(rx.try_recv().is_err(), "file batches are not mirrored");
 
-        observer.on_batch(SourceKind::Live, &batch);
-        assert!(rx.try_recv().is_ok(), "live batches are mirrored");
+        observer.on_batch(SourceKind::Live, "live", &batch);
+        let mirrored = rx.try_recv().expect("live batches are mirrored");
+        assert_eq!(mirrored.source_label, "live");
+        assert_eq!(mirrored.batch.source, batch.source);
     }
 
     fn tiny_bin() -> Vec<u8> {

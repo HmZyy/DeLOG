@@ -34,7 +34,9 @@ pub trait IngestObserver: Send {
     fn on_diagnostic(&mut self, _diag: Diag) {}
     fn on_progress(&mut self, _source: SourceId, _frac: f32) {}
     fn on_close(&mut self, _source: SourceId, _summary: ParseSummary) {}
-    fn on_batch(&mut self, _kind: SourceKind, _batch: &ParsedBatch) {}
+    /// Runs before the batch is published. `source_label` comes directly from
+    /// the ingestor's identity registry and is authoritative at this boundary.
+    fn on_batch(&mut self, _kind: SourceKind, _source_label: &str, _batch: &ParsedBatch) {}
 }
 
 #[derive(Debug, Default)]
@@ -184,7 +186,13 @@ impl<O: IngestObserver> Ingestor<O> {
         let seal_rows = source.seal_rows;
         let source_kind = source.kind;
         let source_id = batch.source;
-        self.observer.on_batch(source_kind, &batch);
+        let source_label = self
+            .identity
+            .source(source_id)
+            .expect("opened source has identity")
+            .label
+            .as_str();
+        self.observer.on_batch(source_kind, source_label, &batch);
 
         let topic_id = match self.ensure_topic(source_id, &batch.schema) {
             Some(id) => id,
@@ -514,7 +522,7 @@ mod tests {
     struct Recorder {
         diags: Vec<Diag>,
         closes: Vec<(SourceId, ParseSummary)>,
-        batches: Vec<(SourceKind, String, usize)>,
+        batches: Vec<(SourceKind, String, String, usize)>,
     }
     impl IngestObserver for &mut Recorder {
         fn on_diagnostic(&mut self, diag: Diag) {
@@ -523,9 +531,13 @@ mod tests {
         fn on_close(&mut self, source: SourceId, summary: ParseSummary) {
             self.closes.push((source, summary));
         }
-        fn on_batch(&mut self, kind: SourceKind, batch: &ParsedBatch) {
-            self.batches
-                .push((kind, batch.topic().to_owned(), batch.rows()));
+        fn on_batch(&mut self, kind: SourceKind, source_label: &str, batch: &ParsedBatch) {
+            self.batches.push((
+                kind,
+                source_label.to_owned(),
+                batch.topic().to_owned(),
+                batch.rows(),
+            ));
         }
     }
 
@@ -626,9 +638,18 @@ mod tests {
         let mut recorder = Recorder::default();
         {
             let mut ing = Ingestor::new(&mut recorder);
+            let store = ing.store();
             let source = open_with(&mut ing, "script:live_math", SourceKind::LiveDerived);
+            assert!(
+                store.load().source(source).is_none(),
+                "open is not published yet"
+            );
 
             ing.process(IngestMsg::Batch(batch(source, "NAV_RAD", &[1, 2])));
+            assert!(
+                store.load().source(source).is_none(),
+                "observer runs while the first batch remains unpublished"
+            );
             ing.process(IngestMsg::Batch(batch(
                 SourceId(99),
                 "UNOPENED_NAV_RAD",
@@ -639,7 +660,12 @@ mod tests {
 
         assert_eq!(
             recorder.batches,
-            vec![(SourceKind::LiveDerived, "NAV_RAD".to_owned(), 2)]
+            vec![(
+                SourceKind::LiveDerived,
+                "script:live_math".to_owned(),
+                "NAV_RAD".to_owned(),
+                2
+            )]
         );
     }
 
