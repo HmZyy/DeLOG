@@ -11,6 +11,8 @@ use delog_core::schema::{FieldSchema, TopicSchema};
 use delog_core::snapshot::{DataStore, StoreSnapshot};
 use delog_script::{ScriptCommand, ScriptEngine, ScriptEvent};
 
+const LIVE_RADIANS_SCRIPT: &str = include_str!("../../../scripts/live/nav_controller_live_rad.py");
+
 fn read_store() -> Arc<DataStore> {
     Arc::new(DataStore::from_snapshot(StoreSnapshot::empty()))
 }
@@ -48,24 +50,9 @@ fn live_transform_appends_derived_batches() {
         Arc::new(MetricsRegistry::new()),
         delog_script::params::shared_empty(),
     );
-    let script = r#"
-DEG_TO_RAD = 0.017453292519943295
-
-@delog.live_transform(
-    topic="NAV_CONTROLLER_OUTPUT",
-    fields=["nav_roll", "nav_pitch", "nav_bearing"],
-    output_topic="NAV_CONTROLLER_OUTPUT_RAD",
-)
-def convert(batch):
-    return {
-        "nav_roll_rad": batch.nav_roll * DEG_TO_RAD,
-        "nav_pitch_rad": (batch.nav_pitch * DEG_TO_RAD, "rad"),
-        "nav_bearing_rad": (batch.t, batch.nav_bearing * DEG_TO_RAD, "rad"),
-    }
-"#;
     let _ = engine.send(ScriptCommand::RunScript {
         name: "nav_rad".into(),
-        source: script.into(),
+        source: LIVE_RADIANS_SCRIPT.into(),
     });
 
     wait_done(&engine);
@@ -74,7 +61,9 @@ def convert(batch):
         let mut sink = sender.file_sink();
         sink.open_source("live", delog_core::ingest::SourceKind::Live)
     };
-    engine.try_send_live_batch(nav_batch(raw_source)).unwrap();
+    engine
+        .try_send_live_batch("live", nav_batch(raw_source))
+        .unwrap();
     wait_live_processed(&engine);
 
     let snap = wait_for_topic(&write_store, "NAV_CONTROLLER_OUTPUT_RAD");
@@ -84,7 +73,7 @@ def convert(batch):
         .find(|t| t.entry.name == "NAV_CONTROLLER_OUTPUT_RAD")
         .unwrap();
     let store = snap.topic_store(topic.entry.id).unwrap();
-    let idx = store.schema.field_index("nav_bearing_rad").unwrap();
+    let idx = store.schema.field_index("nav_bearing").unwrap();
     let values = store.chunks[0].cols[idx]
         .as_any()
         .downcast_ref::<arrow::array::Float64Array>()
