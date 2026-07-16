@@ -3,8 +3,9 @@ use std::collections::HashMap;
 use delog_core::identity::FieldId;
 use delog_core::snapshot::StoreSnapshot;
 
-use crate::plot::{PlotPane, TraceMode};
+use crate::plot::{PlotPane, TraceMode, TraceRef};
 use crate::settings::LegendPosition;
+use egui_tiles::TileId;
 
 pub fn with_bg_opacity(color: egui::Color32, opacity: f32) -> egui::Color32 {
     let [r, g, b, a] = color.to_srgba_unmultiplied();
@@ -120,6 +121,18 @@ fn legend_anchor(position: LegendPosition, bounds: egui::Rect) -> (egui::Pos2, e
     }
 }
 
+#[derive(Default)]
+pub struct LegendOutcome {
+    pub removed: Option<FieldId>,
+    pub rename: Option<FieldId>,
+}
+
+#[derive(Clone)]
+pub struct LegendTraceDrag {
+    pub source: TileId,
+    pub trace: TraceRef,
+}
+
 pub fn trace_label(snapshot: &StoreSnapshot, field: FieldId) -> String {
     let Some(entry) = snapshot.fields.get(field.index()).filter(|f| f.id == field) else {
         return format!("field {}", field.0);
@@ -138,14 +151,16 @@ pub fn ui(
     position: LegendPosition,
     opacity: f32,
     pane: &mut PlotPane,
+    source_tile: TileId,
     labels: &[(FieldId, String)],
     deltas: &HashMap<FieldId, String>,
     snapshot: &StoreSnapshot,
-) -> Option<FieldId> {
+) -> LegendOutcome {
     if labels.is_empty() && pane.ghosts.is_empty() {
-        return None;
+        return LegendOutcome::default();
     }
     let mut removed = None;
+    let mut rename = None;
     // Applied after the Area closure releases its borrow of `pane`.
     let mut filter_edits: Vec<(FieldId, String)> = Vec::new();
 
@@ -215,10 +230,12 @@ pub fn ui(
                                     has_delta,
                                     is_text,
                                 );
-                                let label_widget =
-                                    egui::Label::new(egui::RichText::new(label).color(text_color))
-                                        .truncate()
-                                        .sense(egui::Sense::click());
+                                let display = trace.display_label(label).to_string();
+                                let label_widget = egui::Label::new(
+                                    egui::RichText::new(display.clone()).color(text_color),
+                                )
+                                .truncate()
+                                .sense(egui::Sense::click_and_drag());
                                 // Hug the label to its content, left-aligned, but cap its width
                                 // so long labels truncate within bounds instead of forcing the
                                 // whole legend to the full plot width.
@@ -231,6 +248,39 @@ pub fn ui(
                                     .inner;
                                 if resp.clicked() {
                                     trace.visible = !trace.visible;
+                                }
+
+                                if resp.dragged_by(egui::PointerButton::Middle) {
+                                    egui::DragAndDrop::set_payload(
+                                        ui.ctx(),
+                                        LegendTraceDrag {
+                                            source: source_tile,
+                                            trace: trace.clone(),
+                                        },
+                                    );
+                                    if let Some(pointer) = ui.ctx().pointer_interact_pos() {
+                                        egui::Area::new(id.with(("legend_drag_ghost", field.0)))
+                                            .order(egui::Order::Tooltip)
+                                            .fixed_pos(pointer + egui::vec2(12.0, 8.0))
+                                            .interactable(false)
+                                            .show(ui.ctx(), |ui| {
+                                                egui::Frame::new()
+                                                    .fill(ui.visuals().selection.bg_fill)
+                                                    .inner_margin(egui::Margin::symmetric(6, 3))
+                                                    .corner_radius(4)
+                                                    .show(ui, |ui| {
+                                                        ui.label(
+                                                            egui::RichText::new(display.clone())
+                                                                .color(
+                                                                    ui.visuals()
+                                                                        .selection
+                                                                        .stroke
+                                                                        .color,
+                                                                ),
+                                                        );
+                                                    });
+                                            });
+                                    }
                                 }
 
                                 if let Some(delta) =
@@ -277,6 +327,10 @@ pub fn ui(
                                             .suffix(" px"),
                                     );
                                     ui.separator();
+                                    if ui.button("Rename").clicked() {
+                                        rename = Some(*field);
+                                        ui.close();
+                                    }
                                     if ui.button("Remove").clicked() {
                                         removed = Some(*field);
                                         ui.close();
@@ -327,7 +381,7 @@ pub fn ui(
         }
     }
 
-    removed
+    LegendOutcome { removed, rename }
 }
 
 fn ghost_color(color: [f32; 4]) -> egui::Color32 {
