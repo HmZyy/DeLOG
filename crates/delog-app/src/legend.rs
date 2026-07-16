@@ -120,6 +120,12 @@ fn legend_anchor(position: LegendPosition, bounds: egui::Rect) -> (egui::Pos2, e
     }
 }
 
+#[derive(Default)]
+pub struct LegendOutcome {
+    pub removed: Option<FieldId>,
+    pub rename: Option<FieldId>,
+}
+
 pub fn trace_label(snapshot: &StoreSnapshot, field: FieldId) -> String {
     let Some(entry) = snapshot.fields.get(field.index()).filter(|f| f.id == field) else {
         return format!("field {}", field.0);
@@ -141,11 +147,12 @@ pub fn ui(
     labels: &[(FieldId, String)],
     deltas: &HashMap<FieldId, String>,
     snapshot: &StoreSnapshot,
-) -> Option<FieldId> {
+) -> LegendOutcome {
     if labels.is_empty() && pane.ghosts.is_empty() {
-        return None;
+        return LegendOutcome::default();
     }
     let mut removed = None;
+    let mut rename = None;
     // Applied after the Area closure releases its borrow of `pane`.
     let mut filter_edits: Vec<(FieldId, String)> = Vec::new();
 
@@ -215,10 +222,15 @@ pub fn ui(
                                     has_delta,
                                     is_text,
                                 );
-                                let label_widget =
-                                    egui::Label::new(egui::RichText::new(label).color(text_color))
-                                        .truncate()
-                                        .sense(egui::Sense::click());
+                                let display = trace
+                                    .label_override
+                                    .clone()
+                                    .unwrap_or_else(|| label.clone());
+                                let label_widget = egui::Label::new(
+                                    egui::RichText::new(display.clone()).color(text_color),
+                                )
+                                .truncate()
+                                .sense(egui::Sense::click());
                                 // Hug the label to its content, left-aligned, but cap its width
                                 // so long labels truncate within bounds instead of forcing the
                                 // whole legend to the full plot width.
@@ -277,6 +289,10 @@ pub fn ui(
                                             .suffix(" px"),
                                     );
                                     ui.separator();
+                                    if ui.button("Rename").clicked() {
+                                        rename = Some(*field);
+                                        ui.close();
+                                    }
                                     if ui.button("Remove").clicked() {
                                         removed = Some(*field);
                                         ui.close();
@@ -327,7 +343,7 @@ pub fn ui(
         }
     }
 
-    removed
+    LegendOutcome { removed, rename }
 }
 
 fn ghost_color(color: [f32; 4]) -> egui::Color32 {

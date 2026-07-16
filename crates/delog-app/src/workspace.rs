@@ -1250,7 +1250,7 @@ impl Behavior<'_> {
                     )
                 })
                 .collect();
-            if let Some(removed) = legend::ui(
+            let outcome = legend::ui(
                 ui,
                 egui::Id::new(("plot_legend", tile_id)),
                 plot_rect,
@@ -1260,12 +1260,23 @@ impl Behavior<'_> {
                 &labels,
                 legend_deltas,
                 self.services.snapshot.as_ref(),
-            ) {
+            );
+            if let Some(removed) = outcome.removed {
                 pane.remove_trace(removed);
                 self.services.caches.unpin(removed);
                 self.actions.remove_trace.push(removed);
             }
+            if let Some(field) = outcome.rename {
+                let canonical = legend::trace_label(self.services.snapshot.as_ref(), field);
+                let text = pane
+                    .trace_mut(field)
+                    .and_then(|t| t.label_override.clone())
+                    .unwrap_or(canonical);
+                pane.rename = Some(crate::plot::RenameDialog { field, text });
+            }
         }
+
+        plot_rename_dialog(ui.ctx(), tile_id, pane);
 
         self.plot_info_window(ui, tile_id, pane, Some(debug));
         drop(pane_overlay_timer);
@@ -1748,6 +1759,47 @@ fn rebind_text_state(pane: &mut PlotPane, old_field: FieldId, new_field: FieldId
 fn zoom_drag_anchor_x(view: ViewX, rect: egui::Rect, anchor_us: i64) -> f32 {
     let frac = (anchor_us - view.min_us) as f64 / view.span_us() as f64;
     rect.left() + frac as f32 * rect.width()
+}
+
+fn plot_rename_dialog(ctx: &egui::Context, tile_id: egui_tiles::TileId, pane: &mut PlotPane) {
+    if pane.rename.is_none() {
+        return;
+    }
+    let mut apply = false;
+    let mut cancel = false;
+    let modal = egui::Modal::new(egui::Id::new(("rename_trace", tile_id))).show(ctx, |ui| {
+        ui.set_width(240.0);
+        ui.label("Rename trace");
+        let dialog = pane.rename.as_mut().expect("rename dialog present");
+        let edit = ui.add(egui::TextEdit::singleline(&mut dialog.text));
+        edit.request_focus();
+        if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            apply = true;
+        }
+        ui.horizontal(|ui| {
+            if ui.button("OK").clicked() {
+                apply = true;
+            }
+            if ui.button("Cancel").clicked() {
+                cancel = true;
+            }
+        });
+    });
+    if modal.should_close() {
+        cancel = true;
+    }
+    if apply {
+        let field = pane.rename.as_ref().map(|d| d.field);
+        let value = pane.rename.as_ref().map(|d| crate::plot::rename_value(&d.text));
+        if let (Some(field), Some(value)) = (field, value)
+            && let Some(trace) = pane.trace_mut(field)
+        {
+            trace.label_override = value;
+        }
+        pane.rename = None;
+    } else if cancel {
+        pane.rename = None;
+    }
 }
 
 fn take_text_state(pane: &mut PlotPane, field: FieldId) -> (Option<String>, Vec<(i64, f32)>) {
