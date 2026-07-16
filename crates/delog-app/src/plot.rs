@@ -61,7 +61,7 @@ impl ViewX {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TraceRef {
     pub field: FieldId,
     /// sRGB straight RGBA; the renderer converts to the target's colour space.
@@ -69,6 +69,8 @@ pub struct TraceRef {
     pub width_px: f32,
     pub mode: TraceMode,
     pub visible: bool,
+    /// Session-only, per-plot rename. `None` = derived `topic.field` label.
+    pub label_override: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -93,6 +95,10 @@ impl TraceRef {
             u(self.color[2]),
             u(self.color[3]),
         )
+    }
+
+    pub fn display_label<'a>(&'a self, canonical: &'a str) -> &'a str {
+        self.label_override.as_deref().unwrap_or(canonical)
     }
 }
 
@@ -159,6 +165,7 @@ impl PlotPane {
             width_px: 1.5,
             mode: TraceMode::Line,
             visible: true,
+            label_override: None,
         });
         true
     }
@@ -251,6 +258,16 @@ mod tests {
         assert_eq!(pane.traces.len(), 2);
         assert_ne!(pane.traces[0].color, pane.traces[1].color);
         assert_eq!(pane.traces[0].mode, TraceMode::Line);
+    }
+
+    #[test]
+    fn add_trace_has_no_label_override_and_display_label_prefers_override() {
+        let mut pane = PlotPane::default();
+        pane.add_trace(FieldId(0));
+        assert_eq!(pane.traces[0].label_override, None);
+        assert_eq!(pane.traces[0].display_label("topic.field"), "topic.field");
+        pane.traces[0].label_override = Some("renamed".to_string());
+        assert_eq!(pane.traces[0].display_label("topic.field"), "renamed");
     }
 
     #[test]
