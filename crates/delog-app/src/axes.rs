@@ -167,22 +167,6 @@ pub fn draw(
     draw_border(ui, plot_rect);
 }
 
-pub fn draw_y(ui: &egui::Ui, plot_rect: egui::Rect, y_range: (f64, f64), y_unit: Option<&str>) {
-    let formatting = y_axis_formatting(0.0, y_range, plot_rect.height());
-    draw_y_grid_formatted(ui, plot_rect, y_range, &formatting);
-    draw_y_unit(
-        ui,
-        plot_rect,
-        y_unit,
-        formatting.offset_annotation.as_deref(),
-    );
-}
-
-pub fn draw_y_grid(ui: &egui::Ui, plot_rect: egui::Rect, y_range: (f64, f64)) {
-    let formatting = y_axis_formatting(0.0, y_range, plot_rect.height());
-    draw_y_grid_formatted(ui, plot_rect, y_range, &formatting);
-}
-
 pub fn draw_y_relative(
     ui: &egui::Ui,
     plot_rect: egui::Rect,
