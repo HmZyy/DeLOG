@@ -78,8 +78,8 @@ mod tests {
 
     fn run_frame(ctx: &egui::Context, input: egui::RawInput, popup: &MessagePopup) -> bool {
         let mut open = true;
-        let _ = ctx.run(input, |ctx| {
-            open = popup.show(ctx, egui::Id::new("test-popup"));
+        let _ = ctx.run_ui(input, |ui| {
+            open = popup.show(ui.ctx(), egui::Id::new("test-popup"));
         });
         open
     }

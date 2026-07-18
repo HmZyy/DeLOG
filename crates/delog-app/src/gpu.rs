@@ -2228,10 +2228,6 @@ mod tests {
             .collect()
     }
 
-    fn live_zoom_ids(zoom: u8) -> Vec<TileId> {
-        live_zoom(zoom).into_iter().map(|(id, _)| id).collect()
-    }
-
     #[test]
     fn line_window_always_strips_non_finite_points() {
         let xy = [
