@@ -16,6 +16,7 @@ const DOCKS_SOURCE: &str = include_str!("../src/docks.rs");
 const SCRIPTS_SOURCE: &str = include_str!("../src/scripts.rs");
 const WORKSPACE_SOURCE: &str = include_str!("../src/workspace.rs");
 const SETTINGS_SOURCE: &str = include_str!("../src/settings.rs");
+const SYNC_WINDOW_SOURCE: &str = include_str!("../src/sync_window.rs");
 
 fn occurrence_count(needle: &str) -> usize {
     POPUP_SOURCES
@@ -33,6 +34,14 @@ fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
 
 fn normalized(source: &str) -> String {
     source.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[test]
+fn sync_toolbar_uses_icons_instead_of_unsupported_arrow_glyphs() {
+    assert!(!SYNC_WINDOW_SOURCE.contains('→'));
+    assert!(!SYNC_WINDOW_SOURCE.contains('↔'));
+    assert!(SYNC_WINDOW_SOURCE.contains("crate::icons::arrow_right()"));
+    assert!(SYNC_WINDOW_SOURCE.contains("crate::icons::arrow_left_right()"));
 }
 
 #[test]

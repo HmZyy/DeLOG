@@ -122,14 +122,15 @@ fn picker_live_status_is_rendered_after_plot_updates_hover_state() {
 #[test]
 fn sync_anchor_toolbar_picker_and_standard_palette_remain_wired() {
     for label in [
-        "First ↔ First",
-        "Last ↔ Last",
+        "First to First",
+        "Last to Last",
         "Back to back",
         "First change",
         "Pick samples",
     ] {
         assert!(SYNC_SOURCE.contains(label), "missing sync action {label}");
     }
+    assert!(SYNC_SOURCE.contains("crate::icons::arrow_left_right()"));
     assert!(SYNC_SOURCE.contains("align_active(snapshot"));
     assert!(SYNC_SOURCE.contains("begin_sample_pick"));
     assert!(SYNC_SOURCE.contains("sample_neighborhood"));
