@@ -65,6 +65,14 @@ pub fn skip_forward() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/skip-forward.svg")
 }
 
+pub fn arrow_right() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/arrow-right.svg")
+}
+
+pub fn arrow_left_right() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/arrow-left-right.svg")
+}
+
 #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
 pub fn square() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/square.svg")

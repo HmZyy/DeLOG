@@ -1184,15 +1184,23 @@ impl SyncWindow {
             .map(|active| source_label(snapshot, active))
             .unwrap_or_else(|| "Select active target".to_owned());
         ui.horizontal(|ui| {
-            ui.label(format!("{reference_label} → {active_label}"));
+            ui.label(reference_label);
+            ui.add(sync_toolbar_icon(ui, crate::icons::arrow_right()));
+            ui.label(active_label);
             for (label, method) in [
-                ("First ↔ First", AutoAlignMethod::FirstToFirst),
-                ("Last ↔ Last", AutoAlignMethod::LastToLast),
+                ("First to First", AutoAlignMethod::FirstToFirst),
+                ("Last to Last", AutoAlignMethod::LastToLast),
                 ("Back to back", AutoAlignMethod::BackToBack),
                 ("First change", AutoAlignMethod::FirstChange),
             ] {
                 if ui
-                    .add_enabled(pair_ready, egui::Button::new(label))
+                    .add_enabled(
+                        pair_ready,
+                        egui::Button::image_and_text(
+                            sync_toolbar_icon(ui, crate::icons::arrow_left_right()),
+                            label,
+                        ),
+                    )
                     .clicked()
                 {
                     let _ = self.align_active(snapshot, method);
@@ -2132,6 +2140,12 @@ fn is_plottable(dtype: &DataType) -> bool {
             | DataType::Float64
             | DataType::Boolean
     )
+}
+
+fn sync_toolbar_icon(ui: &egui::Ui, source: egui::ImageSource<'static>) -> egui::Image<'static> {
+    egui::Image::new(source)
+        .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
+        .tint(ui.visuals().text_color())
 }
 
 #[cfg(test)]
