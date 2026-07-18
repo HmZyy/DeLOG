@@ -2,6 +2,7 @@
 //! GPU, or UI.
 
 pub mod analysis;
+pub mod align;
 pub mod chunk;
 pub mod diagnostics;
 pub mod export;
