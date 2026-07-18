@@ -84,9 +84,10 @@ fn sync_controls_use_cumulative_drag_and_topic_scoped_field_selection() {
 }
 
 #[test]
-fn sync_preview_uses_double_click_fit_and_middle_pan() {
+fn sync_preview_uses_double_click_fit_primary_pan_and_middle_alignment_drag() {
     assert!(SYNC_SOURCE.contains("interaction.double_clicked()"));
     assert!(SYNC_SOURCE.contains("fit_selected_plots(snapshot)"));
+    assert!(SYNC_SOURCE.contains("interaction.dragged_by(egui::PointerButton::Primary)"));
     assert!(SYNC_SOURCE.contains("interaction.dragged_by(egui::PointerButton::Middle)"));
     assert!(SYNC_SOURCE.contains("gpu::apply_pan"));
     assert!(
@@ -131,7 +132,7 @@ fn sync_anchor_toolbar_picker_and_standard_palette_remain_wired() {
         assert!(SYNC_SOURCE.contains(label), "missing sync action {label}");
     }
     assert!(SYNC_SOURCE.contains("crate::icons::arrow_left_right()"));
-    assert!(SYNC_SOURCE.contains("align_active(snapshot"));
+    assert!(SYNC_SOURCE.contains("align_and_begin_apply(snapshot"));
     assert!(SYNC_SOURCE.contains("begin_sample_pick"));
     assert!(SYNC_SOURCE.contains("sample_neighborhood"));
     assert!(SYNC_SOURCE.contains("egui::Key::Escape"));
