@@ -20,6 +20,7 @@ use crate::map::worker::{MapScopeId, ReadyTile};
 use crate::models;
 use crate::plot::{PlotPane, TraceMode, ViewX};
 use crate::settings::{GapMode, RenderTuning, Scene3dSettings};
+use crate::sync_window::CompareMode;
 use crate::vehicle::ModelKind;
 
 #[derive(Clone, Debug)]
@@ -56,6 +57,61 @@ pub struct PaneView {
     pub rect: egui::Rect,
     pub x_range: (f32, f32),
     pub y_range: (f64, f64),
+}
+
+/// A trace prepared for the synchronization preview. The cached samples keep
+/// their committed effective times; `preview_delta_us` is applied only by the
+/// plot uniform.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PreparedYRange {
+    pub origin: f64,
+    pub min: f64,
+    pub max: f64,
+}
+
+impl PreparedYRange {
+    pub fn new(origin: f64, min: f64, max: f64) -> Option<Self> {
+        (origin.is_finite() && min.is_finite() && max.is_finite() && max >= min).then_some(Self {
+            origin,
+            min,
+            max,
+        })
+    }
+
+    pub fn padded(self) -> Self {
+        let Some((min, max)) = padded_relative_range(self.min, self.max) else {
+            return Self {
+                origin: 0.0,
+                min: -1.0,
+                max: 1.0,
+            };
+        };
+        Self { min, max, ..self }
+    }
+
+    pub fn span(self) -> f64 {
+        self.max - self.min
+    }
+
+    pub fn relative_to(self, origin: f64) -> Option<Self> {
+        let offset = self.origin - origin;
+        Self::new(origin, offset + self.min, offset + self.max)
+    }
+
+    pub fn cache_lower(self, cache_origin: f64) -> f64 {
+        (self.origin - cache_origin) + self.min
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SyncTrace {
+    pub field: FieldId,
+    pub preview_delta_us: i64,
+    pub color: [f32; 4],
+    /// Semantic-absolute range represented relative to a stable origin.
+    pub y_range: PreparedYRange,
+    /// Optional normalized vertical lane `(top, bottom)` in the plot callback.
+    pub lane: Option<(f32, f32)>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -134,6 +190,80 @@ impl GpuBridge {
         {
             res.retain_buffers(plotted);
         }
+    }
+
+    /// Prepare a private synchronization preview without changing shared plot
+    /// state or rebuilding caches with draft source offsets.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sync_plot_callback(
+        &self,
+        ui: &egui::Ui,
+        frame: &eframe::Frame,
+        caches: &mut CacheManager,
+        rect: egui::Rect,
+        traces: &[SyncTrace],
+        view: ViewX,
+    ) -> Option<egui::PaintCallback> {
+        if !self.available || traces.is_empty() || rect.width() < 2.0 || rect.height() < 2.0 {
+            return None;
+        }
+        let render_state = frame.wgpu_render_state()?;
+        let ppp = ui.ctx().pixels_per_point();
+        let mut renderer = render_state.renderer.write();
+        let res = renderer
+            .callback_resources
+            .get_mut::<PlotCallbackResources>()?;
+        let base_slot = res.next_uniform_slot;
+        res.next_uniform_slot += traces.len() as u32;
+        res.ensure_uniform_capacity(res.next_uniform_slot);
+        let mut items = Vec::with_capacity(traces.len());
+
+        for (index, trace) in traces.iter().enumerate() {
+            let Some(cache) = caches.get(trace.field) else {
+                continue;
+            };
+            let shift_s = trace.preview_delta_us as f64 * 1e-6;
+            if !shift_s.is_finite() || shift_s < f32::MIN as f64 || shift_s > f32::MAX as f64 {
+                continue;
+            }
+            let shift_s = shift_s as f32;
+            let x = sync_x_bounds(view, cache.origin_us);
+            let Some((y_scale, y_lower)) = sync_y_axis(trace.y_range, cache.y_origin()) else {
+                continue;
+            };
+            let Some(lane) = trace.lane else {
+                continue;
+            };
+            let lane_height = rect.height() * (lane.1 - lane.0).max(0.0);
+            let viewport_px = [(rect.width() * ppp).max(1.0), (lane_height * ppp).max(1.0)];
+            let slot = base_slot + index as u32;
+            res.uniforms.write(
+                slot,
+                &PlotUniform::from_view_with_x_shift(
+                    x,
+                    (0.0, 1.0),
+                    viewport_px,
+                    1.5,
+                    shader_color(trace.color, self.srgb_target),
+                    shift_s,
+                )
+                .with_y_axis(y_scale, y_lower),
+            );
+            if cache.xy.len() < 4 {
+                continue;
+            }
+            res.buffers.sync(trace.field, &cache.xy, false);
+            items.push(DrawItem {
+                field: trace.field,
+                slot,
+                kind: DrawKind::SyncLine {
+                    samples: (cache.xy.len() / 2) as u32,
+                },
+                lane: Some(lane),
+            });
+        }
+        (!items.is_empty())
+            .then(|| egui_wgpu::Callback::new_paint_callback(rect, ScenePaintCallback { items }))
     }
 
     /// Drop map state belonging to 3D panes that no longer exist in the
@@ -420,6 +550,7 @@ impl GpuBridge {
                         field: trace.field,
                         slot,
                         kind,
+                        lane: None,
                     });
                     if bridged && matches!(kind, DrawKind::Columns { .. }) {
                         let bridge = DrawKind::Bridge {
@@ -430,6 +561,7 @@ impl GpuBridge {
                                 field: trace.field,
                                 slot: slot + 1,
                                 kind: bridge,
+                                lane: None,
                             });
                         }
                     }
@@ -442,6 +574,7 @@ impl GpuBridge {
                                 field: trace.field,
                                 slot,
                                 kind: points,
+                                lane: None,
                             });
                         }
                     }
@@ -618,15 +751,36 @@ pub fn visible_y_range(
     if !(min.is_finite() && max.is_finite()) {
         return (-1.0, 1.0);
     }
-    padded(min, max)
+    padded_y_range(min, max)
 }
 
-fn padded(min: f64, max: f64) -> (f64, f64) {
-    if (max - min).abs() <= f64::EPSILON {
-        return (min - 1.0, max + 1.0);
+pub fn padded_y_range(min: f64, max: f64) -> (f64, f64) {
+    padded_relative_range(min, max).unwrap_or((-1.0, 1.0))
+}
+
+fn padded_relative_range(min: f64, max: f64) -> Option<(f64, f64)> {
+    if !min.is_finite() || !max.is_finite() || max < min {
+        return None;
     }
-    let pad = (max - min) * 0.05;
-    (min - pad, max + pad)
+    let span = max - min;
+    if !span.is_finite() {
+        return None;
+    }
+    let padded = if span.abs() <= f64::EPSILON {
+        (min - 1.0, max + 1.0)
+    } else {
+        let pad = span * 0.05;
+        (min - pad, max + pad)
+    };
+    (padded.0.is_finite() && padded.1.is_finite() && padded.1 > padded.0).then_some(padded)
+}
+
+fn sync_y_axis(range: PreparedYRange, cache_origin: f64) -> Option<(f32, f32)> {
+    let span = range.span();
+    let scale = (2.0 / span) as f32;
+    let lower = range.cache_lower(cache_origin) as f32;
+    (span.is_finite() && span > 0.0 && scale.is_finite() && lower.is_finite())
+        .then_some((scale, lower))
 }
 
 /// sRGB target gamma-encodes the shader output, so emit linear; UNORM writes
@@ -655,6 +809,10 @@ fn srgb_to_linear(c: f32) -> f32 {
 #[derive(Clone, Copy)]
 enum DrawKind {
     Line {
+        samples: u32,
+    },
+    /// Synchronization preview using the full resident trace buffer.
+    SyncLine {
         samples: u32,
     },
     Scatter {
@@ -746,7 +904,7 @@ fn pipeline_runs(kinds: impl Iterator<Item = PipelineKind>) -> Vec<(PipelineKind
 impl DrawKind {
     fn pipeline(self) -> PipelineKind {
         match self {
-            DrawKind::Line { .. } => PipelineKind::Line,
+            DrawKind::Line { .. } | DrawKind::SyncLine { .. } => PipelineKind::Line,
             DrawKind::Scatter { .. } => PipelineKind::Scatter,
             DrawKind::Step { .. } => PipelineKind::Step,
             DrawKind::Columns { .. } => PipelineKind::Columns,
@@ -757,7 +915,7 @@ impl DrawKind {
 
     fn is_drawable(self) -> bool {
         match self {
-            DrawKind::Line { samples } => samples >= 2,
+            DrawKind::Line { samples } | DrawKind::SyncLine { samples } => samples >= 2,
             DrawKind::Scatter { samples } => samples >= 1,
             DrawKind::Step { samples } => samples >= 2,
             DrawKind::Columns { count } => count >= 1,
@@ -771,6 +929,7 @@ struct DrawItem {
     field: FieldId,
     slot: u32,
     kind: DrawKind,
+    lane: Option<(f32, f32)>,
 }
 
 struct PlotCallbackResources {
@@ -793,6 +952,7 @@ struct PlotCallbackResources {
     uniforms: UniformRing,
     next_uniform_slot: u32,
     line_binds: HashMap<FieldId, wgpu::BindGroup>,
+    sync_line_binds: HashMap<FieldId, wgpu::BindGroup>,
     scatter_binds: HashMap<FieldId, wgpu::BindGroup>,
     step_binds: HashMap<FieldId, wgpu::BindGroup>,
     col_binds: HashMap<FieldId, wgpu::BindGroup>,
@@ -861,6 +1021,7 @@ impl PlotCallbackResources {
             uniforms,
             next_uniform_slot: 0,
             line_binds: HashMap::new(),
+            sync_line_binds: HashMap::new(),
             scatter_binds: HashMap::new(),
             step_binds: HashMap::new(),
             col_binds: HashMap::new(),
@@ -1479,6 +1640,7 @@ impl egui_wgpu::CallbackTrait for ScenePaintCallback {
                 uniforms,
                 next_uniform_slot: _,
                 line_binds,
+                sync_line_binds,
                 scatter_binds,
                 step_binds,
                 col_binds,
@@ -1496,6 +1658,11 @@ impl egui_wgpu::CallbackTrait for ScenePaintCallback {
                     DrawKind::Line { .. } => {
                         if let Some(buf) = win_buffers.buffer(item.field) {
                             line_binds.insert(item.field, line.bind_group(ctx, buf, uniforms));
+                        }
+                    }
+                    DrawKind::SyncLine { .. } => {
+                        if let Some(buf) = buffers.buffer(item.field) {
+                            sync_line_binds.insert(item.field, line.bind_group(ctx, buf, uniforms));
                         }
                     }
                     DrawKind::Scatter { .. } => {
@@ -1586,10 +1753,38 @@ impl egui_wgpu::CallbackTrait for ScenePaintCallback {
                 PipelineKind::Columns => res.minmax.bind(render_pass),
             }
             for item in &self.items[next..next + count as usize] {
+                if let Some((top, bottom)) = item.lane {
+                    let lane_top = viewport.top_px
+                        + (viewport.height_px as f32 * top.clamp(0.0, 1.0)).round() as i32;
+                    let lane_bottom = viewport.top_px
+                        + (viewport.height_px as f32 * bottom.clamp(0.0, 1.0)).round() as i32;
+                    let lane_height = lane_bottom.saturating_sub(lane_top);
+                    let Some((lsx, lsy, lsw, lsh)) = intersect_scissor_rect(
+                        (viewport.left_px, lane_top, viewport.width_px, lane_height),
+                        (clip.left_px, clip.top_px, clip.width_px, clip.height_px),
+                        info.screen_size_px,
+                    ) else {
+                        continue;
+                    };
+                    render_pass.set_viewport(
+                        viewport.left_px.max(0) as f32,
+                        lane_top.max(0) as f32,
+                        viewport.width_px as f32,
+                        lane_height as f32,
+                        0.0,
+                        1.0,
+                    );
+                    render_pass.set_scissor_rect(lsx, lsy, lsw, lsh);
+                }
                 let offset = res.uniforms.dynamic_offset(item.slot);
                 match item.kind {
                     DrawKind::Line { samples } => {
                         if let Some(bind) = res.line_binds.get(&item.field) {
+                            res.line.draw_trace(render_pass, bind, offset, samples);
+                        }
+                    }
+                    DrawKind::SyncLine { samples } => {
+                        if let Some(bind) = res.sync_line_binds.get(&item.field) {
                             res.line.draw_trace(render_pass, bind, offset, samples);
                         }
                     }
@@ -1649,6 +1844,47 @@ fn intersect_scissor_rect(
     ))
 }
 
+pub(crate) fn sync_lane_fractions(count: usize, mode: CompareMode) -> Vec<(f32, f32)> {
+    if count == 0 {
+        return Vec::new();
+    }
+    match mode {
+        CompareMode::Overlay => vec![(0.0, 1.0); count],
+        CompareMode::Stacked => (0..count)
+            .map(|index| {
+                let top = index as f32 / count as f32;
+                let bottom = (index + 1) as f32 / count as f32;
+                (top, bottom)
+            })
+            .collect(),
+    }
+}
+
+pub fn sync_lane_rects(rect: egui::Rect, traces: &[SyncTrace]) -> Vec<egui::Rect> {
+    traces
+        .iter()
+        .map(|trace| {
+            let (top, bottom) = trace
+                .lane
+                .expect("synchronization trace lane should be prepared");
+            egui::Rect::from_min_max(
+                egui::pos2(rect.left(), rect.top() + top * rect.height()),
+                egui::pos2(rect.right(), rect.top() + bottom * rect.height()),
+            )
+        })
+        .collect()
+}
+
+pub fn sync_x_bounds(view: ViewX, cache_origin_us: i64) -> (f32, f32) {
+    view.seconds(cache_origin_us)
+}
+
+pub fn sync_active_trace_at(lanes: &[egui::Rect], pointer: egui::Pos2) -> Option<usize> {
+    lanes
+        .iter()
+        .position(|lane| crate::axes::usable_plot_rect(*lane) && lane.contains(pointer))
+}
+
 /// Convert an egui drag delta and a wheel scroll into [`ViewX`] updates,
 /// mapping screen pixels to the data window. Pure so it stays unit-testable.
 pub fn apply_pan(view: &mut ViewX, drag_dx_px: f32, rect_width_px: f32) {
@@ -1698,6 +1934,50 @@ pub fn zoom_drag_view(
 mod tests {
     use arrow::array::{ArrayRef, Int32Array, Int64Array};
     use arrow::datatypes::DataType;
+
+    #[test]
+    fn y_padding_matches_normal_plot_policy() {
+        assert_eq!(padded_y_range(10.0, 20.0), (9.5, 20.5));
+        assert_eq!(padded_y_range(7.0, 7.0), (6.0, 8.0));
+        assert_eq!(padded_y_range(f64::NAN, 1.0), (-1.0, 1.0));
+    }
+
+    #[test]
+    fn both_padding_paths_fallback_when_padding_overflows() {
+        let min = f64::MAX / 2.0;
+        let max = f64::MAX;
+        assert_eq!(padded_y_range(min, max), (-1.0, 1.0));
+        assert_eq!(
+            PreparedYRange::new(0.0, min, max).unwrap().padded(),
+            PreparedYRange::new(0.0, -1.0, 1.0).unwrap(),
+        );
+    }
+
+    #[test]
+    fn prepared_padding_failure_resets_the_semantic_origin_with_fallback() {
+        let range = PreparedYRange::new(1.0e20, f64::MAX / 2.0, f64::MAX).unwrap();
+        assert_eq!(range.padded(), PreparedYRange::new(0.0, -1.0, 1.0).unwrap(),);
+    }
+
+    #[test]
+    fn sync_y_axis_uses_the_prepared_relative_range() {
+        let range = PreparedYRange::new(1000.0, 0.0, 10.0).unwrap();
+        assert_eq!(sync_y_axis(range, 997.0), Some((0.2, 3.0)));
+    }
+
+    #[test]
+    fn sync_y_span_survives_large_distant_cache_origin() {
+        let range = PreparedYRange::new(1.0e12, 0.0, 8.0).unwrap();
+        let (scale, lower) = sync_y_axis(range, -1.0e12).unwrap();
+        assert_eq!(scale, 0.25);
+        assert!(lower.is_finite());
+    }
+
+    #[test]
+    fn flat_padding_survives_large_absolute_origin() {
+        let range = PreparedYRange::new(1.0e20, 0.0, 0.0).unwrap().padded();
+        assert_eq!(range.span(), 2.0);
+    }
     use delog_core::chunk::Chunk;
     use delog_core::identity::IdentityRegistry;
     use delog_core::schema::{FieldSchema, TopicSchema};
@@ -1705,6 +1985,74 @@ mod tests {
     use delog_core::store::TopicStore;
 
     use super::*;
+
+    #[test]
+    fn sync_stacked_lanes_are_equal_and_cover_the_plot() {
+        let rect = egui::Rect::from_min_max(egui::pos2(10.0, 20.0), egui::pos2(110.0, 80.0));
+        let traces: Vec<_> = sync_lane_fractions(3, CompareMode::Stacked)
+            .into_iter()
+            .map(|lane| SyncTrace {
+                field: FieldId(0),
+                preview_delta_us: 0,
+                color: [0.0; 4],
+                y_range: PreparedYRange::new(0.0, -1.0, 1.0).unwrap(),
+                lane: Some(lane),
+            })
+            .collect();
+        let lanes = sync_lane_rects(rect, &traces);
+        assert_eq!(lanes.len(), 3);
+        assert_eq!(
+            lanes[0],
+            egui::Rect::from_min_max(egui::pos2(10.0, 20.0), egui::pos2(110.0, 40.0))
+        );
+        assert_eq!(
+            lanes[2],
+            egui::Rect::from_min_max(egui::pos2(10.0, 60.0), egui::pos2(110.0, 80.0))
+        );
+    }
+
+    #[test]
+    fn sync_traces_share_absolute_x_bounds_across_cache_origins() {
+        let view = ViewX::new(2_000_000, 5_000_000);
+        assert_eq!(sync_x_bounds(view, 0), (2.0, 5.0));
+        assert_eq!(sync_x_bounds(view, 1_000_000), (1.0, 4.0));
+    }
+
+    #[test]
+    fn sync_active_trace_resolves_the_lane_under_the_pointer() {
+        let rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(100.0, 90.0));
+        let traces: Vec<_> = sync_lane_fractions(3, CompareMode::Stacked)
+            .into_iter()
+            .map(|lane| SyncTrace {
+                field: FieldId(0),
+                preview_delta_us: 0,
+                color: [0.0; 4],
+                y_range: PreparedYRange::new(0.0, -1.0, 1.0).unwrap(),
+                lane: Some(lane),
+            })
+            .collect();
+        let lanes = sync_lane_rects(rect, &traces);
+        assert_eq!(
+            sync_active_trace_at(&lanes, egui::pos2(50.0, 45.0)),
+            Some(1)
+        );
+        assert_eq!(sync_active_trace_at(&lanes, egui::pos2(150.0, 45.0)), None);
+    }
+
+    #[test]
+    fn sync_active_trace_ignores_tiny_lanes() {
+        let too_narrow = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1.0e-7, 100.0));
+        let too_short = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(100.0, 1.0e-7));
+
+        assert_eq!(
+            sync_active_trace_at(&[too_narrow], egui::pos2(0.0, 50.0)),
+            None
+        );
+        assert_eq!(
+            sync_active_trace_at(&[too_short], egui::pos2(50.0, 0.0)),
+            None
+        );
+    }
 
     #[test]
     fn visible_y_range_merges_distinct_trace_origins_as_absolute_values() {

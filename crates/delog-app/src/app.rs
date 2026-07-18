@@ -22,6 +22,7 @@ use crate::plot::ViewX;
 use crate::scripts;
 use crate::session::Session;
 use crate::settings::{AppSettings, RenderMode, SettingsDialog, TileCacheUiState};
+use crate::sync_window::SyncWindow;
 
 fn tile_cache_needs_repaint(clear_submitted: bool, cache_action_pending: bool) -> bool {
     clear_submitted || cache_action_pending
@@ -296,6 +297,7 @@ pub struct DelogApp {
     source_metadata_dialog: Option<delog_core::identity::SourceId>,
     field_metadata_dialog: Option<delog_core::identity::FieldId>,
     field_stats: FieldStatsController,
+    sync_window: Option<SyncWindow>,
     generate_markers_dialog: Option<crate::generate_markers::GenerateMarkersDialog>,
     save_layout_dialog: SaveLayoutDialog,
     load_layout_dialog: LoadLayoutDialog,
@@ -432,6 +434,7 @@ impl DelogApp {
             source_metadata_dialog: None,
             field_metadata_dialog: None,
             field_stats: FieldStatsController::default(),
+            sync_window: None,
             generate_markers_dialog: None,
             save_layout_dialog: SaveLayoutDialog {
                 open: false,
@@ -1944,6 +1947,21 @@ impl eframe::App for DelogApp {
                         self.spawn_open_dialog(ui.ctx());
                         ui.close();
                     }
+                    let offline_sources = snapshot
+                        .sources
+                        .iter()
+                        .filter(|source| {
+                            !source.entry.removed
+                                && source.entry.kind == delog_core::identity::SourceKind::File
+                        })
+                        .count();
+                    if ui
+                        .add_enabled(offline_sources >= 2, egui::Button::new("Sync Sources"))
+                        .clicked()
+                    {
+                        self.sync_window = SyncWindow::open(&snapshot);
+                        ui.close();
+                    }
                     ui.menu_button("Export", |ui| {
                         if ui.button("Export Data").clicked() {
                             self.data_export.open();
@@ -2880,6 +2898,27 @@ impl eframe::App for DelogApp {
             self.start_queued_image_capture(ui.ctx(), Some(workspace_rect));
         });
         drop(ui_workspace_timer);
+
+        // Render synchronization previews after the workspace has reset the
+        // per-frame uniform allocator and retained its own GPU buffers. The
+        // synchronization callback can then safely append private uniforms and
+        // upload fields that are not plotted in the workspace.
+        if let Some(mut sync_window) = self.sync_window.take() {
+            sync_window.reconcile(&snapshot);
+            if sync_window.pending_is_authoritative(&snapshot) {
+                sync_window.mark_applied(&snapshot);
+            }
+            let response =
+                sync_window.show(ui.ctx(), &snapshot, &self.gpu, frame, &mut self.caches);
+            if let Some(offsets) = response.apply {
+                if self.session.set_source_offsets(offsets).is_err() {
+                    sync_window.apply_dispatch_failed();
+                }
+            }
+            if sync_window.open {
+                self.sync_window = Some(sync_window);
+            }
+        }
 
         // Floating windows/dialogs + overlays; drops with the function (still
         // inside `frame_total`, after every other section).

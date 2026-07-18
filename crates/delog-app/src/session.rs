@@ -264,6 +264,10 @@ impl Session {
         self.sender.set_source_offset(source, offset_us);
     }
 
+    pub fn set_source_offsets(&self, offsets: Vec<(SourceId, i64)>) -> Result<(), ()> {
+        self.sender.set_source_offsets(offsets)
+    }
+
     /// Request removal of a source. Applied by the ingest thread
     /// (the single registry writer): it tombstones the source and its
     /// topics/fields, drops their stores, and publishes a new epoch off which
