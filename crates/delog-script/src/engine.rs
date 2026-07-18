@@ -338,6 +338,7 @@ pub struct ScriptEngine {
     active_declarative: Arc<Mutex<HashSet<String>>>,
     parser_cancellation: Arc<Mutex<ParserCancellationState>>,
     params: SharedParams,
+    use_original_timestamps: Arc<AtomicBool>,
 }
 
 impl ScriptEngine {
@@ -360,6 +361,8 @@ impl ScriptEngine {
         let parser_cancellation = Arc::new(Mutex::new(ParserCancellationState::default()));
         let parser_cancellation_worker = Arc::clone(&parser_cancellation);
         let params_worker = Arc::clone(&params);
+        let use_original_timestamps = Arc::new(AtomicBool::new(false));
+        let use_original_timestamps_worker = Arc::clone(&use_original_timestamps);
         let handle = std::thread::Builder::new()
             .name("delog-script".into())
             .spawn(move || {
@@ -374,6 +377,7 @@ impl ScriptEngine {
                     active_declarative_worker,
                     parser_cancellation_worker,
                     params_worker,
+                    use_original_timestamps_worker,
                 )
             })
             .expect("spawn script thread");
@@ -386,7 +390,13 @@ impl ScriptEngine {
             active_declarative,
             parser_cancellation,
             params,
+            use_original_timestamps,
         }
+    }
+
+    pub fn set_use_original_timestamps(&self, use_original: bool) {
+        self.use_original_timestamps
+            .store(use_original, Ordering::Relaxed);
     }
 
     pub fn send(&self, cmd: ScriptCommand) -> Result<(), String> {
@@ -551,6 +561,7 @@ fn worker_loop(
     active_declarative: Arc<Mutex<HashSet<String>>>,
     parser_cancellation: Arc<Mutex<ParserCancellationState>>,
     params: SharedParams,
+    use_original_timestamps: Arc<AtomicBool>,
 ) {
     let globals: Py<PyDict> = Python::attach(|py| PyDict::new(py).unbind());
     // Per-script-name snapshot-emit source from the previous run, for
@@ -588,24 +599,32 @@ fn worker_loop(
                 continue;
             }
             Ok(EngineCommand::Script(cmd)) => {
-                if handle_command(
-                    cmd,
-                    &store,
-                    &sender,
-                    &metrics,
-                    &globals,
-                    &evt_tx,
-                    &active_live,
-                    &active_declarative,
-                    &mut prev_sources,
-                    &mut live_sources,
-                    &mut active_transforms,
-                    &mut declarative_sources,
-                    &mut active_operations,
-                    &mut run_counter,
-                    &parser_cancellation,
-                    &params,
-                ) {
+                let timestamp_mode = if use_original_timestamps.load(Ordering::Relaxed) {
+                    crate::api::ScriptTimestampMode::Original
+                } else {
+                    crate::api::ScriptTimestampMode::Effective
+                };
+                let shutdown = crate::api::with_timestamp_mode(timestamp_mode, || {
+                    handle_command(
+                        cmd,
+                        &store,
+                        &sender,
+                        &metrics,
+                        &globals,
+                        &evt_tx,
+                        &active_live,
+                        &active_declarative,
+                        &mut prev_sources,
+                        &mut live_sources,
+                        &mut active_transforms,
+                        &mut declarative_sources,
+                        &mut active_operations,
+                        &mut run_counter,
+                        &parser_cancellation,
+                        &params,
+                    )
+                });
+                if shutdown {
                     break; // Shutdown
                 }
                 continue;
@@ -1571,8 +1590,13 @@ mod tests {
     }
 
     fn test_store_with_baro_alt() -> Arc<DataStore> {
+        test_store_with_baro_alt_offset(0)
+    }
+
+    fn test_store_with_baro_alt_offset(offset_us: i64) -> Arc<DataStore> {
         let mut id = IdentityRegistry::new();
         let src = id.add_source("flight");
+        id.set_source_offset_us(src, offset_us).unwrap();
         let topic = id.add_topic(src, "BARO").unwrap();
         id.add_field(topic, "Alt").unwrap();
         let schema = Arc::new(
@@ -2130,6 +2154,39 @@ def mark(batch):
             }
         }
         assert_eq!(result.as_deref(), Some("1.0"));
+    }
+
+    #[test]
+    fn timestamp_setting_switches_python_reads_between_effective_and_original_time() {
+        let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let engine = ScriptEngine::spawn(
+            test_store_with_baro_alt_offset(250),
+            dummy_sender(),
+            test_metrics(),
+            crate::params::shared_empty(),
+        );
+
+        let read_time = |engine: &ScriptEngine| {
+            engine
+                .send(ScriptCommand::Eval(
+                    "int(delog.topic('BARO').field('Alt').read().t[0])".into(),
+                ))
+                .unwrap();
+            let mut result = None;
+            loop {
+                match engine.recv_blocking() {
+                    ScriptEvent::Result(value) => result = Some(value),
+                    ScriptEvent::Done => break,
+                    ScriptEvent::Error(error) => panic!("{error}"),
+                    _ => {}
+                }
+            }
+            result
+        };
+
+        assert_eq!(read_time(&engine).as_deref(), Some("250"));
+        engine.set_use_original_timestamps(true);
+        assert_eq!(read_time(&engine).as_deref(), Some("0"));
     }
 
     #[test]
@@ -3018,6 +3075,7 @@ def f(batch):
             active_declarative: Arc::new(Mutex::new(HashSet::new())),
             parser_cancellation: Arc::clone(&cancellation),
             params: crate::params::shared_empty(),
+            use_original_timestamps: Arc::new(AtomicBool::new(false)),
         };
 
         let failed_interrupt = std::sync::Mutex::new(None);
@@ -3098,6 +3156,7 @@ def f(batch):
             active_declarative: Arc::new(Mutex::new(HashSet::new())),
             parser_cancellation: Arc::clone(&cancellation),
             params: crate::params::shared_empty(),
+            use_original_timestamps: Arc::new(AtomicBool::new(false)),
         };
 
         engine
@@ -3150,6 +3209,7 @@ def f(batch):
                 active_declarative: Arc::new(Mutex::new(HashSet::new())),
                 parser_cancellation: Arc::clone(&cancellation),
                 params: crate::params::shared_empty(),
+                use_original_timestamps: Arc::new(AtomicBool::new(false)),
             };
             let (boundary_tx, boundary_rx) = channel();
             let (cancelled_tx, cancelled_rx) = channel();
@@ -3237,6 +3297,7 @@ def f(batch):
             active_declarative: Arc::new(Mutex::new(HashSet::new())),
             parser_cancellation: Arc::new(Mutex::new(ParserCancellationState::default())),
             params: crate::params::shared_empty(),
+            use_original_timestamps: Arc::new(AtomicBool::new(false)),
         };
 
         assert!(engine.send(ScriptCommand::Eval("1".into())).is_err());

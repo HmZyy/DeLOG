@@ -114,6 +114,7 @@ pub struct ScriptsPanel {
     pub variables_open: bool,
     pending_auto_open: Option<PendingAutoOpen>,
     auto_open_mode: AutoOpenVariables,
+    use_original_timestamps: bool,
     pending_logs: Vec<PendingLog>,
     pending_marker_commands: Vec<MarkerCommand>,
     completion: ReplCompletion,
@@ -153,6 +154,7 @@ impl ScriptsPanel {
             variables_open: false,
             pending_auto_open: None,
             auto_open_mode: AutoOpenVariables::default(),
+            use_original_timestamps: false,
             pending_logs: Vec::new(),
             pending_marker_commands: Vec::new(),
             completion: ReplCompletion::new(),
@@ -428,8 +430,12 @@ impl ScriptsPanel {
         metrics: Arc<MetricsRegistry>,
     ) -> &ScriptEngine {
         let params = Arc::clone(&self.params);
-        self.engine
-            .get_or_insert_with(|| ScriptEngine::spawn(store, sender, metrics, params))
+        let use_original_timestamps = self.use_original_timestamps;
+        let engine = self
+            .engine
+            .get_or_insert_with(|| ScriptEngine::spawn(store, sender, metrics, params));
+        engine.set_use_original_timestamps(use_original_timestamps);
+        engine
     }
 
     /// Returns `None` rather than spawning the engine: a live transform only
@@ -600,8 +606,13 @@ impl ScriptsPanel {
         metrics: Arc<MetricsRegistry>,
         auto_open: AutoOpenVariables,
         auto_open_console: crate::settings::AutoOpenScriptingConsole,
+        use_original_timestamps: bool,
     ) {
         self.auto_open_mode = auto_open;
+        self.use_original_timestamps = use_original_timestamps;
+        if let Some(engine) = &self.engine {
+            engine.set_use_original_timestamps(use_original_timestamps);
+        }
         self.drain(auto_open_console);
 
         for action in self.parsers.ui(ctx, self.parser_dispatch_enabled()) {
