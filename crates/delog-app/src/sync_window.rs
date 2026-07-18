@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::axes;
 use crate::gpu::{self, GpuBridge, PreparedYRange, SyncTrace};
-use crate::plot::ViewX;
+use crate::plot::{ViewX, draw_zoom_drag_overlay};
 use crate::sync_alignment::{
     AlignmentError, AnchorKind, SampleNeighborhood, SyncSample, anchor, sample_neighborhood,
     target_offset_us,
@@ -400,15 +400,15 @@ fn pointer_fraction_in_lane(lane: egui::Rect, pointer: egui::Pos2) -> Option<f32
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlotPointerAction {
     DoubleClickFit,
-    MiddlePan,
+    PrimaryPan,
     Other,
 }
 
-fn plot_pointer_action(double_clicked: bool, middle_dragged: bool) -> PlotPointerAction {
+fn plot_pointer_action(double_clicked: bool, primary_dragged: bool) -> PlotPointerAction {
     if double_clicked {
         PlotPointerAction::DoubleClickFit
-    } else if middle_dragged {
-        PlotPointerAction::MiddlePan
+    } else if primary_dragged {
+        PlotPointerAction::PrimaryPan
     } else {
         PlotPointerAction::Other
     }
@@ -434,7 +434,7 @@ fn final_frame_views(
                 final_view = fitted;
             }
         }
-        PlotPointerAction::MiddlePan => {
+        PlotPointerAction::PrimaryPan => {
             gpu::apply_pan(&mut final_view, middle_drag_dx_px, plot_width_px)
         }
         PlotPointerAction::Other => {}
@@ -459,6 +459,7 @@ impl OffsetInput {
         }
     }
 
+    #[cfg(test)]
     fn set(&mut self, text: impl Into<String>) -> Option<i64> {
         self.text = text.into();
         let parsed = self.text.trim().parse().ok();
@@ -564,11 +565,12 @@ impl SyncWindow {
             return None;
         }
         let reference = sources[0].source;
+        let active = Some(sources[1].source);
         let mut window = Self {
             open: true,
             sources,
             reference,
-            active: None,
+            active,
             mode: CompareMode::Overlay,
             view: None,
             confirm_discard: false,
@@ -704,6 +706,7 @@ impl SyncWindow {
         }
     }
 
+    #[cfg(test)]
     pub fn included_ids(&self) -> Vec<SourceId> {
         self.sources
             .iter()
@@ -742,12 +745,14 @@ impl SyncWindow {
         self.view = Some(view);
         true
     }
+    #[cfg(test)]
     pub fn draft_offsets(&self) -> Vec<(SourceId, i64)> {
         self.sources
             .iter()
             .map(|item| (item.source, item.draft_offset_us))
             .collect()
     }
+    #[cfg(test)]
     pub fn reference(&self) -> SourceId {
         self.reference
     }
@@ -771,6 +776,7 @@ impl SyncWindow {
     pub fn draft_offset(&self, id: SourceId) -> Option<i64> {
         Some(self.source(id)?.draft_offset_us)
     }
+    #[cfg(test)]
     pub fn input(&self, id: SourceId) -> Option<&str> {
         Some(&self.source(id)?.input.text)
     }
@@ -789,7 +795,8 @@ impl SyncWindow {
         }
     }
     fn automatic_alignment_ready(&self) -> bool {
-        self.picker.is_none()
+        self.pending_apply.is_none()
+            && self.picker.is_none()
             && self.active.is_some_and(|active| {
                 active != self.reference
                     && self
@@ -804,6 +811,7 @@ impl SyncWindow {
         }
         self.apply_request(snapshot).err()
     }
+    #[cfg(test)]
     pub fn set_mode(&mut self, mode: CompareMode) {
         self.mode = mode;
     }
@@ -997,6 +1005,16 @@ impl SyncWindow {
         }
         result
     }
+    fn align_and_begin_apply(
+        &mut self,
+        snapshot: &StoreSnapshot,
+        method: AutoAlignMethod,
+    ) -> Option<Vec<(SourceId, i64)>> {
+        self.align_active(snapshot, method).ok()?;
+        let batch = self.apply_request(snapshot).ok()?;
+        self.begin_apply(batch.clone(), snapshot.epoch);
+        Some(batch)
+    }
     pub fn set_topic(
         &mut self,
         snapshot: &StoreSnapshot,
@@ -1039,6 +1057,7 @@ impl SyncWindow {
         item.input = OffsetInput::normalized(offset);
         Ok(())
     }
+    #[cfg(test)]
     pub fn set_input(&mut self, id: SourceId, input: impl Into<String>) -> Result<(), ()> {
         if !self.is_movable(id) {
             return Err(());
@@ -1125,7 +1144,7 @@ impl SyncWindow {
             .min_size(min_size)
             .max_size(max_size)
             .show(ctx, |ui| {
-                self.toolbar(ui, snapshot);
+                self.toolbar(ui, snapshot, &mut response);
                 ui.separator();
                 egui::ScrollArea::vertical()
                     .id_salt("sync-source-rows")
@@ -1151,31 +1170,28 @@ impl SyncWindow {
         response
     }
 
-    fn toolbar(&mut self, ui: &mut egui::Ui, snapshot: &StoreSnapshot) {
+    fn toolbar(
+        &mut self,
+        ui: &mut egui::Ui,
+        snapshot: &StoreSnapshot,
+        response: &mut SyncWindowResponse,
+    ) {
         if self.picker.is_some()
             && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
         {
             self.cancel_sample_pick();
         }
         ui.horizontal(|ui| {
-            ui.menu_button("Sources", |ui| {
-                let ids: Vec<_> = self.sources.iter().map(|item| item.source).collect();
-                for id in ids {
-                    let mut included = self.source(id).is_some_and(|item| item.included);
-                    let label = source_label(snapshot, id);
-                    if ui.checkbox(&mut included, label).changed() {
-                        let _ = self.set_included(id, included);
-                    }
-                }
-            });
             ui.selectable_value(&mut self.mode, CompareMode::Overlay, "Overlay");
             ui.selectable_value(&mut self.mode, CompareMode::Stacked, "Stacked");
-            if ui.button("Reset zoom").clicked() {
-                self.fit_selected_plots(snapshot);
-            }
-            if ui.button("Reset all").clicked() {
-                self.reset_all();
-            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Reset all").clicked() {
+                    self.reset_all();
+                }
+                if ui.button("Reset zoom").clicked() {
+                    self.fit_selected_plots(snapshot);
+                }
+            });
         });
         let active = self.active;
         let pair_ready = self.automatic_alignment_ready();
@@ -1203,7 +1219,9 @@ impl SyncWindow {
                     )
                     .clicked()
                 {
-                    let _ = self.align_active(snapshot, method);
+                    if let Some(batch) = self.align_and_begin_apply(snapshot, method) {
+                        response.apply = Some(batch);
+                    }
                 }
             }
             if self.picker.is_some() {
@@ -1459,9 +1477,9 @@ impl SyncWindow {
         }
         let pointer_action = plot_pointer_action(
             interaction.double_clicked(),
-            interaction.dragged_by(egui::PointerButton::Middle),
+            interaction.dragged_by(egui::PointerButton::Primary),
         );
-        let pan_width = if pointer_action == PlotPointerAction::MiddlePan {
+        let pan_width = if pointer_action == PlotPointerAction::PrimaryPan {
             let provisional =
                 prepare_rendered_geometry(&candidates, caches, initial_view, self.mode);
             (rect.width() - prepared_y_gutter(ui, rect, self.mode, &provisional)).max(1.0)
@@ -1638,13 +1656,13 @@ impl SyncWindow {
         }
         if pointer_action == PlotPointerAction::Other
             && self.picker.is_none()
-            && interaction.drag_started_by(egui::PointerButton::Primary)
+            && interaction.drag_started_by(egui::PointerButton::Middle)
         {
             self.drag_start_offset_us = self.active.and_then(|id| self.draft_offset(id));
         }
         if pointer_action == PlotPointerAction::Other
             && self.picker.is_none()
-            && interaction.dragged_by(egui::PointerButton::Primary)
+            && interaction.dragged_by(egui::PointerButton::Middle)
             && let Some(active) = self.active
             && active != self.reference
             && let Some(total_drag) = interaction.total_drag_delta()
@@ -1653,7 +1671,7 @@ impl SyncWindow {
         {
             let _ = self.apply_drag_delta(active, start, delta);
         }
-        if interaction.drag_stopped_by(egui::PointerButton::Primary) {
+        if interaction.drag_stopped_by(egui::PointerButton::Middle) {
             self.drag_start_offset_us = None;
         }
         if pointer_action == PlotPointerAction::Other && interaction.hovered() {
@@ -1672,6 +1690,11 @@ impl SyncWindow {
             && interaction.drag_started_by(egui::PointerButton::Secondary)
         {
             self.zoom_drag_anchor_x = interaction.interact_pointer_pos().map(|p| p.x);
+        }
+        if let Some(anchor_x) = self.zoom_drag_anchor_x
+            && let Some(pointer) = interaction.interact_pointer_pos()
+        {
+            draw_zoom_drag_overlay(ui, plot_rect, anchor_x, pointer.x);
         }
         if pointer_action == PlotPointerAction::Other
             && interaction.drag_stopped_by(egui::PointerButton::Secondary)
@@ -1700,37 +1723,37 @@ impl SyncWindow {
     ) {
         ui.horizontal(|ui| {
             let block = self.apply_block(snapshot);
-            let status = if self.pending_apply.is_some() {
-                "Applying…"
-            } else {
-                match block {
-                    None => "Unsaved changes",
-                    Some(ApplyBlock::Clean) => "No changes",
-                    Some(ApplyBlock::InvalidInput) => "Invalid offset or field",
-                    Some(ApplyBlock::Conflict) => "Source offsets changed externally",
-                    Some(ApplyBlock::InsufficientSources) => "Include at least two sources",
-                }
-            };
-            ui.label(status);
+            if self.pending_apply.is_some() {
+                ui.label("Applying…");
+            } else if let Some(status) = match block {
+                Some(ApplyBlock::InvalidInput) => Some("Invalid offset or field"),
+                Some(ApplyBlock::Conflict) => Some("Source offsets changed externally"),
+                Some(ApplyBlock::InsufficientSources) => Some("Include at least two sources"),
+                None | Some(ApplyBlock::Clean) => None,
+            } {
+                ui.label(status);
+            }
             if block == Some(ApplyBlock::Conflict) && ui.button("Reload current offsets").clicked()
             {
                 self.reload_offsets(snapshot);
             }
-            if ui
-                .add_enabled(block.is_none(), egui::Button::new("Apply"))
-                .clicked()
-                && let Ok(batch) = self.apply_request(snapshot)
-            {
-                self.begin_apply(batch.clone(), snapshot.epoch);
-                response.apply = Some(batch);
-            }
-            if ui.button("Close").clicked() {
-                if self.is_dirty() || self.pending_apply.is_some() {
-                    self.confirm_discard = true;
-                } else {
-                    self.open = false;
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add_enabled(block.is_none(), egui::Button::new("Apply"))
+                    .clicked()
+                    && let Ok(batch) = self.apply_request(snapshot)
+                {
+                    self.begin_apply(batch.clone(), snapshot.epoch);
+                    response.apply = Some(batch);
                 }
-            }
+                if ui.button("Close").clicked() {
+                    if self.is_dirty() || self.pending_apply.is_some() {
+                        self.confirm_discard = true;
+                    } else {
+                        self.open = false;
+                    }
+                }
+            });
         });
     }
 
@@ -2345,14 +2368,14 @@ mod tests {
     }
 
     #[test]
-    fn plot_pointer_precedence_is_double_then_middle_then_other_actions() {
+    fn plot_pointer_precedence_is_double_then_primary_pan_then_other_actions() {
         assert_eq!(
             plot_pointer_action(true, true),
             PlotPointerAction::DoubleClickFit
         );
         assert_eq!(
             plot_pointer_action(false, true),
-            PlotPointerAction::MiddlePan
+            PlotPointerAction::PrimaryPan
         );
         assert_eq!(plot_pointer_action(false, false), PlotPointerAction::Other);
     }
@@ -2361,7 +2384,7 @@ mod tests {
     fn accepted_view_actions_update_the_single_current_view() {
         let mut view = final_frame_views(
             ViewX::new(0, 100),
-            PlotPointerAction::MiddlePan,
+            PlotPointerAction::PrimaryPan,
             None,
             10.0,
             100.0,
@@ -2376,9 +2399,9 @@ mod tests {
     #[test]
     fn accepted_navigation_supplies_one_final_view_to_trace_and_picker_paths() {
         let initial = ViewX::new(0, 100);
-        let middle = final_frame_views(initial, PlotPointerAction::MiddlePan, None, 10.0, 100.0);
-        assert_eq!(middle.trace_projection, ViewX::new(-10, 90));
-        assert_eq!(middle.picker_projection, middle.trace_projection);
+        let primary = final_frame_views(initial, PlotPointerAction::PrimaryPan, None, 10.0, 100.0);
+        assert_eq!(primary.trace_projection, ViewX::new(-10, 90));
+        assert_eq!(primary.picker_projection, primary.trace_projection);
 
         let fitted = ViewX::new(1_000, 2_000);
         let double = final_frame_views(
@@ -2441,6 +2464,22 @@ mod tests {
             .unwrap();
         assert_eq!(sync.draft_offset(target), Some(390));
         assert_eq!(sync.reference(), reference);
+    }
+
+    #[test]
+    fn automatic_methods_immediately_begin_applying_the_new_offset() {
+        let snapshot = alignment_fixture();
+        let mut sync = SyncWindow::open(&snapshot).unwrap();
+        let target = sync.active.unwrap();
+
+        let batch = sync
+            .align_and_begin_apply(&snapshot, AutoAlignMethod::FirstToFirst)
+            .unwrap();
+
+        assert_eq!(batch, vec![(target, 90)]);
+        assert!(sync.pending_apply.is_some());
+        assert_eq!(sync.apply_block(&snapshot), Some(ApplyBlock::Clean));
+        assert!(!sync.automatic_alignment_ready());
     }
 
     #[test]
@@ -2711,6 +2750,16 @@ mod tests {
 
         assert!(!sync.automatic_alignment_ready());
         assert_eq!(sync.pick_expected_source(), Some(sync.reference()));
+    }
+
+    #[test]
+    fn opening_selects_the_first_source_as_reference_and_second_as_active() {
+        let snapshot = fixture_snapshot();
+        let sync = SyncWindow::open(&snapshot).unwrap();
+        let [first, second, _] = sync.included_ids().try_into().unwrap();
+
+        assert_eq!(sync.reference(), first);
+        assert_eq!(sync.active, Some(second));
     }
 
     #[test]

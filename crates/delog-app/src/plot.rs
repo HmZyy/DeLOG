@@ -82,6 +82,27 @@ impl ViewX {
     }
 }
 
+pub fn draw_zoom_drag_overlay(ui: &egui::Ui, plot_rect: egui::Rect, anchor_x: f32, cursor_x: f32) {
+    let anchor_x = anchor_x.clamp(plot_rect.left(), plot_rect.right());
+    let cursor_x = cursor_x.clamp(plot_rect.left(), plot_rect.right());
+    let (lo, hi) = (anchor_x.min(cursor_x), anchor_x.max(cursor_x));
+    let painter = ui.painter();
+    let shade = egui::Color32::from_black_alpha(120);
+    painter.rect_filled(
+        egui::Rect::from_min_max(plot_rect.left_top(), egui::pos2(lo, plot_rect.bottom())),
+        0.0,
+        shade,
+    );
+    painter.rect_filled(
+        egui::Rect::from_min_max(egui::pos2(hi, plot_rect.top()), plot_rect.right_bottom()),
+        0.0,
+        shade,
+    );
+    let edge = egui::Stroke::new(1.0, egui::Color32::from_white_alpha(160));
+    painter.vline(lo, plot_rect.y_range(), edge);
+    painter.vline(hi, plot_rect.y_range(), edge);
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TraceRef {
     pub field: FieldId,
