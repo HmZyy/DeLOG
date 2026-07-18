@@ -1947,21 +1947,6 @@ impl eframe::App for DelogApp {
                         self.spawn_open_dialog(ui.ctx());
                         ui.close();
                     }
-                    let offline_sources = snapshot
-                        .sources
-                        .iter()
-                        .filter(|source| {
-                            !source.entry.removed
-                                && source.entry.kind == delog_core::identity::SourceKind::File
-                        })
-                        .count();
-                    if ui
-                        .add_enabled(offline_sources >= 2, egui::Button::new("Sync Sources"))
-                        .clicked()
-                    {
-                        self.sync_window = SyncWindow::open(&snapshot);
-                        ui.close();
-                    }
                     ui.menu_button("Export", |ui| {
                         if ui.button("Export Data").clicked() {
                             self.data_export.open();
@@ -1981,6 +1966,21 @@ impl eframe::App for DelogApp {
                             ui.close();
                         }
                     });
+                    let offline_sources = snapshot
+                        .sources
+                        .iter()
+                        .filter(|source| {
+                            !source.entry.removed
+                                && source.entry.kind == delog_core::identity::SourceKind::File
+                        })
+                        .count();
+                    if ui
+                        .add_enabled(offline_sources >= 2, egui::Button::new("Sync Sources"))
+                        .clicked()
+                    {
+                        self.sync_window = SyncWindow::open(&snapshot);
+                        ui.close();
+                    }
                     ui.separator();
                     if ui.button("Settings").clicked() {
                         self.settings_dialog.open();
