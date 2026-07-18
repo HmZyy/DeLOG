@@ -5,6 +5,7 @@ pub mod analysis;
 pub mod align;
 pub mod chunk;
 pub mod diagnostics;
+pub mod derived;
 pub mod export;
 pub mod field_view;
 pub mod identity;

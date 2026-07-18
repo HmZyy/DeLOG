@@ -3,11 +3,13 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use delog_core::align::{AlignMode, align_values};
+pub use delog_core::derived::{PendingColumn, PendingField, PendingTopic};
 use delog_core::field_view::FieldView;
 use delog_core::field_view::array_row_as_f64;
 use delog_core::field_view::array_row_as_str;
 use delog_core::identity::FieldId;
 use delog_core::identity::{SourceId, TopicId};
+pub(crate) use delog_core::identity::parse_topic_instance;
 use delog_core::snapshot::StoreSnapshot;
 
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
@@ -156,23 +158,6 @@ pub(crate) struct FieldMatch {
     pub(crate) field_id: FieldId,
     pub(crate) field_name: String,
     pub(crate) unit: Option<String>,
-}
-
-pub(crate) fn parse_topic_instance(name: &str) -> (String, Option<u32>) {
-    let Some(open) = name.rfind('[') else {
-        return (name.to_owned(), None);
-    };
-    if !name.ends_with(']') || open == 0 {
-        return (name.to_owned(), None);
-    }
-    let digits = &name[open + 1..name.len() - 1];
-    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-        return (name.to_owned(), None);
-    }
-    match digits.parse::<u32>() {
-        Ok(instance) => (name[..open].to_owned(), Some(instance)),
-        Err(_) => (name.to_owned(), None),
-    }
 }
 
 pub(crate) fn topic_matches(
@@ -383,77 +368,6 @@ fn materialized_values_to_py(
     match strings {
         Some(vals) => numpy_str_array(py, vals),
         None => Ok(values.into_pyarray(py).into_any().unbind()),
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum PendingColumn {
-    F64(Vec<f64>),
-    Utf8(Vec<String>),
-}
-
-impl PendingColumn {
-    pub fn len(&self) -> usize {
-        match self {
-            Self::F64(v) => v.len(),
-            Self::Utf8(v) => v.len(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct PendingField {
-    pub name: String,
-    pub values: PendingColumn,
-    pub unit: Option<String>,
-}
-
-impl PendingField {
-    pub fn numeric(name: impl Into<String>, values: Vec<f64>, unit: Option<String>) -> Self {
-        Self {
-            name: name.into(),
-            values: PendingColumn::F64(values),
-            unit,
-        }
-    }
-
-    pub fn utf8(name: impl Into<String>, values: Vec<String>) -> Self {
-        Self {
-            name: name.into(),
-            values: PendingColumn::Utf8(values),
-            unit: None,
-        }
-    }
-}
-
-/// One derived topic the script is building. Every field shares `times`.
-pub struct PendingTopic {
-    pub name: String,
-    pub times: Vec<i64>,
-    pub fields: Vec<PendingField>,
-}
-
-impl PendingTopic {
-    pub fn new(name: String, times: Vec<i64>) -> Self {
-        Self {
-            name,
-            times,
-            fields: Vec::new(),
-        }
-    }
-
-    pub fn add_field(&mut self, field: PendingField) -> Result<(), String> {
-        if field.values.len() != self.times.len() {
-            return Err(format!(
-                "field '{}': {} values but topic '{}' has {} timestamps",
-                field.name,
-                field.values.len(),
-                self.name,
-                self.times.len()
-            ));
-        }
-        self.fields.push(field);
-        Ok(())
     }
 }
 
@@ -1877,31 +1791,6 @@ delog.group_by("PARAM_VALUE", "param_id")
     use delog_core::identity::IdentityRegistry;
     use delog_core::schema::{FieldSchema, TopicSchema};
     use delog_core::store::TopicStore;
-
-    #[test]
-    fn parse_topic_instance_suffixes() {
-        assert_eq!(super::parse_topic_instance("IMU"), ("IMU".to_owned(), None));
-        assert_eq!(
-            super::parse_topic_instance("IMU[0]"),
-            ("IMU".to_owned(), Some(0))
-        );
-        assert_eq!(
-            super::parse_topic_instance("vehicle_attitude[12]"),
-            ("vehicle_attitude".to_owned(), Some(12))
-        );
-        assert_eq!(
-            super::parse_topic_instance("NAMED_VALUE_FLOAT/airspd"),
-            ("NAMED_VALUE_FLOAT/airspd".to_owned(), None)
-        );
-        assert_eq!(
-            super::parse_topic_instance("bad[x]"),
-            ("bad[x]".to_owned(), None)
-        );
-        assert_eq!(
-            super::parse_topic_instance("bad[]"),
-            ("bad[]".to_owned(), None)
-        );
-    }
 
     #[test]
     fn snapshot_lookup_finds_topics_and_fields() {

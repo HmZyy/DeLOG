@@ -89,6 +89,23 @@ pub struct RemovedSource {
     pub fields: Vec<FieldId>,
 }
 
+pub fn parse_topic_instance(name: &str) -> (String, Option<u32>) {
+    let Some(open) = name.rfind('[') else {
+        return (name.to_owned(), None);
+    };
+    if !name.ends_with(']') || open == 0 {
+        return (name.to_owned(), None);
+    }
+    let digits = &name[open + 1..name.len() - 1];
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return (name.to_owned(), None);
+    }
+    match digits.parse::<u32>() {
+        Ok(instance) => (name[..open].to_owned(), Some(instance)),
+        Err(_) => (name.to_owned(), None),
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct IdentityRegistry {
     sources: Vec<SourceEntry>,
@@ -404,6 +421,28 @@ pub fn topic_instance_name(base_name: impl AsRef<str>, instance: u32) -> String 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_topic_instance_suffixes() {
+        assert_eq!(parse_topic_instance("IMU"), ("IMU".to_owned(), None));
+        assert_eq!(
+            parse_topic_instance("IMU[0]"),
+            ("IMU".to_owned(), Some(0))
+        );
+        assert_eq!(
+            parse_topic_instance("vehicle_attitude[12]"),
+            ("vehicle_attitude".to_owned(), Some(12))
+        );
+        assert_eq!(
+            parse_topic_instance("NAMED_VALUE_FLOAT/airspd"),
+            ("NAMED_VALUE_FLOAT/airspd".to_owned(), None)
+        );
+        assert_eq!(
+            parse_topic_instance("bad[x]"),
+            ("bad[x]".to_owned(), None)
+        );
+        assert_eq!(parse_topic_instance("bad[]"), ("bad[]".to_owned(), None));
+    }
 
     #[test]
     fn source_labels_use_file_stem_and_collision_suffixes() {
