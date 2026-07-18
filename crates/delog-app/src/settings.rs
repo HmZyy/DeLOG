@@ -550,6 +550,8 @@ pub struct ScriptingSettings {
     pub auto_open_variables: AutoOpenVariables,
     #[serde(default)]
     pub auto_open_console: AutoOpenScriptingConsole,
+    #[serde(default)]
+    pub use_original_timestamps: bool,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
@@ -788,6 +790,7 @@ fn general_tab(ui: &mut egui::Ui, settings: &mut AppSettings) -> SettingsChange 
                 });
             });
             ui.end_row();
+
         });
 
     SettingsChange {
@@ -902,6 +905,7 @@ fn plots_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
                 .on_hover_text("Opacity of the timestamp connector line. 1 = solid, 0 = fully transparent.");
             ui.add(egui::Slider::new(&mut p.text_line_opacity, 0.0..=1.0));
             ui.end_row();
+
         });
 
     if reset_to_defaults_button(ui) {
@@ -1124,6 +1128,15 @@ fn scripting_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
                         ui.selectable_value(&mut s.auto_open_console, mode, mode.label());
                     }
                 });
+            ui.end_row();
+
+            ui.label("Script timestamps").on_hover_text(
+                "By default scripts read effective timestamps with each source offset applied.",
+            );
+            ui.checkbox(
+                &mut s.use_original_timestamps,
+                "Use original source timestamps",
+            );
             ui.end_row();
         });
 
@@ -1509,6 +1522,7 @@ mod scripting_settings_tests {
             s.scripting.auto_open_console,
             AutoOpenScriptingConsole::OnErrors
         );
+        assert!(!s.scripting.use_original_timestamps);
     }
 
     #[test]

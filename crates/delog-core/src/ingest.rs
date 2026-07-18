@@ -8,6 +8,7 @@ use std::time::Duration;
 use arrow::array::{ArrayRef, Int64Array};
 
 use crate::diagnostics::Diag;
+pub use crate::identity::SourceKind;
 use crate::identity::{SourceId, SourceMetadata};
 use crate::metrics::MetricsRegistry;
 use crate::schema::TopicSchema;
@@ -20,16 +21,6 @@ pub const METRIC_DROPPED_BATCHES: &str = "ingest_dropped_batches";
 /// Emit a drop diagnostic on the 1st drop and every Nth thereafter, so a
 /// saturated link reports without flooding the channel it is already starving.
 const DROP_DIAG_INTERVAL: u64 = 256;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SourceKind {
-    /// May block on backpressure.
-    File,
-    /// Must never block — full channel drops the batch.
-    Live,
-    Derived,
-    LiveDerived,
-}
 
 /// A parsed slice of one topic: sorted i64 µs timestamps plus original-dtype
 /// Arrow columns.
@@ -97,6 +88,9 @@ pub enum IngestMsg {
         source: SourceId,
         offset_us: i64,
     },
+    SetSourceOffsets {
+        offsets: Vec<(SourceId, i64)>,
+    },
     RemoveSource {
         source: SourceId,
     },
@@ -141,6 +135,15 @@ impl IngestSender {
         let _ = self
             .tx
             .send(IngestMsg::SetSourceOffset { source, offset_us });
+    }
+
+    pub fn set_source_offsets(&self, offsets: Vec<(SourceId, i64)>) -> Result<(), ()> {
+        if !offsets.is_empty() {
+            self.tx
+                .send(IngestMsg::SetSourceOffsets { offsets })
+                .map_err(|_| ())?;
+        }
+        Ok(())
     }
 
     pub fn remove_source(&self, source: SourceId) {

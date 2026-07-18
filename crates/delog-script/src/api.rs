@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -23,6 +23,41 @@ use crate::operations::{
 };
 use crate::params::{ParamKind, ParamSpec, ParamValue, SharedParams};
 use pyo3::types::{PyBool, PyInt};
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum ScriptTimestampMode {
+    #[default]
+    Effective,
+    Original,
+}
+
+thread_local! {
+    static SCRIPT_TIMESTAMP_MODE: Cell<ScriptTimestampMode> = const {
+        Cell::new(ScriptTimestampMode::Effective)
+    };
+}
+
+pub(crate) fn with_timestamp_mode<T>(mode: ScriptTimestampMode, f: impl FnOnce() -> T) -> T {
+    SCRIPT_TIMESTAMP_MODE.with(|current| {
+        struct Reset<'a> {
+            current: &'a Cell<ScriptTimestampMode>,
+            previous: ScriptTimestampMode,
+        }
+        impl Drop for Reset<'_> {
+            fn drop(&mut self) {
+                self.current.set(self.previous);
+            }
+        }
+
+        let reset = Reset {
+            current,
+            previous: current.replace(mode),
+        };
+        let result = f();
+        drop(reset);
+        result
+    })
+}
 
 pub struct PendingLiveTransform {
     pub spec: LiveTransformSpec,
@@ -357,8 +392,8 @@ pub(crate) fn find_fields_in_topic(
 }
 
 /// Materialize a field as `(times_us, values, strings)` by walking its chunks
-/// in time order. Concatenates chunk buffers — the one copy for script
-/// consumption.
+/// in time order. Timestamps are effective (source offset applied) unless the
+/// current script command explicitly requests original source time.
 pub fn materialize_field(
     snapshot: &StoreSnapshot,
     field: FieldId,
@@ -371,9 +406,18 @@ pub fn materialize_field(
     let mut times = Vec::new();
     let mut values = Vec::new();
     let mut strings = view.schema_field().is_string().then(Vec::new);
+    let timestamp_mode = SCRIPT_TIMESTAMP_MODE.get();
+    let offset_us = view.offset_us_for_export();
     for chunk in view.chunks_overlapping(range) {
         for row in 0..chunk.len() {
-            times.push(chunk.t.value(row));
+            let raw_time = chunk.t.value(row);
+            let time = match timestamp_mode {
+                ScriptTimestampMode::Effective => raw_time
+                    .checked_add(offset_us)
+                    .ok_or_else(|| "source offset overflows a script timestamp".to_owned())?,
+                ScriptTimestampMode::Original => raw_time,
+            };
+            times.push(time);
             values.push(array_row_as_f64(chunk.cols[col].as_ref(), row));
             if let Some(s) = &mut strings {
                 s.push(
@@ -2129,6 +2173,40 @@ delog.group_by("PARAM_VALUE", "param_id")
         assert_eq!(t, vec![10, 20, 30]);
         assert_eq!(v, vec![1.0, 2.0, 3.0]);
         assert_eq!(s, None);
+    }
+
+    #[test]
+    fn materialize_field_uses_effective_times_by_default_and_can_use_original_times() {
+        let mut id = IdentityRegistry::new();
+        let src = id.add_source("flight");
+        id.set_source_offset_us(src, -1_784_120_623_158_000)
+            .unwrap();
+        let topic = id.add_topic(src, "BARO").unwrap();
+        let alt = id.add_field(topic, "Alt").unwrap();
+        let schema = Arc::new(
+            TopicSchema::new(
+                "BARO",
+                [FieldSchema::new("Alt", DataType::Float64, Some("m"), 1.0).unwrap()],
+            )
+            .unwrap(),
+        );
+        let columns: Vec<ArrayRef> = vec![Arc::new(Float64Array::from(vec![1.0]))];
+        let chunk = Arc::new(
+            Chunk::try_new(
+                Int64Array::from(vec![1_784_120_700_000_000]),
+                columns,
+                &schema,
+            )
+            .unwrap(),
+        );
+        let store = Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap());
+        let snap = StoreSnapshot::from_registry(&id, [(topic, store)], 0).unwrap();
+
+        assert_eq!(materialize_field(&snap, alt).unwrap().0, vec![76_842_000]);
+        let original = with_timestamp_mode(ScriptTimestampMode::Original, || {
+            materialize_field(&snap, alt).unwrap().0
+        });
+        assert_eq!(original, vec![1_784_120_700_000_000]);
     }
 
     #[test]

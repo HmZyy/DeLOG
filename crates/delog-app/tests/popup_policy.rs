@@ -16,6 +16,7 @@ const DOCKS_SOURCE: &str = include_str!("../src/docks.rs");
 const SCRIPTS_SOURCE: &str = include_str!("../src/scripts.rs");
 const WORKSPACE_SOURCE: &str = include_str!("../src/workspace.rs");
 const SETTINGS_SOURCE: &str = include_str!("../src/settings.rs");
+const SYNC_WINDOW_SOURCE: &str = include_str!("../src/sync_window.rs");
 
 fn occurrence_count(needle: &str) -> usize {
     POPUP_SOURCES
@@ -29,6 +30,18 @@ fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
     let rest = &source[start..];
     let end = rest.find(end).expect("end marker should exist");
     &rest[..end]
+}
+
+fn normalized(source: &str) -> String {
+    source.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[test]
+fn sync_toolbar_uses_icons_instead_of_unsupported_arrow_glyphs() {
+    assert!(!SYNC_WINDOW_SOURCE.contains('→'));
+    assert!(!SYNC_WINDOW_SOURCE.contains('↔'));
+    assert!(SYNC_WINDOW_SOURCE.contains("crate::icons::arrow_right()"));
+    assert!(SYNC_WINDOW_SOURCE.contains("crate::icons::arrow_left_right()"));
 }
 
 #[test]
@@ -446,6 +459,9 @@ fn file_menu_nests_exports_in_the_requested_order() {
         "\n                ui.separator();\n                ui.menu_button(\"View\"",
     );
     let open = file_menu.find("ui.button(\"Open\")").unwrap();
+    let sync = file_menu
+        .find("egui::Button::new(\"Sync Sources\")")
+        .unwrap();
     let export_menu = file_menu.find("ui.menu_button(\"Export\", |ui|").unwrap();
     let data = file_menu.find("ui.button(\"Export Data\")").unwrap();
     let diagnostics = file_menu.find("ui.button(\"Export Diagnostics\")").unwrap();
@@ -453,13 +469,67 @@ fn file_menu_nests_exports_in_the_requested_order() {
     let settings = file_menu.find("ui.button(\"Settings\")").unwrap();
     let exit = file_menu.find("ui.button(\"Exit\")").unwrap();
 
-    assert!(open < export_menu);
+    assert!(open < export_menu && export_menu < sync);
     assert!(export_menu < data && data < diagnostics && diagnostics < profiling);
     assert!(profiling < settings && settings < exit);
     assert_eq!(file_menu.matches("ui.separator();").count(), 3);
     assert!(file_menu.contains("self.settings_dialog.open();"));
     assert!(!file_menu.contains("Open File"));
     assert!(!file_menu.contains("JSON..."));
+}
+
+#[test]
+fn sync_sources_lives_directly_below_export_in_file_not_view() {
+    let file_menu = between(
+        APP_SOURCE,
+        "ui.menu_button(\"File\"",
+        "\n                ui.separator();\n                ui.menu_button(\"View\"",
+    );
+    let export_menu = between(
+        file_menu,
+        "ui.menu_button(\"Export\", |ui|",
+        "let offline_sources = snapshot",
+    );
+    assert!(!export_menu.contains("Sync Sources"));
+    assert!(file_menu.contains("                    });\n                    let offline_sources"));
+
+    let launcher = between(
+        file_menu,
+        "let offline_sources = snapshot",
+        "ui.separator();",
+    );
+    assert!(launcher.contains("!source.entry.removed"));
+    assert!(launcher.contains("source.entry.kind == delog_core::identity::SourceKind::File"));
+    assert!(launcher.contains("offline_sources >= 2"));
+    assert!(launcher.contains("self.sync_window = SyncWindow::open(&snapshot);"));
+    assert_eq!(launcher.matches("ui.close();").count(), 1);
+}
+
+#[test]
+fn view_menu_is_a_dock_only_block_without_orphan_sync_separator() {
+    const VIEW_START: &str = "ui.menu_button(\"View\", |ui| {";
+    let view = between(
+        APP_SOURCE,
+        VIEW_START,
+        "\n                });\n                ui.separator();\n                ui.menu_button(\"Layout\"",
+    );
+    let body = view
+        .strip_prefix(VIEW_START)
+        .expect("View menu extraction should retain its start marker");
+    let expected_docks = r#"
+        self.dock_open_checkbox(ui, AppDockTab::Diagnostics, "Diagnostic (F1)");
+        self.dock_open_checkbox(ui, AppDockTab::Performance, "Performance (F2)");
+        self.dock_open_checkbox(ui, AppDockTab::Markers, "Markers (F3)");
+        #[cfg(feature = "scripting")]
+        self.dock_open_checkbox(ui, AppDockTab::ScriptingConsole, "Scripting (F9)");
+        self.dock_open_checkbox(ui, AppDockTab::Logging, "Logging (F12)");
+    "#;
+
+    assert_eq!(normalized(body), normalized(expected_docks));
+    assert!(!body.trim_start().starts_with("ui.separator();"));
+    assert!(!body.trim_end().ends_with("ui.separator();"));
+    assert!(!view.contains("Sync Sources"));
+    assert!(!view.contains("offline_sources"));
 }
 
 #[test]

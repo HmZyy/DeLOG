@@ -19,7 +19,7 @@ use crate::legend;
 use crate::map::mercator;
 use crate::map::provider::{MapProviderId, provider};
 use crate::map::worker::{MapScopeId, TileFailureClass, TileManager, TileRequest};
-use crate::plot::{GhostTrace, PlotPane, TraceMode, TraceRef, ViewX};
+use crate::plot::{GhostTrace, PlotPane, TraceMode, TraceRef, ViewX, draw_zoom_drag_overlay};
 use crate::vehicle;
 
 pub type TileTree = egui_tiles::Tree<Pane>;
@@ -1172,25 +1172,12 @@ impl Behavior<'_> {
         if let Some(anchor_us) = pane.zoom_drag_anchor_us
             && let Some(p) = response.interact_pointer_pos()
         {
-            let anchor_x = zoom_drag_anchor_x(view, plot_rect, anchor_us)
-                .clamp(plot_rect.left(), plot_rect.right());
-            let cursor_x = p.x.clamp(plot_rect.left(), plot_rect.right());
-            let (lo, hi) = (anchor_x.min(cursor_x), anchor_x.max(cursor_x));
-            let painter = ui.painter();
-            let shade = egui::Color32::from_black_alpha(120);
-            painter.rect_filled(
-                egui::Rect::from_min_max(plot_rect.left_top(), egui::pos2(lo, plot_rect.bottom())),
-                0.0,
-                shade,
+            draw_zoom_drag_overlay(
+                ui,
+                plot_rect,
+                zoom_drag_anchor_x(view, plot_rect, anchor_us),
+                p.x,
             );
-            painter.rect_filled(
-                egui::Rect::from_min_max(egui::pos2(hi, plot_rect.top()), plot_rect.right_bottom()),
-                0.0,
-                shade,
-            );
-            let edge = egui::Stroke::new(1.0, egui::Color32::from_white_alpha(160));
-            painter.vline(lo, plot_rect.y_range(), edge);
-            painter.vline(hi, plot_rect.y_range(), edge);
         }
         self.plot_context_menu(tile_id, &response, pane);
 
@@ -1869,7 +1856,10 @@ fn plot_rename_dialog(ctx: &egui::Context, tile_id: egui_tiles::TileId, pane: &m
     }
     if apply {
         let field = pane.rename.as_ref().map(|d| d.field);
-        let value = pane.rename.as_ref().map(|d| crate::plot::rename_value(&d.text));
+        let value = pane
+            .rename
+            .as_ref()
+            .map(|d| crate::plot::rename_value(&d.text));
         if let (Some(field), Some(value)) = (field, value)
             && let Some(trace) = pane.trace_mut(field)
         {
