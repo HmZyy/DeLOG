@@ -469,7 +469,7 @@ fn file_menu_nests_exports_in_the_requested_order() {
     let settings = file_menu.find("ui.button(\"Settings\")").unwrap();
     let exit = file_menu.find("ui.button(\"Exit\")").unwrap();
 
-    assert!(open < sync && sync < export_menu);
+    assert!(open < export_menu && export_menu < sync);
     assert!(export_menu < data && data < diagnostics && diagnostics < profiling);
     assert!(profiling < settings && settings < exit);
     assert_eq!(file_menu.matches("ui.separator();").count(), 3);
@@ -479,35 +479,24 @@ fn file_menu_nests_exports_in_the_requested_order() {
 }
 
 #[test]
-fn sync_sources_lives_directly_below_open_in_file_not_view() {
+fn sync_sources_lives_directly_below_export_in_file_not_view() {
     let file_menu = between(
         APP_SOURCE,
         "ui.menu_button(\"File\"",
         "\n                ui.separator();\n                ui.menu_button(\"View\"",
     );
-    let open_and_launcher = between(
+    let export_menu = between(
         file_menu,
-        "if ui.button(\"Open\").clicked()",
         "ui.menu_button(\"Export\", |ui|",
+        "let offline_sources = snapshot",
     );
-    let normalized_open_and_launcher = normalized(open_and_launcher);
-    let normalized_open_block = normalized(
-        r#"if ui.button("Open").clicked() {
-            self.spawn_open_dialog(ui.ctx());
-            ui.close();
-        }"#,
-    );
-    assert!(
-        normalized_open_and_launcher
-            .starts_with(&format!("{normalized_open_block} let offline_sources")),
-        "the Sync Sources launcher block must directly follow Open"
-    );
-    assert!(!open_and_launcher.contains("ui.separator();"));
+    assert!(!export_menu.contains("Sync Sources"));
+    assert!(file_menu.contains("                    });\n                    let offline_sources"));
 
     let launcher = between(
         file_menu,
         "let offline_sources = snapshot",
-        "ui.menu_button(\"Export\", |ui|",
+        "ui.separator();",
     );
     assert!(launcher.contains("!source.entry.removed"));
     assert!(launcher.contains("source.entry.kind == delog_core::identity::SourceKind::File"));
