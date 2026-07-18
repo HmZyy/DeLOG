@@ -31,6 +31,10 @@ fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
     &rest[..end]
 }
 
+fn normalized(source: &str) -> String {
+    source.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 #[test]
 fn menus_expose_scripts_parsers_and_scripting_console_dock() {
     assert!(APP_SOURCE.contains("AppDockTab::ScriptingConsole, \"Scripting (F9)\""));
@@ -446,6 +450,9 @@ fn file_menu_nests_exports_in_the_requested_order() {
         "\n                ui.separator();\n                ui.menu_button(\"View\"",
     );
     let open = file_menu.find("ui.button(\"Open\")").unwrap();
+    let sync = file_menu
+        .find("egui::Button::new(\"Sync Sources\")")
+        .unwrap();
     let export_menu = file_menu.find("ui.menu_button(\"Export\", |ui|").unwrap();
     let data = file_menu.find("ui.button(\"Export Data\")").unwrap();
     let diagnostics = file_menu.find("ui.button(\"Export Diagnostics\")").unwrap();
@@ -453,13 +460,78 @@ fn file_menu_nests_exports_in_the_requested_order() {
     let settings = file_menu.find("ui.button(\"Settings\")").unwrap();
     let exit = file_menu.find("ui.button(\"Exit\")").unwrap();
 
-    assert!(open < export_menu);
+    assert!(open < sync && sync < export_menu);
     assert!(export_menu < data && data < diagnostics && diagnostics < profiling);
     assert!(profiling < settings && settings < exit);
     assert_eq!(file_menu.matches("ui.separator();").count(), 3);
     assert!(file_menu.contains("self.settings_dialog.open();"));
     assert!(!file_menu.contains("Open File"));
     assert!(!file_menu.contains("JSON..."));
+}
+
+#[test]
+fn sync_sources_lives_directly_below_open_in_file_not_view() {
+    let file_menu = between(
+        APP_SOURCE,
+        "ui.menu_button(\"File\"",
+        "\n                ui.separator();\n                ui.menu_button(\"View\"",
+    );
+    let open_and_launcher = between(
+        file_menu,
+        "if ui.button(\"Open\").clicked()",
+        "ui.menu_button(\"Export\", |ui|",
+    );
+    let normalized_open_and_launcher = normalized(open_and_launcher);
+    let normalized_open_block = normalized(
+        r#"if ui.button("Open").clicked() {
+            self.spawn_open_dialog(ui.ctx());
+            ui.close();
+        }"#,
+    );
+    assert!(
+        normalized_open_and_launcher
+            .starts_with(&format!("{normalized_open_block} let offline_sources")),
+        "the Sync Sources launcher block must directly follow Open"
+    );
+    assert!(!open_and_launcher.contains("ui.separator();"));
+
+    let launcher = between(
+        file_menu,
+        "let offline_sources = snapshot",
+        "ui.menu_button(\"Export\", |ui|",
+    );
+    assert!(launcher.contains("!source.entry.removed"));
+    assert!(launcher.contains("source.entry.kind == delog_core::identity::SourceKind::File"));
+    assert!(launcher.contains("offline_sources >= 2"));
+    assert!(launcher.contains("self.sync_window = SyncWindow::open(&snapshot);"));
+    assert_eq!(launcher.matches("ui.close();").count(), 1);
+}
+
+#[test]
+fn view_menu_is_a_dock_only_block_without_orphan_sync_separator() {
+    const VIEW_START: &str = "ui.menu_button(\"View\", |ui| {";
+    let view = between(
+        APP_SOURCE,
+        VIEW_START,
+        "\n                });\n                ui.separator();\n                ui.menu_button(\"Layout\"",
+    );
+    let body = view
+        .strip_prefix(VIEW_START)
+        .expect("View menu extraction should retain its start marker");
+    let expected_docks = r#"
+        self.dock_open_checkbox(ui, AppDockTab::Diagnostics, "Diagnostic (F1)");
+        self.dock_open_checkbox(ui, AppDockTab::Performance, "Performance (F2)");
+        self.dock_open_checkbox(ui, AppDockTab::Markers, "Markers (F3)");
+        #[cfg(feature = "scripting")]
+        self.dock_open_checkbox(ui, AppDockTab::ScriptingConsole, "Scripting (F9)");
+        self.dock_open_checkbox(ui, AppDockTab::Logging, "Logging (F12)");
+    "#;
+
+    assert_eq!(normalized(body), normalized(expected_docks));
+    assert!(!body.trim_start().starts_with("ui.separator();"));
+    assert!(!body.trim_end().ends_with("ui.separator();"));
+    assert!(!view.contains("Sync Sources"));
+    assert!(!view.contains("offline_sources"));
 }
 
 #[test]

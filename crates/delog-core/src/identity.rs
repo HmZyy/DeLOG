@@ -9,6 +9,16 @@ use crate::time::{TimestampUs, effective_time_us};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SourceId(pub u32);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceKind {
+    /// May block on backpressure.
+    File,
+    /// Must never block — full channel drops the batch.
+    Live,
+    Derived,
+    LiveDerived,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TopicId(pub u32);
 
@@ -28,6 +38,7 @@ pub struct FieldKey {
 pub struct SourceEntry {
     pub id: SourceId,
     pub label: String,
+    pub kind: SourceKind,
     pub offset_us: TimestampUs,
     pub meta: SourceMetadata,
     pub removed: bool,
@@ -129,11 +140,20 @@ impl IdentityRegistry {
 
     /// A label already in use receives `#2`, `#3`, ... suffixes.
     pub fn add_source(&mut self, preferred_label: impl Into<String>) -> SourceId {
+        self.add_source_with_kind(preferred_label, SourceKind::File)
+    }
+
+    pub fn add_source_with_kind(
+        &mut self,
+        preferred_label: impl Into<String>,
+        kind: SourceKind,
+    ) -> SourceId {
         let label = self.unique_source_label(preferred_label.into());
         let id = SourceId(next_id(self.sources.len(), "source"));
         self.sources.push(SourceEntry {
             id,
             label,
+            kind,
             offset_us: 0,
             meta: SourceMetadata::default(),
             removed: false,
@@ -564,6 +584,16 @@ mod tests {
         assert_eq!(ids.set_source_offset_us(source, -250), Some(0));
         assert_eq!(ids.source(source).unwrap().offset_us, -250);
         assert_eq!(ids.effective_source_time_us(source, 1_000), Some(750));
+    }
+
+    #[test]
+    fn source_kind_is_retained_and_defaults_to_file() {
+        let mut ids = IdentityRegistry::new();
+        let live = ids.add_source_with_kind("udp", SourceKind::Live);
+        let file = ids.add_source("log");
+
+        assert_eq!(ids.source(live).unwrap().kind, SourceKind::Live);
+        assert_eq!(ids.source(file).unwrap().kind, SourceKind::File);
     }
 
     #[test]
