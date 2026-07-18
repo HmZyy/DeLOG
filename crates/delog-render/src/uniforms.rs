@@ -54,6 +54,22 @@ impl PlotUniform {
         Self::new(x_scale, x_min, y_scale, y_min, viewport, width_px, color)
     }
 
+    /// Build a plot transform whose samples are translated horizontally while
+    /// the visible data window remains unchanged. A positive shift moves a
+    /// sample to the right.
+    pub fn from_view_with_x_shift(
+        x: (f32, f32),
+        y: (f32, f32),
+        viewport: [f32; 2],
+        width_px: f32,
+        color: [f32; 4],
+        x_shift: f32,
+    ) -> Self {
+        let mut uniform = Self::from_view(x, y, viewport, width_px, color);
+        uniform.transform[1] -= x_shift;
+        uniform
+    }
+
     /// Edge anti-alias feather, stored in `view.w`.
     pub fn with_aa(mut self, aa: f32) -> Self {
         self.view[3] = aa.max(0.0);
@@ -220,6 +236,26 @@ mod tests {
         assert!((clip(-100.0, u.transform[2], u.transform[3]) + 1.0).abs() < 1e-5);
         assert!((clip(100.0, u.transform[2], u.transform[3]) - 1.0).abs() < 1e-5);
         assert!(clip(0.0, u.transform[2], u.transform[3]).abs() < 1e-5);
+    }
+
+    #[test]
+    fn x_shift_moves_trace_without_changing_view() {
+        let u = PlotUniform::from_view_with_x_shift(
+            (0.0, 10.0),
+            (-1.0, 1.0),
+            [1.0, 1.0],
+            1.0,
+            [0.0; 4],
+            2.0,
+        );
+        let base = PlotUniform::from_view((0.0, 10.0), (-1.0, 1.0), [1.0, 1.0], 1.0, [0.0; 4]);
+        assert_eq!(u.transform[2..], base.transform[2..]);
+        assert!(
+            (clip(0.0, u.transform[0], u.transform[1])
+                - clip(2.0, base.transform[0], base.transform[1]))
+            .abs()
+                < 1e-6
+        );
     }
 
     #[test]
