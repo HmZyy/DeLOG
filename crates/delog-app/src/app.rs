@@ -3030,6 +3030,7 @@ impl eframe::App for DelogApp {
                 Arc::clone(self.session.metrics()),
                 self.settings.scripting.auto_open_variables,
                 self.settings.scripting.auto_open_console,
+                self.settings.scripting.use_original_timestamps,
             );
             for command in self.scripts.take_marker_commands() {
                 self.markers.apply_script_command(command);
