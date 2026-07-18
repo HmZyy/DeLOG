@@ -370,6 +370,7 @@ struct PositionRows<'a> {
     store: &'a TopicStore,
     col_indices: [usize; 3],
     multipliers: [f64; 3],
+    offset_us: i64,
 }
 
 fn position_row_source<'a>(
@@ -391,6 +392,8 @@ fn position_row_source<'a>(
     }
 
     let store = snapshot.topic_store(a.topic)?;
+    let source = snapshot.topic(a.topic)?.entry.source;
+    let offset_us = snapshot.source(source)?.entry.offset_us;
     let names = [&a.name, &b.name, &c.name];
     let mut col_indices = [0; 3];
     let mut multipliers = [1.0; 3];
@@ -404,6 +407,7 @@ fn position_row_source<'a>(
         store,
         col_indices,
         multipliers,
+        offset_us,
     })
 }
 
@@ -470,7 +474,7 @@ fn build_trajectory_from_rows(
     let mut times_us = Vec::with_capacity(total_rows);
     for chunk in rows.store.chunks.iter() {
         for row in 0..chunk.len() {
-            times_us.push(chunk.t.value(row));
+            times_us.push(chunk.t.value(row).checked_add(rows.offset_us)?);
             match position_from_row(&config.pos, &rows, gps_ref, chunk, row) {
                 Some(p) => points.push([p.x, p.y, p.z]),
                 None => points.push([f32::NAN, f32::NAN, f32::NAN]),
@@ -915,6 +919,23 @@ mod tests {
             traj.times_us.windows(2).all(|w| w[0] <= w[1]),
             "row-order path has non-decreasing timestamps",
         );
+    }
+
+    #[test]
+    fn trajectory_timestamps_include_the_source_offset() {
+        let (mut snap, f) = ned_snapshot(
+            vec![1_784_120_700_000_000, 1_784_120_800_000_000],
+            vec![0.0, 10.0],
+            vec![0.0, 0.0],
+            vec![0.0, 0.0],
+        );
+        let mut sources = snap.sources.to_vec();
+        sources[0].entry.offset_us = -1_784_120_623_158_000;
+        snap.sources = Arc::from(sources);
+
+        let traj = build_trajectory(&snap, &ned_config(f));
+
+        assert_eq!(traj.times_us, vec![76_842_000, 176_842_000]);
     }
 
     #[test]

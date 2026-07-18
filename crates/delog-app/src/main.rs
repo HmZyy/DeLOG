@@ -41,6 +41,8 @@ mod script_params_io;
 mod scripts;
 mod session;
 mod settings;
+mod sync_alignment;
+mod sync_window;
 mod text_overlay;
 mod theme;
 mod timeline;
