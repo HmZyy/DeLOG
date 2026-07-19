@@ -68,7 +68,7 @@ pub fn build_outputs(
         let mut times = None;
         let mut pending_fields = Vec::with_capacity(spec.fields.len());
         for (port, field) in spec.fields.iter().enumerate() {
-            let Some((upstream, _from_port)) = graph.incoming(node_id, port as u32) else {
+            let Some((upstream, from_port)) = graph.incoming(node_id, port as u32) else {
                 errors.push(Diagnostic {
                     node: node_id,
                     message: format!("Input {} has no connection.", field.name),
@@ -76,7 +76,11 @@ pub fn build_outputs(
                 valid = false;
                 continue;
             };
-            let Some(Value::Signal(signal)) = report.values.get(&upstream) else {
+            let Some(Value::Signal(signal)) = report
+                .values
+                .get(&upstream)
+                .and_then(|values| values.get(from_port as usize))
+            else {
                 errors.push(Diagnostic {
                     node: node_id,
                     message: "Upstream node has errors.".to_owned(),
