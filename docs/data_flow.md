@@ -16,6 +16,7 @@ request it; it does not continue processing future live batches.
 - [Publishing](#publishing)
 - [Saving graphs](#saving-graphs)
 - [Worked examples](#worked-examples)
+- [Python Script node](#python-script-node)
 - [Limitations](#limitations)
 - [Developer guide](#developer-guide)
 
@@ -163,14 +164,136 @@ the BARO timeline, so Subtract can compare it with `BARO.Alt`. Aligning before
 Subtract is essential: equal array lengths, when they happen, do not establish
 sample-by-sample correspondence.
 
+## Python Script node
+
+The **Python Script** node runs a small user-written Python function inside
+the graph, with N wired inputs and M named outputs, evaluated on the same
+worker thread and snapshot-only model as every other node. It requires a
+build with the `scripting` feature (the default build has it); see
+[Feature-gating](#feature-gating) below for what happens without it.
+
+Add one from the unified Add menu (category **Script**; aliases `python`,
+`py`, `script`, `code`). Its inspector lets you edit:
+
+- **Name** - the node's label.
+- **Inputs** - a row per input port (name, with Add/Remove); wire a Data
+  Field, constant, or any upstream signal to each one.
+- **Outputs** - a row per output port (name and an optional unit override,
+  with Add/Remove); each becomes its own output socket, connectable like any
+  other node's output.
+- **Code** - a Python source buffer with an **Apply** button. Editing the
+  buffer does not re-evaluate the graph on every keystroke; Apply commits the
+  code as one undoable edit and triggers one re-evaluation.
+
+### The `flow(inputs)` contract
+
+The script must define a module-level function `flow(inputs)` that returns a
+`dict` keyed by output port name:
+
+```python
+import numpy as np
+
+def flow(inputs):
+    # inputs.<port> -> a signal object for a wired signal input:
+    #   .t    np.int64 timestamps, microseconds
+    #   .v    np.float64 values
+    #   .unit str | None
+    # a scalar-wired port (e.g. a Constant node) arrives as a plain float
+    a = inputs.a
+    return {
+        "sum":  a.v + inputs.b.v,           # bare values: inherits a shared input timeline
+        "half": (a.t[::2], a.v[::2]),       # explicit (times, values)
+        "cal":  (a.t, a.v * 2.0, "m/s^2"),  # explicit (times, values, unit)
+    }
+```
+
+Each output's value in the returned dict takes one of three forms:
+
+- **`values`** - a 1-D array; the evaluator assigns it a timeline per the
+  rules below.
+- **`(times, values)`** - explicit timestamps, no unit.
+- **`(times, values, unit)`** - explicit timestamps and an explicit unit
+  string.
+
+The dict's keys must be exactly the node's declared output names (no
+missing or extra keys). `times`, when given, must be a 1-D `int64` array
+sorted ascending (equal adjacent timestamps are allowed); `values` must be a
+1-D array coercible to `float64` and the same length as `times`.
+
+### Timeline rules
+
+The evaluator - not the Python code - assigns each output a `TimelineId`,
+applied per output in declared order:
+
+1. **Bare `values`** (no explicit times) are legal only when every wired
+   signal input to the node shares one timeline and the returned array's
+   length matches it; the output inherits that timeline. A node with no
+   signal inputs, or with signal inputs on different timelines, must return
+   explicit times - otherwise:
+   `Output '<name>' must return explicit times because the inputs are on
+   different timelines.`
+2. **Explicit `times` equal to a wired input's timestamps** (matching
+   length and values) reuse that input's timeline.
+3. **Explicit `times` equal to an earlier output of the same evaluation**
+   share that output's timeline, so one script node can produce several
+   outputs on one shared new axis, or an output that shares its own input's
+   axis, without an Align node in between.
+4. **Otherwise**, the output gets a fresh timeline
+   (`TimelineId::NodeOutput`) distinct per output index.
+
+An output's unit is the port's configured unit override if set, otherwise
+the unit the script returned (or none).
+
+### Purity and caching
+
+Node scripts run in a **fresh Python namespace on every evaluation** - no
+persistence between evaluations, no REPL globals, and **no snapshot access**:
+a script node cannot call anything like `delog.topic(...)`, `delog.emit`, or
+read runtime variables. It is purely a function of its wired input values.
+This keeps it cacheable under the same fingerprint rule as every other node
+(`hash(node kind JSON, upstream fingerprints)`): editing the code or a port
+invalidates only that node and everything downstream; unrelated nodes keep
+their cached values. An impure script (using `time`, `random`, file I/O) is
+possible - it is not sandboxed - but its cached result can go stale exactly
+like any other impure operation; this is a documented trade-off, not a bug.
+
+### Errors, print, and cancellation
+
+A raised Python exception becomes that node's diagnostic (with traceback),
+shown in its inspector, exactly like a native kernel error. **`print(...)`**
+output goes to the **Scripting Console** (`View > Scripting`, <kbd>F9</kbd>),
+not the node itself, because node scripts run on the same embedded-Python
+worker as regular scripts. A script stuck in a `while True:` loop can be
+cancelled the same way any other evaluation is superseded: editing another
+node (or re-evaluating) requests cancellation, which raises
+`KeyboardInterrupt` in the running script at its next bytecode boundary - a
+script stuck inside one long C call cannot be interrupted mid-call, matching
+the limitation documented for [Python scripting](scripting.md#console-errors-and-cancellation).
+
+### Feature-gating
+
+The Script node lives entirely behind the `scripting` cargo feature (the
+same feature that gates Python scripting generally) and pulls in no Python
+dependency when off. In a `--no-default-features` build:
+
+- The node cannot be added (its template is absent from the Add menu).
+- A saved graph containing one still **loads without crashing**: the node
+  renders as a disabled Unknown node (same fallback as any node type from a
+  newer DéLOG the current build doesn't recognize) and evaluating it reports
+  a diagnostic instead of running Python.
+- **Saving that graph back writes the script node's JSON byte-for-byte
+  unchanged** - loading and re-saving in a Python-less build never loses or
+  mangles the code or port declarations.
+
 ## Limitations
 
 - Data flows process snapshots only. Publish again after loading or receiving
   more data.
 - Data selection and arithmetic are numeric-only.
 - Arithmetic nodes are binary; chain nodes for three or more inputs.
-- There is no resample-by-rate, expression, moving filter, derivative,
-  saved-script, or runtime-parameter node yet.
+- There is no resample-by-rate, expression, moving filter, derivative, or
+  runtime-parameter node yet. (A Python Script node covers ad hoc arithmetic
+  and simple filters without leaving the graph; see above.)
 - Live execution, maximum-gap alignment, plot-preview outputs, drag-to-empty
   insertion, and workspace-tile embedding are deferred.
 
@@ -230,6 +353,25 @@ is retained as raw JSON and written back unchanged. The canvas can therefore
 round-trip graphs made by a newer DéLOG even though it cannot evaluate the
 unknown node.
 
+Edges carry a `from_port` (zero-based, selecting one of the source node's
+output ports) in addition to `to_port`. Nodes with more than one output -
+today, only the Python Script node - use it to say which of their outputs an
+edge draws from:
+
+```json
+{ "from": 2, "from_port": 1, "to": 3, "to_port": 0 }
+```
+
+The document is versioned by **minimum required version**, not by feature
+presence: `from_port` is omitted entirely when it is `0` (the default, and
+every single-output node's only port), and the root `"delog_dataflow"` field
+is written as `2` only when at least one edge in the graph has a non-zero
+`from_port`; otherwise it is written as `1`. This means a graph containing a
+Script node with exactly one output still saves as version 1 and loads in
+older builds (the node round-trips as `Unknown` there, per the existing
+degrade path); only a graph that actually wires from a second-or-later output
+port requires a version-2-aware reader. Readers accept versions 1 and 2.
+
 ### Crate layout
 
 The native backend lives in `crates/delog-flow`:
@@ -258,13 +400,18 @@ data flows use one implementation.
 When adding an operation:
 
 1. Add its `NodeKind` variant, display label, input port specifications, and
-   output port type in `graph.rs`.
+   `outputs()` (a `Vec<PortSpec>`; most kinds return one entry, but nothing
+   stops a kind from declaring more, as the Script node does) in `graph.rs`.
 2. Encode and decode its tagged fields in `doc.rs`, preserving the existing
-   versioning and unknown-node behavior.
-3. Implement its numeric kernel and diagnostics in `eval.rs`.
+   versioning and unknown-node behavior. If the kind can have more than one
+   output port, confirm `to_json`/`from_json` still write the minimum
+   required document version (see [Document schema](#document-schema)).
+3. Implement its numeric kernel and diagnostics in `eval.rs`, returning one
+   `Value` per declared output port, in port order.
 4. Add its entry and aliases to the application registry.
 5. Add graph, document round-trip, evaluator, cache, and UI-registry tests as
-   appropriate.
+   appropriate, including a case with more than one output port if the kind
+   supports it.
 
 Changing a node's inputs also requires checking saved-edge compatibility and
 whether the data-flow document version must change.
