@@ -162,7 +162,6 @@ impl DataFlowUi {
             match action {
                 Some(AddAction::Template(ADD_DATA_INDEX)) => {
                     menu.mode = AddMenuMode::Data;
-                    menu.query.clear();
                     menu.highlighted = 0;
                     menu.focus_requested = true;
                     self.add_menu = Some(menu);
@@ -1105,6 +1104,32 @@ mod tests {
         assert_eq!(move_highlight(3, 4, 1), 0);
         assert_eq!(move_highlight(1, 4, 1), 2);
         assert_eq!(move_highlight(9, 0, 1), 0);
+    }
+
+    #[test]
+    fn choosing_add_data_keeps_the_typed_filter() {
+        let ctx = egui::Context::default();
+        let snapshot = Arc::new(StoreSnapshot::empty());
+        let (sender, _receiver) = ingest_channel();
+        let mut flow = DataFlowUi::new();
+        flow.open = true;
+        let mut menu = AddMenuState::new(egui::pos2(20.0, 30.0), [1.0, 2.0]);
+        menu.query = "altitude".to_owned();
+        menu.dismiss_armed = true;
+        flow.add_menu = Some(menu);
+
+        let enter = egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let _ = render_data_flow_frame(&ctx, &mut flow, &snapshot, &sender, vec![enter]);
+
+        let menu = flow.add_menu.expect("add menu stays open after choosing Add Data");
+        assert_eq!(menu.mode, AddMenuMode::Data);
+        assert_eq!(menu.query, "altitude");
     }
 
     #[test]
