@@ -158,7 +158,8 @@ pub fn evaluate(
                 let mut input_fingerprints = Vec::with_capacity(ports.len());
                 let mut blocked = false;
                 for (port_index, port) in ports.iter().enumerate() {
-                    let Some(upstream) = graph.incoming(id, port_index as u32) else {
+                    let Some((upstream, _from_port)) = graph.incoming(id, port_index as u32)
+                    else {
                         report.diagnostics.push(Diagnostic {
                             node: id,
                             message: format!("Input {} has no connection.", port.name),
@@ -540,8 +541,8 @@ mod tests {
         let mul = add_node(&mut graph, NodeKind::Multiply);
         let div = add_node(&mut graph, NodeKind::Divide);
         for operation in [add, sub, mul, div] {
-            graph.connect(a, operation, 0).unwrap();
-            graph.connect(b, operation, 1).unwrap();
+            graph.connect(a, 0, operation, 0).unwrap();
+            graph.connect(b, 0, operation, 1).unwrap();
         }
         let report = evaluate(
             &graph,
@@ -572,9 +573,9 @@ mod tests {
             },
         );
         let add = add_node(&mut graph, NodeKind::Add);
-        graph.connect(x, scale, 0).unwrap();
-        graph.connect(x, add, 0).unwrap();
-        graph.connect(y, add, 1).unwrap();
+        graph.connect(x, 0, scale, 0).unwrap();
+        graph.connect(x, 0, add, 0).unwrap();
+        graph.connect(y, 0, add, 1).unwrap();
 
         let report = evaluate(
             &graph,
@@ -598,8 +599,8 @@ mod tests {
         let data = add_node(&mut graph, field("GPS", "Alt"));
         let zero = add_node(&mut graph, NodeKind::Constant { value: 0.0 });
         let divide = add_node(&mut graph, NodeKind::Divide);
-        graph.connect(data, divide, 0).unwrap();
-        graph.connect(zero, divide, 1).unwrap();
+        graph.connect(data, 0, divide, 0).unwrap();
+        graph.connect(zero, 0, divide, 1).unwrap();
 
         let report = eval_single(&graph, &snapshot, divide);
         let values = &signal(&report, divide).v;
@@ -615,8 +616,8 @@ mod tests {
         let gps = add_node(&mut graph, field("GPS", "Alt"));
         let baro = add_node(&mut graph, field("BARO", "Alt"));
         let add = add_node(&mut graph, NodeKind::Add);
-        graph.connect(gps, add, 0).unwrap();
-        graph.connect(baro, add, 1).unwrap();
+        graph.connect(gps, 0, add, 0).unwrap();
+        graph.connect(baro, 0, add, 1).unwrap();
 
         let report = eval_single(&graph, &snapshot, add);
         assert!(!report.values.contains_key(&add));
@@ -641,10 +642,10 @@ mod tests {
             },
         );
         let add = add_node(&mut graph, NodeKind::Add);
-        graph.connect(gps, align, 0).unwrap();
-        graph.connect(baro, align, 1).unwrap();
-        graph.connect(align, add, 0).unwrap();
-        graph.connect(baro, add, 1).unwrap();
+        graph.connect(gps, 0, align, 0).unwrap();
+        graph.connect(baro, 0, align, 1).unwrap();
+        graph.connect(align, 0, add, 0).unwrap();
+        graph.connect(baro, 0, add, 1).unwrap();
 
         let report = eval_single(&graph, &snapshot, add);
         let aligned = signal(&report, align);
@@ -660,7 +661,7 @@ mod tests {
         let gps = add_node(&mut graph, field("GPS", "Alt"));
         let add = add_node(&mut graph, NodeKind::Add);
         let invalid = add_node(&mut graph, field("MISSING", "Nope"));
-        graph.connect(gps, add, 0).unwrap();
+        graph.connect(gps, 0, add, 0).unwrap();
 
         let report = eval_single(&graph, &snapshot, add);
         assert!(report.diagnostics.iter().any(|diagnostic| {
@@ -685,12 +686,12 @@ mod tests {
         let same = add_node(&mut graph, NodeKind::Add);
         let different = add_node(&mut graph, NodeKind::Add);
         let multiply = add_node(&mut graph, NodeKind::Multiply);
-        graph.connect(x, same, 0).unwrap();
-        graph.connect(y, same, 1).unwrap();
-        graph.connect(x, different, 0).unwrap();
-        graph.connect(other, different, 1).unwrap();
-        graph.connect(x, multiply, 0).unwrap();
-        graph.connect(scalar, multiply, 1).unwrap();
+        graph.connect(x, 0, same, 0).unwrap();
+        graph.connect(y, 0, same, 1).unwrap();
+        graph.connect(x, 0, different, 0).unwrap();
+        graph.connect(other, 0, different, 1).unwrap();
+        graph.connect(x, 0, multiply, 0).unwrap();
+        graph.connect(scalar, 0, multiply, 1).unwrap();
 
         let report = evaluate(
             &graph,
@@ -725,7 +726,7 @@ mod tests {
                 offset: 0.0,
             },
         );
-        graph.connect(data, scale, 0).unwrap();
+        graph.connect(data, 0, scale, 0).unwrap();
         let mut cache = EvalCache::default();
         let first = evaluate(
             &graph,
@@ -771,8 +772,8 @@ mod tests {
                 mode: AlignMode::Prev,
             },
         );
-        graph.connect(source, align, 0).unwrap();
-        graph.connect(base, align, 1).unwrap();
+        graph.connect(source, 0, align, 0).unwrap();
+        graph.connect(base, 0, align, 1).unwrap();
 
         let report = eval_single(&graph, &snapshot, align);
         assert_eq!(signal(&report, align).v.as_slice(), &[22.0]);
@@ -790,8 +791,8 @@ mod tests {
                 mode: AlignMode::Prev,
             },
         );
-        graph.connect(source, align, 0).unwrap();
-        graph.connect(base, align, 1).unwrap();
+        graph.connect(source, 0, align, 0).unwrap();
+        graph.connect(base, 0, align, 1).unwrap();
 
         let report = eval_single(&graph, &snapshot, align);
 

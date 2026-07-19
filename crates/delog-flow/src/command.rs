@@ -14,6 +14,7 @@ pub enum GraphCommand {
     },
     Connect {
         from: NodeId,
+        from_port: u32,
         to: NodeId,
         to_port: u32,
     },
@@ -29,7 +30,7 @@ pub enum GraphCommand {
         id: NodeId,
         index: usize,
         field: OutputFieldSpec,
-        connection: Option<(usize, NodeId)>,
+        connection: Option<(usize, NodeId, u32)>,
     },
     RemoveOutputField {
         id: NodeId,
@@ -62,6 +63,7 @@ pub fn apply(graph: &mut Graph, cmd: GraphCommand) -> Result<GraphCommand, Apply
             inverse.push(GraphCommand::AddNode { node });
             inverse.extend(edges.into_iter().map(|edge| GraphCommand::Connect {
                 from: edge.from,
+                from_port: edge.from_port,
                 to: edge.to,
                 to_port: edge.to_port,
             }));
@@ -73,9 +75,14 @@ pub fn apply(graph: &mut Graph, cmd: GraphCommand) -> Result<GraphCommand, Apply
             node.pos = to;
             Ok(GraphCommand::MoveNode { id, to: old })
         }
-        GraphCommand::Connect { from, to, to_port } => {
+        GraphCommand::Connect {
+            from,
+            from_port,
+            to,
+            to_port,
+        } => {
             graph
-                .connect(from, to, to_port)
+                .connect(from, from_port, to, to_port)
                 .map_err(ApplyError::Connect)?;
             Ok(GraphCommand::Disconnect { to, to_port })
         }
@@ -85,6 +92,7 @@ pub fn apply(graph: &mut Graph, cmd: GraphCommand) -> Result<GraphCommand, Apply
                 .ok_or(ApplyError::NothingToDo)?;
             Ok(GraphCommand::Connect {
                 from: edge.from,
+                from_port: edge.from_port,
                 to: edge.to,
                 to_port: edge.to_port,
             })
@@ -137,11 +145,12 @@ pub fn apply(graph: &mut Graph, cmd: GraphCommand) -> Result<GraphCommand, Apply
                     edge.to_port += 1;
                 }
             }
-            if let Some((edge_index, from)) = connection {
+            if let Some((edge_index, from, from_port)) = connection {
                 graph.edges.insert(
                     edge_index.min(graph.edges.len()),
                     crate::graph::Edge {
                         from,
+                        from_port,
                         to: id,
                         to_port: index as u32,
                     },
@@ -162,7 +171,10 @@ pub fn apply(graph: &mut Graph, cmd: GraphCommand) -> Result<GraphCommand, Apply
                 .edges
                 .iter()
                 .position(|edge| edge.to == id && edge.to_port == index as u32)
-                .map(|edge_index| (edge_index, graph.edges.remove(edge_index).from));
+                .map(|edge_index| {
+                    let edge = graph.edges.remove(edge_index);
+                    (edge_index, edge.from, edge.from_port)
+                });
             for edge in &mut graph.edges {
                 if edge.to == id && edge.to_port > index as u32 {
                     edge.to_port -= 1;
@@ -180,7 +192,7 @@ pub fn apply(graph: &mut Graph, cmd: GraphCommand) -> Result<GraphCommand, Apply
             let mut validation = graph.clone();
             for (_, edge) in &edges {
                 validation
-                    .connect(edge.from, edge.to, edge.to_port)
+                    .connect(edge.from, edge.from_port, edge.to, edge.to_port)
                     .map_err(ApplyError::Connect)?;
             }
             let mut disconnects = Vec::with_capacity(edges.len());
@@ -257,11 +269,21 @@ mod tests {
             &mut g,
             GraphCommand::Connect {
                 from: id,
+                from_port: 0,
                 to: mul,
                 to_port: 1,
             },
         )
         .unwrap();
+        assert_eq!(
+            g.edges,
+            vec![Edge {
+                from: id,
+                from_port: 0,
+                to: mul,
+                to_port: 1
+            }]
+        );
         let inv_move = apply(&mut g, GraphCommand::MoveNode { id, to: [5.0, 5.0] }).unwrap();
         let inv_kind = apply(
             &mut g,
@@ -316,6 +338,7 @@ mod tests {
             &mut g,
             GraphCommand::Connect {
                 from: c,
+                from_port: 0,
                 to: m,
                 to_port: 1,
             },
@@ -326,7 +349,7 @@ mod tests {
         assert!(g.node(m).is_none() && g.edges.is_empty());
         apply(&mut g, inverse).unwrap();
         assert!(g.node(m).is_some());
-        assert_eq!(g.incoming(m, 1), Some(c));
+        assert_eq!(g.incoming(m, 1), Some((c, 0)));
     }
 
     #[test]
@@ -369,8 +392,8 @@ mod tests {
             pos: [0.0; 2],
             kind: output(&["first", "second"]),
         });
-        graph.connect(first, output_id, 0).unwrap();
-        graph.connect(second, output_id, 1).unwrap();
+        graph.connect(first, 0, output_id, 0).unwrap();
+        graph.connect(second, 0, output_id, 1).unwrap();
         let original = graph.clone();
 
         let inverse = apply(
@@ -382,7 +405,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(graph.incoming(output_id, 0), Some(second));
+        assert_eq!(graph.incoming(output_id, 0), Some((second, 0)));
         assert_eq!(graph.edges.len(), 1);
         apply(&mut graph, inverse).unwrap();
         assert_eq!(graph, original);
@@ -418,9 +441,9 @@ mod tests {
                 offset: 0.0,
             },
         });
-        graph.connect(first, target, 0).unwrap();
-        graph.connect(first, unrelated, 0).unwrap();
-        graph.connect(second, target, 1).unwrap();
+        graph.connect(first, 0, target, 0).unwrap();
+        graph.connect(first, 0, unrelated, 0).unwrap();
+        graph.connect(second, 0, target, 1).unwrap();
         let original = graph.clone();
 
         let inverse = apply(
