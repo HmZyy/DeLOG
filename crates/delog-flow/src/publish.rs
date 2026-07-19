@@ -68,7 +68,7 @@ pub fn build_outputs(
         let mut times = None;
         let mut pending_fields = Vec::with_capacity(spec.fields.len());
         for (port, field) in spec.fields.iter().enumerate() {
-            let Some(upstream) = graph.incoming(node_id, port as u32) else {
+            let Some((upstream, _from_port)) = graph.incoming(node_id, port as u32) else {
                 errors.push(Diagnostic {
                     node: node_id,
                     message: format!("Input {} has no connection.", field.name),
@@ -217,8 +217,8 @@ mod tests {
             },
         );
         let out = add_node(&mut graph, output("alt_scaled", &[("alt", None)]));
-        graph.connect(gps, scale, 0).unwrap();
-        graph.connect(scale, out, 0).unwrap();
+        graph.connect(gps, 0, scale, 0).unwrap();
+        graph.connect(scale, 0, out, 0).unwrap();
         let report = evaluate(
             &graph,
             &snapshot,
@@ -258,7 +258,7 @@ mod tests {
             }),
         );
         let out = add_node(&mut graph, output("scaled", &[("value", None)]));
-        graph.connect(data, out, 0).unwrap();
+        graph.connect(data, 0, out, 0).unwrap();
         let report = evaluate(
             &graph,
             &snapshot,
@@ -285,8 +285,8 @@ mod tests {
             &mut graph,
             output("mixed", &[("gps", None), ("baro", None)]),
         );
-        graph.connect(gps, out, 0).unwrap();
-        graph.connect(baro, out, 1).unwrap();
+        graph.connect(gps, 0, out, 0).unwrap();
+        graph.connect(baro, 0, out, 1).unwrap();
         let report = evaluate(
             &graph,
             &snapshot,
@@ -308,8 +308,8 @@ mod tests {
         let mut graph = Graph::new("g");
         let gps = add_node(&mut graph, data("GPS"));
         let out = add_node(&mut graph, output("duplicate", &[("a", None), ("a", None)]));
-        graph.connect(gps, out, 0).unwrap();
-        graph.connect(gps, out, 1).unwrap();
+        graph.connect(gps, 0, out, 0).unwrap();
+        graph.connect(gps, 0, out, 1).unwrap();
         let report = evaluate(
             &graph,
             &snapshot,
@@ -331,7 +331,7 @@ mod tests {
         let mut graph = Graph::new("g");
         let gps = add_node(&mut graph, data("GPS"));
         let out = add_node(&mut graph, output("altitude", &[("alt", Some("ft"))]));
-        graph.connect(gps, out, 0).unwrap();
+        graph.connect(gps, 0, out, 0).unwrap();
         let report = evaluate(
             &graph,
             &snapshot,
@@ -354,8 +354,8 @@ mod tests {
             &mut graph,
             output("altitude", &[("gps", None), ("baro", None)]),
         );
-        graph.connect(gps, output, 0).unwrap();
-        graph.connect(baro, output, 1).unwrap();
+        graph.connect(gps, 0, output, 0).unwrap();
+        graph.connect(baro, 0, output, 1).unwrap();
 
         apply(
             &mut graph,

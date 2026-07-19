@@ -84,17 +84,23 @@ impl NodeKind {
         }
     }
 
-    pub fn output(&self) -> Option<PortType> {
+    pub fn outputs(&self) -> Vec<PortSpec> {
+        let single = |accepts: Vec<PortType>| {
+            vec![PortSpec {
+                name: String::new(),
+                accepts,
+            }]
+        };
         match self {
-            Self::Constant { .. } => Some(PortType::Scalar),
+            Self::Constant { .. } => single(vec![PortType::Scalar]),
             Self::DataField(_)
             | Self::Add
             | Self::Subtract
             | Self::Multiply
             | Self::Divide
             | Self::ScaleOffset { .. }
-            | Self::Align { .. } => Some(PortType::Signal),
-            Self::Output(_) | Self::Unknown(_) => None,
+            | Self::Align { .. } => single(vec![PortType::Signal]),
+            Self::Output(_) | Self::Unknown(_) => Vec::new(),
         }
     }
 
@@ -124,8 +130,14 @@ pub struct Node {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Edge {
     pub from: NodeId,
+    #[serde(default, skip_serializing_if = "is_zero_port")]
+    pub from_port: u32,
     pub to: NodeId,
     pub to_port: u32,
+}
+
+fn is_zero_port(port: &u32) -> bool {
+    *port == 0
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -211,6 +223,7 @@ impl Graph {
     pub fn check_connect(
         &self,
         from: NodeId,
+        from_port: u32,
         to: NodeId,
         to_port: u32,
     ) -> Result<(), ConnectError> {
@@ -223,14 +236,19 @@ impl Graph {
         if from == to {
             return Err(ConnectError::SelfLoop);
         }
-        let Some(output) = from_node.kind.output() else {
-            return Err(ConnectError::NoOutput);
+        let outputs = from_node.kind.outputs();
+        let Some(output) = outputs.get(from_port as usize) else {
+            return Err(if outputs.is_empty() {
+                ConnectError::NoOutput
+            } else {
+                ConnectError::BadPort
+            });
         };
         let inputs = to_node.kind.inputs();
         let Some(input) = inputs.get(to_port as usize) else {
             return Err(ConnectError::BadPort);
         };
-        if !input.accepts.contains(&output) {
+        if !output.accepts.iter().any(|kind| input.accepts.contains(kind)) {
             return Err(ConnectError::TypeMismatch);
         }
         if self.incoming(to, to_port).is_some() {
@@ -242,9 +260,20 @@ impl Graph {
         Ok(())
     }
 
-    pub fn connect(&mut self, from: NodeId, to: NodeId, to_port: u32) -> Result<(), ConnectError> {
-        self.check_connect(from, to, to_port)?;
-        self.edges.push(Edge { from, to, to_port });
+    pub fn connect(
+        &mut self,
+        from: NodeId,
+        from_port: u32,
+        to: NodeId,
+        to_port: u32,
+    ) -> Result<(), ConnectError> {
+        self.check_connect(from, from_port, to, to_port)?;
+        self.edges.push(Edge {
+            from,
+            from_port,
+            to,
+            to_port,
+        });
         Ok(())
     }
 
@@ -256,11 +285,11 @@ impl Graph {
         Some(self.edges.remove(index))
     }
 
-    pub fn incoming(&self, to: NodeId, to_port: u32) -> Option<NodeId> {
+    pub fn incoming(&self, to: NodeId, to_port: u32) -> Option<(NodeId, u32)> {
         self.edges
             .iter()
             .find(|edge| edge.to == to && edge.to_port == to_port)
-            .map(|edge| edge.from)
+            .map(|edge| (edge.from, edge.from_port))
     }
 
     pub fn would_cycle(&self, from: NodeId, to: NodeId) -> bool {
@@ -315,9 +344,12 @@ mod tests {
         let konst = add_node(&mut g, NodeKind::Constant { value: 2.0 });
         let add = add_node(&mut g, NodeKind::Add);
         let mul = add_node(&mut g, NodeKind::Multiply);
-        assert_eq!(g.connect(konst, add, 0), Err(ConnectError::TypeMismatch));
-        assert_eq!(g.connect(konst, mul, 1), Ok(()));
-        assert_eq!(g.connect(konst, mul, 7), Err(ConnectError::BadPort));
+        assert_eq!(
+            g.connect(konst, 0, add, 0),
+            Err(ConnectError::TypeMismatch)
+        );
+        assert_eq!(g.connect(konst, 0, mul, 1), Ok(()));
+        assert_eq!(g.connect(konst, 0, mul, 7), Err(ConnectError::BadPort));
     }
 
     #[test]
@@ -338,18 +370,19 @@ mod tests {
             },
         );
         let add = add_node(&mut g, NodeKind::Add);
-        assert_eq!(g.connect(d1, add, 0), Ok(()));
-        assert_eq!(g.connect(d2, add, 0), Err(ConnectError::InputOccupied));
+        assert_eq!(g.connect(d1, 0, add, 0), Ok(()));
+        assert_eq!(g.connect(d2, 0, add, 0), Err(ConnectError::InputOccupied));
         assert_eq!(
             g.disconnect(add, 0),
             Some(Edge {
                 from: d1,
+                from_port: 0,
                 to: add,
                 to_port: 0
             })
         );
-        assert_eq!(g.connect(d2, add, 0), Ok(()));
-        assert_eq!(g.incoming(add, 0), Some(d2));
+        assert_eq!(g.connect(d2, 0, add, 0), Ok(()));
+        assert_eq!(g.incoming(add, 0), Some((d2, 0)));
     }
 
     #[test]
@@ -357,9 +390,9 @@ mod tests {
         let mut g = Graph::new("t");
         let a = add_node(&mut g, NodeKind::Add);
         let b = add_node(&mut g, NodeKind::Add);
-        assert_eq!(g.connect(a, a, 0), Err(ConnectError::SelfLoop));
-        g.connect(a, b, 0).unwrap();
-        assert_eq!(g.connect(b, a, 0), Err(ConnectError::Cycle));
+        assert_eq!(g.connect(a, 0, a, 0), Err(ConnectError::SelfLoop));
+        g.connect(a, 0, b, 0).unwrap();
+        assert_eq!(g.connect(b, 0, a, 0), Err(ConnectError::Cycle));
     }
 
     #[test]
@@ -374,12 +407,39 @@ mod tests {
                 offset: 0.0,
             },
         );
-        g.connect(a, m, 1).unwrap();
-        g.connect(m, s, 0).unwrap();
+        g.connect(a, 0, m, 1).unwrap();
+        g.connect(m, 0, s, 0).unwrap();
         let (node, edges) = g.remove_node(m).unwrap();
         assert!(matches!(node.kind, NodeKind::Multiply));
         assert_eq!(edges.len(), 2);
         assert!(g.edges.is_empty());
+    }
+
+    #[test]
+    fn connect_validates_from_port_range() {
+        let mut g = Graph::new("t");
+        let a = add_node(&mut g, NodeKind::Add);
+        let b = add_node(&mut g, NodeKind::Add);
+        assert_eq!(g.connect(a, 1, b, 0), Err(ConnectError::BadPort));
+        assert_eq!(g.connect(a, 0, b, 0), Ok(()));
+        assert_eq!(g.incoming(b, 0), Some((a, 0)));
+    }
+
+    #[test]
+    fn outputs_replaces_output_for_every_kind() {
+        assert!(
+            NodeKind::Output(OutputSpec {
+                topic: "t".into(),
+                fields: vec![]
+            })
+            .outputs()
+            .is_empty()
+        );
+        assert_eq!(NodeKind::Add.outputs().len(), 1);
+        assert_eq!(
+            NodeKind::Constant { value: 1.0 }.outputs()[0].accepts,
+            vec![PortType::Scalar]
+        );
     }
 
     #[test]
@@ -400,6 +460,6 @@ mod tests {
         let ports = out.inputs();
         assert_eq!(ports.len(), 2);
         assert_eq!(ports[1].name, "b");
-        assert!(out.output().is_none());
+        assert!(out.outputs().is_empty());
     }
 }
