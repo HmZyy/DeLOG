@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use arrow::array::{ArrayRef, Float64Array, Int16Array, Int64Array};
 use arrow::datatypes::DataType;
@@ -7,6 +8,33 @@ use delog_core::identity::{IdentityRegistry, SourceId, TopicId};
 use delog_core::schema::{FieldSchema, TopicSchema};
 use delog_core::snapshot::StoreSnapshot;
 use delog_core::store::TopicStore;
+
+use crate::eval::{EvalCache, EvalReport, evaluate};
+use crate::graph::{Graph, NodeId};
+
+/// `evaluate()` with no script host wired up; used by tests that don't exercise script nodes
+/// so they don't need to thread the `scripting`-gated parameter through every call site.
+#[cfg(feature = "scripting")]
+pub(crate) fn eval_no_host(
+    graph: &Graph,
+    snapshot: &StoreSnapshot,
+    targets: &[NodeId],
+    cancel: &AtomicBool,
+    cache: &mut EvalCache,
+) -> EvalReport {
+    evaluate(graph, snapshot, targets, cancel, cache, None)
+}
+
+#[cfg(not(feature = "scripting"))]
+pub(crate) fn eval_no_host(
+    graph: &Graph,
+    snapshot: &StoreSnapshot,
+    targets: &[NodeId],
+    cancel: &AtomicBool,
+    cache: &mut EvalCache,
+) -> EvalReport {
+    evaluate(graph, snapshot, targets, cancel, cache)
+}
 
 fn numeric_topic(
     identity: &mut IdentityRegistry,

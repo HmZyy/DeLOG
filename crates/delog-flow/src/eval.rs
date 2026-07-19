@@ -54,6 +54,7 @@ pub fn evaluate(
     targets: &[NodeId],
     cancel: &AtomicBool,
     cache: &mut EvalCache,
+    #[cfg(feature = "scripting")] script_host: Option<&dyn crate::script::ScriptNodeHost>,
 ) -> EvalReport {
     let order = match topological_order(graph, targets) {
         Ok(order) => order,
@@ -152,39 +153,47 @@ pub fn evaluate(
                 node: id,
                 message: "Unknown node type; this graph was saved by a newer version.".to_owned(),
             }),
-            kind => {
-                let ports = kind.inputs();
-                let mut inputs = Vec::with_capacity(ports.len());
-                let mut input_fingerprints = Vec::with_capacity(ports.len());
-                let mut blocked = false;
-                for (port_index, port) in ports.iter().enumerate() {
-                    let Some((upstream, from_port)) = graph.incoming(id, port_index as u32) else {
-                        report.diagnostics.push(Diagnostic {
-                            node: id,
-                            message: format!("Input {} has no connection.", port.name),
-                        });
-                        blocked = true;
-                        continue;
-                    };
-                    let Some(value) = report
-                        .values
-                        .get(&upstream)
-                        .and_then(|values| values.get(from_port as usize))
-                        .cloned()
-                    else {
-                        blocked = true;
-                        continue;
-                    };
-                    let Some(&upstream_fingerprint) = fingerprints.get(&upstream) else {
-                        blocked = true;
-                        continue;
-                    };
-                    inputs.push(value);
-                    input_fingerprints.push(upstream_fingerprint);
-                }
-                if blocked {
+            #[cfg(feature = "scripting")]
+            NodeKind::Script(spec) => {
+                let Some((inputs, input_fingerprints)) =
+                    gather_inputs(graph, id, &node.kind, &mut report, &fingerprints)
+                else {
+                    continue;
+                };
+                if let Err(message) = crate::script::validate_spec(spec) {
+                    report.diagnostics.push(Diagnostic { node: id, message });
                     continue;
                 }
+                let fingerprint = fingerprint(&node.kind, &input_fingerprints, None);
+                if restore_cached(id, fingerprint, cache, &mut report) {
+                    fingerprints.insert(id, fingerprint);
+                    continue;
+                }
+                let Some(host) = script_host else {
+                    report.diagnostics.push(Diagnostic {
+                        node: id,
+                        message: crate::script::HOST_UNAVAILABLE.to_owned(),
+                    });
+                    continue;
+                };
+                let request = crate::script::request_for(&node.kind.label(), spec, &inputs);
+                match host.eval(request, cancel) {
+                    Ok(outputs) => match crate::script::bind_outputs(id, spec, &inputs, outputs) {
+                        Ok(values) => {
+                            store_value(id, fingerprint, values, Vec::new(), cache, &mut report);
+                            fingerprints.insert(id, fingerprint);
+                        }
+                        Err(message) => report.diagnostics.push(Diagnostic { node: id, message }),
+                    },
+                    Err(message) => report.diagnostics.push(Diagnostic { node: id, message }),
+                }
+            }
+            kind => {
+                let Some((inputs, input_fingerprints)) =
+                    gather_inputs(graph, id, kind, &mut report, &fingerprints)
+                else {
+                    continue;
+                };
                 if matches!(kind, NodeKind::Output(_)) {
                     continue;
                 }
@@ -213,6 +222,49 @@ pub fn evaluate(
         }
     }
     report
+}
+
+fn gather_inputs(
+    graph: &Graph,
+    id: NodeId,
+    kind: &NodeKind,
+    report: &mut EvalReport,
+    fingerprints: &HashMap<NodeId, u64>,
+) -> Option<(Vec<Value>, Vec<u64>)> {
+    let ports = kind.inputs();
+    let mut inputs = Vec::with_capacity(ports.len());
+    let mut input_fingerprints = Vec::with_capacity(ports.len());
+    let mut blocked = false;
+    for (port_index, port) in ports.iter().enumerate() {
+        let Some((upstream, from_port)) = graph.incoming(id, port_index as u32) else {
+            report.diagnostics.push(Diagnostic {
+                node: id,
+                message: format!("Input {} has no connection.", port.name),
+            });
+            blocked = true;
+            continue;
+        };
+        let Some(value) = report
+            .values
+            .get(&upstream)
+            .and_then(|values| values.get(from_port as usize))
+            .cloned()
+        else {
+            blocked = true;
+            continue;
+        };
+        let Some(&upstream_fingerprint) = fingerprints.get(&upstream) else {
+            blocked = true;
+            continue;
+        };
+        inputs.push(value);
+        input_fingerprints.push(upstream_fingerprint);
+    }
+    if blocked {
+        None
+    } else {
+        Some((inputs, input_fingerprints))
+    }
 }
 
 pub fn read_field(
@@ -494,7 +546,7 @@ mod tests {
     use crate::command::{GraphCommand, apply};
     use crate::graph::{FieldSelector, Graph, Node, NodeId, NodeKind};
     use crate::test_util::{
-        snapshot_duplicate_times, snapshot_gps_baro, snapshot_overlapping_chunks,
+        eval_no_host, snapshot_duplicate_times, snapshot_gps_baro, snapshot_overlapping_chunks,
         snapshot_scaled_i16,
     };
     use crate::types::{Signal, Value};
@@ -519,7 +571,7 @@ mod tests {
     }
 
     fn eval_single(graph: &Graph, snapshot: &StoreSnapshot, target: NodeId) -> EvalReport {
-        evaluate(
+        eval_no_host(
             graph,
             snapshot,
             &[target],
@@ -553,7 +605,7 @@ mod tests {
             graph.connect(a, 0, operation, 0).unwrap();
             graph.connect(b, 0, operation, 1).unwrap();
         }
-        let report = evaluate(
+        let report = eval_no_host(
             &graph,
             &snapshot,
             &[a, b, add, sub, mul, div],
@@ -586,7 +638,7 @@ mod tests {
         graph.connect(x, 0, add, 0).unwrap();
         graph.connect(y, 0, add, 1).unwrap();
 
-        let report = evaluate(
+        let report = eval_no_host(
             &graph,
             &snapshot,
             &[scale, add],
@@ -702,7 +754,7 @@ mod tests {
         graph.connect(x, 0, multiply, 0).unwrap();
         graph.connect(scalar, 0, multiply, 1).unwrap();
 
-        let report = evaluate(
+        let report = eval_no_host(
             &graph,
             &snapshot,
             &[same, different, multiply],
@@ -737,7 +789,7 @@ mod tests {
         );
         graph.connect(data, 0, scale, 0).unwrap();
         let mut cache = EvalCache::default();
-        let first = evaluate(
+        let first = eval_no_host(
             &graph,
             &snapshot,
             &[scale],
@@ -758,7 +810,7 @@ mod tests {
             },
         )
         .unwrap();
-        let second = evaluate(
+        let second = eval_no_host(
             &graph,
             &snapshot,
             &[scale],
