@@ -40,6 +40,8 @@ pub enum NodeKind {
     ScaleOffset { multiplier: f64, offset: f64 },
     Align { mode: AlignMode },
     Output(OutputSpec),
+    #[cfg(feature = "scripting")]
+    Script(crate::script::ScriptSpec),
     Unknown(serde_json::Value),
 }
 
@@ -80,6 +82,12 @@ impl NodeKind {
                 .iter()
                 .map(|field| port(&field.name, vec![PortType::Signal]))
                 .collect(),
+            #[cfg(feature = "scripting")]
+            Self::Script(spec) => spec
+                .inputs
+                .iter()
+                .map(|input| port(&input.name, vec![PortType::Signal, PortType::Scalar]))
+                .collect(),
             Self::DataField(_) | Self::Constant { .. } | Self::Unknown(_) => Vec::new(),
         }
     }
@@ -100,6 +108,15 @@ impl NodeKind {
             | Self::Divide
             | Self::ScaleOffset { .. }
             | Self::Align { .. } => single(vec![PortType::Signal]),
+            #[cfg(feature = "scripting")]
+            Self::Script(spec) => spec
+                .outputs
+                .iter()
+                .map(|output| PortSpec {
+                    name: output.name.clone(),
+                    accepts: vec![PortType::Signal],
+                })
+                .collect(),
             Self::Output(_) | Self::Unknown(_) => Vec::new(),
         }
     }
@@ -115,6 +132,14 @@ impl NodeKind {
             Self::ScaleOffset { .. } => "Scale / Offset".to_owned(),
             Self::Align { .. } => "Align to Timeline".to_owned(),
             Self::Output(spec) => format!("Output: {}", spec.topic),
+            #[cfg(feature = "scripting")]
+            Self::Script(spec) => {
+                if spec.name.is_empty() {
+                    "Script".to_owned()
+                } else {
+                    spec.name.clone()
+                }
+            }
             Self::Unknown(_) => "Unknown node".to_owned(),
         }
     }

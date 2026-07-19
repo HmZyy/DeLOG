@@ -182,6 +182,8 @@ pub(crate) fn node_kind_json(kind: &NodeKind) -> Value {
         ]),
         NodeKind::Align { mode } => Map::from_iter([("mode".to_owned(), json!(mode.as_str()))]),
         NodeKind::Output(spec) => serialized_object(spec),
+        #[cfg(feature = "scripting")]
+        NodeKind::Script(spec) => serialized_object(spec),
     };
     let tag = match kind {
         NodeKind::DataField(_) => "data_field",
@@ -193,6 +195,8 @@ pub(crate) fn node_kind_json(kind: &NodeKind) -> Value {
         NodeKind::ScaleOffset { .. } => "scale_offset",
         NodeKind::Align { .. } => "align",
         NodeKind::Output(_) => "output",
+        #[cfg(feature = "scripting")]
+        NodeKind::Script(_) => "script",
         NodeKind::Unknown(_) => unreachable!(),
     };
     object.insert("type".to_owned(), Value::String(tag.to_owned()));
@@ -259,6 +263,8 @@ fn node_from_json(value: &Value) -> Result<Node, DocError> {
             }
         }
         "output" => NodeKind::Output(decode_value::<OutputSpec>(value)?),
+        #[cfg(feature = "scripting")]
+        "script" => NodeKind::Script(decode_value::<crate::script::ScriptSpec>(value)?),
         _ => NodeKind::Unknown(value.clone()),
     };
     Ok(Node { id, pos, kind })
@@ -433,6 +439,22 @@ mod tests {
         let mut fresh = fresh;
         let n = fresh.alloc_id();
         assert!(n.0 > o.0);
+    }
+
+    #[test]
+    #[cfg(not(feature = "scripting"))]
+    fn script_docs_degrade_to_unknown_without_the_feature() {
+        let raw = serde_json::json!({
+            "delog_dataflow": 1, "name": "g", "next_id": 2, "viewport": {"offset": [0.0, 0.0], "zoom": 1.0},
+            "nodes": [{
+                "id": 1, "pos": [0.0, 0.0], "type": "script", "name": "Double",
+                "inputs": [{"name": "a"}], "outputs": [{"name": "out"}], "code": "x = 1"
+            }],
+            "edges": []
+        });
+        let g = from_json(&raw).unwrap();
+        assert!(matches!(&g.nodes[0].kind, NodeKind::Unknown(_)));
+        assert_eq!(to_json(&g), raw);
     }
 
     #[test]

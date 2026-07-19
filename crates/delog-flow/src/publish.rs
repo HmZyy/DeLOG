@@ -147,9 +147,9 @@ mod tests {
 
     use super::*;
     use crate::command::{GraphCommand, apply};
-    use crate::eval::{EvalCache, evaluate};
+    use crate::eval::EvalCache;
     use crate::graph::{FieldSelector, Graph, Node, NodeId, NodeKind, OutputFieldSpec, OutputSpec};
-    use crate::test_util::{snapshot_gps_baro, snapshot_scaled_i16};
+    use crate::test_util::{eval_no_host, snapshot_gps_baro, snapshot_scaled_i16};
 
     struct RecordingSink {
         opened: Vec<(String, SourceKind)>,
@@ -223,7 +223,7 @@ mod tests {
         let out = add_node(&mut graph, output("alt_scaled", &[("alt", None)]));
         graph.connect(gps, 0, scale, 0).unwrap();
         graph.connect(scale, 0, out, 0).unwrap();
-        let report = evaluate(
+        let report = eval_no_host(
             &graph,
             &snapshot,
             &[out],
@@ -263,7 +263,7 @@ mod tests {
         );
         let out = add_node(&mut graph, output("scaled", &[("value", None)]));
         graph.connect(data, 0, out, 0).unwrap();
-        let report = evaluate(
+        let report = eval_no_host(
             &graph,
             &snapshot,
             &[out],
@@ -291,7 +291,7 @@ mod tests {
         );
         graph.connect(gps, 0, out, 0).unwrap();
         graph.connect(baro, 0, out, 1).unwrap();
-        let report = evaluate(
+        let report = eval_no_host(
             &graph,
             &snapshot,
             &[out],
@@ -314,7 +314,7 @@ mod tests {
         let out = add_node(&mut graph, output("duplicate", &[("a", None), ("a", None)]));
         graph.connect(gps, 0, out, 0).unwrap();
         graph.connect(gps, 0, out, 1).unwrap();
-        let report = evaluate(
+        let report = eval_no_host(
             &graph,
             &snapshot,
             &[out],
@@ -336,7 +336,7 @@ mod tests {
         let gps = add_node(&mut graph, data("GPS"));
         let out = add_node(&mut graph, output("altitude", &[("alt", Some("ft"))]));
         graph.connect(gps, 0, out, 0).unwrap();
-        let report = evaluate(
+        let report = eval_no_host(
             &graph,
             &snapshot,
             &[out],
@@ -369,7 +369,7 @@ mod tests {
             },
         )
         .unwrap();
-        let report = evaluate(
+        let report = eval_no_host(
             &graph,
             &snapshot,
             &[output],

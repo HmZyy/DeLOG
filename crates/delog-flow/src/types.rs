@@ -8,6 +8,7 @@ use crate::graph::NodeId;
 pub enum TimelineId {
     Topic(TopicId),
     Node(NodeId),
+    NodeOutput(NodeId, u16),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

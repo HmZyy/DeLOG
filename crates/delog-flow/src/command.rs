@@ -36,6 +36,29 @@ pub enum GraphCommand {
         id: NodeId,
         index: usize,
     },
+    #[cfg(feature = "scripting")]
+    InsertScriptInput {
+        id: NodeId,
+        index: usize,
+        input: crate::script::ScriptInputSpec,
+        connection: Option<(usize, NodeId, u32)>,
+    },
+    #[cfg(feature = "scripting")]
+    RemoveScriptInput {
+        id: NodeId,
+        index: usize,
+    },
+    #[cfg(feature = "scripting")]
+    InsertScriptOutput {
+        id: NodeId,
+        index: usize,
+        output: crate::script::ScriptOutputSpec,
+    },
+    #[cfg(feature = "scripting")]
+    RemoveScriptOutput {
+        id: NodeId,
+        index: usize,
+    },
     RestoreEdges {
         edges: Vec<(usize, Edge)>,
     },
@@ -48,6 +71,8 @@ pub enum ApplyError {
     Connect(ConnectError),
     NothingToDo,
     InvalidOutputField,
+    #[cfg(feature = "scripting")]
+    InvalidScriptPort,
 }
 
 pub fn apply(graph: &mut Graph, cmd: GraphCommand) -> Result<GraphCommand, ApplyError> {
@@ -105,13 +130,18 @@ pub fn apply(graph: &mut Graph, cmd: GraphCommand) -> Result<GraphCommand, Apply
                 .inputs()
                 .iter()
                 .map(|input| &input.accepts));
-            if !inputs_changed {
+            let outputs_changed = old.outputs().iter().map(|output| &output.accepts).ne(node
+                .kind
+                .outputs()
+                .iter()
+                .map(|output| &output.accepts));
+            if !inputs_changed && !outputs_changed {
                 return Ok(GraphCommand::SetKind { id, kind: old });
             }
             let old_edges = std::mem::take(&mut graph.edges);
             let mut removed = Vec::new();
             for (index, edge) in old_edges.into_iter().enumerate() {
-                if edge.to == id {
+                if (inputs_changed && edge.to == id) || (outputs_changed && edge.from == id) {
                     removed.push((index, edge));
                 } else {
                     graph.edges.push(edge);
@@ -186,6 +216,120 @@ pub fn apply(graph: &mut Graph, cmd: GraphCommand) -> Result<GraphCommand, Apply
                 field,
                 connection: removed_connection,
             })
+        }
+        #[cfg(feature = "scripting")]
+        GraphCommand::InsertScriptInput {
+            id,
+            index,
+            input,
+            connection,
+        } => {
+            let node = graph.node_mut(id).ok_or(ApplyError::UnknownNode)?;
+            let NodeKind::Script(spec) = &mut node.kind else {
+                return Err(ApplyError::InvalidScriptPort);
+            };
+            if index > spec.inputs.len() {
+                return Err(ApplyError::InvalidScriptPort);
+            }
+            spec.inputs.insert(index, input);
+            for edge in &mut graph.edges {
+                if edge.to == id && edge.to_port >= index as u32 {
+                    edge.to_port += 1;
+                }
+            }
+            if let Some((edge_index, from, from_port)) = connection {
+                graph.edges.insert(
+                    edge_index.min(graph.edges.len()),
+                    Edge {
+                        from,
+                        from_port,
+                        to: id,
+                        to_port: index as u32,
+                    },
+                );
+            }
+            Ok(GraphCommand::RemoveScriptInput { id, index })
+        }
+        #[cfg(feature = "scripting")]
+        GraphCommand::RemoveScriptInput { id, index } => {
+            let node = graph.node_mut(id).ok_or(ApplyError::UnknownNode)?;
+            let NodeKind::Script(spec) = &mut node.kind else {
+                return Err(ApplyError::InvalidScriptPort);
+            };
+            if index >= spec.inputs.len() {
+                return Err(ApplyError::InvalidScriptPort);
+            }
+            let input = spec.inputs.remove(index);
+            let removed_connection = graph
+                .edges
+                .iter()
+                .position(|edge| edge.to == id && edge.to_port == index as u32)
+                .map(|edge_index| {
+                    let edge = graph.edges.remove(edge_index);
+                    (edge_index, edge.from, edge.from_port)
+                });
+            for edge in &mut graph.edges {
+                if edge.to == id && edge.to_port > index as u32 {
+                    edge.to_port -= 1;
+                }
+            }
+            Ok(GraphCommand::InsertScriptInput {
+                id,
+                index,
+                input,
+                connection: removed_connection,
+            })
+        }
+        #[cfg(feature = "scripting")]
+        GraphCommand::InsertScriptOutput { id, index, output } => {
+            let node = graph.node_mut(id).ok_or(ApplyError::UnknownNode)?;
+            let NodeKind::Script(spec) = &mut node.kind else {
+                return Err(ApplyError::InvalidScriptPort);
+            };
+            if index > spec.outputs.len() {
+                return Err(ApplyError::InvalidScriptPort);
+            }
+            spec.outputs.insert(index, output);
+            for edge in &mut graph.edges {
+                if edge.from == id && edge.from_port >= index as u32 {
+                    edge.from_port += 1;
+                }
+            }
+            Ok(GraphCommand::RemoveScriptOutput { id, index })
+        }
+        #[cfg(feature = "scripting")]
+        GraphCommand::RemoveScriptOutput { id, index } => {
+            let node = graph.node_mut(id).ok_or(ApplyError::UnknownNode)?;
+            let NodeKind::Script(spec) = &mut node.kind else {
+                return Err(ApplyError::InvalidScriptPort);
+            };
+            if index >= spec.outputs.len() {
+                return Err(ApplyError::InvalidScriptPort);
+            }
+            let output = spec.outputs.remove(index);
+            let old_edges = std::mem::take(&mut graph.edges);
+            let mut removed = Vec::new();
+            for (edge_index, edge) in old_edges.into_iter().enumerate() {
+                if edge.from == id && edge.from_port == index as u32 {
+                    removed.push((edge_index, edge));
+                } else {
+                    graph.edges.push(edge);
+                }
+            }
+            for edge in &mut graph.edges {
+                if edge.from == id && edge.from_port > index as u32 {
+                    edge.from_port -= 1;
+                }
+            }
+            let insert = GraphCommand::InsertScriptOutput { id, index, output };
+            if removed.is_empty() {
+                Ok(insert)
+            } else {
+                Ok(GraphCommand::Batch(vec![
+                    insert,
+                    GraphCommand::RestoreEdges { edges: removed },
+                ]))
+            }
         }
         GraphCommand::RestoreEdges { mut edges } => {
             edges.sort_by_key(|(index, _)| *index);
