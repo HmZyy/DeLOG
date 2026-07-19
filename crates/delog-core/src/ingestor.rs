@@ -156,6 +156,11 @@ impl<O: IngestObserver> Ingestor<O> {
                 }
             }
             IngestMsg::RemoveSource { source } => self.remove_source(source),
+            IngestMsg::RelabelSource { source, label } => {
+                if self.identity.relabel_source(source, label).is_some() {
+                    self.publish();
+                }
+            }
         }
     }
 
