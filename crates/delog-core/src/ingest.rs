@@ -94,6 +94,10 @@ pub enum IngestMsg {
     RemoveSource {
         source: SourceId,
     },
+    RelabelSource {
+        source: SourceId,
+        label: String,
+    },
 }
 
 /// Infallible: once the ingest thread is gone the sink goes inert (submits
@@ -148,6 +152,13 @@ impl IngestSender {
 
     pub fn remove_source(&self, source: SourceId) {
         let _ = self.tx.send(IngestMsg::RemoveSource { source });
+    }
+
+    pub fn relabel_source(&self, source: SourceId, label: impl Into<String>) {
+        let _ = self.tx.send(IngestMsg::RelabelSource {
+            source,
+            label: label.into(),
+        });
     }
 
     /// Non-blocking: a full channel drops the batch and bumps

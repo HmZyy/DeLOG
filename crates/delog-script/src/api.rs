@@ -8,8 +8,8 @@ use delog_core::field_view::FieldView;
 use delog_core::field_view::array_row_as_f64;
 use delog_core::field_view::array_row_as_str;
 use delog_core::identity::FieldId;
-use delog_core::identity::{SourceId, TopicId};
 pub(crate) use delog_core::identity::parse_topic_instance;
+use delog_core::identity::{SourceId, TopicId};
 use delog_core::snapshot::StoreSnapshot;
 
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
