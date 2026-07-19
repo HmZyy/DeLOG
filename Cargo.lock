@@ -1082,6 +1082,7 @@ dependencies = [
  "arrow",
  "criterion",
  "delog-core",
+ "delog-flow",
  "numpy",
  "proptest",
  "pyo3",
