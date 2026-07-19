@@ -22,14 +22,14 @@ pub struct Diagnostic {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct EvalReport {
-    pub values: HashMap<NodeId, Value>,
+    pub values: HashMap<NodeId, Vec<Value>>,
     pub diagnostics: Vec<Diagnostic>,
 }
 
 #[derive(Debug, Clone)]
 struct CacheEntry {
     fingerprint: u64,
-    value: Value,
+    value: Vec<Value>,
     diagnostics: Vec<String>,
 }
 
@@ -121,7 +121,7 @@ pub fn evaluate(
                                 unit: resolved.unit,
                             },
                         });
-                        store_value(id, fingerprint, value, Vec::new(), cache, &mut report);
+                        store_value(id, fingerprint, vec![value], Vec::new(), cache, &mut report);
                         fingerprints.insert(id, fingerprint);
                     }
                     Err(message) => report.diagnostics.push(Diagnostic { node: id, message }),
@@ -140,7 +140,7 @@ pub fn evaluate(
                     store_value(
                         id,
                         fingerprint,
-                        Value::Scalar(*value),
+                        vec![Value::Scalar(*value)],
                         Vec::new(),
                         cache,
                         &mut report,
@@ -158,8 +158,7 @@ pub fn evaluate(
                 let mut input_fingerprints = Vec::with_capacity(ports.len());
                 let mut blocked = false;
                 for (port_index, port) in ports.iter().enumerate() {
-                    let Some((upstream, _from_port)) = graph.incoming(id, port_index as u32)
-                    else {
+                    let Some((upstream, from_port)) = graph.incoming(id, port_index as u32) else {
                         report.diagnostics.push(Diagnostic {
                             node: id,
                             message: format!("Input {} has no connection.", port.name),
@@ -167,7 +166,12 @@ pub fn evaluate(
                         blocked = true;
                         continue;
                     };
-                    let Some(value) = report.values.get(&upstream).cloned() else {
+                    let Some(value) = report
+                        .values
+                        .get(&upstream)
+                        .and_then(|values| values.get(from_port as usize))
+                        .cloned()
+                    else {
                         blocked = true;
                         continue;
                     };
@@ -244,12 +248,12 @@ pub fn read_field(
     Ok((times, values))
 }
 
-fn evaluate_kernel(kind: &NodeKind, inputs: &[Value]) -> Result<(Value, Vec<String>), String> {
-    match kind {
-        NodeKind::Add => signal_binary(inputs, |a, b| a + b, true),
-        NodeKind::Subtract => signal_binary(inputs, |a, b| a - b, true),
-        NodeKind::Multiply => signal_or_scalar_binary(inputs, |a, b| a * b, true),
-        NodeKind::Divide => signal_or_scalar_binary(inputs, |a, b| a / b, true),
+fn evaluate_kernel(kind: &NodeKind, inputs: &[Value]) -> Result<(Vec<Value>, Vec<String>), String> {
+    let (value, messages) = match kind {
+        NodeKind::Add => signal_binary(inputs, |a, b| a + b, true)?,
+        NodeKind::Subtract => signal_binary(inputs, |a, b| a - b, true)?,
+        NodeKind::Multiply => signal_or_scalar_binary(inputs, |a, b| a * b, true)?,
+        NodeKind::Divide => signal_or_scalar_binary(inputs, |a, b| a / b, true)?,
         NodeKind::ScaleOffset { multiplier, offset } => {
             let input = require_signal(inputs.first())?;
             let values = input
@@ -257,20 +261,20 @@ fn evaluate_kernel(kind: &NodeKind, inputs: &[Value]) -> Result<(Value, Vec<Stri
                 .iter()
                 .map(|value| value * multiplier + offset)
                 .collect();
-            Ok((
+            (
                 Value::Signal(Signal {
                     t: Arc::clone(&input.t),
                     v: Arc::new(values),
                     meta: input.meta.clone(),
                 }),
                 Vec::new(),
-            ))
+            )
         }
         NodeKind::Align { mode } => {
             let data = require_signal(inputs.first())?;
             let reference = require_signal(inputs.get(1))?;
             let values = delog_core::align::align_values(&data.t, &data.v, &reference.t, *mode);
-            Ok((
+            (
                 Value::Signal(Signal {
                     t: Arc::clone(&reference.t),
                     v: Arc::new(values),
@@ -280,10 +284,11 @@ fn evaluate_kernel(kind: &NodeKind, inputs: &[Value]) -> Result<(Value, Vec<Stri
                     },
                 }),
                 Vec::new(),
-            ))
+            )
         }
-        _ => Err("This operation requires numeric input.".to_owned()),
-    }
+        _ => return Err("This operation requires numeric input.".to_owned()),
+    };
+    Ok((vec![value], messages))
 }
 
 fn signal_binary(
@@ -423,7 +428,7 @@ fn restore_cached(
 fn store_value(
     id: NodeId,
     fingerprint: u64,
-    value: Value,
+    value: Vec<Value>,
     diagnostics: Vec<String>,
     cache: &mut EvalCache,
     report: &mut EvalReport,
@@ -524,7 +529,11 @@ mod tests {
     }
 
     fn signal(report: &EvalReport, id: NodeId) -> &Signal {
-        match report.values.get(&id).unwrap() {
+        signal_at(report, id, 0)
+    }
+
+    fn signal_at(report: &EvalReport, id: NodeId, port: usize) -> &Signal {
+        match report.values.get(&id).and_then(|v| v.get(port)).unwrap() {
             Value::Signal(signal) => signal,
             Value::Scalar(_) => panic!("expected signal"),
         }
