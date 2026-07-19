@@ -56,8 +56,8 @@ pub struct DataFlowUi {
     canvas: CanvasState,
     add_menu: Option<AddMenuState>,
     name_edit: String,
-    load_menu_names: Vec<String>,
-    armed_load: Option<String>,
+    loaded_name: Option<String>,
+    pending_delete: Option<String>,
 }
 
 fn bounded_window_body<R>(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui) -> R) -> R {
@@ -88,8 +88,8 @@ impl DataFlowUi {
             canvas: CanvasState::default(),
             add_menu: None,
             name_edit: "untitled".to_owned(),
-            load_menu_names: Vec::new(),
-            armed_load: None,
+            loaded_name: None,
+            pending_delete: None,
         }
     }
 
@@ -107,33 +107,40 @@ impl DataFlowUi {
             .min_size([720.0, 420.0])
             .show(ctx, |ui| {
                 bounded_window_body(ui, |ui| {
-                    self.toolbar(ui, snapshot, &mut logs);
-                    ui.separator();
-
-                    let height = ui.available_height();
-                    ui.horizontal(|ui| {
-                        let canvas_width = (ui.available_width() - 270.0).max(200.0);
-                        let events = ui
-                            .allocate_ui_with_layout(
-                                egui::vec2(canvas_width, height),
-                                egui::Layout::top_down(egui::Align::Min),
-                                |ui| {
-                                    show_canvas(
-                                        ui,
-                                        &self.controller.graph,
-                                        self.controller.selection,
-                                        &mut self.canvas,
-                                    )
-                                },
-                            )
-                            .inner;
+                    egui::Panel::left("dataflow_library_drawer")
+                        .resizable(true)
+                        .default_size(180.0)
+                        .size_range(140.0..=260.0)
+                        .show_inside(ui, |ui| self.library_drawer(ui, &mut logs));
+                    egui::CentralPanel::default().show_inside(ui, |ui| {
+                        self.toolbar(ui, snapshot, &mut logs);
                         ui.separator();
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(260.0, height),
-                            egui::Layout::top_down(egui::Align::Min),
-                            |ui| self.inspector(ui, &mut logs),
-                        );
-                        self.handle_canvas_events(events, snapshot, &mut logs);
+
+                        let height = ui.available_height();
+                        ui.horizontal(|ui| {
+                            let canvas_width = (ui.available_width() - 270.0).max(200.0);
+                            let events = ui
+                                .allocate_ui_with_layout(
+                                    egui::vec2(canvas_width, height),
+                                    egui::Layout::top_down(egui::Align::Min),
+                                    |ui| {
+                                        show_canvas(
+                                            ui,
+                                            &self.controller.graph,
+                                            self.controller.selection,
+                                            &mut self.canvas,
+                                        )
+                                    },
+                                )
+                                .inner;
+                            ui.separator();
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(260.0, height),
+                                egui::Layout::top_down(egui::Align::Min),
+                                |ui| self.inspector(ui, &mut logs),
+                            );
+                            self.handle_canvas_events(events, snapshot, &mut logs);
+                        });
                     });
                 });
             });
@@ -142,6 +149,7 @@ impl DataFlowUi {
             self.controller.dirty = true;
         }
         self.update_open(open);
+        self.delete_confirm(ctx, &mut logs);
 
         if let Some(mut menu) = self.add_menu.take() {
             let action = show_add_menu(ctx, &mut menu, snapshot);
@@ -197,99 +205,194 @@ impl DataFlowUi {
         ui.horizontal(|ui| {
             let name = ui.add(
                 egui::TextEdit::singleline(&mut self.name_edit)
-                    .desired_width(130.0)
-                    .hint_text("Graph name"),
+                    .desired_width(160.0)
+                    .hint_text("graph name"),
             );
             if name.lost_focus() && self.name_edit != self.controller.graph.name {
                 self.controller.graph.name.clone_from(&self.name_edit);
                 self.controller.dirty = true;
             }
-            if ui.button("Save").clicked() {
-                self.controller.graph.name.clone_from(&self.name_edit);
-                match self.store.save(&self.controller.graph) {
-                    Ok(()) => {
-                        self.controller.dirty = false;
-                        logs.push((
-                            LogLevel::Info,
-                            format!("Saved data flow '{}'", self.controller.graph.name),
-                        ));
-                    }
-                    Err(error) => logs.push((LogLevel::Error, error)),
-                }
-            }
-            ui.menu_button("Load", |ui| {
-                self.load_menu_names = self.store.list();
-                if self.load_menu_names.is_empty() {
-                    ui.weak("No saved data flows");
-                }
-                for graph_name in self.load_menu_names.clone() {
-                    let armed = self.armed_load.as_deref() == Some(&graph_name);
-                    let label = if armed {
-                        format!("Load {graph_name} - unsaved changes, click again")
-                    } else {
-                        graph_name.clone()
-                    };
-                    ui.horizontal(|ui| {
-                        if ui.button(label).clicked() {
-                            if self.controller.dirty && !armed {
-                                self.armed_load = Some(graph_name.clone());
-                            } else {
-                                match self.store.load(&graph_name) {
-                                    Ok(graph) => {
-                                        self.name_edit.clone_from(&graph.name);
-                                        self.replace_graph(graph);
-                                        self.armed_load = None;
-                                        ui.close();
-                                    }
-                                    Err(error) => logs.push((LogLevel::Error, error)),
-                                }
-                            }
-                        }
-                        if ui.small_button("Delete").clicked() {
-                            match self.store.delete(&graph_name) {
-                                Ok(()) => logs.push((
-                                    LogLevel::Info,
-                                    format!("Deleted data flow '{graph_name}'"),
-                                )),
-                                Err(error) => logs.push((LogLevel::Error, error)),
-                            }
-                        }
-                    });
-                }
-            });
-            if ui.button("New").clicked() {
-                if self.controller.dirty {
-                    logs.push((
-                        LogLevel::Warning,
-                        "Discarded unsaved data-flow changes".to_owned(),
-                    ));
-                }
-                self.name_edit = "untitled".to_owned();
-                self.replace_graph(Graph::new(&self.name_edit));
-                self.add_menu = None;
+            if icon_btn_enabled(ui, !self.name_edit.is_empty(), crate::icons::save(), "Save")
+                .clicked()
+            {
+                self.save(logs);
             }
             ui.separator();
-            if ui
-                .add_enabled(self.controller.can_undo(), egui::Button::new("Undo"))
+            if icon_btn_enabled(ui, self.controller.can_undo(), crate::icons::rotate_ccw(), "Undo")
                 .clicked()
             {
                 self.controller.undo();
             }
-            if ui
-                .add_enabled(self.controller.can_redo(), egui::Button::new("Redo"))
+            if icon_btn_enabled(ui, self.controller.can_redo(), crate::icons::rotate_cw(), "Redo")
                 .clicked()
             {
                 self.controller.redo();
             }
             ui.separator();
             ui.weak("Snapshot only - processes currently loaded data");
-            if ui.button("Publish").clicked() {
+            if icon_btn_enabled(ui, true, crate::icons::play(), "Run").clicked() {
                 self.controller.request_publish(Arc::clone(snapshot));
             }
             if self.controller.is_evaluating() {
                 ui.spinner();
             }
         });
+    }
+
+    fn library_drawer(&mut self, ui: &mut egui::Ui, logs: &mut Vec<(LogLevel, String)>) {
+        ui.horizontal(|ui| {
+            ui.strong("Data Flows");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("+ New").clicked() {
+                    self.new_graph(logs);
+                }
+            });
+        });
+        ui.separator();
+        let names = self.store.list();
+        if names.is_empty() {
+            ui.weak("No saved data flows.");
+            return;
+        }
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for name in names {
+                    ui.horizontal(|ui| {
+                        let selected = self.loaded_name.as_deref() == Some(name.as_str());
+                        if ui
+                            .selectable_label(selected, name.as_str())
+                            .on_hover_text("Load data flow")
+                            .clicked()
+                        {
+                            self.edit_named(&name, logs);
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.menu_button("...", |ui| {
+                                if ui.button("Edit").clicked() {
+                                    self.edit_named(&name, logs);
+                                    ui.close();
+                                }
+                                if ui.button("Duplicate").clicked() {
+                                    self.duplicate(&name, logs);
+                                    ui.close();
+                                }
+                                if ui.button("Remove").clicked() {
+                                    self.pending_delete = Some(name.clone());
+                                    ui.close();
+                                }
+                            });
+                        });
+                    });
+                }
+            });
+    }
+
+    fn save(&mut self, logs: &mut Vec<(LogLevel, String)>) {
+        self.controller.graph.name.clone_from(&self.name_edit);
+        match self.store.save(&self.controller.graph) {
+            Ok(()) => {
+                self.controller.dirty = false;
+                self.loaded_name = Some(self.controller.graph.name.clone());
+                logs.push((
+                    LogLevel::Info,
+                    format!("Saved data flow '{}'", self.controller.graph.name),
+                ));
+            }
+            Err(error) => logs.push((LogLevel::Error, error)),
+        }
+    }
+
+    fn new_graph(&mut self, logs: &mut Vec<(LogLevel, String)>) {
+        if self.controller.dirty {
+            logs.push((
+                LogLevel::Warning,
+                "Discarded unsaved data-flow changes".to_owned(),
+            ));
+        }
+        self.name_edit = "untitled".to_owned();
+        self.replace_graph(Graph::new(&self.name_edit));
+        self.loaded_name = None;
+        self.add_menu = None;
+    }
+
+    fn edit_named(&mut self, name: &str, logs: &mut Vec<(LogLevel, String)>) {
+        if self.controller.dirty {
+            logs.push((
+                LogLevel::Warning,
+                "Discarded unsaved data-flow changes".to_owned(),
+            ));
+        }
+        match self.store.load(name) {
+            Ok(graph) => {
+                self.name_edit.clone_from(&graph.name);
+                self.replace_graph(graph);
+                self.loaded_name = Some(name.to_owned());
+                self.add_menu = None;
+            }
+            Err(error) => logs.push((LogLevel::Error, error)),
+        }
+    }
+
+    fn duplicate(&mut self, name: &str, logs: &mut Vec<(LogLevel, String)>) {
+        match self.store.load(name) {
+            Ok(mut graph) => {
+                let copy = available_copy_name(&self.store.list(), name);
+                graph.name.clone_from(&copy);
+                match self.store.save(&graph) {
+                    Ok(()) => logs.push((
+                        LogLevel::Info,
+                        format!("Duplicated data flow '{name}' as '{copy}'"),
+                    )),
+                    Err(error) => logs.push((LogLevel::Error, error)),
+                }
+            }
+            Err(error) => logs.push((LogLevel::Error, error)),
+        }
+    }
+
+    fn delete_confirm(&mut self, ctx: &egui::Context, logs: &mut Vec<(LogLevel, String)>) {
+        let Some(name) = self.pending_delete.clone() else {
+            return;
+        };
+        let mut keep_open = true;
+        let mut decision: Option<bool> = None;
+        egui::Window::new("Delete data flow?")
+            .collapsible(false)
+            .default_pos(ctx.content_rect().center())
+            .pivot(egui::Align2::CENTER_CENTER)
+            .resizable(false)
+            .open(&mut keep_open)
+            .show(ctx, |ui| {
+                ui.label(format!("Delete \u{201c}{name}\u{201d}? This cannot be undone."));
+                ui.horizontal(|ui| {
+                    if ui.button("Delete").clicked() {
+                        decision = Some(true);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        decision = Some(false);
+                    }
+                });
+            });
+        if !keep_open {
+            decision = decision.or(Some(false));
+        }
+        match decision {
+            Some(true) => {
+                match self.store.delete(&name) {
+                    Ok(()) => {
+                        if self.loaded_name.as_deref() == Some(name.as_str()) {
+                            self.loaded_name = None;
+                        }
+                        logs.push((LogLevel::Info, format!("Deleted data flow '{name}'")));
+                    }
+                    Err(error) => logs.push((LogLevel::Error, error)),
+                }
+                self.pending_delete = None;
+            }
+            Some(false) => self.pending_delete = None,
+            None => {}
+        }
     }
 
     fn inspector(&mut self, ui: &mut egui::Ui, logs: &mut Vec<(LogLevel, String)>) {
@@ -662,6 +765,33 @@ fn disconnect_many_command(endpoints: Vec<(NodeId, u32)>) -> GraphCommand {
             .map(|(to, to_port)| GraphCommand::Disconnect { to, to_port })
             .collect(),
     )
+}
+
+fn icon_btn_enabled(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    icon: egui::ImageSource<'static>,
+    hover: &str,
+) -> egui::Response {
+    let image = egui::Image::new(icon)
+        .fit_to_exact_size(egui::vec2(16.0, 16.0))
+        .tint(ui.visuals().text_color());
+    ui.add_enabled(enabled, egui::Button::image(image))
+        .on_hover_text(hover)
+}
+
+fn available_copy_name(existing: &[String], name: &str) -> String {
+    let base = format!("{name}_copy");
+    if !existing.iter().any(|candidate| candidate == &base) {
+        return base;
+    }
+    for i in 2.. {
+        let candidate = format!("{base}_{i}");
+        if !existing.iter().any(|existing| existing == &candidate) {
+            return candidate;
+        }
+    }
+    unreachable!()
 }
 
 #[cfg(test)]
