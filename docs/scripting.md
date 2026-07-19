@@ -5,6 +5,9 @@ fields and topics** - derived signals that appear in the data browser and plot
 exactly like parsed log data. Scripts get the full embedded CPython interpreter
 (including `numpy`), so derived-field math is just numpy.
 
+For simple numeric derived signals, the [Data Flow editor](data_flow.md) is a
+visual alternative that does not require Python.
+
 This is an **optional, build-time feature**. It is off by default.
 
 - [Enabling scripting](#enabling-scripting)
