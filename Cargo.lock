@@ -989,6 +989,7 @@ dependencies = [
  "crossbeam-channel",
  "delog-cache",
  "delog-core",
+ "delog-flow",
  "delog-parsers",
  "delog-render",
  "delog-script",
@@ -999,6 +1000,7 @@ dependencies = [
  "egui_code_editor",
  "egui_dock",
  "egui_extras",
+ "egui_graph",
  "egui_tiles",
  "glam",
  "image",
@@ -1033,6 +1035,16 @@ dependencies = [
  "arrow",
  "criterion",
  "proptest",
+]
+
+[[package]]
+name = "delog-flow"
+version = "0.2.1"
+dependencies = [
+ "arrow",
+ "delog-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1340,6 +1352,13 @@ dependencies = [
  "wasm-bindgen",
  "web-sys",
  "winit",
+]
+
+[[package]]
+name = "egui_graph"
+version = "0.16.2"
+dependencies = [
+ "egui",
 ]
 
 [[package]]
@@ -4487,7 +4506,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
