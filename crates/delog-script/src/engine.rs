@@ -56,7 +56,7 @@ struct ActiveTransform {
     emitted_fields: HashMap<String, Vec<String>>,
 }
 
-fn format_pyerr(py: Python<'_>, err: &PyErr) -> String {
+pub(crate) fn format_pyerr(py: Python<'_>, err: &PyErr) -> String {
     let tb = err
         .traceback(py)
         .and_then(|t| t.format().ok())
@@ -91,10 +91,18 @@ pub enum ScriptCommand {
         source: String,
         path: PathBuf,
     },
+    /// Evaluate a data-flow script node's `flow(inputs)` function in a fresh
+    /// namespace and report the result directly on `reply`, bypassing the
+    /// `ScriptEvent` channel. Touches no snapshot state, `prev_sources`,
+    /// markers, or params.
+    EvalFlowScript {
+        request: delog_flow::script::ScriptRequest,
+        reply: std::sync::mpsc::SyncSender<Result<Vec<delog_flow::script::ScriptOutput>, String>>,
+    },
     Shutdown,
 }
 
-enum EngineCommand {
+pub(crate) enum EngineCommand {
     Script(ScriptCommand),
     ResetParserCancellation,
 }
@@ -485,6 +493,12 @@ impl ScriptEngine {
         Arc::clone(&self.params)
     }
 
+    /// A `ScriptNodeHost` for the data-flow evaluator: clones the command
+    /// sender so flow-script evaluation is dispatched onto this same worker.
+    pub fn flow_host(&self) -> crate::flow::EngineFlowHost {
+        crate::flow::EngineFlowHost::new(self.tx.clone())
+    }
+
     #[cfg(test)]
     pub fn recv_blocking(&self) -> ScriptEvent {
         self.events.recv().expect("worker alive")
@@ -502,7 +516,7 @@ impl ScriptEngine {
     }
 }
 
-fn request_python_interrupt() {
+pub(crate) fn request_python_interrupt() {
     // Both mechanisms, for coverage: PyErr_SetInterrupt trips the pending-SIGINT
     // flag (needs a main-thread SIGINT handler, i.e. the real app); Py_AddPendingCall
     // injects an eval-loop callback checked at every bytecode boundary in any thread
@@ -1263,6 +1277,10 @@ fn handle_command(
                 let matches = complete_line(globals, &text);
                 let _ = evt_tx.send(ScriptEvent::Completions { seq, matches });
             }
+            ScriptCommand::EvalFlowScript { request, reply } => {
+                let result = crate::flow::eval_flow_script(&request);
+                let _ = reply.send(result);
+            }
         }
     }
     false
@@ -1559,17 +1577,17 @@ fn build_completer<'py>(
     completer_cls.call1((globals,))
 }
 
+/// Serializes tests (in this module and `crate::flow`) that spawn a
+/// `ScriptEngine`: they share one process-global embedded CPython interpreter
+/// (and its global `sys.stdout`), so they must not run concurrently.
+/// `unwrap_or_else(into_inner)` ignores poisoning from a panicking test so one
+/// failure doesn't cascade.
+#[cfg(test)]
+pub(crate) static ENGINE_LOCK: Mutex<()> = Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use std::sync::Mutex;
-
-    /// Serializes tests that spawn a `ScriptEngine`: they share one process-global
-    /// embedded CPython interpreter (and its global `sys.stdout`), so they must not
-    /// run concurrently. `unwrap_or_else(into_inner)` ignores poisoning from a
-    /// panicking test so one failure doesn't cascade.
-    static ENGINE_LOCK: Mutex<()> = Mutex::new(());
 
     use arrow::array::{ArrayRef, Float64Array, Int64Array};
     use arrow::datatypes::DataType;

@@ -22,6 +22,9 @@ pub mod emit;
 pub mod engine;
 
 #[cfg(feature = "python")]
+pub mod flow;
+
+#[cfg(feature = "python")]
 pub mod live;
 
 #[cfg(feature = "python")]
