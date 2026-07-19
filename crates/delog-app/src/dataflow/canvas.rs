@@ -328,9 +328,31 @@ fn show_node_contents(
             let offset_changed = ui.add(egui::DragValue::new(offset).prefix("+ ")).changed();
             multiplier_changed || offset_changed
         }
+        #[cfg(feature = "scripting")]
+        NodeKind::Script(spec) => {
+            ui.weak(code_summary_line(&spec.code));
+            false
+        }
         _ => false,
     };
     result
+}
+
+/// A short, single-line summary of a script's code shown in the node body;
+/// full editing happens in the inspector.
+#[cfg(feature = "scripting")]
+fn code_summary_line(code: &str) -> String {
+    match code.lines().find(|line| !line.trim().is_empty()) {
+        Some(line) => {
+            let line = line.trim();
+            if line.chars().count() > 40 {
+                format!("{}\u{2026}", line.chars().take(40).collect::<String>())
+            } else {
+                line.to_owned()
+            }
+        }
+        None => "(empty script)".to_owned(),
+    }
 }
 
 fn handle_edge_event(
