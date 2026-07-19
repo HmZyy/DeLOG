@@ -70,6 +70,8 @@ pub struct DataFlowController {
     publication_rx: mpsc::Receiver<PublicationOutcome>,
     publications_in_flight: usize,
     cache: Arc<Mutex<EvalCache>>,
+    #[cfg(feature = "scripting")]
+    script_host: Option<Arc<dyn delog_flow::script::ScriptNodeHost + Sync>>,
 }
 
 impl DataFlowController {
@@ -108,13 +110,29 @@ impl DataFlowController {
             publication_rx,
             publications_in_flight: 0,
             cache: Arc::new(Mutex::new(EvalCache::default())),
+            #[cfg(feature = "scripting")]
+            script_host: None,
         }
     }
 
     pub fn replace_graph(&mut self, graph: Graph) {
         let published = Arc::clone(&self.published);
         let latest_generation = Arc::clone(&self.latest_generation);
+        #[cfg(feature = "scripting")]
+        let script_host = self.script_host.clone();
         *self = Self::with_publication_state(graph, published, latest_generation);
+        #[cfg(feature = "scripting")]
+        {
+            self.script_host = script_host;
+        }
+    }
+
+    /// Sets (or clears) the host used to run `NodeKind::Script` nodes. The app
+    /// layer refreshes this before each eval/publish request based on whether
+    /// the graph currently contains a script node.
+    #[cfg(feature = "scripting")]
+    pub fn set_script_host(&mut self, host: Option<delog_script::flow::EngineFlowHost>) {
+        self.script_host = host.map(|host| Arc::new(host) as Arc<dyn delog_flow::script::ScriptNodeHost + Sync>);
     }
 
     pub fn apply(&mut self, command: GraphCommand) -> Result<(), String> {
@@ -252,6 +270,8 @@ impl DataFlowController {
         self.in_flight = true;
         let tx = self.tx.clone();
         let cache = Arc::clone(&self.cache);
+        #[cfg(feature = "scripting")]
+        let script_host = self.script_host.clone();
         std::thread::spawn(move || {
             let mut targets = request
                 .graph
@@ -270,6 +290,10 @@ impl DataFlowController {
                 &targets,
                 &cancel,
                 &mut cache.lock().unwrap(),
+                #[cfg(feature = "scripting")]
+                script_host
+                    .as_deref()
+                    .map(|host| host as &dyn delog_flow::script::ScriptNodeHost),
             );
             let previews = report
                 .values
@@ -421,6 +445,8 @@ mod tests {
     use std::sync::Arc;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
+    #[cfg(feature = "scripting")]
+    use std::collections::VecDeque;
 
     use arrow::array::{ArrayRef, Float64Array, Int64Array};
     use arrow::datatypes::DataType;
@@ -855,6 +881,81 @@ mod tests {
 
         drop(sender);
         ingest_thread.join().unwrap();
+    }
+
+    #[cfg(feature = "scripting")]
+    struct FakeScriptHost {
+        responses: Mutex<VecDeque<Result<Vec<delog_flow::script::ScriptOutput>, String>>>,
+    }
+
+    #[cfg(feature = "scripting")]
+    impl FakeScriptHost {
+        fn new(responses: Vec<Result<Vec<delog_flow::script::ScriptOutput>, String>>) -> Self {
+            Self {
+                responses: Mutex::new(responses.into()),
+            }
+        }
+    }
+
+    #[cfg(feature = "scripting")]
+    impl delog_flow::script::ScriptNodeHost for FakeScriptHost {
+        fn eval(
+            &self,
+            _request: delog_flow::script::ScriptRequest,
+            _cancel: &AtomicBool,
+        ) -> Result<Vec<delog_flow::script::ScriptOutput>, String> {
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("fake host ran out of scripted responses")
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "scripting")]
+    fn script_node_preview_arrives_per_output_port() {
+        use delog_flow::script::{ScriptOutput, ScriptOutputSpec, ScriptSpec};
+
+        let mut graph = Graph::new("g");
+        let node = add_node(
+            &mut graph,
+            NodeKind::Script(ScriptSpec {
+                name: "Solo".to_owned(),
+                inputs: vec![],
+                outputs: vec![
+                    ScriptOutputSpec {
+                        name: "a".to_owned(),
+                        unit: None,
+                    },
+                    ScriptOutputSpec {
+                        name: "b".to_owned(),
+                        unit: None,
+                    },
+                ],
+                code: "def flow(inputs):\n    return {}\n".to_owned(),
+            }),
+        );
+        let mut controller = DataFlowController::new(graph);
+        controller.selection = Some(node);
+        controller.script_host = Some(Arc::new(FakeScriptHost::new(vec![Ok(vec![
+            ScriptOutput {
+                times: Some(vec![1, 2, 3]),
+                values: vec![1.0, 2.0, 3.0],
+                unit: None,
+            },
+            ScriptOutput {
+                times: Some(vec![1, 2, 3]),
+                values: vec![4.0, 5.0, 6.0],
+                unit: None,
+            },
+        ])])));
+        let (sender, _receiver) = ingest_channel();
+        controller.request_eval(snapshot());
+        wait_for(&mut controller, &sender);
+
+        assert_eq!(controller.preview_for(node, 0).unwrap().mean, 2.0);
+        assert_eq!(controller.preview_for(node, 1).unwrap().mean, 5.0);
     }
 
     #[test]
