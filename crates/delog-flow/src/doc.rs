@@ -134,14 +134,16 @@ pub fn from_json(value: &Value) -> Result<Graph, DocError> {
             .ok_or_else(|| invalid("unknown destination node"))?;
         if !matches!(from.kind, NodeKind::Unknown(_)) && !matches!(to.kind, NodeKind::Unknown(_)) {
             graph
-                .connect(edge.from, edge.to, edge.to_port)
+                .connect(edge.from, edge.from_port, edge.to, edge.to_port)
                 .map_err(|error| invalid(&format!("{error:?}")))?;
             continue;
         }
         if edge.from == edge.to {
             return Err(invalid("self loop"));
         }
-        if !matches!(from.kind, NodeKind::Unknown(_)) && from.kind.output().is_none() {
+        if !matches!(from.kind, NodeKind::Unknown(_))
+            && from.kind.outputs().get(edge.from_port as usize).is_none()
+        {
             return Err(invalid("source node has no output"));
         }
         if !matches!(to.kind, NodeKind::Unknown(_))
@@ -331,8 +333,8 @@ mod tests {
                 }],
             }),
         });
-        g.connect(d, a, 0).unwrap();
-        g.connect(a, o, 0).unwrap();
+        g.connect(d, 0, a, 0).unwrap();
+        g.connect(a, 0, o, 0).unwrap();
         g.viewport = Viewport {
             offset: [5.0, -3.0],
             zoom: 1.5,
