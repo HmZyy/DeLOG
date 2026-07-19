@@ -58,6 +58,7 @@ pub struct DataFlowUi {
     name_edit: String,
     loaded_name: Option<String>,
     pending_delete: Option<String>,
+    canvas_layers: Vec<egui::LayerId>,
 }
 
 fn bounded_window_body<R>(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui) -> R) -> R {
@@ -90,6 +91,7 @@ impl DataFlowUi {
             name_edit: "untitled".to_owned(),
             loaded_name: None,
             pending_delete: None,
+            canvas_layers: Vec::new(),
         }
     }
 
@@ -101,12 +103,15 @@ impl DataFlowUi {
     ) -> Vec<(LogLevel, String)> {
         let mut logs = Vec::new();
         let mut open = self.open;
+        let window_layer = self.reassert_canvas_sublayers(ctx);
         egui::Window::new("Data Flow")
             .open(&mut open)
             .default_size([980.0, 640.0])
             .min_size([720.0, 420.0])
             .show(ctx, |ui| {
                 bounded_window_body(ui, |ui| {
+                    egui::Panel::bottom("dataflow_footer")
+                        .show_inside(ui, |ui| self.footer(ui));
                     egui::Panel::left("dataflow_library_drawer")
                         .resizable(true)
                         .default_size(180.0)
@@ -144,6 +149,7 @@ impl DataFlowUi {
                     });
                 });
             });
+        self.canvas_layers = descendant_layers(ctx, window_layer);
         if self.controller.graph.viewport != self.canvas.viewport {
             self.controller.graph.viewport = self.canvas.viewport;
             self.controller.dirty = true;
@@ -229,13 +235,31 @@ impl DataFlowUi {
                 self.controller.redo();
             }
             ui.separator();
-            ui.weak("Snapshot only - processes currently loaded data");
             if icon_btn_enabled(ui, true, crate::icons::play(), "Run").clicked() {
                 self.controller.request_publish(Arc::clone(snapshot));
             }
+        });
+    }
+
+    // egui only highlights the title bar of the layer that is `ctx.top_layer_id()`.
+    // egui_graph paints the canvas in sublayers that egui re-orders above the
+    // window each frame, so the window is never seen as topmost. Re-parent the
+    // previous frame's canvas layers under the window so egui excludes them from
+    // the "top layer" search and keeps the active-window highlight.
+    fn reassert_canvas_sublayers(&self, ctx: &egui::Context) -> egui::LayerId {
+        let window_layer = egui::LayerId::new(egui::Order::Middle, egui::Id::new("Data Flow"));
+        for child in &self.canvas_layers {
+            ctx.set_sublayer(window_layer, *child);
+        }
+        window_layer
+    }
+
+    fn footer(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
             if self.controller.is_evaluating() {
                 ui.spinner();
             }
+            ui.weak("Snapshot only - processes currently loaded data");
         });
     }
 
@@ -269,10 +293,6 @@ impl DataFlowUi {
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.menu_button("...", |ui| {
-                                if ui.button("Edit").clicked() {
-                                    self.edit_named(&name, logs);
-                                    ui.close();
-                                }
                                 if ui.button("Duplicate").clicked() {
                                     self.duplicate(&name, logs);
                                     ui.close();
@@ -767,6 +787,22 @@ fn disconnect_many_command(endpoints: Vec<(NodeId, u32)>) -> GraphCommand {
     )
 }
 
+fn descendant_layers(ctx: &egui::Context, root: egui::LayerId) -> Vec<egui::LayerId> {
+    ctx.memory(|memory| {
+        let areas = memory.areas();
+        let mut out: Vec<egui::LayerId> = Vec::new();
+        let mut stack: Vec<egui::LayerId> = areas.child_layers(root).collect();
+        while let Some(layer) = stack.pop() {
+            if out.contains(&layer) {
+                continue;
+            }
+            out.push(layer);
+            stack.extend(areas.child_layers(layer));
+        }
+        out
+    })
+}
+
 fn icon_btn_enabled(
     ui: &mut egui::Ui,
     enabled: bool,
@@ -852,6 +888,50 @@ mod tests {
             let _ = flow.show(ui.ctx(), snapshot, sender);
         });
         ctx.memory(|memory| memory.area_rect(egui::Id::new("Data Flow")).unwrap())
+    }
+
+    #[test]
+    fn active_data_flow_window_is_the_top_layer_for_title_highlight() {
+        let ctx = egui::Context::default();
+        let snapshot = Arc::new(StoreSnapshot::empty());
+        let (sender, _receiver) = ingest_channel();
+        let mut flow = DataFlowUi::new();
+        flow.open = true;
+        let id = flow.controller.graph.alloc_id();
+        flow.controller.graph.insert_node(Node {
+            id,
+            pos: [0.0, 0.0],
+            kind: NodeKind::Add,
+        });
+        flow.controller.selection = Some(id);
+        for _ in 0..4 {
+            let _ = render_data_flow_frame(&ctx, &mut flow, &snapshot, &sender, vec![]);
+        }
+        let window_layer = egui::LayerId::new(egui::Order::Middle, egui::Id::new("Data Flow"));
+        assert!(
+            !flow.canvas_layers.is_empty(),
+            "canvas should paint sublayers that would otherwise shadow the window"
+        );
+
+        // The window's title highlight is decided at its `begin`, right after the
+        // re-parenting, mid-pass. Observe `top_layer_id()` at that same moment.
+        let mut observed = None;
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1_600.0, 900.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input, |ui| {
+            let _ = flow.reassert_canvas_sublayers(ui.ctx());
+            observed = ui.ctx().top_layer_id();
+        });
+        assert_eq!(
+            observed,
+            Some(window_layer),
+            "re-parenting canvas sublayers must leave the window as the top layer so egui keeps the active title highlight"
+        );
     }
 
     #[test]
