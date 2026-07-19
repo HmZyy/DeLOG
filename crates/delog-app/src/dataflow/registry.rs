@@ -1,0 +1,147 @@
+use delog_core::align::AlignMode;
+use delog_flow::graph::{NodeKind, OutputFieldSpec, OutputSpec};
+
+use crate::fuzzy::fuzzy_match_score;
+
+pub const ADD_DATA_INDEX: usize = usize::MAX;
+
+pub struct NodeTemplate {
+    pub name: &'static str,
+    pub category: &'static str,
+    pub aliases: &'static [&'static str],
+    pub make: fn() -> NodeKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MenuEntry {
+    pub index: usize,
+    pub score: u32,
+}
+
+pub fn templates() -> &'static [NodeTemplate] {
+    static TEMPLATES: &[NodeTemplate] = &[
+        NodeTemplate {
+            name: "Constant",
+            category: "Data",
+            aliases: &["const", "number", "value"],
+            make: || NodeKind::Constant { value: 0.0 },
+        },
+        NodeTemplate {
+            name: "Add",
+            category: "Math",
+            aliases: &["+", "plus", "sum"],
+            make: || NodeKind::Add,
+        },
+        NodeTemplate {
+            name: "Subtract",
+            category: "Math",
+            aliases: &["-", "minus"],
+            make: || NodeKind::Subtract,
+        },
+        NodeTemplate {
+            name: "Multiply",
+            category: "Math",
+            aliases: &["*", "x", "times"],
+            make: || NodeKind::Multiply,
+        },
+        NodeTemplate {
+            name: "Divide",
+            category: "Math",
+            aliases: &["/", "over"],
+            make: || NodeKind::Divide,
+        },
+        NodeTemplate {
+            name: "Scale / Offset",
+            category: "Math",
+            aliases: &["scale", "offset", "gain"],
+            make: || NodeKind::ScaleOffset {
+                multiplier: 1.0,
+                offset: 0.0,
+            },
+        },
+        NodeTemplate {
+            name: "Align to Timeline",
+            category: "Time",
+            aliases: &["align", "resample-to", "interp"],
+            make: || NodeKind::Align {
+                mode: AlignMode::Prev,
+            },
+        },
+        NodeTemplate {
+            name: "Derived Topic Output",
+            category: "Output",
+            aliases: &["output", "publish", "emit"],
+            make: || {
+                NodeKind::Output(OutputSpec {
+                    topic: "derived".to_owned(),
+                    fields: vec![OutputFieldSpec {
+                        name: "out".to_owned(),
+                        unit: None,
+                    }],
+                })
+            },
+        },
+    ];
+    TEMPLATES
+}
+
+pub fn search_templates(query: &str) -> Vec<MenuEntry> {
+    if query.trim().is_empty() {
+        return templates()
+            .iter()
+            .enumerate()
+            .map(|(index, _)| MenuEntry { index, score: 0 })
+            .collect();
+    }
+    let mut entries = templates()
+        .iter()
+        .enumerate()
+        .filter_map(|(index, template)| {
+            let mut score = fuzzy_match_score(query, template.name);
+            for alias in template.aliases {
+                let alias_score = if query.trim().eq_ignore_ascii_case(alias) {
+                    Some(0)
+                } else {
+                    fuzzy_match_score(query, alias)
+                };
+                score = match (score, alias_score) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (None, hit) | (hit, None) => hit,
+                };
+            }
+            score.map(|score| MenuEntry { index, score })
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|entry| (entry.score, entry.index));
+    entries
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn symbol_aliases_rank_their_operation_first() {
+        for (symbol, expected) in [
+            ("+", "Add"),
+            ("-", "Subtract"),
+            ("*", "Multiply"),
+            ("/", "Divide"),
+        ] {
+            let hits = search_templates(symbol);
+            assert_eq!(templates()[hits[0].index].name, expected, "for {symbol}");
+        }
+    }
+
+    #[test]
+    fn fuzzy_matches_rank_substrings_before_subsequences() {
+        let hits = search_templates("ali");
+        assert_eq!(templates()[hits[0].index].name, "Align to Timeline");
+    }
+
+    #[test]
+    fn empty_query_lists_everything_grouped_by_category() {
+        let hits = search_templates("");
+        assert_eq!(hits.len(), templates().len());
+    }
+}
