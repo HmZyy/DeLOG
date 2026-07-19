@@ -81,6 +81,25 @@ pub fn templates() -> &'static [NodeTemplate] {
                 })
             },
         },
+        #[cfg(feature = "scripting")]
+        NodeTemplate {
+            name: "Python Script",
+            category: "Script",
+            aliases: &["python", "py", "script", "code"],
+            make: || {
+                NodeKind::Script(delog_flow::script::ScriptSpec {
+                    name: "Script".to_owned(),
+                    inputs: vec![delog_flow::script::ScriptInputSpec {
+                        name: "a".to_owned(),
+                    }],
+                    outputs: vec![delog_flow::script::ScriptOutputSpec {
+                        name: "out".to_owned(),
+                        unit: None,
+                    }],
+                    code: "def flow(inputs):\n    return {\"out\": inputs.a.v}\n".to_owned(),
+                })
+            },
+        },
     ];
     TEMPLATES
 }
@@ -143,5 +162,12 @@ mod tests {
     fn empty_query_lists_everything_grouped_by_category() {
         let hits = search_templates("");
         assert_eq!(hits.len(), templates().len());
+    }
+
+    #[test]
+    #[cfg(feature = "scripting")]
+    fn python_alias_ranks_the_script_template_first() {
+        let hits = search_templates("py");
+        assert_eq!(templates()[hits[0].index].name, "Python Script");
     }
 }

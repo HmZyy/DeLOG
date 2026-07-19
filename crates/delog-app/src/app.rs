@@ -2927,6 +2927,18 @@ impl eframe::App for DelogApp {
         }
 
         if self.dataflow.open {
+            #[cfg(feature = "scripting")]
+            {
+                let host = self.dataflow.has_script_node().then(|| {
+                    self.scripts
+                        .engine_flow_host(
+                            self.session.store(),
+                            self.session.ingest_sender(),
+                            Arc::clone(self.session.metrics()),
+                        )
+                });
+                self.dataflow.set_script_host(host);
+            }
             let sender = self.session.ingest_sender();
             let logs = self.dataflow.show(ui.ctx(), &snapshot, &sender);
             for (level, message) in logs {

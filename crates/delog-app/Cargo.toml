@@ -25,7 +25,7 @@ winresource = { workspace = true }
 # "without-scripting" feature cannot subtract — disabling the default is the
 # opt-out).
 default = ["scripting"]
-scripting = ["dep:delog-script", "delog-script/python", "dep:egui_code_editor"]
+scripting = ["dep:delog-script", "delog-script/python", "dep:egui_code_editor", "delog-flow/scripting"]
 bundled-python = ["scripting"]
 
 [dependencies]

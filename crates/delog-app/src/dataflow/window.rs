@@ -13,6 +13,11 @@ use super::registry::{ADD_DATA_INDEX, search_templates, templates};
 use super::store::GraphStore;
 use crate::logging::LogLevel;
 
+#[cfg(feature = "scripting")]
+use delog_flow::script::{ScriptInputSpec, ScriptOutputSpec};
+#[cfg(feature = "scripting")]
+use egui_code_editor::{CodeEditor, ColorTheme, Syntax};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AddMenuMode {
     Templates,
@@ -49,6 +54,13 @@ enum AddAction {
     Close,
 }
 
+#[cfg(feature = "scripting")]
+struct ScriptEditorState {
+    node: NodeId,
+    baseline: String,
+    buffer: String,
+}
+
 pub struct DataFlowUi {
     pub open: bool,
     controller: DataFlowController,
@@ -59,6 +71,8 @@ pub struct DataFlowUi {
     loaded_name: Option<String>,
     pending_delete: Option<String>,
     canvas_layers: Vec<egui::LayerId>,
+    #[cfg(feature = "scripting")]
+    script_editor: Option<ScriptEditorState>,
 }
 
 fn bounded_window_body<R>(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui) -> R) -> R {
@@ -92,7 +106,25 @@ impl DataFlowUi {
             loaded_name: None,
             pending_delete: None,
             canvas_layers: Vec::new(),
+            #[cfg(feature = "scripting")]
+            script_editor: None,
         }
+    }
+
+    /// Whether the graph currently contains a script node — the app layer
+    /// uses this to decide whether the Python engine needs to be running.
+    #[cfg(feature = "scripting")]
+    pub fn has_script_node(&self) -> bool {
+        self.controller
+            .graph
+            .nodes
+            .iter()
+            .any(|node| matches!(node.kind, NodeKind::Script(_)))
+    }
+
+    #[cfg(feature = "scripting")]
+    pub fn set_script_host(&mut self, host: Option<delog_script::flow::EngineFlowHost>) {
+        self.controller.set_script_host(host);
     }
 
     pub fn show(
@@ -494,19 +526,130 @@ impl DataFlowUi {
                     });
                 }
             }
+            #[cfg(feature = "scripting")]
+            NodeKind::Script(spec) => {
+                ui.horizontal(|ui| {
+                    ui.label("Name");
+                    ui.text_edit_singleline(&mut spec.name);
+                });
+
+                ui.separator();
+                ui.strong("Inputs");
+                let mut remove_input = None;
+                for (index, input) in spec.inputs.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.text_edit_singleline(&mut input.name);
+                        if ui.button("Remove").clicked() {
+                            remove_input = Some(index);
+                        }
+                    });
+                }
+                if let Some(index) = remove_input {
+                    structural_edit = Some(GraphCommand::RemoveScriptInput { id, index });
+                }
+                if ui.button("Add input").clicked() {
+                    structural_edit = Some(GraphCommand::InsertScriptInput {
+                        id,
+                        index: spec.inputs.len(),
+                        input: ScriptInputSpec {
+                            name: format!("in_{}", spec.inputs.len() + 1),
+                        },
+                        connection: None,
+                    });
+                }
+
+                ui.separator();
+                ui.strong("Outputs");
+                let mut remove_output = None;
+                for (index, output) in spec.outputs.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.text_edit_singleline(&mut output.name);
+                        let mut unit = output.unit.clone().unwrap_or_default();
+                        if ui
+                            .add(egui::TextEdit::singleline(&mut unit).hint_text("unit"))
+                            .changed()
+                        {
+                            output.unit = (!unit.is_empty()).then_some(unit);
+                        }
+                        if ui.button("Remove").clicked() {
+                            remove_output = Some(index);
+                        }
+                    });
+                }
+                if let Some(index) = remove_output {
+                    structural_edit = Some(GraphCommand::RemoveScriptOutput { id, index });
+                }
+                if ui.button("Add output").clicked() {
+                    structural_edit = Some(GraphCommand::InsertScriptOutput {
+                        id,
+                        index: spec.outputs.len(),
+                        output: ScriptOutputSpec {
+                            name: format!("out_{}", spec.outputs.len() + 1),
+                            unit: None,
+                        },
+                    });
+                }
+
+                ui.separator();
+                ui.strong("Code");
+                let buffer = script_editor_buffer(&mut self.script_editor, id, &spec.code);
+                CodeEditor::default()
+                    .id_source(format!("dataflow-script-code-{}", id.0))
+                    .with_rows(14)
+                    .with_theme(ColorTheme::GITHUB_DARK)
+                    .show(ui, buffer, &Syntax::python());
+
+                if ui.button("Apply").clicked() {
+                    let mut applied = spec.clone();
+                    applied.code = self
+                        .script_editor
+                        .as_ref()
+                        .map_or_else(|| spec.code.clone(), |state| state.buffer.clone());
+                    structural_edit = Some(GraphCommand::SetKind {
+                        id,
+                        kind: NodeKind::Script(applied),
+                    });
+                }
+
+                ui.separator();
+                ui.strong("Preview");
+                for (index, output) in spec.outputs.iter().enumerate() {
+                    if let Some(preview) = self.controller.preview_for(id, index) {
+                        ui.label(output.name.as_str());
+                        egui::Grid::new(("dataflow-script-preview", id.0, index))
+                            .num_columns(2)
+                            .show(ui, |ui| {
+                                stat_row(ui, "Count", preview.count);
+                                stat_row(ui, "NaN", preview.nan_count);
+                                stat_row(ui, "Min", preview.min);
+                                stat_row(ui, "Max", preview.max);
+                                stat_row(ui, "Mean", preview.mean);
+                                stat_row(ui, "Stddev", preview.stddev);
+                                stat_row(ui, "Start (us)", preview.t0_us);
+                                stat_row(ui, "End (us)", preview.t1_us);
+                            });
+                    }
+                }
+            }
             NodeKind::Add
             | NodeKind::Subtract
             | NodeKind::Multiply
             | NodeKind::Divide
             | NodeKind::Unknown(_) => {}
         }
+        #[cfg(feature = "scripting")]
+        let has_own_preview_section = matches!(node.kind, NodeKind::Script(_));
+        #[cfg(not(feature = "scripting"))]
+        let has_own_preview_section = false;
         if let Some(command) = structural_edit {
             self.apply(command, logs);
         } else if edited != node.kind {
             self.apply(GraphCommand::SetKind { id, kind: edited }, logs);
         }
 
-        if let Some(preview) = self.controller.preview_for(id, 0) {
+        if !has_own_preview_section
+            && let Some(preview) = self.controller.preview_for(id, 0)
+        {
             ui.separator();
             ui.strong("Preview");
             egui::Grid::new(("dataflow-preview", id.0))
@@ -618,6 +761,29 @@ fn show_selector(ui: &mut egui::Ui, selector: &FieldSelector) {
         ui.label(format!("Instance: {instance}"));
     }
     ui.label(format!("Field: {}", selector.field));
+}
+
+/// Resets the code-editor buffer to `code` when the selected node changes or
+/// when `code` moves out from under the buffer (undo/redo, load, or the
+/// Apply button's own commit reconciling on the next frame).
+#[cfg(feature = "scripting")]
+fn script_editor_buffer<'a>(
+    state: &'a mut Option<ScriptEditorState>,
+    id: NodeId,
+    code: &str,
+) -> &'a mut String {
+    let needs_reset = match state {
+        Some(existing) => existing.node != id || existing.baseline != code,
+        None => true,
+    };
+    if needs_reset {
+        *state = Some(ScriptEditorState {
+            node: id,
+            baseline: code.to_owned(),
+            buffer: code.to_owned(),
+        });
+    }
+    &mut state.as_mut().expect("just reset if absent").buffer
 }
 
 fn stat_row(ui: &mut egui::Ui, label: &str, value: impl std::fmt::Display) {
@@ -853,7 +1019,8 @@ mod tests {
     use super::*;
 
     fn node_kinds_that_must_not_expand_the_window() -> Vec<NodeKind> {
-        vec![
+        #[allow(unused_mut)]
+        let mut kinds = vec![
             NodeKind::DataField(FieldSelector {
                 source: Some("source-with-a-deliberately-long-display-name".to_owned()),
                 topic: "topic_with_a_deliberately_long_name".to_owned(),
@@ -880,7 +1047,20 @@ mod tests {
                 }],
             }),
             NodeKind::Unknown(serde_json::json!({"type": "future_node"})),
-        ]
+        ];
+        #[cfg(feature = "scripting")]
+        kinds.push(NodeKind::Script(delog_flow::script::ScriptSpec {
+            name: "script_with_a_deliberately_long_display_name".to_owned(),
+            inputs: vec![ScriptInputSpec {
+                name: "input_with_a_deliberately_long_name".to_owned(),
+            }],
+            outputs: vec![ScriptOutputSpec {
+                name: "output_with_a_deliberately_long_name".to_owned(),
+                unit: Some("unit_with_a_deliberately_long_name".to_owned()),
+            }],
+            code: "def flow(inputs):\n    return {\"output_with_a_deliberately_long_name\": inputs.input_with_a_deliberately_long_name.v}\n".to_owned(),
+        }));
+        kinds
     }
 
     fn render_data_flow_frame(
