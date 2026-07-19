@@ -31,7 +31,7 @@ pub struct PreviewStats {
 pub struct EvalOutcome {
     pub generation: u64,
     pub graph_name: String,
-    pub previews: HashMap<NodeId, PreviewStats>,
+    pub previews: HashMap<NodeId, Vec<Option<PreviewStats>>>,
     pub diagnostics: Vec<Diagnostic>,
     pub publish: Option<Result<Vec<PendingTopic>, Vec<Diagnostic>>>,
 }
@@ -207,8 +207,13 @@ impl DataFlowController {
             .collect()
     }
 
-    pub fn preview_for(&self, node: NodeId) -> Option<&PreviewStats> {
-        self.last_outcome.as_ref()?.previews.get(&node)
+    pub fn preview_for(&self, node: NodeId, port: usize) -> Option<&PreviewStats> {
+        self.last_outcome
+            .as_ref()?
+            .previews
+            .get(&node)?
+            .get(port)?
+            .as_ref()
     }
 
     pub fn is_evaluating(&self) -> bool {
@@ -269,9 +274,17 @@ impl DataFlowController {
             let previews = report
                 .values
                 .iter()
-                .filter_map(|(&node, value)| match value {
-                    Value::Signal(signal) => Some((node, preview_stats(signal))),
-                    Value::Scalar(_) => None,
+                .map(|(&node, values)| {
+                    (
+                        node,
+                        values
+                            .iter()
+                            .map(|value| match value {
+                                Value::Signal(signal) => Some(preview_stats(signal)),
+                                Value::Scalar(_) => None,
+                            })
+                            .collect::<Vec<Option<PreviewStats>>>(),
+                    )
                 })
                 .collect();
             let publish = request
@@ -478,7 +491,7 @@ mod tests {
                 offset: 0.0,
             },
         );
-        graph.connect(input, scale, 0).unwrap();
+        graph.connect(input, 0, scale, 0).unwrap();
         (graph, scale)
     }
 
@@ -525,7 +538,7 @@ mod tests {
         let (sender, _receiver) = ingest_channel();
         controller.request_eval(snapshot());
         wait_for(&mut controller, &sender);
-        let preview = controller.preview_for(scale).unwrap();
+        let preview = controller.preview_for(scale, 0).unwrap();
         assert_eq!(preview.count, 3);
         assert_eq!(preview.mean, 4.0);
         assert!(controller.diagnostics_for(scale).is_empty());
@@ -697,7 +710,7 @@ mod tests {
                 }],
             }),
         );
-        graph.connect(input, output, 0).unwrap();
+        graph.connect(input, 0, output, 0).unwrap();
         let mut controller = DataFlowController::new(graph);
         let (sender, receiver) = ingest_channel();
         let (observed_tx, observed_rx) = mpsc::channel();
@@ -792,7 +805,7 @@ mod tests {
                 }],
             }),
         );
-        graph.connect(input, output, 0).unwrap();
+        graph.connect(input, 0, output, 0).unwrap();
         let mut controller = DataFlowController::new(graph.clone());
         let (sender, receiver) = ingest_channel();
         let (observed_tx, observed_rx) = mpsc::channel();
@@ -862,6 +875,6 @@ mod tests {
             .unwrap();
         controller.request_eval(snapshot());
         wait_for(&mut controller, &sender);
-        assert_eq!(controller.preview_for(scale).unwrap().mean, 6.0);
+        assert_eq!(controller.preview_for(scale, 0).unwrap().mean, 6.0);
     }
 }

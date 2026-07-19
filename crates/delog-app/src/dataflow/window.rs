@@ -506,7 +506,7 @@ impl DataFlowUi {
             self.apply(GraphCommand::SetKind { id, kind: edited }, logs);
         }
 
-        if let Some(preview) = self.controller.preview_for(id) {
+        if let Some(preview) = self.controller.preview_for(id, 0) {
             ui.separator();
             ui.strong("Preview");
             egui::Grid::new(("dataflow-preview", id.0))
@@ -540,14 +540,29 @@ impl DataFlowUi {
                     let _ = from;
                     self.apply(GraphCommand::MoveNode { id, to }, logs);
                 }
-                CanvasEvent::Connect { from, to, to_port } => {
-                    match self.controller.graph.check_connect(from, to, to_port) {
-                        Ok(()) => self.apply(GraphCommand::Connect { from, to, to_port }, logs),
-                        Err(error) => {
-                            logs.push((LogLevel::Error, format!("Cannot connect nodes: {error:?}")))
-                        }
+                CanvasEvent::Connect {
+                    from,
+                    from_port,
+                    to,
+                    to_port,
+                } => match self
+                    .controller
+                    .graph
+                    .check_connect(from, from_port, to, to_port)
+                {
+                    Ok(()) => self.apply(
+                        GraphCommand::Connect {
+                            from,
+                            from_port,
+                            to,
+                            to_port,
+                        },
+                        logs,
+                    ),
+                    Err(error) => {
+                        logs.push((LogLevel::Error, format!("Cannot connect nodes: {error:?}")))
                     }
-                }
+                },
                 CanvasEvent::Disconnect { to, to_port } => {
                     if self.controller.graph.incoming(to, to_port).is_some() {
                         self.apply(GraphCommand::Disconnect { to, to_port }, logs);
@@ -955,7 +970,7 @@ mod tests {
                     offset: 0.0,
                 },
             });
-            graph.connect(NodeId(1), id, 0).unwrap();
+            graph.connect(NodeId(1), 0, id, 0).unwrap();
         }
         let original_edges = graph.edges.clone();
         let mut controller = DataFlowController::new(graph);

@@ -24,6 +24,7 @@ pub enum CanvasEvent {
     },
     Connect {
         from: NodeId,
+        from_port: u32,
         to: NodeId,
         to_port: u32,
     },
@@ -87,11 +88,11 @@ pub fn show_canvas(
             show.nodes(ui, |node_context, ui| {
                 for node in &graph.nodes {
                     let inputs = node.kind.inputs();
-                    let outputs = usize::from(node.kind.output().is_some());
+                    let outputs = node.kind.outputs();
                     let mut edited = node.kind.clone();
                     let node_response = egui_graph::node::Node::from_id(ui_node_id(node.id))
                         .inputs(inputs.len())
-                        .outputs(outputs)
+                        .outputs(outputs.len())
                         .flow(egui::Direction::LeftToRight)
                         .socket_radius(5.0)
                         .socket_color(socket_color(node))
@@ -99,7 +100,14 @@ pub fn show_canvas(
                         .animation_time(0.0)
                         .show(node_context, ui, |context| {
                             context.framed(|ui, sockets| {
-                                show_node_contents(ui, sockets, node, &inputs, &mut edited)
+                                show_node_contents(
+                                    ui,
+                                    sockets,
+                                    node,
+                                    &inputs,
+                                    &outputs,
+                                    &mut edited,
+                                )
                             })
                         });
 
@@ -148,7 +156,7 @@ pub fn show_canvas(
                     let key = edge_key(edge);
                     let mut selected = selected_edges.contains(&key);
                     let edge_response = egui_graph::edge::Edge::new(
-                        (ui_node_id(edge.from), 0),
+                        (ui_node_id(edge.from), edge.from_port as usize),
                         (ui_node_id(edge.to), edge.to_port as usize),
                         &mut selected,
                     )
@@ -270,6 +278,7 @@ fn show_node_contents(
     sockets: &mut egui_graph::SocketLayout,
     node: &Node,
     inputs: &[delog_flow::graph::PortSpec],
+    outputs: &[delog_flow::graph::PortSpec],
     edited: &mut NodeKind,
 ) -> NodeContentResponse {
     let mut result = NodeContentResponse::default();
@@ -288,26 +297,24 @@ fn show_node_contents(
     });
     ui.separator();
 
-    let output = node.kind.output();
-    for (index, input) in inputs.iter().enumerate() {
-        let output_index = (index == 0 && output.is_some()).then_some(0);
-        sockets.row(ui, Some(index), output_index, |ui| {
+    for index in 0..inputs.len().max(outputs.len()) {
+        let input = inputs.get(index);
+        let output = outputs.get(index);
+        sockets.row(ui, input.map(|_| index), output.map(|_| index), |ui| {
             ui.horizontal(|ui| {
-                ui.label(&input.name);
-                if let Some(output) = output.filter(|_| output_index.is_some()) {
+                if let Some(input) = input {
+                    ui.label(&input.name);
+                }
+                if let Some(output) = output {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(port_type_label(output));
+                        if let Some(port_type) = output.accepts.first().copied() {
+                            ui.label(port_type_label(port_type));
+                        }
+                        if !output.name.is_empty() {
+                            ui.label(&output.name);
+                        }
                     });
                 }
-            });
-        });
-    }
-    if inputs.is_empty()
-        && let Some(output) = output
-    {
-        sockets.row(ui, None, Some(0), |ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(port_type_label(output));
             });
         });
     }
@@ -357,14 +364,21 @@ fn handle_edge_event(
 }
 
 fn connection_event(first: EdgeStart, second: EdgeStart) -> Option<CanvasEvent> {
-    let (from, _from_port, to, to_port) = complete_connection(first, second)?;
-    Some(CanvasEvent::Connect { from, to, to_port })
+    let (from, from_port, to, to_port) = complete_connection(first, second)?;
+    Some(CanvasEvent::Connect {
+        from,
+        from_port,
+        to,
+        to_port,
+    })
 }
 
 fn socket_color(node: &Node) -> egui::Color32 {
     match node
         .kind
-        .output()
+        .outputs()
+        .first()
+        .and_then(|output| output.accepts.first().copied())
         .or_else(|| node.kind.inputs().first()?.accepts.first().copied())
     {
         Some(PortType::Signal) => egui::Color32::from_rgb(90, 180, 235),
@@ -393,13 +407,17 @@ fn disconnect_endpoints_for_socket(
             .filter(|&port| graph.incoming(node, port).is_some())
             .map(|port| vec![(node, port)])
             .unwrap_or_default(),
-        SocketKind::Output if index == 0 => graph
-            .edges
-            .iter()
-            .filter(|edge| edge.from == node)
-            .map(|edge| (edge.to, edge.to_port))
-            .collect(),
-        SocketKind::Output => Vec::new(),
+        SocketKind::Output => u32::try_from(index)
+            .ok()
+            .map(|port| {
+                graph
+                    .edges
+                    .iter()
+                    .filter(|edge| edge.from == node && edge.from_port == port)
+                    .map(|edge| (edge.to, edge.to_port))
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
 }
 
@@ -561,7 +579,7 @@ mod tests {
                     offset: 0.0,
                 },
             });
-            graph.connect(NodeId(1), id, 0).unwrap();
+            graph.connect(NodeId(1), 0, id, 0).unwrap();
         }
         graph
     }
@@ -1014,12 +1032,13 @@ mod tests {
             port: 1,
         };
 
-        assert_eq!(graph.check_connect(NodeId(1), NodeId(2), 1), Ok(()));
+        assert_eq!(graph.check_connect(NodeId(1), 0, NodeId(2), 1), Ok(()));
 
         assert!(matches!(
             connection_event(output, input),
             Some(CanvasEvent::Connect {
                 from: NodeId(1),
+                from_port: 0,
                 to: NodeId(2),
                 to_port: 1,
             })
@@ -1051,7 +1070,7 @@ mod tests {
         };
 
         assert_eq!(
-            graph.check_connect(NodeId(1), NodeId(2), 0),
+            graph.check_connect(NodeId(1), 0, NodeId(2), 0),
             Err(delog_flow::graph::ConnectError::TypeMismatch)
         );
 
@@ -1059,6 +1078,7 @@ mod tests {
             connection_event(output, input),
             Some(CanvasEvent::Connect {
                 from: NodeId(1),
+                from_port: 0,
                 to: NodeId(2),
                 to_port: 0,
             })
