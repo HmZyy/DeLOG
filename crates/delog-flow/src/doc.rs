@@ -5,7 +5,15 @@ use serde_json::{Map, Value, json};
 
 use crate::graph::{Edge, Graph, Node, NodeKind, OutputSpec, Viewport};
 
-pub const DATAFLOW_VERSION: u32 = 1;
+pub const DATAFLOW_VERSION: u32 = 2;
+
+pub(crate) fn required_version(graph: &Graph) -> u32 {
+    if graph.edges.iter().any(|edge| edge.from_port != 0) {
+        2
+    } else {
+        1
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DocError {
@@ -34,7 +42,7 @@ impl std::error::Error for DocError {}
 pub fn to_json(graph: &Graph) -> Value {
     let nodes: Vec<Value> = graph.nodes.iter().map(node_to_json).collect();
     json!({
-        "delog_dataflow": DATAFLOW_VERSION,
+        "delog_dataflow": required_version(graph),
         "name": graph.name,
         "next_id": graph.next_id,
         "viewport": graph.viewport,
@@ -54,7 +62,7 @@ pub fn from_json(value: &Value) -> Result<Graph, DocError> {
         .as_u64()
         .and_then(|value| u32::try_from(value).ok())
         .ok_or_else(|| DocError::Invalid("delog_dataflow must be an integer".to_owned()))?;
-    if version != DATAFLOW_VERSION {
+    if !(1..=DATAFLOW_VERSION).contains(&version) {
         return Err(DocError::UnsupportedVersion(version));
     }
 
@@ -297,6 +305,76 @@ mod tests {
 
     fn add_node_json(id: u64) -> Value {
         serde_json::json!({"id": id, "pos": [0.0, 0.0], "type": "add"})
+    }
+
+    fn add(g: &mut Graph, kind: NodeKind) -> crate::graph::NodeId {
+        let id = g.alloc_id();
+        g.insert_node(Node {
+            id,
+            pos: [0.0, 0.0],
+            kind,
+        });
+        id
+    }
+
+    #[test]
+    fn v1_docs_still_load_and_single_output_graphs_still_write_v1() {
+        let mut g = Graph::new("g");
+        let a = add(&mut g, NodeKind::Add);
+        let s = add(
+            &mut g,
+            NodeKind::ScaleOffset {
+                multiplier: 1.0,
+                offset: 0.0,
+            },
+        );
+        g.connect(a, 0, s, 0).unwrap();
+        let doc = to_json(&g);
+        assert_eq!(doc["delog_dataflow"], 1);
+        assert!(doc["edges"][0].get("from_port").is_none());
+        assert_eq!(from_json(&doc).unwrap().edges, g.edges);
+    }
+
+    #[test]
+    fn nonzero_from_port_writes_v2_and_round_trips() {
+        // The source is an unknown kind so `from_json` takes the raw-edge
+        // fallback path (it preserves `from_port` as-is) instead of routing
+        // through `Graph::connect`, whose bounds check would reject
+        // `from_port: 1` on a single-output node.
+        let mut g = Graph::new("g");
+        let a = add(
+            &mut g,
+            NodeKind::Unknown(serde_json::json!({"type": "resample", "hz": 50})),
+        );
+        let s = add(
+            &mut g,
+            NodeKind::ScaleOffset {
+                multiplier: 1.0,
+                offset: 0.0,
+            },
+        );
+        g.edges.push(Edge {
+            from: a,
+            from_port: 1,
+            to: s,
+            to_port: 0,
+        });
+
+        let doc = to_json(&g);
+        assert_eq!(doc["delog_dataflow"], 2);
+        assert_eq!(doc["edges"][0]["from_port"], 1);
+
+        let restored = from_json(&doc).unwrap();
+        assert_eq!(restored.edges.len(), 1);
+        assert_eq!(restored.edges[0].from_port, 1);
+    }
+
+    #[test]
+    fn versions_above_current_are_rejected() {
+        assert!(matches!(
+            from_json(&serde_json::json!({"delog_dataflow": 3})),
+            Err(DocError::UnsupportedVersion(3))
+        ));
     }
 
     #[test]
