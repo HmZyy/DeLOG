@@ -1,11 +1,11 @@
 //! DeLOG core data model. Dependency rule: nothing here may depend on parsers,
 //! GPU, or UI.
 
-pub mod analysis;
 pub mod align;
+pub mod analysis;
 pub mod chunk;
-pub mod diagnostics;
 pub mod derived;
+pub mod diagnostics;
 pub mod export;
 pub mod field_view;
 pub mod identity;

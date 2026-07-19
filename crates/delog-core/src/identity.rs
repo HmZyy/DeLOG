@@ -192,6 +192,39 @@ impl IdentityRegistry {
         self.add_source(endpoint)
     }
 
+    pub fn relabel_source(
+        &mut self,
+        id: SourceId,
+        preferred_label: impl Into<String>,
+    ) -> Option<String> {
+        let old_label = self.live_source(id)?.label.clone();
+        self.source_labels.remove(&old_label);
+        let label = self.unique_source_label(preferred_label.into());
+        self.sources[id.index()].label.clone_from(&label);
+
+        let portable_fields = self
+            .fields
+            .iter()
+            .filter(|field| !field.removed)
+            .filter_map(|field| {
+                let topic = self.topics.get(field.topic.index())?;
+                let source = self.sources.get(topic.source.index())?;
+                (!topic.removed && !source.removed).then(|| {
+                    (
+                        FieldKey {
+                            source: source.label.clone(),
+                            topic: topic.name.clone(),
+                            field: field.name.clone(),
+                        },
+                        field.id,
+                    )
+                })
+            })
+            .collect();
+        self.field_by_key = portable_fields;
+        Some(label)
+    }
+
     pub fn add_topic(&mut self, source: SourceId, name: impl Into<String>) -> Option<TopicId> {
         self.live_source(source)?;
         let name = name.into();
@@ -425,10 +458,7 @@ mod tests {
     #[test]
     fn parse_topic_instance_suffixes() {
         assert_eq!(parse_topic_instance("IMU"), ("IMU".to_owned(), None));
-        assert_eq!(
-            parse_topic_instance("IMU[0]"),
-            ("IMU".to_owned(), Some(0))
-        );
+        assert_eq!(parse_topic_instance("IMU[0]"), ("IMU".to_owned(), Some(0)));
         assert_eq!(
             parse_topic_instance("vehicle_attitude[12]"),
             ("vehicle_attitude".to_owned(), Some(12))
@@ -437,10 +467,7 @@ mod tests {
             parse_topic_instance("NAMED_VALUE_FLOAT/airspd"),
             ("NAMED_VALUE_FLOAT/airspd".to_owned(), None)
         );
-        assert_eq!(
-            parse_topic_instance("bad[x]"),
-            ("bad[x]".to_owned(), None)
-        );
+        assert_eq!(parse_topic_instance("bad[x]"), ("bad[x]".to_owned(), None));
         assert_eq!(parse_topic_instance("bad[]"), ("bad[]".to_owned(), None));
     }
 
@@ -468,6 +495,29 @@ mod tests {
         assert_eq!(ids.source(explicit_suffix).unwrap().label, "flight#2");
         assert_eq!(ids.source(first).unwrap().label, "flight");
         assert_eq!(ids.source(second).unwrap().label, "flight#3");
+    }
+
+    #[test]
+    fn relabel_source_reclaims_freed_label_and_updates_portable_field_keys() {
+        let mut ids = IdentityRegistry::new();
+        let previous = ids.add_source("dataflow:g");
+        let replacement = ids.add_source("dataflow:g");
+        let topic = ids.add_topic(replacement, "derived").unwrap();
+        let field = ids.add_field(topic, "alt").unwrap();
+        assert_eq!(ids.source(replacement).unwrap().label, "dataflow:g#2");
+
+        ids.remove_source(previous).unwrap();
+        ids.relabel_source(replacement, "dataflow:g").unwrap();
+
+        assert_eq!(ids.source(replacement).unwrap().label, "dataflow:g");
+        assert_eq!(
+            ids.resolve(&FieldKey::new("dataflow:g", "derived", "alt")),
+            Some(field)
+        );
+        assert_eq!(
+            ids.resolve(&FieldKey::new("dataflow:g#2", "derived", "alt")),
+            None
+        );
     }
 
     #[test]
