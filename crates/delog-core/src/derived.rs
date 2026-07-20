@@ -112,15 +112,27 @@ pub fn emit_topics(
     Ok(emit_prepared_topics(sink, source_key, prepared))
 }
 
+pub fn open_derived_source(sink: &mut dyn IngestSink, source_key: &str) -> SourceId {
+    sink.open_source(source_key, SourceKind::Derived)
+}
+
+pub fn submit_prepared_topics(
+    sink: &mut dyn IngestSink,
+    source: SourceId,
+    prepared: PreparedTopics,
+) {
+    for batch in prepared.into_batches(source) {
+        sink.submit(batch);
+    }
+}
+
 pub fn emit_prepared_topics(
     sink: &mut dyn IngestSink,
     source_key: &str,
     prepared: PreparedTopics,
 ) -> SourceId {
-    let source = sink.open_source(source_key, SourceKind::Derived);
-    for batch in prepared.into_batches(source) {
-        sink.submit(batch);
-    }
+    let source = open_derived_source(sink, source_key);
+    submit_prepared_topics(sink, source, prepared);
     sink.close_source(source, ParseSummary::default());
     source
 }
@@ -196,5 +208,49 @@ mod tests {
                 .value(1),
             "b"
         );
+    }
+
+    #[test]
+    fn submit_prepared_topics_appends_without_closing() {
+        use crate::diagnostics::Diag;
+        use crate::identity::SourceId;
+        use crate::ingest::{IngestSink, ParseSummary, ParsedBatch, SourceKind};
+
+        struct Sink {
+            opened: usize,
+            batches: usize,
+            closed: usize,
+        }
+        impl IngestSink for Sink {
+            fn open_source(&mut self, _key: &str, _kind: SourceKind) -> SourceId {
+                self.opened += 1;
+                SourceId(7)
+            }
+            fn submit(&mut self, _batch: ParsedBatch) {
+                self.batches += 1;
+            }
+            fn diagnostic(&mut self, _d: Diag) {}
+            fn progress(&mut self, _s: SourceId, _f: f32) {}
+            fn close_source(&mut self, _s: SourceId, _summary: ParseSummary) {
+                self.closed += 1;
+            }
+        }
+
+        let mut topic = PendingTopic::new("derived".into(), vec![10, 20]);
+        topic
+            .add_field(PendingField::numeric("v", vec![1.0, 2.0], None))
+            .unwrap();
+
+        let mut sink = Sink {
+            opened: 0,
+            batches: 0,
+            closed: 0,
+        };
+        let source = open_derived_source(&mut sink, "dataflow:g");
+        submit_prepared_topics(&mut sink, source, prepare_topics(&[topic]).unwrap());
+
+        assert_eq!(sink.opened, 1);
+        assert_eq!(sink.batches, 1);
+        assert_eq!(sink.closed, 0);
     }
 }
