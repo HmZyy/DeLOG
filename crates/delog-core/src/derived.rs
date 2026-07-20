@@ -112,8 +112,12 @@ pub fn emit_topics(
     Ok(emit_prepared_topics(sink, source_key, prepared))
 }
 
-pub fn open_derived_source(sink: &mut dyn IngestSink, source_key: &str) -> SourceId {
-    sink.open_source(source_key, SourceKind::Derived)
+pub fn open_derived_source(
+    sink: &mut dyn IngestSink,
+    source_key: &str,
+    kind: SourceKind,
+) -> SourceId {
+    sink.open_source(source_key, kind)
 }
 
 pub fn submit_prepared_topics(
@@ -131,7 +135,7 @@ pub fn emit_prepared_topics(
     source_key: &str,
     prepared: PreparedTopics,
 ) -> SourceId {
-    let source = open_derived_source(sink, source_key);
+    let source = open_derived_source(sink, source_key, SourceKind::Derived);
     submit_prepared_topics(sink, source, prepared);
     sink.close_source(source, ParseSummary::default());
     source
@@ -246,7 +250,7 @@ mod tests {
             batches: 0,
             closed: 0,
         };
-        let source = open_derived_source(&mut sink, "dataflow:g");
+        let source = open_derived_source(&mut sink, "dataflow:g", SourceKind::LiveDerived);
         submit_prepared_topics(&mut sink, source, prepare_topics(&[topic]).unwrap());
 
         assert_eq!(sink.opened, 1);
