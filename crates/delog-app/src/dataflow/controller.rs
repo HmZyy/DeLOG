@@ -2,14 +2,16 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
-use delog_core::derived::{PendingTopic, emit_prepared_topics, prepare_topics};
+use delog_core::derived::{
+    PendingTopic, emit_prepared_topics, open_derived_source, prepare_topics, submit_prepared_topics,
+};
 use delog_core::identity::SourceId;
-use delog_core::ingest::IngestSender;
+use delog_core::ingest::{IngestSender, IngestSink};
 use delog_core::snapshot::StoreSnapshot;
 use delog_flow::command::{GraphCommand, apply};
 use delog_flow::eval::{Diagnostic, EvalCache, evaluate_windowed};
 use delog_flow::graph::{Graph, NodeId, NodeKind};
-use delog_flow::publish::{build_outputs, source_key};
+use delog_flow::publish::{build_outputs, slice_topic_after, source_key};
 use delog_flow::types::Value;
 
 use crate::logging::LogLevel;
@@ -161,6 +163,9 @@ pub struct DataFlowController {
     last_previewed_t: HashMap<(NodeId, usize), i64>,
     pending_preview_from: Option<i64>,
     pending_snapshot_max: Option<i64>,
+    live_source: Option<SourceId>,
+    last_published_t: HashMap<String, i64>,
+    live_needs_reset: bool,
     #[cfg(feature = "scripting")]
     script_host: Option<Arc<dyn delog_flow::script::ScriptNodeHost + Sync>>,
 }
@@ -206,6 +211,9 @@ impl DataFlowController {
             last_previewed_t: HashMap::new(),
             pending_preview_from: None,
             pending_snapshot_max: None,
+            live_source: None,
+            last_published_t: HashMap::new(),
+            live_needs_reset: false,
             #[cfg(feature = "scripting")]
             script_host: None,
         }
@@ -237,6 +245,7 @@ impl DataFlowController {
         self.redo.clear();
         self.dirty = true;
         self.needs_eval = true;
+        self.invalidate_live();
         if self
             .selection
             .is_some_and(|selection| self.graph.node(selection).is_none())
@@ -258,6 +267,7 @@ impl DataFlowController {
             push_bounded(&mut self.redo, inverse);
             self.dirty = true;
             self.needs_eval = true;
+            self.invalidate_live();
             if self
                 .selection
                 .is_some_and(|selection| self.graph.node(selection).is_none())
@@ -275,6 +285,7 @@ impl DataFlowController {
             push_bounded(&mut self.undo, inverse);
             self.dirty = true;
             self.needs_eval = true;
+            self.invalidate_live();
         }
     }
 
@@ -320,6 +331,7 @@ impl DataFlowController {
             if outcome.generation == self.generation {
                 if outcome.live {
                     self.merge_live_previews(&outcome);
+                    self.append_publish(&mut outcome, sender, &mut logs);
                     if let Some(max) = outcome.snapshot_max_t {
                         self.live_watermark_t = Some(max);
                     }
@@ -561,6 +573,83 @@ impl DataFlowController {
                 result,
             });
         });
+    }
+
+    pub fn is_live_published(&self) -> bool {
+        self.live_source.is_some()
+    }
+
+    pub fn invalidate_live(&mut self) {
+        if self.live_source.is_some() {
+            self.live_needs_reset = true;
+        }
+    }
+
+    pub fn take_needs_live_reset(&mut self) -> bool {
+        std::mem::take(&mut self.live_needs_reset)
+    }
+
+    pub fn reset_live(&mut self, sender: &IngestSender) {
+        if let Some(source) = self.live_source.take() {
+            let mut sink = sender.file_sink();
+            sink.close_source(source, delog_core::ingest::ParseSummary::default());
+        }
+        self.last_published_t.clear();
+        self.live_watermark_t = None;
+        self.running_preview.clear();
+        self.last_previewed_t.clear();
+    }
+
+    fn append_publish(
+        &mut self,
+        outcome: &mut EvalOutcome,
+        sender: &IngestSender,
+        logs: &mut Vec<(LogLevel, String)>,
+    ) {
+        let Some(result) = outcome.publish.take() else {
+            return;
+        };
+        let topics = match result {
+            Ok(topics) => topics,
+            Err(diagnostics) => {
+                logs.push((
+                    LogLevel::Error,
+                    diagnostics
+                        .iter()
+                        .map(|diagnostic| diagnostic.message.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                ));
+                return;
+            }
+        };
+        let mut sink = sender.file_sink();
+        let source = *self
+            .live_source
+            .get_or_insert_with(|| open_derived_source(&mut sink, &source_key(&outcome.graph_name)));
+
+        let mut tails = Vec::new();
+        for topic in &topics {
+            let after = self
+                .last_published_t
+                .get(&topic.name)
+                .copied()
+                .unwrap_or(i64::MIN);
+            let tail = slice_topic_after(topic, after);
+            if let Some(&last) = tail.times.last() {
+                self.last_published_t.insert(topic.name.clone(), last);
+            }
+            if !tail.times.is_empty() {
+                tails.push(tail);
+            }
+        }
+        if tails.is_empty() {
+            return;
+        }
+        match prepare_topics(&tails) {
+            Ok(prepared) => submit_prepared_topics(&mut sink, source, prepared),
+            Err(message) => logs.push((LogLevel::Error, message)),
+        }
     }
 
     fn collect_publications(&mut self, logs: &mut Vec<(LogLevel, String)>) {
@@ -1291,5 +1380,76 @@ mod tests {
         let preview = controller.preview_for(field, 0).unwrap();
         assert_eq!(preview.count, 5);
         assert_eq!(preview.mean, 3.0);
+    }
+
+    #[test]
+    fn live_append_seeds_then_appends_only_new_tail() {
+        let mut graph = Graph::new("g");
+        let input = add_node(&mut graph, data());
+        let out = add_node(
+            &mut graph,
+            NodeKind::Output(OutputSpec {
+                topic: "derived".into(),
+                fields: vec![OutputFieldSpec {
+                    name: "alt".into(),
+                    unit: None,
+                }],
+            }),
+        );
+        graph.connect(input, 0, out, 0).unwrap();
+        let mut controller = DataFlowController::new(graph);
+        let (sender, receiver) = ingest_channel();
+        let (observed_tx, observed_rx) = mpsc::channel();
+        let ingest_thread = std::thread::spawn(move || {
+            let mut next = 40;
+            while let Some(message) = receiver.recv() {
+                let observed = match message {
+                    IngestMsg::OpenSource { key, kind, reply } => {
+                        let id = SourceId(next);
+                        next += 1;
+                        reply.send(id).unwrap();
+                        Observed::Open(key, kind)
+                    }
+                    IngestMsg::Batch(batch) => {
+                        // record row count via a Batch marker; count rows through summary elsewhere
+                        let _ = batch;
+                        Observed::Batch
+                    }
+                    IngestMsg::CloseSource { source, .. } => Observed::Close(source),
+                    IngestMsg::RemoveSource { source } => Observed::Remove(source),
+                    _ => continue,
+                };
+                observed_tx.send(observed).unwrap();
+            }
+        });
+
+        // Seed.
+        controller.request_live(snapshot_alt(vec![100, 200, 300], vec![1.0, 2.0, 3.0], 1), 3.0, true);
+        wait_for(&mut controller, &sender);
+        assert!(controller.is_live_published());
+        assert_eq!(
+            observed_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Observed::Open("dataflow:g".into(), SourceKind::Derived)
+        );
+        assert_eq!(
+            observed_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Observed::Batch
+        );
+
+        // Append: new samples 400,500; must NOT re-open, must NOT close, one more batch.
+        controller.request_live(
+            snapshot_alt(vec![100, 200, 300, 400, 500], vec![1.0, 2.0, 3.0, 4.0, 5.0], 2),
+            3.0,
+            true,
+        );
+        wait_for(&mut controller, &sender);
+        assert_eq!(
+            observed_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Observed::Batch
+        );
+        assert!(observed_rx.try_recv().is_err(), "no second open, no close on append");
+
+        drop(sender);
+        ingest_thread.join().unwrap();
     }
 }
