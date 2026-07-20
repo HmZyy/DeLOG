@@ -1,5 +1,5 @@
 use delog_core::align::AlignMode;
-use delog_flow::graph::{NodeKind, OutputFieldSpec, OutputSpec};
+use delog_flow::graph::{ConversionKind, NodeKind, OutputFieldSpec, OutputSpec};
 
 use crate::fuzzy::fuzzy_match_score;
 
@@ -57,6 +57,70 @@ pub fn templates() -> &'static [NodeTemplate] {
             make: || NodeKind::ScaleOffset {
                 multiplier: 1.0,
                 offset: 0.0,
+            },
+        },
+        NodeTemplate {
+            name: "Radians to Degrees",
+            category: "Convert",
+            aliases: &["rad", "deg", "radians", "degrees", "convert"],
+            make: || NodeKind::Convert {
+                kind: ConversionKind::RadToDeg,
+            },
+        },
+        NodeTemplate {
+            name: "Degrees to Radians",
+            category: "Convert",
+            aliases: &["deg", "rad", "degrees", "radians", "convert"],
+            make: || NodeKind::Convert {
+                kind: ConversionKind::DegToRad,
+            },
+        },
+        NodeTemplate {
+            name: "Heading 0..360",
+            category: "Convert",
+            aliases: &["heading", "wrap", "normalize", "angle", "yaw"],
+            make: || NodeKind::Convert {
+                kind: ConversionKind::Heading0To360,
+            },
+        },
+        NodeTemplate {
+            name: "Heading -180..180",
+            category: "Convert",
+            aliases: &["heading", "wrap", "normalize", "angle", "yaw"],
+            make: || NodeKind::Convert {
+                kind: ConversionKind::HeadingPm180,
+            },
+        },
+        NodeTemplate {
+            name: "m/s to km/h",
+            category: "Convert",
+            aliases: &["speed", "mps", "kmh", "kph", "velocity"],
+            make: || NodeKind::Convert {
+                kind: ConversionKind::MsToKmh,
+            },
+        },
+        NodeTemplate {
+            name: "km/h to m/s",
+            category: "Convert",
+            aliases: &["speed", "kmh", "kph", "mps", "velocity"],
+            make: || NodeKind::Convert {
+                kind: ConversionKind::KmhToMs,
+            },
+        },
+        NodeTemplate {
+            name: "Meters to Feet",
+            category: "Convert",
+            aliases: &["meters", "feet", "ft", "altitude", "distance"],
+            make: || NodeKind::Convert {
+                kind: ConversionKind::MToFt,
+            },
+        },
+        NodeTemplate {
+            name: "Feet to Meters",
+            category: "Convert",
+            aliases: &["feet", "meters", "ft", "altitude", "distance"],
+            make: || NodeKind::Convert {
+                kind: ConversionKind::FtToM,
             },
         },
         NodeTemplate {
@@ -138,6 +202,17 @@ pub fn search_templates(query: &str) -> Vec<MenuEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_conversion_has_a_searchable_template() {
+        let names: Vec<_> = templates().iter().map(|template| template.name).collect();
+        for kind in ConversionKind::ALL {
+            assert!(
+                names.contains(&kind.label()),
+                "missing template for {kind:?}"
+            );
+        }
+    }
 
     #[test]
     fn symbol_aliases_rank_their_operation_first() {

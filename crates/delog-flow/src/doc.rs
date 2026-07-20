@@ -180,6 +180,9 @@ pub(crate) fn node_kind_json(kind: &NodeKind) -> Value {
             ("multiplier".to_owned(), json!(multiplier)),
             ("offset".to_owned(), json!(offset)),
         ]),
+        NodeKind::Convert { kind } => {
+            Map::from_iter([("conversion".to_owned(), json!(kind.as_str()))])
+        }
         NodeKind::Align { mode } => Map::from_iter([("mode".to_owned(), json!(mode.as_str()))]),
         NodeKind::Output(spec) => serialized_object(spec),
         #[cfg(feature = "scripting")]
@@ -193,6 +196,7 @@ pub(crate) fn node_kind_json(kind: &NodeKind) -> Value {
         NodeKind::Multiply => "multiply",
         NodeKind::Divide => "divide",
         NodeKind::ScaleOffset { .. } => "scale_offset",
+        NodeKind::Convert { .. } => "convert",
         NodeKind::Align { .. } => "align",
         NodeKind::Output(_) => "output",
         #[cfg(feature = "scripting")]
@@ -252,6 +256,15 @@ fn node_from_json(value: &Value) -> Result<Node, DocError> {
             multiplier: number("multiplier")?,
             offset: number("offset")?,
         },
+        "convert" => {
+            let conversion = object
+                .get("conversion")
+                .and_then(Value::as_str)
+                .ok_or_else(|| invalid("conversion must be a string"))?;
+            NodeKind::Convert {
+                kind: crate::graph::ConversionKind::parse(conversion).map_err(|message| invalid(&message))?,
+            }
+        }
         "align" => {
             let mode = object
                 .get("mode")
@@ -493,6 +506,24 @@ mod tests {
             }
             other => panic!("expected data_field, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn convert_node_round_trips() {
+        let raw = document(
+            serde_json::json!([{"id": 1, "pos": [0.0, 0.0], "type": "convert", "conversion": "m_to_ft"}]),
+            serde_json::json!([]),
+        );
+        let graph = from_json(&raw).unwrap();
+        match &graph.nodes[0].kind {
+            NodeKind::Convert { kind } => {
+                assert_eq!(*kind, crate::graph::ConversionKind::MToFt)
+            }
+            other => panic!("expected convert, got {other:?}"),
+        }
+        let back = to_json(&graph);
+        assert_eq!(back["nodes"][0]["type"], "convert");
+        assert_eq!(back["nodes"][0]["conversion"], "m_to_ft");
     }
 
     #[test]

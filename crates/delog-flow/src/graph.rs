@@ -41,11 +41,102 @@ pub enum NodeKind {
     Multiply,
     Divide,
     ScaleOffset { multiplier: f64, offset: f64 },
+    Convert { kind: ConversionKind },
     Align { mode: AlignMode },
     Output(OutputSpec),
     #[cfg(feature = "scripting")]
     Script(crate::script::ScriptSpec),
     Unknown(serde_json::Value),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConversionKind {
+    RadToDeg,
+    DegToRad,
+    Heading0To360,
+    HeadingPm180,
+    MsToKmh,
+    KmhToMs,
+    MToFt,
+    FtToM,
+}
+
+impl ConversionKind {
+    pub const ALL: [Self; 8] = [
+        Self::RadToDeg,
+        Self::DegToRad,
+        Self::Heading0To360,
+        Self::HeadingPm180,
+        Self::MsToKmh,
+        Self::KmhToMs,
+        Self::MToFt,
+        Self::FtToM,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::RadToDeg => "Radians to Degrees",
+            Self::DegToRad => "Degrees to Radians",
+            Self::Heading0To360 => "Heading 0..360",
+            Self::HeadingPm180 => "Heading -180..180",
+            Self::MsToKmh => "m/s to km/h",
+            Self::KmhToMs => "km/h to m/s",
+            Self::MToFt => "Meters to Feet",
+            Self::FtToM => "Feet to Meters",
+        }
+    }
+
+    pub fn output_unit(self) -> &'static str {
+        match self {
+            Self::RadToDeg | Self::Heading0To360 | Self::HeadingPm180 => "deg",
+            Self::DegToRad => "rad",
+            Self::MsToKmh => "km/h",
+            Self::KmhToMs => "m/s",
+            Self::MToFt => "ft",
+            Self::FtToM => "m",
+        }
+    }
+
+    pub fn apply(self, x: f64) -> f64 {
+        match self {
+            Self::RadToDeg => x.to_degrees(),
+            Self::DegToRad => x.to_radians(),
+            Self::Heading0To360 => x.rem_euclid(360.0),
+            Self::HeadingPm180 => {
+                let wrapped = x.rem_euclid(360.0);
+                if wrapped > 180.0 {
+                    wrapped - 360.0
+                } else {
+                    wrapped
+                }
+            }
+            Self::MsToKmh => x * 3.6,
+            Self::KmhToMs => x / 3.6,
+            Self::MToFt => x / 0.3048,
+            Self::FtToM => x * 0.3048,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RadToDeg => "rad_to_deg",
+            Self::DegToRad => "deg_to_rad",
+            Self::Heading0To360 => "heading_0_360",
+            Self::HeadingPm180 => "heading_pm_180",
+            Self::MsToKmh => "ms_to_kmh",
+            Self::KmhToMs => "kmh_to_ms",
+            Self::MToFt => "m_to_ft",
+            Self::FtToM => "ft_to_m",
+        }
+    }
+
+    pub fn parse(text: &str) -> Result<Self, String> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|kind| kind.as_str() == text)
+            .ok_or_else(|| format!("unknown conversion '{text}'"))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,7 +166,9 @@ impl NodeKind {
                 port("A", vec![PortType::Signal]),
                 port("B", vec![PortType::Signal, PortType::Scalar]),
             ],
-            Self::ScaleOffset { .. } => vec![port("In", vec![PortType::Signal])],
+            Self::ScaleOffset { .. } | Self::Convert { .. } => {
+                vec![port("In", vec![PortType::Signal])]
+            }
             Self::Align { .. } => vec![
                 port("Data", vec![PortType::Signal]),
                 port("Reference", vec![PortType::Signal]),
@@ -110,6 +203,7 @@ impl NodeKind {
             | Self::Multiply
             | Self::Divide
             | Self::ScaleOffset { .. }
+            | Self::Convert { .. }
             | Self::Align { .. } => single(vec![PortType::Signal]),
             #[cfg(feature = "scripting")]
             Self::Script(spec) => spec
@@ -133,6 +227,7 @@ impl NodeKind {
             Self::Multiply => "Multiply".to_owned(),
             Self::Divide => "Divide".to_owned(),
             Self::ScaleOffset { .. } => "Scale / Offset".to_owned(),
+            Self::Convert { kind } => kind.label().to_owned(),
             Self::Align { .. } => "Align to Timeline".to_owned(),
             Self::Output(spec) => format!("Output: {}", spec.topic),
             #[cfg(feature = "scripting")]
@@ -344,6 +439,25 @@ impl Graph {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conversion_math_units_and_string_round_trip() {
+        assert!((ConversionKind::RadToDeg.apply(std::f64::consts::PI) - 180.0).abs() < 1e-9);
+        assert!((ConversionKind::DegToRad.apply(180.0) - std::f64::consts::PI).abs() < 1e-9);
+        assert_eq!(ConversionKind::Heading0To360.apply(-90.0), 270.0);
+        assert_eq!(ConversionKind::HeadingPm180.apply(270.0), -90.0);
+        assert!((ConversionKind::MsToKmh.apply(10.0) - 36.0).abs() < 1e-9);
+        assert!((ConversionKind::KmhToMs.apply(36.0) - 10.0).abs() < 1e-9);
+        assert!((ConversionKind::MToFt.apply(0.3048) - 1.0).abs() < 1e-9);
+        assert!((ConversionKind::FtToM.apply(1.0) - 0.3048).abs() < 1e-9);
+        assert!(ConversionKind::RadToDeg.apply(f64::NAN).is_nan());
+        assert_eq!(ConversionKind::MToFt.output_unit(), "ft");
+        assert_eq!(ConversionKind::KmhToMs.output_unit(), "m/s");
+        for kind in ConversionKind::ALL {
+            assert_eq!(ConversionKind::parse(kind.as_str()).unwrap(), kind);
+        }
+        assert!(ConversionKind::parse("nope").is_err());
+    }
 
     fn add_node(g: &mut Graph, kind: NodeKind) -> NodeId {
         let id = g.alloc_id();
