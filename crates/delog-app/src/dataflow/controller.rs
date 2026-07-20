@@ -7,7 +7,7 @@ use delog_core::identity::SourceId;
 use delog_core::ingest::IngestSender;
 use delog_core::snapshot::StoreSnapshot;
 use delog_flow::command::{GraphCommand, apply};
-use delog_flow::eval::{Diagnostic, EvalCache, evaluate};
+use delog_flow::eval::{Diagnostic, EvalCache, evaluate_windowed};
 use delog_flow::graph::{Graph, NodeId, NodeKind};
 use delog_flow::publish::{build_outputs, source_key};
 use delog_flow::types::Value;
@@ -110,8 +110,11 @@ pub struct EvalOutcome {
     pub generation: u64,
     pub graph_name: String,
     pub previews: HashMap<NodeId, Vec<Option<PreviewStats>>>,
+    pub preview_end_t: HashMap<(NodeId, usize), i64>,
     pub diagnostics: Vec<Diagnostic>,
     pub publish: Option<Result<Vec<PendingTopic>, Vec<Diagnostic>>>,
+    pub live: bool,
+    pub window: Option<delog_core::time::TimeRange>,
 }
 
 struct PublicationOutcome {
@@ -126,6 +129,9 @@ struct PendingRequest {
     snapshot: Arc<StoreSnapshot>,
     selection: Option<NodeId>,
     publish: bool,
+    window: Option<delog_core::time::TimeRange>,
+    live: bool,
+    preview_from_t: Option<i64>,
 }
 
 pub struct DataFlowController {
@@ -148,6 +154,10 @@ pub struct DataFlowController {
     publication_rx: mpsc::Receiver<PublicationOutcome>,
     publications_in_flight: usize,
     cache: Arc<Mutex<EvalCache>>,
+    live_watermark_t: Option<i64>,
+    running_preview: HashMap<(NodeId, usize), RunningStats>,
+    last_previewed_t: HashMap<(NodeId, usize), i64>,
+    pending_preview_from: Option<i64>,
     #[cfg(feature = "scripting")]
     script_host: Option<Arc<dyn delog_flow::script::ScriptNodeHost + Sync>>,
 }
@@ -188,6 +198,10 @@ impl DataFlowController {
             publication_rx,
             publications_in_flight: 0,
             cache: Arc::new(Mutex::new(EvalCache::default())),
+            live_watermark_t: None,
+            running_preview: HashMap::new(),
+            last_previewed_t: HashMap::new(),
+            pending_preview_from: None,
             #[cfg(feature = "scripting")]
             script_host: None,
         }
@@ -269,11 +283,26 @@ impl DataFlowController {
     }
 
     pub fn request_eval(&mut self, snapshot: Arc<StoreSnapshot>) {
-        self.queue(snapshot, false);
+        self.queue(snapshot, false, None, false);
     }
 
     pub fn request_publish(&mut self, snapshot: Arc<StoreSnapshot>) {
-        self.queue(snapshot, true);
+        self.queue(snapshot, true, None, false);
+    }
+
+    pub fn request_live(&mut self, snapshot: Arc<StoreSnapshot>, overlap_secs: f32, append: bool) {
+        let previous_watermark = self.live_watermark_t;
+        let window = previous_watermark.and_then(|watermark| {
+            let max = snapshot.global_time_range()?.max_us;
+            let overlap_us = (overlap_secs.max(0.0) as f64 * 1_000_000.0) as i64;
+            delog_core::time::TimeRange::new(watermark.saturating_sub(overlap_us), max)
+        });
+        // Advance the watermark to the newest sample so the next tick windows from here.
+        if let Some(range) = snapshot.global_time_range() {
+            self.live_watermark_t = Some(range.max_us);
+        }
+        self.pending_preview_from = previous_watermark;
+        self.queue(snapshot, append, window, true);
     }
 
     pub fn poll(&mut self, sender: &IngestSender) -> Vec<(LogLevel, String)> {
@@ -283,7 +312,11 @@ impl DataFlowController {
             self.in_flight = false;
             self.cancel = None;
             if outcome.generation == self.generation {
-                self.handle_publish(&mut outcome, sender, &mut logs);
+                if outcome.live {
+                    self.merge_live_previews(&outcome);
+                } else {
+                    self.handle_publish(&mut outcome, sender, &mut logs);
+                }
                 self.last_outcome = Some(outcome);
             }
             if let Some(request) = self.pending.take() {
@@ -303,20 +336,58 @@ impl DataFlowController {
             .collect()
     }
 
-    pub fn preview_for(&self, node: NodeId, port: usize) -> Option<&PreviewStats> {
+    pub fn preview_for(&self, node: NodeId, port: usize) -> Option<PreviewStats> {
+        if let Some(running) = self.running_preview.get(&(node, port)) {
+            return Some(running.as_preview());
+        }
         self.last_outcome
             .as_ref()?
             .previews
             .get(&node)?
             .get(port)?
             .as_ref()
+            .copied()
     }
 
     pub fn is_evaluating(&self) -> bool {
         self.in_flight || self.pending.is_some() || self.publications_in_flight > 0
     }
 
-    fn queue(&mut self, snapshot: Arc<StoreSnapshot>, publish: bool) {
+    fn merge_live_previews(&mut self, outcome: &EvalOutcome) {
+        for (&node, values) in &outcome.previews {
+            for (port, stat) in values.iter().enumerate() {
+                let Some(stat) = stat else { continue };
+                let key = (node, port);
+                let end = outcome.preview_end_t.get(&key).copied();
+                let previously = self.last_previewed_t.get(&key).copied();
+                // Only merge samples newer than the watermark for this port so the
+                // recompute overlap is not double-counted. On the seed tick
+                // (`previously` is None) the whole window is new.
+                let is_new_tail = match (previously, end) {
+                    (Some(prev), Some(end)) => end > prev,
+                    _ => true,
+                };
+                if !is_new_tail {
+                    continue;
+                }
+                self.running_preview
+                    .entry(key)
+                    .and_modify(|running| running.merge(*stat))
+                    .or_insert_with(|| RunningStats::from_stats(*stat));
+                if let Some(end) = end {
+                    self.last_previewed_t.insert(key, end);
+                }
+            }
+        }
+    }
+
+    fn queue(
+        &mut self,
+        snapshot: Arc<StoreSnapshot>,
+        publish: bool,
+        window: Option<delog_core::time::TimeRange>,
+        live: bool,
+    ) {
         self.generation = self
             .latest_generation
             .fetch_add(1, Ordering::Relaxed)
@@ -325,12 +396,17 @@ impl DataFlowController {
         self.latest_generation
             .store(self.generation, Ordering::Relaxed);
         self.needs_eval = false;
+        let preview_from_t = if live { self.pending_preview_from } else { None };
+        self.pending_preview_from = None;
         let request = PendingRequest {
             generation: self.generation,
             graph: self.graph.clone(),
             snapshot,
             selection: self.selection,
             publish,
+            window,
+            live,
+            preview_from_t,
         };
         if self.in_flight {
             if let Some(cancel) = &self.cancel {
@@ -362,12 +438,13 @@ impl DataFlowController {
             {
                 targets.push(selection);
             }
-            let report = evaluate(
+            let report = evaluate_windowed(
                 &request.graph,
                 &request.snapshot,
                 &targets,
                 &cancel,
                 &mut cache.lock().unwrap(),
+                request.window,
                 #[cfg(feature = "scripting")]
                 script_host
                     .as_deref()
@@ -382,13 +459,25 @@ impl DataFlowController {
                         values
                             .iter()
                             .map(|value| match value {
-                                Value::Signal(signal) => Some(preview_stats(signal)),
+                                Value::Signal(signal) => {
+                                    Some(preview_stats_from(signal, request.preview_from_t))
+                                }
                                 Value::Scalar(_) => None,
                             })
                             .collect::<Vec<Option<PreviewStats>>>(),
                     )
                 })
                 .collect();
+            let mut preview_end_t = HashMap::new();
+            for (&node, values) in &report.values {
+                for (port, value) in values.iter().enumerate() {
+                    if let Value::Signal(signal) = value {
+                        if let Some(&last) = signal.t.last() {
+                            preview_end_t.insert((node, port), last);
+                        }
+                    }
+                }
+            }
             let publish = request
                 .publish
                 .then(|| build_outputs(&request.graph, &report));
@@ -396,8 +485,11 @@ impl DataFlowController {
                 generation: request.generation,
                 graph_name: request.graph.name,
                 previews,
+                preview_end_t,
                 diagnostics: report.diagnostics,
                 publish,
+                live: request.live,
+                window: request.window,
             });
         });
     }
@@ -476,14 +568,25 @@ impl DataFlowController {
     }
 }
 
-fn preview_stats(signal: &delog_flow::types::Signal) -> PreviewStats {
+/// Preview stats over the signal samples strictly newer than `from` (all samples
+/// when `from` is `None`). The `None` case is the non-live path and is identical
+/// to computing over the whole signal.
+fn preview_stats_from(signal: &delog_flow::types::Signal, from: Option<i64>) -> PreviewStats {
     let mut count = 0_u64;
     let mut nan_count = 0_u64;
     let mut min = f64::NAN;
     let mut max = f64::NAN;
     let mut mean = 0.0;
     let mut m2 = 0.0;
-    for &value in signal.v.iter() {
+    let mut t0 = None;
+    let mut t1 = 0;
+    for (i, &value) in signal.v.iter().enumerate() {
+        let t = signal.t.get(i).copied().unwrap_or_default();
+        if from.is_some_and(|from| t <= from) {
+            continue;
+        }
+        t0.get_or_insert(t);
+        t1 = t;
         if value.is_nan() {
             nan_count += 1;
             continue;
@@ -506,8 +609,8 @@ fn preview_stats(signal: &delog_flow::types::Signal) -> PreviewStats {
         } else {
             (m2 / count as f64).sqrt()
         },
-        t0_us: signal.t.first().copied().unwrap_or_default(),
-        t1_us: signal.t.last().copied().unwrap_or_default(),
+        t0_us: t0.unwrap_or_default(),
+        t1_us: t1,
     }
 }
 
@@ -564,6 +667,30 @@ mod tests {
         );
         let store = Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap());
         Arc::new(StoreSnapshot::from_registry(&identity, [(topic, store)], 1).unwrap())
+    }
+
+    fn snapshot_alt(times: Vec<i64>, values: Vec<f64>, epoch: u64) -> Arc<StoreSnapshot> {
+        let mut identity = IdentityRegistry::new();
+        let source = identity.add_source("flight");
+        let topic = identity.add_topic(source, "GPS").unwrap();
+        identity.add_field(topic, "Alt").unwrap();
+        let schema = Arc::new(
+            TopicSchema::new(
+                "GPS",
+                [FieldSchema::new("Alt", DataType::Float64, Some("m"), 1.0).unwrap()],
+            )
+            .unwrap(),
+        );
+        let chunk = Arc::new(
+            Chunk::try_new(
+                Int64Array::from(times),
+                vec![Arc::new(Float64Array::from(values)) as ArrayRef],
+                &schema,
+            )
+            .unwrap(),
+        );
+        let store = Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap());
+        Arc::new(StoreSnapshot::from_registry(&identity, [(topic, store)], epoch).unwrap())
     }
 
     fn data() -> NodeKind {
@@ -671,8 +798,11 @@ mod tests {
                 generation: 1,
                 graph_name: "g".into(),
                 previews: HashMap::new(),
+                preview_end_t: HashMap::new(),
                 diagnostics: Vec::new(),
                 publish: Some(Ok(vec![topic])),
+                live: false,
+                window: None,
             })
             .unwrap();
         let (sender, receiver) = ingest_channel();
@@ -718,8 +848,11 @@ mod tests {
                 generation: 1,
                 graph_name: "g".into(),
                 previews: HashMap::new(),
+                preview_end_t: HashMap::new(),
                 diagnostics: Vec::new(),
                 publish: Some(Ok(vec![topic])),
+                live: false,
+                window: None,
             })
             .unwrap();
         let (sender, receiver) = ingest_channel();
@@ -756,8 +889,11 @@ mod tests {
                 generation: 1,
                 graph_name: "g".into(),
                 previews: HashMap::new(),
+                preview_end_t: HashMap::new(),
                 diagnostics: Vec::new(),
                 publish: Some(Ok(vec![topic])),
+                live: false,
+                window: None,
             })
             .unwrap();
         let (sender, receiver) = ingest_channel();
@@ -1088,5 +1224,31 @@ mod tests {
         assert_eq!(merged.max, 6.0);
         assert_eq!(merged.t0_us, 10);
         assert_eq!(merged.t1_us, 60);
+    }
+
+    #[test]
+    fn live_preview_accumulates_across_ticks() {
+        let mut graph = Graph::new("g");
+        let field = add_node(&mut graph, data());
+        let mut controller = DataFlowController::new(graph);
+        controller.selection = Some(field);
+        let (sender, _receiver) = ingest_channel();
+
+        // Seed tick: full history [100,200,300] -> [1,2,3].
+        controller.request_live(snapshot_alt(vec![100, 200, 300], vec![1.0, 2.0, 3.0], 1), 3.0, false);
+        wait_for(&mut controller, &sender);
+        assert_eq!(controller.preview_for(field, 0).unwrap().count, 3);
+
+        // Append tick: new samples 400,500 -> [4,5]; overlap re-reads 300 but the
+        // tail merge only adds t > watermark, so count becomes 5, not 6.
+        controller.request_live(
+            snapshot_alt(vec![100, 200, 300, 400, 500], vec![1.0, 2.0, 3.0, 4.0, 5.0], 2),
+            3.0,
+            false,
+        );
+        wait_for(&mut controller, &sender);
+        let preview = controller.preview_for(field, 0).unwrap();
+        assert_eq!(preview.count, 5);
+        assert_eq!(preview.mean, 3.0);
     }
 }
