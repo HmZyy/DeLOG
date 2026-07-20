@@ -151,7 +151,7 @@ impl DataFlowUi {
         let mut logs = Vec::new();
         let mut open = self.open;
         let window_layer = self.reassert_canvas_sublayers(ctx);
-        let window_response = egui::Window::new("Data Flow")
+        egui::Window::new("Data Flow")
             .open(&mut open)
             .default_size([980.0, 640.0])
             .min_size([720.0, 420.0])
@@ -249,10 +249,14 @@ impl DataFlowUi {
             }
         }
 
-        let window_active = window_response
-            .as_ref()
-            .is_some_and(|response| response.response.contains_pointer());
-        self.handle_shortcuts(ctx, window_active, &mut logs);
+        // Scope shortcuts by window geometry, not layer hit-testing: the canvas
+        // paints in sublayers re-ordered above the window, so a layer-based
+        // `contains_pointer` is false whenever the pointer is over the graph.
+        let pointer_over_window = ctx
+            .memory(|memory| memory.area_rect(egui::Id::new("Data Flow")))
+            .zip(ctx.pointer_hover_pos())
+            .is_some_and(|(rect, pointer)| rect.contains(pointer));
+        self.handle_shortcuts(ctx, pointer_over_window, &mut logs);
 
         logs
     }
