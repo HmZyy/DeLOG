@@ -2926,21 +2926,30 @@ impl eframe::App for DelogApp {
             }
         }
 
-        if self.dataflow.open {
+        {
             #[cfg(feature = "scripting")]
-            {
-                let host = self.dataflow.has_script_node().then(|| {
-                    self.scripts
-                        .engine_flow_host(
-                            self.session.store(),
-                            self.session.ingest_sender(),
-                            Arc::clone(self.session.metrics()),
-                        )
-                });
-                self.dataflow.set_script_host(host);
+            if self.dataflow.open && self.dataflow.has_script_node() {
+                let host = self.scripts.engine_flow_host(
+                    self.session.store(),
+                    self.session.ingest_sender(),
+                    Arc::clone(self.session.metrics()),
+                );
+                self.dataflow.set_script_host(Some(host));
             }
             let sender = self.session.ingest_sender();
-            let logs = self.dataflow.show(ui.ctx(), &snapshot, &sender);
+            let live_connected = self.session.has_connected_live();
+            let dataflow_settings = self.settings.dataflow;
+            let mut logs = Vec::new();
+            if self.dataflow.open {
+                logs.extend(self.dataflow.show(ui.ctx(), &snapshot, &sender, live_connected));
+            }
+            logs.extend(self.dataflow.drive(
+                ui.ctx(),
+                &snapshot,
+                &sender,
+                live_connected,
+                dataflow_settings,
+            ));
             for (level, message) in logs {
                 self.push_log(crate::logging::log(level, message));
             }
