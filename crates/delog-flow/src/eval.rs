@@ -371,6 +371,21 @@ fn evaluate_kernel(kind: &NodeKind, inputs: &[Value]) -> Result<(Vec<Value>, Vec
                 Vec::new(),
             )
         }
+        NodeKind::Convert { kind } => {
+            let input = require_signal(inputs.first())?;
+            let values = input.v.iter().map(|&value| kind.apply(value)).collect();
+            (
+                Value::Signal(Signal {
+                    t: Arc::clone(&input.t),
+                    v: Arc::new(values),
+                    meta: SignalMeta {
+                        timeline: input.meta.timeline,
+                        unit: Some(kind.output_unit().to_owned()),
+                    },
+                }),
+                Vec::new(),
+            )
+        }
         NodeKind::Align { mode } => {
             let data = require_signal(inputs.first())?;
             let reference = require_signal(inputs.get(1))?;
@@ -599,7 +614,7 @@ mod tests {
 
     use super::*;
     use crate::command::{GraphCommand, apply};
-    use crate::graph::{FieldSelector, Graph, Node, NodeId, NodeKind};
+    use crate::graph::{ConversionKind, FieldSelector, Graph, Node, NodeId, NodeKind};
     use crate::test_util::{
         eval_no_host, snapshot_duplicate_times, snapshot_gps_baro, snapshot_overlapping_chunks,
         snapshot_scaled_i16,
@@ -706,6 +721,28 @@ mod tests {
         let sum = &signal(&report, add).v;
         assert_eq!(sum[0..2], [11.0, 22.0]);
         assert!(sum[2].is_nan());
+    }
+
+    #[test]
+    fn convert_applies_elementwise_sets_unit_and_keeps_timeline() {
+        let snapshot = snapshot_gps_baro();
+        let mut graph = Graph::new("g");
+        let x = add_node(&mut graph, field("IMU", "AccX"));
+        let convert = add_node(
+            &mut graph,
+            NodeKind::Convert {
+                kind: ConversionKind::RadToDeg,
+            },
+        );
+        graph.connect(x, 0, convert, 0).unwrap();
+
+        let report = eval_single(&graph, &snapshot, convert);
+        let out = signal(&report, convert);
+        assert!((out.v[0] - 1.0_f64.to_degrees()).abs() < 1e-9);
+        assert!((out.v[1] - 2.0_f64.to_degrees()).abs() < 1e-9);
+        assert!(out.v[2].is_nan());
+        assert_eq!(out.meta.unit.as_deref(), Some("deg"));
+        assert_eq!(out.meta.timeline, signal(&report, x).meta.timeline);
     }
 
     #[test]

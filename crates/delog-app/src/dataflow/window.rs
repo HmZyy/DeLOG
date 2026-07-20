@@ -373,7 +373,8 @@ impl DataFlowUi {
     fn collapsed_library_drawer(&mut self, ui: &mut egui::Ui) {
         let button_size = crate::browser::panel_toggle_button_size(ui);
         let collapsed_left_margin = ui.spacing().item_spacing.x;
-        let collapsed_width = collapsed_left_margin + button_size.x;
+        let collapsed_right_margin = ui.spacing().item_spacing.x;
+        let collapsed_width = collapsed_left_margin + button_size.x + collapsed_right_margin;
         let collapsed_frame =
             egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::ZERO);
         egui::Panel::left("dataflow_library_collapsed")
@@ -629,6 +630,15 @@ impl DataFlowUi {
                     ui.label("Offset");
                     ui.add(egui::DragValue::new(offset));
                 });
+            }
+            NodeKind::Convert { kind } => {
+                egui::ComboBox::from_label("Conversion")
+                    .selected_text(kind.label())
+                    .show_ui(ui, |ui| {
+                        for option in delog_flow::graph::ConversionKind::ALL {
+                            ui.selectable_value(kind, option, option.label());
+                        }
+                    });
             }
             NodeKind::Align { mode } => {
                 egui::ComboBox::from_id_salt(("dataflow-align-mode", id.0))
