@@ -144,8 +144,6 @@ impl DataFlowUi {
             .min_size([720.0, 420.0])
             .show(ctx, |ui| {
                 bounded_window_body(ui, |ui| {
-                    egui::Panel::bottom("dataflow_footer")
-                        .show_inside(ui, |ui| self.footer(ui));
                     if self.library_collapsed {
                         self.collapsed_library_drawer(ui);
                     } else {
@@ -272,7 +270,10 @@ impl DataFlowUi {
                 self.controller.redo();
             }
             ui.separator();
-            if icon_btn_enabled(ui, true, crate::icons::play(), "Run").clicked() {
+            if self.controller.is_evaluating() {
+                ui.add(egui::Spinner::new().size(16.0))
+                    .on_hover_text("Running");
+            } else if icon_btn_enabled(ui, true, crate::icons::play(), "Run").clicked() {
                 self.controller.request_publish(Arc::clone(snapshot));
             }
         });
@@ -289,15 +290,6 @@ impl DataFlowUi {
             ctx.set_sublayer(window_layer, *child);
         }
         window_layer
-    }
-
-    fn footer(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            if self.controller.is_evaluating() {
-                ui.spinner();
-            }
-            ui.weak("Snapshot only - processes currently loaded data");
-        });
     }
 
     fn collapsed_library_drawer(&mut self, ui: &mut egui::Ui) {
