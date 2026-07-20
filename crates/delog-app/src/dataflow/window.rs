@@ -72,6 +72,9 @@ pub struct DataFlowUi {
     pending_delete: Option<String>,
     library_collapsed: bool,
     canvas_layers: Vec<egui::LayerId>,
+    last_live_request_s: f64,
+    last_live_epoch: u64,
+    pending_live_publish: bool,
     #[cfg(feature = "scripting")]
     script_editor: Option<ScriptEditorState>,
 }
@@ -108,6 +111,9 @@ impl DataFlowUi {
             pending_delete: None,
             library_collapsed: true,
             canvas_layers: Vec::new(),
+            last_live_request_s: 0.0,
+            last_live_epoch: 0,
+            pending_live_publish: false,
             #[cfg(feature = "scripting")]
             script_editor: None,
         }
@@ -133,7 +139,8 @@ impl DataFlowUi {
         &mut self,
         ctx: &egui::Context,
         snapshot: &Arc<StoreSnapshot>,
-        sender: &IngestSender,
+        _sender: &IngestSender,
+        live_connected: bool,
     ) -> Vec<(LogLevel, String)> {
         let mut logs = Vec::new();
         let mut open = self.open;
@@ -154,7 +161,7 @@ impl DataFlowUi {
                             .show_inside(ui, |ui| self.library_drawer(ui, &mut logs));
                     }
                     egui::CentralPanel::default().show_inside(ui, |ui| {
-                        self.toolbar(ui, snapshot, &mut logs);
+                        self.toolbar(ui, snapshot, live_connected, &mut logs);
                         ui.separator();
 
                         let height = ui.available_height();
@@ -227,9 +234,52 @@ impl DataFlowUi {
             }
         }
 
-        if self.controller.needs_eval() {
+        logs
+    }
+
+    /// Runs every frame regardless of window visibility: handles live reset,
+    /// the throttled live cadence, static preview evaluation, and `poll`.
+    pub fn drive(
+        &mut self,
+        ctx: &egui::Context,
+        snapshot: &Arc<StoreSnapshot>,
+        sender: &IngestSender,
+        live_connected: bool,
+        settings: crate::settings::DataFlowSettings,
+    ) -> Vec<(LogLevel, String)> {
+        let mut logs = Vec::new();
+
+        // Live disconnected -> freeze the current output (data stays), stop live.
+        if !live_connected && self.controller.is_live_published() {
+            self.controller.reset_live(sender);
+        }
+        // Graph edited while live -> re-seed on the next tick.
+        if self.controller.take_needs_live_reset() {
+            self.controller.reset_live(sender);
+        }
+
+        if live_connected {
+            let now_s = ctx.input(|i| i.time);
+            let epoch = snapshot.epoch;
+            if should_tick_live(
+                now_s,
+                self.last_live_request_s,
+                settings.live_throttle_ms,
+                epoch,
+                self.last_live_epoch,
+            ) {
+                let append = self.controller.is_live_published() || self.pending_live_publish;
+                self.pending_live_publish = false;
+                self.controller
+                    .request_live(Arc::clone(snapshot), settings.live_overlap_secs, append);
+                self.last_live_request_s = now_s;
+                self.last_live_epoch = epoch;
+            }
+            ctx.request_repaint();
+        } else if self.controller.needs_eval() {
             self.controller.request_eval(Arc::clone(snapshot));
         }
+
         logs.extend(self.controller.poll(sender));
         if self.controller.is_evaluating() {
             ctx.request_repaint();
@@ -241,6 +291,7 @@ impl DataFlowUi {
         &mut self,
         ui: &mut egui::Ui,
         snapshot: &Arc<StoreSnapshot>,
+        live_connected: bool,
         logs: &mut Vec<(LogLevel, String)>,
     ) {
         ui.horizontal(|ui| {
@@ -274,7 +325,11 @@ impl DataFlowUi {
                 ui.add(egui::Spinner::new().size(16.0))
                     .on_hover_text("Running");
             } else if icon_btn_enabled(ui, true, crate::icons::play(), "Run").clicked() {
-                self.controller.request_publish(Arc::clone(snapshot));
+                if live_connected {
+                    self.pending_live_publish = true;
+                } else {
+                    self.controller.request_publish(Arc::clone(snapshot));
+                }
             }
         });
     }
@@ -791,6 +846,10 @@ impl DataFlowUi {
     }
 }
 
+fn should_tick_live(now_s: f64, last_s: f64, throttle_ms: u32, epoch: u64, last_epoch: u64) -> bool {
+    epoch != last_epoch && (now_s - last_s) * 1000.0 >= throttle_ms as f64
+}
+
 fn show_selector(ui: &mut egui::Ui, selector: &FieldSelector) {
     ui.label(format!(
         "Source: {}",
@@ -1119,7 +1178,14 @@ mod tests {
             ..Default::default()
         };
         let _ = ctx.run_ui(input, |ui| {
-            let _ = flow.show(ui.ctx(), snapshot, sender);
+            let _ = flow.show(ui.ctx(), snapshot, sender, false);
+            let _ = flow.drive(
+                ui.ctx(),
+                snapshot,
+                sender,
+                false,
+                crate::settings::DataFlowSettings::default(),
+            );
         });
         ctx.memory(|memory| memory.area_rect(egui::Id::new("Data Flow")).unwrap())
     }
@@ -1166,6 +1232,16 @@ mod tests {
             Some(window_layer),
             "re-parenting canvas sublayers must leave the window as the top layer so egui keeps the active title highlight"
         );
+    }
+
+    #[test]
+    fn live_cadence_fires_only_on_new_epoch_after_interval() {
+        // New epoch + interval elapsed -> fire.
+        assert!(super::should_tick_live(1.000, 0.700, 200, 5, 4));
+        // New epoch but interval not elapsed -> hold.
+        assert!(!super::should_tick_live(0.800, 0.700, 200, 5, 4));
+        // Interval elapsed but no new epoch -> hold.
+        assert!(!super::should_tick_live(2.000, 0.700, 200, 4, 4));
     }
 
     #[test]
