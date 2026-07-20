@@ -167,6 +167,14 @@ impl DataFlowUi {
                         self.toolbar(ui, snapshot, live_connected, &mut logs);
                         ui.separator();
 
+                        let issue_nodes: std::collections::HashSet<NodeId> = self
+                            .controller
+                            .graph
+                            .nodes
+                            .iter()
+                            .map(|node| node.id)
+                            .filter(|&id| !self.controller.diagnostics_for(id).is_empty())
+                            .collect();
                         let height = ui.available_height();
                         ui.horizontal(|ui| {
                             let canvas_width = (ui.available_width() - 270.0).max(200.0);
@@ -179,6 +187,7 @@ impl DataFlowUi {
                                             ui,
                                             &self.controller.graph,
                                             self.controller.selection,
+                                            &issue_nodes,
                                             &mut self.canvas,
                                         )
                                     },

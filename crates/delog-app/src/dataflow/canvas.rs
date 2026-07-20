@@ -50,6 +50,7 @@ pub fn show_canvas(
     ui: &mut egui::Ui,
     graph: &Graph,
     selection: Option<NodeId>,
+    issues: &HashSet<NodeId>,
     state: &mut CanvasState,
 ) -> Vec<CanvasEvent> {
     let canvas_size = ui.available_size();
@@ -99,7 +100,15 @@ pub fn show_canvas(
                         .max_width(220.0)
                         .animation_time(0.0)
                         .show(node_context, ui, |context| {
-                            context.framed(|ui, sockets| {
+                            let mut frame = egui_graph::node::default_frame(
+                                context.style(),
+                                context.interaction(),
+                            );
+                            if issues.contains(&node.id) {
+                                frame.stroke.color = context.style().visuals.error_fg_color;
+                                frame.stroke.width = frame.stroke.width.max(1.5);
+                            }
+                            context.framed_with(frame, |ui, sockets| {
                                 show_node_contents(
                                     ui,
                                     sockets,
@@ -551,7 +560,31 @@ mod tests {
         let _ = ctx.run_ui(input, |ui| {
             ui.set_min_size(size);
             ui.set_max_size(size);
-            let _ = show_canvas(ui, graph, None, state);
+            let _ = show_canvas(ui, graph, None, &HashSet::new(), state);
+        });
+    }
+
+    #[test]
+    fn issue_node_renders_with_error_stroke() {
+        let ctx = egui::Context::default();
+        let mut graph = Graph::new("g");
+        let id = graph.alloc_id();
+        graph.insert_node(Node {
+            id,
+            pos: [0.0, 0.0],
+            kind: NodeKind::Add,
+        });
+        let issues: HashSet<NodeId> = [id].into_iter().collect();
+        let mut state = CanvasState::default();
+        let size = egui::vec2(400.0, 300.0);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input, |ui| {
+            ui.set_min_size(size);
+            ui.set_max_size(size);
+            let _ = show_canvas(ui, &graph, None, &issues, &mut state);
         });
     }
 
@@ -963,7 +996,7 @@ mod tests {
                 ..Default::default()
             },
             |ui| {
-                show_canvas(ui, &graph, None, &mut state);
+                show_canvas(ui, &graph, None, &HashSet::new(), &mut state);
             },
         );
 
