@@ -116,7 +116,6 @@ pub struct EvalOutcome {
     pub diagnostics: Vec<Diagnostic>,
     pub publish: Option<Result<Vec<PendingTopic>, Vec<Diagnostic>>>,
     pub live: bool,
-    pub window: Option<delog_core::time::TimeRange>,
     pub snapshot_max_t: Option<i64>,
 }
 
@@ -513,7 +512,6 @@ impl DataFlowController {
                 diagnostics: report.diagnostics,
                 publish,
                 live: request.live,
-                window: request.window,
                 snapshot_max_t: request.snapshot_max_t,
             });
         });
@@ -904,7 +902,6 @@ mod tests {
                 diagnostics: Vec::new(),
                 publish: Some(Ok(vec![topic])),
                 live: false,
-                window: None,
                 snapshot_max_t: None,
             })
             .unwrap();
@@ -955,7 +952,6 @@ mod tests {
                 diagnostics: Vec::new(),
                 publish: Some(Ok(vec![topic])),
                 live: false,
-                window: None,
                 snapshot_max_t: None,
             })
             .unwrap();
@@ -997,7 +993,6 @@ mod tests {
                 diagnostics: Vec::new(),
                 publish: Some(Ok(vec![topic])),
                 live: false,
-                window: None,
                 snapshot_max_t: None,
             })
             .unwrap();
