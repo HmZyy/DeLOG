@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use delog_core::derived::{PendingField, PendingTopic};
+use delog_core::derived::{PendingColumn, PendingField, PendingTopic};
 
 use crate::eval::{Diagnostic, EvalReport};
 use crate::graph::{Graph, NodeId, NodeKind};
@@ -8,6 +8,36 @@ use crate::types::{TimelineId, Value};
 
 pub fn source_key(graph_name: &str) -> String {
     format!("dataflow:{graph_name}")
+}
+
+/// A copy of `topic` containing only the rows whose timestamp is strictly
+/// greater than `after_t`, preserving field names, units, and order. Used to
+/// append just the new tail to an already-open live derived source.
+pub fn slice_topic_after(topic: &PendingTopic, after_t: i64) -> PendingTopic {
+    let keep: Vec<usize> = topic
+        .times
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &t)| (t > after_t).then_some(i))
+        .collect();
+    let times = keep.iter().map(|&i| topic.times[i]).collect();
+    let mut out = PendingTopic::new(topic.name.clone(), times);
+    for field in &topic.fields {
+        let values = match &field.values {
+            PendingColumn::F64(v) => PendingColumn::F64(keep.iter().map(|&i| v[i]).collect()),
+            PendingColumn::Utf8(v) => {
+                PendingColumn::Utf8(keep.iter().map(|&i| v[i].clone()).collect())
+            }
+        };
+        // Reuse the length-checking constructor path via a manual push; lengths
+        // match by construction, so add_field cannot fail here.
+        let _ = out.add_field(PendingField {
+            name: field.name.clone(),
+            values,
+            unit: field.unit.clone(),
+        });
+    }
+    out
 }
 
 pub fn build_outputs(
@@ -383,5 +413,26 @@ mod tests {
             &topics[0].fields[0].values,
             PendingColumn::F64(values) if values == &[10.0, 20.0]
         ));
+    }
+
+    #[test]
+    fn slice_topic_after_keeps_only_newer_rows() {
+        use delog_core::derived::{PendingColumn, PendingField, PendingTopic};
+        let mut topic = PendingTopic::new("derived".into(), vec![10, 20, 30]);
+        topic
+            .add_field(PendingField::numeric("v", vec![1.0, 2.0, 3.0], Some("m".into())))
+            .unwrap();
+
+        let all = super::slice_topic_after(&topic, i64::MIN);
+        assert_eq!(all.times, vec![10, 20, 30]);
+
+        let tail = super::slice_topic_after(&topic, 15);
+        assert_eq!(tail.times, vec![20, 30]);
+        assert_eq!(tail.fields[0].unit.as_deref(), Some("m"));
+        assert!(matches!(&tail.fields[0].values, PendingColumn::F64(v) if v == &[2.0, 3.0]));
+
+        let empty = super::slice_topic_after(&topic, 30);
+        assert!(empty.times.is_empty());
+        assert!(empty.fields[0].values.is_empty());
     }
 }
