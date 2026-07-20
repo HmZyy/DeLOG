@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use delog_core::field_view::{FieldView, array_row_as_f64};
 use delog_core::identity::FieldId;
 use delog_core::snapshot::StoreSnapshot;
+use delog_core::time::TimeRange;
 
 use crate::doc::node_kind_json;
 use crate::graph::{Graph, NodeId, NodeKind};
@@ -54,6 +55,48 @@ pub fn evaluate(
     targets: &[NodeId],
     cancel: &AtomicBool,
     cache: &mut EvalCache,
+    #[cfg(feature = "scripting")] script_host: Option<&dyn crate::script::ScriptNodeHost>,
+) -> EvalReport {
+    evaluate_inner(
+        graph,
+        snapshot,
+        targets,
+        cancel,
+        cache,
+        None,
+        #[cfg(feature = "scripting")]
+        script_host,
+    )
+}
+
+pub fn evaluate_windowed(
+    graph: &Graph,
+    snapshot: &StoreSnapshot,
+    targets: &[NodeId],
+    cancel: &AtomicBool,
+    cache: &mut EvalCache,
+    window: Option<TimeRange>,
+    #[cfg(feature = "scripting")] script_host: Option<&dyn crate::script::ScriptNodeHost>,
+) -> EvalReport {
+    evaluate_inner(
+        graph,
+        snapshot,
+        targets,
+        cancel,
+        cache,
+        window,
+        #[cfg(feature = "scripting")]
+        script_host,
+    )
+}
+
+fn evaluate_inner(
+    graph: &Graph,
+    snapshot: &StoreSnapshot,
+    targets: &[NodeId],
+    cancel: &AtomicBool,
+    cache: &mut EvalCache,
+    window: Option<TimeRange>,
     #[cfg(feature = "scripting")] script_host: Option<&dyn crate::script::ScriptNodeHost>,
 ) -> EvalReport {
     let order = match topological_order(graph, targets) {
@@ -107,12 +150,13 @@ pub fn evaluate(
                         resolved.topic.0,
                         resolved.field.0,
                     )),
+                    window,
                 );
                 if restore_cached(id, fingerprint, cache, &mut report) {
                     fingerprints.insert(id, fingerprint);
                     continue;
                 }
-                match read_field(snapshot, resolved.field, resolved.multiplier) {
+                match read_field(snapshot, resolved.field, resolved.multiplier, window) {
                     Ok((times, values)) => {
                         let value = Value::Signal(Signal {
                             t: Arc::new(times),
@@ -136,7 +180,7 @@ pub fn evaluate(
                     });
                     continue;
                 }
-                let fingerprint = fingerprint(&node.kind, &[], None);
+                let fingerprint = fingerprint(&node.kind, &[], None, None);
                 if !restore_cached(id, fingerprint, cache, &mut report) {
                     store_value(
                         id,
@@ -164,7 +208,7 @@ pub fn evaluate(
                     report.diagnostics.push(Diagnostic { node: id, message });
                     continue;
                 }
-                let fingerprint = fingerprint(&node.kind, &input_fingerprints, None);
+                let fingerprint = fingerprint(&node.kind, &input_fingerprints, None, None);
                 if restore_cached(id, fingerprint, cache, &mut report) {
                     fingerprints.insert(id, fingerprint);
                     continue;
@@ -206,7 +250,7 @@ pub fn evaluate(
                     });
                     continue;
                 }
-                let fingerprint = fingerprint(kind, &input_fingerprints, None);
+                let fingerprint = fingerprint(kind, &input_fingerprints, None, None);
                 if restore_cached(id, fingerprint, cache, &mut report) {
                     fingerprints.insert(id, fingerprint);
                     continue;
@@ -271,10 +315,12 @@ pub fn read_field(
     snapshot: &StoreSnapshot,
     field: FieldId,
     multiplier: f64,
+    window: Option<TimeRange>,
 ) -> Result<(Vec<i64>, Vec<f64>), String> {
     let view = FieldView::new(snapshot, field).map_err(|error| error.to_string())?;
-    let Some(range) = snapshot.global_time_range() else {
-        return Ok((Vec::new(), Vec::new()));
+    let range = match window.or_else(|| snapshot.global_time_range()) {
+        Some(range) => range,
+        None => return Ok((Vec::new(), Vec::new())),
     };
     let col = view.col_index();
     let offset = view.offset_us_for_export();
@@ -287,6 +333,9 @@ pub fn read_field(
                 .value(row)
                 .checked_add(offset)
                 .ok_or_else(|| "source offset overflows a data-flow timestamp".to_owned())?;
+            if window.is_some() && (time < range.min_us || time > range.max_us) {
+                continue;
+            }
             times.push(time);
             values.push(array_row_as_f64(chunk.cols[col].as_ref(), row) * multiplier);
         }
@@ -445,11 +494,17 @@ fn require_same_timeline(a: &Signal, b: &Signal) -> Result<(), String> {
     Ok(())
 }
 
-fn fingerprint(kind: &NodeKind, inputs: &[u64], data: Option<(u64, u32, u32, u32)>) -> u64 {
+fn fingerprint(
+    kind: &NodeKind,
+    inputs: &[u64],
+    data: Option<(u64, u32, u32, u32)>,
+    window: Option<TimeRange>,
+) -> u64 {
     let mut hasher = DefaultHasher::new();
     node_kind_json(kind).to_string().hash(&mut hasher);
     inputs.hash(&mut hasher);
     data.hash(&mut hasher);
+    window.map(|w| (w.min_us, w.max_us)).hash(&mut hasher);
     hasher.finish()
 }
 
@@ -858,5 +913,47 @@ mod tests {
         let report = eval_single(&graph, &snapshot, align);
 
         assert_eq!(signal(&report, align).v.as_slice(), &[1.0, 33.0, 33.0, 4.0]);
+    }
+
+    #[test]
+    fn windowed_read_limits_rows_to_window() {
+        let snapshot = snapshot_gps_baro(); // GPS.Alt times 100,200,300 values 1.0,-1.0,0.0
+        let mut graph = Graph::new("g");
+        let gps = add_node(&mut graph, field("GPS", "Alt"));
+        let window = delog_core::time::TimeRange::new(150, 300);
+        let report = evaluate_windowed(
+            &graph,
+            &snapshot,
+            &[gps],
+            &AtomicBool::new(false),
+            &mut EvalCache::default(),
+            window,
+            #[cfg(feature = "scripting")]
+            None,
+        );
+        let signal = signal(&report, gps);
+        assert_eq!(signal.t.as_slice(), &[200, 300]);
+        assert_eq!(signal.v.as_slice(), &[-1.0, 0.0]);
+    }
+
+    #[test]
+    fn window_and_full_do_not_collide_in_cache() {
+        let snapshot = snapshot_gps_baro();
+        let mut graph = Graph::new("g");
+        let gps = add_node(&mut graph, field("GPS", "Alt"));
+        let mut cache = EvalCache::default();
+        let full = eval_no_host(&graph, &snapshot, &[gps], &AtomicBool::new(false), &mut cache);
+        assert_eq!(signal(&full, gps).t.len(), 3);
+        let windowed = evaluate_windowed(
+            &graph,
+            &snapshot,
+            &[gps],
+            &AtomicBool::new(false),
+            &mut cache,
+            delog_core::time::TimeRange::new(250, 300),
+            #[cfg(feature = "scripting")]
+            None,
+        );
+        assert_eq!(signal(&windowed, gps).t.as_slice(), &[300]);
     }
 }
