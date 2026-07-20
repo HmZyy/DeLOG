@@ -107,7 +107,7 @@ In its inspector, set the topic name and add one row per output field. Each row
 has a field name and an optional unit override. Connect every field input to a
 signal on the same timeline.
 
-Click **Publish** to evaluate all Output nodes on a worker thread. Publication
+Click **Run** to evaluate all Output nodes on a worker thread. Publication
 is all-or-nothing: an unresolved input, timeline conflict, missing connection,
 or invalid output prevents the entire derived source from being emitted. The
 diagnostics stay attached to their nodes and errors also go to the Logging dock.
