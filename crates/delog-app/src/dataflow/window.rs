@@ -188,7 +188,7 @@ impl DataFlowUi {
                             ui.allocate_ui_with_layout(
                                 egui::vec2(260.0, height),
                                 egui::Layout::top_down(egui::Align::Min),
-                                |ui| self.inspector(ui, &mut logs),
+                                |ui| self.inspector(ui, snapshot, &mut logs),
                             );
                             self.handle_canvas_events(events, snapshot, &mut logs);
                         });
@@ -561,7 +561,12 @@ impl DataFlowUi {
         }
     }
 
-    fn inspector(&mut self, ui: &mut egui::Ui, logs: &mut Vec<(LogLevel, String)>) {
+    fn inspector(
+        &mut self,
+        ui: &mut egui::Ui,
+        snapshot: &Arc<StoreSnapshot>,
+        logs: &mut Vec<(LogLevel, String)>,
+    ) {
         ui.heading("Inspector");
         let Some(id) = self.controller.selection else {
             ui.weak("Select a node to inspect it");
@@ -576,6 +581,32 @@ impl DataFlowUi {
         }
         ui.separator();
 
+        // Source disambiguation (session-only binding, not an undoable edit):
+        // only shown when this field's topic/field is present in >1 source.
+        let mut source_choice = None;
+        if let NodeKind::DataField(selector) = &node.kind {
+            let candidates = delog_flow::resolve::candidate_source_labels(snapshot, selector);
+            if candidates.len() > 1 {
+                let mut chosen = selector.source.clone();
+                egui::ComboBox::from_label("Source")
+                    .selected_text(chosen.as_deref().unwrap_or("(choose)"))
+                    .show_ui(ui, |ui| {
+                        for label in &candidates {
+                            ui.selectable_value(&mut chosen, Some(label.clone()), label);
+                        }
+                    });
+                if chosen != selector.source {
+                    source_choice = Some(chosen);
+                }
+            }
+        }
+        if let Some(choice) = source_choice {
+            self.controller.set_field_source(id, choice);
+        }
+
+        let Some(node) = self.controller.graph.node(id) else {
+            return;
+        };
         let mut edited = node.kind.clone();
         let mut structural_edit = None;
         match &mut edited {
@@ -874,10 +905,6 @@ fn should_tick_live(now_s: f64, last_s: f64, throttle_ms: u32, epoch: u64, last_
 }
 
 fn show_selector(ui: &mut egui::Ui, selector: &FieldSelector) {
-    ui.label(format!(
-        "Source: {}",
-        selector.source.as_deref().unwrap_or("any")
-    ));
     ui.label(format!("Topic: {}", selector.topic));
     if let Some(instance) = selector.instance {
         ui.label(format!("Instance: {instance}"));

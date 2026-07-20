@@ -34,10 +34,7 @@ pub fn resolve_field(
             if topic.entry.removed || topic.store.is_none() {
                 continue;
             }
-            let (base, instance) = parse_topic_instance(&topic.entry.name);
-            let matches_structured = base == selector.topic && instance == selector.instance;
-            let matches_full = selector.instance.is_none() && topic.entry.name == selector.topic;
-            if matches_structured || matches_full {
+            if topic_matches(&topic.entry.name, selector) {
                 candidates.push((source, topic));
             }
         }
@@ -93,6 +90,41 @@ pub fn resolve_field(
     })
 }
 
+/// Whether `topic_name` matches the selector's topic, either as a structured
+/// `base[instance]` pair or as a full literal name.
+fn topic_matches(topic_name: &str, selector: &FieldSelector) -> bool {
+    let (base, instance) = parse_topic_instance(topic_name);
+    (base == selector.topic && instance == selector.instance)
+        || (selector.instance.is_none() && topic_name == selector.topic)
+}
+
+/// Labels of every non-removed loaded source that has this selector's topic AND
+/// field, ignoring `selector.source`. Used by the editor to offer a source
+/// choice when a field is ambiguous (more than one candidate).
+pub fn candidate_source_labels(snapshot: &StoreSnapshot, selector: &FieldSelector) -> Vec<String> {
+    let mut labels = Vec::new();
+    for source in snapshot.sources.iter() {
+        if source.entry.removed {
+            continue;
+        }
+        let has_match = source.topics.iter().any(|&topic_id| {
+            let Some(topic) = snapshot.topic(topic_id) else {
+                return false;
+            };
+            if topic.entry.removed || topic.store.is_none() || !topic_matches(&topic.entry.name, selector) {
+                return false;
+            }
+            snapshot.fields.iter().any(|field| {
+                !field.removed && field.topic == topic.entry.id && field.name == selector.field
+            })
+        });
+        if has_match && !labels.contains(&source.entry.label) {
+            labels.push(source.entry.label.clone());
+        }
+    }
+    labels
+}
+
 fn selector_topic(selector: &FieldSelector) -> String {
     match selector.instance {
         Some(instance) => format!("{}[{instance}]", selector.topic),
@@ -129,6 +161,40 @@ mod tests {
         let hit = resolve_field(&snap, &sel).unwrap();
         assert_eq!(hit.unit.as_deref(), Some("m/s^2"));
         assert!(!hit.is_string);
+    }
+
+    #[test]
+    fn candidate_labels_list_every_source_with_the_field() {
+        let snap = snapshot_two_sources();
+        let imu = FieldSelector {
+            source: None,
+            topic: "IMU".into(),
+            instance: Some(0),
+            field: "AccX".into(),
+        };
+        let mut labels = candidate_source_labels(&snap, &imu);
+        labels.sort();
+        assert_eq!(labels, vec!["flight_01".to_owned(), "flight_02".to_owned()]);
+
+        let missing = FieldSelector {
+            source: None,
+            topic: "IMU".into(),
+            instance: Some(0),
+            field: "Nope".into(),
+        };
+        assert!(candidate_source_labels(&snap, &missing).is_empty());
+    }
+
+    #[test]
+    fn candidate_labels_single_source_has_one() {
+        let snap = snapshot_scaled_i16();
+        let sel = FieldSelector {
+            source: None,
+            topic: "SCALED".into(),
+            instance: None,
+            field: "A".into(),
+        };
+        assert_eq!(candidate_source_labels(&snap, &sel), vec!["flight".to_owned()]);
     }
 
     #[test]

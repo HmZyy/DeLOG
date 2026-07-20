@@ -258,6 +258,21 @@ impl DataFlowController {
         self.needs_eval
     }
 
+    /// Bind (or clear) a DataField's source for this session only. The choice
+    /// is not persisted and is not an undoable graph edit, so it does not touch
+    /// `dirty`/undo; it just re-evaluates and re-seeds any live publication off
+    /// the newly chosen source.
+    pub fn set_field_source(&mut self, node: NodeId, source: Option<String>) {
+        if let Some(node) = self.graph.node_mut(node)
+            && let NodeKind::DataField(selector) = &mut node.kind
+            && selector.source != source
+        {
+            selector.source = source;
+            self.needs_eval = true;
+            self.invalidate_live();
+        }
+    }
+
     pub fn undo(&mut self) {
         let Some(command) = self.undo.pop() else {
             return;
@@ -808,6 +823,84 @@ mod tests {
             instance: None,
             field: "Alt".into(),
         })
+    }
+
+    fn gps_source(
+        identity: &mut IdentityRegistry,
+        name: &str,
+        values: Vec<f64>,
+    ) -> (delog_core::identity::TopicId, Arc<TopicStore>) {
+        let source = identity.add_source(name);
+        let topic = identity.add_topic(source, "GPS").unwrap();
+        identity.add_field(topic, "Alt").unwrap();
+        let schema = Arc::new(
+            TopicSchema::new(
+                "GPS",
+                [FieldSchema::new("Alt", DataType::Float64, Some("m"), 1.0).unwrap()],
+            )
+            .unwrap(),
+        );
+        let chunk = Arc::new(
+            Chunk::try_new(
+                Int64Array::from(vec![100, 200, 300]),
+                vec![Arc::new(Float64Array::from(values)) as ArrayRef],
+                &schema,
+            )
+            .unwrap(),
+        );
+        (topic, Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap()))
+    }
+
+    fn snapshot_two_sources() -> Arc<StoreSnapshot> {
+        let mut identity = IdentityRegistry::new();
+        let a = gps_source(&mut identity, "flight_a", vec![1.0, 2.0, 3.0]);
+        let b = gps_source(&mut identity, "flight_b", vec![10.0, 20.0, 30.0]);
+        Arc::new(StoreSnapshot::from_registry(&identity, [a, b], 1).unwrap())
+    }
+
+    fn agnostic_field() -> NodeKind {
+        NodeKind::DataField(FieldSelector {
+            source: None,
+            topic: "GPS".into(),
+            instance: None,
+            field: "Alt".into(),
+        })
+    }
+
+    #[test]
+    fn set_field_source_binds_a_source_without_dirtying_and_re_resolves() {
+        let mut graph = Graph::new("g");
+        let field = graph.alloc_id();
+        graph.insert_node(Node {
+            id: field,
+            pos: [0.0; 2],
+            kind: agnostic_field(),
+        });
+        let mut controller = DataFlowController::new(graph);
+        controller.selection = Some(field);
+        let (sender, _receiver) = ingest_channel();
+
+        // Agnostic + two matching sources -> ambiguous, no preview.
+        controller.request_eval(snapshot_two_sources());
+        wait_for(&mut controller, &sender);
+        assert!(controller.preview_for(field, 0).is_none());
+        assert!(
+            controller
+                .diagnostics_for(field)
+                .iter()
+                .any(|message| message.contains("ambiguous"))
+        );
+
+        // Binding a source is session-only: re-evaluates, does not dirty/undo.
+        controller.set_field_source(field, Some("flight_b".into()));
+        assert!(controller.needs_eval());
+        assert!(!controller.dirty);
+        assert!(!controller.can_undo());
+
+        controller.request_eval(snapshot_two_sources());
+        wait_for(&mut controller, &sender);
+        // flight_b's Alt is [10,20,30] -> mean 20.
+        assert_eq!(controller.preview_for(field, 0).unwrap().mean, 20.0);
     }
 
     fn add_node(graph: &mut Graph, kind: NodeKind) -> NodeId {

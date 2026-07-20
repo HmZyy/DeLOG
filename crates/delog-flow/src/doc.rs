@@ -458,6 +458,44 @@ mod tests {
     }
 
     #[test]
+    fn data_field_source_is_never_saved_and_legacy_source_is_ignored() {
+        // An in-memory source binding is not written to the document.
+        let mut graph = crate::graph::Graph::new("g");
+        let id = graph.alloc_id();
+        graph.insert_node(Node {
+            id,
+            pos: [0.0, 0.0],
+            kind: NodeKind::DataField(FieldSelector {
+                source: Some("flight".into()),
+                topic: "GPS".into(),
+                instance: None,
+                field: "Alt".into(),
+            }),
+        });
+        let json = to_json(&graph);
+        let node = &json["nodes"][0];
+        assert!(node.get("source").is_none());
+        assert_eq!(node["topic"], "GPS");
+        assert_eq!(node["field"], "Alt");
+
+        // A document that still carries a legacy source loads it as agnostic.
+        let raw = serde_json::json!({
+            "delog_dataflow": 1, "name": "g", "next_id": 2, "viewport": {"offset": [0.0, 0.0], "zoom": 1.0},
+            "nodes": [{"id": 1, "pos": [0.0, 0.0], "type": "data_field", "source": "legacy", "topic": "GPS", "field": "Alt"}],
+            "edges": []
+        });
+        let loaded = from_json(&raw).unwrap();
+        match &loaded.nodes[0].kind {
+            NodeKind::DataField(selector) => {
+                assert_eq!(selector.source, None);
+                assert_eq!(selector.topic, "GPS");
+                assert_eq!(selector.field, "Alt");
+            }
+            other => panic!("expected data_field, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn unknown_node_kinds_survive_round_trip() {
         let raw = serde_json::json!({
             "delog_dataflow": 1, "name": "g", "next_id": 2, "viewport": {"offset": [0.0, 0.0], "zoom": 1.0},
