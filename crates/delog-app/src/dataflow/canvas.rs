@@ -202,16 +202,6 @@ pub fn show_canvas(
             screen_pos,
         });
     }
-    if graph.nodes.is_empty() {
-        ui.painter().text(
-            response.response.rect.center(),
-            egui::Align2::CENTER_CENTER,
-            "Right-click to add data or an operation",
-            egui::TextStyle::Body.resolve(ui.style()),
-            ui.visuals().weak_text_color(),
-        );
-    }
-
     if needs_node_wheel_fallback(node_contains_pointer, response.response.contains_pointer()) {
         let (pointer, zoom_delta, pan_delta) = ui.input(|input| {
             (
