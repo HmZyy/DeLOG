@@ -70,6 +70,7 @@ pub struct DataFlowUi {
     name_edit: String,
     loaded_name: Option<String>,
     pending_delete: Option<String>,
+    library_collapsed: bool,
     canvas_layers: Vec<egui::LayerId>,
     #[cfg(feature = "scripting")]
     script_editor: Option<ScriptEditorState>,
@@ -105,6 +106,7 @@ impl DataFlowUi {
             name_edit: "untitled".to_owned(),
             loaded_name: None,
             pending_delete: None,
+            library_collapsed: true,
             canvas_layers: Vec::new(),
             #[cfg(feature = "scripting")]
             script_editor: None,
@@ -144,11 +146,15 @@ impl DataFlowUi {
                 bounded_window_body(ui, |ui| {
                     egui::Panel::bottom("dataflow_footer")
                         .show_inside(ui, |ui| self.footer(ui));
-                    egui::Panel::left("dataflow_library_drawer")
-                        .resizable(true)
-                        .default_size(180.0)
-                        .size_range(140.0..=260.0)
-                        .show_inside(ui, |ui| self.library_drawer(ui, &mut logs));
+                    if self.library_collapsed {
+                        self.collapsed_library_drawer(ui);
+                    } else {
+                        egui::Panel::left("dataflow_library_drawer")
+                            .resizable(true)
+                            .default_size(180.0)
+                            .size_range(140.0..=260.0)
+                            .show_inside(ui, |ui| self.library_drawer(ui, &mut logs));
+                    }
                     egui::CentralPanel::default().show_inside(ui, |ui| {
                         self.toolbar(ui, snapshot, &mut logs);
                         ui.separator();
@@ -294,10 +300,52 @@ impl DataFlowUi {
         });
     }
 
+    fn collapsed_library_drawer(&mut self, ui: &mut egui::Ui) {
+        let button_size = crate::browser::panel_toggle_button_size(ui);
+        let collapsed_left_margin = ui.spacing().item_spacing.x;
+        let collapsed_width = collapsed_left_margin + button_size.x;
+        let collapsed_frame =
+            egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::ZERO);
+        egui::Panel::left("dataflow_library_collapsed")
+            .resizable(false)
+            .show_separator_line(false)
+            .frame(collapsed_frame)
+            .exact_size(collapsed_width)
+            .show_inside(ui, |ui| {
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(collapsed_left_margin);
+                    let icon_size = button_size - ui.spacing().button_padding * 2.0;
+                    let icon = egui::Image::new(crate::icons::panel_left_open())
+                        .fit_to_exact_size(icon_size)
+                        .tint(ui.visuals().text_color());
+                    if ui
+                        .add_sized(button_size, egui::Button::image(icon))
+                        .on_hover_text("Show data flows")
+                        .clicked()
+                    {
+                        self.library_collapsed = false;
+                    }
+                });
+            });
+    }
+
     fn library_drawer(&mut self, ui: &mut egui::Ui, logs: &mut Vec<(LogLevel, String)>) {
         ui.horizontal(|ui| {
             ui.strong("Data Flows");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let button_size = crate::browser::panel_toggle_button_size(ui);
+                let icon_size = button_size - ui.spacing().button_padding * 2.0;
+                let icon = egui::Image::new(crate::icons::panel_left_close())
+                    .fit_to_exact_size(icon_size)
+                    .tint(ui.visuals().text_color());
+                if ui
+                    .add_sized(button_size, egui::Button::image(icon))
+                    .on_hover_text("Hide data flows")
+                    .clicked()
+                {
+                    self.library_collapsed = true;
+                }
                 if ui.button("+ New").clicked() {
                     self.new_graph(logs);
                 }
