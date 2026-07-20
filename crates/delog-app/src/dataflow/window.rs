@@ -341,14 +341,17 @@ impl DataFlowUi {
                 self.controller.redo();
             }
             ui.separator();
-            if self.controller.is_evaluating() {
+            if !live_connected && self.controller.is_evaluating() {
                 ui.add(egui::Spinner::new().size(16.0))
                     .on_hover_text("Running");
-            } else if icon_btn_enabled(ui, true, crate::icons::play(), "Run").clicked() {
-                if live_connected {
-                    self.pending_live_publish = true;
-                } else {
-                    self.controller.request_publish(Arc::clone(snapshot));
+            } else {
+                let tooltip = if live_connected { "Run (publish live output)" } else { "Run" };
+                if icon_btn_enabled(ui, true, crate::icons::play(), tooltip).clicked() {
+                    if live_connected {
+                        self.pending_live_publish = true;
+                    } else {
+                        self.controller.request_publish(Arc::clone(snapshot));
+                    }
                 }
             }
         });
@@ -375,7 +378,7 @@ impl DataFlowUi {
             egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::ZERO);
         egui::Panel::left("dataflow_library_collapsed")
             .resizable(false)
-            .show_separator_line(false)
+            .show_separator_line(true)
             .frame(collapsed_frame)
             .exact_size(collapsed_width)
             .show_inside(ui, |ui| {
