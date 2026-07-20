@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use delog_core::align::AlignMode;
@@ -8,7 +9,7 @@ use delog_flow::command::GraphCommand;
 use delog_flow::graph::{FieldSelector, Graph, Node, NodeId, NodeKind, OutputFieldSpec};
 
 use super::canvas::{CanvasEvent, CanvasState, show_canvas};
-use super::controller::DataFlowController;
+use super::controller::{Clipboard, DataFlowController};
 use super::picker::{DataHit, search_fields};
 use super::registry::{ADD_DATA_INDEX, search_templates, templates};
 use super::store::GraphStore;
@@ -77,6 +78,7 @@ pub struct DataFlowUi {
     last_live_epoch: u64,
     pending_live_publish: bool,
     orphaned_live_sources: Vec<SourceId>,
+    clipboard: Clipboard,
     #[cfg(feature = "scripting")]
     script_editor: Option<ScriptEditorState>,
 }
@@ -117,6 +119,7 @@ impl DataFlowUi {
             last_live_epoch: 0,
             pending_live_publish: false,
             orphaned_live_sources: Vec::new(),
+            clipboard: Clipboard::default(),
             #[cfg(feature = "scripting")]
             script_editor: None,
         }
@@ -148,7 +151,7 @@ impl DataFlowUi {
         let mut logs = Vec::new();
         let mut open = self.open;
         let window_layer = self.reassert_canvas_sublayers(ctx);
-        egui::Window::new("Data Flow")
+        let window_response = egui::Window::new("Data Flow")
             .open(&mut open)
             .default_size([980.0, 640.0])
             .min_size([720.0, 420.0])
@@ -186,7 +189,7 @@ impl DataFlowUi {
                                         show_canvas(
                                             ui,
                                             &self.controller.graph,
-                                            self.controller.selection,
+                                            &self.controller.selection,
                                             &issue_nodes,
                                             &mut self.canvas,
                                         )
@@ -229,7 +232,7 @@ impl DataFlowUi {
                         kind: (templates()[index].make)(),
                     };
                     self.apply(GraphCommand::AddNode { node }, &mut logs);
-                    self.controller.selection = Some(id);
+                    self.controller.selection = HashSet::from([id]);
                 }
                 Some(AddAction::Data(hit)) => {
                     let id = self.controller.graph.alloc_id();
@@ -239,14 +242,52 @@ impl DataFlowUi {
                         kind: NodeKind::DataField(hit.selector),
                     };
                     self.apply(GraphCommand::AddNode { node }, &mut logs);
-                    self.controller.selection = Some(id);
+                    self.controller.selection = HashSet::from([id]);
                 }
                 Some(AddAction::Close) => {}
                 None => self.add_menu = Some(menu),
             }
         }
 
+        let window_active = window_response
+            .as_ref()
+            .is_some_and(|response| response.response.contains_pointer());
+        self.handle_shortcuts(ctx, window_active, &mut logs);
+
         logs
+    }
+
+    /// Delete / copy / paste keyboard shortcuts, scoped to the Data Flow window
+    /// and suppressed while a text field or code editor has keyboard focus.
+    fn handle_shortcuts(
+        &mut self,
+        ctx: &egui::Context,
+        window_active: bool,
+        logs: &mut Vec<(LogLevel, String)>,
+    ) {
+        if !window_active || ctx.egui_wants_keyboard_input() {
+            return;
+        }
+        let (delete, copy, paste) = ctx.input(|input| {
+            (
+                input.key_pressed(egui::Key::Delete) || input.key_pressed(egui::Key::Backspace),
+                input.modifiers.command && input.key_pressed(egui::Key::C),
+                input.modifiers.command && input.key_pressed(egui::Key::V),
+            )
+        });
+        if copy {
+            self.clipboard = self.controller.copy_selection();
+        }
+        if paste && !self.clipboard.is_empty() {
+            if let Err(error) = self.controller.paste(&self.clipboard, [30.0, 30.0]) {
+                logs.push((LogLevel::Error, format!("Paste failed: {error}")));
+            }
+        }
+        if delete && !self.controller.selection.is_empty() {
+            if let Err(error) = self.controller.delete_selection() {
+                logs.push((LogLevel::Error, format!("Delete failed: {error}")));
+            }
+        }
     }
 
     /// Runs every frame regardless of window visibility: handles live reset,
@@ -581,8 +622,13 @@ impl DataFlowUi {
         logs: &mut Vec<(LogLevel, String)>,
     ) {
         ui.heading("Inspector");
-        let Some(id) = self.controller.selection else {
-            ui.weak("Select a node to inspect it");
+        let Some(id) = self.controller.sole_selection() else {
+            let count = self.controller.selection.len();
+            if count > 1 {
+                ui.weak(format!("{count} nodes selected"));
+            } else {
+                ui.weak("Select a node to inspect it");
+            }
             return;
         };
         let Some(node) = self.controller.graph.node(id) else {
@@ -847,9 +893,14 @@ impl DataFlowUi {
                     self.controller.selection = selection;
                     self.controller.request_eval(Arc::clone(snapshot));
                 }
-                CanvasEvent::Moved { id, from, to } => {
-                    let _ = from;
-                    self.apply(GraphCommand::MoveNode { id, to }, logs);
+                CanvasEvent::Moved { moves } => {
+                    if !moves.is_empty() {
+                        let commands = moves
+                            .into_iter()
+                            .map(|(id, to)| GraphCommand::MoveNode { id, to })
+                            .collect();
+                        self.apply(GraphCommand::Batch(commands), logs);
+                    }
                 }
                 CanvasEvent::Connect {
                     from,
@@ -918,6 +969,7 @@ impl DataFlowUi {
         if let Some(source) = self.controller.live_source() {
             self.orphaned_live_sources.push(source);
         }
+        self.clipboard = Clipboard::default();
         self.controller.replace_graph(graph);
     }
 }
@@ -1275,7 +1327,7 @@ mod tests {
             pos: [0.0, 0.0],
             kind: NodeKind::Add,
         });
-        flow.controller.selection = Some(id);
+        flow.controller.selection = HashSet::from([id]);
         for _ in 0..4 {
             let _ = render_data_flow_frame(&ctx, &mut flow, &snapshot, &sender, vec![]);
         }
@@ -1373,7 +1425,7 @@ mod tests {
                 pos: [0.0, 0.0],
                 kind,
             });
-            flow.controller.selection = Some(id);
+            flow.controller.selection = HashSet::from([id]);
 
             let node_frame = render_data_flow_frame(&ctx, &mut flow, &snapshot, &sender, vec![]);
             let following_frame =
@@ -1569,11 +1621,11 @@ mod tests {
                 },
             })
             .unwrap();
-        ui.controller.selection = Some(id);
+        ui.controller.selection = HashSet::from([id]);
 
         ui.replace_graph(Graph::new("untitled"));
 
-        assert!(ui.controller.selection.is_none());
+        assert!(ui.controller.selection.is_empty());
         assert!(!ui.controller.can_undo());
         assert!(!ui.controller.dirty);
         assert!(ui.canvas.view.layout.is_empty());

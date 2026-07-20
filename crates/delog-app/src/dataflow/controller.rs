@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
@@ -10,7 +10,7 @@ use delog_core::ingest::{IngestSender, IngestSink, SourceKind};
 use delog_core::snapshot::StoreSnapshot;
 use delog_flow::command::{GraphCommand, apply};
 use delog_flow::eval::{Diagnostic, EvalCache, evaluate_windowed};
-use delog_flow::graph::{Graph, NodeId, NodeKind};
+use delog_flow::graph::{Edge, Graph, Node, NodeId, NodeKind};
 use delog_flow::publish::{build_outputs, slice_topic_after, source_key};
 use delog_flow::types::Value;
 
@@ -125,11 +125,24 @@ struct PublicationOutcome {
     result: Result<Option<SourceId>, String>,
 }
 
+/// Copied nodes and the edges between them, for in-editor duplication.
+#[derive(Debug, Clone, Default)]
+pub struct Clipboard {
+    nodes: Vec<Node>,
+    edges: Vec<Edge>,
+}
+
+impl Clipboard {
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+}
+
 struct PendingRequest {
     generation: u64,
     graph: Graph,
     snapshot: Arc<StoreSnapshot>,
-    selection: Option<NodeId>,
+    selection: HashSet<NodeId>,
     publish: bool,
     window: Option<delog_core::time::TimeRange>,
     live: bool,
@@ -139,7 +152,7 @@ struct PendingRequest {
 
 pub struct DataFlowController {
     pub graph: Graph,
-    pub selection: Option<NodeId>,
+    pub selection: HashSet<NodeId>,
     pub dirty: bool,
     undo: Vec<GraphCommand>,
     redo: Vec<GraphCommand>,
@@ -187,7 +200,7 @@ impl DataFlowController {
         let (publication_tx, publication_rx) = mpsc::channel();
         Self {
             graph,
-            selection: None,
+            selection: HashSet::new(),
             dirty: false,
             undo: Vec::new(),
             redo: Vec::new(),
@@ -245,12 +258,7 @@ impl DataFlowController {
         self.dirty = true;
         self.needs_eval = true;
         self.invalidate_live();
-        if self
-            .selection
-            .is_some_and(|selection| self.graph.node(selection).is_none())
-        {
-            self.selection = None;
-        }
+        self.selection.retain(|id| self.graph.node(*id).is_some());
         Ok(())
     }
 
@@ -273,6 +281,83 @@ impl DataFlowController {
         }
     }
 
+    /// The single selected node, or `None` when zero or multiple are selected.
+    pub fn sole_selection(&self) -> Option<NodeId> {
+        if self.selection.len() == 1 {
+            self.selection.iter().copied().next()
+        } else {
+            None
+        }
+    }
+
+    pub fn copy_selection(&self) -> Clipboard {
+        let nodes: Vec<Node> = self
+            .graph
+            .nodes
+            .iter()
+            .filter(|node| self.selection.contains(&node.id))
+            .cloned()
+            .collect();
+        let ids: HashSet<NodeId> = nodes.iter().map(|node| node.id).collect();
+        let edges: Vec<Edge> = self
+            .graph
+            .edges
+            .iter()
+            .filter(|edge| ids.contains(&edge.from) && ids.contains(&edge.to))
+            .cloned()
+            .collect();
+        Clipboard { nodes, edges }
+    }
+
+    pub fn delete_selection(&mut self) -> Result<(), String> {
+        if self.selection.is_empty() {
+            return Ok(());
+        }
+        let commands = self
+            .selection
+            .iter()
+            .map(|&id| GraphCommand::RemoveNode { id })
+            .collect();
+        self.selection.clear();
+        self.apply(GraphCommand::Batch(commands))
+    }
+
+    /// Duplicates `clipboard` into the graph shifted by `offset`, remapping edges
+    /// between copied nodes, as one undo step, and selects the new nodes.
+    pub fn paste(&mut self, clipboard: &Clipboard, offset: [f32; 2]) -> Result<(), String> {
+        if clipboard.is_empty() {
+            return Ok(());
+        }
+        let mut id_map = HashMap::new();
+        let mut commands = Vec::new();
+        let mut pasted = HashSet::new();
+        for node in &clipboard.nodes {
+            let new_id = self.graph.alloc_id();
+            id_map.insert(node.id, new_id);
+            pasted.insert(new_id);
+            commands.push(GraphCommand::AddNode {
+                node: Node {
+                    id: new_id,
+                    pos: [node.pos[0] + offset[0], node.pos[1] + offset[1]],
+                    kind: node.kind.clone(),
+                },
+            });
+        }
+        for edge in &clipboard.edges {
+            if let (Some(&from), Some(&to)) = (id_map.get(&edge.from), id_map.get(&edge.to)) {
+                commands.push(GraphCommand::Connect {
+                    from,
+                    from_port: edge.from_port,
+                    to,
+                    to_port: edge.to_port,
+                });
+            }
+        }
+        self.apply(GraphCommand::Batch(commands))?;
+        self.selection = pasted;
+        Ok(())
+    }
+
     pub fn undo(&mut self) {
         let Some(command) = self.undo.pop() else {
             return;
@@ -282,12 +367,7 @@ impl DataFlowController {
             self.dirty = true;
             self.needs_eval = true;
             self.invalidate_live();
-            if self
-                .selection
-                .is_some_and(|selection| self.graph.node(selection).is_none())
-            {
-                self.selection = None;
-            }
+            self.selection.retain(|id| self.graph.node(*id).is_some());
         }
     }
 
@@ -439,7 +519,7 @@ impl DataFlowController {
             generation: self.generation,
             graph: self.graph.clone(),
             snapshot,
-            selection: self.selection,
+            selection: self.selection.clone(),
             publish,
             window,
             live,
@@ -471,10 +551,10 @@ impl DataFlowController {
                 .iter()
                 .filter_map(|node| matches!(node.kind, NodeKind::Output(_)).then_some(node.id))
                 .collect::<Vec<_>>();
-            if let Some(selection) = request.selection
-                && !targets.contains(&selection)
-            {
-                targets.push(selection);
+            for &selection in &request.selection {
+                if !targets.contains(&selection) {
+                    targets.push(selection);
+                }
             }
             let report = evaluate_windowed(
                 &request.graph,
@@ -877,7 +957,7 @@ mod tests {
             kind: agnostic_field(),
         });
         let mut controller = DataFlowController::new(graph);
-        controller.selection = Some(field);
+        controller.selection = HashSet::from([field]);
         let (sender, _receiver) = ingest_channel();
 
         // Agnostic + two matching sources -> ambiguous, no preview.
@@ -901,6 +981,76 @@ mod tests {
         wait_for(&mut controller, &sender);
         // flight_b's Alt is [10,20,30] -> mean 20.
         assert_eq!(controller.preview_for(field, 0).unwrap().mean, 20.0);
+    }
+
+    #[test]
+    fn sole_selection_only_when_exactly_one() {
+        let mut controller = DataFlowController::new(Graph::new("g"));
+        assert_eq!(controller.sole_selection(), None);
+        controller.selection = HashSet::from([NodeId(1)]);
+        assert_eq!(controller.sole_selection(), Some(NodeId(1)));
+        controller.selection = HashSet::from([NodeId(1), NodeId(2)]);
+        assert_eq!(controller.sole_selection(), None);
+    }
+
+    #[test]
+    fn delete_selection_removes_all_selected_in_one_undo_step() {
+        let mut graph = Graph::new("g");
+        let a = add_node(&mut graph, data());
+        let b = add_node(
+            &mut graph,
+            NodeKind::ScaleOffset {
+                multiplier: 1.0,
+                offset: 0.0,
+            },
+        );
+        graph.connect(a, 0, b, 0).unwrap();
+        let mut controller = DataFlowController::new(graph);
+        controller.selection = HashSet::from([a, b]);
+
+        controller.delete_selection().unwrap();
+        assert!(controller.graph.nodes.is_empty());
+        assert!(controller.graph.edges.is_empty());
+        assert!(controller.selection.is_empty());
+
+        controller.undo();
+        assert_eq!(controller.graph.nodes.len(), 2);
+        assert_eq!(controller.graph.edges.len(), 1);
+    }
+
+    #[test]
+    fn copy_paste_duplicates_nodes_and_internal_edges_in_one_undo_step() {
+        let mut graph = Graph::new("g");
+        let a = add_node(&mut graph, data());
+        let b = add_node(
+            &mut graph,
+            NodeKind::ScaleOffset {
+                multiplier: 2.0,
+                offset: 0.0,
+            },
+        );
+        graph.connect(a, 0, b, 0).unwrap();
+        let a_pos = graph.node(a).unwrap().pos;
+        let mut controller = DataFlowController::new(graph);
+        controller.selection = HashSet::from([a, b]);
+
+        let clipboard = controller.copy_selection();
+        controller.paste(&clipboard, [30.0, 30.0]).unwrap();
+
+        assert_eq!(controller.graph.nodes.len(), 4);
+        assert_eq!(controller.graph.edges.len(), 2);
+        assert_eq!(controller.selection.len(), 2);
+        assert!(!controller.selection.contains(&a));
+        assert!(!controller.selection.contains(&b));
+        // A pasted DataField sits at the original offset by +30,+30.
+        assert!(controller.graph.nodes.iter().any(|node| {
+            controller.selection.contains(&node.id)
+                && node.pos == [a_pos[0] + 30.0, a_pos[1] + 30.0]
+        }));
+
+        controller.undo();
+        assert_eq!(controller.graph.nodes.len(), 2);
+        assert_eq!(controller.graph.edges.len(), 1);
     }
 
     fn add_node(graph: &mut Graph, kind: NodeKind) -> NodeId {
@@ -966,7 +1116,7 @@ mod tests {
     fn eval_outcome_carries_previews_and_diagnostics() {
         let (graph, scale) = scale_graph(2.0);
         let mut controller = DataFlowController::new(graph);
-        controller.selection = Some(scale);
+        controller.selection = HashSet::from([scale]);
         let (sender, _receiver) = ingest_channel();
         controller.request_eval(snapshot());
         wait_for(&mut controller, &sender);
@@ -1352,7 +1502,7 @@ mod tests {
             }),
         );
         let mut controller = DataFlowController::new(graph);
-        controller.selection = Some(node);
+        controller.selection = HashSet::from([node]);
         controller.script_host = Some(Arc::new(FakeScriptHost::new(vec![Ok(vec![
             ScriptOutput {
                 times: Some(vec![1, 2, 3]),
@@ -1377,7 +1527,7 @@ mod tests {
     fn stale_generations_are_dropped() {
         let (graph, scale) = scale_graph(2.0);
         let mut controller = DataFlowController::new(graph);
-        controller.selection = Some(scale);
+        controller.selection = HashSet::from([scale]);
         let (sender, _receiver) = ingest_channel();
         controller.request_eval(snapshot());
         controller
@@ -1432,7 +1582,7 @@ mod tests {
         let mut graph = Graph::new("g");
         let field = add_node(&mut graph, data());
         let mut controller = DataFlowController::new(graph);
-        controller.selection = Some(field);
+        controller.selection = HashSet::from([field]);
         let (sender, _receiver) = ingest_channel();
 
         // Seed tick: full history [100,200,300] -> [1,2,3].
@@ -1458,7 +1608,7 @@ mod tests {
         let mut graph = Graph::new("g");
         let field = add_node(&mut graph, data());
         let mut controller = DataFlowController::new(graph);
-        controller.selection = Some(field);
+        controller.selection = HashSet::from([field]);
         let (sender, _receiver) = ingest_channel();
 
         // First live tick (seed) launches and stays in_flight (we do NOT poll).
