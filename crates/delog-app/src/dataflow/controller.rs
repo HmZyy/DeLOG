@@ -28,6 +28,84 @@ pub struct PreviewStats {
     pub t1_us: i64,
 }
 
+/// Whole-session preview aggregate, merged from per-tick window stats via the
+/// parallel variance-combine formula so live previews span the full session at
+/// O(window) cost per tick.
+#[derive(Debug, Clone, Copy)]
+pub struct RunningStats {
+    count: u64,
+    nan_count: u64,
+    min: f64,
+    max: f64,
+    mean: f64,
+    m2: f64,
+    t0_us: i64,
+    t1_us: i64,
+}
+
+impl RunningStats {
+    pub fn from_stats(s: PreviewStats) -> Self {
+        Self {
+            count: s.count,
+            nan_count: s.nan_count,
+            min: s.min,
+            max: s.max,
+            mean: if s.count == 0 { 0.0 } else { s.mean },
+            m2: if s.count == 0 { 0.0 } else { s.stddev * s.stddev * s.count as f64 },
+            t0_us: s.t0_us,
+            t1_us: s.t1_us,
+        }
+    }
+
+    pub fn merge(&mut self, other: PreviewStats) {
+        self.nan_count += other.nan_count;
+        if other.t0_us != 0 || other.t1_us != 0 {
+            if self.count == 0 && self.t0_us == 0 && self.t1_us == 0 {
+                self.t0_us = other.t0_us;
+            }
+            self.t1_us = other.t1_us;
+        }
+        if other.count == 0 {
+            return;
+        }
+        let other_m2 = other.stddev * other.stddev * other.count as f64;
+        if self.count == 0 {
+            self.count = other.count;
+            self.min = other.min;
+            self.max = other.max;
+            self.mean = other.mean;
+            self.m2 = other_m2;
+            return;
+        }
+        let n_a = self.count as f64;
+        let n_b = other.count as f64;
+        let n = n_a + n_b;
+        let delta = other.mean - self.mean;
+        self.mean += delta * n_b / n;
+        self.m2 += other_m2 + delta * delta * n_a * n_b / n;
+        self.count += other.count;
+        self.min = self.min.min(other.min);
+        self.max = self.max.max(other.max);
+    }
+
+    pub fn as_preview(&self) -> PreviewStats {
+        PreviewStats {
+            count: self.count,
+            nan_count: self.nan_count,
+            min: self.min,
+            max: self.max,
+            mean: if self.count == 0 { f64::NAN } else { self.mean },
+            stddev: if self.count == 0 {
+                f64::NAN
+            } else {
+                (self.m2 / self.count as f64).sqrt()
+            },
+            t0_us: self.t0_us,
+            t1_us: self.t1_us,
+        }
+    }
+}
+
 pub struct EvalOutcome {
     pub generation: u64,
     pub graph_name: String,
@@ -977,5 +1055,38 @@ mod tests {
         controller.request_eval(snapshot());
         wait_for(&mut controller, &sender);
         assert_eq!(controller.preview_for(scale, 0).unwrap().mean, 6.0);
+    }
+
+    #[test]
+    fn running_stats_merge_matches_single_pass() {
+        // Combining stats of [1,2,3] then [4,5,6] equals stats of [1..=6].
+        fn stats_of(values: &[f64], t0: i64, t1: i64) -> PreviewStats {
+            let count = values.len() as u64;
+            let mean = values.iter().sum::<f64>() / count as f64;
+            let m2: f64 = values.iter().map(|v| (v - mean).powi(2)).sum();
+            PreviewStats {
+                count,
+                nan_count: 0,
+                min: values.iter().cloned().fold(f64::INFINITY, f64::min),
+                max: values.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+                mean,
+                stddev: (m2 / count as f64).sqrt(),
+                t0_us: t0,
+                t1_us: t1,
+            }
+        }
+
+        let mut running = RunningStats::from_stats(stats_of(&[1.0, 2.0, 3.0], 10, 30));
+        running.merge(stats_of(&[4.0, 5.0, 6.0], 40, 60));
+        let merged = running.as_preview();
+        let whole = stats_of(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], 10, 60);
+
+        assert_eq!(merged.count, 6);
+        assert!((merged.mean - whole.mean).abs() < 1e-9);
+        assert!((merged.stddev - whole.stddev).abs() < 1e-9);
+        assert_eq!(merged.min, 1.0);
+        assert_eq!(merged.max, 6.0);
+        assert_eq!(merged.t0_us, 10);
+        assert_eq!(merged.t1_us, 60);
     }
 }
