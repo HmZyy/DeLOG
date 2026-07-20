@@ -6,7 +6,7 @@ use delog_core::derived::{
     PendingTopic, emit_prepared_topics, open_derived_source, prepare_topics, submit_prepared_topics,
 };
 use delog_core::identity::SourceId;
-use delog_core::ingest::{IngestSender, IngestSink};
+use delog_core::ingest::{IngestSender, IngestSink, SourceKind};
 use delog_core::snapshot::StoreSnapshot;
 use delog_flow::command::{GraphCommand, apply};
 use delog_flow::eval::{Diagnostic, EvalCache, evaluate_windowed};
@@ -626,9 +626,13 @@ impl DataFlowController {
             }
         };
         let mut sink = sender.file_sink();
-        let source = *self
-            .live_source
-            .get_or_insert_with(|| open_derived_source(&mut sink, &source_key(&outcome.graph_name)));
+        let source = *self.live_source.get_or_insert_with(|| {
+            open_derived_source(
+                &mut sink,
+                &source_key(&outcome.graph_name),
+                SourceKind::LiveDerived,
+            )
+        });
 
         let mut tails = Vec::new();
         for topic in &topics {
@@ -1428,7 +1432,9 @@ mod tests {
         assert!(controller.is_live_published());
         assert_eq!(
             observed_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
-            Observed::Open("dataflow:g".into(), SourceKind::Derived)
+            // Live streaming derived sources must be LiveDerived so the ingestor
+            // seals pending rows by age and they become visible without a close.
+            Observed::Open("dataflow:g".into(), SourceKind::LiveDerived)
         );
         assert_eq!(
             observed_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
