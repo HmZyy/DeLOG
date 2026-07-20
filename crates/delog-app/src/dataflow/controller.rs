@@ -115,6 +115,7 @@ pub struct EvalOutcome {
     pub publish: Option<Result<Vec<PendingTopic>, Vec<Diagnostic>>>,
     pub live: bool,
     pub window: Option<delog_core::time::TimeRange>,
+    pub snapshot_max_t: Option<i64>,
 }
 
 struct PublicationOutcome {
@@ -132,6 +133,7 @@ struct PendingRequest {
     window: Option<delog_core::time::TimeRange>,
     live: bool,
     preview_from_t: Option<i64>,
+    snapshot_max_t: Option<i64>,
 }
 
 pub struct DataFlowController {
@@ -158,6 +160,7 @@ pub struct DataFlowController {
     running_preview: HashMap<(NodeId, usize), RunningStats>,
     last_previewed_t: HashMap<(NodeId, usize), i64>,
     pending_preview_from: Option<i64>,
+    pending_snapshot_max: Option<i64>,
     #[cfg(feature = "scripting")]
     script_host: Option<Arc<dyn delog_flow::script::ScriptNodeHost + Sync>>,
 }
@@ -202,6 +205,7 @@ impl DataFlowController {
             running_preview: HashMap::new(),
             last_previewed_t: HashMap::new(),
             pending_preview_from: None,
+            pending_snapshot_max: None,
             #[cfg(feature = "scripting")]
             script_host: None,
         }
@@ -292,16 +296,18 @@ impl DataFlowController {
 
     pub fn request_live(&mut self, snapshot: Arc<StoreSnapshot>, overlap_secs: f32, append: bool) {
         let previous_watermark = self.live_watermark_t;
+        let snapshot_max = snapshot.global_time_range().map(|range| range.max_us);
+        // Do NOT advance the watermark here. If this generation is coalesced away
+        // before it is merged, the watermark must stay put so the surviving
+        // generation re-reads the missed tail. `poll` advances it only when a
+        // live outcome actually survives.
         let window = previous_watermark.and_then(|watermark| {
-            let max = snapshot.global_time_range()?.max_us;
+            let max = snapshot_max?;
             let overlap_us = (overlap_secs.max(0.0) as f64 * 1_000_000.0) as i64;
             delog_core::time::TimeRange::new(watermark.saturating_sub(overlap_us), max)
         });
-        // Advance the watermark to the newest sample so the next tick windows from here.
-        if let Some(range) = snapshot.global_time_range() {
-            self.live_watermark_t = Some(range.max_us);
-        }
         self.pending_preview_from = previous_watermark;
+        self.pending_snapshot_max = snapshot_max;
         self.queue(snapshot, append, window, true);
     }
 
@@ -314,6 +320,9 @@ impl DataFlowController {
             if outcome.generation == self.generation {
                 if outcome.live {
                     self.merge_live_previews(&outcome);
+                    if let Some(max) = outcome.snapshot_max_t {
+                        self.live_watermark_t = Some(max);
+                    }
                 } else {
                     self.handle_publish(&mut outcome, sender, &mut logs);
                 }
@@ -398,6 +407,8 @@ impl DataFlowController {
         self.needs_eval = false;
         let preview_from_t = if live { self.pending_preview_from } else { None };
         self.pending_preview_from = None;
+        let snapshot_max_t = if live { self.pending_snapshot_max } else { None };
+        self.pending_snapshot_max = None;
         let request = PendingRequest {
             generation: self.generation,
             graph: self.graph.clone(),
@@ -407,6 +418,7 @@ impl DataFlowController {
             window,
             live,
             preview_from_t,
+            snapshot_max_t,
         };
         if self.in_flight {
             if let Some(cancel) = &self.cancel {
@@ -490,6 +502,7 @@ impl DataFlowController {
                 publish,
                 live: request.live,
                 window: request.window,
+                snapshot_max_t: request.snapshot_max_t,
             });
         });
     }
@@ -803,6 +816,7 @@ mod tests {
                 publish: Some(Ok(vec![topic])),
                 live: false,
                 window: None,
+                snapshot_max_t: None,
             })
             .unwrap();
         let (sender, receiver) = ingest_channel();
@@ -853,6 +867,7 @@ mod tests {
                 publish: Some(Ok(vec![topic])),
                 live: false,
                 window: None,
+                snapshot_max_t: None,
             })
             .unwrap();
         let (sender, receiver) = ingest_channel();
@@ -894,6 +909,7 @@ mod tests {
                 publish: Some(Ok(vec![topic])),
                 live: false,
                 window: None,
+                snapshot_max_t: None,
             })
             .unwrap();
         let (sender, receiver) = ingest_channel();
@@ -1247,6 +1263,31 @@ mod tests {
             false,
         );
         wait_for(&mut controller, &sender);
+        let preview = controller.preview_for(field, 0).unwrap();
+        assert_eq!(preview.count, 5);
+        assert_eq!(preview.mean, 3.0);
+    }
+
+    #[test]
+    fn live_preview_survives_coalesced_generation() {
+        let mut graph = Graph::new("g");
+        let field = add_node(&mut graph, data());
+        let mut controller = DataFlowController::new(graph);
+        controller.selection = Some(field);
+        let (sender, _receiver) = ingest_channel();
+
+        // First live tick (seed) launches and stays in_flight (we do NOT poll).
+        controller.request_live(snapshot_alt(vec![100, 200, 300], vec![1.0, 2.0, 3.0], 1), 3.0, false);
+        // Second tick arrives before the first is polled -> coalesces, cancelling gen 1.
+        controller.request_live(
+            snapshot_alt(vec![100, 200, 300, 400, 500], vec![1.0, 2.0, 3.0, 4.0, 5.0], 2),
+            3.0,
+            false,
+        );
+        wait_for(&mut controller, &sender);
+
+        // With the fix, the dropped gen-1 never advanced the watermark, so the surviving
+        // gen-2 re-read the full history: count 5, mean 3.0. (Pre-fix this was 2.)
         let preview = controller.preview_for(field, 0).unwrap();
         assert_eq!(preview.count, 5);
         assert_eq!(preview.mean, 3.0);
