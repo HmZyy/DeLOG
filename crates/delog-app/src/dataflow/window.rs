@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use delog_core::align::AlignMode;
-use delog_core::ingest::IngestSender;
+use delog_core::identity::SourceId;
+use delog_core::ingest::{IngestSender, IngestSink, ParseSummary};
 use delog_core::snapshot::StoreSnapshot;
 use delog_flow::command::GraphCommand;
 use delog_flow::graph::{FieldSelector, Graph, Node, NodeId, NodeKind, OutputFieldSpec};
@@ -75,6 +76,7 @@ pub struct DataFlowUi {
     last_live_request_s: f64,
     last_live_epoch: u64,
     pending_live_publish: bool,
+    orphaned_live_sources: Vec<SourceId>,
     #[cfg(feature = "scripting")]
     script_editor: Option<ScriptEditorState>,
 }
@@ -114,6 +116,7 @@ impl DataFlowUi {
             last_live_request_s: 0.0,
             last_live_epoch: 0,
             pending_live_publish: false,
+            orphaned_live_sources: Vec::new(),
             #[cfg(feature = "scripting")]
             script_editor: None,
         }
@@ -249,9 +252,20 @@ impl DataFlowUi {
     ) -> Vec<(LogLevel, String)> {
         let mut logs = Vec::new();
 
+        // Close any live sources orphaned by a graph reload/new (see replace_graph),
+        // which drops the controller before it can close them itself.
+        for source in std::mem::take(&mut self.orphaned_live_sources) {
+            let mut sink = sender.file_sink();
+            sink.close_source(source, ParseSummary::default());
+        }
+
         // Live disconnected -> freeze the current output (data stays), stop live.
         if !live_connected && self.controller.is_live_published() {
             self.controller.reset_live(sender);
+        }
+        // A Run intent must not survive a disconnect.
+        if !live_connected {
+            self.pending_live_publish = false;
         }
         // Graph edited while live -> re-seed on the next tick.
         if self.controller.take_needs_live_reset() {
@@ -268,6 +282,12 @@ impl DataFlowUi {
                 epoch,
                 self.last_live_epoch,
             ) {
+                // A fresh live publication (Run pressed, nothing published yet) must seed
+                // from the full history, so clear the preview-advanced watermark before
+                // seeding.
+                if self.pending_live_publish && !self.controller.is_live_published() {
+                    self.controller.reset_live(sender);
+                }
                 let append = self.controller.is_live_published() || self.pending_live_publish;
                 self.pending_live_publish = false;
                 self.controller
@@ -842,6 +862,9 @@ impl DataFlowUi {
 
     fn replace_graph(&mut self, graph: Graph) {
         self.canvas.reset(&graph);
+        if let Some(source) = self.controller.live_source() {
+            self.orphaned_live_sources.push(source);
+        }
         self.controller.replace_graph(graph);
     }
 }

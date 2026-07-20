@@ -577,6 +577,10 @@ impl DataFlowController {
         self.live_source.is_some()
     }
 
+    pub fn live_source(&self) -> Option<SourceId> {
+        self.live_source
+    }
+
     pub fn invalidate_live(&mut self) {
         if self.live_source.is_some() {
             self.live_needs_reset = true;
@@ -1443,6 +1447,134 @@ mod tests {
             Observed::Batch
         );
         assert!(observed_rx.try_recv().is_err(), "no second open, no close on append");
+
+        drop(sender);
+        ingest_thread.join().unwrap();
+    }
+
+    #[test]
+    fn live_seed_after_preview_covers_full_history() {
+        // Timestamps are spaced 10s apart so the 3s overlap window genuinely clips
+        // earlier history: without the reset before seeding, the seed would omit the
+        // pre-watermark samples. (Sub-microsecond spacing would let the 3s overlap
+        // span everything and hide the bug.)
+        #[derive(Debug, PartialEq, Eq)]
+        enum Rec {
+            Open,
+            Batch(usize),
+            Close,
+            Remove,
+        }
+        let mut graph = Graph::new("g");
+        let input = add_node(&mut graph, data());
+        let out = add_node(
+            &mut graph,
+            NodeKind::Output(OutputSpec {
+                topic: "derived".into(),
+                fields: vec![OutputFieldSpec {
+                    name: "alt".into(),
+                    unit: None,
+                }],
+            }),
+        );
+        graph.connect(input, 0, out, 0).unwrap();
+        let mut controller = DataFlowController::new(graph);
+        let (sender, receiver) = ingest_channel();
+        let (rec_tx, rec_rx) = mpsc::channel();
+        let ingest_thread = std::thread::spawn(move || {
+            let mut next = 40;
+            while let Some(message) = receiver.recv() {
+                let rec = match message {
+                    IngestMsg::OpenSource { reply, .. } => {
+                        reply.send(SourceId(next)).unwrap();
+                        next += 1;
+                        Rec::Open
+                    }
+                    IngestMsg::Batch(batch) => Rec::Batch(batch.rows()),
+                    IngestMsg::CloseSource { .. } => Rec::Close,
+                    IngestMsg::RemoveSource { .. } => Rec::Remove,
+                    _ => continue,
+                };
+                rec_tx.send(rec).unwrap();
+            }
+        });
+
+        // 1. Preview tick (append=false): advances the watermark to 30_000_000, no publish.
+        controller.request_live(
+            snapshot_alt(vec![10_000_000, 20_000_000, 30_000_000], vec![1.0, 2.0, 3.0], 1),
+            3.0,
+            false,
+        );
+        wait_for(&mut controller, &sender);
+
+        // 2. Clear the preview-advanced watermark before seeding (the drive fix's mechanism).
+        controller.reset_live(&sender);
+
+        // 3. Seed publish (append=true) over the full history.
+        controller.request_live(
+            snapshot_alt(
+                vec![10_000_000, 20_000_000, 30_000_000, 40_000_000, 50_000_000],
+                vec![1.0, 2.0, 3.0, 4.0, 5.0],
+                2,
+            ),
+            3.0,
+            true,
+        );
+        wait_for(&mut controller, &sender);
+
+        // The seed spans all 5 rows (full history), not a windowed tail.
+        assert_eq!(rec_rx.recv_timeout(Duration::from_secs(1)).unwrap(), Rec::Open);
+        assert_eq!(
+            rec_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Rec::Batch(5)
+        );
+        assert!(
+            rec_rx.try_recv().is_err(),
+            "exactly one open and one full-history seed batch"
+        );
+
+        drop(sender);
+        ingest_thread.join().unwrap();
+    }
+
+    #[test]
+    fn live_source_getter_exposes_open_source() {
+        let mut graph = Graph::new("g");
+        let input = add_node(&mut graph, data());
+        let out = add_node(
+            &mut graph,
+            NodeKind::Output(OutputSpec {
+                topic: "derived".into(),
+                fields: vec![OutputFieldSpec {
+                    name: "alt".into(),
+                    unit: None,
+                }],
+            }),
+        );
+        graph.connect(input, 0, out, 0).unwrap();
+        let mut controller = DataFlowController::new(graph);
+        let (sender, receiver) = ingest_channel();
+        let ingest_thread = std::thread::spawn(move || {
+            let mut next = 40;
+            while let Some(message) = receiver.recv() {
+                if let IngestMsg::OpenSource { reply, .. } = message {
+                    reply.send(SourceId(next)).unwrap();
+                    next += 1;
+                }
+            }
+        });
+
+        assert!(controller.live_source().is_none());
+        controller.request_live(
+            snapshot_alt(vec![100, 200, 300], vec![1.0, 2.0, 3.0], 1),
+            3.0,
+            true,
+        );
+        wait_for(&mut controller, &sender);
+        assert!(controller.live_source().is_some());
+
+        controller.reset_live(&sender);
+        assert!(controller.live_source().is_none());
 
         drop(sender);
         ingest_thread.join().unwrap();
