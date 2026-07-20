@@ -6,14 +6,17 @@ its outputs as a derived source named **`dataflow:<name>`**. It uses DéLOG's
 native evaluation engine, so it works without Python and is available in
 `--no-default-features` builds.
 
-Data flows are snapshot-only. Evaluation processes the data loaded when you
-request it; it does not continue processing future live batches.
+Evaluation processes a snapshot of the current data on request. When a live
+MAVLink link is connected, the currently loaded flow keeps recomputing as new
+samples arrive - see [Live data](#live-data). Otherwise evaluation is a
+one-shot snapshot: publish again after loading or receiving more data.
 
 - [Opening the editor](#opening-the-editor)
 - [Building a graph](#building-a-graph)
 - [Timelines and alignment](#timelines-and-alignment)
 - [Units and NaN gaps](#units-and-nan-gaps)
 - [Publishing](#publishing)
+- [Live data](#live-data)
 - [Saving graphs](#saving-graphs)
 - [Worked examples](#worked-examples)
 - [Python Script node](#python-script-node)
@@ -113,6 +116,35 @@ Publishing a graph named `altitude-check` creates
 `dataflow:altitude-check`. Publishing it again replaces the previous source of
 that name, so reruns do not accumulate duplicates. Original sources and their
 samples are never mutated.
+
+## Live data
+
+Evaluation described above processes one snapshot per request. When a live
+MAVLink link is connected, the currently loaded flow instead re-evaluates
+automatically on a throttled cadence as new samples arrive - there is no
+toggle for this; it follows the link. Node preview statistics accumulate over
+the whole live session, not just the most recent recompute window.
+
+Clicking **Run** while live seeds the derived source from all data already in
+the store, then keeps appending new samples as they arrive. The resulting
+`dataflow:<name>` topic behaves like any other live topic: it plots normally,
+its extent keeps growing as new samples publish, and it keeps updating even
+after the Data Flow editor window is closed.
+
+Without a live link connected, nothing changes: the preview still updates on
+edit, and **Run** still publishes a one-shot snapshot.
+
+Only the currently loaded flow updates live. Loading a different flow does
+not carry the update forward - the previous flow's already-published
+`dataflow:<name>` data remains in the store, frozen at whatever it last
+computed.
+
+**Settings > Data Flow** exposes two parameters for the live recompute:
+
+| Setting | Meaning |
+| --- | --- |
+| Overlap (s) | How far before the newest sample each live re-evaluation reaches back, so lookback nodes such as Align keep finding a prior sample |
+| Interval (ms) | Minimum time between live re-evaluations |
 
 ## Saving graphs
 
@@ -294,8 +326,14 @@ dependency when off. In a `--no-default-features` build:
 - There is no resample-by-rate, expression, moving filter, derivative, or
   runtime-parameter node yet. (A Python Script node covers ad hoc arithmetic
   and simple filters without leaving the graph; see above.)
-- Live execution, maximum-gap alignment, plot-preview outputs, drag-to-empty
-  insertion, and workspace-tile embedding are deferred.
+- Maximum-gap alignment, plot-preview outputs, drag-to-empty insertion, and
+  workspace-tile embedding are deferred.
+- A **Script** node that needs unbounded history (for example, a cumulative
+  integral since t = 0) is correct only via a full **Run**, not in windowed
+  live recompute; its values at the recompute-window seam can be wrong.
+- Aligning against a very sparse reference signal may need a larger live
+  recompute overlap margin to find the previous sample; a full **Run** is
+  always correct regardless of overlap.
 
 Use [Python scripting](scripting.md) when an analysis needs arbitrary NumPy,
 string data, custom algorithms, or live transforms.
