@@ -16,11 +16,9 @@ const MAX_FIT_ZOOM: f32 = 1.0;
 
 #[derive(Debug)]
 pub enum CanvasEvent {
-    Select(Option<NodeId>),
+    Select(HashSet<NodeId>),
     Moved {
-        id: NodeId,
-        from: [f32; 2],
-        to: [f32; 2],
+        moves: Vec<(NodeId, [f32; 2])>,
     },
     Connect {
         from: NodeId,
@@ -49,7 +47,7 @@ pub enum CanvasEvent {
 pub fn show_canvas(
     ui: &mut egui::Ui,
     graph: &Graph,
-    selection: Option<NodeId>,
+    selection: &HashSet<NodeId>,
     issues: &HashSet<NodeId>,
     state: &mut CanvasState,
 ) -> Vec<CanvasEvent> {
@@ -68,7 +66,7 @@ pub fn show_canvas(
         .selected_edges
         .retain(|key| graph.edges.iter().any(|edge| edge_key(edge) == *key));
 
-    let selected_nodes: HashSet<_> = selection.into_iter().map(ui_node_id).collect();
+    let selected_nodes: HashSet<_> = selection.iter().copied().map(ui_node_id).collect();
     let mut events = Vec::new();
     let edge_start = &mut state.edge_start;
     let selected_edges = &mut state.selected_edges;
@@ -192,7 +190,7 @@ pub fn show_canvas(
         });
 
     if let Some(selected) = response.selection_changed {
-        let selected = selected.into_iter().min().map(domain_node_id);
+        let selected: HashSet<NodeId> = selected.into_iter().map(domain_node_id).collect();
         events.push(CanvasEvent::Select(selected));
     }
     let occupied = node_contains_pointer || socket_contains_pointer || edge_contains_pointer;
@@ -233,16 +231,14 @@ pub fn show_canvas(
     }
 
     let primary_down = ui.input(|input| input.pointer.primary_down());
-    events.extend(
-        state
-            .finish(graph, canvas_size, primary_down)
-            .into_iter()
-            .map(|moved| CanvasEvent::Moved {
-                id: moved.id,
-                from: moved.from,
-                to: moved.to,
-            }),
-    );
+    let moves: Vec<(NodeId, [f32; 2])> = state
+        .finish(graph, canvas_size, primary_down)
+        .into_iter()
+        .map(|moved| (moved.id, moved.to))
+        .collect();
+    if !moves.is_empty() {
+        events.push(CanvasEvent::Moved { moves });
+    }
     events
 }
 
@@ -560,7 +556,7 @@ mod tests {
         let _ = ctx.run_ui(input, |ui| {
             ui.set_min_size(size);
             ui.set_max_size(size);
-            let _ = show_canvas(ui, graph, None, &HashSet::new(), state);
+            let _ = show_canvas(ui, graph, &HashSet::new(), &HashSet::new(), state);
         });
     }
 
@@ -584,7 +580,7 @@ mod tests {
         let _ = ctx.run_ui(input, |ui| {
             ui.set_min_size(size);
             ui.set_max_size(size);
-            let _ = show_canvas(ui, &graph, None, &issues, &mut state);
+            let _ = show_canvas(ui, &graph, &HashSet::new(), &issues, &mut state);
         });
     }
 
@@ -996,7 +992,7 @@ mod tests {
                 ..Default::default()
             },
             |ui| {
-                show_canvas(ui, &graph, None, &HashSet::new(), &mut state);
+                show_canvas(ui, &graph, &HashSet::new(), &HashSet::new(), &mut state);
             },
         );
 
