@@ -8,7 +8,10 @@ pub struct NodeId(pub u64);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FieldSelector {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Session-only source binding used to disambiguate a topic present in more
+    /// than one loaded source. Never serialized: saved flows are source-agnostic
+    /// and resolve against whatever source has the topic/field.
+    #[serde(skip)]
     pub source: Option<String>,
     pub topic: String,
     #[serde(skip_serializing_if = "Option::is_none")]
