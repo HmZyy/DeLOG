@@ -298,6 +298,7 @@ pub struct DelogApp {
     field_metadata_dialog: Option<delog_core::identity::FieldId>,
     field_stats: FieldStatsController,
     sync_window: Option<SyncWindow>,
+    dataflow: crate::dataflow::window::DataFlowUi,
     generate_markers_dialog: Option<crate::generate_markers::GenerateMarkersDialog>,
     save_layout_dialog: SaveLayoutDialog,
     load_layout_dialog: LoadLayoutDialog,
@@ -435,6 +436,7 @@ impl DelogApp {
             field_metadata_dialog: None,
             field_stats: FieldStatsController::default(),
             sync_window: None,
+            dataflow: crate::dataflow::window::DataFlowUi::new(),
             generate_markers_dialog: None,
             save_layout_dialog: SaveLayoutDialog {
                 open: false,
@@ -1981,6 +1983,10 @@ impl eframe::App for DelogApp {
                         self.sync_window = SyncWindow::open(&snapshot);
                         ui.close();
                     }
+                    if ui.button("Data Flow").clicked() {
+                        self.dataflow.open = true;
+                        ui.close();
+                    }
                     ui.separator();
                     if ui.button("Settings").clicked() {
                         self.settings_dialog.open();
@@ -2917,6 +2923,35 @@ impl eframe::App for DelogApp {
             }
             if sync_window.open {
                 self.sync_window = Some(sync_window);
+            }
+        }
+
+        {
+            #[cfg(feature = "scripting")]
+            if self.dataflow.open && self.dataflow.has_script_node() {
+                let host = self.scripts.engine_flow_host(
+                    self.session.store(),
+                    self.session.ingest_sender(),
+                    Arc::clone(self.session.metrics()),
+                );
+                self.dataflow.set_script_host(Some(host));
+            }
+            let sender = self.session.ingest_sender();
+            let live_connected = self.session.has_connected_live();
+            let dataflow_settings = self.settings.dataflow;
+            let mut logs = Vec::new();
+            if self.dataflow.open {
+                logs.extend(self.dataflow.show(ui.ctx(), &snapshot, &sender, live_connected));
+            }
+            logs.extend(self.dataflow.drive(
+                ui.ctx(),
+                &snapshot,
+                &sender,
+                live_connected,
+                dataflow_settings,
+            ));
+            for (level, message) in logs {
+                self.push_log(crate::logging::log(level, message));
             }
         }
 

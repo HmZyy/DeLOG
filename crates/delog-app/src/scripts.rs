@@ -438,6 +438,18 @@ impl ScriptsPanel {
         engine
     }
 
+    /// A host for the data-flow editor's script nodes, spawning the engine on
+    /// first use like [`Self::engine`]. Cheap to call repeatedly: it only
+    /// clones the worker's command sender.
+    pub fn engine_flow_host(
+        &mut self,
+        store: Arc<DataStore>,
+        sender: IngestSender,
+        metrics: Arc<MetricsRegistry>,
+    ) -> delog_script::flow::EngineFlowHost {
+        self.engine(store, sender, metrics).flow_host()
+    }
+
     /// Returns `None` rather than spawning the engine: a live transform only
     /// exists if a script already ran (which spawned the engine).
     pub fn live_batch_sender_if_running(

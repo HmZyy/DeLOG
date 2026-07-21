@@ -1,0 +1,36 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo:
+    permissions:
+      contents: "read"
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-D warnings"
+      RUSTDOCFLAGS: "-D warnings"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - command: check --locked --all
+          - command: doc --all-features --locked --no-deps
+          - command: fmt --all -- --check
+          - command: test --locked --all
+          - command: test --no-default-features --locked --all
+          - command: test --all-features --locked --all
+    steps:
+      - uses: actions/checkout@v5
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@v13
+      - uses: Swatinem/rust-cache@v2
+      - run: nix develop github:mitchmindtree/egui.nix -c cargo ${{ matrix.command }}
