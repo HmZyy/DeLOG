@@ -1009,6 +1009,9 @@ impl DataFlowUi {
 
     fn replace_graph(&mut self, graph: Graph) {
         self.canvas.reset(&graph);
+        if !graph.nodes.is_empty() {
+            self.canvas.request_fit();
+        }
         if let Some(source) = self.controller.live_source() {
             self.orphaned_live_sources.push(source);
         }
