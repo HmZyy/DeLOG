@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
   "crates/delog-core",
+  "crates/delog-flow",
   "crates/delog-parsers",
   "crates/delog-stream",
   "crates/delog-cache",
@@ -9,6 +10,7 @@ members = [
   "crates/delog-app",
   "crates/delog-script",
 ]
+exclude = ["third_party/egui_graph"]
 
 [workspace.package]
 version = "0.2.1"
@@ -23,6 +25,7 @@ rust-version = "1.92"
 tempfile = "3.27.0"
 # intra-workspace
 delog-core = { path = "crates/delog-core" }
+delog-flow = { path = "crates/delog-flow" }
 delog-parsers = { path = "crates/delog-parsers" }
 delog-stream = { path = "crates/delog-stream" }
 delog-cache = { path = "crates/delog-cache" }
@@ -106,3 +109,6 @@ criterion = "0.8.2"
 proptest = "1.11.0"
 png = "0.18.1"
 tiny_http = "0.12.0"
+
+[patch.crates-io]
+egui_graph = { path = "third_party/egui_graph" }
