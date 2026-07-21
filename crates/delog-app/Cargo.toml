@@ -25,7 +25,7 @@ winresource = { workspace = true }
 # "without-scripting" feature cannot subtract — disabling the default is the
 # opt-out).
 default = ["scripting"]
-scripting = ["dep:delog-script", "delog-script/python", "dep:egui_code_editor"]
+scripting = ["dep:delog-script", "delog-script/python", "dep:egui_code_editor", "delog-flow/scripting"]
 bundled-python = ["scripting"]
 
 [dependencies]
@@ -33,6 +33,7 @@ arboard = { workspace = true }
 arrow = { workspace = true }
 parquet = { workspace = true }
 delog-core = { workspace = true }
+delog-flow = { workspace = true }
 delog-parsers = { workspace = true }
 delog-stream = { workspace = true }
 delog-cache = { workspace = true }
@@ -43,6 +44,7 @@ egui_code_editor = { workspace = true, optional = true }
 bytemuck = { workspace = true }
 eframe = { workspace = true }
 egui = { workspace = true }
+egui_graph = { version = "0.16.2", default-features = false }
 egui_extras = { workspace = true }
 egui_dock = { workspace = true }
 egui_tiles = { workspace = true }

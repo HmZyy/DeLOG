@@ -47,6 +47,12 @@ fn default_text_line_opacity() -> f32 {
 fn default_font_size() -> f32 {
     14.0
 }
+fn default_live_overlap_secs() -> f32 {
+    3.0
+}
+fn default_live_throttle_ms() -> u32 {
+    200
+}
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AppSettings {
     #[serde(default)]
@@ -71,6 +77,8 @@ pub struct AppSettings {
     pub auto_open_diagnostics: bool,
     #[serde(default)]
     pub scripting: ScriptingSettings,
+    #[serde(default)]
+    pub dataflow: DataFlowSettings,
 }
 
 impl Default for AppSettings {
@@ -87,6 +95,24 @@ impl Default for AppSettings {
             font: FontOverride::default(),
             auto_open_diagnostics: false,
             scripting: ScriptingSettings::default(),
+            dataflow: DataFlowSettings::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DataFlowSettings {
+    #[serde(default = "default_live_overlap_secs")]
+    pub live_overlap_secs: f32,
+    #[serde(default = "default_live_throttle_ms")]
+    pub live_throttle_ms: u32,
+}
+
+impl Default for DataFlowSettings {
+    fn default() -> Self {
+        Self {
+            live_overlap_secs: default_live_overlap_secs(),
+            live_throttle_ms: default_live_throttle_ms(),
         }
     }
 }
@@ -562,15 +588,17 @@ enum SettingsTab {
     Rendering,
     Scene3d,
     Scripting,
+    DataFlow,
 }
 
 impl SettingsTab {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::General,
         Self::Plots,
         Self::Rendering,
         Self::Scene3d,
         Self::Scripting,
+        Self::DataFlow,
     ];
 
     const fn label(self) -> &'static str {
@@ -580,6 +608,7 @@ impl SettingsTab {
             Self::Rendering => "Rendering",
             Self::Scene3d => "3D View",
             Self::Scripting => "Scripting",
+            Self::DataFlow => "Data Flow",
         }
     }
 }
@@ -676,6 +705,9 @@ impl egui_dock::TabViewer for SettingsTabViewer<'_> {
             }
             SettingsTab::Scripting => {
                 scripting_tab(ui, self.settings);
+            }
+            SettingsTab::DataFlow => {
+                dataflow_tab(ui, self.settings);
             }
         }
     }
@@ -1145,6 +1177,40 @@ fn scripting_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
     }
 }
 
+fn dataflow_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
+    let s = &mut settings.dataflow;
+    egui::Grid::new("settings-dataflow-grid")
+        .num_columns(2)
+        .spacing(egui::vec2(16.0, 10.0))
+        .show(ui, |ui| {
+            ui.label("Live recompute overlap").on_hover_text(
+                "How far before the newest data each live re-evaluation reaches back, so lookback nodes (Align) and batch gaps are covered.",
+            );
+            ui.add(
+                egui::DragValue::new(&mut s.live_overlap_secs)
+                    .speed(0.1)
+                    .range(0.1..=60.0)
+                    .suffix(" s"),
+            );
+            ui.end_row();
+
+            ui.label("Live update interval").on_hover_text(
+                "Minimum time between live re-evaluations. Lower is more responsive but heavier.",
+            );
+            ui.add(
+                egui::DragValue::new(&mut s.live_throttle_ms)
+                    .speed(10.0)
+                    .range(50..=2000)
+                    .suffix(" ms"),
+            );
+            ui.end_row();
+        });
+
+    if reset_to_defaults_button(ui) {
+        settings.dataflow = DataFlowSettings::default();
+    }
+}
+
 fn reset_to_defaults_button(ui: &mut egui::Ui) -> bool {
     ui.add_space(10.0);
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1218,8 +1284,37 @@ mod tests {
             .collect();
         assert_eq!(
             labels,
-            ["General", "Plots", "Rendering", "3D View", "Scripting"]
+            [
+                "General",
+                "Plots",
+                "Rendering",
+                "3D View",
+                "Scripting",
+                "Data Flow"
+            ]
         );
+    }
+
+    #[test]
+    fn settings_tab_all_includes_dataflow() {
+        let labels: Vec<_> = SettingsTab::ALL
+            .into_iter()
+            .map(SettingsTab::label)
+            .collect();
+        assert!(labels.contains(&"Data Flow"));
+    }
+
+    #[test]
+    fn dataflow_settings_round_trip_with_defaults() {
+        let mut settings = AppSettings::default();
+        assert_eq!(settings.dataflow.live_overlap_secs, 3.0);
+        assert_eq!(settings.dataflow.live_throttle_ms, 200);
+        settings.dataflow.live_overlap_secs = 5.0;
+        settings.dataflow.live_throttle_ms = 100;
+        let json = serde_json::to_string(&settings).unwrap();
+        let back: AppSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.dataflow.live_overlap_secs, 5.0);
+        assert_eq!(back.dataflow.live_throttle_ms, 100);
     }
 
     #[test]
@@ -1263,7 +1358,7 @@ mod tests {
         assert!(source.contains("egui::Layout::right_to_left"));
         assert_eq!(
             production.matches("reset_to_defaults_button(ui)").count(),
-            4
+            5
         );
     }
 

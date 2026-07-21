@@ -30,6 +30,8 @@ it in Python - both file parsers and analysis scripts - without recompiling.
   `Parse(raw_data)` function. See [docs/custom_parsers.md](docs/custom_parsers.md).
 - **Custom scripts** - embedded CPython + NumPy for derived fields and live transforms;
   results plot exactly like parsed data. See [docs/scripting.md](docs/scripting.md).
+- **Visual data flows** - build and save derived numeric signals with a node graph, no
+  Python required. See [docs/data_flow.md](docs/data_flow.md).
 - **Fast WGPU visualization** - GPU-rendered line/scatter/step plots with automatic
   decimation for million-point series, plus a 3D trajectory view with vehicle models.
 
@@ -82,6 +84,7 @@ When DéLOG's built-in parsers don't cover a format, add a Python parser under
 
 ## Documentation
 
+- [Data Flow editor](docs/data_flow.md) - visual derived signals, timeline alignment, and publishing.
 - [Scripting](docs/scripting.md) - embedded-Python derived fields, the `delog` API, live transforms.
 - [Custom parsers](docs/custom_parsers.md) - Python file parsers via `Parse(raw_data)`.
 

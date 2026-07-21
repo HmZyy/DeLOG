@@ -462,6 +462,7 @@ fn file_menu_nests_exports_in_the_requested_order() {
     let sync = file_menu
         .find("egui::Button::new(\"Sync Sources\")")
         .unwrap();
+    let dataflow = file_menu.find("ui.button(\"Data Flow\")").unwrap();
     let export_menu = file_menu.find("ui.menu_button(\"Export\", |ui|").unwrap();
     let data = file_menu.find("ui.button(\"Export Data\")").unwrap();
     let diagnostics = file_menu.find("ui.button(\"Export Diagnostics\")").unwrap();
@@ -469,7 +470,7 @@ fn file_menu_nests_exports_in_the_requested_order() {
     let settings = file_menu.find("ui.button(\"Settings\")").unwrap();
     let exit = file_menu.find("ui.button(\"Exit\")").unwrap();
 
-    assert!(open < export_menu && export_menu < sync);
+    assert!(open < export_menu && export_menu < sync && sync < dataflow);
     assert!(export_menu < data && data < diagnostics && diagnostics < profiling);
     assert!(profiling < settings && settings < exit);
     assert_eq!(file_menu.matches("ui.separator();").count(), 3);
@@ -479,7 +480,7 @@ fn file_menu_nests_exports_in_the_requested_order() {
 }
 
 #[test]
-fn sync_sources_lives_directly_below_export_in_file_not_view() {
+fn source_tools_live_directly_below_export_in_file_not_view() {
     let file_menu = between(
         APP_SOURCE,
         "ui.menu_button(\"File\"",
@@ -502,7 +503,9 @@ fn sync_sources_lives_directly_below_export_in_file_not_view() {
     assert!(launcher.contains("source.entry.kind == delog_core::identity::SourceKind::File"));
     assert!(launcher.contains("offline_sources >= 2"));
     assert!(launcher.contains("self.sync_window = SyncWindow::open(&snapshot);"));
-    assert_eq!(launcher.matches("ui.close();").count(), 1);
+    assert!(launcher.contains("ui.button(\"Data Flow\")"));
+    assert!(launcher.contains("self.dataflow.open = true;"));
+    assert_eq!(launcher.matches("ui.close();").count(), 2);
 }
 
 #[test]
