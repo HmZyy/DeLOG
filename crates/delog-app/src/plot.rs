@@ -144,6 +144,23 @@ impl TraceRef {
     }
 }
 
+impl GhostTrace {
+    pub fn color32(&self) -> egui::Color32 {
+        let u = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+        egui::Color32::from_rgba_unmultiplied(
+            u(self.color[0]),
+            u(self.color[1]),
+            u(self.color[2]),
+            u(self.color[3]),
+        )
+    }
+
+    /// Dimmed swatch color matching how the ghost renders in the legend.
+    pub fn display_color32(&self) -> egui::Color32 {
+        self.color32().gamma_multiply(0.45)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraceMode {
     Line,
@@ -245,6 +262,13 @@ impl PlotPane {
             .any(|g| g.source == ghost.source && g.topic == ghost.topic && g.field == ghost.field)
         {
             self.ghosts.push(ghost);
+        }
+    }
+
+    /// Drop the ghost (missing) trace at `index`. Out-of-range indices are ignored.
+    pub fn remove_ghost(&mut self, index: usize) {
+        if index < self.ghosts.len() {
+            self.ghosts.remove(index);
         }
     }
 
@@ -377,6 +401,31 @@ mod tests {
         assert_eq!(pane.traces[0].display_label("topic.field"), "topic.field");
         pane.traces[0].label_override = Some("renamed".to_string());
         assert_eq!(pane.traces[0].display_label("topic.field"), "renamed");
+    }
+
+    #[test]
+    fn remove_ghost_drops_only_the_indexed_entry_and_ignores_out_of_range() {
+        let ghost = |field: &str| GhostTrace {
+            source: None,
+            topic: "TOPIC".to_string(),
+            field: field.to_string(),
+            color: [1.0, 1.0, 1.0, 1.0],
+            width_px: 1.5,
+            mode: TraceMode::Line,
+            visible: true,
+            text_filter: None,
+            text_offsets: Vec::new(),
+        };
+        let mut pane = PlotPane::default();
+        pane.add_ghost(ghost("a"));
+        pane.add_ghost(ghost("b"));
+
+        pane.remove_ghost(0);
+        assert_eq!(pane.ghosts.len(), 1);
+        assert_eq!(pane.ghosts[0].field, "b");
+
+        pane.remove_ghost(5);
+        assert_eq!(pane.ghosts.len(), 1);
     }
 
     #[test]

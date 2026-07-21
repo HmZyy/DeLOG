@@ -125,6 +125,8 @@ fn legend_anchor(position: LegendPosition, bounds: egui::Rect) -> (egui::Pos2, e
 pub struct LegendOutcome {
     pub removed: Option<FieldId>,
     pub rename: Option<FieldId>,
+    /// Index into `pane.ghosts` of a missing trace the user asked to remove.
+    pub removed_ghost: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -161,6 +163,7 @@ pub fn ui(
     }
     let mut removed = None;
     let mut rename = None;
+    let mut removed_ghost = None;
     // Applied after the Area closure releases its borrow of `pane`.
     let mut filter_edits: Vec<(FieldId, String)> = Vec::new();
 
@@ -338,14 +341,14 @@ pub fn ui(
                                 });
                             });
                         }
-                        for ghost in &pane.ghosts {
+                        for (index, ghost) in pane.ghosts.iter().enumerate() {
                             ui.horizontal(|ui| {
                                 if legend_can_show_color_picker(
                                     ui.available_width(),
                                     ui.spacing().interact_size.x,
                                     ui.spacing().item_spacing.x,
                                 ) {
-                                    let mut color = ghost_color(ghost.color);
+                                    let mut color = ghost.display_color32();
                                     let _ = egui::color_picker::color_edit_button_srgba(
                                         ui,
                                         &mut color,
@@ -354,19 +357,28 @@ pub fn ui(
                                 }
                                 let label = format!("{}.{} (missing)", ghost.topic, ghost.field);
                                 let label_width = legend_ghost_label_width(ui.available_width());
-                                ui.allocate_ui_with_layout(
-                                    egui::vec2(label_width, ui.spacing().interact_size.y),
-                                    egui::Layout::left_to_right(egui::Align::Center),
-                                    |ui| {
-                                        ui.add(
-                                            egui::Label::new(
-                                                egui::RichText::new(label)
-                                                    .color(ui.visuals().weak_text_color()),
+                                let resp = ui
+                                    .allocate_ui_with_layout(
+                                        egui::vec2(label_width, ui.spacing().interact_size.y),
+                                        egui::Layout::left_to_right(egui::Align::Center),
+                                        |ui| {
+                                            ui.add(
+                                                egui::Label::new(
+                                                    egui::RichText::new(label)
+                                                        .color(ui.visuals().weak_text_color()),
+                                                )
+                                                .truncate()
+                                                .sense(egui::Sense::click()),
                                             )
-                                            .truncate(),
-                                        );
-                                    },
-                                );
+                                        },
+                                    )
+                                    .inner;
+                                resp.context_menu(|ui| {
+                                    if ui.button("Remove").clicked() {
+                                        removed_ghost = Some(index);
+                                        ui.close();
+                                    }
+                                });
                             });
                         }
                     });
@@ -381,13 +393,11 @@ pub fn ui(
         }
     }
 
-    LegendOutcome { removed, rename }
-}
-
-fn ghost_color(color: [f32; 4]) -> egui::Color32 {
-    let u = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-    egui::Color32::from_rgba_unmultiplied(u(color[0]), u(color[1]), u(color[2]), u(color[3]))
-        .gamma_multiply(0.45)
+    LegendOutcome {
+        removed,
+        rename,
+        removed_ghost,
+    }
 }
 
 pub fn color32_to_srgb(c: egui::Color32) -> [f32; 4] {

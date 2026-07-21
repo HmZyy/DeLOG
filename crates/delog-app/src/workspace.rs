@@ -1338,6 +1338,9 @@ impl Behavior<'_> {
                     .unwrap_or(canonical);
                 pane.rename = Some(crate::plot::RenameDialog { field, text });
             }
+            if let Some(index) = outcome.removed_ghost {
+                pane.remove_ghost(index);
+            }
         }
 
         plot_rename_dialog(ui.ctx(), tile_id, pane);
@@ -1381,7 +1384,19 @@ impl Behavior<'_> {
                         )
                     })
                     .collect();
-                if entries.is_empty() {
+                let ghosts: Vec<(usize, String, egui::Color32)> = pane
+                    .ghosts
+                    .iter()
+                    .enumerate()
+                    .map(|(index, g)| {
+                        (
+                            index,
+                            format!("{}.{} (missing)", g.topic, g.field),
+                            g.display_color32(),
+                        )
+                    })
+                    .collect();
+                if entries.is_empty() && ghosts.is_empty() {
                     ui.add_enabled(false, egui::Button::new("No traces"));
                 }
                 for (field, label, color) in entries {
@@ -1395,6 +1410,18 @@ impl Behavior<'_> {
                         pane.remove_trace(field);
                         self.services.caches.unpin(field);
                         self.actions.remove_trace.push(field);
+                        ui.close();
+                    }
+                }
+                for (index, label, color) in ghosts {
+                    let clicked = ui
+                        .horizontal(|ui| {
+                            color_swatch(ui, color);
+                            ui.button(label).clicked()
+                        })
+                        .inner;
+                    if clicked {
+                        pane.remove_ghost(index);
                         ui.close();
                     }
                 }
@@ -1427,7 +1454,13 @@ impl Behavior<'_> {
                         )
                     })
                     .collect();
-                if entries.is_empty() {
+                let ghost_labels: Vec<(usize, String)> = pane
+                    .ghosts
+                    .iter()
+                    .enumerate()
+                    .map(|(index, g)| (index, format!("{}.{} (missing)", g.topic, g.field)))
+                    .collect();
+                if entries.is_empty() && ghost_labels.is_empty() {
                     ui.add_enabled(false, egui::Button::new("No traces"));
                 }
                 for (field, label, color) in entries {
@@ -1453,6 +1486,34 @@ impl Behavior<'_> {
                         }
                         ui.add(
                             egui::Slider::new(&mut trace.width_px, 1.0..=12.0)
+                                .text("Width")
+                                .suffix(" px"),
+                        );
+                    });
+                }
+                for (index, label) in ghost_labels {
+                    let Some(ghost) = pane.ghosts.get_mut(index) else {
+                        continue;
+                    };
+                    ui.menu_button(label, |ui| {
+                        ui.horizontal(|ui| {
+                            let mut color = ghost.color32();
+                            if egui::color_picker::color_edit_button_srgba(
+                                ui,
+                                &mut color,
+                                egui::color_picker::Alpha::Opaque,
+                            )
+                            .changed()
+                            {
+                                ghost.color = legend::color32_to_srgb(color);
+                            }
+                            ui.weak("Color / mode");
+                        });
+                        for mode in TraceMode::ALL {
+                            ui.radio_value(&mut ghost.mode, mode, mode.label());
+                        }
+                        ui.add(
+                            egui::Slider::new(&mut ghost.width_px, 1.0..=12.0)
                                 .text("Width")
                                 .suffix(" px"),
                         );
