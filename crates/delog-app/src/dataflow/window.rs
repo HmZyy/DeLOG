@@ -20,6 +20,11 @@ use delog_flow::script::{ScriptInputSpec, ScriptOutputSpec};
 #[cfg(feature = "scripting")]
 use egui_code_editor::{CodeEditor, ColorTheme, Syntax};
 
+/// Written to the OS clipboard on copy so a later Ctrl+V emits `Event::Paste`
+/// (which egui only produces when the clipboard holds text). The pasted node
+/// data itself lives in the in-app `Clipboard`, not this string.
+const CLIPBOARD_SENTINEL: &str = "delog-dataflow-clipboard";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AddMenuMode {
     Templates,
@@ -256,6 +261,7 @@ impl DataFlowUi {
             .memory(|memory| memory.area_rect(egui::Id::new("Data Flow")))
             .zip(ctx.pointer_hover_pos())
             .is_some_and(|(rect, pointer)| rect.contains(pointer));
+
         self.handle_shortcuts(ctx, pointer_over_window, &mut logs);
 
         logs
@@ -263,6 +269,10 @@ impl DataFlowUi {
 
     /// Delete / copy / paste keyboard shortcuts, scoped to the Data Flow window
     /// and suppressed while a text field or code editor has keyboard focus.
+    ///
+    /// egui-winit turns Ctrl+C/Ctrl+V into `Event::Copy`/`Event::Paste` (not key
+    /// presses), and `Event::Paste` only fires when the OS clipboard holds text —
+    /// so a copy seeds the OS clipboard with a sentinel to make later pastes fire.
     fn handle_shortcuts(
         &mut self,
         ctx: &egui::Context,
@@ -272,15 +282,29 @@ impl DataFlowUi {
         if !window_active || ctx.egui_wants_keyboard_input() {
             return;
         }
-        let (delete, copy, paste) = ctx.input(|input| {
-            (
-                input.key_pressed(egui::Key::Delete) || input.key_pressed(egui::Key::Backspace),
-                input.modifiers.command && input.key_pressed(egui::Key::C),
-                input.modifiers.command && input.key_pressed(egui::Key::V),
-            )
+        let (copy, paste, delete) = ctx.input(|input| {
+            let mut copy = false;
+            let mut paste = false;
+            let mut delete = false;
+            for event in &input.events {
+                match event {
+                    egui::Event::Copy | egui::Event::Cut => copy = true,
+                    egui::Event::Paste(_) => paste = true,
+                    egui::Event::Key {
+                        key: egui::Key::Delete | egui::Key::Backspace,
+                        pressed: true,
+                        ..
+                    } => delete = true,
+                    _ => {}
+                }
+            }
+            (copy, paste, delete)
         });
         if copy {
             self.clipboard = self.controller.copy_selection();
+            if !self.clipboard.is_empty() {
+                ctx.copy_text(CLIPBOARD_SENTINEL.to_owned());
+            }
         }
         if paste && !self.clipboard.is_empty() {
             if let Err(error) = self.controller.paste(&self.clipboard, [30.0, 30.0]) {
@@ -395,6 +419,22 @@ impl DataFlowUi {
                 self.controller.redo();
             }
             ui.separator();
+            let has_selection = !self.controller.selection.is_empty();
+            if icon_btn_enabled(ui, has_selection, crate::icons::copy(), "Duplicate selected")
+                .clicked()
+            {
+                let clipboard = self.controller.copy_selection();
+                if let Err(error) = self.controller.paste(&clipboard, [30.0, 30.0]) {
+                    logs.push((LogLevel::Error, format!("Duplicate failed: {error}")));
+                }
+            }
+            if icon_btn_enabled(ui, has_selection, crate::icons::trash(), "Delete selected")
+                .clicked()
+                && let Err(error) = self.controller.delete_selection()
+            {
+                logs.push((LogLevel::Error, format!("Delete failed: {error}")));
+            }
+            ui.separator();
             if !live_connected && self.controller.is_evaluating() {
                 ui.add(egui::Spinner::new().size(16.0))
                     .on_hover_text("Running");
@@ -457,7 +497,6 @@ impl DataFlowUi {
 
     fn library_drawer(&mut self, ui: &mut egui::Ui, logs: &mut Vec<(LogLevel, String)>) {
         ui.horizontal(|ui| {
-            ui.strong("Data Flows");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let button_size = crate::browser::panel_toggle_button_size(ui);
                 let icon_size = button_size - ui.spacing().button_padding * 2.0;
