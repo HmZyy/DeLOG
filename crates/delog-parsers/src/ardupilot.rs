@@ -30,6 +30,15 @@ const FMT_MSGID: u8 = 0x80;
 const FMT_PAYLOAD_LEN: usize = 1 + 1 + 4 + 16 + 64;
 const BATCH_ROWS: usize = 8192;
 
+/// Absolute sanity bound on the first decoded timestamp, which anchors the log's
+/// time window. `TimeUS` is microseconds since boot; no vehicle stays booted for
+/// the ~3.2 years this allows, yet it is far above any real log.
+const MAX_PLAUSIBLE_TIME_US: i64 = 100_000_000_000_000;
+
+const START_SKEW_US: i64 = 1_000_000;
+const MAX_LOG_SPAN_US: i64 = 24 * 60 * 60 * 1_000_000;
+const IMPLAUSIBLE_TIME_DIAG_INTERVAL: u64 = 512;
+
 #[derive(Debug, Default)]
 pub struct ArduPilotParser;
 
@@ -107,7 +116,21 @@ struct TopicAccum {
     schema: Arc<TopicSchema>,
     ts: Int64Builder,
     cols: Vec<ColBuilder>,
+    emits: Vec<Emit>,
     rows: usize,
+    pending: Option<(i64, Vec<u8>)>,
+    last_committed: Option<i64>,
+}
+
+impl TopicAccum {
+    fn push(&mut self, time_us: i64, payload: &[u8]) {
+        self.ts.append_value(time_us);
+        for (col, emit) in self.cols.iter_mut().zip(&self.emits) {
+            col.append(emit.chr, payload, emit.offset);
+        }
+        self.rows += 1;
+        self.last_committed = Some(time_us);
+    }
 }
 
 struct Decoder<'a> {
@@ -122,6 +145,9 @@ struct Decoder<'a> {
     topics: HashMap<String, TopicAccum>,
     row_count: u64,
     diagnostics: u64,
+    implausible_times: u64,
+    /// First accepted timestamp; anchors the fixed plausibility window.
+    start_us: Option<i64>,
     time_range: Option<TimeRange>,
 }
 
@@ -140,6 +166,8 @@ impl<'a> Decoder<'a> {
             topics: HashMap::new(),
             row_count: 0,
             diagnostics: 0,
+            implausible_times: 0,
+            start_us: None,
             time_range: None,
         }
     }
@@ -262,7 +290,7 @@ impl<'a> Decoder<'a> {
             "FMTU" => self.decode_fmtu(msgid, &payload),
             "UNIT" => self.read_unit(msgid, &payload),
             "MULT" => self.read_mult(msgid, &payload),
-            _ => self.decode_data(msgid, &payload),
+            _ => self.decode_data(msgid, payload),
         }
         Ok(true)
     }
@@ -285,7 +313,7 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    fn decode_data(&mut self, msgid: u8, payload: &[u8]) {
+    fn decode_data(&mut self, msgid: u8, payload: Vec<u8>) {
         if !self.plans.contains_key(&msgid) {
             let plan = self.build_plan(msgid);
             self.plans.insert(msgid, plan);
@@ -294,13 +322,18 @@ impl<'a> Decoder<'a> {
             return;
         };
 
-        let Some(time_us) = read_time(&plan.time, payload) else {
+        let Some(time_us) = read_time(&plan.time, &payload) else {
             return;
         };
+        if !self.timestamp_in_window(time_us) {
+            self.note_implausible_time(&plan.base_name, time_us);
+            return;
+        }
+        self.start_us.get_or_insert(time_us);
 
         let topic_name = match plan.instance {
             Some((off, chr)) => {
-                let inst = read_instance(chr, payload, off);
+                let inst = read_instance(chr, &payload, off);
                 format!("{}[{inst}]", plan.base_name)
             }
             None => plan.base_name.clone(),
@@ -327,25 +360,36 @@ impl<'a> Decoder<'a> {
                     .iter()
                     .map(|e| ColBuilder::for_chr(e.chr))
                     .collect(),
+                emits: plan.emits.clone(),
                 rows: 0,
+                pending: None,
+                last_committed: None,
             };
             self.topics.entry(topic_name).or_insert(accum)
         };
 
-        accum.ts.append_value(time_us);
-        for (col, emit) in accum.cols.iter_mut().zip(&plan.emits) {
-            col.append(emit.chr, payload, emit.offset);
+        let mut dropped = None;
+        if let Some((prev_us, prev_payload)) = accum.pending.take() {
+            let above_baseline = accum.last_committed.is_none_or(|last| prev_us >= last);
+            if above_baseline && prev_us <= time_us {
+                accum.push(prev_us, &prev_payload);
+                self.row_count += 1;
+                self.time_range = Some(match self.time_range {
+                    Some(r) => r.include(prev_us),
+                    None => TimeRange::point(prev_us),
+                });
+                if accum.rows >= BATCH_ROWS {
+                    let batch = accum.take_batch(self.source);
+                    self.sink.submit(batch);
+                }
+            } else {
+                dropped = Some(prev_us);
+            }
         }
-        accum.rows += 1;
-        self.row_count += 1;
-        self.time_range = Some(match self.time_range {
-            Some(r) => r.include(time_us),
-            None => TimeRange::point(time_us),
-        });
+        accum.pending = Some((time_us, payload));
 
-        if accum.rows >= BATCH_ROWS {
-            let batch = accum.take_batch(self.source);
-            self.sink.submit(batch);
+        if let Some(prev_us) = dropped {
+            self.note_implausible_time(&plan.base_name, prev_us);
         }
     }
 
@@ -454,8 +498,21 @@ impl<'a> Decoder<'a> {
     }
 
     fn flush_all(&mut self) {
+        let committed_max = self.time_range.map(|r| r.max_us);
         let names: Vec<String> = self.topics.keys().cloned().collect();
         for name in names {
+            if let Some(accum) = self.topics.get_mut(&name)
+                && let Some((prev_us, prev_payload)) = accum.pending.take()
+                && accum.last_committed.is_none_or(|last| prev_us >= last)
+                && committed_max.is_none_or(|max| prev_us <= max.saturating_add(START_SKEW_US))
+            {
+                accum.push(prev_us, &prev_payload);
+                self.row_count += 1;
+                self.time_range = Some(match self.time_range {
+                    Some(r) => r.include(prev_us),
+                    None => TimeRange::point(prev_us),
+                });
+            }
             if let Some(accum) = self.topics.get_mut(&name)
                 && accum.rows > 0
             {
@@ -468,6 +525,35 @@ impl<'a> Decoder<'a> {
     fn diagnostic(&mut self, diag: Diag) {
         self.diagnostics += 1;
         self.sink.diagnostic(diag.with_source(self.source));
+    }
+
+    /// Whether a decoded timestamp falls in the log's plausible window. The first
+    /// row bootstraps the anchor with an absolute bound; later rows must sit
+    /// within `[anchor - skew, anchor + span]`. The anchor is fixed, so no single
+    /// bogus value can drag the window and starve later real rows.
+    fn timestamp_in_window(&self, time_us: i64) -> bool {
+        match self.start_us {
+            None => (0..=MAX_PLAUSIBLE_TIME_US).contains(&time_us),
+            Some(start) => {
+                time_us.saturating_add(START_SKEW_US) >= start
+                    && time_us <= start.saturating_add(MAX_LOG_SPAN_US)
+            }
+        }
+    }
+
+    /// Count a dropped-timestamp row, emitting a throttled diagnostic so a badly
+    /// corrupted file reports without flooding the log dock.
+    fn note_implausible_time(&mut self, base_name: &str, time_us: i64) {
+        self.implausible_times += 1;
+        if self.implausible_times % IMPLAUSIBLE_TIME_DIAG_INTERVAL == 1 {
+            self.diagnostic(Diag::warning(
+                "bin-implausible-time",
+                format!(
+                    "dropped `{base_name}` record with implausible timestamp \
+                     {time_us} (likely corruption after a resync)"
+                ),
+            ));
+        }
     }
 
     fn summary(&self) -> ParseSummary {
