@@ -396,6 +396,14 @@ fn parse_arrow_error(error: impl std::fmt::Display, emitted_any: bool) -> ParseE
     parse_data_error(error.to_string(), emitted_any)
 }
 
+fn cancellation_error(emitted_any: bool) -> ParseError {
+    if emitted_any {
+        ParseError::Cancelled
+    } else {
+        ParseError::SetupCancelled
+    }
+}
+
 fn parquet_summary(
     emitted_any: bool,
     row_count: u64,
@@ -568,7 +576,7 @@ impl LogParser for ParquetParser {
 
         let parse_result = (|| {
             if ctl.is_cancelled() {
-                return Err(ParseError::Cancelled);
+                return Err(cancellation_error(emitted_any));
             }
             for row_group in 0..row_group_count {
                 let mut reader = ParquetRecordBatchReaderBuilder::new_with_metadata(
@@ -593,7 +601,7 @@ impl LogParser for ParquetParser {
                     if converted.timestamps.is_empty() {
                         ctl.report_fraction(sink, processed_rows as f32 / total_rows.max(1) as f32);
                         if ctl.is_cancelled() {
-                            return Err(ParseError::Cancelled);
+                            return Err(cancellation_error(emitted_any));
                         }
                         continue;
                     }
@@ -623,7 +631,7 @@ impl LogParser for ParquetParser {
                     emitted_any = true;
                     ctl.report_fraction(sink, processed_rows as f32 / total_rows.max(1) as f32);
                     if ctl.is_cancelled() {
-                        return Err(ParseError::Cancelled);
+                        return Err(cancellation_error(emitted_any));
                     }
                 }
             }
@@ -766,6 +774,7 @@ mod tests {
         progress: Vec<f32>,
         closed: Option<ParseSummary>,
         cancel_after_first: Option<CancelToken>,
+        cancel_on_progress: Option<CancelToken>,
     }
 
     impl IngestSink for RecordingSink {
@@ -788,6 +797,9 @@ mod tests {
 
         fn progress(&mut self, _source: SourceId, frac: f32) {
             self.progress.push(frac);
+            if let Some(token) = &self.cancel_on_progress {
+                token.cancel();
+            }
         }
 
         fn close_source(&mut self, _source: SourceId, summary: ParseSummary) {
@@ -1293,6 +1305,57 @@ mod tests {
         let (result, sink) = drive_parquet(parquet_bytes(schema, &[batch]), provider);
         assert!(matches!(result, Err(ParseError::SetupCancelled)));
         assert!(sink.batches.is_empty());
+    }
+
+    #[test]
+    fn pre_cancelled_parse_maps_to_setup_cancelled_before_submission() {
+        let (schema, batch) = delog_batch(vec![1], vec![1.0]);
+        let bytes = parquet_bytes(schema, &[batch]);
+        let token = CancelToken::new();
+        token.cancel();
+        let ctl = ParseCtl::new(token, SourceId(4), bytes.len() as u64).with_label("generic");
+        let parser = ParquetParser::new(Arc::new(FixedProvider::panic_if_called()));
+        let mut sink = RecordingSink::default();
+
+        let result = parser.parse(Box::new(Cursor::new(bytes)), &mut sink, &ctl);
+
+        assert!(matches!(result, Err(ParseError::SetupCancelled)));
+        assert!(sink.batches.is_empty());
+        assert!(sink.closed.is_none());
+    }
+
+    #[test]
+    fn cancellation_after_all_invalid_batch_maps_to_setup_cancelled() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("time", DataType::Float64, true),
+            Field::new("value", DataType::Float32, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Float64Array::from(vec![None, Some(f64::NAN)])),
+                Arc::new(Float32Array::from(vec![1.0, 2.0])),
+            ],
+        )
+        .unwrap();
+        let bytes = parquet_bytes(schema, &[batch]);
+        let token = CancelToken::new();
+        let ctl =
+            ParseCtl::new(token.clone(), SourceId(4), bytes.len() as u64).with_label("generic");
+        let parser = ParquetParser::new(Arc::new(FixedProvider::ok(TimestampSelection {
+            column_index: 0,
+            unit: TimestampUnit::Seconds,
+        })));
+        let mut sink = RecordingSink {
+            cancel_on_progress: Some(token),
+            ..RecordingSink::default()
+        };
+
+        let result = parser.parse(Box::new(Cursor::new(bytes)), &mut sink, &ctl);
+
+        assert!(matches!(result, Err(ParseError::SetupCancelled)));
+        assert!(sink.batches.is_empty());
+        assert!(sink.closed.is_none());
     }
 
     #[test]
