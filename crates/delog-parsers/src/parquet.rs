@@ -80,7 +80,6 @@ fn timestamp_candidates(schema: &Schema) -> Vec<TimestampCandidate> {
                         | DataType::UInt16
                         | DataType::UInt32
                         | DataType::UInt64
-                        | DataType::Float16
                         | DataType::Float32
                         | DataType::Float64
                 )
@@ -224,6 +223,13 @@ mod tests {
         assert_eq!(candidates[0].name, "counter");
         assert_eq!(candidates[0].logical_unit, None);
         assert_eq!(candidates[1].logical_unit, Some(TimestampUnit::Nanoseconds));
+    }
+
+    #[test]
+    fn schema_inspection_excludes_float16_timestamp_candidates() {
+        let schema = Schema::new(vec![Field::new("half", DataType::Float16, false)]);
+
+        assert!(timestamp_candidates(&schema).is_empty());
     }
 
     #[test]
