@@ -59,6 +59,7 @@ impl TimestampSelectionProvider for ChannelTimestampSelectionProvider {
 struct DialogRequest {
     state: DialogState,
     response: mpsc::SyncSender<Option<TimestampSelection>>,
+    pending_response: Option<Option<TimestampSelection>>,
     cancelled: Arc<AtomicBool>,
 }
 
@@ -142,7 +143,7 @@ impl ParquetImportUi {
         )
     }
 
-    fn poll_requests(&mut self) {
+    pub(crate) fn poll_requests(&mut self) {
         self.queued.extend(self.incoming.try_iter());
 
         if self
@@ -154,7 +155,32 @@ impl ParquetImportUi {
         }
         self.queued
             .retain(|pending| !pending.cancelled.load(Ordering::Relaxed));
+        self.retry_active_response();
         self.promote_next();
+    }
+
+    fn retry_active_response(&mut self) {
+        let delivered = {
+            let Some(active) = self.active.as_mut() else {
+                return;
+            };
+            let Some(response) = active.pending_response.take() else {
+                return;
+            };
+
+            match active.response.try_send(response) {
+                Ok(()) => true,
+                Err(mpsc::TrySendError::Full(response)) => {
+                    active.pending_response = Some(response);
+                    false
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => true,
+            }
+        };
+
+        if delivered {
+            self.active = None;
+        }
     }
 
     fn promote_next(&mut self) {
@@ -166,6 +192,7 @@ impl ParquetImportUi {
                 self.active = Some(DialogRequest {
                     state: DialogState::new(pending.request),
                     response: pending.response,
+                    pending_response: None,
                     cancelled: pending.cancelled,
                 });
             }
@@ -188,9 +215,12 @@ impl ParquetImportUi {
     }
 
     fn respond_active(&mut self, response: Option<TimestampSelection>) {
-        if let Some(active) = self.active.take() {
-            let _ = active.response.send(response);
+        if let Some(active) = self.active.as_mut()
+            && active.pending_response.is_none()
+        {
+            active.pending_response = Some(response);
         }
+        self.retry_active_response();
         self.promote_next();
     }
 
@@ -200,6 +230,10 @@ impl ParquetImportUi {
         let Some(active) = self.active.as_mut() else {
             return;
         };
+        if active.pending_response.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(10));
+            return;
+        }
         let request_id = active.state.request.request_id;
         let mut open = true;
         let mut response = None;
@@ -285,6 +319,13 @@ impl ParquetImportUi {
                 None => self.cancel_active(),
             }
         }
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|active| active.pending_response.is_some())
+        {
+            ctx.request_repaint_after(Duration::from_millis(10));
+        }
     }
 }
 
@@ -355,6 +396,17 @@ mod tests {
         panic!("request {request_id} did not become active");
     }
 
+    fn wait_for_inactive(ui: &mut ParquetImportUi) {
+        for _ in 0..1_000 {
+            ui.poll_requests();
+            if ui.active_request_id().is_none() {
+                return;
+            }
+            std::thread::yield_now();
+        }
+        panic!("active request did not finish");
+    }
+
     #[test]
     fn provider_delivers_request_and_correlates_response() {
         let (mut ui, provider) = ParquetImportUi::new();
@@ -368,6 +420,7 @@ mod tests {
             column_index: 0,
             unit: TimestampUnit::Milliseconds,
         });
+        wait_for_inactive(&mut ui);
         assert_eq!(
             handle.join().unwrap().unwrap().unit,
             TimestampUnit::Milliseconds
@@ -403,6 +456,7 @@ mod tests {
         wait_for_active(&mut ui, 2);
         assert_eq!(ui.active_request_id(), Some(2));
         ui.cancel_active();
+        wait_for_inactive(&mut ui);
         assert_eq!(
             first.join().unwrap(),
             Err(TimestampSelectionError::Cancelled)
@@ -411,6 +465,47 @@ mod tests {
             second.join().unwrap(),
             Err(TimestampSelectionError::Cancelled)
         );
+    }
+
+    #[test]
+    fn pending_response_returns_without_receiver_then_delivers_before_fifo_promotion() {
+        let (response, replies) = mpsc::sync_channel(0);
+        let (next_response, _next_replies) = mpsc::sync_channel(0);
+        let (_requests, incoming) = mpsc::channel();
+        let mut ui = ParquetImportUi {
+            incoming,
+            queued: VecDeque::from([PendingRequest {
+                request: request(2, numeric_candidate("next")),
+                response: next_response,
+                cancelled: Arc::new(AtomicBool::new(false)),
+            }]),
+            active: Some(DialogRequest {
+                state: DialogState::new(request(1, numeric_candidate("clock"))),
+                response,
+                pending_response: None,
+                cancelled: Arc::new(AtomicBool::new(false)),
+            }),
+        };
+        let selection = TimestampSelection {
+            column_index: 0,
+            unit: TimestampUnit::Milliseconds,
+        };
+        let (returned_ui, ui_returned) = mpsc::sync_channel(1);
+
+        std::thread::spawn(move || {
+            ui.answer(selection);
+            returned_ui.send(ui).unwrap();
+        });
+
+        let mut ui = ui_returned
+            .recv_timeout(Duration::from_secs(1))
+            .expect("answering must not wait for the response receiver");
+        assert_eq!(ui.active_request_id(), Some(1));
+
+        let receiver =
+            std::thread::spawn(move || replies.recv_timeout(Duration::from_secs(1)).unwrap());
+        wait_for_active(&mut ui, 2);
+        assert_eq!(receiver.join().unwrap(), Some(selection));
     }
 
     #[test]
