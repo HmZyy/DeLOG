@@ -27,6 +27,12 @@ use crate::sync_window::SyncWindow;
 fn tile_cache_needs_repaint(clear_submitted: bool, cache_action_pending: bool) -> bool {
     clear_submitted || cache_action_pending
 }
+
+fn keep_active_loads_repainting(ctx: &egui::Context, has_active_loads: bool) {
+    if has_active_loads {
+        ctx.request_repaint_after(Duration::from_millis(50));
+    }
+}
 use crate::timeline::Playback;
 use crate::workspace::{PlotServices, Workspace};
 
@@ -226,6 +232,7 @@ enum LayoutManagerAction {
 
 pub struct DelogApp {
     session: Session,
+    parquet_import: crate::parquet_import::ParquetImportUi,
     #[cfg(feature = "scripting")]
     scripts: scripts::ScriptsPanel,
     gpu: GpuBridge,
@@ -362,11 +369,13 @@ impl DelogApp {
         let (exported_profiling_tx, exported_profiling) = mpsc::channel();
         let (data_export_tx, data_export_rx) = mpsc::channel();
         let (image_export_writes_tx, image_export_writes) = mpsc::channel();
-        let session = Session::new(cc.egui_ctx.clone());
+        let (parquet_import, parquet_selection) = crate::parquet_import::ParquetImportUi::new();
+        let session = Session::new(cc.egui_ctx.clone(), parquet_selection);
         // Shared metrics registry so cache metrics land in the same dock.
         let caches = CacheManager::new().with_metrics(std::sync::Arc::clone(session.metrics()));
         Self {
             session,
+            parquet_import,
             #[cfg(feature = "scripting")]
             scripts: {
                 let config_dir =
@@ -541,7 +550,10 @@ impl DelogApp {
             .name("delog-open-dialog".into())
             .spawn(move || {
                 let picked = rfd::FileDialog::new()
-                    .add_filter("Flight logs", &["bin", "BIN", "ulg", "ulog", "tlog"])
+                    .add_filter(
+                        "Flight logs",
+                        &["bin", "BIN", "ulg", "ulog", "tlog", "parquet"],
+                    )
                     .add_filter("All files", &["*"])
                     .set_title("Open flight logs")
                     .pick_files();
@@ -1823,6 +1835,8 @@ impl eframe::App for DelogApp {
         let ui_prelude_timer = self.session.metrics().scope("ui_prelude");
         self.handle_picked_files();
         self.handle_layout_io_results();
+        self.parquet_import.poll_requests();
+        keep_active_loads_repainting(ui.ctx(), self.session.has_active_loads());
         self.session.prune_finished();
         self.poll_trajectory_builds();
         self.frame = self.frame.wrapping_add(1);
@@ -2958,6 +2972,7 @@ impl eframe::App for DelogApp {
         // Floating windows/dialogs + overlays; drops with the function (still
         // inside `frame_total`, after every other section).
         let _ui_windows_timer = self.session.metrics().scope("ui_windows");
+        self.parquet_import.show(ui.ctx());
         self.show_layout_windows(ui.ctx());
         crate::message_popup::show_all(&mut self.message_popups, ui.ctx());
         let settings_before = self.settings.clone();
@@ -4206,6 +4221,24 @@ mod tests {
     use delog_core::store::TopicStore;
 
     use super::*;
+
+    #[test]
+    fn active_native_loads_schedule_reactive_mode_polling() {
+        let ctx = egui::Context::default();
+        let (repaints, repaint_requests) = mpsc::channel();
+        ctx.set_request_repaint_callback(move |request| {
+            repaints.send(request.delay).unwrap();
+        });
+
+        keep_active_loads_repainting(&ctx, false);
+        assert!(repaint_requests.try_recv().is_err());
+        keep_active_loads_repainting(&ctx, true);
+
+        let delay = repaint_requests
+            .recv_timeout(Duration::from_secs(1))
+            .expect("an active parser schedules another UI poll");
+        assert!(delay <= Duration::from_millis(50));
+    }
 
     #[test]
     fn auto_open_diagnostics_only_fires_for_newer_seqs_when_enabled() {
