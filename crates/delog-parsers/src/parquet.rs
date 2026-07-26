@@ -1,6 +1,11 @@
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::{Arc, Mutex};
 
+use arrow::array::{
+    Array, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
+    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+    TimestampSecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+};
 use arrow::datatypes::{DataType, Schema, TimeUnit};
 use bytes::Bytes;
 use delog_core::parse_ctl::ParseCtl;
@@ -41,6 +46,201 @@ pub struct TimestampSelection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimestampSelectionError {
     Cancelled,
+}
+
+struct ConvertedTimestamps {
+    timestamps: Int64Array,
+    keep: BooleanArray,
+    skipped: u64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum TimestampConversionError {
+    Unsupported(DataType),
+    OutOfRange { row: usize },
+    SubMicrosecond { row: usize },
+    FractionalMicrosecond { row: usize },
+}
+
+fn signed_to_us(
+    value: i64,
+    unit: TimestampUnit,
+    row: usize,
+) -> Result<i64, TimestampConversionError> {
+    match unit {
+        TimestampUnit::Seconds => value
+            .checked_mul(1_000_000)
+            .ok_or(TimestampConversionError::OutOfRange { row }),
+        TimestampUnit::Milliseconds => value
+            .checked_mul(1_000)
+            .ok_or(TimestampConversionError::OutOfRange { row }),
+        TimestampUnit::Microseconds => Ok(value),
+        TimestampUnit::Nanoseconds => {
+            if value % 1_000 != 0 {
+                return Err(TimestampConversionError::SubMicrosecond { row });
+            }
+            Ok(value / 1_000)
+        }
+    }
+}
+
+fn unsigned_to_us(
+    value: u64,
+    unit: TimestampUnit,
+    row: usize,
+) -> Result<i64, TimestampConversionError> {
+    match unit {
+        TimestampUnit::Nanoseconds => {
+            if value % 1_000 != 0 {
+                return Err(TimestampConversionError::SubMicrosecond { row });
+            }
+            i64::try_from(value / 1_000).map_err(|_| TimestampConversionError::OutOfRange { row })
+        }
+        _ => i64::try_from(value)
+            .map_err(|_| TimestampConversionError::OutOfRange { row })
+            .and_then(|value| signed_to_us(value, unit, row)),
+    }
+}
+
+fn float_to_us(
+    value: f64,
+    unit: TimestampUnit,
+    row: usize,
+) -> Result<Option<i64>, TimestampConversionError> {
+    if !value.is_finite() {
+        return Ok(None);
+    }
+    let scale = match unit {
+        TimestampUnit::Seconds => 1_000_000.0,
+        TimestampUnit::Milliseconds => 1_000.0,
+        TimestampUnit::Microseconds => 1.0,
+        TimestampUnit::Nanoseconds => 0.001,
+    };
+    let scaled = value * scale;
+    if !scaled.is_finite() || scaled < i64::MIN as f64 || scaled > i64::MAX as f64 {
+        return Err(TimestampConversionError::OutOfRange { row });
+    }
+    if scaled.fract() != 0.0 {
+        return Err(TimestampConversionError::FractionalMicrosecond { row });
+    }
+    Ok(Some(scaled as i64))
+}
+
+fn convert_rows(
+    len: usize,
+    mut convert: impl FnMut(usize) -> Result<Option<i64>, TimestampConversionError>,
+) -> Result<ConvertedTimestamps, TimestampConversionError> {
+    let mut timestamps = Vec::with_capacity(len);
+    let mut keep = Vec::with_capacity(len);
+    let mut skipped = 0;
+
+    for row in 0..len {
+        match convert(row)? {
+            Some(value) => {
+                timestamps.push(value);
+                keep.push(true);
+            }
+            None => {
+                keep.push(false);
+                skipped += 1;
+            }
+        }
+    }
+
+    Ok(ConvertedTimestamps {
+        timestamps: Int64Array::from(timestamps),
+        keep: BooleanArray::from(keep),
+        skipped,
+    })
+}
+
+macro_rules! convert_primitive_timestamps {
+    ($array:expr, $array_type:ty, $convert:expr) => {{
+        let values = $array.as_any().downcast_ref::<$array_type>().unwrap();
+        convert_rows(values.len(), |row| {
+            if values.is_null(row) {
+                Ok(None)
+            } else {
+                $convert(values.value(row), row).map(Some)
+            }
+        })
+    }};
+}
+
+macro_rules! convert_optional_primitive_timestamps {
+    ($array:expr, $array_type:ty, $convert:expr) => {{
+        let values = $array.as_any().downcast_ref::<$array_type>().unwrap();
+        convert_rows(values.len(), |row| {
+            if values.is_null(row) {
+                Ok(None)
+            } else {
+                $convert(values.value(row), row)
+            }
+        })
+    }};
+}
+
+fn convert_timestamps(
+    array: &dyn Array,
+    unit: TimestampUnit,
+) -> Result<ConvertedTimestamps, TimestampConversionError> {
+    match array.data_type() {
+        DataType::Int8 => convert_primitive_timestamps!(array, Int8Array, |value, row| {
+            signed_to_us(value as i64, unit, row)
+        }),
+        DataType::Int16 => convert_primitive_timestamps!(array, Int16Array, |value, row| {
+            signed_to_us(value as i64, unit, row)
+        }),
+        DataType::Int32 => convert_primitive_timestamps!(array, Int32Array, |value, row| {
+            signed_to_us(value as i64, unit, row)
+        }),
+        DataType::Int64 => convert_primitive_timestamps!(array, Int64Array, |value, row| {
+            signed_to_us(value, unit, row)
+        }),
+        DataType::UInt8 => convert_primitive_timestamps!(array, UInt8Array, |value, row| {
+            unsigned_to_us(value as u64, unit, row)
+        }),
+        DataType::UInt16 => convert_primitive_timestamps!(array, UInt16Array, |value, row| {
+            unsigned_to_us(value as u64, unit, row)
+        }),
+        DataType::UInt32 => convert_primitive_timestamps!(array, UInt32Array, |value, row| {
+            unsigned_to_us(value as u64, unit, row)
+        }),
+        DataType::UInt64 => convert_primitive_timestamps!(array, UInt64Array, |value, row| {
+            unsigned_to_us(value, unit, row)
+        }),
+        DataType::Float32 => {
+            convert_optional_primitive_timestamps!(array, Float32Array, |value, row| {
+                float_to_us(value as f64, unit, row)
+            })
+        }
+        DataType::Float64 => {
+            convert_optional_primitive_timestamps!(array, Float64Array, |value, row| {
+                float_to_us(value, unit, row)
+            })
+        }
+        DataType::Timestamp(TimeUnit::Second, _) => {
+            convert_primitive_timestamps!(array, TimestampSecondArray, |value, row| {
+                signed_to_us(value, TimestampUnit::Seconds, row)
+            })
+        }
+        DataType::Timestamp(TimeUnit::Millisecond, _) => {
+            convert_primitive_timestamps!(array, TimestampMillisecondArray, |value, row| {
+                signed_to_us(value, TimestampUnit::Milliseconds, row)
+            })
+        }
+        DataType::Timestamp(TimeUnit::Microsecond, _) => {
+            convert_primitive_timestamps!(array, TimestampMicrosecondArray, |value, row| {
+                signed_to_us(value, TimestampUnit::Microseconds, row)
+            })
+        }
+        DataType::Timestamp(TimeUnit::Nanosecond, _) => {
+            convert_primitive_timestamps!(array, TimestampNanosecondArray, |value, row| {
+                signed_to_us(value, TimestampUnit::Nanoseconds, row)
+            })
+        }
+        data_type => Err(TimestampConversionError::Unsupported(data_type.clone())),
+    }
 }
 
 pub trait TimestampSelectionProvider: Send + Sync {
@@ -187,6 +387,11 @@ mod tests {
     use std::io::{Cursor, Read};
     use std::sync::Arc;
 
+    use arrow::array::{
+        ArrayRef, BooleanArray, Float64Array, Int32Array, Int64Array, TimestampMicrosecondArray,
+        TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, UInt16Array,
+        UInt32Array, UInt64Array,
+    };
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 
     use super::*;
@@ -246,5 +451,115 @@ mod tests {
             Field::new("t_s", DataType::Float64, false),
         ]);
         assert!(delog_timestamp_selection(&nullable).is_none());
+    }
+
+    #[test]
+    fn integer_units_convert_exactly_to_microseconds() {
+        let cases: Vec<(ArrayRef, TimestampUnit, Vec<i64>)> = vec![
+            (
+                Arc::new(Int64Array::from(vec![1, -2])),
+                TimestampUnit::Seconds,
+                vec![1_000_000, -2_000_000],
+            ),
+            (
+                Arc::new(UInt32Array::from(vec![1, 2])),
+                TimestampUnit::Milliseconds,
+                vec![1_000, 2_000],
+            ),
+            (
+                Arc::new(Int32Array::from(vec![1, 2])),
+                TimestampUnit::Microseconds,
+                vec![1, 2],
+            ),
+            (
+                Arc::new(Int64Array::from(vec![1_000, -2_000])),
+                TimestampUnit::Nanoseconds,
+                vec![1, -2],
+            ),
+        ];
+        for (array, unit, expected) in cases {
+            let converted = convert_timestamps(array.as_ref(), unit).unwrap();
+            assert_eq!(converted.timestamps.values(), expected.as_slice());
+        }
+    }
+
+    #[test]
+    fn arrow_timestamp_storage_uses_its_declared_unit() {
+        let cases: Vec<(ArrayRef, TimestampUnit, Vec<i64>)> = vec![
+            (
+                Arc::new(TimestampSecondArray::from(vec![1_i64])),
+                TimestampUnit::Seconds,
+                vec![1_000_000],
+            ),
+            (
+                Arc::new(TimestampMillisecondArray::from(vec![1_i64])),
+                TimestampUnit::Milliseconds,
+                vec![1_000],
+            ),
+            (
+                Arc::new(TimestampMicrosecondArray::from(vec![1_i64])),
+                TimestampUnit::Microseconds,
+                vec![1],
+            ),
+            (
+                Arc::new(TimestampNanosecondArray::from(vec![1_000_i64])),
+                TimestampUnit::Nanoseconds,
+                vec![1],
+            ),
+        ];
+        for (array, unit, expected) in cases {
+            let converted = convert_timestamps(array.as_ref(), unit).unwrap();
+            assert_eq!(converted.timestamps.values(), expected.as_slice());
+        }
+    }
+
+    #[test]
+    fn null_and_non_finite_float_timestamps_are_skipped() {
+        let array = Float64Array::from(vec![Some(1.0), None, Some(f64::NAN), Some(2.0)]);
+        let converted = convert_timestamps(&array, TimestampUnit::Seconds).unwrap();
+        assert_eq!(converted.timestamps.values(), &[1_000_000, 2_000_000]);
+        assert_eq!(converted.skipped, 2);
+        assert_eq!(
+            converted.keep.iter().collect::<Vec<_>>(),
+            vec![Some(true), Some(false), Some(false), Some(true)]
+        );
+    }
+
+    #[test]
+    fn precision_loss_and_overflow_are_errors() {
+        assert!(matches!(
+            convert_timestamps(&Int64Array::from(vec![1]), TimestampUnit::Nanoseconds),
+            Err(TimestampConversionError::SubMicrosecond { row: 0 })
+        ));
+        assert!(matches!(
+            convert_timestamps(
+                &Float64Array::from(vec![0.000_000_5]),
+                TimestampUnit::Seconds
+            ),
+            Err(TimestampConversionError::FractionalMicrosecond { row: 0 })
+        ));
+        assert!(matches!(
+            convert_timestamps(
+                &UInt64Array::from(vec![u64::MAX]),
+                TimestampUnit::Microseconds
+            ),
+            Err(TimestampConversionError::OutOfRange { row: 0 })
+        ));
+    }
+
+    #[test]
+    fn keep_mask_filters_value_columns_without_changing_type() {
+        let values: ArrayRef = Arc::new(UInt16Array::from(vec![10, 20, 30, 40]));
+        let keep = BooleanArray::from(vec![true, false, false, true]);
+        let filtered = arrow::compute::filter(values.as_ref(), &keep).unwrap();
+        assert_eq!(filtered.data_type(), &DataType::UInt16);
+        assert_eq!(
+            filtered
+                .as_any()
+                .downcast_ref::<UInt16Array>()
+                .unwrap()
+                .values(),
+            &[10, 40]
+        );
     }
 }
