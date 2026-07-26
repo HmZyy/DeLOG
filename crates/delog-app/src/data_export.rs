@@ -8,7 +8,7 @@ use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::error::ArrowError;
 use arrow::record_batch::RecordBatch;
 use delog_core::export::{Cell, ExportError, ResampleMode, RowCursor};
-use delog_core::identity::FieldId;
+use delog_core::identity::{FieldId, SourceId, TopicId};
 use delog_core::snapshot::StoreSnapshot;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
@@ -67,11 +67,39 @@ impl ExportFormat {
 #[derive(Debug, Clone)]
 pub struct ExportField {
     pub id: FieldId,
+    pub source_id: SourceId,
+    pub topic_id: TopicId,
     pub source: String,
     pub topic: String,
     pub name: String,
     pub label: String,
+    pub dtype: DataType,
     pub unit: Option<String>,
+    pub multiplier: f64,
+    pub description: Option<String>,
+}
+
+impl ExportField {
+    pub fn csv_compatible(&self) -> bool {
+        matches!(
+            self.dtype,
+            DataType::Int8
+                | DataType::Int16
+                | DataType::Int32
+                | DataType::Int64
+                | DataType::UInt8
+                | DataType::UInt16
+                | DataType::UInt32
+                | DataType::UInt64
+                | DataType::Float32
+                | DataType::Float64
+                | DataType::Boolean
+        )
+    }
+
+    pub fn parquet_compatible(&self) -> bool {
+        self.csv_compatible() || matches!(self.dtype, DataType::Utf8 | DataType::LargeUtf8)
+    }
 }
 
 pub const EXPORT_BATCH_ROWS: usize = 8_192;
@@ -301,11 +329,16 @@ fn field_picker_ui(
                             .show(ui, |ui| {
                                 let mut previous_source = None::<&str>;
                                 let mut previous_topic = None::<&str>;
-                                for field in available.iter().filter(|field| state.matches(field)) {
+                                for field in available.iter().filter(|field| {
+                                    state.format_compatible(field) && state.matches(field)
+                                }) {
                                     if previous_source != Some(field.source.as_str()) {
                                         let source_fully_selected = available
                                             .iter()
-                                            .filter(|candidate| candidate.source == field.source)
+                                            .filter(|candidate| {
+                                                candidate.source == field.source
+                                                    && state.format_compatible(candidate)
+                                            })
                                             .all(|candidate| {
                                                 state.selected.contains(&candidate.id)
                                             });
@@ -444,8 +477,12 @@ pub fn dialog_ui(
                 .show_inside(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label("Format:");
-                        ui.radio_value(&mut state.format, ExportFormat::Csv, "CSV");
-                        ui.radio_value(&mut state.format, ExportFormat::Parquet, "Parquet");
+                        let mut format = state.format;
+                        ui.radio_value(&mut format, ExportFormat::Csv, "CSV");
+                        ui.radio_value(&mut format, ExportFormat::Parquet, "Parquet");
+                        if format != state.format {
+                            state.set_format(format, available);
+                        }
                     });
                     ui.horizontal(|ui| {
                         ui.label("Range:");
@@ -454,20 +491,25 @@ pub fn dialog_ui(
                     });
                     ui.horizontal(|ui| {
                         ui.label("Resample:");
-                        egui::ComboBox::from_id_salt("data_export_mode")
-                            .selected_text(MODES[state.mode_ix])
-                            .show_ui(ui, |ui| {
-                                for (index, mode) in MODES.iter().enumerate() {
-                                    ui.selectable_value(&mut state.mode_ix, index, *mode);
-                                }
-                            });
-                        if state.mode_ix == 2 {
-                            ui.label("dt (s):");
-                            ui.add(
-                                egui::DragValue::new(&mut state.dt_s)
-                                    .speed(0.001)
-                                    .range(1e-4..=3600.0),
-                            );
+                        ui.add_enabled_ui(state.format == ExportFormat::Csv, |ui| {
+                            egui::ComboBox::from_id_salt("data_export_mode")
+                                .selected_text(MODES[state.mode_ix])
+                                .show_ui(ui, |ui| {
+                                    for (index, mode) in MODES.iter().enumerate() {
+                                        ui.selectable_value(&mut state.mode_ix, index, *mode);
+                                    }
+                                });
+                            if state.mode_ix == 2 {
+                                ui.label("dt (s):");
+                                ui.add(
+                                    egui::DragValue::new(&mut state.dt_s)
+                                        .speed(0.001)
+                                        .range(1e-4..=3600.0),
+                                );
+                            }
+                        });
+                        if state.format == ExportFormat::Parquet {
+                            ui.label("Native samples per topic");
                         }
                     });
                     ui.separator();
@@ -549,7 +591,7 @@ impl DataExportState {
     pub fn add_filtered(&mut self, available: &[ExportField]) {
         let ids = available
             .iter()
-            .filter(|field| self.matches(field))
+            .filter(|field| self.format_compatible(field) && self.matches(field))
             .map(|field| field.id)
             .collect::<Vec<_>>();
         for id in ids {
@@ -558,11 +600,12 @@ impl DataExportState {
     }
 
     pub fn add_source_fields(&mut self, source: &str, available: &[ExportField]) {
-        for id in available
+        let ids = available
             .iter()
-            .filter(|field| field.source == source)
+            .filter(|field| field.source == source && self.format_compatible(field))
             .map(|field| field.id)
-        {
+            .collect::<Vec<_>>();
+        for id in ids {
             self.add(id);
         }
     }
@@ -575,6 +618,19 @@ impl DataExportState {
         self.selected.clear();
     }
 
+    pub fn set_format(&mut self, format: ExportFormat, available: &[ExportField]) {
+        self.format = format;
+        self.selected.retain(|id| {
+            available
+                .iter()
+                .find(|field| field.id == *id)
+                .is_some_and(|field| match format {
+                    ExportFormat::Csv => field.csv_compatible(),
+                    ExportFormat::Parquet => field.parquet_compatible(),
+                })
+        });
+    }
+
     pub fn request(&self, visible: (i64, i64), full: (i64, i64)) -> Option<DataExportRequest> {
         if self.selected.is_empty() {
             return None;
@@ -583,7 +639,10 @@ impl DataExportState {
             format: self.format,
             fields: self.selected.clone(),
             window: if self.visible_range { visible } else { full },
-            mode: self.mode(),
+            mode: match self.format {
+                ExportFormat::Csv => self.mode(),
+                ExportFormat::Parquet => ResampleMode::None,
+            },
         })
     }
 
@@ -599,6 +658,13 @@ impl DataExportState {
         needle.is_empty() || field.label.to_lowercase().contains(&needle)
     }
 
+    fn format_compatible(&self, field: &ExportField) -> bool {
+        match self.format {
+            ExportFormat::Csv => field.csv_compatible(),
+            ExportFormat::Parquet => field.parquet_compatible(),
+        }
+    }
+
     pub fn mode(&self) -> ResampleMode {
         match self.mode_ix {
             1 => ResampleMode::PrevFill,
@@ -610,23 +676,32 @@ impl DataExportState {
     }
 }
 
-pub fn numeric_fields(snapshot: &StoreSnapshot, model: &BrowserModel) -> Vec<ExportField> {
+pub fn available_fields(snapshot: &StoreSnapshot, model: &BrowserModel) -> Vec<ExportField> {
     let mut out = Vec::new();
     for src in &model.sources {
         for topic in &src.topics {
-            for field in &topic.fields {
-                if let Ok(view) = delog_core::field_view::FieldView::new(snapshot, field.id) {
-                    let sf = view.schema_field();
-                    if sf.is_plottable() {
-                        out.push(ExportField {
-                            id: field.id,
-                            source: src.label.clone(),
-                            topic: topic.name.clone(),
-                            name: field.name.clone(),
-                            label: format!("{} / {}.{}", src.label, topic.name, field.name),
-                            unit: sf.unit.clone(),
-                        });
-                    }
+            let Some(store) = snapshot.topic_store(topic.id) else {
+                continue;
+            };
+            for sf in store.schema.fields() {
+                let Some(field) = topic.fields.iter().find(|field| field.name == sf.name) else {
+                    continue;
+                };
+                let export_field = ExportField {
+                    id: field.id,
+                    source_id: src.id,
+                    topic_id: topic.id,
+                    source: src.label.clone(),
+                    topic: topic.name.clone(),
+                    name: field.name.clone(),
+                    label: format!("{} / {}.{}", src.label, topic.name, field.name),
+                    dtype: sf.dtype.clone(),
+                    unit: sf.unit.clone(),
+                    multiplier: sf.multiplier,
+                    description: sf.description.clone(),
+                };
+                if export_field.parquet_compatible() {
+                    out.push(export_field);
                 }
             }
         }
@@ -714,7 +789,9 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
-    use arrow::array::{Array, Float64Array, Int64Array};
+    use arrow::array::{
+        Array, BooleanArray, Float32Array, Float64Array, Int64Array, LargeStringArray, StringArray,
+    };
     use arrow::datatypes::DataType;
     use delog_core::chunk::Chunk;
     use delog_core::diagnostics::Diag;
@@ -806,11 +883,16 @@ mod tests {
             snapshot,
             ExportField {
                 id,
+                source_id: source,
+                topic_id: topic,
                 source: "flight".into(),
                 topic: "ATT".into(),
                 name: "Roll".into(),
                 label: "flight / ATT.Roll".into(),
+                dtype: DataType::Float64,
                 unit: Some("rad".into()),
+                multiplier: 2.0,
+                description: None,
             },
         )
     }
@@ -858,16 +940,61 @@ mod tests {
         let snapshot = StoreSnapshot::from_registry(&registry, [(topic, store)], 1).unwrap();
         let field = |id, name: &str| ExportField {
             id,
+            source_id: source,
+            topic_id: topic,
             source: "flight".into(),
             topic: "ATT".into(),
             name: name.into(),
             label: format!("flight / ATT.{name}"),
+            dtype: DataType::Float64,
             unit: Some("rad".into()),
+            multiplier: 1.0,
+            description: None,
         };
         (
             snapshot,
             vec![field(roll_id, "Roll"), field(pitch_id, "Pitch")],
         )
+    }
+
+    fn snapshot_with_supported_fields() -> (StoreSnapshot, BrowserModel) {
+        let mut registry = IdentityRegistry::new();
+        let source = registry.add_source("flight");
+        let topic = registry.add_topic(source, "STATUS").unwrap();
+        for name in ["value", "armed", "mode", "message"] {
+            registry.add_field(topic, name).unwrap();
+        }
+        let topic_schema = Arc::new(
+            TopicSchema::new(
+                "STATUS",
+                vec![
+                    FieldSchema::new("value", DataType::Float32, Some("m"), 2.0)
+                        .unwrap()
+                        .with_description("scaled value"),
+                    FieldSchema::new("armed", DataType::Boolean, None::<String>, 1.0).unwrap(),
+                    FieldSchema::new("mode", DataType::Utf8, None::<String>, 1.0).unwrap(),
+                    FieldSchema::new("message", DataType::LargeUtf8, None::<String>, 1.0).unwrap(),
+                ],
+            )
+            .unwrap(),
+        );
+        let chunk = Arc::new(
+            Chunk::try_new(
+                Int64Array::from(vec![10]),
+                vec![
+                    Arc::new(Float32Array::from(vec![Some(1.5)])),
+                    Arc::new(BooleanArray::from(vec![Some(true)])),
+                    Arc::new(StringArray::from(vec![Some("AUTO")])),
+                    Arc::new(LargeStringArray::from(vec![Some("ready")])),
+                ],
+                &topic_schema,
+            )
+            .unwrap(),
+        );
+        let store = Arc::new(TopicStore::from_chunks(topic_schema, vec![chunk]).unwrap());
+        let snapshot = StoreSnapshot::from_registry(&registry, [(topic, store)], 1).unwrap();
+        let model = BrowserModel::from_snapshot(&snapshot);
+        (snapshot, model)
     }
 
     #[test]
@@ -1258,14 +1385,91 @@ mod tests {
         assert!(DataExportState::default().visible_range);
     }
 
+    #[test]
+    fn available_fields_retain_every_supported_field_schema() {
+        let (snapshot, model) = snapshot_with_supported_fields();
+
+        let available = available_fields(&snapshot, &model);
+
+        assert_eq!(
+            available
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect::<Vec<_>>(),
+            ["value", "armed", "mode", "message"],
+        );
+        assert!(
+            available
+                .iter()
+                .find(|field| field.name == "mode")
+                .unwrap()
+                .parquet_compatible()
+        );
+        assert!(
+            !available
+                .iter()
+                .find(|field| field.name == "mode")
+                .unwrap()
+                .csv_compatible()
+        );
+        let value = available
+            .iter()
+            .find(|field| field.name == "value")
+            .unwrap();
+        assert_eq!(value.source_id, model.sources[0].id);
+        assert_eq!(value.topic_id, model.sources[0].topics[0].id);
+        assert_eq!(value.dtype, DataType::Float32);
+        assert_eq!(value.multiplier, 2.0);
+        assert_eq!(value.description.as_deref(), Some("scaled value"));
+    }
+
+    #[test]
+    fn switching_from_parquet_to_csv_prunes_string_selections() {
+        let (snapshot, model) = snapshot_with_supported_fields();
+        let available = available_fields(&snapshot, &model);
+        let mut state = DataExportState::default();
+        state.set_format(ExportFormat::Parquet, &available);
+        state.selected = available.iter().map(|field| field.id).collect();
+
+        state.set_format(ExportFormat::Csv, &available);
+
+        assert!(state.selected.iter().all(|id| {
+            available
+                .iter()
+                .find(|field| field.id == *id)
+                .unwrap()
+                .csv_compatible()
+        }));
+    }
+
+    #[test]
+    fn parquet_request_forces_native_samples_after_linear_csv_state() {
+        let state = DataExportState {
+            format: ExportFormat::Parquet,
+            selected: vec![FieldId(1)],
+            mode_ix: 2,
+            dt_s: 0.5,
+            ..DataExportState::default()
+        };
+
+        let request = state.request((10, 20), (0, 100)).unwrap();
+
+        assert_eq!(request.mode, ResampleMode::None);
+    }
+
     fn export_field(id: u32, label: &str) -> ExportField {
         ExportField {
             id: delog_core::identity::FieldId(id),
+            source_id: SourceId(0),
+            topic_id: TopicId(0),
             source: "flight".into(),
             topic: "ATT".into(),
             name: label.into(),
             label: format!("flight / ATT.{label}"),
+            dtype: DataType::Float64,
             unit: Some("rad".into()),
+            multiplier: 1.0,
+            description: None,
         }
     }
 
