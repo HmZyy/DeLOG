@@ -33,6 +33,7 @@ arboard = { workspace = true }
 arrow = { workspace = true }
 parquet = { workspace = true }
 delog-core = { workspace = true }
+delog-parquet-format = { workspace = true }
 delog-flow = { workspace = true }
 delog-parsers = { workspace = true }
 delog-stream = { workspace = true }
