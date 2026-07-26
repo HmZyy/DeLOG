@@ -158,7 +158,7 @@ mod tests {
 
     use super::*;
     use crate::chunk::Chunk;
-    use crate::schema::FieldSchema;
+    use crate::schema::{FieldSchema, TopicProvenance};
 
     fn schema() -> Arc<TopicSchema> {
         Arc::new(
@@ -183,6 +183,23 @@ mod tests {
         assert!(store.is_empty());
         assert_eq!(store.time_range(), None);
         assert!(store.is_monotonic());
+    }
+
+    #[test]
+    fn store_preserves_tagged_schema_provenance() {
+        let provenance = TopicProvenance::new("flight-a", "BARO").unwrap();
+        let schema = Arc::new(
+            TopicSchema::new(
+                "BARO",
+                [FieldSchema::new("Alt", DataType::Float64, Some("m"), 1.0).unwrap()],
+            )
+            .unwrap()
+            .with_provenance(provenance.clone()),
+        );
+
+        let store = TopicStore::new(schema);
+
+        assert_eq!(store.schema.provenance(), Some(&provenance));
     }
 
     #[test]
