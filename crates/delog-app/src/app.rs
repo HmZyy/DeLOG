@@ -3184,6 +3184,8 @@ struct FieldMetadata {
     title: String,
     source_label: String,
     topic_name: String,
+    original_source: Option<String>,
+    original_topic: Option<String>,
     field_name: String,
     dtype: &'static str,
     unit: Option<String>,
@@ -3221,6 +3223,14 @@ fn field_metadata(
         ),
         source_label: source.entry.label.clone(),
         topic_name: topic.entry.name.clone(),
+        original_source: store
+            .schema
+            .provenance()
+            .map(|provenance| provenance.original_source().to_owned()),
+        original_topic: store
+            .schema
+            .provenance()
+            .map(|provenance| provenance.original_topic().to_owned()),
         field_name: field.name.clone(),
         dtype: schema.dtype_label(),
         unit: schema.unit.clone(),
@@ -3266,6 +3276,16 @@ fn show_field_metadata_window(
                     ui.strong("Topic");
                     ui.label(meta.topic_name.as_str());
                     ui.end_row();
+                    if let Some(original_source) = meta.original_source.as_deref() {
+                        ui.strong("Original source");
+                        ui.label(original_source);
+                        ui.end_row();
+                    }
+                    if let Some(original_topic) = meta.original_topic.as_deref() {
+                        ui.strong("Original topic");
+                        ui.label(original_topic);
+                        ui.end_row();
+                    }
                     ui.strong("Field");
                     ui.label(meta.field_name.as_str());
                     ui.end_row();
@@ -4216,7 +4236,7 @@ mod tests {
     use delog_core::chunk::Chunk;
     use delog_core::diagnostics::{Diag, DiagRecord};
     use delog_core::identity::IdentityRegistry;
-    use delog_core::schema::{FieldSchema, TopicSchema};
+    use delog_core::schema::{FieldSchema, TopicProvenance, TopicSchema};
     use delog_core::snapshot::StoreSnapshot;
     use delog_core::store::TopicStore;
 
@@ -4536,7 +4556,8 @@ mod tests {
                     FieldSchema::new("Alt", DataType::Float64, Some("m"), 1.0).unwrap(),
                 ],
             )
-            .unwrap(),
+            .unwrap()
+            .with_provenance(TopicProvenance::new("flight-a", "ATT").unwrap()),
         );
         let chunk = Arc::new(
             Chunk::try_new(
@@ -4557,6 +4578,8 @@ mod tests {
         assert_eq!(meta.title, "flight / GPS.Lat");
         assert_eq!(meta.source_label, "flight");
         assert_eq!(meta.topic_name, "GPS");
+        assert_eq!(meta.original_source.as_deref(), Some("flight-a"));
+        assert_eq!(meta.original_topic.as_deref(), Some("ATT"));
         assert_eq!(meta.field_name, "Lat");
         assert_eq!(meta.dtype, "i32");
         assert_eq!(meta.unit.as_deref(), Some("deg"));
@@ -4565,6 +4588,23 @@ mod tests {
         assert_eq!(meta.rows, 3);
         assert_eq!(meta.source_offset_us, 250);
         assert_eq!(meta.range, TimeRange::new(1_250, 3_250));
+    }
+
+    #[test]
+    fn field_metadata_window_renders_provenance_rows_only_when_available() {
+        let source = include_str!("app.rs");
+        let field_metadata_window = source
+            .split("fn show_field_metadata_window")
+            .nth(1)
+            .expect("field metadata window should exist")
+            .split("fn show_source_metadata_window")
+            .next()
+            .expect("field metadata window should precede source metadata window");
+
+        assert!(field_metadata_window.contains("if let Some(original_source)"));
+        assert!(field_metadata_window.contains("if let Some(original_topic)"));
+        assert!(field_metadata_window.contains("ui.strong(\"Original source\")"));
+        assert!(field_metadata_window.contains("ui.strong(\"Original topic\")"));
     }
 
     #[test]

@@ -16,16 +16,25 @@ pub struct FieldSchema {
     pub multiplier: f64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TopicProvenance {
+    original_source: String,
+    original_topic: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TopicSchema {
     name: String,
     fields: Vec<FieldSchema>,
     field_indices: HashMap<String, usize>,
+    provenance: Option<TopicProvenance>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SchemaError {
     EmptyTopicName,
+    EmptyOriginalSource,
+    EmptyOriginalTopic,
     EmptyFieldName,
     DuplicateFieldName(String),
     UnsupportedDataType(DataType),
@@ -134,6 +143,36 @@ impl FieldSchema {
     }
 }
 
+impl TopicProvenance {
+    pub fn new(
+        original_source: impl Into<String>,
+        original_topic: impl Into<String>,
+    ) -> Result<Self, SchemaError> {
+        let original_source = original_source.into();
+        if original_source.is_empty() {
+            return Err(SchemaError::EmptyOriginalSource);
+        }
+
+        let original_topic = original_topic.into();
+        if original_topic.is_empty() {
+            return Err(SchemaError::EmptyOriginalTopic);
+        }
+
+        Ok(Self {
+            original_source,
+            original_topic,
+        })
+    }
+
+    pub fn original_source(&self) -> &str {
+        &self.original_source
+    }
+
+    pub fn original_topic(&self) -> &str {
+        &self.original_topic
+    }
+}
+
 impl TopicSchema {
     pub fn new(
         name: impl Into<String>,
@@ -156,7 +195,13 @@ impl TopicSchema {
             name,
             fields,
             field_indices,
+            provenance: None,
         })
+    }
+
+    pub fn with_provenance(mut self, provenance: TopicProvenance) -> Self {
+        self.provenance = Some(provenance);
+        self
     }
 
     pub fn name(&self) -> &str {
@@ -165,6 +210,10 @@ impl TopicSchema {
 
     pub fn fields(&self) -> &[FieldSchema] {
         &self.fields
+    }
+
+    pub fn provenance(&self) -> Option<&TopicProvenance> {
+        self.provenance.as_ref()
     }
 
     pub fn field(&self, index: usize) -> Option<&FieldSchema> {
@@ -192,6 +241,8 @@ impl fmt::Display for SchemaError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::EmptyTopicName => write!(f, "topic name must not be empty"),
+            Self::EmptyOriginalSource => write!(f, "original source must not be empty"),
+            Self::EmptyOriginalTopic => write!(f, "original topic must not be empty"),
             Self::EmptyFieldName => write!(f, "field name must not be empty"),
             Self::DuplicateFieldName(name) => write!(f, "duplicate field name `{name}`"),
             Self::UnsupportedDataType(dtype) => write!(f, "unsupported field dtype {dtype:?}"),
@@ -246,6 +297,31 @@ mod tests {
             Some("cm")
         );
         assert_eq!(schema.field_by_name("Alt").unwrap().multiplier, 0.01);
+    }
+
+    #[test]
+    fn topic_provenance_is_optional_and_builder_preserves_fields() {
+        let plain = TopicSchema::new("ATT", [field("Roll", DataType::Float64)]).unwrap();
+        assert_eq!(plain.provenance(), None);
+
+        let provenance = TopicProvenance::new("flight-a", "ATT").unwrap();
+        let tagged = plain.clone().with_provenance(provenance.clone());
+        assert_eq!(tagged.name(), "ATT");
+        assert_eq!(tagged.fields(), plain.fields());
+        assert_eq!(tagged.provenance(), Some(&provenance));
+        assert_ne!(tagged, plain);
+    }
+
+    #[test]
+    fn topic_provenance_rejects_empty_original_values() {
+        assert_eq!(
+            TopicProvenance::new("", "ATT"),
+            Err(SchemaError::EmptyOriginalSource)
+        );
+        assert_eq!(
+            TopicProvenance::new("flight-a", ""),
+            Err(SchemaError::EmptyOriginalTopic)
+        );
     }
 
     #[test]
