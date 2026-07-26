@@ -1,4 +1,5 @@
 use std::io::{self, Read, Seek, SeekFrom};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use arrow::array::{
@@ -8,11 +9,21 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Schema, TimeUnit};
 use bytes::Bytes;
+use delog_core::diagnostics::Diag;
+use delog_core::identity::SourceMetadata;
+use delog_core::ingest::{IngestSink, ParseSummary, ParsedBatch};
 use delog_core::parse_ctl::ParseCtl;
+use delog_core::schema::{FieldSchema, TopicSchema};
+use delog_core::time::TimeRange;
+use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ParquetRecordBatchReaderBuilder};
 use parquet::errors::ParquetError;
 use parquet::file::reader::{ChunkReader, Length};
 
-use crate::parser::ReadSeek;
+use crate::parser::{LogParser, ParseError, ReadSeek, Sniff};
+
+pub const PARQUET_BATCH_ROWS: usize = 8_192;
+
+static NEXT_TIMESTAMP_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimestampUnit {
@@ -314,6 +325,337 @@ fn delog_timestamp_selection(schema: &Schema) -> Option<TimestampSelection> {
     })
 }
 
+fn supported_value_type(dtype: &DataType) -> bool {
+    matches!(
+        dtype,
+        DataType::Int8
+            | DataType::Int16
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::UInt8
+            | DataType::UInt16
+            | DataType::UInt32
+            | DataType::UInt64
+            | DataType::Float32
+            | DataType::Float64
+            | DataType::Boolean
+            | DataType::Utf8
+            | DataType::LargeUtf8
+    )
+}
+
+fn validate_nondecreasing(
+    timestamps: &Int64Array,
+    last_timestamp: &mut Option<i64>,
+) -> Result<(), String> {
+    let mut previous = *last_timestamp;
+    for &current in timestamps.values() {
+        if let Some(previous) = previous
+            && current < previous
+        {
+            return Err(format!(
+                "timestamp regression: previous timestamp {previous}, current timestamp {current}"
+            ));
+        }
+        previous = Some(current);
+    }
+    *last_timestamp = previous;
+    Ok(())
+}
+
+fn timestamp_conversion_detail(error: TimestampConversionError) -> String {
+    match error {
+        TimestampConversionError::Unsupported(dtype) => {
+            format!("unsupported timestamp type {dtype}")
+        }
+        TimestampConversionError::OutOfRange { row } => {
+            format!("timestamp at row {row} is outside the microsecond range")
+        }
+        TimestampConversionError::SubMicrosecond { row } => {
+            format!("timestamp at row {row} has sub-microsecond precision")
+        }
+        TimestampConversionError::FractionalMicrosecond { row } => {
+            format!("timestamp at row {row} is not an exact microsecond")
+        }
+    }
+}
+
+fn parse_data_error(detail: impl Into<String>, emitted_any: bool) -> ParseError {
+    let detail = detail.into();
+    if emitted_any {
+        ParseError::Framing {
+            byte_offset: 0,
+            detail,
+        }
+    } else {
+        ParseError::Setup { detail }
+    }
+}
+
+fn parse_arrow_error(error: impl std::fmt::Display, emitted_any: bool) -> ParseError {
+    parse_data_error(error.to_string(), emitted_any)
+}
+
+fn parquet_summary(
+    emitted_any: bool,
+    row_count: u64,
+    time_range: Option<TimeRange>,
+    diagnostics: u64,
+) -> ParseSummary {
+    ParseSummary {
+        topic_count: u64::from(emitted_any),
+        row_count,
+        time_range,
+        diagnostics,
+        source_meta: SourceMetadata::default(),
+    }
+}
+
+pub struct ParquetParser {
+    selection: Arc<dyn TimestampSelectionProvider>,
+}
+
+impl ParquetParser {
+    pub fn new(selection: Arc<dyn TimestampSelectionProvider>) -> Self {
+        Self { selection }
+    }
+}
+
+impl LogParser for ParquetParser {
+    fn name(&self) -> &'static str {
+        "parquet"
+    }
+
+    fn sniff(&self, head: &[u8]) -> Sniff {
+        if head.starts_with(b"PAR1") {
+            Sniff::new(100, "Parquet magic")
+        } else {
+            Sniff::no()
+        }
+    }
+
+    fn parse(
+        &self,
+        src: Box<dyn ReadSeek>,
+        sink: &mut dyn IngestSink,
+        ctl: &ParseCtl,
+    ) -> Result<ParseSummary, ParseError> {
+        let chunk_reader = SeekChunkReader::try_new(src).map_err(|error| ParseError::Setup {
+            detail: error.to_string(),
+        })?;
+        let reader_metadata = ArrowReaderMetadata::load(&chunk_reader, Default::default())
+            .map_err(|error| ParseError::Setup {
+                detail: error.to_string(),
+            })?;
+        let builder = ParquetRecordBatchReaderBuilder::new_with_metadata(
+            chunk_reader.clone(),
+            reader_metadata.clone(),
+        );
+        let schema = Arc::clone(builder.schema());
+        let total_rows = builder.metadata().file_metadata().num_rows().max(0) as u64;
+        let row_group_count = builder.metadata().num_row_groups();
+
+        let delog_selection = delog_timestamp_selection(&schema);
+        let selection = match delog_selection {
+            Some(selection) => selection,
+            None => {
+                let candidates = timestamp_candidates(&schema);
+                if candidates.is_empty() {
+                    return Err(ParseError::Setup {
+                        detail: "Parquet schema has no timestamp-capable columns".to_owned(),
+                    });
+                }
+                let request = TimestampSelectionRequest {
+                    request_id: NEXT_TIMESTAMP_REQUEST_ID.fetch_add(1, Ordering::Relaxed),
+                    file_label: ctl.label().to_owned(),
+                    candidates: candidates.clone(),
+                };
+                let selection = self
+                    .selection
+                    .select(request, ctl)
+                    .map_err(|TimestampSelectionError::Cancelled| ParseError::SetupCancelled)?;
+                let Some(candidate) = candidates
+                    .iter()
+                    .find(|candidate| candidate.column_index == selection.column_index)
+                else {
+                    return Err(ParseError::Setup {
+                        detail: format!(
+                            "timestamp selection column {} is stale or ineligible",
+                            selection.column_index
+                        ),
+                    });
+                };
+                if candidate
+                    .logical_unit
+                    .is_some_and(|unit| unit != selection.unit)
+                {
+                    return Err(ParseError::Setup {
+                        detail: format!(
+                            "timestamp selection unit does not match column `{}`",
+                            candidate.name
+                        ),
+                    });
+                }
+                selection
+            }
+        };
+
+        let excluded_time_indices: &[usize] = if delog_selection.is_some() {
+            &[0, 1]
+        } else {
+            std::slice::from_ref(&selection.column_index)
+        };
+        let mut value_indices = Vec::new();
+        let mut field_schemas = Vec::new();
+        let mut unsupported_names = Vec::new();
+        for (index, field) in schema.fields().iter().enumerate() {
+            if excluded_time_indices.contains(&index) {
+                continue;
+            }
+            if !supported_value_type(field.data_type()) {
+                unsupported_names.push(field.name().to_owned());
+                continue;
+            }
+            let unit = field
+                .metadata()
+                .get("unit")
+                .filter(|unit| !unit.is_empty())
+                .cloned();
+            let field_schema = FieldSchema::new(
+                field.name().to_owned(),
+                field.data_type().clone(),
+                unit,
+                1.0,
+            )
+            .map_err(|error| ParseError::Setup {
+                detail: format!("invalid value field `{}`: {error}", field.name()),
+            })?;
+            value_indices.push(index);
+            field_schemas.push(field_schema);
+        }
+        if value_indices.is_empty() {
+            return Err(ParseError::Setup {
+                detail: "Parquet schema has no supported value columns after timestamp projection"
+                    .to_owned(),
+            });
+        }
+        let topic_schema = Arc::new(TopicSchema::new(ctl.label(), field_schemas).map_err(
+            |error| ParseError::Setup {
+                detail: format!("invalid Parquet topic schema: {error}"),
+            },
+        )?);
+        let mut diagnostics = 0;
+        if !unsupported_names.is_empty() {
+            diagnostics += 1;
+            sink.diagnostic(
+                Diag::warning(
+                    "parquet-unsupported-columns",
+                    format!(
+                        "skipped unsupported Parquet column(s): {}",
+                        unsupported_names.join(", ")
+                    ),
+                )
+                .with_source(ctl.source()),
+            );
+        }
+
+        let mut emitted_any = false;
+        let mut row_count = 0u64;
+        let mut skipped_rows = 0u64;
+        let mut processed_rows = 0u64;
+        let mut time_range: Option<TimeRange> = None;
+        let mut last_timestamp = None;
+
+        let parse_result = (|| {
+            if ctl.is_cancelled() {
+                return Err(ParseError::Cancelled);
+            }
+            for row_group in 0..row_group_count {
+                let mut reader = ParquetRecordBatchReaderBuilder::new_with_metadata(
+                    chunk_reader.clone(),
+                    reader_metadata.clone(),
+                )
+                .with_batch_size(PARQUET_BATCH_ROWS)
+                .with_row_groups(vec![row_group])
+                .build()
+                .map_err(|error| parse_arrow_error(error, emitted_any))?;
+                for batch in &mut reader {
+                    let batch = batch.map_err(|error| parse_arrow_error(error, emitted_any))?;
+                    let converted = convert_timestamps(
+                        batch.column(selection.column_index).as_ref(),
+                        selection.unit,
+                    )
+                    .map_err(|error| {
+                        parse_data_error(timestamp_conversion_detail(error), emitted_any)
+                    })?;
+                    skipped_rows += converted.skipped;
+                    processed_rows += batch.num_rows() as u64;
+                    if converted.timestamps.is_empty() {
+                        ctl.report_fraction(sink, processed_rows as f32 / total_rows.max(1) as f32);
+                        if ctl.is_cancelled() {
+                            return Err(ParseError::Cancelled);
+                        }
+                        continue;
+                    }
+                    validate_nondecreasing(&converted.timestamps, &mut last_timestamp)
+                        .map_err(|error| parse_data_error(error, emitted_any))?;
+                    let columns = value_indices
+                        .iter()
+                        .map(|&index| {
+                            arrow::compute::filter(batch.column(index).as_ref(), &converted.keep)
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|error| parse_arrow_error(error, emitted_any))?;
+
+                    let first = converted.timestamps.value(0);
+                    let last = converted.timestamps.value(converted.timestamps.len() - 1);
+                    time_range = Some(match time_range {
+                        Some(range) => range.include(last),
+                        None => TimeRange::new(first, last).expect("timestamps were validated"),
+                    });
+                    row_count += converted.timestamps.len() as u64;
+                    sink.submit(ParsedBatch::new(
+                        ctl.source(),
+                        Arc::clone(&topic_schema),
+                        converted.timestamps,
+                        columns,
+                    ));
+                    emitted_any = true;
+                    ctl.report_fraction(sink, processed_rows as f32 / total_rows.max(1) as f32);
+                    if ctl.is_cancelled() {
+                        return Err(ParseError::Cancelled);
+                    }
+                }
+            }
+            Ok(())
+        })();
+
+        if skipped_rows > 0 {
+            diagnostics += 1;
+            sink.diagnostic(
+                Diag::warning(
+                    "parquet-skipped-timestamps",
+                    format!("skipped {skipped_rows} row(s) with null or non-finite timestamps"),
+                )
+                .with_source(ctl.source()),
+            );
+        }
+        let summary = parquet_summary(emitted_any, row_count, time_range, diagnostics);
+        match parse_result {
+            Ok(()) => {
+                sink.close_source(ctl.source(), summary.clone());
+                Ok(summary)
+            }
+            Err(error) => {
+                if emitted_any {
+                    sink.close_source(ctl.source(), summary);
+                }
+                Err(error)
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 struct SeekChunkReader {
     inner: Arc<Mutex<Box<dyn ReadSeek>>>,
@@ -384,17 +726,599 @@ impl ChunkReader for SeekChunkReader {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::io::{Cursor, Read};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use arrow::array::{
-        ArrayRef, BooleanArray, Float64Array, Int32Array, Int64Array, TimestampMicrosecondArray,
-        TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, UInt16Array,
-        UInt32Array, UInt64Array,
+        ArrayRef, BinaryArray, BooleanArray, Date32Array, Float32Array, Float64Array, Int8Array,
+        Int16Array, Int32Array, Int64Array, LargeStringArray, ListBuilder, StringArray,
+        TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+        TimestampSecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
     };
-    use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+    use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
+    use arrow::record_batch::RecordBatch;
+    use delog_core::diagnostics::Diag;
+    use delog_core::identity::SourceId;
+    use delog_core::ingest::{IngestSink, ParseSummary, ParsedBatch, SourceKind};
+    use delog_core::parse_ctl::{CancelToken, ParseCtl};
+    use parquet::arrow::ArrowWriter;
 
     use super::*;
+    use crate::parser::{LogParser, ParseError};
+
+    fn parquet_bytes(schema: SchemaRef, batches: &[RecordBatch]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut writer = ArrowWriter::try_new(&mut out, schema, None).unwrap();
+        for batch in batches {
+            writer.write(batch).unwrap();
+            writer.flush().unwrap();
+        }
+        writer.close().unwrap();
+        out
+    }
+
+    #[derive(Default)]
+    struct RecordingSink {
+        batches: Vec<ParsedBatch>,
+        diagnostics: Vec<Diag>,
+        progress: Vec<f32>,
+        closed: Option<ParseSummary>,
+        cancel_after_first: Option<CancelToken>,
+    }
+
+    impl IngestSink for RecordingSink {
+        fn open_source(&mut self, _key: &str, _kind: SourceKind) -> SourceId {
+            SourceId(4)
+        }
+
+        fn submit(&mut self, batch: ParsedBatch) {
+            self.batches.push(batch);
+            if self.batches.len() == 1
+                && let Some(token) = &self.cancel_after_first
+            {
+                token.cancel();
+            }
+        }
+
+        fn diagnostic(&mut self, diag: Diag) {
+            self.diagnostics.push(diag);
+        }
+
+        fn progress(&mut self, _source: SourceId, frac: f32) {
+            self.progress.push(frac);
+        }
+
+        fn close_source(&mut self, _source: SourceId, summary: ParseSummary) {
+            self.closed = Some(summary);
+        }
+    }
+
+    struct FixedProvider {
+        response: Option<Result<TimestampSelection, TimestampSelectionError>>,
+        calls: AtomicUsize,
+    }
+
+    impl FixedProvider {
+        fn ok(selection: TimestampSelection) -> Self {
+            Self {
+                response: Some(Ok(selection)),
+                calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn cancelled() -> Self {
+            Self {
+                response: Some(Err(TimestampSelectionError::Cancelled)),
+                calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn panic_if_called() -> Self {
+            Self {
+                response: None,
+                calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl TimestampSelectionProvider for FixedProvider {
+        fn select(
+            &self,
+            _request: TimestampSelectionRequest,
+            _ctl: &ParseCtl,
+        ) -> Result<TimestampSelection, TimestampSelectionError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.response
+                .expect("provider must not be called for a DéLOG export")
+        }
+    }
+
+    fn drive_parquet(
+        bytes: Vec<u8>,
+        provider: Arc<dyn TimestampSelectionProvider>,
+    ) -> (Result<ParseSummary, ParseError>, RecordingSink) {
+        let parser = ParquetParser::new(provider);
+        let ctl = ParseCtl::new(CancelToken::new(), SourceId(4), bytes.len() as u64)
+            .with_label("generic");
+        let mut sink = RecordingSink::default();
+        let result = parser.parse(Box::new(Cursor::new(bytes)), &mut sink, &ctl);
+        (result, sink)
+    }
+
+    fn delog_batch(timestamps: Vec<i64>, values: Vec<f64>) -> (SchemaRef, RecordBatch) {
+        let seconds = timestamps
+            .iter()
+            .map(|&value| value as f64 / 1_000_000.0)
+            .collect::<Vec<_>>();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("t_us", DataType::Int64, false),
+            Field::new("t_s", DataType::Float64, false),
+            Field::new("value", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int64Array::from(timestamps)),
+                Arc::new(Float64Array::from(seconds)),
+                Arc::new(Float64Array::from(values)),
+            ],
+        )
+        .unwrap();
+        (schema, batch)
+    }
+
+    #[test]
+    fn delog_schema_bypasses_provider_and_excludes_both_time_columns() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("t_us", DataType::Int64, false),
+            Field::new("t_s", DataType::Float64, false),
+            Field::new("roll", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int64Array::from(vec![10, 20])),
+                Arc::new(Float64Array::from(vec![0.0, 0.00001])),
+                Arc::new(Float64Array::from(vec![Some(1.0), None])),
+            ],
+        )
+        .unwrap();
+        let provider = Arc::new(FixedProvider::panic_if_called());
+        let calls = Arc::clone(&provider);
+        let (result, sink) = drive_parquet(parquet_bytes(schema, &[batch]), provider);
+        let summary = result.unwrap();
+        assert_eq!(summary.row_count, 2);
+        assert_eq!(calls.calls.load(Ordering::Relaxed), 0);
+        assert_eq!(sink.batches[0].schema.fields().len(), 1);
+    }
+
+    #[test]
+    fn parquet_magic_is_a_confident_match() {
+        let provider = Arc::new(FixedProvider::panic_if_called());
+        let parser = ParquetParser::new(provider);
+        assert_eq!(parser.sniff(b"PAR1rest").score, 100);
+        assert_eq!(parser.sniff(b"not parquet").score, 0);
+    }
+
+    #[test]
+    fn generic_schema_uses_selected_numeric_column_and_unit() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("value", DataType::Float32, true),
+            Field::new("time_ms", DataType::Int64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Float32Array::from(vec![1.0, 2.0])),
+                Arc::new(Int64Array::from(vec![1, 2])),
+            ],
+        )
+        .unwrap();
+        let provider = Arc::new(FixedProvider::ok(TimestampSelection {
+            column_index: 1,
+            unit: TimestampUnit::Milliseconds,
+        }));
+        let (result, sink) = drive_parquet(parquet_bytes(schema, &[batch]), provider);
+        assert_eq!(result.unwrap().row_count, 2);
+        assert_eq!(sink.batches[0].timestamps.values(), &[1_000, 2_000]);
+        assert_eq!(sink.batches[0].schema.name(), "generic");
+        assert_eq!(sink.batches[0].schema.fields()[0].name, "value");
+    }
+
+    #[test]
+    fn rejects_regression_across_record_batches() {
+        let (schema, first) = delog_batch(vec![20], vec![1.0]);
+        let (_, second) = delog_batch(vec![10], vec![2.0]);
+        let provider = Arc::new(FixedProvider::panic_if_called());
+        let (result, sink) = drive_parquet(parquet_bytes(schema, &[first, second]), provider);
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("previous timestamp 20"));
+        assert!(error.contains("current timestamp 10"));
+        assert_eq!(sink.batches.len(), 1);
+        assert_eq!(sink.batches[0].timestamps.values(), &[20]);
+        assert_eq!(sink.closed.as_ref().unwrap().row_count, 1);
+    }
+
+    #[test]
+    fn preserves_all_supported_primitive_types_and_nulls() {
+        let fields = vec![
+            Field::new("time", DataType::Int64, false),
+            Field::new("i8", DataType::Int8, true),
+            Field::new("i16", DataType::Int16, true),
+            Field::new("i32", DataType::Int32, true),
+            Field::new("i64", DataType::Int64, true),
+            Field::new("u8", DataType::UInt8, true),
+            Field::new("u16", DataType::UInt16, true),
+            Field::new("u32", DataType::UInt32, true),
+            Field::new("u64", DataType::UInt64, true),
+            Field::new("f32", DataType::Float32, true),
+            Field::new("f64", DataType::Float64, true),
+            Field::new("bool", DataType::Boolean, true),
+            Field::new("utf8", DataType::Utf8, true),
+            Field::new("large_utf8", DataType::LargeUtf8, true),
+        ];
+        let value_columns: Vec<ArrayRef> = vec![
+            Arc::new(Int8Array::from(vec![Some(-1), None])),
+            Arc::new(Int16Array::from(vec![Some(-2), None])),
+            Arc::new(Int32Array::from(vec![Some(-3), None])),
+            Arc::new(Int64Array::from(vec![Some(-4), None])),
+            Arc::new(UInt8Array::from(vec![Some(1), None])),
+            Arc::new(UInt16Array::from(vec![Some(2), None])),
+            Arc::new(UInt32Array::from(vec![Some(3), None])),
+            Arc::new(UInt64Array::from(vec![Some(4), None])),
+            Arc::new(Float32Array::from(vec![Some(1.5), None])),
+            Arc::new(Float64Array::from(vec![Some(2.5), None])),
+            Arc::new(BooleanArray::from(vec![Some(true), None])),
+            Arc::new(StringArray::from(vec![Some("a"), None])),
+            Arc::new(LargeStringArray::from(vec![Some("b"), None])),
+        ];
+        let mut columns: Vec<ArrayRef> = vec![Arc::new(Int64Array::from(vec![1, 2]))];
+        columns.extend(value_columns.iter().cloned());
+        let schema = Arc::new(Schema::new(fields));
+        let batch = RecordBatch::try_new(Arc::clone(&schema), columns).unwrap();
+        let provider = Arc::new(FixedProvider::ok(TimestampSelection {
+            column_index: 0,
+            unit: TimestampUnit::Microseconds,
+        }));
+        let (result, sink) = drive_parquet(parquet_bytes(schema, &[batch]), provider);
+        result.unwrap();
+        let emitted = &sink.batches[0];
+        assert_eq!(
+            emitted
+                .schema
+                .fields()
+                .iter()
+                .map(|field| field.dtype.clone())
+                .collect::<Vec<_>>(),
+            value_columns
+                .iter()
+                .map(|column| column.data_type().clone())
+                .collect::<Vec<_>>()
+        );
+        for (actual, expected) in emitted.columns.iter().zip(&value_columns) {
+            assert_eq!(actual.nulls(), expected.nulls());
+        }
+    }
+
+    #[test]
+    fn preserves_non_empty_unit_metadata() {
+        let mut radians = HashMap::new();
+        radians.insert("unit".to_owned(), "rad".to_owned());
+        let mut empty = HashMap::new();
+        empty.insert("unit".to_owned(), String::new());
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("time", DataType::Int64, false),
+            Field::new("angle", DataType::Float32, true).with_metadata(radians),
+            Field::new("empty", DataType::Float32, true).with_metadata(empty),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int64Array::from(vec![1])),
+                Arc::new(Float32Array::from(vec![1.0])),
+                Arc::new(Float32Array::from(vec![2.0])),
+            ],
+        )
+        .unwrap();
+        let provider = Arc::new(FixedProvider::ok(TimestampSelection {
+            column_index: 0,
+            unit: TimestampUnit::Microseconds,
+        }));
+        let (result, sink) = drive_parquet(parquet_bytes(schema, &[batch]), provider);
+        result.unwrap();
+        assert_eq!(
+            sink.batches[0].schema.fields()[0].unit.as_deref(),
+            Some("rad")
+        );
+        assert_eq!(sink.batches[0].schema.fields()[1].unit, None);
+    }
+
+    #[test]
+    fn warns_once_for_unsupported_columns() {
+        let list_field = Arc::new(Field::new_list_field(DataType::Int32, true));
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("time", DataType::Int64, false),
+            Field::new("value", DataType::Float32, true),
+            Field::new("payload", DataType::Binary, true),
+            Field::new("items", DataType::List(list_field), true),
+            Field::new("day", DataType::Date32, true),
+        ]));
+        let mut list = ListBuilder::new(arrow::array::Int32Builder::new());
+        list.values().append_value(1);
+        list.append(true);
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int64Array::from(vec![1])),
+                Arc::new(Float32Array::from(vec![1.0])),
+                Arc::new(BinaryArray::from(vec![Some(&b"x"[..])])),
+                Arc::new(list.finish()),
+                Arc::new(Date32Array::from(vec![Some(1)])),
+            ],
+        )
+        .unwrap();
+        let provider = Arc::new(FixedProvider::ok(TimestampSelection {
+            column_index: 0,
+            unit: TimestampUnit::Microseconds,
+        }));
+        let (result, sink) = drive_parquet(parquet_bytes(schema, &[batch]), provider);
+        result.unwrap();
+        assert_eq!(sink.batches[0].schema.fields().len(), 1);
+        let diagnostics = sink
+            .diagnostics
+            .iter()
+            .filter(|diag| diag.code == "parquet-unsupported-columns")
+            .collect::<Vec<_>>();
+        assert_eq!(diagnostics.len(), 1);
+        for name in ["payload", "items", "day"] {
+            assert!(diagnostics[0].message.contains(name));
+        }
+    }
+
+    #[test]
+    fn fails_setup_when_no_value_columns_remain() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("time", DataType::Int64, false),
+            Field::new("payload", DataType::Binary, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int64Array::from(vec![1])),
+                Arc::new(BinaryArray::from(vec![Some(&b"x"[..])])),
+            ],
+        )
+        .unwrap();
+        let provider = Arc::new(FixedProvider::ok(TimestampSelection {
+            column_index: 0,
+            unit: TimestampUnit::Microseconds,
+        }));
+        let (result, sink) = drive_parquet(parquet_bytes(schema, &[batch]), provider);
+        assert!(matches!(result, Err(ParseError::Setup { .. })));
+        assert!(sink.batches.is_empty());
+        assert!(sink.closed.is_none());
+    }
+
+    #[test]
+    fn fails_setup_when_no_timestamp_candidate_exists() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("text", DataType::Utf8, true),
+            Field::new("flag", DataType::Boolean, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(StringArray::from(vec![Some("x")])),
+                Arc::new(BooleanArray::from(vec![Some(true)])),
+            ],
+        )
+        .unwrap();
+        let provider = Arc::new(FixedProvider::panic_if_called());
+        let calls = Arc::clone(&provider);
+        let (result, sink) = drive_parquet(parquet_bytes(schema, &[batch]), provider);
+        assert!(matches!(result, Err(ParseError::Setup { .. })));
+        assert_eq!(calls.calls.load(Ordering::Relaxed), 0);
+        assert!(sink.batches.is_empty());
+    }
+
+    #[test]
+    fn rejects_stale_or_ineligible_provider_selection() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("time", DataType::Int64, false),
+            Field::new("text", DataType::Utf8, true),
+            Field::new("value", DataType::Float32, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int64Array::from(vec![1])),
+                Arc::new(StringArray::from(vec![Some("x")])),
+                Arc::new(Float32Array::from(vec![1.0])),
+            ],
+        )
+        .unwrap();
+        let out_of_range = Arc::new(FixedProvider::ok(TimestampSelection {
+            column_index: 99,
+            unit: TimestampUnit::Microseconds,
+        }));
+        let (result, sink) = drive_parquet(
+            parquet_bytes(Arc::clone(&schema), std::slice::from_ref(&batch)),
+            out_of_range,
+        );
+        assert!(matches!(result, Err(ParseError::Setup { .. })));
+        assert!(sink.batches.is_empty());
+
+        let ineligible = Arc::new(FixedProvider::ok(TimestampSelection {
+            column_index: 1,
+            unit: TimestampUnit::Microseconds,
+        }));
+        let (result, sink) = drive_parquet(parquet_bytes(schema, &[batch]), ineligible);
+        assert!(matches!(result, Err(ParseError::Setup { .. })));
+        assert!(sink.batches.is_empty());
+    }
+
+    #[test]
+    fn skips_null_and_non_finite_rows_with_one_warning() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("time", DataType::Float64, true),
+            Field::new("value", DataType::Float32, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Float64Array::from(vec![
+                    Some(1.0),
+                    None,
+                    Some(f64::NAN),
+                    Some(2.0),
+                ])),
+                Arc::new(Float32Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+            ],
+        )
+        .unwrap();
+        let provider = Arc::new(FixedProvider::ok(TimestampSelection {
+            column_index: 0,
+            unit: TimestampUnit::Seconds,
+        }));
+        let (result, sink) = drive_parquet(parquet_bytes(schema, &[batch]), provider);
+        result.unwrap();
+        assert_eq!(sink.batches[0].timestamps.values(), &[1_000_000, 2_000_000]);
+        let diagnostics = sink
+            .diagnostics
+            .iter()
+            .filter(|diag| diag.code == "parquet-skipped-timestamps")
+            .collect::<Vec<_>>();
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains("skipped 2 row(s)"));
+    }
+
+    #[test]
+    fn all_invalid_timestamp_rows_complete_without_a_batch() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("time", DataType::Float64, true),
+            Field::new("value", DataType::Float32, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Float64Array::from(vec![None, Some(f64::NAN)])),
+                Arc::new(Float32Array::from(vec![1.0, 2.0])),
+            ],
+        )
+        .unwrap();
+        let provider = Arc::new(FixedProvider::ok(TimestampSelection {
+            column_index: 0,
+            unit: TimestampUnit::Seconds,
+        }));
+        let (result, sink) = drive_parquet(parquet_bytes(schema, &[batch]), provider);
+        let summary = result.unwrap();
+        assert_eq!(summary.row_count, 0);
+        assert_eq!(summary.topic_count, 0);
+        assert!(sink.batches.is_empty());
+        assert_eq!(sink.closed.as_ref().unwrap(), &summary);
+        assert_eq!(
+            sink.diagnostics
+                .iter()
+                .filter(|diag| diag.code == "parquet-skipped-timestamps")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn generic_t_s_is_retained_when_another_column_is_selected() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("clock", DataType::Int64, false),
+            Field::new("t_s", DataType::Float64, false),
+            Field::new("value", DataType::Float32, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int64Array::from(vec![1])),
+                Arc::new(Float64Array::from(vec![0.1])),
+                Arc::new(Float32Array::from(vec![2.0])),
+            ],
+        )
+        .unwrap();
+        let provider = Arc::new(FixedProvider::ok(TimestampSelection {
+            column_index: 0,
+            unit: TimestampUnit::Microseconds,
+        }));
+        let (result, sink) = drive_parquet(parquet_bytes(schema, &[batch]), provider);
+        result.unwrap();
+        let fields = sink.batches[0]
+            .schema
+            .fields()
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(fields, ["t_s", "value"]);
+    }
+
+    #[test]
+    fn reports_row_based_progress_and_summary_counts() {
+        let (schema, first) = delog_batch(vec![10, 20], vec![1.0, 2.0]);
+        let (_, second) = delog_batch(vec![30, 40], vec![3.0, 4.0]);
+        let provider = Arc::new(FixedProvider::panic_if_called());
+        let (result, sink) = drive_parquet(parquet_bytes(schema, &[first, second]), provider);
+        let summary = result.unwrap();
+        assert_eq!(sink.progress.last(), Some(&1.0));
+        assert_eq!(summary.topic_count, 1);
+        assert_eq!(summary.row_count, 4);
+        assert_eq!(summary.time_range.unwrap().min_us, 10);
+        assert_eq!(summary.time_range.unwrap().max_us, 40);
+        assert_eq!(summary.diagnostics, 0);
+        assert_eq!(sink.diagnostics.len() as u64, summary.diagnostics);
+        assert_eq!(sink.closed.as_ref().unwrap(), &summary);
+    }
+
+    #[test]
+    fn provider_cancellation_maps_to_setup_cancelled() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("time", DataType::Int64, false),
+            Field::new("value", DataType::Float32, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int64Array::from(vec![1])),
+                Arc::new(Float32Array::from(vec![1.0])),
+            ],
+        )
+        .unwrap();
+        let provider = Arc::new(FixedProvider::cancelled());
+        let (result, sink) = drive_parquet(parquet_bytes(schema, &[batch]), provider);
+        assert!(matches!(result, Err(ParseError::SetupCancelled)));
+        assert!(sink.batches.is_empty());
+    }
+
+    #[test]
+    fn cancellation_after_submission_preserves_partial_batches() {
+        let timestamps = (0..PARQUET_BATCH_ROWS as i64).collect::<Vec<_>>();
+        let values = vec![1.0; PARQUET_BATCH_ROWS];
+        let (schema, first) = delog_batch(timestamps, values);
+        let (_, second) = delog_batch(vec![PARQUET_BATCH_ROWS as i64], vec![2.0]);
+        let bytes = parquet_bytes(schema, &[first, second]);
+        let token = CancelToken::new();
+        let ctl =
+            ParseCtl::new(token.clone(), SourceId(4), bytes.len() as u64).with_label("generic");
+        let provider = Arc::new(FixedProvider::panic_if_called());
+        let parser = ParquetParser::new(provider);
+        let mut sink = RecordingSink {
+            cancel_after_first: Some(token),
+            ..RecordingSink::default()
+        };
+        let result = parser.parse(Box::new(Cursor::new(bytes)), &mut sink, &ctl);
+        assert!(matches!(result, Err(ParseError::Cancelled)));
+        assert_eq!(sink.batches.len(), 1);
+        assert_eq!(
+            sink.closed.as_ref().unwrap().row_count,
+            PARQUET_BATCH_ROWS as u64
+        );
+    }
 
     #[test]
     fn seek_chunk_reader_serves_independent_ranges() {

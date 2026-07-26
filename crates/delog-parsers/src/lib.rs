@@ -12,8 +12,8 @@ pub mod ulog;
 
 pub use ardupilot::ArduPilotParser;
 pub use parquet::{
-    TimestampCandidate, TimestampSelection, TimestampSelectionError, TimestampSelectionProvider,
-    TimestampSelectionRequest, TimestampUnit,
+    ParquetParser, TimestampCandidate, TimestampSelection, TimestampSelectionError,
+    TimestampSelectionProvider, TimestampSelectionRequest, TimestampUnit,
 };
 pub use parser::{
     Candidate, Detection, LogParser, ParseError, ParserRegistry, ReadSeek, SNIFF_CONFIDENCE,
