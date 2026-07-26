@@ -13,6 +13,7 @@ const POPUP_SOURCES: &[&str] = &[
 const APP_SOURCE: &str = include_str!("../src/app.rs");
 const DATA_EXPORT_SOURCE: &str = include_str!("../src/data_export.rs");
 const DOCKS_SOURCE: &str = include_str!("../src/docks.rs");
+const PARQUET_IMPORT_SOURCE: &str = include_str!("../src/parquet_import.rs");
 const SCRIPTS_SOURCE: &str = include_str!("../src/scripts.rs");
 const WORKSPACE_SOURCE: &str = include_str!("../src/workspace.rs");
 const SETTINGS_SOURCE: &str = include_str!("../src/settings.rs");
@@ -23,6 +24,14 @@ fn occurrence_count(needle: &str) -> usize {
         .iter()
         .map(|source| source.matches(needle).count())
         .sum()
+}
+
+#[test]
+fn parquet_import_uses_an_in_app_non_collapsible_window_and_picker_filter() {
+    assert!(APP_SOURCE.contains("\"parquet\""));
+    assert!(PARQUET_IMPORT_SOURCE.contains("egui::Window::new(\"Import Parquet\")"));
+    assert!(PARQUET_IMPORT_SOURCE.contains(".collapsible(false)"));
+    assert!(!PARQUET_IMPORT_SOURCE.contains("rfd::MessageDialog"));
 }
 
 fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
