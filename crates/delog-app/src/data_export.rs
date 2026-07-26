@@ -711,14 +711,65 @@ pub fn write_export_file(
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
     use arrow::array::{Array, Float64Array, Int64Array};
     use arrow::datatypes::DataType;
     use delog_core::chunk::Chunk;
-    use delog_core::identity::IdentityRegistry;
+    use delog_core::diagnostics::Diag;
+    use delog_core::identity::{IdentityRegistry, SourceId};
+    use delog_core::ingest::{IngestSink, ParseSummary, ParsedBatch, SourceKind};
+    use delog_core::parse_ctl::{CancelToken, ParseCtl};
     use delog_core::schema::{FieldSchema, TopicSchema};
     use delog_core::store::TopicStore;
+    use delog_parsers::{
+        LogParser, ParquetParser, TimestampSelection, TimestampSelectionError,
+        TimestampSelectionProvider, TimestampSelectionRequest,
+    };
+
+    #[derive(Default)]
+    struct PanicTimestampSelection {
+        calls: AtomicUsize,
+    }
+
+    impl PanicTimestampSelection {
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::Relaxed)
+        }
+    }
+
+    impl TimestampSelectionProvider for PanicTimestampSelection {
+        fn select(
+            &self,
+            _request: TimestampSelectionRequest,
+            _ctl: &ParseCtl,
+        ) -> Result<TimestampSelection, TimestampSelectionError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            panic!("DéLOG exports must not prompt for a timestamp column");
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingSink {
+        batches: Vec<ParsedBatch>,
+    }
+
+    impl IngestSink for RecordingSink {
+        fn open_source(&mut self, _key: &str, _kind: SourceKind) -> SourceId {
+            SourceId(1)
+        }
+
+        fn submit(&mut self, batch: ParsedBatch) {
+            self.batches.push(batch);
+        }
+
+        fn diagnostic(&mut self, _diag: Diag) {}
+
+        fn progress(&mut self, _source: SourceId, _frac: f32) {}
+
+        fn close_source(&mut self, _source: SourceId, _summary: ParseSummary) {}
+    }
 
     fn snapshot_with_values(
         timestamps: Vec<i64>,
@@ -988,6 +1039,53 @@ mod tests {
             .downcast_ref::<Float64Array>()
             .unwrap();
         assert_eq!(values.values(), &[2.5, -6.0]);
+    }
+
+    #[test]
+    fn parquet_export_round_trips_through_builtin_parser() {
+        let (snapshot, field) =
+            snapshot_with_values(vec![1_000_000, 2_000_000], vec![Some(1.25), Some(-3.0)]);
+        let file = tempfile::NamedTempFile::new().unwrap();
+        write_export_file(
+            file.path(),
+            ExportFormat::Parquet,
+            &snapshot,
+            std::slice::from_ref(&field),
+            (1_000_000, 2_000_000),
+            ResampleMode::None,
+            1_000_000,
+        )
+        .unwrap();
+
+        let provider = Arc::new(PanicTimestampSelection::default());
+        let parser = ParquetParser::new(provider.clone());
+        let mut sink = RecordingSink::default();
+        let ctl = ParseCtl::new(
+            CancelToken::new(),
+            SourceId(1),
+            std::fs::metadata(file.path()).unwrap().len(),
+        )
+        .with_label("export");
+        parser
+            .parse(
+                Box::new(std::fs::File::open(file.path()).unwrap()),
+                &mut sink,
+                &ctl,
+            )
+            .unwrap();
+
+        assert_eq!(provider.calls(), 0);
+        assert_eq!(sink.batches.len(), 1);
+        let parsed = &sink.batches[0];
+        assert_eq!(parsed.timestamps.values(), &[1_000_000, 2_000_000]);
+        assert_eq!(parsed.schema.fields().len(), 1);
+        assert_eq!(parsed.schema.fields()[0].unit.as_deref(), Some("rad"));
+        let values = parsed.columns[0]
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert_eq!(values.value(0), 2.5);
+        assert_eq!(values.value(1), -6.0);
     }
 
     #[derive(Default)]

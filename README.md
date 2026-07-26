@@ -21,9 +21,10 @@ it in Python - both file parsers and analysis scripts - without recompiling.
 
 - **Drag-and-drop UI** - drop a log file anywhere on the window to load it; arrange plots
   in a tiling workspace that persists across sessions.
-- **Multiple log formats** - PX4 ULog (`.ulg`), ArduPilot (`.BIN`), and MAVLink
-  telemetry logs (`.tlog`) from QGroundControl or Mission Planner, with automatic
-  format sniffing and a manual-override picker.
+- **Multiple log formats** - PX4 ULog (`.ulg`), ArduPilot (`.BIN`), MAVLink
+  telemetry logs (`.tlog`) from QGroundControl or Mission Planner, and generic Parquet
+  files, with automatic format sniffing, a manual-override picker, and an in-app Parquet
+  timestamp picker.
 - **Live MAVLink telemetry** - stream from a vehicle over UDP, TCP, or serial through the
   same ingest path as files, and record incoming frames to a `.tlog`.
 - **Custom parsers** - add Python parsers for formats DéLOG doesn't ship, defining a single
@@ -39,6 +40,7 @@ it in Python - both file parsers and analysis scripts - without recompiling.
 
 - **Live and offline share one path.** A live MAVLink stream and a recorded `.tlog`
   round-trip through identical decoding code, so what you see live is what you replay.
+- **Parquet round trips cleanly.** DéLOG Parquet exports reopen without prompting.
 - **Extend it in Python, no rebuild.** Custom parsers and analysis scripts are plain `.py`
   files in your config directory - edit them in any editor and they appear in the menus.
 - **Real CPython, not a sandboxed subset.** Scripts get the full interpreter with NumPy

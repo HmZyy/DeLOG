@@ -2,13 +2,17 @@
 //! memory. Stable counterpart to the cargo-fuzz targets in `/fuzz`.
 
 use std::io::Cursor;
+use std::sync::Arc;
 
 use delog_core::diagnostics::Diag;
 use delog_core::identity::SourceId;
 use delog_core::ingest::{IngestSink, ParseSummary, ParsedBatch, SourceKind};
 use delog_core::parse_ctl::{CancelToken, ParseCtl};
 use delog_parsers::mavlink::{FrameDecoder, extract_fields};
-use delog_parsers::{ArduPilotParser, LogParser, TlogParser, ULogParser};
+use delog_parsers::{
+    ArduPilotParser, LogParser, ParquetParser, TimestampSelection, TimestampSelectionError,
+    TimestampSelectionProvider, TimestampSelectionRequest, TlogParser, ULogParser,
+};
 
 #[derive(Default)]
 struct NullSink;
@@ -23,6 +27,18 @@ impl IngestSink for NullSink {
     fn close_source(&mut self, _source: SourceId, _summary: ParseSummary) {}
 }
 
+struct CancelSelection;
+
+impl TimestampSelectionProvider for CancelSelection {
+    fn select(
+        &self,
+        _request: TimestampSelectionRequest,
+        _ctl: &ParseCtl,
+    ) -> Result<TimestampSelection, TimestampSelectionError> {
+        Err(TimestampSelectionError::Cancelled)
+    }
+}
+
 fn drive(parser: &dyn LogParser, data: &[u8]) {
     let mut sink = NullSink;
     let ctl = ParseCtl::new(CancelToken::new(), SourceId(0), data.len() as u64);
@@ -33,6 +49,8 @@ fn drive_all(data: &[u8]) {
     drive(&ArduPilotParser, data);
     drive(&ULogParser, data);
     drive(&TlogParser, data);
+    let parquet = ParquetParser::new(Arc::new(CancelSelection));
+    drive(&parquet, data);
 
     let mut decoder = FrameDecoder::new();
     decoder.push(data);
@@ -86,6 +104,7 @@ fn truncated_and_oversized_headers_are_handled() {
 
     cases.push(vec![0xFD; 4096]);
     cases.push(vec![0xFE; 4096]);
+    cases.push(b"PAR1".to_vec());
 
     cases.push(Vec::new());
     cases.push(vec![0x00]);
