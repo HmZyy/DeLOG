@@ -669,6 +669,16 @@ fn export_picker_controls_scrollbars_divider_and_add_hitbox_are_stable() {
 }
 
 #[test]
+fn parquet_export_disables_resampling_and_uses_native_topic_samples() {
+    let dialog_body = between(DATA_EXPORT_SOURCE, "pub fn dialog_ui(", "pub const MODES");
+
+    assert!(dialog_body.contains("state.set_format(format, available)"));
+    assert!(dialog_body.contains("state.format == ExportFormat::Csv"));
+    assert!(dialog_body.contains("ui.add_enabled_ui("));
+    assert!(dialog_body.contains("\"Native samples per topic\""));
+}
+
+#[test]
 fn export_footer_keeps_cancel_left_and_export_right() {
     let actions = between(
         DATA_EXPORT_SOURCE,
