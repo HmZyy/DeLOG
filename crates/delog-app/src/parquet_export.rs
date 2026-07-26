@@ -1,0 +1,1031 @@
+use std::collections::HashMap;
+use std::io::Write;
+use std::sync::Arc;
+
+use arrow::array::{Array, ArrayRef, Int64Array, new_null_array};
+use arrow::compute::concat;
+use arrow::datatypes::{DataType, Field, SchemaRef};
+use arrow::record_batch::RecordBatch;
+use delog_core::identity::TopicId;
+use delog_core::snapshot::StoreSnapshot;
+use delog_core::store::TopicStore;
+use delog_core::time::TimeRange;
+use delog_parquet_format::{FORMAT_VERSION, FieldManifest, Manifest, TopicManifest, encode_schema};
+use parquet::arrow::ArrowWriter;
+use parquet::basic::Compression;
+use parquet::file::properties::WriterProperties;
+
+use crate::data_export::{DataExportError, EXPORT_BATCH_ROWS, ExportField};
+
+struct TopicExportCursor<'a> {
+    source_label: String,
+    topic_name: String,
+    store: &'a TopicStore,
+    selected_columns: Vec<usize>,
+    source_offset_us: i64,
+    window: TimeRange,
+    chunk_index: usize,
+    row_index: usize,
+}
+
+struct TopicStripe {
+    timestamps: Int64Array,
+    columns: Vec<ArrayRef>,
+}
+
+impl TopicExportCursor<'_> {
+    fn next_stripe(&mut self, max_rows: usize) -> Result<Option<TopicStripe>, DataExportError> {
+        let mut timestamps = Vec::with_capacity(max_rows);
+        let mut slices = (0..self.selected_columns.len())
+            .map(|_| Vec::<ArrayRef>::new())
+            .collect::<Vec<_>>();
+
+        while timestamps.len() < max_rows && self.chunk_index < self.store.chunks.len() {
+            let chunk = &self.store.chunks[self.chunk_index];
+            if self.row_index == chunk.len() {
+                self.chunk_index += 1;
+                self.row_index = 0;
+                continue;
+            }
+
+            let raw_us = chunk.t.value(self.row_index);
+            let effective_us = raw_us.checked_add(self.source_offset_us).ok_or_else(|| {
+                DataExportError::TimestampOverflow {
+                    source: format!("{} / {}", self.source_label, self.topic_name),
+                    timestamp_us: raw_us,
+                    offset_us: self.source_offset_us,
+                }
+            })?;
+            if !self.window.contains(effective_us) {
+                self.row_index += 1;
+                continue;
+            }
+
+            let run_start = self.row_index;
+            let mut run_len = 0;
+            while self.row_index < chunk.len() && timestamps.len() < max_rows {
+                let raw_us = chunk.t.value(self.row_index);
+                let effective_us = raw_us.checked_add(self.source_offset_us).ok_or_else(|| {
+                    DataExportError::TimestampOverflow {
+                        source: format!("{} / {}", self.source_label, self.topic_name),
+                        timestamp_us: raw_us,
+                        offset_us: self.source_offset_us,
+                    }
+                })?;
+                if !self.window.contains(effective_us) {
+                    break;
+                }
+                timestamps.push(effective_us);
+                self.row_index += 1;
+                run_len += 1;
+            }
+
+            for (destination, column) in slices.iter_mut().zip(&self.selected_columns) {
+                destination.push(chunk.cols[*column].slice(run_start, run_len));
+            }
+        }
+
+        if timestamps.is_empty() {
+            return Ok(None);
+        }
+
+        let columns = slices
+            .into_iter()
+            .map(concat_slices)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Some(TopicStripe {
+            timestamps: Int64Array::from(timestamps),
+            columns,
+        }))
+    }
+}
+
+fn concat_slices(slices: Vec<ArrayRef>) -> Result<ArrayRef, arrow::error::ArrowError> {
+    if slices.len() == 1 {
+        return Ok(slices.into_iter().next().expect("one slice"));
+    }
+    let references = slices
+        .iter()
+        .map(|array| array.as_ref())
+        .collect::<Vec<_>>();
+    concat(&references)
+}
+
+fn pad_array(
+    array: ArrayRef,
+    data_type: &DataType,
+    len: usize,
+) -> Result<ArrayRef, DataExportError> {
+    if array.len() == len {
+        return Ok(array);
+    }
+    let padding = new_null_array(data_type, len - array.len());
+    Ok(concat(&[array.as_ref(), padding.as_ref()])?)
+}
+
+pub fn write_structured_parquet<W: Write + Send>(
+    writer: W,
+    snapshot: &StoreSnapshot,
+    fields: &[ExportField],
+    window: (i64, i64),
+) -> Result<u64, DataExportError> {
+    let window = TimeRange::new(window.0, window.1).ok_or_else(|| {
+        DataExportError::InvalidSelection(format!(
+            "time range is inverted: {} > {}",
+            window.0, window.1
+        ))
+    })?;
+    let groups = group_fields(fields);
+    let mut cursors = Vec::with_capacity(groups.len());
+    let mut physical_fields = Vec::new();
+    let mut manifest_topics = Vec::with_capacity(groups.len());
+
+    for (topic_ix, group) in groups.into_iter().enumerate() {
+        let first = group[0];
+        let source = snapshot
+            .source(first.source_id)
+            .filter(|source| !source.entry.removed)
+            .ok_or_else(|| invalid_field(first, "source is stale"))?;
+        let topic = snapshot
+            .topic(first.topic_id)
+            .filter(|topic| !topic.entry.removed)
+            .ok_or_else(|| invalid_field(first, "topic is stale"))?;
+        if topic.entry.source != first.source_id {
+            return Err(invalid_field(first, "topic belongs to a different source"));
+        }
+        if source.entry.label != first.source || topic.entry.name != first.topic {
+            return Err(invalid_field(first, "source or topic label is stale"));
+        }
+        let store = topic
+            .store
+            .as_deref()
+            .ok_or_else(|| invalid_field(first, "topic store is unavailable"))?;
+
+        let timestamp_column = u32::try_from(physical_fields.len())
+            .map_err(|_| invalid_field(first, "too many physical columns"))?;
+        physical_fields.push(Field::new(
+            format!("__delog_t{topic_ix}_time"),
+            DataType::Int64,
+            true,
+        ));
+
+        let mut selected_columns = Vec::with_capacity(group.len());
+        let mut field_manifest = Vec::with_capacity(group.len());
+        for (field_ix, field) in group.into_iter().enumerate() {
+            validate_field(snapshot, store, first, field)?;
+            let column_ix = store
+                .schema
+                .fields()
+                .iter()
+                .position(|schema_field| schema_field.name == field.name)
+                .expect("validated field exists in schema");
+            let column = u32::try_from(physical_fields.len())
+                .map_err(|_| invalid_field(field, "too many physical columns"))?;
+            physical_fields.push(Field::new(
+                format!("__delog_t{topic_ix}_f{field_ix}"),
+                field.dtype.clone(),
+                true,
+            ));
+            selected_columns.push(column_ix);
+            field_manifest.push(FieldManifest {
+                column,
+                name: field.name.clone(),
+                unit: field.unit.clone(),
+                multiplier: field.multiplier,
+                description: field.description.clone(),
+            });
+        }
+
+        let (source_label, topic_name) = store
+            .schema
+            .provenance()
+            .map(|provenance| {
+                (
+                    provenance.original_source().to_owned(),
+                    provenance.original_topic().to_owned(),
+                )
+            })
+            .unwrap_or_else(|| (source.entry.label.clone(), topic.entry.name.clone()));
+        let topic_id =
+            u32::try_from(topic_ix).map_err(|_| invalid_field(first, "too many topics"))?;
+        manifest_topics.push(TopicManifest {
+            id: topic_id,
+            original_source: source_label.clone(),
+            original_topic: topic_name.clone(),
+            timestamp_column,
+            fields: field_manifest,
+        });
+        cursors.push(TopicExportCursor {
+            source_label,
+            topic_name,
+            store,
+            selected_columns,
+            source_offset_us: source.entry.offset_us,
+            window,
+            chunk_index: 0,
+            row_index: 0,
+        });
+    }
+
+    let manifest = Manifest {
+        version: FORMAT_VERSION,
+        topics: manifest_topics,
+    };
+    let schema: SchemaRef = Arc::new(encode_schema(physical_fields, &manifest)?);
+    let properties = WriterProperties::builder()
+        .set_compression(Compression::ZSTD(Default::default()))
+        .set_max_row_group_row_count(Some(EXPORT_BATCH_ROWS))
+        .build();
+    let mut writer = ArrowWriter::try_new(writer, Arc::clone(&schema), Some(properties))?;
+    let mut logical_rows = 0_u64;
+
+    loop {
+        let stripes = cursors
+            .iter_mut()
+            .map(|cursor| cursor.next_stripe(EXPORT_BATCH_ROWS))
+            .collect::<Result<Vec<_>, _>>()?;
+        let stripe_len = stripes
+            .iter()
+            .filter_map(|stripe| stripe.as_ref().map(|stripe| stripe.timestamps.len()))
+            .max()
+            .unwrap_or(0);
+        if stripe_len == 0 {
+            break;
+        }
+
+        let mut columns = Vec::with_capacity(schema.fields().len());
+        for (stripe, topic) in stripes.into_iter().zip(&manifest.topics) {
+            let logical_len = stripe
+                .as_ref()
+                .map(|stripe| stripe.timestamps.len())
+                .unwrap_or(0);
+            logical_rows = logical_rows
+                .checked_add(logical_len as u64)
+                .ok_or_else(|| {
+                    DataExportError::InvalidSelection("logical row count overflow".into())
+                })?;
+            match stripe {
+                Some(stripe) => {
+                    columns.push(pad_array(
+                        Arc::new(stripe.timestamps),
+                        &DataType::Int64,
+                        stripe_len,
+                    )?);
+                    for (array, field) in stripe.columns.into_iter().zip(&topic.fields) {
+                        columns.push(pad_array(
+                            array,
+                            schema.field(field.column as usize).data_type(),
+                            stripe_len,
+                        )?);
+                    }
+                }
+                None => {
+                    columns.push(new_null_array(&DataType::Int64, stripe_len));
+                    for field in &topic.fields {
+                        columns.push(new_null_array(
+                            schema.field(field.column as usize).data_type(),
+                            stripe_len,
+                        ));
+                    }
+                }
+            }
+        }
+        writer.write(&RecordBatch::try_new(Arc::clone(&schema), columns)?)?;
+        writer.flush()?;
+    }
+
+    writer.finish()?;
+    writer.sync()?;
+    Ok(logical_rows)
+}
+
+fn group_fields(fields: &[ExportField]) -> Vec<Vec<&ExportField>> {
+    let mut by_topic = HashMap::<TopicId, usize>::new();
+    let mut groups = Vec::<Vec<&ExportField>>::new();
+    for field in fields {
+        let group_ix = *by_topic.entry(field.topic_id).or_insert_with(|| {
+            groups.push(Vec::new());
+            groups.len() - 1
+        });
+        groups[group_ix].push(field);
+    }
+    groups
+}
+
+fn validate_field(
+    snapshot: &StoreSnapshot,
+    store: &TopicStore,
+    first: &ExportField,
+    field: &ExportField,
+) -> Result<(), DataExportError> {
+    if field.source_id != first.source_id
+        || field.topic_id != first.topic_id
+        || field.source != first.source
+        || field.topic != first.topic
+    {
+        return Err(invalid_field(field, "mixed schema ownership"));
+    }
+    if !snapshot.is_field_live(field.id) {
+        return Err(invalid_field(field, "field is stale"));
+    }
+    let entry = snapshot
+        .fields
+        .get(field.id.index())
+        .filter(|entry| entry.id == field.id)
+        .ok_or_else(|| invalid_field(field, "field ID is stale"))?;
+    if entry.topic != field.topic_id || entry.name != field.name {
+        return Err(invalid_field(field, "field schema ownership is stale"));
+    }
+    let schema_field = store
+        .schema
+        .fields()
+        .iter()
+        .find(|schema_field| schema_field.name == field.name)
+        .ok_or_else(|| invalid_field(field, "field is absent from its topic schema"))?;
+    if schema_field.dtype != field.dtype
+        || schema_field.unit != field.unit
+        || schema_field.multiplier != field.multiplier
+        || schema_field.description != field.description
+    {
+        return Err(invalid_field(field, "field metadata is stale"));
+    }
+    if !field.parquet_compatible() {
+        return Err(invalid_field(field, "field type is not Parquet-compatible"));
+    }
+    Ok(())
+}
+
+fn invalid_field(field: &ExportField, reason: &str) -> DataExportError {
+    DataExportError::InvalidSelection(format!(
+        "{} / {}.{}: {reason}",
+        field.source, field.topic, field.name
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use arrow::array::{Array, BooleanArray, Float32Array, Int64Array, StringArray};
+    use arrow::datatypes::DataType;
+    use delog_core::chunk::Chunk;
+    use delog_core::identity::IdentityRegistry;
+    use delog_core::schema::{FieldSchema, TopicSchema};
+    use delog_core::snapshot::StoreSnapshot;
+    use delog_core::store::TopicStore;
+    use delog_parquet_format::decode_schema;
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+    use super::*;
+    use crate::data_export::ExportField;
+
+    fn float_topic_snapshot(
+        source_label: &str,
+        topic_name: &str,
+        timestamps: Vec<i64>,
+        values: Vec<Option<f32>>,
+        offset_us: i64,
+    ) -> (StoreSnapshot, ExportField) {
+        let mut registry = IdentityRegistry::new();
+        let source = registry.add_source(source_label);
+        registry.set_source_offset_us(source, offset_us);
+        let topic = registry.add_topic(source, topic_name).unwrap();
+        let field_id = registry.add_field(topic, "value").unwrap();
+        let schema = Arc::new(
+            TopicSchema::new(
+                topic_name,
+                [FieldSchema::new("value", DataType::Float32, Some("m"), 2.5)
+                    .unwrap()
+                    .with_description("native value")],
+            )
+            .unwrap(),
+        );
+        let store = if timestamps.is_empty() {
+            Arc::new(TopicStore::new(schema))
+        } else {
+            let chunk = Arc::new(
+                Chunk::try_new(
+                    Int64Array::from(timestamps),
+                    vec![Arc::new(Float32Array::from(values))],
+                    &schema,
+                )
+                .unwrap(),
+            );
+            Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap())
+        };
+        let snapshot = StoreSnapshot::from_registry(&registry, [(topic, store)], 1).unwrap();
+        let field = ExportField {
+            id: field_id,
+            source_id: source,
+            topic_id: topic,
+            source: source_label.into(),
+            topic: topic_name.into(),
+            name: "value".into(),
+            label: format!("{source_label} / {topic_name}.value"),
+            dtype: DataType::Float32,
+            unit: Some("m".into()),
+            multiplier: 2.5,
+            description: Some("native value".into()),
+        };
+        (snapshot, field)
+    }
+
+    fn independent_topic_snapshot() -> (StoreSnapshot, Vec<ExportField>) {
+        let mut registry = IdentityRegistry::new();
+
+        let att_source = registry.add_source("flight-a");
+        registry.set_source_offset_us(att_source, 5);
+        let att_topic = registry.add_topic(att_source, "ATT").unwrap();
+        let roll_id = registry.add_field(att_topic, "Roll").unwrap();
+        let att_schema = Arc::new(
+            TopicSchema::new(
+                "ATT",
+                [
+                    FieldSchema::new("Roll", DataType::Float32, Some("rad"), 1.0)
+                        .unwrap()
+                        .with_description("airframe roll"),
+                ],
+            )
+            .unwrap(),
+        );
+        let att_chunk = Arc::new(
+            Chunk::try_new(
+                Int64Array::from(vec![5, 25]),
+                vec![Arc::new(Float32Array::from(vec![Some(1.5), None]))],
+                &att_schema,
+            )
+            .unwrap(),
+        );
+        let att_store =
+            Arc::new(TopicStore::from_chunks(Arc::clone(&att_schema), [att_chunk]).unwrap());
+
+        let status_source = registry.add_source("flight-b");
+        registry.set_source_offset_us(status_source, -2);
+        let status_topic = registry.add_topic(status_source, "STATUS").unwrap();
+        let armed_id = registry.add_field(status_topic, "armed").unwrap();
+        let mode_id = registry.add_field(status_topic, "mode").unwrap();
+        let status_schema = Arc::new(
+            TopicSchema::new(
+                "STATUS",
+                [
+                    FieldSchema::new("armed", DataType::Boolean, None::<String>, 1.0).unwrap(),
+                    FieldSchema::new("mode", DataType::Utf8, None::<String>, 1.0).unwrap(),
+                ],
+            )
+            .unwrap(),
+        );
+        let status_chunk = Arc::new(
+            Chunk::try_new(
+                Int64Array::from(vec![7, 17, 27]),
+                vec![
+                    Arc::new(BooleanArray::from(vec![true, false, true])),
+                    Arc::new(StringArray::from(vec!["MANUAL", "AUTO", "RTL"])),
+                ],
+                &status_schema,
+            )
+            .unwrap(),
+        );
+        let status_store =
+            Arc::new(TopicStore::from_chunks(Arc::clone(&status_schema), [status_chunk]).unwrap());
+
+        let snapshot = StoreSnapshot::from_registry(
+            &registry,
+            [(att_topic, att_store), (status_topic, status_store)],
+            1,
+        )
+        .unwrap();
+        let fields = vec![
+            ExportField {
+                id: roll_id,
+                source_id: att_source,
+                topic_id: att_topic,
+                source: "flight-a".into(),
+                topic: "ATT".into(),
+                name: "Roll".into(),
+                label: "flight-a / ATT.Roll".into(),
+                dtype: DataType::Float32,
+                unit: Some("rad".into()),
+                multiplier: 1.0,
+                description: Some("airframe roll".into()),
+            },
+            ExportField {
+                id: armed_id,
+                source_id: status_source,
+                topic_id: status_topic,
+                source: "flight-b".into(),
+                topic: "STATUS".into(),
+                name: "armed".into(),
+                label: "flight-b / STATUS.armed".into(),
+                dtype: DataType::Boolean,
+                unit: None,
+                multiplier: 1.0,
+                description: None,
+            },
+            ExportField {
+                id: mode_id,
+                source_id: status_source,
+                topic_id: status_topic,
+                source: "flight-b".into(),
+                topic: "STATUS".into(),
+                name: "mode".into(),
+                label: "flight-b / STATUS.mode".into(),
+                dtype: DataType::Utf8,
+                unit: None,
+                multiplier: 1.0,
+                description: None,
+            },
+        ];
+        (snapshot, fields)
+    }
+
+    #[test]
+    fn writes_independent_topic_timelines_with_typed_padding() {
+        let (snapshot, fields) = independent_topic_snapshot();
+        let file = tempfile::NamedTempFile::new().unwrap();
+
+        let logical_rows = write_structured_parquet(
+            std::fs::File::create(file.path()).unwrap(),
+            &snapshot,
+            &fields,
+            (5, 30),
+        )
+        .unwrap();
+
+        let builder =
+            ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(file.path()).unwrap())
+                .unwrap();
+        let manifest = decode_schema(builder.schema().as_ref()).unwrap().unwrap();
+        assert_eq!(manifest.topics.len(), 2);
+        assert_eq!(manifest.topics[0].original_topic, "ATT");
+        assert_eq!(manifest.topics[1].original_topic, "STATUS");
+        assert_eq!(logical_rows, 5);
+        assert_eq!(builder.metadata().file_metadata().num_rows(), 3);
+        assert_eq!(builder.schema().field(1).data_type(), &DataType::Float32);
+        assert_eq!(builder.schema().field(3).data_type(), &DataType::Boolean);
+        assert_eq!(builder.schema().field(4).data_type(), &DataType::Utf8);
+
+        let batch = builder.build().unwrap().next().unwrap().unwrap();
+        let att_time = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let roll = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .unwrap();
+        let status_time = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let armed = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .unwrap();
+        let mode = batch
+            .column(4)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+
+        assert_eq!(att_time.value(0), 10);
+        assert_eq!(att_time.value(1), 30);
+        assert!(att_time.is_null(2));
+        assert_eq!(roll.value(0), 1.5);
+        assert!(roll.is_null(1));
+        assert!(roll.is_null(2));
+        assert!(att_time.is_valid(1));
+        assert_eq!(
+            (0..3)
+                .map(|index| status_time.value(index))
+                .collect::<Vec<_>>(),
+            [5, 15, 25]
+        );
+        assert_eq!(
+            (0..3).map(|index| armed.value(index)).collect::<Vec<_>>(),
+            [true, false, true]
+        );
+        assert_eq!(
+            (0..3).map(|index| mode.value(index)).collect::<Vec<_>>(),
+            ["MANUAL", "AUTO", "RTL"]
+        );
+    }
+
+    #[test]
+    fn writes_unit_multiplier_and_description_to_manifest() {
+        let (snapshot, field) = float_topic_snapshot("flight", "ALT", vec![1], vec![Some(3.5)], 0);
+        let file = tempfile::NamedTempFile::new().unwrap();
+
+        write_structured_parquet(
+            std::fs::File::create(file.path()).unwrap(),
+            &snapshot,
+            &[field],
+            (1, 1),
+        )
+        .unwrap();
+
+        let builder =
+            ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(file.path()).unwrap())
+                .unwrap();
+        let manifest = decode_schema(builder.schema().as_ref()).unwrap().unwrap();
+        let field = &manifest.topics[0].fields[0];
+        assert_eq!(field.unit.as_deref(), Some("m"));
+        assert_eq!(field.multiplier, 2.5);
+        assert_eq!(field.description.as_deref(), Some("native value"));
+    }
+
+    #[test]
+    fn rejects_source_offset_overflow() {
+        let (snapshot, field) =
+            float_topic_snapshot("overflow", "VALUE", vec![i64::MAX], vec![Some(1.0)], 1);
+
+        let error = write_structured_parquet(Vec::new(), &snapshot, &[field], (i64::MIN, i64::MAX))
+            .unwrap_err();
+
+        assert!(error.to_string().contains("timestamp overflow"));
+        assert!(error.to_string().contains("9223372036854775807 + 1"));
+    }
+
+    #[test]
+    fn bounds_topic_stripes_and_row_groups_to_8192_rows() {
+        let timestamps = (0..=EXPORT_BATCH_ROWS as i64).collect::<Vec<_>>();
+        let values = timestamps
+            .iter()
+            .map(|value| Some(*value as f32))
+            .collect::<Vec<_>>();
+        let (snapshot, field) = float_topic_snapshot("flight", "VALUE", timestamps, values, 0);
+        let file = tempfile::NamedTempFile::new().unwrap();
+
+        let rows = write_structured_parquet(
+            std::fs::File::create(file.path()).unwrap(),
+            &snapshot,
+            &[field],
+            (0, EXPORT_BATCH_ROWS as i64),
+        )
+        .unwrap();
+
+        let builder =
+            ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(file.path()).unwrap())
+                .unwrap();
+        let row_groups = builder
+            .metadata()
+            .row_groups()
+            .iter()
+            .map(|group| group.num_rows())
+            .collect::<Vec<_>>();
+        assert_eq!(rows, 8_193);
+        assert_eq!(row_groups, [8_192, 1]);
+    }
+
+    #[test]
+    fn pads_unequal_topics_across_multiple_stripes() {
+        let mut registry = IdentityRegistry::new();
+        let mut stores = Vec::new();
+        let mut fields = Vec::new();
+        for (source_label, topic_name, row_count) in
+            [("flight-a", "A", 8_193_usize), ("flight-b", "B", 8_194)]
+        {
+            let source = registry.add_source(source_label);
+            let topic = registry.add_topic(source, topic_name).unwrap();
+            let field_id = registry.add_field(topic, "value").unwrap();
+            let schema = Arc::new(
+                TopicSchema::new(
+                    topic_name,
+                    [FieldSchema::new("value", DataType::Float32, None::<String>, 1.0).unwrap()],
+                )
+                .unwrap(),
+            );
+            let timestamps = (0..row_count as i64).collect::<Vec<_>>();
+            let values = timestamps
+                .iter()
+                .map(|value| Some(*value as f32))
+                .collect::<Vec<_>>();
+            let chunk = Arc::new(
+                Chunk::try_new(
+                    Int64Array::from(timestamps),
+                    vec![Arc::new(Float32Array::from(values))],
+                    &schema,
+                )
+                .unwrap(),
+            );
+            stores.push((
+                topic,
+                Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap()),
+            ));
+            fields.push(ExportField {
+                id: field_id,
+                source_id: source,
+                topic_id: topic,
+                source: source_label.into(),
+                topic: topic_name.into(),
+                name: "value".into(),
+                label: format!("{source_label} / {topic_name}.value"),
+                dtype: DataType::Float32,
+                unit: None,
+                multiplier: 1.0,
+                description: None,
+            });
+        }
+        let snapshot = StoreSnapshot::from_registry(&registry, stores, 1).unwrap();
+        let file = tempfile::NamedTempFile::new().unwrap();
+
+        let logical_rows = write_structured_parquet(
+            std::fs::File::create(file.path()).unwrap(),
+            &snapshot,
+            &fields,
+            (0, 8_193),
+        )
+        .unwrap();
+
+        let builder =
+            ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(file.path()).unwrap())
+                .unwrap();
+        assert_eq!(
+            builder
+                .metadata()
+                .row_groups()
+                .iter()
+                .map(|group| group.num_rows())
+                .collect::<Vec<_>>(),
+            [8_192, 2]
+        );
+        assert_eq!(logical_rows, 8_193 + 8_194);
+        let mut reader = builder.with_batch_size(EXPORT_BATCH_ROWS).build().unwrap();
+        assert_eq!(
+            reader.next().unwrap().unwrap().num_rows(),
+            EXPORT_BATCH_ROWS
+        );
+        let tail = reader.next().unwrap().unwrap();
+        let a_time = tail
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let b_time = tail
+            .column(2)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(a_time.value(0), 8_192);
+        assert!(a_time.is_null(1));
+        assert_eq!(b_time.value(0), 8_192);
+        assert_eq!(b_time.value(1), 8_193);
+    }
+
+    #[test]
+    fn preserves_selected_field_order_within_topic() {
+        let mut registry = IdentityRegistry::new();
+        let source = registry.add_source("flight");
+        let topic = registry.add_topic(source, "STATUS").unwrap();
+        let count_id = registry.add_field(topic, "count").unwrap();
+        registry.add_field(topic, "armed").unwrap();
+        let mode_id = registry.add_field(topic, "mode").unwrap();
+        let schema = Arc::new(
+            TopicSchema::new(
+                "STATUS",
+                [
+                    FieldSchema::new("count", DataType::Float32, None::<String>, 1.0).unwrap(),
+                    FieldSchema::new("armed", DataType::Boolean, None::<String>, 1.0).unwrap(),
+                    FieldSchema::new("mode", DataType::Utf8, None::<String>, 1.0).unwrap(),
+                ],
+            )
+            .unwrap(),
+        );
+        let chunk = Arc::new(
+            Chunk::try_new(
+                Int64Array::from(vec![10]),
+                vec![
+                    Arc::new(Float32Array::from(vec![2.0])),
+                    Arc::new(BooleanArray::from(vec![true])),
+                    Arc::new(StringArray::from(vec!["AUTO"])),
+                ],
+                &schema,
+            )
+            .unwrap(),
+        );
+        let store = Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap());
+        let snapshot = StoreSnapshot::from_registry(&registry, [(topic, store)], 1).unwrap();
+        let field = |id, name: &str, dtype| ExportField {
+            id,
+            source_id: source,
+            topic_id: topic,
+            source: "flight".into(),
+            topic: "STATUS".into(),
+            name: name.into(),
+            label: format!("flight / STATUS.{name}"),
+            dtype,
+            unit: None,
+            multiplier: 1.0,
+            description: None,
+        };
+        let fields = vec![
+            field(mode_id, "mode", DataType::Utf8),
+            field(count_id, "count", DataType::Float32),
+        ];
+        let file = tempfile::NamedTempFile::new().unwrap();
+
+        write_structured_parquet(
+            std::fs::File::create(file.path()).unwrap(),
+            &snapshot,
+            &fields,
+            (10, 10),
+        )
+        .unwrap();
+
+        let builder =
+            ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(file.path()).unwrap())
+                .unwrap();
+        let manifest = decode_schema(builder.schema().as_ref()).unwrap().unwrap();
+        assert_eq!(
+            manifest.topics[0]
+                .fields
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect::<Vec<_>>(),
+            ["mode", "count"]
+        );
+        assert_eq!(builder.schema().field(1).data_type(), &DataType::Utf8);
+        assert_eq!(builder.schema().field(2).data_type(), &DataType::Float32);
+    }
+
+    #[test]
+    fn keeps_duplicate_topic_names_separate_by_source() {
+        let mut registry = IdentityRegistry::new();
+        let mut stores = Vec::new();
+        let mut fields = Vec::new();
+        for source_label in ["flight-a", "flight-b"] {
+            let source = registry.add_source(source_label);
+            let topic = registry.add_topic(source, "STATUS").unwrap();
+            let field_id = registry.add_field(topic, "armed").unwrap();
+            let schema = Arc::new(
+                TopicSchema::new(
+                    "STATUS",
+                    [FieldSchema::new("armed", DataType::Boolean, None::<String>, 1.0).unwrap()],
+                )
+                .unwrap(),
+            );
+            let chunk = Arc::new(
+                Chunk::try_new(
+                    Int64Array::from(vec![1]),
+                    vec![Arc::new(BooleanArray::from(vec![true]))],
+                    &schema,
+                )
+                .unwrap(),
+            );
+            stores.push((
+                topic,
+                Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap()),
+            ));
+            fields.push(ExportField {
+                id: field_id,
+                source_id: source,
+                topic_id: topic,
+                source: source_label.into(),
+                topic: "STATUS".into(),
+                name: "armed".into(),
+                label: format!("{source_label} / STATUS.armed"),
+                dtype: DataType::Boolean,
+                unit: None,
+                multiplier: 1.0,
+                description: None,
+            });
+        }
+        let snapshot = StoreSnapshot::from_registry(&registry, stores, 1).unwrap();
+        let file = tempfile::NamedTempFile::new().unwrap();
+
+        write_structured_parquet(
+            std::fs::File::create(file.path()).unwrap(),
+            &snapshot,
+            &fields,
+            (1, 1),
+        )
+        .unwrap();
+
+        let builder =
+            ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(file.path()).unwrap())
+                .unwrap();
+        let manifest = decode_schema(builder.schema().as_ref()).unwrap().unwrap();
+        assert_eq!(manifest.topics[0].original_topic, "STATUS");
+        assert_eq!(manifest.topics[1].original_topic, "STATUS");
+        assert_eq!(manifest.topics[0].original_source, "flight-a");
+        assert_eq!(manifest.topics[1].original_source, "flight-b");
+    }
+
+    #[test]
+    fn writes_readable_marked_file_when_all_topics_are_empty() {
+        let (snapshot, field) = float_topic_snapshot("flight", "EMPTY", vec![], vec![], 0);
+        let file = tempfile::NamedTempFile::new().unwrap();
+
+        let rows = write_structured_parquet(
+            std::fs::File::create(file.path()).unwrap(),
+            &snapshot,
+            &[field],
+            (0, 100),
+        )
+        .unwrap();
+
+        let builder =
+            ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(file.path()).unwrap())
+                .unwrap();
+        let manifest = decode_schema(builder.schema().as_ref()).unwrap().unwrap();
+        assert_eq!(rows, 0);
+        assert_eq!(builder.metadata().file_metadata().num_rows(), 0);
+        assert_eq!(manifest.topics[0].original_topic, "EMPTY");
+        assert!(builder.build().unwrap().next().is_none());
+    }
+
+    struct CountingWriter {
+        writes: Arc<AtomicUsize>,
+    }
+
+    impl Write for CountingWriter {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.writes.fetch_add(1, Ordering::Relaxed);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn rejects_stale_fields_before_creating_destination_writer() {
+        let (snapshot, mut fields) = independent_topic_snapshot();
+        fields[0].id = delog_core::identity::FieldId(u32::MAX);
+        let writes = Arc::new(AtomicUsize::new(0));
+
+        let error = write_structured_parquet(
+            CountingWriter {
+                writes: Arc::clone(&writes),
+            },
+            &snapshot,
+            &fields,
+            (5, 30),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("field is stale"));
+        assert_eq!(writes.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn rejects_mixed_schema_ownership_before_creating_destination_writer() {
+        let (snapshot, fields) = independent_topic_snapshot();
+        let mut forged = fields[1].clone();
+        forged.topic_id = fields[0].topic_id;
+        let writes = Arc::new(AtomicUsize::new(0));
+
+        let error = write_structured_parquet(
+            CountingWriter {
+                writes: Arc::clone(&writes),
+            },
+            &snapshot,
+            &[fields[0].clone(), forged],
+            (5, 30),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("mixed schema ownership"));
+        assert_eq!(writes.load(Ordering::Relaxed), 0);
+    }
+
+    #[derive(Default)]
+    struct FinalFlushFailure {
+        bytes: Vec<u8>,
+    }
+
+    impl Write for FinalFlushFailure {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.bytes.extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::other(
+                "injected structured final flush failure",
+            ))
+        }
+    }
+
+    #[test]
+    fn returns_final_flush_failure_after_writing_footer() {
+        let (snapshot, field) =
+            float_topic_snapshot("flight", "VALUE", vec![1], vec![Some(2.0)], 0);
+
+        let error =
+            write_structured_parquet(FinalFlushFailure::default(), &snapshot, &[field], (1, 1))
+                .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("injected structured final flush failure")
+        );
+    }
+}

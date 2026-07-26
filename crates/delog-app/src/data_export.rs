@@ -10,9 +10,6 @@ use arrow::record_batch::RecordBatch;
 use delog_core::export::{Cell, ExportError, ResampleMode, RowCursor};
 use delog_core::identity::{FieldId, SourceId, TopicId};
 use delog_core::snapshot::StoreSnapshot;
-use parquet::arrow::ArrowWriter;
-use parquet::basic::Compression;
-use parquet::file::properties::WriterProperties;
 
 use crate::browser::BrowserModel;
 
@@ -109,6 +106,13 @@ pub enum DataExportError {
     Export(ExportError),
     Arrow(ArrowError),
     Parquet(parquet::errors::ParquetError),
+    ParquetFormat(delog_parquet_format::FormatError),
+    InvalidSelection(String),
+    TimestampOverflow {
+        source: String,
+        timestamp_us: i64,
+        offset_us: i64,
+    },
     Io(std::io::Error),
 }
 
@@ -118,6 +122,16 @@ impl std::fmt::Display for DataExportError {
             Self::Export(error) => write!(f, "{error}"),
             Self::Arrow(error) => write!(f, "{error}"),
             Self::Parquet(error) => write!(f, "{error}"),
+            Self::ParquetFormat(error) => write!(f, "{error}"),
+            Self::InvalidSelection(message) => write!(f, "invalid export selection: {message}"),
+            Self::TimestampOverflow {
+                source,
+                timestamp_us,
+                offset_us,
+            } => write!(
+                f,
+                "timestamp overflow for source {source}: {timestamp_us} + {offset_us}"
+            ),
             Self::Io(error) => write!(f, "{error}"),
         }
     }
@@ -140,6 +154,12 @@ impl From<ArrowError> for DataExportError {
 impl From<parquet::errors::ParquetError> for DataExportError {
     fn from(error: parquet::errors::ParquetError) -> Self {
         Self::Parquet(error)
+    }
+}
+
+impl From<delog_parquet_format::FormatError> for DataExportError {
+    fn from(error: delog_parquet_format::FormatError) -> Self {
+        Self::ParquetFormat(error)
     }
 }
 
@@ -709,43 +729,26 @@ pub fn available_fields(snapshot: &StoreSnapshot, model: &BrowserModel) -> Vec<E
     out
 }
 
-pub fn write_export<W: Write + Send>(
+fn write_csv<W: Write + Send>(
     mut writer: W,
-    format: ExportFormat,
     mut batches: ExportBatchReader<'_>,
 ) -> Result<u64, DataExportError> {
     let schema = batches.schema();
     let mut rows = 0_u64;
-    match format {
-        ExportFormat::Csv => {
-            let mut writer = arrow::csv::WriterBuilder::new()
-                .with_header(true)
-                .build(&mut writer);
-            let mut wrote_batch = false;
-            for batch in &mut batches {
-                let batch = batch?;
-                rows += batch.num_rows() as u64;
-                writer.write(&batch)?;
-                wrote_batch = true;
-            }
-            if !wrote_batch {
-                writer.write(&RecordBatch::new_empty(schema))?;
-            }
-        }
-        ExportFormat::Parquet => {
-            let properties = WriterProperties::builder()
-                .set_compression(Compression::ZSTD(Default::default()))
-                .set_max_row_group_row_count(Some(EXPORT_BATCH_ROWS))
-                .build();
-            let mut writer = ArrowWriter::try_new(&mut writer, schema, Some(properties))?;
-            for batch in batches {
-                let batch = batch?;
-                rows += batch.num_rows() as u64;
-                writer.write(&batch)?;
-            }
-            writer.close()?;
-        }
+    let mut csv = arrow::csv::WriterBuilder::new()
+        .with_header(true)
+        .build(&mut writer);
+    let mut wrote_batch = false;
+    for batch in &mut batches {
+        let batch = batch?;
+        rows += batch.num_rows() as u64;
+        csv.write(&batch)?;
+        wrote_batch = true;
     }
+    if !wrote_batch {
+        csv.write(&RecordBatch::new_empty(schema))?;
+    }
+    drop(csv);
     writer.flush()?;
     Ok(rows)
 }
@@ -776,17 +779,23 @@ pub fn write_export_file(
     mode: ResampleMode,
     origin_us: i64,
 ) -> Result<u64, DataExportError> {
-    let batches = ExportBatchReader::try_new(snapshot, fields, window, mode, origin_us)?;
-    write_atomic(path, |temporary| {
-        let writer = BufWriter::new(temporary);
-        write_export(writer, format, batches)
+    write_atomic(path, |temporary| match format {
+        ExportFormat::Csv => {
+            let batches = ExportBatchReader::try_new(snapshot, fields, window, mode, origin_us)?;
+            write_csv(BufWriter::new(temporary), batches)
+        }
+        ExportFormat::Parquet => crate::parquet_export::write_structured_parquet(
+            BufWriter::new(temporary),
+            snapshot,
+            fields,
+            window,
+        ),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
     use arrow::array::{
@@ -794,59 +803,9 @@ mod tests {
     };
     use arrow::datatypes::DataType;
     use delog_core::chunk::Chunk;
-    use delog_core::diagnostics::Diag;
     use delog_core::identity::{IdentityRegistry, SourceId};
-    use delog_core::ingest::{IngestSink, ParseSummary, ParsedBatch, SourceKind};
-    use delog_core::parse_ctl::{CancelToken, ParseCtl};
     use delog_core::schema::{FieldSchema, TopicSchema};
     use delog_core::store::TopicStore;
-    use delog_parsers::{
-        LogParser, ParquetParser, TimestampSelection, TimestampSelectionError,
-        TimestampSelectionProvider, TimestampSelectionRequest,
-    };
-
-    #[derive(Default)]
-    struct PanicTimestampSelection {
-        calls: AtomicUsize,
-    }
-
-    impl PanicTimestampSelection {
-        fn calls(&self) -> usize {
-            self.calls.load(Ordering::Relaxed)
-        }
-    }
-
-    impl TimestampSelectionProvider for PanicTimestampSelection {
-        fn select(
-            &self,
-            _request: TimestampSelectionRequest,
-            _ctl: &ParseCtl,
-        ) -> Result<TimestampSelection, TimestampSelectionError> {
-            self.calls.fetch_add(1, Ordering::Relaxed);
-            panic!("DéLOG exports must not prompt for a timestamp column");
-        }
-    }
-
-    #[derive(Default)]
-    struct RecordingSink {
-        batches: Vec<ParsedBatch>,
-    }
-
-    impl IngestSink for RecordingSink {
-        fn open_source(&mut self, _key: &str, _kind: SourceKind) -> SourceId {
-            SourceId(1)
-        }
-
-        fn submit(&mut self, batch: ParsedBatch) {
-            self.batches.push(batch);
-        }
-
-        fn diagnostic(&mut self, _diag: Diag) {}
-
-        fn progress(&mut self, _source: SourceId, _frac: f32) {}
-
-        fn close_source(&mut self, _source: SourceId, _summary: ParseSummary) {}
-    }
 
     fn snapshot_with_values(
         timestamps: Vec<i64>,
@@ -1104,7 +1063,7 @@ mod tests {
             ExportBatchReader::try_new(&snapshot, &[field], (1_000, 2_000), ResampleMode::None, 0)
                 .unwrap();
         let mut output = Vec::new();
-        let rows = write_export(&mut output, ExportFormat::Csv, batches).unwrap();
+        let rows = write_csv(&mut output, batches).unwrap();
         assert_eq!(rows, 2);
         assert_eq!(
             String::from_utf8(output).unwrap(),
@@ -1120,7 +1079,7 @@ mod tests {
             ExportBatchReader::try_new(&snapshot, &fields, (10, 20), ResampleMode::None, 10)
                 .unwrap();
         let mut output = Vec::new();
-        let rows = write_export(&mut output, ExportFormat::Csv, batches).unwrap();
+        let rows = write_csv(&mut output, batches).unwrap();
         assert_eq!(rows, 2);
         assert_eq!(
             String::from_utf8(output).unwrap(),
@@ -1129,7 +1088,8 @@ mod tests {
     }
 
     #[test]
-    fn parquet_round_trip_preserves_schema_values_and_unit_metadata() {
+    fn parquet_route_writes_structured_raw_values_and_manifest_metadata() {
+        use delog_parquet_format::decode_schema;
         use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
         let (snapshot, field) =
@@ -1150,69 +1110,20 @@ mod tests {
         let builder =
             ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(file.path()).unwrap())
                 .unwrap();
-        assert_eq!(
-            builder
-                .schema()
-                .field(2)
-                .metadata()
-                .get("unit")
-                .map(String::as_str),
-            Some("rad")
-        );
+        let manifest = decode_schema(builder.schema().as_ref()).unwrap().unwrap();
+        assert_eq!(manifest.topics.len(), 1);
+        assert_eq!(manifest.topics[0].original_source, "flight");
+        assert_eq!(manifest.topics[0].original_topic, "ATT");
+        assert_eq!(manifest.topics[0].fields[0].name, "Roll");
+        assert_eq!(manifest.topics[0].fields[0].unit.as_deref(), Some("rad"));
+        assert_eq!(manifest.topics[0].fields[0].multiplier, 2.0);
         let batch = builder.build().unwrap().next().unwrap().unwrap();
         let values = batch
-            .column(2)
+            .column(1)
             .as_any()
             .downcast_ref::<Float64Array>()
             .unwrap();
-        assert_eq!(values.values(), &[2.5, -6.0]);
-    }
-
-    #[test]
-    fn parquet_export_round_trips_through_builtin_parser() {
-        let (snapshot, field) =
-            snapshot_with_values(vec![1_000_000, 2_000_000], vec![Some(1.25), Some(-3.0)]);
-        let file = tempfile::NamedTempFile::new().unwrap();
-        write_export_file(
-            file.path(),
-            ExportFormat::Parquet,
-            &snapshot,
-            std::slice::from_ref(&field),
-            (1_000_000, 2_000_000),
-            ResampleMode::None,
-            1_000_000,
-        )
-        .unwrap();
-
-        let provider = Arc::new(PanicTimestampSelection::default());
-        let parser = ParquetParser::new(provider.clone());
-        let mut sink = RecordingSink::default();
-        let ctl = ParseCtl::new(
-            CancelToken::new(),
-            SourceId(1),
-            std::fs::metadata(file.path()).unwrap().len(),
-        )
-        .with_label("export");
-        parser
-            .parse(
-                Box::new(std::fs::File::open(file.path()).unwrap()),
-                &mut sink,
-                &ctl,
-            )
-            .unwrap();
-
-        assert_eq!(provider.calls(), 0);
-        assert_eq!(sink.batches.len(), 1);
-        let parsed = &sink.batches[0];
-        assert_eq!(parsed.timestamps.values(), &[1_000_000, 2_000_000]);
-        assert_eq!(parsed.schema.fields().len(), 1);
-        assert_eq!(parsed.schema.fields()[0].unit.as_deref(), Some("rad"));
-        let values = parsed.columns[0]
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap();
-        assert_eq!(values.value(0), 2.5);
-        assert_eq!(values.value(1), -6.0);
+        assert_eq!(values.values(), &[1.25, -3.0]);
     }
 
     #[derive(Default)]
@@ -1250,29 +1161,13 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
-    struct ImmediateFlushFailure {
-        bytes: Vec<u8>,
-    }
-
-    impl std::io::Write for ImmediateFlushFailure {
-        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-            self.bytes.extend_from_slice(buffer);
-            Ok(buffer.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Err(std::io::Error::other("injected parquet flush failure"))
-        }
-    }
-
     #[test]
     fn writer_failure_is_returned() {
         let (snapshot, field) = snapshot_with_values(vec![1], vec![Some(1.0)]);
         let batches =
             ExportBatchReader::try_new(&snapshot, &[field], (1, 1), ResampleMode::None, 0).unwrap();
 
-        let error = write_export(WriteFailure, ExportFormat::Parquet, batches).unwrap_err();
+        let error = write_csv(WriteFailure, batches).unwrap_err();
 
         assert!(error.to_string().contains("injected write failure"));
     }
@@ -1283,25 +1178,9 @@ mod tests {
         let batches =
             ExportBatchReader::try_new(&snapshot, &[field], (1, 1), ResampleMode::None, 0).unwrap();
 
-        let error = write_export(FlushFailure::default(), ExportFormat::Csv, batches).unwrap_err();
+        let error = write_csv(FlushFailure::default(), batches).unwrap_err();
 
         assert!(error.to_string().contains("injected final flush failure"));
-    }
-
-    #[test]
-    fn parquet_final_flush_failure_is_returned_after_close() {
-        let (snapshot, field) = snapshot_with_values(vec![1], vec![Some(1.0)]);
-        let batches =
-            ExportBatchReader::try_new(&snapshot, &[field], (1, 1), ResampleMode::None, 0).unwrap();
-
-        let error = write_export(
-            ImmediateFlushFailure::default(),
-            ExportFormat::Parquet,
-            batches,
-        )
-        .unwrap_err();
-
-        assert!(error.to_string().contains("injected parquet flush failure"));
     }
 
     #[test]
@@ -1316,6 +1195,48 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("injected export failure"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"prior export");
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+    }
+
+    struct FinalFlushFailingFile<'a> {
+        inner: &'a mut std::fs::File,
+    }
+
+    impl std::io::Write for FinalFlushFailingFile<'_> {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.inner.write(buffer)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::other(
+                "injected structured final flush failure",
+            ))
+        }
+    }
+
+    #[test]
+    fn parquet_final_flush_failure_preserves_existing_destination() {
+        let (snapshot, field) = snapshot_with_values(vec![1], vec![Some(1.0)]);
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("existing.parquet");
+        std::fs::write(&path, b"prior export").unwrap();
+
+        let error = write_atomic(&path, |temporary| {
+            crate::parquet_export::write_structured_parquet(
+                FinalFlushFailingFile { inner: temporary },
+                &snapshot,
+                &[field],
+                (1, 1),
+            )
+        })
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("injected structured final flush failure")
+        );
         assert_eq!(std::fs::read(&path).unwrap(), b"prior export");
         assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
     }
@@ -1433,13 +1354,21 @@ mod tests {
 
         state.set_format(ExportFormat::Csv, &available);
 
-        assert!(state.selected.iter().all(|id| {
-            available
-                .iter()
-                .find(|field| field.id == *id)
-                .unwrap()
-                .csv_compatible()
-        }));
+        let selected_names = state
+            .selected
+            .iter()
+            .map(|id| {
+                available
+                    .iter()
+                    .find(|field| field.id == *id)
+                    .unwrap()
+                    .name
+                    .as_str()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(selected_names, ["value", "armed"]);
+        assert!(!selected_names.contains(&"mode"));
+        assert!(!selected_names.contains(&"message"));
     }
 
     #[test]
