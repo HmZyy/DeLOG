@@ -1052,9 +1052,11 @@ name = "delog-parsers"
 version = "0.2.1"
 dependencies = [
  "arrow",
+ "bytes",
  "criterion",
  "delog-core",
  "mavlink",
+ "parquet",
  "serde",
 ]
 
