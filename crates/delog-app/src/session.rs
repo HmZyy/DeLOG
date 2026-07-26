@@ -10,13 +10,13 @@ use std::thread::JoinHandle;
 
 use delog_core::diagnostics::{Diag, DiagRecord, DiagnosticHub, Severity};
 use delog_core::identity::SourceId;
-use delog_core::ingest::{IngestSender, IngestSink, ParseSummary, SourceKind, ingest_channel};
+use delog_core::ingest::{ingest_channel, IngestSender, IngestSink, ParseSummary, SourceKind};
 use delog_core::ingestor::{IngestObserver, Ingestor};
 use delog_core::metrics::MetricsRegistry;
 use delog_core::parse_ctl::{CancelToken, ParseCtl};
 use delog_core::snapshot::{DataStore, StoreSnapshot};
 use delog_parsers::{
-    ArduPilotParser, Detection, ParserRegistry, SNIFF_HEAD_LEN, TlogParser, ULogParser,
+    ArduPilotParser, Detection, ParseError, ParserRegistry, TlogParser, ULogParser, SNIFF_HEAD_LEN,
 };
 
 #[cfg(feature = "scripting")]
@@ -460,9 +460,17 @@ fn run_parse(
     };
 
     let source = sink.open_source(label, SourceKind::File);
-    let ctl = ParseCtl::new(cancel, source, total);
-    if let Err(err) = parser.parse(Box::new(file), &mut sink, &ctl) {
-        sink.diagnostic(Diag::warning("parse-ended", format!("{label}: {err}")).at_byte(0));
+    let ctl = ParseCtl::new(cancel, source, total).with_label(label);
+    match parser.parse(Box::new(file), &mut sink, &ctl) {
+        Ok(_) => {}
+        Err(ParseError::Setup { detail }) => {
+            sender.remove_source(source);
+            sink.diagnostic(Diag::error("parse-setup", format!("{label}: {detail}")).at_byte(0));
+        }
+        Err(ParseError::SetupCancelled) => sender.remove_source(source),
+        Err(err) => {
+            sink.diagnostic(Diag::warning("parse-ended", format!("{label}: {err}")).at_byte(0));
+        }
     }
 }
 
@@ -490,6 +498,8 @@ fn source_label(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use std::io::Write;
+
+    use delog_parsers::{LogParser, ParseError, ReadSeek, Sniff};
 
     use super::*;
 
@@ -604,6 +614,69 @@ mod tests {
 
         let snap = session.snapshot();
         assert!(snap.topics.iter().all(|t| t.store.is_none()));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    struct StubSetupParser;
+
+    impl LogParser for StubSetupParser {
+        fn name(&self) -> &'static str {
+            "setup-stub"
+        }
+
+        fn sniff(&self, _head: &[u8]) -> Sniff {
+            Sniff::new(100, "test")
+        }
+
+        fn parse(
+            &self,
+            _src: Box<dyn ReadSeek>,
+            _sink: &mut dyn IngestSink,
+            _ctl: &ParseCtl,
+        ) -> Result<ParseSummary, ParseError> {
+            Err(ParseError::Setup {
+                detail: "bad schema".into(),
+            })
+        }
+    }
+
+    #[test]
+    fn setup_failure_removes_the_provisional_source() {
+        let path = temp_path("setup-failure");
+        File::create(&path).unwrap().write_all(b"setup").unwrap();
+
+        let session = Session::new(egui::Context::default());
+        let mut registry = ParserRegistry::new();
+        registry.register(Arc::new(StubSetupParser));
+        run_parse(
+            &path,
+            "setup-failure",
+            &registry,
+            &session.sender,
+            CancelToken::new(),
+        );
+        session.wait_until(|s| {
+            let snapshot = s.snapshot();
+            snapshot
+                .sources
+                .iter()
+                .any(|source| source.entry.label == "setup-failure" && source.entry.removed)
+                && s.diagnostic_records()
+                    .iter()
+                    .any(|record| record.diag.code == "parse-setup")
+        });
+
+        let snapshot = session.snapshot();
+        let source = snapshot
+            .sources
+            .iter()
+            .find(|source| source.entry.label == "setup-failure")
+            .expect("setup parser opens a provisional source");
+        assert!(source.entry.removed);
+        assert!(session.diagnostic_records().iter().any(|record| {
+            record.diag.code == "parse-setup" && record.diag.message == "setup-failure: bad schema"
+        }));
 
         let _ = std::fs::remove_file(&path);
     }
