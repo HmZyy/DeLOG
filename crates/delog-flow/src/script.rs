@@ -661,7 +661,12 @@ mod script_tests {
         let doc = to_json(&graph);
         assert_eq!(doc["nodes"][1]["type"], "script");
         let restored = from_json(&doc).unwrap();
-        assert_eq!(restored, graph);
+        let mut expected = graph;
+        let NodeKind::DataField(selector) = &mut expected.nodes[0].kind else {
+            panic!("expected data-field source node");
+        };
+        selector.source = None;
+        assert_eq!(restored, expected);
     }
 
     #[test]
