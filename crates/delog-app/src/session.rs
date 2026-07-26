@@ -42,16 +42,23 @@ struct AppObserver {
 
 impl IngestObserver for AppObserver {
     fn on_progress(&mut self, source: SourceId, frac: f32) {
-        self.loads
-            .lock()
-            .unwrap()
-            .entry(source)
-            .or_default()
-            .progress = frac;
+        let mut loads = self.loads.lock().unwrap();
+        let state = loads.entry(source).or_default();
+        if !state.done {
+            state.progress = frac;
+        }
         self.ctx.request_repaint();
     }
 
     fn on_close(&mut self, source: SourceId, _summary: ParseSummary) {
+        let mut loads = self.loads.lock().unwrap();
+        let state = loads.entry(source).or_default();
+        state.done = true;
+        state.progress = 1.0;
+        self.ctx.request_repaint();
+    }
+
+    fn on_remove(&mut self, source: SourceId) {
         let mut loads = self.loads.lock().unwrap();
         let state = loads.entry(source).or_default();
         state.done = true;
@@ -501,7 +508,7 @@ fn source_label(path: &Path) -> String {
 mod tests {
     use std::io::Write;
 
-    use arrow::array::{ArrayRef, Float32Array, Int64Array};
+    use arrow::array::{ArrayRef, Float32Array, Float64Array, Int64Array};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
     use delog_parsers::{
@@ -630,6 +637,26 @@ mod tests {
         writer.close().unwrap();
     }
 
+    fn write_all_invalid_parquet(path: &Path) {
+        let rows = delog_parsers::parquet::PARQUET_BATCH_ROWS * 32;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("time", DataType::Float64, false),
+            Field::new("value", DataType::Float32, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Float64Array::from(vec![f64::NAN; rows])) as ArrayRef,
+                Arc::new(Float32Array::from(vec![1.0; rows])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let file = File::create(path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+
     #[test]
     fn open_path_loads_a_bin_into_the_store() {
         let path = temp_path("load");
@@ -713,6 +740,92 @@ mod tests {
         assert!(source.entry.removed);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn pre_submit_cancellation_after_progress_does_not_contaminate_the_next_load() {
+        let invalid_path = temp_parquet_path("invalid-progress-cancel");
+        write_all_invalid_parquet(&invalid_path);
+        let next_path = temp_path("after-invalid-cancel");
+        File::create(&next_path)
+            .unwrap()
+            .write_all(&tiny_bin())
+            .unwrap();
+        let provider = fixed_selection_provider(Ok(TimestampSelection {
+            column_index: 0,
+            unit: TimestampUnit::Seconds,
+        }));
+        let mut session = Session::new(egui::Context::default(), provider);
+
+        session.open_path(invalid_path.clone());
+        let cancel = session.active[0].cancel.clone();
+        let loads = Arc::clone(&session.loads);
+        let cancel_after_progress = std::thread::spawn(move || {
+            for _ in 0..2_000 {
+                if !loads.lock().unwrap().is_empty() {
+                    cancel.cancel();
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            panic!("all-invalid Parquet parse did not report progress");
+        });
+        session.join_workers();
+        cancel_after_progress.join().unwrap();
+        session.wait_until(|session| {
+            session.snapshot().sources.iter().any(|source| {
+                source.entry.label == source_label(invalid_path.as_path()) && source.entry.removed
+            })
+        });
+
+        let invalid_source = session
+            .snapshot()
+            .sources
+            .iter()
+            .find(|source| source.entry.label == source_label(invalid_path.as_path()))
+            .expect("all-invalid Parquet opens a provisional source")
+            .entry
+            .id;
+
+        let mut late_sink = session.sender.file_sink();
+        late_sink.progress(invalid_source, 0.25);
+        late_sink.diagnostic(Diag::info(
+            "late-progress-sentinel",
+            "late progress was processed",
+        ));
+        session.wait_until(|session| {
+            session
+                .diagnostic_records()
+                .iter()
+                .any(|record| record.diag.code == "late-progress-sentinel")
+        });
+
+        session.open_path(next_path.clone());
+        session.join_workers();
+        session.wait_until(|session| {
+            let snapshot = session.snapshot();
+            snapshot
+                .topics
+                .iter()
+                .find(|topic| topic.entry.name == "TEST")
+                .and_then(|topic| snapshot.topic_store(topic.entry.id))
+                .is_some_and(|store| store.rows == 2)
+        });
+
+        let invalid_load = session.loads.lock().unwrap()[&invalid_source];
+        assert!(invalid_load.done);
+        assert_eq!(invalid_load.progress, 1.0);
+        assert_eq!(
+            session.overall_progress(),
+            None,
+            "removed-source progress must not contaminate later imports"
+        );
+        assert!(session.diagnostic_records().iter().all(|record| {
+            record.diag.code != "parse-setup" && record.diag.code != "parse-ended"
+        }));
+
+        let _ = std::fs::remove_file(&invalid_path);
+        let _ = std::fs::remove_file(&next_path);
     }
 
     #[test]
