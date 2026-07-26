@@ -4591,6 +4591,46 @@ mod tests {
     }
 
     #[test]
+    fn field_metadata_reports_original_sources_for_imported_topic_collisions() {
+        let snapshot = crate::session::tests::structured_round_trip_snapshot();
+        let metadata_for = |topic_name: &str| {
+            let topic = snapshot
+                .topics
+                .iter()
+                .find(|topic| topic.entry.name == topic_name)
+                .unwrap();
+            let roll = snapshot
+                .fields
+                .iter()
+                .find(|field| field.topic == topic.entry.id && field.name == "Roll")
+                .unwrap();
+            field_metadata(&snapshot, roll.id).unwrap()
+        };
+
+        let primary = metadata_for("ATT[0]");
+        assert_eq!(primary.source_label, "structured-metadata");
+        assert_eq!(primary.topic_name, "ATT[0]");
+        assert_eq!(primary.original_source.as_deref(), Some("flight-a"));
+        assert_eq!(primary.original_topic.as_deref(), Some("ATT"));
+        assert_eq!(primary.dtype, "f32");
+        assert_eq!(primary.unit.as_deref(), Some("deg"));
+        assert_eq!(primary.description.as_deref(), Some("roll angle"));
+        assert_eq!(primary.multiplier, 0.01);
+        assert_eq!(primary.rows, 2);
+        assert_eq!(primary.source_offset_us, 0);
+        assert_eq!(primary.range, TimeRange::new(1_100, 2_100));
+
+        let secondary = metadata_for("ATT[1]");
+        assert_eq!(secondary.source_label, "structured-metadata");
+        assert_eq!(secondary.topic_name, "ATT[1]");
+        assert_eq!(secondary.original_source.as_deref(), Some("flight-b"));
+        assert_eq!(secondary.original_topic.as_deref(), Some("ATT"));
+        assert_eq!(secondary.description.as_deref(), Some("secondary roll"));
+        assert_eq!(secondary.rows, 3);
+        assert_eq!(secondary.range, TimeRange::new(1_300, 3_300));
+    }
+
+    #[test]
     fn field_metadata_window_renders_provenance_rows_only_when_available() {
         let source = include_str!("app.rs");
         let field_metadata_window = source
