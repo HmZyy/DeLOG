@@ -2752,7 +2752,7 @@ impl eframe::App for DelogApp {
                 .as_ref()
                 .map(|(_, m)| m.clone())
                 .unwrap_or_default();
-            let fields = crate::data_export::numeric_fields(&snapshot, &model);
+            let fields = crate::data_export::available_fields(&snapshot, &model);
             let full = snapshot
                 .global_time_range()
                 .map(|r| (r.min_us, r.max_us))
