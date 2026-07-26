@@ -21,6 +21,8 @@ use parquet::file::reader::{ChunkReader, Length};
 
 use crate::parser::{LogParser, ParseError, ReadSeek, Sniff};
 
+mod structured;
+
 pub const PARQUET_BATCH_ROWS: usize = 8_192;
 
 static NEXT_TIMESTAMP_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
@@ -308,23 +310,6 @@ fn timestamp_candidates(schema: &Schema) -> Vec<TimestampCandidate> {
         .collect()
 }
 
-fn delog_timestamp_selection(schema: &Schema) -> Option<TimestampSelection> {
-    let [timestamp, seconds, ..] = schema.fields().as_ref() else {
-        return None;
-    };
-
-    (timestamp.name() == "t_us"
-        && timestamp.data_type() == &DataType::Int64
-        && !timestamp.is_nullable()
-        && seconds.name() == "t_s"
-        && seconds.data_type() == &DataType::Float64
-        && !seconds.is_nullable())
-    .then_some(TimestampSelection {
-        column_index: 0,
-        unit: TimestampUnit::Microseconds,
-    })
-}
-
 fn supported_value_type(dtype: &DataType) -> bool {
     matches!(
         dtype,
@@ -455,6 +440,17 @@ impl LogParser for ParquetParser {
             .map_err(|error| ParseError::Setup {
                 detail: error.to_string(),
             })?;
+        match delog_parquet_format::decode_schema(reader_metadata.schema().as_ref()) {
+            Ok(Some(manifest)) => {
+                return structured::parse(chunk_reader, reader_metadata, manifest, sink, ctl);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return Err(ParseError::Setup {
+                    detail: format!("invalid structured DéLOG Parquet metadata: {error}"),
+                });
+            }
+        }
         let builder = ParquetRecordBatchReaderBuilder::new_with_metadata(
             chunk_reader.clone(),
             reader_metadata.clone(),
@@ -463,56 +459,45 @@ impl LogParser for ParquetParser {
         let total_rows = builder.metadata().file_metadata().num_rows().max(0) as u64;
         let row_group_count = builder.metadata().num_row_groups();
 
-        let delog_selection = delog_timestamp_selection(&schema);
-        let selection = match delog_selection {
-            Some(selection) => selection,
-            None => {
-                let candidates = timestamp_candidates(&schema);
-                if candidates.is_empty() {
-                    return Err(ParseError::Setup {
-                        detail: "Parquet schema has no timestamp-capable columns".to_owned(),
-                    });
-                }
-                let request = TimestampSelectionRequest {
-                    request_id: NEXT_TIMESTAMP_REQUEST_ID.fetch_add(1, Ordering::Relaxed),
-                    file_label: ctl.label().to_owned(),
-                    candidates: candidates.clone(),
-                };
-                let selection = self
-                    .selection
-                    .select(request, ctl)
-                    .map_err(|TimestampSelectionError::Cancelled| ParseError::SetupCancelled)?;
-                let Some(candidate) = candidates
-                    .iter()
-                    .find(|candidate| candidate.column_index == selection.column_index)
-                else {
-                    return Err(ParseError::Setup {
-                        detail: format!(
-                            "timestamp selection column {} is stale or ineligible",
-                            selection.column_index
-                        ),
-                    });
-                };
-                if candidate
-                    .logical_unit
-                    .is_some_and(|unit| unit != selection.unit)
-                {
-                    return Err(ParseError::Setup {
-                        detail: format!(
-                            "timestamp selection unit does not match column `{}`",
-                            candidate.name
-                        ),
-                    });
-                }
-                selection
-            }
+        let candidates = timestamp_candidates(&schema);
+        if candidates.is_empty() {
+            return Err(ParseError::Setup {
+                detail: "Parquet schema has no timestamp-capable columns".to_owned(),
+            });
+        }
+        let request = TimestampSelectionRequest {
+            request_id: NEXT_TIMESTAMP_REQUEST_ID.fetch_add(1, Ordering::Relaxed),
+            file_label: ctl.label().to_owned(),
+            candidates: candidates.clone(),
         };
+        let selection = self
+            .selection
+            .select(request, ctl)
+            .map_err(|TimestampSelectionError::Cancelled| ParseError::SetupCancelled)?;
+        let Some(candidate) = candidates
+            .iter()
+            .find(|candidate| candidate.column_index == selection.column_index)
+        else {
+            return Err(ParseError::Setup {
+                detail: format!(
+                    "timestamp selection column {} is stale or ineligible",
+                    selection.column_index
+                ),
+            });
+        };
+        if candidate
+            .logical_unit
+            .is_some_and(|unit| unit != selection.unit)
+        {
+            return Err(ParseError::Setup {
+                detail: format!(
+                    "timestamp selection unit does not match column `{}`",
+                    candidate.name
+                ),
+            });
+        }
 
-        let excluded_time_indices: &[usize] = if delog_selection.is_some() {
-            &[0, 1]
-        } else {
-            std::slice::from_ref(&selection.column_index)
-        };
+        let excluded_time_indices = std::slice::from_ref(&selection.column_index);
         let mut value_indices = Vec::new();
         let mut field_schemas = Vec::new();
         let mut unsupported_names = Vec::new();
@@ -751,6 +736,10 @@ mod tests {
     use delog_core::identity::SourceId;
     use delog_core::ingest::{IngestSink, ParseSummary, ParsedBatch, SourceKind};
     use delog_core::parse_ctl::{CancelToken, ParseCtl};
+    use delog_parquet_format::{
+        FORMAT_KEY, FORMAT_NAME, FORMAT_VERSION, FieldManifest, MANIFEST_KEY, Manifest,
+        TopicManifest, VERSION_KEY, encode_schema,
+    };
     use parquet::arrow::ArrowWriter;
 
     use super::*;
@@ -859,7 +848,7 @@ mod tests {
         (result, sink)
     }
 
-    fn delog_batch(timestamps: Vec<i64>, values: Vec<f64>) -> (SchemaRef, RecordBatch) {
+    fn legacy_flat_batch(timestamps: Vec<i64>, values: Vec<f64>) -> (SchemaRef, RecordBatch) {
         let seconds = timestamps
             .iter()
             .map(|&value| value as f64 / 1_000_000.0)
@@ -881,8 +870,571 @@ mod tests {
         (schema, batch)
     }
 
+    fn structured_fixture() -> (SchemaRef, RecordBatch) {
+        let manifest = Manifest {
+            version: FORMAT_VERSION,
+            topics: vec![
+                TopicManifest {
+                    id: 0,
+                    original_source: "flight-a".into(),
+                    original_topic: "ATT".into(),
+                    timestamp_column: 0,
+                    fields: vec![FieldManifest {
+                        column: 1,
+                        name: "Roll".into(),
+                        unit: Some("rad".into()),
+                        multiplier: 1.0,
+                        description: Some("airframe roll".into()),
+                    }],
+                },
+                TopicManifest {
+                    id: 1,
+                    original_source: "flight-b".into(),
+                    original_topic: "STATUS".into(),
+                    timestamp_column: 2,
+                    fields: vec![
+                        FieldManifest {
+                            column: 3,
+                            name: "armed".into(),
+                            unit: None,
+                            multiplier: 1.0,
+                            description: None,
+                        },
+                        FieldManifest {
+                            column: 4,
+                            name: "mode".into(),
+                            unit: None,
+                            multiplier: 1.0,
+                            description: None,
+                        },
+                    ],
+                },
+            ],
+        };
+        let schema = Arc::new(
+            encode_schema(
+                vec![
+                    Field::new("__delog_t0_time", DataType::Int64, true),
+                    Field::new("__delog_t0_f0", DataType::Float32, true),
+                    Field::new("__delog_t1_time", DataType::Int64, true),
+                    Field::new("__delog_t1_f0", DataType::Boolean, true),
+                    Field::new("__delog_t1_f1", DataType::Utf8, true),
+                ],
+                &manifest,
+            )
+            .unwrap(),
+        );
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int64Array::from(vec![Some(10), Some(30), None])),
+                Arc::new(Float32Array::from(vec![Some(1.5), None, None])),
+                Arc::new(Int64Array::from(vec![Some(5), Some(15), Some(25)])),
+                Arc::new(BooleanArray::from(vec![
+                    Some(true),
+                    Some(false),
+                    Some(true),
+                ])),
+                Arc::new(StringArray::from(vec![
+                    Some("MANUAL"),
+                    Some("AUTO"),
+                    Some("RTL"),
+                ])),
+            ],
+        )
+        .unwrap();
+        (schema, batch)
+    }
+
+    fn structured_parquet_bytes() -> Vec<u8> {
+        let (schema, batch) = structured_fixture();
+        parquet_bytes(schema, &[batch])
+    }
+
+    fn single_float_topic_schema(original_source: &str, original_topic: &str) -> SchemaRef {
+        Arc::new(
+            encode_schema(
+                vec![
+                    Field::new("__delog_t0_time", DataType::Int64, true),
+                    Field::new("__delog_t0_f0", DataType::Float32, true),
+                ],
+                &Manifest {
+                    version: FORMAT_VERSION,
+                    topics: vec![TopicManifest {
+                        id: 0,
+                        original_source: original_source.into(),
+                        original_topic: original_topic.into(),
+                        timestamp_column: 0,
+                        fields: vec![FieldManifest {
+                            column: 1,
+                            name: "value".into(),
+                            unit: None,
+                            multiplier: 1.0,
+                            description: None,
+                        }],
+                    }],
+                },
+            )
+            .unwrap(),
+        )
+    }
+
+    fn single_float_topic_batch(
+        schema: SchemaRef,
+        timestamps: Vec<Option<i64>>,
+        values: Vec<Option<f32>>,
+    ) -> RecordBatch {
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(timestamps)),
+                Arc::new(Float32Array::from(values)),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn marked_parquet_bytes(version: &str, manifest: &str) -> Vec<u8> {
+        let metadata = HashMap::from([
+            (FORMAT_KEY.to_owned(), FORMAT_NAME.to_owned()),
+            (VERSION_KEY.to_owned(), version.to_owned()),
+            (MANIFEST_KEY.to_owned(), manifest.to_owned()),
+        ]);
+        let schema = Arc::new(Schema::new_with_metadata(
+            vec![
+                Field::new("__delog_t0_time", DataType::Int64, true),
+                Field::new("__delog_t0_f0", DataType::Float32, true),
+            ],
+            metadata,
+        ));
+        let batch = single_float_topic_batch(Arc::clone(&schema), vec![Some(1)], vec![Some(1.0)]);
+        parquet_bytes(schema, &[batch])
+    }
+
     #[test]
-    fn delog_schema_bypasses_provider_and_excludes_both_time_columns() {
+    fn structured_file_reconstructs_independent_topics() {
+        let provider = Arc::new(FixedProvider::panic_if_called());
+        let calls = Arc::clone(&provider);
+
+        let (result, sink) = drive_parquet(structured_parquet_bytes(), provider);
+
+        let summary = result.unwrap();
+        assert_eq!(calls.calls.load(Ordering::Relaxed), 0);
+        assert_eq!(summary.topic_count, 2);
+        assert_eq!(summary.row_count, 5);
+
+        let att = sink
+            .batches
+            .iter()
+            .filter(|batch| batch.topic() == "ATT")
+            .collect::<Vec<_>>();
+        assert_eq!(att.len(), 1);
+        assert_eq!(att[0].timestamps.values(), &[10, 30]);
+        assert_eq!(att[0].schema.fields()[0].dtype, DataType::Float32);
+        assert_eq!(
+            att[0].schema.provenance().unwrap().original_source(),
+            "flight-a"
+        );
+        assert_eq!(att[0].schema.provenance().unwrap().original_topic(), "ATT");
+        assert_eq!(att[0].schema.fields()[0].unit.as_deref(), Some("rad"));
+        assert_eq!(att[0].schema.fields()[0].multiplier, 1.0);
+        assert_eq!(
+            att[0].schema.fields()[0].description.as_deref(),
+            Some("airframe roll")
+        );
+        let roll = att[0].columns[0]
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .unwrap();
+        assert_eq!(roll.len(), 2);
+        assert!(roll.is_valid(0));
+        assert!(roll.is_null(1));
+
+        let status = sink
+            .batches
+            .iter()
+            .find(|batch| batch.topic() == "STATUS")
+            .unwrap();
+        assert_eq!(status.timestamps.values(), &[5, 15, 25]);
+        assert_eq!(status.schema.fields()[1].dtype, DataType::Utf8);
+    }
+
+    #[test]
+    fn invalid_marked_metadata_never_falls_back_to_generic_picker() {
+        let cases = [
+            ("1", "{broken", "invalid manifest JSON"),
+            ("2", "{}", "unsupported format version 2"),
+        ];
+
+        for (version, manifest, expected) in cases {
+            let provider = Arc::new(FixedProvider::panic_if_called());
+            let calls = Arc::clone(&provider);
+
+            let (result, sink) = drive_parquet(marked_parquet_bytes(version, manifest), provider);
+
+            assert!(matches!(result, Err(ParseError::Setup { .. })));
+            assert!(result.unwrap_err().to_string().contains(expected));
+            assert_eq!(calls.calls.load(Ordering::Relaxed), 0);
+            assert!(sink.batches.is_empty());
+            assert!(sink.closed.is_none());
+        }
+    }
+
+    #[test]
+    fn structured_padding_rejects_non_null_topic_data() {
+        let schema = single_float_topic_schema("flight-a", "ATT");
+        let batch = single_float_topic_batch(Arc::clone(&schema), vec![None], vec![Some(1.0)]);
+        let provider = Arc::new(FixedProvider::panic_if_called());
+
+        let (result, sink) = drive_parquet(parquet_bytes(schema, &[batch]), provider);
+
+        assert!(matches!(result, Err(ParseError::Setup { .. })));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("non-null data in padding row 0")
+        );
+        assert!(sink.batches.is_empty());
+        assert!(sink.closed.is_none());
+    }
+
+    #[test]
+    fn structured_regression_is_tracked_per_topic_across_batches() {
+        let manifest = Manifest {
+            version: FORMAT_VERSION,
+            topics: vec![
+                TopicManifest {
+                    id: 0,
+                    original_source: "flight-a".into(),
+                    original_topic: "A".into(),
+                    timestamp_column: 0,
+                    fields: vec![FieldManifest {
+                        column: 1,
+                        name: "value".into(),
+                        unit: None,
+                        multiplier: 1.0,
+                        description: None,
+                    }],
+                },
+                TopicManifest {
+                    id: 1,
+                    original_source: "flight-b".into(),
+                    original_topic: "B".into(),
+                    timestamp_column: 2,
+                    fields: vec![FieldManifest {
+                        column: 3,
+                        name: "value".into(),
+                        unit: None,
+                        multiplier: 1.0,
+                        description: None,
+                    }],
+                },
+            ],
+        };
+        let schema = Arc::new(
+            encode_schema(
+                vec![
+                    Field::new("a_time", DataType::Int64, true),
+                    Field::new("a_value", DataType::Float32, true),
+                    Field::new("b_time", DataType::Int64, true),
+                    Field::new("b_value", DataType::Float32, true),
+                ],
+                &manifest,
+            )
+            .unwrap(),
+        );
+        let batch = |a_time, b_time| {
+            RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![
+                    Arc::new(Int64Array::from(vec![Some(a_time)])),
+                    Arc::new(Float32Array::from(vec![Some(1.0)])),
+                    Arc::new(Int64Array::from(vec![Some(b_time)])),
+                    Arc::new(Float32Array::from(vec![Some(2.0)])),
+                ],
+            )
+            .unwrap()
+        };
+        let first = batch(10, 100);
+        let second = batch(9, 101);
+
+        let (result, sink) = drive_parquet(
+            parquet_bytes(schema, &[first, second]),
+            Arc::new(FixedProvider::panic_if_called()),
+        );
+
+        assert!(matches!(result, Err(ParseError::Framing { .. })));
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("topic `A`"));
+        assert!(error.contains("previous timestamp 10"));
+        assert!(error.contains("current timestamp 9"));
+        assert_eq!(sink.batches.len(), 2);
+        assert_eq!(sink.closed.as_ref().unwrap().topic_count, 2);
+        assert_eq!(sink.closed.as_ref().unwrap().row_count, 2);
+    }
+
+    #[test]
+    fn structured_regression_within_batch_identifies_the_bad_topic() {
+        let (schema, _) = structured_fixture();
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int64Array::from(vec![Some(10), Some(9)])),
+                Arc::new(Float32Array::from(vec![Some(1.0), Some(2.0)])),
+                Arc::new(Int64Array::from(vec![Some(5), Some(15)])),
+                Arc::new(BooleanArray::from(vec![Some(true), Some(false)])),
+                Arc::new(StringArray::from(vec![Some("MANUAL"), Some("AUTO")])),
+            ],
+        )
+        .unwrap();
+
+        let (result, sink) = drive_parquet(
+            parquet_bytes(schema, &[batch]),
+            Arc::new(FixedProvider::panic_if_called()),
+        );
+
+        assert!(matches!(result, Err(ParseError::Setup { .. })));
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("topic `ATT`"));
+        assert!(error.contains("previous timestamp 10"));
+        assert!(error.contains("current timestamp 9"));
+        assert!(sink.batches.is_empty());
+        assert!(sink.closed.is_none());
+    }
+
+    #[test]
+    fn structured_same_named_topics_get_stable_instances_and_provenance() {
+        let manifest = Manifest {
+            version: FORMAT_VERSION,
+            topics: vec![
+                TopicManifest {
+                    id: 9,
+                    original_source: "flight-a".into(),
+                    original_topic: "ATT".into(),
+                    timestamp_column: 0,
+                    fields: vec![FieldManifest {
+                        column: 1,
+                        name: "Roll".into(),
+                        unit: None,
+                        multiplier: 1.0,
+                        description: None,
+                    }],
+                },
+                TopicManifest {
+                    id: 3,
+                    original_source: "flight-b".into(),
+                    original_topic: "ATT".into(),
+                    timestamp_column: 2,
+                    fields: vec![FieldManifest {
+                        column: 3,
+                        name: "Roll".into(),
+                        unit: None,
+                        multiplier: 1.0,
+                        description: None,
+                    }],
+                },
+            ],
+        };
+        let schema = Arc::new(
+            encode_schema(
+                vec![
+                    Field::new("a_time", DataType::Int64, true),
+                    Field::new("a_roll", DataType::Float32, true),
+                    Field::new("b_time", DataType::Int64, true),
+                    Field::new("b_roll", DataType::Float32, true),
+                ],
+                &manifest,
+            )
+            .unwrap(),
+        );
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int64Array::from(vec![Some(1)])),
+                Arc::new(Float32Array::from(vec![Some(1.0)])),
+                Arc::new(Int64Array::from(vec![Some(2)])),
+                Arc::new(Float32Array::from(vec![Some(2.0)])),
+            ],
+        )
+        .unwrap();
+
+        let (result, sink) = drive_parquet(
+            parquet_bytes(schema, &[batch]),
+            Arc::new(FixedProvider::panic_if_called()),
+        );
+
+        assert_eq!(result.unwrap().topic_count, 2);
+        assert_eq!(
+            sink.batches
+                .iter()
+                .map(|batch| batch.topic())
+                .collect::<Vec<_>>(),
+            ["ATT[0]", "ATT[1]"]
+        );
+        assert_eq!(
+            sink.batches[0]
+                .schema
+                .provenance()
+                .unwrap()
+                .original_source(),
+            "flight-a"
+        );
+        assert_eq!(
+            sink.batches[1]
+                .schema
+                .provenance()
+                .unwrap()
+                .original_source(),
+            "flight-b"
+        );
+    }
+
+    #[test]
+    fn structured_zero_row_manifest_topic_is_not_emitted() {
+        let (schema, _) = structured_fixture();
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int64Array::from(vec![None, None])),
+                Arc::new(Float32Array::from(vec![None, None])),
+                Arc::new(Int64Array::from(vec![Some(5), Some(15)])),
+                Arc::new(BooleanArray::from(vec![Some(true), Some(false)])),
+                Arc::new(StringArray::from(vec![Some("MANUAL"), Some("AUTO")])),
+            ],
+        )
+        .unwrap();
+
+        let (result, sink) = drive_parquet(
+            parquet_bytes(schema, &[batch]),
+            Arc::new(FixedProvider::panic_if_called()),
+        );
+
+        let summary = result.unwrap();
+        assert_eq!(summary.topic_count, 1);
+        assert_eq!(summary.row_count, 2);
+        assert_eq!(
+            sink.batches
+                .iter()
+                .map(|batch| batch.topic())
+                .collect::<Vec<_>>(),
+            ["STATUS"]
+        );
+    }
+
+    #[test]
+    fn structured_emitted_batches_are_bounded_to_8192_rows() {
+        let schema = single_float_topic_schema("flight-a", "VALUE");
+        let timestamps = (0..=PARQUET_BATCH_ROWS as i64)
+            .map(Some)
+            .collect::<Vec<_>>();
+        let values = (0..=PARQUET_BATCH_ROWS)
+            .map(|value| Some(value as f32))
+            .collect::<Vec<_>>();
+        let batch = single_float_topic_batch(Arc::clone(&schema), timestamps, values);
+
+        let (result, sink) = drive_parquet(
+            parquet_bytes(schema, &[batch]),
+            Arc::new(FixedProvider::panic_if_called()),
+        );
+
+        assert_eq!(result.unwrap().row_count, 8_193);
+        assert_eq!(
+            sink.batches
+                .iter()
+                .map(ParsedBatch::rows)
+                .collect::<Vec<_>>(),
+            [8_192, 1]
+        );
+        assert!(
+            sink.batches
+                .iter()
+                .all(|batch| batch.rows() <= PARQUET_BATCH_ROWS)
+        );
+        assert_eq!(sink.progress.len(), 2);
+        assert!(sink.progress[0] < 1.0);
+        assert_eq!(sink.progress[1], 1.0);
+    }
+
+    #[test]
+    fn structured_cancellation_before_submission_is_setup_cancelled() {
+        let bytes = structured_parquet_bytes();
+        let token = CancelToken::new();
+        token.cancel();
+        let ctl = ParseCtl::new(token, SourceId(4), bytes.len() as u64).with_label("structured");
+        let parser = ParquetParser::new(Arc::new(FixedProvider::panic_if_called()));
+        let mut sink = RecordingSink::default();
+
+        let result = parser.parse(Box::new(Cursor::new(bytes)), &mut sink, &ctl);
+
+        assert!(matches!(result, Err(ParseError::SetupCancelled)));
+        assert!(sink.batches.is_empty());
+        assert!(sink.closed.is_none());
+    }
+
+    #[test]
+    fn structured_cancellation_after_first_topic_closes_partial_summary() {
+        let bytes = structured_parquet_bytes();
+        let token = CancelToken::new();
+        let ctl =
+            ParseCtl::new(token.clone(), SourceId(4), bytes.len() as u64).with_label("structured");
+        let parser = ParquetParser::new(Arc::new(FixedProvider::panic_if_called()));
+        let mut sink = RecordingSink {
+            cancel_after_first: Some(token),
+            ..RecordingSink::default()
+        };
+
+        let result = parser.parse(Box::new(Cursor::new(bytes)), &mut sink, &ctl);
+
+        assert!(matches!(result, Err(ParseError::Cancelled)));
+        assert_eq!(sink.batches.len(), 1);
+        let summary = sink.closed.unwrap();
+        assert_eq!(summary.topic_count, 1);
+        assert_eq!(summary.row_count, 2);
+        assert_eq!(summary.time_range, TimeRange::new(10, 30));
+    }
+
+    #[test]
+    fn structured_error_closes_accurate_multi_topic_partial_summary() {
+        let (schema, _) = structured_fixture();
+        let first = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int64Array::from(vec![Some(10)])),
+                Arc::new(Float32Array::from(vec![Some(1.0)])),
+                Arc::new(Int64Array::from(vec![Some(5)])),
+                Arc::new(BooleanArray::from(vec![Some(true)])),
+                Arc::new(StringArray::from(vec![Some("MANUAL")])),
+            ],
+        )
+        .unwrap();
+        let invalid_second = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int64Array::from(vec![Some(20)])),
+                Arc::new(Float32Array::from(vec![Some(2.0)])),
+                Arc::new(Int64Array::from(vec![None])),
+                Arc::new(BooleanArray::from(vec![Some(false)])),
+                Arc::new(StringArray::from(vec![None::<&str>])),
+            ],
+        )
+        .unwrap();
+
+        let (result, sink) = drive_parquet(
+            parquet_bytes(schema, &[first, invalid_second]),
+            Arc::new(FixedProvider::panic_if_called()),
+        );
+
+        assert!(matches!(result, Err(ParseError::Framing { .. })));
+        assert_eq!(sink.batches.len(), 3);
+        let summary = sink.closed.unwrap();
+        assert_eq!(summary.topic_count, 2);
+        assert_eq!(summary.row_count, 3);
+        assert_eq!(summary.time_range, TimeRange::new(5, 20));
+    }
+
+    #[test]
+    fn legacy_flat_schema_uses_provider_and_retains_seconds_column() {
         let schema = Arc::new(Schema::new(vec![
             Field::new("t_us", DataType::Int64, false),
             Field::new("t_s", DataType::Float64, false),
@@ -897,13 +1449,24 @@ mod tests {
             ],
         )
         .unwrap();
-        let provider = Arc::new(FixedProvider::panic_if_called());
+        let provider = Arc::new(FixedProvider::ok(TimestampSelection {
+            column_index: 0,
+            unit: TimestampUnit::Microseconds,
+        }));
         let calls = Arc::clone(&provider);
         let (result, sink) = drive_parquet(parquet_bytes(schema, &[batch]), provider);
         let summary = result.unwrap();
         assert_eq!(summary.row_count, 2);
-        assert_eq!(calls.calls.load(Ordering::Relaxed), 0);
-        assert_eq!(sink.batches[0].schema.fields().len(), 1);
+        assert_eq!(calls.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            sink.batches[0]
+                .schema
+                .fields()
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect::<Vec<_>>(),
+            ["t_s", "roll"]
+        );
     }
 
     #[test]
@@ -941,9 +1504,12 @@ mod tests {
 
     #[test]
     fn rejects_regression_across_record_batches() {
-        let (schema, first) = delog_batch(vec![20], vec![1.0]);
-        let (_, second) = delog_batch(vec![10], vec![2.0]);
-        let provider = Arc::new(FixedProvider::panic_if_called());
+        let (schema, first) = legacy_flat_batch(vec![20], vec![1.0]);
+        let (_, second) = legacy_flat_batch(vec![10], vec![2.0]);
+        let provider = Arc::new(FixedProvider::ok(TimestampSelection {
+            column_index: 0,
+            unit: TimestampUnit::Microseconds,
+        }));
         let (result, sink) = drive_parquet(parquet_bytes(schema, &[first, second]), provider);
         let error = result.unwrap_err().to_string();
         assert!(error.contains("previous timestamp 20"));
@@ -1272,9 +1838,12 @@ mod tests {
 
     #[test]
     fn reports_row_based_progress_and_summary_counts() {
-        let (schema, first) = delog_batch(vec![10, 20], vec![1.0, 2.0]);
-        let (_, second) = delog_batch(vec![30, 40], vec![3.0, 4.0]);
-        let provider = Arc::new(FixedProvider::panic_if_called());
+        let (schema, first) = legacy_flat_batch(vec![10, 20], vec![1.0, 2.0]);
+        let (_, second) = legacy_flat_batch(vec![30, 40], vec![3.0, 4.0]);
+        let provider = Arc::new(FixedProvider::ok(TimestampSelection {
+            column_index: 0,
+            unit: TimestampUnit::Microseconds,
+        }));
         let (result, sink) = drive_parquet(parquet_bytes(schema, &[first, second]), provider);
         let summary = result.unwrap();
         assert_eq!(sink.progress.last(), Some(&1.0));
@@ -1309,12 +1878,15 @@ mod tests {
 
     #[test]
     fn pre_cancelled_parse_maps_to_setup_cancelled_before_submission() {
-        let (schema, batch) = delog_batch(vec![1], vec![1.0]);
+        let (schema, batch) = legacy_flat_batch(vec![1], vec![1.0]);
         let bytes = parquet_bytes(schema, &[batch]);
         let token = CancelToken::new();
         token.cancel();
         let ctl = ParseCtl::new(token, SourceId(4), bytes.len() as u64).with_label("generic");
-        let parser = ParquetParser::new(Arc::new(FixedProvider::panic_if_called()));
+        let parser = ParquetParser::new(Arc::new(FixedProvider::ok(TimestampSelection {
+            column_index: 0,
+            unit: TimestampUnit::Microseconds,
+        })));
         let mut sink = RecordingSink::default();
 
         let result = parser.parse(Box::new(Cursor::new(bytes)), &mut sink, &ctl);
@@ -1362,13 +1934,16 @@ mod tests {
     fn cancellation_after_submission_preserves_partial_batches() {
         let timestamps = (0..PARQUET_BATCH_ROWS as i64).collect::<Vec<_>>();
         let values = vec![1.0; PARQUET_BATCH_ROWS];
-        let (schema, first) = delog_batch(timestamps, values);
-        let (_, second) = delog_batch(vec![PARQUET_BATCH_ROWS as i64], vec![2.0]);
+        let (schema, first) = legacy_flat_batch(timestamps, values);
+        let (_, second) = legacy_flat_batch(vec![PARQUET_BATCH_ROWS as i64], vec![2.0]);
         let bytes = parquet_bytes(schema, &[first, second]);
         let token = CancelToken::new();
         let ctl =
             ParseCtl::new(token.clone(), SourceId(4), bytes.len() as u64).with_label("generic");
-        let provider = Arc::new(FixedProvider::panic_if_called());
+        let provider = Arc::new(FixedProvider::ok(TimestampSelection {
+            column_index: 0,
+            unit: TimestampUnit::Microseconds,
+        }));
         let parser = ParquetParser::new(provider);
         let mut sink = RecordingSink {
             cancel_after_first: Some(token),
@@ -1422,22 +1997,6 @@ mod tests {
         let schema = Schema::new(vec![Field::new("half", DataType::Float16, false)]);
 
         assert!(timestamp_candidates(&schema).is_empty());
-    }
-
-    #[test]
-    fn delog_signature_requires_exact_leading_fields() {
-        let schema = Schema::new(vec![
-            Field::new("t_us", DataType::Int64, false),
-            Field::new("t_s", DataType::Float64, false),
-            Field::new("roll", DataType::Float64, true),
-        ]);
-        assert_eq!(delog_timestamp_selection(&schema).unwrap().column_index, 0);
-
-        let nullable = Schema::new(vec![
-            Field::new("t_us", DataType::Int64, true),
-            Field::new("t_s", DataType::Float64, false),
-        ]);
-        assert!(delog_timestamp_selection(&nullable).is_none());
     }
 
     #[test]

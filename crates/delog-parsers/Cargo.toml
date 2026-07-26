@@ -9,6 +9,7 @@ rust-version.workspace = true
 
 [dependencies]
 delog-core = { workspace = true }
+delog-parquet-format = { workspace = true }
 arrow = { workspace = true }
 bytes = { workspace = true }
 mavlink = { workspace = true }

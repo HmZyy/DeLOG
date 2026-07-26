@@ -1066,6 +1066,7 @@ dependencies = [
  "bytes",
  "criterion",
  "delog-core",
+ "delog-parquet-format",
  "mavlink",
  "parquet",
  "serde",
