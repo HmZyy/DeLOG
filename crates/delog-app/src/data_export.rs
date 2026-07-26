@@ -1345,15 +1345,21 @@ mod tests {
     }
 
     #[test]
-    fn switching_from_parquet_to_csv_prunes_string_selections() {
+    fn switching_from_parquet_to_csv_prunes_only_incompatible_string_selections() {
         let (snapshot, model) = snapshot_with_supported_fields();
         let available = available_fields(&snapshot, &model);
         let mut state = DataExportState::default();
         state.set_format(ExportFormat::Parquet, &available);
         state.selected = available.iter().map(|field| field.id).collect();
+        let compatible_ids = available
+            .iter()
+            .filter(|field| field.csv_compatible())
+            .map(|field| field.id)
+            .collect::<Vec<_>>();
 
         state.set_format(ExportFormat::Csv, &available);
 
+        assert_eq!(state.selected, compatible_ids);
         let selected_names = state
             .selected
             .iter()

@@ -505,12 +505,21 @@ fn source_label(path: &Path) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::io::Write;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use arrow::array::{ArrayRef, Float32Array, Float64Array, Int64Array};
+    use arrow::array::{
+        Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int64Array, LargeStringArray,
+        StringArray, UInt16Array,
+    };
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
+    use delog_core::chunk::Chunk;
+    use delog_core::identity::IdentityRegistry;
+    use delog_core::schema::{FieldSchema, TopicSchema};
+    use delog_core::snapshot::StoreSnapshot;
+    use delog_core::store::TopicStore;
     use delog_parsers::{
         LogParser, ParseError, ReadSeek, Sniff, TimestampSelection, TimestampSelectionError,
         TimestampSelectionProvider, TimestampSelectionRequest, TimestampUnit,
@@ -518,6 +527,9 @@ mod tests {
     use parquet::arrow::ArrowWriter;
 
     use super::*;
+    use crate::browser::BrowserModel;
+    use crate::data_export::{ExportField, ExportFormat, available_fields, write_export_file};
+    use delog_core::export::ResampleMode;
 
     struct FixedSelectionProvider {
         response: Result<TimestampSelection, TimestampSelectionError>,
@@ -655,6 +667,343 @@ mod tests {
         let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
         writer.write(&batch).unwrap();
         writer.close().unwrap();
+    }
+
+    #[derive(Default)]
+    struct NeverSelectionProvider {
+        calls: AtomicUsize,
+    }
+
+    impl TimestampSelectionProvider for NeverSelectionProvider {
+        fn select(
+            &self,
+            _request: TimestampSelectionRequest,
+            _ctl: &ParseCtl,
+        ) -> Result<TimestampSelection, TimestampSelectionError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            panic!("structured Parquet must not request a timestamp selection");
+        }
+    }
+
+    fn structured_export_fixture() -> (StoreSnapshot, Vec<ExportField>) {
+        let mut identity = IdentityRegistry::new();
+        let flight_a = identity.add_source("flight-a");
+        identity.set_source_offset_us(flight_a, 100).unwrap();
+        let att_a = identity.add_topic(flight_a, "ATT").unwrap();
+        for name in ["Roll", "Seq", "Pitch"] {
+            identity.add_field(att_a, name).unwrap();
+        }
+        let status = identity.add_topic(flight_a, "STATUS").unwrap();
+        for name in ["armed", "mode", "message", "ignored"] {
+            identity.add_field(status, name).unwrap();
+        }
+
+        let flight_b = identity.add_source("flight-b");
+        identity.set_source_offset_us(flight_b, -200).unwrap();
+        let att_b = identity.add_topic(flight_b, "ATT").unwrap();
+        for name in ["Roll", "Yaw"] {
+            identity.add_field(att_b, name).unwrap();
+        }
+
+        let att_a_schema = Arc::new(
+            TopicSchema::new(
+                "ATT",
+                [
+                    FieldSchema::new("Roll", DataType::Float32, Some("deg"), 0.01)
+                        .unwrap()
+                        .with_description("roll angle"),
+                    FieldSchema::new("Seq", DataType::UInt16, Some("count"), 2.0)
+                        .unwrap()
+                        .with_description("sample sequence"),
+                    FieldSchema::new("Pitch", DataType::Float64, Some("deg"), 1.0).unwrap(),
+                ],
+            )
+            .unwrap(),
+        );
+        let att_a_chunk = Arc::new(
+            Chunk::try_new(
+                Int64Array::from(vec![1_000, 2_000]),
+                vec![
+                    Arc::new(Float32Array::from(vec![Some(1.25), None])) as ArrayRef,
+                    Arc::new(UInt16Array::from(vec![Some(10), Some(11)])) as ArrayRef,
+                    Arc::new(Float64Array::from(vec![Some(2.5), Some(3.5)])) as ArrayRef,
+                ],
+                &att_a_schema,
+            )
+            .unwrap(),
+        );
+        let att_a_store = Arc::new(TopicStore::from_chunks(att_a_schema, [att_a_chunk]).unwrap());
+
+        let status_schema = Arc::new(
+            TopicSchema::new(
+                "STATUS",
+                [
+                    FieldSchema::new("armed", DataType::Boolean, None::<String>, 1.0)
+                        .unwrap()
+                        .with_description("arming state"),
+                    FieldSchema::new("mode", DataType::Utf8, None::<String>, 1.0)
+                        .unwrap()
+                        .with_description("flight mode"),
+                    FieldSchema::new("message", DataType::LargeUtf8, None::<String>, 1.0)
+                        .unwrap()
+                        .with_description("status message"),
+                    FieldSchema::new("ignored", DataType::Int64, None::<String>, 1.0).unwrap(),
+                ],
+            )
+            .unwrap(),
+        );
+        let status_chunk = Arc::new(
+            Chunk::try_new(
+                Int64Array::from(vec![1_200, 3_200]),
+                vec![
+                    Arc::new(BooleanArray::from(vec![Some(true), None])) as ArrayRef,
+                    Arc::new(StringArray::from(vec![Some("AUTO"), None])) as ArrayRef,
+                    Arc::new(LargeStringArray::from(vec![None, Some("ready")])) as ArrayRef,
+                    Arc::new(Int64Array::from(vec![99, 100])) as ArrayRef,
+                ],
+                &status_schema,
+            )
+            .unwrap(),
+        );
+        let status_store =
+            Arc::new(TopicStore::from_chunks(status_schema, [status_chunk]).unwrap());
+
+        let att_b_schema = Arc::new(
+            TopicSchema::new(
+                "ATT",
+                [
+                    FieldSchema::new("Roll", DataType::Float32, Some("rad"), 1.0)
+                        .unwrap()
+                        .with_description("secondary roll"),
+                    FieldSchema::new("Yaw", DataType::Float64, Some("rad"), 1.0).unwrap(),
+                ],
+            )
+            .unwrap(),
+        );
+        let att_b_chunk = Arc::new(
+            Chunk::try_new(
+                Int64Array::from(vec![1_500, 2_500, 3_500]),
+                vec![
+                    Arc::new(Float32Array::from(vec![Some(-2.0), Some(-1.0), Some(0.0)]))
+                        as ArrayRef,
+                    Arc::new(Float64Array::from(vec![0.5, 0.75, 1.0])) as ArrayRef,
+                ],
+                &att_b_schema,
+            )
+            .unwrap(),
+        );
+        let att_b_store = Arc::new(TopicStore::from_chunks(att_b_schema, [att_b_chunk]).unwrap());
+
+        let snapshot = StoreSnapshot::from_registry(
+            &identity,
+            [
+                (att_a, att_a_store),
+                (status, status_store),
+                (att_b, att_b_store),
+            ],
+            1,
+        )
+        .unwrap();
+        let model = BrowserModel::from_snapshot(&snapshot);
+        let fields = available_fields(&snapshot, &model)
+            .into_iter()
+            .filter(|field| {
+                matches!(
+                    (
+                        field.source.as_str(),
+                        field.topic.as_str(),
+                        field.name.as_str()
+                    ),
+                    ("flight-a", "ATT", "Roll" | "Seq")
+                        | ("flight-a", "STATUS", "armed" | "mode" | "message")
+                        | ("flight-b", "ATT", "Roll")
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(fields.len(), 6);
+        (snapshot, fields)
+    }
+
+    fn load_structured_export(
+        window: (i64, i64),
+        file_stem: &str,
+    ) -> (Arc<StoreSnapshot>, usize, u64) {
+        let (source_snapshot, fields) = structured_export_fixture();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(format!("{file_stem}.parquet"));
+        let exported_rows = write_export_file(
+            &path,
+            ExportFormat::Parquet,
+            &source_snapshot,
+            &fields,
+            window,
+            ResampleMode::None,
+            window.0,
+        )
+        .unwrap();
+        let provider = Arc::new(NeverSelectionProvider::default());
+        let mut session = Session::new(egui::Context::default(), provider.clone());
+        session.open_path(path);
+        session.join_workers();
+        session.wait_until(|session| {
+            let loads = session.loads.lock().unwrap();
+            loads.len() == 1 && loads.values().all(|state| state.done)
+        });
+        (
+            session.snapshot(),
+            provider.calls.load(Ordering::SeqCst),
+            exported_rows,
+        )
+    }
+
+    pub(crate) fn structured_round_trip_snapshot() -> Arc<StoreSnapshot> {
+        let (snapshot, provider_calls, exported_rows) =
+            load_structured_export((1_100, 3_300), "structured-metadata");
+        assert_eq!(provider_calls, 0);
+        assert_eq!(exported_rows, 7);
+        snapshot
+    }
+
+    fn store_for<'a>(snapshot: &'a StoreSnapshot, topic_name: &str) -> &'a TopicStore {
+        snapshot
+            .topics
+            .iter()
+            .find(|topic| topic.entry.name == topic_name)
+            .and_then(|topic| topic.store.as_deref())
+            .unwrap_or_else(|| panic!("missing topic store {topic_name}"))
+    }
+
+    fn topic_times(store: &TopicStore) -> Vec<i64> {
+        store
+            .chunks
+            .iter()
+            .flat_map(|chunk| chunk.t.values().iter().copied())
+            .collect()
+    }
+
+    fn float32_values(store: &TopicStore, field_name: &str) -> Vec<Option<f32>> {
+        let field_index = store.schema.field_index(field_name).unwrap();
+        store
+            .chunks
+            .iter()
+            .flat_map(|chunk| {
+                chunk.cols[field_index]
+                    .as_any()
+                    .downcast_ref::<Float32Array>()
+                    .unwrap()
+                    .iter()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn structured_parquet_round_trip_preserves_topics_and_fields() {
+        let (snapshot, provider_calls, exported_rows) =
+            load_structured_export((1_100, 3_300), "structured-round-trip");
+
+        assert_eq!(provider_calls, 0);
+        assert_eq!(exported_rows, 7);
+        assert_eq!(
+            snapshot
+                .topics
+                .iter()
+                .filter(|topic| topic.store.is_some())
+                .count(),
+            3
+        );
+
+        let att_a = store_for(&snapshot, "ATT[0]");
+        let att_b = store_for(&snapshot, "ATT[1]");
+        let status = store_for(&snapshot, "STATUS");
+        assert_eq!(att_a.rows, 2);
+        assert_eq!(att_b.rows, 3);
+        assert_eq!(status.rows, 2);
+        assert_eq!(topic_times(att_a), [1_100, 2_100]);
+        assert_eq!(topic_times(att_b), [1_300, 2_300, 3_300]);
+        assert_eq!(topic_times(status), [1_300, 3_300]);
+
+        assert_eq!(
+            att_a.schema.provenance().unwrap().original_source(),
+            "flight-a"
+        );
+        assert_eq!(att_a.schema.provenance().unwrap().original_topic(), "ATT");
+        assert_eq!(
+            att_b.schema.provenance().unwrap().original_source(),
+            "flight-b"
+        );
+        assert_eq!(
+            status.schema.provenance().unwrap().original_source(),
+            "flight-a"
+        );
+        assert_eq!(
+            status.schema.provenance().unwrap().original_topic(),
+            "STATUS"
+        );
+
+        let roll = att_a.schema.field_by_name("Roll").unwrap();
+        assert_eq!(roll.dtype, DataType::Float32);
+        assert_eq!(roll.unit.as_deref(), Some("deg"));
+        assert_eq!(roll.multiplier, 0.01);
+        assert_eq!(roll.description.as_deref(), Some("roll angle"));
+        assert_eq!(float32_values(att_a, "Roll"), [Some(1.25), None]);
+        assert_eq!(
+            att_a.schema.field_by_name("Seq").unwrap().dtype,
+            DataType::UInt16
+        );
+        assert!(att_a.schema.field_by_name("Pitch").is_none());
+        assert!(att_b.schema.field_by_name("Yaw").is_none());
+
+        assert_eq!(
+            status.schema.field_by_name("armed").unwrap().dtype,
+            DataType::Boolean
+        );
+        assert_eq!(
+            status.schema.field_by_name("mode").unwrap().dtype,
+            DataType::Utf8
+        );
+        assert_eq!(
+            status.schema.field_by_name("message").unwrap().dtype,
+            DataType::LargeUtf8
+        );
+        assert_eq!(
+            status
+                .schema
+                .field_by_name("message")
+                .unwrap()
+                .description
+                .as_deref(),
+            Some("status message")
+        );
+        assert!(status.schema.field_by_name("ignored").is_none());
+
+        let armed = status.chunks[0].cols[0]
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .unwrap();
+        let mode = status.chunks[0].cols[1]
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let message = status.chunks[0].cols[2]
+            .as_any()
+            .downcast_ref::<LargeStringArray>()
+            .unwrap();
+        assert_eq!(armed.iter().collect::<Vec<_>>(), [Some(true), None]);
+        assert_eq!(mode.iter().collect::<Vec<_>>(), [Some("AUTO"), None]);
+        assert_eq!(message.iter().collect::<Vec<_>>(), [None, Some("ready")]);
+    }
+
+    #[test]
+    fn structured_parquet_empty_window_opens_without_topics_or_picker() {
+        let (snapshot, provider_calls, exported_rows) =
+            load_structured_export((9_000, 10_000), "structured-empty-window");
+
+        assert_eq!(provider_calls, 0);
+        assert_eq!(exported_rows, 0);
+        assert!(
+            snapshot.topics.is_empty(),
+            "manifest-only topics must not be registered without rows"
+        );
     }
 
     #[test]
