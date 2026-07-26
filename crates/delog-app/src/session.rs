@@ -804,13 +804,29 @@ mod tests {
         session.join_workers();
         session.wait_until(|session| {
             let snapshot = session.snapshot();
-            snapshot
+            let Some(source) = snapshot
+                .sources
+                .iter()
+                .find(|source| source.entry.label == source_label(next_path.as_path()))
+            else {
+                return false;
+            };
+            session
+                .loads
+                .lock()
+                .unwrap()
+                .get(&source.entry.id)
+                .is_some_and(|state| state.done)
+        });
+        let next_snapshot = session.snapshot();
+        assert!(
+            next_snapshot
                 .topics
                 .iter()
                 .find(|topic| topic.entry.name == "TEST")
-                .and_then(|topic| snapshot.topic_store(topic.entry.id))
+                .and_then(|topic| next_snapshot.topic_store(topic.entry.id))
                 .is_some_and(|store| store.rows == 2)
-        });
+        );
 
         let invalid_load = session.loads.lock().unwrap()[&invalid_source];
         assert!(invalid_load.done);
