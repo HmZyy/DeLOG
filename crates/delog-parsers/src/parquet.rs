@@ -117,7 +117,7 @@ fn float_to_us(
         TimestampUnit::Nanoseconds => 0.001,
     };
     let scaled = value * scale;
-    if !scaled.is_finite() || scaled < i64::MIN as f64 || scaled > i64::MAX as f64 {
+    if !scaled.is_finite() || scaled < i64::MIN as f64 || scaled >= i64::MAX as f64 {
         return Err(TimestampConversionError::OutOfRange { row });
     }
     if scaled.fract() != 0.0 {
@@ -541,6 +541,17 @@ mod tests {
         assert!(matches!(
             convert_timestamps(
                 &UInt64Array::from(vec![u64::MAX]),
+                TimestampUnit::Microseconds
+            ),
+            Err(TimestampConversionError::OutOfRange { row: 0 })
+        ));
+    }
+
+    #[test]
+    fn float_timestamp_at_positive_i64_boundary_is_out_of_range() {
+        assert!(matches!(
+            convert_timestamps(
+                &Float64Array::from(vec![i64::MAX as f64]),
                 TimestampUnit::Microseconds
             ),
             Err(TimestampConversionError::OutOfRange { row: 0 })
