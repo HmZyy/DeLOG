@@ -16,7 +16,8 @@ use delog_core::metrics::MetricsRegistry;
 use delog_core::parse_ctl::{CancelToken, ParseCtl};
 use delog_core::snapshot::{DataStore, StoreSnapshot};
 use delog_parsers::{
-    ArduPilotParser, Detection, ParseError, ParserRegistry, TlogParser, ULogParser, SNIFF_HEAD_LEN,
+    ArduPilotParser, Detection, ParquetParser, ParseError, ParserRegistry, SNIFF_HEAD_LEN,
+    TimestampSelectionProvider, TlogParser, ULogParser,
 };
 
 #[cfg(feature = "scripting")]
@@ -112,7 +113,7 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(ctx: egui::Context) -> Self {
+    pub fn new(ctx: egui::Context, parquet_selection: Arc<dyn TimestampSelectionProvider>) -> Self {
         let loads: Loads = Arc::default();
         let diagnostics = Arc::new(DiagnosticHub::new());
         #[cfg(feature = "scripting")]
@@ -143,6 +144,7 @@ impl Session {
         registry.register(Arc::new(ArduPilotParser));
         registry.register(Arc::new(ULogParser));
         registry.register(Arc::new(TlogParser));
+        registry.register(Arc::new(ParquetParser::new(parquet_selection)));
 
         Self {
             store,
@@ -499,9 +501,40 @@ fn source_label(path: &Path) -> String {
 mod tests {
     use std::io::Write;
 
-    use delog_parsers::{LogParser, ParseError, ReadSeek, Sniff};
+    use arrow::array::{ArrayRef, Float32Array, Int64Array};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use delog_parsers::{
+        LogParser, ParseError, ReadSeek, Sniff, TimestampSelection, TimestampSelectionError,
+        TimestampSelectionProvider, TimestampSelectionRequest, TimestampUnit,
+    };
+    use parquet::arrow::ArrowWriter;
 
     use super::*;
+
+    struct FixedSelectionProvider {
+        response: Result<TimestampSelection, TimestampSelectionError>,
+    }
+
+    impl TimestampSelectionProvider for FixedSelectionProvider {
+        fn select(
+            &self,
+            _request: TimestampSelectionRequest,
+            _ctl: &ParseCtl,
+        ) -> Result<TimestampSelection, TimestampSelectionError> {
+            self.response
+        }
+    }
+
+    fn fixed_selection_provider(
+        response: Result<TimestampSelection, TimestampSelectionError>,
+    ) -> Arc<dyn TimestampSelectionProvider> {
+        Arc::new(FixedSelectionProvider { response })
+    }
+
+    fn cancelling_selection_provider() -> Arc<dyn TimestampSelectionProvider> {
+        fixed_selection_provider(Err(TimestampSelectionError::Cancelled))
+    }
 
     #[cfg(feature = "scripting")]
     #[test]
@@ -572,12 +605,38 @@ mod tests {
         p
     }
 
+    fn temp_parquet_path(name: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!("delog-session-test-{name}.parquet"));
+        path
+    }
+
+    fn write_generic_parquet(path: &Path) {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("time_ms", DataType::Int64, false),
+            Field::new("value", DataType::Float32, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2])) as ArrayRef,
+                Arc::new(Float32Array::from(vec![1.5, 2.5])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let file = File::create(path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+
     #[test]
     fn open_path_loads_a_bin_into_the_store() {
         let path = temp_path("load");
         File::create(&path).unwrap().write_all(&tiny_bin()).unwrap();
 
-        let mut session = Session::new(egui::Context::default());
+        let mut session =
+            Session::new(egui::Context::default(), cancelling_selection_provider());
         session.open_path(path.clone());
         session.join_workers();
         session.wait_until(|s| {
@@ -596,6 +655,67 @@ mod tests {
     }
 
     #[test]
+    fn open_path_loads_a_generic_parquet_into_the_store() {
+        let path = temp_parquet_path("generic-load");
+        write_generic_parquet(&path);
+        let provider = fixed_selection_provider(Ok(TimestampSelection {
+            column_index: 0,
+            unit: TimestampUnit::Milliseconds,
+        }));
+
+        let mut session = Session::new(egui::Context::default(), provider);
+        session.open_path(path.clone());
+        session.join_workers();
+        session.wait_until(|session| {
+            session
+                .snapshot()
+                .topics
+                .iter()
+                .filter_map(|topic| topic.store.as_ref())
+                .any(|store| store.rows == 2)
+        });
+
+        let snapshot = session.snapshot();
+        let store = snapshot
+            .topics
+            .iter()
+            .find_map(|topic| topic.store.as_ref())
+            .expect("generic Parquet creates a topic store");
+        assert_eq!(store.rows, 2);
+        assert_eq!(store.schema.name(), source_label(path.as_path()));
+        assert_eq!(store.chunks[0].t.values(), &[1_000, 2_000]);
+        assert_eq!(store.schema.fields()[0].dtype, DataType::Float32);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn cancelled_parquet_selection_tombstones_the_provisional_source() {
+        let path = temp_parquet_path("cancelled");
+        write_generic_parquet(&path);
+
+        let mut session =
+            Session::new(egui::Context::default(), cancelling_selection_provider());
+        session.open_path(path.clone());
+        session.join_workers();
+        session.wait_until(|session| {
+            session.snapshot().sources.iter().any(|source| {
+                source.entry.label == source_label(path.as_path()) && source.entry.removed
+            })
+        });
+
+        let snapshot = session.snapshot();
+        let source = snapshot
+            .sources
+            .iter()
+            .find(|source| source.entry.label == source_label(path.as_path()))
+            .expect("Parquet parser opens a provisional source");
+        assert!(source.entry.removed);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn unknown_format_reports_a_diagnostic_and_no_topics() {
         let path = temp_path("garbage");
         File::create(&path)
@@ -603,7 +723,8 @@ mod tests {
             .write_all(b"this is not a flight log")
             .unwrap();
 
-        let mut session = Session::new(egui::Context::default());
+        let mut session =
+            Session::new(egui::Context::default(), cancelling_selection_provider());
         session.open_path(path.clone());
         session.join_workers();
         session.wait_until(|s| {
@@ -646,7 +767,7 @@ mod tests {
         let path = temp_path("setup-failure");
         File::create(&path).unwrap().write_all(b"setup").unwrap();
 
-        let session = Session::new(egui::Context::default());
+        let session = Session::new(egui::Context::default(), cancelling_selection_provider());
         let mut registry = ParserRegistry::new();
         registry.register(Arc::new(StubSetupParser));
         run_parse(
