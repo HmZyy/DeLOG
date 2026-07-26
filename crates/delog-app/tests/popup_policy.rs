@@ -34,6 +34,24 @@ fn parquet_import_uses_an_in_app_non_collapsible_window_and_picker_filter() {
     assert!(!PARQUET_IMPORT_SOURCE.contains("rfd::MessageDialog"));
 }
 
+#[test]
+fn structured_parquet_reuses_existing_metadata_window_without_a_native_dialog() {
+    let metadata_window = between(
+        APP_SOURCE,
+        "fn show_field_metadata_window(",
+        "fn show_source_metadata_window(",
+    );
+
+    assert!(metadata_window.contains("ui.strong(\"Original source\")"));
+    assert!(metadata_window.contains("ui.strong(\"Original topic\")"));
+    assert_eq!(
+        PARQUET_IMPORT_SOURCE.matches("egui::Window::new(").count(),
+        1,
+        "the timestamp picker is the only Parquet import dialog"
+    );
+    assert_eq!(APP_SOURCE.matches("self.parquet_import.show(").count(), 1);
+}
+
 fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
     let start = source.find(start).expect("start marker should exist");
     let rest = &source[start..];
