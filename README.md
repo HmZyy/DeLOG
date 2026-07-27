@@ -42,7 +42,9 @@ it in Python - both file parsers and analysis scripts - without recompiling.
   round-trip through identical decoding code, so what you see live is what you replay.
 - **Structured Parquet preserves native topics.** DéLOG exports retain each topic's own
   timestamps and supported integer, floating-point, boolean, and UTF-8 fields, then
-  reopen automatically without a timestamp prompt.
+  reopen automatically without a timestamp prompt. Columns are named `TOPIC.field` and
+  carry unit, description, and multiplier metadata, so pandas or DuckDB read the file
+  without decoding the DéLOG manifest.
 - **Export sampling is format-aware.** Parquet writes each selected topic's native
   samples, while CSV retains uniform resampling.
 - **Extend it in Python, no rebuild.** Custom parsers and analysis scripts are plain `.py`
