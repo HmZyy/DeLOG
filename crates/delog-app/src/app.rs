@@ -4630,21 +4630,55 @@ mod tests {
         assert_eq!(secondary.range, TimeRange::new(1_300, 3_300));
     }
 
-    #[test]
-    fn field_metadata_window_renders_provenance_rows_only_when_available() {
-        let source = include_str!("app.rs");
-        let field_metadata_window = source
-            .split("fn show_field_metadata_window")
-            .nth(1)
-            .expect("field metadata window should exist")
-            .split("fn show_source_metadata_window")
-            .next()
-            .expect("field metadata window should precede source metadata window");
+    fn shape_contains_text(shape: &egui::epaint::Shape, expected: &str) -> bool {
+        match shape {
+            egui::epaint::Shape::Text(text) => text.galley.job.text == expected,
+            egui::epaint::Shape::Vec(shapes) => shapes
+                .iter()
+                .any(|shape| shape_contains_text(shape, expected)),
+            _ => false,
+        }
+    }
 
-        assert!(field_metadata_window.contains("if let Some(original_source)"));
-        assert!(field_metadata_window.contains("if let Some(original_topic)"));
-        assert!(field_metadata_window.contains("ui.strong(\"Original source\")"));
-        assert!(field_metadata_window.contains("ui.strong(\"Original topic\")"));
+    #[test]
+    fn imported_provenance_is_rendered_in_the_existing_field_metadata_window() {
+        let snapshot = crate::session::tests::structured_round_trip_snapshot();
+        let topic = snapshot
+            .topics
+            .iter()
+            .find(|topic| topic.entry.name == "ATT[0]")
+            .unwrap();
+        let roll = snapshot
+            .fields
+            .iter()
+            .find(|field| field.topic == topic.entry.id && field.name == "Roll")
+            .unwrap();
+        let mut selected = Some(roll.id);
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1_200.0, 800.0),
+            )),
+            ..Default::default()
+        };
+
+        let _ = ctx.run_ui(input.clone(), |ui| {
+            show_field_metadata_window(ui.ctx(), &snapshot, &mut selected);
+        });
+        let output = ctx.run_ui(input, |ui| {
+            show_field_metadata_window(ui.ctx(), &snapshot, &mut selected);
+        });
+
+        for expected in ["Original source", "flight-a", "Original topic", "ATT"] {
+            assert!(
+                output
+                    .shapes
+                    .iter()
+                    .any(|clipped| shape_contains_text(&clipped.shape, expected)),
+                "field metadata window should render {expected:?}"
+            );
+        }
     }
 
     #[test]
