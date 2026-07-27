@@ -160,6 +160,12 @@ pub fn write_structured_parquet<W: Write + Send>(
             .store
             .as_deref()
             .ok_or_else(|| invalid_field(first, "topic store is unavailable"))?;
+        if !store.is_monotonic() {
+            return Err(invalid_field(
+                first,
+                "topic timestamps are non-monotonic across chunks",
+            ));
+        }
 
         let timestamp_column = u32::try_from(physical_fields.len())
             .map_err(|_| invalid_field(first, "too many physical columns"))?;
@@ -428,6 +434,51 @@ mod tests {
             unit: Some("m".into()),
             multiplier: 2.5,
             description: Some("native value".into()),
+        };
+        (snapshot, field)
+    }
+
+    fn nonmonotonic_topic_snapshot() -> (StoreSnapshot, ExportField) {
+        let mut registry = IdentityRegistry::new();
+        let source = registry.add_source("flight");
+        let topic = registry.add_topic(source, "ATT").unwrap();
+        let field_id = registry.add_field(topic, "value").unwrap();
+        let schema = Arc::new(
+            TopicSchema::new(
+                "ATT",
+                [FieldSchema::new("value", DataType::Float32, None::<String>, 1.0).unwrap()],
+            )
+            .unwrap(),
+        );
+        let chunks = [
+            (vec![100, 200], vec![1.0, 2.0]),
+            (vec![50, 300], vec![3.0, 4.0]),
+        ]
+        .map(|(timestamps, values)| {
+            Arc::new(
+                Chunk::try_new(
+                    Int64Array::from(timestamps),
+                    vec![Arc::new(Float32Array::from(values))],
+                    &schema,
+                )
+                .unwrap(),
+            )
+        });
+        let store = Arc::new(TopicStore::from_chunks(schema, chunks).unwrap());
+        assert!(!store.is_monotonic());
+        let snapshot = StoreSnapshot::from_registry(&registry, [(topic, store)], 1).unwrap();
+        let field = ExportField {
+            id: field_id,
+            source_id: source,
+            topic_id: topic,
+            source: "flight".into(),
+            topic: "ATT".into(),
+            name: "value".into(),
+            label: "flight / ATT.value".into(),
+            dtype: DataType::Float32,
+            unit: None,
+            multiplier: 1.0,
+            description: None,
         };
         (snapshot, field)
     }
@@ -1075,6 +1126,29 @@ mod tests {
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn rejects_cross_chunk_timestamp_regression_before_writing_bytes() {
+        let (snapshot, field) = nonmonotonic_topic_snapshot();
+        let writes = Arc::new(AtomicUsize::new(0));
+
+        let error = write_structured_parquet(
+            CountingWriter {
+                writes: Arc::clone(&writes),
+            },
+            &snapshot,
+            &[field],
+            (0, 300),
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("topic timestamps are non-monotonic across chunks")
+        );
+        assert_eq!(writes.load(Ordering::Relaxed), 0);
     }
 
     #[test]
