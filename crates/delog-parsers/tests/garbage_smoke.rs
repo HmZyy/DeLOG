@@ -227,7 +227,7 @@ fn malformed_marked_parquet_never_falls_back_to_generic_selection() {
 }
 
 #[test]
-fn marked_parquet_rejects_non_null_data_in_padding_rows_without_fallback() {
+fn marked_parquet_tolerates_stray_data_in_padding_rows_without_fallback() {
     let manifest = r#"{"version":1,"topics":[{"id":0,"original_source":"flight","original_topic":"ATT","timestamp_column":0,"fields":[{"column":1,"name":"Roll","unit":null,"multiplier":1.0,"description":null}]}]}"#;
     let bytes = marked_parquet(
         Some("1"),
@@ -236,5 +236,16 @@ fn marked_parquet_rejects_non_null_data_in_padding_rows_without_fallback() {
         vec![Some(2.0), Some(3.0)],
     );
 
-    assert_marked_setup_failure(bytes, "non-null padding");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let parser = ParquetParser::new(Arc::new(PanicSelection {
+        calls: Arc::clone(&calls),
+    }));
+    let ctl = ParseCtl::new(CancelToken::new(), SourceId(0), bytes.len() as u64)
+        .with_label("non-null padding.parquet");
+    let mut sink = NullSink;
+
+    let result = parser.parse(Box::new(Cursor::new(bytes)), &mut sink, &ctl);
+
+    assert!(result.is_ok(), "expected lenient parse, got {result:?}");
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
 }
