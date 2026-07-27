@@ -10,8 +10,7 @@ use delog_parquet_format::{ValidatedManifest, ValidatedTopic, resolved_topic_nam
 use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ParquetRecordBatchReaderBuilder};
 
 use super::{
-    PARQUET_BATCH_ROWS, SeekChunkReader, cancellation_error, parse_arrow_error, parse_data_error,
-    validate_nondecreasing,
+    PARQUET_BATCH_ROWS, SeekChunkReader, cancellation_error, parse_arrow_error,
 };
 use crate::parser::ParseError;
 
@@ -19,7 +18,6 @@ struct TopicState {
     schema: Arc<TopicSchema>,
     timestamp_column: usize,
     value_columns: Vec<usize>,
-    last_timestamp: Option<i64>,
     emitted_rows: u64,
     emitted_any: bool,
 }
@@ -63,8 +61,6 @@ pub(super) fn parse(
                         .as_any()
                         .downcast_ref::<Int64Array>()
                         .expect("validated manifest guarantees nullable Int64 timestamps");
-                    validate_padding(&batch, timestamps, topic)
-                        .map_err(|detail| parse_data_error(detail, emitted_any))?;
                     let keep = BooleanArray::from_iter(
                         (0..timestamps.len()).map(|row| timestamps.is_valid(row)),
                     );
@@ -79,13 +75,6 @@ pub(super) fn parse(
                         continue;
                     }
 
-                    validate_nondecreasing(&filtered_timestamps, &mut topic.last_timestamp)
-                        .map_err(|detail| {
-                            parse_data_error(
-                                format!("topic `{}` {detail}", topic.schema.name()),
-                                emitted_any,
-                            )
-                        })?;
                     let columns = topic
                         .value_columns
                         .iter()
@@ -95,8 +84,8 @@ pub(super) fn parse(
 
                     let first = filtered_timestamps.value(0);
                     let last = filtered_timestamps.value(filtered_timestamps.len() - 1);
-                    let batch_range =
-                        TimeRange::new(first, last).expect("timestamps were validated");
+                    let batch_range = TimeRange::new(first.min(last), first.max(last))
+                        .expect("min <= max by construction");
                     time_range = Some(match time_range {
                         Some(range) => range.union(batch_range),
                         None => batch_range,
@@ -202,29 +191,7 @@ fn topic_state(
         schema: Arc::new(schema),
         timestamp_column: topic.timestamp_column,
         value_columns: topic.fields.iter().map(|field| field.column).collect(),
-        last_timestamp: None,
         emitted_rows: 0,
         emitted_any: false,
     })
-}
-
-fn validate_padding(
-    batch: &arrow::record_batch::RecordBatch,
-    timestamps: &Int64Array,
-    topic: &TopicState,
-) -> Result<(), String> {
-    for row in 0..timestamps.len() {
-        if timestamps.is_null(row)
-            && topic
-                .value_columns
-                .iter()
-                .any(|&column| batch.column(column).is_valid(row))
-        {
-            return Err(format!(
-                "topic `{}` has non-null data in padding row {row}",
-                topic.schema.name()
-            ));
-        }
-    }
-    Ok(())
 }

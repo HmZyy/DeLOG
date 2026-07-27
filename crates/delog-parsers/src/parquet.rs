@@ -1093,26 +1093,22 @@ mod tests {
     }
 
     #[test]
-    fn structured_padding_rejects_non_null_topic_data() {
+    fn structured_padding_row_data_is_dropped_without_validation() {
         let schema = single_float_topic_schema("flight-a", "ATT");
         let batch = single_float_topic_batch(Arc::clone(&schema), vec![None], vec![Some(1.0)]);
         let provider = Arc::new(FixedProvider::panic_if_called());
 
         let (result, sink) = drive_parquet(parquet_bytes(schema, &[batch]), provider);
 
-        assert!(matches!(result, Err(ParseError::Setup { .. })));
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("non-null data in padding row 0")
-        );
+        result.expect("lenient parse succeeds");
         assert!(sink.batches.is_empty());
-        assert!(sink.closed.is_none());
+        let summary = sink.closed.unwrap();
+        assert_eq!(summary.topic_count, 0);
+        assert_eq!(summary.row_count, 0);
     }
 
     #[test]
-    fn structured_regression_is_tracked_per_topic_across_batches() {
+    fn structured_non_monotonic_across_batches_is_accepted_without_validation() {
         let manifest = Manifest {
             version: FORMAT_VERSION,
             topics: vec![
@@ -1176,18 +1172,16 @@ mod tests {
             Arc::new(FixedProvider::panic_if_called()),
         );
 
-        assert!(matches!(result, Err(ParseError::Framing { .. })));
-        let error = result.unwrap_err().to_string();
-        assert!(error.contains("topic `A`"));
-        assert!(error.contains("previous timestamp 10"));
-        assert!(error.contains("current timestamp 9"));
-        assert_eq!(sink.batches.len(), 2);
-        assert_eq!(sink.closed.as_ref().unwrap().topic_count, 2);
-        assert_eq!(sink.closed.as_ref().unwrap().row_count, 2);
+        result.expect("lenient parse succeeds");
+        assert_eq!(sink.batches.len(), 4);
+        let summary = sink.closed.unwrap();
+        assert_eq!(summary.topic_count, 2);
+        assert_eq!(summary.row_count, 4);
+        assert_eq!(summary.time_range, TimeRange::new(9, 101));
     }
 
     #[test]
-    fn structured_regression_within_batch_identifies_the_bad_topic() {
+    fn structured_non_monotonic_within_batch_is_accepted_without_validation() {
         let (schema, _) = structured_fixture();
         let batch = RecordBatch::try_new(
             Arc::clone(&schema),
@@ -1206,13 +1200,12 @@ mod tests {
             Arc::new(FixedProvider::panic_if_called()),
         );
 
-        assert!(matches!(result, Err(ParseError::Setup { .. })));
-        let error = result.unwrap_err().to_string();
-        assert!(error.contains("topic `ATT`"));
-        assert!(error.contains("previous timestamp 10"));
-        assert!(error.contains("current timestamp 9"));
-        assert!(sink.batches.is_empty());
-        assert!(sink.closed.is_none());
+        result.expect("lenient parse succeeds");
+        assert_eq!(sink.batches.len(), 2);
+        let summary = sink.closed.unwrap();
+        assert_eq!(summary.topic_count, 2);
+        assert_eq!(summary.row_count, 4);
+        assert_eq!(summary.time_range, TimeRange::new(5, 15));
     }
 
     #[test]
@@ -1482,7 +1475,7 @@ mod tests {
     }
 
     #[test]
-    fn structured_error_closes_accurate_multi_topic_partial_summary() {
+    fn structured_multi_topic_partial_batch_closes_accurate_summary() {
         let (schema, _) = structured_fixture();
         let first = RecordBatch::try_new(
             Arc::clone(&schema),
@@ -1495,7 +1488,7 @@ mod tests {
             ],
         )
         .unwrap();
-        let invalid_second = RecordBatch::try_new(
+        let second = RecordBatch::try_new(
             Arc::clone(&schema),
             vec![
                 Arc::new(Int64Array::from(vec![Some(20)])),
@@ -1508,11 +1501,11 @@ mod tests {
         .unwrap();
 
         let (result, sink) = drive_parquet(
-            parquet_bytes(schema, &[first, invalid_second]),
+            parquet_bytes(schema, &[first, second]),
             Arc::new(FixedProvider::panic_if_called()),
         );
 
-        assert!(matches!(result, Err(ParseError::Framing { .. })));
+        result.expect("lenient parse succeeds");
         assert_eq!(sink.batches.len(), 3);
         let summary = sink.closed.unwrap();
         assert_eq!(summary.topic_count, 2);
