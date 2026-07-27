@@ -10,6 +10,12 @@ pub const MANIFEST_KEY: &str = "delog.manifest";
 pub const FORMAT_NAME: &str = "multi-topic";
 pub const FORMAT_VERSION: u32 = 1;
 
+/// Per-column Arrow metadata. The manifest stays authoritative; these keys
+/// repeat the same facts so tools that ignore the manifest still read units.
+pub const FIELD_UNIT_KEY: &str = "unit";
+pub const FIELD_DESCRIPTION_KEY: &str = "description";
+pub const FIELD_MULTIPLIER_KEY: &str = "multiplier";
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
     pub version: u32,
@@ -135,9 +141,19 @@ pub fn decode_schema(schema: &Schema) -> Result<Option<ValidatedManifest>, Forma
 }
 
 pub fn resolved_topic_names(manifest: &ValidatedManifest) -> Vec<String> {
+    resolve_topic_instances(
+        manifest
+            .topics
+            .iter()
+            .map(|topic| topic.original_topic.as_str()),
+    )
+}
+
+pub fn resolve_topic_instances<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let names = names.into_iter().collect::<Vec<_>>();
     let mut counts = HashMap::<&str, usize>::new();
-    for topic in &manifest.topics {
-        *counts.entry(&topic.original_topic).or_default() += 1;
+    for name in &names {
+        *counts.entry(name).or_default() += 1;
     }
 
     let mut reserved = counts
@@ -146,16 +162,15 @@ pub fn resolved_topic_names(manifest: &ValidatedManifest) -> Vec<String> {
         .map(|(name, _)| (*name).to_owned())
         .collect::<HashSet<_>>();
     let mut occurrences = HashMap::<&str, usize>::new();
-    manifest
-        .topics
+    names
         .iter()
-        .map(|topic| {
-            if counts[topic.original_topic.as_str()] == 1 {
-                topic.original_topic.clone()
+        .map(|name| {
+            if counts[*name] == 1 {
+                (*name).to_owned()
             } else {
-                let occurrence = occurrences.entry(&topic.original_topic).or_default();
+                let occurrence = occurrences.entry(name).or_default();
                 loop {
-                    let resolved = format!("{}[{occurrence}]", topic.original_topic);
+                    let resolved = format!("{name}[{occurrence}]");
                     *occurrence += 1;
                     if reserved.insert(resolved.clone()) {
                         break resolved;
@@ -531,6 +546,14 @@ mod tests {
         assert_eq!(
             resolved_topic_names(&repeated),
             ["ATT[0]", "ATT[1]", "GPS", "ATT[2]"]
+        );
+    }
+
+    #[test]
+    fn topic_instances_resolve_from_unvalidated_names() {
+        assert_eq!(
+            resolve_topic_instances(["ATT", "ATT", "GPS"]),
+            ["ATT[0]", "ATT[1]", "GPS"]
         );
     }
 

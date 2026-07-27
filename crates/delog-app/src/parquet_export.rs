@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::Arc;
 
@@ -10,7 +10,10 @@ use delog_core::identity::TopicId;
 use delog_core::snapshot::StoreSnapshot;
 use delog_core::store::TopicStore;
 use delog_core::time::TimeRange;
-use delog_parquet_format::{FORMAT_VERSION, FieldManifest, Manifest, TopicManifest, encode_schema};
+use delog_parquet_format::{
+    FIELD_DESCRIPTION_KEY, FIELD_MULTIPLIER_KEY, FIELD_UNIT_KEY, FORMAT_VERSION, FieldManifest,
+    Manifest, TopicManifest, encode_schema, resolve_topic_instances,
+};
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
@@ -34,6 +37,17 @@ struct TopicStripe {
     timestamps: Int64Array,
     columns: Vec<ArrayRef>,
 }
+
+/// A physical column whose final name waits on the instance-qualified topic
+/// labels, which are only known once every topic has been collected.
+struct PlannedColumn {
+    topic_ix: usize,
+    leaf: String,
+    dtype: DataType,
+    metadata: HashMap<String, String>,
+}
+
+const TIMESTAMP_LEAF: &str = "t_us";
 
 impl TopicExportCursor<'_> {
     fn next_stripe(&mut self, max_rows: usize) -> Result<Option<TopicStripe>, DataExportError> {
@@ -140,7 +154,7 @@ pub fn write_structured_parquet<W: Write + Send>(
     })?;
     let groups = group_fields(fields);
     let mut cursors = Vec::with_capacity(groups.len());
-    let mut physical_fields = Vec::new();
+    let mut planned = Vec::<PlannedColumn>::new();
     let mut manifest_topics = Vec::with_capacity(groups.len());
 
     for (topic_ix, group) in groups.into_iter().enumerate() {
@@ -170,17 +184,18 @@ pub fn write_structured_parquet<W: Write + Send>(
             ));
         }
 
-        let timestamp_column = u32::try_from(physical_fields.len())
+        let timestamp_column = u32::try_from(planned.len())
             .map_err(|_| invalid_field(first, "too many physical columns"))?;
-        physical_fields.push(Field::new(
-            format!("__delog_t{topic_ix}_time"),
-            DataType::Int64,
-            true,
-        ));
+        planned.push(PlannedColumn {
+            topic_ix,
+            leaf: TIMESTAMP_LEAF.to_owned(),
+            dtype: DataType::Int64,
+            metadata: HashMap::new(),
+        });
 
         let mut selected_columns = Vec::with_capacity(group.len());
         let mut field_manifest = Vec::with_capacity(group.len());
-        for (field_ix, field) in group.into_iter().enumerate() {
+        for field in group {
             validate_field(snapshot, store, first, field)?;
             let column_ix = store
                 .schema
@@ -188,13 +203,14 @@ pub fn write_structured_parquet<W: Write + Send>(
                 .iter()
                 .position(|schema_field| schema_field.name == field.name)
                 .expect("validated field exists in schema");
-            let column = u32::try_from(physical_fields.len())
+            let column = u32::try_from(planned.len())
                 .map_err(|_| invalid_field(field, "too many physical columns"))?;
-            physical_fields.push(Field::new(
-                format!("__delog_t{topic_ix}_f{field_ix}"),
-                field.dtype.clone(),
-                true,
-            ));
+            planned.push(PlannedColumn {
+                topic_ix,
+                leaf: field.name.clone(),
+                dtype: field.dtype.clone(),
+                metadata: field_metadata(field),
+            });
             selected_columns.push(column_ix);
             field_manifest.push(FieldManifest {
                 column,
@@ -240,7 +256,7 @@ pub fn write_structured_parquet<W: Write + Send>(
         version: FORMAT_VERSION,
         topics: manifest_topics,
     };
-    let schema: SchemaRef = Arc::new(encode_schema(physical_fields, &manifest)?);
+    let schema: SchemaRef = Arc::new(encode_schema(named_columns(planned, &manifest), &manifest)?);
     let properties = WriterProperties::builder()
         .set_compression(Compression::ZSTD(Default::default()))
         .set_max_row_group_row_count(Some(EXPORT_BATCH_ROWS))
@@ -326,6 +342,57 @@ pub fn write_structured_parquet<W: Write + Send>(
     writer.sync()?;
     ctl.report_fraction(1.0);
     Ok(logical_rows)
+}
+
+fn field_metadata(field: &ExportField) -> HashMap<String, String> {
+    let mut metadata = HashMap::new();
+    if let Some(unit) = field.unit.as_deref().filter(|unit| !unit.is_empty()) {
+        metadata.insert(FIELD_UNIT_KEY.to_owned(), unit.to_owned());
+    }
+    if let Some(description) = field
+        .description
+        .as_deref()
+        .filter(|description| !description.is_empty())
+    {
+        metadata.insert(FIELD_DESCRIPTION_KEY.to_owned(), description.to_owned());
+    }
+    if field.multiplier != 1.0 {
+        metadata.insert(
+            FIELD_MULTIPLIER_KEY.to_owned(),
+            field.multiplier.to_string(),
+        );
+    }
+    metadata
+}
+
+fn named_columns(planned: Vec<PlannedColumn>, manifest: &Manifest) -> Vec<Field> {
+    let labels = resolve_topic_instances(
+        manifest
+            .topics
+            .iter()
+            .map(|topic| topic.original_topic.as_str()),
+    );
+    let mut used = HashSet::new();
+    planned
+        .into_iter()
+        .map(|column| {
+            let name = unique_name(
+                format!("{}.{}", labels[column.topic_ix], column.leaf),
+                &mut used,
+            );
+            Field::new(name, column.dtype, true).with_metadata(column.metadata)
+        })
+        .collect()
+}
+
+fn unique_name(base: String, used: &mut HashSet<String>) -> String {
+    if used.insert(base.clone()) {
+        return base;
+    }
+    (2_usize..)
+        .map(|suffix| format!("{base}_{suffix}"))
+        .find(|candidate| used.insert(candidate.clone()))
+        .expect("an unbounded suffix range always yields a free name")
 }
 
 fn group_fields(fields: &[ExportField]) -> Vec<Vec<&ExportField>> {
@@ -698,6 +765,204 @@ mod tests {
         assert_eq!(
             (0..3).map(|index| mode.value(index)).collect::<Vec<_>>(),
             ["MANUAL", "AUTO", "RTL"]
+        );
+    }
+
+    fn exported_schema(file: &tempfile::NamedTempFile) -> SchemaRef {
+        ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(file.path()).unwrap())
+            .unwrap()
+            .schema()
+            .clone()
+    }
+
+    fn column_names(schema: &SchemaRef) -> Vec<&str> {
+        schema
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect()
+    }
+
+    #[test]
+    fn names_physical_columns_after_their_topic_and_field() {
+        let (snapshot, fields) = independent_topic_snapshot();
+        let file = tempfile::NamedTempFile::new().unwrap();
+
+        write_structured_parquet(
+            std::fs::File::create(file.path()).unwrap(),
+            &snapshot,
+            &fields,
+            (5, 30),
+        )
+        .unwrap();
+
+        assert_eq!(
+            column_names(&exported_schema(&file)),
+            [
+                "ATT.t_us",
+                "ATT.Roll",
+                "STATUS.t_us",
+                "STATUS.armed",
+                "STATUS.mode"
+            ]
+        );
+    }
+
+    #[test]
+    fn duplicate_topic_names_get_instance_qualified_columns() {
+        let mut registry = IdentityRegistry::new();
+        let mut stores = Vec::new();
+        let mut fields = Vec::new();
+        for source_label in ["flight-a", "flight-b"] {
+            let source = registry.add_source(source_label);
+            let topic = registry.add_topic(source, "STATUS").unwrap();
+            let field_id = registry.add_field(topic, "armed").unwrap();
+            let schema = Arc::new(
+                TopicSchema::new(
+                    "STATUS",
+                    [FieldSchema::new("armed", DataType::Boolean, None::<String>, 1.0).unwrap()],
+                )
+                .unwrap(),
+            );
+            let chunk = Arc::new(
+                Chunk::try_new(
+                    Int64Array::from(vec![1]),
+                    vec![Arc::new(BooleanArray::from(vec![true]))],
+                    &schema,
+                )
+                .unwrap(),
+            );
+            stores.push((
+                topic,
+                Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap()),
+            ));
+            fields.push(ExportField {
+                id: field_id,
+                source_id: source,
+                topic_id: topic,
+                source: source_label.into(),
+                topic: "STATUS".into(),
+                name: "armed".into(),
+                label: format!("{source_label} / STATUS.armed"),
+                dtype: DataType::Boolean,
+                unit: None,
+                multiplier: 1.0,
+                description: None,
+            });
+        }
+        let snapshot = StoreSnapshot::from_registry(&registry, stores, 1).unwrap();
+        let file = tempfile::NamedTempFile::new().unwrap();
+
+        write_structured_parquet(
+            std::fs::File::create(file.path()).unwrap(),
+            &snapshot,
+            &fields,
+            (1, 1),
+        )
+        .unwrap();
+
+        assert_eq!(
+            column_names(&exported_schema(&file)),
+            [
+                "STATUS[0].t_us",
+                "STATUS[0].armed",
+                "STATUS[1].t_us",
+                "STATUS[1].armed"
+            ]
+        );
+    }
+
+    #[test]
+    fn value_columns_carry_unit_multiplier_and_description_metadata() {
+        let (snapshot, field) = float_topic_snapshot("flight", "ALT", vec![1], vec![Some(3.5)], 0);
+        let file = tempfile::NamedTempFile::new().unwrap();
+
+        write_structured_parquet(
+            std::fs::File::create(file.path()).unwrap(),
+            &snapshot,
+            &[field],
+            (1, 1),
+        )
+        .unwrap();
+
+        let schema = exported_schema(&file);
+        assert!(schema.field(0).metadata().is_empty());
+        assert_eq!(schema.field(1).metadata().get("unit").unwrap(), "m");
+        assert_eq!(schema.field(1).metadata().get("multiplier").unwrap(), "2.5");
+        assert_eq!(
+            schema.field(1).metadata().get("description").unwrap(),
+            "native value"
+        );
+    }
+
+    #[test]
+    fn unit_multiplier_metadata_is_omitted_when_it_carries_nothing() {
+        let (snapshot, fields) = independent_topic_snapshot();
+        let file = tempfile::NamedTempFile::new().unwrap();
+
+        write_structured_parquet(
+            std::fs::File::create(file.path()).unwrap(),
+            &snapshot,
+            &fields,
+            (5, 30),
+        )
+        .unwrap();
+
+        let schema = exported_schema(&file);
+        assert_eq!(schema.field(1).metadata().get("unit").unwrap(), "rad");
+        assert_eq!(schema.field(1).metadata().get("multiplier"), None);
+        assert!(schema.field(3).metadata().is_empty());
+    }
+
+    #[test]
+    fn a_field_shadowing_the_timestamp_column_name_stays_unique() {
+        let mut registry = IdentityRegistry::new();
+        let source = registry.add_source("flight");
+        let topic = registry.add_topic(source, "ATT").unwrap();
+        let field_id = registry.add_field(topic, "t_us").unwrap();
+        let schema = Arc::new(
+            TopicSchema::new(
+                "ATT",
+                [FieldSchema::new("t_us", DataType::Float32, None::<String>, 1.0).unwrap()],
+            )
+            .unwrap(),
+        );
+        let chunk = Arc::new(
+            Chunk::try_new(
+                Int64Array::from(vec![1]),
+                vec![Arc::new(Float32Array::from(vec![1.0]))],
+                &schema,
+            )
+            .unwrap(),
+        );
+        let store = Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap());
+        let snapshot = StoreSnapshot::from_registry(&registry, [(topic, store)], 1).unwrap();
+        let field = ExportField {
+            id: field_id,
+            source_id: source,
+            topic_id: topic,
+            source: "flight".into(),
+            topic: "ATT".into(),
+            name: "t_us".into(),
+            label: "flight / ATT.t_us".into(),
+            dtype: DataType::Float32,
+            unit: None,
+            multiplier: 1.0,
+            description: None,
+        };
+        let file = tempfile::NamedTempFile::new().unwrap();
+
+        write_structured_parquet(
+            std::fs::File::create(file.path()).unwrap(),
+            &snapshot,
+            &[field],
+            (1, 1),
+        )
+        .unwrap();
+
+        assert_eq!(
+            column_names(&exported_schema(&file)),
+            ["ATT.t_us", "ATT.t_us_2"]
         );
     }
 
