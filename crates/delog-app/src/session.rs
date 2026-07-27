@@ -31,9 +31,21 @@ struct LoadState {
 
 type Loads = Arc<Mutex<HashMap<SourceId, LoadState>>>;
 
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LoadTerminal {
+    Closed(ParseSummary),
+    Removed,
+}
+
+#[cfg(test)]
+type LoadTerminals = Arc<Mutex<HashMap<SourceId, LoadTerminal>>>;
+
 /// Lives on the ingest thread.
 struct AppObserver {
     loads: Loads,
+    #[cfg(test)]
+    load_terminals: LoadTerminals,
     diagnostics: Arc<DiagnosticHub>,
     ctx: egui::Context,
     #[cfg(feature = "scripting")]
@@ -51,18 +63,32 @@ impl IngestObserver for AppObserver {
     }
 
     fn on_close(&mut self, source: SourceId, _summary: ParseSummary) {
-        let mut loads = self.loads.lock().unwrap();
-        let state = loads.entry(source).or_default();
-        state.done = true;
-        state.progress = 1.0;
+        {
+            let mut loads = self.loads.lock().unwrap();
+            let state = loads.entry(source).or_default();
+            state.done = true;
+            state.progress = 1.0;
+        }
+        #[cfg(test)]
+        self.load_terminals
+            .lock()
+            .unwrap()
+            .insert(source, LoadTerminal::Closed(_summary));
         self.ctx.request_repaint();
     }
 
     fn on_remove(&mut self, source: SourceId) {
-        let mut loads = self.loads.lock().unwrap();
-        let state = loads.entry(source).or_default();
-        state.done = true;
-        state.progress = 1.0;
+        {
+            let mut loads = self.loads.lock().unwrap();
+            let state = loads.entry(source).or_default();
+            state.done = true;
+            state.progress = 1.0;
+        }
+        #[cfg(test)]
+        self.load_terminals
+            .lock()
+            .unwrap()
+            .insert(source, LoadTerminal::Removed);
         self.ctx.request_repaint();
     }
 
@@ -108,6 +134,8 @@ pub struct Session {
     metrics: Arc<MetricsRegistry>,
     registry: Arc<ParserRegistry>,
     loads: Loads,
+    #[cfg(test)]
+    load_terminals: LoadTerminals,
     diagnostics: Arc<DiagnosticHub>,
     active: Vec<ActiveLoad>,
     live_links: Vec<delog_stream::LiveLink>,
@@ -122,11 +150,15 @@ pub struct Session {
 impl Session {
     pub fn new(ctx: egui::Context, parquet_selection: Arc<dyn TimestampSelectionProvider>) -> Self {
         let loads: Loads = Arc::default();
+        #[cfg(test)]
+        let load_terminals: LoadTerminals = Arc::default();
         let diagnostics = Arc::new(DiagnosticHub::new());
         #[cfg(feature = "scripting")]
         let live_scripts: LiveScriptSink = Arc::new(Mutex::new(None));
         let observer = AppObserver {
             loads: Arc::clone(&loads),
+            #[cfg(test)]
+            load_terminals: Arc::clone(&load_terminals),
             diagnostics: Arc::clone(&diagnostics),
             ctx: ctx.clone(),
             #[cfg(feature = "scripting")]
@@ -159,6 +191,8 @@ impl Session {
             metrics,
             registry: Arc::new(registry),
             loads,
+            #[cfg(test)]
+            load_terminals,
             diagnostics,
             active: Vec::new(),
             live_links: Vec::new(),
@@ -569,6 +603,7 @@ pub(crate) mod tests {
         let live_scripts = Arc::new(Mutex::new(Some(tx)));
         let mut observer = AppObserver {
             loads: Arc::default(),
+            load_terminals: Arc::default(),
             diagnostics: Arc::default(),
             ctx: egui::Context::default(),
             live_scripts,
@@ -824,10 +859,50 @@ pub(crate) mod tests {
         (snapshot, fields)
     }
 
-    fn load_structured_export(
-        window: (i64, i64),
-        file_stem: &str,
-    ) -> (Arc<StoreSnapshot>, usize, u64) {
+    struct LoadedStructuredExport {
+        snapshot: Arc<StoreSnapshot>,
+        provider_calls: usize,
+        exported_rows: u64,
+        terminal: LoadTerminal,
+        diagnostics: Vec<DiagRecord>,
+    }
+
+    fn open_parquet_path(
+        path: PathBuf,
+        exported_rows: u64,
+        expected_diagnostic: Option<&str>,
+    ) -> LoadedStructuredExport {
+        let provider = Arc::new(NeverSelectionProvider::default());
+        let mut session = Session::new(egui::Context::default(), provider.clone());
+        session.open_path(path);
+        session.join_workers();
+        session.wait_until(|session| {
+            !session.load_terminals.lock().unwrap().is_empty()
+                && expected_diagnostic.is_none_or(|code| {
+                    session
+                        .diagnostic_records()
+                        .iter()
+                        .any(|record| record.diag.code == code)
+                })
+        });
+        let terminal = session
+            .load_terminals
+            .lock()
+            .unwrap()
+            .values()
+            .next()
+            .cloned()
+            .expect("one parser terminal event");
+        LoadedStructuredExport {
+            snapshot: session.snapshot(),
+            provider_calls: provider.calls.load(Ordering::SeqCst),
+            exported_rows,
+            terminal,
+            diagnostics: session.diagnostic_records(),
+        }
+    }
+
+    fn load_structured_export(window: (i64, i64), file_stem: &str) -> LoadedStructuredExport {
         let (source_snapshot, fields) = structured_export_fixture();
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join(format!("{file_stem}.parquet"));
@@ -841,27 +916,15 @@ pub(crate) mod tests {
             window.0,
         )
         .unwrap();
-        let provider = Arc::new(NeverSelectionProvider::default());
-        let mut session = Session::new(egui::Context::default(), provider.clone());
-        session.open_path(path);
-        session.join_workers();
-        session.wait_until(|session| {
-            let loads = session.loads.lock().unwrap();
-            loads.len() == 1 && loads.values().all(|state| state.done)
-        });
-        (
-            session.snapshot(),
-            provider.calls.load(Ordering::SeqCst),
-            exported_rows,
-        )
+        open_parquet_path(path, exported_rows, None)
     }
 
     pub(crate) fn structured_round_trip_snapshot() -> Arc<StoreSnapshot> {
-        let (snapshot, provider_calls, exported_rows) =
-            load_structured_export((1_100, 3_300), "structured-metadata");
-        assert_eq!(provider_calls, 0);
-        assert_eq!(exported_rows, 7);
-        snapshot
+        let loaded = load_structured_export((1_100, 3_300), "structured-metadata");
+        assert_eq!(loaded.provider_calls, 0);
+        assert_eq!(loaded.exported_rows, 7);
+        assert!(matches!(loaded.terminal, LoadTerminal::Closed(_)));
+        loaded.snapshot
     }
 
     fn store_for<'a>(snapshot: &'a StoreSnapshot, topic_name: &str) -> &'a TopicStore {
@@ -898,11 +961,20 @@ pub(crate) mod tests {
 
     #[test]
     fn structured_parquet_round_trip_preserves_topics_and_fields() {
-        let (snapshot, provider_calls, exported_rows) =
-            load_structured_export((1_100, 3_300), "structured-round-trip");
-
-        assert_eq!(provider_calls, 0);
-        assert_eq!(exported_rows, 7);
+        let loaded = load_structured_export((1_100, 3_300), "structured-round-trip");
+        assert_eq!(loaded.provider_calls, 0);
+        assert_eq!(loaded.exported_rows, 7);
+        assert_eq!(
+            loaded.terminal,
+            LoadTerminal::Closed(ParseSummary {
+                topic_count: 3,
+                row_count: 7,
+                time_range: delog_core::time::TimeRange::new(1_100, 3_300),
+                diagnostics: 0,
+                source_meta: Default::default(),
+            })
+        );
+        let snapshot = loaded.snapshot;
         assert_eq!(
             snapshot
                 .topics
@@ -995,14 +1067,49 @@ pub(crate) mod tests {
 
     #[test]
     fn structured_parquet_empty_window_opens_without_topics_or_picker() {
-        let (snapshot, provider_calls, exported_rows) =
-            load_structured_export((9_000, 10_000), "structured-empty-window");
+        let loaded = load_structured_export((9_000, 10_000), "structured-empty-window");
 
-        assert_eq!(provider_calls, 0);
-        assert_eq!(exported_rows, 0);
+        assert_eq!(loaded.provider_calls, 0);
+        assert_eq!(loaded.exported_rows, 0);
+        assert_eq!(
+            loaded.terminal,
+            LoadTerminal::Closed(ParseSummary::default())
+        );
         assert!(
-            snapshot.topics.is_empty(),
+            loaded.snapshot.topics.is_empty(),
             "manifest-only topics must not be registered without rows"
+        );
+    }
+
+    #[test]
+    fn invalid_marked_parquet_records_removal_instead_of_successful_close() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("structured-invalid-version.parquet");
+        let schema = Arc::new(Schema::new_with_metadata(
+            vec![Field::new("time", DataType::Int64, true)],
+            [
+                ("delog.format".to_owned(), "multi-topic".to_owned()),
+                ("delog.version".to_owned(), "99".to_owned()),
+                (
+                    "delog.manifest".to_owned(),
+                    r#"{"version":99,"topics":[]}"#.to_owned(),
+                ),
+            ]
+            .into(),
+        ));
+        let writer = ArrowWriter::try_new(File::create(&path).unwrap(), schema, None).unwrap();
+        writer.close().unwrap();
+
+        let loaded = open_parquet_path(path, 0, Some("parse-setup"));
+
+        assert_eq!(loaded.provider_calls, 0);
+        assert_eq!(loaded.terminal, LoadTerminal::Removed);
+        assert!(loaded.snapshot.topics.is_empty());
+        assert!(
+            loaded
+                .diagnostics
+                .iter()
+                .any(|record| record.diag.code == "parse-setup")
         );
     }
 

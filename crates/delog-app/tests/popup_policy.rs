@@ -19,8 +19,17 @@ const WORKSPACE_SOURCE: &str = include_str!("../src/workspace.rs");
 const SETTINGS_SOURCE: &str = include_str!("../src/settings.rs");
 const SYNC_WINDOW_SOURCE: &str = include_str!("../src/sync_window.rs");
 
+const PARQUET_UI_SOURCES: &[&str] = &[APP_SOURCE, DATA_EXPORT_SOURCE, PARQUET_IMPORT_SOURCE];
+
 fn occurrence_count(needle: &str) -> usize {
     POPUP_SOURCES
+        .iter()
+        .map(|source| source.matches(needle).count())
+        .sum()
+}
+
+fn parquet_ui_occurrence_count(needle: &str) -> usize {
+    PARQUET_UI_SOURCES
         .iter()
         .map(|source| source.matches(needle).count())
         .sum()
@@ -35,21 +44,13 @@ fn parquet_import_uses_an_in_app_non_collapsible_window_and_picker_filter() {
 }
 
 #[test]
-fn structured_parquet_reuses_existing_metadata_window_without_a_native_dialog() {
-    let metadata_window = between(
-        APP_SOURCE,
-        "fn show_field_metadata_window(",
-        "fn show_source_metadata_window(",
-    );
-
-    assert!(metadata_window.contains("ui.strong(\"Original source\")"));
-    assert!(metadata_window.contains("ui.strong(\"Original topic\")"));
+fn structured_parquet_adds_no_second_import_dialog() {
     assert_eq!(
-        PARQUET_IMPORT_SOURCE.matches("egui::Window::new(").count(),
+        parquet_ui_occurrence_count("egui::Window::new(\"Import"),
         1,
-        "the timestamp picker is the only Parquet import dialog"
+        "the generic timestamp picker is the only import window in the Parquet UI path"
     );
-    assert_eq!(APP_SOURCE.matches("self.parquet_import.show(").count(), 1);
+    assert_eq!(parquet_ui_occurrence_count("self.parquet_import.show("), 1);
 }
 
 fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
