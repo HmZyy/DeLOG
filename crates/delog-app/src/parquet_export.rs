@@ -372,7 +372,7 @@ mod tests {
     use arrow::datatypes::DataType;
     use delog_core::chunk::Chunk;
     use delog_core::identity::IdentityRegistry;
-    use delog_core::schema::{FieldSchema, TopicSchema};
+    use delog_core::schema::{FieldSchema, TopicProvenance, TopicSchema};
     use delog_core::snapshot::StoreSnapshot;
     use delog_core::store::TopicStore;
     use delog_parquet_format::decode_schema;
@@ -683,6 +683,74 @@ mod tests {
     }
 
     #[test]
+    fn cursor_caps_multi_chunk_stripes_after_effective_window_filtering() {
+        let mut registry = IdentityRegistry::new();
+        let source = registry.add_source("flight");
+        registry.set_source_offset_us(source, 10);
+        let topic = registry.add_topic(source, "VALUE").unwrap();
+        registry.add_field(topic, "value").unwrap();
+        let schema = Arc::new(
+            TopicSchema::new(
+                "VALUE",
+                [FieldSchema::new("value", DataType::Float32, None::<String>, 1.0).unwrap()],
+            )
+            .unwrap(),
+        );
+        let chunks = [(0_i64, 5_000_i64), (5_000, 10_000)].map(|(start, end)| {
+            let timestamps = (start..end).collect::<Vec<_>>();
+            Arc::new(
+                Chunk::try_new(
+                    Int64Array::from(timestamps.clone()),
+                    vec![Arc::new(Float32Array::from(
+                        timestamps
+                            .into_iter()
+                            .map(|timestamp| timestamp as f32)
+                            .collect::<Vec<_>>(),
+                    ))],
+                    &schema,
+                )
+                .unwrap(),
+            )
+        });
+        let store = Arc::new(TopicStore::from_chunks(schema, chunks).unwrap());
+        let snapshot =
+            StoreSnapshot::from_registry(&registry, [(topic, Arc::clone(&store))], 1).unwrap();
+        let mut cursor = TopicExportCursor {
+            source_label: "flight".into(),
+            topic_name: "VALUE".into(),
+            store: snapshot.topic_store(topic).unwrap(),
+            selected_columns: vec![0],
+            source_offset_us: 10,
+            window: TimeRange::new(510, 9_010).unwrap(),
+            chunk_index: 0,
+            row_index: 0,
+        };
+
+        let first = cursor.next_stripe(EXPORT_BATCH_ROWS).unwrap().unwrap();
+        assert_eq!(first.timestamps.len(), EXPORT_BATCH_ROWS);
+        assert_eq!(first.timestamps.value(0), 510);
+        assert_eq!(first.timestamps.value(EXPORT_BATCH_ROWS - 1), 8_701);
+        let first_values = first.columns[0]
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .unwrap();
+        assert_eq!(first_values.value(0), 500.0);
+        assert_eq!(first_values.value(EXPORT_BATCH_ROWS - 1), 8_691.0);
+
+        let second = cursor.next_stripe(EXPORT_BATCH_ROWS).unwrap().unwrap();
+        assert_eq!(second.timestamps.len(), 309);
+        assert_eq!(second.timestamps.value(0), 8_702);
+        assert_eq!(second.timestamps.value(308), 9_010);
+        let second_values = second.columns[0]
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .unwrap();
+        assert_eq!(second_values.value(0), 8_692.0);
+        assert_eq!(second_values.value(308), 9_000.0);
+        assert!(cursor.next_stripe(EXPORT_BATCH_ROWS).unwrap().is_none());
+    }
+
+    #[test]
     fn pads_unequal_topics_across_multiple_stripes() {
         let mut registry = IdentityRegistry::new();
         let mut stores = Vec::new();
@@ -914,6 +982,61 @@ mod tests {
         assert_eq!(manifest.topics[1].original_topic, "STATUS");
         assert_eq!(manifest.topics[0].original_source, "flight-a");
         assert_eq!(manifest.topics[1].original_source, "flight-b");
+    }
+
+    #[test]
+    fn reexport_preserves_imported_topic_provenance() {
+        let mut registry = IdentityRegistry::new();
+        let source = registry.add_source("imported.parquet");
+        let topic = registry.add_topic(source, "STATUS[0]").unwrap();
+        let field_id = registry.add_field(topic, "armed").unwrap();
+        let schema = Arc::new(
+            TopicSchema::new(
+                "STATUS[0]",
+                [FieldSchema::new("armed", DataType::Boolean, None::<String>, 1.0).unwrap()],
+            )
+            .unwrap()
+            .with_provenance(TopicProvenance::new("flight-a", "STATUS").unwrap()),
+        );
+        let chunk = Arc::new(
+            Chunk::try_new(
+                Int64Array::from(vec![10]),
+                vec![Arc::new(BooleanArray::from(vec![true]))],
+                &schema,
+            )
+            .unwrap(),
+        );
+        let store = Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap());
+        let snapshot = StoreSnapshot::from_registry(&registry, [(topic, store)], 1).unwrap();
+        let field = ExportField {
+            id: field_id,
+            source_id: source,
+            topic_id: topic,
+            source: "imported.parquet".into(),
+            topic: "STATUS[0]".into(),
+            name: "armed".into(),
+            label: "imported.parquet / STATUS[0].armed".into(),
+            dtype: DataType::Boolean,
+            unit: None,
+            multiplier: 1.0,
+            description: None,
+        };
+        let file = tempfile::NamedTempFile::new().unwrap();
+
+        write_structured_parquet(
+            std::fs::File::create(file.path()).unwrap(),
+            &snapshot,
+            &[field],
+            (10, 10),
+        )
+        .unwrap();
+
+        let builder =
+            ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(file.path()).unwrap())
+                .unwrap();
+        let manifest = decode_schema(builder.schema().as_ref()).unwrap().unwrap();
+        assert_eq!(manifest.topics[0].original_source, "flight-a");
+        assert_eq!(manifest.topics[0].original_topic, "STATUS");
     }
 
     #[test]
