@@ -140,6 +140,11 @@ pub fn resolved_topic_names(manifest: &ValidatedManifest) -> Vec<String> {
         *counts.entry(&topic.original_topic).or_default() += 1;
     }
 
+    let mut reserved = counts
+        .iter()
+        .filter(|(_, count)| **count == 1)
+        .map(|(name, _)| (*name).to_owned())
+        .collect::<HashSet<_>>();
     let mut occurrences = HashMap::<&str, usize>::new();
     manifest
         .topics
@@ -149,9 +154,13 @@ pub fn resolved_topic_names(manifest: &ValidatedManifest) -> Vec<String> {
                 topic.original_topic.clone()
             } else {
                 let occurrence = occurrences.entry(&topic.original_topic).or_default();
-                let resolved = format!("{}[{occurrence}]", topic.original_topic);
-                *occurrence += 1;
-                resolved
+                loop {
+                    let resolved = format!("{}[{occurrence}]", topic.original_topic);
+                    *occurrence += 1;
+                    if reserved.insert(resolved.clone()) {
+                        break resolved;
+                    }
+                }
             }
         })
         .collect()
@@ -326,6 +335,23 @@ mod tests {
                     description: Some("roll angle".into()),
                 }],
             }],
+        }
+    }
+
+    fn validated_topics(names: &[&str]) -> ValidatedManifest {
+        ValidatedManifest {
+            version: FORMAT_VERSION,
+            topics: names
+                .iter()
+                .enumerate()
+                .map(|(index, name)| ValidatedTopic {
+                    id: index as u32,
+                    original_source: format!("source-{index}"),
+                    original_topic: (*name).into(),
+                    timestamp_column: index,
+                    fields: vec![],
+                })
+                .collect(),
         }
     }
 
@@ -505,6 +531,39 @@ mod tests {
         assert_eq!(
             resolved_topic_names(&repeated),
             ["ATT[0]", "ATT[1]", "GPS", "ATT[2]"]
+        );
+    }
+
+    #[test]
+    fn duplicate_topic_names_get_deterministic_instances() {
+        let manifest = validated_topics(&["ATT", "ATT"]);
+
+        assert_eq!(resolved_topic_names(&manifest), ["ATT[0]", "ATT[1]"]);
+    }
+
+    #[test]
+    fn unique_original_name_is_reserved_before_duplicate_instances() {
+        let manifest = validated_topics(&["ATT", "ATT", "ATT[0]"]);
+
+        assert_eq!(
+            resolved_topic_names(&manifest),
+            ["ATT[1]", "ATT[2]", "ATT[0]"]
+        );
+    }
+
+    #[test]
+    fn nested_duplicate_groups_share_one_global_reservation_set() {
+        let manifest = validated_topics(&["ATT", "ATT", "ATT[0]", "ATT[0]", "ATT[0][0]"]);
+
+        let resolved = resolved_topic_names(&manifest);
+
+        assert_eq!(
+            resolved,
+            ["ATT[0]", "ATT[1]", "ATT[0][1]", "ATT[0][2]", "ATT[0][0]"]
+        );
+        assert_eq!(
+            resolved.iter().collect::<HashSet<_>>().len(),
+            resolved.len()
         );
     }
 }

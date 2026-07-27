@@ -856,6 +856,53 @@ mod tests {
         )
     }
 
+    fn snapshot_with_nonmonotonic_chunks() -> (StoreSnapshot, ExportField) {
+        let mut registry = IdentityRegistry::new();
+        let source = registry.add_source("flight");
+        let topic = registry.add_topic(source, "ATT").unwrap();
+        let id = registry.add_field(topic, "Roll").unwrap();
+        let topic_schema = Arc::new(
+            TopicSchema::new(
+                "ATT",
+                [FieldSchema::new("Roll", DataType::Float64, Some("rad"), 2.0).unwrap()],
+            )
+            .unwrap(),
+        );
+        let chunks = [
+            (vec![100, 200], vec![Some(1.0), Some(2.0)]),
+            (vec![50, 300], vec![Some(3.0), Some(4.0)]),
+        ]
+        .map(|(timestamps, values)| {
+            Arc::new(
+                Chunk::try_new(
+                    Int64Array::from(timestamps),
+                    vec![Arc::new(Float64Array::from(values))],
+                    &topic_schema,
+                )
+                .unwrap(),
+            )
+        });
+        let store = Arc::new(TopicStore::from_chunks(topic_schema, chunks).unwrap());
+        assert!(!store.is_monotonic());
+        let snapshot = StoreSnapshot::from_registry(&registry, [(topic, store)], 1).unwrap();
+        (
+            snapshot,
+            ExportField {
+                id,
+                source_id: source,
+                topic_id: topic,
+                source: "flight".into(),
+                topic: "ATT".into(),
+                name: "Roll".into(),
+                label: "flight / ATT.Roll".into(),
+                dtype: DataType::Float64,
+                unit: Some("rad".into()),
+                multiplier: 2.0,
+                description: None,
+            },
+        )
+    }
+
     fn snapshot_with_staggered_fields() -> (StoreSnapshot, Vec<ExportField>) {
         let mut registry = IdentityRegistry::new();
         let source = registry.add_source("flight");
@@ -1236,6 +1283,33 @@ mod tests {
             error
                 .to_string()
                 .contains("injected structured final flush failure")
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"prior export");
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn nonmonotonic_parquet_export_preserves_existing_destination() {
+        let (snapshot, field) = snapshot_with_nonmonotonic_chunks();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("existing.parquet");
+        std::fs::write(&path, b"prior export").unwrap();
+
+        let error = write_export_file(
+            &path,
+            ExportFormat::Parquet,
+            &snapshot,
+            &[field],
+            (0, 300),
+            ResampleMode::None,
+            0,
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("topic timestamps are non-monotonic across chunks")
         );
         assert_eq!(std::fs::read(&path).unwrap(), b"prior export");
         assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);

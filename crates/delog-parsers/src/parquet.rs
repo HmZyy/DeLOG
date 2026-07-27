@@ -1291,6 +1291,81 @@ mod tests {
     }
 
     #[test]
+    fn structured_topic_instances_cannot_collide_with_unique_original_names() {
+        let topic_names = ["ATT", "ATT", "ATT[0]"];
+        let manifest = Manifest {
+            version: FORMAT_VERSION,
+            topics: topic_names
+                .iter()
+                .enumerate()
+                .map(|(index, topic)| TopicManifest {
+                    id: index as u32,
+                    original_source: format!("flight-{index}"),
+                    original_topic: (*topic).into(),
+                    timestamp_column: (index * 2) as u32,
+                    fields: vec![FieldManifest {
+                        column: (index * 2 + 1) as u32,
+                        name: "value".into(),
+                        unit: None,
+                        multiplier: 1.0,
+                        description: None,
+                    }],
+                })
+                .collect(),
+        };
+        let physical_fields = topic_names
+            .iter()
+            .enumerate()
+            .flat_map(|(index, _)| {
+                [
+                    Field::new(format!("t{index}"), DataType::Int64, true),
+                    Field::new(format!("v{index}"), DataType::Float32, true),
+                ]
+            })
+            .collect::<Vec<_>>();
+        let schema = Arc::new(encode_schema(physical_fields, &manifest).unwrap());
+        let columns = topic_names
+            .iter()
+            .enumerate()
+            .flat_map(|(index, _)| {
+                [
+                    Arc::new(Int64Array::from(vec![Some(index as i64)])) as ArrayRef,
+                    Arc::new(Float32Array::from(vec![Some(index as f32)])) as ArrayRef,
+                ]
+            })
+            .collect::<Vec<_>>();
+        let batch = RecordBatch::try_new(Arc::clone(&schema), columns).unwrap();
+
+        let (result, sink) = drive_parquet(
+            parquet_bytes(schema, &[batch]),
+            Arc::new(FixedProvider::panic_if_called()),
+        );
+
+        assert_eq!(result.unwrap().topic_count, 3);
+        assert_eq!(
+            sink.batches
+                .iter()
+                .map(|batch| batch.topic())
+                .collect::<Vec<_>>(),
+            ["ATT[1]", "ATT[2]", "ATT[0]"]
+        );
+        assert_eq!(
+            sink.batches
+                .iter()
+                .map(|batch| {
+                    batch
+                        .schema
+                        .provenance()
+                        .unwrap()
+                        .original_source()
+                        .to_owned()
+                })
+                .collect::<Vec<_>>(),
+            ["flight-0", "flight-1", "flight-2"]
+        );
+    }
+
+    #[test]
     fn structured_zero_row_manifest_topic_is_not_emitted() {
         let (schema, _) = structured_fixture();
         let batch = RecordBatch::try_new(
