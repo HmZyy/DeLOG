@@ -623,7 +623,7 @@ fn data_export_rejects_stale_fields_before_opening_save_dialog() {
 
     assert!(resolution < spawn);
     assert!(spawn < save_dialog);
-    assert!(worker.contains("data_export_tx.send(Err"));
+    assert!(worker.contains("data_export_tx.send(DataExportEvent::Failed"));
 }
 
 #[test]
@@ -695,6 +695,31 @@ fn parquet_export_disables_resampling_and_uses_native_topic_samples() {
     assert!(dialog_body.contains("state.format == ExportFormat::Csv"));
     assert!(dialog_body.contains("ui.add_enabled_ui("));
     assert!(dialog_body.contains("\"Native samples per topic\""));
+}
+
+#[test]
+fn writing_exports_report_progress_and_stay_cancellable() {
+    let progress = between(DATA_EXPORT_SOURCE, "pub fn progress_ui(", "pub const MODES");
+
+    assert!(progress.contains("egui::Window::new(\"Exporting data\")"));
+    assert!(progress.contains(".collapsible(false)"));
+    assert!(progress.contains("egui::ProgressBar::new(active.fraction())"));
+    assert!(progress.contains("active.status()"));
+    assert!(progress.contains("ui.button(\"Cancel\")"));
+    assert!(progress.contains("active.request_cancel()"));
+
+    assert!(APP_SOURCE.contains("crate::data_export::progress_ui("));
+
+    let worker = between(APP_SOURCE, "fn spawn_data_export(", "fn load_layout(");
+    let save_dialog = worker.find(".save_file()").unwrap();
+    let started = worker
+        .find("DataExportEvent::Started")
+        .expect("a chosen destination starts a tracked export");
+    let ctl = worker
+        .find("crate::data_export::ExportCtl::new(")
+        .expect("the writer runs under a cancellable control");
+
+    assert!(save_dialog < started && started < ctl);
 }
 
 #[test]

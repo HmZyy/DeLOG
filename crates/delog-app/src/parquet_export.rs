@@ -15,7 +15,9 @@ use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 
-use crate::data_export::{DataExportError, EXPORT_BATCH_ROWS, ExportField};
+use crate::data_export::{
+    DataExportError, EXPORT_BATCH_ROWS, ExportCtl, ExportField, window_fraction,
+};
 
 struct TopicExportCursor<'a> {
     source_label: String,
@@ -128,6 +130,7 @@ pub fn write_structured_parquet<W: Write + Send>(
     snapshot: &StoreSnapshot,
     fields: &[ExportField],
     window: (i64, i64),
+    ctl: &ExportCtl,
 ) -> Result<u64, DataExportError> {
     let window = TimeRange::new(window.0, window.1).ok_or_else(|| {
         DataExportError::InvalidSelection(format!(
@@ -244,8 +247,14 @@ pub fn write_structured_parquet<W: Write + Send>(
         .build();
     let mut writer = ArrowWriter::try_new(writer, Arc::clone(&schema), Some(properties))?;
     let mut logical_rows = 0_u64;
+    // Tracked per topic: topics advance independently, so only the slowest one
+    // describes how much of the window is written.
+    let mut topic_progress = vec![0.0_f32; manifest.topics.len()];
 
     loop {
+        if ctl.is_cancelled() {
+            return Err(DataExportError::Cancelled);
+        }
         let stripes = cursors
             .iter_mut()
             .map(|cursor| cursor.next_stripe(EXPORT_BATCH_ROWS))
@@ -260,11 +269,21 @@ pub fn write_structured_parquet<W: Write + Send>(
         }
 
         let mut columns = Vec::with_capacity(schema.fields().len());
-        for (stripe, topic) in stripes.into_iter().zip(&manifest.topics) {
+        for (topic_ix, (stripe, topic)) in stripes.into_iter().zip(&manifest.topics).enumerate() {
             let logical_len = stripe
                 .as_ref()
                 .map(|stripe| stripe.timestamps.len())
                 .unwrap_or(0);
+            topic_progress[topic_ix] = stripe
+                .as_ref()
+                .and_then(|stripe| {
+                    let last_row = stripe.timestamps.len().checked_sub(1)?;
+                    Some(window_fraction(
+                        stripe.timestamps.value(last_row),
+                        (window.min_us, window.max_us),
+                    ))
+                })
+                .unwrap_or(1.0);
             logical_rows = logical_rows
                 .checked_add(logical_len as u64)
                 .ok_or_else(|| {
@@ -298,10 +317,14 @@ pub fn write_structured_parquet<W: Write + Send>(
         }
         writer.write(&RecordBatch::try_new(Arc::clone(&schema), columns)?)?;
         writer.flush()?;
+        if let Some(slowest) = topic_progress.iter().copied().reduce(f32::min) {
+            ctl.report_fraction(slowest);
+        }
     }
 
     writer.finish()?;
     writer.sync()?;
+    ctl.report_fraction(1.0);
     Ok(logical_rows)
 }
 
@@ -386,6 +409,17 @@ mod tests {
 
     use super::*;
     use crate::data_export::ExportField;
+
+    /// Shadows the real writer so these tests read without a control argument;
+    /// cancellation and progress are covered in `data_export`.
+    fn write_structured_parquet<W: Write + Send>(
+        writer: W,
+        snapshot: &StoreSnapshot,
+        fields: &[ExportField],
+        window: (i64, i64),
+    ) -> Result<u64, DataExportError> {
+        super::write_structured_parquet(writer, snapshot, fields, window, &ExportCtl::default())
+    }
 
     fn float_topic_snapshot(
         source_label: &str,
