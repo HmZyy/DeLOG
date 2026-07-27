@@ -190,7 +190,7 @@ impl ActiveExport {
         if self.cancel.is_cancelled() {
             format!("{} — cancelling…", self.label)
         } else {
-            format!("{} — {}%", self.label, self.progress.per_mille() / 10)
+            format!("{} - {}%", self.label, self.progress.per_mille() / 10)
         }
     }
 
