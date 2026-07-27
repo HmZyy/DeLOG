@@ -10,7 +10,7 @@ use std::thread::JoinHandle;
 
 use delog_core::diagnostics::{Diag, DiagRecord, DiagnosticHub, Severity};
 use delog_core::identity::SourceId;
-use delog_core::ingest::{ingest_channel, IngestSender, IngestSink, ParseSummary, SourceKind};
+use delog_core::ingest::{IngestSender, IngestSink, ParseSummary, SourceKind, ingest_channel};
 use delog_core::ingestor::{IngestObserver, Ingestor};
 use delog_core::metrics::MetricsRegistry;
 use delog_core::parse_ctl::{CancelToken, ParseCtl};
@@ -562,7 +562,9 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::browser::BrowserModel;
-    use crate::data_export::{ExportField, ExportFormat, available_fields, write_export_file};
+    use crate::data_export::{
+        ExportCtl, ExportField, ExportFormat, available_fields, write_export_file,
+    };
     use delog_core::export::ResampleMode;
 
     struct FixedSelectionProvider {
@@ -914,6 +916,7 @@ pub(crate) mod tests {
             window,
             ResampleMode::None,
             window.0,
+            &ExportCtl::default(),
         )
         .unwrap();
         open_parquet_path(path, exported_rows, None)
@@ -1118,8 +1121,7 @@ pub(crate) mod tests {
         let path = temp_path("load");
         File::create(&path).unwrap().write_all(&tiny_bin()).unwrap();
 
-        let mut session =
-            Session::new(egui::Context::default(), cancelling_selection_provider());
+        let mut session = Session::new(egui::Context::default(), cancelling_selection_provider());
         session.open_path(path.clone());
         session.join_workers();
         session.wait_until(|s| {
@@ -1177,8 +1179,7 @@ pub(crate) mod tests {
         let path = temp_parquet_path("cancelled");
         write_generic_parquet(&path);
 
-        let mut session =
-            Session::new(egui::Context::default(), cancelling_selection_provider());
+        let mut session = Session::new(egui::Context::default(), cancelling_selection_provider());
         session.open_path(path.clone());
         session.join_workers();
         session.wait_until(|session| {
@@ -1308,8 +1309,7 @@ pub(crate) mod tests {
             .write_all(b"this is not a flight log")
             .unwrap();
 
-        let mut session =
-            Session::new(egui::Context::default(), cancelling_selection_provider());
+        let mut session = Session::new(egui::Context::default(), cancelling_selection_provider());
         session.open_path(path.clone());
         session.join_workers();
         session.wait_until(|s| {

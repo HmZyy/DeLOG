@@ -53,7 +53,12 @@ struct DataExportSuccess {
     rows: u64,
 }
 
-type DataExportResult = Result<DataExportSuccess, String>;
+enum DataExportEvent {
+    Started(crate::data_export::ActiveExport),
+    Written { id: u64, success: DataExportSuccess },
+    Cancelled { id: u64, path: std::path::PathBuf },
+    Failed { id: u64, error: String },
+}
 const SESSION_AUTOSAVE_INTERVAL: Duration = Duration::from_secs(30);
 const PERFORMANCE_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 const LOG_RETENTION: usize = 1_000;
@@ -274,8 +279,10 @@ pub struct DelogApp {
     exported_profiling: mpsc::Receiver<ProfilingExportResult>,
     exported_profiling_tx: mpsc::Sender<ProfilingExportResult>,
     data_export: crate::data_export::DataExportState,
-    data_export_tx: mpsc::Sender<DataExportResult>,
-    data_export_rx: mpsc::Receiver<DataExportResult>,
+    data_export_tx: mpsc::Sender<DataExportEvent>,
+    data_export_rx: mpsc::Receiver<DataExportEvent>,
+    data_exports: Vec<crate::data_export::ActiveExport>,
+    next_data_export_id: u64,
     image_export_writes: mpsc::Receiver<crate::image_export::PngWriteRequest>,
     image_export_writes_tx: mpsc::Sender<crate::image_export::PngWriteRequest>,
     pending_image_capture: Option<crate::image_export::PendingImageCapture>,
@@ -418,6 +425,8 @@ impl DelogApp {
             data_export: crate::data_export::DataExportState::default(),
             data_export_tx,
             data_export_rx,
+            data_exports: Vec::new(),
+            next_data_export_id: 1,
             image_export_writes,
             image_export_writes_tx,
             pending_image_capture: None,
@@ -902,23 +911,43 @@ impl DelogApp {
             }
         }
 
-        while let Ok(result) = self.data_export_rx.try_recv() {
-            match result {
-                Ok(success) => self
-                    .session
-                    .push_diagnostic(delog_core::diagnostics::Diag::info(
-                        "data-export",
-                        format!(
-                            "exported {} rows as {} to {}",
-                            success.rows,
-                            success.format.label(),
-                            success.path.display()
-                        ),
-                    )),
-                Err(error) => self
-                    .session
-                    .push_diagnostic(delog_core::diagnostics::Diag::error("data-export", error)),
-            }
+        while let Ok(event) = self.data_export_rx.try_recv() {
+            let finished = match event {
+                DataExportEvent::Started(active) => {
+                    self.data_exports.push(active);
+                    continue;
+                }
+                DataExportEvent::Written { id, success } => {
+                    self.session
+                        .push_diagnostic(delog_core::diagnostics::Diag::info(
+                            "data-export",
+                            format!(
+                                "exported {} rows as {} to {}",
+                                success.rows,
+                                success.format.label(),
+                                success.path.display()
+                            ),
+                        ));
+                    id
+                }
+                DataExportEvent::Cancelled { id, path } => {
+                    self.session
+                        .push_diagnostic(delog_core::diagnostics::Diag::info(
+                            "data-export",
+                            format!("cancelled export to {}", path.display()),
+                        ));
+                    id
+                }
+                DataExportEvent::Failed { id, error } => {
+                    self.session
+                        .push_diagnostic(delog_core::diagnostics::Diag::error(
+                            "data-export",
+                            error,
+                        ));
+                    id
+                }
+            };
+            self.data_exports.retain(|active| active.id != finished);
         }
     }
 
@@ -1420,10 +1449,15 @@ impl DelogApp {
         all_fields: &[crate::data_export::ExportField],
         request: crate::data_export::DataExportRequest,
     ) {
+        let id = self.next_data_export_id;
+        self.next_data_export_id += 1;
         let chosen = match crate::data_export::resolve_export_fields(&request.fields, all_fields) {
             Ok(chosen) => chosen,
             Err(error) => {
-                let _ = self.data_export_tx.send(Err(error.to_string()));
+                let _ = self.data_export_tx.send(DataExportEvent::Failed {
+                    id,
+                    error: error.to_string(),
+                });
                 ctx.request_repaint();
                 return;
             }
@@ -1446,7 +1480,22 @@ impl DelogApp {
                     .set_file_name(format.default_file_name())
                     .save_file();
                 let Some(path) = picked else { return };
-                let result = crate::data_export::write_export_file(
+                let progress = crate::data_export::ExportProgress::default();
+                let cancel = delog_core::parse_ctl::CancelToken::new();
+                let _ = tx.send(DataExportEvent::Started(
+                    crate::data_export::ActiveExport::new(
+                        id,
+                        &path,
+                        progress.clone(),
+                        cancel.clone(),
+                    ),
+                ));
+                ctx.request_repaint();
+
+                let ctl = crate::data_export::ExportCtl::new(cancel, move |fraction| {
+                    progress.set(fraction);
+                });
+                let event = match crate::data_export::write_export_file(
                     &path,
                     format,
                     &snapshot,
@@ -1454,10 +1503,21 @@ impl DelogApp {
                     request.window,
                     request.mode,
                     origin_us,
-                )
-                .map(|rows| DataExportSuccess { path, format, rows })
-                .map_err(|error| error.to_string());
-                let _ = tx.send(result);
+                    &ctl,
+                ) {
+                    Ok(rows) => DataExportEvent::Written {
+                        id,
+                        success: DataExportSuccess { path, format, rows },
+                    },
+                    Err(crate::data_export::DataExportError::Cancelled) => {
+                        DataExportEvent::Cancelled { id, path }
+                    }
+                    Err(error) => DataExportEvent::Failed {
+                        id,
+                        error: error.to_string(),
+                    },
+                };
+                let _ = tx.send(event);
                 ctx.request_repaint();
             })
             .expect("spawn data export thread");
@@ -2955,7 +3015,10 @@ impl eframe::App for DelogApp {
             let dataflow_settings = self.settings.dataflow;
             let mut logs = Vec::new();
             if self.dataflow.open {
-                logs.extend(self.dataflow.show(ui.ctx(), &snapshot, &sender, live_connected));
+                logs.extend(
+                    self.dataflow
+                        .show(ui.ctx(), &snapshot, &sender, live_connected),
+                );
             }
             logs.extend(self.dataflow.drive(
                 ui.ctx(),
@@ -2973,6 +3036,7 @@ impl eframe::App for DelogApp {
         // inside `frame_total`, after every other section).
         let _ui_windows_timer = self.session.metrics().scope("ui_windows");
         self.parquet_import.show(ui.ctx());
+        crate::data_export::progress_ui(ui.ctx(), &self.data_exports);
         self.show_layout_windows(ui.ctx());
         crate::message_popup::show_all(&mut self.message_popups, ui.ctx());
         let settings_before = self.settings.clone();
