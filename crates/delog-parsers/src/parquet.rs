@@ -15,6 +15,7 @@ use delog_core::ingest::{IngestSink, ParseSummary, ParsedBatch};
 use delog_core::parse_ctl::ParseCtl;
 use delog_core::schema::{FieldSchema, TopicSchema};
 use delog_core::time::TimeRange;
+use delog_parquet_format::{FIELD_DESCRIPTION_KEY, FIELD_MULTIPLIER_KEY, FIELD_UNIT_KEY};
 use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ParquetRecordBatchReaderBuilder};
 use parquet::errors::ParquetError;
 use parquet::file::reader::{ChunkReader, Length};
@@ -509,20 +510,31 @@ impl LogParser for ParquetParser {
                 unsupported_names.push(field.name().to_owned());
                 continue;
             }
-            let unit = field
-                .metadata()
-                .get("unit")
+            let metadata = field.metadata();
+            let unit = metadata
+                .get(FIELD_UNIT_KEY)
                 .filter(|unit| !unit.is_empty())
                 .cloned();
-            let field_schema = FieldSchema::new(
+            let multiplier = metadata
+                .get(FIELD_MULTIPLIER_KEY)
+                .and_then(|multiplier| multiplier.parse::<f64>().ok())
+                .filter(|multiplier| multiplier.is_finite() && *multiplier != 0.0)
+                .unwrap_or(1.0);
+            let mut field_schema = FieldSchema::new(
                 field.name().to_owned(),
                 field.data_type().clone(),
                 unit,
-                1.0,
+                multiplier,
             )
             .map_err(|error| ParseError::Setup {
                 detail: format!("invalid value field `{}`: {error}", field.name()),
             })?;
+            if let Some(description) = metadata
+                .get(FIELD_DESCRIPTION_KEY)
+                .filter(|description| !description.is_empty())
+            {
+                field_schema = field_schema.with_description(description);
+            }
             value_indices.push(index);
             field_schemas.push(field_schema);
         }
@@ -1686,6 +1698,56 @@ mod tests {
             Some("rad")
         );
         assert_eq!(sink.batches[0].schema.fields()[1].unit, None);
+    }
+
+    fn metadata_field_schema(metadata: HashMap<String, String>) -> FieldSchema {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("time", DataType::Int64, false),
+            Field::new("angle", DataType::Float32, true).with_metadata(metadata),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int64Array::from(vec![1])),
+                Arc::new(Float32Array::from(vec![1.0])),
+            ],
+        )
+        .unwrap();
+        let provider = Arc::new(FixedProvider::ok(TimestampSelection {
+            column_index: 0,
+            unit: TimestampUnit::Microseconds,
+        }));
+        let (result, sink) = drive_parquet(parquet_bytes(schema, &[batch]), provider);
+        result.unwrap();
+        sink.batches[0].schema.fields()[0].clone()
+    }
+
+    #[test]
+    fn adopts_description_and_multiplier_metadata() {
+        let metadata = HashMap::from([
+            ("description".to_owned(), "airframe roll".to_owned()),
+            ("multiplier".to_owned(), "2.5".to_owned()),
+        ]);
+
+        let field = metadata_field_schema(metadata);
+
+        assert_eq!(field.description.as_deref(), Some("airframe roll"));
+        assert_eq!(field.multiplier, 2.5);
+    }
+
+    #[test]
+    fn unusable_multiplier_and_empty_description_metadata_are_ignored() {
+        for value in ["abc", "inf", "nan", "", "0"] {
+            let metadata = HashMap::from([
+                ("description".to_owned(), String::new()),
+                ("multiplier".to_owned(), value.to_owned()),
+            ]);
+
+            let field = metadata_field_schema(metadata);
+
+            assert_eq!(field.multiplier, 1.0, "multiplier metadata `{value}`");
+            assert_eq!(field.description, None);
+        }
     }
 
     #[test]
