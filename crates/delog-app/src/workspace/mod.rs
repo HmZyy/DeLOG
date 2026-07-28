@@ -11,15 +11,15 @@ use delog_cache::CacheManager;
 use delog_core::identity::FieldId;
 use delog_core::snapshot::StoreSnapshot;
 
-use crate::axes;
+use crate::plotting::axes;
 use crate::scene3d::camera::OrbitCamera;
-use crate::gpu::{self, GpuBridge, PaneView, VehicleDraw};
-use crate::hover::{self, HoverTarget};
-use crate::legend;
+use crate::plotting::gpu::{self, GpuBridge, PaneView, VehicleDraw};
+use crate::plotting::hover::{self, HoverTarget};
+use crate::plotting::legend;
 use crate::map::mercator;
 use crate::map::provider::{MapProviderId, provider};
 use crate::map::worker::{MapScopeId, TileFailureClass, TileManager, TileRequest};
-use crate::plot::{GhostTrace, PlotPane, TraceMode, TraceRef, ViewX, draw_zoom_drag_overlay};
+use crate::plotting::plot::{GhostTrace, PlotPane, TraceMode, TraceRef, ViewX, draw_zoom_drag_overlay};
 use crate::scene3d::vehicle;
 
 pub type TileTree = egui_tiles::Tree<Pane>;
@@ -588,7 +588,7 @@ pub struct PlotServices<'a> {
     pub traj_generation: u64,
     pub shared_y_gutter: f32,
     pub plot_display: crate::config::settings::PlotDisplay,
-    pub markers: &'a [crate::markers::Marker],
+    pub markers: &'a [crate::plotting::markers::Marker],
 }
 
 pub struct Behavior<'a> {
@@ -1216,7 +1216,7 @@ impl Behavior<'_> {
         );
 
         // String fields drawn as labels at each sample's timestamp.
-        crate::text_overlay::draw(
+        crate::plotting::text_overlay::draw(
             ui,
             &response,
             pview,
@@ -1225,7 +1225,7 @@ impl Behavior<'_> {
             &pane.traces,
             &mut pane.text_offsets,
             &pane.text_filters,
-            crate::text_overlay::TextLabelStyle {
+            crate::plotting::text_overlay::TextLabelStyle {
                 cap: self.services.plot_display.text_label_cap,
                 bottom_up: self.services.plot_display.text_labels_bottom_up,
                 spacing_px: self.services.plot_display.text_label_spacing,
@@ -1336,7 +1336,7 @@ impl Behavior<'_> {
                     .trace_mut(field)
                     .and_then(|t| t.label_override.clone())
                     .unwrap_or(canonical);
-                pane.rename = Some(crate::plot::RenameDialog { field, text });
+                pane.rename = Some(crate::plotting::plot::RenameDialog { field, text });
             }
             if let Some(index) = outcome.removed_ghost {
                 pane.remove_ghost(index);
@@ -1920,7 +1920,7 @@ fn plot_rename_dialog(ctx: &egui::Context, tile_id: egui_tiles::TileId, pane: &m
         let value = pane
             .rename
             .as_ref()
-            .map(|d| crate::plot::rename_value(&d.text));
+            .map(|d| crate::plotting::plot::rename_value(&d.text));
         if let (Some(field), Some(value)) = (field, value)
             && let Some(trace) = pane.trace_mut(field)
         {

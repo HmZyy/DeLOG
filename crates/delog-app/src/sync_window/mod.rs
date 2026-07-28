@@ -6,10 +6,10 @@ use delog_core::time::TimeRange;
 use delog_render::palette;
 use std::sync::Arc;
 
-use crate::axes;
+use crate::plotting::axes;
 use crate::ui::fuzzy::fuzzy_match_score;
-use crate::gpu::{self, GpuBridge, PreparedYRange, SyncTrace};
-use crate::plot::{ViewX, draw_zoom_drag_overlay};
+use crate::plotting::gpu::{self, GpuBridge, PreparedYRange, SyncTrace};
+use crate::plotting::plot::{ViewX, draw_zoom_drag_overlay};
 use crate::sync_alignment::{
     AlignmentError, AnchorKind, SampleNeighborhood, SyncSample, anchor, sample_neighborhood,
     target_offset_us,

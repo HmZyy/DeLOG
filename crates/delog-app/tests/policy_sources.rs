@@ -1,18 +1,18 @@
 #![allow(dead_code)]
 
 pub const APP: &str = include_str!("../src/app/mod.rs");
-pub const BROWSER: &str = include_str!("../src/browser.rs");
+pub const BROWSER: &str = include_str!("../src/plotting/browser.rs");
 pub const DATAFLOW_CANVAS: &str = include_str!("../src/dataflow/canvas.rs");
 pub const DATAFLOW_WINDOW: &str = include_str!("../src/dataflow/window.rs");
 pub const DATA_EXPORT: &str = include_str!("../src/data_export/mod.rs");
 pub const DIAGNOSTICS: &str = include_str!("../src/ui/diagnostics.rs");
 pub const DOCKS: &str = include_str!("../src/ui/docks.rs");
 pub const GENERATE_MARKERS: &str = include_str!("../src/generate_markers.rs");
-pub const HOVER: &str = include_str!("../src/hover.rs");
-pub const LEGEND: &str = include_str!("../src/legend.rs");
+pub const HOVER: &str = include_str!("../src/plotting/hover.rs");
+pub const LEGEND: &str = include_str!("../src/plotting/legend.rs");
 pub const LIVE: &str = include_str!("../src/live.rs");
 pub const LOGGING: &str = include_str!("../src/ui/logging.rs");
-pub const MARKERS: &str = include_str!("../src/markers.rs");
+pub const MARKERS: &str = include_str!("../src/plotting/markers.rs");
 pub const MESSAGE_POPUP: &str = include_str!("../src/ui/message_popup.rs");
 pub const PARQUET_IMPORT: &str = include_str!("../src/parquet_import.rs");
 pub const PARSERS: &str = include_str!("../src/parsers.rs");
