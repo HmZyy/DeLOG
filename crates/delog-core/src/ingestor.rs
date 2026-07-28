@@ -811,6 +811,7 @@ mod tests {
                 name: "MPC_XY_CRUISE".to_owned(),
                 ty: "float".to_owned(),
                 value: "5.5".to_owned(),
+                default: None,
             }],
             auto_markers: vec![AutoMarker {
                 time_us: 42,

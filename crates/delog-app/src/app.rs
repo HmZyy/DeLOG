@@ -3599,6 +3599,7 @@ fn source_metadata_params_table(
                 .auto_shrink([false, false])
                 .column(Column::auto().at_least(120.0))
                 .column(Column::auto().at_least(72.0))
+                .column(Column::auto().at_least(72.0))
                 .column(Column::remainder().clip(true))
                 .header(row_height, |mut header| {
                     header.col(|ui| {
@@ -3609,6 +3610,9 @@ fn source_metadata_params_table(
                     });
                     header.col(|ui| {
                         ui.strong("Value");
+                    });
+                    header.col(|ui| {
+                        ui.strong("Default");
                     });
                 })
                 .body(|body| {
@@ -3622,6 +3626,14 @@ fn source_metadata_params_table(
                         });
                         row.col(|ui| {
                             ui.label(param.value.as_str());
+                        });
+                        row.col(|ui| match param.default.as_deref() {
+                            Some(default) => {
+                                ui.label(default);
+                            }
+                            None => {
+                                ui.weak("-");
+                            }
                         });
                     });
                 });
