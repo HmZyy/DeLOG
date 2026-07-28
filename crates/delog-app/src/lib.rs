@@ -21,8 +21,6 @@ pub mod scripts;
 pub mod session;
 pub mod sync;
 pub mod ui;
-pub mod vehicle_dialog;
-pub mod vehicle_profiles;
 pub mod workspace;
 
 pub use app::DelogApp;
