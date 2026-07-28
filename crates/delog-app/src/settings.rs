@@ -1591,6 +1591,11 @@ mod tests {
         let back: RenderTuning = serde_json::from_str(&json).unwrap();
         assert_eq!(back, r);
     }
+
+    #[test]
+    fn marker_shade_regions_defaults_on() {
+        assert!(PlotDisplay::default().marker_shade_regions);
+    }
 }
 
 #[cfg(test)]
@@ -1634,10 +1639,5 @@ mod scripting_settings_tests {
         assert_eq!(json, "\"on_output\"");
         let back: AutoOpenScriptingConsole = serde_json::from_str(&json).unwrap();
         assert_eq!(back, AutoOpenScriptingConsole::OnOutput);
-    }
-
-    #[test]
-    fn marker_shade_regions_defaults_on() {
-        assert!(PlotDisplay::default().marker_shade_regions);
     }
 }
