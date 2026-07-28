@@ -192,7 +192,7 @@ writing separate snapshot and live callbacks. These are the exact signatures:
 delog.transform(topic, *, multiplier=1.0, offset=0.0, fields=None,
                 unit=None, units=None, output_topic=None, source=None,
                 instance=None, mode="both")
-delog.group_by(topic, field, *, fields=None, output_topic=None, source=None,
+delog.split_by(topic, field, *, fields=None, output_topic=None, source=None,
                instance=None, mode="both")
 delog.merge(topics, *, base_topic, output_topic, source=None, mode="both")
 ```
@@ -214,12 +214,12 @@ does not remove it.
 `delog.catalog()` (for example, `"flight"` or a live connection's label).
 It applies to both the snapshot and future batches, including the first live
 batch before its raw source is visible in the browser. `instance=` disambiguates
-topic instances for `transform` and `group_by`. Without those selectors, an
+topic instances for `transform` and `split_by`. Without those selectors, an
 ambiguous snapshot topic is an error. Generated topics from all declarations in
 one run share the run's `script:<name>` source; declarations do not consume
 their own derived output as live input. Each generated topic name has exactly
 one owning declaration per run. Static collisions fail before the source is
-opened; dynamic `group_by` names are claimed atomically on first output. The
+opened; dynamic `split_by` names are claimed atomically on first output. The
 owner must keep the exact field order, names, types, and units thereafter.
 
 ### Transform
@@ -249,9 +249,9 @@ The multiplier and offset must be finite, `fields` cannot be empty, requested
 fields must exist when the input schema is available, and an explicitly empty
 `output_topic` is rejected.
 
-### Group by a field
+### Split by a field
 
-`group_by` emits one topic per distinct key and removes the grouping field from
+`split_by` emits one topic per distinct key and removes the split field from
 the emitted fields. With `fields=None`, it copies every other field; an explicit
 `fields=[...]` copies only those fields (and still omits the key). Utf8 keys must
 be non-empty. Numeric keys must be finite; integral values are formatted without
@@ -259,11 +259,11 @@ a decimal suffix. Rows with `""`, NaN, or infinite keys are skipped.
 
 The default output template is `"{topic}/{value}"`. A custom `output_topic`
 must contain `{value}`; `{topic}` is optional. Both placeholders are replaced
-for each group. Units and the string-versus-numeric kind are preserved; numeric
+for each key. Units and the string-versus-numeric kind are preserved; numeric
 fields are normalized to Arrow Float64, while string fields remain Arrow Utf8.
 
 ```python
-delog.group_by("PARAM_VALUE", "param_id")
+delog.split_by("PARAM_VALUE", "param_id")
 ```
 
 For example, keys `SYS_ID` and `RATE` produce `PARAM_VALUE/SYS_ID` and
@@ -542,7 +542,7 @@ session. You never import or construct it.
 | `delog.param(name)` | `float`/`int`/`bool`/`str` | Read the current value of a variable inside a live callback. |
 | `delog.add_marker(time_us, label, *, color=None, note=None)` | `None` | Add a runtime marker after the current script or callback succeeds. |
 | `delog.transform(topic, *, multiplier=1.0, offset=0.0, fields=None, unit=None, units=None, output_topic=None, source=None, instance=None, mode="both")` | `None` | Scale/offset selected numeric fields and pass through the topic. |
-| `delog.group_by(topic, field, *, fields=None, output_topic=None, source=None, instance=None, mode="both")` | `None` | Split a topic into stable per-key output topics. |
+| `delog.split_by(topic, field, *, fields=None, output_topic=None, source=None, instance=None, mode="both")` | `None` | Split a topic into stable per-key output topics. |
 | `delog.merge(topics, *, base_topic, output_topic, source=None, mode="both")` | `None` | Previous-sample align selected fields onto a base topic. |
 | `delog.live_transform(*, topic, fields, output_topic=None)` | decorator | Register custom processing for future batches. |
 | `delog.catalog()` | `Catalog` | Structured source/topic/field catalogue. |
@@ -865,8 +865,8 @@ explicitly.
 | [`snapshot/vehicle_attitude_euler.py`](../scripts/snapshot/vehicle_attitude_euler.py) | snapshot-only | Converts a PX4 `vehicle_attitude[0]` quaternion to roll/pitch/yaw with structured reads and `delog.emit(...)`. |
 | [`snapshot/nav_controller_output_radians.py`](../scripts/snapshot/nav_controller_output_radians.py) | snapshot-only | Converts ArduPilot `NAV_CONTROLLER_OUTPUT` angle fields to radians with a declarative transform in `mode="snapshot"`. |
 | [`live/nav_controller_live_rad.py`](../scripts/live/nav_controller_live_rad.py) | live-only | Converts future `NAV_CONTROLLER_OUTPUT` angle fields to radians with a declarative transform in `mode="live"`. |
-| [`live/named_values_live_split.py`](../scripts/live/named_values_live_split.py) | live-only | Splits future `NAMED_VALUE_FLOAT` and `NAMED_VALUE_INT` rows into one topic per `name` with declarative grouping. |
-| [`live/param_value_live_split.py`](../scripts/live/param_value_live_split.py) | live-only | Splits future `PARAM_VALUE` rows into one topic per `param_id` with declarative grouping. |
+| [`live/named_values_live_split.py`](../scripts/live/named_values_live_split.py) | live-only | Splits future `NAMED_VALUE_FLOAT` and `NAMED_VALUE_INT` rows into one topic per `name` with a declarative split. |
+| [`live/param_value_live_split.py`](../scripts/live/param_value_live_split.py) | live-only | Splits future `PARAM_VALUE` rows into one topic per `param_id` with a declarative split. |
 | [`live/tunable_lowpass.py`](../scripts/live/tunable_lowpass.py) | live-only callback | Applies a slider-controlled exponential low-pass filter to future IMU batches. |
 
 `tunable_lowpass.py` remains the callback escape hatch for algorithms that need

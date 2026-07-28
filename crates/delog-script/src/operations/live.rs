@@ -10,10 +10,10 @@ use delog_core::ingest::ParsedBatch;
 use crate::api::{PendingColumn, PendingTopic, parse_topic_instance, topic_matches};
 use crate::emit::prepare_topics;
 use crate::operations::snapshot::{
-    MergeSeed, SeedField, StreamKey, group_key, pending_topic, slice_column,
+    MergeSeed, SeedField, StreamKey, split_key, pending_topic, slice_column,
 };
 use crate::operations::{
-    GroupBySpec, MergeSpec, OperationSpec, TopicRegistry, TopicSelector, TransformSpec,
+    SplitBySpec, MergeSpec, OperationSpec, TopicRegistry, TopicSelector, TransformSpec,
 };
 
 type EmittedSchema = Vec<(String, DataType, Option<String>)>;
@@ -248,7 +248,7 @@ impl ActiveOperation {
             OperationSpec::Transform(spec) => {
                 spec.mode.wants_live() && selector_matches(&spec.input, batch.topic(), source_label)
             }
-            OperationSpec::GroupBy(spec) => {
+            OperationSpec::SplitBy(spec) => {
                 spec.mode.wants_live() && selector_matches(&spec.input, batch.topic(), source_label)
             }
             OperationSpec::Merge(spec) => {
@@ -280,7 +280,7 @@ impl ActiveOperation {
     pub fn description(&self) -> String {
         match &self.spec {
             OperationSpec::Transform(spec) => format!("transform({})", spec.input.topic),
-            OperationSpec::GroupBy(spec) => format!("group_by({})", spec.input.topic),
+            OperationSpec::SplitBy(spec) => format!("split_by({})", spec.input.topic),
             OperationSpec::Merge(spec) => format!("merge({})", spec.base_topic),
         }
     }
@@ -328,11 +328,11 @@ impl ActiveOperation {
             {
                 execute_transform(batch, spec, self.watermark_rows(batch, batch.topic()))?
             }
-            OperationSpec::GroupBy(spec)
+            OperationSpec::SplitBy(spec)
                 if spec.mode.wants_live()
                     && selector_matches(&spec.input, batch.topic(), source_label) =>
             {
-                execute_group(batch, spec, self.watermark_rows(batch, batch.topic()))?
+                execute_split(batch, spec, self.watermark_rows(batch, batch.topic()))?
             }
             _ => Vec::new(),
         };
@@ -541,9 +541,9 @@ fn execute_transform(
     )?])
 }
 
-fn execute_group(
+fn execute_split(
     batch: &ParsedBatch,
-    spec: &GroupBySpec,
+    spec: &SplitBySpec,
     rows: Vec<usize>,
 ) -> Result<Vec<PendingTopic>, String> {
     validate_requested_fields(batch, spec.fields.as_deref())?;
@@ -555,10 +555,10 @@ fn execute_group(
         ));
     }
     let fields = materialize_columns(batch, &rows)?;
-    let group_column = fields
+    let split_column = fields
         .iter()
         .find(|(name, _, _)| name == &spec.field)
-        .expect("grouping field was validated");
+        .expect("split field was validated");
     let selected = match &spec.fields {
         Some(requested) => requested
             .iter()
@@ -574,7 +574,7 @@ fn execute_group(
     let mut groups = Vec::<(String, Vec<usize>)>::new();
     let mut positions = HashMap::<String, usize>::new();
     for row in 0..rows.len() {
-        let Some(key) = group_key(&group_column.1, row) else {
+        let Some(key) = split_key(&split_column.1, row) else {
             continue;
         };
         let position = match positions.get(&key) {
@@ -913,7 +913,7 @@ mod tests {
     use crate::api::{PendingColumn, PendingField, PendingTopic};
     use crate::operations::snapshot::{MergeSeed, SeedField, StreamKey};
     use crate::operations::{
-        GroupBySpec, MergeSpec, OperationMode, OperationSpec, TopicRegistry, TopicSelector,
+        SplitBySpec, MergeSpec, OperationMode, OperationSpec, TopicRegistry, TopicSelector,
         TransformSpec,
     };
 
@@ -1028,9 +1028,9 @@ mod tests {
         )
     }
 
-    fn group_operation() -> ActiveOperation {
+    fn split_operation() -> ActiveOperation {
         ActiveOperation::new(
-            OperationSpec::GroupBy(GroupBySpec {
+            OperationSpec::SplitBy(SplitBySpec {
                 input: TopicSelector {
                     topic: "PARAM_VALUE".into(),
                     source: None,
@@ -1109,8 +1109,8 @@ mod tests {
     }
 
     #[test]
-    fn live_group_creates_one_batch_per_nonempty_key() {
-        let mut op = group_operation();
+    fn live_split_creates_one_batch_per_nonempty_key() {
+        let mut op = split_operation();
         let out = op.process(&param_batch(), "live").unwrap();
         assert_eq!(
             out.iter().map(ParsedBatch::topic).collect::<Vec<_>>(),
@@ -1121,12 +1121,12 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_group_collision_is_atomic_and_counts_as_a_matching_error() {
+    fn dynamic_split_collision_is_atomic_and_counts_as_a_matching_error() {
         let registry = Rc::new(RefCell::new(TopicRegistry::default()));
         let make = |index| {
             ActiveOperation::with_registry(
                 index,
-                OperationSpec::GroupBy(GroupBySpec {
+                OperationSpec::SplitBy(SplitBySpec {
                     input: TopicSelector {
                         topic: "PARAM_VALUE".into(),
                         source: None,

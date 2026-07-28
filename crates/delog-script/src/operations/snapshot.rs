@@ -8,7 +8,7 @@ use crate::api::{
     materialize_field,
 };
 use crate::operations::{
-    GroupBySpec, MergeSpec, OperationMode, OperationSpec, TopicRegistry, TopicSelector,
+    SplitBySpec, MergeSpec, OperationMode, OperationSpec, TopicRegistry, TopicSelector,
     TransformSpec,
 };
 
@@ -359,7 +359,7 @@ fn execute_transform(
     Ok(())
 }
 
-pub(crate) fn group_key(column: &PendingColumn, row: usize) -> Option<String> {
+pub(crate) fn split_key(column: &PendingColumn, row: usize) -> Option<String> {
     match column {
         PendingColumn::Utf8(values) => values.get(row).filter(|value| !value.is_empty()).cloned(),
         PendingColumn::F64(values) => {
@@ -386,9 +386,9 @@ pub(crate) fn slice_column(column: &PendingColumn, rows: &[usize]) -> PendingCol
     }
 }
 
-fn execute_group(
+fn execute_split(
     snapshot: &StoreSnapshot,
-    spec: &GroupBySpec,
+    spec: &SplitBySpec,
     out: &mut SnapshotOperationOutput,
 ) -> Result<(), String> {
     let Some(topic_match) = resolve_topic(snapshot, &spec.input, spec.mode)? else {
@@ -399,7 +399,7 @@ fn execute_group(
         return Ok(());
     };
     let topic = materialize_topic(snapshot, topic_match, None)?;
-    let group_column = topic
+    let split_column = topic
         .fields
         .iter()
         .find(|(name, _, _)| name == &spec.field)
@@ -439,7 +439,7 @@ fn execute_group(
     let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
     let mut positions = HashMap::<String, usize>::new();
     for row in 0..topic.times.len() {
-        let Some(key) = group_key(&group_column.1, row) else {
+        let Some(key) = split_key(&split_column.1, row) else {
             continue;
         };
         let position = match positions.get(&key) {
@@ -640,7 +640,7 @@ pub fn prepare_snapshot(
         let first_topic = out.topics.len();
         match spec {
             OperationSpec::Transform(spec) => execute_transform(snapshot, spec, &mut out)?,
-            OperationSpec::GroupBy(spec) => execute_group(snapshot, spec, &mut out)?,
+            OperationSpec::SplitBy(spec) => execute_split(snapshot, spec, &mut out)?,
             OperationSpec::Merge(spec) => execute_merge(snapshot, index, spec, &mut out)?,
         }
         let claims = out.topics[first_topic..]
@@ -680,7 +680,7 @@ mod tests {
 
     use crate::api::{PendingColumn, PendingTopic};
     use crate::operations::{
-        GroupBySpec, MergeSpec, OperationMode, OperationSpec, TopicSelector, TransformSpec,
+        SplitBySpec, MergeSpec, OperationMode, OperationSpec, TopicSelector, TransformSpec,
     };
 
     use super::{StreamKey, prepare_snapshot};
@@ -785,7 +785,7 @@ mod tests {
                 output_topic: "ATTITUDE_DEG".into(),
                 mode: OperationMode::Both,
             }),
-            OperationSpec::GroupBy(GroupBySpec {
+            OperationSpec::SplitBy(SplitBySpec {
                 input: TopicSelector {
                     topic: "PARAM_VALUE".into(),
                     source: None,
@@ -843,7 +843,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_operations_transform_group_and_merge() {
+    fn snapshot_operations_transform_split_and_merge() {
         let snap = operation_fixture();
         let out = prepare_snapshot(&snap, &fixture_specs()).unwrap();
 
@@ -903,7 +903,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_dynamic_group_claim_is_atomic_across_all_topics() {
+    fn failed_dynamic_split_claim_is_atomic_across_all_topics() {
         let specs = vec![
             OperationSpec::Transform(TransformSpec {
                 input: TopicSelector {
@@ -919,7 +919,7 @@ mod tests {
                 output_topic: "PARAM_VALUE/MIN_SPEED".into(),
                 mode: OperationMode::Snapshot,
             }),
-            OperationSpec::GroupBy(GroupBySpec {
+            OperationSpec::SplitBy(SplitBySpec {
                 input: TopicSelector {
                     topic: "PARAM_VALUE".into(),
                     source: None,
@@ -1018,8 +1018,8 @@ mod tests {
     }
 
     #[test]
-    fn group_omits_the_grouping_field_from_an_explicit_selection() {
-        let spec = OperationSpec::GroupBy(GroupBySpec {
+    fn split_omits_the_split_field_from_an_explicit_selection() {
+        let spec = OperationSpec::SplitBy(SplitBySpec {
             input: TopicSelector {
                 topic: "PARAM_VALUE".into(),
                 source: None,
