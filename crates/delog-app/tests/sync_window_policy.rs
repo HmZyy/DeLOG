@@ -130,7 +130,7 @@ fn sync_anchor_toolbar_picker_and_standard_palette_remain_wired() {
     ] {
         assert!(SYNC_WINDOW.contains(label), "missing sync action {label}");
     }
-    assert!(SYNC_WINDOW.contains("crate::icons::arrow_left_right()"));
+    assert!(SYNC_WINDOW.contains("crate::ui::icons::arrow_left_right()"));
     assert!(SYNC_WINDOW.contains("align_and_begin_apply(snapshot"));
     assert!(SYNC_WINDOW.contains("begin_sample_pick"));
     assert!(SYNC_WINDOW.contains("sample_neighborhood"));

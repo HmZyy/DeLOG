@@ -470,7 +470,7 @@ impl ParsersPanel {
                         ui.add(egui::TextEdit::singleline(&mut self.filename).desired_width(160.0));
                         if image_text_button(
                             ui,
-                            crate::icons::save(),
+                            crate::ui::icons::save(),
                             "Save",
                             validation_enabled && self.pending_save.is_none(),
                         )

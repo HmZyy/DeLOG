@@ -1,7 +1,7 @@
 //! Settings dialog state and tab rendering.
 
 use crate::map::provider::{MapProviderId, provider};
-use crate::theme::ThemeChoice;
+use crate::ui::theme::ThemeChoice;
 
 const DEFAULT_TILE_CACHE_LIMIT_BYTES: u64 = 1024 * 1024 * 1024;
 const MIN_TILE_CACHE_LIMIT_BYTES: u64 = 64 * 1024 * 1024;

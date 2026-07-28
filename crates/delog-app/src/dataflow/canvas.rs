@@ -281,7 +281,7 @@ fn show_node_contents(
         ui.strong(node_title(&node.kind));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let icon_size = egui::Vec2::splat(ui.spacing().icon_width);
-            let close = egui::Image::new(crate::icons::close())
+            let close = egui::Image::new(crate::ui::icons::close())
                 .fit_to_exact_size(icon_size)
                 .tint(ui.visuals().text_color());
             result.delete = ui

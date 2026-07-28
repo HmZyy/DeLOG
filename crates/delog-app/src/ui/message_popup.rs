@@ -38,9 +38,9 @@ impl MessagePopup {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     let (icon, tint) = if self.error {
-                        (crate::icons::circle_alert(), ui.visuals().error_fg_color)
+                        (crate::ui::icons::circle_alert(), ui.visuals().error_fg_color)
                     } else {
-                        (crate::icons::info(), ui.visuals().text_color())
+                        (crate::ui::icons::info(), ui.visuals().text_color())
                     };
                     ui.add(
                         egui::Image::new(icon)

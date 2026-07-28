@@ -14,7 +14,7 @@ use delog_flow::graph::{Edge, Graph, Node, NodeId, NodeKind};
 use delog_flow::publish::{build_outputs, slice_topic_after, source_key};
 use delog_flow::types::Value;
 
-use crate::logging::LogLevel;
+use crate::ui::logging::LogLevel;
 
 const UNDO_CAPACITY: usize = 64;
 

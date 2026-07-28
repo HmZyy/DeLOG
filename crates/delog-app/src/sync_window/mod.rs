@@ -7,7 +7,7 @@ use delog_render::palette;
 use std::sync::Arc;
 
 use crate::axes;
-use crate::fuzzy::fuzzy_match_score;
+use crate::ui::fuzzy::fuzzy_match_score;
 use crate::gpu::{self, GpuBridge, PreparedYRange, SyncTrace};
 use crate::plot::{ViewX, draw_zoom_drag_overlay};
 use crate::sync_alignment::{
@@ -1154,7 +1154,7 @@ impl SyncWindow {
             .unwrap_or_else(|| "Select active target".to_owned());
         ui.horizontal(|ui| {
             ui.label(reference_label);
-            ui.add(sync_toolbar_icon(ui, crate::icons::arrow_right()));
+            ui.add(sync_toolbar_icon(ui, crate::ui::icons::arrow_right()));
             ui.label(active_label);
             for (label, method) in [
                 ("First to First", AutoAlignMethod::FirstToFirst),
@@ -1166,7 +1166,7 @@ impl SyncWindow {
                     .add_enabled(
                         pair_ready,
                         egui::Button::image_and_text(
-                            sync_toolbar_icon(ui, crate::icons::arrow_left_right()),
+                            sync_toolbar_icon(ui, crate::ui::icons::arrow_left_right()),
                             label,
                         ),
                     )

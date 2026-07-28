@@ -217,7 +217,7 @@ pub fn ui(
     range: TimeRange,
     utc_offset_us: Option<i64>,
     any_live: bool,
-    theme: crate::theme::ThemeChoice,
+    theme: crate::ui::theme::ThemeChoice,
     markers: &crate::markers::Markers,
 ) -> TimelineAction {
     let mut action = TimelineAction::default();
@@ -269,7 +269,7 @@ pub fn ui(
         if ui
             .add_sized(
                 button_size,
-                egui::Button::image(transport_icon(crate::icons::skip_back(), ui)),
+                egui::Button::image(transport_icon(crate::ui::icons::skip_back(), ui)),
             )
             .on_hover_text("Jump to start (Home)")
             .clicked()
@@ -278,9 +278,9 @@ pub fn ui(
             action.manual_scrub = true;
         }
         let icon = if playback.playing {
-            crate::icons::pause()
+            crate::ui::icons::pause()
         } else {
-            crate::icons::play()
+            crate::ui::icons::play()
         };
         if ui
             .add_sized(button_size, egui::Button::image(transport_icon(icon, ui)))
@@ -297,7 +297,7 @@ pub fn ui(
         if ui
             .add_sized(
                 button_size,
-                egui::Button::image(transport_icon(crate::icons::skip_forward(), ui)),
+                egui::Button::image(transport_icon(crate::ui::icons::skip_forward(), ui)),
             )
             .on_hover_text(end_tip)
             .clicked()
@@ -311,7 +311,7 @@ pub fn ui(
             }
         }
 
-        let fit_icon = egui::Image::new(crate::icons::maximize())
+        let fit_icon = egui::Image::new(crate::ui::icons::maximize())
             .fit_to_exact_size(egui::vec2(16.0, 16.0))
             .tint(ui.visuals().text_color());
         if ui

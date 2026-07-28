@@ -1257,7 +1257,7 @@ mod tests {
         let mut settings = AppSettings::default();
         settings.show_fps = true;
         settings.render_mode = crate::settings::RenderMode::Continuous;
-        settings.theme = crate::theme::ThemeChoice::Light;
+        settings.theme = crate::ui::theme::ThemeChoice::Light;
         settings.scene3d.map_provider = crate::map::provider::MapProviderId::BingSatellite;
         settings.scene3d.tile_cache_limit_bytes = 8 * 1024 * 1024 * 1024;
 
