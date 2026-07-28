@@ -10,14 +10,16 @@ use std::thread::JoinHandle;
 
 use delog_core::diagnostics::{Diag, DiagRecord, DiagnosticHub, Severity};
 use delog_core::identity::SourceId;
-use delog_core::ingest::{IngestSender, IngestSink, ParseSummary, SourceKind, ingest_channel};
+use delog_core::ingest::{
+    ChannelSink, IngestSender, IngestSink, ParseSummary, SourceKind, ingest_channel,
+};
 use delog_core::ingestor::{IngestObserver, Ingestor};
 use delog_core::metrics::MetricsRegistry;
 use delog_core::parse_ctl::{CancelToken, ParseCtl};
 use delog_core::snapshot::{DataStore, StoreSnapshot};
 use delog_parsers::{
-    ArduPilotParser, Detection, ParquetParser, ParseError, ParserRegistry, SNIFF_HEAD_LEN,
-    TimestampSelectionProvider, TlogParser, ULogParser,
+    ArduPilotParser, Detection, LogParser, ParquetParser, ParseError, ParserRegistry,
+    SNIFF_HEAD_LEN, TimestampSelectionProvider, TlogParser, ULogParser,
 };
 
 #[cfg(feature = "scripting")]
@@ -345,8 +347,13 @@ impl Session {
             .any(|a| a.handle.as_ref().is_some_and(|h| !h.is_finished()))
     }
 
-    /// Start parsing `path` on a worker thread. Returns immediately.
-    pub fn open_path(&mut self, path: impl Into<PathBuf>) {
+    pub fn parser_names(&self) -> Vec<&'static str> {
+        self.registry.parsers().iter().map(|p| p.name()).collect()
+    }
+
+    /// Start parsing `path` on a worker thread. Returns immediately. A
+    /// `parser_name` forces that parser instead of sniffing the file.
+    pub fn open_path(&mut self, path: impl Into<PathBuf>, parser_name: Option<String>) {
         let path = path.into();
         let label = source_label(&path);
         let cancel = CancelToken::new();
@@ -363,7 +370,14 @@ impl Session {
                 {
                     // Wall-clock parse time for this file (`parse_total`).
                     let _t = metrics.scope("parse_total");
-                    run_parse(&path, &worker_label, &registry, &sender, worker_cancel);
+                    run_parse(
+                        &path,
+                        &worker_label,
+                        &registry,
+                        &sender,
+                        worker_cancel,
+                        parser_name.as_deref(),
+                    );
                 }
                 ctx.request_repaint();
             })
@@ -452,6 +466,7 @@ fn run_parse(
     registry: &ParserRegistry,
     sender: &IngestSender,
     cancel: CancelToken,
+    forced: Option<&str>,
 ) {
     let mut sink = sender.file_sink();
     let mut file = match File::open(path) {
@@ -466,6 +481,18 @@ fn run_parse(
         }
     };
     let total = file.metadata().map(|m| m.len()).unwrap_or(0);
+
+    if let Some(name) = forced {
+        let Some(parser) = registry.by_name(name) else {
+            sink.diagnostic(Diag::error(
+                "parser-unknown",
+                format!("{label}: no parser named `{name}`"),
+            ));
+            return;
+        };
+        run_with_parser(file, label, parser, sender, &mut sink, cancel, total);
+        return;
+    }
 
     let mut head = vec![0u8; SNIFF_HEAD_LEN];
     let read = read_head(&mut file, &mut head);
@@ -502,9 +529,21 @@ fn run_parse(
         }
     };
 
+    run_with_parser(file, label, parser, sender, &mut sink, cancel, total);
+}
+
+fn run_with_parser(
+    file: File,
+    label: &str,
+    parser: Arc<dyn LogParser>,
+    sender: &IngestSender,
+    sink: &mut ChannelSink,
+    cancel: CancelToken,
+    total: u64,
+) {
     let source = sink.open_source(label, SourceKind::File);
     let ctl = ParseCtl::new(cancel, source, total).with_label(label);
-    match parser.parse(Box::new(file), &mut sink, &ctl) {
+    match parser.parse(Box::new(file), sink, &ctl) {
         Ok(_) => {}
         Err(ParseError::Setup { detail }) => {
             sender.remove_source(source);
@@ -876,7 +915,7 @@ pub(crate) mod tests {
     ) -> LoadedStructuredExport {
         let provider = Arc::new(NeverSelectionProvider::default());
         let mut session = Session::new(egui::Context::default(), provider.clone());
-        session.open_path(path);
+        session.open_path(path, None);
         session.join_workers();
         session.wait_until(|session| {
             !session.load_terminals.lock().unwrap().is_empty()
@@ -1122,7 +1161,7 @@ pub(crate) mod tests {
         File::create(&path).unwrap().write_all(&tiny_bin()).unwrap();
 
         let mut session = Session::new(egui::Context::default(), cancelling_selection_provider());
-        session.open_path(path.clone());
+        session.open_path(path.clone(), None);
         session.join_workers();
         session.wait_until(|s| {
             let snap = s.snapshot();
@@ -1140,6 +1179,51 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_forced_parser_bypasses_sniffing() {
+        let path = temp_path("forced-wrong");
+        File::create(&path).unwrap().write_all(&tiny_bin()).unwrap();
+
+        let mut session = Session::new(egui::Context::default(), cancelling_selection_provider());
+        session.open_path(path.clone(), Some("ulog".to_owned()));
+        session.join_workers();
+        session.wait_until(|s| !s.diagnostic_records().is_empty());
+
+        let snap = session.snapshot();
+        assert!(
+            !snap.topics.iter().any(|t| t.entry.name == "TEST"),
+            "forcing `ulog` must not fall back to the sniffed ArduPilot parser"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn an_unknown_forced_parser_name_is_reported() {
+        let path = temp_path("forced-missing");
+        File::create(&path).unwrap().write_all(&tiny_bin()).unwrap();
+
+        let mut session = Session::new(egui::Context::default(), cancelling_selection_provider());
+        session.open_path(path.clone(), Some("nope".to_owned()));
+        session.join_workers();
+        session.wait_until(|s| {
+            s.diagnostic_records()
+                .iter()
+                .any(|r| r.diag.code == "parser-unknown")
+        });
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn parser_names_lists_every_registered_parser() {
+        let session = Session::new(egui::Context::default(), cancelling_selection_provider());
+        assert_eq!(
+            session.parser_names(),
+            ["ardupilot-bin", "ulog", "tlog", "parquet"]
+        );
+    }
+
+    #[test]
     fn open_path_loads_a_generic_parquet_into_the_store() {
         let path = temp_parquet_path("generic-load");
         write_generic_parquet(&path);
@@ -1149,7 +1233,7 @@ pub(crate) mod tests {
         }));
 
         let mut session = Session::new(egui::Context::default(), provider);
-        session.open_path(path.clone());
+        session.open_path(path.clone(), None);
         session.join_workers();
         session.wait_until(|session| {
             session
@@ -1180,7 +1264,7 @@ pub(crate) mod tests {
         write_generic_parquet(&path);
 
         let mut session = Session::new(egui::Context::default(), cancelling_selection_provider());
-        session.open_path(path.clone());
+        session.open_path(path.clone(), None);
         session.join_workers();
         session.wait_until(|session| {
             session.snapshot().sources.iter().any(|source| {
@@ -1214,7 +1298,7 @@ pub(crate) mod tests {
         }));
         let mut session = Session::new(egui::Context::default(), provider);
 
-        session.open_path(invalid_path.clone());
+        session.open_path(invalid_path.clone(), None);
         let cancel = session.active[0].cancel.clone();
         let loads = Arc::clone(&session.loads);
         let cancel_after_progress = std::thread::spawn(move || {
@@ -1257,7 +1341,7 @@ pub(crate) mod tests {
                 .any(|record| record.diag.code == "late-progress-sentinel")
         });
 
-        session.open_path(next_path.clone());
+        session.open_path(next_path.clone(), None);
         session.join_workers();
         session.wait_until(|session| {
             let snapshot = session.snapshot();
@@ -1310,7 +1394,7 @@ pub(crate) mod tests {
             .unwrap();
 
         let mut session = Session::new(egui::Context::default(), cancelling_selection_provider());
-        session.open_path(path.clone());
+        session.open_path(path.clone(), None);
         session.join_workers();
         session.wait_until(|s| {
             s.diagnostic_records()
@@ -1361,6 +1445,7 @@ pub(crate) mod tests {
             &registry,
             &session.sender,
             CancelToken::new(),
+            None,
         );
         session.wait_until(|s| {
             let snapshot = s.snapshot();
