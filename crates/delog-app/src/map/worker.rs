@@ -95,10 +95,8 @@ pub struct TileManagerStatus {
     pub ready: usize,
     pub failed: usize,
     pub failure: Option<TileFailure>,
-    #[cfg(test)]
-    completions_processed: u64,
-    #[cfg(test)]
-    stale_completions_discarded: u64,
+    pub completions_processed: u64,
+    pub stale_completions_discarded: u64,
     pub cache_bytes: u64,
     pub cache_action: CacheActionStatus,
 }
@@ -526,8 +524,7 @@ impl TileManager {
         self.status.lock().unwrap().clone()
     }
 
-    #[cfg(test)]
-    pub(crate) fn test_completion_counts(&self) -> (u64, u64) {
+    pub fn test_completion_counts(&self) -> (u64, u64) {
         let status = self.status.lock().unwrap();
         (
             status.completions_processed,
@@ -1029,7 +1026,6 @@ fn process_completion(
             .get(&work.request.scope)
             .is_none_or(|snapshot| snapshot.accepts(&key, work.sequence))
         && authoritative_accepts;
-    #[cfg(test)]
     {
         let mut status = _status_snapshot.lock().unwrap();
         status.completions_processed = status.completions_processed.saturating_add(1);
@@ -1270,6 +1266,10 @@ fn retry_delay(attempts: u32) -> Duration {
             .unwrap_or(u64::MAX)
             .min(60),
     )
+}
+
+pub fn request_from_test(manager: &mut TileManager, request: TileRequest, url: String) {
+    manager.request_with_url(request, Some(url));
 }
 
 #[cfg(test)]
