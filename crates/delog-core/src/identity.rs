@@ -61,7 +61,7 @@ pub struct SourceParam {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AutoMarker {
     pub time_us: TimestampUs,
-    pub level: u8,
+    pub level: Option<u8>,
     pub text: String,
 }
 
@@ -699,7 +699,7 @@ mod tests {
             }],
             auto_markers: vec![AutoMarker {
                 time_us: 1_000,
-                level: 6,
+                level: Some(6),
                 text: "armed".to_owned(),
             }],
         };

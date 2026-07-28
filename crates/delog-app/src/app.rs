@@ -3676,8 +3676,13 @@ fn source_metadata_markers_table(
                         row.col(|ui| {
                             ui.label(format!("{:.3}s", marker.time_us as f64 / 1e6));
                         });
-                        row.col(|ui| {
-                            ui.label(marker.level.to_string());
+                        row.col(|ui| match marker.level {
+                            Some(level) => {
+                                ui.label(level.to_string());
+                            }
+                            None => {
+                                ui.weak("-");
+                            }
                         });
                         row.col(|ui| {
                             ui.label(marker.text.as_str());

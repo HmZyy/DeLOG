@@ -815,7 +815,7 @@ mod tests {
             }],
             auto_markers: vec![AutoMarker {
                 time_us: 42,
-                level: 6,
+                level: Some(6),
                 text: "takeoff".to_owned(),
             }],
         };
