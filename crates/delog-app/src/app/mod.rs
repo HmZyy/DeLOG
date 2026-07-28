@@ -19,7 +19,7 @@ use crate::map::worker::{CacheActionKind, CacheActionStatus, TileManager};
 use crate::ui::performance::{PerformanceDock, PerformanceSnapshot, ResourceSummary, TraceSummary};
 use crate::plotting::plot::ViewX;
 #[cfg(feature = "scripting")]
-use crate::scripts;
+use crate::scripting::scripts;
 use crate::session::session::Session;
 use crate::config::settings::{AppSettings, RenderMode, SettingsDialog, TileCacheUiState};
 use crate::sync::sync_window::SyncWindow;
