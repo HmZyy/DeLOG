@@ -44,10 +44,12 @@ cargo run -p delog-app          # scripting included
 cargo build --workspace         # scripting included
 ```
 
-Because it's on by default, the default build needs a Python 3 toolchain
-(interpreter + dev headers). To build **without** Python, disable the default
-feature (Cargo features are additive, so the opt-out is `--no-default-features`,
-not a `without-scripting` feature):
+Because it's on by default, the default build needs
+[Python 3.12.3](https://www.python.org/downloads/release/python-3123/) plus
+the matching development headers. Use that release page to download the
+installer or source archive for your platform. To build **without** Python,
+disable the default feature (Cargo features are additive, so the opt-out is
+`--no-default-features`, not a `without-scripting` feature):
 
 ```bash
 cargo run   -p delog-app --no-default-features   # no scripting, no Python needed
