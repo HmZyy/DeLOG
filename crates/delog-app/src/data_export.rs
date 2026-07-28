@@ -2,17 +2,16 @@ use std::collections::HashMap;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
-use arrow::array::{ArrayBuilder, ArrayRef, Float64Builder, Int64Builder};
+use arrow::array::{ArrayBuilder, ArrayRef, Float64Builder, Int64Array, Int64Builder};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::error::ArrowError;
 use arrow::record_batch::RecordBatch;
 use delog_core::export::{Cell, ExportError, ResampleMode, RowCursor};
-use delog_core::identity::FieldId;
+use delog_core::identity::{FieldId, SourceId, TopicId};
+use delog_core::parse_ctl::CancelToken;
 use delog_core::snapshot::StoreSnapshot;
-use parquet::arrow::ArrowWriter;
-use parquet::basic::Compression;
-use parquet::file::properties::WriterProperties;
 
 use crate::browser::BrowserModel;
 
@@ -67,20 +66,152 @@ impl ExportFormat {
 #[derive(Debug, Clone)]
 pub struct ExportField {
     pub id: FieldId,
+    pub source_id: SourceId,
+    pub topic_id: TopicId,
     pub source: String,
     pub topic: String,
     pub name: String,
     pub label: String,
+    pub dtype: DataType,
     pub unit: Option<String>,
+    pub multiplier: f64,
+    pub description: Option<String>,
+}
+
+impl ExportField {
+    pub fn csv_compatible(&self) -> bool {
+        matches!(
+            self.dtype,
+            DataType::Int8
+                | DataType::Int16
+                | DataType::Int32
+                | DataType::Int64
+                | DataType::UInt8
+                | DataType::UInt16
+                | DataType::UInt32
+                | DataType::UInt64
+                | DataType::Float32
+                | DataType::Float64
+                | DataType::Boolean
+        )
+    }
+
+    pub fn parquet_compatible(&self) -> bool {
+        self.csv_compatible() || matches!(self.dtype, DataType::Utf8 | DataType::LargeUtf8)
+    }
 }
 
 pub const EXPORT_BATCH_ROWS: usize = 8_192;
+
+const PROGRESS_REFRESH: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Export progress in per mille, shared between the writer and the UI.
+#[derive(Clone, Default)]
+pub struct ExportProgress(Arc<AtomicU32>);
+
+impl ExportProgress {
+    pub fn set(&self, fraction: f32) {
+        let per_mille = (fraction.clamp(0.0, 1.0) * 1_000.0).round() as u32;
+        self.0.store(per_mille, Ordering::Relaxed);
+    }
+
+    fn per_mille(&self) -> u32 {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+/// Cancellation plus a progress callback for one export run.
+pub struct ExportCtl {
+    cancel: CancelToken,
+    progress: Box<dyn Fn(f32) + Send + Sync>,
+}
+
+impl ExportCtl {
+    pub fn new(cancel: CancelToken, progress: impl Fn(f32) + Send + Sync + 'static) -> Self {
+        Self {
+            cancel,
+            progress: Box::new(progress),
+        }
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+
+    pub(crate) fn report_fraction(&self, fraction: f32) {
+        (self.progress)(fraction);
+    }
+}
+
+impl Default for ExportCtl {
+    fn default() -> Self {
+        Self::new(CancelToken::new(), |_| {})
+    }
+}
+
+/// How far `t_us` sits through the exported window. Rows leave the store in
+/// timestamp order, so this is the only progress measure both formats share
+/// without counting the output rows up front.
+pub(crate) fn window_fraction(t_us: i64, window: (i64, i64)) -> f32 {
+    let span = i128::from(window.1) - i128::from(window.0);
+    if span <= 0 {
+        return 1.0;
+    }
+    let done = i128::from(t_us) - i128::from(window.0);
+    (done as f64 / span as f64).clamp(0.0, 1.0) as f32
+}
+
+/// An export that is writing right now, as shown by [`progress_ui`].
+pub struct ActiveExport {
+    pub id: u64,
+    label: String,
+    progress: ExportProgress,
+    cancel: CancelToken,
+}
+
+impl ActiveExport {
+    pub fn new(id: u64, path: &Path, progress: ExportProgress, cancel: CancelToken) -> Self {
+        Self {
+            id,
+            label: path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string()),
+            progress,
+            cancel,
+        }
+    }
+
+    pub fn fraction(&self) -> f32 {
+        self.progress.per_mille() as f32 / 1_000.0
+    }
+
+    pub fn status(&self) -> String {
+        if self.cancel.is_cancelled() {
+            format!("{} — cancelling…", self.label)
+        } else {
+            format!("{} - {}%", self.label, self.progress.per_mille() / 10)
+        }
+    }
+
+    pub fn request_cancel(&self) {
+        self.cancel.cancel();
+    }
+}
 
 #[derive(Debug)]
 pub enum DataExportError {
     Export(ExportError),
     Arrow(ArrowError),
     Parquet(parquet::errors::ParquetError),
+    ParquetFormat(delog_parquet_format::FormatError),
+    InvalidSelection(String),
+    TimestampOverflow {
+        source: String,
+        timestamp_us: i64,
+        offset_us: i64,
+    },
+    Cancelled,
     Io(std::io::Error),
 }
 
@@ -90,6 +221,17 @@ impl std::fmt::Display for DataExportError {
             Self::Export(error) => write!(f, "{error}"),
             Self::Arrow(error) => write!(f, "{error}"),
             Self::Parquet(error) => write!(f, "{error}"),
+            Self::ParquetFormat(error) => write!(f, "{error}"),
+            Self::InvalidSelection(message) => write!(f, "invalid export selection: {message}"),
+            Self::TimestampOverflow {
+                source,
+                timestamp_us,
+                offset_us,
+            } => write!(
+                f,
+                "timestamp overflow for source {source}: {timestamp_us} + {offset_us}"
+            ),
+            Self::Cancelled => write!(f, "export cancelled"),
             Self::Io(error) => write!(f, "{error}"),
         }
     }
@@ -112,6 +254,12 @@ impl From<ArrowError> for DataExportError {
 impl From<parquet::errors::ParquetError> for DataExportError {
     fn from(error: parquet::errors::ParquetError) -> Self {
         Self::Parquet(error)
+    }
+}
+
+impl From<delog_parquet_format::FormatError> for DataExportError {
+    fn from(error: delog_parquet_format::FormatError) -> Self {
+        Self::ParquetFormat(error)
     }
 }
 
@@ -301,11 +449,16 @@ fn field_picker_ui(
                             .show(ui, |ui| {
                                 let mut previous_source = None::<&str>;
                                 let mut previous_topic = None::<&str>;
-                                for field in available.iter().filter(|field| state.matches(field)) {
+                                for field in available.iter().filter(|field| {
+                                    state.format_compatible(field) && state.matches(field)
+                                }) {
                                     if previous_source != Some(field.source.as_str()) {
                                         let source_fully_selected = available
                                             .iter()
-                                            .filter(|candidate| candidate.source == field.source)
+                                            .filter(|candidate| {
+                                                candidate.source == field.source
+                                                    && state.format_compatible(candidate)
+                                            })
                                             .all(|candidate| {
                                                 state.selected.contains(&candidate.id)
                                             });
@@ -444,8 +597,12 @@ pub fn dialog_ui(
                 .show_inside(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label("Format:");
-                        ui.radio_value(&mut state.format, ExportFormat::Csv, "CSV");
-                        ui.radio_value(&mut state.format, ExportFormat::Parquet, "Parquet");
+                        let mut format = state.format;
+                        ui.radio_value(&mut format, ExportFormat::Csv, "CSV");
+                        ui.radio_value(&mut format, ExportFormat::Parquet, "Parquet");
+                        if format != state.format {
+                            state.set_format(format, available);
+                        }
                     });
                     ui.horizontal(|ui| {
                         ui.label("Range:");
@@ -454,20 +611,25 @@ pub fn dialog_ui(
                     });
                     ui.horizontal(|ui| {
                         ui.label("Resample:");
-                        egui::ComboBox::from_id_salt("data_export_mode")
-                            .selected_text(MODES[state.mode_ix])
-                            .show_ui(ui, |ui| {
-                                for (index, mode) in MODES.iter().enumerate() {
-                                    ui.selectable_value(&mut state.mode_ix, index, *mode);
-                                }
-                            });
-                        if state.mode_ix == 2 {
-                            ui.label("dt (s):");
-                            ui.add(
-                                egui::DragValue::new(&mut state.dt_s)
-                                    .speed(0.001)
-                                    .range(1e-4..=3600.0),
-                            );
+                        ui.add_enabled_ui(state.format == ExportFormat::Csv, |ui| {
+                            egui::ComboBox::from_id_salt("data_export_mode")
+                                .selected_text(MODES[state.mode_ix])
+                                .show_ui(ui, |ui| {
+                                    for (index, mode) in MODES.iter().enumerate() {
+                                        ui.selectable_value(&mut state.mode_ix, index, *mode);
+                                    }
+                                });
+                            if state.mode_ix == 2 {
+                                ui.label("dt (s):");
+                                ui.add(
+                                    egui::DragValue::new(&mut state.dt_s)
+                                        .speed(0.001)
+                                        .range(1e-4..=3600.0),
+                                );
+                            }
+                        });
+                        if state.format == ExportFormat::Parquet {
+                            ui.label("Native samples per topic");
                         }
                     });
                     ui.separator();
@@ -504,6 +666,33 @@ pub fn dialog_ui(
         });
     state.open = open && state.open;
     request
+}
+
+pub fn progress_ui(ctx: &egui::Context, active: &[ActiveExport]) {
+    if active.is_empty() {
+        return;
+    }
+
+    egui::Window::new("Exporting data")
+        .collapsible(false)
+        .resizable(false)
+        .default_pos(ctx.content_rect().center())
+        .pivot(egui::Align2::CENTER_CENTER)
+        .show(ctx, |ui| {
+            for active in active {
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::ProgressBar::new(active.fraction())
+                            .desired_width(260.0)
+                            .text(active.status()),
+                    );
+                    if ui.button("Cancel").clicked() {
+                        active.request_cancel();
+                    }
+                });
+            }
+        });
+    ctx.request_repaint_after(PROGRESS_REFRESH);
 }
 
 pub const MODES: [&str; 3] = ["None (union)", "Previous-fill", "Linear @ dt"];
@@ -549,7 +738,7 @@ impl DataExportState {
     pub fn add_filtered(&mut self, available: &[ExportField]) {
         let ids = available
             .iter()
-            .filter(|field| self.matches(field))
+            .filter(|field| self.format_compatible(field) && self.matches(field))
             .map(|field| field.id)
             .collect::<Vec<_>>();
         for id in ids {
@@ -558,11 +747,12 @@ impl DataExportState {
     }
 
     pub fn add_source_fields(&mut self, source: &str, available: &[ExportField]) {
-        for id in available
+        let ids = available
             .iter()
-            .filter(|field| field.source == source)
+            .filter(|field| field.source == source && self.format_compatible(field))
             .map(|field| field.id)
-        {
+            .collect::<Vec<_>>();
+        for id in ids {
             self.add(id);
         }
     }
@@ -575,6 +765,19 @@ impl DataExportState {
         self.selected.clear();
     }
 
+    pub fn set_format(&mut self, format: ExportFormat, available: &[ExportField]) {
+        self.format = format;
+        self.selected.retain(|id| {
+            available
+                .iter()
+                .find(|field| field.id == *id)
+                .is_some_and(|field| match format {
+                    ExportFormat::Csv => field.csv_compatible(),
+                    ExportFormat::Parquet => field.parquet_compatible(),
+                })
+        });
+    }
+
     pub fn request(&self, visible: (i64, i64), full: (i64, i64)) -> Option<DataExportRequest> {
         if self.selected.is_empty() {
             return None;
@@ -583,7 +786,10 @@ impl DataExportState {
             format: self.format,
             fields: self.selected.clone(),
             window: if self.visible_range { visible } else { full },
-            mode: self.mode(),
+            mode: match self.format {
+                ExportFormat::Csv => self.mode(),
+                ExportFormat::Parquet => ResampleMode::None,
+            },
         })
     }
 
@@ -599,6 +805,13 @@ impl DataExportState {
         needle.is_empty() || field.label.to_lowercase().contains(&needle)
     }
 
+    fn format_compatible(&self, field: &ExportField) -> bool {
+        match self.format {
+            ExportFormat::Csv => field.csv_compatible(),
+            ExportFormat::Parquet => field.parquet_compatible(),
+        }
+    }
+
     pub fn mode(&self) -> ResampleMode {
         match self.mode_ix {
             1 => ResampleMode::PrevFill,
@@ -610,23 +823,32 @@ impl DataExportState {
     }
 }
 
-pub fn numeric_fields(snapshot: &StoreSnapshot, model: &BrowserModel) -> Vec<ExportField> {
+pub fn available_fields(snapshot: &StoreSnapshot, model: &BrowserModel) -> Vec<ExportField> {
     let mut out = Vec::new();
     for src in &model.sources {
         for topic in &src.topics {
-            for field in &topic.fields {
-                if let Ok(view) = delog_core::field_view::FieldView::new(snapshot, field.id) {
-                    let sf = view.schema_field();
-                    if sf.is_plottable() {
-                        out.push(ExportField {
-                            id: field.id,
-                            source: src.label.clone(),
-                            topic: topic.name.clone(),
-                            name: field.name.clone(),
-                            label: format!("{} / {}.{}", src.label, topic.name, field.name),
-                            unit: sf.unit.clone(),
-                        });
-                    }
+            let Some(store) = snapshot.topic_store(topic.id) else {
+                continue;
+            };
+            for sf in store.schema.fields() {
+                let Some(field) = topic.fields.iter().find(|field| field.name == sf.name) else {
+                    continue;
+                };
+                let export_field = ExportField {
+                    id: field.id,
+                    source_id: src.id,
+                    topic_id: topic.id,
+                    source: src.label.clone(),
+                    topic: topic.name.clone(),
+                    name: field.name.clone(),
+                    label: format!("{} / {}.{}", src.label, topic.name, field.name),
+                    dtype: sf.dtype.clone(),
+                    unit: sf.unit.clone(),
+                    multiplier: sf.multiplier,
+                    description: sf.description.clone(),
+                };
+                if export_field.parquet_compatible() {
+                    out.push(export_field);
                 }
             }
         }
@@ -634,44 +856,40 @@ pub fn numeric_fields(snapshot: &StoreSnapshot, model: &BrowserModel) -> Vec<Exp
     out
 }
 
-pub fn write_export<W: Write + Send>(
+fn write_csv<W: Write + Send>(
     mut writer: W,
-    format: ExportFormat,
     mut batches: ExportBatchReader<'_>,
+    window: (i64, i64),
+    ctl: &ExportCtl,
 ) -> Result<u64, DataExportError> {
     let schema = batches.schema();
     let mut rows = 0_u64;
-    match format {
-        ExportFormat::Csv => {
-            let mut writer = arrow::csv::WriterBuilder::new()
-                .with_header(true)
-                .build(&mut writer);
-            let mut wrote_batch = false;
-            for batch in &mut batches {
-                let batch = batch?;
-                rows += batch.num_rows() as u64;
-                writer.write(&batch)?;
-                wrote_batch = true;
-            }
-            if !wrote_batch {
-                writer.write(&RecordBatch::new_empty(schema))?;
-            }
+    let mut csv = arrow::csv::WriterBuilder::new()
+        .with_header(true)
+        .build(&mut writer);
+    let mut wrote_batch = false;
+    for batch in &mut batches {
+        if ctl.is_cancelled() {
+            return Err(DataExportError::Cancelled);
         }
-        ExportFormat::Parquet => {
-            let properties = WriterProperties::builder()
-                .set_compression(Compression::ZSTD(Default::default()))
-                .set_max_row_group_row_count(Some(EXPORT_BATCH_ROWS))
-                .build();
-            let mut writer = ArrowWriter::try_new(&mut writer, schema, Some(properties))?;
-            for batch in batches {
-                let batch = batch?;
-                rows += batch.num_rows() as u64;
-                writer.write(&batch)?;
-            }
-            writer.close()?;
-        }
+        let batch = batch?;
+        rows += batch.num_rows() as u64;
+        let times = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("the export schema starts with an Int64 t_us column");
+        let last_t_us = times.value(times.len() - 1);
+        csv.write(&batch)?;
+        wrote_batch = true;
+        ctl.report_fraction(window_fraction(last_t_us, window));
     }
+    if !wrote_batch {
+        csv.write(&RecordBatch::new_empty(schema))?;
+    }
+    drop(csv);
     writer.flush()?;
+    ctl.report_fraction(1.0);
     Ok(rows)
 }
 
@@ -700,11 +918,23 @@ pub fn write_export_file(
     window: (i64, i64),
     mode: ResampleMode,
     origin_us: i64,
+    ctl: &ExportCtl,
 ) -> Result<u64, DataExportError> {
-    let batches = ExportBatchReader::try_new(snapshot, fields, window, mode, origin_us)?;
-    write_atomic(path, |temporary| {
-        let writer = BufWriter::new(temporary);
-        write_export(writer, format, batches)
+    if ctl.is_cancelled() {
+        return Err(DataExportError::Cancelled);
+    }
+    write_atomic(path, |temporary| match format {
+        ExportFormat::Csv => {
+            let batches = ExportBatchReader::try_new(snapshot, fields, window, mode, origin_us)?;
+            write_csv(BufWriter::new(temporary), batches, window, ctl)
+        }
+        ExportFormat::Parquet => crate::parquet_export::write_structured_parquet(
+            BufWriter::new(temporary),
+            snapshot,
+            fields,
+            window,
+            ctl,
+        ),
     })
 }
 
@@ -713,10 +943,13 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use arrow::array::{Array, Float64Array, Int64Array};
+    use arrow::array::{
+        Array, BooleanArray, Float32Array, Float64Array, Int64Array, LargeStringArray, StringArray,
+    };
     use arrow::datatypes::DataType;
     use delog_core::chunk::Chunk;
-    use delog_core::identity::IdentityRegistry;
+    use delog_core::identity::{IdentityRegistry, SourceId};
+    use delog_core::parse_ctl::CancelToken;
     use delog_core::schema::{FieldSchema, TopicSchema};
     use delog_core::store::TopicStore;
 
@@ -755,11 +988,63 @@ mod tests {
             snapshot,
             ExportField {
                 id,
+                source_id: source,
+                topic_id: topic,
                 source: "flight".into(),
                 topic: "ATT".into(),
                 name: "Roll".into(),
                 label: "flight / ATT.Roll".into(),
+                dtype: DataType::Float64,
                 unit: Some("rad".into()),
+                multiplier: 2.0,
+                description: None,
+            },
+        )
+    }
+
+    fn snapshot_with_nonmonotonic_chunks() -> (StoreSnapshot, ExportField) {
+        let mut registry = IdentityRegistry::new();
+        let source = registry.add_source("flight");
+        let topic = registry.add_topic(source, "ATT").unwrap();
+        let id = registry.add_field(topic, "Roll").unwrap();
+        let topic_schema = Arc::new(
+            TopicSchema::new(
+                "ATT",
+                [FieldSchema::new("Roll", DataType::Float64, Some("rad"), 2.0).unwrap()],
+            )
+            .unwrap(),
+        );
+        let chunks = [
+            (vec![100, 200], vec![Some(1.0), Some(2.0)]),
+            (vec![50, 300], vec![Some(3.0), Some(4.0)]),
+        ]
+        .map(|(timestamps, values)| {
+            Arc::new(
+                Chunk::try_new(
+                    Int64Array::from(timestamps),
+                    vec![Arc::new(Float64Array::from(values))],
+                    &topic_schema,
+                )
+                .unwrap(),
+            )
+        });
+        let store = Arc::new(TopicStore::from_chunks(topic_schema, chunks).unwrap());
+        assert!(!store.is_monotonic());
+        let snapshot = StoreSnapshot::from_registry(&registry, [(topic, store)], 1).unwrap();
+        (
+            snapshot,
+            ExportField {
+                id,
+                source_id: source,
+                topic_id: topic,
+                source: "flight".into(),
+                topic: "ATT".into(),
+                name: "Roll".into(),
+                label: "flight / ATT.Roll".into(),
+                dtype: DataType::Float64,
+                unit: Some("rad".into()),
+                multiplier: 2.0,
+                description: None,
             },
         )
     }
@@ -807,16 +1092,61 @@ mod tests {
         let snapshot = StoreSnapshot::from_registry(&registry, [(topic, store)], 1).unwrap();
         let field = |id, name: &str| ExportField {
             id,
+            source_id: source,
+            topic_id: topic,
             source: "flight".into(),
             topic: "ATT".into(),
             name: name.into(),
             label: format!("flight / ATT.{name}"),
+            dtype: DataType::Float64,
             unit: Some("rad".into()),
+            multiplier: 1.0,
+            description: None,
         };
         (
             snapshot,
             vec![field(roll_id, "Roll"), field(pitch_id, "Pitch")],
         )
+    }
+
+    fn snapshot_with_supported_fields() -> (StoreSnapshot, BrowserModel) {
+        let mut registry = IdentityRegistry::new();
+        let source = registry.add_source("flight");
+        let topic = registry.add_topic(source, "STATUS").unwrap();
+        for name in ["value", "armed", "mode", "message"] {
+            registry.add_field(topic, name).unwrap();
+        }
+        let topic_schema = Arc::new(
+            TopicSchema::new(
+                "STATUS",
+                vec![
+                    FieldSchema::new("value", DataType::Float32, Some("m"), 2.0)
+                        .unwrap()
+                        .with_description("scaled value"),
+                    FieldSchema::new("armed", DataType::Boolean, None::<String>, 1.0).unwrap(),
+                    FieldSchema::new("mode", DataType::Utf8, None::<String>, 1.0).unwrap(),
+                    FieldSchema::new("message", DataType::LargeUtf8, None::<String>, 1.0).unwrap(),
+                ],
+            )
+            .unwrap(),
+        );
+        let chunk = Arc::new(
+            Chunk::try_new(
+                Int64Array::from(vec![10]),
+                vec![
+                    Arc::new(Float32Array::from(vec![Some(1.5)])),
+                    Arc::new(BooleanArray::from(vec![Some(true)])),
+                    Arc::new(StringArray::from(vec![Some("AUTO")])),
+                    Arc::new(LargeStringArray::from(vec![Some("ready")])),
+                ],
+                &topic_schema,
+            )
+            .unwrap(),
+        );
+        let store = Arc::new(TopicStore::from_chunks(topic_schema, vec![chunk]).unwrap());
+        let snapshot = StoreSnapshot::from_registry(&registry, [(topic, store)], 1).unwrap();
+        let model = BrowserModel::from_snapshot(&snapshot);
+        (snapshot, model)
     }
 
     #[test]
@@ -926,7 +1256,7 @@ mod tests {
             ExportBatchReader::try_new(&snapshot, &[field], (1_000, 2_000), ResampleMode::None, 0)
                 .unwrap();
         let mut output = Vec::new();
-        let rows = write_export(&mut output, ExportFormat::Csv, batches).unwrap();
+        let rows = write_csv(&mut output, batches, (1_000, 2_000), &ExportCtl::default()).unwrap();
         assert_eq!(rows, 2);
         assert_eq!(
             String::from_utf8(output).unwrap(),
@@ -942,7 +1272,7 @@ mod tests {
             ExportBatchReader::try_new(&snapshot, &fields, (10, 20), ResampleMode::None, 10)
                 .unwrap();
         let mut output = Vec::new();
-        let rows = write_export(&mut output, ExportFormat::Csv, batches).unwrap();
+        let rows = write_csv(&mut output, batches, (10, 20), &ExportCtl::default()).unwrap();
         assert_eq!(rows, 2);
         assert_eq!(
             String::from_utf8(output).unwrap(),
@@ -951,7 +1281,8 @@ mod tests {
     }
 
     #[test]
-    fn parquet_round_trip_preserves_schema_values_and_unit_metadata() {
+    fn parquet_route_writes_structured_raw_values_and_manifest_metadata() {
+        use delog_parquet_format::decode_schema;
         use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
         let (snapshot, field) =
@@ -965,6 +1296,7 @@ mod tests {
             (1_000_000, 2_000_000),
             ResampleMode::None,
             1_000_000,
+            &ExportCtl::default(),
         )
         .unwrap();
         assert_eq!(rows, 2);
@@ -972,22 +1304,20 @@ mod tests {
         let builder =
             ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(file.path()).unwrap())
                 .unwrap();
-        assert_eq!(
-            builder
-                .schema()
-                .field(2)
-                .metadata()
-                .get("unit")
-                .map(String::as_str),
-            Some("rad")
-        );
+        let manifest = decode_schema(builder.schema().as_ref()).unwrap().unwrap();
+        assert_eq!(manifest.topics.len(), 1);
+        assert_eq!(manifest.topics[0].original_source, "flight");
+        assert_eq!(manifest.topics[0].original_topic, "ATT");
+        assert_eq!(manifest.topics[0].fields[0].name, "Roll");
+        assert_eq!(manifest.topics[0].fields[0].unit.as_deref(), Some("rad"));
+        assert_eq!(manifest.topics[0].fields[0].multiplier, 2.0);
         let batch = builder.build().unwrap().next().unwrap().unwrap();
         let values = batch
-            .column(2)
+            .column(1)
             .as_any()
             .downcast_ref::<Float64Array>()
             .unwrap();
-        assert_eq!(values.values(), &[2.5, -6.0]);
+        assert_eq!(values.values(), &[1.25, -3.0]);
     }
 
     #[derive(Default)]
@@ -1025,29 +1355,13 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
-    struct ImmediateFlushFailure {
-        bytes: Vec<u8>,
-    }
-
-    impl std::io::Write for ImmediateFlushFailure {
-        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-            self.bytes.extend_from_slice(buffer);
-            Ok(buffer.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Err(std::io::Error::other("injected parquet flush failure"))
-        }
-    }
-
     #[test]
     fn writer_failure_is_returned() {
         let (snapshot, field) = snapshot_with_values(vec![1], vec![Some(1.0)]);
         let batches =
             ExportBatchReader::try_new(&snapshot, &[field], (1, 1), ResampleMode::None, 0).unwrap();
 
-        let error = write_export(WriteFailure, ExportFormat::Parquet, batches).unwrap_err();
+        let error = write_csv(WriteFailure, batches, (1, 1), &ExportCtl::default()).unwrap_err();
 
         assert!(error.to_string().contains("injected write failure"));
     }
@@ -1058,25 +1372,15 @@ mod tests {
         let batches =
             ExportBatchReader::try_new(&snapshot, &[field], (1, 1), ResampleMode::None, 0).unwrap();
 
-        let error = write_export(FlushFailure::default(), ExportFormat::Csv, batches).unwrap_err();
-
-        assert!(error.to_string().contains("injected final flush failure"));
-    }
-
-    #[test]
-    fn parquet_final_flush_failure_is_returned_after_close() {
-        let (snapshot, field) = snapshot_with_values(vec![1], vec![Some(1.0)]);
-        let batches =
-            ExportBatchReader::try_new(&snapshot, &[field], (1, 1), ResampleMode::None, 0).unwrap();
-
-        let error = write_export(
-            ImmediateFlushFailure::default(),
-            ExportFormat::Parquet,
+        let error = write_csv(
+            FlushFailure::default(),
             batches,
+            (1, 1),
+            &ExportCtl::default(),
         )
         .unwrap_err();
 
-        assert!(error.to_string().contains("injected parquet flush failure"));
+        assert!(error.to_string().contains("injected final flush failure"));
     }
 
     #[test]
@@ -1091,6 +1395,77 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("injected export failure"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"prior export");
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+    }
+
+    struct FinalFlushFailingFile<'a> {
+        inner: &'a mut std::fs::File,
+    }
+
+    impl std::io::Write for FinalFlushFailingFile<'_> {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.inner.write(buffer)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::other(
+                "injected structured final flush failure",
+            ))
+        }
+    }
+
+    #[test]
+    fn parquet_final_flush_failure_preserves_existing_destination() {
+        let (snapshot, field) = snapshot_with_values(vec![1], vec![Some(1.0)]);
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("existing.parquet");
+        std::fs::write(&path, b"prior export").unwrap();
+
+        let error = write_atomic(&path, |temporary| {
+            crate::parquet_export::write_structured_parquet(
+                FinalFlushFailingFile { inner: temporary },
+                &snapshot,
+                &[field],
+                (1, 1),
+                &ExportCtl::default(),
+            )
+        })
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("injected structured final flush failure")
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"prior export");
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn nonmonotonic_parquet_export_preserves_existing_destination() {
+        let (snapshot, field) = snapshot_with_nonmonotonic_chunks();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("existing.parquet");
+        std::fs::write(&path, b"prior export").unwrap();
+
+        let error = write_export_file(
+            &path,
+            ExportFormat::Parquet,
+            &snapshot,
+            &[field],
+            (0, 300),
+            ResampleMode::None,
+            0,
+            &ExportCtl::default(),
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("topic timestamps are non-monotonic across chunks")
+        );
         assert_eq!(std::fs::read(&path).unwrap(), b"prior export");
         assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
     }
@@ -1110,6 +1485,7 @@ mod tests {
             (1, 1),
             ResampleMode::None,
             0,
+            &ExportCtl::default(),
         )
         .unwrap();
 
@@ -1140,6 +1516,7 @@ mod tests {
             (0, EXPORT_BATCH_ROWS as i64),
             ResampleMode::None,
             0,
+            &ExportCtl::default(),
         )
         .unwrap();
 
@@ -1155,19 +1532,412 @@ mod tests {
         assert_eq!(row_group_sizes, vec![EXPORT_BATCH_ROWS, 1]);
     }
 
+    fn long_export() -> (StoreSnapshot, ExportField) {
+        let timestamps = (0..=EXPORT_BATCH_ROWS as i64).collect::<Vec<_>>();
+        let values = timestamps
+            .iter()
+            .map(|value| Some(*value as f64))
+            .collect::<Vec<_>>();
+        snapshot_with_values(timestamps, values)
+    }
+
+    const STRIPED_EXPORT_ROWS: usize = EXPORT_BATCH_ROWS * 3;
+
+    /// A topic long enough to need three stripes, beside a topic whose only row
+    /// sits at the end of the window.
+    fn snapshot_with_long_and_late_topics() -> (StoreSnapshot, Vec<ExportField>) {
+        let mut registry = IdentityRegistry::new();
+        let source = registry.add_source("flight");
+        let mut stores = Vec::new();
+        let mut fields = Vec::new();
+        let last_us = STRIPED_EXPORT_ROWS as i64 - 1;
+        for (topic_name, timestamps) in [
+            ("LONG", (0..=last_us).collect::<Vec<_>>()),
+            ("LATE", vec![last_us]),
+        ] {
+            let topic = registry.add_topic(source, topic_name).unwrap();
+            let id = registry.add_field(topic, "value").unwrap();
+            let schema = Arc::new(
+                TopicSchema::new(
+                    topic_name,
+                    [FieldSchema::new("value", DataType::Float64, None::<String>, 1.0).unwrap()],
+                )
+                .unwrap(),
+            );
+            let values = timestamps
+                .iter()
+                .map(|value| Some(*value as f64))
+                .collect::<Vec<_>>();
+            let chunk = Arc::new(
+                Chunk::try_new(
+                    Int64Array::from(timestamps),
+                    vec![Arc::new(Float64Array::from(values))],
+                    &schema,
+                )
+                .unwrap(),
+            );
+            stores.push((
+                topic,
+                Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap()),
+            ));
+            fields.push(ExportField {
+                id,
+                source_id: source,
+                topic_id: topic,
+                source: "flight".into(),
+                topic: topic_name.into(),
+                name: "value".into(),
+                label: format!("flight / {topic_name}.value"),
+                dtype: DataType::Float64,
+                unit: None,
+                multiplier: 1.0,
+                description: None,
+            });
+        }
+        let snapshot = StoreSnapshot::from_registry(&registry, stores, 1).unwrap();
+        (snapshot, fields)
+    }
+
+    fn recording_ctl() -> (ExportCtl, Arc<std::sync::Mutex<Vec<f32>>>) {
+        let reports = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = Arc::clone(&reports);
+        let ctl = ExportCtl::new(CancelToken::new(), move |fraction| {
+            sink.lock().unwrap().push(fraction)
+        });
+        (ctl, reports)
+    }
+
+    fn assert_monotone_completing_fractions(reports: &Arc<std::sync::Mutex<Vec<f32>>>) {
+        let reports = reports.lock().unwrap();
+        assert!(reports.len() >= 2, "progress is reported while writing");
+        assert!(
+            reports.windows(2).all(|pair| pair[0] <= pair[1]),
+            "progress never goes backwards: {reports:?}"
+        );
+        assert!(
+            reports[0] > 0.0 && reports[0] < 1.0,
+            "the first batch is partial: {}",
+            reports[0]
+        );
+        assert_eq!(*reports.last().unwrap(), 1.0);
+    }
+
+    fn self_cancelling_ctl() -> ExportCtl {
+        let cancel = CancelToken::new();
+        let trigger = cancel.clone();
+        ExportCtl::new(cancel, move |_| trigger.cancel())
+    }
+
+    #[test]
+    fn csv_export_reports_window_progress_per_batch() {
+        let (snapshot, field) = long_export();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let (ctl, reports) = recording_ctl();
+
+        let rows = write_export_file(
+            file.path(),
+            ExportFormat::Csv,
+            &snapshot,
+            &[field],
+            (0, EXPORT_BATCH_ROWS as i64),
+            ResampleMode::None,
+            0,
+            &ctl,
+        )
+        .unwrap();
+
+        assert_eq!(rows, EXPORT_BATCH_ROWS as u64 + 1);
+        assert_monotone_completing_fractions(&reports);
+    }
+
+    #[test]
+    fn parquet_export_reports_window_progress_per_stripe() {
+        let (snapshot, field) = long_export();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let (ctl, reports) = recording_ctl();
+
+        let rows = write_export_file(
+            file.path(),
+            ExportFormat::Parquet,
+            &snapshot,
+            &[field],
+            (0, EXPORT_BATCH_ROWS as i64),
+            ResampleMode::None,
+            0,
+            &ctl,
+        )
+        .unwrap();
+
+        assert_eq!(rows, EXPORT_BATCH_ROWS as u64 + 1);
+        assert_monotone_completing_fractions(&reports);
+    }
+
+    #[test]
+    fn export_cancelled_before_the_first_batch_creates_no_destination() {
+        let (snapshot, field) = snapshot_with_values(vec![1], vec![Some(1.0)]);
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("export.csv");
+        let cancel = CancelToken::new();
+        cancel.cancel();
+
+        let error = write_export_file(
+            &path,
+            ExportFormat::Csv,
+            &snapshot,
+            &[field],
+            (1, 1),
+            ResampleMode::None,
+            0,
+            &ExportCtl::new(cancel, |_| {}),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "export cancelled");
+        assert!(!path.exists());
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn cancelling_mid_csv_export_preserves_the_existing_destination() {
+        let (snapshot, field) = long_export();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("existing.csv");
+        std::fs::write(&path, b"prior export").unwrap();
+
+        let error = write_export_file(
+            &path,
+            ExportFormat::Csv,
+            &snapshot,
+            &[field],
+            (0, EXPORT_BATCH_ROWS as i64),
+            ResampleMode::None,
+            0,
+            &self_cancelling_ctl(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "export cancelled");
+        assert_eq!(std::fs::read(&path).unwrap(), b"prior export");
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn cancelling_mid_parquet_export_preserves_the_existing_destination() {
+        let (snapshot, field) = long_export();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("existing.parquet");
+        std::fs::write(&path, b"prior export").unwrap();
+
+        let error = write_export_file(
+            &path,
+            ExportFormat::Parquet,
+            &snapshot,
+            &[field],
+            (0, EXPORT_BATCH_ROWS as i64),
+            ResampleMode::None,
+            0,
+            &self_cancelling_ctl(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "export cancelled");
+        assert_eq!(std::fs::read(&path).unwrap(), b"prior export");
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn parquet_progress_tracks_the_slowest_topic_instead_of_jumping_to_full() {
+        let (snapshot, fields) = snapshot_with_long_and_late_topics();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let (ctl, reports) = recording_ctl();
+
+        write_export_file(
+            file.path(),
+            ExportFormat::Parquet,
+            &snapshot,
+            &fields,
+            (0, STRIPED_EXPORT_ROWS as i64 - 1),
+            ResampleMode::None,
+            0,
+            &ctl,
+        )
+        .unwrap();
+
+        let reports = reports.lock().unwrap();
+        assert!(
+            reports.windows(2).all(|pair| pair[0] <= pair[1]),
+            "a finished short topic must not pull progress back: {reports:?}"
+        );
+        assert!(
+            reports[0] < 0.5,
+            "the first stripe covers a third of the long topic: {reports:?}"
+        );
+        assert_eq!(*reports.last().unwrap(), 1.0);
+    }
+
+    #[test]
+    fn export_progress_completes_when_the_data_ends_before_the_window() {
+        for format in [ExportFormat::Csv, ExportFormat::Parquet] {
+            let (snapshot, field) = long_export();
+            let file = tempfile::NamedTempFile::new().unwrap();
+            let (ctl, reports) = recording_ctl();
+
+            write_export_file(
+                file.path(),
+                format,
+                &snapshot,
+                &[field],
+                (0, 100_000),
+                ResampleMode::None,
+                0,
+                &ctl,
+            )
+            .unwrap();
+
+            let reports = reports.lock().unwrap();
+            assert!(
+                reports[reports.len() - 2] < 0.2,
+                "{format:?} tracks the data, not the window: {reports:?}"
+            );
+            assert_eq!(*reports.last().unwrap(), 1.0, "{format:?} finishes at 100%");
+        }
+    }
+
+    #[test]
+    fn window_fraction_maps_timestamps_into_the_exported_window() {
+        assert_eq!(window_fraction(0, (0, 100)), 0.0);
+        assert_eq!(window_fraction(25, (0, 100)), 0.25);
+        assert_eq!(window_fraction(100, (0, 100)), 1.0);
+        assert_eq!(window_fraction(-50, (-100, 100)), 0.25);
+        assert_eq!(window_fraction(-5, (0, 100)), 0.0);
+        assert_eq!(window_fraction(150, (0, 100)), 1.0);
+        assert_eq!(window_fraction(5, (5, 5)), 1.0);
+        assert_eq!(window_fraction(i64::MAX, (i64::MIN, i64::MAX)), 1.0);
+    }
+
+    #[test]
+    fn active_export_shows_a_percentage_then_cancellation() {
+        let progress = ExportProgress::default();
+        progress.set(0.456);
+        let active = ActiveExport::new(
+            7,
+            std::path::Path::new("/tmp/flight.parquet"),
+            progress,
+            CancelToken::new(),
+        );
+
+        assert_eq!(active.status(), "flight.parquet — 45%");
+        assert!((active.fraction() - 0.456).abs() < 0.001);
+
+        active.request_cancel();
+
+        assert_eq!(active.status(), "flight.parquet — cancelling…");
+    }
+
     #[test]
     fn default_range_is_visible_window() {
         assert!(DataExportState::default().visible_range);
     }
 
+    #[test]
+    fn available_fields_retain_every_supported_field_schema() {
+        let (snapshot, model) = snapshot_with_supported_fields();
+
+        let available = available_fields(&snapshot, &model);
+
+        assert_eq!(
+            available
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect::<Vec<_>>(),
+            ["value", "armed", "mode", "message"],
+        );
+        assert!(
+            available
+                .iter()
+                .find(|field| field.name == "mode")
+                .unwrap()
+                .parquet_compatible()
+        );
+        assert!(
+            !available
+                .iter()
+                .find(|field| field.name == "mode")
+                .unwrap()
+                .csv_compatible()
+        );
+        let value = available
+            .iter()
+            .find(|field| field.name == "value")
+            .unwrap();
+        assert_eq!(value.source_id, model.sources[0].id);
+        assert_eq!(value.topic_id, model.sources[0].topics[0].id);
+        assert_eq!(value.dtype, DataType::Float32);
+        assert_eq!(value.multiplier, 2.0);
+        assert_eq!(value.description.as_deref(), Some("scaled value"));
+    }
+
+    #[test]
+    fn switching_from_parquet_to_csv_prunes_only_incompatible_string_selections() {
+        let (snapshot, model) = snapshot_with_supported_fields();
+        let available = available_fields(&snapshot, &model);
+        let mut state = DataExportState::default();
+        state.set_format(ExportFormat::Parquet, &available);
+        state.selected = available.iter().map(|field| field.id).collect();
+        let compatible_ids = available
+            .iter()
+            .filter(|field| field.csv_compatible())
+            .map(|field| field.id)
+            .collect::<Vec<_>>();
+
+        state.set_format(ExportFormat::Csv, &available);
+
+        assert_eq!(state.selected, compatible_ids);
+        let selected_names = state
+            .selected
+            .iter()
+            .map(|id| {
+                available
+                    .iter()
+                    .find(|field| field.id == *id)
+                    .unwrap()
+                    .name
+                    .as_str()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(selected_names, ["value", "armed"]);
+        assert!(!selected_names.contains(&"mode"));
+        assert!(!selected_names.contains(&"message"));
+    }
+
+    #[test]
+    fn parquet_request_forces_native_samples_after_linear_csv_state() {
+        let state = DataExportState {
+            format: ExportFormat::Parquet,
+            selected: vec![FieldId(1)],
+            mode_ix: 2,
+            dt_s: 0.5,
+            ..DataExportState::default()
+        };
+
+        let request = state.request((10, 20), (0, 100)).unwrap();
+
+        assert_eq!(request.mode, ResampleMode::None);
+    }
+
     fn export_field(id: u32, label: &str) -> ExportField {
         ExportField {
             id: delog_core::identity::FieldId(id),
+            source_id: SourceId(0),
+            topic_id: TopicId(0),
             source: "flight".into(),
             topic: "ATT".into(),
             name: label.into(),
             label: format!("flight / ATT.{label}"),
+            dtype: DataType::Float64,
             unit: Some("rad".into()),
+            multiplier: 1.0,
+            description: None,
         }
     }
 
