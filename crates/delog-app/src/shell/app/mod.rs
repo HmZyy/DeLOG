@@ -34,7 +34,7 @@ fn keep_active_loads_repainting(ctx: &egui::Context, has_active_loads: bool) {
     }
 }
 use crate::plotting::timeline::Playback;
-use crate::workspace::{PlotServices, Workspace};
+use crate::shell::workspace::{PlotServices, Workspace};
 
 struct TrajectoryBuildResult {
     epoch: u64,
@@ -313,7 +313,7 @@ pub struct DelogApp {
     field_stats: FieldStatsController,
     sync_window: Option<SyncWindow>,
     dataflow: crate::dataflow::window::DataFlowUi,
-    generate_markers_dialog: Option<crate::generate_markers::GenerateMarkersDialog>,
+    generate_markers_dialog: Option<crate::shell::generate_markers::GenerateMarkersDialog>,
     save_layout_dialog: SaveLayoutDialog,
     load_layout_dialog: LoadLayoutDialog,
     layout_manager_dialog: LayoutManagerDialog,
@@ -2797,7 +2797,7 @@ impl eframe::App for DelogApp {
                 if let Some(field) = browser_response.generate_markers {
                     let title = crate::plotting::legend::trace_label(&snapshot, field);
                     self.generate_markers_dialog =
-                        Some(crate::generate_markers::GenerateMarkersDialog::open(
+                        Some(crate::shell::generate_markers::GenerateMarkersDialog::open(
                             &snapshot, field, title,
                         ));
                 }
@@ -2819,7 +2819,7 @@ impl eframe::App for DelogApp {
             &mut self.caches,
             &mut self.field_stats,
         );
-        for (t_us, name, color) in crate::generate_markers::generate_markers_window(
+        for (t_us, name, color) in crate::shell::generate_markers::generate_markers_window(
             ui.ctx(),
             &mut self.generate_markers_dialog,
         ) {
@@ -2897,7 +2897,7 @@ impl eframe::App for DelogApp {
                         plot_display: self.settings.plot,
                         markers: self.markers.as_slice(),
                     };
-                    let mut behavior = crate::workspace::Behavior::new(services);
+                    let mut behavior = crate::shell::workspace::Behavior::new(services);
                     // `workspace_tree`: the egui_tiles layout + pane rendering.
                     // Profiling (2026-06-28) showed egui_tiles' own machinery is
                     // negligible (~0.02 ms); the cost is the per-pane `pane_ui`
@@ -2961,7 +2961,7 @@ impl eframe::App for DelogApp {
                     }
                     if let Some(action) = actions.image {
                         match action {
-                            crate::workspace::WorkspaceImageAction::CopyPlot { rect } => {
+                            crate::shell::workspace::WorkspaceImageAction::CopyPlot { rect } => {
                                 self.queue_image_capture(
                                     ui.ctx(),
                                     crate::export::image_export::ImageCaptureIntent::plot(
@@ -2971,7 +2971,7 @@ impl eframe::App for DelogApp {
                                     ),
                                 );
                             }
-                            crate::workspace::WorkspaceImageAction::ExportPlot { rect } => {
+                            crate::shell::workspace::WorkspaceImageAction::ExportPlot { rect } => {
                                 self.queue_image_capture(
                                     ui.ctx(),
                                     crate::export::image_export::ImageCaptureIntent::plot(
