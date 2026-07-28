@@ -188,7 +188,7 @@ impl ActiveExport {
 
     pub fn status(&self) -> String {
         if self.cancel.is_cancelled() {
-            format!("{} — cancelling…", self.label)
+            format!("{} - cancelling…", self.label)
         } else {
             format!("{} - {}%", self.label, self.progress.per_mille() / 10)
         }
@@ -1826,12 +1826,12 @@ mod tests {
             CancelToken::new(),
         );
 
-        assert_eq!(active.status(), "flight.parquet — 45%");
+        assert_eq!(active.status(), "flight.parquet - 45%");
         assert!((active.fraction() - 0.456).abs() < 0.001);
 
         active.request_cancel();
 
-        assert_eq!(active.status(), "flight.parquet — cancelling…");
+        assert_eq!(active.status(), "flight.parquet - cancelling…");
     }
 
     #[test]

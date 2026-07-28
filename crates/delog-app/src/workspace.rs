@@ -1836,7 +1836,7 @@ fn scene_map_overlay(
     } else if failure == Some(TileFailureClass::Cache) {
         Some("Map cache error".into())
     } else if failure == Some(TileFailureClass::NetworkTransient) && cached {
-        Some("Map tiles offline — showing cached imagery".into())
+        Some("Map tiles offline - showing cached imagery".into())
     } else {
         None
     }
@@ -2469,7 +2469,7 @@ mod tests {
         assert_eq!(
             scene_map_overlay(true, None, Some(TileFailureClass::NetworkTransient), true)
                 .as_deref(),
-            Some("Map tiles offline — showing cached imagery")
+            Some("Map tiles offline - showing cached imagery")
         );
         assert_eq!(scene_map_overlay(true, None, None, true), None);
         assert_eq!(

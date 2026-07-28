@@ -1,7 +1,7 @@
 //! Frames:
 //! - **Geodetic**: WGS84 latitude/longitude (radians) + altitude (m).
 //! - **ECEF**: earth-centred earth-fixed metres (f64).
-//! - **NED**: local tangent metres about a reference origin — North, East, Down.
+//! - **NED**: local tangent metres about a reference origin - North, East, Down.
 //! - **Render**: right-handed Y-up, `render = (E, −D, −N)` i.e. X=East, Y=Up,
 //!   Z=South.
 
@@ -104,7 +104,7 @@ pub fn ned_to_render_mat3() -> Mat3 {
     )
 }
 
-/// Body→NED quaternion from intrinsic Z-Y-X Euler angles (radians) — the
+/// Body→NED quaternion from intrinsic Z-Y-X Euler angles (radians) - the
 /// AP/PX4 convention.
 pub fn euler_to_quat(roll: f32, pitch: f32, yaw: f32) -> Quat {
     Quat::from_euler(EulerRot::ZYX, yaw, pitch, roll)

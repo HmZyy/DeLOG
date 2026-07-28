@@ -228,11 +228,11 @@ pub fn ui(
         let (dot_color, dot_tip) = if !any_live {
             (theme.neutral(), "Not streaming")
         } else if playback.follow_live {
-            (theme.error(), "Locked to live tail — click to unlock")
+            (theme.error(), "Locked to live tail - click to unlock")
         } else {
             (
                 theme.warning(),
-                "Live (not locked) — click to lock to the tail",
+                "Live (not locked) - click to lock to the tail",
             )
         };
         let sense = if any_live {
@@ -551,7 +551,7 @@ fn window_slider(ui: &mut egui::Ui, view: &mut ViewX, range: TimeRange) -> bool 
     // Keep ~8 px of window so both handles stay grabbable.
     let min_span_us = (span as f64 * (8.0 / rect.width().max(1.0)) as f64) as i64 + 1;
 
-    // The view may extend beyond the data range; don't clamp here — handles
+    // The view may extend beyond the data range; don't clamp here - handles
     // ride the bar edges (via `bar_x_at`'s clamp) and grey out when out of range.
     let lo_in_range = (range.min_us..=range.max_us).contains(&view.min_us);
     let hi_in_range = (range.min_us..=range.max_us).contains(&view.max_us);

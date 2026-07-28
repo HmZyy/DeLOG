@@ -679,8 +679,8 @@ fn combo_label<'a, T: PartialEq>(items: &'a [(T, String)], sel: &Option<T>) -> &
             .iter()
             .find(|(v, _)| v == s)
             .map(|(_, l)| l.as_str())
-            .unwrap_or("—"),
-        None => "—",
+            .unwrap_or("-"),
+        None => "-",
     }
 }
 
@@ -997,7 +997,7 @@ fn show_vehicle_profile_dropdown(
         ui.label("Profile");
         let before = draft.selected_profile.clone();
         egui::ComboBox::from_id_salt(("vehicle-profile", draft_index))
-            .selected_text(draft.selected_profile.as_deref().unwrap_or("—"))
+            .selected_text(draft.selected_profile.as_deref().unwrap_or("-"))
             .show_ui(ui, |ui| {
                 for name in profiles {
                     ui.selectable_value(&mut draft.selected_profile, Some(name.clone()), name);

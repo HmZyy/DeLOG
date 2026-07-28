@@ -226,7 +226,7 @@ mod tests {
     #[test]
     fn polyline_renders_a_visible_line() {
         let Some(ctx) = RenderContext::headless() else {
-            eprintln!("no wgpu adapter — skipping traj3d test");
+            eprintln!("no wgpu adapter - skipping traj3d test");
             return;
         };
         let (w, h) = (96u32, 96u32);

@@ -106,7 +106,7 @@ impl MinMaxPyramid {
         self.levels.len()
     }
 
-    /// The L0 nodes — each the min/max of 64 consecutive samples. Empty before
+    /// The L0 nodes - each the min/max of 64 consecutive samples. Empty before
     /// any build. Lets the cache decimate by walking nodes instead of samples.
     pub fn l0(&self) -> &[MinMax] {
         self.levels.first().map(Vec::as_slice).unwrap_or(&[])

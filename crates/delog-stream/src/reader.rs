@@ -455,7 +455,7 @@ mod tests {
     }
 
     /// A `Read` that hands back queued chunks (respecting the caller's buffer
-    /// size) then `Ok(0)` to end the pump — a deterministic stand-in transport.
+    /// size) then `Ok(0)` to end the pump - a deterministic stand-in transport.
     struct ChunkReader {
         chunks: VecDeque<Vec<u8>>,
     }

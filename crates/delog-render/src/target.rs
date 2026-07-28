@@ -1,4 +1,4 @@
-//! Offscreen render target + readback — the headless golden-image rig.
+//! Offscreen render target + readback - the headless golden-image rig.
 
 use crate::context::RenderContext;
 
@@ -177,7 +177,7 @@ mod tests {
     #[test]
     fn golden_horizontal_line_renders_to_expected_pixels() {
         let Some(ctx) = RenderContext::headless() else {
-            eprintln!("no wgpu adapter — skipping golden-image test");
+            eprintln!("no wgpu adapter - skipping golden-image test");
             return;
         };
 

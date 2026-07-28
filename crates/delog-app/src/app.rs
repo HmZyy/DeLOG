@@ -264,7 +264,7 @@ pub struct DelogApp {
     /// rate built from a single stale frame.
     fps_ema: Option<f32>,
     last_frame_at: Option<Instant>,
-    /// Picked on a worker thread — the dialog must never block the UI thread.
+    /// Picked on a worker thread - the dialog must never block the UI thread.
     picked_files: mpsc::Receiver<PickedFiles>,
     picked_files_tx: mpsc::Sender<PickedFiles>,
     imported_layouts: mpsc::Receiver<LayoutImportResult>,
@@ -1896,7 +1896,7 @@ impl eframe::App for DelogApp {
         self.handle_image_screenshot_events(ui.ctx());
         self.handle_image_export_writes();
         // Pre-UI bookkeeping: picked files, job pruning,
-        // cache lifecycle + epoch handling, trajectory builds and autosave —
+        // cache lifecycle + epoch handling, trajectory builds and autosave -
         // none of it inside a panel scope. `ui_prelude` captures this block so
         // `frame_total − Σ(ui_*)` no longer hides it as an unattributed gap.
         let ui_prelude_timer = self.session.metrics().scope("ui_prelude");
@@ -1944,7 +1944,7 @@ impl eframe::App for DelogApp {
                 self.view_fitted = true;
             }
 
-            // Advance the playhead — the single time authority.
+            // Advance the playhead - the single time authority.
             let dt = ui.ctx().input(|i| i.stable_dt) as f64;
             self.playback.clamp_to(range);
             self.playback.advance(dt, range);
@@ -2509,7 +2509,7 @@ impl eframe::App for DelogApp {
             self.open_dock(AppDockTab::ScriptingConsole);
         }
 
-        // Transport keys — skipped while a widget owns the
+        // Transport keys - skipped while a widget owns the
         // keyboard (e.g. the browser filter box).
         if !ui.ctx().egui_wants_keyboard_input() {
             let (space, home, end, left, right, save_layout, load_layout, add_marker) =
@@ -4406,7 +4406,7 @@ mod tests {
         assert!(should_auto_open_diagnostics(true, None, 0));
         // A strictly newer seq opens it again.
         assert!(should_auto_open_diagnostics(true, Some(3), 4));
-        // The same (or older) seq does not — avoids reopening after the user closes.
+        // The same (or older) seq does not - avoids reopening after the user closes.
         assert!(!should_auto_open_diagnostics(true, Some(4), 4));
         assert!(!should_auto_open_diagnostics(true, Some(5), 4));
         // Disabled never opens, even for a brand-new diagnostic.

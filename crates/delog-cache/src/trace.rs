@@ -720,7 +720,7 @@ fn bridge_empty_columns(mins: &mut [f32], maxs: &mut [f32], max_run: usize) {
     }
 }
 
-/// Median x-delta between consecutive *finite* samples — null rows on a merged
+/// Median x-delta between consecutive *finite* samples - null rows on a merged
 /// timeline must not drag the estimate down to the row rate. The median is
 /// taken over a strided subsample (capped) so the sort stays bounded; 0.0 when
 /// no positive finite delta exists.

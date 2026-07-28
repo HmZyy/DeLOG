@@ -302,7 +302,7 @@ mod tests {
         let (ys, ymin) = (u.transform[2], u.transform[3]);
         let v = 437129312.0f32; // representable; 32 above the view min
         // (v - min) is exact in f32, so the mapping is the true rebased clip,
-        // placing v in the lower third — not cancelled toward the middle (0).
+        // placing v in the lower third - not cancelled toward the middle (0).
         let got = clip(v, ys, ymin);
         assert!((got - (32.0f32 * ys - 1.0)).abs() < 1e-5);
         assert!(
@@ -324,7 +324,7 @@ mod tests {
     #[test]
     fn slots_are_aligned_and_independently_addressable() {
         let Some(ctx) = RenderContext::headless() else {
-            eprintln!("no wgpu adapter — skipping uniform ring test");
+            eprintln!("no wgpu adapter - skipping uniform ring test");
             return;
         };
         let ring = UniformRing::new(ctx.clone(), 4);

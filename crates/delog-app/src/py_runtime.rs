@@ -13,7 +13,7 @@ pub fn init_bundled_python() {
     if !home.is_dir() {
         eprintln!(
             "fatal: bundled Python runtime not found at {}\n\
-             This install is incomplete — reinstall DeLOG.",
+             This install is incomplete - reinstall DeLOG.",
             home.display()
         );
         std::process::exit(1);
