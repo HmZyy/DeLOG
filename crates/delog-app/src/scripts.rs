@@ -11,7 +11,7 @@ use delog_script::params::{ParamSpec, ParamValue};
 use delog_script::{MarkerCommand, ScriptCommand, ScriptEngine, ScriptEvent};
 use egui_code_editor::{CodeEditor, ColorTheme, Syntax};
 
-use crate::parsers::{ParserUiAction, ParsersPanel};
+use crate::ingest::parsers::{ParserUiAction, ParsersPanel};
 use crate::repl_complete::{self, ReplCompletion};
 use crate::repl_history::ReplHistory;
 
@@ -1476,7 +1476,7 @@ mod tests {
         assert!(!panel.parser_dispatch_enabled());
         panel
             .parsers
-            .enqueue_parse_request(crate::parsers::ParseRequest {
+            .enqueue_parse_request(crate::ingest::parsers::ParseRequest {
                 parser_name: "raw.py".into(),
                 source: "def Parse(data): return []".into(),
                 path: path.clone(),
