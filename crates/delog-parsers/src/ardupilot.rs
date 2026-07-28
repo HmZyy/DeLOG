@@ -15,13 +15,15 @@ use arrow::array::{
 };
 use arrow::datatypes::DataType;
 use delog_core::diagnostics::Diag;
-use delog_core::identity::{SourceId, SourceMetadata, SourceParam};
+use delog_core::identity::{AutoMarker, SourceId, SourceMetadata, SourceParam};
 use delog_core::ingest::{IngestSink, ParseSummary, ParsedBatch};
 use delog_core::parse_ctl::ParseCtl;
 use delog_core::schema::{FieldSchema, TopicSchema};
 use delog_core::time::TimeRange;
 
 use crate::parser::{LogParser, ParseError, ReadSeek, Sniff};
+
+mod events;
 
 const HEAD1: u8 = 0xA3;
 const HEAD2: u8 = 0x95;
@@ -38,6 +40,11 @@ const MAX_PLAUSIBLE_TIME_US: i64 = 100_000_000_000_000;
 const START_SKEW_US: i64 = 1_000_000;
 const MAX_LOG_SPAN_US: i64 = 24 * 60 * 60 * 1_000_000;
 const IMPLAUSIBLE_TIME_DIAG_INTERVAL: u64 = 512;
+
+/// Syslog severities, matching the levels ULog logged messages carry. Dataflash
+/// records have no severity field, so they are assigned by record type.
+const MARKER_LEVEL_ERROR: u8 = 3;
+const MARKER_LEVEL_INFO: u8 = 6;
 
 #[derive(Debug, Default)]
 pub struct ArduPilotParser;
@@ -110,6 +117,26 @@ struct ParmValue {
 }
 
 #[derive(Debug, Clone, Copy)]
+enum MarkerKind {
+    Msg {
+        text: (usize, u8),
+    },
+    Event {
+        id: (usize, u8),
+    },
+    Error {
+        subsys: (usize, u8),
+        ecode: (usize, u8),
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MarkerLayout {
+    time: TimeSource,
+    kind: MarkerKind,
+}
+
+#[derive(Debug, Clone, Copy)]
 enum TimeSource {
     /// `TimeUS`, u64 microseconds.
     Micros(usize),
@@ -159,6 +186,8 @@ struct Decoder<'a> {
     topics: HashMap<String, TopicAccum>,
     params: BTreeMap<String, ParmValue>,
     parm_layouts: HashMap<u8, Option<ParmLayout>>,
+    markers: Vec<AutoMarker>,
+    marker_layouts: HashMap<u8, Option<MarkerLayout>>,
     row_count: u64,
     diagnostics: u64,
     implausible_times: u64,
@@ -182,6 +211,8 @@ impl<'a> Decoder<'a> {
             topics: HashMap::new(),
             params: BTreeMap::new(),
             parm_layouts: HashMap::new(),
+            markers: Vec::new(),
+            marker_layouts: HashMap::new(),
             row_count: 0,
             diagnostics: 0,
             implausible_times: 0,
@@ -312,6 +343,10 @@ impl<'a> Decoder<'a> {
                 self.read_parm(msgid, &payload, record_offset);
                 self.decode_data(msgid, payload);
             }
+            "MSG" | "EV" | "ERR" => {
+                self.read_marker(msgid, &payload, record_offset);
+                self.decode_data(msgid, payload);
+            }
             _ => self.decode_data(msgid, payload),
         }
         Ok(true)
@@ -391,6 +426,91 @@ impl<'a> Decoder<'a> {
                     "bin-bad-param",
                     "PARM format has no decodable Name and Value fields; \
                      parameters not captured",
+                )
+                .at_byte(record_offset),
+            );
+        }
+        resolved
+    }
+
+    fn read_marker(&mut self, msgid: u8, payload: &[u8], record_offset: u64) {
+        if !self.marker_layouts.contains_key(&msgid) {
+            let layout = self.build_marker_layout(msgid, record_offset);
+            self.marker_layouts.insert(msgid, layout);
+        }
+        let Some(layout) = self.marker_layouts.get(&msgid).copied().flatten() else {
+            return;
+        };
+
+        let Some(time_us) = read_time(&layout.time, payload) else {
+            return;
+        };
+        if !self.timestamp_in_window(time_us) {
+            return;
+        }
+
+        let (level, text) = match layout.kind {
+            MarkerKind::Msg { text } => {
+                let message = c_str(&payload[text.0..text.0 + str_len(text.1)]);
+                if message.is_empty() {
+                    return;
+                }
+                (MARKER_LEVEL_INFO, message)
+            }
+            MarkerKind::Event { id } => {
+                let id = read_instance(id.1, payload, id.0);
+                (MARKER_LEVEL_INFO, format!("EV: {}", event_label(id)))
+            }
+            MarkerKind::Error { subsys, ecode } => {
+                let subsys = read_instance(subsys.1, payload, subsys.0);
+                let ecode = read_instance(ecode.1, payload, ecode.0);
+                (
+                    MARKER_LEVEL_ERROR,
+                    format!("Err: {}-{ecode}", error_subsystem_label(subsys)),
+                )
+            }
+        };
+
+        self.markers.push(AutoMarker {
+            time_us,
+            level,
+            text,
+        });
+    }
+
+    fn build_marker_layout(&mut self, msgid: u8, record_offset: u64) -> Option<MarkerLayout> {
+        let resolved = {
+            let fmt = &self.formats[&msgid];
+            let field = |name: &str| -> Option<(usize, u8)> {
+                let f = fmt.field(name)?;
+                let width = type_size(f.chr)?;
+                (f.offset + width <= fmt.payload_len).then_some((f.offset, f.chr))
+            };
+            let kind = match fmt.name.as_str() {
+                "MSG" => field("Message")
+                    .filter(|&(_, chr)| str_len(chr) > 0)
+                    .map(|text| MarkerKind::Msg { text }),
+                "EV" => field("Id")
+                    .filter(|&(_, chr)| is_integer_chr(chr))
+                    .map(|id| MarkerKind::Event { id }),
+                _ => {
+                    let subsys = field("Subsys").filter(|&(_, chr)| is_integer_chr(chr));
+                    let ecode = field("ECode").filter(|&(_, chr)| is_integer_chr(chr));
+                    subsys
+                        .zip(ecode)
+                        .map(|(subsys, ecode)| MarkerKind::Error { subsys, ecode })
+                }
+            };
+            time_source(fmt)
+                .zip(kind)
+                .map(|(time, kind)| MarkerLayout { time, kind })
+        };
+        if resolved.is_none() {
+            let name = self.formats[&msgid].name.clone();
+            self.diagnostic(
+                Diag::warning(
+                    "bin-bad-marker",
+                    format!("`{name}` format is not decodable as a logged message; skipped"),
                 )
                 .at_byte(record_offset),
             );
@@ -491,11 +611,7 @@ impl<'a> Decoder<'a> {
             return None;
         }
 
-        let time = if let Some(f) = format.field("TimeUS") {
-            TimeSource::Micros(f.offset)
-        } else if let Some(f) = format.field("TimeMS") {
-            TimeSource::Millis(f.offset)
-        } else {
+        let Some(time) = time_source(format) else {
             self.diagnostic(Diag::info(
                 "bin-no-timestamp",
                 format!(
@@ -658,7 +774,11 @@ impl<'a> Decoder<'a> {
                         default: parm.default.clone(),
                     })
                     .collect(),
-                auto_markers: Vec::new(),
+                auto_markers: {
+                    let mut markers = self.markers.clone();
+                    markers.sort_by_key(|marker| marker.time_us);
+                    markers
+                },
             },
         }
     }
@@ -856,6 +976,30 @@ impl FrameReader {
             }
         }
         Ok(Some(buf))
+    }
+}
+
+fn event_label(id: i64) -> String {
+    u8::try_from(id)
+        .ok()
+        .and_then(events::event_name)
+        .map(str::to_owned)
+        .unwrap_or_else(|| id.to_string())
+}
+
+fn error_subsystem_label(id: i64) -> String {
+    u8::try_from(id)
+        .ok()
+        .and_then(events::error_subsystem_name)
+        .map(str::to_owned)
+        .unwrap_or_else(|| id.to_string())
+}
+
+fn time_source(format: &MsgFormat) -> Option<TimeSource> {
+    if let Some(f) = format.field("TimeUS") {
+        Some(TimeSource::Micros(f.offset))
+    } else {
+        format.field("TimeMS").map(|f| TimeSource::Millis(f.offset))
     }
 }
 
@@ -1258,6 +1402,130 @@ mod tests {
             .downcast_ref::<Float32Array>()
             .unwrap();
         assert_eq!(values.values(), &[0.135, 0.2]);
+    }
+
+    fn push_msg(buf: &mut Vec<u8>, time_us: u64, text: &str) {
+        let mut p = Vec::new();
+        p.extend(time_us.to_le_bytes());
+        push_padded(&mut p, text.as_bytes(), 64);
+        push_rec(buf, 203, &p);
+    }
+
+    fn push_ev(buf: &mut Vec<u8>, time_us: u64, id: u8) {
+        let mut p = Vec::new();
+        p.extend(time_us.to_le_bytes());
+        p.push(id);
+        push_rec(buf, 204, &p);
+    }
+
+    fn push_err(buf: &mut Vec<u8>, time_us: u64, subsys: u8, ecode: u8) {
+        let mut p = Vec::new();
+        p.extend(time_us.to_le_bytes());
+        p.push(subsys);
+        p.push(ecode);
+        push_rec(buf, 205, &p);
+    }
+
+    fn marker_fmts(buf: &mut Vec<u8>) {
+        push_fmt(buf, 203, "MSG", "QZ", "TimeUS,Message");
+        push_fmt(buf, 204, "EV", "QB", "TimeUS,Id");
+        push_fmt(buf, 205, "ERR", "QBB", "TimeUS,Subsys,ECode");
+    }
+
+    #[test]
+    fn captures_msg_ev_and_err_as_logged_messages() {
+        let mut buf = Vec::new();
+        marker_fmts(&mut buf);
+        push_msg(&mut buf, 1_000, "ArduPlane V4.5.7 (0358a9c2)");
+        push_ev(&mut buf, 2_000, 10);
+        push_err(&mut buf, 3_000, 6, 1);
+
+        let (summary, _) = parse(buf);
+        let markers = &summary.source_meta.auto_markers;
+        assert_eq!(markers.len(), 3);
+        assert_eq!(markers[0].text, "ArduPlane V4.5.7 (0358a9c2)");
+        assert_eq!(markers[0].level, 6);
+        assert_eq!(markers[1].text, "EV: ARMED");
+        assert_eq!(markers[1].level, 6);
+        assert_eq!(markers[2].text, "Err: FAILSAFE_BATT-1");
+        assert_eq!(markers[2].level, 3);
+    }
+
+    #[test]
+    fn unknown_event_and_subsystem_ids_fall_back_to_their_number() {
+        let mut buf = Vec::new();
+        marker_fmts(&mut buf);
+        push_ev(&mut buf, 1_000, 200);
+        push_err(&mut buf, 2_000, 250, 9);
+
+        let (summary, _) = parse(buf);
+        let markers = &summary.source_meta.auto_markers;
+        assert_eq!(markers[0].text, "EV: 200");
+        assert_eq!(markers[1].text, "Err: 250-9");
+    }
+
+    #[test]
+    fn logged_messages_are_merged_in_time_order() {
+        let mut buf = Vec::new();
+        marker_fmts(&mut buf);
+        push_msg(&mut buf, 5_000, "late text");
+        push_ev(&mut buf, 1_000, 11);
+        push_err(&mut buf, 3_000, 2, 0);
+        push_msg(&mut buf, 2_000, "early text");
+
+        let (summary, _) = parse(buf);
+        let markers = &summary.source_meta.auto_markers;
+        assert_eq!(
+            markers.iter().map(|m| m.time_us).collect::<Vec<_>>(),
+            [1_000, 2_000, 3_000, 5_000]
+        );
+        assert_eq!(markers[0].text, "EV: DISARMED");
+        assert_eq!(markers[3].text, "late text");
+    }
+
+    #[test]
+    fn marker_records_are_still_emitted_as_topics() {
+        let mut buf = Vec::new();
+        marker_fmts(&mut buf);
+        push_msg(&mut buf, 1_000, "boot");
+        push_msg(&mut buf, 2_000, "ready");
+        push_ev(&mut buf, 3_000, 10);
+        push_err(&mut buf, 4_000, 6, 1);
+
+        let (_, sink) = parse(buf);
+        let msg = batch(&sink, "MSG");
+        assert_eq!(msg.timestamps.values(), &[1_000, 2_000]);
+        let texts = msg.columns[0]
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(texts.value(1), "ready");
+        assert_eq!(batch(&sink, "EV").timestamps.values(), &[3_000]);
+        assert_eq!(batch(&sink, "ERR").timestamps.values(), &[4_000]);
+    }
+
+    #[test]
+    fn an_undecodable_msg_format_warns_once_and_captures_nothing() {
+        let mut buf = Vec::new();
+        push_fmt(&mut buf, 203, "MSG", "QI", "TimeUS,Message");
+        let mut p = Vec::new();
+        p.extend(1_000u64.to_le_bytes());
+        p.extend(7u32.to_le_bytes());
+        push_rec(&mut buf, 203, &p);
+        let mut p = Vec::new();
+        p.extend(2_000u64.to_le_bytes());
+        p.extend(8u32.to_le_bytes());
+        push_rec(&mut buf, 203, &p);
+
+        let (summary, sink) = parse(buf);
+        assert!(summary.source_meta.auto_markers.is_empty());
+        assert_eq!(
+            sink.diags
+                .iter()
+                .filter(|d| d.code == "bin-bad-marker")
+                .count(),
+            1
+        );
     }
 
     #[test]
