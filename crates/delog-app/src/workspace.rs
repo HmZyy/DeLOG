@@ -2026,10 +2026,10 @@ fn resolve_source_field(
             if topic.entry.removed || topic.entry.name != topic_name {
                 continue;
             }
-            for field in snapshot
+            if let Some(field) = snapshot
                 .fields
                 .iter()
-                .filter(|f| f.topic == topic_id && !f.removed && f.name == field_name)
+                .find(|f| f.topic == topic_id && !f.removed && f.name == field_name)
             {
                 return Some(field.id);
             }
