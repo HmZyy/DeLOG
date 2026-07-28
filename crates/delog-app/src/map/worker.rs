@@ -695,73 +695,73 @@ fn controller_loop(
         );
         if !shutdown {
             loop {
-            if pending.is_empty() || idle.is_empty() {
-                break;
-            }
-            let Pending(work) = pending.pop().unwrap();
-            let std::cmp::Reverse(worker) = idle.pop().unwrap();
-            let key = (
-                work.request.scope,
-                work.request.provider,
-                work.request.id,
-                work.request.generation,
-            );
-            if work.epoch != epoch
-                || latest_generations.get(&work.request.scope).copied()
-                    != Some(work.request.generation)
-                || !controller_desired
-                    .get(&work.request.scope)
-                    .is_none_or(|snapshot| snapshot.accepts(&key, work.sequence))
-                || !states
-                    .get(&key)
-                    .is_some_and(|(_, token)| *token == work.sequence)
-            {
-                idle.push(std::cmp::Reverse(worker));
-                continue;
-            }
-            match cache.read(work.request.provider, work.request.id) {
-                Ok(Some(bytes)) => match decode_tile(&bytes) {
-                    Ok(rgba) => {
-                        retain_ready(&mut states, &mut ready_order, key, work.sequence);
-                        send_ready(
-                            &ready_tx,
-                            &ready_evict_rx,
-                            ReadyEnvelope {
-                                epoch: work.epoch,
-                                sequence: work.sequence,
-                                tile: ReadyTile {
-                                    scope: work.request.scope,
+                if pending.is_empty() || idle.is_empty() {
+                    break;
+                }
+                let Pending(work) = pending.pop().unwrap();
+                let std::cmp::Reverse(worker) = idle.pop().unwrap();
+                let key = (
+                    work.request.scope,
+                    work.request.provider,
+                    work.request.id,
+                    work.request.generation,
+                );
+                if work.epoch != epoch
+                    || latest_generations.get(&work.request.scope).copied()
+                        != Some(work.request.generation)
+                    || !controller_desired
+                        .get(&work.request.scope)
+                        .is_none_or(|snapshot| snapshot.accepts(&key, work.sequence))
+                    || !states
+                        .get(&key)
+                        .is_some_and(|(_, token)| *token == work.sequence)
+                {
+                    idle.push(std::cmp::Reverse(worker));
+                    continue;
+                }
+                match cache.read(work.request.provider, work.request.id) {
+                    Ok(Some(bytes)) => match decode_tile(&bytes) {
+                        Ok(rgba) => {
+                            retain_ready(&mut states, &mut ready_order, key, work.sequence);
+                            send_ready(
+                                &ready_tx,
+                                &ready_evict_rx,
+                                ReadyEnvelope {
                                     epoch: work.epoch,
-                                    provider: work.request.provider,
-                                    id: work.request.id,
-                                    generation: work.request.generation,
-                                    rgba,
-                                    corners: work.request.corners,
+                                    sequence: work.sequence,
+                                    tile: ReadyTile {
+                                        scope: work.request.scope,
+                                        epoch: work.epoch,
+                                        provider: work.request.provider,
+                                        id: work.request.id,
+                                        generation: work.request.generation,
+                                        rgba,
+                                        corners: work.request.corners,
+                                    },
                                 },
-                            },
-                        );
-                        idle.push(std::cmp::Reverse(worker));
-                        repaint();
-                    }
-                    Err(_) => {
+                            );
+                            idle.push(std::cmp::Reverse(worker));
+                            repaint();
+                        }
+                        Err(_) => {
+                            states.insert(key, (RequestState::InFlight, work.sequence));
+                            let _ = worker_txs[worker].send(work);
+                        }
+                    },
+                    Err(error) => {
+                        status_snapshot.lock().unwrap().failure = Some(TileFailure {
+                            class: TileFailureClass::Cache,
+                            retryable: false,
+                            message: error.to_string(),
+                        });
                         states.insert(key, (RequestState::InFlight, work.sequence));
                         let _ = worker_txs[worker].send(work);
                     }
-                },
-                Err(error) => {
-                    status_snapshot.lock().unwrap().failure = Some(TileFailure {
-                        class: TileFailureClass::Cache,
-                        retryable: false,
-                        message: error.to_string(),
-                    });
-                    states.insert(key, (RequestState::InFlight, work.sequence));
-                    let _ = worker_txs[worker].send(work);
+                    Ok(None) => {
+                        states.insert(key, (RequestState::InFlight, work.sequence));
+                        let _ = worker_txs[worker].send(work);
+                    }
                 }
-                Ok(None) => {
-                    states.insert(key, (RequestState::InFlight, work.sequence));
-                    let _ = worker_txs[worker].send(work);
-                }
-            }
             }
         }
         publish_status(&status_snapshot, &states, cache.usage_bytes());
