@@ -317,7 +317,7 @@ fn ghost_trace_resolves_when_matching_field_loads() {
     else {
         panic!("root should be a plot");
     };
-    pane.add_ghost(crate::plot::GhostTrace {
+    pane.add_ghost(crate::plotting::plot::GhostTrace {
         source: None,
         topic: "ATT".into(),
         field: "Roll".into(),
@@ -355,7 +355,7 @@ fn ghost_trace_stays_missing_when_field_is_ambiguous() {
     else {
         panic!("root should be a plot");
     };
-    pane.add_ghost(crate::plot::GhostTrace {
+    pane.add_ghost(crate::plotting::plot::GhostTrace {
         source: None,
         topic: "ATT".into(),
         field: "Roll".into(),
