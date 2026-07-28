@@ -1,21 +1,4 @@
-#[allow(dead_code)]
-mod map {
-    pub mod cache {
-        include!("../src/map/cache.rs");
-    }
-    pub mod provider {
-        include!("../src/map/provider.rs");
-    }
-
-    pub mod worker {
-        include!("../src/map/worker.rs");
-
-        pub fn request_from_test(manager: &mut TileManager, request: TileRequest, url: String) {
-            manager.request_with_url(request, Some(url));
-        }
-    }
-}
-
+use delog_app::map;
 use std::{
     io::Cursor,
     sync::{
