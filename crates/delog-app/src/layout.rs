@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::scene3d::camera::OrbitCamera;
-use crate::plot::{GhostTrace, PlotPane, TraceMode, TraceRef};
+use crate::plotting::plot::{GhostTrace, PlotPane, TraceMode, TraceRef};
 use crate::config::settings::AppSettings;
 use crate::scene3d::vehicle::{GeoRef, ModelKind, NedReference, OriMapping, PosMapping, VehicleConfig};
 use crate::workspace::{Pane, Scene3dPane, Workspace};

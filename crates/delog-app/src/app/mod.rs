@@ -7,17 +7,17 @@ use delog_core::time::TimeRange;
 use egui_extras::{Column, TableBuilder};
 use serde::Serialize;
 
-use crate::browser::{self, BrowserFilterCache, BrowserModel};
+use crate::plotting::browser::{self, BrowserFilterCache, BrowserModel};
 use crate::ui::diagnostics::DiagnosticsDock;
 use crate::ui::docks::{AppDockController, AppDockTab};
-use crate::field_stats::{FieldStatsController, StatsTab};
-use crate::gpu::GpuBridge;
+use crate::plotting::field_stats::{FieldStatsController, StatsTab};
+use crate::plotting::gpu::GpuBridge;
 use crate::layout::{LayoutApply, LayoutDoc, LayoutError, LoadOutcome, PendingLayout};
 use crate::live::ConnectionDialog;
 use crate::ui::logging::{LogLevel, LogRecord, LoggingDock, PendingLog};
 use crate::map::worker::{CacheActionKind, CacheActionStatus, TileManager};
 use crate::ui::performance::{PerformanceDock, PerformanceSnapshot, ResourceSummary, TraceSummary};
-use crate::plot::ViewX;
+use crate::plotting::plot::ViewX;
 #[cfg(feature = "scripting")]
 use crate::scripts;
 use crate::session::Session;
@@ -33,7 +33,7 @@ fn keep_active_loads_repainting(ctx: &egui::Context, has_active_loads: bool) {
         ctx.request_repaint_after(Duration::from_millis(50));
     }
 }
-use crate::timeline::Playback;
+use crate::plotting::timeline::Playback;
 use crate::workspace::{PlotServices, Workspace};
 
 struct TrajectoryBuildResult {
@@ -255,7 +255,7 @@ pub struct DelogApp {
     /// Shared measurement-marker time when the marker scope is Global. Per-pane
     /// markers live on the pane.
     marker_us: Option<i64>,
-    markers: crate::markers::Markers,
+    markers: crate::plotting::markers::Markers,
     snap_playhead: bool,
     frame: u64,
     last_epoch: u64,
@@ -298,7 +298,7 @@ pub struct DelogApp {
     next_log_seq: u64,
     log_started_at: Instant,
     performance_dock: PerformanceDock,
-    markers_dock: crate::markers::MarkersDock,
+    markers_dock: crate::plotting::markers::MarkersDock,
     performance_snapshot: PerformanceSnapshot,
     performance_last_refresh: Option<Instant>,
     browser_query: String,
@@ -402,7 +402,7 @@ impl DelogApp {
             fit_view_all: DEFAULT_FIT_VIEW_ALL,
             hover_mode: delog_core::field_view::SampleMode::Prev,
             marker_us: None,
-            markers: crate::markers::Markers::new(),
+            markers: crate::plotting::markers::Markers::new(),
             snap_playhead: false,
             frame: 0,
             last_epoch: u64::MAX,
@@ -442,7 +442,7 @@ impl DelogApp {
             next_log_seq: 0,
             log_started_at: Instant::now(),
             performance_dock: PerformanceDock::default(),
-            markers_dock: crate::markers::MarkersDock::default(),
+            markers_dock: crate::plotting::markers::MarkersDock::default(),
             performance_snapshot: PerformanceSnapshot::default(),
             performance_last_refresh: None,
             browser_query: String::new(),
@@ -1077,7 +1077,7 @@ impl DelogApp {
         view_fitted: &mut bool,
         fit_view_all: &mut bool,
         marker_us: &mut Option<i64>,
-        markers: &mut crate::markers::Markers,
+        markers: &mut crate::plotting::markers::Markers,
         vehicles: &mut Vec<crate::scene3d::vehicle::VehicleConfig>,
         vehicle_dialog: &mut crate::vehicle_dialog::VehicleDialog,
         vehicle_revision: &mut u64,
@@ -1090,7 +1090,7 @@ impl DelogApp {
         *view_fitted = false;
         *fit_view_all = DEFAULT_FIT_VIEW_ALL;
         *marker_us = None;
-        *markers = crate::markers::Markers::new();
+        *markers = crate::plotting::markers::Markers::new();
         vehicles.clear();
         *vehicle_dialog = crate::vehicle_dialog::VehicleDialog::default();
         *vehicle_revision = vehicle_revision.wrapping_add(1);
@@ -1132,7 +1132,7 @@ impl DelogApp {
                     self.caches.field_visible_samples(field, x0, x1)
                 });
                 TraceSummary {
-                    label: crate::legend::trace_label(snapshot, field),
+                    label: crate::plotting::legend::trace_label(snapshot, field),
                     samples: self.caches.field_samples(field),
                     visible_samples,
                     cache_cpu_bytes: self.caches.field_mem(field).cache_cpu,
@@ -2549,7 +2549,7 @@ impl eframe::App for DelogApp {
             if left || right {
                 let reference = self.workspace.focused_first_field();
                 let target =
-                    crate::timeline::step_target(&snapshot, reference, self.playback.t_us, right);
+                    crate::plotting::timeline::step_target(&snapshot, reference, self.playback.t_us, right);
                 self.playback.scrub(target, range);
             }
             if add_marker {
@@ -2668,7 +2668,7 @@ impl eframe::App for DelogApp {
         // after the resizable docks so those docks sit below the timeline.
         let ui_timeline_timer = self.session.metrics().scope("ui_timeline");
         egui::Panel::bottom("timeline").show_inside(ui, |ui| {
-            let action = crate::timeline::ui(
+            let action = crate::plotting::timeline::ui(
                 ui,
                 &mut self.playback,
                 &mut self.fit_view_all,
@@ -2795,7 +2795,7 @@ impl eframe::App for DelogApp {
                     self.field_stats.open(field);
                 }
                 if let Some(field) = browser_response.generate_markers {
-                    let title = crate::legend::trace_label(&snapshot, field);
+                    let title = crate::plotting::legend::trace_label(&snapshot, field);
                     self.generate_markers_dialog =
                         Some(crate::generate_markers::GenerateMarkersDialog::open(
                             &snapshot, field, title,
@@ -3560,7 +3560,7 @@ fn show_source_metadata_tab(
                     .meta
                     .params
                     .iter()
-                    .filter(|param| crate::browser::matches_query(&query, &param.name))
+                    .filter(|param| crate::plotting::browser::matches_query(&query, &param.name))
                     .collect();
                 if matches.is_empty() {
                     ui.weak("No parameters match the filter.");
@@ -3831,7 +3831,7 @@ fn field_stats_rows(
         .iter()
         .copied()
         .map(|field| {
-            let name = crate::legend::trace_label(snapshot, field);
+            let name = crate::plotting::legend::trace_label(snapshot, field);
             let (suffix, unavailable) = match field_unit(snapshot, field) {
                 Some(Some(unit)) => (format!(" {unit}"), false),
                 Some(None) => (String::new(), false),
@@ -4225,8 +4225,8 @@ struct AppDockViewer<'a> {
     logs: &'a [LogRecord],
     performance_dock: &'a mut PerformanceDock,
     performance_snapshot: &'a PerformanceSnapshot,
-    markers_dock: &'a mut crate::markers::MarkersDock,
-    markers: &'a mut crate::markers::Markers,
+    markers_dock: &'a mut crate::plotting::markers::MarkersDock,
+    markers: &'a mut crate::plotting::markers::Markers,
     origin_us: i64,
     #[cfg(feature = "scripting")]
     scripts: &'a mut scripts::ScriptsPanel,

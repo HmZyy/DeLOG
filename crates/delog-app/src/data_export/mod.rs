@@ -13,7 +13,7 @@ use delog_core::identity::{FieldId, SourceId, TopicId};
 use delog_core::parse_ctl::CancelToken;
 use delog_core::snapshot::StoreSnapshot;
 
-use crate::browser::BrowserModel;
+use crate::plotting::browser::BrowserModel;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ExportFormat {

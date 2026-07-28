@@ -100,7 +100,7 @@ fn clear_current_layout_resets_layout_and_vehicle_state() {
     let mut view_fitted = true;
     let mut fit_view_all = false;
     let mut marker_us = Some(42);
-    let mut markers = crate::markers::Markers::new();
+    let mut markers = crate::plotting::markers::Markers::new();
     markers.add_at(42);
     let mut vehicles = vec![crate::scene3d::vehicle::VehicleConfig {
         source: delog_core::identity::SourceId(0),
@@ -222,7 +222,7 @@ fn field_stats_rows_use_topic_dot_field_labels_and_per_field_state() {
         .next()
         .expect("row builder should precede table renderer");
 
-    assert!(rows.contains("crate::legend::trace_label(snapshot, field)"));
+    assert!(rows.contains("crate::plotting::legend::trace_label(snapshot, field)"));
     assert!(rows.contains(".result_for(field)"));
     assert!(rows.contains(".error_for(field)"));
 }

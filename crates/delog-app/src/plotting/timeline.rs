@@ -5,7 +5,7 @@
 
 use delog_core::time::TimeRange;
 
-use crate::plot::ViewX;
+use crate::plotting::plot::ViewX;
 
 pub const MIN_SPEED: f32 = 0.1;
 pub const MAX_SPEED: f32 = 100.0;
@@ -218,7 +218,7 @@ pub fn ui(
     utc_offset_us: Option<i64>,
     any_live: bool,
     theme: crate::ui::theme::ThemeChoice,
-    markers: &crate::markers::Markers,
+    markers: &crate::plotting::markers::Markers,
 ) -> TimelineAction {
     let mut action = TimelineAction::default();
     ui.add_space(6.0);
@@ -373,7 +373,7 @@ fn scrubber(
     playback: &mut Playback,
     range: TimeRange,
     any_live: bool,
-    markers: &crate::markers::Markers,
+    markers: &crate::plotting::markers::Markers,
     action: &mut TimelineAction,
 ) -> bool {
     let height = 16.0;
@@ -521,7 +521,7 @@ fn scrubber(
                     m.id,
                     MarkerEdit {
                         label: None,
-                        color: Some(crate::legend::color32_to_srgb(color)),
+                        color: Some(crate::plotting::legend::color32_to_srgb(color)),
                     },
                 ));
             }

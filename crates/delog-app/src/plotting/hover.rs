@@ -6,9 +6,9 @@ use delog_core::field_view::{FieldView, SampleMode};
 use delog_core::identity::FieldId;
 use delog_core::snapshot::StoreSnapshot;
 
-use crate::gpu::PaneView;
-use crate::legend::trace_label;
-use crate::plot::PlotPane;
+use crate::plotting::gpu::PaneView;
+use crate::plotting::legend::trace_label;
+use crate::plotting::plot::PlotPane;
 
 const READOUT_ORDER: egui::Order = egui::Order::Background;
 
@@ -166,7 +166,7 @@ fn show_tooltip(
             let base = egui::Frame::popup(ui.style());
             egui::Frame {
                 shadow: egui::Shadow::NONE,
-                fill: crate::legend::with_bg_opacity(base.fill, opacity),
+                fill: crate::plotting::legend::with_bg_opacity(base.fill, opacity),
                 ..base
             }
             .show(ui, |ui| {
@@ -361,7 +361,7 @@ pub fn draw_marker_regions(
     ui: &egui::Ui,
     view: PaneView,
     origin_us: i64,
-    markers: &[crate::markers::Marker],
+    markers: &[crate::plotting::markers::Marker],
     data_end_us: i64,
     opacity: f32,
 ) {
@@ -370,7 +370,7 @@ pub fn draw_marker_regions(
     if x1 <= x0 || markers.is_empty() {
         return;
     }
-    let mut sorted: Vec<&crate::markers::Marker> = markers.iter().collect();
+    let mut sorted: Vec<&crate::plotting::markers::Marker> = markers.iter().collect();
     sorted.sort_by_key(|m| m.t_us);
     let to_x = |t_us: i64| {
         let t_sec = ((t_us - origin_us) as f64 * 1e-6) as f32;
@@ -402,7 +402,7 @@ pub fn draw_session_markers(
     ui: &egui::Ui,
     view: PaneView,
     origin_us: i64,
-    markers: &[crate::markers::Marker],
+    markers: &[crate::plotting::markers::Marker],
     opacity: f32,
     width: f32,
     show_label: bool,

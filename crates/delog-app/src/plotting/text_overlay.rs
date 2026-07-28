@@ -5,8 +5,8 @@ use delog_core::identity::FieldId;
 use delog_core::snapshot::StoreSnapshot;
 use delog_core::time::TimeRange;
 
-use crate::gpu::PaneView;
-use crate::plot::TraceRef;
+use crate::plotting::gpu::PaneView;
+use crate::plotting::plot::TraceRef;
 
 const FONT_SIZE: f32 = 11.0;
 const ROW_GAP: f32 = 6.0;

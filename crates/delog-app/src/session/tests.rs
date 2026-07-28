@@ -19,7 +19,7 @@ use delog_parsers::{
 use parquet::arrow::ArrowWriter;
 
 use super::*;
-use crate::browser::BrowserModel;
+use crate::plotting::browser::BrowserModel;
 use crate::data_export::{
     ExportCtl, ExportField, ExportFormat, available_fields, write_export_file,
 };

@@ -136,7 +136,7 @@ pub fn generate_markers_window(
                                 )
                                 .changed()
                                 {
-                                    row.color = crate::legend::color32_to_srgb(c);
+                                    row.color = crate::plotting::legend::color32_to_srgb(c);
                                 }
                                 ui.end_row();
                             }

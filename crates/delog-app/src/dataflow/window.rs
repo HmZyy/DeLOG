@@ -465,7 +465,7 @@ impl DataFlowUi {
     }
 
     fn collapsed_library_drawer(&mut self, ui: &mut egui::Ui) {
-        let button_size = crate::browser::panel_toggle_button_size(ui);
+        let button_size = crate::plotting::browser::panel_toggle_button_size(ui);
         let collapsed_left_margin = ui.spacing().item_spacing.x;
         let collapsed_right_margin = ui.spacing().item_spacing.x;
         let collapsed_width = collapsed_left_margin + button_size.x + collapsed_right_margin;
@@ -498,7 +498,7 @@ impl DataFlowUi {
     fn library_drawer(&mut self, ui: &mut egui::Ui, logs: &mut Vec<(LogLevel, String)>) {
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let button_size = crate::browser::panel_toggle_button_size(ui);
+                let button_size = crate::plotting::browser::panel_toggle_button_size(ui);
                 let icon_size = button_size - ui.spacing().button_padding * 2.0;
                 let icon = egui::Image::new(crate::ui::icons::panel_left_close())
                     .fit_to_exact_size(icon_size)

@@ -275,7 +275,7 @@ impl MarkersDock {
                         )
                         .changed()
                         {
-                            m.color = crate::legend::color32_to_srgb(color);
+                            m.color = crate::plotting::legend::color32_to_srgb(color);
                         }
                         ui.monospace(fmt_rel(m.t_us, origin_us));
                         ui.add(

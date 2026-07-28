@@ -18,7 +18,7 @@ use crate::scene3d::camera::OrbitCamera;
 use crate::map::provider::{MapProviderId, TileId};
 use crate::map::worker::{MapScopeId, ReadyTile};
 use crate::scene3d::models;
-use crate::plot::{PlotPane, TraceMode, ViewX};
+use crate::plotting::plot::{PlotPane, TraceMode, ViewX};
 use crate::config::settings::{GapMode, RenderTuning, Scene3dSettings};
 use crate::sync_window::CompareMode;
 use crate::scene3d::vehicle::ModelKind;
@@ -1882,7 +1882,7 @@ pub fn sync_x_bounds(view: ViewX, cache_origin_us: i64) -> (f32, f32) {
 pub fn sync_active_trace_at(lanes: &[egui::Rect], pointer: egui::Pos2) -> Option<usize> {
     lanes
         .iter()
-        .position(|lane| crate::axes::usable_plot_rect(*lane) && lane.contains(pointer))
+        .position(|lane| crate::plotting::axes::usable_plot_rect(*lane) && lane.contains(pointer))
 }
 
 /// Convert an egui drag delta and a wheel scroll into [`ViewX`] updates,

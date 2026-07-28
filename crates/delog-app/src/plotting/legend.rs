@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use delog_core::identity::FieldId;
 use delog_core::snapshot::StoreSnapshot;
 
-use crate::plot::{PlotPane, TraceMode, TraceRef};
+use crate::plotting::plot::{PlotPane, TraceMode, TraceRef};
 use crate::config::settings::LegendPosition;
 use egui_tiles::TileId;
 
@@ -194,7 +194,7 @@ pub fn ui(
                     )
                     .show(ui, |ui| {
                         for (field, label) in labels {
-                            let is_text = crate::text_overlay::field_is_string(snapshot, *field);
+                            let is_text = crate::plotting::text_overlay::field_is_string(snapshot, *field);
                             let mut filter = if is_text {
                                 pane.text_filters.get(field).cloned().unwrap_or_default()
                             } else {
