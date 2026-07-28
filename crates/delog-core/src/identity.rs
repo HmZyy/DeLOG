@@ -55,6 +55,7 @@ pub struct SourceParam {
     pub name: String,
     pub ty: String,
     pub value: String,
+    pub default: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -694,6 +695,7 @@ mod tests {
                 name: "SYS_AUTOSTART".to_owned(),
                 ty: "int32_t".to_owned(),
                 value: "4001".to_owned(),
+                default: None,
             }],
             auto_markers: vec![AutoMarker {
                 time_us: 1_000,

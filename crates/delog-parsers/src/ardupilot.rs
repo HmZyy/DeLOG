@@ -5,7 +5,7 @@
 //! `FMTU`/`UNIT`/`MULT` attach units and multipliers. Raw values are stored and
 //! the unit + multiplier recorded in the [`TopicSchema`].
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{BufReader, Read};
 use std::sync::Arc;
 
@@ -15,7 +15,7 @@ use arrow::array::{
 };
 use arrow::datatypes::DataType;
 use delog_core::diagnostics::Diag;
-use delog_core::identity::SourceId;
+use delog_core::identity::{SourceId, SourceMetadata, SourceParam};
 use delog_core::ingest::{IngestSink, ParseSummary, ParsedBatch};
 use delog_core::parse_ctl::ParseCtl;
 use delog_core::schema::{FieldSchema, TopicSchema};
@@ -96,6 +96,20 @@ struct Emit {
 }
 
 #[derive(Debug, Clone, Copy)]
+struct ParmLayout {
+    name: (usize, u8),
+    value: (usize, u8),
+    default: Option<(usize, u8)>,
+}
+
+#[derive(Debug, Clone)]
+struct ParmValue {
+    ty: &'static str,
+    value: String,
+    default: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
 enum TimeSource {
     /// `TimeUS`, u64 microseconds.
     Micros(usize),
@@ -143,6 +157,8 @@ struct Decoder<'a> {
     mults: HashMap<u8, f64>,
     fmtu: HashMap<u8, (Vec<u8>, Vec<u8>)>,
     topics: HashMap<String, TopicAccum>,
+    params: BTreeMap<String, ParmValue>,
+    parm_layouts: HashMap<u8, Option<ParmLayout>>,
     row_count: u64,
     diagnostics: u64,
     implausible_times: u64,
@@ -164,6 +180,8 @@ impl<'a> Decoder<'a> {
             mults: HashMap::new(),
             fmtu: HashMap::new(),
             topics: HashMap::new(),
+            params: BTreeMap::new(),
+            parm_layouts: HashMap::new(),
             row_count: 0,
             diagnostics: 0,
             implausible_times: 0,
@@ -290,6 +308,10 @@ impl<'a> Decoder<'a> {
             "FMTU" => self.decode_fmtu(msgid, &payload),
             "UNIT" => self.read_unit(msgid, &payload),
             "MULT" => self.read_mult(msgid, &payload),
+            "PARM" => {
+                self.read_parm(msgid, &payload, record_offset);
+                self.decode_data(msgid, payload);
+            }
             _ => self.decode_data(msgid, payload),
         }
         Ok(true)
@@ -311,6 +333,69 @@ impl<'a> Decoder<'a> {
             let value = f64::from_le_bytes(read_8(payload, mult.offset));
             self.mults.insert(id_char, value);
         }
+    }
+
+    fn read_parm(&mut self, msgid: u8, payload: &[u8], record_offset: u64) {
+        if !self.parm_layouts.contains_key(&msgid) {
+            let layout = self.build_parm_layout(msgid, record_offset);
+            self.parm_layouts.insert(msgid, layout);
+        }
+        let Some(layout) = self.parm_layouts.get(&msgid).copied().flatten() else {
+            return;
+        };
+
+        let (name_offset, name_chr) = layout.name;
+        let name = c_str(&payload[name_offset..name_offset + str_len(name_chr)]);
+        if name.is_empty() {
+            return;
+        }
+
+        let (value_offset, value_chr) = layout.value;
+        let Some(value) = scalar_to_string(value_chr, payload, value_offset) else {
+            return;
+        };
+        let default = layout
+            .default
+            .and_then(|(offset, chr)| parm_default_to_string(chr, payload, offset));
+
+        self.params.insert(
+            name,
+            ParmValue {
+                ty: type_name(value_chr),
+                value,
+                default,
+            },
+        );
+    }
+
+    fn build_parm_layout(&mut self, msgid: u8, record_offset: u64) -> Option<ParmLayout> {
+        let resolved = {
+            let fmt = &self.formats[&msgid];
+            let field = |name: &str| -> Option<(usize, u8)> {
+                let f = fmt.field(name)?;
+                let width = type_size(f.chr)?;
+                (f.offset + width <= fmt.payload_len).then_some((f.offset, f.chr))
+            };
+            let name = field("Name").filter(|&(_, chr)| str_len(chr) > 0);
+            let value = field("Value").filter(|&(_, chr)| scalar_dtype(chr).is_some());
+            let default = field("Default").filter(|&(_, chr)| scalar_dtype(chr).is_some());
+            name.zip(value).map(|(name, value)| ParmLayout {
+                name,
+                value,
+                default,
+            })
+        };
+        if resolved.is_none() {
+            self.diagnostic(
+                Diag::warning(
+                    "bin-bad-param",
+                    "PARM format has no decodable Name and Value fields; \
+                     parameters not captured",
+                )
+                .at_byte(record_offset),
+            );
+        }
+        resolved
     }
 
     fn decode_data(&mut self, msgid: u8, payload: Vec<u8>) {
@@ -562,7 +647,19 @@ impl<'a> Decoder<'a> {
             row_count: self.row_count,
             time_range: self.time_range,
             diagnostics: self.diagnostics,
-            ..ParseSummary::default()
+            source_meta: SourceMetadata {
+                params: self
+                    .params
+                    .iter()
+                    .map(|(name, parm)| SourceParam {
+                        name: name.clone(),
+                        ty: parm.ty.to_owned(),
+                        value: parm.value.clone(),
+                        default: parm.default.clone(),
+                    })
+                    .collect(),
+                auto_markers: Vec::new(),
+            },
         }
     }
 }
@@ -818,6 +915,54 @@ fn scalar_dtype(chr: u8) -> Option<DataType> {
     })
 }
 
+fn scalar_to_string(chr: u8, p: &[u8], off: usize) -> Option<String> {
+    Some(match chr {
+        b'b' => (p[off] as i8).to_string(),
+        b'B' | b'M' => p[off].to_string(),
+        b'h' | b'c' => i16::from_le_bytes(read_2(p, off)).to_string(),
+        b'H' | b'C' => u16::from_le_bytes(read_2(p, off)).to_string(),
+        b'i' | b'e' | b'L' => i32::from_le_bytes(read_4(p, off)).to_string(),
+        b'I' | b'E' => u32::from_le_bytes(read_4(p, off)).to_string(),
+        b'q' => i64::from_le_bytes(read_8(p, off)).to_string(),
+        b'Q' => u64::from_le_bytes(read_8(p, off)).to_string(),
+        b'f' => f32::from_le_bytes(read_4(p, off)).to_string(),
+        b'd' => f64::from_le_bytes(read_8(p, off)).to_string(),
+        b'n' | b'N' | b'Z' => c_str(&p[off..off + str_len(chr)]),
+        _ => return None,
+    })
+}
+
+fn parm_default_to_string(chr: u8, p: &[u8], off: usize) -> Option<String> {
+    match chr {
+        b'f' => {
+            let value = f32::from_le_bytes(read_4(p, off));
+            value.is_finite().then(|| value.to_string())
+        }
+        b'd' => {
+            let value = f64::from_le_bytes(read_8(p, off));
+            value.is_finite().then(|| value.to_string())
+        }
+        other => scalar_to_string(other, p, off),
+    }
+}
+
+fn type_name(chr: u8) -> &'static str {
+    match chr {
+        b'b' => "int8_t",
+        b'B' | b'M' => "uint8_t",
+        b'h' | b'c' => "int16_t",
+        b'H' | b'C' => "uint16_t",
+        b'i' | b'e' | b'L' => "int32_t",
+        b'I' | b'E' => "uint32_t",
+        b'q' => "int64_t",
+        b'Q' => "uint64_t",
+        b'f' => "float",
+        b'd' => "double",
+        b'n' | b'N' | b'Z' => "char",
+        _ => "unknown",
+    }
+}
+
 fn default_mult_unit(chr: u8) -> (f64, Option<&'static str>) {
     match chr {
         b'c' | b'C' | b'e' | b'E' => (0.01, None),
@@ -877,7 +1022,7 @@ fn read_8(p: &[u8], off: usize) -> [u8; 8] {
 mod tests {
     use std::io::Cursor;
 
-    use arrow::array::{Float32Array, Int16Array};
+    use arrow::array::{Float32Array, Int16Array, StringArray};
     use delog_core::ingest::SourceKind;
     use delog_core::parse_ctl::CancelToken;
 
@@ -1027,5 +1172,109 @@ mod tests {
         let test = batch(&sink, "TEST");
         assert_eq!(test.timestamps.values(), &[3_000]);
         assert!(summary.diagnostics >= 1);
+    }
+
+    fn push_parm(buf: &mut Vec<u8>, time_us: u64, name: &str, value: f32) {
+        let mut p = Vec::new();
+        p.extend(time_us.to_le_bytes());
+        push_padded(&mut p, name.as_bytes(), 16);
+        p.extend(value.to_le_bytes());
+        push_rec(buf, 202, &p);
+    }
+
+    fn push_parm_default(buf: &mut Vec<u8>, time_us: u64, name: &str, value: f32, default: f32) {
+        let mut p = Vec::new();
+        p.extend(time_us.to_le_bytes());
+        push_padded(&mut p, name.as_bytes(), 16);
+        p.extend(value.to_le_bytes());
+        p.extend(default.to_le_bytes());
+        push_rec(buf, 202, &p);
+    }
+
+    #[test]
+    fn captures_parm_records_sorted_by_name() {
+        let mut buf = Vec::new();
+        push_fmt(&mut buf, 202, "PARM", "QNf", "TimeUS,Name,Value");
+        push_parm(&mut buf, 1_000, "RATE_RLL_P", 0.135);
+        push_parm(&mut buf, 1_000, "ATC_ANG_PIT_P", 4.5);
+        push_parm(&mut buf, 1_000, "INS_GYRO_FILTER", 20.0);
+
+        let (summary, _) = parse(buf);
+        let params = &summary.source_meta.params;
+        assert_eq!(
+            params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            ["ATC_ANG_PIT_P", "INS_GYRO_FILTER", "RATE_RLL_P"]
+        );
+        assert_eq!(params[0].ty, "float");
+        assert_eq!(params[0].value, "4.5");
+        assert_eq!(params[0].default, None);
+        assert_eq!(params[2].value, "0.135");
+    }
+
+    #[test]
+    fn a_parameter_logged_twice_keeps_its_last_value() {
+        let mut buf = Vec::new();
+        push_fmt(&mut buf, 202, "PARM", "QNf", "TimeUS,Name,Value");
+        push_parm(&mut buf, 1_000, "RATE_RLL_P", 0.135);
+        push_parm(&mut buf, 9_000, "RATE_RLL_P", 0.2);
+
+        let (summary, _) = parse(buf);
+        assert_eq!(summary.source_meta.params.len(), 1);
+        assert_eq!(summary.source_meta.params[0].value, "0.2");
+    }
+
+    #[test]
+    fn captures_the_default_field_when_the_format_declares_it() {
+        let mut buf = Vec::new();
+        push_fmt(&mut buf, 202, "PARM", "QNff", "TimeUS,Name,Value,Default");
+        push_parm_default(&mut buf, 1_000, "RATE_RLL_P", 0.2, 0.135);
+        push_parm_default(&mut buf, 1_000, "ATC_RAT_PIT_D", 0.003, f32::NAN);
+
+        let (summary, _) = parse(buf);
+        let params = &summary.source_meta.params;
+        assert_eq!(params[0].name, "ATC_RAT_PIT_D");
+        assert_eq!(params[0].default, None);
+        assert_eq!(params[1].name, "RATE_RLL_P");
+        assert_eq!(params[1].default.as_deref(), Some("0.135"));
+    }
+
+    #[test]
+    fn parm_is_still_emitted_as_a_topic() {
+        let mut buf = Vec::new();
+        push_fmt(&mut buf, 202, "PARM", "QNf", "TimeUS,Name,Value");
+        push_parm(&mut buf, 1_000, "RATE_RLL_P", 0.135);
+        push_parm(&mut buf, 9_000, "RATE_RLL_P", 0.2);
+
+        let (_, sink) = parse(buf);
+        let parm = batch(&sink, "PARM");
+        assert_eq!(parm.timestamps.values(), &[1_000, 9_000]);
+        let names = parm.columns[0]
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(names.value(0), "RATE_RLL_P");
+        let values = parm.columns[1]
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .unwrap();
+        assert_eq!(values.values(), &[0.135, 0.2]);
+    }
+
+    #[test]
+    fn an_undecodable_parm_format_warns_once_and_captures_nothing() {
+        let mut buf = Vec::new();
+        push_fmt(&mut buf, 202, "PARM", "QNf", "TimeUS,Ident,Value");
+        push_parm(&mut buf, 1_000, "RATE_RLL_P", 0.135);
+        push_parm(&mut buf, 2_000, "ATC_ANG_PIT_P", 4.5);
+
+        let (summary, sink) = parse(buf);
+        assert!(summary.source_meta.params.is_empty());
+        assert_eq!(
+            sink.diags
+                .iter()
+                .filter(|d| d.code == "bin-bad-param")
+                .count(),
+            1
+        );
     }
 }
