@@ -118,7 +118,7 @@ fn clear_current_layout_resets_layout_and_vehicle_state() {
         path_color: egui::Color32::WHITE,
         scale: 1.0,
     }];
-    let mut vehicle_dialog = crate::vehicle_dialog::VehicleDialog::default();
+    let mut vehicle_dialog = crate::session::vehicle_dialog::VehicleDialog::default();
     vehicle_dialog.open = true;
     let mut vehicle_revision = 7;
     let mut traj_dirty = false;
@@ -361,7 +361,7 @@ fn field_metadata_includes_schema_rows_and_effective_range() {
 
 #[test]
 fn field_metadata_reports_original_sources_for_imported_topic_collisions() {
-    let snapshot = crate::session::tests::structured_round_trip_snapshot();
+    let snapshot = crate::session::session::tests::structured_round_trip_snapshot();
     let metadata_for = |topic_name: &str| {
         let topic = snapshot
             .topics
@@ -411,7 +411,7 @@ fn shape_contains_text(shape: &egui::epaint::Shape, expected: &str) -> bool {
 
 #[test]
 fn imported_provenance_is_rendered_in_the_existing_field_metadata_window() {
-    let snapshot = crate::session::tests::structured_round_trip_snapshot();
+    let snapshot = crate::session::session::tests::structured_round_trip_snapshot();
     let topic = snapshot
         .topics
         .iter()
