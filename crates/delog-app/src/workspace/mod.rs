@@ -573,8 +573,8 @@ pub struct PlotServices<'a> {
     pub snap_playhead: &'a mut bool,
     /// Shared measurement marker time.
     pub marker_us: &'a mut Option<i64>,
-    pub render_tuning: crate::settings::RenderTuning,
-    pub scene3d: crate::settings::Scene3dSettings,
+    pub render_tuning: crate::config::settings::RenderTuning,
+    pub scene3d: crate::config::settings::Scene3dSettings,
     pub accent: egui::Color32,
     /// Playhead cursor time; `None` before any data loads.
     pub playhead_us: Option<i64>,
@@ -587,7 +587,7 @@ pub struct PlotServices<'a> {
     /// upload only appended tail points.
     pub traj_generation: u64,
     pub shared_y_gutter: f32,
-    pub plot_display: crate::settings::PlotDisplay,
+    pub plot_display: crate::config::settings::PlotDisplay,
     pub markers: &'a [crate::markers::Marker],
 }
 
@@ -1201,8 +1201,8 @@ impl Behavior<'_> {
         let no_deltas = std::collections::HashMap::new();
         let (legend_deltas, readout_deltas) = match self.services.plot_display.marker_delta_readout
         {
-            crate::settings::MarkerDeltaReadout::Legend => (&marker_deltas, &no_deltas),
-            crate::settings::MarkerDeltaReadout::Hover => (&no_deltas, &marker_deltas),
+            crate::config::settings::MarkerDeltaReadout::Legend => (&marker_deltas, &no_deltas),
+            crate::config::settings::MarkerDeltaReadout::Hover => (&no_deltas, &marker_deltas),
         };
 
         hover::draw_session_markers(

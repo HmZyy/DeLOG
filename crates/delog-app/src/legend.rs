@@ -4,7 +4,7 @@ use delog_core::identity::FieldId;
 use delog_core::snapshot::StoreSnapshot;
 
 use crate::plot::{PlotPane, TraceMode, TraceRef};
-use crate::settings::LegendPosition;
+use crate::config::settings::LegendPosition;
 use egui_tiles::TileId;
 
 pub fn with_bg_opacity(color: egui::Color32, opacity: f32) -> egui::Color32 {
