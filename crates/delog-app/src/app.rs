@@ -2790,7 +2790,12 @@ impl eframe::App for DelogApp {
             self.browser_model = Some((epoch, model));
         }
         drop(ui_browser_timer);
-        show_source_metadata_window(ui.ctx(), &snapshot, &mut self.source_metadata_dialog);
+        if let Some(t_us) =
+            show_source_metadata_window(ui.ctx(), &snapshot, &mut self.source_metadata_dialog)
+            && let Some(range) = snapshot.global_time_range()
+        {
+            self.playback.scrub(t_us, range);
+        }
         show_field_metadata_window(ui.ctx(), &snapshot, &mut self.field_metadata_dialog);
         show_field_stats_window(
             ui.ctx(),
@@ -3395,18 +3400,17 @@ fn show_source_metadata_window(
     ctx: &egui::Context,
     snapshot: &delog_core::snapshot::StoreSnapshot,
     selected: &mut Option<delog_core::identity::SourceId>,
-) {
-    let Some(source_id) = *selected else {
-        return;
-    };
+) -> Option<i64> {
+    let source_id = (*selected)?;
     let Some(source) = snapshot
         .source(source_id)
         .filter(|source| !source.entry.removed)
     else {
         *selected = None;
-        return;
+        return None;
     };
 
+    let mut jump_to_time_us = None;
     let mut open = true;
     egui::Window::new(format!("Source Metadata - {}", source.entry.label))
         .id(egui::Id::new(("source_metadata", source_id.0)))
@@ -3425,6 +3429,7 @@ fn show_source_metadata_window(
             let mut viewer = SourceMetadataTabViewer {
                 snapshot,
                 source_id,
+                jump_to_time_us: None,
             };
             egui_dock::DockArea::new(&mut dock_state)
                 .id(egui::Id::new(("source_metadata_dock_area", source_id.0)))
@@ -3436,12 +3441,14 @@ fn show_source_metadata_window(
                 .show_leaf_close_all_buttons(false)
                 .show_leaf_collapse_buttons(false)
                 .show_inside(ui, &mut viewer);
+            jump_to_time_us = viewer.jump_to_time_us;
             ui.data_mut(|d| d.insert_temp(tab_id, active_source_metadata_tab(&mut dock_state)));
         });
 
     if !open {
         *selected = None;
     }
+    jump_to_time_us
 }
 
 fn source_metadata_dock_state(active_tab: SourceMetaTab) -> egui_dock::DockState<SourceMetaTab> {
@@ -3465,6 +3472,7 @@ fn active_source_metadata_tab(
 struct SourceMetadataTabViewer<'a> {
     snapshot: &'a delog_core::snapshot::StoreSnapshot,
     source_id: delog_core::identity::SourceId,
+    jump_to_time_us: Option<i64>,
 }
 
 impl egui_dock::TabViewer for SourceMetadataTabViewer<'_> {
@@ -3475,7 +3483,9 @@ impl egui_dock::TabViewer for SourceMetadataTabViewer<'_> {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
-        show_source_metadata_tab(ui, self.snapshot, self.source_id, *tab);
+        if let Some(t_us) = show_source_metadata_tab(ui, self.snapshot, self.source_id, *tab) {
+            self.jump_to_time_us = Some(t_us);
+        }
     }
 
     fn allowed_in_windows(&self, _tab: &mut Self::Tab) -> bool {
@@ -3488,13 +3498,10 @@ fn show_source_metadata_tab(
     snapshot: &delog_core::snapshot::StoreSnapshot,
     source_id: delog_core::identity::SourceId,
     tab: SourceMetaTab,
-) {
-    let Some(source) = snapshot
+) -> Option<i64> {
+    let source = snapshot
         .source(source_id)
-        .filter(|source| !source.entry.removed)
-    else {
-        return;
-    };
+        .filter(|source| !source.entry.removed)?;
 
     match tab {
         SourceMetaTab::Info => {
@@ -3551,10 +3558,16 @@ fn show_source_metadata_tab(
             if source.entry.meta.auto_markers.is_empty() {
                 ui.weak("No logged messages captured.");
             } else {
-                source_metadata_markers_table(ui, source_id, &source.entry.meta.auto_markers);
+                return source_metadata_markers_table(
+                    ui,
+                    source_id,
+                    &source.entry.meta.auto_markers,
+                    source.entry.offset_us,
+                );
             }
         }
     }
+    None
 }
 
 fn source_metadata_summary_table(ui: &mut egui::Ui, rows: &[(&str, String)]) {
@@ -3644,7 +3657,9 @@ fn source_metadata_markers_table(
     ui: &mut egui::Ui,
     source_id: delog_core::identity::SourceId,
     markers: &[delog_core::identity::AutoMarker],
-) {
+    offset_us: i64,
+) -> Option<i64> {
+    let mut jump_to_time_us = None;
     let row_height = table_row_height(ui);
     egui::ScrollArea::vertical()
         .id_salt(("source_markers", source_id.0))
@@ -3674,7 +3689,20 @@ fn source_metadata_markers_table(
                     body.rows(row_height, markers.len(), |mut row| {
                         let marker = &markers[row.index()];
                         row.col(|ui| {
-                            ui.label(format!("{:.3}s", marker.time_us as f64 / 1e6));
+                            match delog_core::time::effective_time_us(marker.time_us, offset_us) {
+                                Some(t_us) => {
+                                    if ui
+                                        .button(format!("{:.3}s", t_us as f64 / 1e6))
+                                        .on_hover_text("Jump playhead to this message")
+                                        .clicked()
+                                    {
+                                        jump_to_time_us = Some(t_us);
+                                    }
+                                }
+                                None => {
+                                    ui.weak("-");
+                                }
+                            }
                         });
                         row.col(|ui| match marker.level {
                             Some(level) => {
@@ -3690,6 +3718,7 @@ fn source_metadata_markers_table(
                     });
                 });
         });
+    jump_to_time_us
 }
 
 fn show_field_stats_window(
