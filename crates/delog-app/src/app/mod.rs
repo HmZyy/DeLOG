@@ -20,7 +20,7 @@ use crate::ui::performance::{PerformanceDock, PerformanceSnapshot, ResourceSumma
 use crate::plotting::plot::ViewX;
 #[cfg(feature = "scripting")]
 use crate::scripts;
-use crate::session::Session;
+use crate::session::session::Session;
 use crate::config::settings::{AppSettings, RenderMode, SettingsDialog, TileCacheUiState};
 use crate::sync::sync_window::SyncWindow;
 
@@ -329,7 +329,7 @@ pub struct DelogApp {
     show_connection_dialog: bool,
     connection_dialog: ConnectionDialog,
     vehicles: Vec<crate::scene3d::vehicle::VehicleConfig>,
-    vehicle_dialog: crate::vehicle_dialog::VehicleDialog,
+    vehicle_dialog: crate::session::vehicle_dialog::VehicleDialog,
     /// Parallel to `vehicles`, rebuilt on a worker when the data epoch or
     /// vehicle set changes.
     vehicle_trajectories: Vec<crate::scene3d::vehicle::VehicleTrajectory>,
@@ -474,7 +474,7 @@ impl DelogApp {
             show_connection_dialog: false,
             connection_dialog,
             vehicles: Vec::new(),
-            vehicle_dialog: crate::vehicle_dialog::VehicleDialog::default(),
+            vehicle_dialog: crate::session::vehicle_dialog::VehicleDialog::default(),
             vehicle_trajectories: Vec::new(),
             traj_epoch: u64::MAX,
             traj_vehicle_revision: u64::MAX,
@@ -1079,7 +1079,7 @@ impl DelogApp {
         marker_us: &mut Option<i64>,
         markers: &mut crate::plotting::markers::Markers,
         vehicles: &mut Vec<crate::scene3d::vehicle::VehicleConfig>,
-        vehicle_dialog: &mut crate::vehicle_dialog::VehicleDialog,
+        vehicle_dialog: &mut crate::session::vehicle_dialog::VehicleDialog,
         vehicle_revision: &mut u64,
         traj_dirty: &mut bool,
     ) {
@@ -1092,7 +1092,7 @@ impl DelogApp {
         *marker_us = None;
         *markers = crate::plotting::markers::Markers::new();
         vehicles.clear();
-        *vehicle_dialog = crate::vehicle_dialog::VehicleDialog::default();
+        *vehicle_dialog = crate::session::vehicle_dialog::VehicleDialog::default();
         *vehicle_revision = vehicle_revision.wrapping_add(1);
         *traj_dirty = true;
     }
@@ -3110,7 +3110,7 @@ impl eframe::App for DelogApp {
                     err.to_string(),
                 ));
         }
-        if crate::vehicle_dialog::show(
+        if crate::session::vehicle_dialog::show(
             ui.ctx(),
             &mut self.vehicle_dialog,
             &mut self.vehicles,

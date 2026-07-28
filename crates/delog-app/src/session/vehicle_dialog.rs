@@ -5,7 +5,7 @@ use egui::Color32;
 use crate::layout::{FieldRef, ModelLayout, NedRefLayout, OriLayout, PosLayout, VehicleLayout};
 use crate::ui::logging::{LogLevel, PendingLog, log};
 use crate::scene3d::vehicle::{GeoRef, ModelKind, NedReference, OriMapping, PosMapping, VehicleConfig};
-use crate::vehicle_profiles::{VEHICLE_PROFILE_VERSION, VehicleProfileDoc, VehicleProfileLibrary};
+use crate::session::vehicle_profiles::{VEHICLE_PROFILE_VERSION, VehicleProfileDoc, VehicleProfileLibrary};
 
 const DIALOG_WIDTH: f32 = 320.0;
 
