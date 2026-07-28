@@ -102,7 +102,7 @@ impl LoggingDock {
                     .desired_width(220.0),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let trash = egui::Image::new(crate::icons::trash())
+                let trash = egui::Image::new(crate::ui::icons::trash())
                     .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
                     .tint(ui.visuals().text_color());
                 if ui

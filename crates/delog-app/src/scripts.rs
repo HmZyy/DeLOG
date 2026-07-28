@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
-use crate::logging::{LogLevel, PendingLog, log};
+use crate::ui::logging::{LogLevel, PendingLog, log};
 use crate::settings::AutoOpenVariables;
 use delog_core::ingest::IngestSender;
 use delog_core::metrics::MetricsRegistry;
@@ -681,7 +681,7 @@ impl ScriptsPanel {
                     // the remaining space to its left.
                     let resp = ui
                         .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let trash = egui::Image::new(crate::icons::trash())
+                            let trash = egui::Image::new(crate::ui::icons::trash())
                                 .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
                                 .tint(ui.visuals().text_color());
                             if ui
@@ -879,7 +879,7 @@ impl ScriptsPanel {
                                                     .add(
                                                         egui::Button::image(
                                                             egui::Image::new(
-                                                                crate::icons::rotate_ccw(),
+                                                                crate::ui::icons::rotate_ccw(),
                                                             )
                                                             .fit_to_exact_size(egui::vec2(
                                                                 14.0, 14.0,
@@ -1005,7 +1005,7 @@ impl ScriptsPanel {
                         .desired_width(160.0),
                 );
 
-                let save_img = egui::Image::new(crate::icons::save())
+                let save_img = egui::Image::new(crate::ui::icons::save())
                     .fit_to_exact_size(egui::vec2(16.0, 16.0))
                     .tint(ui.visuals().text_color());
                 if ui
@@ -1042,7 +1042,7 @@ impl ScriptsPanel {
                 if icon_btn_enabled(
                     ui,
                     self.ordinary_dispatch_enabled(),
-                    crate::icons::play(),
+                    crate::ui::icons::play(),
                     "Run",
                 )
                 .clicked()
@@ -1060,7 +1060,7 @@ impl ScriptsPanel {
                 if icon_btn_enabled(
                     ui,
                     self.can_interrupt_console(),
-                    crate::icons::square(),
+                    crate::ui::icons::square(),
                     "Stop",
                 )
                 .clicked()
@@ -1071,7 +1071,7 @@ impl ScriptsPanel {
                 if icon_btn_enabled(
                     ui,
                     has_live,
-                    crate::icons::unplug(),
+                    crate::ui::icons::unplug(),
                     "Unregister live transform",
                 )
                 .clicked()
@@ -1332,7 +1332,7 @@ mod tests {
 
         let logs = panel.take_logs();
         assert_eq!(logs.len(), 1);
-        assert_eq!(logs[0].level, crate::logging::LogLevel::Error);
+        assert_eq!(logs[0].level, crate::ui::logging::LogLevel::Error);
         assert!(logs[0].message.contains("python exploded"));
         assert!(panel.take_logs().is_empty());
     }
