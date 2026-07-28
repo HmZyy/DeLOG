@@ -19,7 +19,7 @@ use crate::map::provider::{MapProviderId, TileId};
 use crate::map::worker::{MapScopeId, ReadyTile};
 use crate::scene3d::models;
 use crate::plot::{PlotPane, TraceMode, ViewX};
-use crate::settings::{GapMode, RenderTuning, Scene3dSettings};
+use crate::config::settings::{GapMode, RenderTuning, Scene3dSettings};
 use crate::sync_window::CompareMode;
 use crate::scene3d::vehicle::ModelKind;
 
@@ -365,7 +365,7 @@ impl GpuBridge {
         caches: &mut CacheManager,
         pane: &PlotPane,
         view: PaneView,
-        tuning: crate::settings::RenderTuning,
+        tuning: crate::config::settings::RenderTuning,
         metrics: &Arc<MetricsRegistry>,
     ) {
         let plot_rect = view.rect;

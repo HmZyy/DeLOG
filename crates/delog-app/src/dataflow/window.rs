@@ -326,7 +326,7 @@ impl DataFlowUi {
         snapshot: &Arc<StoreSnapshot>,
         sender: &IngestSender,
         live_connected: bool,
-        settings: crate::settings::DataFlowSettings,
+        settings: crate::config::settings::DataFlowSettings,
     ) -> Vec<(LogLevel, String)> {
         let mut logs = Vec::new();
 
@@ -1354,7 +1354,7 @@ mod tests {
                 snapshot,
                 sender,
                 false,
-                crate::settings::DataFlowSettings::default(),
+                crate::config::settings::DataFlowSettings::default(),
             );
         });
         ctx.memory(|memory| memory.area_rect(egui::Id::new("Data Flow")).unwrap())

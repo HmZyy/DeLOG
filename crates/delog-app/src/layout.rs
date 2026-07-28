@@ -14,7 +14,7 @@ use serde_json::Value;
 
 use crate::scene3d::camera::OrbitCamera;
 use crate::plot::{GhostTrace, PlotPane, TraceMode, TraceRef};
-use crate::settings::AppSettings;
+use crate::config::settings::AppSettings;
 use crate::scene3d::vehicle::{GeoRef, ModelKind, NedReference, OriMapping, PosMapping, VehicleConfig};
 use crate::workspace::{Pane, Scene3dPane, Workspace};
 
@@ -1256,7 +1256,7 @@ mod tests {
         ));
         let mut settings = AppSettings::default();
         settings.show_fps = true;
-        settings.render_mode = crate::settings::RenderMode::Continuous;
+        settings.render_mode = crate::config::settings::RenderMode::Continuous;
         settings.theme = crate::ui::theme::ThemeChoice::Light;
         settings.scene3d.map_provider = crate::map::provider::MapProviderId::BingSatellite;
         settings.scene3d.tile_cache_limit_bytes = 8 * 1024 * 1024 * 1024;

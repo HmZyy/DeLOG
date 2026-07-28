@@ -1,6 +1,7 @@
 pub mod app;
 pub mod axes;
 pub mod browser;
+pub mod config;
 pub mod data_export;
 pub mod dataflow;
 pub mod field_stats;
@@ -31,7 +32,6 @@ pub mod script_params_io;
 #[cfg(feature = "scripting")]
 pub mod scripts;
 pub mod session;
-pub mod settings;
 pub mod sync_alignment;
 pub mod sync_window;
 pub mod text_overlay;
