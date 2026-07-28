@@ -59,6 +59,8 @@ pub fn run() -> eframe::Result {
 
     #[cfg(feature = "scripting")]
     if std::env::args().any(|a| a == "--check-scripting") {
+        // Release builds use the Windows GUI subsystem, which detaches stdout;
+        // reattach to the parent console so the diagnostic is visible.
         #[cfg(windows)]
         unsafe {
             use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
