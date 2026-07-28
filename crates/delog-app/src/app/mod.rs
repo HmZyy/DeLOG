@@ -13,7 +13,7 @@ use crate::ui::docks::{AppDockController, AppDockTab};
 use crate::plotting::field_stats::{FieldStatsController, StatsTab};
 use crate::plotting::gpu::GpuBridge;
 use crate::layout::{LayoutApply, LayoutDoc, LayoutError, LoadOutcome, PendingLayout};
-use crate::live::ConnectionDialog;
+use crate::ingest::live::ConnectionDialog;
 use crate::ui::logging::{LogLevel, LogRecord, LoggingDock, PendingLog};
 use crate::map::worker::{CacheActionKind, CacheActionStatus, TileManager};
 use crate::ui::performance::{PerformanceDock, PerformanceSnapshot, ResourceSummary, TraceSummary};
@@ -237,7 +237,7 @@ enum LayoutManagerAction {
 
 pub struct DelogApp {
     session: Session,
-    parquet_import: crate::parquet_import::ParquetImportUi,
+    parquet_import: crate::ingest::parquet_import::ParquetImportUi,
     #[cfg(feature = "scripting")]
     scripts: scripts::ScriptsPanel,
     gpu: GpuBridge,
@@ -376,7 +376,7 @@ impl DelogApp {
         let (exported_profiling_tx, exported_profiling) = mpsc::channel();
         let (data_export_tx, data_export_rx) = mpsc::channel();
         let (image_export_writes_tx, image_export_writes) = mpsc::channel();
-        let (parquet_import, parquet_selection) = crate::parquet_import::ParquetImportUi::new();
+        let (parquet_import, parquet_selection) = crate::ingest::parquet_import::ParquetImportUi::new();
         let session = Session::new(cc.egui_ctx.clone(), parquet_selection);
         // Shared metrics registry so cache metrics land in the same dock.
         let caches = CacheManager::new().with_metrics(std::sync::Arc::clone(session.metrics()));
