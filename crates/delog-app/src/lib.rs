@@ -1,8 +1,6 @@
-pub mod app;
 pub mod config;
 pub mod dataflow;
 pub mod export;
-pub mod generate_markers;
 pub mod ingest;
 pub mod layout;
 pub mod map;
@@ -10,15 +8,15 @@ pub mod plotting;
 pub mod scene3d;
 pub mod scripting;
 pub mod session;
+pub mod shell;
 pub mod sync;
 pub mod ui;
-pub mod workspace;
 
-pub use app::DelogApp;
+pub use shell::app::DelogApp;
 
 pub fn run() -> eframe::Result {
     #[cfg(feature = "bundled-python")]
-    py_runtime::init_bundled_python();
+    scripting::py_runtime::init_bundled_python();
 
     #[cfg(feature = "scripting")]
     if std::env::args().any(|a| a == "--check-scripting") {

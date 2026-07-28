@@ -16,7 +16,7 @@ use crate::scene3d::camera::OrbitCamera;
 use crate::plotting::plot::{GhostTrace, PlotPane, TraceMode, TraceRef};
 use crate::config::settings::AppSettings;
 use crate::scene3d::vehicle::{GeoRef, ModelKind, NedReference, OriMapping, PosMapping, VehicleConfig};
-use crate::workspace::{Pane, Scene3dPane, Workspace};
+use crate::shell::workspace::{Pane, Scene3dPane, Workspace};
 
 const APP_ID: &str = "DeLOG";
 const LAYOUT_VERSION: u32 = 1;
