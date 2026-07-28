@@ -1268,7 +1268,7 @@ mod tests {
 
     #[test]
     fn app_wires_cache_controls_without_blocking_the_ui() {
-        let source = include_str!("app.rs");
+        let source = include_str!("app/mod.rs");
         assert!(source.contains("TileManager::new"));
         assert!(source.contains("manager.set_limit"));
         assert!(source.contains("manager.clear_cache"));
