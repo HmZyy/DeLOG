@@ -693,7 +693,8 @@ fn controller_loop(
             &mut latest_generations,
             epoch,
         );
-        while !shutdown {
+        if !shutdown {
+            loop {
             if pending.is_empty() || idle.is_empty() {
                 break;
             }
@@ -760,6 +761,7 @@ fn controller_loop(
                     states.insert(key, (RequestState::InFlight, work.sequence));
                     let _ = worker_txs[worker].send(work);
                 }
+            }
             }
         }
         publish_status(&status_snapshot, &states, cache.usage_bytes());
