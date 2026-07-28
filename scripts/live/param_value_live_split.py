@@ -1,1 +1,1 @@
-delog.group_by("PARAM_VALUE", "param_id", mode="live")
+delog.split_by("PARAM_VALUE", "param_id", mode="live")

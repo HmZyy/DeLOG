@@ -65,7 +65,7 @@ pub struct MergeSpec {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GroupBySpec {
+pub struct SplitBySpec {
     pub input: TopicSelector,
     pub field: String,
     pub fields: Option<Vec<String>>,
@@ -77,7 +77,7 @@ pub struct GroupBySpec {
 pub enum OperationSpec {
     Transform(TransformSpec),
     Merge(MergeSpec),
-    GroupBy(GroupBySpec),
+    SplitBy(SplitBySpec),
 }
 
 pub type OperationBuffer = Rc<RefCell<Vec<OperationSpec>>>;
@@ -102,7 +102,7 @@ impl TopicRegistry {
             let topic = match spec {
                 OperationSpec::Transform(spec) => Some(spec.output_topic.as_str()),
                 OperationSpec::Merge(spec) => Some(spec.output_topic.as_str()),
-                OperationSpec::GroupBy(_) => None,
+                OperationSpec::SplitBy(_) => None,
             };
             if let Some(topic) = topic {
                 self.claim_batch(operation, &[(topic.to_owned(), None)])?;
@@ -174,9 +174,9 @@ pub(crate) fn validate_transform(
     Ok(())
 }
 
-pub(crate) fn validate_group_template(template: &str) -> Result<(), String> {
+pub(crate) fn validate_split_template(template: &str) -> Result<(), String> {
     if !template.contains("{value}") {
-        return Err("group_by output_topic must contain '{value}'".to_owned());
+        return Err("split_by output_topic must contain '{value}'".to_owned());
     }
     Ok(())
 }
@@ -228,12 +228,12 @@ mod tests {
     }
 
     #[test]
-    fn group_template_requires_value() {
+    fn split_template_requires_value() {
         assert_eq!(
-            validate_group_template("{topic}/fixed").unwrap_err(),
-            "group_by output_topic must contain '{value}'"
+            validate_split_template("{topic}/fixed").unwrap_err(),
+            "split_by output_topic must contain '{value}'"
         );
-        assert!(validate_group_template("{topic}/{value}").is_ok());
+        assert!(validate_split_template("{topic}/{value}").is_ok());
     }
 
     #[test]

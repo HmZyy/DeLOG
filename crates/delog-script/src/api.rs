@@ -21,8 +21,8 @@ use pyo3::types::{PyMapping, PyMappingMethods};
 
 use crate::live::LiveTransformSpec;
 use crate::operations::{
-    GroupBySpec, MergeSpec, OperationBuffer, OperationMode, OperationSpec, TopicSelector,
-    TransformSpec, merged_field_names, validate_group_template, validate_transform,
+    SplitBySpec, MergeSpec, OperationBuffer, OperationMode, OperationSpec, TopicSelector,
+    TransformSpec, merged_field_names, validate_split_template, validate_transform,
 };
 use crate::params::{ParamKind, ParamSpec, ParamValue, SharedParams};
 use pyo3::types::{PyBool, PyInt};
@@ -880,7 +880,7 @@ impl Delog {
 
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (topic, field, *, fields=None, output_topic=None, source=None, instance=None, mode="both"))]
-    fn group_by(
+    fn split_by(
         &self,
         topic: String,
         field: String,
@@ -892,18 +892,18 @@ impl Delog {
     ) -> PyResult<()> {
         if matches!(&fields, Some(fields) if fields.is_empty()) {
             return Err(pyo3::exceptions::PyValueError::new_err(
-                "group_by fields must not be empty",
+                "split_by fields must not be empty",
             ));
         }
         let output_template = output_topic.unwrap_or_else(|| "{topic}/{value}".to_owned());
-        validate_group_template(&output_template)
+        validate_split_template(&output_template)
             .map_err(pyo3::exceptions::PyValueError::new_err)?;
         let mode = Some(mode);
         let mode = OperationMode::parse(mode.as_deref())
             .map_err(pyo3::exceptions::PyValueError::new_err)?;
         self.operations
             .borrow_mut()
-            .push(OperationSpec::GroupBy(GroupBySpec {
+            .push(OperationSpec::SplitBy(SplitBySpec {
                 input: TopicSelector {
                     topic,
                     source,
@@ -1498,7 +1498,7 @@ def callback(batch):
             )
             .unwrap();
             let inspect = py.import("inspect").unwrap();
-            for method in ["transform", "merge", "group_by"] {
+            for method in ["transform", "merge", "split_by"] {
                 let signature = inspect
                     .call_method1("signature", (delog.getattr(method).unwrap(),))
                     .unwrap();
@@ -1572,7 +1572,7 @@ from collections import UserDict
 delog.transform("ATTITUDE", multiplier=57.29577951308232)
 delog.merge(UserDict({"ATTITUDE": ["roll"], "GPS": ["alt"]}),
             base_topic="ATTITUDE", output_topic="STATE")
-delog.group_by("PARAM_VALUE", "param_id")
+delog.split_by("PARAM_VALUE", "param_id")
 "#,
             )
             .unwrap();
@@ -1600,8 +1600,8 @@ delog.group_by("PARAM_VALUE", "param_id")
             );
             assert_eq!(merge.output_names, vec![vec!["roll"], vec!["alt"]]);
 
-            let OperationSpec::GroupBy(group) = &specs[2] else {
-                panic!("third operation was not group_by")
+            let OperationSpec::SplitBy(group) = &specs[2] else {
+                panic!("third operation was not split_by")
             };
             assert_eq!(group.output_template, "{topic}/{value}");
             assert_eq!(group.mode, OperationMode::Both);
@@ -1636,8 +1636,8 @@ delog.group_by("PARAM_VALUE", "param_id")
                 r#"delog.transform("A", mode=None)"#,
                 r#"delog.merge({}, base_topic="A", output_topic="OUT")"#,
                 r#"delog.merge({"A": ["x"]}, base_topic="B", output_topic="OUT")"#,
-                r#"delog.group_by("A", "key", fields=[])"#,
-                r#"delog.group_by("A", "key", output_topic="{topic}/fixed")"#,
+                r#"delog.split_by("A", "key", fields=[])"#,
+                r#"delog.split_by("A", "key", output_topic="{topic}/fixed")"#,
             ];
             for call in invalid_calls {
                 let code = std::ffi::CString::new(call).unwrap();

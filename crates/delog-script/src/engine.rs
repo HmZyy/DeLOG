@@ -778,12 +778,12 @@ fn operation_modes(specs: &[crate::operations::OperationSpec]) -> (bool, bool) {
     let wants_live = specs.iter().any(|spec| match spec {
         crate::operations::OperationSpec::Transform(spec) => spec.mode.wants_live(),
         crate::operations::OperationSpec::Merge(spec) => spec.mode.wants_live(),
-        crate::operations::OperationSpec::GroupBy(spec) => spec.mode.wants_live(),
+        crate::operations::OperationSpec::SplitBy(spec) => spec.mode.wants_live(),
     });
     let wants_snapshot = specs.iter().any(|spec| match spec {
         crate::operations::OperationSpec::Transform(spec) => spec.mode.wants_snapshot(),
         crate::operations::OperationSpec::Merge(spec) => spec.mode.wants_snapshot(),
-        crate::operations::OperationSpec::GroupBy(spec) => spec.mode.wants_snapshot(),
+        crate::operations::OperationSpec::SplitBy(spec) => spec.mode.wants_snapshot(),
     });
     (wants_live, wants_snapshot)
 }

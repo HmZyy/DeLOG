@@ -217,8 +217,8 @@ fn dynamic_cross_operation_collision_disables_only_the_losing_producer() {
         .send(ScriptCommand::RunScript {
             name: "owners".into(),
             source: r#"
-delog.group_by("PARAM_VALUE", "param_id", mode="live")
-delog.group_by("PARAM_VALUE", "param_id", mode="live")
+delog.split_by("PARAM_VALUE", "param_id", mode="live")
+delog.split_by("PARAM_VALUE", "param_id", mode="live")
 "#
             .into(),
         })

@@ -137,7 +137,7 @@ fn concise_documentation_examples_execute_verbatim() {
 delog.transform("NAV_CONTROLLER_OUTPUT", multiplier=0.017453292519943295,
                 fields=["nav_roll", "nav_pitch", "nav_bearing"],
                 unit="rad", output_topic="NAV_CONTROLLER_OUTPUT_RAD")
-delog.group_by("PARAM_VALUE", "param_id")
+delog.split_by("PARAM_VALUE", "param_id")
 delog.merge({"NAV_CONTROLLER_OUTPUT": ["nav_roll"], "GPS": ["alt"]},
             base_topic="NAV_CONTROLLER_OUTPUT", output_topic="NAV_WITH_ALT")
 "#
@@ -400,7 +400,7 @@ fn declarative_operations_share_one_snapshot_and_source() {
             name: "declarative".into(),
             source: r#"
 delog.transform("ATTITUDE", multiplier=2.0, offset=10.0, output_topic="ATTITUDE_X")
-delog.group_by("PARAM_VALUE", "param_id")
+delog.split_by("PARAM_VALUE", "param_id")
 delog.merge({"ATTITUDE": ["roll"], "GPS": ["alt"]},
             base_topic="ATTITUDE", output_topic="STATE")
 "#
