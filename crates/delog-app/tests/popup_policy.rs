@@ -1,23 +1,26 @@
+#[path = "policy_sources.rs"]
+mod policy_sources;
+
+use policy_sources::{
+    APP as APP_SOURCE, BROWSER, DATA_EXPORT as DATA_EXPORT_SOURCE, DIAGNOSTICS,
+    DOCKS as DOCKS_SOURCE, GENERATE_MARKERS, LIVE, LOGGING, MARKERS, MESSAGE_POPUP,
+    PARQUET_IMPORT as PARQUET_IMPORT_SOURCE, PARSERS, PERFORMANCE, SCRIPTS as SCRIPTS_SOURCE,
+    SETTINGS as SETTINGS_SOURCE, SYNC_WINDOW as SYNC_WINDOW_SOURCE, VEHICLE_DIALOG,
+    WORKSPACE as WORKSPACE_SOURCE,
+};
+
 const POPUP_SOURCES: &[&str] = &[
-    include_str!("../src/app.rs"),
-    include_str!("../src/browser.rs"),
-    include_str!("../src/generate_markers.rs"),
-    include_str!("../src/live.rs"),
-    include_str!("../src/message_popup.rs"),
-    include_str!("../src/parsers.rs"),
-    include_str!("../src/scripts.rs"),
-    include_str!("../src/settings.rs"),
-    include_str!("../src/vehicle_dialog.rs"),
-    include_str!("../src/workspace.rs"),
+    APP_SOURCE,
+    BROWSER,
+    GENERATE_MARKERS,
+    LIVE,
+    MESSAGE_POPUP,
+    PARSERS,
+    SCRIPTS_SOURCE,
+    SETTINGS_SOURCE,
+    VEHICLE_DIALOG,
+    WORKSPACE_SOURCE,
 ];
-const APP_SOURCE: &str = include_str!("../src/app.rs");
-const DATA_EXPORT_SOURCE: &str = include_str!("../src/data_export.rs");
-const DOCKS_SOURCE: &str = include_str!("../src/docks.rs");
-const PARQUET_IMPORT_SOURCE: &str = include_str!("../src/parquet_import.rs");
-const SCRIPTS_SOURCE: &str = include_str!("../src/scripts.rs");
-const WORKSPACE_SOURCE: &str = include_str!("../src/workspace.rs");
-const SETTINGS_SOURCE: &str = include_str!("../src/settings.rs");
-const SYNC_WINDOW_SOURCE: &str = include_str!("../src/sync_window.rs");
 
 const PARQUET_UI_SOURCES: &[&str] = &[APP_SOURCE, DATA_EXPORT_SOURCE, PARQUET_IMPORT_SOURCE];
 
@@ -151,10 +154,10 @@ fn bottom_docks_use_egui_dock_fixed_tabs_without_floating_or_reordering() {
 
 #[test]
 fn bottom_dock_bodies_do_not_render_redundant_headers_or_close_buttons() {
-    let diagnostics = include_str!("../src/diagnostics.rs");
-    let logging = include_str!("../src/logging.rs");
-    let performance = include_str!("../src/performance.rs");
-    let markers = include_str!("../src/markers.rs");
+    let diagnostics = DIAGNOSTICS;
+    let logging = LOGGING;
+    let performance = PERFORMANCE;
+    let markers = MARKERS;
 
     for source in [diagnostics, logging, performance, markers, SCRIPTS_SOURCE] {
         assert!(!source.contains("ui.button(\"Close\")"));
@@ -174,8 +177,8 @@ fn bottom_dock_bodies_do_not_render_redundant_headers_or_close_buttons() {
 
 #[test]
 fn clear_trash_buttons_are_aligned_to_the_right_of_their_control_rows() {
-    let diagnostics = include_str!("../src/diagnostics.rs");
-    let logging = include_str!("../src/logging.rs");
+    let diagnostics = DIAGNOSTICS;
+    let logging = LOGGING;
     let diagnostics_controls = between(
         diagnostics,
         "egui::TextEdit::singleline(&mut self.search)",
@@ -232,7 +235,7 @@ fn scripting_console_dock_matches_diagnostics_height_and_reserves_prompt() {
 
 #[test]
 fn browser_exposes_field_metadata_inspector() {
-    let browser = include_str!("../src/browser.rs");
+    let browser = BROWSER;
 
     assert!(browser.contains("inspect_field_metadata"));
     assert!(browser.contains("Field metadata"));
@@ -373,7 +376,7 @@ fn measuring_marker_scope_is_not_a_runtime_plot_setting() {
 
 #[test]
 fn browser_topic_tables_keep_field_drag_source() {
-    let browser = include_str!("../src/browser.rs");
+    let browser = BROWSER;
 
     let visible_loop = browser
         .find("for &field_idx in &visible_topic.fields")
@@ -443,7 +446,7 @@ fn browser_topic_tables_keep_field_drag_source() {
 
 #[test]
 fn browser_topic_table_layout_keeps_source_actions() {
-    let browser = include_str!("../src/browser.rs");
+    let browser = BROWSER;
 
     assert!(browser.contains("Source metadata"));
     assert!(browser.contains("Remove source"));
