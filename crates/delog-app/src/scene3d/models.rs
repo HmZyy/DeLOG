@@ -3,11 +3,11 @@
 
 use delog_render::{MeshCpu, load_glb};
 
-use crate::vehicle::ModelKind;
+use crate::scene3d::vehicle::ModelKind;
 
-const QUAD_GLB: &[u8] = include_bytes!("../../../assets/models/QuadCopter.glb");
-const FIXEDWING_GLB: &[u8] = include_bytes!("../../../assets/models/FixedWing.glb");
-const DELTAWING_GLB: &[u8] = include_bytes!("../../../assets/models/DeltaWing.glb");
+const QUAD_GLB: &[u8] = include_bytes!("../../../../assets/models/QuadCopter.glb");
+const FIXEDWING_GLB: &[u8] = include_bytes!("../../../../assets/models/FixedWing.glb");
+const DELTAWING_GLB: &[u8] = include_bytes!("../../../../assets/models/DeltaWing.glb");
 
 pub fn cone_mesh() -> MeshCpu {
     MeshCpu::cone(4, 0.5, 1.4)

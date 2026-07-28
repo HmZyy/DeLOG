@@ -102,18 +102,18 @@ fn clear_current_layout_resets_layout_and_vehicle_state() {
     let mut marker_us = Some(42);
     let mut markers = crate::markers::Markers::new();
     markers.add_at(42);
-    let mut vehicles = vec![crate::vehicle::VehicleConfig {
+    let mut vehicles = vec![crate::scene3d::vehicle::VehicleConfig {
         source: delog_core::identity::SourceId(0),
         label: "Vehicle".into(),
         show: true,
-        pos: crate::vehicle::PosMapping::Ned {
+        pos: crate::scene3d::vehicle::PosMapping::Ned {
             north: delog_core::identity::FieldId(0),
             east: delog_core::identity::FieldId(1),
             down: delog_core::identity::FieldId(2),
             reference: None,
         },
-        ori: crate::vehicle::OriMapping::Static,
-        model: crate::vehicle::ModelKind::Cone,
+        ori: crate::scene3d::vehicle::OriMapping::Static,
+        model: crate::scene3d::vehicle::ModelKind::Cone,
         color: egui::Color32::WHITE,
         path_color: egui::Color32::WHITE,
         scale: 1.0,

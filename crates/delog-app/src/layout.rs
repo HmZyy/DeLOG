@@ -12,10 +12,10 @@ use egui::Color32;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::camera::OrbitCamera;
+use crate::scene3d::camera::OrbitCamera;
 use crate::plot::{GhostTrace, PlotPane, TraceMode, TraceRef};
 use crate::settings::AppSettings;
-use crate::vehicle::{GeoRef, ModelKind, NedReference, OriMapping, PosMapping, VehicleConfig};
+use crate::scene3d::vehicle::{GeoRef, ModelKind, NedReference, OriMapping, PosMapping, VehicleConfig};
 use crate::workspace::{Pane, Scene3dPane, Workspace};
 
 const APP_ID: &str = "DeLOG";

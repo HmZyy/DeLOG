@@ -12,7 +12,7 @@ use delog_core::identity::FieldId;
 use delog_core::snapshot::StoreSnapshot;
 
 use crate::axes;
-use crate::camera::OrbitCamera;
+use crate::scene3d::camera::OrbitCamera;
 use crate::gpu::{self, GpuBridge, PaneView, VehicleDraw};
 use crate::hover::{self, HoverTarget};
 use crate::legend;
@@ -20,7 +20,7 @@ use crate::map::mercator;
 use crate::map::provider::{MapProviderId, provider};
 use crate::map::worker::{MapScopeId, TileFailureClass, TileManager, TileRequest};
 use crate::plot::{GhostTrace, PlotPane, TraceMode, TraceRef, ViewX, draw_zoom_drag_overlay};
-use crate::vehicle;
+use crate::scene3d::vehicle;
 
 pub type TileTree = egui_tiles::Tree<Pane>;
 
@@ -579,10 +579,10 @@ pub struct PlotServices<'a> {
     /// Playhead cursor time; `None` before any data loads.
     pub playhead_us: Option<i64>,
     pub playing: bool,
-    pub vehicles: &'a [crate::vehicle::VehicleConfig],
+    pub vehicles: &'a [crate::scene3d::vehicle::VehicleConfig],
     /// Render-space trajectories (points + per-point timestamps), parallel to
     /// `vehicles`.
-    pub trajectories: &'a [crate::vehicle::VehicleTrajectory],
+    pub trajectories: &'a [crate::scene3d::vehicle::VehicleTrajectory],
     /// Vehicle revision the cached trajectories were built at; lets the GPU
     /// upload only appended tail points.
     pub traj_generation: u64,

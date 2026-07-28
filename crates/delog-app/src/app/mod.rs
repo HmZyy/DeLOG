@@ -39,7 +39,7 @@ use crate::workspace::{PlotServices, Workspace};
 struct TrajectoryBuildResult {
     epoch: u64,
     vehicle_revision: u64,
-    trajectories: Vec<crate::vehicle::VehicleTrajectory>,
+    trajectories: Vec<crate::scene3d::vehicle::VehicleTrajectory>,
 }
 
 type LayoutImportResult = Result<LayoutDoc, LayoutError>;
@@ -328,11 +328,11 @@ pub struct DelogApp {
     last_session_autosave_json: Option<String>,
     show_connection_dialog: bool,
     connection_dialog: ConnectionDialog,
-    vehicles: Vec<crate::vehicle::VehicleConfig>,
+    vehicles: Vec<crate::scene3d::vehicle::VehicleConfig>,
     vehicle_dialog: crate::vehicle_dialog::VehicleDialog,
     /// Parallel to `vehicles`, rebuilt on a worker when the data epoch or
     /// vehicle set changes.
-    vehicle_trajectories: Vec<crate::vehicle::VehicleTrajectory>,
+    vehicle_trajectories: Vec<crate::scene3d::vehicle::VehicleTrajectory>,
     traj_epoch: u64,
     traj_vehicle_revision: u64,
     vehicle_revision: u64,
@@ -1078,7 +1078,7 @@ impl DelogApp {
         fit_view_all: &mut bool,
         marker_us: &mut Option<i64>,
         markers: &mut crate::markers::Markers,
-        vehicles: &mut Vec<crate::vehicle::VehicleConfig>,
+        vehicles: &mut Vec<crate::scene3d::vehicle::VehicleConfig>,
         vehicle_dialog: &mut crate::vehicle_dialog::VehicleDialog,
         vehicle_revision: &mut u64,
         traj_dirty: &mut bool,
@@ -1221,7 +1221,7 @@ impl DelogApp {
             .spawn(move || {
                 let trajectories = vehicles
                     .iter()
-                    .map(|v| crate::vehicle::build_trajectory(&snapshot, v))
+                    .map(|v| crate::scene3d::vehicle::build_trajectory(&snapshot, v))
                     .collect();
                 let _ = tx.send(TrajectoryBuildResult {
                     epoch: target_epoch,

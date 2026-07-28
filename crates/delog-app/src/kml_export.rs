@@ -5,7 +5,7 @@ use egui::Color32;
 
 use delog_core::snapshot::StoreSnapshot;
 
-use crate::vehicle::{self, GeodeticSample, PosMapping, VehicleConfig, VehicleTrajectory};
+use crate::scene3d::vehicle::{self, GeodeticSample, PosMapping, VehicleConfig, VehicleTrajectory};
 
 fn xml_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -69,7 +69,7 @@ fn vehicle_geo_segments(
                         return None;
                     }
                     let ned = glam::DVec3::new(-f64::from(p[2]), f64::from(p[0]), -f64::from(p[1]));
-                    let (lat, lon, alt) = crate::geo::ned_to_geodetic(ned, rlat, rlon, ralt);
+                    let (lat, lon, alt) = crate::scene3d::geo::ned_to_geodetic(ned, rlat, rlon, ralt);
                     Some(GeodeticSample {
                         t_us,
                         lat_deg: lat.to_degrees(),
@@ -157,7 +157,7 @@ mod tests {
     use delog_core::snapshot::StoreSnapshot;
     use delog_core::store::TopicStore;
 
-    use crate::vehicle::{
+    use crate::scene3d::vehicle::{
         GeoRef, ModelKind, NedReference, OriMapping, PosMapping, VehicleConfig, VehicleTrajectory,
     };
 

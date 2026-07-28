@@ -12,7 +12,7 @@ use delog_core::store::TopicStore;
 use egui::Color32;
 use glam::{Mat3, Mat4, Quat, Vec3};
 
-use crate::geo;
+use crate::scene3d::geo;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ModelKind {

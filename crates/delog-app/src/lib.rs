@@ -1,7 +1,6 @@
 pub mod app;
 pub mod axes;
 pub mod browser;
-pub mod camera;
 pub mod data_export;
 pub mod dataflow;
 pub mod diagnostics;
@@ -9,7 +8,6 @@ pub mod docks;
 pub mod field_stats;
 pub mod fuzzy;
 pub mod generate_markers;
-pub mod geo;
 pub mod gpu;
 pub mod hover;
 pub mod icons;
@@ -22,7 +20,6 @@ pub mod logging;
 pub mod map;
 pub mod markers;
 pub mod message_popup;
-pub mod models;
 pub mod parquet_export;
 pub mod parquet_import;
 #[cfg(feature = "scripting")]
@@ -35,6 +32,7 @@ pub mod py_runtime;
 pub mod repl_complete;
 #[cfg(feature = "scripting")]
 pub mod repl_history;
+pub mod scene3d;
 #[cfg(feature = "scripting")]
 pub mod script_params_io;
 #[cfg(feature = "scripting")]
@@ -46,7 +44,6 @@ pub mod sync_window;
 pub mod text_overlay;
 pub mod theme;
 pub mod timeline;
-pub mod vehicle;
 pub mod vehicle_dialog;
 pub mod vehicle_profiles;
 pub mod workspace;
