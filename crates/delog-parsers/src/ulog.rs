@@ -315,7 +315,12 @@ impl<'a> Decoder<'a> {
             );
             return;
         };
-        self.params.push(SourceParam { name, ty, value });
+        self.params.push(SourceParam {
+            name,
+            ty,
+            value,
+            default: None,
+        });
     }
 
     fn read_logged_message(&mut self, payload: &[u8], msg_offset: u64) {
