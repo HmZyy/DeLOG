@@ -206,7 +206,7 @@ mod tests {
     #[test]
     fn append_then_grow_preserves_contents_and_counts_uploads() {
         let Some(ctx) = RenderContext::headless() else {
-            eprintln!("no wgpu adapter — skipping buffer manager test");
+            eprintln!("no wgpu adapter - skipping buffer manager test");
             return;
         };
         let mut mgr = BufferManager::new(ctx.clone());
@@ -236,7 +236,7 @@ mod tests {
     #[test]
     fn rebuilt_smaller_window_reuploads_from_zero() {
         let Some(ctx) = RenderContext::headless() else {
-            eprintln!("no wgpu adapter — skipping buffer manager test");
+            eprintln!("no wgpu adapter - skipping buffer manager test");
             return;
         };
         let mut mgr = BufferManager::new(ctx.clone());

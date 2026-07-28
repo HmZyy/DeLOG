@@ -1205,7 +1205,7 @@ impl SyncWindow {
             let offset = self.draft_offset(expected).unwrap_or_default();
             let effective = hovered.sample.raw_time_us.checked_add(offset);
             status.push_str(&format!(
-                " — raw {} us, effective {}, value {}",
+                " - raw {} us, effective {}, value {}",
                 hovered.sample.raw_time_us,
                 effective.map_or_else(|| "overflow".to_owned(), |time| format!("{time} us")),
                 hovered.sample.value

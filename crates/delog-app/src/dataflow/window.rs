@@ -130,7 +130,7 @@ impl DataFlowUi {
         }
     }
 
-    /// Whether the graph currently contains a script node — the app layer
+    /// Whether the graph currently contains a script node - the app layer
     /// uses this to decide whether the Python engine needs to be running.
     #[cfg(feature = "scripting")]
     pub fn has_script_node(&self) -> bool {
@@ -271,7 +271,7 @@ impl DataFlowUi {
     /// and suppressed while a text field or code editor has keyboard focus.
     ///
     /// egui-winit turns Ctrl+C/Ctrl+V into `Event::Copy`/`Event::Paste` (not key
-    /// presses), and `Event::Paste` only fires when the OS clipboard holds text —
+    /// presses), and `Event::Paste` only fires when the OS clipboard holds text -
     /// so a copy seeds the OS clipboard with a sentinel to make later pastes fire.
     fn handle_shortcuts(
         &mut self,

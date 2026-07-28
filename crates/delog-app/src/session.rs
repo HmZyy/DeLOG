@@ -235,7 +235,7 @@ impl Session {
         *self.live_scripts.lock().unwrap() = sink;
     }
 
-    /// The shared metrics registry — instrumentation reads/writes
+    /// The shared metrics registry - instrumentation reads/writes
     /// through this; the perf dock snapshots it at 4 Hz.
     pub fn metrics(&self) -> &Arc<MetricsRegistry> {
         &self.metrics

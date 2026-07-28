@@ -22,7 +22,7 @@ fn xml_escape(s: &str) -> String {
     out
 }
 
-/// KML colors are `aabbggrr` hex — reversed byte order from RGBA.
+/// KML colors are `aabbggrr` hex - reversed byte order from RGBA.
 fn kml_color(color: Color32) -> String {
     format!(
         "{:02x}{:02x}{:02x}{:02x}",

@@ -166,7 +166,7 @@ mod tests {
     #[test]
     fn columns_render_a_minmax_band() {
         let Some(ctx) = RenderContext::headless() else {
-            eprintln!("no wgpu adapter — skipping minmax_col test");
+            eprintln!("no wgpu adapter - skipping minmax_col test");
             return;
         };
         let (w, h) = (64u32, 64u32);
