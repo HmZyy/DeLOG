@@ -22,7 +22,7 @@ use crate::plotting::plot::ViewX;
 use crate::scripts;
 use crate::session::Session;
 use crate::config::settings::{AppSettings, RenderMode, SettingsDialog, TileCacheUiState};
-use crate::sync_window::SyncWindow;
+use crate::sync::sync_window::SyncWindow;
 
 fn tile_cache_needs_repaint(clear_submitted: bool, cache_action_pending: bool) -> bool {
     clear_submitted || cache_action_pending

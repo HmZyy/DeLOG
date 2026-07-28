@@ -10,7 +10,7 @@ use crate::plotting::axes;
 use crate::ui::fuzzy::fuzzy_match_score;
 use crate::plotting::gpu::{self, GpuBridge, PreparedYRange, SyncTrace};
 use crate::plotting::plot::{ViewX, draw_zoom_drag_overlay};
-use crate::sync_alignment::{
+use crate::sync::sync_alignment::{
     AlignmentError, AnchorKind, SampleNeighborhood, SyncSample, anchor, sample_neighborhood,
     target_offset_us,
 };

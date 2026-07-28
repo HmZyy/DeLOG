@@ -19,8 +19,7 @@ pub mod script_params_io;
 #[cfg(feature = "scripting")]
 pub mod scripts;
 pub mod session;
-pub mod sync_alignment;
-pub mod sync_window;
+pub mod sync;
 pub mod ui;
 pub mod vehicle_dialog;
 pub mod vehicle_profiles;
