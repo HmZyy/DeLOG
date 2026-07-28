@@ -13,16 +13,44 @@ const POPUP_SOURCES: &[&str] = &[
 const APP_SOURCE: &str = include_str!("../src/app.rs");
 const DATA_EXPORT_SOURCE: &str = include_str!("../src/data_export.rs");
 const DOCKS_SOURCE: &str = include_str!("../src/docks.rs");
+const PARQUET_IMPORT_SOURCE: &str = include_str!("../src/parquet_import.rs");
 const SCRIPTS_SOURCE: &str = include_str!("../src/scripts.rs");
 const WORKSPACE_SOURCE: &str = include_str!("../src/workspace.rs");
 const SETTINGS_SOURCE: &str = include_str!("../src/settings.rs");
 const SYNC_WINDOW_SOURCE: &str = include_str!("../src/sync_window.rs");
+
+const PARQUET_UI_SOURCES: &[&str] = &[APP_SOURCE, DATA_EXPORT_SOURCE, PARQUET_IMPORT_SOURCE];
 
 fn occurrence_count(needle: &str) -> usize {
     POPUP_SOURCES
         .iter()
         .map(|source| source.matches(needle).count())
         .sum()
+}
+
+fn parquet_ui_occurrence_count(needle: &str) -> usize {
+    PARQUET_UI_SOURCES
+        .iter()
+        .map(|source| source.matches(needle).count())
+        .sum()
+}
+
+#[test]
+fn parquet_import_uses_an_in_app_non_collapsible_window_and_picker_filter() {
+    assert!(APP_SOURCE.contains("\"parquet\""));
+    assert!(PARQUET_IMPORT_SOURCE.contains("egui::Window::new(\"Import Parquet\")"));
+    assert!(PARQUET_IMPORT_SOURCE.contains(".collapsible(false)"));
+    assert!(!PARQUET_IMPORT_SOURCE.contains("rfd::MessageDialog"));
+}
+
+#[test]
+fn structured_parquet_adds_no_second_import_dialog() {
+    assert_eq!(
+        parquet_ui_occurrence_count("egui::Window::new(\"Import"),
+        1,
+        "the generic timestamp picker is the only import window in the Parquet UI path"
+    );
+    assert_eq!(parquet_ui_occurrence_count("self.parquet_import.show("), 1);
 }
 
 fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
@@ -595,7 +623,7 @@ fn data_export_rejects_stale_fields_before_opening_save_dialog() {
 
     assert!(resolution < spawn);
     assert!(spawn < save_dialog);
-    assert!(worker.contains("data_export_tx.send(Err"));
+    assert!(worker.contains("data_export_tx.send(DataExportEvent::Failed"));
 }
 
 #[test]
@@ -657,6 +685,41 @@ fn export_picker_controls_scrollbars_divider_and_add_hitbox_are_stable() {
         2
     );
     assert!(!DATA_EXPORT_SOURCE.contains(".max_height(280.0)"));
+}
+
+#[test]
+fn parquet_export_disables_resampling_and_uses_native_topic_samples() {
+    let dialog_body = between(DATA_EXPORT_SOURCE, "pub fn dialog_ui(", "pub const MODES");
+
+    assert!(dialog_body.contains("state.set_format(format, available)"));
+    assert!(dialog_body.contains("state.format == ExportFormat::Csv"));
+    assert!(dialog_body.contains("ui.add_enabled_ui("));
+    assert!(dialog_body.contains("\"Native samples per topic\""));
+}
+
+#[test]
+fn writing_exports_report_progress_and_stay_cancellable() {
+    let progress = between(DATA_EXPORT_SOURCE, "pub fn progress_ui(", "pub const MODES");
+
+    assert!(progress.contains("egui::Window::new(\"Exporting data\")"));
+    assert!(progress.contains(".collapsible(false)"));
+    assert!(progress.contains("egui::ProgressBar::new(active.fraction())"));
+    assert!(progress.contains("active.status()"));
+    assert!(progress.contains("ui.button(\"Cancel\")"));
+    assert!(progress.contains("active.request_cancel()"));
+
+    assert!(APP_SOURCE.contains("crate::data_export::progress_ui("));
+
+    let worker = between(APP_SOURCE, "fn spawn_data_export(", "fn load_layout(");
+    let save_dialog = worker.find(".save_file()").unwrap();
+    let started = worker
+        .find("DataExportEvent::Started")
+        .expect("a chosen destination starts a tracked export");
+    let ctl = worker
+        .find("crate::data_export::ExportCtl::new(")
+        .expect("the writer runs under a cancellable control");
+
+    assert!(save_dialog < started && started < ctl);
 }
 
 #[test]

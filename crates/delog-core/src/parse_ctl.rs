@@ -5,8 +5,8 @@
 //! throttled so a multi-GB parse emits ~100 events, not millions.
 
 use std::cell::Cell;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use crate::identity::SourceId;
 use crate::ingest::IngestSink;
@@ -44,6 +44,7 @@ impl CancelToken {
 pub struct ParseCtl {
     cancel: CancelToken,
     source: SourceId,
+    label: String,
     /// Total source bytes, or 0 when unknown (e.g. a live stream).
     total_bytes: u64,
     last_reported: Cell<f32>,
@@ -54,9 +55,19 @@ impl ParseCtl {
         Self {
             cancel,
             source,
+            label: String::new(),
             total_bytes,
             last_reported: Cell::new(0.0),
         }
+    }
+
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = label.into();
+        self
+    }
+
+    pub fn label(&self) -> &str {
+        &self.label
     }
 
     pub fn source(&self) -> SourceId {
@@ -91,7 +102,12 @@ impl ParseCtl {
         if self.total_bytes == 0 {
             return;
         }
-        let frac = self.fraction(bytes_read);
+
+        self.report_fraction(sink, self.fraction(bytes_read));
+    }
+
+    pub fn report_fraction(&self, sink: &mut dyn IngestSink, frac: f32) {
+        let frac = frac.clamp(0.0, 1.0);
         let last = self.last_reported.get();
         let completed = frac >= 1.0 && last < 1.0;
         if completed || frac - last >= PROGRESS_EPSILON {
@@ -153,6 +169,25 @@ mod tests {
 
         let unknown = ParseCtl::new(CancelToken::new(), SourceId(0), 0);
         assert_eq!(unknown.fraction(123), 0.0);
+    }
+
+    #[test]
+    fn label_defaults_empty_and_can_be_attached() {
+        let ctl = ParseCtl::new(CancelToken::new(), SourceId(7), 0);
+        assert_eq!(ctl.label(), "");
+        let ctl = ctl.with_label("flight.parquet");
+        assert_eq!(ctl.label(), "flight.parquet");
+    }
+
+    #[test]
+    fn explicit_fraction_uses_the_existing_progress_throttle() {
+        let ctl = ParseCtl::new(CancelToken::new(), SourceId(0), 0);
+        let mut sink = ProgressSink::default();
+        ctl.report_fraction(&mut sink, 0.005);
+        ctl.report_fraction(&mut sink, 0.01);
+        ctl.report_fraction(&mut sink, 0.015);
+        ctl.report_fraction(&mut sink, 1.5);
+        assert_eq!(sink.events, vec![0.01, 1.0]);
     }
 
     #[test]

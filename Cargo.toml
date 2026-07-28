@@ -9,6 +9,7 @@ members = [
   "crates/delog-render",
   "crates/delog-app",
   "crates/delog-script",
+  "crates/delog-parquet-format",
 ]
 exclude = ["third_party/egui_graph"]
 
@@ -31,10 +32,12 @@ delog-stream = { path = "crates/delog-stream" }
 delog-cache = { path = "crates/delog-cache" }
 delog-render = { path = "crates/delog-render" }
 delog-script = { path = "crates/delog-script" }
+delog-parquet-format = { path = "crates/delog-parquet-format" }
 
 # columnar data
 arrow = "59.0.0"
 arrow-ipc = "59.0.0"
+bytes = "1.11.1"
 parquet = "59.0.0"
 
 # GUI / GPU
