@@ -1,21 +1,38 @@
 use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
-use delog_cache::{CacheManager, MinMax};
+use delog_cache::{CacheManager, GapBehavior, TraceGeometry};
 use delog_core::identity::FieldId;
 use delog_core::metrics::MetricsRegistry;
 use delog_render::{
-    BufferManager, GpuErrorHub, Grid3dPipeline, GridUniform, LinePipeline, MeshGpu, MeshPipeline,
-    MeshUniform, MinMaxColPipeline, PlotUniform, RenderContext, ScatterPipeline, Scene3dTarget,
-    StepPipeline, Traj3dPipeline, Traj3dUniform, UniformRing,
+    BufferManager, GAP_CONNECT, GAP_CUT, GAP_DOTTED, GAP_FORCE_DASH, GpuErrorHub, Grid3dPipeline,
+    GridUniform, LinePipeline, MAP_TILE_CAPACITY, MapTileDrawGroups, MapTilePipeline,
+    MapTileUpload, MeshGpu, MeshPipeline, MeshUniform, MinMaxColPipeline, PlotUniform,
+    RenderContext, ScatterPipeline, Scene3dTarget, StepPipeline, Traj3dPipeline, Traj3dUniform,
+    UniformRing,
 };
 use eframe::{egui_wgpu, wgpu};
 
 use crate::camera::OrbitCamera;
+use crate::map::provider::{MapProviderId, TileId};
+use crate::map::worker::{MapScopeId, ReadyTile};
 use crate::models;
 use crate::plot::{PlotPane, TraceMode, ViewX};
-use crate::settings::Scene3dSettings;
+use crate::settings::{GapMode, RenderTuning, Scene3dSettings};
+use crate::sync_window::CompareMode;
 use crate::vehicle::ModelKind;
+
+#[derive(Clone, Debug)]
+pub struct MapTileSelection {
+    pub scope: MapScopeId,
+    pub epoch: u64,
+    pub provider: MapProviderId,
+    pub generation: u64,
+    /// Exactly the tiles visible in the current camera footprint, in priority order.
+    pub current_tiles: Vec<(TileId, i32)>,
+    pub enabled: bool,
+}
 
 pub struct VehicleDraw<'a> {
     pub key: u32,
@@ -39,7 +56,62 @@ pub struct VehicleDraw<'a> {
 pub struct PaneView {
     pub rect: egui::Rect,
     pub x_range: (f32, f32),
-    pub y_range: (f32, f32),
+    pub y_range: (f64, f64),
+}
+
+/// A trace prepared for the synchronization preview. The cached samples keep
+/// their committed effective times; `preview_delta_us` is applied only by the
+/// plot uniform.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PreparedYRange {
+    pub origin: f64,
+    pub min: f64,
+    pub max: f64,
+}
+
+impl PreparedYRange {
+    pub fn new(origin: f64, min: f64, max: f64) -> Option<Self> {
+        (origin.is_finite() && min.is_finite() && max.is_finite() && max >= min).then_some(Self {
+            origin,
+            min,
+            max,
+        })
+    }
+
+    pub fn padded(self) -> Self {
+        let Some((min, max)) = padded_relative_range(self.min, self.max) else {
+            return Self {
+                origin: 0.0,
+                min: -1.0,
+                max: 1.0,
+            };
+        };
+        Self { min, max, ..self }
+    }
+
+    pub fn span(self) -> f64 {
+        self.max - self.min
+    }
+
+    pub fn relative_to(self, origin: f64) -> Option<Self> {
+        let offset = self.origin - origin;
+        Self::new(origin, offset + self.min, offset + self.max)
+    }
+
+    pub fn cache_lower(self, cache_origin: f64) -> f64 {
+        (self.origin - cache_origin) + self.min
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SyncTrace {
+    pub field: FieldId,
+    pub preview_delta_us: i64,
+    pub color: [f32; 4],
+    /// Semantic-absolute range represented relative to a stable origin.
+    pub y_range: PreparedYRange,
+    /// Optional normalized vertical lane `(top, bottom)` in the plot callback.
+    pub lane: Option<(f32, f32)>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -118,6 +190,114 @@ impl GpuBridge {
         {
             res.retain_buffers(plotted);
         }
+    }
+
+    /// Prepare a private synchronization preview without changing shared plot
+    /// state or rebuilding caches with draft source offsets.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sync_plot_callback(
+        &self,
+        ui: &egui::Ui,
+        frame: &eframe::Frame,
+        caches: &mut CacheManager,
+        rect: egui::Rect,
+        traces: &[SyncTrace],
+        view: ViewX,
+    ) -> Option<egui::PaintCallback> {
+        if !self.available || traces.is_empty() || rect.width() < 2.0 || rect.height() < 2.0 {
+            return None;
+        }
+        let render_state = frame.wgpu_render_state()?;
+        let ppp = ui.ctx().pixels_per_point();
+        let mut renderer = render_state.renderer.write();
+        let res = renderer
+            .callback_resources
+            .get_mut::<PlotCallbackResources>()?;
+        let base_slot = res.next_uniform_slot;
+        res.next_uniform_slot += traces.len() as u32;
+        res.ensure_uniform_capacity(res.next_uniform_slot);
+        let mut items = Vec::with_capacity(traces.len());
+
+        for (index, trace) in traces.iter().enumerate() {
+            let Some(cache) = caches.get(trace.field) else {
+                continue;
+            };
+            let shift_s = trace.preview_delta_us as f64 * 1e-6;
+            if !shift_s.is_finite() || shift_s < f32::MIN as f64 || shift_s > f32::MAX as f64 {
+                continue;
+            }
+            let shift_s = shift_s as f32;
+            let x = sync_x_bounds(view, cache.origin_us);
+            let Some((y_scale, y_lower)) = sync_y_axis(trace.y_range, cache.y_origin()) else {
+                continue;
+            };
+            let Some(lane) = trace.lane else {
+                continue;
+            };
+            let lane_height = rect.height() * (lane.1 - lane.0).max(0.0);
+            let viewport_px = [(rect.width() * ppp).max(1.0), (lane_height * ppp).max(1.0)];
+            let slot = base_slot + index as u32;
+            res.uniforms.write(
+                slot,
+                &PlotUniform::from_view_with_x_shift(
+                    x,
+                    (0.0, 1.0),
+                    viewport_px,
+                    1.5,
+                    shader_color(trace.color, self.srgb_target),
+                    shift_s,
+                )
+                .with_y_axis(y_scale, y_lower),
+            );
+            if cache.xy.len() < 4 {
+                continue;
+            }
+            res.buffers.sync(trace.field, &cache.xy, false);
+            items.push(DrawItem {
+                field: trace.field,
+                slot,
+                kind: DrawKind::SyncLine {
+                    samples: (cache.xy.len() / 2) as u32,
+                },
+                lane: Some(lane),
+            });
+        }
+        (!items.is_empty())
+            .then(|| egui_wgpu::Callback::new_paint_callback(rect, ScenePaintCallback { items }))
+    }
+
+    /// Drop map state belonging to 3D panes that no longer exist in the
+    /// workspace. Call before rendering any scene panes for the frame.
+    pub fn retain_map_scopes(&self, frame: &eframe::Frame, live: &[MapScopeId]) {
+        if !self.available {
+            return;
+        }
+        let Some(render_state) = frame.wgpu_render_state() else {
+            return;
+        };
+        let mut renderer = render_state.renderer.write();
+        if let Some(res) = renderer.callback_resources.get_mut::<SceneResources>() {
+            res.retain_map_scopes(live);
+        }
+    }
+
+    /// Whether the exact current selection has imagery resident for drawing.
+    pub fn map_selection_has_current_imagery(
+        &self,
+        frame: &eframe::Frame,
+        selection: &MapTileSelection,
+    ) -> bool {
+        if !self.available {
+            return false;
+        }
+        let Some(render_state) = frame.wgpu_render_state() else {
+            return false;
+        };
+        let renderer = render_state.renderer.read();
+        renderer
+            .callback_resources
+            .get::<SceneResources>()
+            .is_some_and(|resources| resources.selection_has_current_imagery(selection))
     }
 
     /// Call once per frame.
@@ -219,27 +399,58 @@ impl GpuBridge {
             if res.metrics.is_none() {
                 res.metrics = Some(Arc::clone(metrics));
             }
+            let dotted = tuning.gap_mode == GapMode::Dotted;
+            // Connect and Dotted both draw a bridge across gaps in the decimated
+            // path (solid vs dashed); Cut leaves them blank.
+            let bridged = tuning.gap_mode != GapMode::Cut;
+            let slots_per_trace: u32 = if bridged { 2 } else { 1 };
             let base_slot = res.next_uniform_slot;
-            res.next_uniform_slot += pane.traces.len() as u32;
+            res.next_uniform_slot += pane.traces.len() as u32 * slots_per_trace;
             res.ensure_uniform_capacity(res.next_uniform_slot);
             let plot_w = viewport_px[0];
 
             for (slot, trace) in pane.visible_traces().enumerate() {
-                let slot = base_slot + slot as u32;
+                let slot = base_slot + slot as u32 * slots_per_trace;
                 let Some(cache) = caches.get(trace.field) else {
                     continue;
                 };
+                let gap_threshold = if cache.median_dt <= 0.0 {
+                    0.0
+                } else {
+                    tuning.gap_factor * cache.median_dt
+                };
+                let y_span = (y1 - y0).max(f64::MIN_POSITIVE);
+                let y_scale = (2.0 / y_span) as f32;
+                let y_min = (y0 - cache.y_origin()) as f32;
                 res.uniforms.write(
                     slot,
                     &PlotUniform::from_view(
                         (x0, x1),
-                        (y0, y1),
+                        (0.0, 1.0),
                         viewport_px,
                         trace.width_px,
                         shader_color(trace.color, self.srgb_target),
                     )
-                    .with_aa(tuning.line_aa_px),
+                    .with_y_axis(y_scale, y_min)
+                    .with_aa(tuning.line_aa_px)
+                    .with_gap(gap_mode_u32(tuning.gap_mode), gap_threshold),
                 );
+                if bridged && trace.mode == TraceMode::Line {
+                    let bridge_mode = if dotted { GAP_FORCE_DASH } else { GAP_CONNECT };
+                    res.uniforms.write(
+                        slot + 1,
+                        &PlotUniform::from_view(
+                            (x0, x1),
+                            (0.0, 1.0),
+                            viewport_px,
+                            trace.width_px,
+                            shader_color(trace.color, self.srgb_target),
+                        )
+                        .with_y_axis(y_scale, y_min)
+                        .with_aa(tuning.line_aa_px)
+                        .with_gap(bridge_mode, 0.0),
+                    );
+                }
 
                 let kind = match trace.mode {
                     TraceMode::Line => {
@@ -248,6 +459,13 @@ impl GpuBridge {
                         let visible = b.saturating_sub(a) as f32;
                         if plot_w >= 1.0 && visible / plot_w > tuning.decimate_threshold {
                             let width = plot_w as usize;
+                            // Empty-column runs spanning at most the gap threshold
+                            // are slow sampling, not missing data; bridge them.
+                            let max_bridge_run = if gap_threshold <= 0.0 {
+                                usize::MAX
+                            } else {
+                                (gap_threshold * width as f32 / (x1 - x0)) as usize
+                            };
                             // Skip the per-frame decimation + upload when the same
                             // view over unchanged data already produced the
                             // resident columns (static/paused views go ~free).
@@ -255,26 +473,35 @@ impl GpuBridge {
                                 x0: x0.to_bits(),
                                 x1: x1.to_bits(),
                                 width: width as u32,
-                                bridge: tuning.bridge_columns,
+                                mode: gap_mode_u32(tuning.gap_mode),
+                                threshold: gap_threshold.to_bits(),
                                 len: cache.samples(),
                             };
                             if res.col_params.get(&trace.field) != Some(&key) {
-                                let cols =
-                                    cache.minmax_columns(x0, x1, width, tuning.bridge_columns);
+                                let cols = cache.minmax_columns(x0, x1, width, max_bridge_run);
                                 let stat = res.col_buffers.sync(trace.field, &cols, true);
                                 upload_bytes += stat.bytes;
                                 full_uploads += stat.full_upload as u64;
                                 res.col_params.insert(trace.field, key);
+                                if bridged {
+                                    let bxy = cache.dotted_bridge_xy(x0, x1, &cols);
+                                    if bxy.is_empty() {
+                                        res.bridge_buffers.remove(trace.field);
+                                    } else {
+                                        res.bridge_buffers.sync(trace.field, &bxy, true);
+                                    }
+                                }
                             }
                             DrawKind::Columns {
                                 count: width as u32,
                             }
                         } else {
-                            let (aw, bw) = pad_window(a, b, cache.samples());
+                            let (aw, bw) = cache.finite_window(x0, x1);
                             let key = WinKey {
                                 a: aw,
                                 b: bw,
                                 len: cache.samples(),
+                                threshold: gap_threshold.to_bits(),
                             };
                             if res.win_params.get(&trace.field) != Some(&key) {
                                 let line_xy = line_window_xy(&cache.xy, aw, bw);
@@ -285,6 +512,19 @@ impl GpuBridge {
                                 upload_bytes += stat.bytes;
                                 full_uploads += stat.full_upload as u64;
                                 res.win_params.insert(trace.field, key);
+                                // Only Cut removes gap segments, so only Cut can
+                                // strand a lone sample; Connect/Dotted keep it on
+                                // the (solid/dashed) line.
+                                let iso = if tuning.gap_mode == GapMode::Cut {
+                                    isolated_points_xy(&line_xy, gap_threshold)
+                                } else {
+                                    Vec::new()
+                                };
+                                if iso.is_empty() {
+                                    res.iso_buffers.remove(trace.field);
+                                } else {
+                                    res.iso_buffers.sync(trace.field, &iso, true);
+                                }
                             }
                             DrawKind::Line {
                                 samples: res.win_buffers.samples(trace.field) as u32,
@@ -310,7 +550,34 @@ impl GpuBridge {
                         field: trace.field,
                         slot,
                         kind,
+                        lane: None,
                     });
+                    if bridged && matches!(kind, DrawKind::Columns { .. }) {
+                        let bridge = DrawKind::Bridge {
+                            samples: res.bridge_buffers.samples(trace.field) as u32,
+                        };
+                        if bridge.is_drawable() {
+                            items.push(DrawItem {
+                                field: trace.field,
+                                slot: slot + 1,
+                                kind: bridge,
+                                lane: None,
+                            });
+                        }
+                    }
+                    if matches!(kind, DrawKind::Line { .. }) {
+                        let points = DrawKind::Points {
+                            samples: res.iso_buffers.samples(trace.field) as u32,
+                        };
+                        if points.is_drawable() {
+                            items.push(DrawItem {
+                                field: trace.field,
+                                slot,
+                                kind: points,
+                                lane: None,
+                            });
+                        }
+                    }
                 }
             }
             res.errors.get_mut().unwrap().close(scope);
@@ -341,6 +608,8 @@ impl GpuBridge {
         rect: egui::Rect,
         camera: &OrbitCamera,
         scene3d: Scene3dSettings,
+        map_selection: MapTileSelection,
+        ready_tiles: &[ReadyTile],
         vehicles: &[VehicleDraw],
     ) -> Option<egui::TextureId> {
         if !self.available {
@@ -387,6 +656,7 @@ impl GpuBridge {
                 bytemuck::bytes_of(&Traj3dUniform::new(vp_cols, res.axis_gizmo.color)),
             );
             res.prepare_vehicles(vp_cols, camera.eye().to_array(), vehicles);
+            let visible_map_tiles = res.prepare_map_tiles(vp_cols, &map_selection, ready_tiles);
 
             let clear = wgpu::Color {
                 r: 0.07,
@@ -402,6 +672,7 @@ impl GpuBridge {
                     });
             {
                 let mut pass = res.target.begin_pass(&mut enc, clear);
+                res.map_tiles.draw_visible(&mut pass, &visible_map_tiles);
                 if scene3d.show_grid {
                     res.grid.draw(&mut pass);
                 }
@@ -439,25 +710,77 @@ impl GpuBridge {
     }
 }
 
-pub fn visible_y_range(caches: &mut CacheManager, pane: &PlotPane, x0: f32, x1: f32) -> (f32, f32) {
-    let mut mm = MinMax::EMPTY;
+pub fn visible_y_range(
+    caches: &mut CacheManager,
+    pane: &PlotPane,
+    x0: f32,
+    x1: f32,
+    tuning: RenderTuning,
+) -> (f64, f64) {
+    let mut min = f64::INFINITY;
+    let mut max = f64::NEG_INFINITY;
     for trace in pane.visible_traces() {
         if let Some(cache) = caches.get(trace.field) {
-            mm = mm.merge(cache.y_range(x0, x1));
+            let geometry = match trace.mode {
+                TraceMode::Line => TraceGeometry::Linear,
+                TraceMode::Scatter => TraceGeometry::Points,
+                TraceMode::Step => TraceGeometry::Step,
+            };
+            let gap_threshold = if cache.median_dt <= 0.0 {
+                0.0
+            } else {
+                tuning.gap_factor * cache.median_dt
+            };
+            let gaps = match tuning.gap_mode {
+                GapMode::Connect => GapBehavior::Connect,
+                GapMode::Cut => GapBehavior::Cut {
+                    threshold: gap_threshold,
+                },
+                GapMode::Dotted => GapBehavior::Dotted {
+                    threshold: gap_threshold,
+                },
+            };
+            let mm = cache.visible_y_range(x0, x1, geometry, gaps);
+            if mm.is_finite() {
+                let origin = cache.y_origin();
+                min = min.min(mm.min as f64 + origin);
+                max = max.max(mm.max as f64 + origin);
+            }
         }
     }
-    if !mm.is_finite() {
+    if !(min.is_finite() && max.is_finite()) {
         return (-1.0, 1.0);
     }
-    padded(mm.min, mm.max)
+    padded_y_range(min, max)
 }
 
-fn padded(min: f32, max: f32) -> (f32, f32) {
-    if (max - min).abs() <= f32::EPSILON {
-        return (min - 1.0, max + 1.0);
+pub fn padded_y_range(min: f64, max: f64) -> (f64, f64) {
+    padded_relative_range(min, max).unwrap_or((-1.0, 1.0))
+}
+
+fn padded_relative_range(min: f64, max: f64) -> Option<(f64, f64)> {
+    if !min.is_finite() || !max.is_finite() || max < min {
+        return None;
     }
-    let pad = (max - min) * 0.05;
-    (min - pad, max + pad)
+    let span = max - min;
+    if !span.is_finite() {
+        return None;
+    }
+    let padded = if span.abs() <= f64::EPSILON {
+        (min - 1.0, max + 1.0)
+    } else {
+        let pad = span * 0.05;
+        (min - pad, max + pad)
+    };
+    (padded.0.is_finite() && padded.1.is_finite() && padded.1 > padded.0).then_some(padded)
+}
+
+fn sync_y_axis(range: PreparedYRange, cache_origin: f64) -> Option<(f32, f32)> {
+    let span = range.span();
+    let scale = (2.0 / span) as f32;
+    let lower = range.cache_lower(cache_origin) as f32;
+    (span.is_finite() && span > 0.0 && scale.is_finite() && lower.is_finite())
+        .then_some((scale, lower))
 }
 
 /// sRGB target gamma-encodes the shader output, so emit linear; UNORM writes
@@ -488,6 +811,10 @@ enum DrawKind {
     Line {
         samples: u32,
     },
+    /// Synchronization preview using the full resident trace buffer.
+    SyncLine {
+        samples: u32,
+    },
     Scatter {
         samples: u32,
     },
@@ -497,6 +824,15 @@ enum DrawKind {
     /// `count` per-pixel min/max columns.
     Columns {
         count: u32,
+    },
+    /// Dotted-gap bridge segments, drawn through the line pipeline.
+    Bridge {
+        samples: u32,
+    },
+    /// Gap-isolated samples, drawn through the scatter pipeline so they stay
+    /// visible when every adjacent segment is cut.
+    Points {
+        samples: u32,
     },
 }
 
@@ -508,13 +844,6 @@ enum PipelineKind {
     Columns,
 }
 
-/// Pad a visible index range `[a, b)` over `n` samples by one sample of context
-/// each side so the line segments entering/leaving the viewport are drawn.
-/// Clamps to `[0, n]`.
-fn pad_window(a: usize, b: usize, n: usize) -> (usize, usize) {
-    (a.saturating_sub(1), (b + 1).min(n))
-}
-
 fn line_window_xy(xy: &[f32], a: usize, b: usize) -> Vec<f32> {
     let samples = xy.len() / 2;
     let a = a.min(samples);
@@ -522,7 +851,6 @@ fn line_window_xy(xy: &[f32], a: usize, b: usize) -> Vec<f32> {
     if a >= b {
         return Vec::new();
     }
-
     let mut out = Vec::with_capacity((b - a) * 2);
     for p in xy[2 * a..2 * b].chunks_exact(2) {
         if p[0].is_finite() && p[1].is_finite() {
@@ -530,6 +858,34 @@ fn line_window_xy(xy: &[f32], a: usize, b: usize) -> Vec<f32> {
         }
     }
     out
+}
+
+/// Samples of a NaN-stripped window whose x-distance to BOTH neighbours
+/// exceeds `threshold` (or that have no neighbour). The line shader cuts every
+/// segment touching such a sample, so without a point draw the data would be
+/// invisible. Threshold 0 means delta detection is off: nothing is isolated.
+fn isolated_points_xy(xy: &[f32], threshold: f32) -> Vec<f32> {
+    if threshold <= 0.0 {
+        return Vec::new();
+    }
+    let n = xy.len() / 2;
+    let mut out = Vec::new();
+    for i in 0..n {
+        let gap_left = i == 0 || xy[2 * i] - xy[2 * (i - 1)] > threshold;
+        let gap_right = i + 1 == n || xy[2 * (i + 1)] - xy[2 * i] > threshold;
+        if gap_left && gap_right {
+            out.extend_from_slice(&[xy[2 * i], xy[2 * i + 1]]);
+        }
+    }
+    out
+}
+
+fn gap_mode_u32(mode: GapMode) -> u32 {
+    match mode {
+        GapMode::Connect => GAP_CONNECT,
+        GapMode::Cut => GAP_CUT,
+        GapMode::Dotted => GAP_DOTTED,
+    }
 }
 
 /// Consecutive same-pipeline runs in draw order (one `set_pipeline` each).
@@ -548,19 +904,23 @@ fn pipeline_runs(kinds: impl Iterator<Item = PipelineKind>) -> Vec<(PipelineKind
 impl DrawKind {
     fn pipeline(self) -> PipelineKind {
         match self {
-            DrawKind::Line { .. } => PipelineKind::Line,
+            DrawKind::Line { .. } | DrawKind::SyncLine { .. } => PipelineKind::Line,
             DrawKind::Scatter { .. } => PipelineKind::Scatter,
             DrawKind::Step { .. } => PipelineKind::Step,
             DrawKind::Columns { .. } => PipelineKind::Columns,
+            DrawKind::Bridge { .. } => PipelineKind::Line,
+            DrawKind::Points { .. } => PipelineKind::Scatter,
         }
     }
 
     fn is_drawable(self) -> bool {
         match self {
-            DrawKind::Line { samples } => samples >= 2,
+            DrawKind::Line { samples } | DrawKind::SyncLine { samples } => samples >= 2,
             DrawKind::Scatter { samples } => samples >= 1,
             DrawKind::Step { samples } => samples >= 2,
             DrawKind::Columns { count } => count >= 1,
+            DrawKind::Bridge { samples } => samples >= 2,
+            DrawKind::Points { samples } => samples >= 1,
         }
     }
 }
@@ -569,6 +929,7 @@ struct DrawItem {
     field: FieldId,
     slot: u32,
     kind: DrawKind,
+    lane: Option<(f32, f32)>,
 }
 
 struct PlotCallbackResources {
@@ -584,12 +945,19 @@ struct PlotCallbackResources {
     /// Interleaved `[x,y]` buffers holding only the visible window per field
     /// (raw `Line` path); sized to what's on screen, not the full trace.
     win_buffers: BufferManager,
+    /// NaN-separated dotted-gap bridge segments per field (Dotted mode only).
+    bridge_buffers: BufferManager,
+    /// Gap-isolated samples per field, drawn as points (Cut/Dotted raw path).
+    iso_buffers: BufferManager,
     uniforms: UniformRing,
     next_uniform_slot: u32,
     line_binds: HashMap<FieldId, wgpu::BindGroup>,
+    sync_line_binds: HashMap<FieldId, wgpu::BindGroup>,
     scatter_binds: HashMap<FieldId, wgpu::BindGroup>,
     step_binds: HashMap<FieldId, wgpu::BindGroup>,
     col_binds: HashMap<FieldId, wgpu::BindGroup>,
+    bridge_binds: HashMap<FieldId, wgpu::BindGroup>,
+    iso_binds: HashMap<FieldId, wgpu::BindGroup>,
     /// Memoizes the decimated columns resident in `col_buffers` per field, so a
     /// static view skips the per-frame `minmax_columns` recompute and upload.
     col_params: HashMap<FieldId, ColKey>,
@@ -609,7 +977,9 @@ struct ColKey {
     x0: u32,
     x1: u32,
     width: u32,
-    bridge: bool,
+    mode: u32,
+    /// Effective gap threshold bits; drives the empty-run bridging cap.
+    threshold: u32,
     len: usize,
 }
 
@@ -621,6 +991,8 @@ struct WinKey {
     a: usize,
     b: usize,
     len: usize,
+    /// Effective gap threshold bits; drives isolated-point extraction.
+    threshold: u32,
 }
 
 impl PlotCallbackResources {
@@ -632,6 +1004,8 @@ impl PlotCallbackResources {
         let buffers = BufferManager::new(ctx.clone());
         let col_buffers = BufferManager::new(ctx.clone());
         let win_buffers = BufferManager::new(ctx.clone());
+        let bridge_buffers = BufferManager::new(ctx.clone());
+        let iso_buffers = BufferManager::new(ctx.clone());
         let uniforms = UniformRing::new(ctx.clone(), 8);
         Self {
             ctx,
@@ -642,12 +1016,17 @@ impl PlotCallbackResources {
             buffers,
             col_buffers,
             win_buffers,
+            bridge_buffers,
+            iso_buffers,
             uniforms,
             next_uniform_slot: 0,
             line_binds: HashMap::new(),
+            sync_line_binds: HashMap::new(),
             scatter_binds: HashMap::new(),
             step_binds: HashMap::new(),
             col_binds: HashMap::new(),
+            bridge_binds: HashMap::new(),
+            iso_binds: HashMap::new(),
             col_params: HashMap::new(),
             win_params: HashMap::new(),
             errors: Mutex::new(GpuErrorHub::new()),
@@ -667,6 +1046,8 @@ impl PlotCallbackResources {
             .fields()
             .chain(self.col_buffers.fields())
             .chain(self.win_buffers.fields())
+            .chain(self.bridge_buffers.fields())
+            .chain(self.iso_buffers.fields())
             .filter(|f| !plotted.contains(f))
             .collect();
         for field in stale {
@@ -675,6 +1056,8 @@ impl PlotCallbackResources {
             self.col_params.remove(&field);
             self.win_buffers.remove(field);
             self.win_params.remove(&field);
+            self.bridge_buffers.remove(field);
+            self.iso_buffers.remove(field);
         }
     }
 }
@@ -704,6 +1087,13 @@ struct SceneResources {
     ctx: RenderContext,
     target: Scene3dTarget,
     grid: Grid3dPipeline,
+    map_tiles: MapTilePipeline,
+    map_tile_cache: HashMap<MapScopeId, HashMap<u64, ReadyTile>>,
+    map_tile_selections: HashMap<MapScopeId, MapTileSelection>,
+    map_tile_resident_signatures: HashMap<u64, u64>,
+    map_tile_last_seen: HashMap<u64, u64>,
+    map_tile_clock: u64,
+    map_tile_epoch: u64,
     traj: Traj3dPipeline,
     mesh: MeshPipeline,
     /// Decoded meshes by model kind (lazy; built on first use).
@@ -719,6 +1109,12 @@ impl SceneResources {
         // Start at 1×1; the first `render_scene` resizes to the pane.
         let target = Scene3dTarget::new(ctx.clone(), 1, 1);
         let grid = Grid3dPipeline::new(
+            &ctx,
+            target.color_format(),
+            target.depth_format(),
+            target.sample_count(),
+        );
+        let map_tiles = MapTilePipeline::new(
             &ctx,
             target.color_format(),
             target.depth_format(),
@@ -745,6 +1141,13 @@ impl SceneResources {
             ctx,
             target,
             grid,
+            map_tiles,
+            map_tile_cache: HashMap::new(),
+            map_tile_selections: HashMap::new(),
+            map_tile_resident_signatures: HashMap::new(),
+            map_tile_last_seen: HashMap::new(),
+            map_tile_clock: 0,
+            map_tile_epoch: 0,
             traj,
             mesh,
             model_cache: HashMap::new(),
@@ -758,6 +1161,30 @@ impl SceneResources {
         self.model_cache
             .entry(kind.clone())
             .or_insert_with(|| MeshGpu::upload(&self.ctx, &models::mesh_for(kind)))
+    }
+
+    fn retain_map_scopes(&mut self, live: &[MapScopeId]) {
+        let live: std::collections::HashSet<_> = live.iter().copied().collect();
+        self.map_tile_cache.retain(|scope, _| live.contains(scope));
+        self.map_tile_selections
+            .retain(|scope, _| live.contains(scope));
+
+        // Recompute the complete residency union immediately. This both drops
+        // signatures for dead scopes and lets the surviving panes consume any
+        // quota released by them before the first scene render of this frame.
+        self.admit_map_tiles(&std::collections::HashSet::new(), None);
+    }
+
+    fn selection_has_current_imagery(&self, selection: &MapTileSelection) -> bool {
+        self.map_tile_cache
+            .get(&selection.scope)
+            .is_some_and(|cache| {
+                cache.iter().any(|(key, tile)| {
+                    self.map_tiles.contains(*key)
+                        && map_tile_matches(selection, tile)
+                        && map_tile_is_current(selection, tile)
+                })
+            })
     }
 
     /// Prepare GPU buffers + uniforms for the frame's vehicles (before the
@@ -877,6 +1304,262 @@ impl SceneResources {
             }
         }
     }
+
+    fn prepare_map_tiles(
+        &mut self,
+        vp: [[f32; 4]; 4],
+        selection: &MapTileSelection,
+        ready: &[ReadyTile],
+    ) -> MapTileDrawGroups {
+        self.map_tiles.set_view_proj(vp);
+        if self.map_tile_epoch != selection.epoch {
+            self.map_tile_epoch = selection.epoch;
+            self.map_tile_cache.clear();
+            self.map_tile_selections.clear();
+            self.map_tile_resident_signatures.clear();
+            self.map_tile_last_seen.clear();
+        }
+        if !selection.enabled {
+            self.map_tile_cache.remove(&selection.scope);
+            self.map_tile_selections.remove(&selection.scope);
+            self.admit_map_tiles(&std::collections::HashSet::new(), Some(selection.scope));
+            return MapTileDrawGroups::default();
+        }
+        self.map_tile_selections
+            .insert(selection.scope, selection.clone());
+        let selection_changed = self
+            .map_tile_cache
+            .get(&selection.scope)
+            .into_iter()
+            .flat_map(HashMap::values)
+            .any(|tile| {
+                tile.provider != selection.provider || tile.generation != selection.generation
+            });
+        if selection_changed {
+            self.map_tile_cache.remove(&selection.scope);
+        }
+        self.map_tile_clock += 1;
+        let clock = self.map_tile_clock;
+        let changed = {
+            let cache = self.map_tile_cache.entry(selection.scope).or_default();
+            let mut changed = std::collections::HashSet::new();
+            for tile in ready
+                .iter()
+                .filter(|tile| map_tile_matches(selection, tile))
+            {
+                let key = map_tile_key(tile);
+                let signature = map_tile_signature(tile);
+                if self.map_tile_resident_signatures.get(&key) != Some(&signature) {
+                    changed.insert(key);
+                }
+                cache.insert(key, tile.clone());
+            }
+            cache.retain(|_, tile| map_tile_matches(selection, tile));
+            for (key, tile) in cache.iter() {
+                if map_tile_is_current(selection, tile) {
+                    self.map_tile_last_seen.insert(*key, clock);
+                }
+            }
+            let mut stale: Vec<(u64, u64)> = cache
+                .iter()
+                .filter(|(_, tile)| !map_tile_is_current(selection, tile))
+                .map(|(key, _)| (self.map_tile_last_seen.get(key).copied().unwrap_or(0), *key))
+                .collect();
+            if stale.len() > MAP_TILE_CAPACITY {
+                stale.sort_unstable();
+                for (_, key) in stale.drain(..stale.len() - MAP_TILE_CAPACITY) {
+                    cache.remove(&key);
+                    self.map_tile_last_seen.remove(&key);
+                }
+            }
+            changed
+        };
+        self.admit_map_tiles(&changed, Some(selection.scope));
+        let cache = &self.map_tile_cache[&selection.scope];
+        let mut visible = MapTileDrawGroups::default();
+        for (key, tile) in cache {
+            if !self.map_tiles.contains(*key) {
+                continue;
+            }
+            if map_tile_is_current(selection, tile) {
+                visible.current.push(*key);
+            } else {
+                visible.fallback.push(*key);
+            }
+        }
+        visible.fallback.sort_unstable();
+        visible.current.sort_unstable();
+        visible
+    }
+
+    fn admit_map_tiles(
+        &mut self,
+        changed: &std::collections::HashSet<u64>,
+        active_scope: Option<MapScopeId>,
+    ) {
+        let mut scopes: Vec<_> = self.map_tile_selections.keys().copied().collect();
+        scopes.sort_by_key(|scope| scope.0);
+        // Above capacity, not every scope can own a slot. Keep the pane being
+        // rendered first so it always retains one usable current tile; normal
+        // <=128 deterministic quota allocation is unchanged.
+        prioritize_active_scope(&mut scopes, active_scope);
+        let scope_count = scopes.len().max(1);
+        let base_quota = MAP_TILE_CAPACITY / scope_count;
+        let remainder = MAP_TILE_CAPACITY % scope_count;
+        let mut order = Vec::with_capacity(MAP_TILE_CAPACITY);
+        for (index, scope) in scopes.iter().enumerate() {
+            let quota = base_quota + usize::from(index < remainder);
+            let selection = &self.map_tile_selections[scope];
+            let empty = HashMap::new();
+            let cache = self.map_tile_cache.get(scope).unwrap_or(&empty);
+            order.extend(scope_admission_order(
+                selection,
+                cache,
+                &self.map_tile_last_seen,
+                quota,
+            ));
+        }
+        let admitted: std::collections::HashSet<_> = order.iter().copied().collect();
+        let caches = &self.map_tile_cache;
+        self.map_tile_last_seen
+            .retain(|key, _| caches.values().any(|cache| cache.contains_key(key)));
+
+        self.map_tiles.retain(order.iter().copied());
+        self.map_tile_resident_signatures
+            .retain(|key, _| admitted.contains(key));
+        for key in order {
+            let tile = self
+                .map_tile_cache
+                .values()
+                .find_map(|cache| cache.get(&key))
+                .expect("admitted tile cached");
+            if self.map_tiles.contains(key) && !changed.contains(&key) {
+                continue;
+            }
+            if let Err(error) = self.map_tiles.upload(MapTileUpload {
+                key,
+                rgba: &tile.rgba,
+                corners: tile.corners,
+            }) {
+                tracing::error!(%error, key, "capacity-aware map tile admission failed");
+            } else {
+                self.map_tile_resident_signatures
+                    .insert(key, map_tile_signature(tile));
+            }
+        }
+    }
+}
+
+fn prioritize_active_scope(scopes: &mut [MapScopeId], active_scope: Option<MapScopeId>) {
+    if scopes.len() > MAP_TILE_CAPACITY
+        && let Some(active) = active_scope
+        && let Some(index) = scopes.iter().position(|scope| *scope == active)
+    {
+        scopes.swap(0, index);
+    }
+}
+
+fn scope_admission_order(
+    selection: &MapTileSelection,
+    cache: &HashMap<u64, ReadyTile>,
+    last_seen: &HashMap<u64, u64>,
+    quota: usize,
+) -> Vec<u64> {
+    let ready_by_id: HashMap<_, _> = cache.iter().map(|(key, tile)| (tile.id, *key)).collect();
+    let mut current = selection.current_tiles.clone();
+    current.sort_by_key(|(id, priority)| (*priority, id.zoom, id.y, id.x));
+    let mut order = Vec::with_capacity(quota);
+    let mut admitted = std::collections::HashSet::new();
+    for (id, _) in current {
+        if order.len() == quota {
+            break;
+        }
+        if let Some(key) = ready_by_id.get(&id)
+            && admitted.insert(*key)
+        {
+            order.push(*key);
+        }
+    }
+    let mut stale: Vec<_> = cache
+        .iter()
+        .filter(|(key, tile)| !admitted.contains(*key) && !map_tile_is_current(selection, tile))
+        .collect();
+    stale.sort_by_key(|(key, _)| {
+        (
+            std::cmp::Reverse(last_seen.get(key).copied().unwrap_or(0)),
+            **key,
+        )
+    });
+    let mut covered: Vec<TileId> = Vec::new();
+    for (key, tile) in stale {
+        if order.len() == quota {
+            break;
+        }
+        if covered
+            .iter()
+            .any(|other| tiles_overlap_at_different_zooms(*other, tile.id))
+        {
+            continue;
+        }
+        covered.push(tile.id);
+        if admitted.insert(*key) {
+            order.push(*key);
+        }
+    }
+    order
+}
+
+fn tiles_overlap_at_different_zooms(a: TileId, b: TileId) -> bool {
+    let (coarse, fine) = if a.zoom <= b.zoom { (a, b) } else { (b, a) };
+    let delta = fine.zoom - coarse.zoom;
+    let normalize_x = |id: TileId| {
+        1_u32
+            .checked_shl(u32::from(id.zoom))
+            .map_or(id.x, |world_width| id.x % world_width)
+    };
+    delta < 32
+        && normalize_x(fine).checked_shr(delta as u32) == Some(normalize_x(coarse))
+        && fine.y.checked_shr(delta as u32) == Some(coarse.y)
+}
+
+fn map_tile_matches(selection: &MapTileSelection, tile: &ReadyTile) -> bool {
+    selection.enabled
+        && tile.scope == selection.scope
+        && tile.epoch == selection.epoch
+        && tile.provider == selection.provider
+        && tile.generation == selection.generation
+}
+
+fn map_tile_is_current(selection: &MapTileSelection, tile: &ReadyTile) -> bool {
+    selection.current_tiles.iter().any(|(id, _)| *id == tile.id)
+}
+
+fn map_tile_key(tile: &ReadyTile) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    tile.scope.hash(&mut hasher);
+    tile.epoch.hash(&mut hasher);
+    tile.provider.hash(&mut hasher);
+    tile.generation.hash(&mut hasher);
+    tile.id.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn map_tile_signature(tile: &ReadyTile) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    tile.scope.hash(&mut hasher);
+    tile.epoch.hash(&mut hasher);
+    tile.provider.hash(&mut hasher);
+    tile.generation.hash(&mut hasher);
+    tile.id.zoom.hash(&mut hasher);
+    tile.id.x.hash(&mut hasher);
+    tile.id.y.hash(&mut hasher);
+    tile.rgba.hash(&mut hasher);
+    for corner in tile.corners {
+        for coordinate in corner {
+            coordinate.to_bits().hash(&mut hasher);
+        }
+    }
+    hasher.finish()
 }
 
 fn new_points_buffer(ctx: &RenderContext, count: u32, label: &str) -> wgpu::Buffer {
@@ -952,12 +1635,17 @@ impl egui_wgpu::CallbackTrait for ScenePaintCallback {
                 buffers,
                 col_buffers,
                 win_buffers,
+                bridge_buffers,
+                iso_buffers,
                 uniforms,
                 next_uniform_slot: _,
                 line_binds,
+                sync_line_binds,
                 scatter_binds,
                 step_binds,
                 col_binds,
+                bridge_binds,
+                iso_binds,
                 col_params: _,
                 win_params: _,
                 errors,
@@ -970,6 +1658,11 @@ impl egui_wgpu::CallbackTrait for ScenePaintCallback {
                     DrawKind::Line { .. } => {
                         if let Some(buf) = win_buffers.buffer(item.field) {
                             line_binds.insert(item.field, line.bind_group(ctx, buf, uniforms));
+                        }
+                    }
+                    DrawKind::SyncLine { .. } => {
+                        if let Some(buf) = buffers.buffer(item.field) {
+                            sync_line_binds.insert(item.field, line.bind_group(ctx, buf, uniforms));
                         }
                     }
                     DrawKind::Scatter { .. } => {
@@ -986,6 +1679,16 @@ impl egui_wgpu::CallbackTrait for ScenePaintCallback {
                     DrawKind::Columns { .. } => {
                         if let Some(buf) = col_buffers.buffer(item.field) {
                             col_binds.insert(item.field, minmax.bind_group(ctx, buf, uniforms));
+                        }
+                    }
+                    DrawKind::Bridge { .. } => {
+                        if let Some(buf) = bridge_buffers.buffer(item.field) {
+                            bridge_binds.insert(item.field, line.bind_group(ctx, buf, uniforms));
+                        }
+                    }
+                    DrawKind::Points { .. } => {
+                        if let Some(buf) = iso_buffers.buffer(item.field) {
+                            iso_binds.insert(item.field, scatter.bind_group(ctx, buf, uniforms));
                         }
                     }
                 }
@@ -1050,10 +1753,38 @@ impl egui_wgpu::CallbackTrait for ScenePaintCallback {
                 PipelineKind::Columns => res.minmax.bind(render_pass),
             }
             for item in &self.items[next..next + count as usize] {
+                if let Some((top, bottom)) = item.lane {
+                    let lane_top = viewport.top_px
+                        + (viewport.height_px as f32 * top.clamp(0.0, 1.0)).round() as i32;
+                    let lane_bottom = viewport.top_px
+                        + (viewport.height_px as f32 * bottom.clamp(0.0, 1.0)).round() as i32;
+                    let lane_height = lane_bottom.saturating_sub(lane_top);
+                    let Some((lsx, lsy, lsw, lsh)) = intersect_scissor_rect(
+                        (viewport.left_px, lane_top, viewport.width_px, lane_height),
+                        (clip.left_px, clip.top_px, clip.width_px, clip.height_px),
+                        info.screen_size_px,
+                    ) else {
+                        continue;
+                    };
+                    render_pass.set_viewport(
+                        viewport.left_px.max(0) as f32,
+                        lane_top.max(0) as f32,
+                        viewport.width_px as f32,
+                        lane_height as f32,
+                        0.0,
+                        1.0,
+                    );
+                    render_pass.set_scissor_rect(lsx, lsy, lsw, lsh);
+                }
                 let offset = res.uniforms.dynamic_offset(item.slot);
                 match item.kind {
                     DrawKind::Line { samples } => {
                         if let Some(bind) = res.line_binds.get(&item.field) {
+                            res.line.draw_trace(render_pass, bind, offset, samples);
+                        }
+                    }
+                    DrawKind::SyncLine { samples } => {
+                        if let Some(bind) = res.sync_line_binds.get(&item.field) {
                             res.line.draw_trace(render_pass, bind, offset, samples);
                         }
                     }
@@ -1070,6 +1801,16 @@ impl egui_wgpu::CallbackTrait for ScenePaintCallback {
                     DrawKind::Columns { count } => {
                         if let Some(bind) = res.col_binds.get(&item.field) {
                             res.minmax.draw_trace(render_pass, bind, offset, count);
+                        }
+                    }
+                    DrawKind::Bridge { samples } => {
+                        if let Some(bind) = res.bridge_binds.get(&item.field) {
+                            res.line.draw_trace(render_pass, bind, offset, samples);
+                        }
+                    }
+                    DrawKind::Points { samples } => {
+                        if let Some(bind) = res.iso_binds.get(&item.field) {
+                            res.scatter.draw_trace(render_pass, bind, offset, samples);
                         }
                     }
                 }
@@ -1101,6 +1842,47 @@ fn intersect_scissor_rect(
         (right - left) as u32,
         (bottom - top) as u32,
     ))
+}
+
+pub(crate) fn sync_lane_fractions(count: usize, mode: CompareMode) -> Vec<(f32, f32)> {
+    if count == 0 {
+        return Vec::new();
+    }
+    match mode {
+        CompareMode::Overlay => vec![(0.0, 1.0); count],
+        CompareMode::Stacked => (0..count)
+            .map(|index| {
+                let top = index as f32 / count as f32;
+                let bottom = (index + 1) as f32 / count as f32;
+                (top, bottom)
+            })
+            .collect(),
+    }
+}
+
+pub fn sync_lane_rects(rect: egui::Rect, traces: &[SyncTrace]) -> Vec<egui::Rect> {
+    traces
+        .iter()
+        .map(|trace| {
+            let (top, bottom) = trace
+                .lane
+                .expect("synchronization trace lane should be prepared");
+            egui::Rect::from_min_max(
+                egui::pos2(rect.left(), rect.top() + top * rect.height()),
+                egui::pos2(rect.right(), rect.top() + bottom * rect.height()),
+            )
+        })
+        .collect()
+}
+
+pub fn sync_x_bounds(view: ViewX, cache_origin_us: i64) -> (f32, f32) {
+    view.seconds(cache_origin_us)
+}
+
+pub fn sync_active_trace_at(lanes: &[egui::Rect], pointer: egui::Pos2) -> Option<usize> {
+    lanes
+        .iter()
+        .position(|lane| crate::axes::usable_plot_rect(*lane) && lane.contains(pointer))
 }
 
 /// Convert an egui drag delta and a wheel scroll into [`ViewX`] updates,
@@ -1150,27 +1932,304 @@ pub fn zoom_drag_view(
 
 #[cfg(test)]
 mod tests {
+    use arrow::array::{ArrayRef, Int32Array, Int64Array};
+    use arrow::datatypes::DataType;
+
+    #[test]
+    fn y_padding_matches_normal_plot_policy() {
+        assert_eq!(padded_y_range(10.0, 20.0), (9.5, 20.5));
+        assert_eq!(padded_y_range(7.0, 7.0), (6.0, 8.0));
+        assert_eq!(padded_y_range(f64::NAN, 1.0), (-1.0, 1.0));
+    }
+
+    #[test]
+    fn both_padding_paths_fallback_when_padding_overflows() {
+        let min = f64::MAX / 2.0;
+        let max = f64::MAX;
+        assert_eq!(padded_y_range(min, max), (-1.0, 1.0));
+        assert_eq!(
+            PreparedYRange::new(0.0, min, max).unwrap().padded(),
+            PreparedYRange::new(0.0, -1.0, 1.0).unwrap(),
+        );
+    }
+
+    #[test]
+    fn prepared_padding_failure_resets_the_semantic_origin_with_fallback() {
+        let range = PreparedYRange::new(1.0e20, f64::MAX / 2.0, f64::MAX).unwrap();
+        assert_eq!(range.padded(), PreparedYRange::new(0.0, -1.0, 1.0).unwrap(),);
+    }
+
+    #[test]
+    fn sync_y_axis_uses_the_prepared_relative_range() {
+        let range = PreparedYRange::new(1000.0, 0.0, 10.0).unwrap();
+        assert_eq!(sync_y_axis(range, 997.0), Some((0.2, 3.0)));
+    }
+
+    #[test]
+    fn sync_y_span_survives_large_distant_cache_origin() {
+        let range = PreparedYRange::new(1.0e12, 0.0, 8.0).unwrap();
+        let (scale, lower) = sync_y_axis(range, -1.0e12).unwrap();
+        assert_eq!(scale, 0.25);
+        assert!(lower.is_finite());
+    }
+
+    #[test]
+    fn flat_padding_survives_large_absolute_origin() {
+        let range = PreparedYRange::new(1.0e20, 0.0, 0.0).unwrap().padded();
+        assert_eq!(range.span(), 2.0);
+    }
+    use delog_core::chunk::Chunk;
+    use delog_core::identity::IdentityRegistry;
+    use delog_core::schema::{FieldSchema, TopicSchema};
+    use delog_core::snapshot::StoreSnapshot;
+    use delog_core::store::TopicStore;
+
     use super::*;
 
     #[test]
-    fn pad_window_adds_one_sample_of_context_each_side() {
-        assert_eq!(pad_window(10, 20, 100), (9, 21));
+    fn sync_stacked_lanes_are_equal_and_cover_the_plot() {
+        let rect = egui::Rect::from_min_max(egui::pos2(10.0, 20.0), egui::pos2(110.0, 80.0));
+        let traces: Vec<_> = sync_lane_fractions(3, CompareMode::Stacked)
+            .into_iter()
+            .map(|lane| SyncTrace {
+                field: FieldId(0),
+                preview_delta_us: 0,
+                color: [0.0; 4],
+                y_range: PreparedYRange::new(0.0, -1.0, 1.0).unwrap(),
+                lane: Some(lane),
+            })
+            .collect();
+        let lanes = sync_lane_rects(rect, &traces);
+        assert_eq!(lanes.len(), 3);
+        assert_eq!(
+            lanes[0],
+            egui::Rect::from_min_max(egui::pos2(10.0, 20.0), egui::pos2(110.0, 40.0))
+        );
+        assert_eq!(
+            lanes[2],
+            egui::Rect::from_min_max(egui::pos2(10.0, 60.0), egui::pos2(110.0, 80.0))
+        );
     }
 
     #[test]
-    fn pad_window_clamps_at_buffer_ends() {
-        assert_eq!(pad_window(0, 100, 100), (0, 100)); // both ends clamp
-        assert_eq!(pad_window(0, 5, 100), (0, 6)); // low clamps, high pads
-        assert_eq!(pad_window(95, 100, 100), (94, 100)); // low pads, high clamps
+    fn sync_traces_share_absolute_x_bounds_across_cache_origins() {
+        let view = ViewX::new(2_000_000, 5_000_000);
+        assert_eq!(sync_x_bounds(view, 0), (2.0, 5.0));
+        assert_eq!(sync_x_bounds(view, 1_000_000), (1.0, 4.0));
     }
 
     #[test]
-    fn pad_window_handles_empty() {
-        assert_eq!(pad_window(0, 0, 0), (0, 0));
+    fn sync_active_trace_resolves_the_lane_under_the_pointer() {
+        let rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(100.0, 90.0));
+        let traces: Vec<_> = sync_lane_fractions(3, CompareMode::Stacked)
+            .into_iter()
+            .map(|lane| SyncTrace {
+                field: FieldId(0),
+                preview_delta_us: 0,
+                color: [0.0; 4],
+                y_range: PreparedYRange::new(0.0, -1.0, 1.0).unwrap(),
+                lane: Some(lane),
+            })
+            .collect();
+        let lanes = sync_lane_rects(rect, &traces);
+        assert_eq!(
+            sync_active_trace_at(&lanes, egui::pos2(50.0, 45.0)),
+            Some(1)
+        );
+        assert_eq!(sync_active_trace_at(&lanes, egui::pos2(150.0, 45.0)), None);
     }
 
     #[test]
-    fn line_window_upload_skips_nan_points_so_finite_samples_connect() {
+    fn sync_active_trace_ignores_tiny_lanes() {
+        let too_narrow = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1.0e-7, 100.0));
+        let too_short = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(100.0, 1.0e-7));
+
+        assert_eq!(
+            sync_active_trace_at(&[too_narrow], egui::pos2(0.0, 50.0)),
+            None
+        );
+        assert_eq!(
+            sync_active_trace_at(&[too_short], egui::pos2(50.0, 0.0)),
+            None
+        );
+    }
+
+    #[test]
+    fn visible_y_range_merges_distinct_trace_origins_as_absolute_values() {
+        let mut identity = IdentityRegistry::new();
+        let source = identity.add_source("flight");
+        let topic = identity.add_topic(source, "DATA").unwrap();
+        let low = identity.add_field(topic, "Low").unwrap();
+        let high = identity.add_field(topic, "High").unwrap();
+        let schema = Arc::new(
+            TopicSchema::new(
+                "DATA",
+                [
+                    FieldSchema::new("Low", DataType::Int32, None::<String>, 0.01).unwrap(),
+                    FieldSchema::new("High", DataType::Int32, None::<String>, 0.01).unwrap(),
+                ],
+            )
+            .unwrap(),
+        );
+        let chunk = Arc::new(
+            Chunk::try_new(
+                Int64Array::from(vec![0, 1_000_000]),
+                vec![
+                    Arc::new(Int32Array::from(vec![10_000, 10_100])) as ArrayRef,
+                    Arc::new(Int32Array::from(vec![100_000, 100_200])) as ArrayRef,
+                ],
+                &schema,
+            )
+            .unwrap(),
+        );
+        let store = Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap());
+        let snapshot =
+            Arc::new(StoreSnapshot::from_registry(&identity, [(topic, store)], 0).unwrap());
+        let mut caches = CacheManager::new();
+        caches.request(low, &snapshot);
+        caches.request(high, &snapshot);
+        for _ in 0..2_000 {
+            caches.poll_builds();
+            if caches.is_ready(low) && caches.is_ready(high) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(caches.is_ready(low) && caches.is_ready(high));
+
+        let mut pane = PlotPane::default();
+        pane.add_trace(low);
+        pane.add_trace(high);
+        let (min, max) = visible_y_range(&mut caches, &pane, 0.0, 1.0, RenderTuning::default());
+        assert!((min - 54.9).abs() < 1e-9, "min was {min}");
+        assert!((max - 1_047.1).abs() < 1e-9, "max was {max}");
+    }
+
+    #[test]
+    fn visible_y_range_threads_tuning_and_trace_mode_to_cache_geometry() {
+        let mut identity = IdentityRegistry::new();
+        let source = identity.add_source("flight");
+        let topic = identity.add_topic(source, "DATA").unwrap();
+        let field = identity.add_field(topic, "Value").unwrap();
+        let schema = Arc::new(
+            TopicSchema::new(
+                "DATA",
+                [FieldSchema::new("Value", DataType::Int32, None::<String>, 0.01).unwrap()],
+            )
+            .unwrap(),
+        );
+        let chunk = Arc::new(
+            Chunk::try_new(
+                Int64Array::from(vec![0, 1_000_000, 10_000_000, 11_000_000]),
+                vec![Arc::new(Int32Array::from(vec![0, 100, 10_000, 10_100])) as ArrayRef],
+                &schema,
+            )
+            .unwrap(),
+        );
+        let store = Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap());
+        let snapshot =
+            Arc::new(StoreSnapshot::from_registry(&identity, [(topic, store)], 0).unwrap());
+        let mut caches = CacheManager::new();
+        caches.request(field, &snapshot);
+        for _ in 0..2_000 {
+            caches.poll_builds();
+            if caches.is_ready(field) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(caches.is_ready(field));
+
+        let mut pane = PlotPane::default();
+        pane.add_trace(field);
+        let tuning = RenderTuning {
+            gap_mode: GapMode::Cut,
+            gap_factor: 2.0,
+            ..RenderTuning::default()
+        };
+
+        let (min, max) = visible_y_range(&mut caches, &pane, 0.0, 5.0, tuning);
+
+        assert!((min - -0.05).abs() < 1e-9, "min was {min}");
+        assert!((max - 1.05).abs() < 1e-9, "max was {max}");
+
+        pane.traces[0].mode = TraceMode::Step;
+        let tuning = RenderTuning {
+            gap_mode: GapMode::Connect,
+            ..tuning
+        };
+        let (min, max) = visible_y_range(&mut caches, &pane, 5.0, 11.0, tuning);
+        assert!((min - -4.0).abs() < 1e-9, "min was {min}");
+        assert!((max - 106.0).abs() < 1e-9, "max was {max}");
+    }
+
+    #[test]
+    fn visible_y_range_line_connect_singleton_uses_empty_fallback() {
+        let mut identity = IdentityRegistry::new();
+        let source = identity.add_source("flight");
+        let topic = identity.add_topic(source, "DATA").unwrap();
+        let field = identity.add_field(topic, "Value").unwrap();
+        let schema = Arc::new(
+            TopicSchema::new(
+                "DATA",
+                [FieldSchema::new("Value", DataType::Int32, None::<String>, 0.01).unwrap()],
+            )
+            .unwrap(),
+        );
+        let chunk = Arc::new(
+            Chunk::try_new(
+                Int64Array::from(vec![1_000_000]),
+                vec![Arc::new(Int32Array::from(vec![4_200])) as ArrayRef],
+                &schema,
+            )
+            .unwrap(),
+        );
+        let store = Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap());
+        let snapshot =
+            Arc::new(StoreSnapshot::from_registry(&identity, [(topic, store)], 0).unwrap());
+        let mut caches = CacheManager::new();
+        caches.request(field, &snapshot);
+        for _ in 0..2_000 {
+            caches.poll_builds();
+            if caches.is_ready(field) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(caches.is_ready(field));
+
+        let mut pane = PlotPane::default();
+        pane.add_trace(field);
+        let tuning = RenderTuning {
+            gap_mode: GapMode::Connect,
+            ..RenderTuning::default()
+        };
+
+        assert_eq!(
+            visible_y_range(&mut caches, &pane, 0.0, 2.0, tuning),
+            (-1.0, 1.0)
+        );
+    }
+
+    #[test]
+    fn active_scope_is_first_only_when_scope_count_exceeds_capacity() {
+        let mut saturated: Vec<_> = (0..=MAP_TILE_CAPACITY as u64).map(MapScopeId).collect();
+        prioritize_active_scope(&mut saturated, Some(MapScopeId(128)));
+        assert_eq!(saturated[0], MapScopeId(128));
+
+        let mut normal = vec![MapScopeId(1), MapScopeId(2)];
+        prioritize_active_scope(&mut normal, Some(MapScopeId(2)));
+        assert_eq!(normal, vec![MapScopeId(1), MapScopeId(2)]);
+    }
+
+    fn live_zoom(zoom: u8) -> Vec<(TileId, i32)> {
+        (0..4)
+            .flat_map(|y| (0..256).map(move |x| (TileId { zoom, x, y }, x as i32)))
+            .collect()
+    }
+
+    #[test]
+    fn line_window_always_strips_non_finite_points() {
         let xy = [
             0.0,
             10.0, //
@@ -1183,10 +2242,60 @@ mod tests {
             4.0,
             14.0,
         ];
-
         let line_xy = line_window_xy(&xy, 0, 5);
-
         assert_eq!(line_xy, vec![0.0, 10.0, 2.0, 12.0, 4.0, 14.0]);
+    }
+
+    #[test]
+    fn isolated_points_are_the_samples_with_gaps_on_both_sides() {
+        // Regular 1s samples, one lone sample at t=10, more at t=20,21.
+        let xy = [
+            0.0, 1.0, //
+            1.0, 2.0, //
+            2.0, 3.0, //
+            10.0, 4.0, //
+            20.0, 5.0, //
+            21.0, 6.0,
+        ];
+        let iso = isolated_points_xy(&xy, 5.0);
+        assert_eq!(iso, vec![10.0, 4.0]);
+    }
+
+    #[test]
+    fn isolated_points_include_lone_edge_samples_and_need_a_threshold() {
+        // A single sample is isolated by definition.
+        assert_eq!(isolated_points_xy(&[3.0, 7.0], 1.0), vec![3.0, 7.0]);
+        // Every sample farther than threshold from both neighbours is isolated.
+        let sparse = [0.0, 1.0, 10.0, 2.0, 20.0, 3.0];
+        assert_eq!(isolated_points_xy(&sparse, 5.0), sparse.to_vec());
+        // Threshold 0 = delta detection off: nothing is isolated.
+        assert!(isolated_points_xy(&sparse, 0.0).is_empty());
+        assert!(isolated_points_xy(&[], 5.0).is_empty());
+    }
+
+    #[test]
+    fn point_draws_use_the_scatter_pipeline() {
+        assert_eq!(
+            DrawKind::Points { samples: 3 }.pipeline(),
+            PipelineKind::Scatter
+        );
+        assert!(DrawKind::Points { samples: 1 }.is_drawable());
+        assert!(!DrawKind::Points { samples: 0 }.is_drawable());
+    }
+
+    #[test]
+    fn bridge_draws_batch_with_line_pipeline_runs() {
+        use PipelineKind::{Columns, Line};
+        let kinds = [
+            DrawKind::Columns { count: 100 },
+            DrawKind::Bridge { samples: 5 },
+            DrawKind::Line { samples: 10 },
+            DrawKind::Bridge { samples: 5 },
+        ];
+        let runs = pipeline_runs(kinds.iter().map(|k| k.pipeline()));
+        assert_eq!(runs, vec![(Columns, 1), (Line, 3)]);
+        assert!(!DrawKind::Bridge { samples: 1 }.is_drawable());
+        assert!(DrawKind::Bridge { samples: 2 }.is_drawable());
     }
 
     #[test]
@@ -1276,5 +2385,950 @@ mod tests {
     fn zoom_drag_zero_width_rect_is_noop() {
         let view = ViewX::new(0, 1000);
         assert!(zoom_drag_view(view, 0.0, 0.0, 5.0, 50.0).is_none());
+    }
+
+    #[test]
+    fn mixed_ready_batch_classifies_current_and_stale_independent_of_order() {
+        let selection = MapTileSelection {
+            scope: MapScopeId(4),
+            epoch: 3,
+            provider: crate::map::provider::MapProviderId::BingSatellite,
+            generation: 9,
+            current_tiles: live_zoom(12),
+            enabled: true,
+        };
+        let tile = |zoom, generation| ReadyTile {
+            scope: MapScopeId(4),
+            epoch: 3,
+            provider: crate::map::provider::MapProviderId::BingSatellite,
+            id: crate::map::provider::TileId { zoom, x: 0, y: 0 },
+            generation,
+            rgba: Vec::new(),
+            corners: [[0.0; 3]; 4],
+        };
+        let mixed = [tile(11, 9), tile(12, 9)];
+        assert!(mixed.iter().all(|tile| map_tile_matches(&selection, tile)));
+        assert!(map_tile_is_current(&selection, &mixed[1]));
+        assert!(!map_tile_is_current(&selection, &mixed[0]));
+        assert!(!map_tile_matches(&selection, &tile(12, 8)));
+    }
+
+    #[test]
+    fn prepare_map_tiles_exposes_sorted_fallback_then_current_draw_groups() {
+        let Some(ctx) = RenderContext::headless() else {
+            eprintln!("no wgpu adapter — skipping map zoom grouping test");
+            return;
+        };
+        let mut resources = SceneResources::new(ctx);
+        let selection = MapTileSelection {
+            scope: MapScopeId(44),
+            epoch: 2,
+            provider: crate::map::provider::MapProviderId::BingSatellite,
+            generation: 7,
+            current_tiles: live_zoom(8),
+            enabled: true,
+        };
+        let tile = |zoom, x| ReadyTile {
+            scope: selection.scope,
+            epoch: selection.epoch,
+            provider: selection.provider,
+            id: crate::map::provider::TileId { zoom, x, y: 3 },
+            generation: selection.generation,
+            rgba: [x as u8, zoom, 0, 255].repeat(256 * 256),
+            corners: [[x as f32, 0.0, 0.0]; 4],
+        };
+        let tiles = [tile(8, 5), tile(7, 2), tile(8, 1), tile(7, 6)];
+        let mut expected_fallback = vec![map_tile_key(&tiles[1]), map_tile_key(&tiles[3])];
+        let mut expected_current = vec![map_tile_key(&tiles[0]), map_tile_key(&tiles[2])];
+        expected_fallback.sort_unstable();
+        expected_current.sort_unstable();
+        let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+
+        let first = resources.prepare_map_tiles(identity, &selection, &tiles);
+        let reversed = resources.prepare_map_tiles(
+            identity,
+            &selection,
+            &tiles.iter().rev().cloned().collect::<Vec<_>>(),
+        );
+        assert_eq!(first.fallback, expected_fallback);
+        assert_eq!(first.current, expected_current);
+        assert_eq!(reversed, first, "ready insertion order cannot affect draws");
+        assert!(resources.selection_has_current_imagery(&selection));
+
+        let mut other_pane = selection.clone();
+        other_pane.scope = MapScopeId(45);
+
+        let mut switched_generation = selection.clone();
+        switched_generation.generation += 1;
+    }
+
+    #[test]
+    fn cache_epoch_change_purges_cpu_and_gpu_tiles_on_empty_poll() {
+        let Some(ctx) = RenderContext::headless() else {
+            eprintln!("no wgpu adapter — skipping map clear residency test");
+            return;
+        };
+        let mut resources = SceneResources::new(ctx);
+        let selection = MapTileSelection {
+            scope: MapScopeId(7),
+            epoch: 0,
+            provider: crate::map::provider::MapProviderId::BingSatellite,
+            generation: 1,
+            current_tiles: vec![(
+                crate::map::provider::TileId {
+                    zoom: 3,
+                    x: 1,
+                    y: 2,
+                },
+                0,
+            )],
+            enabled: true,
+        };
+        let tile = ReadyTile {
+            scope: selection.scope,
+            epoch: 0,
+            provider: crate::map::provider::MapProviderId::BingSatellite,
+            id: crate::map::provider::TileId {
+                zoom: 3,
+                x: 1,
+                y: 2,
+            },
+            generation: 1,
+            rgba: [40, 80, 120, 255].repeat(256 * 256),
+            corners: [[0.0, 0.0, 0.0]; 4],
+        };
+        let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+        resources.prepare_map_tiles(identity, &selection, &[tile]);
+        assert_eq!(resources.map_tile_cache[&selection.scope].len(), 1);
+        assert_eq!(resources.map_tiles.resident_tile_count(), 1);
+
+        resources.prepare_map_tiles(
+            identity,
+            &MapTileSelection {
+                epoch: 1,
+                ..selection.clone()
+            },
+            &[],
+        );
+        assert_eq!(resources.map_tile_cache[&selection.scope].len(), 0);
+        assert_eq!(resources.map_tiles.resident_tile_count(), 0);
+    }
+
+    #[test]
+    fn map_tile_prepare_only_uploads_and_allocates_changed_residency() {
+        let Some(ctx) = RenderContext::headless() else {
+            eprintln!("no wgpu adapter — skipping map residency instrumentation test");
+            return;
+        };
+        let mut resources = SceneResources::new(ctx);
+        let selection = MapTileSelection {
+            scope: MapScopeId(8),
+            epoch: 2,
+            provider: crate::map::provider::MapProviderId::BingSatellite,
+            generation: 5,
+            current_tiles: live_zoom(4),
+            enabled: true,
+        };
+        let tile = |zoom, x, color: [u8; 4]| ReadyTile {
+            scope: selection.scope,
+            epoch: selection.epoch,
+            provider: crate::map::provider::MapProviderId::BingSatellite,
+            id: crate::map::provider::TileId { zoom, x, y: 1 },
+            generation: selection.generation,
+            rgba: color.repeat(256 * 256),
+            corners: [[x as f32, 0.0, 0.0]; 4],
+        };
+        let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+        resources.prepare_map_tiles(identity, &selection, &[tile(4, 1, [1, 2, 3, 255])]);
+        assert_eq!(resources.map_tiles.upload_count(), 1);
+        assert_eq!(resources.map_tiles.allocation_count(), 1);
+
+        resources.prepare_map_tiles(identity, &selection, &[]);
+        assert_eq!(
+            resources.map_tiles.upload_count(),
+            1,
+            "static frame uploads zero"
+        );
+        assert_eq!(
+            resources.map_tiles.allocation_count(),
+            1,
+            "static frame allocates zero"
+        );
+
+        let zoomed = MapTileSelection {
+            current_tiles: live_zoom(5),
+            ..selection
+        };
+        resources.prepare_map_tiles(identity, &zoomed, &[tile(5, 2, [4, 5, 6, 255])]);
+        assert_eq!(resources.map_tiles.resident_tile_count(), 2);
+        assert_eq!(
+            resources.map_tiles.upload_count(),
+            2,
+            "only the new zoom uploads"
+        );
+        assert_eq!(
+            resources.map_tiles.allocation_count(),
+            2,
+            "only the new zoom allocates"
+        );
+
+        resources.prepare_map_tiles(identity, &zoomed, &[tile(5, 2, [7, 8, 9, 255])]);
+        assert_eq!(
+            resources.map_tiles.upload_count(),
+            3,
+            "changed content uploads"
+        );
+    }
+
+    #[test]
+    fn alternating_map_scopes_keep_union_resident_without_cross_pane_draws() {
+        let Some(ctx) = RenderContext::headless() else {
+            eprintln!("no wgpu adapter — skipping multi-pane map residency test");
+            return;
+        };
+        let mut resources = SceneResources::new(ctx);
+        let selection = |scope| MapTileSelection {
+            scope: MapScopeId(scope),
+            epoch: 4,
+            provider: crate::map::provider::MapProviderId::BingSatellite,
+            generation: 1,
+            current_tiles: live_zoom(6),
+            enabled: true,
+        };
+        let tile = |scope, x, color: [u8; 4]| ReadyTile {
+            scope: MapScopeId(scope),
+            epoch: 4,
+            provider: crate::map::provider::MapProviderId::BingSatellite,
+            id: crate::map::provider::TileId { zoom: 6, x, y: 2 },
+            generation: 1,
+            rgba: color.repeat(256 * 256),
+            corners: [[x as f32, 0.0, 0.0]; 4],
+        };
+        let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+        let tile_a = tile(10, 1, [10, 20, 30, 255]);
+        let tile_b = tile(20, 2, [40, 50, 60, 255]);
+        let key_a = map_tile_key(&tile_a);
+        let key_b = map_tile_key(&tile_b);
+
+        let draw_a = resources.prepare_map_tiles(identity, &selection(10), &[tile_a]);
+        assert_eq!(draw_a.current, vec![key_a], "pane A draws only A");
+        assert!(draw_a.fallback.is_empty());
+        let draw_b = resources.prepare_map_tiles(identity, &selection(20), &[tile_b]);
+        assert_eq!(draw_b.current, vec![key_b], "pane B draws only B");
+        assert!(draw_b.fallback.is_empty());
+        let draw_a_again = resources.prepare_map_tiles(identity, &selection(10), &[]);
+        assert_eq!(
+            draw_a_again.current,
+            vec![key_a],
+            "pane A still draws only A"
+        );
+        assert!(draw_a_again.fallback.is_empty());
+        assert_eq!(resources.map_tiles.resident_tile_count(), 2);
+        assert_eq!(
+            resources.map_tiles.upload_count(),
+            2,
+            "each scope uploads once"
+        );
+
+        let disabled_b = MapTileSelection {
+            current_tiles: Vec::new(),
+            enabled: false,
+            ..selection(20)
+        };
+        let draw_disabled_b = resources.prepare_map_tiles(identity, &disabled_b, &[]);
+        assert!(draw_disabled_b.is_empty());
+        assert!(!resources.map_tile_cache.contains_key(&MapScopeId(20)));
+        assert_eq!(resources.map_tiles.resident_tile_count(), 1);
+        assert!(resources.map_tiles.contains(key_a), "disabling B retains A");
+
+        let draw_a_after_b_disabled = resources.prepare_map_tiles(identity, &selection(10), &[]);
+        assert_eq!(draw_a_after_b_disabled.current, vec![key_a]);
+        assert!(draw_a_after_b_disabled.fallback.is_empty());
+        assert_eq!(resources.map_tiles.upload_count(), 2, "A is not reuploaded");
+
+        let draw_after_epoch = resources.prepare_map_tiles(
+            identity,
+            &MapTileSelection {
+                epoch: 5,
+                ..selection(10)
+            },
+            &[],
+        );
+        assert!(draw_after_epoch.is_empty());
+        assert!(resources.map_tile_cache.values().all(HashMap::is_empty));
+        assert_eq!(resources.map_tiles.resident_tile_count(), 0);
+    }
+
+    fn transition_selection(current: Vec<(TileId, i32)>) -> MapTileSelection {
+        MapTileSelection {
+            scope: MapScopeId(31),
+            epoch: 1,
+            provider: crate::map::provider::MapProviderId::BingSatellite,
+            generation: 1,
+            current_tiles: current,
+            enabled: true,
+        }
+    }
+
+    fn transition_tile(selection: &MapTileSelection, id: TileId) -> ReadyTile {
+        ReadyTile {
+            scope: selection.scope,
+            epoch: selection.epoch,
+            provider: selection.provider,
+            id,
+            generation: selection.generation,
+            rgba: [id.x as u8, id.zoom, id.y as u8, 255].repeat(256 * 256),
+            corners: [[id.x as f32, id.y as f32, 0.0]; 4],
+        }
+    }
+
+    #[test]
+    fn stale_resident_tiles_fall_back_while_replacements_load() {
+        let Some(ctx) = RenderContext::headless() else {
+            return;
+        };
+        let mut resources = SceneResources::new(ctx);
+        let id = |x| TileId { zoom: 8, x, y: 4 };
+        let shown = transition_selection(vec![(id(1), 0)]);
+        let tile = transition_tile(&shown, id(1));
+        let stale_key = map_tile_key(&tile);
+        let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+        resources.prepare_map_tiles(identity, &shown, &[tile]);
+
+        let moved = transition_selection(vec![(id(2), 0)]);
+        let draw = resources.prepare_map_tiles(identity, &moved, &[]);
+        assert!(draw.current.is_empty());
+        assert_eq!(draw.fallback, vec![stale_key]);
+        assert!(resources.map_tiles.contains(stale_key));
+
+        let replacement = transition_tile(&moved, id(2));
+        let replaced = resources.prepare_map_tiles(identity, &moved, &[replacement.clone()]);
+        assert_eq!(replaced.current, vec![map_tile_key(&replacement)]);
+        assert_eq!(replaced.fallback, vec![stale_key]);
+    }
+
+    #[test]
+    fn stale_fallback_prefers_recent_and_skips_overlapping_older_tiles() {
+        let Some(ctx) = RenderContext::headless() else {
+            return;
+        };
+        let mut resources = SceneResources::new(ctx);
+        let parent = TileId {
+            zoom: 7,
+            x: 3,
+            y: 5,
+        };
+        let child = TileId {
+            zoom: 8,
+            x: 6,
+            y: 10,
+        };
+        let far = TileId {
+            zoom: 8,
+            x: 40,
+            y: 4,
+        };
+        let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+
+        let first = transition_selection(vec![(parent, 0)]);
+        resources.prepare_map_tiles(identity, &first, &[transition_tile(&first, parent)]);
+        let second = transition_selection(vec![(child, 0)]);
+        let child_tile = transition_tile(&second, child);
+        resources.prepare_map_tiles(identity, &second, &[child_tile.clone()]);
+
+        let third = transition_selection(vec![(far, 0)]);
+        let draw = resources.prepare_map_tiles(identity, &third, &[]);
+        assert!(draw.current.is_empty());
+        assert_eq!(
+            draw.fallback,
+            vec![map_tile_key(&child_tile)],
+            "the newer child covers its area; the stale parent must not z-fight it"
+        );
+    }
+
+    #[test]
+    fn stale_cache_is_bounded_per_scope() {
+        let Some(ctx) = RenderContext::headless() else {
+            return;
+        };
+        let mut resources = SceneResources::new(ctx);
+        let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+        for round in 0..3_u32 {
+            let ids: Vec<_> = (0..128)
+                .map(|x| TileId {
+                    zoom: 8,
+                    x: round * 128 + x,
+                    y: 4,
+                })
+                .collect();
+            let selection = transition_selection(
+                ids.iter()
+                    .enumerate()
+                    .map(|(p, id)| (*id, p as i32))
+                    .collect(),
+            );
+            let ready: Vec<_> = ids
+                .iter()
+                .map(|id| transition_tile(&selection, *id))
+                .collect();
+            resources.prepare_map_tiles(identity, &selection, &ready);
+        }
+        let cached = resources.map_tile_cache[&MapScopeId(31)].len();
+        assert!(cached <= 2 * MAP_TILE_CAPACITY, "cache holds {cached}");
+        assert_eq!(resources.map_tiles.resident_tile_count(), MAP_TILE_CAPACITY);
+    }
+
+    #[test]
+    fn ready_current_tile_preempts_saturated_fallback() {
+        let Some(ctx) = RenderContext::headless() else {
+            return;
+        };
+        let mut resources = SceneResources::new(ctx);
+        let parent_ids: Vec<_> = (0..128).map(|x| TileId { zoom: 7, x, y: 5 }).collect();
+        let child_ids = [
+            TileId {
+                zoom: 8,
+                x: 6,
+                y: 10,
+            },
+            TileId {
+                zoom: 8,
+                x: 7,
+                y: 10,
+            },
+            TileId {
+                zoom: 8,
+                x: 6,
+                y: 11,
+            },
+            TileId {
+                zoom: 8,
+                x: 7,
+                y: 11,
+            },
+        ];
+        let selection = transition_selection(
+            child_ids
+                .iter()
+                .enumerate()
+                .map(|(p, id)| (*id, p as i32))
+                .collect(),
+        );
+        let fallback: Vec<_> = parent_ids
+            .iter()
+            .copied()
+            .map(|id| transition_tile(&selection, id))
+            .collect();
+        let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+        let first = resources.prepare_map_tiles(identity, &selection, &fallback);
+        assert_eq!(first.fallback.len(), 128);
+
+        let child = transition_tile(&selection, child_ids[0]);
+        let child_key = map_tile_key(&child);
+        let draw = resources.prepare_map_tiles(identity, &selection, &[child]);
+        assert!(draw.current.contains(&child_key));
+        assert!(resources.map_tiles.contains(child_key));
+        assert_eq!(draw.fallback.len(), 127);
+        assert_eq!(resources.map_tiles.resident_tile_count(), 128);
+    }
+
+    #[test]
+    fn partial_child_uses_spare_slot_over_retained_parent() {
+        let Some(ctx) = RenderContext::headless() else {
+            return;
+        };
+        let mut resources = SceneResources::new(ctx);
+        let parent_ids: Vec<_> = (0..127).map(|x| TileId { zoom: 7, x, y: 5 }).collect();
+        let child_ids = [
+            TileId {
+                zoom: 8,
+                x: 6,
+                y: 10,
+            },
+            TileId {
+                zoom: 8,
+                x: 7,
+                y: 10,
+            },
+            TileId {
+                zoom: 8,
+                x: 6,
+                y: 11,
+            },
+            TileId {
+                zoom: 8,
+                x: 7,
+                y: 11,
+            },
+        ];
+        let selection = transition_selection(
+            child_ids
+                .iter()
+                .enumerate()
+                .map(|(p, id)| (*id, p as i32))
+                .collect(),
+        );
+        let previous: Vec<_> = parent_ids
+            .iter()
+            .copied()
+            .map(|id| transition_tile(&selection, id))
+            .collect();
+        let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+        resources.prepare_map_tiles(identity, &selection, &previous);
+        let child = transition_tile(&selection, child_ids[0]);
+        let draw = resources.prepare_map_tiles(identity, &selection, &[child.clone()]);
+        assert_eq!(draw.fallback.len(), 127);
+        assert!(draw.current.contains(&map_tile_key(&child)));
+        assert!(
+            resources
+                .map_tiles
+                .contains(map_tile_key(&transition_tile(&selection, parent_ids[3])))
+        );
+    }
+
+    #[test]
+    fn ready_children_and_fallback_share_quota_deterministically() {
+        let Some(ctx) = RenderContext::headless() else {
+            return;
+        };
+        let mut resources = SceneResources::new(ctx);
+        let parent_ids: Vec<_> = (0..125).map(|x| TileId { zoom: 7, x, y: 5 }).collect();
+        let children = [
+            TileId {
+                zoom: 8,
+                x: 6,
+                y: 10,
+            },
+            TileId {
+                zoom: 8,
+                x: 7,
+                y: 10,
+            },
+            TileId {
+                zoom: 8,
+                x: 6,
+                y: 11,
+            },
+            TileId {
+                zoom: 8,
+                x: 7,
+                y: 11,
+            },
+        ];
+        let selection = transition_selection(
+            children
+                .iter()
+                .enumerate()
+                .map(|(priority, id)| (*id, priority as i32))
+                .collect(),
+        );
+        let fallback: Vec<_> = parent_ids
+            .iter()
+            .copied()
+            .map(|id| transition_tile(&selection, id))
+            .collect();
+        let ready_children: Vec<_> = children
+            .iter()
+            .map(|id| transition_tile(&selection, *id))
+            .collect();
+        let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+        resources.prepare_map_tiles(identity, &selection, &fallback);
+        let draw = resources.prepare_map_tiles(identity, &selection, &ready_children);
+        assert_eq!(draw.current.len(), 4);
+        assert_eq!(draw.fallback.len(), 124);
+        assert!(
+            resources
+                .map_tiles
+                .contains(map_tile_key(&transition_tile(&selection, parent_ids[3])))
+        );
+        let reversed = resources.prepare_map_tiles(
+            identity,
+            &selection,
+            &ready_children.iter().rev().cloned().collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            reversed, draw,
+            "ready arrival order cannot affect admission"
+        );
+    }
+
+    #[test]
+    fn zoom_out_parent_draws_over_retained_fallback_children() {
+        let Some(ctx) = RenderContext::headless() else {
+            return;
+        };
+        let mut resources = SceneResources::new(ctx);
+        let parent = TileId {
+            zoom: 7,
+            x: 3,
+            y: 5,
+        };
+        let children = vec![
+            TileId {
+                zoom: 8,
+                x: 6,
+                y: 10,
+            },
+            TileId {
+                zoom: 8,
+                x: 7,
+                y: 10,
+            },
+            TileId {
+                zoom: 8,
+                x: 6,
+                y: 11,
+            },
+            TileId {
+                zoom: 8,
+                x: 7,
+                y: 11,
+            },
+        ];
+        let selection = transition_selection(vec![(parent, 0)]);
+        let fallback: Vec<_> = children
+            .iter()
+            .copied()
+            .map(|id| transition_tile(&selection, id))
+            .collect();
+        let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+        resources.prepare_map_tiles(identity, &selection, &fallback);
+        let current = transition_tile(&selection, parent);
+        let draw = resources.prepare_map_tiles(identity, &selection, &[current.clone()]);
+        assert_eq!(draw.current, vec![map_tile_key(&current)]);
+        assert_eq!(draw.fallback.len(), 4);
+    }
+
+    #[test]
+    fn saturated_scope_draws_only_deterministic_first_128_candidates() {
+        let Some(ctx) = RenderContext::headless() else {
+            return;
+        };
+        let mut resources = SceneResources::new(ctx);
+        let selection = MapTileSelection {
+            scope: MapScopeId(32),
+            epoch: 1,
+            provider: crate::map::provider::MapProviderId::BingSatellite,
+            generation: 1,
+            current_tiles: live_zoom(8),
+            enabled: true,
+        };
+        let tile = |x| ReadyTile {
+            scope: selection.scope,
+            epoch: 1,
+            provider: selection.provider,
+            id: crate::map::provider::TileId { zoom: 8, x, y: 0 },
+            generation: 1,
+            rgba: [x as u8, 8, 0, 255].repeat(256 * 256),
+            corners: [[x as f32, 0.0, 0.0]; 4],
+        };
+        let tiles: Vec<_> = (0..140).rev().map(tile).collect();
+        let expected: std::collections::HashSet<_> =
+            (0..128).map(|x| map_tile_key(&tile(x))).collect();
+        let draw = resources.prepare_map_tiles(
+            glam::Mat4::IDENTITY.to_cols_array_2d(),
+            &selection,
+            &tiles,
+        );
+        assert_eq!(draw.current.len(), 128);
+        assert_eq!(
+            draw.current
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>(),
+            expected
+        );
+        assert!(
+            draw.current
+                .iter()
+                .all(|key| resources.map_tiles.contains(*key))
+        );
+        assert_eq!(
+            resources.map_tile_cache[&selection.scope].len(),
+            140,
+            "CPU cache retains overflow"
+        );
+    }
+
+    #[test]
+    fn saturated_same_zoom_pan_prefers_current_and_keeps_bounded_stale() {
+        let Some(ctx) = RenderContext::headless() else {
+            return;
+        };
+        let mut resources = SceneResources::new(ctx);
+        let mut selection = MapTileSelection {
+            scope: MapScopeId(33),
+            epoch: 1,
+            provider: crate::map::provider::MapProviderId::BingSatellite,
+            generation: 1,
+            current_tiles: live_zoom(8),
+            enabled: true,
+        };
+        let tile = |x| ReadyTile {
+            scope: selection.scope,
+            epoch: selection.epoch,
+            provider: selection.provider,
+            id: crate::map::provider::TileId { zoom: 8, x, y: 0 },
+            generation: selection.generation,
+            rgba: [x as u8, 8, 0, 255].repeat(256 * 256),
+            corners: [[x as f32, 0.0, 0.0]; 4],
+        };
+        let old: Vec<_> = (0..128).map(tile).collect();
+        let new: Vec<_> = (128..256).map(tile).collect();
+        let expected: std::collections::HashSet<_> = new.iter().map(map_tile_key).collect();
+        let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+        selection.current_tiles = old
+            .iter()
+            .map(|tile| (tile.id, (tile.id.x % 128) as i32))
+            .collect();
+        resources.prepare_map_tiles(identity, &selection, &old);
+        selection.current_tiles = new
+            .iter()
+            .map(|tile| (tile.id, (tile.id.x % 128) as i32))
+            .collect();
+        let draw = resources.prepare_map_tiles(identity, &selection, &new);
+
+        assert_eq!(
+            draw.current
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>(),
+            expected
+        );
+        assert!(
+            draw.fallback.is_empty(),
+            "saturated current leaves no stale slots"
+        );
+        assert_eq!(
+            resources.map_tile_cache[&selection.scope].len(),
+            256,
+            "displaced tiles stay cached as bounded stale fallback"
+        );
+        assert_eq!(resources.map_tiles.resident_tile_count(), 128);
+    }
+
+    #[test]
+    fn same_zoom_one_tile_pan_retains_old_nonoverlap_with_exact_current_group() {
+        let Some(ctx) = RenderContext::headless() else {
+            return;
+        };
+        let mut resources = SceneResources::new(ctx);
+        let id = |x| crate::map::provider::TileId { zoom: 8, x, y: 2 };
+        let mut selection = MapTileSelection {
+            scope: MapScopeId(34),
+            epoch: 1,
+            provider: crate::map::provider::MapProviderId::BingSatellite,
+            generation: 1,
+            current_tiles: vec![(id(1), 0), (id(2), 1)],
+            enabled: true,
+        };
+        let tile = |x| ReadyTile {
+            scope: selection.scope,
+            epoch: selection.epoch,
+            provider: selection.provider,
+            id: id(x),
+            generation: selection.generation,
+            rgba: [x as u8, 8, 0, 255].repeat(256 * 256),
+            corners: [[x as f32, 0.0, 0.0]; 4],
+        };
+        let old = vec![tile(1), tile(2)];
+        let old_key = map_tile_key(&old[0]);
+        let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+        resources.prepare_map_tiles(identity, &selection, &old);
+
+        selection.current_tiles = vec![(id(2), 0), (id(3), 1)];
+        let new = tile(3);
+        let expected_current = [map_tile_key(&old[1]), map_tile_key(&new)]
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>();
+        let draw = resources.prepare_map_tiles(identity, &selection, &[new]);
+
+        assert_eq!(draw.fallback, vec![old_key]);
+        assert_eq!(
+            draw.current
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>(),
+            expected_current
+        );
+        assert!(resources.map_tiles.contains(old_key));
+    }
+
+    #[test]
+    fn three_saturated_scopes_have_stable_sorted_quotas_and_uploads() {
+        let Some(ctx) = RenderContext::headless() else {
+            return;
+        };
+        let mut resources = SceneResources::new(ctx);
+        let selection = |scope| MapTileSelection {
+            scope: MapScopeId(scope),
+            epoch: 1,
+            provider: crate::map::provider::MapProviderId::BingSatellite,
+            generation: 1,
+            current_tiles: (0..128)
+                .map(|x| (crate::map::provider::TileId { zoom: 8, x, y: 0 }, x as i32))
+                .collect(),
+            enabled: true,
+        };
+        let tiles = |scope| {
+            (0..128)
+                .map(|x| ReadyTile {
+                    scope: MapScopeId(scope),
+                    epoch: 1,
+                    provider: crate::map::provider::MapProviderId::BingSatellite,
+                    id: crate::map::provider::TileId { zoom: 8, x, y: 0 },
+                    generation: 1,
+                    rgba: [scope as u8, x as u8, 0, 255].repeat(256 * 256),
+                    corners: [[x as f32, 0.0, 0.0]; 4],
+                })
+                .collect::<Vec<_>>()
+        };
+        let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+        for scope in [30, 10, 20] {
+            resources.prepare_map_tiles(identity, &selection(scope), &tiles(scope));
+        }
+        let warm = resources.map_tiles.upload_count();
+        for _ in 0..3 {
+            for scope in [30, 10, 20] {
+                resources.prepare_map_tiles(identity, &selection(scope), &[]);
+            }
+        }
+        let resident = |scope| {
+            resources.map_tile_cache[&MapScopeId(scope)]
+                .keys()
+                .filter(|key| resources.map_tiles.contains(**key))
+                .count()
+        };
+        assert_eq!((resident(10), resident(20), resident(30)), (43, 43, 42));
+        assert_eq!(resources.map_tiles.upload_count(), warm);
+    }
+
+    #[test]
+    fn saturated_other_scope_cannot_starve_active_scope() {
+        let Some(ctx) = RenderContext::headless() else {
+            return;
+        };
+        let mut resources = SceneResources::new(ctx);
+        let selection = |scope| MapTileSelection {
+            scope: MapScopeId(scope),
+            epoch: 1,
+            provider: crate::map::provider::MapProviderId::BingSatellite,
+            generation: 1,
+            current_tiles: live_zoom(8),
+            enabled: true,
+        };
+        let tile = |scope, x| ReadyTile {
+            scope: MapScopeId(scope),
+            epoch: 1,
+            provider: crate::map::provider::MapProviderId::BingSatellite,
+            id: crate::map::provider::TileId { zoom: 8, x, y: 0 },
+            generation: 1,
+            rgba: [scope as u8, x as u8, 0, 255].repeat(256 * 256),
+            corners: [[x as f32, 0.0, 0.0]; 4],
+        };
+        let a: Vec<_> = (0..128).map(|x| tile(41, x)).collect();
+        let b = tile(42, 0);
+        let b_key = map_tile_key(&b);
+        let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+        resources.prepare_map_tiles(identity, &selection(41), &a);
+        let draw_b = resources.prepare_map_tiles(identity, &selection(42), &[b]);
+        assert_eq!(draw_b.current, vec![b_key]);
+        assert!(resources.map_tiles.contains(b_key));
+        assert!(
+            draw_b
+                .current
+                .iter()
+                .all(|key| resources.map_tiles.contains(*key))
+        );
+        let draw_a = resources.prepare_map_tiles(identity, &selection(41), &[]);
+        assert_eq!(draw_a.current.len(), 64);
+        assert!(
+            resources.map_tiles.contains(b_key),
+            "alternating panes stabilizes without evicting B"
+        );
+        let draw_b_again = resources.prepare_map_tiles(identity, &selection(42), &[]);
+        assert_eq!(draw_b_again.current, vec![b_key]);
+        assert_eq!(resources.map_tiles.resident_tile_count(), 65);
+    }
+
+    #[test]
+    fn retaining_live_map_scopes_reclaims_closed_scope_quota_and_cache() {
+        let Some(ctx) = RenderContext::headless() else {
+            return;
+        };
+        let mut resources = SceneResources::new(ctx);
+        let selection = |scope| MapTileSelection {
+            scope: MapScopeId(scope),
+            epoch: 1,
+            provider: crate::map::provider::MapProviderId::BingSatellite,
+            generation: 1,
+            current_tiles: live_zoom(8),
+            enabled: true,
+        };
+        let tile = |scope, x| ReadyTile {
+            scope: MapScopeId(scope),
+            epoch: 1,
+            provider: crate::map::provider::MapProviderId::BingSatellite,
+            id: crate::map::provider::TileId { zoom: 8, x, y: 0 },
+            generation: 1,
+            rgba: [scope as u8, x as u8, 0, 255].repeat(256 * 256),
+            corners: [[x as f32, 0.0, 0.0]; 4],
+        };
+        let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+        let a: Vec<_> = (0..128).map(|x| tile(51, x)).collect();
+        let b: Vec<_> = (0..128).map(|x| tile(52, x)).collect();
+        resources.prepare_map_tiles(identity, &selection(51), &a);
+        resources.prepare_map_tiles(identity, &selection(52), &b);
+
+        resources.retain_map_scopes(&[MapScopeId(52)]);
+
+        assert!(!resources.map_tile_cache.contains_key(&MapScopeId(51)));
+        assert!(!resources.map_tile_selections.contains_key(&MapScopeId(51)));
+        assert_eq!(resources.map_tiles.resident_tile_count(), 128);
+        let draw_b = resources.prepare_map_tiles(identity, &selection(52), &[]);
+        assert_eq!(draw_b.current.len(), 128, "B gets the closed pane's quota");
+
+        resources.retain_map_scopes(&[]);
+        assert!(resources.map_tile_cache.is_empty());
+        assert!(resources.map_tile_selections.is_empty());
+        assert!(resources.map_tile_resident_signatures.is_empty());
+        assert_eq!(resources.map_tiles.resident_tile_count(), 0);
+
+        for scope in 60..64 {
+            let tiles: Vec<_> = (0..128).map(|x| tile(scope, x)).collect();
+            resources.prepare_map_tiles(identity, &selection(scope), &tiles);
+            resources.retain_map_scopes(&[]);
+            assert!(resources.map_tile_cache.is_empty());
+            assert!(resources.map_tile_selections.is_empty());
+            assert!(resources.map_tile_resident_signatures.is_empty());
+            assert_eq!(resources.map_tiles.resident_tile_count(), 0);
+        }
+
+        let disabled_scope = MapScopeId(70);
+        resources.prepare_map_tiles(
+            identity,
+            &MapTileSelection {
+                current_tiles: Vec::new(),
+                enabled: false,
+                ..selection(disabled_scope.0)
+            },
+            &[],
+        );
+        resources.retain_map_scopes(&[disabled_scope]);
+        assert!(resources.map_tile_cache.is_empty());
+        assert!(resources.map_tile_selections.is_empty());
+        assert_eq!(resources.map_tiles.resident_tile_count(), 0);
+    }
+
+    #[test]
+    fn scene_pass_encodes_tiles_before_grid_before_vehicle_overlays() {
+        let source = include_str!("gpu.rs");
+        let pass = source
+            .split("let mut pass = res.target.begin_pass")
+            .nth(1)
+            .expect("scene pass");
+        let tiles = pass.find("res.map_tiles.draw").expect("tile draw");
+        let grid = pass.find("res.grid.draw").expect("grid draw");
+        let vehicles = pass.find("res.draw_vehicles").expect("vehicle draw");
+        assert!(tiles < grid && grid < vehicles);
     }
 }

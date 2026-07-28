@@ -1,0 +1,28 @@
+[package]
+name = "egui_graph"
+version = "0.16.2"
+edition = "2021"
+description = "A general-purpose node graph widget for egui."
+license = "MIT"
+repository = "https://github.com/nannou-org/egui_graph"
+
+# Required for wgpu v0.10 feature resolution.
+resolver = "2"
+
+[dependencies]
+egui = { version = "0.34", default-features = false }
+serde = { version = "1.0", optional = true }
+
+[dev-dependencies]
+eframe = "0.34"
+env_logger = "0.11"
+petgraph = "0.8"
+
+[features]
+default = ["layout", "serde"]
+layout = []
+serde = ["egui/serde", "dep:serde"]
+
+[[example]]
+name = "mixed_flow"
+required-features = ["layout"]

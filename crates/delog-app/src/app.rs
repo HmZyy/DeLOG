@@ -4,20 +4,35 @@ use std::time::{Duration, Instant};
 use delog_cache::CacheManager;
 use delog_core::diagnostics::{DiagRecord, Severity};
 use delog_core::time::TimeRange;
+use egui_extras::{Column, TableBuilder};
 use serde::Serialize;
 
 use crate::browser::{self, BrowserFilterCache, BrowserModel};
 use crate::diagnostics::DiagnosticsDock;
-use crate::field_stats::{FieldStatsController, StatsRequestKey, StatsTab};
+use crate::docks::{AppDockController, AppDockTab};
+use crate::field_stats::{FieldStatsController, StatsTab};
 use crate::gpu::GpuBridge;
 use crate::layout::{LayoutApply, LayoutDoc, LayoutError, LoadOutcome, PendingLayout};
 use crate::live::ConnectionDialog;
+use crate::logging::{LogLevel, LogRecord, LoggingDock, PendingLog};
+use crate::map::worker::{CacheActionKind, CacheActionStatus, TileManager};
 use crate::performance::{PerformanceDock, PerformanceSnapshot, ResourceSummary, TraceSummary};
 use crate::plot::ViewX;
 #[cfg(feature = "scripting")]
 use crate::scripts;
 use crate::session::Session;
-use crate::settings::{AppSettings, RenderMode, SettingsDialog};
+use crate::settings::{AppSettings, RenderMode, SettingsDialog, TileCacheUiState};
+use crate::sync_window::SyncWindow;
+
+fn tile_cache_needs_repaint(clear_submitted: bool, cache_action_pending: bool) -> bool {
+    clear_submitted || cache_action_pending
+}
+
+fn keep_active_loads_repainting(ctx: &egui::Context, has_active_loads: bool) {
+    if has_active_loads {
+        ctx.request_repaint_after(Duration::from_millis(50));
+    }
+}
 use crate::timeline::Playback;
 use crate::workspace::{PlotServices, Workspace};
 
@@ -31,9 +46,22 @@ type LayoutImportResult = Result<LayoutDoc, LayoutError>;
 type LayoutExportResult = Result<std::path::PathBuf, LayoutError>;
 type DiagnosticsExportResult = Result<std::path::PathBuf, String>;
 type ProfilingExportResult = Result<std::path::PathBuf, String>;
-type CsvExportResult = Result<(std::path::PathBuf, u64), String>;
+
+struct DataExportSuccess {
+    path: std::path::PathBuf,
+    format: crate::data_export::ExportFormat,
+    rows: u64,
+}
+
+enum DataExportEvent {
+    Started(crate::data_export::ActiveExport),
+    Written { id: u64, success: DataExportSuccess },
+    Cancelled { id: u64, path: std::path::PathBuf },
+    Failed { id: u64, error: String },
+}
 const SESSION_AUTOSAVE_INTERVAL: Duration = Duration::from_secs(30);
 const PERFORMANCE_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
+const LOG_RETENTION: usize = 1_000;
 const EMPTY_SESSION_TIMELINE_RANGE: TimeRange = TimeRange {
     min_us: 0,
     max_us: 10_000_000,
@@ -209,6 +237,7 @@ enum LayoutManagerAction {
 
 pub struct DelogApp {
     session: Session,
+    parquet_import: crate::parquet_import::ParquetImportUi,
     #[cfg(feature = "scripting")]
     scripts: scripts::ScriptsPanel,
     gpu: GpuBridge,
@@ -236,23 +265,38 @@ pub struct DelogApp {
     fps_ema: Option<f32>,
     last_frame_at: Option<Instant>,
     /// Picked on a worker thread — the dialog must never block the UI thread.
-    picked_files: mpsc::Receiver<Vec<std::path::PathBuf>>,
-    picked_files_tx: mpsc::Sender<Vec<std::path::PathBuf>>,
+    picked_files: mpsc::Receiver<PickedFiles>,
+    picked_files_tx: mpsc::Sender<PickedFiles>,
     imported_layouts: mpsc::Receiver<LayoutImportResult>,
     imported_layouts_tx: mpsc::Sender<LayoutImportResult>,
     exported_layouts: mpsc::Receiver<LayoutExportResult>,
     exported_layouts_tx: mpsc::Sender<LayoutExportResult>,
     exported_diagnostics: mpsc::Receiver<DiagnosticsExportResult>,
     exported_diagnostics_tx: mpsc::Sender<DiagnosticsExportResult>,
+    exported_kml: mpsc::Receiver<Result<String, String>>,
+    exported_kml_tx: mpsc::Sender<Result<String, String>>,
+    message_popups: Vec<crate::message_popup::MessagePopup>,
     exported_profiling: mpsc::Receiver<ProfilingExportResult>,
     exported_profiling_tx: mpsc::Sender<ProfilingExportResult>,
-    csv_export: crate::csv_export::CsvExportState,
-    csv_export_tx: mpsc::Sender<CsvExportResult>,
-    csv_export_rx: mpsc::Receiver<CsvExportResult>,
-    csv_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    data_export: crate::data_export::DataExportState,
+    data_export_tx: mpsc::Sender<DataExportEvent>,
+    data_export_rx: mpsc::Receiver<DataExportEvent>,
+    data_exports: Vec<crate::data_export::ActiveExport>,
+    next_data_export_id: u64,
+    image_export_writes: mpsc::Receiver<crate::image_export::PngWriteRequest>,
+    image_export_writes_tx: mpsc::Sender<crate::image_export::PngWriteRequest>,
+    pending_image_capture: Option<crate::image_export::PendingImageCapture>,
+    queued_image_capture: Option<crate::image_export::ImageCaptureIntent>,
+    next_image_capture_id: u64,
+    image_clipboard: Option<arboard::Clipboard>,
     browser_collapsed: bool,
+    docks: AppDockController,
     diagnostics_dock: DiagnosticsDock,
     last_diagnostic_seq: Option<u64>,
+    logging_dock: LoggingDock,
+    logs: Vec<LogRecord>,
+    next_log_seq: u64,
+    log_started_at: Instant,
     performance_dock: PerformanceDock,
     markers_dock: crate::markers::MarkersDock,
     performance_snapshot: PerformanceSnapshot,
@@ -267,12 +311,16 @@ pub struct DelogApp {
     source_metadata_dialog: Option<delog_core::identity::SourceId>,
     field_metadata_dialog: Option<delog_core::identity::FieldId>,
     field_stats: FieldStatsController,
+    sync_window: Option<SyncWindow>,
+    dataflow: crate::dataflow::window::DataFlowUi,
     generate_markers_dialog: Option<crate::generate_markers::GenerateMarkersDialog>,
     save_layout_dialog: SaveLayoutDialog,
     load_layout_dialog: LoadLayoutDialog,
     layout_manager_dialog: LayoutManagerDialog,
     settings: AppSettings,
     settings_dialog: SettingsDialog,
+    tile_manager: Option<TileManager>,
+    tile_manager_error: Option<String>,
     theme_needs_apply: bool,
     pending_layout: Option<PendingLayout>,
     deferred_layout_doc: Option<LayoutDoc>,
@@ -300,18 +348,41 @@ impl DelogApp {
         settings.theme.apply(&cc.egui_ctx);
         settings.font.apply(&cc.egui_ctx);
         let connection_dialog = ConnectionDialog::from_settings(&settings.live_connection);
+        let (tile_manager, tile_manager_error) =
+            match directories::ProjectDirs::from("org", "hmzyy", "DeLOG") {
+                Some(dirs) => {
+                    let cache_dir = dirs.cache_dir().join("map-tiles");
+                    let repaint = cc.egui_ctx.clone();
+                    match TileManager::new(
+                        cache_dir,
+                        settings.scene3d.tile_cache_limit_bytes,
+                        move || repaint.request_repaint(),
+                    ) {
+                        Ok(manager) => (Some(manager), None),
+                        Err(error) => {
+                            tracing::warn!(%error, "map tile cache unavailable");
+                            (None, Some(error.to_string()))
+                        }
+                    }
+                }
+                None => (None, Some("cache directory unavailable".to_owned())),
+            };
         let (picked_files_tx, picked_files) = mpsc::channel();
         let (traj_results_tx, traj_results) = mpsc::channel();
         let (imported_layouts_tx, imported_layouts) = mpsc::channel();
         let (exported_layouts_tx, exported_layouts) = mpsc::channel();
         let (exported_diagnostics_tx, exported_diagnostics) = mpsc::channel();
+        let (exported_kml_tx, exported_kml) = mpsc::channel();
         let (exported_profiling_tx, exported_profiling) = mpsc::channel();
-        let (csv_export_tx, csv_export_rx) = mpsc::channel();
-        let session = Session::new(cc.egui_ctx.clone());
+        let (data_export_tx, data_export_rx) = mpsc::channel();
+        let (image_export_writes_tx, image_export_writes) = mpsc::channel();
+        let (parquet_import, parquet_selection) = crate::parquet_import::ParquetImportUi::new();
+        let session = Session::new(cc.egui_ctx.clone(), parquet_selection);
         // Shared metrics registry so cache metrics land in the same dock.
         let caches = CacheManager::new().with_metrics(std::sync::Arc::clone(session.metrics()));
         Self {
             session,
+            parquet_import,
             #[cfg(feature = "scripting")]
             scripts: {
                 let config_dir =
@@ -346,15 +417,30 @@ impl DelogApp {
             exported_layouts_tx,
             exported_diagnostics,
             exported_diagnostics_tx,
+            exported_kml,
+            exported_kml_tx,
+            message_popups: Vec::new(),
             exported_profiling,
             exported_profiling_tx,
-            csv_export: crate::csv_export::CsvExportState::default(),
-            csv_export_tx,
-            csv_export_rx,
-            csv_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            data_export: crate::data_export::DataExportState::default(),
+            data_export_tx,
+            data_export_rx,
+            data_exports: Vec::new(),
+            next_data_export_id: 1,
+            image_export_writes,
+            image_export_writes_tx,
+            pending_image_capture: None,
+            queued_image_capture: None,
+            next_image_capture_id: 1,
+            image_clipboard: None,
             browser_collapsed: false,
+            docks: AppDockController::new_empty(),
             diagnostics_dock: DiagnosticsDock::default(),
             last_diagnostic_seq: None,
+            logging_dock: LoggingDock::default(),
+            logs: Vec::new(),
+            next_log_seq: 0,
+            log_started_at: Instant::now(),
             performance_dock: PerformanceDock::default(),
             markers_dock: crate::markers::MarkersDock::default(),
             performance_snapshot: PerformanceSnapshot::default(),
@@ -367,6 +453,8 @@ impl DelogApp {
             source_metadata_dialog: None,
             field_metadata_dialog: None,
             field_stats: FieldStatsController::default(),
+            sync_window: None,
+            dataflow: crate::dataflow::window::DataFlowUi::new(),
             generate_markers_dialog: None,
             save_layout_dialog: SaveLayoutDialog {
                 open: false,
@@ -376,6 +464,8 @@ impl DelogApp {
             layout_manager_dialog: LayoutManagerDialog::default(),
             settings,
             settings_dialog: SettingsDialog::default(),
+            tile_manager,
+            tile_manager_error,
             theme_needs_apply: false,
             pending_layout: None,
             deferred_layout_doc: None,
@@ -396,20 +486,95 @@ impl DelogApp {
         }
     }
 
+    fn dock_open_checkbox(&mut self, ui: &mut egui::Ui, tab: AppDockTab, label: &str) {
+        let mut open = self.docks.is_open(tab);
+        if ui.checkbox(&mut open, label).clicked() {
+            if open {
+                self.open_dock(tab);
+            } else {
+                self.close_dock(tab);
+            }
+            ui.close();
+        }
+    }
+
+    fn open_dock(&mut self, tab: AppDockTab) {
+        self.set_legacy_dock_open(tab, true);
+        self.docks.open_or_focus(tab);
+    }
+
+    fn close_dock(&mut self, tab: AppDockTab) {
+        self.set_legacy_dock_open(tab, false);
+        self.docks.close(tab);
+    }
+
+    fn set_legacy_dock_open(&mut self, tab: AppDockTab, open: bool) {
+        match tab {
+            AppDockTab::Diagnostics => self.diagnostics_dock.open = open,
+            AppDockTab::Performance => self.performance_dock.open = open,
+            AppDockTab::Markers => self.markers_dock.open = open,
+            #[cfg(feature = "scripting")]
+            AppDockTab::ScriptingConsole => self.scripts.set_console_open(open),
+            AppDockTab::Logging => self.logging_dock.open = open,
+        }
+    }
+
+    fn sync_dock_from_legacy_flag(&mut self, tab: AppDockTab, open: bool) {
+        if open {
+            if !self.docks.is_open(tab) {
+                self.docks.open_or_focus(tab);
+            }
+        } else if self.docks.is_open(tab) {
+            self.docks.close(tab);
+        }
+    }
+
+    fn sync_docks_from_legacy_flags(&mut self) {
+        self.sync_dock_from_legacy_flag(AppDockTab::Diagnostics, self.diagnostics_dock.open);
+        self.sync_dock_from_legacy_flag(AppDockTab::Performance, self.performance_dock.open);
+        self.sync_dock_from_legacy_flag(AppDockTab::Markers, self.markers_dock.open);
+        #[cfg(feature = "scripting")]
+        self.sync_dock_from_legacy_flag(AppDockTab::ScriptingConsole, self.scripts.console_open);
+        self.sync_dock_from_legacy_flag(AppDockTab::Logging, self.logging_dock.open);
+    }
+
+    fn sync_legacy_dock_flag_from_state(&mut self, tab: AppDockTab) {
+        self.set_legacy_dock_open(tab, self.docks.is_open(tab));
+    }
+
+    fn sync_legacy_dock_flags_from_state(&mut self) {
+        self.sync_legacy_dock_flag_from_state(AppDockTab::Diagnostics);
+        self.sync_legacy_dock_flag_from_state(AppDockTab::Performance);
+        self.sync_legacy_dock_flag_from_state(AppDockTab::Markers);
+        #[cfg(feature = "scripting")]
+        self.sync_legacy_dock_flag_from_state(AppDockTab::ScriptingConsole);
+        self.sync_legacy_dock_flag_from_state(AppDockTab::Logging);
+    }
+
     /// On a worker thread so the native dialog never blocks the UI.
-    fn spawn_open_dialog(&self, ctx: &egui::Context) {
+    fn spawn_open_dialog(&self, ctx: &egui::Context, parser: Option<&'static str>) {
         let tx = self.picked_files_tx.clone();
         let ctx = ctx.clone();
         std::thread::Builder::new()
             .name("delog-open-dialog".into())
             .spawn(move || {
-                let picked = rfd::FileDialog::new()
-                    .add_filter("Flight logs", &["bin", "BIN", "ulg", "ulog", "tlog"])
-                    .add_filter("All files", &["*"])
-                    .set_title("Open flight logs")
-                    .pick_files();
-                if let Some(paths) = picked {
-                    let _ = tx.send(paths);
+                let dialog = match parser {
+                    Some(name) => rfd::FileDialog::new()
+                        .add_filter("All files", &["*"])
+                        .set_title(format!("Open with {}", parser_label(name))),
+                    None => rfd::FileDialog::new()
+                        .add_filter(
+                            "Flight logs",
+                            &["bin", "BIN", "ulg", "ulog", "tlog", "parquet"],
+                        )
+                        .add_filter("All files", &["*"])
+                        .set_title("Open flight logs"),
+                };
+                if let Some(paths) = dialog.pick_files() {
+                    let _ = tx.send(PickedFiles {
+                        paths,
+                        parser: parser.map(str::to_owned),
+                    });
                     ctx.request_repaint();
                 }
             })
@@ -417,9 +582,244 @@ impl DelogApp {
     }
 
     fn handle_picked_files(&mut self) {
-        while let Ok(paths) = self.picked_files.try_recv() {
-            for path in paths {
-                self.session.open_path(path);
+        while let Ok(picked) = self.picked_files.try_recv() {
+            for path in picked.paths {
+                self.session.open_path(path, picked.parser.clone());
+            }
+        }
+    }
+
+    fn spawn_png_export_dialog(
+        &self,
+        ctx: &egui::Context,
+        kind: crate::image_export::ImageCaptureKind,
+        png_bytes: Vec<u8>,
+    ) {
+        let tx = self.image_export_writes_tx.clone();
+        let ctx = ctx.clone();
+        let file_name = match kind {
+            crate::image_export::ImageCaptureKind::Workspace => "workspace.png",
+            crate::image_export::ImageCaptureKind::Plot => "plot.png",
+        };
+        std::thread::Builder::new()
+            .name("delog-image-export-dialog".into())
+            .spawn(move || {
+                let picked = rfd::FileDialog::new()
+                    .add_filter("PNG image", &["png"])
+                    .set_file_name(file_name)
+                    .set_title("Export PNG")
+                    .save_file();
+                if let Some(path) = picked {
+                    let _ = tx.send(crate::image_export::PngWriteRequest::new(path, png_bytes));
+                    ctx.request_repaint();
+                }
+            })
+            .expect("spawn image export dialog thread");
+    }
+
+    fn handle_image_export_writes(&mut self) {
+        while let Ok(request) = self.image_export_writes.try_recv() {
+            match std::fs::write(&request.path, request.png_bytes) {
+                Ok(()) => self
+                    .session
+                    .push_diagnostic(delog_core::diagnostics::Diag::info(
+                        "image-export",
+                        format!("exported image to {}", request.path.display()),
+                    )),
+                Err(err) => self
+                    .session
+                    .push_diagnostic(delog_core::diagnostics::Diag::error(
+                        "image-export",
+                        err.to_string(),
+                    )),
+            }
+        }
+    }
+
+    fn copy_captured_image_to_clipboard(
+        &mut self,
+        kind: crate::image_export::ImageCaptureKind,
+        image: &egui::ColorImage,
+    ) {
+        let what = match kind {
+            crate::image_export::ImageCaptureKind::Workspace => "workspace",
+            crate::image_export::ImageCaptureKind::Plot => "plot",
+        };
+
+        if self.image_clipboard.is_none() {
+            match arboard::Clipboard::new() {
+                Ok(clipboard) => self.image_clipboard = Some(clipboard),
+                Err(err) => {
+                    self.session
+                        .push_diagnostic(delog_core::diagnostics::Diag::error(
+                            "image-copy",
+                            format!("failed to initialize clipboard: {err}"),
+                        ));
+                    return;
+                }
+            }
+        }
+
+        let Some(clipboard) = self.image_clipboard.as_mut() else {
+            return;
+        };
+        match crate::image_export::copy_image_to_clipboard(clipboard, image) {
+            Ok(()) => self
+                .session
+                .push_diagnostic(delog_core::diagnostics::Diag::info(
+                    "image-copy",
+                    format!(
+                        "copied {what} image to clipboard via arboard ({}x{})",
+                        image.size[0], image.size[1]
+                    ),
+                )),
+            Err(err) => {
+                self.image_clipboard = None;
+                self.session
+                    .push_diagnostic(delog_core::diagnostics::Diag::error(
+                        "image-copy",
+                        format!("failed to copy {what} image to clipboard: {err}"),
+                    ));
+            }
+        }
+    }
+
+    fn queue_image_capture(
+        &mut self,
+        ctx: &egui::Context,
+        intent: crate::image_export::ImageCaptureIntent,
+    ) {
+        if self.pending_image_capture.is_some() || self.queued_image_capture.is_some() {
+            self.session
+                .push_diagnostic(delog_core::diagnostics::Diag::warning(
+                    "image-export",
+                    "image capture already in progress",
+                ));
+            return;
+        }
+        self.queued_image_capture = Some(intent);
+        ctx.request_repaint();
+    }
+
+    fn start_queued_image_capture(
+        &mut self,
+        ctx: &egui::Context,
+        workspace_rect: Option<egui::Rect>,
+    ) {
+        let Some(intent) = self.queued_image_capture.take() else {
+            return;
+        };
+        if !intent.is_ready(self.frame) || self.pending_image_capture.is_some() {
+            self.queued_image_capture = Some(intent);
+            ctx.request_repaint();
+            return;
+        }
+        let Some(rect) = intent.resolve_rect(workspace_rect) else {
+            self.session
+                .push_diagnostic(delog_core::diagnostics::Diag::warning(
+                    "image-export",
+                    "workspace is not ready to export",
+                ));
+            return;
+        };
+        self.request_image_capture(
+            ctx,
+            intent.action,
+            intent.kind,
+            rect,
+            ctx.pixels_per_point(),
+        );
+    }
+
+    fn request_image_capture(
+        &mut self,
+        ctx: &egui::Context,
+        action: crate::image_export::ImageCaptureAction,
+        kind: crate::image_export::ImageCaptureKind,
+        rect: egui::Rect,
+        pixels_per_point: f32,
+    ) {
+        if self.pending_image_capture.is_some() {
+            self.session
+                .push_diagnostic(delog_core::diagnostics::Diag::warning(
+                    "image-export",
+                    "image capture already in progress",
+                ));
+            return;
+        }
+        if rect.width() <= 1.0 || rect.height() <= 1.0 {
+            self.session
+                .push_diagnostic(delog_core::diagnostics::Diag::warning(
+                    "image-export",
+                    "nothing to capture",
+                ));
+            return;
+        }
+        let id = self.next_image_capture_id;
+        self.next_image_capture_id = self.next_image_capture_id.wrapping_add(1).max(1);
+        self.pending_image_capture = Some(crate::image_export::PendingImageCapture {
+            id,
+            action,
+            kind,
+            rect,
+            pixels_per_point,
+        });
+        ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(id)));
+        ctx.request_repaint();
+    }
+
+    fn handle_image_screenshot_events(&mut self, ctx: &egui::Context) {
+        let events = ctx.input(|input| input.events.clone());
+        for event in events {
+            let egui::Event::Screenshot {
+                user_data, image, ..
+            } = event
+            else {
+                continue;
+            };
+            let Some(id) = crate::image_export::screenshot_request_id(&user_data) else {
+                continue;
+            };
+            if self
+                .pending_image_capture
+                .as_ref()
+                .map(|pending| pending.id)
+                != Some(id)
+            {
+                continue;
+            }
+            let Some(pending) = self.pending_image_capture.take() else {
+                continue;
+            };
+            let Some(cropped) = crate::image_export::crop_color_image(
+                &image,
+                pending.rect,
+                pending.pixels_per_point,
+            ) else {
+                self.session
+                    .push_diagnostic(delog_core::diagnostics::Diag::error(
+                        "image-export",
+                        "captured image did not overlap the requested area",
+                    ));
+                continue;
+            };
+
+            match pending.action {
+                crate::image_export::ImageCaptureAction::Copy => {
+                    self.copy_captured_image_to_clipboard(pending.kind, &cropped);
+                }
+                crate::image_export::ImageCaptureAction::Export => {
+                    match crate::image_export::encode_png(&cropped) {
+                        Ok(png_bytes) => self.spawn_png_export_dialog(ctx, pending.kind, png_bytes),
+                        Err(err) => {
+                            self.session
+                                .push_diagnostic(delog_core::diagnostics::Diag::error(
+                                    "image-export",
+                                    err.to_string(),
+                                ))
+                        }
+                    }
+                }
             }
         }
     }
@@ -472,6 +872,35 @@ impl DelogApp {
             }
         }
 
+        while let Ok(result) = self.exported_kml.try_recv() {
+            match result {
+                Ok(msg) => {
+                    self.push_log(PendingLog::with_target(
+                        LogLevel::Info,
+                        "kml-export",
+                        msg.clone(),
+                    ));
+                    self.message_popups
+                        .push(crate::message_popup::MessagePopup::info(
+                            "Export trajectories KML",
+                            msg,
+                        ));
+                }
+                Err(err) => {
+                    self.push_log(PendingLog::with_target(
+                        LogLevel::Error,
+                        "kml-export",
+                        err.clone(),
+                    ));
+                    self.message_popups
+                        .push(crate::message_popup::MessagePopup::error(
+                            "Export trajectories KML",
+                            err,
+                        ));
+                }
+            }
+        }
+
         while let Ok(result) = self.exported_profiling.try_recv() {
             match result {
                 Ok(path) => self
@@ -489,19 +918,43 @@ impl DelogApp {
             }
         }
 
-        while let Ok(result) = self.csv_export_rx.try_recv() {
-            match result {
-                Ok((path, rows)) => {
+        while let Ok(event) = self.data_export_rx.try_recv() {
+            let finished = match event {
+                DataExportEvent::Started(active) => {
+                    self.data_exports.push(active);
+                    continue;
+                }
+                DataExportEvent::Written { id, success } => {
                     self.session
                         .push_diagnostic(delog_core::diagnostics::Diag::info(
-                            "csv-export",
-                            format!("exported {rows} rows to {}", path.display()),
-                        ))
+                            "data-export",
+                            format!(
+                                "exported {} rows as {} to {}",
+                                success.rows,
+                                success.format.label(),
+                                success.path.display()
+                            ),
+                        ));
+                    id
                 }
-                Err(err) => self
-                    .session
-                    .push_diagnostic(delog_core::diagnostics::Diag::error("csv-export", err)),
-            }
+                DataExportEvent::Cancelled { id, path } => {
+                    self.session
+                        .push_diagnostic(delog_core::diagnostics::Diag::info(
+                            "data-export",
+                            format!("cancelled export to {}", path.display()),
+                        ));
+                    id
+                }
+                DataExportEvent::Failed { id, error } => {
+                    self.session
+                        .push_diagnostic(delog_core::diagnostics::Diag::error(
+                            "data-export",
+                            error,
+                        ));
+                    id
+                }
+            };
+            self.data_exports.retain(|active| active.id != finished);
         }
     }
 
@@ -700,53 +1153,19 @@ impl DelogApp {
         }
     }
 
-    /// Anchored top-left so it clears the corner FPS badge.
-    fn paint_debug_overlay(&self, ctx: &egui::Context) {
-        if !self.settings.show_debug_overlay {
-            return;
+    fn push_log(&mut self, pending: PendingLog) {
+        self.logs.push(LogRecord {
+            seq: self.next_log_seq,
+            elapsed_ms: self.log_started_at.elapsed().as_millis(),
+            level: pending.level,
+            target: pending.target,
+            message: pending.message,
+        });
+        self.next_log_seq = self.next_log_seq.wrapping_add(1);
+        let excess = self.logs.len().saturating_sub(LOG_RETENTION);
+        if excess > 0 {
+            self.logs.drain(0..excess);
         }
-        let metrics = self.session.metrics();
-        egui::Area::new(egui::Id::new("debug_overlay"))
-            .order(egui::Order::Foreground)
-            .anchor(egui::Align2::LEFT_TOP, egui::vec2(8.0, 8.0))
-            .interactable(false)
-            .show(ctx, |ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.set_min_width(190.0);
-                    ui.strong("Debug Overlay (F12)");
-                    match self.fps_ema {
-                        Some(fps) => ui.label(format!("FPS {fps:.0}")),
-                        None => ui.weak("FPS idle"),
-                    };
-                    ui.separator();
-                    egui::Grid::new("debug_overlay_grid")
-                        .num_columns(3)
-                        .spacing([10.0, 2.0])
-                        .show(ui, |ui| {
-                            ui.strong("timer");
-                            ui.strong("last");
-                            ui.strong("avg");
-                            ui.end_row();
-                            // Frame timers, in milliseconds.
-                            for name in [
-                                "frame_total",
-                                "plot_paint_cpu",
-                                "gpu_encode",
-                                "yquery",
-                                "3d_frame",
-                            ] {
-                                if let Some(s) = metrics.stats(name)
-                                    && s.n > 0
-                                {
-                                    ui.monospace(name);
-                                    ui.label(format!("{:.2} ms", s.last));
-                                    ui.label(format!("{:.2} ms", s.avg));
-                                    ui.end_row();
-                                }
-                            }
-                        });
-                });
-            });
     }
 
     fn poll_trajectory_builds(&mut self) {
@@ -823,22 +1242,8 @@ impl DelogApp {
             name,
             workspace: &self.workspace,
             snapshot,
-            view: self.view,
-            fit_all: self.fit_view_all,
             speed: self.playback.speed as f64,
             follow_live: self.playback.follow_live,
-            marker_us: self.marker_us,
-            markers: self
-                .markers
-                .as_slice()
-                .iter()
-                .map(|m| crate::layout::MarkerLayout {
-                    t_us: m.t_us,
-                    label: m.label.clone(),
-                    color: m.color,
-                    note: m.note.clone(),
-                })
-                .collect(),
             vehicles: &self.vehicles,
         })
     }
@@ -948,6 +1353,61 @@ impl DelogApp {
             .expect("spawn diagnostics export dialog thread");
     }
 
+    /// KML is built on the UI thread (needs snapshot + vehicle state); only the
+    /// file dialog and write run on the worker. Results flow back through
+    /// `exported_kml` and surface as a diagnostic plus a message popup.
+    fn spawn_export_kml_dialog(
+        &self,
+        ctx: &egui::Context,
+        snapshot: &delog_core::snapshot::StoreSnapshot,
+    ) {
+        let export =
+            crate::kml_export::build_kml(snapshot, &self.vehicles, &self.vehicle_trajectories);
+        if export.exported == 0 {
+            let _ = self
+                .exported_kml_tx
+                .send(Err("no georeferenced trajectories to export".into()));
+            ctx.request_repaint();
+            return;
+        }
+        let noun = if export.exported == 1 {
+            "trajectory"
+        } else {
+            "trajectories"
+        };
+        let summary = if export.skipped.is_empty() {
+            format!("exported {} vehicle {noun}", export.exported)
+        } else {
+            format!(
+                "exported {} vehicle {noun}, skipped {} (no geo reference): {}",
+                export.exported,
+                export.skipped.len(),
+                export.skipped.join(", ")
+            )
+        };
+        let xml = export.xml;
+        let tx = self.exported_kml_tx.clone();
+        let ctx = ctx.clone();
+        std::thread::Builder::new()
+            .name("delog-kml-export-dialog".into())
+            .spawn(move || {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("KML", &["kml"])
+                    .add_filter("All files", &["*"])
+                    .set_title("Export trajectories KML")
+                    .set_file_name("trajectories.kml")
+                    .save_file()
+                {
+                    let result = std::fs::write(&path, xml.as_bytes())
+                        .map(|_| format!("{summary} to {}", path.display()))
+                        .map_err(|err| format!("failed to write {}: {err}", path.display()));
+                    let _ = tx.send(result);
+                    ctx.request_repaint();
+                }
+            })
+            .expect("spawn kml export dialog thread");
+    }
+
     /// Export the current profiling snapshot (metric rings + resources + traces)
     /// to JSON off the UI thread. The doc is built on the UI
     /// thread (it needs the wgpu frame for GPU stats); only the file dialog and
@@ -989,64 +1449,85 @@ impl DelogApp {
             .expect("spawn profiling export dialog thread");
     }
 
-    fn spawn_csv_export(
+    fn spawn_data_export(
         &mut self,
         ctx: &egui::Context,
         snapshot: &std::sync::Arc<delog_core::snapshot::StoreSnapshot>,
-        all_fields: &[crate::csv_export::CsvField],
-        req: crate::csv_export::CsvExportRequest,
+        all_fields: &[crate::data_export::ExportField],
+        request: crate::data_export::DataExportRequest,
     ) {
-        use std::sync::atomic::Ordering;
-        let chosen: Vec<crate::csv_export::CsvField> = req
-            .fields
-            .iter()
-            .filter_map(|id| all_fields.iter().find(|f| f.id == *id))
-            .map(|f| crate::csv_export::CsvField {
-                id: f.id,
-                label: f.label.clone(),
-                unit: f.unit.clone(),
-            })
-            .collect();
-        let origin_us = snapshot.global_time_range().map(|r| r.min_us).unwrap_or(0);
+        let id = self.next_data_export_id;
+        self.next_data_export_id += 1;
+        let chosen = match crate::data_export::resolve_export_fields(&request.fields, all_fields) {
+            Ok(chosen) => chosen,
+            Err(error) => {
+                let _ = self.data_export_tx.send(DataExportEvent::Failed {
+                    id,
+                    error: error.to_string(),
+                });
+                ctx.request_repaint();
+                return;
+            }
+        };
+        let origin_us = snapshot
+            .global_time_range()
+            .map(|range| range.min_us)
+            .unwrap_or(0);
         let snapshot = std::sync::Arc::clone(snapshot);
-        let tx = self.csv_export_tx.clone();
+        let tx = self.data_export_tx.clone();
         let ctx = ctx.clone();
-        self.csv_cancel.store(false, Ordering::Relaxed);
-        let cancel = std::sync::Arc::clone(&self.csv_cancel);
-        let mode = req.mode;
-        let window = req.window;
         std::thread::Builder::new()
-            .name("delog-csv-export".into())
+            .name("delog-data-export".into())
             .spawn(move || {
+                let format = request.format;
                 let picked = rfd::FileDialog::new()
-                    .add_filter("CSV", &["csv"])
+                    .add_filter(format.filter_name(), &[format.extension()])
                     .add_filter("All files", &["*"])
-                    .set_title("Export CSV")
-                    .set_file_name("export.csv")
+                    .set_title(format.dialog_title())
+                    .set_file_name(format.default_file_name())
                     .save_file();
                 let Some(path) = picked else { return };
-                let result = (|| {
-                    let file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
-                    let mut w = std::io::BufWriter::new(file);
-                    let rows = crate::csv_export::write_csv(
-                        &mut w,
-                        &snapshot,
-                        &chosen,
-                        window,
-                        mode,
-                        origin_us,
-                        &cancel,
-                        |_frac| {},
-                    )
-                    .map_err(|e| e.to_string())?;
-                    use std::io::Write;
-                    w.flush().map_err(|e| e.to_string())?;
-                    Ok::<_, String>((path, rows))
-                })();
-                let _ = tx.send(result);
+                let progress = crate::data_export::ExportProgress::default();
+                let cancel = delog_core::parse_ctl::CancelToken::new();
+                let _ = tx.send(DataExportEvent::Started(
+                    crate::data_export::ActiveExport::new(
+                        id,
+                        &path,
+                        progress.clone(),
+                        cancel.clone(),
+                    ),
+                ));
+                ctx.request_repaint();
+
+                let ctl = crate::data_export::ExportCtl::new(cancel, move |fraction| {
+                    progress.set(fraction);
+                });
+                let event = match crate::data_export::write_export_file(
+                    &path,
+                    format,
+                    &snapshot,
+                    &chosen,
+                    request.window,
+                    request.mode,
+                    origin_us,
+                    &ctl,
+                ) {
+                    Ok(rows) => DataExportEvent::Written {
+                        id,
+                        success: DataExportSuccess { path, format, rows },
+                    },
+                    Err(crate::data_export::DataExportError::Cancelled) => {
+                        DataExportEvent::Cancelled { id, path }
+                    }
+                    Err(error) => DataExportEvent::Failed {
+                        id,
+                        error: error.to_string(),
+                    },
+                };
+                let _ = tx.send(event);
                 ctx.request_repaint();
             })
-            .expect("spawn csv export thread");
+            .expect("spawn data export thread");
     }
 
     fn load_layout(&mut self, name: &str, snapshot: &delog_core::snapshot::StoreSnapshot) {
@@ -1158,19 +1639,11 @@ impl DelogApp {
 
     fn apply_layout(&mut self, layout: LayoutApply) {
         self.workspace = layout.workspace;
-        self.view = layout.view;
-        // A restored view is authoritative — don't let the data-fit refit
-        // overwrite it on the next frame.
-        self.view_fitted = layout.view.is_some();
+        self.view = None;
+        self.view_fitted = false;
         self.fit_view_all = layout.fit_all;
         self.playback.set_speed(layout.speed as f32);
         self.playback.follow_live = layout.follow_live;
-        self.marker_us = layout.marker_us;
-        let mut markers = crate::markers::Markers::new();
-        for m in layout.markers {
-            markers.push_loaded(m.t_us, m.label, m.color, m.note);
-        }
-        self.markers = markers;
         // Legend/tooltip visibility is restored per-pane via the workspace.
         self.vehicles = layout.vehicles;
         self.vehicle_revision = self.vehicle_revision.wrapping_add(1);
@@ -1420,6 +1893,8 @@ impl eframe::App for DelogApp {
         // Apply the global font override before any widget is laid out so a
         // changed size/family takes effect this frame.
         self.settings.font.apply(ui.ctx());
+        self.handle_image_screenshot_events(ui.ctx());
+        self.handle_image_export_writes();
         // Pre-UI bookkeeping: picked files, job pruning,
         // cache lifecycle + epoch handling, trajectory builds and autosave —
         // none of it inside a panel scope. `ui_prelude` captures this block so
@@ -1427,6 +1902,8 @@ impl eframe::App for DelogApp {
         let ui_prelude_timer = self.session.metrics().scope("ui_prelude");
         self.handle_picked_files();
         self.handle_layout_io_results();
+        self.parquet_import.poll_requests();
+        keep_active_loads_repainting(ui.ctx(), self.session.has_active_loads());
         self.session.prune_finished();
         self.poll_trajectory_builds();
         self.frame = self.frame.wrapping_add(1);
@@ -1549,25 +2026,59 @@ impl eframe::App for DelogApp {
         egui::Panel::top("main_menu").show_inside(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
-                    if ui.button("Open File").clicked() {
-                        self.spawn_open_dialog(ui.ctx());
+                    if ui.button("Open").clicked() {
+                        self.spawn_open_dialog(ui.ctx(), None);
+                        ui.close();
+                    }
+                    ui.menu_button("Open With", |ui| {
+                        for name in self.session.parser_names() {
+                            if ui.button(parser_label(name)).clicked() {
+                                self.spawn_open_dialog(ui.ctx(), Some(name));
+                                ui.close();
+                            }
+                        }
+                    });
+                    ui.menu_button("Export", |ui| {
+                        if ui.button("Export Data").clicked() {
+                            self.data_export.open();
+                            ui.close();
+                        }
+                        ui.separator();
+                        if ui.button("Export Diagnostics").clicked() {
+                            self.spawn_export_diagnostics_dialog(
+                                ui.ctx(),
+                                self.session.diagnostic_records(),
+                                &snapshot,
+                            );
+                            ui.close();
+                        }
+                        if ui.button("Export Profiling").clicked() {
+                            self.spawn_export_profiling_dialog(ui.ctx(), frame, &snapshot);
+                            ui.close();
+                        }
+                    });
+                    let offline_sources = snapshot
+                        .sources
+                        .iter()
+                        .filter(|source| {
+                            !source.entry.removed
+                                && source.entry.kind == delog_core::identity::SourceKind::File
+                        })
+                        .count();
+                    if ui
+                        .add_enabled(offline_sources >= 2, egui::Button::new("Sync Sources"))
+                        .clicked()
+                    {
+                        self.sync_window = SyncWindow::open(&snapshot);
+                        ui.close();
+                    }
+                    if ui.button("Data Flow").clicked() {
+                        self.dataflow.open = true;
                         ui.close();
                     }
                     ui.separator();
-                    if ui.button("Export Diagnostics JSON...").clicked() {
-                        self.spawn_export_diagnostics_dialog(
-                            ui.ctx(),
-                            self.session.diagnostic_records(),
-                            &snapshot,
-                        );
-                        ui.close();
-                    }
-                    if ui.button("Export Profiling JSON...").clicked() {
-                        self.spawn_export_profiling_dialog(ui.ctx(), frame, &snapshot);
-                        ui.close();
-                    }
-                    if ui.button("Export CSV...").clicked() {
-                        self.csv_export.open = true;
+                    if ui.button("Settings").clicked() {
+                        self.settings_dialog.open();
                         ui.close();
                     }
                     ui.separator();
@@ -1576,45 +2087,16 @@ impl eframe::App for DelogApp {
                         ui.close();
                     }
                 });
-                ui.menu_button("Edit", |ui| {
-                    if ui.button("Settings...").clicked() {
-                        self.settings_dialog.open();
-                        ui.close();
-                    }
-                });
+                ui.separator();
                 ui.menu_button("View", |ui| {
-                    if ui
-                        .checkbox(&mut self.diagnostics_dock.open, "Diagnostics")
-                        .clicked()
-                    {
-                        ui.close();
-                    }
-                    if ui
-                        .checkbox(&mut self.performance_dock.open, "Performance")
-                        .clicked()
-                    {
-                        ui.close();
-                    }
-                    if ui
-                        .checkbox(&mut self.markers_dock.open, "Markers")
-                        .clicked()
-                    {
-                        ui.close();
-                    }
+                    self.dock_open_checkbox(ui, AppDockTab::Diagnostics, "Diagnostic (F1)");
+                    self.dock_open_checkbox(ui, AppDockTab::Performance, "Performance (F2)");
+                    self.dock_open_checkbox(ui, AppDockTab::Markers, "Markers (F3)");
                     #[cfg(feature = "scripting")]
-                    if ui
-                        .checkbox(&mut self.scripts.console_open, "Scripting Console")
-                        .clicked()
-                    {
-                        ui.close();
-                    }
-                    if ui
-                        .checkbox(&mut self.settings.show_debug_overlay, "Debug Overlay (F12)")
-                        .clicked()
-                    {
-                        ui.close();
-                    }
+                    self.dock_open_checkbox(ui, AppDockTab::ScriptingConsole, "Scripting (F9)");
+                    self.dock_open_checkbox(ui, AppDockTab::Logging, "Logging (F12)");
                 });
+                ui.separator();
                 ui.menu_button("Layout", |ui| {
                     if ui.button("Save Layout...").clicked() {
                         self.save_layout_dialog.open = true;
@@ -1652,71 +2134,74 @@ impl eframe::App for DelogApp {
                     }
                 });
                 #[cfg(feature = "scripting")]
-                ui.menu_button("Scripts", |ui| {
-                    if ui.button("Editor...").clicked() {
-                        self.scripts.open = true;
-                        ui.close();
-                    }
-                    if ui.button("Variables...").clicked() {
-                        self.scripts.variables_open = true;
-                        ui.close();
-                    }
+                {
                     ui.separator();
-                    ui.menu_button("Run", |ui| {
-                        let names = self.scripts.script_names();
-                        if names.is_empty() {
-                            ui.add_enabled(false, egui::Button::new("No saved scripts"));
-                        } else {
-                            let run_enabled = self.scripts.ordinary_dispatch_enabled();
-                            for name in names {
-                                if ui
-                                    .add_enabled(run_enabled, egui::Button::new(name.as_str()))
-                                    .clicked()
-                                {
-                                    let _ = self.scripts.run_named(
-                                        &name,
-                                        self.session.store(),
-                                        self.session.ingest_sender(),
-                                        Arc::clone(self.session.metrics()),
-                                    );
-                                    ui.close();
+                    ui.menu_button("Scripts", |ui| {
+                        if ui.button("Editor...").clicked() {
+                            self.scripts.open = true;
+                            ui.close();
+                        }
+                        if ui.button("Variables...").clicked() {
+                            self.scripts.variables_open = true;
+                            ui.close();
+                        }
+                        ui.separator();
+                        ui.menu_button("Run", |ui| {
+                            let names = self.scripts.script_names();
+                            if names.is_empty() {
+                                ui.add_enabled(false, egui::Button::new("No saved scripts"));
+                            } else {
+                                let run_enabled = self.scripts.ordinary_dispatch_enabled();
+                                for name in names {
+                                    if ui
+                                        .add_enabled(run_enabled, egui::Button::new(name.as_str()))
+                                        .clicked()
+                                    {
+                                        let _ = self.scripts.run_named(
+                                            &name,
+                                            self.session.store(),
+                                            self.session.ingest_sender(),
+                                            Arc::clone(self.session.metrics()),
+                                        );
+                                        ui.close();
+                                    }
                                 }
                             }
-                        }
+                        });
                     });
-                });
-                #[cfg(feature = "scripting")]
-                ui.menu_button("Parsers", |ui| {
-                    if ui.button("Editor...").clicked() {
-                        self.scripts.open_parser_editor();
-                        ui.close();
-                    }
                     ui.separator();
-                    ui.menu_button("Parse File", |ui| match self.scripts.parser_names() {
-                        Ok(names) if names.is_empty() => {
-                            ui.add_enabled(false, egui::Button::new("No saved parsers"));
+                    ui.menu_button("Parsers", |ui| {
+                        if ui.button("Editor...").clicked() {
+                            self.scripts.open_parser_editor();
+                            ui.close();
                         }
-                        Ok(names) => {
-                            let parser_open_enabled = self.scripts.parser_dispatch_enabled();
-                            for name in names {
-                                if ui
-                                    .add_enabled(
-                                        parser_open_enabled,
-                                        egui::Button::new(name.as_str()),
-                                    )
-                                    .on_hover_text("Open file with parser")
-                                    .clicked()
-                                {
-                                    let _ = self.scripts.request_open(ui.ctx(), &name);
-                                    ui.close();
+                        ui.separator();
+                        ui.menu_button("Parse File", |ui| match self.scripts.parser_names() {
+                            Ok(names) if names.is_empty() => {
+                                ui.add_enabled(false, egui::Button::new("No saved parsers"));
+                            }
+                            Ok(names) => {
+                                let parser_open_enabled = self.scripts.parser_dispatch_enabled();
+                                for name in names {
+                                    if ui
+                                        .add_enabled(
+                                            parser_open_enabled,
+                                            egui::Button::new(name.as_str()),
+                                        )
+                                        .on_hover_text("Open file with parser")
+                                        .clicked()
+                                    {
+                                        let _ = self.scripts.request_open(ui.ctx(), &name);
+                                        ui.close();
+                                    }
                                 }
                             }
-                        }
-                        Err(_) => {
-                            ui.add_enabled(false, egui::Button::new("Could not list parsers"));
-                        }
+                            Err(_) => {
+                                ui.add_enabled(false, egui::Button::new("Could not list parsers"));
+                            }
+                        });
                     });
-                });
+                }
                 if self.settings.show_fps {
                     ui.with_layout(
                         egui::Layout::right_to_left(egui::Align::Center),
@@ -1912,6 +2397,27 @@ impl eframe::App for DelogApp {
                     self.workspace.set_all_plot_legends(legends_hidden);
                 }
 
+                ui.separator();
+
+                if icon_button(
+                    ui,
+                    "toolbar-export-workspace-png",
+                    crate::icons::export(),
+                    inactive_tint,
+                    false,
+                )
+                .on_hover_text("Export workspace PNG")
+                .clicked()
+                {
+                    self.queue_image_capture(
+                        ui.ctx(),
+                        crate::image_export::ImageCaptureIntent::workspace(
+                            crate::image_export::ImageCaptureAction::Export,
+                            self.frame,
+                        ),
+                    );
+                }
+
                 let mut disconnect = None;
                 for (i, status) in self.session.live_statuses().into_iter().enumerate() {
                     ui.separator();
@@ -1974,62 +2480,33 @@ impl eframe::App for DelogApp {
             });
         });
 
-        // The timeline's `utc_offset_us` arg stays None until a parser captures
-        // a UTC reference (BIN GPS week / ULog time_ref_utc); `any_live` stays
-        // false because the snapshot has no streaming flag yet.
         drop(ui_toolbar_timer);
         let range = timeline_range_for_ui(global_range);
-        let ui_timeline_timer = self.session.metrics().scope("ui_timeline");
-        egui::Panel::bottom("timeline").show_inside(ui, |ui| {
-            let action = crate::timeline::ui(
-                ui,
-                &mut self.playback,
-                &mut self.fit_view_all,
-                &mut self.view,
-                range,
-                None,
-                self.session.has_live_links(),
-                self.settings.theme,
-                &self.markers,
-            );
-            if action.lock_live {
-                self.lock_to_live(range);
-            }
-            if action.view_changed {
-                // Dragging the window slider is a manual view change: drop
-                // out of fit-all and live-follow, like a pan/zoom.
-                self.fit_view_all = false;
-                self.playback.unlock_live();
-                self.view_fitted = true;
-            }
-            if let Some(t_us) = action.marker_jump {
-                self.playback.scrub(t_us, range);
-            }
-            if let Some((id, t_us)) = action.marker_move
-                && let Some(m) = self.markers.get_mut(id)
-            {
-                m.t_us = t_us.clamp(range.min_us, range.max_us);
-            }
-            if let Some(id) = action.marker_delete {
-                self.markers.remove(id);
-            }
-            if let Some((id, edit)) = action.marker_edit
-                && let Some(m) = self.markers.get_mut(id)
-            {
-                if let Some(label) = edit.label {
-                    m.label = label;
-                }
-                if let Some(color) = edit.color {
-                    m.color = color;
-                }
-            }
-        });
-        drop(ui_timeline_timer);
 
-        // F12 toggles the debug overlay. Handled ungated — it is
-        // not a text key, so it works even while a widget holds focus.
-        if ui.ctx().input(|i| i.key_pressed(egui::Key::F12)) {
-            self.settings.show_debug_overlay = !self.settings.show_debug_overlay;
+        let (focus_diagnostics, focus_performance, focus_markers, focus_logging) =
+            ui.ctx().input(|i| {
+                (
+                    i.key_pressed(egui::Key::F1),
+                    i.key_pressed(egui::Key::F2),
+                    i.key_pressed(egui::Key::F3),
+                    i.key_pressed(egui::Key::F12),
+                )
+            });
+        if focus_diagnostics {
+            self.open_dock(AppDockTab::Diagnostics);
+        }
+        if focus_performance {
+            self.open_dock(AppDockTab::Performance);
+        }
+        if focus_markers {
+            self.open_dock(AppDockTab::Markers);
+        }
+        if focus_logging {
+            self.open_dock(AppDockTab::Logging);
+        }
+        #[cfg(feature = "scripting")]
+        if ui.ctx().input(|i| i.key_pressed(egui::Key::F9)) {
+            self.open_dock(AppDockTab::ScriptingConsole);
         }
 
         // Transport keys — skipped while a widget owns the
@@ -2091,66 +2568,151 @@ impl eframe::App for DelogApp {
                 self.last_diagnostic_seq,
                 newest_seq,
             ) {
-                self.diagnostics_dock.open = true;
+                self.open_dock(AppDockTab::Diagnostics);
             }
             self.last_diagnostic_seq = Some(newest_seq);
         }
-        if self.diagnostics_dock.open {
-            egui::Panel::bottom("diagnostics")
+        drop(ui_diagnostics_timer);
+        let ui_performance_timer = self.session.metrics().scope("ui_performance");
+        if self.docks.is_open(AppDockTab::Performance) {
+            self.refresh_performance_snapshot(frame, &snapshot);
+            ui.ctx().request_repaint_after(PERFORMANCE_REFRESH_INTERVAL);
+        }
+        drop(ui_performance_timer);
+        self.sync_docks_from_legacy_flags();
+        if self.docks.has_tabs() {
+            let mut actions = PendingDockActions::default();
+            #[cfg(feature = "scripting")]
+            let store = self.session.store();
+            #[cfg(feature = "scripting")]
+            let ingest_sender = self.session.ingest_sender();
+            #[cfg(feature = "scripting")]
+            let metrics = self.session.metrics();
+            let show_docks = |ui: &mut egui::Ui,
+                              docks: &mut AppDockController,
+                              viewer: &mut AppDockViewer<'_>| {
+                docks.show_inside(ui, viewer);
+            };
+            let mut render_docks = |ui: &mut egui::Ui| {
+                let mut viewer = AppDockViewer {
+                    diagnostics_dock: &mut self.diagnostics_dock,
+                    diagnostics: &diagnostics,
+                    snapshot: &snapshot,
+                    logging_dock: &mut self.logging_dock,
+                    logs: &self.logs,
+                    performance_dock: &mut self.performance_dock,
+                    performance_snapshot: &self.performance_snapshot,
+                    markers_dock: &mut self.markers_dock,
+                    markers: &mut self.markers,
+                    origin_us: self.origin_us,
+                    #[cfg(feature = "scripting")]
+                    scripts: &mut self.scripts,
+                    #[cfg(feature = "scripting")]
+                    store: &store,
+                    #[cfg(feature = "scripting")]
+                    ingest_sender: &ingest_sender,
+                    #[cfg(feature = "scripting")]
+                    metrics,
+                    actions: &mut actions,
+                };
+                show_docks(ui, &mut self.docks, &mut viewer);
+            };
+
+            egui::Panel::bottom("app_docks")
                 .resizable(true)
                 .default_size(240.0)
                 .show_inside(ui, |ui| {
-                    let action = self.diagnostics_dock.ui(ui, &diagnostics, &snapshot);
-                    if action.clear {
-                        self.session.clear_diagnostics();
-                    }
-                    if let Some(t_us) = action.jump_to_time_us
-                        && let Some(range) = snapshot.global_time_range()
-                    {
-                        self.playback.scrub(t_us, range);
-                    }
+                    render_docks(ui);
                 });
-        }
-        drop(ui_diagnostics_timer);
-        let ui_performance_timer = self.session.metrics().scope("ui_performance");
-        if self.performance_dock.open {
-            self.refresh_performance_snapshot(frame, &snapshot);
-            ui.ctx().request_repaint_after(PERFORMANCE_REFRESH_INTERVAL);
-            egui::Panel::bottom("performance")
-                .resizable(true)
-                .default_size(220.0)
-                .show_inside(ui, |ui| {
-                    self.performance_dock.ui(ui, &self.performance_snapshot);
-                });
+
+            if !self.diagnostics_dock.open {
+                self.sync_dock_from_legacy_flag(AppDockTab::Diagnostics, false);
+            }
+            if !self.logging_dock.open {
+                self.sync_dock_from_legacy_flag(AppDockTab::Logging, false);
+            }
+            if !self.performance_dock.open {
+                self.sync_dock_from_legacy_flag(AppDockTab::Performance, false);
+            }
+            if !self.markers_dock.open {
+                self.sync_dock_from_legacy_flag(AppDockTab::Markers, false);
+            }
+            #[cfg(feature = "scripting")]
+            if !self.scripts.console_open {
+                self.sync_dock_from_legacy_flag(AppDockTab::ScriptingConsole, false);
+            }
+
+            self.sync_legacy_dock_flags_from_state();
+
+            if actions.clear_diagnostics {
+                self.session.clear_diagnostics();
+            }
+            if let Some(t_us) = actions.diagnostic_jump_us
+                && let Some(range) = snapshot.global_time_range()
+            {
+                self.playback.scrub(t_us, range);
+            }
+            if actions.clear_logs {
+                self.logs.clear();
+            }
+            if let Some(t_us) = actions.marker_jump_us
+                && let Some(range) = snapshot.global_time_range()
+            {
+                self.playback.scrub(t_us, range);
+            }
         }
 
-        drop(ui_performance_timer);
-        if self.markers_dock.open {
-            egui::Panel::bottom("markers")
-                .resizable(true)
-                .default_size(200.0)
-                .show_inside(ui, |ui| {
-                    if let Some(t_us) = self.markers_dock.ui(ui, &mut self.markers, self.origin_us)
-                        && let Some(range) = snapshot.global_time_range()
-                    {
-                        self.playback.scrub(t_us, range);
-                    }
-                });
-        }
-        #[cfg(feature = "scripting")]
-        if self.scripts.console_open {
-            egui::Panel::bottom("scripting_console")
-                .resizable(true)
-                .default_size(crate::scripts::SCRIPTING_CONSOLE_DEFAULT_HEIGHT)
-                .show_inside(ui, |ui| {
-                    self.scripts.console_dock_ui(
-                        ui,
-                        &self.session.store(),
-                        &self.session.ingest_sender(),
-                        self.session.metrics(),
-                    );
-                });
-        }
+        // The timeline's `utc_offset_us` arg stays None until a parser captures
+        // a UTC reference (BIN GPS week / ULog time_ref_utc); `any_live` stays
+        // false because the snapshot has no streaming flag yet. It is registered
+        // after the resizable docks so those docks sit below the timeline.
+        let ui_timeline_timer = self.session.metrics().scope("ui_timeline");
+        egui::Panel::bottom("timeline").show_inside(ui, |ui| {
+            let action = crate::timeline::ui(
+                ui,
+                &mut self.playback,
+                &mut self.fit_view_all,
+                &mut self.view,
+                range,
+                None,
+                self.session.has_live_links(),
+                self.settings.theme,
+                &self.markers,
+            );
+            if action.lock_live {
+                self.lock_to_live(range);
+            }
+            if action.view_changed {
+                // Dragging the window slider is a manual view change: drop
+                // out of fit-all and live-follow, like a pan/zoom.
+                self.fit_view_all = false;
+                self.playback.unlock_live();
+                self.view_fitted = true;
+            }
+            if let Some(t_us) = action.marker_jump {
+                self.playback.scrub(t_us, range);
+            }
+            if let Some((id, t_us)) = action.marker_move
+                && let Some(m) = self.markers.get_mut(id)
+            {
+                m.t_us = t_us.clamp(range.min_us, range.max_us);
+            }
+            if let Some(id) = action.marker_delete {
+                self.markers.remove(id);
+            }
+            if let Some((id, edit)) = action.marker_edit
+                && let Some(m) = self.markers.get_mut(id)
+            {
+                if let Some(label) = edit.label {
+                    m.label = label;
+                }
+                if let Some(color) = edit.color {
+                    m.color = color;
+                }
+            }
+        });
+        drop(ui_timeline_timer);
+
         let ui_browser_timer = self.session.metrics().scope("ui_browser");
         if self.browser_collapsed {
             let button_size = browser::panel_toggle_button_size(ui);
@@ -2243,7 +2805,12 @@ impl eframe::App for DelogApp {
             self.browser_model = Some((epoch, model));
         }
         drop(ui_browser_timer);
-        show_source_metadata_window(ui.ctx(), &snapshot, &mut self.source_metadata_dialog);
+        if let Some(t_us) =
+            show_source_metadata_window(ui.ctx(), &snapshot, &mut self.source_metadata_dialog)
+            && let Some(range) = snapshot.global_time_range()
+        {
+            self.playback.scrub(t_us, range);
+        }
         show_field_metadata_window(ui.ctx(), &snapshot, &mut self.field_metadata_dialog);
         show_field_stats_window(
             ui.ctx(),
@@ -2259,23 +2826,27 @@ impl eframe::App for DelogApp {
             self.markers.push_loaded(t_us, name, color, String::new());
         }
 
-        if self.csv_export.open {
+        if self.data_export.open {
             let model = self
                 .browser_model
                 .as_ref()
                 .map(|(_, m)| m.clone())
                 .unwrap_or_default();
-            let fields = crate::csv_export::numeric_fields(&snapshot, &model);
+            let fields = crate::data_export::available_fields(&snapshot, &model);
             let full = snapshot
                 .global_time_range()
                 .map(|r| (r.min_us, r.max_us))
                 .unwrap_or((0, 1));
             let visible = self.view.map(|v| (v.min_us, v.max_us)).unwrap_or(full);
-            if let Some(req) =
-                crate::csv_export::dialog_ui(ui.ctx(), &mut self.csv_export, &fields, visible, full)
-            {
-                self.spawn_csv_export(ui.ctx(), &snapshot, &fields, req);
-                self.csv_export.open = false;
+            if let Some(req) = crate::data_export::dialog_ui(
+                ui.ctx(),
+                &mut self.data_export,
+                &fields,
+                visible,
+                full,
+            ) {
+                self.spawn_data_export(ui.ctx(), &snapshot, &fields, req);
+                self.data_export.open = false;
             }
         }
 
@@ -2284,24 +2855,30 @@ impl eframe::App for DelogApp {
             // The workspace renders even before any log loads, so plots can be
             // arranged and the 3D view opened on an empty session.
 
+            let workspace_rect = ui.available_rect_before_wrap();
+
             // The central panel is a fallback drop zone: dropping a field onto
             // empty workspace space plots it in the first pane.
             let frame_style = egui::Frame::default();
             let mut handled_workspace_drop = false;
-            // New panes (splits/edge drops) inherit the global legend default;
-            // the per-pane toggle overrides it afterwards.
-            self.workspace.default_show_legend = self.settings.plot.show_legend_default;
             let (_, dropped) =
                 ui.dnd_drop_zone::<Vec<delog_core::identity::FieldId>, ()>(frame_style, |ui| {
                     // Owned metrics handle: `behavior` borrows `self` mutably
                     // below, so we can't reach `self.session` while it lives.
                     let tree_metrics = self.session.metrics().clone();
+                    let live_map_scopes = self.workspace.map_scopes();
+                    self.gpu.retain_map_scopes(frame, &live_map_scopes);
+                    if let Some(manager) = self.tile_manager.as_mut() {
+                        manager.retain_scopes(&live_map_scopes);
+                    }
                     self.gpu.begin_plot_frame(frame);
                     let services = PlotServices {
                         frame,
                         snapshot: &snapshot,
                         metrics: self.session.metrics(),
                         gpu: &mut self.gpu,
+                        tile_manager: self.tile_manager.as_mut(),
+                        tile_manager_error: self.tile_manager_error.as_deref(),
                         caches: &mut self.caches,
                         view: &mut self.view,
                         origin_us: self.origin_us,
@@ -2349,6 +2926,11 @@ impl eframe::App for DelogApp {
                             }
                         }
                     }
+                    if let Some(mv) = actions.legend_move {
+                        let field = self.workspace.apply_legend_move(mv);
+                        self.caches.request(field, &snapshot);
+                        handled_workspace_drop = true;
+                    }
                     if let Some(tile_id) = actions.close {
                         for field in self.workspace.close_plot(tile_id) {
                             self.caches.unpin(field);
@@ -2371,8 +2953,35 @@ impl eframe::App for DelogApp {
                     if actions.open_vehicle_config {
                         self.vehicle_dialog.open = true;
                     }
-                    if let Some(field) = actions.inspect_field_stats {
-                        self.field_stats.open(field);
+                    if actions.export_kml {
+                        self.spawn_export_kml_dialog(ui.ctx(), &snapshot);
+                    }
+                    if let Some(fields) = actions.inspect_field_stats {
+                        self.field_stats.open_fields(fields);
+                    }
+                    if let Some(action) = actions.image {
+                        match action {
+                            crate::workspace::WorkspaceImageAction::CopyPlot { rect } => {
+                                self.queue_image_capture(
+                                    ui.ctx(),
+                                    crate::image_export::ImageCaptureIntent::plot(
+                                        crate::image_export::ImageCaptureAction::Copy,
+                                        rect,
+                                        self.frame,
+                                    ),
+                                );
+                            }
+                            crate::workspace::WorkspaceImageAction::ExportPlot { rect } => {
+                                self.queue_image_capture(
+                                    ui.ctx(),
+                                    crate::image_export::ImageCaptureIntent::plot(
+                                        crate::image_export::ImageCaptureAction::Export,
+                                        rect,
+                                        self.frame,
+                                    ),
+                                );
+                            }
+                        }
                     }
                 });
             if let Some(fields) = dropped
@@ -2386,19 +2995,111 @@ impl eframe::App for DelogApp {
             }
             let plotted: Vec<_> = self.workspace.fields().collect();
             self.gpu.retain_plotted_buffers(frame, &plotted);
+            self.start_queued_image_capture(ui.ctx(), Some(workspace_rect));
         });
         drop(ui_workspace_timer);
+
+        // Render synchronization previews after the workspace has reset the
+        // per-frame uniform allocator and retained its own GPU buffers. The
+        // synchronization callback can then safely append private uniforms and
+        // upload fields that are not plotted in the workspace.
+        if let Some(mut sync_window) = self.sync_window.take() {
+            sync_window.reconcile(&snapshot);
+            if sync_window.pending_is_authoritative(&snapshot) {
+                sync_window.mark_applied(&snapshot);
+            }
+            let response =
+                sync_window.show(ui.ctx(), &snapshot, &self.gpu, frame, &mut self.caches);
+            if let Some(offsets) = response.apply {
+                if self.session.set_source_offsets(offsets).is_err() {
+                    sync_window.apply_dispatch_failed();
+                }
+            }
+            if sync_window.open {
+                self.sync_window = Some(sync_window);
+            }
+        }
+
+        {
+            #[cfg(feature = "scripting")]
+            if self.dataflow.open && self.dataflow.has_script_node() {
+                let host = self.scripts.engine_flow_host(
+                    self.session.store(),
+                    self.session.ingest_sender(),
+                    Arc::clone(self.session.metrics()),
+                );
+                self.dataflow.set_script_host(Some(host));
+            }
+            let sender = self.session.ingest_sender();
+            let live_connected = self.session.has_connected_live();
+            let dataflow_settings = self.settings.dataflow;
+            let mut logs = Vec::new();
+            if self.dataflow.open {
+                logs.extend(
+                    self.dataflow
+                        .show(ui.ctx(), &snapshot, &sender, live_connected),
+                );
+            }
+            logs.extend(self.dataflow.drive(
+                ui.ctx(),
+                &snapshot,
+                &sender,
+                live_connected,
+                dataflow_settings,
+            ));
+            for (level, message) in logs {
+                self.push_log(crate::logging::log(level, message));
+            }
+        }
 
         // Floating windows/dialogs + overlays; drops with the function (still
         // inside `frame_total`, after every other section).
         let _ui_windows_timer = self.session.metrics().scope("ui_windows");
-        self.paint_debug_overlay(ui.ctx());
+        self.parquet_import.show(ui.ctx());
+        crate::data_export::progress_ui(ui.ctx(), &self.data_exports);
         self.show_layout_windows(ui.ctx());
+        crate::message_popup::show_all(&mut self.message_popups, ui.ctx());
         let settings_before = self.settings.clone();
-        let settings_change = self.settings_dialog.show(ui.ctx(), &mut self.settings);
+        let tile_cache =
+            self.tile_manager
+                .as_ref()
+                .map_or_else(TileCacheUiState::default, |manager| {
+                    let status = manager.status();
+                    TileCacheUiState {
+                        available: true,
+                        usage_bytes: status.cache_bytes,
+                        clearing: matches!(
+                            status.cache_action,
+                            CacheActionStatus::Pending {
+                                kind: CacheActionKind::Clear,
+                                ..
+                            }
+                        ),
+                    }
+                });
+        let settings_change = self
+            .settings_dialog
+            .show(ui.ctx(), &mut self.settings, tile_cache);
         if settings_change.theme_changed || self.theme_needs_apply {
             self.settings.theme.apply(ui.ctx());
             self.theme_needs_apply = false;
+        }
+        if let Some(manager) = self.tile_manager.as_mut() {
+            if settings_change.tile_cache_limit_changed
+                && let Err(error) = manager.set_limit(self.settings.scene3d.tile_cache_limit_bytes)
+            {
+                tracing::warn!(%error, "failed to queue map tile cache limit");
+            }
+            if settings_change.clear_tile_cache
+                && let Err(error) = manager.clear_cache()
+            {
+                tracing::warn!(%error, "failed to queue map tile cache clear");
+            }
+        }
+        if settings_change.map_provider_changed
+            || tile_cache_needs_repaint(settings_change.clear_tile_cache, tile_cache.clearing)
+        {
+            ui.ctx().request_repaint();
         }
         if self.settings != settings_before
             && let Err(err) = crate::layout::save_app_settings(&self.settings)
@@ -2418,6 +3119,9 @@ impl eframe::App for DelogApp {
             self.vehicle_revision = self.vehicle_revision.wrapping_add(1);
             self.traj_dirty = true;
             self.ensure_trajectory_build(ui.ctx(), &snapshot);
+        }
+        for log in self.vehicle_dialog.take_logs() {
+            self.push_log(log);
         }
         if let Some(endpoint) = self
             .connection_dialog
@@ -2460,13 +3164,20 @@ impl eframe::App for DelogApp {
                 Arc::clone(self.session.metrics()),
                 self.settings.scripting.auto_open_variables,
                 self.settings.scripting.auto_open_console,
+                self.settings.scripting.use_original_timestamps,
             );
+            for command in self.scripts.take_marker_commands() {
+                self.markers.apply_script_command(command);
+            }
             for message in self.scripts.take_parser_diagnostics() {
-                self.session
-                    .push_diagnostic(delog_core::diagnostics::Diag::error(
-                        "python-parser",
-                        message,
-                    ));
+                self.push_log(PendingLog::with_target(
+                    LogLevel::Error,
+                    "python-parser",
+                    message,
+                ));
+            }
+            for log in self.scripts.take_logs() {
+                self.push_log(log);
             }
         }
     }
@@ -2532,7 +3243,7 @@ fn export_severity(severity: Severity) -> &'static str {
 
 /// Which tab of the source metadata window is active. Persisted per source in
 /// egui temporary memory so the selection survives across frames.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 enum SourceMetaTab {
     #[default]
     Info,
@@ -2540,11 +3251,25 @@ enum SourceMetaTab {
     LoggedMessages,
 }
 
+impl SourceMetaTab {
+    const ALL: [Self; 3] = [Self::Info, Self::Parameters, Self::LoggedMessages];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Info => "Info",
+            Self::Parameters => "Parameters",
+            Self::LoggedMessages => "Logged Messages",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct FieldMetadata {
     title: String,
     source_label: String,
     topic_name: String,
+    original_source: Option<String>,
+    original_topic: Option<String>,
     field_name: String,
     dtype: &'static str,
     unit: Option<String>,
@@ -2582,6 +3307,14 @@ fn field_metadata(
         ),
         source_label: source.entry.label.clone(),
         topic_name: topic.entry.name.clone(),
+        original_source: store
+            .schema
+            .provenance()
+            .map(|provenance| provenance.original_source().to_owned()),
+        original_topic: store
+            .schema
+            .provenance()
+            .map(|provenance| provenance.original_topic().to_owned()),
         field_name: field.name.clone(),
         dtype: schema.dtype_label(),
         unit: schema.unit.clone(),
@@ -2627,6 +3360,16 @@ fn show_field_metadata_window(
                     ui.strong("Topic");
                     ui.label(meta.topic_name.as_str());
                     ui.end_row();
+                    if let Some(original_source) = meta.original_source.as_deref() {
+                        ui.strong("Original source");
+                        ui.label(original_source);
+                        ui.end_row();
+                    }
+                    if let Some(original_topic) = meta.original_topic.as_deref() {
+                        ui.strong("Original topic");
+                        ui.label(original_topic);
+                        ui.end_row();
+                    }
                     ui.strong("Field");
                     ui.label(meta.field_name.as_str());
                     ui.end_row();
@@ -2672,18 +3415,17 @@ fn show_source_metadata_window(
     ctx: &egui::Context,
     snapshot: &delog_core::snapshot::StoreSnapshot,
     selected: &mut Option<delog_core::identity::SourceId>,
-) {
-    let Some(source_id) = *selected else {
-        return;
-    };
+) -> Option<i64> {
+    let source_id = (*selected)?;
     let Some(source) = snapshot
         .source(source_id)
         .filter(|source| !source.entry.removed)
     else {
         *selected = None;
-        return;
+        return None;
     };
 
+    let mut jump_to_time_us = None;
     let mut open = true;
     egui::Window::new(format!("Source Metadata - {}", source.entry.label))
         .id(egui::Id::new(("source_metadata", source_id.0)))
@@ -2695,133 +3437,303 @@ fn show_source_metadata_window(
         .default_height(420.0)
         .show(ctx, |ui| {
             let tab_id = egui::Id::new(("source_metadata_tab", source_id.0));
-            let mut tab = ui
+            let active_tab = ui
                 .data(|d| d.get_temp::<SourceMetaTab>(tab_id))
                 .unwrap_or_default();
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut tab, SourceMetaTab::Info, "Info");
-                ui.selectable_value(&mut tab, SourceMetaTab::Parameters, "Parameters");
-                ui.selectable_value(&mut tab, SourceMetaTab::LoggedMessages, "Logged Messages");
-            });
-            ui.data_mut(|d| d.insert_temp(tab_id, tab));
-            ui.separator();
-
-            match tab {
-                SourceMetaTab::Info => {
-                    let (rows, range, topics) = source_summary(snapshot, source_id);
-                    egui::Grid::new("source_metadata_summary")
-                        .num_columns(2)
-                        .striped(true)
-                        .spacing([16.0, 4.0])
-                        .show(ui, |ui| {
-                            ui.strong("Label");
-                            ui.label(source.entry.label.as_str());
-                            ui.end_row();
-                            ui.strong("Kind");
-                            ui.label(source_kind_label(source.entry.label.as_str()));
-                            ui.end_row();
-                            ui.strong("Source ID");
-                            ui.monospace(source_id.0.to_string());
-                            ui.end_row();
-                            ui.strong("Topics");
-                            ui.label(topics.to_string());
-                            ui.end_row();
-                            ui.strong("Rows");
-                            ui.label(rows.to_string());
-                            ui.end_row();
-                            ui.strong("Offset");
-                            ui.label(format!("{} us", source.entry.offset_us));
-                            ui.end_row();
-                            ui.strong("Range");
-                            ui.label(range.map(format_range).unwrap_or_else(|| "-".into()));
-                            ui.end_row();
-                        });
-                }
-                SourceMetaTab::Parameters => {
-                    if source.entry.meta.params.is_empty() {
-                        ui.weak("No parameters captured.");
-                    } else {
-                        let query_id = egui::Id::new(("source_param_query", source_id.0));
-                        let mut query = ui
-                            .data(|d| d.get_temp::<String>(query_id))
-                            .unwrap_or_default();
-                        ui.add(
-                            egui::TextEdit::singleline(&mut query)
-                                .hint_text("Filter parameters...")
-                                .desired_width(f32::INFINITY),
-                        );
-                        ui.data_mut(|d| d.insert_temp(query_id, query.clone()));
-
-                        let matches: Vec<_> = source
-                            .entry
-                            .meta
-                            .params
-                            .iter()
-                            .filter(|param| crate::browser::matches_query(&query, &param.name))
-                            .collect();
-                        if matches.is_empty() {
-                            ui.weak("No parameters match the filter.");
-                        } else {
-                            egui::ScrollArea::vertical()
-                                .id_salt(("source_params", source_id.0))
-                                .auto_shrink([false, false])
-                                .show(ui, |ui| {
-                                    egui::Grid::new("source_metadata_params")
-                                        .num_columns(3)
-                                        .striped(true)
-                                        .spacing([12.0, 4.0])
-                                        .show(ui, |ui| {
-                                            ui.strong("Name");
-                                            ui.strong("Type");
-                                            ui.strong("Value");
-                                            ui.end_row();
-                                            for param in matches {
-                                                ui.monospace(param.name.as_str());
-                                                ui.label(param.ty.as_str());
-                                                ui.label(param.value.as_str());
-                                                ui.end_row();
-                                            }
-                                        });
-                                });
-                        }
-                    }
-                }
-                SourceMetaTab::LoggedMessages => {
-                    if source.entry.meta.auto_markers.is_empty() {
-                        ui.weak("No logged messages captured.");
-                    } else {
-                        egui::ScrollArea::vertical()
-                            .id_salt(("source_markers", source_id.0))
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                egui::Grid::new("source_metadata_markers")
-                                    .num_columns(3)
-                                    .striped(true)
-                                    .spacing([12.0, 4.0])
-                                    .show(ui, |ui| {
-                                        ui.strong("Time");
-                                        ui.strong("Level");
-                                        ui.strong("Text");
-                                        ui.end_row();
-                                        for marker in &source.entry.meta.auto_markers {
-                                            ui.label(format!(
-                                                "{:.3}s",
-                                                marker.time_us as f64 / 1e6
-                                            ));
-                                            ui.label(marker.level.to_string());
-                                            ui.label(marker.text.as_str());
-                                            ui.end_row();
-                                        }
-                                    });
-                            });
-                    }
-                }
-            }
+            let mut dock_state = source_metadata_dock_state(active_tab);
+            let mut viewer = SourceMetadataTabViewer {
+                snapshot,
+                source_id,
+                jump_to_time_us: None,
+            };
+            egui_dock::DockArea::new(&mut dock_state)
+                .id(egui::Id::new(("source_metadata_dock_area", source_id.0)))
+                .style(egui_dock::Style::from_egui(ui.style().as_ref()))
+                .allowed_splits(egui_dock::AllowedSplits::None)
+                .draggable_tabs(false)
+                .tab_context_menus(false)
+                .show_close_buttons(false)
+                .show_leaf_close_all_buttons(false)
+                .show_leaf_collapse_buttons(false)
+                .show_inside(ui, &mut viewer);
+            jump_to_time_us = viewer.jump_to_time_us;
+            ui.data_mut(|d| d.insert_temp(tab_id, active_source_metadata_tab(&mut dock_state)));
         });
 
     if !open {
         *selected = None;
     }
+    jump_to_time_us
+}
+
+fn source_metadata_dock_state(active_tab: SourceMetaTab) -> egui_dock::DockState<SourceMetaTab> {
+    let mut dock_state = egui_dock::DockState::new(SourceMetaTab::ALL.to_vec());
+    if let Some(path) = dock_state.find_tab(&active_tab) {
+        let _ = dock_state.set_active_tab(path);
+        dock_state.set_focused_node_and_surface(path.node_path());
+    }
+    dock_state
+}
+
+fn active_source_metadata_tab(
+    dock_state: &mut egui_dock::DockState<SourceMetaTab>,
+) -> SourceMetaTab {
+    dock_state
+        .find_active_focused()
+        .map(|(_, tab)| *tab)
+        .unwrap_or_default()
+}
+
+struct SourceMetadataTabViewer<'a> {
+    snapshot: &'a delog_core::snapshot::StoreSnapshot,
+    source_id: delog_core::identity::SourceId,
+    jump_to_time_us: Option<i64>,
+}
+
+impl egui_dock::TabViewer for SourceMetadataTabViewer<'_> {
+    type Tab = SourceMetaTab;
+
+    fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
+        tab.label().into()
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
+        if let Some(t_us) = show_source_metadata_tab(ui, self.snapshot, self.source_id, *tab) {
+            self.jump_to_time_us = Some(t_us);
+        }
+    }
+
+    fn allowed_in_windows(&self, _tab: &mut Self::Tab) -> bool {
+        false
+    }
+}
+
+fn show_source_metadata_tab(
+    ui: &mut egui::Ui,
+    snapshot: &delog_core::snapshot::StoreSnapshot,
+    source_id: delog_core::identity::SourceId,
+    tab: SourceMetaTab,
+) -> Option<i64> {
+    let source = snapshot
+        .source(source_id)
+        .filter(|source| !source.entry.removed)?;
+
+    match tab {
+        SourceMetaTab::Info => {
+            let (rows, range, topics) = source_summary(snapshot, source_id);
+            source_metadata_summary_table(
+                ui,
+                &[
+                    ("Label", source.entry.label.clone()),
+                    (
+                        "Kind",
+                        source_kind_label(source.entry.label.as_str()).to_owned(),
+                    ),
+                    ("Source ID", source_id.0.to_string()),
+                    ("Topics", topics.to_string()),
+                    ("Rows", rows.to_string()),
+                    ("Offset", format!("{} us", source.entry.offset_us)),
+                    (
+                        "Range",
+                        range.map(format_range).unwrap_or_else(|| "-".into()),
+                    ),
+                ],
+            );
+        }
+        SourceMetaTab::Parameters => {
+            if source.entry.meta.params.is_empty() {
+                ui.weak("No parameters captured.");
+            } else {
+                let query_id = egui::Id::new(("source_param_query", source_id.0));
+                let mut query = ui
+                    .data(|d| d.get_temp::<String>(query_id))
+                    .unwrap_or_default();
+                ui.add(
+                    egui::TextEdit::singleline(&mut query)
+                        .hint_text("Filter parameters...")
+                        .desired_width(f32::INFINITY),
+                );
+                ui.data_mut(|d| d.insert_temp(query_id, query.clone()));
+
+                let matches: Vec<_> = source
+                    .entry
+                    .meta
+                    .params
+                    .iter()
+                    .filter(|param| crate::browser::matches_query(&query, &param.name))
+                    .collect();
+                if matches.is_empty() {
+                    ui.weak("No parameters match the filter.");
+                } else {
+                    source_metadata_params_table(ui, source_id, &matches);
+                }
+            }
+        }
+        SourceMetaTab::LoggedMessages => {
+            if source.entry.meta.auto_markers.is_empty() {
+                ui.weak("No logged messages captured.");
+            } else {
+                return source_metadata_markers_table(
+                    ui,
+                    source_id,
+                    &source.entry.meta.auto_markers,
+                    source.entry.offset_us,
+                );
+            }
+        }
+    }
+    None
+}
+
+fn source_metadata_summary_table(ui: &mut egui::Ui, rows: &[(&str, String)]) {
+    let row_height = table_row_height(ui);
+    TableBuilder::new(ui)
+        .id_salt("source_metadata_summary_table")
+        .striped(true)
+        .resizable(true)
+        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+        .auto_shrink([false, false])
+        .column(Column::auto().at_least(96.0))
+        .column(Column::remainder().clip(true))
+        .body(|mut body| {
+            for (key, value) in rows {
+                body.row(row_height, |mut row| {
+                    row.col(|ui| {
+                        ui.strong(*key);
+                    });
+                    row.col(|ui| {
+                        ui.label(value);
+                    });
+                });
+            }
+        });
+}
+
+fn source_metadata_params_table(
+    ui: &mut egui::Ui,
+    source_id: delog_core::identity::SourceId,
+    params: &[&delog_core::identity::SourceParam],
+) {
+    let row_height = table_row_height(ui);
+    egui::ScrollArea::vertical()
+        .id_salt(("source_params", source_id.0))
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            TableBuilder::new(ui)
+                .id_salt("source_metadata_params_table")
+                .striped(true)
+                .resizable(true)
+                .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                .auto_shrink([false, false])
+                .column(Column::auto().at_least(120.0))
+                .column(Column::auto().at_least(72.0))
+                .column(Column::auto().at_least(72.0))
+                .column(Column::remainder().clip(true))
+                .header(row_height, |mut header| {
+                    header.col(|ui| {
+                        ui.strong("Name");
+                    });
+                    header.col(|ui| {
+                        ui.strong("Type");
+                    });
+                    header.col(|ui| {
+                        ui.strong("Value");
+                    });
+                    header.col(|ui| {
+                        ui.strong("Default");
+                    });
+                })
+                .body(|body| {
+                    body.rows(row_height, params.len(), |mut row| {
+                        let param = params[row.index()];
+                        row.col(|ui| {
+                            ui.monospace(param.name.as_str());
+                        });
+                        row.col(|ui| {
+                            ui.label(param.ty.as_str());
+                        });
+                        row.col(|ui| {
+                            ui.label(param.value.as_str());
+                        });
+                        row.col(|ui| match param.default.as_deref() {
+                            Some(default) => {
+                                ui.label(default);
+                            }
+                            None => {
+                                ui.weak("-");
+                            }
+                        });
+                    });
+                });
+        });
+}
+
+fn source_metadata_markers_table(
+    ui: &mut egui::Ui,
+    source_id: delog_core::identity::SourceId,
+    markers: &[delog_core::identity::AutoMarker],
+    offset_us: i64,
+) -> Option<i64> {
+    let mut jump_to_time_us = None;
+    let row_height = table_row_height(ui);
+    egui::ScrollArea::vertical()
+        .id_salt(("source_markers", source_id.0))
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            TableBuilder::new(ui)
+                .id_salt("source_metadata_markers_table")
+                .striped(true)
+                .resizable(true)
+                .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                .auto_shrink([false, false])
+                .column(Column::auto().at_least(72.0))
+                .column(Column::auto().at_least(72.0))
+                .column(Column::remainder().clip(true))
+                .header(row_height, |mut header| {
+                    header.col(|ui| {
+                        ui.strong("Time");
+                    });
+                    header.col(|ui| {
+                        ui.strong("Level");
+                    });
+                    header.col(|ui| {
+                        ui.strong("Text");
+                    });
+                })
+                .body(|body| {
+                    body.rows(row_height, markers.len(), |mut row| {
+                        let marker = &markers[row.index()];
+                        row.col(|ui| {
+                            match delog_core::time::effective_time_us(marker.time_us, offset_us) {
+                                Some(t_us) => {
+                                    if ui
+                                        .button(format!("{:.3}s", t_us as f64 / 1e6))
+                                        .on_hover_text("Jump playhead to this message")
+                                        .clicked()
+                                    {
+                                        jump_to_time_us = Some(t_us);
+                                    }
+                                }
+                                None => {
+                                    ui.weak("-");
+                                }
+                            }
+                        });
+                        row.col(|ui| match marker.level {
+                            Some(level) => {
+                                ui.label(level.to_string());
+                            }
+                            None => {
+                                ui.weak("-");
+                            }
+                        });
+                        row.col(|ui| {
+                            ui.label(marker.text.as_str());
+                        });
+                    });
+                });
+        });
+    jump_to_time_us
 }
 
 fn show_field_stats_window(
@@ -2831,119 +3743,65 @@ fn show_field_stats_window(
     caches: &mut CacheManager,
     controller: &mut FieldStatsController,
 ) {
-    let Some(field_id) = controller.selected() else {
+    if controller.fields().is_empty() {
         return;
-    };
-    let Some((title, unit)) = field_label_and_unit(snapshot, field_id) else {
-        controller.close();
-        return;
-    };
+    }
 
     let now = Instant::now();
     if controller.tab() == StatsTab::Visible
         && let Some(view) = view
     {
-        controller.request(
-            StatsRequestKey::new(field_id, snapshot.epoch, view.min_us, view.max_us),
+        controller.request_all(
+            snapshot.epoch,
+            view.min_us,
+            view.max_us,
             Arc::clone(snapshot),
             now,
         );
     }
     controller.poll(now);
 
-    let provisional = view.and_then(|view| {
-        let cache = caches.get(field_id)?;
-        let (x0, x1) = view.seconds(cache.origin_us);
-        let (a, b) = cache.index_range(x0, x1);
-        let mm = cache.pyramid.query(&cache.xy, a, b);
-        mm.is_finite()
-            .then_some((f64::from(mm.min), f64::from(mm.max)))
-    });
     let tab = controller.tab();
-    let current = controller.result().copied();
-    let displayed = current.or_else(|| controller.stale_result().copied());
-    let updating = controller.is_updating();
+    let rows = field_stats_rows(snapshot, caches, view, controller);
+    let visible_range = view.map(|view| TimeRange {
+        min_us: view.min_us,
+        max_us: view.max_us,
+    });
+    let global_range = snapshot.global_time_range();
+    let updating = controller.is_any_updating();
     if updating {
         ctx.request_repaint_after(Duration::from_millis(100));
     }
-    let error = controller.error().map(str::to_owned);
-    let suffix = unit
-        .as_ref()
-        .map(|unit| format!(" {unit}"))
-        .unwrap_or_default();
 
     let mut open = true;
-    egui::Window::new(field_stats_window_title(&title))
-        .id(egui::Id::new(("field_stats", field_id.0)))
+    egui::Window::new("Field stats")
+        .id(egui::Id::new("field_stats"))
         .open(&mut open)
         .collapsible(false)
         .default_pos(ctx.content_rect().center())
         .pivot(egui::Align2::CENTER_CENTER)
-        .default_width(360.0)
-        .resizable(false)
+        .default_width(900.0)
+        .resizable(true)
         .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                if ui
-                    .selectable_label(tab == StatsTab::Visible, "Visible window")
-                    .clicked()
-                {
-                    controller.set_tab(StatsTab::Visible);
-                }
-                if ui
-                    .selectable_label(tab == StatsTab::Global, "Global")
-                    .clicked()
-                {
-                    controller.set_tab(StatsTab::Global);
-                }
-            });
-            ui.separator();
-
-            if tab == StatsTab::Visible {
-                if let Some(view) = view {
-                    ui.horizontal(|ui| {
-                        ui.weak(format!(
-                            "{} to {}",
-                            format_time_us(view.min_us),
-                            format_time_us(view.max_us)
-                        ));
-                        if updating {
-                            ui.label(
-                                egui::RichText::new("Updating...")
-                                    .color(ui.visuals().hyperlink_color),
-                            );
-                        }
-                    });
-                }
-                if let Some(error) = error.as_deref() {
-                    if error == "This field is not numeric." {
-                        ui.weak(error);
-                    } else {
-                        ui.colored_label(ui.visuals().error_fg_color, error);
-                    }
-                } else {
-                    ui.add_enabled_ui(!updating || displayed.is_none(), |ui| {
-                        stats_grid(
-                            ui,
-                            "visible_field_stats_grid",
-                            displayed,
-                            provisional,
-                            &suffix,
-                        );
-                    });
-                }
-            } else {
-                match delog_core::analysis::global_field_stats(snapshot, field_id) {
-                    Ok(Some(stats)) => {
-                        stats_grid(ui, "global_field_stats_grid", Some(stats), None, &suffix)
-                    }
-                    Ok(None) => {
-                        ui.weak("This field is not numeric.");
-                    }
-                    Err(err) => {
-                        ui.colored_label(ui.visuals().error_fg_color, err.to_string());
-                    }
-                }
-            }
+            let mut dock_state = field_stats_dock_state(tab);
+            let mut viewer = FieldStatsTabViewer {
+                snapshot,
+                rows: &rows,
+                visible_range,
+                global_range,
+                updating,
+            };
+            egui_dock::DockArea::new(&mut dock_state)
+                .id(egui::Id::new("field_stats_dock_area"))
+                .style(egui_dock::Style::from_egui(ui.style().as_ref()))
+                .allowed_splits(egui_dock::AllowedSplits::None)
+                .draggable_tabs(false)
+                .tab_context_menus(false)
+                .show_close_buttons(false)
+                .show_leaf_close_all_buttons(false)
+                .show_leaf_collapse_buttons(false)
+                .show_inside(ui, &mut viewer);
+            controller.set_tab(active_field_stats_tab(&mut dock_state));
         });
 
     if !open {
@@ -2951,51 +3809,315 @@ fn show_field_stats_window(
     }
 }
 
-fn stats_grid(
-    ui: &mut egui::Ui,
-    id: &'static str,
+#[derive(Clone)]
+struct FieldStatsRow {
+    field: delog_core::identity::FieldId,
+    name: String,
+    suffix: String,
     stats: Option<delog_core::analysis::FieldStats>,
     provisional: Option<(f64, f64)>,
-    suffix: &str,
+    updating: bool,
+    state: Option<String>,
+}
+
+fn field_stats_rows(
+    snapshot: &delog_core::snapshot::StoreSnapshot,
+    caches: &mut CacheManager,
+    view: Option<ViewX>,
+    controller: &FieldStatsController,
+) -> Vec<FieldStatsRow> {
+    controller
+        .fields()
+        .iter()
+        .copied()
+        .map(|field| {
+            let name = crate::legend::trace_label(snapshot, field);
+            let (suffix, unavailable) = match field_unit(snapshot, field) {
+                Some(Some(unit)) => (format!(" {unit}"), false),
+                Some(None) => (String::new(), false),
+                None => (String::new(), true),
+            };
+            let stats = controller
+                .result_for(field)
+                .copied()
+                .or_else(|| controller.stale_result_for(field).copied());
+            let provisional = view.and_then(|view| {
+                let cache = caches.get(field)?;
+                provisional_visible_stats(cache, view)
+            });
+            let state = unavailable
+                .then(|| "Unavailable".to_owned())
+                .or_else(|| controller.error_for(field).map(str::to_owned));
+            FieldStatsRow {
+                field,
+                name,
+                suffix,
+                stats,
+                provisional,
+                updating: controller.is_updating_for(field),
+                state,
+            }
+        })
+        .collect()
+}
+
+fn provisional_visible_stats(cache: &delog_cache::TraceCache, view: ViewX) -> Option<(f64, f64)> {
+    let (x0, x1) = view.seconds(cache.origin_us);
+    let (a, b) = cache.index_range(x0, x1);
+    let mm = cache.pyramid.query(&cache.xy, a, b);
+    mm.is_finite().then_some((
+        f64::from(mm.min) + cache.y_origin(),
+        f64::from(mm.max) + cache.y_origin(),
+    ))
+}
+
+fn field_stats_dock_state(active_tab: StatsTab) -> egui_dock::DockState<StatsTab> {
+    let mut dock_state = egui_dock::DockState::new(StatsTab::ALL.to_vec());
+    if let Some(path) = dock_state.find_tab(&active_tab) {
+        let _ = dock_state.set_active_tab(path);
+        dock_state.set_focused_node_and_surface(path.node_path());
+    }
+    dock_state
+}
+
+fn active_field_stats_tab(dock_state: &mut egui_dock::DockState<StatsTab>) -> StatsTab {
+    dock_state
+        .find_active_focused()
+        .map(|(_, tab)| *tab)
+        .unwrap_or_default()
+}
+
+struct FieldStatsTabViewer<'a> {
+    snapshot: &'a delog_core::snapshot::StoreSnapshot,
+    rows: &'a [FieldStatsRow],
+    visible_range: Option<TimeRange>,
+    global_range: Option<TimeRange>,
+    updating: bool,
+}
+
+impl egui_dock::TabViewer for FieldStatsTabViewer<'_> {
+    type Tab = StatsTab;
+
+    fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
+        tab.label().into()
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
+        match tab {
+            StatsTab::Visible => {
+                show_visible_field_stats_tab(ui, self.visible_range, self.rows, self.updating)
+            }
+            StatsTab::Global => {
+                show_global_field_stats_tab(ui, self.snapshot, self.global_range, self.rows)
+            }
+        }
+    }
+
+    fn allowed_in_windows(&self, _tab: &mut Self::Tab) -> bool {
+        false
+    }
+}
+
+fn show_visible_field_stats_tab(
+    ui: &mut egui::Ui,
+    range: Option<TimeRange>,
+    rows: &[FieldStatsRow],
+    updating: bool,
 ) {
-    let min = stats.map(|s| s.min).or(provisional.map(|p| p.0));
-    let max = stats.map(|s| s.max).or(provisional.map(|p| p.1));
-    egui::Grid::new(id)
-        .num_columns(2)
-        .striped(true)
-        .spacing([16.0, 4.0])
+    stats_range_header(ui, range, updating);
+    stats_table(ui, "visible_field_stats_table", rows);
+}
+
+fn show_global_field_stats_tab(
+    ui: &mut egui::Ui,
+    snapshot: &delog_core::snapshot::StoreSnapshot,
+    range: Option<TimeRange>,
+    visible_rows: &[FieldStatsRow],
+) {
+    stats_range_header(ui, range, false);
+    let rows: Vec<_> = visible_rows
+        .iter()
+        .cloned()
+        .map(|mut row| {
+            row.provisional = None;
+            row.updating = false;
+            if row.state.as_deref() != Some("Unavailable") {
+                match delog_core::analysis::global_field_stats(snapshot, row.field) {
+                    Ok(Some(stats)) => {
+                        row.stats = Some(stats);
+                        row.state = None;
+                    }
+                    Ok(None) => {
+                        row.stats = None;
+                        row.state = Some("Not numeric".into());
+                    }
+                    Err(err) => {
+                        row.stats = None;
+                        row.state = Some(err.to_string());
+                    }
+                }
+            }
+            row
+        })
+        .collect();
+    stats_table(ui, "global_field_stats_table", &rows);
+}
+
+fn stats_table(ui: &mut egui::Ui, id: &'static str, rows: &[FieldStatsRow]) {
+    let row_height = table_row_height(ui);
+    egui::ScrollArea::horizontal()
+        .id_salt((id, "horizontal"))
+        .auto_shrink([false, false])
         .show(ui, |ui| {
-            stats_row(ui, "Min", stat_with_unit(min, suffix));
-            stats_row(ui, "Max", stat_with_unit(max, suffix));
-            stats_row(ui, "Mean", stat_with_unit(stats.map(|s| s.mean), suffix));
-            stats_row(
-                ui,
-                "Std dev",
-                stat_with_unit(stats.map(|s| s.stddev), suffix),
-            );
-            stats_row(
-                ui,
-                "Samples",
-                stats.map_or_else(|| "-".into(), |s| s.count.to_string()),
-            );
-            stats_row(
-                ui,
-                "Missing",
-                stats.map_or_else(|| "-".into(), |s| s.missing_count.to_string()),
-            );
-            stats_row(
-                ui,
-                "Rate",
-                stats
-                    .and_then(|s| s.rate_hz)
-                    .map(|rate| format!("{} Hz", format_stat(rate)))
-                    .unwrap_or_else(|| "-".into()),
-            );
+            ui.set_min_width(880.0);
+            TableBuilder::new(ui)
+                .id_salt(id)
+                .striped(true)
+                .resizable(true)
+                .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                .auto_shrink([false, false])
+                .column(Column::initial(180.0).at_least(120.0).clip(true))
+                .column(Column::initial(80.0).at_least(64.0))
+                .column(Column::initial(96.0).at_least(72.0))
+                .column(Column::initial(96.0).at_least(72.0))
+                .column(Column::initial(96.0).at_least(72.0))
+                .column(Column::initial(96.0).at_least(72.0))
+                .column(Column::initial(80.0).at_least(64.0))
+                .column(Column::remainder().at_least(80.0))
+                .header(row_height, |mut header| {
+                    header.col(|ui| {
+                        ui.strong("Name");
+                    });
+                    header.col(|ui| {
+                        ui.strong("Samples");
+                    });
+                    header.col(|ui| {
+                        ui.strong("Min");
+                    });
+                    header.col(|ui| {
+                        ui.strong("Max");
+                    });
+                    header.col(|ui| {
+                        ui.strong("Mean");
+                    });
+                    header.col(|ui| {
+                        ui.strong("Std dev");
+                    });
+                    header.col(|ui| {
+                        ui.strong("Missing");
+                    });
+                    header.col(|ui| {
+                        ui.strong("Rate");
+                    });
+                })
+                .body(|body| {
+                    body.rows(row_height, rows.len(), |mut table_row| {
+                        let row = &rows[table_row.index()];
+                        let values = stats_row_values(row);
+                        table_row.col(|ui| {
+                            ui.label(&row.name);
+                            if row.updating {
+                                ui.weak("updating...");
+                            }
+                        });
+                        table_row.col(|ui| {
+                            ui.label(&values[0]);
+                        });
+                        for value in &values[1..] {
+                            table_row.col(|ui| {
+                                ui.label(value);
+                            });
+                        }
+                    });
+                });
         });
 }
 
-fn field_stats_window_title(field_label: &str) -> String {
-    field_label.to_owned()
+fn stats_row_values(row: &FieldStatsRow) -> [String; 7] {
+    if let Some(state) = &row.state {
+        return [
+            state.clone(),
+            "-".into(),
+            "-".into(),
+            "-".into(),
+            "-".into(),
+            "-".into(),
+            "-".into(),
+        ];
+    }
+
+    let min = row
+        .stats
+        .map(|stats| stats.min)
+        .or(row.provisional.map(|p| p.0));
+    let max = row
+        .stats
+        .map(|stats| stats.max)
+        .or(row.provisional.map(|p| p.1));
+    [
+        row.stats
+            .map(|stats| stats.count.to_string())
+            .unwrap_or_else(|| "-".into()),
+        stat_with_unit(min, &row.suffix),
+        stat_with_unit(max, &row.suffix),
+        stat_with_unit(row.stats.map(|stats| stats.mean), &row.suffix),
+        stat_with_unit(row.stats.map(|stats| stats.stddev), &row.suffix),
+        row.stats
+            .map(|stats| stats.missing_count.to_string())
+            .unwrap_or_else(|| "-".into()),
+        row.stats
+            .and_then(|stats| stats.rate_hz)
+            .map(|rate| format!("{} Hz", format_stat(rate)))
+            .unwrap_or_else(|| "-".into()),
+    ]
+}
+
+fn field_unit(
+    snapshot: &delog_core::snapshot::StoreSnapshot,
+    field_id: delog_core::identity::FieldId,
+) -> Option<Option<String>> {
+    let field = snapshot
+        .fields
+        .get(field_id.index())
+        .filter(|field| field.id == field_id && !field.removed)?;
+    let topic = snapshot
+        .topic(field.topic)
+        .filter(|topic| !topic.entry.removed)?;
+    Some(
+        topic
+            .store
+            .as_ref()
+            .and_then(|store| store.schema.field_by_name(&field.name))
+            .and_then(|schema| schema.unit.clone()),
+    )
+}
+
+fn stats_range_header(ui: &mut egui::Ui, range: Option<TimeRange>, updating: bool) {
+    ui.horizontal(|ui| {
+        ui.strong("Range");
+        match range {
+            Some(range) => {
+                ui.monospace(format_time_us(range.min_us));
+                ui.weak("to");
+                ui.monospace(format_time_us(range.max_us));
+            }
+            None => {
+                ui.weak("unavailable");
+            }
+        }
+        if updating {
+            ui.separator();
+            ui.label(egui::RichText::new("Updating...").color(ui.visuals().hyperlink_color));
+        }
+    });
+    ui.add_space(6.0);
+}
+
+fn table_row_height(ui: &egui::Ui) -> f32 {
+    egui::TextStyle::Body
+        .resolve(ui.style())
+        .size
+        .max(ui.spacing().interact_size.y)
 }
 
 fn stat_with_unit(value: Option<f64>, suffix: &str) -> String {
@@ -3004,38 +4126,23 @@ fn stat_with_unit(value: Option<f64>, suffix: &str) -> String {
         .unwrap_or_else(|| "-".into())
 }
 
+struct PickedFiles {
+    paths: Vec<std::path::PathBuf>,
+    parser: Option<String>,
+}
+
+fn parser_label(name: &str) -> &str {
+    match name {
+        "ardupilot-bin" => "ArduPilot DataFlash",
+        "ulog" => "PX4 ULog",
+        "tlog" => "MAVLink Telemetry",
+        "parquet" => "Parquet",
+        other => other,
+    }
+}
+
 fn format_time_us(value: i64) -> String {
     format!("{:.3} s", value as f64 / 1e6)
-}
-
-fn stats_row(ui: &mut egui::Ui, key: &str, value: String) {
-    ui.strong(key);
-    ui.label(value);
-    ui.end_row();
-}
-
-fn field_label_and_unit(
-    snapshot: &delog_core::snapshot::StoreSnapshot,
-    field_id: delog_core::identity::FieldId,
-) -> Option<(String, Option<String>)> {
-    let field = snapshot
-        .fields
-        .get(field_id.index())
-        .filter(|field| field.id == field_id && !field.removed)?;
-    let topic = snapshot.topic(field.topic)?;
-    let source = snapshot.source(topic.entry.source)?;
-    let unit = topic
-        .store
-        .as_ref()
-        .and_then(|store| store.schema.field_by_name(&field.name))
-        .and_then(|schema| schema.unit.clone());
-    Some((
-        format!(
-            "{} / {}.{}",
-            source.entry.label, topic.entry.name, field.name
-        ),
-        unit,
-    ))
 }
 
 fn format_stat(value: f64) -> String {
@@ -3099,6 +4206,90 @@ fn source_kind_label(label: &str) -> &'static str {
         "Derived"
     } else {
         "File"
+    }
+}
+
+#[derive(Default)]
+struct PendingDockActions {
+    clear_diagnostics: bool,
+    diagnostic_jump_us: Option<i64>,
+    clear_logs: bool,
+    marker_jump_us: Option<i64>,
+}
+
+struct AppDockViewer<'a> {
+    diagnostics_dock: &'a mut DiagnosticsDock,
+    diagnostics: &'a [DiagRecord],
+    snapshot: &'a delog_core::snapshot::StoreSnapshot,
+    logging_dock: &'a mut LoggingDock,
+    logs: &'a [LogRecord],
+    performance_dock: &'a mut PerformanceDock,
+    performance_snapshot: &'a PerformanceSnapshot,
+    markers_dock: &'a mut crate::markers::MarkersDock,
+    markers: &'a mut crate::markers::Markers,
+    origin_us: i64,
+    #[cfg(feature = "scripting")]
+    scripts: &'a mut scripts::ScriptsPanel,
+    #[cfg(feature = "scripting")]
+    store: &'a Arc<delog_core::snapshot::DataStore>,
+    #[cfg(feature = "scripting")]
+    ingest_sender: &'a delog_core::ingest::IngestSender,
+    #[cfg(feature = "scripting")]
+    metrics: &'a Arc<delog_core::metrics::MetricsRegistry>,
+    actions: &'a mut PendingDockActions,
+}
+
+impl egui_dock::TabViewer for AppDockViewer<'_> {
+    type Tab = AppDockTab;
+
+    fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
+        match tab {
+            AppDockTab::Diagnostics => "Diagnostics".into(),
+            AppDockTab::Performance => "Performance".into(),
+            AppDockTab::Markers => "Markers".into(),
+            #[cfg(feature = "scripting")]
+            AppDockTab::ScriptingConsole => "Scripting".into(),
+            AppDockTab::Logging => "Logging".into(),
+        }
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
+        match tab {
+            AppDockTab::Diagnostics => {
+                let action = self
+                    .diagnostics_dock
+                    .ui(ui, self.diagnostics, self.snapshot);
+                if action.clear {
+                    self.actions.clear_diagnostics = true;
+                }
+                if action.jump_to_time_us.is_some() {
+                    self.actions.diagnostic_jump_us = action.jump_to_time_us;
+                }
+            }
+            AppDockTab::Performance => {
+                self.performance_dock.ui(ui, self.performance_snapshot);
+            }
+            AppDockTab::Markers => {
+                if let Some(t_us) = self.markers_dock.ui(ui, self.markers, self.origin_us) {
+                    self.actions.marker_jump_us = Some(t_us);
+                }
+            }
+            #[cfg(feature = "scripting")]
+            AppDockTab::ScriptingConsole => {
+                self.scripts
+                    .console_dock_ui(ui, self.store, self.ingest_sender, self.metrics);
+            }
+            AppDockTab::Logging => {
+                let action = self.logging_dock.ui(ui, self.logs);
+                if action.clear {
+                    self.actions.clear_logs = true;
+                }
+            }
+        }
+    }
+
+    fn allowed_in_windows(&self, _tab: &mut Self::Tab) -> bool {
+        false
     }
 }
 
@@ -3185,11 +4376,29 @@ mod tests {
     use delog_core::chunk::Chunk;
     use delog_core::diagnostics::{Diag, DiagRecord};
     use delog_core::identity::IdentityRegistry;
-    use delog_core::schema::{FieldSchema, TopicSchema};
+    use delog_core::schema::{FieldSchema, TopicProvenance, TopicSchema};
     use delog_core::snapshot::StoreSnapshot;
     use delog_core::store::TopicStore;
 
     use super::*;
+
+    #[test]
+    fn active_native_loads_schedule_reactive_mode_polling() {
+        let ctx = egui::Context::default();
+        let (repaints, repaint_requests) = mpsc::channel();
+        ctx.set_request_repaint_callback(move |request| {
+            repaints.send(request.delay).unwrap();
+        });
+
+        keep_active_loads_repainting(&ctx, false);
+        assert!(repaint_requests.try_recv().is_err());
+        keep_active_loads_repainting(&ctx, true);
+
+        let delay = repaint_requests
+            .recv_timeout(Duration::from_secs(1))
+            .expect("an active parser schedules another UI poll");
+        assert!(delay <= Duration::from_millis(50));
+    }
 
     #[test]
     fn auto_open_diagnostics_only_fires_for_newer_seqs_when_enabled() {
@@ -3319,11 +4528,74 @@ mod tests {
     }
 
     #[test]
-    fn stats_window_title_is_only_the_field_label() {
-        assert_eq!(
-            field_stats_window_title("flight / ATT.Roll"),
-            "flight / ATT.Roll"
-        );
+    fn file_menu_opens_data_export_through_resetting_api() {
+        let source = include_str!("app.rs");
+        let export_action = source
+            .split("if ui.button(\"Export Data\").clicked()")
+            .nth(1)
+            .expect("Export submenu should expose data export")
+            .split("ui.separator();")
+            .next()
+            .expect("data export should precede the File menu separator");
+
+        assert!(export_action.contains("self.data_export.open();"));
+        assert!(!export_action.contains("self.data_export.open = true;"));
+    }
+
+    #[test]
+    fn field_stats_tabs_use_egui_dock() {
+        let source = include_str!("app.rs");
+        let field_stats_window = source
+            .split("fn show_field_stats_window")
+            .nth(1)
+            .expect("field stats window should exist")
+            .split("fn stats_grid")
+            .next()
+            .expect("field stats window should precede stats grid");
+
+        assert!(field_stats_window.contains("egui_dock::DockArea::new"));
+        assert!(source.contains("impl egui_dock::TabViewer for FieldStatsTabViewer"));
+        assert!(!field_stats_window.contains("selectable_label"));
+    }
+
+    #[test]
+    fn field_stats_window_is_a_resizable_multi_field_table() {
+        let source = include_str!("app.rs");
+        let field_stats = source
+            .split("fn show_field_stats_window")
+            .nth(1)
+            .expect("field stats window should exist")
+            .split("fn field_time_range")
+            .next()
+            .expect("field stats helpers should precede field range helper");
+
+        let window_constructor = ["egui::Window", "::new(\"Field stats\")"].concat();
+        assert!(field_stats.contains(&window_constructor));
+        assert!(field_stats.contains(".default_width(900.0)"));
+        assert!(field_stats.contains(".resizable(true)"));
+        assert!(field_stats.contains("fn stats_table"));
+        assert!(field_stats.contains("ScrollArea::horizontal"));
+        for heading in [
+            "Name", "Samples", "Min", "Max", "Mean", "Std dev", "Missing", "Rate",
+        ] {
+            assert!(field_stats.contains(&format!("ui.strong(\"{heading}\")")));
+        }
+    }
+
+    #[test]
+    fn field_stats_rows_use_topic_dot_field_labels_and_per_field_state() {
+        let source = include_str!("app.rs");
+        let rows = source
+            .split("fn field_stats_rows")
+            .nth(1)
+            .expect("field stats row builder should exist")
+            .split("fn stats_table")
+            .next()
+            .expect("row builder should precede table renderer");
+
+        assert!(rows.contains("crate::legend::trace_label(snapshot, field)"));
+        assert!(rows.contains(".result_for(field)"));
+        assert!(rows.contains(".error_for(field)"));
     }
 
     #[test]
@@ -3424,7 +4696,8 @@ mod tests {
                     FieldSchema::new("Alt", DataType::Float64, Some("m"), 1.0).unwrap(),
                 ],
             )
-            .unwrap(),
+            .unwrap()
+            .with_provenance(TopicProvenance::new("flight-a", "ATT").unwrap()),
         );
         let chunk = Arc::new(
             Chunk::try_new(
@@ -3445,6 +4718,8 @@ mod tests {
         assert_eq!(meta.title, "flight / GPS.Lat");
         assert_eq!(meta.source_label, "flight");
         assert_eq!(meta.topic_name, "GPS");
+        assert_eq!(meta.original_source.as_deref(), Some("flight-a"));
+        assert_eq!(meta.original_topic.as_deref(), Some("ATT"));
         assert_eq!(meta.field_name, "Lat");
         assert_eq!(meta.dtype, "i32");
         assert_eq!(meta.unit.as_deref(), Some("deg"));
@@ -3453,5 +4728,177 @@ mod tests {
         assert_eq!(meta.rows, 3);
         assert_eq!(meta.source_offset_us, 250);
         assert_eq!(meta.range, TimeRange::new(1_250, 3_250));
+    }
+
+    #[test]
+    fn field_metadata_reports_original_sources_for_imported_topic_collisions() {
+        let snapshot = crate::session::tests::structured_round_trip_snapshot();
+        let metadata_for = |topic_name: &str| {
+            let topic = snapshot
+                .topics
+                .iter()
+                .find(|topic| topic.entry.name == topic_name)
+                .unwrap();
+            let roll = snapshot
+                .fields
+                .iter()
+                .find(|field| field.topic == topic.entry.id && field.name == "Roll")
+                .unwrap();
+            field_metadata(&snapshot, roll.id).unwrap()
+        };
+
+        let primary = metadata_for("ATT[0]");
+        assert_eq!(primary.source_label, "structured-metadata");
+        assert_eq!(primary.topic_name, "ATT[0]");
+        assert_eq!(primary.original_source.as_deref(), Some("flight-a"));
+        assert_eq!(primary.original_topic.as_deref(), Some("ATT"));
+        assert_eq!(primary.dtype, "f32");
+        assert_eq!(primary.unit.as_deref(), Some("deg"));
+        assert_eq!(primary.description.as_deref(), Some("roll angle"));
+        assert_eq!(primary.multiplier, 0.01);
+        assert_eq!(primary.rows, 2);
+        assert_eq!(primary.source_offset_us, 0);
+        assert_eq!(primary.range, TimeRange::new(1_100, 2_100));
+
+        let secondary = metadata_for("ATT[1]");
+        assert_eq!(secondary.source_label, "structured-metadata");
+        assert_eq!(secondary.topic_name, "ATT[1]");
+        assert_eq!(secondary.original_source.as_deref(), Some("flight-b"));
+        assert_eq!(secondary.original_topic.as_deref(), Some("ATT"));
+        assert_eq!(secondary.description.as_deref(), Some("secondary roll"));
+        assert_eq!(secondary.rows, 3);
+        assert_eq!(secondary.range, TimeRange::new(1_300, 3_300));
+    }
+
+    fn shape_contains_text(shape: &egui::epaint::Shape, expected: &str) -> bool {
+        match shape {
+            egui::epaint::Shape::Text(text) => text.galley.job.text == expected,
+            egui::epaint::Shape::Vec(shapes) => shapes
+                .iter()
+                .any(|shape| shape_contains_text(shape, expected)),
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn imported_provenance_is_rendered_in_the_existing_field_metadata_window() {
+        let snapshot = crate::session::tests::structured_round_trip_snapshot();
+        let topic = snapshot
+            .topics
+            .iter()
+            .find(|topic| topic.entry.name == "ATT[0]")
+            .unwrap();
+        let roll = snapshot
+            .fields
+            .iter()
+            .find(|field| field.topic == topic.entry.id && field.name == "Roll")
+            .unwrap();
+        let mut selected = Some(roll.id);
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1_200.0, 800.0),
+            )),
+            ..Default::default()
+        };
+
+        let _ = ctx.run_ui(input.clone(), |ui| {
+            show_field_metadata_window(ui.ctx(), &snapshot, &mut selected);
+        });
+        let output = ctx.run_ui(input, |ui| {
+            show_field_metadata_window(ui.ctx(), &snapshot, &mut selected);
+        });
+
+        for expected in ["Original source", "flight-a", "Original topic", "ATT"] {
+            assert!(
+                output
+                    .shapes
+                    .iter()
+                    .any(|clipped| shape_contains_text(&clipped.shape, expected)),
+                "field metadata window should render {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn provisional_visible_stats_reconstructs_absolute_minmax() {
+        let mut identity = IdentityRegistry::new();
+        let source = identity.add_source("flight");
+        let topic = identity.add_topic(source, "BARO").unwrap();
+        let field = identity.add_field(topic, "Alt").unwrap();
+        let schema = Arc::new(
+            TopicSchema::new(
+                "BARO",
+                [FieldSchema::new("Alt", DataType::Int32, Some("cm"), 0.01).unwrap()],
+            )
+            .unwrap(),
+        );
+        let chunk = Arc::new(
+            Chunk::try_new(
+                Int64Array::from(vec![0, 1_000_000, 2_000_000]),
+                vec![Arc::new(Int32Array::from(vec![10_000, 10_100, 10_200])) as ArrayRef],
+                &schema,
+            )
+            .unwrap(),
+        );
+        let store = Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap());
+        let snapshot = StoreSnapshot::from_registry(&identity, [(topic, store)], 0).unwrap();
+        let cache = delog_cache::TraceCache::build(
+            &snapshot,
+            field,
+            0,
+            0,
+            &delog_core::metrics::MetricsRegistry::new(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            provisional_visible_stats(&cache, ViewX::new(1_000_000, 2_000_000)),
+            Some((101.0, 102.0))
+        );
+    }
+
+    #[test]
+    fn source_metadata_tabs_use_egui_dock() {
+        let source = include_str!("app.rs");
+        let source_metadata = source
+            .split("fn show_source_metadata_window")
+            .nth(1)
+            .expect("source metadata window should exist")
+            .split("fn show_source_metadata_tab")
+            .next()
+            .expect("source metadata window should precede tab renderer");
+
+        assert!(source_metadata.contains("egui_dock::DockArea::new"));
+        assert!(source.contains("impl egui_dock::TabViewer for SourceMetadataTabViewer"));
+        assert!(!source_metadata.contains("selectable_value"));
+    }
+
+    #[test]
+    fn source_metadata_tables_use_resizable_table_builders() {
+        let source = include_str!("app.rs");
+        let source_metadata = source
+            .split("fn show_source_metadata_tab")
+            .nth(1)
+            .expect("source metadata tab renderer should exist")
+            .split("fn show_field_stats_window")
+            .next()
+            .expect("source metadata should precede field stats");
+
+        assert!(source_metadata.contains("source_metadata_summary_table"));
+        assert!(source_metadata.contains("source_metadata_params_table"));
+        assert!(source_metadata.contains("source_metadata_markers_table"));
+        assert_eq!(source_metadata.matches("TableBuilder::new(ui)").count(), 3);
+        assert_eq!(source_metadata.matches(".resizable(true)").count(), 3);
+        assert!(source_metadata.matches("Column::remainder()").count() >= 3);
+        assert!(!source_metadata.contains("egui::Grid::new"));
+    }
+
+    #[test]
+    fn tile_cache_repaints_on_clear_submission_and_while_action_is_pending() {
+        assert!(tile_cache_needs_repaint(true, false));
+        assert!(tile_cache_needs_repaint(false, true));
+        assert!(!tile_cache_needs_repaint(false, false));
     }
 }

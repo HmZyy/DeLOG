@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::camera::OrbitCamera;
-use crate::plot::{GhostTrace, PlotPane, TraceMode, TraceRef, ViewX};
+use crate::plot::{GhostTrace, PlotPane, TraceMode, TraceRef};
 use crate::settings::AppSettings;
 use crate::vehicle::{GeoRef, ModelKind, NedReference, OriMapping, PosMapping, VehicleConfig};
 use crate::workspace::{Pane, Scene3dPane, Workspace};
@@ -29,38 +29,15 @@ fn default_true() -> bool {
 pub struct LayoutDoc {
     pub delog_layout: u32,
     pub name: String,
-    pub view: Option<ViewLayout>,
     pub playback: PlaybackLayout,
     pub workspace: WorkspaceLayout,
     pub vehicles: Vec<VehicleLayout>,
-    #[serde(default)]
-    pub marker_us: Option<i64>,
-    #[serde(default)]
-    pub markers: Vec<MarkerLayout>,
-    #[serde(default)]
-    pub favorites: Vec<FieldRef>,
-    #[serde(default)]
-    pub docks: BTreeMap<String, bool>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FieldRef {
     pub topic: String,
     pub field: String,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ViewMode {
-    Window,
-    Full,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ViewLayout {
-    pub mode: ViewMode,
-    pub min_us: i64,
-    pub max_us: i64,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -83,12 +60,6 @@ pub enum LayoutNode {
         show_legend: bool,
         #[serde(default = "default_true")]
         show_tooltip: bool,
-        #[serde(default)]
-        marker_us: Option<i64>,
-        #[serde(default)]
-        text_offsets: Vec<TextOffsetLayout>,
-        #[serde(default)]
-        text_filters: Vec<TextFilterLayout>,
     },
     Scene3d(SceneLayout),
     Split {
@@ -121,28 +92,6 @@ pub enum TraceModeLayout {
     Line,
     Scatter,
     Step,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct MarkerLayout {
-    pub t_us: i64,
-    pub label: String,
-    pub color: [f32; 4],
-    pub note: String,
-}
-
-/// `y_frac`: 0 = top .. 1 = bottom in the pane.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct TextOffsetLayout {
-    pub field: FieldRef,
-    pub t_us: i64,
-    pub y_frac: f32,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct TextFilterLayout {
-    pub field: FieldRef,
-    pub filter: String,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -248,12 +197,9 @@ pub enum OriLayout {
 
 pub struct LayoutApply {
     pub workspace: Workspace,
-    pub view: Option<ViewX>,
     pub fit_all: bool,
     pub speed: f64,
     pub follow_live: bool,
-    pub marker_us: Option<i64>,
-    pub markers: Vec<MarkerLayout>,
     pub vehicles: Vec<VehicleConfig>,
     pub diagnostics: Vec<Diag>,
 }
@@ -296,13 +242,8 @@ pub struct CurrentLayout<'a> {
     pub name: String,
     pub workspace: &'a Workspace,
     pub snapshot: &'a StoreSnapshot,
-    pub view: Option<ViewX>,
-    /// Persisted as `ViewMode::Full`.
-    pub fit_all: bool,
     pub speed: f64,
     pub follow_live: bool,
-    pub marker_us: Option<i64>,
-    pub markers: Vec<MarkerLayout>,
     pub vehicles: &'a [VehicleConfig],
 }
 
@@ -523,15 +464,6 @@ pub fn current_doc(input: CurrentLayout<'_>) -> LayoutDoc {
     LayoutDoc {
         delog_layout: LAYOUT_VERSION,
         name: input.name,
-        view: input.view.map(|v| ViewLayout {
-            mode: if input.fit_all {
-                ViewMode::Full
-            } else {
-                ViewMode::Window
-            },
-            min_us: v.min_us,
-            max_us: v.max_us,
-        }),
         playback: PlaybackLayout {
             speed: input.speed,
             follow_live: input.follow_live,
@@ -542,10 +474,6 @@ pub fn current_doc(input: CurrentLayout<'_>) -> LayoutDoc {
             .iter()
             .filter_map(|v| vehicle_to_layout(v, input.snapshot))
             .collect(),
-        marker_us: input.marker_us,
-        markers: input.markers,
-        favorites: Vec::new(),
-        docks: BTreeMap::new(),
     }
 }
 
@@ -606,9 +534,6 @@ fn workspace_doc(workspace: &Workspace, snapshot: &StoreSnapshot) -> WorkspaceLa
             traces: Vec::new(),
             show_legend: true,
             show_tooltip: true,
-            marker_us: None,
-            text_offsets: Vec::new(),
-            text_filters: Vec::new(),
         });
     WorkspaceLayout { root }
 }
@@ -628,29 +553,6 @@ fn node_to_layout(
                 .collect(),
             show_legend: pane.show_legend,
             show_tooltip: pane.show_tooltip,
-            marker_us: pane.marker_us,
-            text_offsets: pane
-                .text_offsets
-                .iter()
-                .filter_map(|(&(field, t_us), &y_frac)| {
-                    field_ref(snapshot, field).map(|field| TextOffsetLayout {
-                        field,
-                        t_us,
-                        y_frac,
-                    })
-                })
-                .collect(),
-            text_filters: pane
-                .text_filters
-                .iter()
-                .filter(|(_, filter)| !filter.trim().is_empty())
-                .filter_map(|(&field, filter)| {
-                    field_ref(snapshot, field).map(|field| TextFilterLayout {
-                        field,
-                        filter: filter.clone(),
-                    })
-                })
-                .collect(),
         }),
         egui_tiles::Tile::Pane(Pane::Scene3D(scene)) => Some(LayoutNode::Scene3d(SceneLayout {
             camera: CameraLayout {
@@ -715,6 +617,48 @@ fn vehicle_to_layout(v: &VehicleConfig, snapshot: &StoreSnapshot) -> Option<Vehi
     })
 }
 
+#[allow(dead_code)]
+pub fn vehicle_config_to_layout(
+    v: &VehicleConfig,
+    snapshot: &StoreSnapshot,
+) -> Option<VehicleLayout> {
+    vehicle_to_layout(v, snapshot)
+}
+
+#[allow(dead_code)]
+pub fn vehicle_config_from_layout(
+    v: &VehicleLayout,
+    snapshot: &StoreSnapshot,
+) -> Option<VehicleConfig> {
+    let choices = HashMap::new();
+    let mut resolver = Resolver {
+        snapshot,
+        choices: &choices,
+        diagnostics: Vec::new(),
+        ambiguities: BTreeMap::new(),
+        collect_ambiguities: false,
+    };
+    vehicle_from_layout(v, &mut resolver)
+}
+
+#[allow(dead_code)]
+pub fn vehicle_config_from_layout_for_source(
+    v: &VehicleLayout,
+    snapshot: &StoreSnapshot,
+    source: SourceId,
+) -> Option<VehicleConfig> {
+    let mut choices = HashMap::new();
+    collect_vehicle_field_choices(v, source, &mut choices);
+    let mut resolver = Resolver {
+        snapshot,
+        choices: &choices,
+        diagnostics: Vec::new(),
+        ambiguities: BTreeMap::new(),
+        collect_ambiguities: false,
+    };
+    vehicle_from_layout(v, &mut resolver)
+}
+
 fn field_ref(snapshot: &StoreSnapshot, field: FieldId) -> Option<FieldRef> {
     let field_entry = snapshot
         .fields
@@ -755,12 +699,9 @@ fn apply_doc(
 
     Ok(LayoutApply {
         workspace,
-        view: doc.view.map(|v| ViewX::new(v.min_us, v.max_us)),
-        fit_all: doc.view.is_some_and(|v| matches!(v.mode, ViewMode::Full)),
+        fit_all: true,
         speed: doc.playback.speed,
         follow_live: doc.playback.follow_live,
-        marker_us: doc.marker_us,
-        markers: doc.markers,
         vehicles,
         diagnostics: resolver.diagnostics,
     })
@@ -771,6 +712,67 @@ fn collect_field_refs(doc: &LayoutDoc, resolver: &mut Resolver<'_>) {
     for vehicle in &doc.vehicles {
         collect_pos_field_refs(&vehicle.position, resolver);
         collect_ori_field_refs(&vehicle.orientation, resolver);
+    }
+}
+
+fn collect_vehicle_field_choices(
+    vehicle: &VehicleLayout,
+    source: SourceId,
+    choices: &mut HashMap<FieldRef, SourceId>,
+) {
+    collect_pos_field_choices(&vehicle.position, source, choices);
+    collect_ori_field_choices(&vehicle.orientation, source, choices);
+}
+
+fn collect_pos_field_choices(
+    pos: &PosLayout,
+    source: SourceId,
+    choices: &mut HashMap<FieldRef, SourceId>,
+) {
+    match pos {
+        PosLayout::Ned {
+            north,
+            east,
+            down,
+            reference,
+        } => {
+            choices.insert(north.clone(), source);
+            choices.insert(east.clone(), source);
+            choices.insert(down.clone(), source);
+            if let Some(NedRefLayout::Fields { lat, lon, alt }) = reference {
+                choices.insert(lat.clone(), source);
+                choices.insert(lon.clone(), source);
+                choices.insert(alt.clone(), source);
+            }
+        }
+        PosLayout::Gps { lat, lon, alt, .. } => {
+            choices.insert(lat.clone(), source);
+            choices.insert(lon.clone(), source);
+            choices.insert(alt.clone(), source);
+        }
+    }
+}
+
+fn collect_ori_field_choices(
+    ori: &OriLayout,
+    source: SourceId,
+    choices: &mut HashMap<FieldRef, SourceId>,
+) {
+    match ori {
+        OriLayout::Static => {}
+        OriLayout::Euler {
+            roll, pitch, yaw, ..
+        } => {
+            choices.insert(roll.clone(), source);
+            choices.insert(pitch.clone(), source);
+            choices.insert(yaw.clone(), source);
+        }
+        OriLayout::Quat { w, x, y, z } => {
+            choices.insert(w.clone(), source);
+            choices.insert(x.clone(), source);
+            choices.insert(y.clone(), source);
+            choices.insert(z.clone(), source);
+        }
     }
 }
 
@@ -947,31 +949,16 @@ fn insert_node(
             traces,
             show_legend,
             show_tooltip,
-            marker_us,
-            text_offsets,
-            text_filters,
         } => {
             let mut pane = PlotPane {
                 show_legend: *show_legend,
                 show_tooltip: *show_tooltip,
-                marker_us: *marker_us,
                 ..PlotPane::default()
             };
             for trace in traces {
                 match trace_from_layout(trace, resolver) {
                     Some(resolved) => pane.traces.push(resolved),
                     None => pane.add_ghost(ghost_from_layout(trace)),
-                }
-            }
-            for offset in text_offsets {
-                if let Some(field) = resolver.resolve(&offset.field) {
-                    pane.text_offsets
-                        .insert((field, offset.t_us), offset.y_frac);
-                }
-            }
-            for tf in text_filters {
-                if let Some(field) = resolver.resolve(&tf.field) {
-                    pane.text_filters.insert(field, tf.filter.clone());
                 }
             }
             Some(tiles.insert_pane(Pane::Plot(pane)))
@@ -985,6 +972,7 @@ fn insert_node(
             },
             tracked_vehicle: scene.tracked_vehicle,
             trail_to_playhead: scene.trail_to_playhead,
+            ..Scene3dPane::default()
         }))),
         LayoutNode::Split { split, children } => {
             let child_ids = children
@@ -1017,6 +1005,7 @@ fn trace_from_layout(trace: &TraceLayout, resolver: &mut Resolver<'_>) -> Option
         width_px: trace.width_px,
         mode: trace.mode.into(),
         visible: trace.visible,
+        label_override: None,
     })
 }
 
@@ -1269,6 +1258,8 @@ mod tests {
         settings.show_fps = true;
         settings.render_mode = crate::settings::RenderMode::Continuous;
         settings.theme = crate::theme::ThemeChoice::Light;
+        settings.scene3d.map_provider = crate::map::provider::MapProviderId::BingSatellite;
+        settings.scene3d.tile_cache_limit_bytes = 8 * 1024 * 1024 * 1024;
 
         save_app_settings_at(&path, &settings).expect("save settings");
         let loaded = load_app_settings_at(&path);
@@ -1352,50 +1343,65 @@ mod tests {
     }
 
     #[test]
-    fn global_marker_us_round_trips_through_json_and_apply() {
-        let mut doc = empty_doc("marker");
-        doc.marker_us = Some(123_456);
+    fn legacy_transient_state_is_ignored_and_not_reserialized() {
+        let doc = decode_doc(
+            r#"{
+                "delog_layout": 1,
+                "name": "legacy-transient",
+                "view": {"mode": "window", "min_us": 10, "max_us": 20},
+                "playback": {"speed": 2.0, "follow_live": false},
+                "workspace": {
+                    "root": {
+                        "plot": {
+                            "traces": [],
+                            "show_legend": true,
+                            "show_tooltip": true,
+                            "marker_us": 15,
+                            "text_offsets": [{"field": {"topic": "MSG", "field": "Text"}, "t_us": 15, "y_frac": 0.4}],
+                            "text_filters": [{"field": {"topic": "MSG", "field": "Text"}, "filter": "armed"}]
+                        }
+                    }
+                },
+                "vehicles": [],
+                "marker_us": 15,
+                "markers": [{"t_us": 15, "label": "M", "color": [1.0, 0.0, 0.0, 1.0], "note": ""}],
+                "favorites": [],
+                "docks": {}
+            }"#,
+        )
+        .expect("legacy transient fields should be accepted");
 
-        let decoded = decode_doc(&doc_json(&doc).unwrap()).expect("decode");
-        assert_eq!(decoded.marker_us, Some(123_456));
+        let json = doc_json(&doc).expect("reserialize");
+        for removed in [
+            "\"view\"",
+            "\"marker_us\"",
+            "\"markers\"",
+            "\"favorites\"",
+            "\"docks\"",
+            "\"text_offsets\"",
+            "\"text_filters\"",
+        ] {
+            assert!(!json.contains(removed), "layout still writes {removed}");
+        }
 
         let LoadOutcome::Applied(layout) =
-            load_doc(decoded, &StoreSnapshot::empty()).expect("apply")
+            load_doc(doc, &StoreSnapshot::empty()).expect("legacy layout should apply")
         else {
-            panic!("no sources → no mapping");
+            panic!("no fields should require mapping");
         };
-        assert_eq!(layout.marker_us, Some(123_456));
-    }
-
-    #[test]
-    fn manual_markers_round_trip_through_json_and_apply() {
-        let mut doc = empty_doc("markers");
-        doc.markers = vec![
-            MarkerLayout {
-                t_us: 1_000,
-                label: "Takeoff".into(),
-                color: [1.0, 0.0, 0.0, 1.0],
-                note: "rotate".into(),
-            },
-            MarkerLayout {
-                t_us: 9_000,
-                label: "Land".into(),
-                color: [0.0, 1.0, 0.0, 1.0],
-                note: String::new(),
-            },
-        ];
-
-        let decoded = decode_doc(&doc_json(&doc).unwrap()).expect("decode");
-        assert_eq!(decoded.markers.len(), 2);
-        assert_eq!(decoded.markers[0].label, "Takeoff");
-
-        let LoadOutcome::Applied(layout) =
-            load_doc(decoded, &StoreSnapshot::empty()).expect("apply")
-        else {
-            panic!("no sources → no mapping");
-        };
-        assert_eq!(layout.markers.len(), 2);
-        assert_eq!(layout.markers[1].t_us, 9_000);
+        assert!(layout.fit_all);
+        let pane = layout
+            .workspace
+            .tree
+            .tiles
+            .tiles()
+            .find_map(|tile| match tile {
+                egui_tiles::Tile::Pane(Pane::Plot(pane)) => Some(pane),
+                _ => None,
+            })
+            .expect("plot pane");
+        assert!(pane.text_offsets.is_empty());
+        assert!(pane.text_filters.is_empty());
     }
 
     #[test]
@@ -1437,6 +1443,107 @@ mod tests {
         assert_eq!(layout.vehicles.len(), 1);
         assert_eq!(layout.vehicles[0].label, "Vehicle");
         assert_eq!(layout.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn vehicle_layout_helpers_round_trip_static_ned_vehicle() {
+        let snapshot = snapshot_with_topics(&[("log", "LOCAL_POSITION_NED", &["x", "y", "z"])]);
+        let source = snapshot
+            .sources
+            .iter()
+            .find(|s| !s.entry.removed)
+            .unwrap()
+            .entry
+            .id;
+        let mut fields = snapshot
+            .fields
+            .iter()
+            .filter(|f| !f.removed)
+            .map(|f| (f.name.as_str(), f.id))
+            .collect::<std::collections::HashMap<_, _>>();
+        let north = fields.remove("x").unwrap();
+        let east = fields.remove("y").unwrap();
+        let down = fields.remove("z").unwrap();
+
+        let cfg = VehicleConfig {
+            source,
+            label: "Vehicle".to_owned(),
+            show: true,
+            pos: PosMapping::Ned {
+                north,
+                east,
+                down,
+                reference: None,
+            },
+            ori: OriMapping::Static,
+            model: ModelKind::Cone,
+            color: Color32::from_rgb(1, 2, 3),
+            path_color: Color32::from_rgb(4, 5, 6),
+            scale: 1.5,
+        };
+
+        let layout = vehicle_config_to_layout(&cfg, &snapshot).expect("vehicle should serialize");
+        let resolved =
+            vehicle_config_from_layout(&layout, &snapshot).expect("vehicle should resolve");
+
+        assert_eq!(resolved, cfg);
+    }
+
+    #[test]
+    fn vehicle_config_from_layout_for_source_resolves_duplicate_topic_fields() {
+        let snapshot = snapshot_with_topics(&[
+            ("flight_a", "LOCAL_POSITION_NED", &["x", "y", "z"]),
+            ("flight_b", "LOCAL_POSITION_NED", &["x", "y", "z"]),
+        ]);
+        let second_source = snapshot
+            .sources
+            .iter()
+            .find(|source| source.entry.label == "flight_b")
+            .map(|source| source.entry.id)
+            .expect("second source should exist");
+        let layout = VehicleLayout {
+            label: "Rover".to_owned(),
+            show: true,
+            model: ModelLayout::Cone,
+            color: [255, 255, 255, 255],
+            path_color: [0, 0, 0, 255],
+            scale: 2.0,
+            position: PosLayout::Ned {
+                north: FieldRef {
+                    topic: "LOCAL_POSITION_NED".to_owned(),
+                    field: "x".to_owned(),
+                },
+                east: FieldRef {
+                    topic: "LOCAL_POSITION_NED".to_owned(),
+                    field: "y".to_owned(),
+                },
+                down: FieldRef {
+                    topic: "LOCAL_POSITION_NED".to_owned(),
+                    field: "z".to_owned(),
+                },
+                reference: None,
+            },
+            orientation: OriLayout::Static,
+        };
+
+        let cfg = vehicle_config_from_layout_for_source(&layout, &snapshot, second_source)
+            .expect("vehicle should resolve for selected source");
+
+        assert_eq!(cfg.source, second_source);
+        let PosMapping::Ned {
+            north, east, down, ..
+        } = cfg.pos
+        else {
+            panic!("expected NED mapping");
+        };
+        for field in [north, east, down] {
+            let topic = snapshot
+                .fields
+                .get(field.index())
+                .and_then(|field| snapshot.topic(field.topic))
+                .expect("field topic should exist");
+            assert_eq!(topic.entry.source, second_source);
+        }
     }
 
     #[test]
@@ -1541,40 +1648,10 @@ mod tests {
         StoreSnapshot::from_registry(&ids, [], 0).expect("identity snapshot")
     }
 
-    #[test]
-    fn fit_to_view_persists_as_full_mode_and_restores_fit_all() {
-        let mut doc = empty_doc("fit");
-        doc.view = Some(ViewLayout {
-            mode: ViewMode::Full,
-            min_us: 0,
-            max_us: 10,
-        });
-        let LoadOutcome::Applied(layout) =
-            load_doc(doc, &StoreSnapshot::empty()).expect("should apply")
-        else {
-            panic!("no sources → no mapping");
-        };
-        assert!(layout.fit_all);
-
-        let mut doc = empty_doc("win");
-        doc.view = Some(ViewLayout {
-            mode: ViewMode::Window,
-            min_us: 0,
-            max_us: 10,
-        });
-        let LoadOutcome::Applied(layout) =
-            load_doc(doc, &StoreSnapshot::empty()).expect("should apply")
-        else {
-            panic!("no sources → no mapping");
-        };
-        assert!(!layout.fit_all);
-    }
-
     fn empty_doc(name: &str) -> LayoutDoc {
         LayoutDoc {
             delog_layout: LAYOUT_VERSION,
             name: name.into(),
-            view: None,
             playback: PlaybackLayout {
                 speed: 1.0,
                 follow_live: false,
@@ -1584,71 +1661,10 @@ mod tests {
                     traces: Vec::new(),
                     show_legend: true,
                     show_tooltip: true,
-                    marker_us: None,
-                    text_offsets: Vec::new(),
-                    text_filters: Vec::new(),
                 },
             },
             vehicles: Vec::new(),
-            marker_us: None,
-            markers: Vec::new(),
-            favorites: Vec::new(),
-            docks: BTreeMap::new(),
         }
-    }
-
-    #[test]
-    fn text_offsets_round_trip_through_layout() {
-        let snapshot = snapshot_with_topics(&[("log", "MSG", &["Message"])]);
-        let mut doc = empty_doc("text");
-        let field = FieldRef {
-            topic: "MSG".into(),
-            field: "Message".into(),
-        };
-        doc.workspace.root = LayoutNode::Plot {
-            traces: vec![TraceLayout {
-                field: field.clone(),
-                color: [1.0, 1.0, 1.0, 1.0],
-                width_px: 1.5,
-                mode: TraceModeLayout::Line,
-                visible: true,
-            }],
-            show_legend: true,
-            show_tooltip: true,
-            marker_us: None,
-            text_offsets: vec![TextOffsetLayout {
-                field: field.clone(),
-                t_us: 5_000,
-                y_frac: 0.25,
-            }],
-            text_filters: vec![TextFilterLayout {
-                field,
-                filter: "mission".into(),
-            }],
-        };
-
-        let decoded = decode_doc(&doc_json(&doc).unwrap()).expect("decode");
-        let LoadOutcome::Applied(layout) = load_doc(decoded, &snapshot).expect("apply") else {
-            panic!("single source should not need mapping");
-        };
-        let pane = layout
-            .workspace
-            .tree
-            .tiles
-            .tiles()
-            .find_map(|tile| match tile {
-                egui_tiles::Tile::Pane(Pane::Plot(pane)) => Some(pane),
-                _ => None,
-            })
-            .expect("a plot pane");
-        assert_eq!(pane.text_offsets.len(), 1);
-        let (&(_, t_us), &y_frac) = pane.text_offsets.iter().next().unwrap();
-        assert_eq!(t_us, 5_000);
-        assert_eq!(y_frac, 0.25);
-        assert_eq!(
-            pane.text_filters.values().next().map(String::as_str),
-            Some("mission")
-        );
     }
 
     fn plot_trace_counts(workspace: &Workspace) -> (usize, usize) {

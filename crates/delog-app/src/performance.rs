@@ -1,4 +1,5 @@
 use delog_core::metrics::MetricStats;
+use egui_extras::{Column, TableBuilder};
 
 #[derive(Debug, Clone, Default)]
 pub struct PerformanceSnapshot {
@@ -41,123 +42,180 @@ pub struct PerformanceDock {
 impl PerformanceDock {
     pub fn ui(&mut self, ui: &mut egui::Ui, snapshot: &PerformanceSnapshot) {
         ui.horizontal(|ui| {
-            ui.strong("Performance");
-            ui.weak(format!("{} metric(s)", snapshot.metrics.len()));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Close").clicked() {
-                    self.open = false;
-                }
-            });
-        });
-        ui.separator();
-
-        ui.horizontal(|ui| {
             ui.selectable_value(&mut self.tab, PerfTab::Resources, "Resources");
             ui.selectable_value(&mut self.tab, PerfTab::Traces, "Traces");
             ui.selectable_value(&mut self.tab, PerfTab::Metrics, "Metrics");
         });
-        ui.separator();
+        ui.add_space(4.0);
 
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| match self.tab {
-                PerfTab::Resources => {
-                    egui::Grid::new("performance-resources-grid")
-                        .num_columns(2)
-                        .striped(true)
-                        .spacing([14.0, 4.0])
-                        .show(ui, |ui| {
-                            summary_row(
-                                ui,
-                                "GPU buffers",
-                                snapshot.resources.gpu_buffer_count.to_string(),
-                            );
-                            summary_row(
-                                ui,
-                                "GPU bytes",
-                                format_bytes(snapshot.resources.gpu_bytes),
-                            );
-                            summary_row(
-                                ui,
-                                "Ready CPU caches",
-                                snapshot.resources.cache_ready_count.to_string(),
-                            );
-                            summary_row(
-                                ui,
-                                "CPU cache bytes",
-                                format_bytes(snapshot.resources.cache_cpu_bytes),
-                            );
-                        });
-                }
-                PerfTab::Traces => {
-                    if snapshot.traces.is_empty() {
-                        ui.weak("No plotted traces.");
-                    } else {
-                        egui::Grid::new("performance-traces-grid")
-                            .num_columns(5)
-                            .striped(true)
-                            .spacing([14.0, 4.0])
-                            .show(ui, |ui| {
-                                ui.strong("Trace");
-                                ui.strong("Samples");
-                                ui.strong("Visible");
-                                ui.strong("CPU cache");
-                                ui.strong("GPU");
-                                ui.end_row();
-
-                                for trace in &snapshot.traces {
-                                    ui.label(trace.label.as_str());
-                                    ui.label(format_optional_usize(trace.samples));
-                                    ui.label(format_optional_usize(trace.visible_samples));
-                                    ui.label(format_bytes(trace.cache_cpu_bytes));
-                                    ui.label(format_bytes(trace.gpu_bytes));
-                                    ui.end_row();
-                                }
+        let row_height = egui::TextStyle::Body
+            .resolve(ui.style())
+            .size
+            .max(ui.spacing().interact_size.y);
+        match self.tab {
+            PerfTab::Resources => {
+                let rows = [
+                    (
+                        "GPU buffers",
+                        snapshot.resources.gpu_buffer_count.to_string(),
+                    ),
+                    ("GPU bytes", format_bytes(snapshot.resources.gpu_bytes)),
+                    (
+                        "Ready CPU caches",
+                        snapshot.resources.cache_ready_count.to_string(),
+                    ),
+                    (
+                        "CPU cache bytes",
+                        format_bytes(snapshot.resources.cache_cpu_bytes),
+                    ),
+                ];
+                TableBuilder::new(ui)
+                    .id_salt("performance-resources-table")
+                    .striped(true)
+                    .resizable(true)
+                    .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                    .auto_shrink([false, false])
+                    .column(Column::auto().at_least(140.0))
+                    .column(Column::remainder().clip(true))
+                    .body(|mut body| {
+                        for (key, value) in rows {
+                            body.row(row_height, |mut row| {
+                                row.col(|ui| {
+                                    ui.strong(key);
+                                });
+                                row.col(|ui| {
+                                    ui.label(value);
+                                });
                             });
-                    }
-                }
-                PerfTab::Metrics => {
-                    if snapshot.metrics.is_empty() {
-                        ui.weak("No metrics recorded yet.");
-                        return;
-                    }
-
-                    egui::Grid::new("performance-metrics-grid")
-                        .num_columns(8)
+                        }
+                    });
+            }
+            PerfTab::Traces => {
+                if snapshot.traces.is_empty() {
+                    ui.weak("No plotted traces.");
+                } else {
+                    TableBuilder::new(ui)
+                        .id_salt("performance-traces-table")
                         .striped(true)
-                        .spacing([14.0, 4.0])
-                        .show(ui, |ui| {
-                            ui.strong("Metric");
-                            ui.strong("Last");
-                            ui.strong("Avg");
-                            ui.strong("Min");
-                            ui.strong("Max");
-                            ui.strong("P99");
-                            ui.strong("Samples");
-                            ui.strong("Counter");
-                            ui.end_row();
-
-                            for (name, stats) in &snapshot.metrics {
-                                ui.monospace(*name);
-                                ui.label(format_value(stats.last));
-                                ui.label(format_value(stats.avg));
-                                ui.label(format_value(stats.min));
-                                ui.label(format_value(stats.max));
-                                ui.label(format_value(stats.p99));
-                                ui.label(stats.n.to_string());
-                                ui.label(stats.counter.to_string());
-                                ui.end_row();
-                            }
+                        .resizable(true)
+                        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                        .auto_shrink([false, false])
+                        .column(Column::remainder().clip(true))
+                        .column(Column::auto().at_least(72.0))
+                        .column(Column::auto().at_least(64.0))
+                        .column(Column::auto().at_least(80.0))
+                        .column(Column::auto().at_least(72.0))
+                        .header(row_height, |mut header| {
+                            header.col(|ui| {
+                                ui.strong("Trace");
+                            });
+                            header.col(|ui| {
+                                ui.strong("Samples");
+                            });
+                            header.col(|ui| {
+                                ui.strong("Visible");
+                            });
+                            header.col(|ui| {
+                                ui.strong("CPU cache");
+                            });
+                            header.col(|ui| {
+                                ui.strong("GPU");
+                            });
+                        })
+                        .body(|body| {
+                            body.rows(row_height, snapshot.traces.len(), |mut row| {
+                                let trace = &snapshot.traces[row.index()];
+                                row.col(|ui| {
+                                    ui.label(trace.label.as_str());
+                                });
+                                row.col(|ui| {
+                                    ui.label(format_optional_usize(trace.samples));
+                                });
+                                row.col(|ui| {
+                                    ui.label(format_optional_usize(trace.visible_samples));
+                                });
+                                row.col(|ui| {
+                                    ui.label(format_bytes(trace.cache_cpu_bytes));
+                                });
+                                row.col(|ui| {
+                                    ui.label(format_bytes(trace.gpu_bytes));
+                                });
+                            });
                         });
                 }
-            });
+            }
+            PerfTab::Metrics => {
+                if snapshot.metrics.is_empty() {
+                    ui.weak("No metrics recorded yet.");
+                } else {
+                    TableBuilder::new(ui)
+                        .id_salt("performance-metrics-table")
+                        .striped(true)
+                        .resizable(true)
+                        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                        .auto_shrink([false, false])
+                        .column(Column::auto().at_least(96.0))
+                        .columns(Column::auto().at_least(56.0), 6)
+                        .column(Column::remainder().clip(true))
+                        .header(row_height, |mut header| {
+                            header.col(|ui| {
+                                ui.strong("Metric");
+                            });
+                            header.col(|ui| {
+                                ui.strong("Last");
+                            });
+                            header.col(|ui| {
+                                ui.strong("Avg");
+                            });
+                            header.col(|ui| {
+                                ui.strong("Min");
+                            });
+                            header.col(|ui| {
+                                ui.strong("Max");
+                            });
+                            header.col(|ui| {
+                                ui.strong("P99");
+                            });
+                            header.col(|ui| {
+                                ui.strong("Samples");
+                            });
+                            header.col(|ui| {
+                                ui.strong("Counter");
+                            });
+                        })
+                        .body(|body| {
+                            body.rows(row_height, snapshot.metrics.len(), |mut row| {
+                                let (name, stats) = &snapshot.metrics[row.index()];
+                                row.col(|ui| {
+                                    ui.monospace(*name);
+                                });
+                                row.col(|ui| {
+                                    ui.label(format_value(stats.last));
+                                });
+                                row.col(|ui| {
+                                    ui.label(format_value(stats.avg));
+                                });
+                                row.col(|ui| {
+                                    ui.label(format_value(stats.min));
+                                });
+                                row.col(|ui| {
+                                    ui.label(format_value(stats.max));
+                                });
+                                row.col(|ui| {
+                                    ui.label(format_value(stats.p99));
+                                });
+                                row.col(|ui| {
+                                    ui.label(stats.n.to_string());
+                                });
+                                row.col(|ui| {
+                                    ui.label(stats.counter.to_string());
+                                });
+                            });
+                        });
+                }
+            }
+        }
     }
-}
-
-fn summary_row(ui: &mut egui::Ui, key: &str, value: String) {
-    ui.strong(key);
-    ui.label(value);
-    ui.end_row();
 }
 
 fn format_optional_usize(value: Option<usize>) -> String {

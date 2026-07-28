@@ -5,7 +5,7 @@
 //! `FMTU`/`UNIT`/`MULT` attach units and multipliers. Raw values are stored and
 //! the unit + multiplier recorded in the [`TopicSchema`].
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{BufReader, Read};
 use std::sync::Arc;
 
@@ -15,7 +15,7 @@ use arrow::array::{
 };
 use arrow::datatypes::DataType;
 use delog_core::diagnostics::Diag;
-use delog_core::identity::SourceId;
+use delog_core::identity::{AutoMarker, SourceId, SourceMetadata, SourceParam};
 use delog_core::ingest::{IngestSink, ParseSummary, ParsedBatch};
 use delog_core::parse_ctl::ParseCtl;
 use delog_core::schema::{FieldSchema, TopicSchema};
@@ -23,12 +23,23 @@ use delog_core::time::TimeRange;
 
 use crate::parser::{LogParser, ParseError, ReadSeek, Sniff};
 
+mod events;
+
 const HEAD1: u8 = 0xA3;
 const HEAD2: u8 = 0x95;
 const FMT_MSGID: u8 = 0x80;
 /// FMT payload: Type(1) Length(1) Name(4) Format(16) Columns(64).
 const FMT_PAYLOAD_LEN: usize = 1 + 1 + 4 + 16 + 64;
 const BATCH_ROWS: usize = 8192;
+
+/// Absolute sanity bound on the first decoded timestamp, which anchors the log's
+/// time window. `TimeUS` is microseconds since boot; no vehicle stays booted for
+/// the ~3.2 years this allows, yet it is far above any real log.
+const MAX_PLAUSIBLE_TIME_US: i64 = 100_000_000_000_000;
+
+const START_SKEW_US: i64 = 1_000_000;
+const MAX_LOG_SPAN_US: i64 = 24 * 60 * 60 * 1_000_000;
+const IMPLAUSIBLE_TIME_DIAG_INTERVAL: u64 = 512;
 
 #[derive(Debug, Default)]
 pub struct ArduPilotParser;
@@ -87,6 +98,40 @@ struct Emit {
 }
 
 #[derive(Debug, Clone, Copy)]
+struct ParmLayout {
+    name: (usize, u8),
+    value: (usize, u8),
+    default: Option<(usize, u8)>,
+}
+
+#[derive(Debug, Clone)]
+struct ParmValue {
+    ty: &'static str,
+    value: String,
+    default: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum MarkerKind {
+    Msg {
+        text: (usize, u8),
+    },
+    Event {
+        id: (usize, u8),
+    },
+    Error {
+        subsys: (usize, u8),
+        ecode: (usize, u8),
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MarkerLayout {
+    time: TimeSource,
+    kind: MarkerKind,
+}
+
+#[derive(Debug, Clone, Copy)]
 enum TimeSource {
     /// `TimeUS`, u64 microseconds.
     Micros(usize),
@@ -107,7 +152,21 @@ struct TopicAccum {
     schema: Arc<TopicSchema>,
     ts: Int64Builder,
     cols: Vec<ColBuilder>,
+    emits: Vec<Emit>,
     rows: usize,
+    pending: Option<(i64, Vec<u8>)>,
+    last_committed: Option<i64>,
+}
+
+impl TopicAccum {
+    fn push(&mut self, time_us: i64, payload: &[u8]) {
+        self.ts.append_value(time_us);
+        for (col, emit) in self.cols.iter_mut().zip(&self.emits) {
+            col.append(emit.chr, payload, emit.offset);
+        }
+        self.rows += 1;
+        self.last_committed = Some(time_us);
+    }
 }
 
 struct Decoder<'a> {
@@ -120,8 +179,15 @@ struct Decoder<'a> {
     mults: HashMap<u8, f64>,
     fmtu: HashMap<u8, (Vec<u8>, Vec<u8>)>,
     topics: HashMap<String, TopicAccum>,
+    params: BTreeMap<String, ParmValue>,
+    parm_layouts: HashMap<u8, Option<ParmLayout>>,
+    markers: Vec<AutoMarker>,
+    marker_layouts: HashMap<u8, Option<MarkerLayout>>,
     row_count: u64,
     diagnostics: u64,
+    implausible_times: u64,
+    /// First accepted timestamp; anchors the fixed plausibility window.
+    start_us: Option<i64>,
     time_range: Option<TimeRange>,
 }
 
@@ -138,8 +204,14 @@ impl<'a> Decoder<'a> {
             mults: HashMap::new(),
             fmtu: HashMap::new(),
             topics: HashMap::new(),
+            params: BTreeMap::new(),
+            parm_layouts: HashMap::new(),
+            markers: Vec::new(),
+            marker_layouts: HashMap::new(),
             row_count: 0,
             diagnostics: 0,
+            implausible_times: 0,
+            start_us: None,
             time_range: None,
         }
     }
@@ -262,7 +334,15 @@ impl<'a> Decoder<'a> {
             "FMTU" => self.decode_fmtu(msgid, &payload),
             "UNIT" => self.read_unit(msgid, &payload),
             "MULT" => self.read_mult(msgid, &payload),
-            _ => self.decode_data(msgid, &payload),
+            "PARM" => {
+                self.read_parm(msgid, &payload, record_offset);
+                self.decode_data(msgid, payload);
+            }
+            "MSG" | "EV" | "ERR" => {
+                self.read_marker(msgid, &payload, record_offset);
+                self.decode_data(msgid, payload);
+            }
+            _ => self.decode_data(msgid, payload),
         }
         Ok(true)
     }
@@ -285,7 +365,152 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    fn decode_data(&mut self, msgid: u8, payload: &[u8]) {
+    fn read_parm(&mut self, msgid: u8, payload: &[u8], record_offset: u64) {
+        if !self.parm_layouts.contains_key(&msgid) {
+            let layout = self.build_parm_layout(msgid, record_offset);
+            self.parm_layouts.insert(msgid, layout);
+        }
+        let Some(layout) = self.parm_layouts.get(&msgid).copied().flatten() else {
+            return;
+        };
+
+        let (name_offset, name_chr) = layout.name;
+        let name = c_str(&payload[name_offset..name_offset + str_len(name_chr)]);
+        if name.is_empty() {
+            return;
+        }
+
+        let (value_offset, value_chr) = layout.value;
+        let Some(value) = scalar_to_string(value_chr, payload, value_offset) else {
+            return;
+        };
+        let default = layout
+            .default
+            .and_then(|(offset, chr)| parm_default_to_string(chr, payload, offset));
+
+        self.params.insert(
+            name,
+            ParmValue {
+                ty: type_name(value_chr),
+                value,
+                default,
+            },
+        );
+    }
+
+    fn build_parm_layout(&mut self, msgid: u8, record_offset: u64) -> Option<ParmLayout> {
+        let resolved = {
+            let fmt = &self.formats[&msgid];
+            let field = |name: &str| -> Option<(usize, u8)> {
+                let f = fmt.field(name)?;
+                let width = type_size(f.chr)?;
+                (f.offset + width <= fmt.payload_len).then_some((f.offset, f.chr))
+            };
+            let name = field("Name").filter(|&(_, chr)| str_len(chr) > 0);
+            let value = field("Value").filter(|&(_, chr)| scalar_dtype(chr).is_some());
+            let default = field("Default").filter(|&(_, chr)| scalar_dtype(chr).is_some());
+            name.zip(value).map(|(name, value)| ParmLayout {
+                name,
+                value,
+                default,
+            })
+        };
+        if resolved.is_none() {
+            self.diagnostic(
+                Diag::warning(
+                    "bin-bad-param",
+                    "PARM format has no decodable Name and Value fields; \
+                     parameters not captured",
+                )
+                .at_byte(record_offset),
+            );
+        }
+        resolved
+    }
+
+    fn read_marker(&mut self, msgid: u8, payload: &[u8], record_offset: u64) {
+        if !self.marker_layouts.contains_key(&msgid) {
+            let layout = self.build_marker_layout(msgid, record_offset);
+            self.marker_layouts.insert(msgid, layout);
+        }
+        let Some(layout) = self.marker_layouts.get(&msgid).copied().flatten() else {
+            return;
+        };
+
+        let Some(time_us) = read_time(&layout.time, payload) else {
+            return;
+        };
+        if !self.timestamp_in_window(time_us) {
+            return;
+        }
+
+        let text = match layout.kind {
+            MarkerKind::Msg { text } => {
+                let message = c_str(&payload[text.0..text.0 + str_len(text.1)]);
+                if message.is_empty() {
+                    return;
+                }
+                message
+            }
+            MarkerKind::Event { id } => {
+                let id = read_instance(id.1, payload, id.0);
+                format!("EV: {}", event_label(id))
+            }
+            MarkerKind::Error { subsys, ecode } => {
+                let subsys = read_instance(subsys.1, payload, subsys.0);
+                let ecode = read_instance(ecode.1, payload, ecode.0);
+                format!("Err: {}-{ecode}", error_subsystem_label(subsys))
+            }
+        };
+
+        self.markers.push(AutoMarker {
+            time_us,
+            level: None,
+            text,
+        });
+    }
+
+    fn build_marker_layout(&mut self, msgid: u8, record_offset: u64) -> Option<MarkerLayout> {
+        let resolved = {
+            let fmt = &self.formats[&msgid];
+            let field = |name: &str| -> Option<(usize, u8)> {
+                let f = fmt.field(name)?;
+                let width = type_size(f.chr)?;
+                (f.offset + width <= fmt.payload_len).then_some((f.offset, f.chr))
+            };
+            let kind = match fmt.name.as_str() {
+                "MSG" => field("Message")
+                    .filter(|&(_, chr)| str_len(chr) > 0)
+                    .map(|text| MarkerKind::Msg { text }),
+                "EV" => field("Id")
+                    .filter(|&(_, chr)| is_integer_chr(chr))
+                    .map(|id| MarkerKind::Event { id }),
+                _ => {
+                    let subsys = field("Subsys").filter(|&(_, chr)| is_integer_chr(chr));
+                    let ecode = field("ECode").filter(|&(_, chr)| is_integer_chr(chr));
+                    subsys
+                        .zip(ecode)
+                        .map(|(subsys, ecode)| MarkerKind::Error { subsys, ecode })
+                }
+            };
+            time_source(fmt)
+                .zip(kind)
+                .map(|(time, kind)| MarkerLayout { time, kind })
+        };
+        if resolved.is_none() {
+            let name = self.formats[&msgid].name.clone();
+            self.diagnostic(
+                Diag::warning(
+                    "bin-bad-marker",
+                    format!("`{name}` format is not decodable as a logged message; skipped"),
+                )
+                .at_byte(record_offset),
+            );
+        }
+        resolved
+    }
+
+    fn decode_data(&mut self, msgid: u8, payload: Vec<u8>) {
         if !self.plans.contains_key(&msgid) {
             let plan = self.build_plan(msgid);
             self.plans.insert(msgid, plan);
@@ -294,13 +519,18 @@ impl<'a> Decoder<'a> {
             return;
         };
 
-        let Some(time_us) = read_time(&plan.time, payload) else {
+        let Some(time_us) = read_time(&plan.time, &payload) else {
             return;
         };
+        if !self.timestamp_in_window(time_us) {
+            self.note_implausible_time(&plan.base_name, time_us);
+            return;
+        }
+        self.start_us.get_or_insert(time_us);
 
         let topic_name = match plan.instance {
             Some((off, chr)) => {
-                let inst = read_instance(chr, payload, off);
+                let inst = read_instance(chr, &payload, off);
                 format!("{}[{inst}]", plan.base_name)
             }
             None => plan.base_name.clone(),
@@ -327,25 +557,36 @@ impl<'a> Decoder<'a> {
                     .iter()
                     .map(|e| ColBuilder::for_chr(e.chr))
                     .collect(),
+                emits: plan.emits.clone(),
                 rows: 0,
+                pending: None,
+                last_committed: None,
             };
             self.topics.entry(topic_name).or_insert(accum)
         };
 
-        accum.ts.append_value(time_us);
-        for (col, emit) in accum.cols.iter_mut().zip(&plan.emits) {
-            col.append(emit.chr, payload, emit.offset);
+        let mut dropped = None;
+        if let Some((prev_us, prev_payload)) = accum.pending.take() {
+            let above_baseline = accum.last_committed.is_none_or(|last| prev_us >= last);
+            if above_baseline && prev_us <= time_us {
+                accum.push(prev_us, &prev_payload);
+                self.row_count += 1;
+                self.time_range = Some(match self.time_range {
+                    Some(r) => r.include(prev_us),
+                    None => TimeRange::point(prev_us),
+                });
+                if accum.rows >= BATCH_ROWS {
+                    let batch = accum.take_batch(self.source);
+                    self.sink.submit(batch);
+                }
+            } else {
+                dropped = Some(prev_us);
+            }
         }
-        accum.rows += 1;
-        self.row_count += 1;
-        self.time_range = Some(match self.time_range {
-            Some(r) => r.include(time_us),
-            None => TimeRange::point(time_us),
-        });
+        accum.pending = Some((time_us, payload));
 
-        if accum.rows >= BATCH_ROWS {
-            let batch = accum.take_batch(self.source);
-            self.sink.submit(batch);
+        if let Some(prev_us) = dropped {
+            self.note_implausible_time(&plan.base_name, prev_us);
         }
     }
 
@@ -362,11 +603,7 @@ impl<'a> Decoder<'a> {
             return None;
         }
 
-        let time = if let Some(f) = format.field("TimeUS") {
-            TimeSource::Micros(f.offset)
-        } else if let Some(f) = format.field("TimeMS") {
-            TimeSource::Millis(f.offset)
-        } else {
+        let Some(time) = time_source(format) else {
             self.diagnostic(Diag::info(
                 "bin-no-timestamp",
                 format!(
@@ -437,7 +674,8 @@ impl<'a> Decoder<'a> {
             .and_then(|(unit_ids, _)| unit_ids.get(field_index).copied())
             .filter(|&c| c != b'-' && c != 0)
             .and_then(|c| self.units.get(&c).cloned())
-            .or_else(|| default_unit.map(str::to_owned));
+            .or_else(|| default_unit.map(str::to_owned))
+            .filter(|u| !u.is_empty() && !u.eq_ignore_ascii_case("unknown"));
 
         let mult = if matches!(chr, b'c' | b'C' | b'e' | b'E' | b'L') {
             default_mult
@@ -453,8 +691,21 @@ impl<'a> Decoder<'a> {
     }
 
     fn flush_all(&mut self) {
+        let committed_max = self.time_range.map(|r| r.max_us);
         let names: Vec<String> = self.topics.keys().cloned().collect();
         for name in names {
+            if let Some(accum) = self.topics.get_mut(&name)
+                && let Some((prev_us, prev_payload)) = accum.pending.take()
+                && accum.last_committed.is_none_or(|last| prev_us >= last)
+                && committed_max.is_none_or(|max| prev_us <= max.saturating_add(START_SKEW_US))
+            {
+                accum.push(prev_us, &prev_payload);
+                self.row_count += 1;
+                self.time_range = Some(match self.time_range {
+                    Some(r) => r.include(prev_us),
+                    None => TimeRange::point(prev_us),
+                });
+            }
             if let Some(accum) = self.topics.get_mut(&name)
                 && accum.rows > 0
             {
@@ -469,13 +720,58 @@ impl<'a> Decoder<'a> {
         self.sink.diagnostic(diag.with_source(self.source));
     }
 
+    /// Whether a decoded timestamp falls in the log's plausible window. The first
+    /// row bootstraps the anchor with an absolute bound; later rows must sit
+    /// within `[anchor - skew, anchor + span]`. The anchor is fixed, so no single
+    /// bogus value can drag the window and starve later real rows.
+    fn timestamp_in_window(&self, time_us: i64) -> bool {
+        match self.start_us {
+            None => (0..=MAX_PLAUSIBLE_TIME_US).contains(&time_us),
+            Some(start) => {
+                time_us.saturating_add(START_SKEW_US) >= start
+                    && time_us <= start.saturating_add(MAX_LOG_SPAN_US)
+            }
+        }
+    }
+
+    /// Count a dropped-timestamp row, emitting a throttled diagnostic so a badly
+    /// corrupted file reports without flooding the log dock.
+    fn note_implausible_time(&mut self, base_name: &str, time_us: i64) {
+        self.implausible_times += 1;
+        if self.implausible_times % IMPLAUSIBLE_TIME_DIAG_INTERVAL == 1 {
+            self.diagnostic(Diag::warning(
+                "bin-implausible-time",
+                format!(
+                    "dropped `{base_name}` record with implausible timestamp \
+                     {time_us} (likely corruption after a resync)"
+                ),
+            ));
+        }
+    }
+
     fn summary(&self) -> ParseSummary {
         ParseSummary {
             topic_count: self.topics.len() as u64,
             row_count: self.row_count,
             time_range: self.time_range,
             diagnostics: self.diagnostics,
-            ..ParseSummary::default()
+            source_meta: SourceMetadata {
+                params: self
+                    .params
+                    .iter()
+                    .map(|(name, parm)| SourceParam {
+                        name: name.clone(),
+                        ty: parm.ty.to_owned(),
+                        value: parm.value.clone(),
+                        default: parm.default.clone(),
+                    })
+                    .collect(),
+                auto_markers: {
+                    let mut markers = self.markers.clone();
+                    markers.sort_by_key(|marker| marker.time_us);
+                    markers
+                },
+            },
         }
     }
 }
@@ -675,6 +971,30 @@ impl FrameReader {
     }
 }
 
+fn event_label(id: i64) -> String {
+    u8::try_from(id)
+        .ok()
+        .and_then(events::event_name)
+        .map(str::to_owned)
+        .unwrap_or_else(|| id.to_string())
+}
+
+fn error_subsystem_label(id: i64) -> String {
+    u8::try_from(id)
+        .ok()
+        .and_then(events::error_subsystem_name)
+        .map(str::to_owned)
+        .unwrap_or_else(|| id.to_string())
+}
+
+fn time_source(format: &MsgFormat) -> Option<TimeSource> {
+    if let Some(f) = format.field("TimeUS") {
+        Some(TimeSource::Micros(f.offset))
+    } else {
+        format.field("TimeMS").map(|f| TimeSource::Millis(f.offset))
+    }
+}
+
 fn read_time(time: &TimeSource, payload: &[u8]) -> Option<i64> {
     match *time {
         TimeSource::Micros(off) => {
@@ -729,6 +1049,54 @@ fn scalar_dtype(chr: u8) -> Option<DataType> {
         b'n' | b'N' | b'Z' => DataType::Utf8,
         _ => return None, // 'a' arrays, unknowns
     })
+}
+
+fn scalar_to_string(chr: u8, p: &[u8], off: usize) -> Option<String> {
+    Some(match chr {
+        b'b' => (p[off] as i8).to_string(),
+        b'B' | b'M' => p[off].to_string(),
+        b'h' | b'c' => i16::from_le_bytes(read_2(p, off)).to_string(),
+        b'H' | b'C' => u16::from_le_bytes(read_2(p, off)).to_string(),
+        b'i' | b'e' | b'L' => i32::from_le_bytes(read_4(p, off)).to_string(),
+        b'I' | b'E' => u32::from_le_bytes(read_4(p, off)).to_string(),
+        b'q' => i64::from_le_bytes(read_8(p, off)).to_string(),
+        b'Q' => u64::from_le_bytes(read_8(p, off)).to_string(),
+        b'f' => f32::from_le_bytes(read_4(p, off)).to_string(),
+        b'd' => f64::from_le_bytes(read_8(p, off)).to_string(),
+        b'n' | b'N' | b'Z' => c_str(&p[off..off + str_len(chr)]),
+        _ => return None,
+    })
+}
+
+fn parm_default_to_string(chr: u8, p: &[u8], off: usize) -> Option<String> {
+    match chr {
+        b'f' => {
+            let value = f32::from_le_bytes(read_4(p, off));
+            value.is_finite().then(|| value.to_string())
+        }
+        b'd' => {
+            let value = f64::from_le_bytes(read_8(p, off));
+            value.is_finite().then(|| value.to_string())
+        }
+        other => scalar_to_string(other, p, off),
+    }
+}
+
+fn type_name(chr: u8) -> &'static str {
+    match chr {
+        b'b' => "int8_t",
+        b'B' | b'M' => "uint8_t",
+        b'h' | b'c' => "int16_t",
+        b'H' | b'C' => "uint16_t",
+        b'i' | b'e' | b'L' => "int32_t",
+        b'I' | b'E' => "uint32_t",
+        b'q' => "int64_t",
+        b'Q' => "uint64_t",
+        b'f' => "float",
+        b'd' => "double",
+        b'n' | b'N' | b'Z' => "char",
+        _ => "unknown",
+    }
 }
 
 fn default_mult_unit(chr: u8) -> (f64, Option<&'static str>) {
@@ -790,7 +1158,7 @@ fn read_8(p: &[u8], off: usize) -> [u8; 8] {
 mod tests {
     use std::io::Cursor;
 
-    use arrow::array::{Float32Array, Int16Array};
+    use arrow::array::{Float32Array, Int16Array, StringArray};
     use delog_core::ingest::SourceKind;
     use delog_core::parse_ctl::CancelToken;
 
@@ -940,5 +1308,234 @@ mod tests {
         let test = batch(&sink, "TEST");
         assert_eq!(test.timestamps.values(), &[3_000]);
         assert!(summary.diagnostics >= 1);
+    }
+
+    fn push_parm(buf: &mut Vec<u8>, time_us: u64, name: &str, value: f32) {
+        let mut p = Vec::new();
+        p.extend(time_us.to_le_bytes());
+        push_padded(&mut p, name.as_bytes(), 16);
+        p.extend(value.to_le_bytes());
+        push_rec(buf, 202, &p);
+    }
+
+    fn push_parm_default(buf: &mut Vec<u8>, time_us: u64, name: &str, value: f32, default: f32) {
+        let mut p = Vec::new();
+        p.extend(time_us.to_le_bytes());
+        push_padded(&mut p, name.as_bytes(), 16);
+        p.extend(value.to_le_bytes());
+        p.extend(default.to_le_bytes());
+        push_rec(buf, 202, &p);
+    }
+
+    #[test]
+    fn captures_parm_records_sorted_by_name() {
+        let mut buf = Vec::new();
+        push_fmt(&mut buf, 202, "PARM", "QNf", "TimeUS,Name,Value");
+        push_parm(&mut buf, 1_000, "RATE_RLL_P", 0.135);
+        push_parm(&mut buf, 1_000, "ATC_ANG_PIT_P", 4.5);
+        push_parm(&mut buf, 1_000, "INS_GYRO_FILTER", 20.0);
+
+        let (summary, _) = parse(buf);
+        let params = &summary.source_meta.params;
+        assert_eq!(
+            params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            ["ATC_ANG_PIT_P", "INS_GYRO_FILTER", "RATE_RLL_P"]
+        );
+        assert_eq!(params[0].ty, "float");
+        assert_eq!(params[0].value, "4.5");
+        assert_eq!(params[0].default, None);
+        assert_eq!(params[2].value, "0.135");
+    }
+
+    #[test]
+    fn a_parameter_logged_twice_keeps_its_last_value() {
+        let mut buf = Vec::new();
+        push_fmt(&mut buf, 202, "PARM", "QNf", "TimeUS,Name,Value");
+        push_parm(&mut buf, 1_000, "RATE_RLL_P", 0.135);
+        push_parm(&mut buf, 9_000, "RATE_RLL_P", 0.2);
+
+        let (summary, _) = parse(buf);
+        assert_eq!(summary.source_meta.params.len(), 1);
+        assert_eq!(summary.source_meta.params[0].value, "0.2");
+    }
+
+    #[test]
+    fn captures_the_default_field_when_the_format_declares_it() {
+        let mut buf = Vec::new();
+        push_fmt(&mut buf, 202, "PARM", "QNff", "TimeUS,Name,Value,Default");
+        push_parm_default(&mut buf, 1_000, "RATE_RLL_P", 0.2, 0.135);
+        push_parm_default(&mut buf, 1_000, "ATC_RAT_PIT_D", 0.003, f32::NAN);
+
+        let (summary, _) = parse(buf);
+        let params = &summary.source_meta.params;
+        assert_eq!(params[0].name, "ATC_RAT_PIT_D");
+        assert_eq!(params[0].default, None);
+        assert_eq!(params[1].name, "RATE_RLL_P");
+        assert_eq!(params[1].default.as_deref(), Some("0.135"));
+    }
+
+    #[test]
+    fn parm_is_still_emitted_as_a_topic() {
+        let mut buf = Vec::new();
+        push_fmt(&mut buf, 202, "PARM", "QNf", "TimeUS,Name,Value");
+        push_parm(&mut buf, 1_000, "RATE_RLL_P", 0.135);
+        push_parm(&mut buf, 9_000, "RATE_RLL_P", 0.2);
+
+        let (_, sink) = parse(buf);
+        let parm = batch(&sink, "PARM");
+        assert_eq!(parm.timestamps.values(), &[1_000, 9_000]);
+        let names = parm.columns[0]
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(names.value(0), "RATE_RLL_P");
+        let values = parm.columns[1]
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .unwrap();
+        assert_eq!(values.values(), &[0.135, 0.2]);
+    }
+
+    fn push_msg(buf: &mut Vec<u8>, time_us: u64, text: &str) {
+        let mut p = Vec::new();
+        p.extend(time_us.to_le_bytes());
+        push_padded(&mut p, text.as_bytes(), 64);
+        push_rec(buf, 203, &p);
+    }
+
+    fn push_ev(buf: &mut Vec<u8>, time_us: u64, id: u8) {
+        let mut p = Vec::new();
+        p.extend(time_us.to_le_bytes());
+        p.push(id);
+        push_rec(buf, 204, &p);
+    }
+
+    fn push_err(buf: &mut Vec<u8>, time_us: u64, subsys: u8, ecode: u8) {
+        let mut p = Vec::new();
+        p.extend(time_us.to_le_bytes());
+        p.push(subsys);
+        p.push(ecode);
+        push_rec(buf, 205, &p);
+    }
+
+    fn marker_fmts(buf: &mut Vec<u8>) {
+        push_fmt(buf, 203, "MSG", "QZ", "TimeUS,Message");
+        push_fmt(buf, 204, "EV", "QB", "TimeUS,Id");
+        push_fmt(buf, 205, "ERR", "QBB", "TimeUS,Subsys,ECode");
+    }
+
+    #[test]
+    fn captures_msg_ev_and_err_as_logged_messages() {
+        let mut buf = Vec::new();
+        marker_fmts(&mut buf);
+        push_msg(&mut buf, 1_000, "ArduPlane V4.5.7 (0358a9c2)");
+        push_ev(&mut buf, 2_000, 10);
+        push_err(&mut buf, 3_000, 6, 1);
+
+        let (summary, _) = parse(buf);
+        let markers = &summary.source_meta.auto_markers;
+        assert_eq!(markers.len(), 3);
+        assert_eq!(markers[0].text, "ArduPlane V4.5.7 (0358a9c2)");
+        assert_eq!(markers[1].text, "EV: ARMED");
+        assert_eq!(markers[2].text, "Err: FAILSAFE_BATT-1");
+        assert!(
+            markers.iter().all(|m| m.level.is_none()),
+            "dataflash carries no severity field, so no level may be invented"
+        );
+    }
+
+    #[test]
+    fn unknown_event_and_subsystem_ids_fall_back_to_their_number() {
+        let mut buf = Vec::new();
+        marker_fmts(&mut buf);
+        push_ev(&mut buf, 1_000, 200);
+        push_err(&mut buf, 2_000, 250, 9);
+
+        let (summary, _) = parse(buf);
+        let markers = &summary.source_meta.auto_markers;
+        assert_eq!(markers[0].text, "EV: 200");
+        assert_eq!(markers[1].text, "Err: 250-9");
+    }
+
+    #[test]
+    fn logged_messages_are_merged_in_time_order() {
+        let mut buf = Vec::new();
+        marker_fmts(&mut buf);
+        push_msg(&mut buf, 5_000, "late text");
+        push_ev(&mut buf, 1_000, 11);
+        push_err(&mut buf, 3_000, 2, 0);
+        push_msg(&mut buf, 2_000, "early text");
+
+        let (summary, _) = parse(buf);
+        let markers = &summary.source_meta.auto_markers;
+        assert_eq!(
+            markers.iter().map(|m| m.time_us).collect::<Vec<_>>(),
+            [1_000, 2_000, 3_000, 5_000]
+        );
+        assert_eq!(markers[0].text, "EV: DISARMED");
+        assert_eq!(markers[3].text, "late text");
+    }
+
+    #[test]
+    fn marker_records_are_still_emitted_as_topics() {
+        let mut buf = Vec::new();
+        marker_fmts(&mut buf);
+        push_msg(&mut buf, 1_000, "boot");
+        push_msg(&mut buf, 2_000, "ready");
+        push_ev(&mut buf, 3_000, 10);
+        push_err(&mut buf, 4_000, 6, 1);
+
+        let (_, sink) = parse(buf);
+        let msg = batch(&sink, "MSG");
+        assert_eq!(msg.timestamps.values(), &[1_000, 2_000]);
+        let texts = msg.columns[0]
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(texts.value(1), "ready");
+        assert_eq!(batch(&sink, "EV").timestamps.values(), &[3_000]);
+        assert_eq!(batch(&sink, "ERR").timestamps.values(), &[4_000]);
+    }
+
+    #[test]
+    fn an_undecodable_msg_format_warns_once_and_captures_nothing() {
+        let mut buf = Vec::new();
+        push_fmt(&mut buf, 203, "MSG", "QI", "TimeUS,Message");
+        let mut p = Vec::new();
+        p.extend(1_000u64.to_le_bytes());
+        p.extend(7u32.to_le_bytes());
+        push_rec(&mut buf, 203, &p);
+        let mut p = Vec::new();
+        p.extend(2_000u64.to_le_bytes());
+        p.extend(8u32.to_le_bytes());
+        push_rec(&mut buf, 203, &p);
+
+        let (summary, sink) = parse(buf);
+        assert!(summary.source_meta.auto_markers.is_empty());
+        assert_eq!(
+            sink.diags
+                .iter()
+                .filter(|d| d.code == "bin-bad-marker")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn an_undecodable_parm_format_warns_once_and_captures_nothing() {
+        let mut buf = Vec::new();
+        push_fmt(&mut buf, 202, "PARM", "QNf", "TimeUS,Ident,Value");
+        push_parm(&mut buf, 1_000, "RATE_RLL_P", 0.135);
+        push_parm(&mut buf, 2_000, "ATC_ANG_PIT_P", 4.5);
+
+        let (summary, sink) = parse(buf);
+        assert!(summary.source_meta.params.is_empty());
+        assert_eq!(
+            sink.diags
+                .iter()
+                .filter(|d| d.code == "bin-bad-param")
+                .count(),
+            1
+        );
     }
 }

@@ -11,7 +11,7 @@ use delog_core::schema::{FieldSchema, TopicSchema};
 use delog_core::snapshot::{DataStore, StoreSnapshot};
 use delog_script::{ScriptCommand, ScriptEngine, ScriptEvent};
 
-const SPLIT_SCRIPT: &str = include_str!("../../../scripts/param_value_live_split.py");
+const SPLIT_SCRIPT: &str = include_str!("../../../scripts/live/param_value_live_split.py");
 
 fn read_store() -> Arc<DataStore> {
     Arc::new(DataStore::from_snapshot(StoreSnapshot::empty()))
@@ -66,7 +66,7 @@ fn param_value_split_creates_one_topic_per_param_id() {
         sink.open_source("live", delog_core::ingest::SourceKind::Live)
     };
     engine
-        .try_send_live_batch(param_value_batch(raw_source))
+        .try_send_live_batch("live", param_value_batch(raw_source))
         .unwrap();
     wait_live_processed(&engine);
 
@@ -74,7 +74,7 @@ fn param_value_split_creates_one_topic_per_param_id() {
     let assert_topic = |snap: &StoreSnapshot, name: &str, times: &[i64], values: &[f64]| {
         let topic = snap.topics.iter().find(|t| t.entry.name == name).unwrap();
         let store = snap.topic_store(topic.entry.id).unwrap();
-        let idx = store.schema.field_index("value").unwrap();
+        let idx = store.schema.field_index("param_value").unwrap();
         let chunk = &store.chunks[0];
         let got: Vec<i64> = (0..chunk.len()).map(|r| chunk.t.value(r)).collect();
         assert_eq!(got, times, "times for {name}");

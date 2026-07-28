@@ -1,0 +1,30 @@
+{
+  "delog_vehicle_profile": 1,
+  "name": "ardupilot_global_position",
+  "vehicle": {
+    "label": "Vehicle",
+    "show": true,
+    "model": "fixed_wing",
+    "color": [90, 170, 255, 255],
+    "path_color": [255, 170, 60, 255],
+    "scale": 1.0,
+    "position": {
+      "gps": {
+        "lat": { "topic": "AHR2", "field": "Lat" },
+        "lon": { "topic": "AHR2", "field": "Lng" },
+        "alt": { "topic": "AHR2", "field": "Alt" },
+        "lat_lon_dege7": false,
+        "alt_mm": false,
+        "alt_offset_m": 0.0
+      }
+    },
+    "orientation": {
+      "euler": {
+        "roll": { "topic": "AHR2", "field": "Roll" },
+        "pitch": { "topic": "AHR2", "field": "Pitch" },
+        "yaw": { "topic": "AHR2", "field": "Yaw" },
+        "degrees": true
+      }
+    }
+  }
+}

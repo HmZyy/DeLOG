@@ -381,10 +381,10 @@ impl ParsersPanel {
                 }
                 let concise = match &path {
                     Some(path) => format!(
-                        "Parser {parser_name} failed for {}. See Diagnostics for details.",
+                        "Parser {parser_name} failed for {}. See Logging for details.",
                         file_label(path)
                     ),
-                    None => format!("Syntax error in {parser_name}. See Diagnostics for details."),
+                    None => format!("Syntax error in {parser_name}. See Logging for details."),
                 };
                 self.status = concise.clone();
                 self.error_popup = Some(concise);
@@ -1118,6 +1118,28 @@ mod tests {
                 .take_diagnostics()
                 .join("\n")
                 .contains("worker disconnected")
+        );
+    }
+
+    #[test]
+    fn parser_failures_point_to_logging_for_details() {
+        let temp = TestDir::new();
+        let mut panel = ParsersPanel::new(temp.0.clone());
+        let path = temp.0.join("flight.bin");
+        panel.mark_parse_dispatched("raw.py", &path);
+
+        panel.handle_event(ParserEvent::Failed {
+            parser_name: "raw.py".into(),
+            path: Some(path),
+            message: "boom".into(),
+        });
+
+        assert!(panel.status().contains("See Logging"));
+        assert!(
+            panel
+                .error_popup
+                .as_deref()
+                .is_some_and(|s| s.contains("See Logging"))
         );
     }
 }

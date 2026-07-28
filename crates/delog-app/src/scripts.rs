@@ -1,18 +1,19 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
+use crate::logging::{LogLevel, PendingLog, log};
 use crate::settings::AutoOpenVariables;
 use delog_core::ingest::IngestSender;
 use delog_core::metrics::MetricsRegistry;
 use delog_core::snapshot::DataStore;
 use delog_script::library::ScriptLibrary;
 use delog_script::params::{ParamSpec, ParamValue};
-use delog_script::{ScriptCommand, ScriptEngine, ScriptEvent};
+use delog_script::{MarkerCommand, ScriptCommand, ScriptEngine, ScriptEvent};
 use egui_code_editor::{CodeEditor, ColorTheme, Syntax};
 
 use crate::parsers::{ParserUiAction, ParsersPanel};
-
-pub const SCRIPTING_CONSOLE_DEFAULT_HEIGHT: f32 = 240.0;
+use crate::repl_complete::{self, ReplCompletion};
+use crate::repl_history::ReplHistory;
 
 enum PreparedParserCommand {
     Validation {
@@ -101,6 +102,7 @@ pub struct ScriptsPanel {
     editing_original_name: Option<String>,
     editor_text: String,
     repl_input: String,
+    refocus_repl_input: bool,
     console: String,
     status: String,
     pending_delete: Option<String>,
@@ -112,6 +114,11 @@ pub struct ScriptsPanel {
     pub variables_open: bool,
     pending_auto_open: Option<PendingAutoOpen>,
     auto_open_mode: AutoOpenVariables,
+    use_original_timestamps: bool,
+    pending_logs: Vec<PendingLog>,
+    pending_marker_commands: Vec<MarkerCommand>,
+    completion: ReplCompletion,
+    history: ReplHistory,
 }
 
 impl ScriptsPanel {
@@ -135,6 +142,7 @@ impl ScriptsPanel {
             editing_original_name: None,
             editor_text: String::new(),
             repl_input: String::new(),
+            refocus_repl_input: false,
             console: String::new(),
             status: String::new(),
             pending_delete: None,
@@ -146,6 +154,11 @@ impl ScriptsPanel {
             variables_open: false,
             pending_auto_open: None,
             auto_open_mode: AutoOpenVariables::default(),
+            use_original_timestamps: false,
+            pending_logs: Vec::new(),
+            pending_marker_commands: Vec::new(),
+            completion: ReplCompletion::new(),
+            history: ReplHistory::new(),
         }
     }
 
@@ -205,6 +218,14 @@ impl ScriptsPanel {
         self.parsers.take_diagnostics()
     }
 
+    pub fn take_logs(&mut self) -> Vec<PendingLog> {
+        std::mem::take(&mut self.pending_logs)
+    }
+
+    pub fn take_marker_commands(&mut self) -> Vec<MarkerCommand> {
+        std::mem::take(&mut self.pending_marker_commands)
+    }
+
     pub fn request_interrupt(&self) {
         if self.can_interrupt_console()
             && let Some(engine) = &self.engine
@@ -215,6 +236,25 @@ impl ScriptsPanel {
 
     pub fn ordinary_dispatch_enabled(&self) -> bool {
         !self.running && !self.should_poll_parser_events()
+    }
+
+    pub fn set_console_open(&mut self, open: bool) {
+        if open && !self.console_open {
+            self.request_repl_refocus();
+        }
+        self.console_open = open;
+    }
+
+    fn request_repl_refocus(&mut self) {
+        self.refocus_repl_input = true;
+    }
+
+    fn take_repl_refocus_request(&mut self) -> bool {
+        if !self.ordinary_dispatch_enabled() || !self.refocus_repl_input {
+            return false;
+        }
+        self.refocus_repl_input = false;
+        true
     }
 
     pub fn parser_dispatch_enabled(&self) -> bool {
@@ -390,15 +430,31 @@ impl ScriptsPanel {
         metrics: Arc<MetricsRegistry>,
     ) -> &ScriptEngine {
         let params = Arc::clone(&self.params);
-        self.engine
-            .get_or_insert_with(|| ScriptEngine::spawn(store, sender, metrics, params))
+        let use_original_timestamps = self.use_original_timestamps;
+        let engine = self
+            .engine
+            .get_or_insert_with(|| ScriptEngine::spawn(store, sender, metrics, params));
+        engine.set_use_original_timestamps(use_original_timestamps);
+        engine
+    }
+
+    /// A host for the data-flow editor's script nodes, spawning the engine on
+    /// first use like [`Self::engine`]. Cheap to call repeatedly: it only
+    /// clones the worker's command sender.
+    pub fn engine_flow_host(
+        &mut self,
+        store: Arc<DataStore>,
+        sender: IngestSender,
+        metrics: Arc<MetricsRegistry>,
+    ) -> delog_script::flow::EngineFlowHost {
+        self.engine(store, sender, metrics).flow_host()
     }
 
     /// Returns `None` rather than spawning the engine: a live transform only
     /// exists if a script already ran (which spawned the engine).
     pub fn live_batch_sender_if_running(
         &self,
-    ) -> Option<std::sync::mpsc::SyncSender<delog_core::ingest::ParsedBatch>> {
+    ) -> Option<std::sync::mpsc::Sender<delog_script::LiveBatchInput>> {
         self.engine.as_ref().map(|e| e.live_batch_sender())
     }
 
@@ -430,24 +486,25 @@ impl ScriptsPanel {
             ScriptEvent::Output(s) => {
                 self.console.push_str(&s);
                 if should_open_scripting_console(auto_open_console, ConsoleEventKind::Output) {
-                    self.console_open = true;
+                    self.set_console_open(true);
                 }
             }
             ScriptEvent::Result(r) => {
                 self.console.push_str(&r);
                 self.console.push('\n');
                 if should_open_scripting_console(auto_open_console, ConsoleEventKind::Output) {
-                    self.console_open = true;
+                    self.set_console_open(true);
                 }
             }
             ScriptEvent::Error(e) => {
                 self.console.push_str(&e);
                 self.console.push('\n');
+                self.pending_logs.push(log(LogLevel::Error, e.clone()));
                 self.status = "error".into();
                 self.running = false;
                 self.pending_auto_open = None;
                 if should_open_scripting_console(auto_open_console, ConsoleEventKind::Error) {
-                    self.console_open = true;
+                    self.set_console_open(true);
                 }
             }
             ScriptEvent::Done => {
@@ -471,8 +528,13 @@ impl ScriptsPanel {
                     }
                 }
             }
+            ScriptEvent::Markers(command) => self.pending_marker_commands.push(command),
             ScriptEvent::LiveBatchProcessed => {}
             ScriptEvent::Parser(event) => self.parsers.handle_event(event),
+            ScriptEvent::Completions { seq, matches } => {
+                self.completion
+                    .on_completions(seq, matches, &mut self.repl_input);
+            }
         }
     }
 
@@ -556,8 +618,13 @@ impl ScriptsPanel {
         metrics: Arc<MetricsRegistry>,
         auto_open: AutoOpenVariables,
         auto_open_console: crate::settings::AutoOpenScriptingConsole,
+        use_original_timestamps: bool,
     ) {
         self.auto_open_mode = auto_open;
+        self.use_original_timestamps = use_original_timestamps;
+        if let Some(engine) = &self.engine {
+            engine.set_use_original_timestamps(use_original_timestamps);
+        }
         self.drain(auto_open_console);
 
         for action in self.parsers.ui(ctx, self.parser_dispatch_enabled()) {
@@ -604,36 +671,124 @@ impl ScriptsPanel {
         sender: &IngestSender,
         metrics: &Arc<MetricsRegistry>,
     ) {
-        ui.horizontal(|ui| {
-            ui.strong("Scripting Console");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Close").clicked() {
-                    self.console_open = false;
-                }
-                if ui.button("Clear").clicked() {
-                    self.console.clear();
-                }
-            });
-        });
-        ui.separator();
         egui::Panel::bottom("scripting_console_input")
             .resizable(false)
             .show_inside(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(">>>");
-                    let resp = ui.add_enabled(
-                        self.ordinary_dispatch_enabled(),
-                        egui::TextEdit::singleline(&mut self.repl_input)
-                            .desired_width(f32::INFINITY),
-                    );
-                    if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    let dispatch_enabled = self.ordinary_dispatch_enabled();
+                    // Pin the trash button flush right, then let the REPL input fill
+                    // the remaining space to its left.
+                    let resp = ui
+                        .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let trash = egui::Image::new(crate::icons::trash())
+                                .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
+                                .tint(ui.visuals().text_color());
+                            if ui
+                                .add(egui::Button::image(trash))
+                                .on_hover_text("Clear console")
+                                .clicked()
+                            {
+                                self.console.clear();
+                            }
+
+                            let repl_width = ui.available_width();
+                            ui.add_enabled(
+                                dispatch_enabled,
+                                egui::TextEdit::singleline(&mut self.repl_input)
+                                    .desired_width(repl_width)
+                                    .lock_focus(true),
+                            )
+                        })
+                        .inner;
+                    if dispatch_enabled && self.take_repl_refocus_request() {
+                        resp.request_focus();
+                    }
+
+                    // The popup owns Up/Down/Tab/Enter/Esc while it is open.
+                    let popup_took_enter =
+                        self.completion
+                            .handle_popup(ui, &resp, &mut self.repl_input);
+
+                    // Typing (not navigation) while the popup is open dismisses it
+                    // and lets the character pass through to the input.
+                    if resp.changed() {
+                        self.completion.dismiss();
+                    }
+
+                    // A completion that mutated the buffer moves the caret to the
+                    // end of the inserted text.
+                    if let Some(byte) = self.completion.take_pending_cursor() {
+                        repl_complete::set_cursor_byte(ui.ctx(), resp.id, &self.repl_input, byte);
+                        resp.request_focus();
+                    }
+
+                    // With no popup open, Up/Down walk the command history.
+                    if dispatch_enabled && resp.has_focus() && !self.completion.is_open() {
+                        let up = ui.input_mut(|i| {
+                            i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)
+                        });
+                        let down = ui.input_mut(|i| {
+                            i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)
+                        });
+                        let recalled = if up {
+                            self.history.older(&self.repl_input)
+                        } else if down {
+                            self.history.newer()
+                        } else {
+                            None
+                        };
+                        if let Some(line) = recalled {
+                            self.repl_input = line;
+                            let end = self.repl_input.len();
+                            repl_complete::set_cursor_byte(
+                                ui.ctx(),
+                                resp.id,
+                                &self.repl_input,
+                                end,
+                            );
+                            resp.request_focus();
+                        }
+                    }
+
+                    // Tab (or Ctrl+N) with no popup open requests completions for
+                    // the token at the cursor.
+                    if dispatch_enabled
+                        && resp.has_focus()
+                        && !self.completion.is_open()
+                        && ui.input_mut(|i| {
+                            i.consume_key(egui::Modifiers::NONE, egui::Key::Tab)
+                                || i.consume_key(egui::Modifiers::CTRL, egui::Key::N)
+                        })
+                    {
+                        let cursor =
+                            repl_complete::cursor_byte(ui.ctx(), resp.id, &self.repl_input);
+                        if let Some((start, token)) =
+                            repl_complete::completable_token(&self.repl_input, cursor)
+                        {
+                            let token = token.to_string();
+                            let seq = self.completion.begin_request(start, cursor, token.clone());
+                            let _ = self
+                                .engine(store.clone(), sender.clone(), Arc::clone(metrics))
+                                .send(ScriptCommand::Complete { seq, text: token });
+                        }
+                    }
+
+                    if !popup_took_enter
+                        && !self.completion.is_open()
+                        && resp.lost_focus()
+                        && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                    {
                         let line = std::mem::take(&mut self.repl_input);
-                        self.dispatch_eval(
+                        self.history.push(&line);
+                        if self.dispatch_eval(
                             line,
                             store.clone(),
                             sender.clone(),
                             Arc::clone(metrics),
-                        );
+                        ) {
+                            self.request_repl_refocus();
+                        }
                     }
                 });
             });
@@ -1164,6 +1319,67 @@ mod tests {
     }
 
     #[test]
+    fn script_errors_are_buffered_for_logging_dock() {
+        let root =
+            std::env::temp_dir().join(format!("delog-scripts-error-log-{}", std::process::id()));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
+
+        panel.handle_event(ScriptEvent::Error("python exploded".into()));
+
+        let logs = panel.take_logs();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].level, crate::logging::LogLevel::Error);
+        assert!(logs[0].message.contains("python exploded"));
+        assert!(panel.take_logs().is_empty());
+    }
+
+    #[test]
+    fn marker_events_are_buffered_without_console_or_completion_side_effects() {
+        let root =
+            std::env::temp_dir().join(format!("delog-scripts-marker-event-{}", std::process::id()));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
+        panel.running = true;
+        panel.status = "running console script".into();
+        panel.console = "existing output\n".into();
+        panel.console_open = false;
+        panel.variables_open = false;
+        panel.refocus_repl_input = false;
+        panel.repl_input = "ma".into();
+        let completion_seq = panel.completion.begin_request(0, 2, "ma".into());
+        let command = delog_script::MarkerCommand::Append {
+            owner: "console".into(),
+            generation: 7,
+            markers: vec![],
+        };
+
+        panel.handle_event(ScriptEvent::Markers(command.clone()));
+
+        assert!(panel.running);
+        assert_eq!(panel.status, "running console script");
+        assert_eq!(panel.console, "existing output\n");
+        assert!(!panel.console_open);
+        assert!(!panel.variables_open);
+        assert!(!panel.refocus_repl_input);
+        assert_eq!(panel.repl_input, "ma");
+        assert_eq!(panel.take_marker_commands(), vec![command]);
+        assert!(panel.take_marker_commands().is_empty());
+
+        panel.handle_event(ScriptEvent::Completions {
+            seq: completion_seq,
+            matches: vec!["marker".into()],
+        });
+        assert_eq!(panel.repl_input, "marker");
+    }
+
+    #[test]
     fn new_script_starts_named_empty_buffer_in_editor() {
         let root =
             std::env::temp_dir().join(format!("delog-scripts-new-buffer-{}", std::process::id()));
@@ -1184,10 +1400,8 @@ mod tests {
 
     #[test]
     fn duplicate_script_copies_source_to_available_name_and_opens_copy() {
-        let root = std::env::temp_dir().join(format!(
-            "delog-scripts-duplicate-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("delog-scripts-duplicate-{}", std::process::id()));
         let mut panel = ScriptsPanel::new(
             root.join("scripts"),
             root.join("parsers"),
@@ -1341,6 +1555,44 @@ mod tests {
             name: "new_parser.py".into(),
         }));
         assert!(!panel.should_poll_parser_events());
+    }
+
+    #[test]
+    fn repl_refocus_request_waits_until_prompt_is_enabled() {
+        let root =
+            std::env::temp_dir().join(format!("delog-scripts-repl-focus-{}", std::process::id()));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
+
+        panel.request_repl_refocus();
+        panel.running = true;
+        assert!(!panel.take_repl_refocus_request());
+
+        panel.handle_event(ScriptEvent::Done);
+        assert!(panel.take_repl_refocus_request());
+        assert!(!panel.take_repl_refocus_request());
+    }
+
+    #[test]
+    fn opening_console_requests_repl_focus_once() {
+        let root =
+            std::env::temp_dir().join(format!("delog-scripts-open-focus-{}", std::process::id()));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.join("parsers"),
+            root.join("params.json"),
+        );
+
+        panel.set_console_open(true);
+        assert!(panel.console_open);
+        assert!(panel.take_repl_refocus_request());
+        assert!(!panel.take_repl_refocus_request());
+
+        panel.set_console_open(true);
+        assert!(!panel.take_repl_refocus_request());
     }
 
     #[test]

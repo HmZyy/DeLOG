@@ -12,9 +12,12 @@ name = "delog"
 path = "src/main.rs"
 
 # `docs/logo.png` is decoded + resized to 256x256 at build time and embedded as
-# the runtime window icon. It is not compiled into the .exe as a resource icon.
+# the runtime window icon.
 [build-dependencies]
 image = { workspace = true }
+# On Windows targets, also embed the logo as a PE icon resource
+# (Explorer/taskbar/shortcuts). No-op for other targets.
+winresource = { workspace = true }
 
 [features]
 # Embedded-Python scripting is ON by default. Build without Python via
@@ -22,11 +25,16 @@ image = { workspace = true }
 # "without-scripting" feature cannot subtract — disabling the default is the
 # opt-out).
 default = ["scripting"]
-scripting = ["dep:delog-script", "delog-script/python", "dep:egui_code_editor"]
+scripting = ["dep:delog-script", "delog-script/python", "dep:egui_code_editor", "delog-flow/scripting"]
+bundled-python = ["scripting"]
 
 [dependencies]
+arboard = { workspace = true }
 arrow = { workspace = true }
+parquet = { workspace = true }
 delog-core = { workspace = true }
+delog-parquet-format = { workspace = true }
+delog-flow = { workspace = true }
 delog-parsers = { workspace = true }
 delog-stream = { workspace = true }
 delog-cache = { workspace = true }
@@ -37,11 +45,27 @@ egui_code_editor = { workspace = true, optional = true }
 bytemuck = { workspace = true }
 eframe = { workspace = true }
 egui = { workspace = true }
+egui_graph = { version = "0.16.2", default-features = false }
 egui_extras = { workspace = true }
+egui_dock = { workspace = true }
 egui_tiles = { workspace = true }
 glam = { workspace = true }
+image = { workspace = true }
+reqwest = { workspace = true }
+directories = { workspace = true }
+crossbeam-channel = { workspace = true }
 rfd = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+tempfile = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+  "Win32_Storage_FileSystem",
+  "Win32_System_Console",
+] }
+
+[dev-dependencies]
+tiny_http = { workspace = true }

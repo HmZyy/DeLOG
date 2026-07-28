@@ -59,6 +59,10 @@ pub trait LogParser: Send + Sync {
 #[derive(Debug)]
 pub enum ParseError {
     Io(io::Error),
+    Setup {
+        detail: String,
+    },
+    SetupCancelled,
     UnsupportedFormat {
         detail: String,
     },
@@ -74,6 +78,8 @@ impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io(err) => write!(f, "io error: {err}"),
+            Self::Setup { detail } => write!(f, "parser setup failed: {detail}"),
+            Self::SetupCancelled => write!(f, "parser setup cancelled"),
             Self::UnsupportedFormat { detail } => write!(f, "unsupported format: {detail}"),
             Self::Cancelled => write!(f, "parse cancelled"),
             Self::Framing {
@@ -260,5 +266,20 @@ mod tests {
         let reg = registry(&[("bin", 0), ("ulog", 0)]);
         assert_eq!(reg.by_name("ulog").unwrap().name(), "ulog");
         assert!(reg.by_name("missing").is_none());
+    }
+
+    #[test]
+    fn setup_errors_are_distinct_from_runtime_cancellation() {
+        assert_eq!(
+            ParseError::Setup {
+                detail: "no timestamp".into()
+            }
+            .to_string(),
+            "parser setup failed: no timestamp"
+        );
+        assert_eq!(
+            ParseError::SetupCancelled.to_string(),
+            "parser setup cancelled"
+        );
     }
 }

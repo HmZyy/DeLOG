@@ -8,6 +8,8 @@ struct PlotUniform {
     transform: vec4<f32>,
     view: vec4<f32>,
     color: vec4<f32>,
+    // x: gap mode (0 connect, 1 cut, 2 dotted, 3 force-dash), y: x-units gap threshold (0 = off).
+    gap: vec4<f32>,
 };
 
 struct VsOut {
@@ -25,8 +27,8 @@ fn finite2(p: vec2<f32>) -> bool {
 
 fn data_to_clip(p: vec2<f32>) -> vec2<f32> {
     return vec2<f32>(
-        p.x * u.transform.x + u.transform.y,
-        p.y * u.transform.z + u.transform.w,
+        (p.x - u.transform.y) * u.transform.x - 1.0,
+        (p.y - u.transform.w) * u.transform.z - 1.0,
     );
 }
 

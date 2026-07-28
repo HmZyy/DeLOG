@@ -82,16 +82,25 @@ fn draw_sample_circles(ui: &egui::Ui, view: PaneView, origin_us: i64, rows: &[Ro
     if x1 <= x0 || y1 <= y0 {
         return;
     }
-    let to_x = |x_sec: f32| rect.left() + (x_sec - x0) / (x1 - x0) * rect.width();
-    let to_y = |y: f32| rect.bottom() - (y - y0) / (y1 - y0) * rect.height();
     let painter = ui.painter();
     for row in rows {
-        let sx = to_x((row.effective_time_us - origin_us) as f32 * 1e-6);
-        let sy = to_y(row.value as f32);
-        if rect.contains(egui::pos2(sx, sy)) {
-            painter.circle_stroke(egui::pos2(sx, sy), 3.5, egui::Stroke::new(1.5, row.color));
+        let x = (row.effective_time_us - origin_us) as f64 * 1e-6;
+        let p = plot_to_screen(rect, (x0 as f64, x1 as f64), (y0, y1), x, row.value);
+        if rect.contains(p) {
+            painter.circle_stroke(p, 3.5, egui::Stroke::new(1.5, row.color));
         }
     }
+}
+
+/// Map a data point to screen in f64 against the absolute view range, matching
+/// the (now rebased, precise) GPU line at large coordinate magnitudes.
+fn plot_to_screen(rect: egui::Rect, x: (f64, f64), y: (f64, f64), px: f64, py: f64) -> egui::Pos2 {
+    let fx = ((px - x.0) / (x.1 - x.0)) as f32;
+    let fy = ((py - y.0) / (y.1 - y.0)) as f32;
+    egui::pos2(
+        rect.left() + fx * rect.width(),
+        rect.bottom() - fy * rect.height(),
+    )
 }
 
 struct Row {
@@ -474,7 +483,23 @@ fn format_value(v: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::format_delta;
+    use super::{format_delta, plot_to_screen};
+
+    #[test]
+    fn sample_circle_maps_in_f64_at_large_magnitude() {
+        // Latitude-scale value at the true midpoint of the view maps to the
+        // middle of the rect; f64 keeps it exact where f32 would collapse.
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 500.0));
+        let p = plot_to_screen(
+            rect,
+            (0.0, 1.0),
+            (437_129_280.0, 437_129_380.0),
+            0.5,
+            437_129_330.0,
+        );
+        let frac = (rect.bottom() - p.y) / rect.height();
+        assert!((frac - 0.5).abs() < 1e-4, "frac was {frac}");
+    }
 
     #[test]
     fn delta_applies_multiplier_and_signs_positive() {

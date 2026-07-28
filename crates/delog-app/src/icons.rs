@@ -65,6 +65,14 @@ pub fn skip_forward() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/skip-forward.svg")
 }
 
+pub fn arrow_right() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/arrow-right.svg")
+}
+
+pub fn arrow_left_right() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/arrow-left-right.svg")
+}
+
 #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
 pub fn square() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/square.svg")
@@ -73,6 +81,14 @@ pub fn square() -> ImageSource<'static> {
 #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
 pub fn save() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/save.svg")
+}
+
+pub fn export() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/upload.svg")
+}
+
+pub fn earth() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/earth.svg")
 }
 
 #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
@@ -90,6 +106,10 @@ pub fn rows() -> ImageSource<'static> {
 
 pub fn info() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/info.svg")
+}
+
+pub fn circle_alert() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/circle-alert.svg")
 }
 
 pub fn clock() -> ImageSource<'static> {
@@ -152,7 +172,10 @@ pub fn panel_left_open() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/panel-left-open.svg")
 }
 
-#[cfg_attr(not(feature = "scripting"), allow(dead_code))]
 pub fn rotate_ccw() -> ImageSource<'static> {
     egui::include_image!("../assets/icons/rotate-ccw.svg")
+}
+
+pub fn rotate_cw() -> ImageSource<'static> {
+    egui::include_image!("../assets/icons/rotate-cw.svg")
 }

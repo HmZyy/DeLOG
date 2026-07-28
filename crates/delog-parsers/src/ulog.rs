@@ -315,7 +315,12 @@ impl<'a> Decoder<'a> {
             );
             return;
         };
-        self.params.push(SourceParam { name, ty, value });
+        self.params.push(SourceParam {
+            name,
+            ty,
+            value,
+            default: None,
+        });
     }
 
     fn read_logged_message(&mut self, payload: &[u8], msg_offset: u64) {
@@ -333,7 +338,7 @@ impl<'a> Decoder<'a> {
         };
         self.auto_markers.push(AutoMarker {
             time_us,
-            level,
+            level: Some(level),
             text: c_str(&payload[9..]),
         });
     }
@@ -1339,7 +1344,7 @@ mod tests {
         assert_eq!(summary.source_meta.auto_markers.len(), 1);
         let marker = &summary.source_meta.auto_markers[0];
         assert_eq!(marker.time_us, 12_345);
-        assert_eq!(marker.level, 6);
+        assert_eq!(marker.level, Some(6));
         assert_eq!(marker.text, "armed and ready");
     }
 }

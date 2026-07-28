@@ -1,6 +1,7 @@
 use delog_core::diagnostics::{DiagRecord, Severity};
 use delog_core::identity::SourceId;
 use delog_core::snapshot::StoreSnapshot;
+use egui_extras::{Column, TableBuilder};
 
 #[derive(Debug, Clone)]
 pub struct DiagnosticsDock {
@@ -38,24 +39,6 @@ impl DiagnosticsDock {
         let mut clear = false;
         let origins = origins(records, snapshot);
         ui.horizontal(|ui| {
-            ui.strong("Diagnostics");
-            ui.weak(format!("{} retained", records.len()));
-            if let Some(last) = records.last() {
-                ui.separator();
-                ui.label(format!("[{}] {}", last.diag.code, last.diag.message));
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Close").clicked() {
-                    self.open = false;
-                }
-                if ui.button("Clear").clicked() {
-                    clear = true;
-                }
-            });
-        });
-
-        ui.separator();
-        ui.horizontal(|ui| {
             egui::ComboBox::from_id_salt("diagnostics-severity")
                 .selected_text(severity_filter_label(self.min_severity))
                 .show_ui(ui, |ui| {
@@ -83,6 +66,18 @@ impl DiagnosticsDock {
                     .hint_text("Search")
                     .desired_width(220.0),
             );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let trash = egui::Image::new(crate::icons::trash())
+                    .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
+                    .tint(ui.visuals().text_color());
+                if ui
+                    .add(egui::Button::image(trash))
+                    .on_hover_text("Clear diagnostics")
+                    .clicked()
+                {
+                    clear = true;
+                }
+            });
         });
 
         let filtered = filtered_records(
@@ -93,57 +88,95 @@ impl DiagnosticsDock {
             &self.search,
         );
         ui.add_space(4.0);
-        egui::ScrollArea::vertical()
+        action.clear = clear;
+        if filtered.is_empty() {
+            ui.weak("No diagnostics match the current filters.");
+            return action;
+        }
+        let row_height = egui::TextStyle::Body
+            .resolve(ui.style())
+            .size
+            .max(ui.spacing().interact_size.y);
+        TableBuilder::new(ui)
+            .id_salt("diagnostics-table")
+            .striped(true)
+            .resizable(true)
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .auto_shrink([false, false])
-            .show(ui, |ui| {
-                if filtered.is_empty() {
-                    ui.weak("No diagnostics match the current filters.");
-                    return;
-                }
-                egui::Grid::new("diagnostics-grid")
-                    .num_columns(7)
-                    .striped(true)
-                    .spacing([12.0, 4.0])
-                    .show(ui, |ui| {
-                        ui.strong("Severity");
-                        ui.strong("Count");
-                        ui.strong("Origin");
-                        ui.strong("Code");
-                        ui.strong("Time");
-                        ui.strong("Byte");
-                        ui.strong("Message");
-                        ui.end_row();
-
-                        for row in filtered {
-                            let color = severity_color(ui, row.record.diag.severity);
-                            ui.colored_label(color, severity_label(row.record.diag.severity));
-                            ui.label(row.record.count.to_string());
-                            ui.label(row.origin);
-                            ui.monospace(row.record.diag.code);
-                            if let Some(time_us) = row.record.diag.time_us {
-                                if ui
-                                    .button(format_time(Some(time_us)))
-                                    .on_hover_text("Jump playhead to this diagnostic")
-                                    .clicked()
-                                {
-                                    action.jump_to_time_us = Some(time_us);
-                                }
-                            } else {
-                                ui.label("-");
+            .column(Column::auto().at_least(72.0))
+            .column(Column::auto().at_least(48.0))
+            .column(Column::auto().at_least(80.0))
+            .column(Column::auto().at_least(64.0))
+            .column(Column::auto().at_least(72.0))
+            .column(Column::auto().at_least(56.0))
+            .column(Column::remainder().clip(true))
+            .header(row_height, |mut header| {
+                header.col(|ui| {
+                    ui.strong("Severity");
+                });
+                header.col(|ui| {
+                    ui.strong("Count");
+                });
+                header.col(|ui| {
+                    ui.strong("Origin");
+                });
+                header.col(|ui| {
+                    ui.strong("Code");
+                });
+                header.col(|ui| {
+                    ui.strong("Time");
+                });
+                header.col(|ui| {
+                    ui.strong("Byte");
+                });
+                header.col(|ui| {
+                    ui.strong("Message");
+                });
+            })
+            .body(|body| {
+                body.rows(row_height, filtered.len(), |mut row| {
+                    let entry = &filtered[row.index()];
+                    row.col(|ui| {
+                        let color = severity_color(ui, entry.record.diag.severity);
+                        ui.colored_label(color, severity_label(entry.record.diag.severity));
+                    });
+                    row.col(|ui| {
+                        ui.label(entry.record.count.to_string());
+                    });
+                    row.col(|ui| {
+                        ui.label(entry.origin.as_str());
+                    });
+                    row.col(|ui| {
+                        ui.monospace(entry.record.diag.code);
+                    });
+                    row.col(|ui| {
+                        if let Some(time_us) = entry.record.diag.time_us {
+                            if ui
+                                .button(format_time(Some(time_us)))
+                                .on_hover_text("Jump playhead to this diagnostic")
+                                .clicked()
+                            {
+                                action.jump_to_time_us = Some(time_us);
                             }
-                            ui.label(
-                                row.record
-                                    .diag
-                                    .byte_offset
-                                    .map(|b| b.to_string())
-                                    .unwrap_or_else(|| "-".into()),
-                            );
-                            ui.label(row.record.diag.message.as_str());
-                            ui.end_row();
+                        } else {
+                            ui.label("-");
                         }
                     });
+                    row.col(|ui| {
+                        ui.label(
+                            entry
+                                .record
+                                .diag
+                                .byte_offset
+                                .map(|b| b.to_string())
+                                .unwrap_or_else(|| "-".into()),
+                        );
+                    });
+                    row.col(|ui| {
+                        ui.label(entry.record.diag.message.as_str());
+                    });
+                });
             });
-        action.clear = clear;
         action
     }
 }

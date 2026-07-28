@@ -5,7 +5,7 @@
 //! when its pending rows reach `LIVE_CHUNK_ROWS` or its per-topic pending age
 //! reaches `LIVE_MAX_AGE`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -22,6 +22,7 @@ use crate::metrics::MetricsRegistry;
 use crate::schema::TopicSchema;
 use crate::snapshot::{DataStore, StoreSnapshot};
 use crate::store::TopicStore;
+use crate::time::TimeRange;
 
 pub const FILE_CHUNK_ROWS: usize = 64 * 1024;
 pub const LIVE_CHUNK_ROWS: usize = 512;
@@ -34,7 +35,10 @@ pub trait IngestObserver: Send {
     fn on_diagnostic(&mut self, _diag: Diag) {}
     fn on_progress(&mut self, _source: SourceId, _frac: f32) {}
     fn on_close(&mut self, _source: SourceId, _summary: ParseSummary) {}
-    fn on_batch(&mut self, _kind: SourceKind, _batch: &ParsedBatch) {}
+    fn on_remove(&mut self, _source: SourceId) {}
+    /// Runs before the batch is published. `source_label` comes directly from
+    /// the ingestor's identity registry and is authoritative at this boundary.
+    fn on_batch(&mut self, _kind: SourceKind, _source_label: &str, _batch: &ParsedBatch) {}
 }
 
 #[derive(Debug, Default)]
@@ -147,12 +151,22 @@ impl<O: IngestObserver> Ingestor<O> {
                     self.publish();
                 }
             }
+            IngestMsg::SetSourceOffsets { offsets } => {
+                if self.set_source_offsets(&offsets) {
+                    self.publish();
+                }
+            }
             IngestMsg::RemoveSource { source } => self.remove_source(source),
+            IngestMsg::RelabelSource { source, label } => {
+                if self.identity.relabel_source(source, label).is_some() {
+                    self.publish();
+                }
+            }
         }
     }
 
     fn open_source(&mut self, key: &str, kind: SourceKind) -> SourceId {
-        let id = self.identity.add_source(key);
+        let id = self.identity.add_source_with_kind(key, kind);
         let seal_rows = match kind {
             SourceKind::File | SourceKind::Derived => FILE_CHUNK_ROWS,
             SourceKind::Live | SourceKind::LiveDerived => LIVE_CHUNK_ROWS,
@@ -167,6 +181,48 @@ impl<O: IngestObserver> Ingestor<O> {
             },
         );
         id
+    }
+
+    fn set_source_offsets(&mut self, offsets: &[(SourceId, i64)]) -> bool {
+        let mut seen = HashSet::with_capacity(offsets.len());
+        let valid = offsets.iter().all(|&(id, offset)| {
+            seen.insert(id)
+                && self.identity.live_source(id).is_some()
+                && self.sources.get(&id).is_some_and(|source| {
+                    source.pending.values().all(|pending| {
+                        pending.timestamps.iter().all(|timestamps| {
+                            let values = timestamps.values();
+                            let Some((&min_us, &max_us)) = values.first().zip(values.last()) else {
+                                return true;
+                            };
+                            TimeRange::new(min_us, max_us)
+                                .is_some_and(|range| range.offset(offset).is_some())
+                        })
+                    })
+                })
+                && self
+                    .stores
+                    .iter()
+                    .filter(|(topic, _)| {
+                        self.identity
+                            .topic(**topic)
+                            .is_some_and(|topic| topic.source == id)
+                    })
+                    .filter_map(|(_, store)| store.time_range())
+                    .all(|range| range.offset(offset).is_some())
+        });
+        if !valid {
+            return false;
+        }
+
+        let mut changed = false;
+        for &(id, offset) in offsets {
+            changed |= self
+                .identity
+                .set_source_offset_us(id, offset)
+                .is_some_and(|old| old != offset);
+        }
+        changed
     }
 
     fn accept_batch(&mut self, batch: ParsedBatch) {
@@ -184,7 +240,13 @@ impl<O: IngestObserver> Ingestor<O> {
         let seal_rows = source.seal_rows;
         let source_kind = source.kind;
         let source_id = batch.source;
-        self.observer.on_batch(source_kind, &batch);
+        let source_label = self
+            .identity
+            .source(source_id)
+            .expect("opened source has identity")
+            .label
+            .as_str();
+        self.observer.on_batch(source_kind, source_label, &batch);
 
         let topic_id = match self.ensure_topic(source_id, &batch.schema) {
             Some(id) => id,
@@ -368,6 +430,7 @@ impl<O: IngestObserver> Ingestor<O> {
         }
         self.sources.remove(&source);
         self.publish();
+        self.observer.on_remove(source);
     }
 
     fn flush_source(&mut self, source: SourceId) {
@@ -514,7 +577,8 @@ mod tests {
     struct Recorder {
         diags: Vec<Diag>,
         closes: Vec<(SourceId, ParseSummary)>,
-        batches: Vec<(SourceKind, String, usize)>,
+        removes: Vec<SourceId>,
+        batches: Vec<(SourceKind, String, String, usize)>,
     }
     impl IngestObserver for &mut Recorder {
         fn on_diagnostic(&mut self, diag: Diag) {
@@ -523,9 +587,16 @@ mod tests {
         fn on_close(&mut self, source: SourceId, summary: ParseSummary) {
             self.closes.push((source, summary));
         }
-        fn on_batch(&mut self, kind: SourceKind, batch: &ParsedBatch) {
-            self.batches
-                .push((kind, batch.topic().to_owned(), batch.rows()));
+        fn on_remove(&mut self, source: SourceId) {
+            self.removes.push(source);
+        }
+        fn on_batch(&mut self, kind: SourceKind, source_label: &str, batch: &ParsedBatch) {
+            self.batches.push((
+                kind,
+                source_label.to_owned(),
+                batch.topic().to_owned(),
+                batch.rows(),
+            ));
         }
     }
 
@@ -626,9 +697,18 @@ mod tests {
         let mut recorder = Recorder::default();
         {
             let mut ing = Ingestor::new(&mut recorder);
+            let store = ing.store();
             let source = open_with(&mut ing, "script:live_math", SourceKind::LiveDerived);
+            assert!(
+                store.load().source(source).is_none(),
+                "open is not published yet"
+            );
 
             ing.process(IngestMsg::Batch(batch(source, "NAV_RAD", &[1, 2])));
+            assert!(
+                store.load().source(source).is_none(),
+                "observer runs while the first batch remains unpublished"
+            );
             ing.process(IngestMsg::Batch(batch(
                 SourceId(99),
                 "UNOPENED_NAV_RAD",
@@ -639,7 +719,12 @@ mod tests {
 
         assert_eq!(
             recorder.batches,
-            vec![(SourceKind::LiveDerived, "NAV_RAD".to_owned(), 2)]
+            vec![(
+                SourceKind::LiveDerived,
+                "script:live_math".to_owned(),
+                "NAV_RAD".to_owned(),
+                2
+            )]
         );
     }
 
@@ -726,10 +811,11 @@ mod tests {
                 name: "MPC_XY_CRUISE".to_owned(),
                 ty: "float".to_owned(),
                 value: "5.5".to_owned(),
+                default: None,
             }],
             auto_markers: vec![AutoMarker {
                 time_us: 42,
-                level: 6,
+                level: Some(6),
                 text: "takeoff".to_owned(),
             }],
         };
@@ -834,6 +920,89 @@ mod tests {
         assert_eq!(store.load().epoch, before.epoch, "no spurious publish");
     }
 
+    fn two_closed_sources() -> (Ingestor<NullObserver>, Arc<DataStore>, SourceId, SourceId) {
+        let mut ing = Ingestor::new(NullObserver);
+        let store = ing.store();
+        let a = open(&mut ing, "a", SourceKind::File);
+        let b = open(&mut ing, "b", SourceKind::File);
+        for (source, times) in [(a, [100, 200]), (b, [300, 400])] {
+            ing.process(IngestMsg::Batch(batch(source, "GPS", &times)));
+            ing.process(IngestMsg::CloseSource {
+                source,
+                summary: ParseSummary::default(),
+            });
+        }
+        (ing, store, a, b)
+    }
+
+    #[test]
+    fn source_offset_batch_publishes_once_with_all_values() {
+        let (mut ing, store, a, b) = two_closed_sources();
+        let before = store.load().epoch;
+        ing.process(IngestMsg::SetSourceOffsets {
+            offsets: vec![(a, 125_000), (b, -250_000)],
+        });
+        let after = store.load();
+        assert_eq!(after.epoch, before + 1);
+        assert_eq!(after.source(a).unwrap().entry.offset_us, 125_000);
+        assert_eq!(after.source(b).unwrap().entry.offset_us, -250_000);
+    }
+
+    #[test]
+    fn invalid_source_offset_batch_is_all_or_nothing() {
+        let (mut ing, store, a, _b) = two_closed_sources();
+        let before = store.load();
+        ing.process(IngestMsg::SetSourceOffsets {
+            offsets: vec![(a, 125_000), (SourceId(u32::MAX), 7)],
+        });
+        let after = store.load();
+        assert_eq!(after.epoch, before.epoch);
+        assert_eq!(after.source(a).unwrap().entry.offset_us, 0);
+    }
+
+    #[test]
+    fn duplicate_source_offset_batch_is_rejected() {
+        let (mut ing, store, a, _b) = two_closed_sources();
+        let before = store.load();
+        ing.process(IngestMsg::SetSourceOffsets {
+            offsets: vec![(a, 1), (a, 2)],
+        });
+        assert_eq!(store.load().epoch, before.epoch);
+        assert_eq!(store.load().source(a).unwrap().entry.offset_us, 0);
+    }
+
+    #[test]
+    fn overflowing_source_offset_batch_is_all_or_nothing() {
+        let (mut ing, store, a, b) = two_closed_sources();
+        let before = store.load();
+        ing.process(IngestMsg::SetSourceOffsets {
+            offsets: vec![(a, 125_000), (b, i64::MAX)],
+        });
+        assert_eq!(store.load().epoch, before.epoch);
+        assert_eq!(store.load().source(a).unwrap().entry.offset_us, 0);
+    }
+
+    #[test]
+    fn pending_timestamp_overflow_rejects_source_offset_batch() {
+        let mut ing = Ingestor::new(NullObserver);
+        let store = ing.store();
+        let a = open(&mut ing, "a", SourceKind::Live);
+        let b = open(&mut ing, "b", SourceKind::Live);
+        ing.process(IngestMsg::Batch(batch(a, "GPS", &[100, 200])));
+        ing.process(IngestMsg::Batch(batch(b, "GPS", &[1, 2])));
+        assert_eq!(ing.chunks_sealed(), 0);
+        let before_epoch = store.load().epoch;
+
+        ing.process(IngestMsg::SetSourceOffsets {
+            offsets: vec![(a, 125_000), (b, i64::MAX)],
+        });
+
+        assert_eq!(store.load().epoch, before_epoch);
+        assert_eq!(ing.identity.source(a).unwrap().offset_us, 0);
+        assert_eq!(ing.identity.source(b).unwrap().offset_us, 0);
+        assert_eq!(ing.chunks_sealed(), 0);
+    }
+
     #[test]
     fn derived_source_seals_at_the_file_threshold() {
         let mut ing = Ingestor::new(NullObserver);
@@ -851,9 +1020,10 @@ mod tests {
 
     #[test]
     fn remove_source_drops_its_stores_and_republishes() {
-        let mut ing = Ingestor::new(NullObserver);
+        let mut recorder = Recorder::default();
+        let mut ing = Ingestor::new(&mut recorder);
         let store = ing.store();
-        let source = open(&mut ing, "script:test", SourceKind::Derived);
+        let source = open_with(&mut ing, "script:test", SourceKind::Derived);
         ing.process(IngestMsg::Batch(batch(source, "DERIVED", &[1, 2, 3])));
         ing.process(IngestMsg::CloseSource {
             source,
@@ -875,6 +1045,7 @@ mod tests {
         assert!(after.epoch > before.epoch, "removal publishes a new epoch");
         assert!(!after.is_source_live(source));
         assert!(after.topic_store(topic).is_none());
+        assert_eq!(recorder.removes, vec![source]);
     }
 
     #[test]
