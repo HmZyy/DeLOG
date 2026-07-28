@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use crate::ui::logging::{LogLevel, PendingLog, log};
-use crate::settings::AutoOpenVariables;
+use crate::config::settings::AutoOpenVariables;
 use delog_core::ingest::IngestSender;
 use delog_core::metrics::MetricsRegistry;
 use delog_core::snapshot::DataStore;
@@ -83,13 +83,13 @@ enum ConsoleEventKind {
 }
 
 fn should_open_scripting_console(
-    mode: crate::settings::AutoOpenScriptingConsole,
+    mode: crate::config::settings::AutoOpenScriptingConsole,
     event: ConsoleEventKind,
 ) -> bool {
     match mode {
-        crate::settings::AutoOpenScriptingConsole::OnOutput => true,
-        crate::settings::AutoOpenScriptingConsole::OnErrors => event == ConsoleEventKind::Error,
-        crate::settings::AutoOpenScriptingConsole::Never => false,
+        crate::config::settings::AutoOpenScriptingConsole::OnOutput => true,
+        crate::config::settings::AutoOpenScriptingConsole::OnErrors => event == ConsoleEventKind::Error,
+        crate::config::settings::AutoOpenScriptingConsole::Never => false,
     }
 }
 
@@ -458,7 +458,7 @@ impl ScriptsPanel {
         self.engine.as_ref().map(|e| e.live_batch_sender())
     }
 
-    fn drain(&mut self, auto_open_console: crate::settings::AutoOpenScriptingConsole) {
+    fn drain(&mut self, auto_open_console: crate::config::settings::AutoOpenScriptingConsole) {
         let events = self
             .engine
             .as_ref()
@@ -473,14 +473,14 @@ impl ScriptsPanel {
     fn handle_event(&mut self, event: ScriptEvent) {
         self.handle_event_with_console_policy(
             event,
-            crate::settings::AutoOpenScriptingConsole::Never,
+            crate::config::settings::AutoOpenScriptingConsole::Never,
         );
     }
 
     fn handle_event_with_console_policy(
         &mut self,
         event: ScriptEvent,
-        auto_open_console: crate::settings::AutoOpenScriptingConsole,
+        auto_open_console: crate::config::settings::AutoOpenScriptingConsole,
     ) {
         match event {
             ScriptEvent::Output(s) => {
@@ -617,7 +617,7 @@ impl ScriptsPanel {
         sender: IngestSender,
         metrics: Arc<MetricsRegistry>,
         auto_open: AutoOpenVariables,
-        auto_open_console: crate::settings::AutoOpenScriptingConsole,
+        auto_open_console: crate::config::settings::AutoOpenScriptingConsole,
         use_original_timestamps: bool,
     ) {
         self.auto_open_mode = auto_open;
@@ -1297,23 +1297,23 @@ mod tests {
     #[test]
     fn console_auto_open_policy_matches_setting() {
         assert!(should_open_scripting_console(
-            crate::settings::AutoOpenScriptingConsole::OnOutput,
+            crate::config::settings::AutoOpenScriptingConsole::OnOutput,
             ConsoleEventKind::Output,
         ));
         assert!(should_open_scripting_console(
-            crate::settings::AutoOpenScriptingConsole::OnOutput,
+            crate::config::settings::AutoOpenScriptingConsole::OnOutput,
             ConsoleEventKind::Error,
         ));
         assert!(!should_open_scripting_console(
-            crate::settings::AutoOpenScriptingConsole::OnErrors,
+            crate::config::settings::AutoOpenScriptingConsole::OnErrors,
             ConsoleEventKind::Output,
         ));
         assert!(should_open_scripting_console(
-            crate::settings::AutoOpenScriptingConsole::OnErrors,
+            crate::config::settings::AutoOpenScriptingConsole::OnErrors,
             ConsoleEventKind::Error,
         ));
         assert!(!should_open_scripting_console(
-            crate::settings::AutoOpenScriptingConsole::Never,
+            crate::config::settings::AutoOpenScriptingConsole::Never,
             ConsoleEventKind::Error,
         ));
     }
@@ -1725,7 +1725,7 @@ mod tests {
         let prior = HashSet::new();
         let current: HashSet<String> = ["gain".into()].into_iter().collect();
         assert!(!should_open_variables(
-            crate::settings::AutoOpenVariables::Never,
+            crate::config::settings::AutoOpenVariables::Never,
             &prior,
             &current
         ));
@@ -1736,7 +1736,7 @@ mod tests {
         let prior: HashSet<String> = ["gain".into()].into_iter().collect();
         let current: HashSet<String> = ["gain".into()].into_iter().collect();
         assert!(should_open_variables(
-            crate::settings::AutoOpenVariables::EveryRun,
+            crate::config::settings::AutoOpenVariables::EveryRun,
             &prior,
             &current
         ));
@@ -1746,7 +1746,7 @@ mod tests {
     fn auto_open_every_run_stays_closed_without_params() {
         let empty = HashSet::new();
         assert!(!should_open_variables(
-            crate::settings::AutoOpenVariables::EveryRun,
+            crate::config::settings::AutoOpenVariables::EveryRun,
             &empty,
             &empty
         ));
@@ -1757,7 +1757,7 @@ mod tests {
         let prior = HashSet::new();
         let current: HashSet<String> = ["gain".into()].into_iter().collect();
         assert!(should_open_variables(
-            crate::settings::AutoOpenVariables::NewlyAdded,
+            crate::config::settings::AutoOpenVariables::NewlyAdded,
             &prior,
             &current
         ));
@@ -1768,7 +1768,7 @@ mod tests {
         let prior: HashSet<String> = ["gain".into()].into_iter().collect();
         let current: HashSet<String> = ["gain".into(), "freq".into()].into_iter().collect();
         assert!(should_open_variables(
-            crate::settings::AutoOpenVariables::NewlyAdded,
+            crate::config::settings::AutoOpenVariables::NewlyAdded,
             &prior,
             &current
         ));
@@ -1779,7 +1779,7 @@ mod tests {
         let prior: HashSet<String> = ["gain".into()].into_iter().collect();
         let current: HashSet<String> = ["gain".into()].into_iter().collect();
         assert!(!should_open_variables(
-            crate::settings::AutoOpenVariables::NewlyAdded,
+            crate::config::settings::AutoOpenVariables::NewlyAdded,
             &prior,
             &current
         ));

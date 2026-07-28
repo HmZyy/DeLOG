@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use delog_stream::{Endpoint, EndpointKind};
 
-use crate::settings::{LiveConnectionMode, LiveConnectionSettings};
+use crate::config::settings::{LiveConnectionMode, LiveConnectionSettings};
 
 #[derive(Debug)]
 pub struct ConnectionDialog {
@@ -388,8 +388,8 @@ mod tests {
 
     #[test]
     fn restores_endpoint_from_last_live_connection_settings() {
-        let settings = crate::settings::LiveConnectionSettings {
-            mode: crate::settings::LiveConnectionMode::TcpClient,
+        let settings = crate::config::settings::LiveConnectionSettings {
+            mode: crate::config::settings::LiveConnectionMode::TcpClient,
             host: "192.168.1.20".to_owned(),
             port: 5760,
             serial_path: "/dev/ttyUSB0".to_owned(),

@@ -21,7 +21,7 @@ use crate::plot::ViewX;
 #[cfg(feature = "scripting")]
 use crate::scripts;
 use crate::session::Session;
-use crate::settings::{AppSettings, RenderMode, SettingsDialog, TileCacheUiState};
+use crate::config::settings::{AppSettings, RenderMode, SettingsDialog, TileCacheUiState};
 use crate::sync_window::SyncWindow;
 
 fn tile_cache_needs_repaint(clear_submitted: bool, cache_action_pending: bool) -> bool {
@@ -4300,22 +4300,22 @@ impl egui_dock::TabViewer for AppDockViewer<'_> {
 const ICON_BUTTON_SIZE: egui::Vec2 = egui::vec2(28.0, 24.0);
 
 fn next_legend_position(
-    position: crate::settings::LegendPosition,
-) -> crate::settings::LegendPosition {
+    position: crate::config::settings::LegendPosition,
+) -> crate::config::settings::LegendPosition {
     match position {
-        crate::settings::LegendPosition::TopLeft => crate::settings::LegendPosition::TopRight,
-        crate::settings::LegendPosition::TopRight => crate::settings::LegendPosition::BottomLeft,
-        crate::settings::LegendPosition::BottomLeft => crate::settings::LegendPosition::BottomRight,
-        crate::settings::LegendPosition::BottomRight => crate::settings::LegendPosition::TopLeft,
+        crate::config::settings::LegendPosition::TopLeft => crate::config::settings::LegendPosition::TopRight,
+        crate::config::settings::LegendPosition::TopRight => crate::config::settings::LegendPosition::BottomLeft,
+        crate::config::settings::LegendPosition::BottomLeft => crate::config::settings::LegendPosition::BottomRight,
+        crate::config::settings::LegendPosition::BottomRight => crate::config::settings::LegendPosition::TopLeft,
     }
 }
 
-fn legend_position_icon(position: crate::settings::LegendPosition) -> egui::ImageSource<'static> {
+fn legend_position_icon(position: crate::config::settings::LegendPosition) -> egui::ImageSource<'static> {
     match position {
-        crate::settings::LegendPosition::TopLeft => crate::ui::icons::dice_top_left(),
-        crate::settings::LegendPosition::TopRight => crate::ui::icons::dice_top_right(),
-        crate::settings::LegendPosition::BottomLeft => crate::ui::icons::dice_bottom_left(),
-        crate::settings::LegendPosition::BottomRight => crate::ui::icons::dice_bottom_right(),
+        crate::config::settings::LegendPosition::TopLeft => crate::ui::icons::dice_top_left(),
+        crate::config::settings::LegendPosition::TopRight => crate::ui::icons::dice_top_right(),
+        crate::config::settings::LegendPosition::BottomLeft => crate::ui::icons::dice_bottom_left(),
+        crate::config::settings::LegendPosition::BottomRight => crate::ui::icons::dice_bottom_right(),
     }
 }
 
