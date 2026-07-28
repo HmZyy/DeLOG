@@ -11,9 +11,16 @@ pub fn shared_empty() -> SharedParams {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ParamKind {
-    Slider { min: f64, max: f64, step: Option<f64>, integer: bool },
+    Slider {
+        min: f64,
+        max: f64,
+        step: Option<f64>,
+        integer: bool,
+    },
     Checkbox,
-    Combo { options: Vec<String> },
+    Combo {
+        options: Vec<String>,
+    },
     Text,
 }
 
@@ -136,13 +143,7 @@ impl ParamStore {
         Some(default)
     }
 
-    pub fn finalize(
-        &mut self,
-        script: &str,
-        generation: u64,
-        has_snapshot: bool,
-        has_live: bool,
-    ) {
+    pub fn finalize(&mut self, script: &str, generation: u64, has_snapshot: bool, has_live: bool) {
         let sp = self.scripts.entry(script.to_string()).or_default();
         // A run that declared no params clears the prior generation's specs.
         if sp.last_generation != Some(generation) {
@@ -175,7 +176,12 @@ mod tests {
         ParamSpec {
             name: name.into(),
             label: name.into(),
-            kind: ParamKind::Slider { min, max, step: None, integer: false },
+            kind: ParamKind::Slider {
+                min,
+                max,
+                step: None,
+                integer: false,
+            },
             default: ParamValue::Float(default),
             order: 0,
             generation: 0,
@@ -226,7 +232,9 @@ mod tests {
         let spec = ParamSpec {
             name: "m".into(),
             label: "m".into(),
-            kind: ParamKind::Combo { options: vec!["a".into(), "b".into()] },
+            kind: ParamKind::Combo {
+                options: vec!["a".into(), "b".into()],
+            },
             default: ParamValue::Text("a".into()),
             order: 0,
             generation: 0,
@@ -244,7 +252,11 @@ mod tests {
         // Next run declares only "a": "b"'s spec is pruned.
         s.declare("foo", 2, slider("a", 1.0, 0.0, 2.0)).unwrap();
         s.finalize("foo", 2, true, false);
-        let names: Vec<_> = s.scripts["foo"].specs.iter().map(|x| x.name.clone()).collect();
+        let names: Vec<_> = s.scripts["foo"]
+            .specs
+            .iter()
+            .map(|x| x.name.clone())
+            .collect();
         assert_eq!(names, vec!["a".to_string()]);
     }
 

@@ -2,16 +2,19 @@
 resolver = "3"
 members = [
   "crates/delog-core",
+  "crates/delog-flow",
   "crates/delog-parsers",
   "crates/delog-stream",
   "crates/delog-cache",
   "crates/delog-render",
   "crates/delog-app",
   "crates/delog-script",
+  "crates/delog-parquet-format",
 ]
+exclude = ["third_party/egui_graph"]
 
 [workspace.package]
-version = "0.2.2"
+version = "0.3.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/HmZyy/DeLOG"
@@ -20,19 +23,25 @@ rust-version = "1.92"
 # Every third-party version is pinned here, once; member crates inherit with
 # `workspace = true`. Cargo.lock is committed.
 [workspace.dependencies]
+tempfile = "3.27.0"
 # intra-workspace
 delog-core = { path = "crates/delog-core" }
+delog-flow = { path = "crates/delog-flow" }
 delog-parsers = { path = "crates/delog-parsers" }
 delog-stream = { path = "crates/delog-stream" }
 delog-cache = { path = "crates/delog-cache" }
 delog-render = { path = "crates/delog-render" }
 delog-script = { path = "crates/delog-script" }
+delog-parquet-format = { path = "crates/delog-parquet-format" }
 
 # columnar data
 arrow = "59.0.0"
 arrow-ipc = "59.0.0"
+bytes = "1.11.1"
+parquet = "59.0.0"
 
 # GUI / GPU
+arboard = { version = "3.6.1", features = ["wayland-data-control"] }
 egui = "0.34.3"
 eframe = { version = "0.34.3", default-features = false, features = [
   "wgpu",
@@ -42,6 +51,7 @@ eframe = { version = "0.34.3", default-features = false, features = [
 ] }
 egui-wgpu = "0.34.3"
 egui_extras = { version = "0.34.3", default-features = false, features = ["svg"] }
+egui_dock = "0.19.1"
 egui_tiles = "0.15.0"
 rfd = "0.17.2"
 wgpu = "29.0.3"
@@ -57,10 +67,16 @@ mavlink = { version = "0.18.0", default-features = false, features = [
 serialport = "4.9.0"
 
 # app packaging (build scripts): decode/resize the logo into the runtime window
-# icon. Build-only; not linked into the binary.
+# icon and, on Windows, a multi-size .ico embedded as a PE resource.
 image = { version = "0.25.10", default-features = false, features = [
   "png",
+  "ico",
+  "jpeg",
 ] }
+reqwest = { version = "0.12.28", default-features = false, features = ["blocking", "rustls-tls"] }
+directories = "6.0.0"
+# Embeds the .ico into the Windows .exe so Explorer/taskbar/shortcuts show it.
+winresource = "0.1.31"
 
 # 3D models
 gltf = "1.4.1"
@@ -95,3 +111,7 @@ egui_code_editor = "0.3.3"
 criterion = "0.8.2"
 proptest = "1.11.0"
 png = "0.18.1"
+tiny_http = "0.12.0"
+
+[patch.crates-io]
+egui_graph = { path = "third_party/egui_graph" }

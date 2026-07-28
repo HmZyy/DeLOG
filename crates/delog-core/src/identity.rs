@@ -9,6 +9,16 @@ use crate::time::{TimestampUs, effective_time_us};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SourceId(pub u32);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceKind {
+    /// May block on backpressure.
+    File,
+    /// Must never block — full channel drops the batch.
+    Live,
+    Derived,
+    LiveDerived,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TopicId(pub u32);
 
@@ -28,6 +38,7 @@ pub struct FieldKey {
 pub struct SourceEntry {
     pub id: SourceId,
     pub label: String,
+    pub kind: SourceKind,
     pub offset_us: TimestampUs,
     pub meta: SourceMetadata,
     pub removed: bool,
@@ -44,12 +55,13 @@ pub struct SourceParam {
     pub name: String,
     pub ty: String,
     pub value: String,
+    pub default: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AutoMarker {
     pub time_us: TimestampUs,
-    pub level: u8,
+    pub level: Option<u8>,
     pub text: String,
 }
 
@@ -76,6 +88,23 @@ pub struct RemovedSource {
     pub source: SourceId,
     pub topics: Vec<TopicId>,
     pub fields: Vec<FieldId>,
+}
+
+pub fn parse_topic_instance(name: &str) -> (String, Option<u32>) {
+    let Some(open) = name.rfind('[') else {
+        return (name.to_owned(), None);
+    };
+    if !name.ends_with(']') || open == 0 {
+        return (name.to_owned(), None);
+    }
+    let digits = &name[open + 1..name.len() - 1];
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return (name.to_owned(), None);
+    }
+    match digits.parse::<u32>() {
+        Ok(instance) => (name[..open].to_owned(), Some(instance)),
+        Err(_) => (name.to_owned(), None),
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -129,11 +158,20 @@ impl IdentityRegistry {
 
     /// A label already in use receives `#2`, `#3`, ... suffixes.
     pub fn add_source(&mut self, preferred_label: impl Into<String>) -> SourceId {
+        self.add_source_with_kind(preferred_label, SourceKind::File)
+    }
+
+    pub fn add_source_with_kind(
+        &mut self,
+        preferred_label: impl Into<String>,
+        kind: SourceKind,
+    ) -> SourceId {
         let label = self.unique_source_label(preferred_label.into());
         let id = SourceId(next_id(self.sources.len(), "source"));
         self.sources.push(SourceEntry {
             id,
             label,
+            kind,
             offset_us: 0,
             meta: SourceMetadata::default(),
             removed: false,
@@ -153,6 +191,39 @@ impl IdentityRegistry {
 
     pub fn add_source_from_endpoint(&mut self, endpoint: impl Into<String>) -> SourceId {
         self.add_source(endpoint)
+    }
+
+    pub fn relabel_source(
+        &mut self,
+        id: SourceId,
+        preferred_label: impl Into<String>,
+    ) -> Option<String> {
+        let old_label = self.live_source(id)?.label.clone();
+        self.source_labels.remove(&old_label);
+        let label = self.unique_source_label(preferred_label.into());
+        self.sources[id.index()].label.clone_from(&label);
+
+        let portable_fields = self
+            .fields
+            .iter()
+            .filter(|field| !field.removed)
+            .filter_map(|field| {
+                let topic = self.topics.get(field.topic.index())?;
+                let source = self.sources.get(topic.source.index())?;
+                (!topic.removed && !source.removed).then(|| {
+                    (
+                        FieldKey {
+                            source: source.label.clone(),
+                            topic: topic.name.clone(),
+                            field: field.name.clone(),
+                        },
+                        field.id,
+                    )
+                })
+            })
+            .collect();
+        self.field_by_key = portable_fields;
+        Some(label)
     }
 
     pub fn add_topic(&mut self, source: SourceId, name: impl Into<String>) -> Option<TopicId> {
@@ -386,6 +457,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parse_topic_instance_suffixes() {
+        assert_eq!(parse_topic_instance("IMU"), ("IMU".to_owned(), None));
+        assert_eq!(parse_topic_instance("IMU[0]"), ("IMU".to_owned(), Some(0)));
+        assert_eq!(
+            parse_topic_instance("vehicle_attitude[12]"),
+            ("vehicle_attitude".to_owned(), Some(12))
+        );
+        assert_eq!(
+            parse_topic_instance("NAMED_VALUE_FLOAT/airspd"),
+            ("NAMED_VALUE_FLOAT/airspd".to_owned(), None)
+        );
+        assert_eq!(parse_topic_instance("bad[x]"), ("bad[x]".to_owned(), None));
+        assert_eq!(parse_topic_instance("bad[]"), ("bad[]".to_owned(), None));
+    }
+
+    #[test]
     fn source_labels_use_file_stem_and_collision_suffixes() {
         let mut ids = IdentityRegistry::new();
 
@@ -409,6 +496,29 @@ mod tests {
         assert_eq!(ids.source(explicit_suffix).unwrap().label, "flight#2");
         assert_eq!(ids.source(first).unwrap().label, "flight");
         assert_eq!(ids.source(second).unwrap().label, "flight#3");
+    }
+
+    #[test]
+    fn relabel_source_reclaims_freed_label_and_updates_portable_field_keys() {
+        let mut ids = IdentityRegistry::new();
+        let previous = ids.add_source("dataflow:g");
+        let replacement = ids.add_source("dataflow:g");
+        let topic = ids.add_topic(replacement, "derived").unwrap();
+        let field = ids.add_field(topic, "alt").unwrap();
+        assert_eq!(ids.source(replacement).unwrap().label, "dataflow:g#2");
+
+        ids.remove_source(previous).unwrap();
+        ids.relabel_source(replacement, "dataflow:g").unwrap();
+
+        assert_eq!(ids.source(replacement).unwrap().label, "dataflow:g");
+        assert_eq!(
+            ids.resolve(&FieldKey::new("dataflow:g", "derived", "alt")),
+            Some(field)
+        );
+        assert_eq!(
+            ids.resolve(&FieldKey::new("dataflow:g#2", "derived", "alt")),
+            None
+        );
     }
 
     #[test]
@@ -567,6 +677,16 @@ mod tests {
     }
 
     #[test]
+    fn source_kind_is_retained_and_defaults_to_file() {
+        let mut ids = IdentityRegistry::new();
+        let live = ids.add_source_with_kind("udp", SourceKind::Live);
+        let file = ids.add_source("log");
+
+        assert_eq!(ids.source(live).unwrap().kind, SourceKind::Live);
+        assert_eq!(ids.source(file).unwrap().kind, SourceKind::File);
+    }
+
+    #[test]
     fn source_metadata_can_be_replaced() {
         let mut ids = IdentityRegistry::new();
         let source = ids.add_source("flight");
@@ -575,10 +695,11 @@ mod tests {
                 name: "SYS_AUTOSTART".to_owned(),
                 ty: "int32_t".to_owned(),
                 value: "4001".to_owned(),
+                default: None,
             }],
             auto_markers: vec![AutoMarker {
                 time_us: 1_000,
-                level: 6,
+                level: Some(6),
                 text: "armed".to_owned(),
             }],
         };
