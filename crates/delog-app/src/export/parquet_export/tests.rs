@@ -13,7 +13,7 @@ use delog_parquet_format::decode_schema;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use super::*;
-use crate::data_export::ExportField;
+use crate::export::data_export::ExportField;
 
 /// Shadows the real writer so these tests read without a control argument;
 /// cancellation and progress are covered in `data_export`.

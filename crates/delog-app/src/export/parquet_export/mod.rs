@@ -18,7 +18,7 @@ use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 
-use crate::data_export::{
+use crate::export::data_export::{
     DataExportError, EXPORT_BATCH_ROWS, ExportCtl, ExportField, window_fraction,
 };
 

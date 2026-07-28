@@ -49,12 +49,12 @@ type ProfilingExportResult = Result<std::path::PathBuf, String>;
 
 struct DataExportSuccess {
     path: std::path::PathBuf,
-    format: crate::data_export::ExportFormat,
+    format: crate::export::data_export::ExportFormat,
     rows: u64,
 }
 
 enum DataExportEvent {
-    Started(crate::data_export::ActiveExport),
+    Started(crate::export::data_export::ActiveExport),
     Written { id: u64, success: DataExportSuccess },
     Cancelled { id: u64, path: std::path::PathBuf },
     Failed { id: u64, error: String },
@@ -278,15 +278,15 @@ pub struct DelogApp {
     message_popups: Vec<crate::ui::message_popup::MessagePopup>,
     exported_profiling: mpsc::Receiver<ProfilingExportResult>,
     exported_profiling_tx: mpsc::Sender<ProfilingExportResult>,
-    data_export: crate::data_export::DataExportState,
+    data_export: crate::export::data_export::DataExportState,
     data_export_tx: mpsc::Sender<DataExportEvent>,
     data_export_rx: mpsc::Receiver<DataExportEvent>,
-    data_exports: Vec<crate::data_export::ActiveExport>,
+    data_exports: Vec<crate::export::data_export::ActiveExport>,
     next_data_export_id: u64,
-    image_export_writes: mpsc::Receiver<crate::image_export::PngWriteRequest>,
-    image_export_writes_tx: mpsc::Sender<crate::image_export::PngWriteRequest>,
-    pending_image_capture: Option<crate::image_export::PendingImageCapture>,
-    queued_image_capture: Option<crate::image_export::ImageCaptureIntent>,
+    image_export_writes: mpsc::Receiver<crate::export::image_export::PngWriteRequest>,
+    image_export_writes_tx: mpsc::Sender<crate::export::image_export::PngWriteRequest>,
+    pending_image_capture: Option<crate::export::image_export::PendingImageCapture>,
+    queued_image_capture: Option<crate::export::image_export::ImageCaptureIntent>,
     next_image_capture_id: u64,
     image_clipboard: Option<arboard::Clipboard>,
     browser_collapsed: bool,
@@ -422,7 +422,7 @@ impl DelogApp {
             message_popups: Vec::new(),
             exported_profiling,
             exported_profiling_tx,
-            data_export: crate::data_export::DataExportState::default(),
+            data_export: crate::export::data_export::DataExportState::default(),
             data_export_tx,
             data_export_rx,
             data_exports: Vec::new(),
@@ -592,14 +592,14 @@ impl DelogApp {
     fn spawn_png_export_dialog(
         &self,
         ctx: &egui::Context,
-        kind: crate::image_export::ImageCaptureKind,
+        kind: crate::export::image_export::ImageCaptureKind,
         png_bytes: Vec<u8>,
     ) {
         let tx = self.image_export_writes_tx.clone();
         let ctx = ctx.clone();
         let file_name = match kind {
-            crate::image_export::ImageCaptureKind::Workspace => "workspace.png",
-            crate::image_export::ImageCaptureKind::Plot => "plot.png",
+            crate::export::image_export::ImageCaptureKind::Workspace => "workspace.png",
+            crate::export::image_export::ImageCaptureKind::Plot => "plot.png",
         };
         std::thread::Builder::new()
             .name("delog-image-export-dialog".into())
@@ -610,7 +610,7 @@ impl DelogApp {
                     .set_title("Export PNG")
                     .save_file();
                 if let Some(path) = picked {
-                    let _ = tx.send(crate::image_export::PngWriteRequest::new(path, png_bytes));
+                    let _ = tx.send(crate::export::image_export::PngWriteRequest::new(path, png_bytes));
                     ctx.request_repaint();
                 }
             })
@@ -638,12 +638,12 @@ impl DelogApp {
 
     fn copy_captured_image_to_clipboard(
         &mut self,
-        kind: crate::image_export::ImageCaptureKind,
+        kind: crate::export::image_export::ImageCaptureKind,
         image: &egui::ColorImage,
     ) {
         let what = match kind {
-            crate::image_export::ImageCaptureKind::Workspace => "workspace",
-            crate::image_export::ImageCaptureKind::Plot => "plot",
+            crate::export::image_export::ImageCaptureKind::Workspace => "workspace",
+            crate::export::image_export::ImageCaptureKind::Plot => "plot",
         };
 
         if self.image_clipboard.is_none() {
@@ -663,7 +663,7 @@ impl DelogApp {
         let Some(clipboard) = self.image_clipboard.as_mut() else {
             return;
         };
-        match crate::image_export::copy_image_to_clipboard(clipboard, image) {
+        match crate::export::image_export::copy_image_to_clipboard(clipboard, image) {
             Ok(()) => self
                 .session
                 .push_diagnostic(delog_core::diagnostics::Diag::info(
@@ -687,7 +687,7 @@ impl DelogApp {
     fn queue_image_capture(
         &mut self,
         ctx: &egui::Context,
-        intent: crate::image_export::ImageCaptureIntent,
+        intent: crate::export::image_export::ImageCaptureIntent,
     ) {
         if self.pending_image_capture.is_some() || self.queued_image_capture.is_some() {
             self.session
@@ -734,8 +734,8 @@ impl DelogApp {
     fn request_image_capture(
         &mut self,
         ctx: &egui::Context,
-        action: crate::image_export::ImageCaptureAction,
-        kind: crate::image_export::ImageCaptureKind,
+        action: crate::export::image_export::ImageCaptureAction,
+        kind: crate::export::image_export::ImageCaptureKind,
         rect: egui::Rect,
         pixels_per_point: f32,
     ) {
@@ -757,7 +757,7 @@ impl DelogApp {
         }
         let id = self.next_image_capture_id;
         self.next_image_capture_id = self.next_image_capture_id.wrapping_add(1).max(1);
-        self.pending_image_capture = Some(crate::image_export::PendingImageCapture {
+        self.pending_image_capture = Some(crate::export::image_export::PendingImageCapture {
             id,
             action,
             kind,
@@ -777,7 +777,7 @@ impl DelogApp {
             else {
                 continue;
             };
-            let Some(id) = crate::image_export::screenshot_request_id(&user_data) else {
+            let Some(id) = crate::export::image_export::screenshot_request_id(&user_data) else {
                 continue;
             };
             if self
@@ -791,7 +791,7 @@ impl DelogApp {
             let Some(pending) = self.pending_image_capture.take() else {
                 continue;
             };
-            let Some(cropped) = crate::image_export::crop_color_image(
+            let Some(cropped) = crate::export::image_export::crop_color_image(
                 &image,
                 pending.rect,
                 pending.pixels_per_point,
@@ -805,11 +805,11 @@ impl DelogApp {
             };
 
             match pending.action {
-                crate::image_export::ImageCaptureAction::Copy => {
+                crate::export::image_export::ImageCaptureAction::Copy => {
                     self.copy_captured_image_to_clipboard(pending.kind, &cropped);
                 }
-                crate::image_export::ImageCaptureAction::Export => {
-                    match crate::image_export::encode_png(&cropped) {
+                crate::export::image_export::ImageCaptureAction::Export => {
+                    match crate::export::image_export::encode_png(&cropped) {
                         Ok(png_bytes) => self.spawn_png_export_dialog(ctx, pending.kind, png_bytes),
                         Err(err) => {
                             self.session
@@ -1362,7 +1362,7 @@ impl DelogApp {
         snapshot: &delog_core::snapshot::StoreSnapshot,
     ) {
         let export =
-            crate::kml_export::build_kml(snapshot, &self.vehicles, &self.vehicle_trajectories);
+            crate::export::kml_export::build_kml(snapshot, &self.vehicles, &self.vehicle_trajectories);
         if export.exported == 0 {
             let _ = self
                 .exported_kml_tx
@@ -1453,12 +1453,12 @@ impl DelogApp {
         &mut self,
         ctx: &egui::Context,
         snapshot: &std::sync::Arc<delog_core::snapshot::StoreSnapshot>,
-        all_fields: &[crate::data_export::ExportField],
-        request: crate::data_export::DataExportRequest,
+        all_fields: &[crate::export::data_export::ExportField],
+        request: crate::export::data_export::DataExportRequest,
     ) {
         let id = self.next_data_export_id;
         self.next_data_export_id += 1;
-        let chosen = match crate::data_export::resolve_export_fields(&request.fields, all_fields) {
+        let chosen = match crate::export::data_export::resolve_export_fields(&request.fields, all_fields) {
             Ok(chosen) => chosen,
             Err(error) => {
                 let _ = self.data_export_tx.send(DataExportEvent::Failed {
@@ -1487,10 +1487,10 @@ impl DelogApp {
                     .set_file_name(format.default_file_name())
                     .save_file();
                 let Some(path) = picked else { return };
-                let progress = crate::data_export::ExportProgress::default();
+                let progress = crate::export::data_export::ExportProgress::default();
                 let cancel = delog_core::parse_ctl::CancelToken::new();
                 let _ = tx.send(DataExportEvent::Started(
-                    crate::data_export::ActiveExport::new(
+                    crate::export::data_export::ActiveExport::new(
                         id,
                         &path,
                         progress.clone(),
@@ -1499,10 +1499,10 @@ impl DelogApp {
                 ));
                 ctx.request_repaint();
 
-                let ctl = crate::data_export::ExportCtl::new(cancel, move |fraction| {
+                let ctl = crate::export::data_export::ExportCtl::new(cancel, move |fraction| {
                     progress.set(fraction);
                 });
-                let event = match crate::data_export::write_export_file(
+                let event = match crate::export::data_export::write_export_file(
                     &path,
                     format,
                     &snapshot,
@@ -1516,7 +1516,7 @@ impl DelogApp {
                         id,
                         success: DataExportSuccess { path, format, rows },
                     },
-                    Err(crate::data_export::DataExportError::Cancelled) => {
+                    Err(crate::export::data_export::DataExportError::Cancelled) => {
                         DataExportEvent::Cancelled { id, path }
                     }
                     Err(error) => DataExportEvent::Failed {
@@ -2411,8 +2411,8 @@ impl eframe::App for DelogApp {
                 {
                     self.queue_image_capture(
                         ui.ctx(),
-                        crate::image_export::ImageCaptureIntent::workspace(
-                            crate::image_export::ImageCaptureAction::Export,
+                        crate::export::image_export::ImageCaptureIntent::workspace(
+                            crate::export::image_export::ImageCaptureAction::Export,
                             self.frame,
                         ),
                     );
@@ -2832,13 +2832,13 @@ impl eframe::App for DelogApp {
                 .as_ref()
                 .map(|(_, m)| m.clone())
                 .unwrap_or_default();
-            let fields = crate::data_export::available_fields(&snapshot, &model);
+            let fields = crate::export::data_export::available_fields(&snapshot, &model);
             let full = snapshot
                 .global_time_range()
                 .map(|r| (r.min_us, r.max_us))
                 .unwrap_or((0, 1));
             let visible = self.view.map(|v| (v.min_us, v.max_us)).unwrap_or(full);
-            if let Some(req) = crate::data_export::dialog_ui(
+            if let Some(req) = crate::export::data_export::dialog_ui(
                 ui.ctx(),
                 &mut self.data_export,
                 &fields,
@@ -2964,8 +2964,8 @@ impl eframe::App for DelogApp {
                             crate::workspace::WorkspaceImageAction::CopyPlot { rect } => {
                                 self.queue_image_capture(
                                     ui.ctx(),
-                                    crate::image_export::ImageCaptureIntent::plot(
-                                        crate::image_export::ImageCaptureAction::Copy,
+                                    crate::export::image_export::ImageCaptureIntent::plot(
+                                        crate::export::image_export::ImageCaptureAction::Copy,
                                         rect,
                                         self.frame,
                                     ),
@@ -2974,8 +2974,8 @@ impl eframe::App for DelogApp {
                             crate::workspace::WorkspaceImageAction::ExportPlot { rect } => {
                                 self.queue_image_capture(
                                     ui.ctx(),
-                                    crate::image_export::ImageCaptureIntent::plot(
-                                        crate::image_export::ImageCaptureAction::Export,
+                                    crate::export::image_export::ImageCaptureIntent::plot(
+                                        crate::export::image_export::ImageCaptureAction::Export,
                                         rect,
                                         self.frame,
                                     ),
@@ -3056,7 +3056,7 @@ impl eframe::App for DelogApp {
         // inside `frame_total`, after every other section).
         let _ui_windows_timer = self.session.metrics().scope("ui_windows");
         self.parquet_import.show(ui.ctx());
-        crate::data_export::progress_ui(ui.ctx(), &self.data_exports);
+        crate::export::data_export::progress_ui(ui.ctx(), &self.data_exports);
         self.show_layout_windows(ui.ctx());
         crate::ui::message_popup::show_all(&mut self.message_popups, ui.ctx());
         let settings_before = self.settings.clone();
