@@ -13,7 +13,7 @@ use super::controller::{Clipboard, DataFlowController};
 use super::picker::{DataHit, search_fields};
 use super::registry::{ADD_DATA_INDEX, search_templates, templates};
 use super::store::GraphStore;
-use crate::logging::LogLevel;
+use crate::ui::logging::LogLevel;
 
 #[cfg(feature = "scripting")]
 use delog_flow::script::{ScriptInputSpec, ScriptOutputSpec};
@@ -402,25 +402,25 @@ impl DataFlowUi {
                 self.controller.graph.name.clone_from(&self.name_edit);
                 self.controller.dirty = true;
             }
-            if icon_btn_enabled(ui, !self.name_edit.is_empty(), crate::icons::save(), "Save")
+            if icon_btn_enabled(ui, !self.name_edit.is_empty(), crate::ui::icons::save(), "Save")
                 .clicked()
             {
                 self.save(logs);
             }
             ui.separator();
-            if icon_btn_enabled(ui, self.controller.can_undo(), crate::icons::rotate_ccw(), "Undo")
+            if icon_btn_enabled(ui, self.controller.can_undo(), crate::ui::icons::rotate_ccw(), "Undo")
                 .clicked()
             {
                 self.controller.undo();
             }
-            if icon_btn_enabled(ui, self.controller.can_redo(), crate::icons::rotate_cw(), "Redo")
+            if icon_btn_enabled(ui, self.controller.can_redo(), crate::ui::icons::rotate_cw(), "Redo")
                 .clicked()
             {
                 self.controller.redo();
             }
             ui.separator();
             let has_selection = !self.controller.selection.is_empty();
-            if icon_btn_enabled(ui, has_selection, crate::icons::copy(), "Duplicate selected")
+            if icon_btn_enabled(ui, has_selection, crate::ui::icons::copy(), "Duplicate selected")
                 .clicked()
             {
                 let clipboard = self.controller.copy_selection();
@@ -428,7 +428,7 @@ impl DataFlowUi {
                     logs.push((LogLevel::Error, format!("Duplicate failed: {error}")));
                 }
             }
-            if icon_btn_enabled(ui, has_selection, crate::icons::trash(), "Delete selected")
+            if icon_btn_enabled(ui, has_selection, crate::ui::icons::trash(), "Delete selected")
                 .clicked()
                 && let Err(error) = self.controller.delete_selection()
             {
@@ -440,7 +440,7 @@ impl DataFlowUi {
                     .on_hover_text("Running");
             } else {
                 let tooltip = if live_connected { "Run (publish live output)" } else { "Run" };
-                if icon_btn_enabled(ui, true, crate::icons::play(), tooltip).clicked() {
+                if icon_btn_enabled(ui, true, crate::ui::icons::play(), tooltip).clicked() {
                     if live_connected {
                         self.pending_live_publish = true;
                     } else {
@@ -481,7 +481,7 @@ impl DataFlowUi {
                 ui.horizontal(|ui| {
                     ui.add_space(collapsed_left_margin);
                     let icon_size = button_size - ui.spacing().button_padding * 2.0;
-                    let icon = egui::Image::new(crate::icons::panel_left_open())
+                    let icon = egui::Image::new(crate::ui::icons::panel_left_open())
                         .fit_to_exact_size(icon_size)
                         .tint(ui.visuals().text_color());
                     if ui
@@ -500,7 +500,7 @@ impl DataFlowUi {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let button_size = crate::browser::panel_toggle_button_size(ui);
                 let icon_size = button_size - ui.spacing().button_padding * 2.0;
-                let icon = egui::Image::new(crate::icons::panel_left_close())
+                let icon = egui::Image::new(crate::ui::icons::panel_left_close())
                     .fit_to_exact_size(icon_size)
                     .tint(ui.visuals().text_color());
                 if ui

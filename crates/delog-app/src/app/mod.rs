@@ -8,15 +8,15 @@ use egui_extras::{Column, TableBuilder};
 use serde::Serialize;
 
 use crate::browser::{self, BrowserFilterCache, BrowserModel};
-use crate::diagnostics::DiagnosticsDock;
-use crate::docks::{AppDockController, AppDockTab};
+use crate::ui::diagnostics::DiagnosticsDock;
+use crate::ui::docks::{AppDockController, AppDockTab};
 use crate::field_stats::{FieldStatsController, StatsTab};
 use crate::gpu::GpuBridge;
 use crate::layout::{LayoutApply, LayoutDoc, LayoutError, LoadOutcome, PendingLayout};
 use crate::live::ConnectionDialog;
-use crate::logging::{LogLevel, LogRecord, LoggingDock, PendingLog};
+use crate::ui::logging::{LogLevel, LogRecord, LoggingDock, PendingLog};
 use crate::map::worker::{CacheActionKind, CacheActionStatus, TileManager};
-use crate::performance::{PerformanceDock, PerformanceSnapshot, ResourceSummary, TraceSummary};
+use crate::ui::performance::{PerformanceDock, PerformanceSnapshot, ResourceSummary, TraceSummary};
 use crate::plot::ViewX;
 #[cfg(feature = "scripting")]
 use crate::scripts;
@@ -275,7 +275,7 @@ pub struct DelogApp {
     exported_diagnostics_tx: mpsc::Sender<DiagnosticsExportResult>,
     exported_kml: mpsc::Receiver<Result<String, String>>,
     exported_kml_tx: mpsc::Sender<Result<String, String>>,
-    message_popups: Vec<crate::message_popup::MessagePopup>,
+    message_popups: Vec<crate::ui::message_popup::MessagePopup>,
     exported_profiling: mpsc::Receiver<ProfilingExportResult>,
     exported_profiling_tx: mpsc::Sender<ProfilingExportResult>,
     data_export: crate::data_export::DataExportState,
@@ -881,7 +881,7 @@ impl DelogApp {
                         msg.clone(),
                     ));
                     self.message_popups
-                        .push(crate::message_popup::MessagePopup::info(
+                        .push(crate::ui::message_popup::MessagePopup::info(
                             "Export trajectories KML",
                             msg,
                         ));
@@ -893,7 +893,7 @@ impl DelogApp {
                         err.clone(),
                     ));
                     self.message_popups
-                        .push(crate::message_popup::MessagePopup::error(
+                        .push(crate::ui::message_popup::MessagePopup::error(
                             "Export trajectories KML",
                             err,
                         ));
@@ -2239,7 +2239,7 @@ impl eframe::App for DelogApp {
                 if icon_button(
                     ui,
                     "toolbar-stream",
-                    crate::icons::satellite_dish(),
+                    crate::ui::icons::satellite_dish(),
                     stream_tint,
                     streaming,
                 )
@@ -2258,7 +2258,7 @@ impl eframe::App for DelogApp {
                 if icon_button(
                     ui,
                     "toolbar-3d",
-                    crate::icons::cube(),
+                    crate::ui::icons::cube(),
                     cube_tint,
                     scene_open,
                 )
@@ -2275,7 +2275,7 @@ impl eframe::App for DelogApp {
                 hover_mode_menu_button(
                     ui,
                     "toolbar-hover-mode",
-                    crate::icons::mouse_pointer(),
+                    crate::ui::icons::mouse_pointer(),
                     active_tint,
                     true,
                     |ui| {
@@ -2307,7 +2307,7 @@ impl eframe::App for DelogApp {
                 if icon_button(
                     ui,
                     "toolbar-snap-playhead",
-                    crate::icons::magnet(),
+                    crate::ui::icons::magnet(),
                     snap_tint,
                     self.snap_playhead,
                 )
@@ -2333,7 +2333,7 @@ impl eframe::App for DelogApp {
                         icon_button(
                             ui,
                             "toolbar-measuring-marker",
-                            crate::icons::ruler_dimension_line(),
+                            crate::ui::icons::ruler_dimension_line(),
                             marker_tint,
                             has_marker,
                         )
@@ -2352,7 +2352,7 @@ impl eframe::App for DelogApp {
                 if icon_button(
                     ui,
                     "toolbar-equal-plot-heights",
-                    crate::icons::grid_2x2_check(),
+                    crate::ui::icons::grid_2x2_check(),
                     inactive_tint,
                     false,
                 )
@@ -2387,7 +2387,7 @@ impl eframe::App for DelogApp {
                 if icon_button(
                     ui,
                     "toolbar-legends",
-                    crate::icons::eye_off(),
+                    crate::ui::icons::eye_off(),
                     legend_tint,
                     legends_hidden,
                 )
@@ -2402,7 +2402,7 @@ impl eframe::App for DelogApp {
                 if icon_button(
                     ui,
                     "toolbar-export-workspace-png",
-                    crate::icons::export(),
+                    crate::ui::icons::export(),
                     inactive_tint,
                     false,
                 )
@@ -2731,7 +2731,7 @@ impl eframe::App for DelogApp {
                         ui.horizontal(|ui| {
                             ui.add_space(collapsed_left_margin);
                             let icon_size = button_size - ui.spacing().button_padding * 2.0;
-                            let icon = egui::Image::new(crate::icons::panel_left_open())
+                            let icon = egui::Image::new(crate::ui::icons::panel_left_open())
                                 .fit_to_exact_size(icon_size)
                                 .tint(ui.visuals().text_color());
                             if ui
@@ -3048,7 +3048,7 @@ impl eframe::App for DelogApp {
                 dataflow_settings,
             ));
             for (level, message) in logs {
-                self.push_log(crate::logging::log(level, message));
+                self.push_log(crate::ui::logging::log(level, message));
             }
         }
 
@@ -3058,7 +3058,7 @@ impl eframe::App for DelogApp {
         self.parquet_import.show(ui.ctx());
         crate::data_export::progress_ui(ui.ctx(), &self.data_exports);
         self.show_layout_windows(ui.ctx());
-        crate::message_popup::show_all(&mut self.message_popups, ui.ctx());
+        crate::ui::message_popup::show_all(&mut self.message_popups, ui.ctx());
         let settings_before = self.settings.clone();
         let tile_cache =
             self.tile_manager
@@ -4312,10 +4312,10 @@ fn next_legend_position(
 
 fn legend_position_icon(position: crate::settings::LegendPosition) -> egui::ImageSource<'static> {
     match position {
-        crate::settings::LegendPosition::TopLeft => crate::icons::dice_top_left(),
-        crate::settings::LegendPosition::TopRight => crate::icons::dice_top_right(),
-        crate::settings::LegendPosition::BottomLeft => crate::icons::dice_bottom_left(),
-        crate::settings::LegendPosition::BottomRight => crate::icons::dice_bottom_right(),
+        crate::settings::LegendPosition::TopLeft => crate::ui::icons::dice_top_left(),
+        crate::settings::LegendPosition::TopRight => crate::ui::icons::dice_top_right(),
+        crate::settings::LegendPosition::BottomLeft => crate::ui::icons::dice_bottom_left(),
+        crate::settings::LegendPosition::BottomRight => crate::ui::icons::dice_bottom_right(),
     }
 }
 

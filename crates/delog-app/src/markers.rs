@@ -289,7 +289,7 @@ impl MarkersDock {
                                 .hint_text("note"),
                         );
                         let icon_size = egui::Vec2::splat(ui.spacing().icon_width);
-                        let jump_icon = egui::Image::new(crate::icons::crosshair())
+                        let jump_icon = egui::Image::new(crate::ui::icons::crosshair())
                             .fit_to_exact_size(icon_size)
                             .tint(ui.visuals().text_color());
                         if ui
@@ -299,7 +299,7 @@ impl MarkersDock {
                         {
                             jump = Some(m.t_us);
                         }
-                        let delete_icon = egui::Image::new(crate::icons::trash())
+                        let delete_icon = egui::Image::new(crate::ui::icons::trash())
                             .fit_to_exact_size(icon_size)
                             .tint(ui.visuals().text_color());
                         if ui

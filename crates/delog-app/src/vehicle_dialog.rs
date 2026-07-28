@@ -3,7 +3,7 @@ use delog_core::snapshot::StoreSnapshot;
 use egui::Color32;
 
 use crate::layout::{FieldRef, ModelLayout, NedRefLayout, OriLayout, PosLayout, VehicleLayout};
-use crate::logging::{LogLevel, PendingLog, log};
+use crate::ui::logging::{LogLevel, PendingLog, log};
 use crate::scene3d::vehicle::{GeoRef, ModelKind, NedReference, OriMapping, PosMapping, VehicleConfig};
 use crate::vehicle_profiles::{VEHICLE_PROFILE_VERSION, VehicleProfileDoc, VehicleProfileLibrary};
 
@@ -911,7 +911,7 @@ impl egui_dock::TabViewer for VehicleDialogTabViewer<'_> {
 fn show_vehicle_config_tab(ui: &mut egui::Ui, state: &mut VehicleDialog, snapshot: &StoreSnapshot) {
     if ui
         .add(egui::Button::image_and_text(
-            icon(ui, crate::icons::plus()),
+            icon(ui, crate::ui::icons::plus()),
             "Add Vehicle",
         ))
         .clicked()
@@ -952,7 +952,7 @@ fn show_vehicle_config_tab(ui: &mut egui::Ui, state: &mut VehicleDialog, snapsho
                     ui.horizontal(|ui| {
                         if ui
                             .add(egui::Button::image_and_text(
-                                icon(ui, crate::icons::trash()),
+                                icon(ui, crate::ui::icons::trash()),
                                 "Remove Vehicle",
                             ))
                             .clicked()
@@ -961,7 +961,7 @@ fn show_vehicle_config_tab(ui: &mut egui::Ui, state: &mut VehicleDialog, snapsho
                         }
                         if ui
                             .add(egui::Button::image_and_text(
-                                icon(ui, crate::icons::copy()),
+                                icon(ui, crate::ui::icons::copy()),
                                 "Duplicate",
                             ))
                             .clicked()
@@ -1061,7 +1061,7 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut VehicleDialog, snapshot: &St
         if ui
             .add_enabled(
                 state.profile_editor_selected.is_some(),
-                egui::Button::image(icon(ui, crate::icons::trash())),
+                egui::Button::image(icon(ui, crate::ui::icons::trash())),
             )
             .on_hover_text("Delete profile")
             .clicked()
@@ -1118,7 +1118,7 @@ fn profile_editor_form(ui: &mut egui::Ui, draft: &mut ProfileDraft) {
                     if ui
                         .add_sized(
                             egui::vec2(28.0, 24.0),
-                            egui::Button::image(icon(ui, crate::icons::folder_open())),
+                            egui::Button::image(icon(ui, crate::ui::icons::folder_open())),
                         )
                         .on_hover_text("Choose custom GLB")
                         .clicked()
@@ -1622,7 +1622,7 @@ fn draft_editor(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapshot) 
                     if ui
                         .add_sized(
                             egui::vec2(28.0, 24.0),
-                            egui::Button::image(icon(ui, crate::icons::folder_open())),
+                            egui::Button::image(icon(ui, crate::ui::icons::folder_open())),
                         )
                         .on_hover_text("Choose custom GLB")
                         .clicked()
@@ -1633,7 +1633,7 @@ fn draft_editor(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapshot) 
                     if ui
                         .add_enabled(
                             has_path,
-                            egui::Button::image(icon(ui, crate::icons::close())),
+                            egui::Button::image(icon(ui, crate::ui::icons::close())),
                         )
                         .on_hover_text("Clear custom GLB")
                         .clicked()

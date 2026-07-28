@@ -35,5 +35,5 @@ fn dataflow_fit_is_an_empty_canvas_double_click_not_a_toolbar_button() {
     assert!(DATAFLOW_CANVAS.contains("response.response.double_clicked()"));
     assert!(DATAFLOW_CANVAS.contains("state.request_fit()"));
     assert!(!DATAFLOW_WINDOW.contains("Fit nodes to view"));
-    assert!(!DATAFLOW_WINDOW.contains("crate::icons::maximize()"));
+    assert!(!DATAFLOW_WINDOW.contains("crate::ui::icons::maximize()"));
 }

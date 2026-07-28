@@ -71,8 +71,8 @@ fn normalized(source: &str) -> String {
 fn sync_toolbar_uses_icons_instead_of_unsupported_arrow_glyphs() {
     assert!(!SYNC_WINDOW_SOURCE.contains('→'));
     assert!(!SYNC_WINDOW_SOURCE.contains('↔'));
-    assert!(SYNC_WINDOW_SOURCE.contains("crate::icons::arrow_right()"));
-    assert!(SYNC_WINDOW_SOURCE.contains("crate::icons::arrow_left_right()"));
+    assert!(SYNC_WINDOW_SOURCE.contains("crate::ui::icons::arrow_right()"));
+    assert!(SYNC_WINDOW_SOURCE.contains("crate::ui::icons::arrow_left_right()"));
 }
 
 #[test]
@@ -170,9 +170,9 @@ fn bottom_dock_bodies_do_not_render_redundant_headers_or_close_buttons() {
     assert!(!markers.contains("ui.strong(\"Markers\")"));
     assert!(!SCRIPTS_SOURCE.contains("ui.strong(\"Scripting Console\")"));
 
-    assert!(diagnostics.contains("crate::icons::trash()"));
-    assert!(logging.contains("crate::icons::trash()"));
-    assert!(SCRIPTS_SOURCE.contains("crate::icons::trash()"));
+    assert!(diagnostics.contains("crate::ui::icons::trash()"));
+    assert!(logging.contains("crate::ui::icons::trash()"));
+    assert!(SCRIPTS_SOURCE.contains("crate::ui::icons::trash()"));
 }
 
 #[test]
@@ -206,7 +206,7 @@ fn clear_trash_buttons_are_aligned_to_the_right_of_their_control_rows() {
     assert!(!console.contains(".desired_width(f32::INFINITY)"));
     assert!(!console.contains("interact_size.x"));
     assert!(console.contains("egui::Layout::right_to_left(egui::Align::Center)"));
-    assert!(console.contains("crate::icons::trash()"));
+    assert!(console.contains("crate::ui::icons::trash()"));
 }
 
 #[test]
@@ -285,7 +285,7 @@ fn moved_plot_controls_live_on_icon_toolbar_not_plot_context_menu() {
     assert!(toolbar.contains("hover_mode_menu_button("));
     assert!(!toolbar.contains("next_sample_mode("));
     assert!(toolbar.contains("legend_position_icon("));
-    assert!(!toolbar.contains("crate::icons::panel_top()"));
+    assert!(!toolbar.contains("crate::ui::icons::panel_top()"));
     assert!(toolbar.contains(".on_hover_text(\"Cycle legend position\")"));
     assert!(!toolbar.contains("Cycle legend position - current"));
     let marker = toolbar
@@ -306,8 +306,8 @@ fn moved_plot_controls_live_on_icon_toolbar_not_plot_context_menu() {
         "a separator should split marker tools from legend tools"
     );
     assert!(toolbar.contains("self.workspace.equalize_plot_heights();"));
-    assert!(toolbar.contains("crate::icons::ruler_dimension_line()"));
-    assert!(toolbar.contains("crate::icons::grid_2x2_check()"));
+    assert!(toolbar.contains("crate::ui::icons::ruler_dimension_line()"));
+    assert!(toolbar.contains("crate::ui::icons::grid_2x2_check()"));
     assert!(toolbar.contains("let legends_hidden = !self.workspace.all_plot_legends_visible();"));
     assert!(
         !APP_SOURCE.contains(
@@ -315,7 +315,7 @@ fn moved_plot_controls_live_on_icon_toolbar_not_plot_context_menu() {
         )
     );
     assert!(toolbar.contains("legend_tint = if legends_hidden"));
-    assert!(toolbar.contains("crate::icons::eye_off()"));
+    assert!(toolbar.contains("crate::ui::icons::eye_off()"));
     assert!(toolbar.contains("legend_tint,\n                    legends_hidden,"));
     for tooltip in [
         "Select hover mode",
@@ -356,7 +356,7 @@ fn plot_field_stats_is_one_direct_action_for_all_pane_traces() {
     let stats = between(
         context_menu,
         "let fields: Vec<FieldId>",
-        "ui.menu_image_text_button(menu_icon(ui, crate::icons::pencil())",
+        "ui.menu_image_text_button(menu_icon(ui, crate::ui::icons::pencil())",
     );
 
     assert!(stats.contains("pane.traces.iter().map(|trace| trace.field).collect"));

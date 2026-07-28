@@ -1359,7 +1359,7 @@ impl Behavior<'_> {
         response.context_menu(|ui| {
             if ui
                 .add(egui::Button::image_and_text(
-                    menu_icon(ui, crate::icons::trash()),
+                    menu_icon(ui, crate::ui::icons::trash()),
                     "Clear all traces",
                 ))
                 .clicked()
@@ -1372,7 +1372,7 @@ impl Behavior<'_> {
                 ui.close();
             }
 
-            ui.menu_image_text_button(menu_icon(ui, crate::icons::ban()), "Remove trace", |ui| {
+            ui.menu_image_text_button(menu_icon(ui, crate::ui::icons::ban()), "Remove trace", |ui| {
                 let entries: Vec<_> = pane
                     .traces
                     .iter()
@@ -1428,7 +1428,7 @@ impl Behavior<'_> {
             });
 
             let fields: Vec<FieldId> = pane.traces.iter().map(|trace| trace.field).collect();
-            let stats_info = egui::Image::new(crate::icons::info())
+            let stats_info = egui::Image::new(crate::ui::icons::info())
                 .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
                 .tint(ui.visuals().text_color());
             if ui
@@ -1442,7 +1442,7 @@ impl Behavior<'_> {
                 ui.close();
             }
 
-            ui.menu_image_text_button(menu_icon(ui, crate::icons::pencil()), "Edit trace", |ui| {
+            ui.menu_image_text_button(menu_icon(ui, crate::ui::icons::pencil()), "Edit trace", |ui| {
                 let entries: Vec<_> = pane
                     .traces
                     .iter()
@@ -1525,7 +1525,7 @@ impl Behavior<'_> {
 
             if ui
                 .add(egui::Button::image_and_text(
-                    menu_icon(ui, crate::icons::copy()),
+                    menu_icon(ui, crate::ui::icons::copy()),
                     "Copy Image",
                 ))
                 .clicked()
@@ -1537,7 +1537,7 @@ impl Behavior<'_> {
             }
             if ui
                 .add(egui::Button::image_and_text(
-                    menu_icon(ui, crate::icons::export()),
+                    menu_icon(ui, crate::ui::icons::export()),
                     "Export PNG...",
                 ))
                 .clicked()
@@ -1552,7 +1552,7 @@ impl Behavior<'_> {
 
             if ui
                 .add(egui::Button::image_and_text(
-                    menu_icon(ui, crate::icons::columns()),
+                    menu_icon(ui, crate::ui::icons::columns()),
                     "Split horizontally",
                 ))
                 .clicked()
@@ -1562,7 +1562,7 @@ impl Behavior<'_> {
             }
             if ui
                 .add(egui::Button::image_and_text(
-                    menu_icon(ui, crate::icons::rows()),
+                    menu_icon(ui, crate::ui::icons::rows()),
                     "Split vertically",
                 ))
                 .clicked()
@@ -1577,7 +1577,7 @@ impl Behavior<'_> {
 
             if ui
                 .add(egui::Button::image_and_text(
-                    menu_icon(ui, crate::icons::info()),
+                    menu_icon(ui, crate::ui::icons::info()),
                     "Plot Info",
                 ))
                 .clicked()
@@ -1590,7 +1590,7 @@ impl Behavior<'_> {
 
             if ui
                 .add(egui::Button::image_and_text(
-                    menu_icon(ui, crate::icons::close()),
+                    menu_icon(ui, crate::ui::icons::close()),
                     "Close",
                 ))
                 .clicked()
@@ -2159,7 +2159,7 @@ fn scene_overlay_buttons(
         .fixed_pos(scene_rect.right_top() + egui::vec2(-36.0, 8.0))
         .show(ui.ctx(), |ui| {
             ui.vertical(|ui| {
-                let gear = egui::Image::new(crate::icons::gear())
+                let gear = egui::Image::new(crate::ui::icons::gear())
                     .fit_to_exact_size(egui::vec2(18.0, 18.0))
                     .tint(ui.visuals().weak_text_color());
                 clicks.vehicle_config = ui
@@ -2174,14 +2174,14 @@ fn scene_overlay_buttons(
                 } else {
                     ui.visuals().weak_text_color()
                 };
-                let route = egui::Image::new(crate::icons::route())
+                let route = egui::Image::new(crate::ui::icons::route())
                     .fit_to_exact_size(egui::vec2(18.0, 18.0))
                     .tint(route_tint);
                 clicks.toggle_trail = ui
                     .add_sized(egui::vec2(28.0, 24.0), egui::Button::image(route))
                     .clicked();
 
-                let earth = egui::Image::new(crate::icons::earth())
+                let earth = egui::Image::new(crate::ui::icons::earth())
                     .fit_to_exact_size(egui::vec2(18.0, 18.0))
                     .tint(ui.visuals().weak_text_color());
                 clicks.export_kml = ui

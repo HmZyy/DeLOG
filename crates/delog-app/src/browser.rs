@@ -522,7 +522,7 @@ pub fn ui(
                 .desired_width(filter_width),
         );
         let icon_size = button_size - ui.spacing().button_padding * 2.0;
-        let icon = egui::Image::new(crate::icons::panel_left_close())
+        let icon = egui::Image::new(crate::ui::icons::panel_left_close())
             .fit_to_exact_size(icon_size)
             .tint(ui.visuals().text_color());
         if ui
@@ -672,7 +672,7 @@ pub fn ui(
                         }
                     });
                 collapsing.header_response.context_menu(|ui| {
-                    let info = egui::Image::new(crate::icons::info())
+                    let info = egui::Image::new(crate::ui::icons::info())
                         .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
                         .tint(ui.visuals().text_color());
                     if ui
@@ -682,7 +682,7 @@ pub fn ui(
                         inspect_source = Some(source.id);
                         ui.close();
                     }
-                    let trash = egui::Image::new(crate::icons::trash())
+                    let trash = egui::Image::new(crate::ui::icons::trash())
                         .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
                         .tint(ui.visuals().error_fg_color);
                     if ui
@@ -725,7 +725,7 @@ fn offset_widget(
     if response.changed() {
         change = Some((source.id, (secs * 1e6).round() as i64));
     }
-    let clock = egui::Image::new(crate::icons::clock())
+    let clock = egui::Image::new(crate::ui::icons::clock())
         .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
         .tint(ui.visuals().text_color());
     if ui
@@ -921,7 +921,7 @@ fn field_row(
         }
     }
     response.context_menu(|ui| {
-        let metadata_info = egui::Image::new(crate::icons::info())
+        let metadata_info = egui::Image::new(crate::ui::icons::info())
             .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
             .tint(ui.visuals().text_color());
         if ui
@@ -934,7 +934,7 @@ fn field_row(
             action = Some(FieldRowAction::InspectMetadata(field.id));
             ui.close();
         }
-        let stats_info = egui::Image::new(crate::icons::info())
+        let stats_info = egui::Image::new(crate::ui::icons::info())
             .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
             .tint(ui.visuals().text_color());
         if ui
@@ -945,7 +945,7 @@ fn field_row(
             ui.close();
         }
         if is_discrete_dtype(field.dtype) {
-            let ruler = egui::Image::new(crate::icons::ruler())
+            let ruler = egui::Image::new(crate::ui::icons::ruler())
                 .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
                 .tint(ui.visuals().text_color());
             if ui
