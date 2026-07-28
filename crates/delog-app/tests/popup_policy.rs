@@ -711,7 +711,7 @@ fn writing_exports_report_progress_and_stay_cancellable() {
     assert!(progress.contains("ui.button(\"Cancel\")"));
     assert!(progress.contains("active.request_cancel()"));
 
-    assert!(APP_SOURCE.contains("crate::data_export::progress_ui("));
+    assert!(APP_SOURCE.contains("crate::export::data_export::progress_ui("));
 
     let worker = between(APP_SOURCE, "fn spawn_data_export(", "fn load_layout(");
     let save_dialog = worker.find(".save_file()").unwrap();
@@ -719,7 +719,7 @@ fn writing_exports_report_progress_and_stay_cancellable() {
         .find("DataExportEvent::Started")
         .expect("a chosen destination starts a tracked export");
     let ctl = worker
-        .find("crate::data_export::ExportCtl::new(")
+        .find("crate::export::data_export::ExportCtl::new(")
         .expect("the writer runs under a cancellable control");
 
     assert!(save_dialog < started && started < ctl);

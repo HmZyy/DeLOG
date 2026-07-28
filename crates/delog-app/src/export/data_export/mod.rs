@@ -928,7 +928,7 @@ pub fn write_export_file(
             let batches = ExportBatchReader::try_new(snapshot, fields, window, mode, origin_us)?;
             write_csv(BufWriter::new(temporary), batches, window, ctl)
         }
-        ExportFormat::Parquet => crate::parquet_export::write_structured_parquet(
+        ExportFormat::Parquet => crate::export::parquet_export::write_structured_parquet(
             BufWriter::new(temporary),
             snapshot,
             fields,

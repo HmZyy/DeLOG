@@ -481,7 +481,7 @@ fn parquet_final_flush_failure_preserves_existing_destination() {
     std::fs::write(&path, b"prior export").unwrap();
 
     let error = write_atomic(&path, |temporary| {
-        crate::parquet_export::write_structured_parquet(
+        crate::export::parquet_export::write_structured_parquet(
             FinalFlushFailingFile { inner: temporary },
             &snapshot,
             &[field],

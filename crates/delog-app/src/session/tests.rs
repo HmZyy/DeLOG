@@ -20,7 +20,7 @@ use parquet::arrow::ArrowWriter;
 
 use super::*;
 use crate::plotting::browser::BrowserModel;
-use crate::data_export::{
+use crate::export::data_export::{
     ExportCtl, ExportField, ExportFormat, available_fields, write_export_file,
 };
 use delog_core::export::ResampleMode;
