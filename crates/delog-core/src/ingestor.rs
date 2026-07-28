@@ -35,6 +35,7 @@ pub trait IngestObserver: Send {
     fn on_diagnostic(&mut self, _diag: Diag) {}
     fn on_progress(&mut self, _source: SourceId, _frac: f32) {}
     fn on_close(&mut self, _source: SourceId, _summary: ParseSummary) {}
+    fn on_remove(&mut self, _source: SourceId) {}
     /// Runs before the batch is published. `source_label` comes directly from
     /// the ingestor's identity registry and is authoritative at this boundary.
     fn on_batch(&mut self, _kind: SourceKind, _source_label: &str, _batch: &ParsedBatch) {}
@@ -429,6 +430,7 @@ impl<O: IngestObserver> Ingestor<O> {
         }
         self.sources.remove(&source);
         self.publish();
+        self.observer.on_remove(source);
     }
 
     fn flush_source(&mut self, source: SourceId) {
@@ -575,6 +577,7 @@ mod tests {
     struct Recorder {
         diags: Vec<Diag>,
         closes: Vec<(SourceId, ParseSummary)>,
+        removes: Vec<SourceId>,
         batches: Vec<(SourceKind, String, String, usize)>,
     }
     impl IngestObserver for &mut Recorder {
@@ -583,6 +586,9 @@ mod tests {
         }
         fn on_close(&mut self, source: SourceId, summary: ParseSummary) {
             self.closes.push((source, summary));
+        }
+        fn on_remove(&mut self, source: SourceId) {
+            self.removes.push(source);
         }
         fn on_batch(&mut self, kind: SourceKind, source_label: &str, batch: &ParsedBatch) {
             self.batches.push((
@@ -1013,9 +1019,10 @@ mod tests {
 
     #[test]
     fn remove_source_drops_its_stores_and_republishes() {
-        let mut ing = Ingestor::new(NullObserver);
+        let mut recorder = Recorder::default();
+        let mut ing = Ingestor::new(&mut recorder);
         let store = ing.store();
-        let source = open(&mut ing, "script:test", SourceKind::Derived);
+        let source = open_with(&mut ing, "script:test", SourceKind::Derived);
         ing.process(IngestMsg::Batch(batch(source, "DERIVED", &[1, 2, 3])));
         ing.process(IngestMsg::CloseSource {
             source,
@@ -1037,6 +1044,7 @@ mod tests {
         assert!(after.epoch > before.epoch, "removal publishes a new epoch");
         assert!(!after.is_source_live(source));
         assert!(after.topic_store(topic).is_none());
+        assert_eq!(recorder.removes, vec![source]);
     }
 
     #[test]

@@ -27,6 +27,12 @@ use crate::sync_window::SyncWindow;
 fn tile_cache_needs_repaint(clear_submitted: bool, cache_action_pending: bool) -> bool {
     clear_submitted || cache_action_pending
 }
+
+fn keep_active_loads_repainting(ctx: &egui::Context, has_active_loads: bool) {
+    if has_active_loads {
+        ctx.request_repaint_after(Duration::from_millis(50));
+    }
+}
 use crate::timeline::Playback;
 use crate::workspace::{PlotServices, Workspace};
 
@@ -47,7 +53,12 @@ struct DataExportSuccess {
     rows: u64,
 }
 
-type DataExportResult = Result<DataExportSuccess, String>;
+enum DataExportEvent {
+    Started(crate::data_export::ActiveExport),
+    Written { id: u64, success: DataExportSuccess },
+    Cancelled { id: u64, path: std::path::PathBuf },
+    Failed { id: u64, error: String },
+}
 const SESSION_AUTOSAVE_INTERVAL: Duration = Duration::from_secs(30);
 const PERFORMANCE_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 const LOG_RETENTION: usize = 1_000;
@@ -226,6 +237,7 @@ enum LayoutManagerAction {
 
 pub struct DelogApp {
     session: Session,
+    parquet_import: crate::parquet_import::ParquetImportUi,
     #[cfg(feature = "scripting")]
     scripts: scripts::ScriptsPanel,
     gpu: GpuBridge,
@@ -267,8 +279,10 @@ pub struct DelogApp {
     exported_profiling: mpsc::Receiver<ProfilingExportResult>,
     exported_profiling_tx: mpsc::Sender<ProfilingExportResult>,
     data_export: crate::data_export::DataExportState,
-    data_export_tx: mpsc::Sender<DataExportResult>,
-    data_export_rx: mpsc::Receiver<DataExportResult>,
+    data_export_tx: mpsc::Sender<DataExportEvent>,
+    data_export_rx: mpsc::Receiver<DataExportEvent>,
+    data_exports: Vec<crate::data_export::ActiveExport>,
+    next_data_export_id: u64,
     image_export_writes: mpsc::Receiver<crate::image_export::PngWriteRequest>,
     image_export_writes_tx: mpsc::Sender<crate::image_export::PngWriteRequest>,
     pending_image_capture: Option<crate::image_export::PendingImageCapture>,
@@ -362,11 +376,13 @@ impl DelogApp {
         let (exported_profiling_tx, exported_profiling) = mpsc::channel();
         let (data_export_tx, data_export_rx) = mpsc::channel();
         let (image_export_writes_tx, image_export_writes) = mpsc::channel();
-        let session = Session::new(cc.egui_ctx.clone());
+        let (parquet_import, parquet_selection) = crate::parquet_import::ParquetImportUi::new();
+        let session = Session::new(cc.egui_ctx.clone(), parquet_selection);
         // Shared metrics registry so cache metrics land in the same dock.
         let caches = CacheManager::new().with_metrics(std::sync::Arc::clone(session.metrics()));
         Self {
             session,
+            parquet_import,
             #[cfg(feature = "scripting")]
             scripts: {
                 let config_dir =
@@ -409,6 +425,8 @@ impl DelogApp {
             data_export: crate::data_export::DataExportState::default(),
             data_export_tx,
             data_export_rx,
+            data_exports: Vec::new(),
+            next_data_export_id: 1,
             image_export_writes,
             image_export_writes_tx,
             pending_image_capture: None,
@@ -541,7 +559,10 @@ impl DelogApp {
             .name("delog-open-dialog".into())
             .spawn(move || {
                 let picked = rfd::FileDialog::new()
-                    .add_filter("Flight logs", &["bin", "BIN", "ulg", "ulog", "tlog"])
+                    .add_filter(
+                        "Flight logs",
+                        &["bin", "BIN", "ulg", "ulog", "tlog", "parquet"],
+                    )
                     .add_filter("All files", &["*"])
                     .set_title("Open flight logs")
                     .pick_files();
@@ -890,23 +911,43 @@ impl DelogApp {
             }
         }
 
-        while let Ok(result) = self.data_export_rx.try_recv() {
-            match result {
-                Ok(success) => self
-                    .session
-                    .push_diagnostic(delog_core::diagnostics::Diag::info(
-                        "data-export",
-                        format!(
-                            "exported {} rows as {} to {}",
-                            success.rows,
-                            success.format.label(),
-                            success.path.display()
-                        ),
-                    )),
-                Err(error) => self
-                    .session
-                    .push_diagnostic(delog_core::diagnostics::Diag::error("data-export", error)),
-            }
+        while let Ok(event) = self.data_export_rx.try_recv() {
+            let finished = match event {
+                DataExportEvent::Started(active) => {
+                    self.data_exports.push(active);
+                    continue;
+                }
+                DataExportEvent::Written { id, success } => {
+                    self.session
+                        .push_diagnostic(delog_core::diagnostics::Diag::info(
+                            "data-export",
+                            format!(
+                                "exported {} rows as {} to {}",
+                                success.rows,
+                                success.format.label(),
+                                success.path.display()
+                            ),
+                        ));
+                    id
+                }
+                DataExportEvent::Cancelled { id, path } => {
+                    self.session
+                        .push_diagnostic(delog_core::diagnostics::Diag::info(
+                            "data-export",
+                            format!("cancelled export to {}", path.display()),
+                        ));
+                    id
+                }
+                DataExportEvent::Failed { id, error } => {
+                    self.session
+                        .push_diagnostic(delog_core::diagnostics::Diag::error(
+                            "data-export",
+                            error,
+                        ));
+                    id
+                }
+            };
+            self.data_exports.retain(|active| active.id != finished);
         }
     }
 
@@ -1408,10 +1449,15 @@ impl DelogApp {
         all_fields: &[crate::data_export::ExportField],
         request: crate::data_export::DataExportRequest,
     ) {
+        let id = self.next_data_export_id;
+        self.next_data_export_id += 1;
         let chosen = match crate::data_export::resolve_export_fields(&request.fields, all_fields) {
             Ok(chosen) => chosen,
             Err(error) => {
-                let _ = self.data_export_tx.send(Err(error.to_string()));
+                let _ = self.data_export_tx.send(DataExportEvent::Failed {
+                    id,
+                    error: error.to_string(),
+                });
                 ctx.request_repaint();
                 return;
             }
@@ -1434,7 +1480,22 @@ impl DelogApp {
                     .set_file_name(format.default_file_name())
                     .save_file();
                 let Some(path) = picked else { return };
-                let result = crate::data_export::write_export_file(
+                let progress = crate::data_export::ExportProgress::default();
+                let cancel = delog_core::parse_ctl::CancelToken::new();
+                let _ = tx.send(DataExportEvent::Started(
+                    crate::data_export::ActiveExport::new(
+                        id,
+                        &path,
+                        progress.clone(),
+                        cancel.clone(),
+                    ),
+                ));
+                ctx.request_repaint();
+
+                let ctl = crate::data_export::ExportCtl::new(cancel, move |fraction| {
+                    progress.set(fraction);
+                });
+                let event = match crate::data_export::write_export_file(
                     &path,
                     format,
                     &snapshot,
@@ -1442,10 +1503,21 @@ impl DelogApp {
                     request.window,
                     request.mode,
                     origin_us,
-                )
-                .map(|rows| DataExportSuccess { path, format, rows })
-                .map_err(|error| error.to_string());
-                let _ = tx.send(result);
+                    &ctl,
+                ) {
+                    Ok(rows) => DataExportEvent::Written {
+                        id,
+                        success: DataExportSuccess { path, format, rows },
+                    },
+                    Err(crate::data_export::DataExportError::Cancelled) => {
+                        DataExportEvent::Cancelled { id, path }
+                    }
+                    Err(error) => DataExportEvent::Failed {
+                        id,
+                        error: error.to_string(),
+                    },
+                };
+                let _ = tx.send(event);
                 ctx.request_repaint();
             })
             .expect("spawn data export thread");
@@ -1823,6 +1895,8 @@ impl eframe::App for DelogApp {
         let ui_prelude_timer = self.session.metrics().scope("ui_prelude");
         self.handle_picked_files();
         self.handle_layout_io_results();
+        self.parquet_import.poll_requests();
+        keep_active_loads_repainting(ui.ctx(), self.session.has_active_loads());
         self.session.prune_finished();
         self.poll_trajectory_builds();
         self.frame = self.frame.wrapping_add(1);
@@ -2738,7 +2812,7 @@ impl eframe::App for DelogApp {
                 .as_ref()
                 .map(|(_, m)| m.clone())
                 .unwrap_or_default();
-            let fields = crate::data_export::numeric_fields(&snapshot, &model);
+            let fields = crate::data_export::available_fields(&snapshot, &model);
             let full = snapshot
                 .global_time_range()
                 .map(|r| (r.min_us, r.max_us))
@@ -2941,7 +3015,10 @@ impl eframe::App for DelogApp {
             let dataflow_settings = self.settings.dataflow;
             let mut logs = Vec::new();
             if self.dataflow.open {
-                logs.extend(self.dataflow.show(ui.ctx(), &snapshot, &sender, live_connected));
+                logs.extend(
+                    self.dataflow
+                        .show(ui.ctx(), &snapshot, &sender, live_connected),
+                );
             }
             logs.extend(self.dataflow.drive(
                 ui.ctx(),
@@ -2958,6 +3035,8 @@ impl eframe::App for DelogApp {
         // Floating windows/dialogs + overlays; drops with the function (still
         // inside `frame_total`, after every other section).
         let _ui_windows_timer = self.session.metrics().scope("ui_windows");
+        self.parquet_import.show(ui.ctx());
+        crate::data_export::progress_ui(ui.ctx(), &self.data_exports);
         self.show_layout_windows(ui.ctx());
         crate::message_popup::show_all(&mut self.message_popups, ui.ctx());
         let settings_before = self.settings.clone();
@@ -3169,6 +3248,8 @@ struct FieldMetadata {
     title: String,
     source_label: String,
     topic_name: String,
+    original_source: Option<String>,
+    original_topic: Option<String>,
     field_name: String,
     dtype: &'static str,
     unit: Option<String>,
@@ -3206,6 +3287,14 @@ fn field_metadata(
         ),
         source_label: source.entry.label.clone(),
         topic_name: topic.entry.name.clone(),
+        original_source: store
+            .schema
+            .provenance()
+            .map(|provenance| provenance.original_source().to_owned()),
+        original_topic: store
+            .schema
+            .provenance()
+            .map(|provenance| provenance.original_topic().to_owned()),
         field_name: field.name.clone(),
         dtype: schema.dtype_label(),
         unit: schema.unit.clone(),
@@ -3251,6 +3340,16 @@ fn show_field_metadata_window(
                     ui.strong("Topic");
                     ui.label(meta.topic_name.as_str());
                     ui.end_row();
+                    if let Some(original_source) = meta.original_source.as_deref() {
+                        ui.strong("Original source");
+                        ui.label(original_source);
+                        ui.end_row();
+                    }
+                    if let Some(original_topic) = meta.original_topic.as_deref() {
+                        ui.strong("Original topic");
+                        ui.label(original_topic);
+                        ui.end_row();
+                    }
                     ui.strong("Field");
                     ui.label(meta.field_name.as_str());
                     ui.end_row();
@@ -4201,11 +4300,29 @@ mod tests {
     use delog_core::chunk::Chunk;
     use delog_core::diagnostics::{Diag, DiagRecord};
     use delog_core::identity::IdentityRegistry;
-    use delog_core::schema::{FieldSchema, TopicSchema};
+    use delog_core::schema::{FieldSchema, TopicProvenance, TopicSchema};
     use delog_core::snapshot::StoreSnapshot;
     use delog_core::store::TopicStore;
 
     use super::*;
+
+    #[test]
+    fn active_native_loads_schedule_reactive_mode_polling() {
+        let ctx = egui::Context::default();
+        let (repaints, repaint_requests) = mpsc::channel();
+        ctx.set_request_repaint_callback(move |request| {
+            repaints.send(request.delay).unwrap();
+        });
+
+        keep_active_loads_repainting(&ctx, false);
+        assert!(repaint_requests.try_recv().is_err());
+        keep_active_loads_repainting(&ctx, true);
+
+        let delay = repaint_requests
+            .recv_timeout(Duration::from_secs(1))
+            .expect("an active parser schedules another UI poll");
+        assert!(delay <= Duration::from_millis(50));
+    }
 
     #[test]
     fn auto_open_diagnostics_only_fires_for_newer_seqs_when_enabled() {
@@ -4503,7 +4620,8 @@ mod tests {
                     FieldSchema::new("Alt", DataType::Float64, Some("m"), 1.0).unwrap(),
                 ],
             )
-            .unwrap(),
+            .unwrap()
+            .with_provenance(TopicProvenance::new("flight-a", "ATT").unwrap()),
         );
         let chunk = Arc::new(
             Chunk::try_new(
@@ -4524,6 +4642,8 @@ mod tests {
         assert_eq!(meta.title, "flight / GPS.Lat");
         assert_eq!(meta.source_label, "flight");
         assert_eq!(meta.topic_name, "GPS");
+        assert_eq!(meta.original_source.as_deref(), Some("flight-a"));
+        assert_eq!(meta.original_topic.as_deref(), Some("ATT"));
         assert_eq!(meta.field_name, "Lat");
         assert_eq!(meta.dtype, "i32");
         assert_eq!(meta.unit.as_deref(), Some("deg"));
@@ -4532,6 +4652,97 @@ mod tests {
         assert_eq!(meta.rows, 3);
         assert_eq!(meta.source_offset_us, 250);
         assert_eq!(meta.range, TimeRange::new(1_250, 3_250));
+    }
+
+    #[test]
+    fn field_metadata_reports_original_sources_for_imported_topic_collisions() {
+        let snapshot = crate::session::tests::structured_round_trip_snapshot();
+        let metadata_for = |topic_name: &str| {
+            let topic = snapshot
+                .topics
+                .iter()
+                .find(|topic| topic.entry.name == topic_name)
+                .unwrap();
+            let roll = snapshot
+                .fields
+                .iter()
+                .find(|field| field.topic == topic.entry.id && field.name == "Roll")
+                .unwrap();
+            field_metadata(&snapshot, roll.id).unwrap()
+        };
+
+        let primary = metadata_for("ATT[0]");
+        assert_eq!(primary.source_label, "structured-metadata");
+        assert_eq!(primary.topic_name, "ATT[0]");
+        assert_eq!(primary.original_source.as_deref(), Some("flight-a"));
+        assert_eq!(primary.original_topic.as_deref(), Some("ATT"));
+        assert_eq!(primary.dtype, "f32");
+        assert_eq!(primary.unit.as_deref(), Some("deg"));
+        assert_eq!(primary.description.as_deref(), Some("roll angle"));
+        assert_eq!(primary.multiplier, 0.01);
+        assert_eq!(primary.rows, 2);
+        assert_eq!(primary.source_offset_us, 0);
+        assert_eq!(primary.range, TimeRange::new(1_100, 2_100));
+
+        let secondary = metadata_for("ATT[1]");
+        assert_eq!(secondary.source_label, "structured-metadata");
+        assert_eq!(secondary.topic_name, "ATT[1]");
+        assert_eq!(secondary.original_source.as_deref(), Some("flight-b"));
+        assert_eq!(secondary.original_topic.as_deref(), Some("ATT"));
+        assert_eq!(secondary.description.as_deref(), Some("secondary roll"));
+        assert_eq!(secondary.rows, 3);
+        assert_eq!(secondary.range, TimeRange::new(1_300, 3_300));
+    }
+
+    fn shape_contains_text(shape: &egui::epaint::Shape, expected: &str) -> bool {
+        match shape {
+            egui::epaint::Shape::Text(text) => text.galley.job.text == expected,
+            egui::epaint::Shape::Vec(shapes) => shapes
+                .iter()
+                .any(|shape| shape_contains_text(shape, expected)),
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn imported_provenance_is_rendered_in_the_existing_field_metadata_window() {
+        let snapshot = crate::session::tests::structured_round_trip_snapshot();
+        let topic = snapshot
+            .topics
+            .iter()
+            .find(|topic| topic.entry.name == "ATT[0]")
+            .unwrap();
+        let roll = snapshot
+            .fields
+            .iter()
+            .find(|field| field.topic == topic.entry.id && field.name == "Roll")
+            .unwrap();
+        let mut selected = Some(roll.id);
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1_200.0, 800.0),
+            )),
+            ..Default::default()
+        };
+
+        let _ = ctx.run_ui(input.clone(), |ui| {
+            show_field_metadata_window(ui.ctx(), &snapshot, &mut selected);
+        });
+        let output = ctx.run_ui(input, |ui| {
+            show_field_metadata_window(ui.ctx(), &snapshot, &mut selected);
+        });
+
+        for expected in ["Original source", "flight-a", "Original topic", "ATT"] {
+            assert!(
+                output
+                    .shapes
+                    .iter()
+                    .any(|clipped| shape_contains_text(&clipped.shape, expected)),
+                "field metadata window should render {expected:?}"
+            );
+        }
     }
 
     #[test]

@@ -990,6 +990,7 @@ dependencies = [
  "delog-cache",
  "delog-core",
  "delog-flow",
+ "delog-parquet-format",
  "delog-parsers",
  "delog-render",
  "delog-script",
@@ -1048,13 +1049,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "delog-parquet-format"
+version = "0.2.1"
+dependencies = [
+ "arrow",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "delog-parsers"
 version = "0.2.1"
 dependencies = [
  "arrow",
+ "bytes",
  "criterion",
  "delog-core",
+ "delog-parquet-format",
  "mavlink",
+ "parquet",
  "serde",
 ]
 

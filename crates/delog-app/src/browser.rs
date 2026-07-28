@@ -752,7 +752,7 @@ fn offset_dialog_window(
 
     let mut change = None;
     let mut open = true;
-    egui::Window::new(format!("Time offset — {label}"))
+    egui::Window::new(format!("Time offset - {label}"))
         .id(egui::Id::new(("source_offset", source_id.0)))
         .open(&mut open)
         .collapsible(false)

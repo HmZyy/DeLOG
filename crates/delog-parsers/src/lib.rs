@@ -5,11 +5,16 @@
 
 pub mod ardupilot;
 pub mod mavlink;
+pub mod parquet;
 pub mod parser;
 pub mod tlog;
 pub mod ulog;
 
 pub use ardupilot::ArduPilotParser;
+pub use parquet::{
+    ParquetParser, TimestampCandidate, TimestampSelection, TimestampSelectionError,
+    TimestampSelectionProvider, TimestampSelectionRequest, TimestampUnit,
+};
 pub use parser::{
     Candidate, Detection, LogParser, ParseError, ParserRegistry, ReadSeek, SNIFF_CONFIDENCE,
     SNIFF_HEAD_LEN, Sniff,

@@ -1,0 +1,14 @@
+[package]
+name = "delog-parquet-format"
+description = "Versioned schema manifest codec for DeLOG structured Parquet files"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+arrow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

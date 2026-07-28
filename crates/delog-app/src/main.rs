@@ -27,6 +27,8 @@ mod map;
 mod markers;
 mod message_popup;
 mod models;
+mod parquet_export;
+pub mod parquet_import;
 #[cfg(feature = "scripting")]
 mod parsers;
 mod performance;
