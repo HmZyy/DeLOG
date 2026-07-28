@@ -1,12 +1,24 @@
 //! Settings dialog state and tab rendering.
 
+use crate::map::provider::{MapProviderId, provider};
 use crate::theme::ThemeChoice;
+
+const DEFAULT_TILE_CACHE_LIMIT_BYTES: u64 = 1024 * 1024 * 1024;
+const MIN_TILE_CACHE_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_TILE_CACHE_LIMIT_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+
+fn default_tile_cache_limit_bytes() -> u64 {
+    DEFAULT_TILE_CACHE_LIMIT_BYTES
+}
 
 fn default_decimate_threshold() -> f32 {
     8.0
 }
 fn default_line_aa_px() -> f32 {
     1.0
+}
+fn default_gap_factor() -> f32 {
+    2.5
 }
 fn default_true() -> bool {
     true
@@ -35,6 +47,12 @@ fn default_text_line_opacity() -> f32 {
 fn default_font_size() -> f32 {
     14.0
 }
+fn default_live_overlap_secs() -> f32 {
+    3.0
+}
+fn default_live_throttle_ms() -> u32 {
+    200
+}
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AppSettings {
     #[serde(default)]
@@ -43,8 +61,6 @@ pub struct AppSettings {
     pub render: RenderTuning,
     #[serde(default)]
     pub show_fps: bool,
-    #[serde(default)]
-    pub show_debug_overlay: bool,
     #[serde(default)]
     pub render_mode: RenderMode,
     #[serde(default = "default_true")]
@@ -61,6 +77,8 @@ pub struct AppSettings {
     pub auto_open_diagnostics: bool,
     #[serde(default)]
     pub scripting: ScriptingSettings,
+    #[serde(default)]
+    pub dataflow: DataFlowSettings,
 }
 
 impl Default for AppSettings {
@@ -69,7 +87,6 @@ impl Default for AppSettings {
             theme: ThemeChoice::default(),
             render: RenderTuning::default(),
             show_fps: false,
-            show_debug_overlay: false,
             render_mode: RenderMode::default(),
             vsync: true,
             live_connection: LiveConnectionSettings::default(),
@@ -78,6 +95,24 @@ impl Default for AppSettings {
             font: FontOverride::default(),
             auto_open_diagnostics: false,
             scripting: ScriptingSettings::default(),
+            dataflow: DataFlowSettings::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DataFlowSettings {
+    #[serde(default = "default_live_overlap_secs")]
+    pub live_overlap_secs: f32,
+    #[serde(default = "default_live_throttle_ms")]
+    pub live_throttle_ms: u32,
+}
+
+impl Default for DataFlowSettings {
+    fn default() -> Self {
+        Self {
+            live_overlap_secs: default_live_overlap_secs(),
+            live_throttle_ms: default_live_throttle_ms(),
         }
     }
 }
@@ -167,8 +202,6 @@ impl MarkerDeltaReadout {
 pub struct PlotDisplay {
     #[serde(default)]
     pub legend_position: LegendPosition,
-    #[serde(default = "default_true")]
-    pub show_legend_default: bool,
     #[serde(default = "default_opacity")]
     pub legend_opacity: f32,
     #[serde(default)]
@@ -205,7 +238,6 @@ impl Default for PlotDisplay {
     fn default() -> Self {
         Self {
             legend_position: LegendPosition::default(),
-            show_legend_default: true,
             legend_opacity: 1.0,
             hover_show_field_name: false,
             hover_show_time: false,
@@ -225,15 +257,38 @@ impl Default for PlotDisplay {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum GapMode {
+    /// Always a single line: bridge decimated columns, drop NaNs in the raw path.
+    Connect,
+    /// Break the line at gaps; draw nothing across them.
+    Cut,
+    /// Break the line at gaps; bridge each gap with a dotted segment.
+    #[default]
+    Dotted,
+}
+
+impl GapMode {
+    pub const ALL: [GapMode; 3] = [GapMode::Connect, GapMode::Cut, GapMode::Dotted];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            GapMode::Connect => "Connect (single line)",
+            GapMode::Cut => "Cut",
+            GapMode::Dotted => "Dotted",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(from = "RenderTuningDe")]
 pub struct RenderTuning {
-    #[serde(default = "default_decimate_threshold")]
     pub decimate_threshold: f32,
     /// pixels (0 = hard edges)
-    #[serde(default = "default_line_aa_px")]
     pub line_aa_px: f32,
-    #[serde(default = "default_true")]
-    pub bridge_columns: bool,
+    pub gap_mode: GapMode,
+    /// A time jump larger than this many median sample intervals is a gap.
+    pub gap_factor: f32,
 }
 
 impl Default for RenderTuning {
@@ -241,7 +296,40 @@ impl Default for RenderTuning {
         Self {
             decimate_threshold: default_decimate_threshold(),
             line_aa_px: default_line_aa_px(),
-            bridge_columns: true,
+            gap_mode: GapMode::default(),
+            gap_factor: default_gap_factor(),
+        }
+    }
+}
+
+/// Deserialization shim: carries the field defaults and migrates the removed
+/// `bridge_columns` flag (`false` meant "leave gaps" — now `Cut`).
+#[derive(serde::Deserialize)]
+struct RenderTuningDe {
+    #[serde(default = "default_decimate_threshold")]
+    decimate_threshold: f32,
+    #[serde(default = "default_line_aa_px")]
+    line_aa_px: f32,
+    #[serde(default)]
+    bridge_columns: Option<bool>,
+    #[serde(default)]
+    gap_mode: Option<GapMode>,
+    #[serde(default = "default_gap_factor")]
+    gap_factor: f32,
+}
+
+impl From<RenderTuningDe> for RenderTuning {
+    fn from(de: RenderTuningDe) -> Self {
+        let gap_mode = de.gap_mode.unwrap_or(match de.bridge_columns {
+            // The removed flag's `false` was an explicit "leave gaps" choice.
+            Some(false) => GapMode::Cut,
+            _ => GapMode::default(),
+        });
+        Self {
+            decimate_threshold: de.decimate_threshold,
+            line_aa_px: de.line_aa_px,
+            gap_mode,
+            gap_factor: de.gap_factor,
         }
     }
 }
@@ -400,6 +488,10 @@ fn finite_or(value: f32, fallback: f32) -> f32 {
 /// Distances are render-space metres.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Scene3dSettings {
+    #[serde(default)]
+    pub map_provider: MapProviderId,
+    #[serde(default = "default_tile_cache_limit_bytes")]
+    pub tile_cache_limit_bytes: u64,
     #[serde(default = "default_scene_far_clip_m")]
     pub far_clip_m: f32,
     #[serde(default = "default_scene_max_camera_distance_m")]
@@ -424,6 +516,8 @@ pub struct Scene3dSettings {
 impl Default for Scene3dSettings {
     fn default() -> Self {
         Self {
+            map_provider: MapProviderId::None,
+            tile_cache_limit_bytes: default_tile_cache_limit_bytes(),
             far_clip_m: default_scene_far_clip_m(),
             max_camera_distance_m: default_scene_max_camera_distance_m(),
             show_grid: true,
@@ -482,9 +576,11 @@ pub struct ScriptingSettings {
     pub auto_open_variables: AutoOpenVariables,
     #[serde(default)]
     pub auto_open_console: AutoOpenScriptingConsole,
+    #[serde(default)]
+    pub use_original_timestamps: bool,
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 enum SettingsTab {
     #[default]
     General,
@@ -492,15 +588,17 @@ enum SettingsTab {
     Rendering,
     Scene3d,
     Scripting,
+    DataFlow,
 }
 
 impl SettingsTab {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::General,
         Self::Plots,
         Self::Rendering,
         Self::Scene3d,
         Self::Scripting,
+        Self::DataFlow,
     ];
 
     const fn label(self) -> &'static str {
@@ -510,14 +608,24 @@ impl SettingsTab {
             Self::Rendering => "Rendering",
             Self::Scene3d => "3D View",
             Self::Scripting => "Scripting",
+            Self::DataFlow => "Data Flow",
         }
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SettingsDialog {
     open: bool,
-    selected_tab: SettingsTab,
+    dock_state: egui_dock::DockState<SettingsTab>,
+}
+
+impl Default for SettingsDialog {
+    fn default() -> Self {
+        Self {
+            open: false,
+            dock_state: egui_dock::DockState::new(SettingsTab::ALL.to_vec()),
+        }
+    }
 }
 
 impl SettingsDialog {
@@ -525,7 +633,12 @@ impl SettingsDialog {
         self.open = true;
     }
 
-    pub fn show(&mut self, ctx: &egui::Context, settings: &mut AppSettings) -> SettingsChange {
+    pub fn show(
+        &mut self,
+        ctx: &egui::Context,
+        settings: &mut AppSettings,
+        tile_cache: TileCacheUiState,
+    ) -> SettingsChange {
         if !self.open {
             return SettingsChange::default();
         }
@@ -541,60 +654,109 @@ impl SettingsDialog {
             .default_height(340.0)
             .resizable(true)
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    self.tab_list(ui);
-                    ui.separator();
-                    ui.vertical(|ui| {
-                        ui.set_min_width(340.0);
-                        match self.selected_tab {
-                            SettingsTab::General => {
-                                change |= general_tab(ui, settings);
-                            }
-                            SettingsTab::Plots => {
-                                plots_tab(ui, settings);
-                            }
-                            SettingsTab::Rendering => {
-                                rendering_tab(ui, settings);
-                            }
-                            SettingsTab::Scene3d => {
-                                scene3d_tab(ui, settings);
-                            }
-                            SettingsTab::Scripting => {
-                                scripting_tab(ui, settings);
-                            }
-                        }
-                    });
-                });
+                let mut viewer = SettingsTabViewer {
+                    settings,
+                    change: &mut change,
+                    tile_cache,
+                };
+                egui_dock::DockArea::new(&mut self.dock_state)
+                    .id(egui::Id::new("settings_dock_area"))
+                    .style(egui_dock::Style::from_egui(ui.style().as_ref()))
+                    .allowed_splits(egui_dock::AllowedSplits::None)
+                    .draggable_tabs(false)
+                    .tab_context_menus(false)
+                    .show_close_buttons(false)
+                    .show_leaf_close_all_buttons(false)
+                    .show_leaf_collapse_buttons(false)
+                    .show_inside(ui, &mut viewer);
             });
         self.open &= open;
         change
     }
+}
 
-    fn tab_list(&mut self, ui: &mut egui::Ui) {
-        ui.vertical(|ui| {
-            ui.set_min_width(132.0);
-            for tab in SettingsTab::ALL {
-                ui.selectable_value(&mut self.selected_tab, tab, tab.label());
+struct SettingsTabViewer<'a> {
+    settings: &'a mut AppSettings,
+    change: &'a mut SettingsChange,
+    tile_cache: TileCacheUiState,
+}
+
+impl egui_dock::TabViewer for SettingsTabViewer<'_> {
+    type Tab = SettingsTab;
+
+    fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
+        tab.label().into()
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
+        ui.set_min_width(340.0);
+        match tab {
+            SettingsTab::General => {
+                *self.change |= general_tab(ui, self.settings);
             }
-        });
+            SettingsTab::Plots => {
+                plots_tab(ui, self.settings);
+            }
+            SettingsTab::Rendering => {
+                rendering_tab(ui, self.settings);
+            }
+            SettingsTab::Scene3d => {
+                *self.change |= scene3d_tab(ui, self.settings, self.tile_cache);
+            }
+            SettingsTab::Scripting => {
+                scripting_tab(ui, self.settings);
+            }
+            SettingsTab::DataFlow => {
+                dataflow_tab(ui, self.settings);
+            }
+        }
+    }
+
+    fn allowed_in_windows(&self, _tab: &mut Self::Tab) -> bool {
+        false
     }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct SettingsChange {
     pub theme_changed: bool,
+    pub map_provider_changed: bool,
+    pub tile_cache_limit_changed: bool,
+    pub clear_tile_cache: bool,
 }
 
 impl std::ops::BitOrAssign for SettingsChange {
     fn bitor_assign(&mut self, rhs: Self) {
         self.theme_changed |= rhs.theme_changed;
+        self.map_provider_changed |= rhs.map_provider_changed;
+        self.tile_cache_limit_changed |= rhs.tile_cache_limit_changed;
+        self.clear_tile_cache |= rhs.clear_tile_cache;
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct TileCacheUiState {
+    pub available: bool,
+    pub usage_bytes: u64,
+    pub clearing: bool,
+}
+
+impl TileCacheUiState {
+    fn usage_label(self) -> String {
+        if self.available {
+            format_bytes(self.usage_bytes)
+        } else {
+            "Cache unavailable".to_owned()
+        }
+    }
+
+    fn clear_enabled(self) -> bool {
+        self.available && !self.clearing
     }
 }
 
 fn general_tab(ui: &mut egui::Ui, settings: &mut AppSettings) -> SettingsChange {
     let before = settings.theme;
-    ui.heading("General");
-    ui.add_space(8.0);
     egui::Grid::new("settings-general-grid")
         .num_columns(2)
         .spacing(egui::vec2(16.0, 10.0))
@@ -660,17 +822,17 @@ fn general_tab(ui: &mut egui::Ui, settings: &mut AppSettings) -> SettingsChange 
                 });
             });
             ui.end_row();
+
         });
 
     SettingsChange {
         theme_changed: settings.theme != before,
+        ..Default::default()
     }
 }
 
 fn plots_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
     let p = &mut settings.plot;
-    ui.heading("Plots");
-    ui.add_space(8.0);
     egui::Grid::new("settings-plots-grid")
         .num_columns(2)
         .spacing(egui::vec2(16.0, 10.0))
@@ -684,11 +846,6 @@ fn plots_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
                         ui.selectable_value(&mut p.legend_position, pos, pos.label());
                     }
                 });
-            ui.end_row();
-
-            ui.label("Show legend by default")
-                .on_hover_text("Show the legend on newly created plots. Each plot's right-click menu can still toggle it.");
-            ui.checkbox(&mut p.show_legend_default, "");
             ui.end_row();
 
             ui.label("Legend background")
@@ -780,18 +937,16 @@ fn plots_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
                 .on_hover_text("Opacity of the timestamp connector line. 1 = solid, 0 = fully transparent.");
             ui.add(egui::Slider::new(&mut p.text_line_opacity, 0.0..=1.0));
             ui.end_row();
+
         });
 
-    ui.add_space(10.0);
-    if ui.button("Reset to defaults").clicked() {
+    if reset_to_defaults_button(ui) {
         settings.plot = PlotDisplay::default();
     }
 }
 
 fn rendering_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
     let r = &mut settings.render;
-    ui.heading("Rendering");
-    ui.add_space(8.0);
     egui::Grid::new("settings-rendering-grid")
         .num_columns(2)
         .spacing(egui::vec2(16.0, 10.0))
@@ -810,26 +965,87 @@ fn rendering_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
             ui.add(egui::Slider::new(&mut r.line_aa_px, 0.0..=3.0).suffix(" px"));
             ui.end_row();
 
-            ui.label("Bridge decimated columns")
-                .on_hover_text("Connect adjacent min/max columns so smooth slopes read as a continuous line instead of disjoint bars.");
-            ui.checkbox(&mut r.bridge_columns, "");
+            ui.label("Missing data")
+                .on_hover_text("How gaps (null samples, or time jumps larger than the gap threshold) are drawn. Connect interpolates a single line across them; Cut breaks the line; Dotted bridges them with a dotted segment.");
+            egui::ComboBox::from_id_salt("settings-gap-mode")
+                .selected_text(r.gap_mode.label())
+                .show_ui(ui, |ui| {
+                    for mode in GapMode::ALL {
+                        ui.selectable_value(&mut r.gap_mode, mode, mode.label());
+                    }
+                });
             ui.end_row();
+
+            if r.gap_mode != GapMode::Connect {
+                ui.label("Gap threshold")
+                    .on_hover_text("A time jump larger than this many typical sample intervals counts as missing data.");
+                ui.add(
+                    egui::DragValue::new(&mut r.gap_factor)
+                        .range(1.5..=1000.0)
+                        .speed(0.5)
+                        .suffix(" x typical interval"),
+                );
+                ui.end_row();
+            }
         });
 
-    ui.add_space(10.0);
-    if ui.button("Reset to defaults").clicked() {
+    if reset_to_defaults_button(ui) {
         settings.render = RenderTuning::default();
     }
 }
 
-fn scene3d_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
+fn scene3d_tab(
+    ui: &mut egui::Ui,
+    settings: &mut AppSettings,
+    tile_cache: TileCacheUiState,
+) -> SettingsChange {
+    let before_provider = settings.scene3d.map_provider;
+    let before_limit = settings.scene3d.tile_cache_limit_bytes;
+    let mut clear_tile_cache = false;
     let s = &mut settings.scene3d;
-    ui.heading("3D View");
-    ui.add_space(8.0);
     egui::Grid::new("settings-scene3d-grid")
         .num_columns(2)
         .spacing(egui::vec2(16.0, 10.0))
         .show(ui, |ui| {
+            ui.label("Map provider");
+            egui::ComboBox::from_id_salt("settings-map-provider")
+                .selected_text(map_provider_label(s.map_provider))
+                .show_ui(ui, |ui| {
+                    for id in [MapProviderId::None, MapProviderId::BingSatellite] {
+                        ui.selectable_value(&mut s.map_provider, id, map_provider_label(id));
+                    }
+                });
+            ui.end_row();
+
+            ui.label("Tile cache limit");
+            ui.add(
+                egui::Slider::new(
+                    &mut s.tile_cache_limit_bytes,
+                    MIN_TILE_CACHE_LIMIT_BYTES..=MAX_TILE_CACHE_LIMIT_BYTES,
+                )
+                .logarithmic(true)
+                .custom_formatter(|value, _| format_bytes(value as u64)),
+            );
+            ui.end_row();
+
+            ui.label("Cache usage");
+            ui.horizontal(|ui| {
+                ui.label(tile_cache.usage_label());
+                if ui
+                    .add_enabled(
+                        tile_cache.clear_enabled(),
+                        egui::Button::new("Clear tile cache"),
+                    )
+                    .clicked()
+                {
+                    clear_tile_cache = true;
+                }
+                if tile_cache.clearing {
+                    ui.spinner();
+                }
+            });
+            ui.end_row();
+
             ui.label("Render distance")
                 .on_hover_text("Far clipping plane for vehicles, paths, and grid rays.");
             ui.add(
@@ -893,16 +1109,33 @@ fn scene3d_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
             ui.end_row();
         });
 
-    ui.add_space(10.0);
-    if ui.button("Reset to defaults").clicked() {
+    if reset_to_defaults_button(ui) {
         settings.scene3d = Scene3dSettings::default();
+    }
+    SettingsChange {
+        map_provider_changed: settings.scene3d.map_provider != before_provider,
+        tile_cache_limit_changed: settings.scene3d.tile_cache_limit_bytes != before_limit,
+        clear_tile_cache,
+        ..Default::default()
+    }
+}
+
+fn map_provider_label(id: MapProviderId) -> &'static str {
+    provider(id).map_or("None", |provider| provider.label())
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    const MIB: f64 = 1024.0 * 1024.0;
+    if bytes >= 1024 * 1024 * 1024 {
+        format!("{:.1} GiB", bytes as f64 / GIB)
+    } else {
+        format!("{:.0} MiB", bytes as f64 / MIB)
     }
 }
 
 fn scripting_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
     let s = &mut settings.scripting;
-    ui.heading("Scripting");
-    ui.add_space(8.0);
     egui::Grid::new("settings-scripting-grid")
         .num_columns(2)
         .spacing(egui::vec2(16.0, 10.0))
@@ -928,17 +1161,120 @@ fn scripting_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
                     }
                 });
             ui.end_row();
+
+            ui.label("Script timestamps").on_hover_text(
+                "By default scripts read effective timestamps with each source offset applied.",
+            );
+            ui.checkbox(
+                &mut s.use_original_timestamps,
+                "Use original source timestamps",
+            );
+            ui.end_row();
         });
 
-    ui.add_space(10.0);
-    if ui.button("Reset to defaults").clicked() {
+    if reset_to_defaults_button(ui) {
         settings.scripting = ScriptingSettings::default();
     }
+}
+
+fn dataflow_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
+    let s = &mut settings.dataflow;
+    egui::Grid::new("settings-dataflow-grid")
+        .num_columns(2)
+        .spacing(egui::vec2(16.0, 10.0))
+        .show(ui, |ui| {
+            ui.label("Live recompute overlap").on_hover_text(
+                "How far before the newest data each live re-evaluation reaches back, so lookback nodes (Align) and batch gaps are covered.",
+            );
+            ui.add(
+                egui::DragValue::new(&mut s.live_overlap_secs)
+                    .speed(0.1)
+                    .range(0.1..=60.0)
+                    .suffix(" s"),
+            );
+            ui.end_row();
+
+            ui.label("Live update interval").on_hover_text(
+                "Minimum time between live re-evaluations. Lower is more responsive but heavier.",
+            );
+            ui.add(
+                egui::DragValue::new(&mut s.live_throttle_ms)
+                    .speed(10.0)
+                    .range(50..=2000)
+                    .suffix(" ms"),
+            );
+            ui.end_row();
+        });
+
+    if reset_to_defaults_button(ui) {
+        settings.dataflow = DataFlowSettings::default();
+    }
+}
+
+fn reset_to_defaults_button(ui: &mut egui::Ui) -> bool {
+    ui.add_space(10.0);
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.button("Reset to defaults").clicked()
+    })
+    .inner
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::map::provider::MapProviderId;
+
+    #[test]
+    fn legacy_empty_settings_default_map_and_cache() {
+        let settings: AppSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(settings.scene3d.map_provider, MapProviderId::None);
+        assert_eq!(settings.scene3d.tile_cache_limit_bytes, 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn map_and_cache_settings_round_trip_with_stable_provider_name() {
+        let mut settings = AppSettings::default();
+        settings.scene3d.map_provider = MapProviderId::BingSatellite;
+        settings.scene3d.tile_cache_limit_bytes = 4 * 1024 * 1024 * 1024;
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(json.contains("\"map_provider\":\"bing_satellite\""));
+        assert_eq!(
+            serde_json::from_str::<AppSettings>(&json).unwrap(),
+            settings
+        );
+    }
+
+    #[test]
+    fn scene_defaults_reset_map_and_cache() {
+        let defaults = Scene3dSettings::default();
+        assert_eq!(defaults.map_provider, MapProviderId::None);
+        assert_eq!(defaults.tile_cache_limit_bytes, 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn unavailable_tile_cache_explains_status_and_disables_clear() {
+        let state = TileCacheUiState::default();
+        assert_eq!(state.usage_label(), "Cache unavailable");
+        assert!(!state.clear_enabled());
+
+        let available = TileCacheUiState {
+            available: true,
+            usage_bytes: 1024 * 1024,
+            clearing: false,
+        };
+        assert_eq!(available.usage_label(), "1 MiB");
+        assert!(available.clear_enabled());
+    }
+
+    #[test]
+    fn app_wires_cache_controls_without_blocking_the_ui() {
+        let source = include_str!("app.rs");
+        assert!(source.contains("TileManager::new"));
+        assert!(source.contains("manager.set_limit"));
+        assert!(source.contains("manager.clear_cache"));
+        assert!(source.contains("CacheActionStatus::Pending"));
+        assert!(!source.contains("block_on"));
+    }
 
     #[test]
     fn settings_tabs_are_named_for_stable_navigation() {
@@ -948,15 +1284,88 @@ mod tests {
             .collect();
         assert_eq!(
             labels,
-            ["General", "Plots", "Rendering", "3D View", "Scripting"]
+            [
+                "General",
+                "Plots",
+                "Rendering",
+                "3D View",
+                "Scripting",
+                "Data Flow"
+            ]
         );
     }
 
     #[test]
-    fn plot_display_defaults_show_legend_top_left_with_minimal_hover() {
+    fn settings_tab_all_includes_dataflow() {
+        let labels: Vec<_> = SettingsTab::ALL
+            .into_iter()
+            .map(SettingsTab::label)
+            .collect();
+        assert!(labels.contains(&"Data Flow"));
+    }
+
+    #[test]
+    fn dataflow_settings_round_trip_with_defaults() {
+        let mut settings = AppSettings::default();
+        assert_eq!(settings.dataflow.live_overlap_secs, 3.0);
+        assert_eq!(settings.dataflow.live_throttle_ms, 200);
+        settings.dataflow.live_overlap_secs = 5.0;
+        settings.dataflow.live_throttle_ms = 100;
+        let json = serde_json::to_string(&settings).unwrap();
+        let back: AppSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.dataflow.live_overlap_secs, 5.0);
+        assert_eq!(back.dataflow.live_throttle_ms, 100);
+    }
+
+    #[test]
+    fn settings_tabs_use_egui_dock() {
+        let source = include_str!("settings.rs");
+
+        assert!(source.contains("egui_dock::DockArea::new"));
+        assert!(source.contains("impl egui_dock::TabViewer for SettingsTabViewer"));
+        assert!(!source.contains(concat!("fn ", "tab_list")));
+    }
+
+    #[test]
+    fn settings_tab_bodies_do_not_repeat_tab_titles_as_headings() {
+        let source = include_str!("settings.rs");
+
+        for title in SettingsTab::ALL.map(SettingsTab::label) {
+            assert!(!source.contains(&format!("ui.heading(\"{title}\")")));
+        }
+    }
+
+    #[test]
+    fn plot_settings_do_not_expose_a_separate_legend_default() {
+        let source = include_str!("settings.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production settings code should precede tests");
+        assert!(!production.contains("show_legend_default"));
+        assert!(!production.contains("Show legend by default"));
+    }
+
+    #[test]
+    fn settings_reset_buttons_are_right_aligned() {
+        let source = include_str!("settings.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production settings code should precede tests");
+
+        assert!(source.contains("fn reset_to_defaults_button"));
+        assert!(source.contains("egui::Layout::right_to_left"));
+        assert_eq!(
+            production.matches("reset_to_defaults_button(ui)").count(),
+            5
+        );
+    }
+
+    #[test]
+    fn plot_display_defaults_legend_top_left_with_minimal_hover() {
         let p = PlotDisplay::default();
         assert_eq!(p.legend_position, LegendPosition::TopLeft);
-        assert!(p.show_legend_default);
         assert!(!p.hover_show_field_name);
         assert!(!p.hover_show_time);
         assert_eq!(p.legend_opacity, 1.0);
@@ -969,7 +1378,6 @@ mod tests {
         let settings = AppSettings {
             plot: PlotDisplay {
                 legend_position: LegendPosition::BottomRight,
-                show_legend_default: false,
                 legend_opacity: 0.5,
                 hover_show_field_name: false,
                 hover_show_time: false,
@@ -1024,7 +1432,6 @@ mod tests {
         let json = r#"{"theme":"catppuccin_mocha"}"#;
         let s: AppSettings = serde_json::from_str(json).unwrap();
         assert_eq!(s.plot.legend_position, LegendPosition::TopLeft);
-        assert!(s.plot.show_legend_default);
         assert!(!s.plot.hover_show_time);
     }
 
@@ -1080,6 +1487,8 @@ mod tests {
     fn app_settings_persist_scene3d_settings() {
         let settings = AppSettings {
             scene3d: Scene3dSettings {
+                map_provider: MapProviderId::BingSatellite,
+                tile_cache_limit_bytes: 2 * 1024 * 1024 * 1024,
                 far_clip_m: 25_000.0,
                 max_camera_distance_m: 12_000.0,
                 show_grid: false,
@@ -1151,6 +1560,37 @@ mod tests {
         let labels: Vec<_> = RenderMode::ALL.into_iter().map(RenderMode::label).collect();
         assert_eq!(labels, ["Reactive", "Continuous"]);
     }
+
+    #[test]
+    fn old_bridge_columns_false_migrates_to_cut() {
+        let r: RenderTuning = serde_json::from_str(
+            r#"{"decimate_threshold":8.0,"line_aa_px":1.0,"bridge_columns":false}"#,
+        )
+        .unwrap();
+        assert_eq!(r.gap_mode, GapMode::Cut);
+    }
+
+    #[test]
+    fn old_bridge_columns_true_and_absent_migrate_to_the_default() {
+        let with_true: RenderTuning = serde_json::from_str(r#"{"bridge_columns":true}"#).unwrap();
+        assert_eq!(with_true.gap_mode, GapMode::Dotted);
+        let absent: RenderTuning = serde_json::from_str("{}").unwrap();
+        assert_eq!(absent.gap_mode, GapMode::Dotted);
+        assert_eq!(absent.gap_factor, 2.5);
+        assert_eq!(absent, RenderTuning::default());
+    }
+
+    #[test]
+    fn new_gap_fields_round_trip() {
+        let r = RenderTuning {
+            gap_mode: GapMode::Dotted,
+            gap_factor: 12.5,
+            ..RenderTuning::default()
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        let back: RenderTuning = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, r);
+    }
 }
 
 #[cfg(test)]
@@ -1177,6 +1617,7 @@ mod scripting_settings_tests {
             s.scripting.auto_open_console,
             AutoOpenScriptingConsole::OnErrors
         );
+        assert!(!s.scripting.use_original_timestamps);
     }
 
     #[test]

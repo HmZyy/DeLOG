@@ -21,15 +21,18 @@ it in Python - both file parsers and analysis scripts - without recompiling.
 
 - **Drag-and-drop UI** - drop a log file anywhere on the window to load it; arrange plots
   in a tiling workspace that persists across sessions.
-- **Multiple log formats** - PX4 ULog (`.ulg`), ArduPilot (`.BIN`), and MAVLink
-  telemetry logs (`.tlog`) from QGroundControl or Mission Planner, with automatic
-  format sniffing and a manual-override picker.
+- **Multiple log formats** - PX4 ULog (`.ulg`), ArduPilot (`.BIN`), MAVLink
+  telemetry logs (`.tlog`) from QGroundControl or Mission Planner, and Parquet files,
+  with automatic format sniffing and a manual-override picker. Structured DéLOG Parquet
+  files open automatically; generic Parquet files prompt for a timestamp field and unit.
 - **Live MAVLink telemetry** - stream from a vehicle over UDP, TCP, or serial through the
   same ingest path as files, and record incoming frames to a `.tlog`.
 - **Custom parsers** - add Python parsers for formats DéLOG doesn't ship, defining a single
   `Parse(raw_data)` function. See [docs/custom_parsers.md](docs/custom_parsers.md).
 - **Custom scripts** - embedded CPython + NumPy for derived fields and live transforms;
   results plot exactly like parsed data. See [docs/scripting.md](docs/scripting.md).
+- **Visual data flows** - build and save derived numeric signals with a node graph, no
+  Python required. See [docs/data_flow.md](docs/data_flow.md).
 - **Fast WGPU visualization** - GPU-rendered line/scatter/step plots with automatic
   decimation for million-point series, plus a 3D trajectory view with vehicle models.
 
@@ -37,6 +40,13 @@ it in Python - both file parsers and analysis scripts - without recompiling.
 
 - **Live and offline share one path.** A live MAVLink stream and a recorded `.tlog`
   round-trip through identical decoding code, so what you see live is what you replay.
+- **Structured Parquet preserves native topics.** DéLOG exports retain each topic's own
+  timestamps and supported integer, floating-point, boolean, and UTF-8 fields, then
+  reopen automatically without a timestamp prompt. Columns are named `TOPIC.field` and
+  carry unit, description, and multiplier metadata, so pandas or DuckDB read the file
+  without decoding the DéLOG manifest.
+- **Export sampling is format-aware.** Parquet writes each selected topic's native
+  samples, while CSV retains uniform resampling.
 - **Extend it in Python, no rebuild.** Custom parsers and analysis scripts are plain `.py`
   files in your config directory - edit them in any editor and they appear in the menus.
 - **Real CPython, not a sandboxed subset.** Scripts get the full interpreter with NumPy
@@ -68,7 +78,11 @@ are two modes: **snapshot scripts** that run once against the current data, and 
 transforms** (`@delog.live_transform`) that append derived fields as telemetry arrives. A
 Console window provides an editor and a persistent REPL.
 
-Bundled examples live in [`scripts/`](scripts/). Full API reference and examples:
+Bundled examples live in [`scripts/`](scripts/): one-shot examples are in
+[`scripts/snapshot/`](scripts/snapshot/) and future-batch examples are in
+[`scripts/live/`](scripts/live/). Each declarative example sets its mode
+explicitly, so its filename and directory match when it runs.
+Full API reference and examples:
 **[docs/scripting.md](docs/scripting.md)**.
 
 ## Custom parsers (overview)
@@ -80,6 +94,7 @@ When DéLOG's built-in parsers don't cover a format, add a Python parser under
 
 ## Documentation
 
+- [Data Flow editor](docs/data_flow.md) - visual derived signals, timeline alignment, and publishing.
 - [Scripting](docs/scripting.md) - embedded-Python derived fields, the `delog` API, live transforms.
 - [Custom parsers](docs/custom_parsers.md) - Python file parsers via `Parse(raw_data)`.
 

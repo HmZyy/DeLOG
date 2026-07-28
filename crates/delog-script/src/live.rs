@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, Float64Array, Int64Array};
+use arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray};
 use arrow::datatypes::DataType;
 use delog_core::field_view::{array_row_as_f64, array_row_as_str};
 use delog_core::identity::SourceId;
@@ -12,7 +12,7 @@ use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 use pyo3::exceptions::{PyAttributeError, PyValueError};
 use pyo3::prelude::*;
 
-use crate::api::PendingField;
+use crate::api::{PendingColumn, PendingField};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveTransformSpec {
@@ -303,7 +303,7 @@ fn parse_topic_fields(
                 )));
             }
         }
-        fields.push(PendingField { name, values, unit });
+        fields.push(PendingField::numeric(name, values, unit));
     }
     // Defensive fallback only: both callers of `parse_topic_fields` reject an
     // empty dict before calling it, so `dict` always has at least one entry
@@ -394,7 +394,13 @@ pub fn result_to_batch(
     let fields = result
         .fields
         .iter()
-        .map(|f| FieldSchema::new(f.name.clone(), DataType::Float64, f.unit.clone(), 1.0))
+        .map(|f| {
+            let dtype = match &f.values {
+                PendingColumn::F64(_) => DataType::Float64,
+                PendingColumn::Utf8(_) => DataType::Utf8,
+            };
+            FieldSchema::new(f.name.clone(), dtype, f.unit.clone(), 1.0)
+        })
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
     let schema = Arc::new(TopicSchema::new(result.topic, fields).map_err(|e| e.to_string())?);
@@ -402,7 +408,10 @@ pub fn result_to_batch(
     let columns: Vec<ArrayRef> = result
         .fields
         .into_iter()
-        .map(|f| Arc::new(Float64Array::from(f.values)) as ArrayRef)
+        .map(|f| match f.values {
+            PendingColumn::F64(values) => Arc::new(Float64Array::from(values)) as ArrayRef,
+            PendingColumn::Utf8(values) => Arc::new(StringArray::from(values)) as ArrayRef,
+        })
         .collect();
     Ok(ParsedBatch::new(source, schema, timestamps, columns))
 }
@@ -589,7 +598,10 @@ mod tests {
             assert_eq!(results.len(), 1);
             assert_eq!(results[0].topic, "NAMED_VALUE_FLOAT/airspd");
             assert_eq!(results[0].times, vec![100, 300]);
-            assert_eq!(results[0].fields[0].values, vec![1.5, 3.5]);
+            assert_eq!(
+                results[0].fields[0].values,
+                PendingColumn::F64(vec![1.5, 3.5])
+            );
         });
     }
 
