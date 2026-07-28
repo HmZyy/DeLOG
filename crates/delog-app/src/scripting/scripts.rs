@@ -12,8 +12,8 @@ use delog_script::{MarkerCommand, ScriptCommand, ScriptEngine, ScriptEvent};
 use egui_code_editor::{CodeEditor, ColorTheme, Syntax};
 
 use crate::ingest::parsers::{ParserUiAction, ParsersPanel};
-use crate::repl_complete::{self, ReplCompletion};
-use crate::repl_history::ReplHistory;
+use crate::scripting::repl_complete::{self, ReplCompletion};
+use crate::scripting::repl_history::ReplHistory;
 
 enum PreparedParserCommand {
     Validation {
@@ -130,8 +130,8 @@ impl ScriptsPanel {
         let library = ScriptLibrary::new(scripts_dir);
         let params = delog_script::params::shared_empty();
         {
-            let loaded = crate::script_params_io::load(&params_file);
-            crate::script_params_io::apply_loaded(&mut params.lock().unwrap(), loaded);
+            let loaded = crate::scripting::script_params_io::load(&params_file);
+            crate::scripting::script_params_io::apply_loaded(&mut params.lock().unwrap(), loaded);
         }
         Self {
             open: false,
@@ -164,7 +164,7 @@ impl ScriptsPanel {
 
     fn save_params(&self) {
         if let Err(e) =
-            crate::script_params_io::save(&self.params_file, &self.params.lock().unwrap())
+            crate::scripting::script_params_io::save(&self.params_file, &self.params.lock().unwrap())
         {
             eprintln!("failed to save script params: {e}");
         }
@@ -921,13 +921,13 @@ impl ScriptsPanel {
             let mut s = self.params.lock().unwrap();
             for (script, name, value, has_snapshot) in &commits {
                 s.set_value(script, name, value.clone());
-                if crate::script_params_io::should_rerun(*has_snapshot, named.contains(script)) {
+                if crate::scripting::script_params_io::should_rerun(*has_snapshot, named.contains(script)) {
                     to_rerun.insert(script.clone());
                 }
             }
             for (script, name, has_snapshot) in &resets {
                 s.reset_value(script, name);
-                if crate::script_params_io::should_rerun(*has_snapshot, named.contains(script)) {
+                if crate::scripting::script_params_io::should_rerun(*has_snapshot, named.contains(script)) {
                     to_rerun.insert(script.clone());
                 }
             }
