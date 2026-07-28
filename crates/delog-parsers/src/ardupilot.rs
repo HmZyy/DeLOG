@@ -41,11 +41,6 @@ const START_SKEW_US: i64 = 1_000_000;
 const MAX_LOG_SPAN_US: i64 = 24 * 60 * 60 * 1_000_000;
 const IMPLAUSIBLE_TIME_DIAG_INTERVAL: u64 = 512;
 
-/// Syslog severities, matching the levels ULog logged messages carry. Dataflash
-/// records have no severity field, so they are assigned by record type.
-const MARKER_LEVEL_ERROR: u8 = 3;
-const MARKER_LEVEL_INFO: u8 = 6;
-
 #[derive(Debug, Default)]
 pub struct ArduPilotParser;
 
@@ -449,31 +444,28 @@ impl<'a> Decoder<'a> {
             return;
         }
 
-        let (level, text) = match layout.kind {
+        let text = match layout.kind {
             MarkerKind::Msg { text } => {
                 let message = c_str(&payload[text.0..text.0 + str_len(text.1)]);
                 if message.is_empty() {
                     return;
                 }
-                (MARKER_LEVEL_INFO, message)
+                message
             }
             MarkerKind::Event { id } => {
                 let id = read_instance(id.1, payload, id.0);
-                (MARKER_LEVEL_INFO, format!("EV: {}", event_label(id)))
+                format!("EV: {}", event_label(id))
             }
             MarkerKind::Error { subsys, ecode } => {
                 let subsys = read_instance(subsys.1, payload, subsys.0);
                 let ecode = read_instance(ecode.1, payload, ecode.0);
-                (
-                    MARKER_LEVEL_ERROR,
-                    format!("Err: {}-{ecode}", error_subsystem_label(subsys)),
-                )
+                format!("Err: {}-{ecode}", error_subsystem_label(subsys))
             }
         };
 
         self.markers.push(AutoMarker {
             time_us,
-            level,
+            level: None,
             text,
         });
     }
@@ -1444,11 +1436,12 @@ mod tests {
         let markers = &summary.source_meta.auto_markers;
         assert_eq!(markers.len(), 3);
         assert_eq!(markers[0].text, "ArduPlane V4.5.7 (0358a9c2)");
-        assert_eq!(markers[0].level, 6);
         assert_eq!(markers[1].text, "EV: ARMED");
-        assert_eq!(markers[1].level, 6);
         assert_eq!(markers[2].text, "Err: FAILSAFE_BATT-1");
-        assert_eq!(markers[2].level, 3);
+        assert!(
+            markers.iter().all(|m| m.level.is_none()),
+            "dataflash carries no severity field, so no level may be invented"
+        );
     }
 
     #[test]
