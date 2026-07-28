@@ -54,7 +54,7 @@ pub fn resolve_field(
             .collect::<Vec<_>>()
             .join(", ");
         return Err(format!(
-            "topic '{}' is ambiguous — specify a source; candidates: {paths}",
+            "topic '{}' is ambiguous - specify a source; candidates: {paths}",
             selector_topic(selector)
         ));
     }

@@ -303,7 +303,7 @@ impl Default for RenderTuning {
 }
 
 /// Deserialization shim: carries the field defaults and migrates the removed
-/// `bridge_columns` flag (`false` meant "leave gaps" — now `Cut`).
+/// `bridge_columns` flag (`false` meant "leave gaps" - now `Cut`).
 #[derive(serde::Deserialize)]
 struct RenderTuningDe {
     #[serde(default = "default_decimate_threshold")]

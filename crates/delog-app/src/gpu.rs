@@ -1133,7 +1133,7 @@ impl SceneResources {
             target.sample_count(),
         );
 
-        // Vertical Y (Up) axis, green — completes the axes gizmo.
+        // Vertical Y (Up) axis, green - completes the axes gizmo.
         let y_axis = vec![[0.0, 0.0, 0.0], [0.0, 12.0, 0.0]];
         let axis_gizmo = SceneTraj::new(&ctx, &traj, &y_axis, [0.25, 0.9, 0.3, 1.0]);
 
@@ -1250,7 +1250,7 @@ impl SceneResources {
 
             // Trajectory upload: full re-upload only when the buffer was just
             // (re)allocated or the config generation changed; otherwise the path
-            // is append-only, so write just the new tail — and skip entirely
+            // is append-only, so write just the new tail - and skip entirely
             // when unchanged. Avoids re-converting/re-uploading the whole path
             // every frame (the cost decimation used to hide).
             let full = realloc || vg.traj_generation != v.traj_generation || needed < vg.traj_count;
@@ -2416,7 +2416,7 @@ mod tests {
     #[test]
     fn prepare_map_tiles_exposes_sorted_fallback_then_current_draw_groups() {
         let Some(ctx) = RenderContext::headless() else {
-            eprintln!("no wgpu adapter — skipping map zoom grouping test");
+            eprintln!("no wgpu adapter - skipping map zoom grouping test");
             return;
         };
         let mut resources = SceneResources::new(ctx);
@@ -2465,7 +2465,7 @@ mod tests {
     #[test]
     fn cache_epoch_change_purges_cpu_and_gpu_tiles_on_empty_poll() {
         let Some(ctx) = RenderContext::headless() else {
-            eprintln!("no wgpu adapter — skipping map clear residency test");
+            eprintln!("no wgpu adapter - skipping map clear residency test");
             return;
         };
         let mut resources = SceneResources::new(ctx);
@@ -2517,7 +2517,7 @@ mod tests {
     #[test]
     fn map_tile_prepare_only_uploads_and_allocates_changed_residency() {
         let Some(ctx) = RenderContext::headless() else {
-            eprintln!("no wgpu adapter — skipping map residency instrumentation test");
+            eprintln!("no wgpu adapter - skipping map residency instrumentation test");
             return;
         };
         let mut resources = SceneResources::new(ctx);
@@ -2583,7 +2583,7 @@ mod tests {
     #[test]
     fn alternating_map_scopes_keep_union_resident_without_cross_pane_draws() {
         let Some(ctx) = RenderContext::headless() else {
-            eprintln!("no wgpu adapter — skipping multi-pane map residency test");
+            eprintln!("no wgpu adapter - skipping multi-pane map residency test");
             return;
         };
         let mut resources = SceneResources::new(ctx);

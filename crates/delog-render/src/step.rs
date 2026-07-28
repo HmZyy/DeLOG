@@ -169,7 +169,7 @@ mod tests {
     #[test]
     fn stepped_trace_renders_horizontal_hold_then_vertical_transition() {
         let Some(ctx) = RenderContext::headless() else {
-            eprintln!("no wgpu adapter — skipping step pipeline test");
+            eprintln!("no wgpu adapter - skipping step pipeline test");
             return;
         };
         let (w, h) = (64u32, 64u32);

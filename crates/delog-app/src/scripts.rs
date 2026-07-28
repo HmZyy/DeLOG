@@ -1182,7 +1182,7 @@ fn icon_btn_enabled(
 
 /// Render one param's widget and return `Some(new_value)` only when the edit
 /// is *committed* (slider drag released, checkbox/combo click, or Enter in a
-/// text field) — not on every intermediate change.
+/// text field) - not on every intermediate change.
 fn render_param_widget(
     ui: &mut egui::Ui,
     spec: &ParamSpec,

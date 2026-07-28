@@ -13,7 +13,7 @@ struct VsOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) color: vec4<f32>,
     // Signed perpendicular distance from the segment centreline, in pixels,
-    // and the line's half-width — together they drive the edge AA ramp.
+    // and the line's half-width - together they drive the edge AA ramp.
     @location(1) dist: f32,
     @location(2) half_w: f32,
     // Distance along the segment from its start (screen pixels) and the dash
