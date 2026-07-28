@@ -1635,4 +1635,9 @@ mod scripting_settings_tests {
         let back: AutoOpenScriptingConsole = serde_json::from_str(&json).unwrap();
         assert_eq!(back, AutoOpenScriptingConsole::OnOutput);
     }
+
+    #[test]
+    fn marker_shade_regions_defaults_on() {
+        assert!(PlotDisplay::default().marker_shade_regions);
+    }
 }
