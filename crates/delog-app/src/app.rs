@@ -265,8 +265,8 @@ pub struct DelogApp {
     fps_ema: Option<f32>,
     last_frame_at: Option<Instant>,
     /// Picked on a worker thread — the dialog must never block the UI thread.
-    picked_files: mpsc::Receiver<Vec<std::path::PathBuf>>,
-    picked_files_tx: mpsc::Sender<Vec<std::path::PathBuf>>,
+    picked_files: mpsc::Receiver<PickedFiles>,
+    picked_files_tx: mpsc::Sender<PickedFiles>,
     imported_layouts: mpsc::Receiver<LayoutImportResult>,
     imported_layouts_tx: mpsc::Sender<LayoutImportResult>,
     exported_layouts: mpsc::Receiver<LayoutExportResult>,
@@ -552,22 +552,29 @@ impl DelogApp {
     }
 
     /// On a worker thread so the native dialog never blocks the UI.
-    fn spawn_open_dialog(&self, ctx: &egui::Context) {
+    fn spawn_open_dialog(&self, ctx: &egui::Context, parser: Option<&'static str>) {
         let tx = self.picked_files_tx.clone();
         let ctx = ctx.clone();
         std::thread::Builder::new()
             .name("delog-open-dialog".into())
             .spawn(move || {
-                let picked = rfd::FileDialog::new()
-                    .add_filter(
-                        "Flight logs",
-                        &["bin", "BIN", "ulg", "ulog", "tlog", "parquet"],
-                    )
-                    .add_filter("All files", &["*"])
-                    .set_title("Open flight logs")
-                    .pick_files();
-                if let Some(paths) = picked {
-                    let _ = tx.send(paths);
+                let dialog = match parser {
+                    Some(name) => rfd::FileDialog::new()
+                        .add_filter("All files", &["*"])
+                        .set_title(format!("Open with {}", parser_label(name))),
+                    None => rfd::FileDialog::new()
+                        .add_filter(
+                            "Flight logs",
+                            &["bin", "BIN", "ulg", "ulog", "tlog", "parquet"],
+                        )
+                        .add_filter("All files", &["*"])
+                        .set_title("Open flight logs"),
+                };
+                if let Some(paths) = dialog.pick_files() {
+                    let _ = tx.send(PickedFiles {
+                        paths,
+                        parser: parser.map(str::to_owned),
+                    });
                     ctx.request_repaint();
                 }
             })
@@ -575,9 +582,9 @@ impl DelogApp {
     }
 
     fn handle_picked_files(&mut self) {
-        while let Ok(paths) = self.picked_files.try_recv() {
-            for path in paths {
-                self.session.open_path(path);
+        while let Ok(picked) = self.picked_files.try_recv() {
+            for path in picked.paths {
+                self.session.open_path(path, picked.parser.clone());
             }
         }
     }
@@ -2020,9 +2027,17 @@ impl eframe::App for DelogApp {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("Open").clicked() {
-                        self.spawn_open_dialog(ui.ctx());
+                        self.spawn_open_dialog(ui.ctx(), None);
                         ui.close();
                     }
+                    ui.menu_button("Open With", |ui| {
+                        for name in self.session.parser_names() {
+                            if ui.button(parser_label(name)).clicked() {
+                                self.spawn_open_dialog(ui.ctx(), Some(name));
+                                ui.close();
+                            }
+                        }
+                    });
                     ui.menu_button("Export", |ui| {
                         if ui.button("Export Data").clicked() {
                             self.data_export.open();
@@ -4109,6 +4124,21 @@ fn stat_with_unit(value: Option<f64>, suffix: &str) -> String {
     value
         .map(|value| format!("{}{suffix}", format_stat(value)))
         .unwrap_or_else(|| "-".into())
+}
+
+struct PickedFiles {
+    paths: Vec<std::path::PathBuf>,
+    parser: Option<String>,
+}
+
+fn parser_label(name: &str) -> &str {
+    match name {
+        "ardupilot-bin" => "ArduPilot DataFlash",
+        "ulog" => "PX4 ULog",
+        "tlog" => "MAVLink Telemetry",
+        "parquet" => "Parquet",
+        other => other,
+    }
 }
 
 fn format_time_us(value: i64) -> String {
