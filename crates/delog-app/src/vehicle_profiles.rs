@@ -9,7 +9,7 @@ use delog_core::snapshot::StoreSnapshot;
 use serde::{Deserialize, Serialize};
 
 use crate::layout;
-use crate::vehicle::VehicleConfig;
+use crate::scene3d::vehicle::VehicleConfig;
 
 pub const VEHICLE_PROFILE_VERSION: u32 = 1;
 
@@ -155,7 +155,7 @@ mod tests {
     use egui::Color32;
 
     use crate::layout::{FieldRef, ModelLayout, OriLayout, PosLayout, VehicleLayout};
-    use crate::vehicle::{ModelKind, OriMapping, PosMapping, VehicleConfig};
+    use crate::scene3d::vehicle::{ModelKind, OriMapping, PosMapping, VehicleConfig};
 
     use super::*;
 

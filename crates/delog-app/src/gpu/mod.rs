@@ -14,14 +14,14 @@ use delog_render::{
 };
 use eframe::{egui_wgpu, wgpu};
 
-use crate::camera::OrbitCamera;
+use crate::scene3d::camera::OrbitCamera;
 use crate::map::provider::{MapProviderId, TileId};
 use crate::map::worker::{MapScopeId, ReadyTile};
-use crate::models;
+use crate::scene3d::models;
 use crate::plot::{PlotPane, TraceMode, ViewX};
 use crate::settings::{GapMode, RenderTuning, Scene3dSettings};
 use crate::sync_window::CompareMode;
-use crate::vehicle::ModelKind;
+use crate::scene3d::vehicle::ModelKind;
 
 #[derive(Clone, Debug)]
 pub struct MapTileSelection {
