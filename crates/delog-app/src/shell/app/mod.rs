@@ -2229,8 +2229,10 @@ impl eframe::App for DelogApp {
         drop(ui_menu_timer);
 
         let ui_toolbar_timer = self.session.metrics().scope("ui_toolbar");
-        egui::Panel::top("tool_icons").show_inside(ui, |ui| {
+        let toolbar_frame = egui::Frame::side_top_panel(ui.style()).inner_margin(TOOLBAR_MARGIN);
+        egui::Panel::top("tool_icons").frame(toolbar_frame).show_inside(ui, |ui| {
             ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing = TOOLBAR_ITEM_SPACING;
                 let streaming = self.session.has_live_links();
                 let stream_tint = if streaming {
                     self.settings.theme.accent()
@@ -4298,7 +4300,10 @@ impl egui_dock::TabViewer for AppDockViewer<'_> {
 /// keeps the button's rect independent of the SVG's load state, so the
 /// toolbar's height can't change between egui's layout passes (which would
 /// otherwise shift every panel below and spam "changed id between passes").
-const ICON_BUTTON_SIZE: egui::Vec2 = egui::vec2(28.0, 24.0);
+const ICON_BUTTON_SIZE: egui::Vec2 = egui::vec2(40.0, 40.0);
+
+const TOOLBAR_MARGIN: egui::Margin = egui::Margin::symmetric(10, 6);
+const TOOLBAR_ITEM_SPACING: egui::Vec2 = egui::vec2(6.0, 6.0);
 
 fn next_legend_position(
     position: crate::config::settings::LegendPosition,
@@ -4363,7 +4368,7 @@ fn hover_mode_menu_button(
 
 fn toolbar_icon_image(icon: egui::ImageSource<'_>, tint: egui::Color32) -> egui::Image<'_> {
     let image = egui::Image::new(icon)
-        .fit_to_exact_size(egui::vec2(18.0, 18.0))
+        .fit_to_exact_size(egui::vec2(22.0, 22.0))
         .tint(tint);
     image
 }
