@@ -1,15 +1,15 @@
-pub mod config;
-pub mod dataflow;
-pub mod export;
-pub mod ingest;
-pub mod map;
-pub mod plotting;
-pub mod scene3d;
-pub mod scripting;
-pub mod session;
-pub mod shell;
-pub mod sync;
-pub mod ui;
+pub(crate) mod config;
+pub(crate) mod dataflow;
+pub(crate) mod export;
+pub(crate) mod ingest;
+pub(crate) mod map;
+pub(crate) mod plotting;
+pub(crate) mod scene3d;
+pub(crate) mod scripting;
+pub(crate) mod session;
+pub(crate) mod shell;
+pub(crate) mod sync;
+pub(crate) mod ui;
 
 pub use shell::app::DelogApp;
 
