@@ -248,7 +248,7 @@ pub(crate) fn parse_flow_result(
 }
 
 /// Runs `request.code` in a fresh namespace and calls its `flow(inputs)`.
-/// Touches no snapshot state, `prev_sources`, markers, or params — a pure
+/// Touches no snapshot state, `prev_sources`, markers, or params - a pure
 /// function call.
 pub(crate) fn eval_flow_script(request: &ScriptRequest) -> Result<Vec<ScriptOutput>, String> {
     Python::attach(|py| {

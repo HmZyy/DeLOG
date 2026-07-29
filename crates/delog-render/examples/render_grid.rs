@@ -68,7 +68,7 @@ fn write_png(path: &str, w: u32, h: u32, rgba: &[u8]) {
 
 fn main() {
     let Some(ctx) = RenderContext::headless() else {
-        eprintln!("no wgpu adapter available — cannot render");
+        eprintln!("no wgpu adapter available - cannot render");
         std::process::exit(1);
     };
     let (w, h) = (960u32, 720u32);
@@ -79,7 +79,7 @@ fn main() {
     let top = render(&ctx, w, h, Vec3::new(0.5, 22.0, 0.5), Vec3::Z);
     write_png("/tmp/delog_grid_topdown.png", w, h, &top);
 
-    // Extreme wide aspect — cells must stay square.
+    // Extreme wide aspect - cells must stay square.
     let wide = render(&ctx, 1280, 360, Vec3::new(0.5, 22.0, 0.5), Vec3::Z);
     write_png("/tmp/delog_grid_wide.png", 1280, 360, &wide);
 }

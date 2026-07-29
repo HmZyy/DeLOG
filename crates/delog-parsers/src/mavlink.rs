@@ -329,7 +329,7 @@ impl serde::Serializer for &mut FieldSink {
     /// Strings occur as char-array fields (`CharArray<N>`, depth 1, e.g.
     /// `NAMED_VALUE_FLOAT.name`) and as the tag of the internally-tagged enum
     /// representation. At depth 1 the only possible tag key is `type`
-    /// (`MavMessage`'s own tag): real fields can never be named `type` — it is
+    /// (`MavMessage`'s own tag): real fields can never be named `type` - it is
     /// a Rust keyword, so the generator renames such fields (e.g. `mavtype`)
     /// and applies no serde rename.
     fn serialize_str(self, v: &str) -> Result<(), Never> {
@@ -373,7 +373,7 @@ impl serde::Serializer for &mut FieldSink {
         value.serialize(self)
     }
 
-    /// `MavMessage::Variant(DATA)` — descend into the data struct.
+    /// `MavMessage::Variant(DATA)` - descend into the data struct.
     fn serialize_newtype_variant<T: serde::Serialize + ?Sized>(
         self,
         _: &'static str,

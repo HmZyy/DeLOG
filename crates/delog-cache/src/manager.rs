@@ -18,7 +18,7 @@ enum Slot {
 
 pub struct CacheManager {
     caches: HashMap<FieldId, Slot>,
-    /// Plotted fields — pinned against eviction.
+    /// Plotted fields - pinned against eviction.
     pinned: HashSet<FieldId>,
     budget_bytes: u64,
     frame: u64,

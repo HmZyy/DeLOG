@@ -195,10 +195,10 @@ mod tests {
         let ctl = ParseCtl::new(CancelToken::new(), SourceId(0), 10_000);
         let mut sink = ProgressSink::default();
 
-        ctl.report_progress(&mut sink, 50); // 0.5% — no event
-        ctl.report_progress(&mut sink, 100); // 1.0% — event
-        ctl.report_progress(&mut sink, 150); // 1.5% — no event
-        ctl.report_progress(&mut sink, 10_000); // 100% — event
+        ctl.report_progress(&mut sink, 50); // 0.5% - no event
+        ctl.report_progress(&mut sink, 100); // 1.0% - event
+        ctl.report_progress(&mut sink, 150); // 1.5% - no event
+        ctl.report_progress(&mut sink, 10_000); // 100% - event
 
         assert_eq!(sink.events, vec![0.01, 1.0]);
     }

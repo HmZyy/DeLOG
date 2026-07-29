@@ -476,7 +476,7 @@ impl ScriptEngine {
 
     /// Ask the running script to stop (raises KeyboardInterrupt at the next
     /// bytecode boundary). Pure C calls (e.g. a large numpy op) cannot be
-    /// interrupted mid-call — documented limitation.
+    /// interrupted mid-call - documented limitation.
     pub fn request_interrupt(&self) {
         request_python_interrupt();
     }
@@ -520,7 +520,7 @@ pub(crate) fn request_python_interrupt() {
     // Both mechanisms, for coverage: PyErr_SetInterrupt trips the pending-SIGINT
     // flag (needs a main-thread SIGINT handler, i.e. the real app); Py_AddPendingCall
     // injects an eval-loop callback checked at every bytecode boundary in any thread
-    // regardless of SIGINT state — what actually fires in the worker-thread tests.
+    // regardless of SIGINT state - what actually fires in the worker-thread tests.
     // Safety: both are documented safe to call from any thread without the GIL.
     extern "C" fn raise_keyboard_interrupt(_arg: *mut std::ffi::c_void) -> std::ffi::c_int {
         // Returns -1 so the eval loop propagates the exception immediately.
@@ -1489,7 +1489,7 @@ fn eval_line(globals: &Py<PyDict>, src: &str, evt_tx: &Sender<ScriptEvent>) -> b
                 true
             }
             Err(_) => {
-                // Not an expression — run as a statement.
+                // Not an expression - run as a statement.
                 match py.run(&code, Some(g), None) {
                     Ok(()) => true,
                     Err(err) => {
@@ -2422,7 +2422,7 @@ def split(batch):
         );
 
         // First call emits topic "T" with fields {a, b}; every later call emits
-        // "T" with only {a} — a field-set change the callback is allowed to
+        // "T" with only {a} - a field-set change the callback is allowed to
         // make (it decides its own output shape per batch) but the engine must
         // reject before it reaches the ingest thread.
         let script = r#"
@@ -2473,7 +2473,7 @@ def split(batch):
         assert_eq!(engine.recv_blocking(), ScriptEvent::LiveBatchProcessed);
 
         // The next LIVE_TRANSFORM_ERROR_LIMIT batches each emit only {a},
-        // which differs from the recorded {a, b} — each is a transform error,
+        // which differs from the recorded {a, b} - each is a transform error,
         // and the last one disables the transform.
         let mut disabled_message = None;
         for _ in 0..LIVE_TRANSFORM_ERROR_LIMIT {
@@ -2709,7 +2709,7 @@ def f(batch):
         }
         drop(engine);
         assert!(err.expect("error event").contains("boom"));
-        // Failure emits nothing — give the ingest thread a moment, then confirm absence.
+        // Failure emits nothing - give the ingest thread a moment, then confirm absence.
         std::thread::sleep(std::time::Duration::from_millis(50));
         let snap = write_store.load();
         assert!(

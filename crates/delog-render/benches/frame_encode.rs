@@ -74,7 +74,7 @@ fn bench_decimate_cpu(c: &mut Criterion) {
 
 fn bench_frame_encode(c: &mut Criterion) {
     let Some(ctx) = RenderContext::headless() else {
-        eprintln!("no wgpu adapter — skipping frame-encode bench");
+        eprintln!("no wgpu adapter - skipping frame-encode bench");
         c.bench_function("frame_encode_32x1M_decimated", |b| b.iter(|| {}));
         return;
     };

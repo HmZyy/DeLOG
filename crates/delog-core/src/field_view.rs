@@ -223,7 +223,7 @@ impl<'a> FieldView<'a> {
     }
 
     /// Walk backward from `(idx, row)` across chunks to the nearest cell that
-    /// holds a value — a merged timeline leaves null cells wherever a slower
+    /// holds a value - a merged timeline leaves null cells wherever a slower
     /// signal has no sample, and those are not samples of this field. Bounded
     /// so a fully-null column can't degenerate into a per-call full scan.
     fn prev_valued_from(&'a self, mut idx: usize, mut row: usize) -> Option<Sample<'a>> {
@@ -729,7 +729,7 @@ mod tests {
     #[test]
     fn sample_at_falls_back_to_linear_scan_for_overlapping_chunks() {
         // Overlapping (non-monotonic) spine: predecessor of 150 is in the later
-        // chunk B (t=100), successor in the earlier chunk A (t=200) — a bsearch
+        // chunk B (t=100), successor in the earlier chunk A (t=200) - a bsearch
         // fast path would miss them, so it must not engage here.
         let mut identity = IdentityRegistry::new();
         let source = identity.add_source("flight");

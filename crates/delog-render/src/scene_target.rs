@@ -308,7 +308,7 @@ fn fs() -> @location(0) vec4<f32> {
     #[test]
     fn clear_resolves_through_msaa() {
         let Some(ctx) = RenderContext::headless() else {
-            eprintln!("no wgpu adapter — skipping scene-target test");
+            eprintln!("no wgpu adapter - skipping scene-target test");
             return;
         };
         let (w, h) = (32u32, 32u32);

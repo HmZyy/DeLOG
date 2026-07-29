@@ -13,7 +13,7 @@ pub struct SourceId(pub u32);
 pub enum SourceKind {
     /// May block on backpressure.
     File,
-    /// Must never block — full channel drops the batch.
+    /// Must never block - full channel drops the batch.
     Live,
     Derived,
     LiveDerived,
