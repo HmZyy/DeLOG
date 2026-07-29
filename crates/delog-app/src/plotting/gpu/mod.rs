@@ -20,7 +20,7 @@ use crate::map::worker::{MapScopeId, ReadyTile};
 use crate::scene3d::models;
 use crate::plotting::plot::{PlotPane, TraceMode, ViewX};
 use crate::config::settings::{GapMode, RenderTuning, Scene3dSettings};
-use crate::sync::sync_window::CompareMode;
+use crate::plotting::compare::CompareMode;
 use crate::scene3d::vehicle::ModelKind;
 
 #[derive(Clone, Debug)]
