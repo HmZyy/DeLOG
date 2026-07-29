@@ -2,7 +2,6 @@ pub mod config;
 pub mod dataflow;
 pub mod export;
 pub mod ingest;
-pub mod layout;
 pub mod map;
 pub mod plotting;
 pub mod scene3d;
@@ -47,7 +46,7 @@ pub fn run() -> eframe::Result {
 fn app_native_options() -> eframe::NativeOptions {
     // VSync is configured once at surface creation, so it must be read from the
     // persisted settings here rather than at app construction.
-    let vsync = crate::layout::load_app_settings().vsync;
+    let vsync = crate::config::layout::doc::load_app_settings().vsync;
 
     let mut options = eframe::NativeOptions {
         viewport: app_viewport(),

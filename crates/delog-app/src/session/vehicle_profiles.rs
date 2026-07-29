@@ -8,7 +8,7 @@ use delog_core::identity::SourceId;
 use delog_core::snapshot::StoreSnapshot;
 use serde::{Deserialize, Serialize};
 
-use crate::layout;
+use crate::config::layout::doc as layout;
 use crate::scene3d::vehicle::VehicleConfig;
 
 pub const VEHICLE_PROFILE_VERSION: u32 = 1;
@@ -17,7 +17,7 @@ pub const VEHICLE_PROFILE_VERSION: u32 = 1;
 pub struct VehicleProfileDoc {
     pub delog_vehicle_profile: u32,
     pub name: String,
-    pub vehicle: crate::layout::VehicleLayout,
+    pub vehicle: crate::config::layout::doc::VehicleLayout,
 }
 
 impl VehicleProfileDoc {
@@ -71,7 +71,7 @@ impl VehicleProfileLibrary {
     }
 
     pub fn from_config_dir() -> Option<Self> {
-        crate::layout::config_dir().map(|dir| Self::new(dir.join("vehicle_profiles")))
+        crate::config::layout::doc::config_dir().map(|dir| Self::new(dir.join("vehicle_profiles")))
     }
 
     pub fn dir(&self) -> &Path {
@@ -154,7 +154,7 @@ mod tests {
 
     use egui::Color32;
 
-    use crate::layout::{FieldRef, ModelLayout, OriLayout, PosLayout, VehicleLayout};
+    use crate::config::layout::doc::{FieldRef, ModelLayout, OriLayout, PosLayout, VehicleLayout};
     use crate::scene3d::vehicle::{ModelKind, OriMapping, PosMapping, VehicleConfig};
 
     use super::*;
