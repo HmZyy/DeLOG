@@ -2,7 +2,7 @@ use delog_core::identity::{FieldId, SourceId, TopicId};
 use delog_core::snapshot::StoreSnapshot;
 use egui::Color32;
 
-use crate::layout::{FieldRef, ModelLayout, NedRefLayout, OriLayout, PosLayout, VehicleLayout};
+use crate::config::layout::doc::{FieldRef, ModelLayout, NedRefLayout, OriLayout, PosLayout, VehicleLayout};
 use crate::ui::logging::{LogLevel, PendingLog, log};
 use crate::scene3d::vehicle::{GeoRef, ModelKind, NedReference, OriMapping, PosMapping, VehicleConfig};
 use crate::session::vehicle_profiles::{VEHICLE_PROFILE_VERSION, VehicleProfileDoc, VehicleProfileLibrary};
