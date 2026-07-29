@@ -117,3 +117,81 @@ fn every_layer_directory_has_a_rank() {
         "new top-level directories must be added to LAYER_RANKS: {unranked:?}"
     );
 }
+
+const BUDGET: usize = 800;
+
+const ALLOWED_OVER_BUDGET: &[&str] = &[
+    "delog-script/src/engine.rs",
+    "delog-script/src/api.rs",
+    "delog-script/src/operations/live.rs",
+    "delog-parsers/src/ardupilot.rs",
+    "delog-parsers/src/ulog.rs",
+    "delog-cache/src/trace.rs",
+    "delog-app/src/config/layout/doc.rs",
+    "delog-app/src/config/settings.rs",
+    "delog-app/src/dataflow/controller/mod.rs",
+    "delog-app/src/dataflow/window.rs",
+    "delog-app/src/export/data_export/mod.rs",
+    "delog-app/src/map/worker/mod.rs",
+    "delog-app/src/plotting/browser.rs",
+    "delog-app/src/plotting/gpu/mod.rs",
+    "delog-app/src/scripting/scripts.rs",
+    "delog-app/src/session/vehicle_dialog.rs",
+    "delog-app/src/shell/app/mod.rs",
+    "delog-app/src/shell/workspace/mod.rs",
+    "delog-app/src/sync/sync_window/mod.rs",
+];
+
+fn implementation_lines(source: &str) -> usize {
+    let lines: Vec<&str> = source.lines().collect();
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        let declares_test_module = trimmed.starts_with("mod tests")
+            || trimmed.starts_with("pub mod tests")
+            || trimmed.starts_with("pub(crate) mod tests");
+        if declares_test_module && index > 0 && lines[index - 1].trim() == "#[cfg(test)]" {
+            return index - 1;
+        }
+    }
+    lines.len()
+}
+
+#[test]
+fn implementation_files_stay_under_budget() {
+    let crates_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates directory")
+        .to_path_buf();
+
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(&crates_dir).expect("readable crates dir") {
+        let crate_src = entry.expect("readable entry").path().join("src");
+        if crate_src.is_dir() {
+            rust_files(&crate_src, &mut files);
+        }
+    }
+
+    let mut over = Vec::new();
+    for file in files {
+        let relative = file
+            .strip_prefix(&crates_dir)
+            .expect("path under crates")
+            .to_string_lossy()
+            .replace('\\', "/");
+        if relative.ends_with("/tests.rs") || ALLOWED_OVER_BUDGET.contains(&relative.as_str()) {
+            continue;
+        }
+        let source = std::fs::read_to_string(&file).expect("readable source");
+        let lines = implementation_lines(&source);
+        if lines > BUDGET {
+            over.push(format!("{relative}: {lines} lines"));
+        }
+    }
+
+    over.sort();
+    assert!(
+        over.is_empty(),
+        "files over the {BUDGET}-line implementation budget:\n{}",
+        over.join("\n")
+    );
+}
