@@ -12,7 +12,8 @@ use crate::ui::diagnostics::DiagnosticsDock;
 use crate::ui::docks::{AppDockController, AppDockTab};
 use crate::plotting::field_stats::{FieldStatsController, StatsTab};
 use crate::plotting::gpu::GpuBridge;
-use crate::layout::{LayoutApply, LayoutDoc, LayoutError, LoadOutcome, PendingLayout};
+use crate::config::layout::doc::{LayoutDoc, LayoutError};
+use crate::shell::layout_apply::{LayoutApply, LoadOutcome, PendingLayout};
 use crate::ingest::live::ConnectionDialog;
 use crate::ui::logging::{LogLevel, LogRecord, LoggingDock, PendingLog};
 use crate::map::worker::{CacheActionKind, CacheActionStatus, TileManager};
@@ -344,7 +345,7 @@ pub struct DelogApp {
 
 impl DelogApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let settings = crate::layout::load_app_settings();
+        let settings = crate::config::layout::doc::load_app_settings();
         settings.theme.apply(&cc.egui_ctx);
         settings.font.apply(&cc.egui_ctx);
         let connection_dialog = ConnectionDialog::from_settings(&settings.live_connection);
@@ -386,7 +387,7 @@ impl DelogApp {
             #[cfg(feature = "scripting")]
             scripts: {
                 let config_dir =
-                    crate::layout::config_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+                    crate::config::layout::doc::config_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
                 scripts::ScriptsPanel::new(
                     config_dir.join("scripts"),
                     config_dir.join("parsers"),
@@ -969,7 +970,7 @@ impl DelogApp {
         code: &'static str,
     ) {
         let should_defer = !Self::snapshot_has_fields(snapshot);
-        match crate::layout::load_doc(doc.clone(), snapshot) {
+        match crate::shell::layout_apply::load_doc(doc.clone(), snapshot) {
             Ok(LoadOutcome::Applied(layout)) => {
                 self.apply_layout(layout);
                 if should_defer {
@@ -1013,13 +1014,13 @@ impl DelogApp {
         }
 
         let doc = self.current_layout_doc("session".to_owned(), snapshot);
-        let json = crate::layout::doc_json(&doc)?;
+        let json = crate::config::layout::doc::doc_json(&doc)?;
         if !force && self.last_session_autosave_json.as_deref() == Some(json.as_str()) {
             self.last_session_autosave = Instant::now();
             return Ok(false);
         }
 
-        crate::layout::save_session_json(&json)?;
+        crate::config::layout::doc::save_session_json(&json)?;
         self.last_session_autosave = Instant::now();
         self.last_session_autosave_json = Some(json);
         Ok(true)
@@ -1238,7 +1239,7 @@ impl DelogApp {
         name: String,
         snapshot: &delog_core::snapshot::StoreSnapshot,
     ) -> LayoutDoc {
-        crate::layout::current_doc(crate::layout::CurrentLayout {
+        crate::shell::layout_apply::current_doc(crate::shell::layout_apply::CurrentLayout {
             name,
             workspace: &self.workspace,
             snapshot,
@@ -1255,7 +1256,7 @@ impl DelogApp {
             self.save_layout_dialog.name.trim()
         };
         let doc = self.current_layout_doc(name.to_owned(), snapshot);
-        match crate::layout::save_named(name, &doc) {
+        match crate::config::layout::doc::save_named(name, &doc) {
             Ok(()) => self
                 .session
                 .push_diagnostic(delog_core::diagnostics::Diag::info(
@@ -1295,7 +1296,7 @@ impl DelogApp {
                     .set_file_name(&file_name)
                     .save_file()
                 {
-                    let result = crate::layout::export_doc(&path, &doc).map(|_| path);
+                    let result = crate::config::layout::doc::export_doc(&path, &doc).map(|_| path);
                     let _ = tx.send(result);
                     ctx.request_repaint();
                 }
@@ -1315,7 +1316,7 @@ impl DelogApp {
                     .set_title("Import layout JSON")
                     .pick_file()
                 {
-                    let result = crate::layout::import_doc(&path);
+                    let result = crate::config::layout::doc::import_doc(&path);
                     let _ = tx.send(result);
                     ctx.request_repaint();
                 }
@@ -1531,7 +1532,7 @@ impl DelogApp {
     }
 
     fn load_layout(&mut self, name: &str, snapshot: &delog_core::snapshot::StoreSnapshot) {
-        match crate::layout::load_named_doc(name) {
+        match crate::config::layout::doc::load_named_doc(name) {
             Ok(doc) => self.apply_layout_doc(doc, snapshot, "layout-load"),
             Err(err) => self
                 .session
@@ -1548,7 +1549,7 @@ impl DelogApp {
     }
 
     fn refresh_layout_manager(&mut self, preferred: Option<String>) {
-        self.layout_manager_dialog.layouts = crate::layout::list_layouts();
+        self.layout_manager_dialog.layouts = crate::config::layout::doc::list_layouts();
         self.layout_manager_dialog.selected = preferred
             .as_deref()
             .and_then(|name| {
@@ -1582,7 +1583,7 @@ impl DelogApp {
             LayoutManagerAction::Load(name) => self.load_layout(&name, snapshot),
             LayoutManagerAction::Rename { from, to } => {
                 let display = to.trim().to_owned();
-                match crate::layout::rename_named(&from, &display) {
+                match crate::config::layout::doc::rename_named(&from, &display) {
                     Ok(()) => {
                         self.refresh_layout_manager(Some(display.clone()));
                         self.session
@@ -1601,7 +1602,7 @@ impl DelogApp {
             }
             LayoutManagerAction::Duplicate { from, to } => {
                 let display = to.trim().to_owned();
-                match crate::layout::duplicate_named(&from, &display) {
+                match crate::config::layout::doc::duplicate_named(&from, &display) {
                     Ok(()) => {
                         self.refresh_layout_manager(Some(display.clone()));
                         self.session
@@ -1618,7 +1619,7 @@ impl DelogApp {
                         )),
                 }
             }
-            LayoutManagerAction::Delete(name) => match crate::layout::delete_named(&name) {
+            LayoutManagerAction::Delete(name) => match crate::config::layout::doc::delete_named(&name) {
                 Ok(()) => {
                     self.refresh_layout_manager(None);
                     self.session
@@ -1884,7 +1885,7 @@ impl eframe::App for DelogApp {
     fn on_exit(&mut self) {
         let snapshot = self.session.snapshot();
         let _ = self.autosave_session(&snapshot, true);
-        let _ = crate::layout::save_app_settings(&self.settings);
+        let _ = crate::config::layout::doc::save_app_settings(&self.settings);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
@@ -2103,7 +2104,7 @@ impl eframe::App for DelogApp {
                         ui.close();
                     }
                     ui.menu_button("Load Layout", |ui| {
-                        let layouts = crate::layout::list_layouts();
+                        let layouts = crate::config::layout::doc::list_layouts();
                         if layouts.is_empty() {
                             ui.add_enabled(false, egui::Button::new("No saved layouts"));
                         } else {
@@ -2529,7 +2530,7 @@ impl eframe::App for DelogApp {
                 self.save_layout_dialog.open = true;
             }
             if load_layout {
-                self.load_layout_dialog.layouts = crate::layout::list_layouts();
+                self.load_layout_dialog.layouts = crate::config::layout::doc::list_layouts();
                 self.load_layout_dialog.selected = None;
                 self.load_layout_dialog.open = true;
             }
@@ -3102,7 +3103,7 @@ impl eframe::App for DelogApp {
             ui.ctx().request_repaint();
         }
         if self.settings != settings_before
-            && let Err(err) = crate::layout::save_app_settings(&self.settings)
+            && let Err(err) = crate::config::layout::doc::save_app_settings(&self.settings)
         {
             self.session
                 .push_diagnostic(delog_core::diagnostics::Diag::error(
@@ -3139,7 +3140,7 @@ impl eframe::App for DelogApp {
                 }
             };
             self.settings.live_connection = self.connection_dialog.to_settings();
-            if let Err(err) = crate::layout::save_app_settings(&self.settings) {
+            if let Err(err) = crate::config::layout::doc::save_app_settings(&self.settings) {
                 self.session
                     .push_diagnostic(delog_core::diagnostics::Diag::error(
                         "settings-save",
