@@ -1,6 +1,6 @@
 [package]
 name = "delog-app"
-description = "DeLOG — drone flight log & live telemetry analyzer"
+description = "DeLOG - drone flight log & live telemetry analyzer"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -22,7 +22,7 @@ winresource = { workspace = true }
 [features]
 # Embedded-Python scripting is ON by default. Build without Python via
 # `--no-default-features` (Cargo features are additive, so a literal
-# "without-scripting" feature cannot subtract — disabling the default is the
+# "without-scripting" feature cannot subtract - disabling the default is the
 # opt-out).
 default = ["scripting"]
 scripting = ["dep:delog-script", "delog-script/python", "dep:egui_code_editor", "delog-flow/scripting"]
