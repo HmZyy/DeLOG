@@ -7,6 +7,7 @@ use delog_render::palette;
 use std::sync::Arc;
 
 use crate::plotting::axes;
+use crate::plotting::compare::CompareMode;
 use crate::ui::fuzzy::fuzzy_match_score;
 use crate::plotting::gpu::{self, GpuBridge, PreparedYRange, SyncTrace};
 use crate::plotting::plot::{ViewX, draw_zoom_drag_overlay};
@@ -105,12 +106,6 @@ pub fn preview_delta_us(
     draft_offset_us
         .checked_sub(current_offset_us)
         .ok_or(OffsetMathError)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CompareMode {
-    Overlay,
-    Stacked,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
