@@ -27,7 +27,7 @@ py="$DEST/bin/python3"
 
 # Trim: remove bytecode caches, the stdlib test suites, pip/ensurepip, and the
 # bundled SciPy test tree (large, never imported at runtime). Scoped to SciPy
-# only — Bottleneck imports its own `tests` package at load time.
+# only - Bottleneck imports its own `tests` package at load time.
 py_minor="${PY_VERSION%.*}"   # e.g. 3.12
 site="$DEST/lib/python${py_minor}/site-packages"
 find "$DEST" -depth -name '__pycache__' -type d -exec rm -rf {} +

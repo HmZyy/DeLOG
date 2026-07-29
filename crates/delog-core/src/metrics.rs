@@ -57,7 +57,7 @@ impl MetricsRegistry {
     }
 
     /// Elapsed time is recorded in milliseconds when the guard drops.
-    #[must_use = "the timer records on drop — binding to `_` discards it immediately"]
+    #[must_use = "the timer records on drop - binding to `_` discards it immediately"]
     pub fn scope(&self, name: &'static str) -> ScopeTimer {
         ScopeTimer {
             metric: self.get_or_register(name),

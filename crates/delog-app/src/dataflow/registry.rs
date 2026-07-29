@@ -1,7 +1,7 @@
 use delog_core::align::AlignMode;
 use delog_flow::graph::{ConversionKind, NodeKind, OutputFieldSpec, OutputSpec};
 
-use crate::fuzzy::fuzzy_match_score;
+use crate::ui::fuzzy::fuzzy_match_score;
 
 pub const ADD_DATA_INDEX: usize = usize::MAX;
 

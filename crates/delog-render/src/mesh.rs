@@ -580,7 +580,7 @@ mod tests {
     #[test]
     fn cone_renders_shaded_with_lit_and_shadowed_facets() {
         let Some(ctx) = RenderContext::headless() else {
-            eprintln!("no wgpu adapter — skipping mesh render test");
+            eprintln!("no wgpu adapter - skipping mesh render test");
             return;
         };
         let (w, h) = (96u32, 96u32);
@@ -655,7 +655,7 @@ mod tests {
     #[test]
     fn back_face_is_lit_not_dark() {
         let Some(ctx) = RenderContext::headless() else {
-            eprintln!("no wgpu adapter — skipping back-face mesh test");
+            eprintln!("no wgpu adapter - skipping back-face mesh test");
             return;
         };
         let (w, h) = (64u32, 64u32);

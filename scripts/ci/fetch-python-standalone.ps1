@@ -26,7 +26,7 @@ $py = Join-Path $Dest "python.exe"
     "cffi==$CffiVersion"
 
 # Trim caches, stdlib tests, pip/ensurepip, and the bundled SciPy test tree
-# (large, never imported at runtime). Scoped to SciPy only — Bottleneck imports
+# (large, never imported at runtime). Scoped to SciPy only - Bottleneck imports
 # its own `tests` package at load time.
 $site = Join-Path $Dest "Lib\site-packages"
 Get-ChildItem -Path $Dest -Recurse -Directory -Filter "__pycache__" | Remove-Item -Recurse -Force
