@@ -15,10 +15,10 @@ use serde_json::Value;
 use crate::config::settings::AppSettings;
 use crate::scene3d::vehicle::{GeoRef, ModelKind, NedReference, OriMapping, PosMapping, VehicleConfig};
 
-pub const APP_ID: &str = "DeLOG";
-pub const LAYOUT_VERSION: u32 = 1;
+const APP_ID: &str = "DeLOG";
+pub(crate) const LAYOUT_VERSION: u32 = 1;
 
-pub fn default_true() -> bool {
+fn default_true() -> bool {
     true
 }
 
@@ -101,7 +101,7 @@ pub struct SceneLayout {
     pub trail_to_playhead: bool,
 }
 
-pub fn default_trail_to_playhead() -> bool {
+fn default_trail_to_playhead() -> bool {
     true
 }
 
