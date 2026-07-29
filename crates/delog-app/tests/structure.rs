@@ -52,6 +52,12 @@ fn layer_imports_point_downward() {
     let mut files = Vec::new();
     rust_files(&src, &mut files);
 
+    assert!(
+        files.len() > 50,
+        "the source walk found only {} files, which means it is not actually scanning the crate",
+        files.len()
+    );
+
     let mut violations = Vec::new();
     for file in files {
         let relative = file.strip_prefix(&src).expect("path under src");
