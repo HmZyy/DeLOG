@@ -1,5 +1,6 @@
 pub mod axes;
 pub mod browser;
+pub mod compare;
 pub mod field_stats;
 pub mod gpu;
 pub mod hover;
