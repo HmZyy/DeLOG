@@ -167,16 +167,45 @@ impl Workspace {
     }
 
     pub fn focused_first_field(&self) -> Option<FieldId> {
-        let tile_id = self.focused?;
+        let tile_id = self.focused_plot_id()?;
         match self.tree.tiles.get(tile_id) {
             Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) => pane.traces.first().map(|t| t.field),
             _ => None,
         }
     }
 
+    pub fn focused_plot_id(&self) -> Option<egui_tiles::TileId> {
+        self.focused.filter(|&tile_id| {
+            matches!(
+                self.tree.tiles.get(tile_id),
+                Some(egui_tiles::Tile::Pane(Pane::Plot(_)))
+            )
+        })
+    }
+
+    pub fn repair_focus(&mut self) {
+        let Some(focused) = self.focused else {
+            return;
+        };
+        if self.tree.tiles.get(focused).is_some() {
+            return;
+        }
+        self.focused = self.deterministic_plot_fallback();
+    }
+
+    fn deterministic_plot_fallback(&self) -> Option<egui_tiles::TileId> {
+        self.tree
+            .tiles
+            .iter()
+            .filter_map(|(tile_id, tile)| {
+                matches!(tile, egui_tiles::Tile::Pane(Pane::Plot(_))).then_some(*tile_id)
+            })
+            .min_by_key(|tile_id| tile_id.0)
+    }
+
     #[cfg(test)]
     pub fn focused_fields(&self) -> Vec<FieldId> {
-        let Some(tile_id) = self.focused else {
+        let Some(tile_id) = self.focused_plot_id() else {
             return Vec::new();
         };
         match self.tree.tiles.get(tile_id) {
@@ -453,11 +482,14 @@ impl Workspace {
 
     pub fn toggle_scene_pane(&mut self) {
         if let Some(id) = self.scene_pane_id() {
+            let previous_focus = self.focused;
             let closing_root = self.tree.root() == Some(id);
             self.tree.remove_recursively(id);
             if closing_root || self.tree.tiles.tiles().next().is_none() {
                 *self = Self::new();
+                self.focused = previous_focus;
             }
+            self.repair_focus();
             return;
         }
         let pane = self
@@ -573,11 +605,14 @@ impl Workspace {
     }
 
     pub fn close_plot(&mut self, tile_id: egui_tiles::TileId) -> Vec<FieldId> {
+        let previous_focus = self.focused;
         let closing_root = self.tree.root() == Some(tile_id);
         let removed = self.tree.remove_recursively(tile_id);
         if closing_root || self.plot_panes().next().is_none() {
             *self = Self::new();
+            self.focused = previous_focus;
         }
+        self.repair_focus();
         removed
             .into_iter()
             .flat_map(fields_from_removed_tile)
@@ -1135,10 +1170,11 @@ impl Behavior<'_> {
             self.actions.max_y_gutter = self.actions.max_y_gutter.max(own_gutter);
             self.handle_plot_interaction(&response, plot_rect);
             self.handle_zoom_drag(&response, plot_rect, pane);
+            let x_range = (*self.services.view)
+                .map(|view| view.seconds(self.services.origin_us))
+                .unwrap_or((0.0, 1.0));
+            self.publish_hovered_cursor(tile_id, &response, plot_rect, x_range);
             if plot_rect.width() > 8.0 {
-                let x_range = (*self.services.view)
-                    .map(|v| v.seconds(self.services.origin_us))
-                    .unwrap_or((0.0, 1.0));
                 axes::draw(ui, plot_rect, x_range, y_range, None);
             }
             self.plot_context_menu(tile_id, &response, pane);
@@ -1210,6 +1246,7 @@ impl Behavior<'_> {
             self.actions.max_y_gutter = self.actions.max_y_gutter.max(own_gutter);
         }
         drop(pane_setup_timer);
+        self.publish_hovered_cursor(tile_id, &response, plot_rect, x_range);
 
         if !self.services.gpu.is_available() || plot_rect.width() <= 8.0 {
             self.plot_context_menu(tile_id, &response, pane);
@@ -1359,13 +1396,6 @@ impl Behavior<'_> {
             );
         }
 
-        let hovered_cursor_us = response.hover_pos().and_then(|pos| {
-            hover::cursor_time_us(plot_rect, x_range, pos, self.services.origin_us)
-        });
-        if let Some(t_us) = hovered_cursor_us {
-            self.actions.hovered_cursor = Some(PlotHover { tile_id, t_us });
-        }
-
         if pane.show_tooltip && !ui.ctx().any_popup_open() {
             // Alt+hover drags the playhead along with the cursor. With
             // snap enabled it lands on the nearest data point instead, so the
@@ -1454,6 +1484,20 @@ impl Behavior<'_> {
         self.plot_info_window(ui, tile_id, pane, Some(debug));
         drop(pane_overlay_timer);
         tile_response
+    }
+
+    fn publish_hovered_cursor(
+        &mut self,
+        tile_id: egui_tiles::TileId,
+        response: &egui::Response,
+        plot_rect: egui::Rect,
+        x_range: (f32, f32),
+    ) {
+        if let Some(t_us) = response.hover_pos().and_then(|pos| {
+            hover::cursor_time_us(plot_rect, x_range, pos, self.services.origin_us)
+        }) {
+            self.actions.hovered_cursor = Some(PlotHover { tile_id, t_us });
+        }
     }
 
     fn plot_context_menu(

@@ -129,14 +129,24 @@ impl CommandPaletteState {
                         if entry.selected == Some(true) {
                             label.insert_str(0, "✓  ");
                         }
-                        if let Some(shortcut) = &entry.subtitle {
-                            label.push_str(&format!("    {shortcut}"));
-                        }
+                        let subtitle = match &entry.command {
+                            AppCommand::Static(_) => {
+                                if let Some(shortcut) = &entry.subtitle {
+                                    label.push_str(&format!("    {shortcut}"));
+                                }
+                                None
+                            }
+                            _ => entry.subtitle.as_deref(),
+                        };
+                        let label = palette_row_text(ui, &label, subtitle);
                         let response = ui.add_enabled(
                             enabled,
                             egui::Button::new(label)
                                 .selected(index == self.selected)
-                                .min_size(egui::vec2(ui.available_width(), 30.0)),
+                                .min_size(egui::vec2(
+                                    ui.available_width(),
+                                    if subtitle.is_some() { 42.0 } else { 30.0 },
+                                )),
                         );
                         let response = match &entry.availability {
                             CommandAvailability::Disabled(reason) => {
@@ -156,6 +166,32 @@ impl CommandPaletteState {
             });
         selected_command
     }
+}
+
+fn palette_row_text(ui: &egui::Ui, label: &str, subtitle: Option<&str>) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        label,
+        0.0,
+        egui::TextFormat {
+            font_id: egui::TextStyle::Button.resolve(ui.style()),
+            color: ui.visuals().text_color(),
+            ..Default::default()
+        },
+    );
+    if let Some(subtitle) = subtitle {
+        job.append("\n", 0.0, egui::TextFormat::default());
+        job.append(
+            subtitle,
+            0.0,
+            egui::TextFormat {
+                font_id: egui::TextStyle::Small.resolve(ui.style()),
+                color: ui.visuals().weak_text_color(),
+                ..Default::default()
+            },
+        );
+    }
+    job
 }
 
 pub fn should_toggle_palette(ctrl_k: bool, wants_keyboard_input: bool) -> bool {
@@ -360,6 +396,32 @@ mod tests {
                     delog_core::field_view::SampleMode::Linear,
                 )
                 && entry.selected == Some(true)
+        }));
+    }
+
+    #[test]
+    fn palette_renders_family_context_on_a_secondary_line() {
+        let ctx = egui::Context::default();
+        let mut palette = CommandPaletteState::default();
+        palette.open();
+        let entries = [PaletteEntry {
+            command: AppCommand::RunScript("shared".into()),
+            label: "shared".to_owned(),
+            subtitle: Some("Tools › Scripts › Run Scripts".to_owned()),
+            search_text: "shared script run execute".to_owned(),
+            availability: CommandAvailability::Enabled,
+            selected: None,
+        }];
+
+        let _ = palette_frame(&ctx, &mut palette, &entries, vec![]);
+        let (output, _) = palette_frame(&ctx, &mut palette, &entries, vec![]);
+
+        assert!(output.shapes.iter().any(|shape| {
+            find_text_rect(
+                &shape.shape,
+                "shared\nTools › Scripts › Run Scripts",
+            )
+            .is_some()
         }));
     }
 }
