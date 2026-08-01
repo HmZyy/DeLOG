@@ -12,6 +12,7 @@ pub enum GlobalPlotToolbarAction {
     EqualizePlotHeights,
 }
 
+#[cfg(test)]
 impl GlobalPlotToolbarAction {
     pub const ALL: [Self; 6] = [
         Self::FitAll,
@@ -45,23 +46,24 @@ pub fn show(ui: &mut egui::Ui, model: &GlobalPlotToolbarModel) -> Vec<GlobalPlot
                 actions.push(GlobalPlotToolbarAction::FitAll);
             }
 
-            ui.menu_button(
+            let cursor_icon = egui::Image::new(crate::ui::icons::mouse_pointer())
+                .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
+                .tint(ui.visuals().text_color());
+            egui::containers::menu::MenuButton::from_button(egui::Button::image_and_text(
+                cursor_icon,
                 format!("Cursor: {}", sample_mode_label(model.cursor_sampling)),
-                |ui| {
-                    for mode in [SampleMode::Prev, SampleMode::Next, SampleMode::Linear] {
-                        if ui
-                            .selectable_label(
-                                model.cursor_sampling == mode,
-                                sample_mode_label(mode),
-                            )
-                            .clicked()
-                        {
-                            actions.push(GlobalPlotToolbarAction::SetCursorSampling(mode));
-                            ui.close();
-                        }
+            ))
+            .ui(ui, |ui| {
+                for mode in [SampleMode::Prev, SampleMode::Next, SampleMode::Linear] {
+                    if ui
+                        .selectable_label(model.cursor_sampling == mode, sample_mode_label(mode))
+                        .clicked()
+                    {
+                        actions.push(GlobalPlotToolbarAction::SetCursorSampling(mode));
+                        ui.close();
                     }
-                },
-            );
+                }
+            });
 
             if crate::ui::components::icon_button(
                 ui,

@@ -120,10 +120,6 @@ pub fn ruler() -> ImageSource<'static> {
     egui::include_image!("../../assets/icons/ruler.svg")
 }
 
-pub fn ruler_dimension_line() -> ImageSource<'static> {
-    egui::include_image!("../../assets/icons/ruler-dimension-line.svg")
-}
-
 pub fn grid_2x2_check() -> ImageSource<'static> {
     egui::include_image!("../../assets/icons/grid-2x2-check.svg")
 }
