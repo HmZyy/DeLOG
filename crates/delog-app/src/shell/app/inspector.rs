@@ -96,6 +96,21 @@ pub const fn cursor_readout_for_frame(
     }
 }
 
+pub fn cursor_fields_for_frame(
+    selection: &InspectorSelection,
+    focused_tile: Option<egui_tiles::TileId>,
+    visible_fields: impl FnOnce(egui_tiles::TileId) -> Vec<FieldId>,
+) -> Vec<FieldId> {
+    let tile_id = match selection {
+        InspectorSelection::Cursor { readout } => readout.tile_id(),
+        // `show` can switch any other selection to Cursor later in this frame.
+        // Seed that first no-hover render from the focused pane rather than an
+        // empty list computed before the transition.
+        _ => focused_tile,
+    };
+    tile_id.map(visible_fields).unwrap_or_default()
+}
+
 pub struct InspectorState {
     pub open: bool,
     pub selection: InspectorSelection,
@@ -504,6 +519,60 @@ fn property(ui: &mut egui::Ui, label: &str, value: impl ToString) {
 mod tests {
     use super::*;
 
+    fn find_text_rect(shape: &egui::epaint::Shape, expected: &str) -> Option<egui::Rect> {
+        match shape {
+            egui::epaint::Shape::Text(text) if text.galley.job.text == expected => {
+                Some(text.visual_bounding_rect())
+            }
+            egui::epaint::Shape::Vec(shapes) => shapes
+                .iter()
+                .find_map(|shape| find_text_rect(shape, expected)),
+            _ => None,
+        }
+    }
+
+    fn inspector_frame(
+        ctx: &egui::Context,
+        state: &mut InspectorState,
+        snapshot: &Arc<StoreSnapshot>,
+        focused_tile: egui_tiles::TileId,
+        visible_field: FieldId,
+        stats: &mut FieldStatsController,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
+        let cursor_fields =
+            cursor_fields_for_frame(&state.selection, Some(focused_tile), |tile_id| {
+                (tile_id == focused_tile)
+                    .then_some(vec![visible_field])
+                    .unwrap_or_default()
+            });
+        ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(500.0, 400.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                show(
+                    ui,
+                    state,
+                    snapshot,
+                    11,
+                    delog_core::field_view::SampleMode::Prev,
+                    &cursor_fields,
+                    Some(focused_tile),
+                    0,
+                    stats,
+                    None,
+                    &[],
+                );
+            },
+        )
+    }
+
     #[test]
     fn inspector_defaults_to_summary_and_can_be_closed_without_losing_selection() {
         let mut state = InspectorState::default();
@@ -561,6 +630,93 @@ mod tests {
             }
         );
         assert_eq!(readout.time_label(), "Playhead time");
+    }
+
+    #[test]
+    fn first_no_hover_cursor_render_contains_focused_pane_fields() {
+        let mut identity = delog_core::identity::IdentityRegistry::new();
+        let source = identity.add_source("flight");
+        let topic = identity.add_topic(source, "ATT").unwrap();
+        let field = identity.add_field(topic, "Roll").unwrap();
+        let snapshot = Arc::new(StoreSnapshot::from_registry(&identity, [], 0).unwrap());
+        let focused = egui_tiles::TileId::from_u64(2);
+        let ctx = egui::Context::default();
+        let mut state = InspectorState::default();
+        let mut stats = FieldStatsController::default();
+
+        let _ = inspector_frame(
+            &ctx,
+            &mut state,
+            &snapshot,
+            focused,
+            field,
+            &mut stats,
+            vec![],
+        );
+        let output = inspector_frame(
+            &ctx,
+            &mut state,
+            &snapshot,
+            focused,
+            field,
+            &mut stats,
+            vec![],
+        );
+        let cursor = output
+            .shapes
+            .iter()
+            .find_map(|shape| find_text_rect(&shape.shape, "Cursor"))
+            .expect("Cursor selector should be painted")
+            .center();
+        let _ = inspector_frame(
+            &ctx,
+            &mut state,
+            &snapshot,
+            focused,
+            field,
+            &mut stats,
+            vec![
+                egui::Event::PointerMoved(cursor),
+                egui::Event::PointerButton {
+                    pos: cursor,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        let clicked = inspector_frame(
+            &ctx,
+            &mut state,
+            &snapshot,
+            focused,
+            field,
+            &mut stats,
+            vec![
+                egui::Event::PointerMoved(cursor),
+                egui::Event::PointerButton {
+                    pos: cursor,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+
+        assert!(matches!(state.selection, InspectorSelection::Cursor { .. }));
+        assert!(
+            clicked
+                .shapes
+                .iter()
+                .any(|shape| { find_text_rect(&shape.shape, "No sample at playhead").is_some() })
+        );
+        assert!(!clicked.shapes.iter().any(|shape| {
+            find_text_rect(
+                &shape.shape,
+                "Focus a plot to inspect values at the playhead.",
+            )
+            .is_some()
+        }));
     }
 
     #[test]

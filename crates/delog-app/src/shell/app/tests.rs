@@ -157,6 +157,23 @@ fn empty_stat_formats_as_a_dash() {
 }
 
 #[test]
+fn built_in_parser_labels_match_the_file_open_with_menu() {
+    assert_eq!(
+        BUILT_IN_PARSER_PRESENTATIONS,
+        &[
+            ("ardupilot-bin", "ArduPilot"),
+            ("ulog", "PX4"),
+            ("tlog", "MAVLink"),
+            ("parquet", "Parquet"),
+        ]
+    );
+    assert_eq!(parser_label("ardupilot-bin"), "ArduPilot");
+    assert_eq!(parser_label("ulog"), "PX4");
+    assert_eq!(parser_label("tlog"), "MAVLink");
+    assert_eq!(parser_label("parquet"), "Parquet");
+}
+
+#[test]
 fn export_command_opens_data_export_through_resetting_api() {
     let source = include_str!("mod.rs");
     let export_action = source
