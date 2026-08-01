@@ -530,3 +530,26 @@ fn tile_cache_repaints_on_clear_submission_and_while_action_is_pending() {
     assert!(tile_cache_needs_repaint(false, true));
     assert!(!tile_cache_needs_repaint(false, false));
 }
+
+#[test]
+fn keyboard_shortcuts_produce_registry_commands() {
+    use crate::shell::app::commands::CommandId;
+
+    assert_eq!(
+        command_for_shortcut(egui::Key::Space, false),
+        Some(CommandId::TogglePlayback)
+    );
+    assert_eq!(
+        command_for_shortcut(egui::Key::S, true),
+        Some(CommandId::SaveLayout)
+    );
+    assert_eq!(
+        command_for_shortcut(egui::Key::L, true),
+        Some(CommandId::LoadLayout)
+    );
+    assert_eq!(
+        command_for_shortcut(egui::Key::M, false),
+        Some(CommandId::AddMarker)
+    );
+    assert_eq!(command_for_shortcut(egui::Key::K, true), None);
+}
