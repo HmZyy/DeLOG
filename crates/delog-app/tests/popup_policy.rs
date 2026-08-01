@@ -87,6 +87,12 @@ fn sync_toolbar_uses_icons_instead_of_unsupported_arrow_glyphs() {
 
 #[test]
 fn menus_expose_scripts_parsers_and_scripting_console_dock() {
+    let tools_static = between(
+        CONTEXT_HEADER_SOURCE,
+        "const TOOLS_MENU",
+        "const TOOLS_SCRIPTS_MENU",
+    );
+    assert_commands_in_order(tools_static, &["CommandId::OpenSettings"]);
     let scripts = between(
         CONTEXT_HEADER_SOURCE,
         "const TOOLS_SCRIPTS_MENU",
