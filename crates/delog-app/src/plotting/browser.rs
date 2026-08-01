@@ -522,12 +522,14 @@ pub fn ui(
                 .desired_width(filter_width),
         );
         let icon_size = button_size - ui.spacing().button_padding * 2.0;
-        let icon = egui::Image::new(crate::ui::icons::panel_left_close())
-            .fit_to_exact_size(icon_size)
-            .tint(ui.visuals().text_color());
-        if ui
-            .add_sized(button_size, egui::Button::image(icon))
-            .on_hover_text("Hide data browser")
+        if crate::ui::components::icon_button_sized(
+            ui,
+            crate::ui::icons::panel_left_close(),
+            "Hide data browser",
+            false,
+            button_size,
+            icon_size,
+        )
             .clicked()
         {
             response.collapse_requested = true;

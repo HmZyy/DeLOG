@@ -4,9 +4,9 @@ use std::time::{Duration, Instant};
 pub mod commands;
 pub mod command_palette;
 pub mod context_header;
+mod dynamic_commands;
 pub mod global_plot_toolbar;
 pub mod inspector;
-pub mod empty_state;
 
 use delog_cache::CacheManager;
 use delog_core::diagnostics::{DiagRecord, Severity};
@@ -301,6 +301,7 @@ pub struct DelogApp {
     inspector: inspector::InspectorState,
     shell_emphasis: context_header::ShellEmphasis,
     command_palette: command_palette::CommandPaletteState,
+    dynamic_command_catalog: commands::DynamicCommandCatalog,
     docks: AppDockController,
     diagnostics_dock: DiagnosticsDock,
     last_diagnostic_seq: Option<u64>,
@@ -448,6 +449,7 @@ impl DelogApp {
             inspector: inspector::InspectorState::default(),
             shell_emphasis: context_header::ShellEmphasis::default(),
             command_palette: command_palette::CommandPaletteState::default(),
+            dynamic_command_catalog: commands::DynamicCommandCatalog::default(),
             docks: AppDockController::new_empty(),
             diagnostics_dock: DiagnosticsDock::default(),
             last_diagnostic_seq: None,
@@ -503,6 +505,12 @@ impl DelogApp {
     fn open_dock(&mut self, tab: AppDockTab) {
         self.set_legacy_dock_open(tab, true);
         self.docks.open_or_focus(tab);
+    }
+
+    fn toggle_dock(&mut self, tab: AppDockTab) {
+        let open = !self.docks.is_open(tab);
+        self.set_legacy_dock_open(tab, open);
+        self.docks.toggle(tab);
     }
 
     fn set_legacy_dock_open(&mut self, tab: AppDockTab, open: bool) {
@@ -1248,18 +1256,19 @@ impl DelogApp {
 
     fn save_layout(&mut self, snapshot: &delog_core::snapshot::StoreSnapshot) {
         let name = if self.save_layout_dialog.name.trim().is_empty() {
-            "default"
+            "default".to_owned()
         } else {
-            self.save_layout_dialog.name.trim()
+            self.save_layout_dialog.name.trim().to_owned()
         };
-        let doc = self.current_layout_doc(name.to_owned(), snapshot);
-        match crate::config::layout::doc::save_named(name, &doc) {
-            Ok(()) => self
-                .session
-                .push_diagnostic(delog_core::diagnostics::Diag::info(
+        let doc = self.current_layout_doc(name.clone(), snapshot);
+        match crate::config::layout::doc::save_named(&name, &doc) {
+            Ok(()) => {
+                self.dynamic_command_catalog.invalidate();
+                self.session.push_diagnostic(delog_core::diagnostics::Diag::info(
                     "layout-save",
                     format!("saved layout `{name}`"),
-                )),
+                ));
+            }
             Err(err) => self
                 .session
                 .push_diagnostic(delog_core::diagnostics::Diag::error(
@@ -1548,6 +1557,7 @@ impl DelogApp {
     fn command_context(
         &self,
         snapshot: &delog_core::snapshot::StoreSnapshot,
+        parser_task_active: bool,
     ) -> commands::CommandContext {
         let offline_source_count = snapshot
             .sources
@@ -1557,23 +1567,52 @@ impl DelogApp {
                     && source.entry.kind == delog_core::identity::SourceKind::File
             })
             .count();
-        commands::CommandContext {
-            has_data: snapshot.global_time_range().is_some(),
+        commands::CommandContext::for_frame(
+            snapshot.global_time_range().is_some(),
             offline_source_count,
-            live_link_count: self.session.live_statuses().len(),
-            has_active_tasks: self.session.has_active_loads(),
-            scripting_enabled: cfg!(feature = "scripting"),
+            self.session.live_statuses().len(),
+            self.session.has_active_loads(),
+            parser_task_active,
+            cfg!(feature = "scripting"),
+        )
+    }
+
+    fn ensure_dynamic_command_catalog(&mut self) {
+        #[cfg(feature = "scripting")]
+        {
+            let scripts = &mut self.scripts;
+            let previous = self.dynamic_command_catalog.names().clone();
+            self.dynamic_command_catalog.ensure_with(|| {
+                Ok::<_, ()>(commands::merge_dynamic_command_refresh(
+                    &previous,
+                    Some(crate::config::layout::doc::list_layouts()),
+                    Some(scripts.script_names()),
+                    scripts.parser_names().ok(),
+                ))
+            });
         }
+        #[cfg(not(feature = "scripting"))]
+        self.dynamic_command_catalog.ensure_with(|| {
+            Ok::<_, ()>(dynamic_commands::DynamicCommandNames {
+                layouts: crate::config::layout::doc::list_layouts(),
+                scripts: Vec::new(),
+                parsers: Vec::new(),
+            })
+        });
+    }
+
+    fn open_command_palette(&mut self) {
+        self.dynamic_command_catalog.invalidate();
+        self.command_palette.open();
     }
 
     fn command_presentations(
-        &mut self,
-        snapshot: &delog_core::snapshot::StoreSnapshot,
+        &self,
+        context: commands::CommandContext,
     ) -> Vec<commands::CommandPresentation> {
         use commands::{
             AppCommand, CommandAvailability, CommandPresentation,
         };
-        let context = self.command_context(snapshot);
         debug_assert_eq!(commands::dynamic_command_families().len(), 4);
         let mut dynamic = Vec::new();
         for name in self.session.parser_names() {
@@ -1582,14 +1621,16 @@ impl DelogApp {
                 label: format!("Open with {}…", parser_label(name)),
                 shortcut: None,
                 availability: CommandAvailability::Enabled,
+                selected: None,
             });
         }
-        for name in crate::config::layout::doc::list_layouts() {
+        for name in &self.dynamic_command_catalog.names().layouts {
             dynamic.push(CommandPresentation {
                 command: AppCommand::LoadNamedLayout(name.clone()),
                 label: format!("Load layout: {name}"),
                 shortcut: None,
                 availability: CommandAvailability::Enabled,
+                selected: None,
             });
         }
         for (index, status) in self.session.live_statuses().into_iter().enumerate() {
@@ -1598,6 +1639,7 @@ impl DelogApp {
                 label: format!("Disconnect {}", status.endpoint),
                 shortcut: None,
                 availability: CommandAvailability::Enabled,
+                selected: None,
             });
         }
         #[cfg(feature = "scripting")]
@@ -1607,45 +1649,78 @@ impl DelogApp {
             } else {
                 CommandAvailability::Disabled("Another script is already running")
             };
-            for name in self.scripts.script_names() {
+            for name in &self.dynamic_command_catalog.names().scripts {
                 dynamic.push(CommandPresentation {
                     command: AppCommand::RunScript(name.clone()),
                     label: format!("Run script: {name}"),
                     shortcut: None,
                     availability: script_availability.clone(),
+                    selected: None,
                 });
             }
-            if let Ok(names) = self.scripts.parser_names() {
-                let parser_availability = if self.scripts.parser_dispatch_enabled() {
-                    CommandAvailability::Enabled
-                } else {
-                    CommandAvailability::Disabled("Another parser is already running")
-                };
-                for name in names {
-                    dynamic.push(CommandPresentation {
-                        command: AppCommand::OpenWithParser(name.clone()),
-                        label: format!("Parse file with {name}…"),
-                        shortcut: None,
-                        availability: parser_availability.clone(),
-                    });
-                }
+            let parser_availability = if self.scripts.parser_dispatch_enabled() {
+                CommandAvailability::Enabled
+            } else {
+                CommandAvailability::Disabled("Another parser is already running")
+            };
+            for name in &self.dynamic_command_catalog.names().parsers {
+                dynamic.push(CommandPresentation {
+                    command: AppCommand::OpenWithParser(name.clone()),
+                    label: format!("Parse file with {name}…"),
+                    shortcut: None,
+                    availability: parser_availability.clone(),
+                    selected: None,
+                });
             }
         }
-        commands::present_commands(&context, dynamic)
+        commands::present_commands(
+            &context,
+            &commands::PresentationState {
+                shell_emphasis_live: self.shell_emphasis
+                    == context_header::ShellEmphasis::Live,
+                cursor_sampling: self.hover_mode,
+                data_browser_open: !self.browser_collapsed,
+                inspector_open: self.inspector.open,
+                scene_3d_open: self.workspace.scene_pane_id().is_some(),
+                diagnostics_open: self.docks.is_open(AppDockTab::Diagnostics),
+                performance_open: self.docks.is_open(AppDockTab::Performance),
+                markers_open: self.docks.is_open(AppDockTab::Markers),
+                scripting_console_open: {
+                    #[cfg(feature = "scripting")]
+                    {
+                        self.docks.is_open(AppDockTab::ScriptingConsole)
+                    }
+                    #[cfg(not(feature = "scripting"))]
+                    {
+                        false
+                    }
+                },
+                logging_open: self.docks.is_open(AppDockTab::Logging),
+                playhead_snap: self.snap_playhead,
+                measuring_marker: self.marker_us.is_some(),
+                legends_visible: self.workspace.all_plot_legends_visible(),
+            },
+            dynamic,
+        )
     }
 
     fn command_palette_entries(
         presentations: Vec<commands::CommandPresentation>,
     ) -> Vec<command_palette::PaletteEntry> {
-        use commands::AppCommand;
         let mut entries = command_palette::CommandPaletteState::entries(presentations);
         for entry in &mut entries {
-            let terms = match entry.command {
-                AppCommand::Static(id) => {
+            let terms = match &entry.command {
+                commands::AppCommand::Static(id) => {
                     let spec = id.spec();
-                    entry
-                        .search_text
-                        .push_str(&format!(" {:?} {:?}", spec.group, spec.routes));
+                    entry.search_text.push_str(&format!(
+                        " {:?} {}",
+                        spec.group,
+                        spec.classic_menu_owner.title()
+                    ));
+                    for route in spec.routes {
+                        entry.search_text.push(' ');
+                        entry.search_text.push_str(route.search_term());
+                    }
                     spec.search_terms
                 }
                 _ => "dynamic recent named",
@@ -1669,6 +1744,13 @@ impl DelogApp {
             AppCommand::ToggleShellEmphasis => {
                 self.shell_emphasis = self.shell_emphasis.toggle();
             }
+            AppCommand::FitAll => {
+                if let Some(range) = snapshot.global_time_range() {
+                    self.view = Some(ViewX::from_range(range));
+                    self.fit_view_all = true;
+                }
+            }
+            AppCommand::SetCursorSampling(mode) => self.hover_mode = mode,
             AppCommand::OpenWithParser(name) => {
                 let built_in = self.session.parser_names().iter().any(|known| *known == name);
                 if built_in {
@@ -1696,9 +1778,7 @@ impl DelogApp {
                 CommandId::ConnectLive => self.show_connection_dialog = true,
                 CommandId::SyncSources => self.sync_window = SyncWindow::open(snapshot),
                 CommandId::DisconnectLive => {
-                    if !self.session.live_statuses().is_empty() {
-                        self.session.stop_live(0);
-                    }
+                    self.session.stop_all_live();
                 }
                 CommandId::CancelTasks => {
                     self.session.cancel_all();
@@ -1724,14 +1804,14 @@ impl DelogApp {
                 CommandId::ToggleDataBrowser => self.browser_collapsed = !self.browser_collapsed,
                 CommandId::ToggleInspector => self.inspector.open = !self.inspector.open,
                 CommandId::ToggleScene3d => self.workspace.toggle_scene_pane(),
-                CommandId::OpenDiagnostics => self.open_dock(AppDockTab::Diagnostics),
-                CommandId::OpenPerformance => self.open_dock(AppDockTab::Performance),
-                CommandId::OpenMarkers => self.open_dock(AppDockTab::Markers),
+                CommandId::OpenDiagnostics => self.toggle_dock(AppDockTab::Diagnostics),
+                CommandId::OpenPerformance => self.toggle_dock(AppDockTab::Performance),
+                CommandId::OpenMarkers => self.toggle_dock(AppDockTab::Markers),
                 CommandId::OpenScripting => {
                     #[cfg(feature = "scripting")]
-                    self.open_dock(AppDockTab::ScriptingConsole);
+                    self.toggle_dock(AppDockTab::ScriptingConsole);
                 }
-                CommandId::OpenLogging => self.open_dock(AppDockTab::Logging),
+                CommandId::OpenLogging => self.toggle_dock(AppDockTab::Logging),
                 CommandId::SaveLayout => self.save_layout_dialog.open = true,
                 CommandId::LoadLayout => {
                     self.load_layout_dialog.layouts =
@@ -1839,6 +1919,7 @@ impl DelogApp {
                 let display = to.trim().to_owned();
                 match crate::config::layout::doc::rename_named(&from, &display) {
                     Ok(()) => {
+                        self.dynamic_command_catalog.invalidate();
                         self.refresh_layout_manager(Some(display.clone()));
                         self.session
                             .push_diagnostic(delog_core::diagnostics::Diag::info(
@@ -1858,6 +1939,7 @@ impl DelogApp {
                 let display = to.trim().to_owned();
                 match crate::config::layout::doc::duplicate_named(&from, &display) {
                     Ok(()) => {
+                        self.dynamic_command_catalog.invalidate();
                         self.refresh_layout_manager(Some(display.clone()));
                         self.session
                             .push_diagnostic(delog_core::diagnostics::Diag::info(
@@ -1875,6 +1957,7 @@ impl DelogApp {
             }
             LayoutManagerAction::Delete(name) => match crate::config::layout::doc::delete_named(&name) {
                 Ok(()) => {
+                    self.dynamic_command_catalog.invalidate();
                     self.refresh_layout_manager(None);
                     self.session
                         .push_diagnostic(delog_core::diagnostics::Diag::info(
@@ -2158,7 +2241,14 @@ impl eframe::App for DelogApp {
         self.handle_picked_files();
         self.handle_layout_io_results();
         self.parquet_import.poll_requests();
-        keep_active_loads_repainting(ui.ctx(), self.session.has_active_loads());
+        #[cfg(feature = "scripting")]
+        let parser_task_active = self.scripts.is_parser_running();
+        #[cfg(not(feature = "scripting"))]
+        let parser_task_active = false;
+        keep_active_loads_repainting(
+            ui.ctx(),
+            self.session.has_active_loads() || parser_task_active,
+        );
         self.session.prune_finished();
         self.poll_trajectory_builds();
         self.frame = self.frame.wrapping_add(1);
@@ -2279,15 +2369,14 @@ impl eframe::App for DelogApp {
         // breakdown attributes the frame to the panel that actually costs it.
         let ui_menu_timer = self.session.metrics().scope("ui_menu");
         let range = timeline_range_for_ui(global_range);
-        let command_presentations = self.command_presentations(&snapshot);
         let native_load_active = self.session.has_active_loads();
         #[cfg(feature = "scripting")]
-        let parser_label = self
-            .scripts
-            .is_parser_running()
-            .then(|| self.scripts.parser_active_label());
+        let parser_label = parser_task_active.then(|| self.scripts.parser_active_label());
         #[cfg(not(feature = "scripting"))]
         let parser_label: Option<String> = None;
+        self.ensure_dynamic_command_catalog();
+        let command_context = self.command_context(&snapshot, parser_task_active);
+        let command_presentations = self.command_presentations(command_context);
         let load_state = combined_load_state(
             native_load_active,
             self.session.active_labels(),
@@ -2311,25 +2400,6 @@ impl eframe::App for DelogApp {
         } else {
             context_header::LoadStatusView::Idle
         };
-        let active_source_label = snapshot
-            .sources
-            .iter()
-            .find(|source| !source.entry.removed)
-            .map(|source| source.entry.label.clone());
-        let file_sources = snapshot
-            .sources
-            .iter()
-            .filter(|source| {
-                !source.entry.removed
-                    && source.entry.kind == delog_core::identity::SourceKind::File
-            })
-            .count();
-        let row_count = snapshot
-            .topics
-            .iter()
-            .filter(|topic| !topic.entry.removed)
-            .filter_map(|topic| topic.store.as_ref().map(|store| store.rows as usize))
-            .fold(0_usize, usize::saturating_add);
         let live_statuses = self
             .session
             .live_statuses()
@@ -2347,31 +2417,24 @@ impl eframe::App for DelogApp {
                 }
             })
             .collect();
-        let adaptive_shell = empty_state::shell_model(
-            empty_state::ShellModelInput {
-                file_sources,
-                live_links: self.session.live_statuses().len(),
-                rows: row_count,
-            },
-            self.shell_emphasis,
-        );
-        debug_assert!(adaptive_shell.browser_available && adaptive_shell.workspace_visible);
         let header_model = context_header::HeaderModel {
             emphasis: self.shell_emphasis,
-            active_source_label,
             live_statuses,
             load,
             fps: self.settings.show_fps.then_some(self.fps_ema).flatten(),
             theme: self.settings.theme,
         };
-        let header_commands = egui::Panel::top("context_header")
+        let header_output = egui::Panel::top("context_header")
             .show_inside(ui, |ui| {
                 context_header::show(ui, &header_model, &command_presentations)
             })
             .inner;
         drop(ui_menu_timer);
-        for command in header_commands {
+        for command in header_output.commands {
             self.dispatch_command(command, ui.ctx(), frame, &snapshot, range);
+        }
+        if header_output.refresh_dynamic_catalog {
+            self.dynamic_command_catalog.invalidate();
         }
 
         let wants_keyboard = ui.ctx().egui_wants_keyboard_input();
@@ -2382,7 +2445,7 @@ impl eframe::App for DelogApp {
             if self.command_palette.open {
                 self.command_palette.open = false;
             } else {
-                self.command_palette.open();
+                self.open_command_palette();
             }
         }
 
@@ -2399,7 +2462,17 @@ impl eframe::App for DelogApp {
                     .collect::<Vec<_>>()
             });
             for command in shortcuts {
-                self.dispatch_command(AppCommand::Static(command), ui.ctx(), frame, &snapshot, range);
+                if let Some(dock) = dock_for_command(command) {
+                    self.open_dock(dock);
+                } else {
+                    self.dispatch_command(
+                        AppCommand::Static(command),
+                        ui.ctx(),
+                        frame,
+                        &snapshot,
+                        range,
+                    );
+                }
             }
         }
 
@@ -2577,12 +2650,14 @@ impl eframe::App for DelogApp {
                         ui.horizontal(|ui| {
                             ui.add_space(collapsed_left_margin);
                             let icon_size = button_size - ui.spacing().button_padding * 2.0;
-                            let icon = egui::Image::new(crate::ui::icons::panel_left_open())
-                                .fit_to_exact_size(icon_size)
-                                .tint(ui.visuals().text_color());
-                            if ui
-                                .add_sized(button_size, egui::Button::image(icon))
-                                .on_hover_text("Show data browser")
+                            if crate::ui::components::icon_button_sized(
+                                ui,
+                                crate::ui::icons::panel_left_open(),
+                                "Show data browser",
+                                false,
+                                button_size,
+                                icon_size,
+                            )
                                 .clicked()
                             {
                                 self.browser_collapsed = false;
@@ -2667,7 +2742,14 @@ impl eframe::App for DelogApp {
             &mut self.field_stats,
         );
         if self.inspector.open {
-            let focused_fields = self.workspace.focused_fields();
+            let focused_tile = self.workspace.focused;
+            let cursor_fields = match &self.inspector.selection {
+                inspector::InspectorSelection::Cursor { readout } => readout
+                    .tile_id()
+                    .map(|tile_id| self.workspace.visible_fields(tile_id))
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            };
             let inspected_trace = match self.inspector.selection {
                 inspector::InspectorSelection::Trace { tile_id, field } => {
                     self.workspace.trace_ref(tile_id, field).cloned()
@@ -2686,7 +2768,8 @@ impl eframe::App for DelogApp {
                         &snapshot,
                         self.playback.t_us,
                         self.hover_mode,
-                        &focused_fields,
+                        &cursor_fields,
+                        focused_tile,
                         diagnostics.len(),
                         &mut self.field_stats,
                         inspected_trace.as_ref(),
@@ -2766,71 +2849,17 @@ impl eframe::App for DelogApp {
             let toolbar_model = global_plot_toolbar::GlobalPlotToolbarModel {
                 cursor_sampling: self.hover_mode,
                 playhead_snap: self.snap_playhead,
+                measuring_marker: self.marker_us.is_some(),
                 all_legends_visible: self.workspace.all_plot_legends_visible(),
                 legend_position: self.settings.plot.legend_position,
             };
-            for action in global_plot_toolbar::show(ui, &toolbar_model) {
-                match action {
-                    global_plot_toolbar::GlobalPlotToolbarAction::FitAll => {
-                        if let Some(range) = snapshot.global_time_range() {
-                            self.view = Some(ViewX::from_range(range));
-                            self.fit_view_all = true;
-                        }
-                    }
-                    global_plot_toolbar::GlobalPlotToolbarAction::SetCursorSampling(mode) => {
-                        self.hover_mode = mode;
-                    }
-                    global_plot_toolbar::GlobalPlotToolbarAction::TogglePlayheadSnap => {
-                        self.snap_playhead = !self.snap_playhead;
-                    }
-                    global_plot_toolbar::GlobalPlotToolbarAction::ToggleAllLegends => {
-                        let visible = !self.workspace.all_plot_legends_visible();
-                        self.workspace.set_all_plot_legends(visible);
-                    }
-                    global_plot_toolbar::GlobalPlotToolbarAction::CycleLegendPosition => {
-                        self.settings.plot.legend_position =
-                            next_legend_position(self.settings.plot.legend_position);
-                    }
-                    global_plot_toolbar::GlobalPlotToolbarAction::EqualizePlotHeights => {
-                        self.workspace.equalize_plot_heights();
-                    }
-                }
+            for command in
+                global_plot_toolbar::show(ui, &toolbar_model, &command_presentations)
+            {
+                self.dispatch_command(command, ui.ctx(), frame, &snapshot, range);
             }
 
             let workspace_rect = ui.available_rect_before_wrap();
-
-            if adaptive_shell.show_empty_state {
-                let parsers: Vec<_> = self
-                    .session
-                    .parser_names()
-                    .iter()
-                    .map(|name| (*name, crate::shell::app::parser_label(name)))
-                    .collect();
-                let actions = egui::Area::new(egui::Id::new("workspace-empty-state"))
-                    .order(egui::Order::Foreground)
-                    .fixed_pos(workspace_rect.center())
-                    .pivot(empty_state::PIVOT)
-                    .show(ui.ctx(), |ui| {
-                        empty_state::show(ui, adaptive_shell.emphasis, &parsers)
-                    })
-                    .inner;
-                for action in actions {
-                    let command = match action {
-                        empty_state::EmptyStateAction::Open => {
-                            Some(commands::AppCommand::Static(commands::CommandId::Open))
-                        }
-                        empty_state::EmptyStateAction::OpenWith(parser) => {
-                            Some(commands::AppCommand::OpenWithParser(parser))
-                        }
-                        empty_state::EmptyStateAction::ConnectLive => Some(
-                            commands::AppCommand::Static(commands::CommandId::ConnectLive),
-                        ),
-                    };
-                    if let Some(command) = command {
-                        self.dispatch_command(command, ui.ctx(), frame, &snapshot, range);
-                    }
-                }
-            }
 
             // The central panel is a fallback drop zone: dropping a field onto
             // empty workspace space plots it in the first pane.
@@ -2881,6 +2910,7 @@ impl eframe::App for DelogApp {
                     self.workspace.tree.ui(&mut behavior, ui);
                     drop(tree_timer);
                     let actions = behavior.into_actions();
+                    let hovered_cursor = actions.hovered_cursor;
                     // Share the widest pane gutter so stacked plots align next
                     // frame. Converges in one frame; until then each
                     // pane never drops below its own gutter, so labels never
@@ -2936,6 +2966,19 @@ impl eframe::App for DelogApp {
                     }
                     if let Some((tile_id, field)) = actions.inspect_trace {
                         self.inspector.focus_trace(tile_id, field);
+                    }
+                    let cursor_changed = self.inspector.update_cursor_readout(
+                        inspector::cursor_readout_for_frame(
+                            hovered_cursor.map(|hover| (hover.tile_id, hover.t_us)),
+                            self.playback.t_us,
+                            self.workspace.focused,
+                        ),
+                    );
+                    if cursor_changed {
+                        // The Inspector is laid out before the central workspace.
+                        // Schedule one convergence frame after its hover readout
+                        // changes so event-driven rendering cannot leave it stale.
+                        ui.ctx().request_repaint();
                     }
                     if let Some(action) = actions.image {
                         match action {
@@ -4139,6 +4182,21 @@ const SHORTCUT_KEYS: &[egui::Key] = &[
     egui::Key::L,
     egui::Key::M,
 ];
+
+fn dock_for_command(command: commands::CommandId) -> Option<AppDockTab> {
+    use commands::CommandId;
+    match command {
+        CommandId::OpenDiagnostics => Some(AppDockTab::Diagnostics),
+        CommandId::OpenPerformance => Some(AppDockTab::Performance),
+        CommandId::OpenMarkers => Some(AppDockTab::Markers),
+        #[cfg(feature = "scripting")]
+        CommandId::OpenScripting => Some(AppDockTab::ScriptingConsole),
+        #[cfg(not(feature = "scripting"))]
+        CommandId::OpenScripting => None,
+        CommandId::OpenLogging => Some(AppDockTab::Logging),
+        _ => None,
+    }
+}
 
 fn command_for_shortcut(
     key: egui::Key,
