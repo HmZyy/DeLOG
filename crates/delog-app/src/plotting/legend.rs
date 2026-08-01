@@ -125,7 +125,6 @@ fn legend_anchor(position: LegendPosition, bounds: egui::Rect) -> (egui::Pos2, e
 pub struct LegendOutcome {
     pub removed: Option<FieldId>,
     pub rename: Option<FieldId>,
-    pub inspect: Option<FieldId>,
     /// Index into `pane.ghosts` of a missing trace the user asked to remove.
     pub removed_ghost: Option<usize>,
 }
@@ -164,7 +163,6 @@ pub fn ui(
     }
     let mut removed = None;
     let mut rename = None;
-    let mut inspect = None;
     let mut removed_ghost = None;
     // Applied after the Area closure releases its borrow of `pane`.
     let mut filter_edits: Vec<(FieldId, String)> = Vec::new();
@@ -333,10 +331,6 @@ pub fn ui(
                                             .suffix(" px"),
                                     );
                                     ui.separator();
-                                    if ui.button("Inspect").clicked() {
-                                        inspect = Some(*field);
-                                        ui.close();
-                                    }
                                     if ui.button("Rename").clicked() {
                                         rename = Some(*field);
                                         ui.close();
@@ -403,7 +397,6 @@ pub fn ui(
     LegendOutcome {
         removed,
         rename,
-        inspect,
         removed_ghost,
     }
 }
