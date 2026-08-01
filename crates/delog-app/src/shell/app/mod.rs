@@ -1,6 +1,10 @@
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
+// Removed when the redesigned menus and command palette consume the registry.
+#[allow(dead_code)]
+pub mod commands;
+
 use delog_cache::CacheManager;
 use delog_core::diagnostics::{DiagRecord, Severity};
 use delog_core::time::TimeRange;
