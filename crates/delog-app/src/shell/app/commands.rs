@@ -45,6 +45,7 @@ pub enum CommandId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppCommand {
     Static(CommandId),
+    ToggleShellEmphasis,
     OpenWithParser(String),
     RunScript(String),
     LoadNamedLayout(String),

@@ -157,17 +157,17 @@ fn empty_stat_formats_as_a_dash() {
 }
 
 #[test]
-fn file_menu_opens_data_export_through_resetting_api() {
+fn export_command_opens_data_export_through_resetting_api() {
     let source = include_str!("mod.rs");
     let export_action = source
-        .split("if ui.button(\"Export Data\").clicked()")
+        .split("CommandId::ExportData =>")
         .nth(1)
-        .expect("Export submenu should expose data export")
-        .split("ui.separator();")
+        .expect("the command dispatcher should expose data export")
+        .split("CommandId::ExportDiagnostics")
         .next()
-        .expect("data export should precede the File menu separator");
+        .expect("data export should precede diagnostics export");
 
-    assert!(export_action.contains("self.data_export.open();"));
+    assert!(export_action.contains("self.data_export.open()"));
     assert!(!export_action.contains("self.data_export.open = true;"));
 }
 
