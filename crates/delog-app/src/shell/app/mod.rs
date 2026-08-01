@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 pub mod commands;
 pub mod command_palette;
 pub mod context_header;
+pub mod inspector;
 
 use delog_cache::CacheManager;
 use delog_core::diagnostics::{DiagRecord, Severity};
@@ -297,7 +298,7 @@ pub struct DelogApp {
     next_image_capture_id: u64,
     image_clipboard: Option<arboard::Clipboard>,
     browser_collapsed: bool,
-    inspector_open: bool,
+    inspector: inspector::InspectorState,
     shell_emphasis: context_header::ShellEmphasis,
     command_palette: command_palette::CommandPaletteState,
     docks: AppDockController,
@@ -444,7 +445,7 @@ impl DelogApp {
             next_image_capture_id: 1,
             image_clipboard: None,
             browser_collapsed: false,
-            inspector_open: false,
+            inspector: inspector::InspectorState::default(),
             shell_emphasis: context_header::ShellEmphasis::default(),
             command_palette: command_palette::CommandPaletteState::default(),
             docks: AppDockController::new_empty(),
@@ -1714,7 +1715,7 @@ impl DelogApp {
                     ),
                 ),
                 CommandId::ToggleDataBrowser => self.browser_collapsed = !self.browser_collapsed,
-                CommandId::ToggleInspector => self.inspector_open = !self.inspector_open,
+                CommandId::ToggleInspector => self.inspector.open = !self.inspector.open,
                 CommandId::ToggleScene3d => self.workspace.toggle_scene_pane(),
                 CommandId::OpenDiagnostics => self.open_dock(AppDockTab::Diagnostics),
                 CommandId::OpenPerformance => self.open_dock(AppDockTab::Performance),
@@ -2608,6 +2609,7 @@ impl eframe::App for DelogApp {
                 }
                 if let Some(field) = browser_response.inspect_field_stats {
                     self.field_stats.open(field);
+                    self.inspector.focus_statistics(vec![field]);
                 }
                 if let Some(field) = browser_response.generate_markers {
                     let title = crate::plotting::legend::trace_label(&snapshot, field);
@@ -2634,6 +2636,26 @@ impl eframe::App for DelogApp {
             &mut self.caches,
             &mut self.field_stats,
         );
+        if self.inspector.open {
+            let focused_fields = self.workspace.focused_fields();
+            egui::Panel::right("analysis_inspector")
+                .resizable(true)
+                .default_size(320.0)
+                .min_size(260.0)
+                .max_size(520.0)
+                .show_inside(ui, |ui| {
+                    inspector::show(
+                        ui,
+                        &mut self.inspector,
+                        &snapshot,
+                        self.playback.t_us,
+                        self.hover_mode,
+                        &focused_fields,
+                        diagnostics.len(),
+                        &mut self.field_stats,
+                    );
+                });
+        }
         for (t_us, name, color) in crate::shell::generate_markers::generate_markers_window(
             ui.ctx(),
             &mut self.generate_markers_dialog,
@@ -2772,7 +2794,11 @@ impl eframe::App for DelogApp {
                         self.spawn_export_kml_dialog(ui.ctx(), &snapshot);
                     }
                     if let Some(fields) = actions.inspect_field_stats {
-                        self.field_stats.open_fields(fields);
+                        self.field_stats.open_fields(fields.clone());
+                        self.inspector.focus_statistics(fields);
+                    }
+                    if let Some((tile_id, field)) = actions.inspect_trace {
+                        self.inspector.focus_trace(tile_id, field);
                     }
                     if let Some(action) = actions.image {
                         match action {

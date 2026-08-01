@@ -173,6 +173,16 @@ impl Workspace {
         }
     }
 
+    pub fn focused_fields(&self) -> Vec<FieldId> {
+        let Some(tile_id) = self.focused else {
+            return Vec::new();
+        };
+        match self.tree.tiles.get(tile_id) {
+            Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) => pane.fields().collect(),
+            _ => Vec::new(),
+        }
+    }
+
     pub fn fields(&self) -> impl Iterator<Item = FieldId> + '_ {
         self.plot_panes().flat_map(PlotPane::fields)
     }
@@ -554,6 +564,7 @@ pub struct WorkspaceActions {
     pub open_vehicle_config: bool,
     pub export_kml: bool,
     pub inspect_field_stats: Option<Vec<FieldId>>,
+    pub inspect_trace: Option<(egui_tiles::TileId, FieldId)>,
     /// Widest Y gutter any pane needed; fed into `Workspace::shared_y_gutter`.
     pub max_y_gutter: f32,
 }
@@ -1338,6 +1349,9 @@ impl Behavior<'_> {
                     .unwrap_or(canonical);
                 pane.rename = Some(crate::plotting::plot::RenameDialog { field, text });
             }
+            if let Some(field) = outcome.inspect {
+                self.actions.inspect_trace = Some((tile_id, field));
+            }
             if let Some(index) = outcome.removed_ghost {
                 pane.remove_ghost(index);
             }
@@ -1441,6 +1455,19 @@ impl Behavior<'_> {
                 self.actions.inspect_field_stats = Some(fields);
                 ui.close();
             }
+
+            ui.menu_button("Inspect trace", |ui| {
+                for trace in &pane.traces {
+                    let label = legend::trace_label(self.services.snapshot.as_ref(), trace.field);
+                    if ui.button(label).clicked() {
+                        self.actions.inspect_trace = Some((tile_id, trace.field));
+                        ui.close();
+                    }
+                }
+                if pane.traces.is_empty() {
+                    ui.add_enabled(false, egui::Button::new("No traces"));
+                }
+            });
 
             ui.menu_image_text_button(menu_icon(ui, crate::ui::icons::pencil()), "Edit trace", |ui| {
                 let entries: Vec<_> = pane
