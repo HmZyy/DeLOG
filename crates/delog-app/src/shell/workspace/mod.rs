@@ -21,6 +21,7 @@ use crate::map::provider::{MapProviderId, provider};
 use crate::map::worker::{MapScopeId, TileFailureClass, TileManager, TileRequest};
 use crate::plotting::plot::{GhostTrace, PlotPane, TraceMode, TraceRef, ViewX, draw_zoom_drag_overlay};
 use crate::scene3d::vehicle;
+use crate::ui::components;
 
 pub type TileTree = egui_tiles::Tree<Pane>;
 
@@ -654,7 +655,6 @@ pub struct PlotServices<'a> {
     pub marker_us: &'a mut Option<i64>,
     pub render_tuning: crate::config::settings::RenderTuning,
     pub scene3d: crate::config::settings::Scene3dSettings,
-    pub accent: egui::Color32,
     /// Playhead cursor time; `None` before any data loads.
     pub playhead_us: Option<i64>,
     pub playing: bool,
@@ -1004,7 +1004,7 @@ impl Behavior<'_> {
             scene_map_status(ui, rect, message.as_deref());
         }
 
-        let overlay = scene_overlay_buttons(ui, rect, pane.trail_to_playhead, self.services.accent);
+        let overlay = scene_overlay_buttons(ui, rect, pane.trail_to_playhead);
         if overlay.vehicle_config {
             self.actions.open_vehicle_config = true;
         }
@@ -1666,6 +1666,28 @@ impl Behavior<'_> {
                 ui.close();
             }
 
+            let marker_enabled = self.marker_us(pane).is_some();
+            if ui
+                .add(
+                    egui::Button::image_and_text(
+                        menu_icon(ui, crate::ui::icons::ruler()),
+                        "Toggle measuring marker",
+                    )
+                    .selected(marker_enabled),
+                )
+                .clicked()
+            {
+                self.set_marker_us(
+                    pane,
+                    if marker_enabled {
+                        None
+                    } else {
+                        self.services.playhead_us
+                    },
+                );
+                ui.close();
+            }
+
             ui.separator();
 
             ui.checkbox(&mut pane.show_legend, "Show legend");
@@ -2246,44 +2268,38 @@ fn scene_overlay_buttons(
     ui: &mut egui::Ui,
     scene_rect: egui::Rect,
     trail_to_playhead: bool,
-    accent: egui::Color32,
 ) -> SceneOverlayClicks {
     let id = ui.make_persistent_id("scene-overlay-buttons");
     let mut clicks = SceneOverlayClicks::default();
     egui::Area::new(id)
         .order(egui::Order::Foreground)
-        .fixed_pos(scene_rect.right_top() + egui::vec2(-36.0, 8.0))
+        .fixed_pos(scene_rect.right_top() + egui::vec2(-8.0, 8.0))
+        .pivot(egui::Align2::RIGHT_TOP)
         .show(ui.ctx(), |ui| {
-            ui.vertical(|ui| {
-                let gear = egui::Image::new(crate::ui::icons::gear())
-                    .fit_to_exact_size(egui::vec2(18.0, 18.0))
-                    .tint(ui.visuals().weak_text_color());
-                clicks.vehicle_config = ui
-                    .add_sized(egui::vec2(28.0, 24.0), egui::Button::image(gear))
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    clicks.vehicle_config = components::icon_button(
+                        ui,
+                        crate::ui::icons::gear(),
+                        "Configure vehicles",
+                        false,
+                    )
                     .clicked();
-
-                // Route toggle: accent when the path is clipped to the playhead,
-                // dimmed when the full path is shown (mirrors the toolbar's
-                // active/inactive icon-tint convention).
-                let route_tint = if trail_to_playhead {
-                    accent
-                } else {
-                    ui.visuals().weak_text_color()
-                };
-                let route = egui::Image::new(crate::ui::icons::route())
-                    .fit_to_exact_size(egui::vec2(18.0, 18.0))
-                    .tint(route_tint);
-                clicks.toggle_trail = ui
-                    .add_sized(egui::vec2(28.0, 24.0), egui::Button::image(route))
+                    clicks.toggle_trail = components::icon_button(
+                        ui,
+                        crate::ui::icons::route(),
+                        "Clip trails to playhead",
+                        trail_to_playhead,
+                    )
                     .clicked();
-
-                let earth = egui::Image::new(crate::ui::icons::earth())
-                    .fit_to_exact_size(egui::vec2(18.0, 18.0))
-                    .tint(ui.visuals().weak_text_color());
-                clicks.export_kml = ui
-                    .add_sized(egui::vec2(28.0, 24.0), egui::Button::image(earth))
-                    .on_hover_text("Export trajectories to KML")
+                    clicks.export_kml = components::icon_button(
+                        ui,
+                        crate::ui::icons::earth(),
+                        "Export trajectories to KML",
+                        false,
+                    )
                     .clicked();
+                });
             });
         });
     clicks
