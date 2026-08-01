@@ -66,6 +66,17 @@ fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
     &rest[..end]
 }
 
+fn assert_commands_in_order(source: &str, commands: &[&str]) {
+    let mut previous = 0;
+    for command in commands {
+        let index = source[previous..]
+            .find(command)
+            .unwrap_or_else(|| panic!("{command} should be present"))
+            + previous;
+        previous = index + command.len();
+    }
+}
+
 #[test]
 fn sync_toolbar_uses_icons_instead_of_unsupported_arrow_glyphs() {
     assert!(!SYNC_WINDOW_SOURCE.contains('→'));
@@ -76,14 +87,32 @@ fn sync_toolbar_uses_icons_instead_of_unsupported_arrow_glyphs() {
 
 #[test]
 fn menus_expose_scripts_parsers_and_scripting_console_dock() {
-    for command in [
-        "CommandId::OpenScripting",
-        "CommandId::OpenScriptEditor",
-        "CommandId::OpenScriptVariables",
-        "CommandId::OpenParserEditor",
-    ] {
-        assert!(CONTEXT_HEADER_SOURCE.contains(command));
-    }
+    let scripts = between(
+        CONTEXT_HEADER_SOURCE,
+        "const TOOLS_SCRIPTS_MENU",
+        "const TOOLS_PARSERS_MENU",
+    );
+    assert_commands_in_order(
+        scripts,
+        &[
+            "CommandId::OpenScripting",
+            "CommandId::OpenScriptEditor",
+            "CommandId::OpenScriptVariables",
+        ],
+    );
+    let parsers = between(
+        CONTEXT_HEADER_SOURCE,
+        "const TOOLS_PARSERS_MENU",
+        "#[cfg(test)]",
+    );
+    assert_commands_in_order(parsers, &["CommandId::OpenParserEditor"]);
+    let tools = between(
+        CONTEXT_HEADER_SOURCE,
+        "ui.menu_button(\"Tools\"",
+        "ui.separator();\n            ui.weak(\"Ctrl+K  Commands\")",
+    );
+    assert!(tools.contains("ui.menu_button(\"Scripts\""));
+    assert!(tools.contains("ui.menu_button(\"Parsers\""));
     assert!(APP_SOURCE.contains("AppCommand::RunScript"));
     assert!(APP_SOURCE.contains("AppCommand::OpenWithParser"));
     assert!(APP_SOURCE.contains("self.open_dock(AppDockTab::ScriptingConsole)"));
@@ -92,17 +121,15 @@ fn menus_expose_scripts_parsers_and_scripting_console_dock() {
 }
 
 #[test]
-fn panels_menu_orders_docks_and_function_keys_focus_them() {
+fn view_panels_menu_orders_docks_and_function_keys_focus_them() {
     let panels = between(
         CONTEXT_HEADER_SOURCE,
-        "const PANELS_MENU",
-        "const EXPORT_MENU",
+        "const VIEW_PANELS_MENU",
+        "const VIEW_LAYOUTS_MENU",
     );
     let expected_order = [
         "CommandId::OpenDiagnostics",
         "CommandId::OpenPerformance",
-        "CommandId::OpenMarkers",
-        "CommandId::OpenScripting",
         "CommandId::OpenLogging",
     ];
     let mut previous = 0;
@@ -402,13 +429,24 @@ fn browser_topic_table_layout_keeps_source_actions() {
 }
 
 #[test]
-fn workspace_menu_exposes_clear_current_layout() {
-    let workspace = between(
+fn view_layouts_menu_exposes_clear_current_layout() {
+    let layouts = between(
         CONTEXT_HEADER_SOURCE,
-        "const WORKSPACE_MENU",
-        "const ANALYSIS_MENU",
+        "const VIEW_LAYOUTS_MENU",
+        "const ANALYZE_MENU",
     );
-    assert!(workspace.contains("CommandId::ClearLayout"));
+    assert_commands_in_order(
+        layouts,
+        &[
+            "CommandId::SaveLayout",
+            "CommandId::LoadLayout",
+            "CommandId::ManageLayouts",
+            "CommandId::ImportLayout",
+            "CommandId::ExportLayout",
+            "CommandId::ClearLayout",
+            "CommandId::EqualizePlots",
+        ],
+    );
     assert!(COMMANDS_SOURCE.contains("\"Clear current layout\""));
     assert!(APP_SOURCE.contains("CommandId::ClearLayout => self.clear_current_layout()"));
 }
@@ -434,43 +472,43 @@ fn kml_export_results_surface_message_popups() {
 }
 
 #[test]
-fn source_and_export_menus_keep_the_requested_order() {
-    let source = between(
+fn file_menu_and_nested_export_keep_the_requested_order() {
+    let file = between(
         CONTEXT_HEADER_SOURCE,
-        "const SOURCE_MENU",
-        "const WORKSPACE_MENU",
+        "const FILE_MENU",
+        "const FILE_EXPORT_MENU",
     );
     let export = between(
         CONTEXT_HEADER_SOURCE,
-        "const EXPORT_MENU",
-        "pub(crate) const fn",
+        "const FILE_EXPORT_MENU",
+        "const VIEW_MENU",
     );
-    for (menu, commands) in [
-        (
-            source,
-            [
-                "CommandId::Open",
-                "CommandId::ConnectLive",
-                "CommandId::SyncSources",
-            ],
-        ),
-        (
-            export,
-            [
-                "CommandId::ExportData",
-                "CommandId::ExportDiagnostics",
-                "CommandId::ExportProfiling",
-            ],
-        ),
-    ] {
-        let mut previous = 0;
-        for command in commands {
-            let index = menu[previous..].find(command).unwrap() + previous;
-            previous = index + command.len();
-        }
-    }
-    assert!(CONTEXT_HEADER_SOURCE.contains("CommandId::OpenSettings"));
-    assert!(CONTEXT_HEADER_SOURCE.contains("CommandId::Exit"));
+    assert_commands_in_order(
+        file,
+        &[
+            "CommandId::Open",
+            "CommandId::ConnectLive",
+            "CommandId::DisconnectLive",
+            "CommandId::CancelTasks",
+            "CommandId::Exit",
+        ],
+    );
+    assert_commands_in_order(
+        export,
+        &[
+            "CommandId::ExportData",
+            "CommandId::ExportDiagnostics",
+            "CommandId::ExportProfiling",
+            "CommandId::ExportWorkspacePng",
+        ],
+    );
+    let file_menu = between(
+        CONTEXT_HEADER_SOURCE,
+        "ui.menu_button(\"File\"",
+        "ui.menu_button(\"View\"",
+    );
+    assert!(file_menu.contains("ui.menu_button(\"Open With\""));
+    assert!(file_menu.contains("ui.menu_button(\"Export\""));
 }
 
 #[test]
@@ -485,30 +523,55 @@ fn source_tools_use_context_availability_and_unified_dispatch() {
 }
 
 #[test]
-fn panels_menu_contains_panels_without_source_mutations() {
-    let panels = between(
+fn view_and_analyze_menus_keep_display_and_analysis_actions_separate() {
+    let view = between(
         CONTEXT_HEADER_SOURCE,
-        "const PANELS_MENU",
-        "const EXPORT_MENU",
+        "const VIEW_MENU",
+        "const VIEW_PANELS_MENU",
     );
-    assert!(panels.contains("CommandId::ToggleDataBrowser"));
-    assert!(panels.contains("CommandId::ToggleInspector"));
-    assert!(panels.contains("CommandId::ToggleScene3d"));
-    assert!(!panels.contains("CommandId::SyncSources"));
-    assert!(!panels.contains("CommandId::DisconnectLive"));
+    assert_commands_in_order(
+        view,
+        &[
+            "CommandId::ToggleDataBrowser",
+            "CommandId::ToggleInspector",
+            "CommandId::ToggleScene3d",
+        ],
+    );
+    assert!(!view.contains("CommandId::SyncSources"));
+    assert!(!view.contains("CommandId::DisconnectLive"));
+    let view_menu = between(
+        CONTEXT_HEADER_SOURCE,
+        "ui.menu_button(\"View\"",
+        "ui.menu_button(\"Analyze\"",
+    );
+    assert!(view_menu.contains("ui.menu_button(\"Panels\""));
+    assert!(view_menu.contains("ui.menu_button(\"Layouts\""));
+
+    let analyze = between(
+        CONTEXT_HEADER_SOURCE,
+        "const ANALYZE_MENU",
+        "const TOOLS_MENU",
+    );
+    assert_commands_in_order(
+        analyze,
+        &[
+            "CommandId::SyncSources",
+            "CommandId::AddMarker",
+            "CommandId::OpenMarkers",
+            "CommandId::OpenDataFlow",
+        ],
+    );
+    assert!(!analyze.contains("CommandId::ToggleScene3d"));
 }
 
 #[test]
 fn context_header_orders_the_application_menus() {
-    let menu_bar = between(CONTEXT_HEADER_SOURCE, "ui.horizontal_wrapped", "fn menu(");
-    let expected_order = [
-        "Source",
-        "Workspace",
-        "Analysis",
-        "Extensions",
-        "Panels",
-        "Export",
-    ];
+    let menu_bar = between(
+        CONTEXT_HEADER_SOURCE,
+        "ui.horizontal_wrapped",
+        "fn menu_items(",
+    );
+    let expected_order = ["File", "View", "Analyze", "Tools"];
     let mut previous = 0;
 
     for label in expected_order {
@@ -521,7 +584,9 @@ fn context_header_orders_the_application_menus() {
     }
 
     assert!(!menu_bar.contains("\"Edit\""));
-    assert!(menu_bar.contains("ui.menu_button(\"App\""));
+    assert!(!menu_bar.contains("\"Source\""));
+    assert!(!menu_bar.contains("\"Workspace\""));
+    assert!(!menu_bar.contains("\"Extensions\""));
     assert!(menu_bar.contains("Ctrl+K  Commands"));
 }
 
