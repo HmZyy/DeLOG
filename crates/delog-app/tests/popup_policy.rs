@@ -9,6 +9,9 @@ use policy_sources::{
     WORKSPACE as WORKSPACE_SOURCE,
 };
 
+const CONTEXT_HEADER_SOURCE: &str = include_str!("../src/shell/app/context_header.rs");
+const COMMANDS_SOURCE: &str = include_str!("../src/shell/app/commands.rs");
+
 const POPUP_SOURCES: &[&str] = &[
     APP_SOURCE,
     BROWSER,
@@ -63,10 +66,6 @@ fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
     &rest[..end]
 }
 
-fn normalized(source: &str) -> String {
-    source.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
 #[test]
 fn sync_toolbar_uses_icons_instead_of_unsupported_arrow_glyphs() {
     assert!(!SYNC_WINDOW_SOURCE.contains('→'));
@@ -77,37 +76,42 @@ fn sync_toolbar_uses_icons_instead_of_unsupported_arrow_glyphs() {
 
 #[test]
 fn menus_expose_scripts_parsers_and_scripting_console_dock() {
-    assert!(APP_SOURCE.contains("AppDockTab::ScriptingConsole, \"Scripting (F9)\""));
-    assert!(APP_SOURCE.contains("AppDockTab::Logging, \"Logging (F12)\""));
-    assert!(APP_SOURCE.contains("self.dock_open_checkbox(ui, AppDockTab::ScriptingConsole"));
-    assert!(APP_SOURCE.contains("ui.menu_button(\"Scripts\""));
-    assert!(APP_SOURCE.contains("ui.menu_button(\"Parsers\""));
-    assert!(APP_SOURCE.contains("ui.button(\"Editor...\")"));
-    assert!(APP_SOURCE.contains("ui.menu_button(\"Run\""));
-    assert!(APP_SOURCE.contains("ui.menu_button(\"Parse File\""));
+    for command in [
+        "CommandId::OpenScripting",
+        "CommandId::OpenScriptEditor",
+        "CommandId::OpenScriptVariables",
+        "CommandId::OpenParserEditor",
+    ] {
+        assert!(CONTEXT_HEADER_SOURCE.contains(command));
+    }
+    assert!(APP_SOURCE.contains("AppCommand::RunScript"));
+    assert!(APP_SOURCE.contains("AppCommand::OpenWithParser"));
+    assert!(APP_SOURCE.contains("self.open_dock(AppDockTab::ScriptingConsole)"));
+    assert!(COMMANDS_SOURCE.contains("Some(\"F9\")"));
+    assert!(COMMANDS_SOURCE.contains("Some(\"F12\")"));
 }
 
 #[test]
-fn view_menu_orders_docks_and_function_keys_focus_them() {
-    let view_menu = between(
-        APP_SOURCE,
-        "ui.menu_button(\"View\"",
-        "ui.menu_button(\"Layout\"",
+fn panels_menu_orders_docks_and_function_keys_focus_them() {
+    let panels = between(
+        CONTEXT_HEADER_SOURCE,
+        "const PANELS_MENU",
+        "const EXPORT_MENU",
     );
     let expected_order = [
-        "\"Diagnostic (F1)\"",
-        "\"Performance (F2)\"",
-        "\"Markers (F3)\"",
-        "\"Scripting (F9)\"",
-        "\"Logging (F12)\"",
+        "CommandId::OpenDiagnostics",
+        "CommandId::OpenPerformance",
+        "CommandId::OpenMarkers",
+        "CommandId::OpenScripting",
+        "CommandId::OpenLogging",
     ];
     let mut previous = 0;
-    for label in expected_order {
-        let index = view_menu[previous..]
-            .find(label)
-            .unwrap_or_else(|| panic!("{label} should be in the View menu"))
+    for command in expected_order {
+        let index = panels[previous..]
+            .find(command)
+            .unwrap_or_else(|| panic!("{command} should be in the Panels menu"))
             + previous;
-        previous = index + label.len();
+        previous = index + command.len();
     }
 
     for key in [
@@ -119,16 +123,15 @@ fn view_menu_orders_docks_and_function_keys_focus_them() {
     ] {
         assert!(APP_SOURCE.contains(key));
     }
-
-    assert!(APP_SOURCE.contains("self.open_dock(AppDockTab::Diagnostics);"));
-    assert!(APP_SOURCE.contains("self.open_dock(AppDockTab::Performance);"));
-    assert!(APP_SOURCE.contains("self.open_dock(AppDockTab::Markers);"));
-    assert!(APP_SOURCE.contains("self.open_dock(AppDockTab::ScriptingConsole);"));
-    assert!(APP_SOURCE.contains("self.open_dock(AppDockTab::Logging);"));
-    assert!(!APP_SOURCE.contains("self.diagnostics_dock.open = !self.diagnostics_dock.open"));
-    assert!(!APP_SOURCE.contains("self.performance_dock.open = !self.performance_dock.open"));
-    assert!(!APP_SOURCE.contains("self.markers_dock.open = !self.markers_dock.open"));
-    assert!(!APP_SOURCE.contains("self.logging_dock.open = !self.logging_dock.open"));
+    for dock in [
+        "Diagnostics",
+        "Performance",
+        "Markers",
+        "ScriptingConsole",
+        "Logging",
+    ] {
+        assert!(APP_SOURCE.contains(&format!("self.open_dock(AppDockTab::{dock})")));
+    }
 }
 
 #[test]
@@ -243,106 +246,17 @@ fn browser_exposes_field_metadata_inspector() {
 }
 
 #[test]
-fn moved_plot_controls_live_on_icon_toolbar_not_plot_context_menu() {
-    let context_menu = between(
-        WORKSPACE_SOURCE,
-        "fn plot_context_menu(",
-        "fn plot_info_window(",
-    );
-    for removed in [
-        "\"Show legend\"",
-        "\"Hover mode\"",
-        "\"Snap\"",
-        "\"Add measuring marker\"",
-        "\"Remove measuring marker\"",
+fn moved_plot_controls_remain_reachable_without_the_global_toolbar() {
+    assert!(!APP_SOURCE.contains("egui::Panel::top(\"tool_icons\")"));
+    for command in [
+        "CommandId::TogglePlayheadSnap",
+        "CommandId::AddMeasuringMarker",
+        "CommandId::EqualizePlots",
+        "CommandId::ToggleLegends",
+        "CommandId::CycleLegendPosition",
     ] {
-        assert!(
-            !context_menu.contains(removed),
-            "{removed} should not be rendered from the plot context menu"
-        );
-    }
-
-    let toolbar = between(
-        APP_SOURCE,
-        "egui::Panel::top(\"tool_icons\")",
-        "drop(ui_toolbar_timer);",
-    );
-    for id in [
-        "toolbar-hover-mode",
-        "toolbar-snap-playhead",
-        "toolbar-measuring-marker",
-        "toolbar-equal-plot-heights",
-        "toolbar-legends",
-        "toolbar-legend-position",
-    ] {
-        assert!(
-            toolbar.contains(id),
-            "{id} should be an icon toolbar control"
-        );
-    }
-    assert!(!toolbar.contains("toolbar-marker-shade"));
-    assert!(!toolbar.contains("Shade between markers"));
-    assert!(toolbar.contains("hover_mode_menu_button("));
-    assert!(!toolbar.contains("next_sample_mode("));
-    assert!(toolbar.contains("legend_position_icon("));
-    assert!(!toolbar.contains("crate::ui::icons::panel_top()"));
-    assert!(toolbar.contains(".on_hover_text(\"Cycle legend position\")"));
-    assert!(!toolbar.contains("Cycle legend position - current"));
-    let marker = toolbar
-        .find("toolbar-measuring-marker")
-        .expect("measuring marker control should exist");
-    let equal_heights = toolbar
-        .find("toolbar-equal-plot-heights")
-        .expect("equal plot heights control should exist");
-    let legends = toolbar
-        .find("toolbar-legends")
-        .expect("legend visibility control should exist");
-    assert!(
-        marker < equal_heights && equal_heights < legends,
-        "equal plot heights should sit between the measuring marker and legend controls"
-    );
-    assert!(
-        toolbar[marker..legends].contains("ui.separator();"),
-        "a separator should split marker tools from legend tools"
-    );
-    assert!(toolbar.contains("self.workspace.equalize_plot_heights();"));
-    assert!(toolbar.contains("crate::ui::icons::ruler_dimension_line()"));
-    assert!(toolbar.contains("crate::ui::icons::grid_2x2_check()"));
-    assert!(toolbar.contains("let legends_hidden = !self.workspace.all_plot_legends_visible();"));
-    assert!(
-        !APP_SOURCE.contains(
-            "self.workspace.default_show_legend = self.settings.plot.show_legend_default"
-        )
-    );
-    assert!(toolbar.contains("legend_tint = if legends_hidden"));
-    assert!(toolbar.contains("crate::ui::icons::eye_off()"));
-    assert!(toolbar.contains("legend_tint,\n                    legends_hidden,"));
-    for tooltip in [
-        "Select hover mode",
-        "Toggle playhead snap",
-        "Add measuring marker",
-        "Resize all plots",
-        "Toggle legends",
-        "Cycle legend position",
-    ] {
-        assert!(
-            toolbar.contains(tooltip),
-            "{tooltip} should be exposed as hover text"
-        );
-    }
-    for mode in ["Previous", "Next", "Linear"] {
-        assert!(
-            toolbar.contains(mode),
-            "{mode} should be selectable from the hover mode menu"
-        );
-    }
-    for icon in [
-        "dice_top_left",
-        "dice_top_right",
-        "dice_bottom_left",
-        "dice_bottom_right",
-    ] {
-        assert!(APP_SOURCE.contains(icon));
+        assert!(COMMANDS_SOURCE.contains(command.trim_start_matches("CommandId::")));
+        assert!(APP_SOURCE.contains(command));
     }
 }
 
@@ -456,10 +370,15 @@ fn browser_topic_table_layout_keeps_source_actions() {
 }
 
 #[test]
-fn layout_menu_exposes_clear_current_layout() {
-    assert!(APP_SOURCE.contains("ui.menu_button(\"Layout\""));
-    assert!(APP_SOURCE.contains("Clear current layout"));
-    assert!(APP_SOURCE.contains("self.clear_current_layout();"));
+fn workspace_menu_exposes_clear_current_layout() {
+    let workspace = between(
+        CONTEXT_HEADER_SOURCE,
+        "const WORKSPACE_MENU",
+        "const ANALYSIS_MENU",
+    );
+    assert!(workspace.contains("CommandId::ClearLayout"));
+    assert!(COMMANDS_SOURCE.contains("\"Clear current layout\""));
+    assert!(APP_SOURCE.contains("CommandId::ClearLayout => self.clear_current_layout()"));
 }
 
 #[test]
@@ -483,127 +402,101 @@ fn kml_export_results_surface_message_popups() {
 }
 
 #[test]
-fn file_menu_nests_exports_in_the_requested_order() {
-    let file_menu = between(
-        APP_SOURCE,
-        "ui.menu_button(\"File\"",
-        "\n                ui.separator();\n                ui.menu_button(\"View\"",
+fn source_and_export_menus_keep_the_requested_order() {
+    let source = between(
+        CONTEXT_HEADER_SOURCE,
+        "const SOURCE_MENU",
+        "const WORKSPACE_MENU",
     );
-    let open = file_menu.find("ui.button(\"Open\")").unwrap();
-    let sync = file_menu
-        .find("egui::Button::new(\"Sync Sources\")")
-        .unwrap();
-    let dataflow = file_menu.find("ui.button(\"Data Flow\")").unwrap();
-    let export_menu = file_menu.find("ui.menu_button(\"Export\", |ui|").unwrap();
-    let data = file_menu.find("ui.button(\"Export Data\")").unwrap();
-    let diagnostics = file_menu.find("ui.button(\"Export Diagnostics\")").unwrap();
-    let profiling = file_menu.find("ui.button(\"Export Profiling\")").unwrap();
-    let settings = file_menu.find("ui.button(\"Settings\")").unwrap();
-    let exit = file_menu.find("ui.button(\"Exit\")").unwrap();
-
-    assert!(open < export_menu && export_menu < sync && sync < dataflow);
-    assert!(export_menu < data && data < diagnostics && diagnostics < profiling);
-    assert!(profiling < settings && settings < exit);
-    assert_eq!(file_menu.matches("ui.separator();").count(), 3);
-    assert!(file_menu.contains("self.settings_dialog.open();"));
-    assert!(!file_menu.contains("Open File"));
-    assert!(!file_menu.contains("JSON..."));
+    let export = between(
+        CONTEXT_HEADER_SOURCE,
+        "const EXPORT_MENU",
+        "pub(crate) const fn",
+    );
+    for (menu, commands) in [
+        (
+            source,
+            [
+                "CommandId::Open",
+                "CommandId::ConnectLive",
+                "CommandId::SyncSources",
+            ],
+        ),
+        (
+            export,
+            [
+                "CommandId::ExportData",
+                "CommandId::ExportDiagnostics",
+                "CommandId::ExportProfiling",
+            ],
+        ),
+    ] {
+        let mut previous = 0;
+        for command in commands {
+            let index = menu[previous..].find(command).unwrap() + previous;
+            previous = index + command.len();
+        }
+    }
+    assert!(CONTEXT_HEADER_SOURCE.contains("CommandId::OpenSettings"));
+    assert!(CONTEXT_HEADER_SOURCE.contains("CommandId::Exit"));
 }
 
 #[test]
-fn source_tools_live_directly_below_export_in_file_not_view() {
-    let file_menu = between(
-        APP_SOURCE,
-        "ui.menu_button(\"File\"",
-        "\n                ui.separator();\n                ui.menu_button(\"View\"",
+fn source_tools_use_context_availability_and_unified_dispatch() {
+    assert!(APP_SOURCE.contains("source.entry.kind == delog_core::identity::SourceKind::File"));
+    assert!(COMMANDS_SOURCE.contains("context.offline_source_count < 2"));
+    assert!(
+        APP_SOURCE
+            .contains("CommandId::SyncSources => self.sync_window = SyncWindow::open(snapshot)")
     );
-    let export_menu = between(
-        file_menu,
-        "ui.menu_button(\"Export\", |ui|",
-        "let offline_sources = snapshot",
-    );
-    assert!(!export_menu.contains("Sync Sources"));
-    assert!(file_menu.contains("                    });\n                    let offline_sources"));
-
-    let launcher = between(
-        file_menu,
-        "let offline_sources = snapshot",
-        "ui.separator();",
-    );
-    assert!(launcher.contains("!source.entry.removed"));
-    assert!(launcher.contains("source.entry.kind == delog_core::identity::SourceKind::File"));
-    assert!(launcher.contains("offline_sources >= 2"));
-    assert!(launcher.contains("self.sync_window = SyncWindow::open(&snapshot);"));
-    assert!(launcher.contains("ui.button(\"Data Flow\")"));
-    assert!(launcher.contains("self.dataflow.open = true;"));
-    assert_eq!(launcher.matches("ui.close();").count(), 2);
+    assert!(APP_SOURCE.contains("CommandId::OpenDataFlow => self.dataflow.open = true"));
 }
 
 #[test]
-fn view_menu_is_a_dock_only_block_without_orphan_sync_separator() {
-    const VIEW_START: &str = "ui.menu_button(\"View\", |ui| {";
-    let view = between(
-        APP_SOURCE,
-        VIEW_START,
-        "\n                });\n                ui.separator();\n                ui.menu_button(\"Layout\"",
+fn panels_menu_contains_panels_without_source_mutations() {
+    let panels = between(
+        CONTEXT_HEADER_SOURCE,
+        "const PANELS_MENU",
+        "const EXPORT_MENU",
     );
-    let body = view
-        .strip_prefix(VIEW_START)
-        .expect("View menu extraction should retain its start marker");
-    let expected_docks = r#"
-        self.dock_open_checkbox(ui, AppDockTab::Diagnostics, "Diagnostic (F1)");
-        self.dock_open_checkbox(ui, AppDockTab::Performance, "Performance (F2)");
-        self.dock_open_checkbox(ui, AppDockTab::Markers, "Markers (F3)");
-        #[cfg(feature = "scripting")]
-        self.dock_open_checkbox(ui, AppDockTab::ScriptingConsole, "Scripting (F9)");
-        self.dock_open_checkbox(ui, AppDockTab::Logging, "Logging (F12)");
-    "#;
-
-    assert_eq!(normalized(body), normalized(expected_docks));
-    assert!(!body.trim_start().starts_with("ui.separator();"));
-    assert!(!body.trim_end().ends_with("ui.separator();"));
-    assert!(!view.contains("Sync Sources"));
-    assert!(!view.contains("offline_sources"));
+    assert!(panels.contains("CommandId::ToggleDataBrowser"));
+    assert!(panels.contains("CommandId::ToggleInspector"));
+    assert!(panels.contains("CommandId::ToggleScene3d"));
+    assert!(!panels.contains("CommandId::SyncSources"));
+    assert!(!panels.contains("CommandId::DisconnectLive"));
 }
 
 #[test]
-fn main_menu_omits_edit_and_orders_the_remaining_menus() {
-    let menu_bar = between(
-        APP_SOURCE,
-        "egui::MenuBar::new().ui(ui, |ui|",
-        "drop(ui_menu_timer);",
-    );
-    let expected_order = ["File", "View", "Layout", "Scripts", "Parsers"];
+fn context_header_orders_the_application_menus() {
+    let menu_bar = between(CONTEXT_HEADER_SOURCE, "ui.horizontal_wrapped", "fn menu(");
+    let expected_order = [
+        "Source",
+        "Workspace",
+        "Analysis",
+        "Extensions",
+        "Panels",
+        "Export",
+    ];
     let mut previous = 0;
 
     for label in expected_order {
-        let needle = format!("ui.menu_button(\"{label}\"");
+        let needle = format!("\"{label}\"");
         let index = menu_bar[previous..]
             .find(&needle)
-            .unwrap_or_else(|| panic!("{label} should be in the main menu"))
+            .unwrap_or_else(|| panic!("{label} should be in the context header"))
             + previous;
         previous = index + needle.len();
     }
 
-    assert!(!menu_bar.contains("ui.menu_button(\"Edit\""));
-    assert!(menu_bar.contains(
-        "                });\n                ui.separator();\n                ui.menu_button(\"View\""
-    ));
-    assert!(menu_bar.contains(
-        "                });\n                ui.separator();\n                ui.menu_button(\"Layout\""
-    ));
-    assert!(menu_bar.contains(
-        "                });\n                #[cfg(feature = \"scripting\")]\n                {\n                    ui.separator();\n                    ui.menu_button(\"Scripts\""
-    ));
-    assert!(menu_bar.contains(
-        "                    });\n                    ui.separator();\n                    ui.menu_button(\"Parsers\""
-    ));
+    assert!(!menu_bar.contains("\"Edit\""));
+    assert!(menu_bar.contains("ui.menu_button(\"App\""));
+    assert!(menu_bar.contains("Ctrl+K  Commands"));
 }
 
 #[test]
-fn file_menu_and_results_use_unified_data_export_path() {
-    assert!(APP_SOURCE.contains("Export Data"));
-    assert!(APP_SOURCE.contains("self.data_export.open();"));
+fn export_menu_and_results_use_unified_data_export_path() {
+    assert!(COMMANDS_SOURCE.contains("\"Export data…\""));
+    assert!(APP_SOURCE.contains("CommandId::ExportData => self.data_export.open()"));
     assert!(APP_SOURCE.contains("fn spawn_data_export("));
     assert!(APP_SOURCE.contains("\"data-export\""));
     assert!(!APP_SOURCE.contains(concat!("Export ", "CSV...")));
