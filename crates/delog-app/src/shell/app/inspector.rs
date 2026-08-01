@@ -89,6 +89,7 @@ pub fn show(
     diagnostic_count: usize,
     stats: &mut FieldStatsController,
     inspected_trace: Option<&TraceRef>,
+    live_summaries: &[super::context_header::LiveSummary],
 ) -> Vec<InspectorEvent> {
     let mut events = Vec::new();
     ui.horizontal(|ui| {
@@ -142,7 +143,7 @@ pub fn show(
         state.selection = InspectorSelection::Cursor { t_us: playback_us };
     }
     egui::ScrollArea::vertical().show(ui, |ui| match &state.selection {
-        InspectorSelection::Summary => summary_ui(ui, snapshot, diagnostic_count),
+        InspectorSelection::Summary => summary_ui(ui, snapshot, diagnostic_count, live_summaries),
         InspectorSelection::Cursor { t_us } => {
             cursor_ui(ui, snapshot, *t_us, hover_mode, focused_fields)
         }
@@ -230,7 +231,12 @@ fn trace_inspector_ui(
     }
 }
 
-fn summary_ui(ui: &mut egui::Ui, snapshot: &StoreSnapshot, diagnostic_count: usize) {
+fn summary_ui(
+    ui: &mut egui::Ui,
+    snapshot: &StoreSnapshot,
+    diagnostic_count: usize,
+    live_summaries: &[super::context_header::LiveSummary],
+) {
     let sources: Vec<_> = snapshot
         .sources
         .iter()
@@ -276,6 +282,21 @@ fn summary_ui(ui: &mut egui::Ui, snapshot: &StoreSnapshot, diagnostic_count: usi
             ui.horizontal(|ui| {
                 ui.label(&source.entry.label);
                 ui.weak(super::source_kind_label(&source.entry.label));
+            });
+        }
+    }
+    if !live_summaries.is_empty() {
+        ui.separator();
+        ui.strong("Live connections");
+        for live in live_summaries {
+            ui.group(|ui| {
+                property(ui, "Endpoint", &live.endpoint);
+                property(ui, "State", &live.state);
+                property(ui, "Frames", live.rx_frames.to_string());
+                property(ui, "Rows", live.rows.to_string());
+                if let Some(recording) = &live.recording {
+                    property(ui, "Recording", recording);
+                }
             });
         }
     }

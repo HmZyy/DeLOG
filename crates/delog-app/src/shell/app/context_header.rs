@@ -22,13 +22,14 @@ impl ShellEmphasis {
 pub struct HeaderModel {
     pub emphasis: ShellEmphasis,
     pub active_source_label: Option<String>,
-    pub live_statuses: Vec<LiveStatusView>,
+    pub live_statuses: Vec<LiveSummary>,
     pub load: LoadStatusView,
     pub fps: Option<f32>,
     pub theme: crate::ui::theme::ThemeChoice,
 }
 
-pub struct LiveStatusView {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveSummary {
     pub index: usize,
     pub endpoint: String,
     pub state: String,
