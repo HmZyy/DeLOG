@@ -116,8 +116,19 @@ fn menus_expose_scripts_parsers_and_scripting_console_dock() {
         .find("ui.menu_button(\"Tools\"")
         .expect("Tools menu should exist")..];
     assert!(tools.contains("ui.menu_button(\"Scripts\""));
-    assert!(tools.contains("ui.menu_button(\"Run Script\""));
+    assert!(tools.contains("ui.menu_button(\"Run Scripts\""));
     assert!(tools.contains("ui.menu_button(\"Parsers\""));
+    assert!(tools.contains("ui.menu_button(\"Run Parser\""));
+    assert!(tools.contains("ui.menu_button(\"Layouts\""));
+    assert_commands_in_order(
+        tools,
+        &[
+            "ui.menu_button(\"Scripts\"",
+            "ui.menu_button(\"Parsers\"",
+            "ui.menu_button(\"Layouts\"",
+            "TOOLS_MENU",
+        ],
+    );
     assert!(!scripts.contains("CommandId::OpenScripting"));
     assert!(APP_SOURCE.contains("AppCommand::RunScript"));
     assert!(APP_SOURCE.contains("AppCommand::OpenWithParser"));
@@ -128,22 +139,17 @@ fn menus_expose_scripts_parsers_and_scripting_console_dock() {
 
 #[test]
 fn dynamic_commands_live_under_the_user_authoritative_nested_menus() {
-    let view = between(
+    let file = between(
         CONTEXT_HEADER_SOURCE,
+        "ui.menu_button(\"File\"",
         "ui.menu_button(\"View\"",
-        "ui.menu_button(\"Analyze\"",
     );
-    let layouts = between(
-        view,
-        "ui.menu_button(\"Layouts\"",
-        "refresh_dynamic_catalog |= view_menu.response.clicked();",
+    let open_with = between(
+        file,
+        "ui.menu_button(\"Open With\"",
+        "ui.menu_button(\"Export\"",
     );
-    let load_layout = between(
-        layouts,
-        "ui.menu_button(\"Load Layout\"",
-        "&VIEW_LAYOUTS_MENU[2..]",
-    );
-    assert!(load_layout.contains("AppCommand::LoadNamedLayout"));
+    assert!(open_with.contains("AppCommand::OpenWithBuiltInParser"));
 
     let tools = &CONTEXT_HEADER_SOURCE[CONTEXT_HEADER_SOURCE
         .find("ui.menu_button(\"Tools\"")
@@ -155,17 +161,58 @@ fn dynamic_commands_live_under_the_user_authoritative_nested_menus() {
     );
     let run_script = between(
         scripts,
-        "ui.menu_button(\"Run Script\"",
+        "ui.menu_button(\"Run Scripts\"",
         "TOOLS_SCRIPTS_MENU",
     );
     assert!(run_script.contains("AppCommand::RunScript"));
 
-    let parsers = &tools[tools
-        .find("ui.menu_button(\"Parsers\"")
-        .expect("Parsers submenu should exist")..];
-    assert!(parsers.contains("AppCommand::OpenWithParser"));
+    let parsers = between(
+        tools,
+        "ui.menu_button(\"Parsers\"",
+        "ui.menu_button(\"Layouts\"",
+    );
+    let parser_editor = parsers
+        .find("TOOLS_PARSERS_MENU")
+        .expect("Parser Editor should be rendered");
+    let run_parser = parsers
+        .find("ui.menu_button(\"Run Parser\"")
+        .expect("Run Parser submenu should exist");
+    assert!(parser_editor < run_parser);
+    assert!(parsers[run_parser..].contains("AppCommand::OpenWithParser"));
+
+    let layouts = &tools[tools
+        .find("ui.menu_button(\"Layouts\"")
+        .expect("Layouts submenu should exist")..];
+    let load_layout = between(
+        layouts,
+        "ui.menu_button(\"Load Layout\"",
+        "&TOOLS_LAYOUTS_MENU[",
+    );
+    assert!(load_layout.contains("AppCommand::LoadNamedLayout"));
+    assert!(!load_layout.contains("CommandId::LoadLayout"));
+
     assert!(APP_SOURCE.contains("self.spawn_open_dialog(ctx, Some(&name))"));
     assert!(APP_SOURCE.contains("self.scripts.request_open(ctx, &name)"));
+}
+
+#[test]
+fn dynamic_menu_rows_use_only_their_display_names() {
+    let presentations = between(
+        APP_SOURCE,
+        "fn command_presentations(",
+        "fn command_palette_entries(",
+    );
+    for forbidden_prefix in [
+        "format!(\"Open with",
+        "format!(\"Parse file with",
+        "format!(\"Run script:",
+        "format!(\"Load layout:",
+    ] {
+        assert!(
+            !presentations.contains(forbidden_prefix),
+            "dynamic row retains action prefix {forbidden_prefix:?}"
+        );
+    }
 }
 
 #[test]
@@ -185,7 +232,7 @@ fn view_panels_menu_orders_docks_and_function_keys_focus_them() {
     let panels = between(
         CONTEXT_HEADER_SOURCE,
         "const VIEW_PANELS_MENU",
-        "const VIEW_LAYOUTS_MENU",
+        "const ANALYZE_MENU",
     );
     let expected_order = [
         "CommandId::OpenDiagnostics",
@@ -488,17 +535,16 @@ fn browser_topic_table_layout_keeps_source_actions() {
 }
 
 #[test]
-fn view_layouts_menu_exposes_clear_current_layout() {
+fn tools_layouts_menu_exposes_clear_current_layout() {
     let layouts = between(
         CONTEXT_HEADER_SOURCE,
-        "const VIEW_LAYOUTS_MENU",
-        "const ANALYZE_MENU",
+        "const TOOLS_LAYOUTS_MENU",
+        "#[cfg(test)]",
     );
     assert_commands_in_order(
         layouts,
         &[
             "CommandId::SaveLayout",
-            "CommandId::LoadLayout",
             "CommandId::ManageLayouts",
             "CommandId::ImportLayout",
             "CommandId::ExportLayout",
@@ -564,7 +610,7 @@ fn file_menu_and_nested_export_keep_the_requested_order() {
         "ui.menu_button(\"File\"",
         "ui.menu_button(\"View\"",
     );
-    assert!(!file_menu.contains("ui.menu_button(\"Open With\""));
+    assert!(file_menu.contains("ui.menu_button(\"Open With\""));
     assert!(file_menu.contains("ui.menu_button(\"Export\""));
     assert!(file_menu.contains("ui.separator();"));
     let separator = file_menu.rfind("ui.separator();").unwrap();
@@ -606,7 +652,7 @@ fn view_and_analyze_menus_keep_display_and_analysis_actions_separate() {
         "ui.menu_button(\"Analyze\"",
     );
     assert!(view_menu.contains("ui.menu_button(\"Panels\""));
-    assert!(view_menu.contains("ui.menu_button(\"Layouts\""));
+    assert!(!view_menu.contains("ui.menu_button(\"Layouts\""));
 
     let analyze = between(
         CONTEXT_HEADER_SOURCE,

@@ -1614,11 +1614,17 @@ impl DelogApp {
             AppCommand, CommandAvailability, CommandPresentation,
         };
         debug_assert_eq!(commands::dynamic_command_families().len(), 4);
+        debug_assert!(
+            self.session
+                .parser_names()
+                .into_iter()
+                .eq(BUILT_IN_PARSER_PRESENTATIONS.iter().map(|(name, _)| *name))
+        );
         let mut dynamic = Vec::new();
-        for name in self.session.parser_names() {
+        for &(name, label) in BUILT_IN_PARSER_PRESENTATIONS {
             dynamic.push(CommandPresentation {
-                command: AppCommand::OpenWithParser(name.to_owned()),
-                label: format!("Open with {}…", parser_label(name)),
+                command: AppCommand::OpenWithBuiltInParser(name.to_owned()),
+                label: label.to_owned(),
                 shortcut: None,
                 availability: CommandAvailability::Enabled,
                 selected: None,
@@ -1627,7 +1633,7 @@ impl DelogApp {
         for name in &self.dynamic_command_catalog.names().layouts {
             dynamic.push(CommandPresentation {
                 command: AppCommand::LoadNamedLayout(name.clone()),
-                label: format!("Load layout: {name}"),
+                label: name.clone(),
                 shortcut: None,
                 availability: CommandAvailability::Enabled,
                 selected: None,
@@ -1652,7 +1658,7 @@ impl DelogApp {
             for name in &self.dynamic_command_catalog.names().scripts {
                 dynamic.push(CommandPresentation {
                     command: AppCommand::RunScript(name.clone()),
-                    label: format!("Run script: {name}"),
+                    label: name.clone(),
                     shortcut: None,
                     availability: script_availability.clone(),
                     selected: None,
@@ -1666,7 +1672,7 @@ impl DelogApp {
             for name in &self.dynamic_command_catalog.names().parsers {
                 dynamic.push(CommandPresentation {
                     command: AppCommand::OpenWithParser(name.clone()),
-                    label: format!("Parse file with {name}…"),
+                    label: name.clone(),
                     shortcut: None,
                     availability: parser_availability.clone(),
                     selected: None,
@@ -1751,14 +1757,14 @@ impl DelogApp {
                 }
             }
             AppCommand::SetCursorSampling(mode) => self.hover_mode = mode,
+            AppCommand::OpenWithBuiltInParser(name) => {
+                self.spawn_open_dialog(ctx, Some(&name));
+            }
             AppCommand::OpenWithParser(name) => {
-                let built_in = self.session.parser_names().iter().any(|known| *known == name);
-                if built_in {
-                    self.spawn_open_dialog(ctx, Some(&name));
-                } else {
-                    #[cfg(feature = "scripting")]
-                    let _ = self.scripts.request_open(ctx, &name);
-                }
+                #[cfg(feature = "scripting")]
+                let _ = self.scripts.request_open(ctx, &name);
+                #[cfg(not(feature = "scripting"))]
+                let _ = name;
             }
             AppCommand::RunScript(name) => {
                 #[cfg(feature = "scripting")]
@@ -2743,13 +2749,11 @@ impl eframe::App for DelogApp {
         );
         if self.inspector.open {
             let focused_tile = self.workspace.focused;
-            let cursor_fields = match &self.inspector.selection {
-                inspector::InspectorSelection::Cursor { readout } => readout
-                    .tile_id()
-                    .map(|tile_id| self.workspace.visible_fields(tile_id))
-                    .unwrap_or_default(),
-                _ => Vec::new(),
-            };
+            let cursor_fields = inspector::cursor_fields_for_frame(
+                &self.inspector.selection,
+                focused_tile,
+                |tile_id| self.workspace.visible_fields(tile_id),
+            );
             let inspected_trace = match self.inspector.selection {
                 inspector::InspectorSelection::Trace { tile_id, field } => {
                     self.workspace.trace_ref(tile_id, field).cloned()
@@ -4157,14 +4161,18 @@ struct PickedFiles {
     parser: Option<String>,
 }
 
+const BUILT_IN_PARSER_PRESENTATIONS: &[(&str, &str)] = &[
+    ("ardupilot-bin", "ArduPilot"),
+    ("ulog", "PX4"),
+    ("tlog", "MAVLink"),
+    ("parquet", "Parquet"),
+];
+
 fn parser_label(name: &str) -> &str {
-    match name {
-        "ardupilot-bin" => "ArduPilot DataFlash",
-        "ulog" => "PX4 ULog",
-        "tlog" => "MAVLink Telemetry",
-        "parquet" => "Parquet",
-        other => other,
-    }
+    BUILT_IN_PARSER_PRESENTATIONS
+        .iter()
+        .find_map(|(parser, label)| (*parser == name).then_some(*label))
+        .unwrap_or(name)
 }
 
 const SHORTCUT_KEYS: &[egui::Key] = &[
