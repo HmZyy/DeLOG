@@ -8,6 +8,17 @@ fn workspace_starts_with_one_plot_pane() {
 }
 
 #[test]
+fn focused_fields_preserve_the_focused_plot_trace_order() {
+    let mut workspace = Workspace::new();
+    let pane = workspace.tree.root().unwrap();
+    workspace.add_trace_to_first_plot(FieldId(7));
+    workspace.add_trace_to_first_plot(FieldId(3));
+    workspace.focused = Some(pane);
+
+    assert_eq!(workspace.focused_fields(), vec![FieldId(7), FieldId(3)]);
+}
+
+#[test]
 fn workspace_image_actions_carry_plot_rects() {
     let rect = egui::Rect::from_min_size(egui::pos2(4.0, 8.0), egui::vec2(120.0, 80.0));
 
