@@ -54,6 +54,8 @@ pub enum AppCommand {
     ToggleShellEmphasis,
     FitAll,
     SetCursorSampling(SampleMode),
+    OpenWithBuiltInParser(String),
+    #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
     OpenWithParser(String),
     #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
     RunScript(String),
@@ -85,11 +87,12 @@ impl AppCommand {
         match self {
             Self::Static(id) => id.classic_menu_owner(),
             Self::ToggleShellEmphasis | Self::DisconnectLink(_) => ClassicMenuOwner::File,
+            Self::OpenWithBuiltInParser(_) => ClassicMenuOwner::File,
             Self::OpenWithParser(_) => ClassicMenuOwner::Tools,
             Self::FitAll => ClassicMenuOwner::View,
             Self::SetCursorSampling(_) => ClassicMenuOwner::Analyze,
             Self::RunScript(_) => ClassicMenuOwner::Tools,
-            Self::LoadNamedLayout(_) => ClassicMenuOwner::View,
+            Self::LoadNamedLayout(_) => ClassicMenuOwner::Tools,
         }
     }
 }
@@ -466,7 +469,6 @@ impl CommandId {
                 Workspace,
                 Some("Ctrl+L"),
                 "workspace arrangement",
-                ClassicMenu,
                 Shortcut,
                 Palette
             ),
@@ -662,12 +664,6 @@ impl CommandId {
             | OpenMarkers
             | OpenScripting
             | OpenLogging
-            | SaveLayout
-            | LoadLayout
-            | ManageLayouts
-            | ClearLayout
-            | ImportLayout
-            | ExportLayout
             | EqualizePlots
             | CycleLegendPosition
             | ToggleLegends => ClassicMenuOwner::View,
@@ -684,6 +680,12 @@ impl CommandId {
             OpenScriptEditor
             | OpenScriptVariables
             | OpenParserEditor
+            | SaveLayout
+            | LoadLayout
+            | ManageLayouts
+            | ClearLayout
+            | ImportLayout
+            | ExportLayout
             | OpenSettings => ClassicMenuOwner::Tools,
         }
     }
@@ -887,6 +889,10 @@ mod tests {
     #[test]
     fn dynamic_command_families_have_canonical_classic_menu_owners() {
         assert_eq!(
+            AppCommand::OpenWithBuiltInParser("ulog".into()).classic_menu_owner(),
+            ClassicMenuOwner::File
+        );
+        assert_eq!(
             AppCommand::OpenWithParser("csv".into()).classic_menu_owner(),
             ClassicMenuOwner::Tools
         );
@@ -896,7 +902,7 @@ mod tests {
         );
         assert_eq!(
             AppCommand::LoadNamedLayout("analysis".into()).classic_menu_owner(),
-            ClassicMenuOwner::View
+            ClassicMenuOwner::Tools
         );
         assert_eq!(
             AppCommand::DisconnectLink(0).classic_menu_owner(),

@@ -77,9 +77,8 @@ const VIEW_PANELS_MENU: &[CommandId] = &[
     CommandId::OpenScripting,
     CommandId::OpenLogging,
 ];
-const VIEW_LAYOUTS_MENU: &[CommandId] = &[
+const TOOLS_LAYOUTS_MENU: &[CommandId] = &[
     CommandId::SaveLayout,
-    CommandId::LoadLayout,
     CommandId::ManageLayouts,
     CommandId::ImportLayout,
     CommandId::ExportLayout,
@@ -103,11 +102,11 @@ pub(crate) fn classic_menu_command_ids() -> Vec<CommandId> {
         FILE_EXPORT_MENU,
         VIEW_MENU,
         VIEW_PANELS_MENU,
-        VIEW_LAYOUTS_MENU,
         ANALYZE_MENU,
         TOOLS_MENU,
         TOOLS_SCRIPTS_MENU,
         TOOLS_PARSERS_MENU,
+        TOOLS_LAYOUTS_MENU,
     ]
     .into_iter()
     .flatten()
@@ -228,6 +227,15 @@ pub fn show(
                     presentations,
                     &mut commands,
                 );
+                ui.menu_button("Open With", |ui| {
+                    dynamic_rows(
+                        ui,
+                        ClassicMenuOwner::File,
+                        presentations,
+                        &mut commands,
+                        |command| matches!(command, AppCommand::OpenWithBuiltInParser(_)),
+                    );
+                });
                 ui.menu_button("Export", |ui| {
                     menu_items(
                         ui,
@@ -247,7 +255,7 @@ pub fn show(
                 ui.separator();
                 menu_item(ui, CommandId::Exit, presentations, &mut commands);
             });
-            let view_menu = ui.menu_button("View", |ui| {
+            ui.menu_button("View", |ui| {
                 checked_menu_items(
                     ui,
                     ClassicMenuOwner::View,
@@ -264,28 +272,7 @@ pub fn show(
                         &mut commands,
                     );
                 });
-                ui.menu_button("Layouts", |ui| {
-                    menu_item(ui, CommandId::SaveLayout, presentations, &mut commands);
-                    ui.menu_button("Load Layout", |ui| {
-                        menu_item(ui, CommandId::LoadLayout, presentations, &mut commands);
-                        dynamic_rows(
-                            ui,
-                            ClassicMenuOwner::View,
-                            presentations,
-                            &mut commands,
-                            |command| matches!(command, AppCommand::LoadNamedLayout(_)),
-                        );
-                    });
-                    menu_items(
-                        ui,
-                        ClassicMenuOwner::View,
-                        &VIEW_LAYOUTS_MENU[2..],
-                        presentations,
-                        &mut commands,
-                    );
-                });
             });
-            refresh_dynamic_catalog |= view_menu.response.clicked();
             ui.menu_button("Analyze", |ui| {
                 menu_items(
                     ui,
@@ -296,15 +283,8 @@ pub fn show(
                 );
             });
             let tools_menu = ui.menu_button("Tools", |ui| {
-                menu_items(
-                    ui,
-                    ClassicMenuOwner::Tools,
-                    TOOLS_MENU,
-                    presentations,
-                    &mut commands,
-                );
                 ui.menu_button("Scripts", |ui| {
-                    ui.menu_button("Run Script", |ui| {
+                    ui.menu_button("Run Scripts", |ui| {
                         dynamic_rows(
                             ui,
                             ClassicMenuOwner::Tools,
@@ -322,13 +302,6 @@ pub fn show(
                     );
                 });
                 ui.menu_button("Parsers", |ui| {
-                    dynamic_rows(
-                        ui,
-                        ClassicMenuOwner::Tools,
-                        presentations,
-                        &mut commands,
-                        |command| matches!(command, AppCommand::OpenWithParser(_)),
-                    );
                     menu_items(
                         ui,
                         ClassicMenuOwner::Tools,
@@ -336,7 +309,42 @@ pub fn show(
                         presentations,
                         &mut commands,
                     );
+                    ui.menu_button("Run Parser", |ui| {
+                        dynamic_rows(
+                            ui,
+                            ClassicMenuOwner::Tools,
+                            presentations,
+                            &mut commands,
+                            |command| matches!(command, AppCommand::OpenWithParser(_)),
+                        );
+                    });
                 });
+                ui.menu_button("Layouts", |ui| {
+                    menu_item(ui, CommandId::SaveLayout, presentations, &mut commands);
+                    ui.menu_button("Load Layout", |ui| {
+                        dynamic_rows(
+                            ui,
+                            ClassicMenuOwner::Tools,
+                            presentations,
+                            &mut commands,
+                            |command| matches!(command, AppCommand::LoadNamedLayout(_)),
+                        );
+                    });
+                    menu_items(
+                        ui,
+                        ClassicMenuOwner::Tools,
+                        &TOOLS_LAYOUTS_MENU[1..],
+                        presentations,
+                        &mut commands,
+                    );
+                });
+                menu_items(
+                    ui,
+                    ClassicMenuOwner::Tools,
+                    TOOLS_MENU,
+                    presentations,
+                    &mut commands,
+                );
             });
             refresh_dynamic_catalog |= tools_menu.response.clicked();
         });
@@ -582,7 +590,6 @@ mod tests {
             CommandId::OpenScripting,
             CommandId::OpenLogging,
             CommandId::SaveLayout,
-            CommandId::LoadLayout,
             CommandId::ManageLayouts,
             CommandId::ImportLayout,
             CommandId::ExportLayout,
@@ -620,7 +627,7 @@ mod tests {
             ),
             (
                 ClassicMenuOwner::View,
-                &[VIEW_MENU, VIEW_PANELS_MENU, VIEW_LAYOUTS_MENU][..],
+                &[VIEW_MENU, VIEW_PANELS_MENU][..],
             ),
             (
                 ClassicMenuOwner::Analyze,
@@ -628,7 +635,12 @@ mod tests {
             ),
             (
                 ClassicMenuOwner::Tools,
-                &[TOOLS_MENU, TOOLS_SCRIPTS_MENU, TOOLS_PARSERS_MENU][..],
+                &[
+                    TOOLS_MENU,
+                    TOOLS_SCRIPTS_MENU,
+                    TOOLS_PARSERS_MENU,
+                    TOOLS_LAYOUTS_MENU,
+                ][..],
             ),
         ] {
             for id in sections.iter().flat_map(|section| section.iter()) {
