@@ -46,6 +46,7 @@ pub enum LoadStatusView {
     },
 }
 
+#[cfg(test)]
 const CLASSIC_MENU_TITLES: &[&str] = &["File", "View", "Analyze", "Tools"];
 
 const FILE_MENU: &[CommandId] = &[
