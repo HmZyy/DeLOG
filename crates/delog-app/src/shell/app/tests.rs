@@ -173,6 +173,155 @@ fn built_in_parser_labels_match_the_file_open_with_menu() {
     assert_eq!(parser_label("parquet"), "Parquet");
 }
 
+fn enabled_presentation(
+    command: commands::AppCommand,
+    label: &str,
+) -> commands::CommandPresentation {
+    commands::CommandPresentation {
+        command,
+        label: label.to_owned(),
+        shortcut: None,
+        availability: commands::CommandAvailability::Enabled,
+        selected: None,
+    }
+}
+
+#[test]
+fn non_static_palette_entries_have_variant_specific_search_metadata() {
+    use commands::AppCommand;
+    use delog_core::field_view::SampleMode;
+
+    let entries = DelogApp::command_palette_entries(vec![
+        enabled_presentation(AppCommand::OpenWithBuiltInParser("ulog".into()), "PX4"),
+        enabled_presentation(AppCommand::OpenWithParser("shared".into()), "shared"),
+        enabled_presentation(AppCommand::RunScript("shared".into()), "shared"),
+        enabled_presentation(AppCommand::LoadNamedLayout("shared".into()), "shared"),
+        enabled_presentation(AppCommand::DisconnectLink(0), "udp://127.0.0.1:14550"),
+        enabled_presentation(AppCommand::ToggleShellEmphasis, "Emphasize live workflows"),
+        enabled_presentation(AppCommand::FitAll, "Fit all plots"),
+        enabled_presentation(
+            AppCommand::SetCursorSampling(SampleMode::Linear),
+            "Cursor sampling: Linear",
+        ),
+    ]);
+
+    for (command, search_terms, subtitle) in [
+        (
+            AppCommand::OpenWithBuiltInParser("ulog".into()),
+            "built-in native parser open with ulog",
+            "File › Open With",
+        ),
+        (
+            AppCommand::OpenWithParser("shared".into()),
+            "custom parser run parse file shared",
+            "Tools › Parsers › Run Parser",
+        ),
+        (
+            AppCommand::RunScript("shared".into()),
+            "script run execute shared",
+            "Tools › Scripts › Run Scripts",
+        ),
+        (
+            AppCommand::LoadNamedLayout("shared".into()),
+            "layout load workspace shared",
+            "Tools › Layouts › Load Layout",
+        ),
+        (
+            AppCommand::DisconnectLink(0),
+            "live link disconnect connection endpoint",
+            "File › Disconnect live link",
+        ),
+        (
+            AppCommand::ToggleShellEmphasis,
+            "shell emphasis workflow offline live",
+            "Header › Workflow emphasis",
+        ),
+        (
+            AppCommand::FitAll,
+            "fit all plots reset zoom range",
+            "View › Plot range",
+        ),
+        (
+            AppCommand::SetCursorSampling(SampleMode::Linear),
+            "cursor sampling interpolation previous next linear",
+            "Analyze › Cursor sampling",
+        ),
+    ] {
+        let entry = entries
+            .iter()
+            .find(|entry| entry.command == command)
+            .expect("variant should remain in the palette");
+        assert!(
+            entry.search_text.contains(search_terms),
+            "missing {search_terms:?} in {:?}",
+            entry.search_text
+        );
+        assert_eq!(entry.subtitle.as_deref(), Some(subtitle));
+    }
+
+    for (query, command) in [
+        (
+            "native ulog",
+            AppCommand::OpenWithBuiltInParser("ulog".into()),
+        ),
+        (
+            "custom parser",
+            AppCommand::OpenWithParser("shared".into()),
+        ),
+        ("execute script", AppCommand::RunScript("shared".into())),
+        (
+            "load workspace layout",
+            AppCommand::LoadNamedLayout("shared".into()),
+        ),
+        ("disconnect endpoint", AppCommand::DisconnectLink(0)),
+        ("workflow emphasis", AppCommand::ToggleShellEmphasis),
+        ("reset zoom range", AppCommand::FitAll),
+        (
+            "interpolation linear",
+            AppCommand::SetCursorSampling(SampleMode::Linear),
+        ),
+    ] {
+        let ranked = command_palette::ranked_entries(query, &entries);
+        assert_eq!(ranked.first().map(|entry| &entry.command), Some(&command));
+    }
+}
+
+#[test]
+fn identical_dynamic_names_keep_raw_primary_labels_and_distinct_palette_context() {
+    use commands::AppCommand;
+
+    let entries = DelogApp::command_palette_entries(vec![
+        enabled_presentation(AppCommand::OpenWithBuiltInParser("shared".into()), "shared"),
+        enabled_presentation(AppCommand::OpenWithParser("shared".into()), "shared"),
+        enabled_presentation(AppCommand::RunScript("shared".into()), "shared"),
+        enabled_presentation(AppCommand::LoadNamedLayout("shared".into()), "shared"),
+        enabled_presentation(AppCommand::DisconnectLink(0), "shared"),
+    ]);
+
+    assert!(entries.iter().all(|entry| entry.label == "shared"));
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.subtitle.as_deref())
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        5
+    );
+    for (query, command) in [
+        (
+            "native open with",
+            AppCommand::OpenWithBuiltInParser("shared".into()),
+        ),
+        ("custom parser", AppCommand::OpenWithParser("shared".into())),
+        ("execute script", AppCommand::RunScript("shared".into())),
+        ("load layout", AppCommand::LoadNamedLayout("shared".into())),
+        ("disconnect endpoint", AppCommand::DisconnectLink(0)),
+    ] {
+        let ranked = command_palette::ranked_entries(query, &entries);
+        assert_eq!(ranked.first().map(|entry| &entry.command), Some(&command));
+    }
+}
+
 #[test]
 fn export_command_opens_data_export_through_resetting_api() {
     let source = include_str!("mod.rs");
