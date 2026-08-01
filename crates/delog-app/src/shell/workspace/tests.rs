@@ -30,6 +30,7 @@ fn plot_context_menu_keeps_every_existing_action() {
         "Export PNG...",
         "Split horizontally",
         "Split vertically",
+        "Show legend",
         "Show tooltip",
         "Plot Info",
         "Close",
