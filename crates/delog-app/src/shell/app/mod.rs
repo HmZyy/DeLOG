@@ -7,6 +7,7 @@ pub mod commands;
 pub mod command_palette;
 pub mod context_header;
 pub mod inspector;
+pub mod empty_state;
 
 use delog_cache::CacheManager;
 use delog_core::diagnostics::{DiagRecord, Severity};
@@ -2309,6 +2310,20 @@ impl eframe::App for DelogApp {
             .iter()
             .find(|source| !source.entry.removed)
             .map(|source| source.entry.label.clone());
+        let file_sources = snapshot
+            .sources
+            .iter()
+            .filter(|source| {
+                !source.entry.removed
+                    && source.entry.kind == delog_core::identity::SourceKind::File
+            })
+            .count();
+        let row_count = snapshot
+            .topics
+            .iter()
+            .filter(|topic| !topic.entry.removed)
+            .filter_map(|topic| topic.store.as_ref().map(|store| store.rows as usize))
+            .fold(0_usize, usize::saturating_add);
         let live_statuses = self
             .session
             .live_statuses()
@@ -2316,7 +2331,7 @@ impl eframe::App for DelogApp {
             .enumerate()
             .map(|(index, status)| {
                 let recording = recording_status(&status);
-                context_header::LiveStatusView {
+                context_header::LiveSummary {
                     index,
                     endpoint: status.endpoint.to_string(),
                     state: status.state.label().to_owned(),
@@ -2326,6 +2341,15 @@ impl eframe::App for DelogApp {
                 }
             })
             .collect();
+        let adaptive_shell = empty_state::shell_model(
+            empty_state::ShellModelInput {
+                file_sources,
+                live_links: self.session.live_statuses().len(),
+                rows: row_count,
+            },
+            self.shell_emphasis,
+        );
+        debug_assert!(adaptive_shell.browser_available && adaptive_shell.workspace_visible);
         let header_model = context_header::HeaderModel {
             emphasis: self.shell_emphasis,
             active_source_label,
@@ -2660,6 +2684,7 @@ impl eframe::App for DelogApp {
                         diagnostics.len(),
                         &mut self.field_stats,
                         inspected_trace.as_ref(),
+                        &header_model.live_statuses,
                     )
                 })
                 .inner;
@@ -2733,6 +2758,39 @@ impl eframe::App for DelogApp {
             // arranged and the 3D view opened on an empty session.
 
             let workspace_rect = ui.available_rect_before_wrap();
+
+            if adaptive_shell.show_empty_state {
+                let parsers: Vec<_> = self
+                    .session
+                    .parser_names()
+                    .iter()
+                    .map(|name| (*name, crate::shell::app::parser_label(name)))
+                    .collect();
+                let actions = egui::Area::new(egui::Id::new("workspace-empty-state"))
+                    .order(egui::Order::Foreground)
+                    .fixed_pos(workspace_rect.center())
+                    .pivot(empty_state::PIVOT)
+                    .show(ui.ctx(), |ui| {
+                        empty_state::show(ui, adaptive_shell.emphasis, &parsers)
+                    })
+                    .inner;
+                for action in actions {
+                    let command = match action {
+                        empty_state::EmptyStateAction::Open => {
+                            Some(commands::AppCommand::Static(commands::CommandId::Open))
+                        }
+                        empty_state::EmptyStateAction::OpenWith(parser) => {
+                            Some(commands::AppCommand::OpenWithParser(parser))
+                        }
+                        empty_state::EmptyStateAction::ConnectLive => Some(
+                            commands::AppCommand::Static(commands::CommandId::ConnectLive),
+                        ),
+                    };
+                    if let Some(command) = command {
+                        self.dispatch_command(command, ui.ctx(), frame, &snapshot, range);
+                    }
+                }
+            }
 
             // The central panel is a fallback drop zone: dropping a field onto
             // empty workspace space plots it in the first pane.
