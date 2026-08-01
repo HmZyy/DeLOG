@@ -389,6 +389,8 @@ fn global_toolbar_keeps_only_global_plot_state_controls() {
         assert!(APP_SOURCE.contains(command));
     }
     assert!(!GLOBAL_TOOLBAR_SOURCE.contains("GlobalPlotControl::FitAll"));
+    assert!(!GLOBAL_TOOLBAR_SOURCE.contains("GlobalPlotControl::ToggleAllLegends"));
+    assert!(!GLOBAL_TOOLBAR_SOURCE.contains("GlobalPlotControl::EqualizePlotHeights"));
     assert!(!GLOBAL_TOOLBAR_SOURCE.contains("X axes linked"));
     assert!(GLOBAL_TOOLBAR_SOURCE.contains("CommandId::AddMeasuringMarker"));
 }
@@ -434,7 +436,7 @@ fn plot_field_stats_is_one_direct_action_for_all_pane_traces() {
     let stats = between(
         context_menu,
         "let fields: Vec<FieldId>",
-        "ui.menu_button(\"Inspect trace\"",
+        "ui.menu_image_text_button(menu_icon(ui, crate::ui::icons::pencil())",
     );
 
     assert!(stats.contains("pane.traces.iter().map(|trace| trace.field).collect"));
@@ -442,7 +444,9 @@ fn plot_field_stats_is_one_direct_action_for_all_pane_traces() {
     assert!(stats.contains("self.actions.inspect_field_stats = Some(fields)"));
     assert!(!stats.contains("menu_image_text_button"));
     assert!(!stats.contains("ui.button(label)"));
-    assert!(context_menu.contains("self.actions.inspect_trace"));
+    assert!(!context_menu.contains("Inspect trace"));
+    assert!(!context_menu.contains("self.actions.inspect_trace"));
+    assert!(!BROWSER.contains("focus the Inspector"));
 }
 
 #[test]
@@ -592,10 +596,10 @@ fn file_menu_and_nested_export_keep_the_requested_order() {
         &[
             "CommandId::Open",
             "CommandId::ConnectLive",
-            "CommandId::DisconnectLive",
             "CommandId::CancelTasks",
         ],
     );
+    assert!(!file.contains("CommandId::DisconnectLive"));
     assert_commands_in_order(
         export,
         &[
@@ -612,6 +616,7 @@ fn file_menu_and_nested_export_keep_the_requested_order() {
     );
     assert!(file_menu.contains("ui.menu_button(\"Open With\""));
     assert!(file_menu.contains("ui.menu_button(\"Export\""));
+    assert!(!file_menu.contains("AppCommand::DisconnectLink"));
     assert!(file_menu.contains("ui.separator();"));
     let separator = file_menu.rfind("ui.separator();").unwrap();
     let exit = file_menu.rfind("CommandId::Exit").unwrap();
@@ -842,6 +847,32 @@ fn export_footer_keeps_cancel_left_and_export_right() {
     let export = actions.find("state.format.action_label()").unwrap();
 
     assert!(cancel < right_layout && right_layout < export);
+}
+
+#[test]
+fn global_toolbar_is_rendered_once_through_the_context_header() {
+    assert_eq!(APP_SOURCE.matches("global_plot_toolbar::show").count(), 1);
+    let header_call = APP_SOURCE.find("context_header::show").unwrap();
+    let toolbar_call = APP_SOURCE.find("global_plot_toolbar::show").unwrap();
+    let workspace = APP_SOURCE
+        .find("central_workspace_frame(ui.style()).show")
+        .unwrap();
+
+    assert!(header_call < toolbar_call && toolbar_call < workspace);
+}
+
+#[test]
+fn header_separates_tools_from_an_ungrouped_toolbar() {
+    assert!(CONTEXT_HEADER_SOURCE.contains(
+        "refresh_dynamic_catalog |= tools_menu.response.clicked();\n            ui.separator();\n            commands.extend(show_toolbar(ui));"
+    ));
+    let toolbar = between(
+        GLOBAL_TOOLBAR_SOURCE,
+        "pub fn show(",
+        "fn sample_mode_label(",
+    );
+    assert!(toolbar.contains("toolbar_container_frame(ui.style()).show"));
+    assert!(!toolbar.contains("egui::Frame::group"));
 }
 
 #[test]

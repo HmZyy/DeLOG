@@ -56,7 +56,6 @@ const CLASSIC_MENU_TITLES: &[&str] = &["File", "View", "Analyze", "Tools"];
 const FILE_MENU: &[CommandId] = &[
     CommandId::Open,
     CommandId::ConnectLive,
-    CommandId::DisconnectLive,
     CommandId::CancelTasks,
 ];
 const FILE_EXPORT_MENU: &[CommandId] = &[
@@ -95,6 +94,10 @@ const TOOLS_SCRIPTS_MENU: &[CommandId] = &[
 ];
 const TOOLS_PARSERS_MENU: &[CommandId] = &[CommandId::OpenParserEditor];
 
+fn header_bottom_margin(style: &egui::Style) -> f32 {
+    crate::ui::design_tokens::DesignTokens::from_style(style).space_xs
+}
+
 #[cfg(test)]
 pub(crate) fn classic_menu_command_ids() -> Vec<CommandId> {
     [
@@ -119,6 +122,7 @@ pub fn show(
     ui: &mut egui::Ui,
     model: &HeaderModel,
     presentations: &[CommandPresentation],
+    show_toolbar: impl FnOnce(&mut egui::Ui) -> Vec<AppCommand>,
 ) -> HeaderOutput {
     let mut commands = Vec::new();
     let mut refresh_dynamic_catalog = false;
@@ -183,8 +187,7 @@ pub fn show(
                     detail: Some(detail),
                     state,
                 };
-                components::status_chip(ui, &chip, model.theme)
-                    .on_hover_text(format!(
+                components::status_chip(ui, &chip, model.theme).on_hover_text(format!(
                         "{} received frames{}",
                         status.rx_frames,
                         status
@@ -192,13 +195,17 @@ pub fn show(
                             .as_deref()
                             .map(|value| format!(" · {value}"))
                             .unwrap_or_default()
-                    ))
-                    .context_menu(|ui| {
-                        if ui.button("Disconnect").clicked() {
-                            commands.push(AppCommand::DisconnectLink(status.index));
-                            ui.close();
-                        }
-                    });
+                    ));
+                if components::icon_button(
+                    ui,
+                    crate::ui::icons::unplug(),
+                    &format!("Disconnect {}", status.endpoint),
+                    false,
+                )
+                .clicked()
+                {
+                    commands.push(AppCommand::DisconnectLink(status.index));
+                }
             }
             if let LoadStatusView::Active { label, progress } = &model.load {
                 ui.separator();
@@ -245,13 +252,6 @@ pub fn show(
                         &mut commands,
                     );
                 });
-                dynamic_rows(
-                    ui,
-                    ClassicMenuOwner::File,
-                    presentations,
-                    &mut commands,
-                    |command| matches!(command, AppCommand::DisconnectLink(_)),
-                );
                 ui.separator();
                 menu_item(ui, CommandId::Exit, presentations, &mut commands);
             });
@@ -347,7 +347,10 @@ pub fn show(
                 );
             });
             refresh_dynamic_catalog |= tools_menu.response.clicked();
+            ui.separator();
+            commands.extend(show_toolbar(ui));
         });
+        ui.add_space(header_bottom_margin(ui.style()));
     });
     HeaderOutput {
         commands,
@@ -498,6 +501,254 @@ mod tests {
         (output, selected)
     }
 
+    fn header_with_toolbar_probe(
+        ctx: &egui::Context,
+    ) -> (egui::FullOutput, HeaderOutput) {
+        let model = HeaderModel {
+            emphasis: ShellEmphasis::Offline,
+            live_statuses: Vec::new(),
+            load: LoadStatusView::Idle,
+            fps: None,
+            theme: crate::ui::theme::ThemeChoice::CatppuccinMocha,
+        };
+        let presentations = crate::shell::app::commands::present_commands(
+            &crate::shell::app::commands::CommandContext::default(),
+            &crate::shell::app::commands::PresentationState::default(),
+            [],
+        );
+        let mut header_output = None;
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1_200.0, 300.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                header_output = Some(show(ui, &model, &presentations, |ui| {
+                    let _ = ui.button("Toolbar probe");
+                    vec![AppCommand::Static(CommandId::TogglePlayheadSnap)]
+                }));
+            },
+        );
+        (output, header_output.expect("header should render"))
+    }
+
+    fn header_with_live_link(
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+    ) -> (egui::FullOutput, HeaderOutput) {
+        let model = HeaderModel {
+            emphasis: ShellEmphasis::Live,
+            live_statuses: vec![LiveSummary {
+                index: 3,
+                endpoint: "UDP 127.0.0.1:14550".to_owned(),
+                state: "Connected".to_owned(),
+                rx_frames: 42,
+                rows: 120,
+                recording: None,
+            }],
+            load: LoadStatusView::Idle,
+            fps: None,
+            theme: crate::ui::theme::ThemeChoice::CatppuccinMocha,
+        };
+        let presentations = crate::shell::app::commands::present_commands(
+            &crate::shell::app::commands::CommandContext {
+                live_link_count: 1,
+                ..Default::default()
+            },
+            &crate::shell::app::commands::PresentationState::default(),
+            [CommandPresentation {
+                command: AppCommand::DisconnectLink(3),
+                label: "Disconnect UDP 127.0.0.1:14550".to_owned(),
+                shortcut: None,
+                availability: CommandAvailability::Enabled,
+                selected: None,
+            }],
+        );
+        let mut header_output = None;
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1_200.0, 300.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                header_output = Some(show(ui, &model, &presentations, |_| Vec::new()));
+            },
+        );
+        (output, header_output.expect("header should render"))
+    }
+
+    #[test]
+    fn header_places_toolbar_after_tools_on_the_menu_row() {
+        let ctx = egui::Context::default();
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        ctx.enable_accesskit();
+
+        let (output, _) = header_with_toolbar_probe(&ctx);
+        let update = output
+            .platform_output
+            .accesskit_update
+            .expect("accessibility tree should be emitted");
+        let bounds = |label: &str| {
+            update
+                .nodes
+                .iter()
+                .map(|(_, node)| node)
+                .find(|node| node.label() == Some(label))
+                .and_then(|node| node.bounds())
+                .unwrap_or_else(|| panic!("{label} should have bounds"))
+        };
+        let tools = bounds("Tools");
+        let toolbar = bounds("Toolbar probe");
+
+        assert!(toolbar.x0 > tools.x1);
+        assert_eq!(
+            (toolbar.y0 + toolbar.y1) * 0.5,
+            (tools.y0 + tools.y1) * 0.5,
+        );
+    }
+
+    #[test]
+    fn header_includes_toolbar_commands_in_its_output() {
+        let ctx = egui::Context::default();
+        let (_, output) = header_with_toolbar_probe(&ctx);
+
+        assert!(
+            output
+                .commands
+                .contains(&AppCommand::Static(CommandId::TogglePlayheadSnap))
+        );
+    }
+
+    #[test]
+    fn clicking_live_link_disconnect_icon_emits_that_links_command() {
+        let ctx = egui::Context::default();
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        ctx.enable_accesskit();
+
+        let (output, _) = header_with_live_link(&ctx, Vec::new());
+        let update = output
+            .platform_output
+            .accesskit_update
+            .expect("accessibility tree should be emitted");
+        let button = update
+            .nodes
+            .iter()
+            .map(|(_, node)| node)
+            .find(|node| node.label() == Some("Disconnect UDP 127.0.0.1:14550"))
+            .expect("each live link should have a labelled disconnect button");
+        let bounds = button
+            .bounds()
+            .expect("disconnect button should have bounds");
+        let pos = egui::pos2(
+            ((bounds.x0 + bounds.x1) * 0.5) as f32,
+            ((bounds.y0 + bounds.y1) * 0.5) as f32,
+        );
+        let _ = header_with_live_link(
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        let (_, output) = header_with_live_link(
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+
+        assert_eq!(output.commands, [AppCommand::DisconnectLink(3)]);
+    }
+
+    #[test]
+    fn file_menu_omits_live_link_disconnect_rows() {
+        let ctx = egui::Context::default();
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        ctx.enable_accesskit();
+
+        let (output, _) = header_with_live_link(&ctx, Vec::new());
+        let update = output
+            .platform_output
+            .accesskit_update
+            .expect("accessibility tree should be emitted");
+        let file = update
+            .nodes
+            .iter()
+            .map(|(_, node)| node)
+            .find(|node| node.label() == Some("File"))
+            .expect("File menu should be accessible");
+        let bounds = file.bounds().expect("File menu should have bounds");
+        let pos = egui::pos2(
+            ((bounds.x0 + bounds.x1) * 0.5) as f32,
+            ((bounds.y0 + bounds.y1) * 0.5) as f32,
+        );
+        let _ = header_with_live_link(
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        let (output, _) = header_with_live_link(
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        let update = output
+            .platform_output
+            .accesskit_update
+            .expect("opening File should update the accessibility tree");
+
+        assert_eq!(
+            update
+                .nodes
+                .iter()
+                .map(|(_, node)| node)
+                .filter(|node| node.label() == Some("Disconnect UDP 127.0.0.1:14550"))
+                .count(),
+            1,
+            "opening File must not add a second disconnect control"
+        );
+    }
+
+    #[test]
+    fn header_bottom_margin_uses_compact_spacing() {
+        let style = egui::Style::default();
+        let tokens = crate::ui::design_tokens::DesignTokens::from_style(&style);
+
+        assert_eq!(header_bottom_margin(&style), tokens.space_xs);
+    }
+
     #[test]
     fn changing_shell_emphasis_never_requests_source_mutation() {
         assert_eq!(ShellEmphasis::Offline.toggle(), ShellEmphasis::Live);
@@ -574,7 +825,6 @@ mod tests {
         let expected: std::collections::HashSet<_> = [
             CommandId::Open,
             CommandId::ConnectLive,
-            CommandId::DisconnectLive,
             CommandId::CancelTasks,
             CommandId::ExportData,
             CommandId::ExportDiagnostics,
@@ -653,9 +903,16 @@ mod tests {
             CommandId::AddMeasuringMarker,
             CommandId::EqualizePlots,
             CommandId::TogglePlayheadSnap,
+            CommandId::DisconnectLive,
         ] {
             assert!(!ids.contains(&omitted), "toolbar/shortcut command leaked into menu");
         }
+        assert!(
+            !CommandId::DisconnectLive
+                .spec()
+                .routes
+                .contains(&crate::shell::app::commands::AccessRoute::ClassicMenu)
+        );
     }
 
     #[test]

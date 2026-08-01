@@ -1,158 +1,20 @@
 use std::sync::Arc;
 
-use delog_core::field_view::{FieldView, SampleValue};
+use delog_core::field_view::{FieldView, SampleMode, SampleValue};
 use delog_core::identity::FieldId;
 use delog_core::snapshot::StoreSnapshot;
+use egui_extras::{Column, TableBuilder};
 
-use crate::plotting::field_stats::{FieldStatsController, StatsTab};
-use crate::plotting::plot::{TraceMode, TraceRef};
-
-#[derive(Debug, Clone)]
-pub enum InspectorEvent {
-    SetTraceColor {
-        tile_id: egui_tiles::TileId,
-        field: FieldId,
-        color: egui::Color32,
-    },
-    SetTraceMode {
-        tile_id: egui_tiles::TileId,
-        field: FieldId,
-        mode: TraceMode,
-    },
-    SetTraceWidth {
-        tile_id: egui_tiles::TileId,
-        field: FieldId,
-        width_px: f32,
-    },
-    SetTraceLabel {
-        tile_id: egui_tiles::TileId,
-        field: FieldId,
-        label: Option<String>,
-    },
-}
-
-pub fn normalize_trace_width(width_px: f32) -> f32 {
-    width_px.clamp(1.0, 12.0)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum InspectorSelection {
-    Summary,
-    Cursor {
-        readout: CursorReadout,
-    },
-    Statistics(Vec<FieldId>),
-    Trace {
-        tile_id: egui_tiles::TileId,
-        field: FieldId,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CursorReadout {
-    Hover {
-        tile_id: egui_tiles::TileId,
-        t_us: i64,
-    },
-    Playhead {
-        tile_id: Option<egui_tiles::TileId>,
-        t_us: i64,
-    },
-}
-
-impl CursorReadout {
-    pub const fn tile_id(self) -> Option<egui_tiles::TileId> {
-        match self {
-            Self::Hover { tile_id, .. } => Some(tile_id),
-            Self::Playhead { tile_id, .. } => tile_id,
-        }
-    }
-
-    pub const fn t_us(self) -> i64 {
-        match self {
-            Self::Hover { t_us, .. } | Self::Playhead { t_us, .. } => t_us,
-        }
-    }
-
-    pub const fn time_label(self) -> &'static str {
-        match self {
-            Self::Hover { .. } => "Cursor time",
-            Self::Playhead { .. } => "Playhead time",
-        }
-    }
-}
-
-pub const fn cursor_readout_for_frame(
-    hover: Option<(egui_tiles::TileId, i64)>,
-    playback_us: i64,
-    focused_tile: Option<egui_tiles::TileId>,
-) -> CursorReadout {
-    match hover {
-        Some((tile_id, t_us)) => CursorReadout::Hover { tile_id, t_us },
-        None => CursorReadout::Playhead {
-            tile_id: focused_tile,
-            t_us: playback_us,
-        },
-    }
-}
-
-pub fn cursor_fields_for_frame(
-    selection: &InspectorSelection,
-    focused_tile: Option<egui_tiles::TileId>,
-    visible_fields: impl FnOnce(egui_tiles::TileId) -> Vec<FieldId>,
-) -> Vec<FieldId> {
-    let tile_id = match selection {
-        InspectorSelection::Cursor { readout } => readout.tile_id(),
-        // `show` can switch any other selection to Cursor later in this frame.
-        // Seed that first no-hover render from the focused pane rather than an
-        // empty list computed before the transition.
-        _ => focused_tile,
-    };
-    tile_id.map(visible_fields).unwrap_or_default()
-}
+use crate::shell::workspace::InspectorTrace;
 
 pub struct InspectorState {
     pub open: bool,
-    pub selection: InspectorSelection,
 }
 
 impl Default for InspectorState {
     fn default() -> Self {
-        Self {
-            open: true,
-            selection: InspectorSelection::Summary,
-        }
+        Self { open: false }
     }
-}
-
-impl InspectorState {
-    pub fn focus_statistics(&mut self, fields: Vec<FieldId>) {
-        self.open = true;
-        self.selection = InspectorSelection::Statistics(fields);
-    }
-
-    pub fn focus_trace(&mut self, tile_id: egui_tiles::TileId, field: FieldId) {
-        self.open = true;
-        self.selection = InspectorSelection::Trace { tile_id, field };
-    }
-
-    pub fn update_cursor_readout(&mut self, readout: CursorReadout) -> bool {
-        if let InspectorSelection::Cursor {
-            readout: current,
-        } = &mut self.selection
-        {
-            if *current == readout {
-                return false;
-            }
-            *current = readout;
-            return true;
-        }
-        false
-    }
-}
-
-pub fn inspector_action_for_stats(fields: Vec<FieldId>) -> InspectorSelection {
-    InspectorSelection::Statistics(fields)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -160,16 +22,11 @@ pub fn show(
     ui: &mut egui::Ui,
     state: &mut InspectorState,
     snapshot: &Arc<StoreSnapshot>,
-    playback_us: i64,
-    hover_mode: delog_core::field_view::SampleMode,
-    cursor_fields: &[FieldId],
-    focused_tile: Option<egui_tiles::TileId>,
-    diagnostic_count: usize,
-    stats: &mut FieldStatsController,
-    inspected_trace: Option<&TraceRef>,
-    live_summaries: &[super::context_header::LiveSummary],
-) -> Vec<InspectorEvent> {
-    let mut events = Vec::new();
+    playhead_us: Option<i64>,
+    marker_us: Option<i64>,
+    sample_mode: SampleMode,
+    traces: &[InspectorTrace],
+) {
     ui.horizontal(|ui| {
         crate::ui::components::panel_header(ui, "Inspector");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -185,251 +42,159 @@ pub fn show(
             }
         });
     });
-    ui.horizontal_wrapped(|ui| {
-        if ui
-            .selectable_label(
-                matches!(state.selection, InspectorSelection::Summary),
-                "Summary",
-            )
-            .clicked()
-        {
-            state.selection = InspectorSelection::Summary;
-        }
-        if ui
-            .selectable_label(
-                matches!(state.selection, InspectorSelection::Cursor { .. }),
-                "Cursor",
-            )
-            .clicked()
-        {
-            state.selection = InspectorSelection::Cursor {
-                readout: cursor_readout_for_frame(None, playback_us, focused_tile),
-            };
-        }
-        if !stats.fields().is_empty()
-            && ui
-                .selectable_label(
-                    matches!(state.selection, InspectorSelection::Statistics(_)),
-                    "Statistics",
-                )
-                .clicked()
-        {
-            state.selection = inspector_action_for_stats(stats.fields().to_vec());
-        }
-    });
     ui.separator();
 
-    egui::ScrollArea::vertical().show(ui, |ui| match &state.selection {
-        InspectorSelection::Summary => summary_ui(ui, snapshot, diagnostic_count, live_summaries),
-        InspectorSelection::Cursor { readout } => {
-            cursor_ui(ui, snapshot, *readout, hover_mode, cursor_fields)
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        time_summary_ui(ui, snapshot, playhead_us, marker_us);
+        ui.separator();
+        ui.strong("Traces");
+        if traces.is_empty() {
+            ui.weak("No visible traces");
+            return;
         }
-        InspectorSelection::Statistics(fields) => statistics_ui(ui, snapshot, fields, stats),
-        InspectorSelection::Trace { tile_id, field } => {
-            ui.weak(format!("Pane {tile_id:?}"));
-            trace_inspector_ui(ui, snapshot, *tile_id, *field, inspected_trace, &mut events);
-            ui.separator();
-            trace_ui(
-                ui,
-                snapshot,
-                *field,
-                playback_us,
-                hover_mode,
-                "No sample at playhead",
-            );
-        }
+
+        ui.add_space(ui.spacing().item_spacing.y);
+        trace_table_ui(ui, snapshot, traces, playhead_us, marker_us, sample_mode);
     });
-    events
 }
 
-fn trace_inspector_ui(
+fn time_summary_ui(
     ui: &mut egui::Ui,
     snapshot: &StoreSnapshot,
-    tile_id: egui_tiles::TileId,
-    field: FieldId,
-    trace: Option<&TraceRef>,
-    events: &mut Vec<InspectorEvent>,
+    playhead_us: Option<i64>,
+    marker_us: Option<i64>,
 ) {
-    let Some(trace) = trace else {
-        ui.weak("This trace is no longer available.");
-        return;
-    };
-    ui.strong(crate::plotting::legend::trace_label(snapshot, field));
-    ui.horizontal(|ui| {
-        ui.label("Color");
-        let mut color = trace.color32();
-        if egui::color_picker::color_edit_button_srgba(
-            ui,
-            &mut color,
-            egui::color_picker::Alpha::Opaque,
-        )
-        .changed()
-        {
-            events.push(InspectorEvent::SetTraceColor {
-                tile_id,
-                field,
-                color,
-            });
-        }
-    });
-    ui.horizontal(|ui| {
-        ui.label("Mode");
-        let mut mode = trace.mode;
-        for candidate in TraceMode::ALL {
-            ui.radio_value(&mut mode, candidate, candidate.label());
-        }
-        if mode != trace.mode {
-            events.push(InspectorEvent::SetTraceMode {
-                tile_id,
-                field,
-                mode,
-            });
-        }
-    });
-    let mut width_px = trace.width_px;
-    if ui
-        .add(
-            egui::Slider::new(&mut width_px, 1.0..=12.0)
-                .text("Width")
-                .suffix(" px"),
-        )
-        .changed()
-    {
-        events.push(InspectorEvent::SetTraceWidth {
-            tile_id,
-            field,
-            width_px: normalize_trace_width(width_px),
-        });
-    }
-    let mut label = trace.label_override.clone().unwrap_or_default();
-    if ui
-        .add(egui::TextEdit::singleline(&mut label).hint_text("Default trace label"))
-        .changed()
-    {
-        let label = (!label.trim().is_empty()).then_some(label);
-        events.push(InspectorEvent::SetTraceLabel {
-            tile_id,
-            field,
-            label,
-        });
-    }
-}
-
-fn summary_ui(
-    ui: &mut egui::Ui,
-    snapshot: &StoreSnapshot,
-    diagnostic_count: usize,
-    live_summaries: &[super::context_header::LiveSummary],
-) {
-    let sources: Vec<_> = snapshot
-        .sources
-        .iter()
-        .filter(|source| !source.entry.removed)
-        .collect();
-    property(ui, "Sources", sources.len().to_string());
+    let range = snapshot.global_time_range();
     property(
         ui,
-        "Topics",
-        snapshot
-            .topics
-            .iter()
-            .filter(|topic| !topic.entry.removed)
-            .count()
-            .to_string(),
+        "Start",
+        range
+            .map(|range| super::format_time_us(range.min_us))
+            .unwrap_or_else(|| "--".to_owned()),
     );
     property(
         ui,
-        "Fields",
-        snapshot
-            .fields
-            .iter()
-            .filter(|field| !field.removed)
-            .count()
-            .to_string(),
+        "End",
+        range
+            .map(|range| super::format_time_us(range.max_us))
+            .unwrap_or_else(|| "--".to_owned()),
     );
-    property(ui, "Diagnostics", diagnostic_count.to_string());
-    if let Some(range) = snapshot.global_time_range() {
-        property(ui, "Start", super::format_time_us(range.min_us));
-        property(ui, "End", super::format_time_us(range.max_us));
+    property(
+        ui,
+        "Duration",
+        range
+            .map(|range| super::format_time_us(range.max_us.saturating_sub(range.min_us)))
+            .unwrap_or_else(|| "--".to_owned()),
+    );
+    property(
+        ui,
+        "Playhead time",
+        playhead_us
+            .map(super::format_time_us)
+            .unwrap_or_else(|| "--".to_owned()),
+    );
+    if marker_us.is_some() {
         property(
             ui,
-            "Duration",
-            super::format_time_us(range.max_us.saturating_sub(range.min_us)),
+            "Δt",
+            marker_us
+                .zip(playhead_us)
+                .map(|(marker, playhead)| format!("{:+.3} s", (marker - playhead) as f64 * 1e-6))
+                .unwrap_or_else(|| "--".to_owned()),
         );
-    } else {
-        ui.weak("No source data loaded");
     }
-    if !sources.is_empty() {
-        ui.separator();
-        ui.strong("Formats");
-        for source in sources {
-            ui.horizontal(|ui| {
-                ui.label(&source.entry.label);
-                ui.weak(super::source_kind_label(&source.entry.label));
+}
+
+fn trace_table_ui(
+    ui: &mut egui::Ui,
+    snapshot: &StoreSnapshot,
+    traces: &[InspectorTrace],
+    playhead_us: Option<i64>,
+    marker_us: Option<i64>,
+    sample_mode: SampleMode,
+) {
+    let row_height = ui.spacing().interact_size.y;
+    let mut table = TableBuilder::new(ui)
+        .id_salt("inspector-traces-table")
+        .striped(true)
+        .resizable(true)
+        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+        .auto_shrink([false, true])
+        .column(Column::remainder().clip(true))
+        .column(Column::auto().at_least(72.0));
+    if marker_us.is_some() {
+        table = table.column(Column::auto().at_least(72.0));
+    }
+    table
+        .header(row_height, |mut header| {
+            header.col(|ui| {
+                ui.strong("Trace");
             });
-        }
-    }
-    if !live_summaries.is_empty() {
-        ui.separator();
-        ui.strong("Live connections");
-        for live in live_summaries {
-            ui.group(|ui| {
-                property(ui, "Endpoint", &live.endpoint);
-                property(ui, "State", &live.state);
-                property(ui, "Frames", live.rx_frames.to_string());
-                property(ui, "Rows", live.rows.to_string());
-                if let Some(recording) = &live.recording {
-                    property(ui, "Recording", recording);
+            header.col(|ui| {
+                ui.strong("Value");
+            });
+            if marker_us.is_some() {
+                header.col(|ui| {
+                    ui.strong("Δ");
+                });
+            }
+        })
+        .body(|body| {
+            body.rows(row_height, traces.len(), |mut row| {
+                let trace = &traces[row.index()];
+                row.col(|ui| {
+                    ui.horizontal(|ui| {
+                        color_swatch(ui, trace.color);
+                        ui.label(&trace.label);
+                    });
+                });
+                let readout =
+                    trace_readout(snapshot, trace.field, playhead_us, marker_us, sample_mode);
+                row.col(|ui| {
+                    ui.monospace(readout.value);
+                });
+                if marker_us.is_some() {
+                    row.col(|ui| {
+                        ui.monospace(readout.delta.unwrap_or_else(|| "--".to_owned()));
+                    });
                 }
             });
-        }
-    }
+        });
 }
 
-fn cursor_ui(
-    ui: &mut egui::Ui,
-    snapshot: &StoreSnapshot,
-    readout: CursorReadout,
-    mode: delog_core::field_view::SampleMode,
-    fields: &[FieldId],
-) {
-    property(ui, readout.time_label(), super::format_time_us(readout.t_us()));
-    if fields.is_empty() {
-        match readout {
-            CursorReadout::Hover { .. } => ui.weak("The hovered plot has no visible traces."),
-            CursorReadout::Playhead { .. } => {
-                ui.weak("Focus a plot to inspect values at the playhead.")
-            }
-        };
-        return;
-    }
-    ui.separator();
-    let missing = match readout {
-        CursorReadout::Hover { .. } => "No sample at cursor",
-        CursorReadout::Playhead { .. } => "No sample at playhead",
-    };
-    for field in fields {
-        trace_ui(ui, snapshot, *field, readout.t_us(), mode, missing);
-    }
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TraceReadout {
+    value: String,
+    delta: Option<String>,
 }
 
-fn trace_ui(
-    ui: &mut egui::Ui,
+fn trace_readout(
     snapshot: &StoreSnapshot,
     field: FieldId,
-    t_us: i64,
-    mode: delog_core::field_view::SampleMode,
-    missing: &str,
-) {
-    ui.strong(crate::plotting::legend::trace_label(snapshot, field));
-    let value = FieldView::new(snapshot, field).ok().and_then(|view| {
-        view.sample_at(t_us, mode)
-            .map(|sample| format_sample(sample.value, snapshot, field))
-    });
-    match value {
-        Some(value) => ui.monospace(value),
-        None => ui.weak(missing),
-    };
+    playhead_us: Option<i64>,
+    marker_us: Option<i64>,
+    mode: SampleMode,
+) -> TraceReadout {
+    let value = playhead_us
+        .and_then(|playhead_us| {
+            FieldView::new(snapshot, field).ok().and_then(|view| {
+                view.sample_at(playhead_us, mode)
+                    .map(|sample| format_sample(sample.value, snapshot, field))
+            })
+        })
+        .unwrap_or_else(|| "--".to_owned());
+    let delta = marker_us
+        .zip(playhead_us)
+        .and_then(|(marker_us, playhead_us)| {
+            crate::plotting::hover::marker_delta_for_field(
+                snapshot,
+                field,
+                marker_us,
+                playhead_us,
+                mode,
+            )
+        });
+    TraceReadout { value, delta }
 }
 
 fn format_sample(value: SampleValue<'_>, snapshot: &StoreSnapshot, field: FieldId) -> String {
@@ -437,73 +202,25 @@ fn format_sample(value: SampleValue<'_>, snapshot: &StoreSnapshot, field: FieldI
         let meta = super::field_metadata(snapshot, field);
         let scaled = value * meta.as_ref().map_or(1.0, |meta| meta.multiplier);
         let unit = meta.and_then(|meta| meta.unit).unwrap_or_default();
-        return format!("{} {unit}", super::format_stat(scaled));
+        let value = super::format_stat(scaled);
+        return if unit.is_empty() {
+            value
+        } else {
+            format!("{value} {unit}")
+        };
     }
     match value {
         SampleValue::Bool(value) => value.to_string(),
         SampleValue::Utf8(value) => value.to_owned(),
-        SampleValue::Null => "—".to_owned(),
-        SampleValue::Int(_) | SampleValue::UInt(_) | SampleValue::Float(_) => "—".to_owned(),
+        SampleValue::Null | SampleValue::Int(_) | SampleValue::UInt(_) | SampleValue::Float(_) => {
+            "--".to_owned()
+        }
     }
 }
 
-fn statistics_ui(
-    ui: &mut egui::Ui,
-    snapshot: &StoreSnapshot,
-    fields: &[FieldId],
-    controller: &mut FieldStatsController,
-) {
-    ui.horizontal(|ui| {
-        for tab in StatsTab::ALL {
-            if ui
-                .selectable_label(controller.tab() == tab, tab.label())
-                .clicked()
-            {
-                controller.set_tab(tab);
-            }
-        }
-        if controller.is_any_updating() {
-            ui.spinner();
-        }
-    });
-    ui.separator();
-    for field in fields {
-        ui.strong(crate::plotting::legend::trace_label(snapshot, *field));
-        let global_result;
-        let result = if controller.tab() == StatsTab::Global {
-            global_result = delog_core::analysis::global_field_stats(snapshot, *field);
-            match &global_result {
-                Ok(Some(result)) => Some(result),
-                Ok(None) => {
-                    ui.weak("Not numeric");
-                    continue;
-                }
-                Err(error) => {
-                    ui.colored_label(ui.visuals().error_fg_color, error.to_string());
-                    continue;
-                }
-            }
-        } else {
-            if let Some(error) = controller.error_for(*field) {
-                ui.colored_label(ui.visuals().error_fg_color, error);
-                continue;
-            }
-            controller
-                .result_for(*field)
-                .or_else(|| controller.stale_result_for(*field))
-        };
-        if let Some(result) = result {
-            property(ui, "Min", super::format_stat(result.min));
-            property(ui, "Max", super::format_stat(result.max));
-            property(ui, "Mean", super::format_stat(result.mean));
-            property(ui, "Std dev", super::format_stat(result.stddev));
-            property(ui, "Samples", result.count.to_string());
-            property(ui, "Missing", result.missing_count.to_string());
-        } else {
-            ui.weak("Calculating…");
-        }
-        ui.separator();
-    }
+fn color_swatch(ui: &mut egui::Ui, color: egui::Color32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 2.0, color);
 }
 
 fn property(ui: &mut egui::Ui, label: &str, value: impl ToString) {
@@ -518,6 +235,12 @@ fn property(ui: &mut egui::Ui, label: &str, value: impl ToString) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shell::workspace::InspectorTrace;
+
+    #[test]
+    fn inspector_starts_closed() {
+        assert!(!InspectorState::default().open);
+    }
 
     fn find_text_rect(shape: &egui::epaint::Shape, expected: &str) -> Option<egui::Rect> {
         match shape {
@@ -531,28 +254,47 @@ mod tests {
         }
     }
 
+    fn numeric_snapshot() -> (Arc<StoreSnapshot>, FieldId) {
+        use arrow::array::{ArrayRef, Float64Array, Int64Array};
+        use arrow::datatypes::DataType;
+        use delog_core::chunk::Chunk;
+        use delog_core::schema::{FieldSchema, TopicSchema};
+        use delog_core::store::TopicStore;
+
+        let mut identity = delog_core::identity::IdentityRegistry::new();
+        let source = identity.add_source("flight");
+        let topic = identity.add_topic(source, "ATT").unwrap();
+        let field = identity.add_field(topic, "Roll").unwrap();
+        let schema = Arc::new(
+            TopicSchema::new(
+                "ATT",
+                [FieldSchema::new("Roll", DataType::Float64, Some("deg"), 0.5).unwrap()],
+            )
+            .unwrap(),
+        );
+        let columns: Vec<ArrayRef> = vec![Arc::new(Float64Array::from(vec![2.0, 8.0]))];
+        let chunk =
+            Arc::new(Chunk::try_new(Int64Array::from(vec![10, 20]), columns, &schema).unwrap());
+        let store = Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap());
+        let snapshot =
+            Arc::new(StoreSnapshot::from_registry(&identity, [(topic, store)], 0).unwrap());
+        (snapshot, field)
+    }
+
     fn inspector_frame(
         ctx: &egui::Context,
         state: &mut InspectorState,
         snapshot: &Arc<StoreSnapshot>,
-        focused_tile: egui_tiles::TileId,
-        visible_field: FieldId,
-        stats: &mut FieldStatsController,
-        events: Vec<egui::Event>,
+        playhead_us: Option<i64>,
+        marker_us: Option<i64>,
+        traces: &[InspectorTrace],
     ) -> egui::FullOutput {
-        let cursor_fields =
-            cursor_fields_for_frame(&state.selection, Some(focused_tile), |tile_id| {
-                (tile_id == focused_tile)
-                    .then_some(vec![visible_field])
-                    .unwrap_or_default()
-            });
         ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
                     egui::vec2(500.0, 400.0),
                 )),
-                events,
                 ..Default::default()
             },
             |ui| {
@@ -560,195 +302,87 @@ mod tests {
                     ui,
                     state,
                     snapshot,
-                    11,
-                    delog_core::field_view::SampleMode::Prev,
-                    &cursor_fields,
-                    Some(focused_tile),
-                    0,
-                    stats,
-                    None,
-                    &[],
+                    playhead_us,
+                    marker_us,
+                    SampleMode::Prev,
+                    traces,
                 );
             },
         )
     }
 
-    #[test]
-    fn inspector_defaults_to_summary_and_can_be_closed_without_losing_selection() {
-        let mut state = InspectorState::default();
-        assert_eq!(state.selection, InspectorSelection::Summary);
-        state.focus_statistics(vec![FieldId(7)]);
-        state.open = false;
-        assert_eq!(
-            state.selection,
-            InspectorSelection::Statistics(vec![FieldId(7)])
-        );
-    }
-
-    #[test]
-    fn field_stats_context_action_also_focuses_inspector() {
-        let action = inspector_action_for_stats(vec![FieldId(1), FieldId(2)]);
-        assert_eq!(
-            action,
-            InspectorSelection::Statistics(vec![FieldId(1), FieldId(2)])
-        );
-    }
-
-    #[test]
-    fn inspector_width_edit_clamps_to_existing_range() {
-        assert_eq!(normalize_trace_width(0.5), 1.0);
-        assert_eq!(normalize_trace_width(6.0), 6.0);
-        assert_eq!(normalize_trace_width(20.0), 12.0);
-    }
-
-    #[test]
-    fn hovered_pane_and_time_win_over_focused_pane_and_playhead() {
-        let hovered = egui_tiles::TileId::from_u64(7);
-        let focused = egui_tiles::TileId::from_u64(2);
-        assert_eq!(
-            cursor_readout_for_frame(Some((hovered, 42)), 11, Some(focused)),
-            CursorReadout::Hover {
-                tile_id: hovered,
-                t_us: 42,
-            }
-        );
-        assert_eq!(
-            cursor_readout_for_frame(Some((hovered, 42)), 11, Some(focused)).time_label(),
-            "Cursor time"
-        );
-    }
-
-    #[test]
-    fn no_hover_uses_a_distinctly_labelled_playhead_fallback() {
-        let focused = egui_tiles::TileId::from_u64(2);
-        let readout = cursor_readout_for_frame(None, 11, Some(focused));
-        assert_eq!(
-            readout,
-            CursorReadout::Playhead {
-                tile_id: Some(focused),
-                t_us: 11,
-            }
-        );
-        assert_eq!(readout.time_label(), "Playhead time");
-    }
-
-    #[test]
-    fn first_no_hover_cursor_render_contains_focused_pane_fields() {
-        let mut identity = delog_core::identity::IdentityRegistry::new();
-        let source = identity.add_source("flight");
-        let topic = identity.add_topic(source, "ATT").unwrap();
-        let field = identity.add_field(topic, "Roll").unwrap();
-        let snapshot = Arc::new(StoreSnapshot::from_registry(&identity, [], 0).unwrap());
-        let focused = egui_tiles::TileId::from_u64(2);
-        let ctx = egui::Context::default();
-        let mut state = InspectorState::default();
-        let mut stats = FieldStatsController::default();
-
-        let _ = inspector_frame(
-            &ctx,
-            &mut state,
-            &snapshot,
-            focused,
-            field,
-            &mut stats,
-            vec![],
-        );
-        let output = inspector_frame(
-            &ctx,
-            &mut state,
-            &snapshot,
-            focused,
-            field,
-            &mut stats,
-            vec![],
-        );
-        let cursor = output
+    fn painted(output: &egui::FullOutput, expected: &str) -> bool {
+        output
             .shapes
             .iter()
-            .find_map(|shape| find_text_rect(&shape.shape, "Cursor"))
-            .expect("Cursor selector should be painted")
-            .center();
-        let _ = inspector_frame(
-            &ctx,
-            &mut state,
-            &snapshot,
-            focused,
-            field,
-            &mut stats,
-            vec![
-                egui::Event::PointerMoved(cursor),
-                egui::Event::PointerButton {
-                    pos: cursor,
-                    button: egui::PointerButton::Primary,
-                    pressed: true,
-                    modifiers: egui::Modifiers::NONE,
-                },
-            ],
-        );
-        let clicked = inspector_frame(
-            &ctx,
-            &mut state,
-            &snapshot,
-            focused,
-            field,
-            &mut stats,
-            vec![
-                egui::Event::PointerMoved(cursor),
-                egui::Event::PointerButton {
-                    pos: cursor,
-                    button: egui::PointerButton::Primary,
-                    pressed: false,
-                    modifiers: egui::Modifiers::NONE,
-                },
-            ],
-        );
-
-        assert!(matches!(state.selection, InspectorSelection::Cursor { .. }));
-        assert!(
-            clicked
-                .shapes
-                .iter()
-                .any(|shape| { find_text_rect(&shape.shape, "No sample at playhead").is_some() })
-        );
-        assert!(!clicked.shapes.iter().any(|shape| {
-            find_text_rect(
-                &shape.shape,
-                "Focus a plot to inspect values at the playhead.",
-            )
-            .is_some()
-        }));
+            .any(|shape| find_text_rect(&shape.shape, expected).is_some())
     }
 
     #[test]
-    fn cursor_refresh_does_not_replace_other_inspector_selections() {
+    fn single_view_omits_unused_cursor_time() {
+        let snapshot = Arc::new(StoreSnapshot::empty());
+        let ctx = egui::Context::default();
         let mut state = InspectorState::default();
-        state.focus_statistics(vec![FieldId(9)]);
-        let changed = state.update_cursor_readout(CursorReadout::Playhead {
-            tile_id: None,
-            t_us: 77,
-        });
-        assert!(!changed);
-        assert_eq!(
-            state.selection,
-            InspectorSelection::Statistics(vec![FieldId(9)])
-        );
+
+        let output = inspector_frame(&ctx, &mut state, &snapshot, None, None, &[]);
+
+        for required in ["Start", "End", "Duration", "Playhead time"] {
+            assert!(painted(&output, required), "missing {required}");
+        }
+        for removed in [
+            "Summary",
+            "Cursor",
+            "Statistics",
+            "Sources",
+            "Topics",
+            "Fields",
+            "Diagnostics",
+            "Cursor time",
+        ] {
+            assert!(
+                !painted(&output, removed),
+                "obsolete inspector row remains: {removed}"
+            );
+        }
+        assert!(painted(&output, "No visible traces"));
     }
 
     #[test]
-    fn cursor_refresh_reports_only_real_readout_changes() {
-        let tile_id = egui_tiles::TileId::from_u64(3);
-        let readout = CursorReadout::Hover { tile_id, t_us: 42 };
-        let mut state = InspectorState {
-            open: true,
-            selection: InspectorSelection::Cursor {
-                readout: CursorReadout::Playhead {
-                    tile_id: Some(tile_id),
-                    t_us: 11,
-                },
-            },
-        };
+    fn trace_readout_uses_playhead_value_and_marker_minus_playhead_delta() {
+        let (snapshot, field) = numeric_snapshot();
 
-        assert!(state.update_cursor_readout(readout));
-        assert!(!state.update_cursor_readout(readout));
+        let readout = trace_readout(&snapshot, field, Some(20), Some(10), SampleMode::Prev);
+
+        assert_eq!(readout.value, "4.0000 deg");
+        assert_eq!(readout.delta.as_deref(), Some("-3.0000 deg"));
+    }
+
+    #[test]
+    fn marker_renders_one_trace_table_with_delta_column() {
+        let (snapshot, field) = numeric_snapshot();
+        let traces = [
+            InspectorTrace {
+                field,
+                label: "ATT.Roll".to_owned(),
+                color: egui::Color32::RED,
+            },
+            InspectorTrace {
+                field,
+                label: "Bank duplicate".to_owned(),
+                color: egui::Color32::BLUE,
+            },
+        ];
+        let ctx = egui::Context::default();
+        let mut state = InspectorState::default();
+
+        let output = inspector_frame(&ctx, &mut state, &snapshot, Some(20), Some(10), &traces);
+
+        assert!(!painted(&output, "Plot 1"));
+        assert!(painted(&output, "ATT.Roll"));
+        assert!(painted(&output, "Bank duplicate"));
+        assert!(painted(&output, "4.0000 deg"));
+        assert!(painted(&output, "-3.0000 deg"));
+        assert!(painted(&output, "Δt"));
+        assert!(painted(&output, "-0.000 s"));
     }
 }

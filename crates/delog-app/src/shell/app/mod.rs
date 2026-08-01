@@ -32,6 +32,24 @@ use crate::session::session::Session;
 use crate::config::settings::{AppSettings, RenderMode, SettingsDialog, TileCacheUiState};
 use crate::sync::sync_window::SyncWindow;
 
+fn data_browser_panel(preferred_width: f32) -> egui::Panel {
+    egui::Panel::left("data_browser_expanded")
+        .resizable(true)
+        .min_size(360.0)
+        .default_size(preferred_width)
+}
+
+fn collapsed_data_browser_width(style: &egui::Style) -> f32 {
+    let tokens = crate::ui::design_tokens::DesignTokens::from_style(style);
+    tokens.space_sm + tokens.control_height + tokens.space_sm
+}
+
+fn central_workspace_frame(style: &egui::Style) -> egui::Frame {
+    let mut frame = egui::Frame::central_panel(style);
+    frame.inner_margin.left = 0;
+    frame
+}
+
 fn tile_cache_needs_repaint(clear_submitted: bool, cache_action_pending: bool) -> bool {
     clear_submitted || cache_action_pending
 }
@@ -133,7 +151,7 @@ fn dynamic_palette_metadata(command: &commands::AppCommand) -> (&'static str, St
             format!("layout load workspace {name}"),
         ),
         AppCommand::DisconnectLink(_) => (
-            "File › Disconnect live link",
+            "Header › Live link",
             "live link disconnect connection endpoint".to_owned(),
         ),
         AppCommand::ToggleShellEmphasis => (
@@ -2478,9 +2496,17 @@ impl eframe::App for DelogApp {
             fps: self.settings.show_fps.then_some(self.fps_ema).flatten(),
             theme: self.settings.theme,
         };
+        let toolbar_model = global_plot_toolbar::GlobalPlotToolbarModel {
+            cursor_sampling: self.hover_mode,
+            playhead_snap: self.snap_playhead,
+            measuring_marker: self.marker_us.is_some(),
+            legend_position: self.settings.plot.legend_position,
+        };
         let header_output = egui::Panel::top("context_header")
             .show_inside(ui, |ui| {
-                context_header::show(ui, &header_model, &command_presentations)
+                context_header::show(ui, &header_model, &command_presentations, |ui| {
+                    global_plot_toolbar::show(ui, &toolbar_model, &command_presentations)
+                })
             })
             .inner;
         drop(ui_menu_timer);
@@ -2688,9 +2714,9 @@ impl eframe::App for DelogApp {
 
         let ui_browser_timer = self.session.metrics().scope("ui_browser");
         if self.browser_collapsed {
-            let button_size = browser::panel_toggle_button_size(ui);
-            let collapsed_left_margin = ui.spacing().item_spacing.x;
-            let collapsed_width = collapsed_left_margin + button_size.x;
+            let tokens = crate::ui::design_tokens::DesignTokens::from_style(ui.style());
+            let collapsed_left_margin = tokens.space_sm;
+            let collapsed_width = collapsed_data_browser_width(ui.style());
             let collapsed_frame =
                 egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::ZERO);
             egui::Panel::left("data_browser_collapsed")
@@ -2700,17 +2726,13 @@ impl eframe::App for DelogApp {
                 .exact_size(collapsed_width)
                 .show_inside(ui, |ui| {
                     ui.vertical(|ui| {
-                        ui.add_space(8.0);
+                        ui.add_space(15.0);
                         ui.horizontal(|ui| {
                             ui.add_space(collapsed_left_margin);
-                            let icon_size = button_size - ui.spacing().button_padding * 2.0;
-                            if crate::ui::components::icon_button_sized(
+                            if browser::data_browser_toggle_button(
                                 ui,
                                 crate::ui::icons::panel_left_open(),
                                 "Show data browser",
-                                false,
-                                button_size,
-                                icon_size,
                             )
                                 .clicked()
                             {
@@ -2731,14 +2753,12 @@ impl eframe::App for DelogApp {
                     BrowserModel::from_snapshot(&snapshot)
                 }
             };
-            let browser_panel = egui::Panel::left("data_browser_expanded")
-                .resizable(true)
-                .min_size(360.0);
-            let browser_panel = if model.is_empty() {
-                browser_panel.default_size(ui.spacing().text_edit_width)
+            let preferred_width = if model.is_empty() {
+                ui.spacing().text_edit_width
             } else {
-                browser_panel.default_size(360.0)
+                360.0
             };
+            let browser_panel = data_browser_panel(preferred_width);
             browser_panel.show_inside(ui, |ui| {
                 // Offset edits go through the ingest thread (the single
                 // registry writer) and come back as a new epoch.
@@ -2768,7 +2788,6 @@ impl eframe::App for DelogApp {
                 }
                 if let Some(field) = browser_response.inspect_field_stats {
                     self.field_stats.open(field);
-                    self.inspector.focus_statistics(vec![field]);
                 }
                 if let Some(field) = browser_response.generate_markers {
                     let title = crate::plotting::legend::trace_label(&snapshot, field);
@@ -2796,19 +2815,9 @@ impl eframe::App for DelogApp {
             &mut self.field_stats,
         );
         if self.inspector.open {
-            let focused_tile = self.workspace.focused_plot_id();
-            let cursor_fields = inspector::cursor_fields_for_frame(
-                &self.inspector.selection,
-                focused_tile,
-                |tile_id| self.workspace.visible_fields(tile_id),
-            );
-            let inspected_trace = match self.inspector.selection {
-                inspector::InspectorSelection::Trace { tile_id, field } => {
-                    self.workspace.trace_ref(tile_id, field).cloned()
-                }
-                _ => None,
-            };
-            let inspector_events = egui::Panel::right("analysis_inspector")
+            let traces = self.workspace.inspector_traces(&snapshot);
+            let playhead_us = snapshot.global_time_range().map(|_| self.playback.t_us);
+            egui::Panel::right("analysis_inspector")
                 .resizable(true)
                 .default_size(320.0)
                 .min_size(260.0)
@@ -2818,49 +2827,12 @@ impl eframe::App for DelogApp {
                         ui,
                         &mut self.inspector,
                         &snapshot,
-                        self.playback.t_us,
+                        playhead_us,
+                        self.marker_us,
                         self.hover_mode,
-                        &cursor_fields,
-                        focused_tile,
-                        diagnostics.len(),
-                        &mut self.field_stats,
-                        inspected_trace.as_ref(),
-                        &header_model.live_statuses,
+                        &traces,
                     )
-                })
-                .inner;
-            for event in inspector_events {
-                match event {
-                    inspector::InspectorEvent::SetTraceColor {
-                        tile_id,
-                        field,
-                        color,
-                    } => {
-                        self.workspace.set_trace_color(tile_id, field, color);
-                    }
-                    inspector::InspectorEvent::SetTraceMode {
-                        tile_id,
-                        field,
-                        mode,
-                    } => {
-                        self.workspace.set_trace_mode(tile_id, field, mode);
-                    }
-                    inspector::InspectorEvent::SetTraceWidth {
-                        tile_id,
-                        field,
-                        width_px,
-                    } => {
-                        self.workspace.set_trace_width(tile_id, field, width_px);
-                    }
-                    inspector::InspectorEvent::SetTraceLabel {
-                        tile_id,
-                        field,
-                        label,
-                    } => {
-                        self.workspace.set_trace_label(tile_id, field, label);
-                    }
-                }
-            }
+                });
         }
         for (t_us, name, color) in crate::shell::generate_markers::generate_markers_window(
             ui.ctx(),
@@ -2894,22 +2866,9 @@ impl eframe::App for DelogApp {
         }
 
         let ui_workspace_timer = self.session.metrics().scope("ui_workspace");
-        egui::Frame::central_panel(ui.style()).show(ui, |ui| {
+        central_workspace_frame(ui.style()).show(ui, |ui| {
             // The workspace renders even before any log loads, so plots can be
             // arranged and the 3D view opened on an empty session.
-
-            let toolbar_model = global_plot_toolbar::GlobalPlotToolbarModel {
-                cursor_sampling: self.hover_mode,
-                playhead_snap: self.snap_playhead,
-                measuring_marker: self.marker_us.is_some(),
-                all_legends_visible: self.workspace.all_plot_legends_visible(),
-                legend_position: self.settings.plot.legend_position,
-            };
-            for command in
-                global_plot_toolbar::show(ui, &toolbar_model, &command_presentations)
-            {
-                self.dispatch_command(command, ui.ctx(), frame, &snapshot, range);
-            }
 
             let workspace_rect = ui.available_rect_before_wrap();
 
@@ -2963,7 +2922,6 @@ impl eframe::App for DelogApp {
                     drop(tree_timer);
                     let actions = behavior.into_actions();
                     self.workspace.repair_focus();
-                    let hovered_cursor = actions.hovered_cursor;
                     // Share the widest pane gutter so stacked plots align next
                     // frame. Converges in one frame; until then each
                     // pane never drops below its own gutter, so labels never
@@ -3014,24 +2972,7 @@ impl eframe::App for DelogApp {
                         self.spawn_export_kml_dialog(ui.ctx(), &snapshot);
                     }
                     if let Some(fields) = actions.inspect_field_stats {
-                        self.field_stats.open_fields(fields.clone());
-                        self.inspector.focus_statistics(fields);
-                    }
-                    if let Some((tile_id, field)) = actions.inspect_trace {
-                        self.inspector.focus_trace(tile_id, field);
-                    }
-                    let cursor_changed = self.inspector.update_cursor_readout(
-                        inspector::cursor_readout_for_frame(
-                            hovered_cursor.map(|hover| (hover.tile_id, hover.t_us)),
-                            self.playback.t_us,
-                            self.workspace.focused_plot_id(),
-                        ),
-                    );
-                    if cursor_changed {
-                        // The Inspector is laid out before the central workspace.
-                        // Schedule one convergence frame after its hover readout
-                        // changes so event-driven rendering cannot leave it stale.
-                        ui.ctx().request_repaint();
+                        self.field_stats.open_fields(fields);
                     }
                     if let Some(action) = actions.image {
                         match action {

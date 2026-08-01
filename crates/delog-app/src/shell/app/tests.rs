@@ -89,6 +89,80 @@ fn fit_to_view_defaults_on_for_new_sessions() {
 }
 
 #[test]
+fn data_browser_panel_stays_at_its_opening_width_across_idle_frames() {
+    let ctx = egui::Context::default();
+    egui_extras::install_image_loaders(&ctx);
+    crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1_200.0, 800.0),
+        )),
+        ..Default::default()
+    };
+    let model = BrowserModel::default();
+    let mut query = String::new();
+    let mut filter_cache = BrowserFilterCache::default();
+    let mut selection = browser::Selection::default();
+    let mut offset_dialog = None;
+    let mut widths = Vec::new();
+
+    for _ in 0..48 {
+        let mut width = 0.0;
+        let _ = ctx.run_ui(input.clone(), |ui| {
+            width = data_browser_panel(ui.spacing().text_edit_width)
+                .show_inside(ui, |ui| {
+                    browser::ui(
+                        ui,
+                        0,
+                        &model,
+                        &mut query,
+                        &mut filter_cache,
+                        &mut selection,
+                        &mut offset_dialog,
+                    );
+                })
+                .response
+                .rect
+                .width();
+        });
+        widths.push(width);
+    }
+
+    assert_eq!(
+        widths[0], 280.0,
+        "browser did not open at its default width"
+    );
+    assert!(
+        widths.iter().all(|width| *width == widths[0]),
+        "browser grew across idle frames: {widths:?}"
+    );
+}
+
+#[test]
+fn central_workspace_frame_removes_only_the_left_margin() {
+    let style = egui::Style::default();
+    let standard = egui::Frame::central_panel(&style);
+    let workspace = central_workspace_frame(&style);
+
+    assert_eq!(workspace.inner_margin.left, 0);
+    assert_eq!(workspace.inner_margin.right, standard.inner_margin.right);
+    assert_eq!(workspace.inner_margin.top, standard.inner_margin.top);
+    assert_eq!(workspace.inner_margin.bottom, standard.inner_margin.bottom);
+}
+
+#[test]
+fn collapsed_data_browser_reserves_standard_margin_on_both_sides() {
+    let style = egui::Style::default();
+    let tokens = crate::ui::design_tokens::DesignTokens::from_style(&style);
+
+    assert_eq!(
+        collapsed_data_browser_width(&style),
+        tokens.space_sm + tokens.control_height + tokens.space_sm,
+    );
+}
+
+#[test]
 fn clear_current_layout_resets_layout_and_vehicle_state() {
     let mut workspace = Workspace::new();
     let mut playback = Playback {
@@ -229,7 +303,7 @@ fn non_static_palette_entries_have_variant_specific_search_metadata() {
         (
             AppCommand::DisconnectLink(0),
             "live link disconnect connection endpoint",
-            "File › Disconnect live link",
+            "Header › Live link",
         ),
         (
             AppCommand::ToggleShellEmphasis,
