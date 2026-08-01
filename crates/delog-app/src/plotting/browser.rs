@@ -939,6 +939,7 @@ fn field_row(
             .tint(ui.visuals().text_color());
         if ui
             .add(egui::Button::image_and_text(stats_info, "Field stats"))
+            .on_hover_text("Open field statistics and focus the Inspector")
             .clicked()
         {
             action = Some(FieldRowAction::InspectStats(field.id));

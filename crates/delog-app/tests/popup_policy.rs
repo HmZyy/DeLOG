@@ -270,7 +270,7 @@ fn plot_field_stats_is_one_direct_action_for_all_pane_traces() {
     let stats = between(
         context_menu,
         "let fields: Vec<FieldId>",
-        "ui.menu_image_text_button(menu_icon(ui, crate::ui::icons::pencil())",
+        "ui.menu_button(\"Inspect trace\"",
     );
 
     assert!(stats.contains("pane.traces.iter().map(|trace| trace.field).collect"));
@@ -278,6 +278,7 @@ fn plot_field_stats_is_one_direct_action_for_all_pane_traces() {
     assert!(stats.contains("self.actions.inspect_field_stats = Some(fields)"));
     assert!(!stats.contains("menu_image_text_button"));
     assert!(!stats.contains("ui.button(label)"));
+    assert!(context_menu.contains("self.actions.inspect_trace"));
 }
 
 #[test]

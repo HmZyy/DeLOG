@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use delog_core::identity::FieldId;
 use delog_core::snapshot::StoreSnapshot;
 
-use crate::plotting::plot::{PlotPane, TraceMode, TraceRef};
 use crate::config::settings::LegendPosition;
+use crate::plotting::plot::{PlotPane, TraceMode, TraceRef};
 use egui_tiles::TileId;
 
 pub fn with_bg_opacity(color: egui::Color32, opacity: f32) -> egui::Color32 {
@@ -125,6 +125,7 @@ fn legend_anchor(position: LegendPosition, bounds: egui::Rect) -> (egui::Pos2, e
 pub struct LegendOutcome {
     pub removed: Option<FieldId>,
     pub rename: Option<FieldId>,
+    pub inspect: Option<FieldId>,
     /// Index into `pane.ghosts` of a missing trace the user asked to remove.
     pub removed_ghost: Option<usize>,
 }
@@ -163,6 +164,7 @@ pub fn ui(
     }
     let mut removed = None;
     let mut rename = None;
+    let mut inspect = None;
     let mut removed_ghost = None;
     // Applied after the Area closure releases its borrow of `pane`.
     let mut filter_edits: Vec<(FieldId, String)> = Vec::new();
@@ -194,7 +196,8 @@ pub fn ui(
                     )
                     .show(ui, |ui| {
                         for (field, label) in labels {
-                            let is_text = crate::plotting::text_overlay::field_is_string(snapshot, *field);
+                            let is_text =
+                                crate::plotting::text_overlay::field_is_string(snapshot, *field);
                             let mut filter = if is_text {
                                 pane.text_filters.get(field).cloned().unwrap_or_default()
                             } else {
@@ -330,6 +333,10 @@ pub fn ui(
                                             .suffix(" px"),
                                     );
                                     ui.separator();
+                                    if ui.button("Inspect").clicked() {
+                                        inspect = Some(*field);
+                                        ui.close();
+                                    }
                                     if ui.button("Rename").clicked() {
                                         rename = Some(*field);
                                         ui.close();
@@ -396,6 +403,7 @@ pub fn ui(
     LegendOutcome {
         removed,
         rename,
+        inspect,
         removed_ghost,
     }
 }
