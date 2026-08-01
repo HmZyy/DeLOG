@@ -1,3 +1,9 @@
+use delog_core::field_view::SampleMode;
+
+pub use super::dynamic_commands::{
+    DynamicCommandCatalog, dynamic_command_families, merge_dynamic_command_refresh,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CommandId {
     Open,
@@ -46,6 +52,8 @@ pub enum CommandId {
 pub enum AppCommand {
     Static(CommandId),
     ToggleShellEmphasis,
+    FitAll,
+    SetCursorSampling(SampleMode),
     OpenWithParser(String),
     #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
     RunScript(String),
@@ -53,20 +61,62 @@ pub enum AppCommand {
     DisconnectLink(usize),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ClassicMenuOwner {
+    File,
+    View,
+    Analyze,
+    Tools,
+}
+
+impl ClassicMenuOwner {
+    pub const fn title(self) -> &'static str {
+        match self {
+            Self::File => "File",
+            Self::View => "View",
+            Self::Analyze => "Analyze",
+            Self::Tools => "Tools",
+        }
+    }
+}
+
+impl AppCommand {
+    pub const fn classic_menu_owner(&self) -> ClassicMenuOwner {
+        match self {
+            Self::Static(id) => id.classic_menu_owner(),
+            Self::ToggleShellEmphasis | Self::DisconnectLink(_) => ClassicMenuOwner::File,
+            Self::OpenWithParser(_) => ClassicMenuOwner::Tools,
+            Self::FitAll => ClassicMenuOwner::View,
+            Self::SetCursorSampling(_) => ClassicMenuOwner::Analyze,
+            Self::RunScript(_) => ClassicMenuOwner::Tools,
+            Self::LoadNamedLayout(_) => ClassicMenuOwner::View,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccessRoute {
     Header,
-    SourceMenu,
-    WorkspaceMenu,
-    AnalysisMenu,
-    ExtensionsMenu,
-    PanelsMenu,
-    ExportMenu,
-    PlotContext,
+    ClassicMenu,
+    GlobalToolbar,
     SceneToolbar,
     Transport,
     Shortcut,
     Palette,
+}
+
+impl AccessRoute {
+    pub const fn search_term(self) -> &'static str {
+        match self {
+            Self::Header => "header",
+            Self::ClassicMenu => "menu",
+            Self::GlobalToolbar => "global toolbar",
+            Self::SceneToolbar => "3d toolbar",
+            Self::Transport => "transport",
+            Self::Shortcut => "shortcut",
+            Self::Palette => "palette",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,26 +135,10 @@ pub enum CommandGroup {
 pub struct CommandSpec {
     pub label: &'static str,
     pub group: CommandGroup,
+    pub classic_menu_owner: ClassicMenuOwner,
     pub shortcut: Option<&'static str>,
     pub search_terms: &'static str,
     pub routes: &'static [AccessRoute],
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DynamicFamily {
-    Parser,
-    Script,
-    Layout,
-    LiveLink,
-}
-
-pub const fn dynamic_command_families() -> &'static [DynamicFamily] {
-    &[
-        DynamicFamily::Parser,
-        DynamicFamily::Script,
-        DynamicFamily::Layout,
-        DynamicFamily::LiveLink,
-    ]
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -114,6 +148,25 @@ pub struct CommandContext {
     pub live_link_count: usize,
     pub has_active_tasks: bool,
     pub scripting_enabled: bool,
+}
+
+impl CommandContext {
+    pub const fn for_frame(
+        has_data: bool,
+        offline_source_count: usize,
+        live_link_count: usize,
+        native_tasks_active: bool,
+        parser_task_active: bool,
+        scripting_enabled: bool,
+    ) -> Self {
+        Self {
+            has_data,
+            offline_source_count,
+            live_link_count,
+            has_active_tasks: native_tasks_active || parser_task_active,
+            scripting_enabled,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,6 +181,65 @@ pub struct CommandPresentation {
     pub label: String,
     pub shortcut: Option<&'static str>,
     pub availability: CommandAvailability,
+    /// `Some` for stateful commands, allowing every surface to render the
+    /// same selected state. Stateless commands use `None`.
+    pub selected: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PresentationState {
+    pub shell_emphasis_live: bool,
+    pub cursor_sampling: SampleMode,
+    pub data_browser_open: bool,
+    pub inspector_open: bool,
+    pub scene_3d_open: bool,
+    pub diagnostics_open: bool,
+    pub performance_open: bool,
+    pub markers_open: bool,
+    pub scripting_console_open: bool,
+    pub logging_open: bool,
+    pub playhead_snap: bool,
+    pub measuring_marker: bool,
+    pub legends_visible: bool,
+}
+
+impl Default for PresentationState {
+    fn default() -> Self {
+        Self {
+            shell_emphasis_live: false,
+            cursor_sampling: SampleMode::Prev,
+            data_browser_open: false,
+            inspector_open: false,
+            scene_3d_open: false,
+            diagnostics_open: false,
+            performance_open: false,
+            markers_open: false,
+            scripting_console_open: false,
+            logging_open: false,
+            playhead_snap: false,
+            measuring_marker: false,
+            legends_visible: true,
+        }
+    }
+}
+
+impl PresentationState {
+    fn selected_for(self, id: CommandId) -> Option<bool> {
+        match id {
+            CommandId::ToggleDataBrowser => Some(self.data_browser_open),
+            CommandId::ToggleInspector => Some(self.inspector_open),
+            CommandId::ToggleScene3d => Some(self.scene_3d_open),
+            CommandId::OpenDiagnostics => Some(self.diagnostics_open),
+            CommandId::OpenPerformance => Some(self.performance_open),
+            CommandId::OpenMarkers => Some(self.markers_open),
+            CommandId::OpenScripting => Some(self.scripting_console_open),
+            CommandId::OpenLogging => Some(self.logging_open),
+            CommandId::TogglePlayheadSnap => Some(self.playhead_snap),
+            CommandId::AddMeasuringMarker => Some(self.measuring_marker),
+            CommandId::ToggleLegends => Some(self.legends_visible),
+            _ => None,
+        }
+    }
 }
 
 macro_rules! spec {
@@ -135,6 +247,7 @@ macro_rules! spec {
         CommandSpec {
             label: $label,
             group: CommandGroup::$group,
+            classic_menu_owner: ClassicMenuOwner::File,
             shortcut: $shortcut,
             search_terms: $terms,
             routes: &[$(AccessRoute::$route),+],
@@ -188,14 +301,14 @@ impl CommandId {
 
     pub const fn spec(self) -> CommandSpec {
         use CommandId::*;
-        match self {
+        let mut spec = match self {
             Open => spec!(
                 "Open log…",
                 Source,
                 None,
                 "file import load",
                 Header,
-                SourceMenu,
+                ClassicMenu,
                 Palette
             ),
             ConnectLive => spec!(
@@ -204,7 +317,7 @@ impl CommandId {
                 None,
                 "stream telemetry mavlink",
                 Header,
-                SourceMenu,
+                ClassicMenu,
                 Palette
             ),
             SyncSources => spec!(
@@ -212,16 +325,16 @@ impl CommandId {
                 Source,
                 None,
                 "align logs time",
-                SourceMenu,
+                ClassicMenu,
                 Palette
             ),
             DisconnectLive => spec!(
-                "Disconnect live",
+                "Disconnect all live links",
                 Source,
                 None,
                 "stop stream",
                 Header,
-                SourceMenu,
+                ClassicMenu,
                 Palette
             ),
             CancelTasks => spec!(
@@ -230,7 +343,7 @@ impl CommandId {
                 None,
                 "stop loading parser",
                 Header,
-                SourceMenu,
+                ClassicMenu,
                 Palette
             ),
             ExportData => spec!(
@@ -238,7 +351,7 @@ impl CommandId {
                 Export,
                 None,
                 "csv parquet",
-                ExportMenu,
+                ClassicMenu,
                 Palette
             ),
             ExportDiagnostics => spec!(
@@ -246,7 +359,7 @@ impl CommandId {
                 Export,
                 None,
                 "errors warnings json",
-                ExportMenu,
+                ClassicMenu,
                 Palette
             ),
             ExportProfiling => spec!(
@@ -254,7 +367,7 @@ impl CommandId {
                 Export,
                 None,
                 "performance metrics json",
-                ExportMenu,
+                ClassicMenu,
                 Palette
             ),
             ExportWorkspacePng => spec!(
@@ -263,34 +376,34 @@ impl CommandId {
                 None,
                 "image screenshot",
                 Header,
-                ExportMenu,
+                ClassicMenu,
                 Palette
             ),
             ToggleDataBrowser => spec!(
-                "Toggle data browser",
+                "Data Browser",
                 Panels,
                 None,
                 "signals topics sidebar",
                 Header,
-                PanelsMenu,
+                ClassicMenu,
                 Palette
             ),
             ToggleInspector => spec!(
-                "Toggle inspector",
+                "Inspector",
                 Panels,
                 None,
                 "properties selection sidebar",
                 Header,
-                PanelsMenu,
+                ClassicMenu,
                 Palette
             ),
             ToggleScene3d => spec!(
-                "Toggle 3D scene",
+                "3D Scene",
                 Panels,
                 None,
                 "vehicle map view",
                 Header,
-                PanelsMenu,
+                ClassicMenu,
                 SceneToolbar,
                 Palette
             ),
@@ -299,8 +412,7 @@ impl CommandId {
                 Analysis,
                 Some("F1"),
                 "errors warnings",
-                AnalysisMenu,
-                PanelsMenu,
+                ClassicMenu,
                 Shortcut,
                 Palette
             ),
@@ -309,8 +421,7 @@ impl CommandId {
                 Analysis,
                 Some("F2"),
                 "profiling metrics",
-                AnalysisMenu,
-                PanelsMenu,
+                ClassicMenu,
                 Shortcut,
                 Palette
             ),
@@ -319,28 +430,25 @@ impl CommandId {
                 Analysis,
                 Some("F3"),
                 "annotations events",
-                AnalysisMenu,
-                PanelsMenu,
+                ClassicMenu,
                 Shortcut,
                 Palette
             ),
             OpenScripting => spec!(
-                "Scripting console",
+                "Scripting Console",
                 Extensions,
                 Some("F9"),
                 "automation code",
-                ExtensionsMenu,
-                PanelsMenu,
+                ClassicMenu,
                 Shortcut,
                 Palette
             ),
             OpenLogging => spec!(
-                "Application logs",
+                "Application Logs",
                 Analysis,
                 Some("F12"),
                 "logging messages",
-                AnalysisMenu,
-                PanelsMenu,
+                ClassicMenu,
                 Shortcut,
                 Palette
             ),
@@ -349,7 +457,7 @@ impl CommandId {
                 Workspace,
                 Some("Ctrl+S"),
                 "workspace arrangement",
-                WorkspaceMenu,
+                ClassicMenu,
                 Shortcut,
                 Palette
             ),
@@ -358,7 +466,7 @@ impl CommandId {
                 Workspace,
                 Some("Ctrl+L"),
                 "workspace arrangement",
-                WorkspaceMenu,
+                ClassicMenu,
                 Shortcut,
                 Palette
             ),
@@ -367,7 +475,7 @@ impl CommandId {
                 Workspace,
                 None,
                 "rename delete",
-                WorkspaceMenu,
+                ClassicMenu,
                 Palette
             ),
             ClearLayout => spec!(
@@ -375,7 +483,7 @@ impl CommandId {
                 Workspace,
                 None,
                 "reset workspace",
-                WorkspaceMenu,
+                ClassicMenu,
                 Palette
             ),
             ImportLayout => spec!(
@@ -383,7 +491,7 @@ impl CommandId {
                 Workspace,
                 None,
                 "workspace file",
-                WorkspaceMenu,
+                ClassicMenu,
                 Palette
             ),
             ExportLayout => spec!(
@@ -391,8 +499,7 @@ impl CommandId {
                 Workspace,
                 None,
                 "workspace file",
-                WorkspaceMenu,
-                ExportMenu,
+                ClassicMenu,
                 Palette
             ),
             EqualizePlots => spec!(
@@ -400,9 +507,7 @@ impl CommandId {
                 Workspace,
                 None,
                 "resize panels",
-                Header,
-                WorkspaceMenu,
-                PlotContext,
+                GlobalToolbar,
                 Palette
             ),
             OpenDataFlow => spec!(
@@ -410,7 +515,7 @@ impl CommandId {
                 Analysis,
                 None,
                 "pipeline graph",
-                AnalysisMenu,
+                ClassicMenu,
                 Palette
             ),
             OpenScriptEditor => spec!(
@@ -418,7 +523,7 @@ impl CommandId {
                 Extensions,
                 None,
                 "automation code",
-                ExtensionsMenu,
+                ClassicMenu,
                 Palette
             ),
             OpenScriptVariables => spec!(
@@ -426,7 +531,7 @@ impl CommandId {
                 Extensions,
                 None,
                 "automation state",
-                ExtensionsMenu,
+                ClassicMenu,
                 Palette
             ),
             OpenParserEditor => spec!(
@@ -434,7 +539,7 @@ impl CommandId {
                 Extensions,
                 None,
                 "custom decoder",
-                ExtensionsMenu,
+                ClassicMenu,
                 Palette
             ),
             TogglePlayheadSnap => spec!(
@@ -442,8 +547,7 @@ impl CommandId {
                 Analysis,
                 None,
                 "sample cursor magnet",
-                Header,
-                PlotContext,
+                GlobalToolbar,
                 Palette
             ),
             AddMeasuringMarker => spec!(
@@ -451,8 +555,7 @@ impl CommandId {
                 Analysis,
                 None,
                 "delta ruler",
-                Header,
-                PlotContext,
+                GlobalToolbar,
                 Palette
             ),
             CycleLegendPosition => spec!(
@@ -460,8 +563,7 @@ impl CommandId {
                 Workspace,
                 None,
                 "plot key corner",
-                Header,
-                PlotContext,
+                GlobalToolbar,
                 Palette
             ),
             ToggleLegends => spec!(
@@ -469,8 +571,7 @@ impl CommandId {
                 Workspace,
                 None,
                 "plot key visibility",
-                Header,
-                PlotContext,
+                GlobalToolbar,
                 Palette
             ),
             OpenSettings => spec!(
@@ -478,10 +579,10 @@ impl CommandId {
                 Application,
                 None,
                 "preferences configuration",
-                Header,
+                ClassicMenu,
                 Palette
             ),
-            Exit => spec!("Exit", Application, None, "quit close", Header, Palette),
+            Exit => spec!("Exit", Application, None, "quit close", ClassicMenu, Palette),
             TogglePlayback => spec!(
                 "Play or pause",
                 Transport,
@@ -536,6 +637,54 @@ impl CommandId {
                 Shortcut,
                 Palette
             ),
+        };
+        spec.classic_menu_owner = self.classic_menu_owner();
+        spec
+    }
+
+    pub const fn classic_menu_owner(self) -> ClassicMenuOwner {
+        use CommandId::*;
+        match self {
+            Open
+            | ConnectLive
+            | DisconnectLive
+            | CancelTasks
+            | ExportData
+            | ExportDiagnostics
+            | ExportProfiling
+            | ExportWorkspacePng
+            | Exit => ClassicMenuOwner::File,
+            ToggleDataBrowser
+            | ToggleInspector
+            | ToggleScene3d
+            | OpenDiagnostics
+            | OpenPerformance
+            | OpenMarkers
+            | OpenScripting
+            | OpenLogging
+            | SaveLayout
+            | LoadLayout
+            | ManageLayouts
+            | ClearLayout
+            | ImportLayout
+            | ExportLayout
+            | EqualizePlots
+            | CycleLegendPosition
+            | ToggleLegends => ClassicMenuOwner::View,
+            SyncSources
+            | OpenDataFlow
+            | TogglePlayheadSnap
+            | AddMeasuringMarker
+            | TogglePlayback
+            | JumpStart
+            | JumpEnd
+            | StepLeft
+            | StepRight
+            | AddMarker => ClassicMenuOwner::Analyze,
+            OpenScriptEditor
+            | OpenScriptVariables
+            | OpenParserEditor
+            | OpenSettings => ClassicMenuOwner::Tools,
         }
     }
 
@@ -568,6 +717,7 @@ impl CommandId {
 
 pub fn present_commands(
     context: &CommandContext,
+    state: &PresentationState,
     dynamic: impl IntoIterator<Item = CommandPresentation>,
 ) -> Vec<CommandPresentation> {
     let mut commands: Vec<_> = CommandId::ALL
@@ -580,16 +730,64 @@ pub fn present_commands(
                 label: spec.label.to_owned(),
                 shortcut: spec.shortcut,
                 availability: id.availability(context),
+                selected: state.selected_for(id),
             }
         })
         .collect();
+    commands.extend([
+        CommandPresentation {
+            command: AppCommand::ToggleShellEmphasis,
+            label: if state.shell_emphasis_live {
+                "Emphasize offline workflows"
+            } else {
+                "Emphasize live workflows"
+            }
+            .to_owned(),
+            shortcut: None,
+            availability: CommandAvailability::Enabled,
+            selected: Some(state.shell_emphasis_live),
+        },
+        CommandPresentation {
+            command: AppCommand::FitAll,
+            label: "Fit all plots".to_owned(),
+            shortcut: None,
+            availability: if context.has_data {
+                CommandAvailability::Enabled
+            } else {
+                CommandAvailability::Disabled(
+                    "Open a log or connect a live source first",
+                )
+            },
+            selected: None,
+        },
+    ]);
+    commands.extend(
+        [SampleMode::Prev, SampleMode::Next, SampleMode::Linear]
+            .into_iter()
+            .map(|mode| CommandPresentation {
+                command: AppCommand::SetCursorSampling(mode),
+                label: format!("Cursor sampling: {}", sample_mode_label(mode)),
+                shortcut: None,
+                availability: CommandAvailability::Enabled,
+                selected: Some(state.cursor_sampling == mode),
+            }),
+    );
     commands.extend(dynamic);
     commands
+}
+
+fn sample_mode_label(mode: SampleMode) -> &'static str {
+    match mode {
+        SampleMode::Prev => "Previous",
+        SampleMode::Next => "Next",
+        SampleMode::Linear => "Linear",
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shell::app::dynamic_commands::{DynamicCommandNames, DynamicFamily};
 
     #[test]
     fn every_current_feature_has_a_redesigned_access_route() {
@@ -665,5 +863,228 @@ mod tests {
         assert!(dynamic_command_families().contains(&DynamicFamily::Script));
         assert!(dynamic_command_families().contains(&DynamicFamily::Layout));
         assert!(dynamic_command_families().contains(&DynamicFamily::LiveLink));
+    }
+
+    #[test]
+    fn every_static_command_has_one_canonical_classic_menu_owner() {
+        let owned: std::collections::HashSet<_> = CommandId::ALL
+            .iter()
+            .map(|id| (*id, id.spec().classic_menu_owner))
+            .collect();
+
+        assert_eq!(owned.len(), CommandId::ALL.len());
+        assert!(owned.iter().all(|(_, owner)| {
+            matches!(
+                owner,
+                ClassicMenuOwner::File
+                    | ClassicMenuOwner::View
+                    | ClassicMenuOwner::Analyze
+                    | ClassicMenuOwner::Tools
+            )
+        }));
+    }
+
+    #[test]
+    fn dynamic_command_families_have_canonical_classic_menu_owners() {
+        assert_eq!(
+            AppCommand::OpenWithParser("csv".into()).classic_menu_owner(),
+            ClassicMenuOwner::Tools
+        );
+        assert_eq!(
+            AppCommand::RunScript("derive".into()).classic_menu_owner(),
+            ClassicMenuOwner::Tools
+        );
+        assert_eq!(
+            AppCommand::LoadNamedLayout("analysis".into()).classic_menu_owner(),
+            ClassicMenuOwner::View
+        );
+        assert_eq!(
+            AppCommand::DisconnectLink(0).classic_menu_owner(),
+            ClassicMenuOwner::File
+        );
+    }
+
+    #[test]
+    fn generic_disconnect_is_distinct_from_named_link_disconnect() {
+        assert_eq!(
+            CommandId::DisconnectLive.spec().label,
+            "Disconnect all live links"
+        );
+        assert_ne!(
+            AppCommand::Static(CommandId::DisconnectLive),
+            AppCommand::DisconnectLink(0)
+        );
+    }
+
+    #[test]
+    fn canonical_catalog_includes_shell_fit_and_every_cursor_sampling_choice() {
+        let context = CommandContext::default();
+        let presentations = present_commands(
+            &context,
+            &PresentationState {
+                shell_emphasis_live: false,
+                cursor_sampling: delog_core::field_view::SampleMode::Next,
+                ..PresentationState::default()
+            },
+            [],
+        );
+        let commands: Vec<_> = presentations
+            .iter()
+            .map(|presentation| presentation.command.clone())
+            .collect();
+
+        assert!(commands.contains(&AppCommand::ToggleShellEmphasis));
+        assert!(commands.contains(&AppCommand::FitAll));
+        for mode in [
+            delog_core::field_view::SampleMode::Prev,
+            delog_core::field_view::SampleMode::Next,
+            delog_core::field_view::SampleMode::Linear,
+        ] {
+            assert!(commands.contains(&AppCommand::SetCursorSampling(mode)));
+        }
+
+        let fit = presentations
+            .iter()
+            .find(|presentation| presentation.command == AppCommand::FitAll)
+            .unwrap();
+        assert_eq!(
+            fit.availability,
+            CommandAvailability::Disabled("Open a log or connect a live source first")
+        );
+        let next = presentations
+            .iter()
+            .find(|presentation| {
+                presentation.command
+                    == AppCommand::SetCursorSampling(
+                        delog_core::field_view::SampleMode::Next,
+                    )
+            })
+            .unwrap();
+        assert_eq!(next.selected, Some(true));
+    }
+
+    #[test]
+    fn dynamic_catalog_scans_once_until_explicitly_invalidated() {
+        use std::cell::Cell;
+
+        let scans = Cell::new(0);
+        let mut catalog = DynamicCommandCatalog::default();
+        let ensure = |catalog: &mut DynamicCommandCatalog| {
+            catalog.ensure_with(|| {
+                scans.set(scans.get() + 1);
+                Ok::<_, ()>(DynamicCommandNames {
+                    layouts: vec!["analysis".to_owned()],
+                    scripts: vec!["derive".to_owned()],
+                    parsers: vec!["custom".to_owned()],
+                })
+            });
+        };
+
+        let state = PresentationState {
+            shell_emphasis_live: false,
+            cursor_sampling: delog_core::field_view::SampleMode::Prev,
+            ..PresentationState::default()
+        };
+        let build_presentations = |catalog: &mut DynamicCommandCatalog| {
+            ensure(catalog);
+            let dynamic = catalog
+                .names()
+                .layouts
+                .iter()
+                .map(|name| CommandPresentation {
+                    command: AppCommand::LoadNamedLayout(name.clone()),
+                    label: format!("Load layout: {name}"),
+                    shortcut: None,
+                    availability: CommandAvailability::Enabled,
+                    selected: None,
+                })
+                .collect::<Vec<_>>();
+            present_commands(&CommandContext::default(), &state, dynamic)
+        };
+
+        let first = build_presentations(&mut catalog);
+        let second = build_presentations(&mut catalog);
+        assert_eq!(scans.get(), 1, "normal frames must not rescan directories");
+        assert_eq!(first, second);
+        assert!(first.iter().any(|presentation| {
+            presentation.command == AppCommand::LoadNamedLayout("analysis".to_owned())
+        }));
+
+        catalog.invalidate();
+        let _ = build_presentations(&mut catalog);
+        assert_eq!(scans.get(), 2, "explicit invalidation refreshes names once");
+    }
+
+    #[test]
+    fn parser_only_work_enables_the_shared_cancel_presentation() {
+        let context = CommandContext::for_frame(false, 0, 0, false, true, true);
+        assert!(context.has_active_tasks);
+        assert_eq!(
+            CommandId::CancelTasks.availability(&context),
+            CommandAvailability::Enabled
+        );
+    }
+
+    #[test]
+    fn dynamic_catalog_keeps_last_known_names_when_refresh_fails() {
+        let mut catalog = DynamicCommandCatalog::default();
+        catalog.ensure_with(|| {
+            Ok::<_, ()>(DynamicCommandNames {
+                layouts: vec!["analysis".to_owned()],
+                scripts: vec!["derive".to_owned()],
+                parsers: vec!["custom".to_owned()],
+            })
+        });
+        let last_good = catalog.names().clone();
+
+        catalog.invalidate();
+        catalog.ensure_with(|| Err::<DynamicCommandNames, _>("transient read failure"));
+
+        assert_eq!(catalog.names(), &last_good);
+    }
+
+    #[test]
+    fn dynamic_refresh_isolates_a_failed_family_from_successful_families() {
+        let previous = DynamicCommandNames {
+            layouts: vec!["old-layout".to_owned()],
+            scripts: vec!["old-script".to_owned()],
+            parsers: vec!["old-parser".to_owned()],
+        };
+
+        let refreshed = merge_dynamic_command_refresh(
+            &previous,
+            Some(vec!["new-layout".to_owned()]),
+            Some(vec!["new-script".to_owned()]),
+            None,
+        );
+
+        assert_eq!(refreshed.layouts, ["new-layout"]);
+        assert_eq!(refreshed.scripts, ["new-script"]);
+        assert_eq!(refreshed.parsers, ["old-parser"]);
+    }
+
+    #[test]
+    fn menu_and_toolbar_toggle_presentations_share_selected_and_disabled_state() {
+        let state = PresentationState {
+            data_browser_open: true,
+            diagnostics_open: true,
+            measuring_marker: true,
+            ..PresentationState::default()
+        };
+        let presentations = present_commands(&CommandContext::default(), &state, []);
+        let presentation = |id| {
+            presentations
+                .iter()
+                .find(|item| item.command == AppCommand::Static(id))
+                .unwrap()
+        };
+
+        assert_eq!(presentation(CommandId::ToggleDataBrowser).selected, Some(true));
+        assert_eq!(presentation(CommandId::OpenDiagnostics).selected, Some(true));
+        assert_eq!(presentation(CommandId::AddMeasuringMarker).selected, Some(true));
+        assert_eq!(
+            presentation(CommandId::AddMeasuringMarker).availability,
+            CommandAvailability::Disabled("Open a log or connect a live source first")
+        );
     }
 }

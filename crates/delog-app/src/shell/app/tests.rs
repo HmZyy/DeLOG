@@ -553,3 +553,24 @@ fn keyboard_shortcuts_produce_registry_commands() {
     );
     assert_eq!(command_for_shortcut(egui::Key::K, true), None);
 }
+
+#[test]
+fn dock_commands_share_one_mapping_for_toggle_and_open_only_routes() {
+    use crate::shell::app::commands::CommandId;
+
+    let expected = [
+        (CommandId::OpenDiagnostics, AppDockTab::Diagnostics),
+        (CommandId::OpenPerformance, AppDockTab::Performance),
+        (CommandId::OpenMarkers, AppDockTab::Markers),
+        (CommandId::OpenLogging, AppDockTab::Logging),
+    ];
+    for (command, dock) in expected {
+        assert_eq!(dock_for_command(command), Some(dock));
+    }
+    #[cfg(feature = "scripting")]
+    assert_eq!(
+        dock_for_command(CommandId::OpenScripting),
+        Some(AppDockTab::ScriptingConsole)
+    );
+    assert_eq!(dock_for_command(CommandId::OpenDataFlow), None);
+}

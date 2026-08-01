@@ -292,6 +292,14 @@ impl Session {
         }
     }
 
+    /// Disconnect every live link while retaining samples already ingested.
+    pub fn stop_all_live(&mut self) {
+        if !self.live_links.is_empty() {
+            self.live_links.clear();
+            self.ctx.request_repaint();
+        }
+    }
+
     pub fn has_live_links(&self) -> bool {
         !self.live_links.is_empty()
     }

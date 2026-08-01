@@ -11,6 +11,7 @@ use policy_sources::{
 
 const CONTEXT_HEADER_SOURCE: &str = include_str!("../src/shell/app/context_header.rs");
 const COMMANDS_SOURCE: &str = include_str!("../src/shell/app/commands.rs");
+const GLOBAL_TOOLBAR_SOURCE: &str = include_str!("../src/shell/app/global_plot_toolbar.rs");
 
 const POPUP_SOURCES: &[&str] = &[
     APP_SOURCE,
@@ -101,7 +102,6 @@ fn menus_expose_scripts_parsers_and_scripting_console_dock() {
     assert_commands_in_order(
         scripts,
         &[
-            "CommandId::OpenScripting",
             "CommandId::OpenScriptEditor",
             "CommandId::OpenScriptVariables",
         ],
@@ -112,18 +112,72 @@ fn menus_expose_scripts_parsers_and_scripting_console_dock() {
         "#[cfg(test)]",
     );
     assert_commands_in_order(parsers, &["CommandId::OpenParserEditor"]);
-    let tools = between(
-        CONTEXT_HEADER_SOURCE,
-        "ui.menu_button(\"Tools\"",
-        "ui.separator();\n            ui.weak(\"Ctrl+K  Commands\")",
-    );
+    let tools = &CONTEXT_HEADER_SOURCE[CONTEXT_HEADER_SOURCE
+        .find("ui.menu_button(\"Tools\"")
+        .expect("Tools menu should exist")..];
     assert!(tools.contains("ui.menu_button(\"Scripts\""));
+    assert!(tools.contains("ui.menu_button(\"Run Script\""));
     assert!(tools.contains("ui.menu_button(\"Parsers\""));
+    assert!(!scripts.contains("CommandId::OpenScripting"));
     assert!(APP_SOURCE.contains("AppCommand::RunScript"));
     assert!(APP_SOURCE.contains("AppCommand::OpenWithParser"));
-    assert!(APP_SOURCE.contains("self.open_dock(AppDockTab::ScriptingConsole)"));
+    assert!(APP_SOURCE.contains("CommandId::OpenScripting => Some(AppDockTab::ScriptingConsole)"));
     assert!(COMMANDS_SOURCE.contains("Some(\"F9\")"));
     assert!(COMMANDS_SOURCE.contains("Some(\"F12\")"));
+}
+
+#[test]
+fn dynamic_commands_live_under_the_user_authoritative_nested_menus() {
+    let view = between(
+        CONTEXT_HEADER_SOURCE,
+        "ui.menu_button(\"View\"",
+        "ui.menu_button(\"Analyze\"",
+    );
+    let layouts = between(
+        view,
+        "ui.menu_button(\"Layouts\"",
+        "refresh_dynamic_catalog |= view_menu.response.clicked();",
+    );
+    let load_layout = between(
+        layouts,
+        "ui.menu_button(\"Load Layout\"",
+        "&VIEW_LAYOUTS_MENU[2..]",
+    );
+    assert!(load_layout.contains("AppCommand::LoadNamedLayout"));
+
+    let tools = &CONTEXT_HEADER_SOURCE[CONTEXT_HEADER_SOURCE
+        .find("ui.menu_button(\"Tools\"")
+        .expect("Tools menu should exist")..];
+    let scripts = between(
+        tools,
+        "ui.menu_button(\"Scripts\"",
+        "ui.menu_button(\"Parsers\"",
+    );
+    let run_script = between(
+        scripts,
+        "ui.menu_button(\"Run Script\"",
+        "TOOLS_SCRIPTS_MENU",
+    );
+    assert!(run_script.contains("AppCommand::RunScript"));
+
+    let parsers = &tools[tools
+        .find("ui.menu_button(\"Parsers\"")
+        .expect("Parsers submenu should exist")..];
+    assert!(parsers.contains("AppCommand::OpenWithParser"));
+    assert!(APP_SOURCE.contains("self.spawn_open_dialog(ctx, Some(&name))"));
+    assert!(APP_SOURCE.contains("self.scripts.request_open(ctx, &name)"));
+}
+
+#[test]
+fn view_and_panel_rows_render_from_canonical_checked_state() {
+    let view = between(
+        CONTEXT_HEADER_SOURCE,
+        "ui.menu_button(\"View\"",
+        "ui.menu_button(\"Analyze\"",
+    );
+    assert_eq!(view.matches("checked_menu_items(").count(), 2);
+    assert!(CONTEXT_HEADER_SOURCE.contains("egui::Checkbox::new(&mut is_selected, text)"));
+    assert!(CONTEXT_HEADER_SOURCE.contains("presentation.selected.unwrap_or(false)"));
 }
 
 #[test]
@@ -136,6 +190,8 @@ fn view_panels_menu_orders_docks_and_function_keys_focus_them() {
     let expected_order = [
         "CommandId::OpenDiagnostics",
         "CommandId::OpenPerformance",
+        "CommandId::OpenMarkers",
+        "CommandId::OpenScripting",
         "CommandId::OpenLogging",
     ];
     let mut previous = 0;
@@ -156,15 +212,9 @@ fn view_panels_menu_orders_docks_and_function_keys_focus_them() {
     ] {
         assert!(APP_SOURCE.contains(key));
     }
-    for dock in [
-        "Diagnostics",
-        "Performance",
-        "Markers",
-        "ScriptingConsole",
-        "Logging",
-    ] {
-        assert!(APP_SOURCE.contains(&format!("self.open_dock(AppDockTab::{dock})")));
-    }
+    assert!(APP_SOURCE.contains("if let Some(dock) = dock_for_command(command)"));
+    assert!(APP_SOURCE.contains("self.open_dock(dock);"));
+    assert!(APP_SOURCE.contains("self.toggle_dock(AppDockTab::Diagnostics)"));
 }
 
 #[test]
@@ -279,7 +329,7 @@ fn browser_exposes_field_metadata_inspector() {
 }
 
 #[test]
-fn moved_plot_controls_remain_reachable_without_the_global_toolbar() {
+fn global_toolbar_keeps_only_global_plot_state_controls() {
     assert!(!APP_SOURCE.contains("egui::Panel::top(\"tool_icons\")"));
     for command in [
         "CommandId::TogglePlayheadSnap",
@@ -291,6 +341,9 @@ fn moved_plot_controls_remain_reachable_without_the_global_toolbar() {
         assert!(COMMANDS_SOURCE.contains(command.trim_start_matches("CommandId::")));
         assert!(APP_SOURCE.contains(command));
     }
+    assert!(!GLOBAL_TOOLBAR_SOURCE.contains("GlobalPlotControl::FitAll"));
+    assert!(!GLOBAL_TOOLBAR_SOURCE.contains("X axes linked"));
+    assert!(GLOBAL_TOOLBAR_SOURCE.contains("CommandId::AddMeasuringMarker"));
 }
 
 #[test]
@@ -299,7 +352,6 @@ fn plot_controls_respect_global_and_local_scope() {
     for label in [
         "Split horizontally",
         "Split vertically",
-        "Toggle measuring marker",
         "Show legend",
         "Show tooltip",
         "Field stats",
@@ -310,6 +362,7 @@ fn plot_controls_respect_global_and_local_scope() {
             "missing pane action {label}"
         );
     }
+    assert!(!WORKSPACE_SOURCE.contains("Toggle measuring marker"));
 }
 
 #[test]
@@ -450,7 +503,6 @@ fn view_layouts_menu_exposes_clear_current_layout() {
             "CommandId::ImportLayout",
             "CommandId::ExportLayout",
             "CommandId::ClearLayout",
-            "CommandId::EqualizePlots",
         ],
     );
     assert!(COMMANDS_SOURCE.contains("\"Clear current layout\""));
@@ -496,7 +548,6 @@ fn file_menu_and_nested_export_keep_the_requested_order() {
             "CommandId::ConnectLive",
             "CommandId::DisconnectLive",
             "CommandId::CancelTasks",
-            "CommandId::Exit",
         ],
     );
     assert_commands_in_order(
@@ -513,8 +564,12 @@ fn file_menu_and_nested_export_keep_the_requested_order() {
         "ui.menu_button(\"File\"",
         "ui.menu_button(\"View\"",
     );
-    assert!(file_menu.contains("ui.menu_button(\"Open With\""));
+    assert!(!file_menu.contains("ui.menu_button(\"Open With\""));
     assert!(file_menu.contains("ui.menu_button(\"Export\""));
+    assert!(file_menu.contains("ui.separator();"));
+    let separator = file_menu.rfind("ui.separator();").unwrap();
+    let exit = file_menu.rfind("CommandId::Exit").unwrap();
+    assert!(separator < exit, "Exit must be last after a separator");
 }
 
 #[test]
@@ -562,11 +617,11 @@ fn view_and_analyze_menus_keep_display_and_analysis_actions_separate() {
         analyze,
         &[
             "CommandId::SyncSources",
-            "CommandId::AddMarker",
-            "CommandId::OpenMarkers",
             "CommandId::OpenDataFlow",
         ],
     );
+    assert!(!analyze.contains("CommandId::AddMarker"));
+    assert!(!analyze.contains("CommandId::OpenMarkers"));
     assert!(!analyze.contains("CommandId::ToggleScene3d"));
 }
 
@@ -593,7 +648,15 @@ fn context_header_orders_the_application_menus() {
     assert!(!menu_bar.contains("\"Source\""));
     assert!(!menu_bar.contains("\"Workspace\""));
     assert!(!menu_bar.contains("\"Extensions\""));
-    assert!(menu_bar.contains("Ctrl+K  Commands"));
+    assert!(!menu_bar.contains("Ctrl+K  Commands"));
+    assert!(APP_SOURCE.contains("command_palette::should_toggle_palette"));
+}
+
+#[test]
+fn user_directed_header_and_empty_shell_omit_onboarding_and_source_name() {
+    assert!(!CONTEXT_HEADER_SOURCE.contains("active_source_label"));
+    assert!(!APP_SOURCE.contains("workspace-empty-state"));
+    assert!(!APP_SOURCE.contains("empty_state::show("));
 }
 
 #[test]

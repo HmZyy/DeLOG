@@ -19,6 +19,45 @@ fn focused_fields_preserve_the_focused_plot_trace_order() {
 }
 
 #[test]
+fn hovered_pane_fields_include_only_visible_traces() {
+    let mut workspace = Workspace::new();
+    let pane = workspace.tree.root().unwrap();
+    workspace.add_trace_to_first_plot(FieldId(7));
+    workspace.add_trace_to_first_plot(FieldId(3));
+    let Pane::Plot(plot) = workspace
+        .tree
+        .tiles
+        .get_mut(pane)
+        .and_then(|tile| match tile {
+            egui_tiles::Tile::Pane(pane) => Some(pane),
+            _ => None,
+        })
+        .unwrap()
+    else {
+        panic!("root should be a plot")
+    };
+    plot.traces[1].visible = false;
+
+    assert_eq!(workspace.visible_fields(pane), vec![FieldId(7)]);
+}
+
+#[test]
+fn inspector_hover_capture_is_independent_of_tooltip_rendering() {
+    let source = include_str!("mod.rs");
+    let capture = source
+        .find("let hovered_cursor_us = response.hover_pos()")
+        .expect("plot hover should be captured for Inspector");
+    let tooltip_guard = source
+        .find("if pane.show_tooltip && !ui.ctx().any_popup_open()")
+        .expect("tooltip rendering should remain optional");
+
+    assert!(
+        capture < tooltip_guard,
+        "Inspector hover capture must not be guarded by tooltip visibility"
+    );
+}
+
+#[test]
 fn plot_context_menu_keeps_every_existing_action() {
     let source = include_str!("mod.rs");
     for label in [

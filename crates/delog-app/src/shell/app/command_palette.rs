@@ -15,6 +15,7 @@ pub struct PaletteEntry {
     pub subtitle: Option<String>,
     pub search_text: String,
     pub availability: CommandAvailability,
+    pub selected: Option<bool>,
 }
 
 impl PaletteEntry {
@@ -26,6 +27,7 @@ impl PaletteEntry {
             subtitle: None,
             search_text: format!("{label} {search_terms}"),
             availability: CommandAvailability::Enabled,
+            selected: None,
         }
     }
 
@@ -36,6 +38,7 @@ impl PaletteEntry {
             label: presentation.label,
             subtitle: presentation.shortcut.map(str::to_owned),
             availability: presentation.availability,
+            selected: presentation.selected,
         }
     }
 }
@@ -123,6 +126,9 @@ impl CommandPaletteState {
                     for (index, entry) in ranked.iter().enumerate() {
                         let enabled = entry.availability == CommandAvailability::Enabled;
                         let mut label = entry.label.clone();
+                        if entry.selected == Some(true) {
+                            label.insert_str(0, "✓  ");
+                        }
                         if let Some(shortcut) = &entry.subtitle {
                             label.push_str(&format!("    {shortcut}"));
                         }
@@ -178,6 +184,48 @@ mod tests {
     use super::*;
     use crate::shell::app::commands::{AppCommand, CommandId};
 
+    fn find_text_rect(shape: &egui::epaint::Shape, expected: &str) -> Option<egui::Rect> {
+        match shape {
+            egui::epaint::Shape::Text(text) if text.galley.job.text == expected => {
+                Some(text.visual_bounding_rect())
+            }
+            egui::epaint::Shape::Vec(shapes) => shapes
+                .iter()
+                .find_map(|shape| find_text_rect(shape, expected)),
+            _ => None,
+        }
+    }
+
+    fn palette_frame(
+        ctx: &egui::Context,
+        palette: &mut CommandPaletteState,
+        entries: &[PaletteEntry],
+        events: Vec<egui::Event>,
+    ) -> (egui::FullOutput, Option<AppCommand>) {
+        let mut selected = None;
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(900.0, 700.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ui| selected = palette.show(ui.ctx(), entries),
+        );
+        (output, selected)
+    }
+
+    fn pointer_button(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
     #[test]
     fn palette_ranks_exact_command_before_loose_match() {
         let entries = vec![
@@ -214,6 +262,7 @@ mod tests {
             subtitle: None,
             search_text: "Sync sources".to_owned(),
             availability: CommandAvailability::Disabled("Open two sources"),
+            selected: None,
         }];
         let context = egui::Context::default();
         context.begin_pass(egui::RawInput {
@@ -228,5 +277,89 @@ mod tests {
         });
         assert_eq!(palette.handle_key(&context, &entries), None);
         let _ = context.end_pass();
+    }
+
+    #[test]
+    fn rendered_palette_click_dispatches_enabled_entry_but_not_disabled_fit_all() {
+        let ctx = egui::Context::default();
+        let enabled = PaletteEntry::enabled(
+            AppCommand::Static(CommandId::Open),
+            "Open test log",
+            "file",
+        );
+        let disabled = PaletteEntry {
+            command: AppCommand::FitAll,
+            label: "Fit all plots".to_owned(),
+            subtitle: None,
+            search_text: "Fit all plots".to_owned(),
+            availability: CommandAvailability::Disabled(
+                "Open a log or connect a live source first",
+            ),
+            selected: None,
+        };
+
+        for (entry, expected) in [
+            (enabled, Some(AppCommand::Static(CommandId::Open))),
+            (disabled, None),
+        ] {
+            let mut palette = CommandPaletteState::default();
+            palette.open();
+            let entries = [entry];
+            let _ = palette_frame(&ctx, &mut palette, &entries, vec![]);
+            let (output, _) = palette_frame(&ctx, &mut palette, &entries, vec![]);
+            let rect = output
+                .shapes
+                .iter()
+                .find_map(|shape| find_text_rect(&shape.shape, &entries[0].label))
+                .expect("palette row should be painted");
+            let pos = rect.center();
+            let _ = palette_frame(
+                &ctx,
+                &mut palette,
+                &entries,
+                vec![egui::Event::PointerMoved(pos), pointer_button(pos, true)],
+            );
+            let (_, selected) = palette_frame(
+                &ctx,
+                &mut palette,
+                &entries,
+                vec![egui::Event::PointerMoved(pos), pointer_button(pos, false)],
+            );
+
+            assert_eq!(selected, expected);
+        }
+    }
+
+    #[test]
+    fn palette_entries_preserve_the_catalog_commands_and_selected_state() {
+        let presentations = crate::shell::app::commands::present_commands(
+            &crate::shell::app::commands::CommandContext::default(),
+            &crate::shell::app::commands::PresentationState {
+                shell_emphasis_live: true,
+                cursor_sampling: delog_core::field_view::SampleMode::Linear,
+                ..crate::shell::app::commands::PresentationState::default()
+            },
+            [],
+        );
+        let expected: Vec<_> = presentations
+            .iter()
+            .map(|presentation| presentation.command.clone())
+            .collect();
+        let entries = CommandPaletteState::entries(presentations);
+
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.command.clone())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert!(entries.iter().any(|entry| {
+            entry.command
+                == AppCommand::SetCursorSampling(
+                    delog_core::field_view::SampleMode::Linear,
+                )
+                && entry.selected == Some(true)
+        }));
     }
 }

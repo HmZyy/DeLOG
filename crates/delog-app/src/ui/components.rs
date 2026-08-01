@@ -40,14 +40,39 @@ pub fn icon_button(
     selected: bool,
 ) -> egui::Response {
     let tokens = DesignTokens::from_style(ui.style());
-    let image = egui::Image::new(icon)
-        .fit_to_exact_size(egui::Vec2::splat(tokens.icon_size))
-        .tint(ui.visuals().text_color());
-    ui.add_sized(
+    icon_button_sized(
+        ui,
+        icon,
+        tooltip,
+        selected,
         egui::Vec2::splat(tokens.control_height),
-        egui::Button::image(image).selected(selected),
+        egui::Vec2::splat(tokens.icon_size),
     )
-    .on_hover_text(tooltip)
+}
+
+pub fn icon_button_sized(
+    ui: &mut egui::Ui,
+    icon: egui::ImageSource<'static>,
+    tooltip: &str,
+    selected: bool,
+    button_size: egui::Vec2,
+    icon_size: egui::Vec2,
+) -> egui::Response {
+    let image = egui::Image::new(icon)
+        .fit_to_exact_size(icon_size)
+        .tint(ui.visuals().text_color())
+        .alt_text(tooltip);
+    let response = ui.add_sized(button_size, egui::Button::image(image).selected(selected));
+    let enabled = response.enabled();
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::Button,
+            enabled,
+            selected,
+            tooltip,
+        )
+    });
+    response.on_hover_text(tooltip)
 }
 
 pub fn icon_text_button(
@@ -112,5 +137,39 @@ mod tests {
         assert_eq!(model.label, "UDP 14550");
         assert_eq!(model.detail.as_deref(), Some("48 Hz"));
         assert_eq!(model.state, StatusState::Success);
+    }
+
+    #[test]
+    fn icon_buttons_emit_accessible_labels_and_selected_state() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let texture = egui::load::SizedTexture::new(
+                egui::TextureId::default(),
+                egui::Vec2::splat(1.0),
+            );
+            icon_button(ui, texture.into(), "Pin plot", true);
+            icon_button(ui, texture.into(), "Unpinned plot", false);
+        });
+        let update = output
+            .platform_output
+            .accesskit_update
+            .expect("accessibility tree should be emitted");
+        let find = |label: &str| {
+            update
+                .nodes
+                .iter()
+                .map(|(_, node)| node)
+                .find(|node| node.label() == Some(label))
+                .expect("labelled icon button should exist")
+        };
+
+        let selected = find("Pin plot");
+        assert_eq!(selected.role(), egui::accesskit::Role::Button);
+        assert_eq!(selected.toggled(), Some(egui::accesskit::Toggled::True));
+        assert_eq!(
+            find("Unpinned plot").toggled(),
+            Some(egui::accesskit::Toggled::False)
+        );
     }
 }

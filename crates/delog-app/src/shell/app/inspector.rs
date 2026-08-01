@@ -39,13 +39,61 @@ pub fn normalize_trace_width(width_px: f32) -> f32 {
 pub enum InspectorSelection {
     Summary,
     Cursor {
-        t_us: i64,
+        readout: CursorReadout,
     },
     Statistics(Vec<FieldId>),
     Trace {
         tile_id: egui_tiles::TileId,
         field: FieldId,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorReadout {
+    Hover {
+        tile_id: egui_tiles::TileId,
+        t_us: i64,
+    },
+    Playhead {
+        tile_id: Option<egui_tiles::TileId>,
+        t_us: i64,
+    },
+}
+
+impl CursorReadout {
+    pub const fn tile_id(self) -> Option<egui_tiles::TileId> {
+        match self {
+            Self::Hover { tile_id, .. } => Some(tile_id),
+            Self::Playhead { tile_id, .. } => tile_id,
+        }
+    }
+
+    pub const fn t_us(self) -> i64 {
+        match self {
+            Self::Hover { t_us, .. } | Self::Playhead { t_us, .. } => t_us,
+        }
+    }
+
+    pub const fn time_label(self) -> &'static str {
+        match self {
+            Self::Hover { .. } => "Cursor time",
+            Self::Playhead { .. } => "Playhead time",
+        }
+    }
+}
+
+pub const fn cursor_readout_for_frame(
+    hover: Option<(egui_tiles::TileId, i64)>,
+    playback_us: i64,
+    focused_tile: Option<egui_tiles::TileId>,
+) -> CursorReadout {
+    match hover {
+        Some((tile_id, t_us)) => CursorReadout::Hover { tile_id, t_us },
+        None => CursorReadout::Playhead {
+            tile_id: focused_tile,
+            t_us: playback_us,
+        },
+    }
 }
 
 pub struct InspectorState {
@@ -72,6 +120,20 @@ impl InspectorState {
         self.open = true;
         self.selection = InspectorSelection::Trace { tile_id, field };
     }
+
+    pub fn update_cursor_readout(&mut self, readout: CursorReadout) -> bool {
+        if let InspectorSelection::Cursor {
+            readout: current,
+        } = &mut self.selection
+        {
+            if *current == readout {
+                return false;
+            }
+            *current = readout;
+            return true;
+        }
+        false
+    }
 }
 
 pub fn inspector_action_for_stats(fields: Vec<FieldId>) -> InspectorSelection {
@@ -85,7 +147,8 @@ pub fn show(
     snapshot: &Arc<StoreSnapshot>,
     playback_us: i64,
     hover_mode: delog_core::field_view::SampleMode,
-    focused_fields: &[FieldId],
+    cursor_fields: &[FieldId],
+    focused_tile: Option<egui_tiles::TileId>,
     diagnostic_count: usize,
     stats: &mut FieldStatsController,
     inspected_trace: Option<&TraceRef>,
@@ -124,7 +187,9 @@ pub fn show(
             )
             .clicked()
         {
-            state.selection = InspectorSelection::Cursor { t_us: playback_us };
+            state.selection = InspectorSelection::Cursor {
+                readout: cursor_readout_for_frame(None, playback_us, focused_tile),
+            };
         }
         if !stats.fields().is_empty()
             && ui
@@ -139,20 +204,24 @@ pub fn show(
     });
     ui.separator();
 
-    if matches!(state.selection, InspectorSelection::Cursor { .. }) {
-        state.selection = InspectorSelection::Cursor { t_us: playback_us };
-    }
     egui::ScrollArea::vertical().show(ui, |ui| match &state.selection {
         InspectorSelection::Summary => summary_ui(ui, snapshot, diagnostic_count, live_summaries),
-        InspectorSelection::Cursor { t_us } => {
-            cursor_ui(ui, snapshot, *t_us, hover_mode, focused_fields)
+        InspectorSelection::Cursor { readout } => {
+            cursor_ui(ui, snapshot, *readout, hover_mode, cursor_fields)
         }
         InspectorSelection::Statistics(fields) => statistics_ui(ui, snapshot, fields, stats),
         InspectorSelection::Trace { tile_id, field } => {
             ui.weak(format!("Pane {tile_id:?}"));
             trace_inspector_ui(ui, snapshot, *tile_id, *field, inspected_trace, &mut events);
             ui.separator();
-            trace_ui(ui, snapshot, *field, playback_us, hover_mode);
+            trace_ui(
+                ui,
+                snapshot,
+                *field,
+                playback_us,
+                hover_mode,
+                "No sample at playhead",
+            );
         }
     });
     events
@@ -305,18 +374,27 @@ fn summary_ui(
 fn cursor_ui(
     ui: &mut egui::Ui,
     snapshot: &StoreSnapshot,
-    t_us: i64,
+    readout: CursorReadout,
     mode: delog_core::field_view::SampleMode,
     fields: &[FieldId],
 ) {
-    property(ui, "Time", super::format_time_us(t_us));
+    property(ui, readout.time_label(), super::format_time_us(readout.t_us()));
     if fields.is_empty() {
-        ui.weak("Focus a plot to inspect its cursor values.");
+        match readout {
+            CursorReadout::Hover { .. } => ui.weak("The hovered plot has no visible traces."),
+            CursorReadout::Playhead { .. } => {
+                ui.weak("Focus a plot to inspect values at the playhead.")
+            }
+        };
         return;
     }
     ui.separator();
+    let missing = match readout {
+        CursorReadout::Hover { .. } => "No sample at cursor",
+        CursorReadout::Playhead { .. } => "No sample at playhead",
+    };
     for field in fields {
-        trace_ui(ui, snapshot, *field, t_us, mode);
+        trace_ui(ui, snapshot, *field, readout.t_us(), mode, missing);
     }
 }
 
@@ -326,6 +404,7 @@ fn trace_ui(
     field: FieldId,
     t_us: i64,
     mode: delog_core::field_view::SampleMode,
+    missing: &str,
 ) {
     ui.strong(crate::plotting::legend::trace_label(snapshot, field));
     let value = FieldView::new(snapshot, field).ok().and_then(|view| {
@@ -334,7 +413,7 @@ fn trace_ui(
     });
     match value {
         Some(value) => ui.monospace(value),
-        None => ui.weak("No sample at cursor"),
+        None => ui.weak(missing),
     };
 }
 
@@ -451,5 +530,69 @@ mod tests {
         assert_eq!(normalize_trace_width(0.5), 1.0);
         assert_eq!(normalize_trace_width(6.0), 6.0);
         assert_eq!(normalize_trace_width(20.0), 12.0);
+    }
+
+    #[test]
+    fn hovered_pane_and_time_win_over_focused_pane_and_playhead() {
+        let hovered = egui_tiles::TileId::from_u64(7);
+        let focused = egui_tiles::TileId::from_u64(2);
+        assert_eq!(
+            cursor_readout_for_frame(Some((hovered, 42)), 11, Some(focused)),
+            CursorReadout::Hover {
+                tile_id: hovered,
+                t_us: 42,
+            }
+        );
+        assert_eq!(
+            cursor_readout_for_frame(Some((hovered, 42)), 11, Some(focused)).time_label(),
+            "Cursor time"
+        );
+    }
+
+    #[test]
+    fn no_hover_uses_a_distinctly_labelled_playhead_fallback() {
+        let focused = egui_tiles::TileId::from_u64(2);
+        let readout = cursor_readout_for_frame(None, 11, Some(focused));
+        assert_eq!(
+            readout,
+            CursorReadout::Playhead {
+                tile_id: Some(focused),
+                t_us: 11,
+            }
+        );
+        assert_eq!(readout.time_label(), "Playhead time");
+    }
+
+    #[test]
+    fn cursor_refresh_does_not_replace_other_inspector_selections() {
+        let mut state = InspectorState::default();
+        state.focus_statistics(vec![FieldId(9)]);
+        let changed = state.update_cursor_readout(CursorReadout::Playhead {
+            tile_id: None,
+            t_us: 77,
+        });
+        assert!(!changed);
+        assert_eq!(
+            state.selection,
+            InspectorSelection::Statistics(vec![FieldId(9)])
+        );
+    }
+
+    #[test]
+    fn cursor_refresh_reports_only_real_readout_changes() {
+        let tile_id = egui_tiles::TileId::from_u64(3);
+        let readout = CursorReadout::Hover { tile_id, t_us: 42 };
+        let mut state = InspectorState {
+            open: true,
+            selection: InspectorSelection::Cursor {
+                readout: CursorReadout::Playhead {
+                    tile_id: Some(tile_id),
+                    t_us: 11,
+                },
+            },
+        };
+
+        assert!(state.update_cursor_readout(readout));
+        assert!(!state.update_cursor_readout(readout));
     }
 }
