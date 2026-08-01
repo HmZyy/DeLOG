@@ -1,5 +1,5 @@
 use crate::shell::app::commands::{
-    AppCommand, CommandAvailability, CommandGroup, CommandId, CommandPresentation,
+    AppCommand, CommandAvailability, CommandId, CommandPresentation,
 };
 use crate::ui::components;
 
@@ -46,85 +46,69 @@ pub enum LoadStatusView {
     },
 }
 
-const SOURCE_MENU: &[CommandId] = &[
+const CLASSIC_MENU_TITLES: &[&str] = &["File", "View", "Analyze", "Tools"];
+
+const FILE_MENU: &[CommandId] = &[
     CommandId::Open,
     CommandId::ConnectLive,
-    CommandId::SyncSources,
     CommandId::DisconnectLive,
     CommandId::CancelTasks,
+    CommandId::Exit,
 ];
-const WORKSPACE_MENU: &[CommandId] = &[
-    CommandId::SaveLayout,
-    CommandId::LoadLayout,
-    CommandId::ManageLayouts,
-    CommandId::ClearLayout,
-    CommandId::ImportLayout,
-    CommandId::ExportLayout,
-    CommandId::EqualizePlots,
-];
-const ANALYSIS_MENU: &[CommandId] = &[
-    CommandId::OpenDiagnostics,
-    CommandId::OpenPerformance,
-    CommandId::OpenMarkers,
-    CommandId::OpenLogging,
-    CommandId::OpenDataFlow,
-];
-const EXTENSIONS_MENU: &[CommandId] = &[
-    CommandId::OpenScripting,
-    CommandId::OpenScriptEditor,
-    CommandId::OpenScriptVariables,
-    CommandId::OpenParserEditor,
-];
-const PANELS_MENU: &[CommandId] = &[
-    CommandId::ToggleDataBrowser,
-    CommandId::ToggleInspector,
-    CommandId::ToggleScene3d,
-    CommandId::OpenDiagnostics,
-    CommandId::OpenPerformance,
-    CommandId::OpenMarkers,
-    CommandId::OpenScripting,
-    CommandId::OpenLogging,
-];
-const EXPORT_MENU: &[CommandId] = &[
+const FILE_EXPORT_MENU: &[CommandId] = &[
     CommandId::ExportData,
     CommandId::ExportDiagnostics,
     CommandId::ExportProfiling,
     CommandId::ExportWorkspacePng,
+];
+const VIEW_MENU: &[CommandId] = &[
+    CommandId::ToggleDataBrowser,
+    CommandId::ToggleInspector,
+    CommandId::ToggleScene3d,
+];
+const VIEW_PANELS_MENU: &[CommandId] = &[
+    CommandId::OpenDiagnostics,
+    CommandId::OpenPerformance,
+    CommandId::OpenLogging,
+];
+const VIEW_LAYOUTS_MENU: &[CommandId] = &[
+    CommandId::SaveLayout,
+    CommandId::LoadLayout,
+    CommandId::ManageLayouts,
+    CommandId::ImportLayout,
     CommandId::ExportLayout,
 ];
+const ANALYZE_MENU: &[CommandId] = &[
+    CommandId::SyncSources,
+    CommandId::AddMarker,
+    CommandId::OpenMarkers,
+    CommandId::OpenDataFlow,
+];
+const TOOLS_MENU: &[CommandId] = &[CommandId::OpenSettings];
+const TOOLS_SCRIPTS_MENU: &[CommandId] = &[
+    CommandId::OpenScripting,
+    CommandId::OpenScriptEditor,
+    CommandId::OpenScriptVariables,
+];
+const TOOLS_PARSERS_MENU: &[CommandId] = &[CommandId::OpenParserEditor];
 
 #[cfg(test)]
-pub(crate) const fn menu_command_ids() -> &'static [CommandId] {
-    &[
-        CommandId::Open,
-        CommandId::ConnectLive,
-        CommandId::SyncSources,
-        CommandId::DisconnectLive,
-        CommandId::CancelTasks,
-        CommandId::SaveLayout,
-        CommandId::LoadLayout,
-        CommandId::ManageLayouts,
-        CommandId::ClearLayout,
-        CommandId::ImportLayout,
-        CommandId::ExportLayout,
-        CommandId::EqualizePlots,
-        CommandId::OpenDiagnostics,
-        CommandId::OpenPerformance,
-        CommandId::OpenMarkers,
-        CommandId::OpenLogging,
-        CommandId::OpenDataFlow,
-        CommandId::OpenScripting,
-        CommandId::OpenScriptEditor,
-        CommandId::OpenScriptVariables,
-        CommandId::OpenParserEditor,
-        CommandId::ToggleDataBrowser,
-        CommandId::ToggleInspector,
-        CommandId::ToggleScene3d,
-        CommandId::ExportData,
-        CommandId::ExportDiagnostics,
-        CommandId::ExportProfiling,
-        CommandId::ExportWorkspacePng,
+pub(crate) fn classic_menu_command_ids() -> Vec<CommandId> {
+    [
+        FILE_MENU,
+        FILE_EXPORT_MENU,
+        VIEW_MENU,
+        VIEW_PANELS_MENU,
+        VIEW_LAYOUTS_MENU,
+        ANALYZE_MENU,
+        TOOLS_MENU,
+        TOOLS_SCRIPTS_MENU,
+        TOOLS_PARSERS_MENU,
     ]
+    .into_iter()
+    .flatten()
+    .copied()
+    .collect()
 }
 
 pub fn show(
@@ -233,27 +217,46 @@ pub fn show(
             });
         });
         ui.horizontal_wrapped(|ui| {
-            menu(ui, "Source", SOURCE_MENU, presentations, &mut commands);
-            menu(
-                ui,
-                "Workspace",
-                WORKSPACE_MENU,
-                presentations,
-                &mut commands,
-            );
-            menu(ui, "Analysis", ANALYSIS_MENU, presentations, &mut commands);
-            menu(
-                ui,
-                "Extensions",
-                EXTENSIONS_MENU,
-                presentations,
-                &mut commands,
-            );
-            menu(ui, "Panels", PANELS_MENU, presentations, &mut commands);
-            menu(ui, "Export", EXPORT_MENU, presentations, &mut commands);
-            ui.menu_button("App", |ui| {
-                menu_item(ui, CommandId::OpenSettings, presentations, &mut commands);
-                menu_item(ui, CommandId::Exit, presentations, &mut commands);
+            ui.menu_button("File", |ui| {
+                menu_items(ui, FILE_MENU, presentations, &mut commands);
+                ui.menu_button("Open With", |ui| {
+                    dynamic_rows(ui, presentations, &mut commands, |command| {
+                        matches!(command, AppCommand::OpenWithParser(_))
+                    });
+                });
+                ui.menu_button("Export", |ui| {
+                    menu_items(ui, FILE_EXPORT_MENU, presentations, &mut commands);
+                });
+                dynamic_rows(ui, presentations, &mut commands, |command| {
+                    matches!(command, AppCommand::DisconnectLink(_))
+                });
+            });
+            ui.menu_button("View", |ui| {
+                menu_items(ui, VIEW_MENU, presentations, &mut commands);
+                ui.menu_button("Panels", |ui| {
+                    menu_items(ui, VIEW_PANELS_MENU, presentations, &mut commands);
+                });
+                ui.menu_button("Layouts", |ui| {
+                    menu_items(ui, VIEW_LAYOUTS_MENU, presentations, &mut commands);
+                    dynamic_rows(ui, presentations, &mut commands, |command| {
+                        matches!(command, AppCommand::LoadNamedLayout(_))
+                    });
+                });
+            });
+            ui.menu_button("Analyze", |ui| {
+                menu_items(ui, ANALYZE_MENU, presentations, &mut commands);
+            });
+            ui.menu_button("Tools", |ui| {
+                menu_items(ui, TOOLS_MENU, presentations, &mut commands);
+                ui.menu_button("Scripts", |ui| {
+                    menu_items(ui, TOOLS_SCRIPTS_MENU, presentations, &mut commands);
+                    dynamic_rows(ui, presentations, &mut commands, |command| {
+                        matches!(command, AppCommand::RunScript(_))
+                    });
+                });
+                ui.menu_button("Parsers", |ui| {
+                    menu_items(ui, TOOLS_PARSERS_MENU, presentations, &mut commands);
+                });
             });
             ui.separator();
             ui.weak("Ctrl+K  Commands");
@@ -262,23 +265,29 @@ pub fn show(
     commands
 }
 
-fn menu(
+fn menu_items(
     ui: &mut egui::Ui,
-    title: &str,
     ids: &[CommandId],
     presentations: &[CommandPresentation],
     selected: &mut Vec<AppCommand>,
 ) {
-    ui.menu_button(title, |ui| {
-        for id in ids {
-            menu_item(ui, *id, presentations, selected);
-        }
-        for presentation in presentations.iter().filter(|presentation| {
-            dynamic_group(&presentation.command) == Some(group_for_title(title))
-        }) {
-            presentation_row(ui, presentation, selected);
-        }
-    });
+    for id in ids {
+        menu_item(ui, *id, presentations, selected);
+    }
+}
+
+fn dynamic_rows(
+    ui: &mut egui::Ui,
+    presentations: &[CommandPresentation],
+    selected: &mut Vec<AppCommand>,
+    matches_command: impl Fn(&AppCommand) -> bool,
+) {
+    for presentation in presentations
+        .iter()
+        .filter(|presentation| matches_command(&presentation.command))
+    {
+        presentation_row(ui, presentation, selected);
+    }
 }
 
 fn menu_item(
@@ -324,31 +333,9 @@ fn static_presentation(
         .find(|presentation| presentation.command == AppCommand::Static(id))
 }
 
-fn group_for_title(title: &str) -> CommandGroup {
-    match title {
-        "Source" => CommandGroup::Source,
-        "Workspace" => CommandGroup::Workspace,
-        "Analysis" => CommandGroup::Analysis,
-        "Extensions" => CommandGroup::Extensions,
-        "Panels" => CommandGroup::Panels,
-        "Export" => CommandGroup::Export,
-        _ => CommandGroup::Application,
-    }
-}
-
-fn dynamic_group(command: &AppCommand) -> Option<CommandGroup> {
-    match command {
-        AppCommand::OpenWithParser(_) | AppCommand::DisconnectLink(_) => Some(CommandGroup::Source),
-        AppCommand::LoadNamedLayout(_) => Some(CommandGroup::Workspace),
-        AppCommand::RunScript(_) => Some(CommandGroup::Extensions),
-        AppCommand::Static(_) | AppCommand::ToggleShellEmphasis => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shell::app::commands::AccessRoute;
 
     #[test]
     fn changing_shell_emphasis_never_requests_source_mutation() {
@@ -357,22 +344,19 @@ mod tests {
     }
 
     #[test]
-    fn application_menus_cover_every_menu_route() {
-        let routed = menu_command_ids();
-        for id in CommandId::ALL {
-            if id.spec().routes.iter().any(|route| {
-                matches!(
-                    route,
-                    AccessRoute::SourceMenu
-                        | AccessRoute::WorkspaceMenu
-                        | AccessRoute::AnalysisMenu
-                        | AccessRoute::ExtensionsMenu
-                        | AccessRoute::PanelsMenu
-                        | AccessRoute::ExportMenu
-                )
-            }) {
-                assert!(routed.contains(id), "missing menu route for {id:?}");
-            }
+    fn classic_menus_own_each_static_command_once() {
+        let ids = classic_menu_command_ids();
+        for id in &ids {
+            assert_eq!(
+                ids.iter().filter(|candidate| *candidate == id).count(),
+                1,
+                "{id:?}"
+            );
         }
+    }
+
+    #[test]
+    fn classic_menu_titles_are_compact() {
+        assert_eq!(CLASSIC_MENU_TITLES, &["File", "View", "Analyze", "Tools"]);
     }
 }
