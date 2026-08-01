@@ -203,6 +203,7 @@ impl ThemeChoice {
                 }
             },
         }
+        crate::ui::design_tokens::apply_design_metrics(ctx);
     }
 
     pub const fn accent(self) -> egui::Color32 {
