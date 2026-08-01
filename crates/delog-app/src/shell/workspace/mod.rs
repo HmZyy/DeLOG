@@ -633,10 +633,6 @@ pub struct WorkspaceActions {
     pub export_kml: bool,
     pub inspect_field_stats: Option<Vec<FieldId>>,
     pub inspect_trace: Option<(egui_tiles::TileId, FieldId)>,
-    pub fit_all: bool,
-    pub equalize_plots: bool,
-    pub cycle_legend_position: bool,
-    pub toggle_all_legends: bool,
     /// Widest Y gutter any pane needed; fed into `Workspace::shared_y_gutter`.
     pub max_y_gutter: f32,
 }
@@ -1099,7 +1095,6 @@ impl Behavior<'_> {
         } else {
             egui_tiles::UiResponse::None
         };
-        self.plot_toolbar(ui, tile_id, outer, pane);
         // Use the widest gutter any pane needed last frame, but never below this
         // pane's own need so labels never clip.
         let shared_gutter = self.services.shared_y_gutter;
@@ -1435,145 +1430,6 @@ impl Behavior<'_> {
         self.plot_info_window(ui, tile_id, pane, Some(debug));
         drop(pane_overlay_timer);
         tile_response
-    }
-
-    fn plot_toolbar(
-        &mut self,
-        ui: &mut egui::Ui,
-        tile_id: egui_tiles::TileId,
-        pane_rect: egui::Rect,
-        pane: &mut PlotPane,
-    ) {
-        let id = egui::Id::new(("plot-toolbar", tile_id));
-        egui::Area::new(id)
-            .order(egui::Order::Foreground)
-            .pivot(egui::Align2::RIGHT_TOP)
-            .fixed_pos(pane_rect.right_top() + egui::vec2(-8.0, 8.0))
-            .show(ui.ctx(), |ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        let plus = toolbar_menu_image(ui, crate::ui::icons::plus());
-                        egui::containers::menu::MenuButton::from_button(
-                            egui::Button::image(plus).min_size(egui::vec2(30.0, 30.0)),
-                        )
-                        .ui(ui, |ui| {
-                            if ui.button("Split horizontally").clicked() {
-                                self.actions.split = Some((tile_id, SplitDirection::Horizontal));
-                                ui.close();
-                            }
-                            if ui.button("Split vertically").clicked() {
-                                self.actions.split = Some((tile_id, SplitDirection::Vertical));
-                                ui.close();
-                            }
-                        });
-                        if crate::ui::components::icon_button(
-                            ui,
-                            crate::ui::icons::maximize(),
-                            "Fit all data",
-                            false,
-                        )
-                        .clicked()
-                        {
-                            self.actions.fit_all = true;
-                        }
-                        crate::ui::components::icon_button(
-                            ui,
-                            crate::ui::icons::arrow_left_right(),
-                            "X axes are linked across plots",
-                            true,
-                        );
-                        let hover = toolbar_menu_image(ui, crate::ui::icons::mouse_pointer());
-                        egui::containers::menu::MenuButton::from_button(
-                            egui::Button::image(hover).min_size(egui::vec2(30.0, 30.0)),
-                        )
-                        .ui(ui, |ui| {
-                            ui.weak("Cursor sampling");
-                            for (mode, label) in [
-                                (delog_core::field_view::SampleMode::Prev, "Previous"),
-                                (delog_core::field_view::SampleMode::Next, "Next"),
-                                (delog_core::field_view::SampleMode::Linear, "Linear"),
-                            ] {
-                                if ui
-                                    .radio_value(self.services.hover_mode, mode, label)
-                                    .clicked()
-                                {
-                                    ui.close();
-                                }
-                            }
-                        });
-                        if crate::ui::components::icon_button(
-                            ui,
-                            crate::ui::icons::magnet(),
-                            "Toggle playhead snap",
-                            *self.services.snap_playhead,
-                        )
-                        .clicked()
-                        {
-                            *self.services.snap_playhead = !*self.services.snap_playhead;
-                        }
-                        let has_marker = self.marker_us(pane).is_some();
-                        if crate::ui::components::icon_button(
-                            ui,
-                            crate::ui::icons::ruler_dimension_line(),
-                            "Toggle measuring marker",
-                            has_marker,
-                        )
-                        .clicked()
-                        {
-                            let marker = (!has_marker).then_some(
-                                self.services.playhead_us.unwrap_or(self.services.origin_us),
-                            );
-                            self.set_marker_us(pane, marker);
-                        }
-                        if crate::ui::components::icon_button(
-                            ui,
-                            crate::ui::icons::eye_off(),
-                            "Show or hide this legend",
-                            !pane.show_legend,
-                        )
-                        .clicked()
-                        {
-                            pane.show_legend = !pane.show_legend;
-                        }
-                        if crate::ui::components::icon_button(
-                            ui,
-                            legend_position_icon(self.services.plot_display.legend_position),
-                            "Cycle legend position",
-                            false,
-                        )
-                        .clicked()
-                        {
-                            self.actions.cycle_legend_position = true;
-                        }
-                        ui.menu_button("•••", |ui| {
-                            if ui
-                                .add(egui::Button::image_and_text(
-                                    toolbar_menu_image(ui, crate::ui::icons::grid_2x2_check()),
-                                    "Equalize plot heights",
-                                ))
-                                .clicked()
-                            {
-                                self.actions.equalize_plots = true;
-                                ui.close();
-                            }
-                            if ui.button("Toggle all legends").clicked() {
-                                self.actions.toggle_all_legends = true;
-                                ui.close();
-                            }
-                            if ui.button("Field stats").clicked() {
-                                self.actions.inspect_field_stats =
-                                    Some(pane.traces.iter().map(|trace| trace.field).collect());
-                                ui.close();
-                            }
-                            ui.checkbox(&mut pane.show_tooltip, "Show tooltip");
-                            if ui.button("Plot Info").clicked() {
-                                pane.show_info = true;
-                                ui.close();
-                            }
-                        });
-                    });
-                });
-            });
     }
 
     fn plot_context_menu(
@@ -2438,28 +2294,6 @@ fn menu_icon(ui: &egui::Ui, src: egui::ImageSource<'static>) -> egui::Image<'sta
     egui::Image::new(src)
         .fit_to_exact_size(egui::vec2(16.0, 16.0))
         .tint(ui.visuals().text_color())
-}
-
-fn toolbar_menu_image(
-    ui: &egui::Ui,
-    src: egui::ImageSource<'static>,
-) -> egui::Image<'static> {
-    egui::Image::new(src)
-        .fit_to_exact_size(egui::vec2(18.0, 18.0))
-        .tint(ui.visuals().text_color())
-}
-
-fn legend_position_icon(
-    position: crate::config::settings::LegendPosition,
-) -> egui::ImageSource<'static> {
-    match position {
-        crate::config::settings::LegendPosition::TopLeft => crate::ui::icons::dice_top_left(),
-        crate::config::settings::LegendPosition::TopRight => crate::ui::icons::dice_top_right(),
-        crate::config::settings::LegendPosition::BottomLeft => crate::ui::icons::dice_bottom_left(),
-        crate::config::settings::LegendPosition::BottomRight => {
-            crate::ui::icons::dice_bottom_right()
-        }
-    }
 }
 
 fn color_swatch(ui: &mut egui::Ui, color: egui::Color32) {
