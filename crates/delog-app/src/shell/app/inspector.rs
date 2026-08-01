@@ -5,6 +5,35 @@ use delog_core::identity::FieldId;
 use delog_core::snapshot::StoreSnapshot;
 
 use crate::plotting::field_stats::{FieldStatsController, StatsTab};
+use crate::plotting::plot::{TraceMode, TraceRef};
+
+#[derive(Debug, Clone)]
+pub enum InspectorEvent {
+    SetTraceColor {
+        tile_id: egui_tiles::TileId,
+        field: FieldId,
+        color: egui::Color32,
+    },
+    SetTraceMode {
+        tile_id: egui_tiles::TileId,
+        field: FieldId,
+        mode: TraceMode,
+    },
+    SetTraceWidth {
+        tile_id: egui_tiles::TileId,
+        field: FieldId,
+        width_px: f32,
+    },
+    SetTraceLabel {
+        tile_id: egui_tiles::TileId,
+        field: FieldId,
+        label: Option<String>,
+    },
+}
+
+pub fn normalize_trace_width(width_px: f32) -> f32 {
+    width_px.clamp(1.0, 12.0)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InspectorSelection {
@@ -59,7 +88,9 @@ pub fn show(
     focused_fields: &[FieldId],
     diagnostic_count: usize,
     stats: &mut FieldStatsController,
-) {
+    inspected_trace: Option<&TraceRef>,
+) -> Vec<InspectorEvent> {
+    let mut events = Vec::new();
     ui.horizontal(|ui| {
         crate::ui::components::panel_header(ui, "Inspector");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -118,9 +149,85 @@ pub fn show(
         InspectorSelection::Statistics(fields) => statistics_ui(ui, snapshot, fields, stats),
         InspectorSelection::Trace { tile_id, field } => {
             ui.weak(format!("Pane {tile_id:?}"));
+            trace_inspector_ui(ui, snapshot, *tile_id, *field, inspected_trace, &mut events);
+            ui.separator();
             trace_ui(ui, snapshot, *field, playback_us, hover_mode);
         }
     });
+    events
+}
+
+fn trace_inspector_ui(
+    ui: &mut egui::Ui,
+    snapshot: &StoreSnapshot,
+    tile_id: egui_tiles::TileId,
+    field: FieldId,
+    trace: Option<&TraceRef>,
+    events: &mut Vec<InspectorEvent>,
+) {
+    let Some(trace) = trace else {
+        ui.weak("This trace is no longer available.");
+        return;
+    };
+    ui.strong(crate::plotting::legend::trace_label(snapshot, field));
+    ui.horizontal(|ui| {
+        ui.label("Color");
+        let mut color = trace.color32();
+        if egui::color_picker::color_edit_button_srgba(
+            ui,
+            &mut color,
+            egui::color_picker::Alpha::Opaque,
+        )
+        .changed()
+        {
+            events.push(InspectorEvent::SetTraceColor {
+                tile_id,
+                field,
+                color,
+            });
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label("Mode");
+        let mut mode = trace.mode;
+        for candidate in TraceMode::ALL {
+            ui.radio_value(&mut mode, candidate, candidate.label());
+        }
+        if mode != trace.mode {
+            events.push(InspectorEvent::SetTraceMode {
+                tile_id,
+                field,
+                mode,
+            });
+        }
+    });
+    let mut width_px = trace.width_px;
+    if ui
+        .add(
+            egui::Slider::new(&mut width_px, 1.0..=12.0)
+                .text("Width")
+                .suffix(" px"),
+        )
+        .changed()
+    {
+        events.push(InspectorEvent::SetTraceWidth {
+            tile_id,
+            field,
+            width_px: normalize_trace_width(width_px),
+        });
+    }
+    let mut label = trace.label_override.clone().unwrap_or_default();
+    if ui
+        .add(egui::TextEdit::singleline(&mut label).hint_text("Default trace label"))
+        .changed()
+    {
+        let label = (!label.trim().is_empty()).then_some(label);
+        events.push(InspectorEvent::SetTraceLabel {
+            tile_id,
+            field,
+            label,
+        });
+    }
 }
 
 fn summary_ui(ui: &mut egui::Ui, snapshot: &StoreSnapshot, diagnostic_count: usize) {
@@ -316,5 +423,12 @@ mod tests {
             action,
             InspectorSelection::Statistics(vec![FieldId(1), FieldId(2)])
         );
+    }
+
+    #[test]
+    fn inspector_width_edit_clamps_to_existing_range() {
+        assert_eq!(normalize_trace_width(0.5), 1.0);
+        assert_eq!(normalize_trace_width(6.0), 6.0);
+        assert_eq!(normalize_trace_width(20.0), 12.0);
     }
 }
