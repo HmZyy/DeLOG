@@ -174,12 +174,22 @@ impl Workspace {
         }
     }
 
+    #[cfg(test)]
     pub fn focused_fields(&self) -> Vec<FieldId> {
         let Some(tile_id) = self.focused else {
             return Vec::new();
         };
         match self.tree.tiles.get(tile_id) {
             Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) => pane.fields().collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    pub fn visible_fields(&self, tile_id: egui_tiles::TileId) -> Vec<FieldId> {
+        match self.tree.tiles.get(tile_id) {
+            Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) => {
+                pane.visible_traces().map(|trace| trace.field).collect()
+            }
             _ => Vec::new(),
         }
     }
@@ -618,6 +628,12 @@ pub struct LegendMove {
     pub trace: TraceRef,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlotHover {
+    pub tile_id: egui_tiles::TileId,
+    pub t_us: i64,
+}
+
 #[derive(Default)]
 pub struct WorkspaceActions {
     pub split: Option<(egui_tiles::TileId, SplitDirection)>,
@@ -627,6 +643,7 @@ pub struct WorkspaceActions {
     pub remove_trace: Vec<FieldId>,
     pub focus: Option<egui_tiles::TileId>,
     pub scrub_to: Option<i64>,
+    pub hovered_cursor: Option<PlotHover>,
     pub image: Option<WorkspaceImageAction>,
     /// Manual X-view change (pan/zoom/reset); unlocks live-tail mode.
     pub view_changed: bool,
@@ -1342,6 +1359,13 @@ impl Behavior<'_> {
             );
         }
 
+        let hovered_cursor_us = response.hover_pos().and_then(|pos| {
+            hover::cursor_time_us(plot_rect, x_range, pos, self.services.origin_us)
+        });
+        if let Some(t_us) = hovered_cursor_us {
+            self.actions.hovered_cursor = Some(PlotHover { tile_id, t_us });
+        }
+
         if pane.show_tooltip && !ui.ctx().any_popup_open() {
             // Alt+hover drags the playhead along with the cursor. With
             // snap enabled it lands on the nearest data point instead, so the
@@ -1362,7 +1386,7 @@ impl Behavior<'_> {
                 self.actions.scrub_to = Some(target);
             }
 
-            hover::draw(
+            let _ = hover::draw(
                 ui,
                 HoverTarget {
                     id: egui::Id::new(("plot_hover", tile_id)),
@@ -1665,30 +1689,6 @@ impl Behavior<'_> {
                 self.actions.split = Some((tile_id, SplitDirection::Vertical));
                 ui.close();
             }
-
-            let marker_enabled = self.marker_us(pane).is_some();
-            if ui
-                .add(
-                    egui::Button::image_and_text(
-                        menu_icon(ui, crate::ui::icons::ruler()),
-                        "Toggle measuring marker",
-                    )
-                    .selected(marker_enabled),
-                )
-                .clicked()
-            {
-                self.set_marker_us(
-                    pane,
-                    if marker_enabled {
-                        None
-                    } else {
-                        self.services.playhead_us
-                    },
-                );
-                ui.close();
-            }
-
-            ui.separator();
 
             ui.checkbox(&mut pane.show_legend, "Show legend");
             ui.checkbox(&mut pane.show_tooltip, "Show tooltip");

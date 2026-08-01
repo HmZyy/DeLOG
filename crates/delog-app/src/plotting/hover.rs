@@ -31,19 +31,19 @@ pub fn draw(
     show_field_name: bool,
     show_time: bool,
     opacity: f32,
-) {
+) -> Option<i64> {
     let Some(pos) = response.hover_pos() else {
-        return;
+        return None;
     };
     let view = target.view;
     let rect = view.rect;
     if !rect.contains(pos) {
-        return;
+        return None;
     }
     let (x0, x1) = view.x_range;
     let (y0, y1) = view.y_range;
     if x1 <= x0 || y1 <= y0 {
-        return;
+        return None;
     }
 
     let painter = ui.painter();
@@ -53,8 +53,7 @@ pub fn draw(
         egui::Stroke::new(1.0, ui.visuals().weak_text_color()),
     );
 
-    let cursor_x_sec = x0 + (pos.x - rect.left()) / rect.width() * (x1 - x0);
-    let cursor_us = origin_us + (cursor_x_sec as f64 * 1e6) as i64;
+    let (cursor_x_sec, cursor_us) = cursor_position(rect, (x0, x1), pos, origin_us)?;
 
     let rows = sampled_rows(snapshot, pane, cursor_us, mode);
     draw_sample_circles(ui, view, origin_us, &rows);
@@ -73,6 +72,33 @@ pub fn draw(
             opacity,
         );
     }
+    Some(cursor_us)
+}
+
+pub(crate) fn cursor_time_us(
+    rect: egui::Rect,
+    x_range: (f32, f32),
+    pos: egui::Pos2,
+    origin_us: i64,
+) -> Option<i64> {
+    cursor_position(rect, x_range, pos, origin_us).map(|(_, t_us)| t_us)
+}
+
+fn cursor_position(
+    rect: egui::Rect,
+    x_range: (f32, f32),
+    pos: egui::Pos2,
+    origin_us: i64,
+) -> Option<(f32, i64)> {
+    let (x0, x1) = x_range;
+    if !rect.contains(pos) || x1 <= x0 || rect.width() <= 0.0 {
+        return None;
+    }
+    let cursor_x_sec = x0 + (pos.x - rect.left()) / rect.width() * (x1 - x0);
+    Some((
+        cursor_x_sec,
+        origin_us + (cursor_x_sec as f64 * 1e6) as i64,
+    ))
 }
 
 fn draw_sample_circles(ui: &egui::Ui, view: PaneView, origin_us: i64, rows: &[Row]) {
@@ -483,7 +509,7 @@ fn format_value(v: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_delta, plot_to_screen};
+    use super::{cursor_time_us, format_delta, plot_to_screen};
 
     #[test]
     fn sample_circle_maps_in_f64_at_large_magnitude() {
@@ -499,6 +525,19 @@ mod tests {
         );
         let frac = (rect.bottom() - p.y) / rect.height();
         assert!((frac - 0.5).abs() < 1e-4, "frac was {frac}");
+    }
+
+    #[test]
+    fn hover_timestamp_uses_the_exact_drawn_cursor_position() {
+        let rect = egui::Rect::from_min_max(egui::pos2(20.0, 10.0), egui::pos2(220.0, 110.0));
+        assert_eq!(
+            cursor_time_us(rect, (2.0, 6.0), egui::pos2(70.0, 50.0), 1_000_000),
+            Some(4_000_000)
+        );
+        assert_eq!(
+            cursor_time_us(rect, (2.0, 6.0), egui::pos2(5.0, 50.0), 1_000_000),
+            None
+        );
     }
 
     #[test]

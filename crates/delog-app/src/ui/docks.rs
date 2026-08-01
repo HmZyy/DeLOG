@@ -62,6 +62,14 @@ impl AppDockController {
         }
     }
 
+    pub fn toggle(&mut self, tab: AppDockTab) {
+        if self.is_open(tab) {
+            self.close(tab);
+        } else {
+            self.open_or_focus(tab);
+        }
+    }
+
     pub fn is_open(&self, tab: AppDockTab) -> bool {
         self.state.find_tab(&tab).is_some()
     }
@@ -175,6 +183,19 @@ mod tests {
         docks.open_or_focus(AppDockTab::Logging);
         assert_eq!(docks.tab_count(), 1);
         assert_eq!(docks.active_tab(), Some(AppDockTab::Logging));
+    }
+
+    #[test]
+    fn toggle_closes_an_open_tab_while_open_or_focus_keeps_it_open() {
+        let mut docks = AppDockController::new_empty();
+        docks.open_or_focus(AppDockTab::Diagnostics);
+        docks.toggle(AppDockTab::Diagnostics);
+        assert!(!docks.is_open(AppDockTab::Diagnostics));
+
+        docks.open_or_focus(AppDockTab::Diagnostics);
+        docks.open_or_focus(AppDockTab::Diagnostics);
+        assert!(docks.is_open(AppDockTab::Diagnostics));
+        assert_eq!(docks.tab_count(), 1);
     }
 
     #[test]
