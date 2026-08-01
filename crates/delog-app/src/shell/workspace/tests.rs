@@ -19,6 +19,64 @@ fn focused_fields_preserve_the_focused_plot_trace_order() {
 }
 
 #[test]
+fn plot_context_menu_keeps_every_existing_action() {
+    let source = include_str!("mod.rs");
+    for label in [
+        "Clear all traces",
+        "Remove trace",
+        "Field stats",
+        "Edit trace",
+        "Copy Image",
+        "Export PNG...",
+        "Split horizontally",
+        "Split vertically",
+        "Show tooltip",
+        "Plot Info",
+        "Close",
+    ] {
+        assert!(source.contains(label), "missing plot action: {label}");
+    }
+}
+
+#[test]
+fn data_browser_and_legend_keep_contextual_actions() {
+    let browser = include_str!("../../plotting/browser.rs");
+    for label in [
+        "Source metadata",
+        "Remove source",
+        "Set exact offset (us)",
+        "Field metadata",
+        "Field stats",
+        "Generate markers",
+    ] {
+        assert!(browser.contains(label), "missing browser action: {label}");
+    }
+    let legend = include_str!("../../plotting/legend.rs");
+    for label in ["Mode", "Rename", "Remove"] {
+        assert!(legend.contains(label), "missing legend action: {label}");
+    }
+}
+
+#[test]
+fn inspector_trace_edits_reuse_workspace_trace_mutation() {
+    let mut workspace = Workspace::new();
+    let pane = workspace.tree.root().unwrap();
+    let field = FieldId(5);
+    workspace.add_trace_to_first_plot(field);
+
+    assert!(workspace.set_trace_width(pane, field, 20.0));
+    assert!(workspace.set_trace_mode(pane, field, TraceMode::Scatter));
+    assert!(workspace.set_trace_label(pane, field, Some("Altitude".into())));
+    assert!(workspace.set_trace_color(pane, field, egui::Color32::RED));
+
+    let trace = workspace.trace_ref(pane, field).unwrap();
+    assert_eq!(trace.width_px, 12.0);
+    assert_eq!(trace.mode, TraceMode::Scatter);
+    assert_eq!(trace.label_override.as_deref(), Some("Altitude"));
+    assert_eq!(trace.color32(), egui::Color32::RED);
+}
+
+#[test]
 fn workspace_image_actions_carry_plot_rects() {
     let rect = egui::Rect::from_min_size(egui::pos2(4.0, 8.0), egui::vec2(120.0, 80.0));
 

@@ -2638,7 +2638,13 @@ impl eframe::App for DelogApp {
         );
         if self.inspector.open {
             let focused_fields = self.workspace.focused_fields();
-            egui::Panel::right("analysis_inspector")
+            let inspected_trace = match self.inspector.selection {
+                inspector::InspectorSelection::Trace { tile_id, field } => {
+                    self.workspace.trace_ref(tile_id, field).cloned()
+                }
+                _ => None,
+            };
+            let inspector_events = egui::Panel::right("analysis_inspector")
                 .resizable(true)
                 .default_size(320.0)
                 .min_size(260.0)
@@ -2653,8 +2659,42 @@ impl eframe::App for DelogApp {
                         &focused_fields,
                         diagnostics.len(),
                         &mut self.field_stats,
-                    );
-                });
+                        inspected_trace.as_ref(),
+                    )
+                })
+                .inner;
+            for event in inspector_events {
+                match event {
+                    inspector::InspectorEvent::SetTraceColor {
+                        tile_id,
+                        field,
+                        color,
+                    } => {
+                        self.workspace.set_trace_color(tile_id, field, color);
+                    }
+                    inspector::InspectorEvent::SetTraceMode {
+                        tile_id,
+                        field,
+                        mode,
+                    } => {
+                        self.workspace.set_trace_mode(tile_id, field, mode);
+                    }
+                    inspector::InspectorEvent::SetTraceWidth {
+                        tile_id,
+                        field,
+                        width_px,
+                    } => {
+                        self.workspace.set_trace_width(tile_id, field, width_px);
+                    }
+                    inspector::InspectorEvent::SetTraceLabel {
+                        tile_id,
+                        field,
+                        label,
+                    } => {
+                        self.workspace.set_trace_label(tile_id, field, label);
+                    }
+                }
+            }
         }
         for (t_us, name, color) in crate::shell::generate_markers::generate_markers_window(
             ui.ctx(),
@@ -2799,6 +2839,23 @@ impl eframe::App for DelogApp {
                     }
                     if let Some((tile_id, field)) = actions.inspect_trace {
                         self.inspector.focus_trace(tile_id, field);
+                    }
+                    if actions.fit_all
+                        && let Some(range) = snapshot.global_time_range()
+                    {
+                        self.view = Some(ViewX::from_range(range));
+                        self.fit_view_all = true;
+                    }
+                    if actions.equalize_plots {
+                        self.workspace.equalize_plot_heights();
+                    }
+                    if actions.cycle_legend_position {
+                        self.settings.plot.legend_position =
+                            next_legend_position(self.settings.plot.legend_position);
+                    }
+                    if actions.toggle_all_legends {
+                        let visible = !self.workspace.all_plot_legends_visible();
+                        self.workspace.set_all_plot_legends(visible);
                     }
                     if let Some(action) = actions.image {
                         match action {
