@@ -16,6 +16,7 @@ pub struct StatusChip {
 }
 
 impl StatusChip {
+    #[cfg(test)]
     pub fn connected(label: impl Into<String>, detail: impl Into<String>) -> Self {
         Self {
             label: label.into(),

@@ -167,12 +167,36 @@ pub fn show(
             {
                 commands.push(presentation.command.clone());
             }
+            if crate::ui::components::icon_button(
+                ui,
+                crate::ui::icons::cube(),
+                "Show or hide the 3D scene",
+                false,
+            )
+            .clicked()
+            {
+                commands.push(AppCommand::Static(CommandId::ToggleScene3d));
+            }
             if let Some(source) = &model.active_source_label {
                 ui.weak(source);
             }
             for status in &model.live_statuses {
                 let detail = format!("{} · {} rows", status.state, status.rows);
-                let chip = components::StatusChip::connected(&status.endpoint, detail);
+                let lowercase = status.state.to_ascii_lowercase();
+                let state = if lowercase.contains("connected") {
+                    components::StatusState::Success
+                } else if lowercase.contains("connect") || lowercase.contains("wait") {
+                    components::StatusState::Warning
+                } else if lowercase.contains("error") || lowercase.contains("fail") {
+                    components::StatusState::Error
+                } else {
+                    components::StatusState::Neutral
+                };
+                let chip = components::StatusChip {
+                    label: status.endpoint.clone(),
+                    detail: Some(detail),
+                    state,
+                };
                 components::status_chip(ui, &chip, model.theme)
                     .on_hover_text(format!(
                         "{} received frames{}",
