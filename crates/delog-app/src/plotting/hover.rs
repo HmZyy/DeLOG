@@ -75,15 +75,6 @@ pub fn draw(
     Some(cursor_us)
 }
 
-pub(crate) fn cursor_time_us(
-    rect: egui::Rect,
-    x_range: (f32, f32),
-    pos: egui::Pos2,
-    origin_us: i64,
-) -> Option<i64> {
-    cursor_position(rect, x_range, pos, origin_us).map(|(_, t_us)| t_us)
-}
-
 fn cursor_position(
     rect: egui::Rect,
     x_range: (f32, f32),
@@ -347,20 +338,30 @@ pub fn marker_deltas(
 ) -> HashMap<FieldId, String> {
     let mut out = HashMap::new();
     for trace in &pane.traces {
-        let Ok(fv) = FieldView::new(snapshot, trace.field) else {
-            continue;
-        };
-        let at_marker = fv.sample_at(marker_us, mode).and_then(|s| s.value.as_f64());
-        let at_playhead = fv
-            .sample_at(playhead_us, mode)
-            .and_then(|s| s.value.as_f64());
-        let (mult, unit) = field_meta(snapshot, trace.field);
         out.insert(
             trace.field,
-            format_delta(at_marker, at_playhead, mult, unit.as_deref()),
+            marker_delta_for_field(snapshot, trace.field, marker_us, playhead_us, mode)
+                .unwrap_or_else(|| "n/a".to_owned()),
         );
     }
     out
+}
+
+pub(crate) fn marker_delta_for_field(
+    snapshot: &StoreSnapshot,
+    field: FieldId,
+    marker_us: i64,
+    playhead_us: i64,
+    mode: SampleMode,
+) -> Option<String> {
+    let fv = FieldView::new(snapshot, field).ok()?;
+    let at_marker = fv.sample_at(marker_us, mode).and_then(|s| s.value.as_f64());
+    let at_playhead = fv
+        .sample_at(playhead_us, mode)
+        .and_then(|s| s.value.as_f64());
+    let (mult, unit) = field_meta(snapshot, field);
+    let delta = format_delta(at_marker, at_playhead, mult, unit.as_deref());
+    (delta != "n/a").then_some(delta)
 }
 
 fn format_delta(
@@ -509,7 +510,7 @@ fn format_value(v: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{cursor_time_us, format_delta, plot_to_screen};
+    use super::{format_delta, plot_to_screen};
 
     #[test]
     fn sample_circle_maps_in_f64_at_large_magnitude() {
@@ -525,19 +526,6 @@ mod tests {
         );
         let frac = (rect.bottom() - p.y) / rect.height();
         assert!((frac - 0.5).abs() < 1e-4, "frac was {frac}");
-    }
-
-    #[test]
-    fn hover_timestamp_uses_the_exact_drawn_cursor_position() {
-        let rect = egui::Rect::from_min_max(egui::pos2(20.0, 10.0), egui::pos2(220.0, 110.0));
-        assert_eq!(
-            cursor_time_us(rect, (2.0, 6.0), egui::pos2(70.0, 50.0), 1_000_000),
-            Some(4_000_000)
-        );
-        assert_eq!(
-            cursor_time_us(rect, (2.0, 6.0), egui::pos2(5.0, 50.0), 1_000_000),
-            None
-        );
     }
 
     #[test]

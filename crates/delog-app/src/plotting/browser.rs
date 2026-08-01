@@ -500,6 +500,26 @@ pub fn panel_toggle_button_size(ui: &egui::Ui) -> egui::Vec2 {
     egui::Vec2::splat(side)
 }
 
+pub fn data_browser_toggle_button_size(ui: &egui::Ui) -> egui::Vec2 {
+    let tokens = crate::ui::design_tokens::DesignTokens::from_style(ui.style());
+    egui::Vec2::splat(tokens.control_height)
+}
+
+pub fn data_browser_toggle_button(
+    ui: &mut egui::Ui,
+    icon: egui::ImageSource<'static>,
+    tooltip: &str,
+) -> egui::Response {
+    let tokens = crate::ui::design_tokens::DesignTokens::from_style(ui.style());
+    let button_size = egui::Vec2::splat(tokens.control_height);
+    let icon_size = egui::Vec2::splat(tokens.icon_size);
+    ui.scope(|ui| {
+        ui.spacing_mut().button_padding = (button_size - icon_size) * 0.5;
+        crate::ui::components::icon_button_sized(ui, icon, tooltip, false, button_size, icon_size)
+    })
+    .inner
+}
+
 pub fn ui(
     ui: &mut egui::Ui,
     model_epoch: u64,
@@ -510,27 +530,25 @@ pub fn ui(
     offset_dialog: &mut Option<(SourceId, i64)>,
 ) -> BrowserResponse {
     let mut response = BrowserResponse::default();
-    ui.add_space(6.0);
+    let tokens = crate::ui::design_tokens::DesignTokens::from_style(ui.style());
+    ui.add_space(5.0 + tokens.space_sm);
     ui.horizontal(|ui| {
-        let button_size = panel_toggle_button_size(ui);
+        let button_size = data_browser_toggle_button_size(ui);
+        let filter_height = button_size.y;
         let filter_width = (ui.available_width() - button_size.x - ui.spacing().item_spacing.x)
             .max(ui.spacing().interact_size.x);
         ui.add_sized(
-            egui::vec2(filter_width, button_size.y),
+            egui::vec2(filter_width, filter_height),
             egui::TextEdit::singleline(query)
                 .hint_text("Filter...")
                 .desired_width(filter_width),
         );
-        let icon_size = button_size - ui.spacing().button_padding * 2.0;
-        if crate::ui::components::icon_button_sized(
+        if data_browser_toggle_button(
             ui,
             crate::ui::icons::panel_left_close(),
             "Hide data browser",
-            false,
-            button_size,
-            icon_size,
         )
-            .clicked()
+        .clicked()
         {
             response.collapse_requested = true;
         }
@@ -941,7 +959,7 @@ fn field_row(
             .tint(ui.visuals().text_color());
         if ui
             .add(egui::Button::image_and_text(stats_info, "Field stats"))
-            .on_hover_text("Open field statistics and focus the Inspector")
+            .on_hover_text("Open field statistics")
             .clicked()
         {
             action = Some(FieldRowAction::InspectStats(field.id));
@@ -1027,6 +1045,161 @@ mod tests {
     use delog_core::store::TopicStore;
 
     use super::*;
+
+    #[test]
+    fn data_browser_toggle_matches_global_toolbar_metrics_and_alignment() {
+        let ctx = egui::Context::default();
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        ctx.enable_accesskit();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1_200.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        let mut query = String::new();
+        let mut filter_cache = BrowserFilterCache::default();
+        let mut selection = Selection::default();
+        let mut offset_dialog = None;
+        let output = ctx.run_ui(input, |ui| {
+            egui::Panel::left("browser-alignment-test")
+                .default_size(280.0)
+                .show_inside(ui, |ui| {
+                    super::ui(
+                        ui,
+                        0,
+                        &BrowserModel::default(),
+                        &mut query,
+                        &mut filter_cache,
+                        &mut selection,
+                        &mut offset_dialog,
+                    );
+                });
+            let button_size = super::data_browser_toggle_button_size(ui);
+            let collapsed_left_margin = ui.spacing().item_spacing.x;
+            let collapsed_frame =
+                egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::ZERO);
+            egui::Panel::left("collapsed-browser-alignment-test")
+                .resizable(false)
+                .show_separator_line(false)
+                .frame(collapsed_frame)
+                .exact_size(collapsed_left_margin + button_size.x)
+                .show_inside(ui, |ui| {
+                    ui.vertical(|ui| {
+                        ui.add_space(15.0);
+                        ui.horizontal(|ui| {
+                            ui.add_space(collapsed_left_margin);
+                            super::data_browser_toggle_button(
+                                ui,
+                                crate::ui::icons::panel_left_open(),
+                                "Show data browser",
+                            );
+                        });
+                    });
+                });
+            egui::Frame::central_panel(ui.style()).show(ui, |ui| {
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    crate::ui::components::icon_button(
+                        ui,
+                        crate::ui::icons::magnet(),
+                        "Toolbar control",
+                        false,
+                    );
+                });
+            });
+        });
+        let update = output
+            .platform_output
+            .accesskit_update
+            .expect("accessibility tree should be emitted");
+        let bounds = |label: &str| {
+            update
+                .nodes
+                .iter()
+                .map(|(_, node)| node)
+                .find(|node| node.label() == Some(label))
+                .and_then(|node| node.bounds())
+                .unwrap_or_else(|| panic!("{label} button should have bounds"))
+        };
+        let browser_bounds = bounds("Hide data browser");
+        let collapsed_browser_bounds = bounds("Show data browser");
+        let toolbar_bounds = bounds("Toolbar control");
+
+        assert_eq!(browser_bounds.size(), toolbar_bounds.size());
+        assert_eq!(collapsed_browser_bounds.size(), toolbar_bounds.size());
+        let center_y = |rect: egui::accesskit::Rect| (rect.y0 + rect.y1) * 0.5;
+        assert_eq!(center_y(browser_bounds), center_y(toolbar_bounds));
+        assert_eq!(center_y(collapsed_browser_bounds), center_y(toolbar_bounds));
+        assert_eq!(browser_bounds.width(), 30.0);
+        assert_eq!(browser_bounds.height(), 30.0);
+    }
+
+    #[test]
+    fn data_browser_toggle_response_is_exactly_thirty_points() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let mut response_rect = egui::Rect::NOTHING;
+
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            response_rect = super::data_browser_toggle_button(
+                ui,
+                crate::ui::icons::panel_left_close(),
+                "Hide data browser",
+            )
+            .rect;
+        });
+
+        assert_eq!(response_rect.size(), egui::Vec2::splat(30.0));
+    }
+
+    #[test]
+    fn data_browser_filter_matches_toggle_height_and_center() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        ctx.enable_accesskit();
+        let mut query = String::new();
+        let mut filter_cache = BrowserFilterCache::default();
+        let mut selection = Selection::default();
+        let mut offset_dialog = None;
+
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            super::ui(
+                ui,
+                0,
+                &BrowserModel::default(),
+                &mut query,
+                &mut filter_cache,
+                &mut selection,
+                &mut offset_dialog,
+            );
+        });
+        let update = output
+            .platform_output
+            .accesskit_update
+            .expect("accessibility tree should be emitted");
+        let filter_bounds = update
+            .nodes
+            .iter()
+            .map(|(_, node)| node)
+            .find(|node| node.role() == egui::accesskit::Role::TextInput)
+            .and_then(|node| node.bounds())
+            .expect("filter input should have bounds");
+        let button_bounds = update
+            .nodes
+            .iter()
+            .map(|(_, node)| node)
+            .find(|node| node.label() == Some("Hide data browser"))
+            .and_then(|node| node.bounds())
+            .expect("browser toggle should have bounds");
+        let center_y = |rect: egui::accesskit::Rect| (rect.y0 + rect.y1) * 0.5;
+
+        assert_eq!(filter_bounds.height(), 30.0);
+        assert_eq!(button_bounds.height(), 30.0);
+        assert_eq!(center_y(filter_bounds), center_y(button_bounds));
+    }
 
     fn snapshot() -> StoreSnapshot {
         let mut identity = IdentityRegistry::new();

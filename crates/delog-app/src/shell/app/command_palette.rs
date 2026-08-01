@@ -1,4 +1,6 @@
-use crate::shell::app::commands::{AppCommand, CommandAvailability, CommandPresentation};
+use crate::shell::app::commands::{
+    AppCommand, CommandAvailability, CommandId, CommandPresentation,
+};
 
 #[derive(Default)]
 pub struct CommandPaletteState {
@@ -32,13 +34,22 @@ impl PaletteEntry {
     }
 
     pub fn from_presentation(presentation: CommandPresentation, search_terms: &str) -> Self {
+        let (label, selected) = match &presentation.command {
+            AppCommand::Static(CommandId::ToggleDataBrowser) => {
+                ("Toggle Data Browser".to_owned(), None)
+            }
+            AppCommand::Static(CommandId::ToggleInspector) => ("Toggle Inspector".to_owned(), None),
+            AppCommand::Static(CommandId::ToggleScene3d) => ("Toggle 3D Scene".to_owned(), None),
+            AppCommand::Static(CommandId::ToggleLegends) => ("Toggle Legends".to_owned(), None),
+            _ => (presentation.label, presentation.selected),
+        };
         Self {
             command: presentation.command,
-            search_text: format!("{} {search_terms}", presentation.label),
-            label: presentation.label,
+            search_text: format!("{label} {search_terms}"),
+            label,
             subtitle: presentation.shortcut.map(str::to_owned),
             availability: presentation.availability,
-            selected: presentation.selected,
+            selected,
         }
     }
 }
@@ -397,6 +408,36 @@ mod tests {
                 )
                 && entry.selected == Some(true)
         }));
+    }
+
+    #[test]
+    fn palette_uses_plain_toggle_actions_for_view_toggles() {
+        let presentations = crate::shell::app::commands::present_commands(
+            &crate::shell::app::commands::CommandContext::default(),
+            &crate::shell::app::commands::PresentationState {
+                data_browser_open: true,
+                inspector_open: true,
+                scene_3d_open: true,
+                legends_visible: true,
+                ..crate::shell::app::commands::PresentationState::default()
+            },
+            [],
+        );
+        let entries = CommandPaletteState::entries(presentations);
+
+        for (command, label) in [
+            (CommandId::ToggleDataBrowser, "Toggle Data Browser"),
+            (CommandId::ToggleInspector, "Toggle Inspector"),
+            (CommandId::ToggleScene3d, "Toggle 3D Scene"),
+            (CommandId::ToggleLegends, "Toggle Legends"),
+        ] {
+            let entry = entries
+                .iter()
+                .find(|entry| entry.command == AppCommand::Static(command))
+                .expect("toggle command should be present in the palette");
+            assert_eq!(entry.label, label);
+            assert_eq!(entry.selected, None);
+        }
     }
 
     #[test]

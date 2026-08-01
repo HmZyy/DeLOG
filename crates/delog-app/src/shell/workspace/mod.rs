@@ -25,6 +25,13 @@ use crate::ui::components;
 
 pub type TileTree = egui_tiles::Tree<Pane>;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InspectorTrace {
+    pub field: FieldId,
+    pub label: String,
+    pub color: egui::Color32,
+}
+
 #[derive(Debug)]
 pub enum Pane {
     Plot(PlotPane),
@@ -214,81 +221,39 @@ impl Workspace {
         }
     }
 
-    pub fn visible_fields(&self, tile_id: egui_tiles::TileId) -> Vec<FieldId> {
-        match self.tree.tiles.get(tile_id) {
-            Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) => {
-                pane.visible_traces().map(|trace| trace.field).collect()
+    pub fn inspector_traces(&self, snapshot: &StoreSnapshot) -> Vec<InspectorTrace> {
+        fn visit(
+            workspace: &Workspace,
+            snapshot: &StoreSnapshot,
+            tile_id: egui_tiles::TileId,
+            traces: &mut Vec<InspectorTrace>,
+        ) {
+            match workspace.tree.tiles.get(tile_id) {
+                Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) => {
+                    traces.extend(pane.visible_traces().map(|trace| {
+                        let canonical = legend::trace_label(snapshot, trace.field);
+                        InspectorTrace {
+                            field: trace.field,
+                            label: trace.display_label(&canonical).to_owned(),
+                            color: trace.color32(),
+                        }
+                    }));
+                }
+                Some(egui_tiles::Tile::Pane(Pane::Scene3D(_))) | None => {}
+                Some(egui_tiles::Tile::Container(container)) => {
+                    let children = container.children_vec();
+                    for child in children {
+                        visit(workspace, snapshot, child, traces);
+                    }
+                }
             }
-            _ => Vec::new(),
         }
-    }
 
-    pub fn trace_ref(
-        &self,
-        tile_id: egui_tiles::TileId,
-        field: FieldId,
-    ) -> Option<&TraceRef> {
-        match self.tree.tiles.get(tile_id) {
-            Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) => {
-                pane.traces.iter().find(|trace| trace.field == field)
-            }
-            _ => None,
+        let mut traces = Vec::new();
+        if let Some(root) = self.tree.root() {
+            visit(self, snapshot, root, &mut traces);
         }
-    }
-
-    pub fn set_trace_color(
-        &mut self,
-        tile_id: egui_tiles::TileId,
-        field: FieldId,
-        color: egui::Color32,
-    ) -> bool {
-        self.trace_mut(tile_id, field)
-            .map(|trace| trace.color = legend::color32_to_srgb(color))
-            .is_some()
-    }
-
-    pub fn set_trace_mode(
-        &mut self,
-        tile_id: egui_tiles::TileId,
-        field: FieldId,
-        mode: TraceMode,
-    ) -> bool {
-        self.trace_mut(tile_id, field)
-            .map(|trace| trace.mode = mode)
-            .is_some()
-    }
-
-    pub fn set_trace_width(
-        &mut self,
-        tile_id: egui_tiles::TileId,
-        field: FieldId,
-        width_px: f32,
-    ) -> bool {
-        self.trace_mut(tile_id, field)
-            .map(|trace| trace.width_px = width_px.clamp(1.0, 12.0))
-            .is_some()
-    }
-
-    pub fn set_trace_label(
-        &mut self,
-        tile_id: egui_tiles::TileId,
-        field: FieldId,
-        label: Option<String>,
-    ) -> bool {
-        self.trace_mut(tile_id, field)
-            .map(|trace| trace.label_override = label)
-            .is_some()
-    }
-
-    fn trace_mut(
-        &mut self,
-        tile_id: egui_tiles::TileId,
-        field: FieldId,
-    ) -> Option<&mut TraceRef> {
-        match self.tree.tiles.get_mut(tile_id) {
-            Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) => pane.trace_mut(field),
-            _ => None,
-        }
+        traces
     }
 
     pub fn fields(&self) -> impl Iterator<Item = FieldId> + '_ {
@@ -663,12 +628,6 @@ pub struct LegendMove {
     pub trace: TraceRef,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PlotHover {
-    pub tile_id: egui_tiles::TileId,
-    pub t_us: i64,
-}
-
 #[derive(Default)]
 pub struct WorkspaceActions {
     pub split: Option<(egui_tiles::TileId, SplitDirection)>,
@@ -678,14 +637,12 @@ pub struct WorkspaceActions {
     pub remove_trace: Vec<FieldId>,
     pub focus: Option<egui_tiles::TileId>,
     pub scrub_to: Option<i64>,
-    pub hovered_cursor: Option<PlotHover>,
     pub image: Option<WorkspaceImageAction>,
     /// Manual X-view change (pan/zoom/reset); unlocks live-tail mode.
     pub view_changed: bool,
     pub open_vehicle_config: bool,
     pub export_kml: bool,
     pub inspect_field_stats: Option<Vec<FieldId>>,
-    pub inspect_trace: Option<(egui_tiles::TileId, FieldId)>,
     /// Widest Y gutter any pane needed; fed into `Workspace::shared_y_gutter`.
     pub max_y_gutter: f32,
 }
@@ -1173,7 +1130,6 @@ impl Behavior<'_> {
             let x_range = (*self.services.view)
                 .map(|view| view.seconds(self.services.origin_us))
                 .unwrap_or((0.0, 1.0));
-            self.publish_hovered_cursor(tile_id, &response, plot_rect, x_range);
             if plot_rect.width() > 8.0 {
                 axes::draw(ui, plot_rect, x_range, y_range, None);
             }
@@ -1246,7 +1202,6 @@ impl Behavior<'_> {
             self.actions.max_y_gutter = self.actions.max_y_gutter.max(own_gutter);
         }
         drop(pane_setup_timer);
-        self.publish_hovered_cursor(tile_id, &response, plot_rect, x_range);
 
         if !self.services.gpu.is_available() || plot_rect.width() <= 8.0 {
             self.plot_context_menu(tile_id, &response, pane);
@@ -1471,9 +1426,6 @@ impl Behavior<'_> {
                     .unwrap_or(canonical);
                 pane.rename = Some(crate::plotting::plot::RenameDialog { field, text });
             }
-            if let Some(field) = outcome.inspect {
-                self.actions.inspect_trace = Some((tile_id, field));
-            }
             if let Some(index) = outcome.removed_ghost {
                 pane.remove_ghost(index);
             }
@@ -1484,20 +1436,6 @@ impl Behavior<'_> {
         self.plot_info_window(ui, tile_id, pane, Some(debug));
         drop(pane_overlay_timer);
         tile_response
-    }
-
-    fn publish_hovered_cursor(
-        &mut self,
-        tile_id: egui_tiles::TileId,
-        response: &egui::Response,
-        plot_rect: egui::Rect,
-        x_range: (f32, f32),
-    ) {
-        if let Some(t_us) = response.hover_pos().and_then(|pos| {
-            hover::cursor_time_us(plot_rect, x_range, pos, self.services.origin_us)
-        }) {
-            self.actions.hovered_cursor = Some(PlotHover { tile_id, t_us });
-        }
     }
 
     fn plot_context_menu(
@@ -1591,19 +1529,6 @@ impl Behavior<'_> {
                 self.actions.inspect_field_stats = Some(fields);
                 ui.close();
             }
-
-            ui.menu_button("Inspect trace", |ui| {
-                for trace in &pane.traces {
-                    let label = legend::trace_label(self.services.snapshot.as_ref(), trace.field);
-                    if ui.button(label).clicked() {
-                        self.actions.inspect_trace = Some((tile_id, trace.field));
-                        ui.close();
-                    }
-                }
-                if pane.traces.is_empty() {
-                    ui.add_enabled(false, egui::Button::new("No traces"));
-                }
-            });
 
             ui.menu_image_text_button(menu_icon(ui, crate::ui::icons::pencil()), "Edit trace", |ui| {
                 let entries: Vec<_> = pane
@@ -1733,6 +1658,8 @@ impl Behavior<'_> {
                 self.actions.split = Some((tile_id, SplitDirection::Vertical));
                 ui.close();
             }
+
+            ui.separator();
 
             ui.checkbox(&mut pane.show_legend, "Show legend");
             ui.checkbox(&mut pane.show_tooltip, "Show tooltip");

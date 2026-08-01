@@ -19,126 +19,6 @@ fn focused_fields_preserve_the_focused_plot_trace_order() {
 }
 
 #[test]
-fn hovered_pane_fields_include_only_visible_traces() {
-    let mut workspace = Workspace::new();
-    let pane = workspace.tree.root().unwrap();
-    workspace.add_trace_to_first_plot(FieldId(7));
-    workspace.add_trace_to_first_plot(FieldId(3));
-    let Pane::Plot(plot) = workspace
-        .tree
-        .tiles
-        .get_mut(pane)
-        .and_then(|tile| match tile {
-            egui_tiles::Tile::Pane(pane) => Some(pane),
-            _ => None,
-        })
-        .unwrap()
-    else {
-        panic!("root should be a plot")
-    };
-    plot.traces[1].visible = false;
-
-    assert_eq!(workspace.visible_fields(pane), vec![FieldId(7)]);
-}
-
-fn render_plot_hover(pane: &mut PlotPane, gpu_available: bool) -> Option<PlotHover> {
-    let ctx = egui::Context::default();
-    let frame = eframe::Frame::_new_kittest();
-    let snapshot = Arc::new(StoreSnapshot::empty());
-    let metrics = Arc::new(delog_core::metrics::MetricsRegistry::new());
-    let mut gpu = gpu::test_bridge(gpu_available);
-    let mut caches = CacheManager::new();
-    let mut view = Some(ViewX::new(0, 1_000_000));
-    let mut hover_mode = delog_core::field_view::SampleMode::Prev;
-    let mut snap_playhead = false;
-    let mut marker_us = None;
-    let markers = Vec::new();
-    let tile_id = egui_tiles::TileId::from_u64(7);
-    let mut hovered = None;
-
-    let mut frame_with = |events| {
-        let _ = ctx.run_ui(
-            egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(500.0, 300.0),
-                )),
-                events,
-                ..Default::default()
-            },
-            |ui| {
-                let services = PlotServices {
-                    frame: &frame,
-                    snapshot: &snapshot,
-                    metrics: &metrics,
-                    gpu: &mut gpu,
-                    tile_manager: None,
-                    tile_manager_error: None,
-                    caches: &mut caches,
-                    view: &mut view,
-                    origin_us: 0,
-                    hover_mode: &mut hover_mode,
-                    snap_playhead: &mut snap_playhead,
-                    marker_us: &mut marker_us,
-                    render_tuning: crate::config::settings::RenderTuning::default(),
-                    scene3d: crate::config::settings::Scene3dSettings::default(),
-                    playhead_us: None,
-                    playing: false,
-                    vehicles: &[],
-                    trajectories: &[],
-                    traj_generation: 0,
-                    shared_y_gutter: 0.0,
-                    plot_display: crate::config::settings::PlotDisplay::default(),
-                    markers: &markers,
-                };
-                let mut behavior = Behavior::new(services);
-                let _ = behavior.plot_body(ui, tile_id, pane);
-                hovered = behavior.into_actions().hovered_cursor;
-            },
-        );
-    };
-    frame_with(Vec::new());
-    frame_with(vec![egui::Event::PointerMoved(egui::pos2(250.0, 120.0))]);
-
-    hovered
-}
-
-#[test]
-fn empty_plot_publishes_hover_before_its_rendering_only_return() {
-    let mut pane = PlotPane::default();
-    pane.show_tooltip = false;
-
-    let hovered = render_plot_hover(&mut pane, false).expect("empty plot hover should publish");
-
-    assert_eq!(hovered.tile_id, egui_tiles::TileId::from_u64(7));
-}
-
-#[test]
-fn gpu_unavailable_plot_publishes_hover_before_its_rendering_only_return() {
-    let mut pane = PlotPane::default();
-    pane.show_tooltip = false;
-    pane.show_legend = false;
-    assert!(pane.add_trace(FieldId(0)));
-
-    let hovered =
-        render_plot_hover(&mut pane, false).expect("GPU-unavailable plot hover should publish");
-
-    assert_eq!(hovered.tile_id, egui_tiles::TileId::from_u64(7));
-}
-
-#[test]
-fn fully_rendered_plot_keeps_publishing_normal_hover() {
-    let mut pane = PlotPane::default();
-    pane.show_tooltip = false;
-    pane.show_legend = false;
-    assert!(pane.add_trace(FieldId(0)));
-
-    let hovered = render_plot_hover(&mut pane, true).expect("normal plot hover should publish");
-
-    assert_eq!(hovered.tile_id, egui_tiles::TileId::from_u64(7));
-}
-
-#[test]
 fn plot_context_menu_keeps_every_existing_action() {
     let source = include_str!("mod.rs");
     for label in [
@@ -176,25 +56,6 @@ fn data_browser_and_legend_keep_contextual_actions() {
     for label in ["Mode", "Rename", "Remove"] {
         assert!(legend.contains(label), "missing legend action: {label}");
     }
-}
-
-#[test]
-fn inspector_trace_edits_reuse_workspace_trace_mutation() {
-    let mut workspace = Workspace::new();
-    let pane = workspace.tree.root().unwrap();
-    let field = FieldId(5);
-    workspace.add_trace_to_first_plot(field);
-
-    assert!(workspace.set_trace_width(pane, field, 20.0));
-    assert!(workspace.set_trace_mode(pane, field, TraceMode::Scatter));
-    assert!(workspace.set_trace_label(pane, field, Some("Altitude".into())));
-    assert!(workspace.set_trace_color(pane, field, egui::Color32::RED));
-
-    let trace = workspace.trace_ref(pane, field).unwrap();
-    assert_eq!(trace.width_px, 12.0);
-    assert_eq!(trace.mode, TraceMode::Scatter);
-    assert_eq!(trace.label_override.as_deref(), Some("Altitude"));
-    assert_eq!(trace.color32(), egui::Color32::RED);
 }
 
 #[test]
@@ -1008,6 +869,69 @@ fn trace_of(ws: &Workspace, tile: egui_tiles::TileId, field: FieldId) -> Option<
         }
         _ => None,
     }
+}
+
+#[test]
+fn inspector_flattens_visible_trace_instances_in_layout_order() {
+    let mut identity = delog_core::identity::IdentityRegistry::new();
+    let source = identity.add_source("flight");
+    let topic = identity.add_topic(source, "ATT").unwrap();
+    let roll = identity.add_field(topic, "Roll").unwrap();
+    let pitch = identity.add_field(topic, "Pitch").unwrap();
+    let snapshot = delog_core::snapshot::StoreSnapshot::from_registry(&identity, [], 0).unwrap();
+    let mut workspace = Workspace::new();
+    let first = workspace.tree.root().unwrap();
+    seed_trace(
+        &mut workspace,
+        first,
+        TraceRef {
+            field: roll,
+            color: [1.0, 0.0, 0.0, 1.0],
+            width_px: 1.5,
+            mode: TraceMode::Line,
+            visible: true,
+            label_override: Some("Bank".to_owned()),
+        },
+    );
+    seed_trace(
+        &mut workspace,
+        first,
+        TraceRef {
+            field: pitch,
+            color: [0.0, 1.0, 0.0, 1.0],
+            width_px: 1.5,
+            mode: TraceMode::Line,
+            visible: false,
+            label_override: None,
+        },
+    );
+    workspace.split_plot(first, SplitDirection::Horizontal);
+    let second = plot_tile_ids(&workspace)
+        .into_iter()
+        .find(|tile| *tile != first)
+        .unwrap();
+    seed_trace(
+        &mut workspace,
+        second,
+        TraceRef {
+            field: roll,
+            color: [0.0, 0.0, 1.0, 1.0],
+            width_px: 1.5,
+            mode: TraceMode::Line,
+            visible: true,
+            label_override: None,
+        },
+    );
+
+    let traces = workspace.inspector_traces(&snapshot);
+
+    assert_eq!(traces.len(), 2);
+    assert_eq!(traces[0].field, roll);
+    assert_eq!(traces[0].label, "Bank");
+    assert_eq!(traces[0].color, egui::Color32::RED);
+    assert_eq!(traces[1].field, roll);
+    assert_eq!(traces[1].label, "ATT.Roll");
+    assert_eq!(traces[1].color, egui::Color32::BLUE);
 }
 
 #[test]

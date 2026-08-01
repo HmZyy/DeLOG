@@ -339,7 +339,6 @@ impl CommandId {
                 None,
                 "stop stream",
                 Header,
-                ClassicMenu,
                 Palette
             ),
             CancelTasks => spec!(
@@ -511,7 +510,6 @@ impl CommandId {
                 Workspace,
                 None,
                 "resize panels",
-                GlobalToolbar,
                 Palette
             ),
             OpenDataFlow => spec!(
@@ -575,7 +573,6 @@ impl CommandId {
                 Workspace,
                 None,
                 "plot key visibility",
-                GlobalToolbar,
                 Palette
             ),
             OpenSettings => spec!(

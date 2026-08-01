@@ -120,20 +120,12 @@ pub fn ruler() -> ImageSource<'static> {
     egui::include_image!("../../assets/icons/ruler.svg")
 }
 
-pub fn grid_2x2_check() -> ImageSource<'static> {
-    egui::include_image!("../../assets/icons/grid-2x2-check.svg")
-}
-
 pub fn mouse_pointer() -> ImageSource<'static> {
     egui::include_image!("../../assets/icons/mouse-pointer-2.svg")
 }
 
 pub fn magnet() -> ImageSource<'static> {
     egui::include_image!("../../assets/icons/magnet.svg")
-}
-
-pub fn eye_off() -> ImageSource<'static> {
-    egui::include_image!("../../assets/icons/eye-off.svg")
 }
 
 pub fn dice_top_left() -> ImageSource<'static> {

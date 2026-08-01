@@ -8,20 +8,16 @@ pub enum GlobalPlotControl {
     CursorSampling(SampleMode),
     TogglePlayheadSnap,
     ToggleMeasuringMarker,
-    ToggleAllLegends,
     CycleLegendPosition,
-    EqualizePlotHeights,
 }
 
 #[cfg(test)]
 impl GlobalPlotControl {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 4] = [
         Self::CursorSampling(SampleMode::Prev),
         Self::TogglePlayheadSnap,
         Self::ToggleMeasuringMarker,
-        Self::ToggleAllLegends,
         Self::CycleLegendPosition,
-        Self::EqualizePlotHeights,
     ];
 }
 
@@ -32,9 +28,7 @@ pub const fn command_for_control(control: GlobalPlotControl) -> AppCommand {
         GlobalPlotControl::ToggleMeasuringMarker => {
             AppCommand::Static(CommandId::AddMeasuringMarker)
         }
-        GlobalPlotControl::ToggleAllLegends => AppCommand::Static(CommandId::ToggleLegends),
         GlobalPlotControl::CycleLegendPosition => AppCommand::Static(CommandId::CycleLegendPosition),
-        GlobalPlotControl::EqualizePlotHeights => AppCommand::Static(CommandId::EqualizePlots),
     }
 }
 
@@ -42,8 +36,11 @@ pub struct GlobalPlotToolbarModel {
     pub cursor_sampling: SampleMode,
     pub playhead_snap: bool,
     pub measuring_marker: bool,
-    pub all_legends_visible: bool,
     pub legend_position: LegendPosition,
+}
+
+fn toolbar_container_frame(_style: &egui::Style) -> egui::Frame {
+    egui::Frame::NONE
 }
 
 pub fn show(
@@ -52,7 +49,7 @@ pub fn show(
     presentations: &[CommandPresentation],
 ) -> Vec<AppCommand> {
     let mut commands = Vec::new();
-    egui::Frame::group(ui.style()).show(ui, |ui| {
+    toolbar_container_frame(ui.style()).show(ui, |ui| {
         ui.horizontal(|ui| {
             let cursor_icon = egui::Image::new(crate::ui::icons::mouse_pointer())
                 .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
@@ -121,17 +118,6 @@ pub fn show(
 
             if crate::ui::components::icon_button(
                 ui,
-                crate::ui::icons::eye_off(),
-                "Toggle legends on all plots",
-                !model.all_legends_visible,
-            )
-            .clicked()
-            {
-                commands.push(command_for_control(GlobalPlotControl::ToggleAllLegends));
-            }
-
-            if crate::ui::components::icon_button(
-                ui,
                 legend_position_icon(model.legend_position),
                 "Cycle legend position on all plots",
                 false,
@@ -141,16 +127,6 @@ pub fn show(
                 commands.push(command_for_control(GlobalPlotControl::CycleLegendPosition));
             }
 
-            if crate::ui::components::icon_button(
-                ui,
-                crate::ui::icons::grid_2x2_check(),
-                "Equalize all plot heights",
-                false,
-            )
-            .clicked()
-            {
-                commands.push(command_for_control(GlobalPlotControl::EqualizePlotHeights));
-            }
         });
     });
     commands
@@ -224,10 +200,21 @@ mod tests {
 
     #[test]
     fn toolbar_actions_are_all_global() {
-        assert_eq!(GlobalPlotControl::ALL.len(), 6);
+        assert_eq!(GlobalPlotControl::ALL.len(), 4);
         assert!(!format!("{:?}", GlobalPlotControl::ALL).contains("Split"));
         assert!(!format!("{:?}", GlobalPlotControl::ALL).contains("FitAll"));
+        assert!(!format!("{:?}", GlobalPlotControl::ALL).contains("ToggleAllLegends"));
+        assert!(!format!("{:?}", GlobalPlotControl::ALL).contains("EqualizePlotHeights"));
         assert!(GlobalPlotControl::ALL.contains(&GlobalPlotControl::ToggleMeasuringMarker));
+    }
+
+    #[test]
+    fn removed_toolbar_controls_keep_palette_commands() {
+        for id in [CommandId::ToggleLegends, CommandId::EqualizePlots] {
+            let routes = id.spec().routes;
+            assert!(routes.contains(&crate::shell::app::commands::AccessRoute::Palette));
+            assert!(!routes.contains(&crate::shell::app::commands::AccessRoute::GlobalToolbar));
+        }
     }
 
     #[test]
@@ -251,13 +238,45 @@ mod tests {
     }
 
     #[test]
+    fn toolbar_frame_adds_no_outline_or_padding_inside_the_header_row() {
+        let ctx = egui::Context::default();
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let frame = toolbar_container_frame(&ctx.global_style());
+        assert_eq!(frame.stroke, egui::Stroke::NONE);
+        assert_eq!(frame.inner_margin, egui::Margin::ZERO);
+        assert_eq!(frame.outer_margin, egui::Margin::ZERO);
+
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            toolbar_container_frame(ui.style()).show(ui, |ui| {
+                ui.label("Inset toolbar");
+            });
+            egui::Frame::NONE.show(ui, |ui| {
+                ui.label("Baseline toolbar");
+            });
+        });
+        let inset_left = output
+            .shapes
+            .iter()
+            .find_map(|shape| find_text_rect(&shape.shape, "Inset toolbar"))
+            .expect("inset toolbar label should be painted")
+            .left();
+        let baseline_left = output
+            .shapes
+            .iter()
+            .find_map(|shape| find_text_rect(&shape.shape, "Baseline toolbar"))
+            .expect("baseline toolbar label should be painted")
+            .left();
+
+        assert_eq!(inset_left, baseline_left);
+    }
+
+    #[test]
     fn clicking_a_rendered_toolbar_sampling_choice_emits_the_canonical_command() {
         let ctx = egui::Context::default();
         let model = GlobalPlotToolbarModel {
             cursor_sampling: SampleMode::Prev,
             playhead_snap: false,
             measuring_marker: false,
-            all_legends_visible: true,
             legend_position: LegendPosition::TopLeft,
         };
         let presentations = crate::shell::app::commands::present_commands(
