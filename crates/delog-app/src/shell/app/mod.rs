@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 #[allow(dead_code)]
 pub mod commands;
 pub mod command_palette;
+pub mod context_header;
 
 use delog_cache::CacheManager;
 use delog_core::diagnostics::{DiagRecord, Severity};
@@ -297,6 +298,7 @@ pub struct DelogApp {
     image_clipboard: Option<arboard::Clipboard>,
     browser_collapsed: bool,
     inspector_open: bool,
+    shell_emphasis: context_header::ShellEmphasis,
     command_palette: command_palette::CommandPaletteState,
     docks: AppDockController,
     diagnostics_dock: DiagnosticsDock,
@@ -443,6 +445,7 @@ impl DelogApp {
             image_clipboard: None,
             browser_collapsed: false,
             inspector_open: false,
+            shell_emphasis: context_header::ShellEmphasis::default(),
             command_palette: command_palette::CommandPaletteState::default(),
             docks: AppDockController::new_empty(),
             diagnostics_dock: DiagnosticsDock::default(),
@@ -496,26 +499,9 @@ impl DelogApp {
         }
     }
 
-    fn dock_open_checkbox(&mut self, ui: &mut egui::Ui, tab: AppDockTab, label: &str) {
-        let mut open = self.docks.is_open(tab);
-        if ui.checkbox(&mut open, label).clicked() {
-            if open {
-                self.open_dock(tab);
-            } else {
-                self.close_dock(tab);
-            }
-            ui.close();
-        }
-    }
-
     fn open_dock(&mut self, tab: AppDockTab) {
         self.set_legacy_dock_open(tab, true);
         self.docks.open_or_focus(tab);
-    }
-
-    fn close_dock(&mut self, tab: AppDockTab) {
-        self.set_legacy_dock_open(tab, false);
-        self.docks.close(tab);
     }
 
     fn set_legacy_dock_open(&mut self, tab: AppDockTab, open: bool) {
@@ -1579,10 +1565,10 @@ impl DelogApp {
         }
     }
 
-    fn command_palette_entries(
+    fn command_presentations(
         &mut self,
         snapshot: &delog_core::snapshot::StoreSnapshot,
-    ) -> Vec<command_palette::PaletteEntry> {
+    ) -> Vec<commands::CommandPresentation> {
         use commands::{
             AppCommand, CommandAvailability, CommandPresentation,
         };
@@ -1643,7 +1629,13 @@ impl DelogApp {
                 }
             }
         }
-        let presentations = commands::present_commands(&context, dynamic);
+        commands::present_commands(&context, dynamic)
+    }
+
+    fn command_palette_entries(
+        presentations: Vec<commands::CommandPresentation>,
+    ) -> Vec<command_palette::PaletteEntry> {
+        use commands::AppCommand;
         let mut entries = command_palette::CommandPaletteState::entries(presentations);
         for entry in &mut entries {
             let terms = match entry.command {
@@ -1666,6 +1658,9 @@ impl DelogApp {
     ) {
         use commands::{AppCommand, CommandId};
         match command {
+            AppCommand::ToggleShellEmphasis => {
+                self.shell_emphasis = self.shell_emphasis.toggle();
+            }
             AppCommand::OpenWithParser(name) => {
                 let built_in = self.session.parser_names().iter().any(|known| *known == name);
                 if built_in {
@@ -2275,467 +2270,78 @@ impl eframe::App for DelogApp {
         // sum of these scopes is egui's own tessellation/bookkeeping, so the
         // breakdown attributes the frame to the panel that actually costs it.
         let ui_menu_timer = self.session.metrics().scope("ui_menu");
-        egui::Panel::top("main_menu").show_inside(ui, |ui| {
-            egui::MenuBar::new().ui(ui, |ui| {
-                ui.menu_button("File", |ui| {
-                    if ui.button("Open").clicked() {
-                        self.spawn_open_dialog(ui.ctx(), None);
-                        ui.close();
-                    }
-                    ui.menu_button("Open With", |ui| {
-                        for name in self.session.parser_names() {
-                            if ui.button(parser_label(name)).clicked() {
-                                self.spawn_open_dialog(ui.ctx(), Some(name));
-                                ui.close();
-                            }
-                        }
-                    });
-                    ui.menu_button("Export", |ui| {
-                        if ui.button("Export Data").clicked() {
-                            self.data_export.open();
-                            ui.close();
-                        }
-                        ui.separator();
-                        if ui.button("Export Diagnostics").clicked() {
-                            self.spawn_export_diagnostics_dialog(
-                                ui.ctx(),
-                                self.session.diagnostic_records(),
-                                &snapshot,
-                            );
-                            ui.close();
-                        }
-                        if ui.button("Export Profiling").clicked() {
-                            self.spawn_export_profiling_dialog(ui.ctx(), frame, &snapshot);
-                            ui.close();
-                        }
-                    });
-                    let offline_sources = snapshot
-                        .sources
-                        .iter()
-                        .filter(|source| {
-                            !source.entry.removed
-                                && source.entry.kind == delog_core::identity::SourceKind::File
-                        })
-                        .count();
-                    if ui
-                        .add_enabled(offline_sources >= 2, egui::Button::new("Sync Sources"))
-                        .clicked()
-                    {
-                        self.sync_window = SyncWindow::open(&snapshot);
-                        ui.close();
-                    }
-                    if ui.button("Data Flow").clicked() {
-                        self.dataflow.open = true;
-                        ui.close();
-                    }
-                    ui.separator();
-                    if ui.button("Settings").clicked() {
-                        self.settings_dialog.open();
-                        ui.close();
-                    }
-                    ui.separator();
-                    if ui.button("Exit").clicked() {
-                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-                        ui.close();
-                    }
-                });
-                ui.separator();
-                ui.menu_button("View", |ui| {
-                    self.dock_open_checkbox(ui, AppDockTab::Diagnostics, "Diagnostic (F1)");
-                    self.dock_open_checkbox(ui, AppDockTab::Performance, "Performance (F2)");
-                    self.dock_open_checkbox(ui, AppDockTab::Markers, "Markers (F3)");
-                    #[cfg(feature = "scripting")]
-                    self.dock_open_checkbox(ui, AppDockTab::ScriptingConsole, "Scripting (F9)");
-                    self.dock_open_checkbox(ui, AppDockTab::Logging, "Logging (F12)");
-                });
-                ui.separator();
-                ui.menu_button("Layout", |ui| {
-                    if ui.button("Save Layout...").clicked() {
-                        self.save_layout_dialog.open = true;
-                        ui.close();
-                    }
-                    ui.menu_button("Load Layout", |ui| {
-                        let layouts = crate::config::layout::doc::list_layouts();
-                        if layouts.is_empty() {
-                            ui.add_enabled(false, egui::Button::new("No saved layouts"));
-                        } else {
-                            for name in layouts {
-                                if ui.button(&name).clicked() {
-                                    self.load_layout(&name, &snapshot);
-                                    ui.close();
-                                }
-                            }
-                        }
-                    });
-                    if ui.button("Manage Layouts...").clicked() {
-                        self.open_layout_manager();
-                        ui.close();
-                    }
-                    if ui.button("Clear current layout").clicked() {
-                        self.clear_current_layout();
-                        ui.close();
-                    }
-                    ui.separator();
-                    if ui.button("Export JSON...").clicked() {
-                        self.spawn_export_layout_dialog(ui.ctx(), &snapshot);
-                        ui.close();
-                    }
-                    if ui.button("Import JSON...").clicked() {
-                        self.spawn_import_layout_dialog(ui.ctx());
-                        ui.close();
-                    }
-                });
-                #[cfg(feature = "scripting")]
-                {
-                    ui.separator();
-                    ui.menu_button("Scripts", |ui| {
-                        if ui.button("Editor...").clicked() {
-                            self.scripts.open = true;
-                            ui.close();
-                        }
-                        if ui.button("Variables...").clicked() {
-                            self.scripts.variables_open = true;
-                            ui.close();
-                        }
-                        ui.separator();
-                        ui.menu_button("Run", |ui| {
-                            let names = self.scripts.script_names();
-                            if names.is_empty() {
-                                ui.add_enabled(false, egui::Button::new("No saved scripts"));
-                            } else {
-                                let run_enabled = self.scripts.ordinary_dispatch_enabled();
-                                for name in names {
-                                    if ui
-                                        .add_enabled(run_enabled, egui::Button::new(name.as_str()))
-                                        .clicked()
-                                    {
-                                        let _ = self.scripts.run_named(
-                                            &name,
-                                            self.session.store(),
-                                            self.session.ingest_sender(),
-                                            Arc::clone(self.session.metrics()),
-                                        );
-                                        ui.close();
-                                    }
-                                }
-                            }
-                        });
-                    });
-                    ui.separator();
-                    ui.menu_button("Parsers", |ui| {
-                        if ui.button("Editor...").clicked() {
-                            self.scripts.open_parser_editor();
-                            ui.close();
-                        }
-                        ui.separator();
-                        ui.menu_button("Parse File", |ui| match self.scripts.parser_names() {
-                            Ok(names) if names.is_empty() => {
-                                ui.add_enabled(false, egui::Button::new("No saved parsers"));
-                            }
-                            Ok(names) => {
-                                let parser_open_enabled = self.scripts.parser_dispatch_enabled();
-                                for name in names {
-                                    if ui
-                                        .add_enabled(
-                                            parser_open_enabled,
-                                            egui::Button::new(name.as_str()),
-                                        )
-                                        .on_hover_text("Open file with parser")
-                                        .clicked()
-                                    {
-                                        let _ = self.scripts.request_open(ui.ctx(), &name);
-                                        ui.close();
-                                    }
-                                }
-                            }
-                            Err(_) => {
-                                ui.add_enabled(false, egui::Button::new("Could not list parsers"));
-                            }
-                        });
-                    });
-                }
-                if self.settings.show_fps {
-                    ui.with_layout(
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| match self.fps_ema {
-                            Some(fps) => {
-                                let color = if fps > 59.0 {
-                                    self.settings.theme.success()
-                                } else if fps >= 30.0 {
-                                    self.settings.theme.warning()
-                                } else {
-                                    self.settings.theme.error()
-                                };
-                                ui.colored_label(color, format!("{fps:.0} FPS"));
-                            }
-                            None => {
-                                ui.weak("idle");
-                            }
-                        },
-                    );
-                }
-            });
-        });
-
-        drop(ui_menu_timer);
-
-        let ui_toolbar_timer = self.session.metrics().scope("ui_toolbar");
-        let toolbar_frame = egui::Frame::side_top_panel(ui.style()).inner_margin(TOOLBAR_MARGIN);
-        egui::Panel::top("tool_icons").frame(toolbar_frame).show_inside(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing = TOOLBAR_ITEM_SPACING;
-                let streaming = self.session.has_live_links();
-                let stream_tint = if streaming {
-                    self.settings.theme.accent()
-                } else {
-                    ui.visuals().weak_text_color()
-                };
-                if icon_button(
-                    ui,
-                    "toolbar-stream",
-                    crate::ui::icons::satellite_dish(),
-                    stream_tint,
-                    streaming,
-                )
-                .on_hover_text("Connect to a MAVLink telemetry stream")
-                .clicked()
-                {
-                    self.show_connection_dialog = true;
-                }
-
-                let scene_open = self.workspace.scene_pane_id().is_some();
-                let cube_tint = if scene_open {
-                    self.settings.theme.accent()
-                } else {
-                    ui.visuals().weak_text_color()
-                };
-                if icon_button(
-                    ui,
-                    "toolbar-3d",
-                    crate::ui::icons::cube(),
-                    cube_tint,
-                    scene_open,
-                )
-                .on_hover_text("Show or hide the 3D scene view")
-                .clicked()
-                {
-                    self.workspace.toggle_scene_pane();
-                }
-
-                ui.separator();
-
-                let active_tint = self.settings.theme.accent();
-                let inactive_tint = ui.visuals().weak_text_color();
-                hover_mode_menu_button(
-                    ui,
-                    "toolbar-hover-mode",
-                    crate::ui::icons::mouse_pointer(),
-                    active_tint,
-                    true,
-                    |ui| {
-                        use delog_core::field_view::SampleMode::{Linear, Next, Prev};
-                        if ui
-                            .radio_value(&mut self.hover_mode, Prev, "Previous")
-                            .clicked()
-                        {
-                            ui.close();
-                        }
-                        if ui.radio_value(&mut self.hover_mode, Next, "Next").clicked() {
-                            ui.close();
-                        }
-                        if ui
-                            .radio_value(&mut self.hover_mode, Linear, "Linear")
-                            .clicked()
-                        {
-                            ui.close();
-                        }
-                    },
-                )
-                .on_hover_text(format!("Select hover mode"));
-
-                let snap_tint = if self.snap_playhead {
-                    active_tint
-                } else {
-                    inactive_tint
-                };
-                if icon_button(
-                    ui,
-                    "toolbar-snap-playhead",
-                    crate::ui::icons::magnet(),
-                    snap_tint,
-                    self.snap_playhead,
-                )
-                .on_hover_text("Toggle playhead snap")
-                .clicked()
-                {
-                    self.snap_playhead = !self.snap_playhead;
-                }
-
-                let has_marker = self.marker_us.is_some();
-                let marker_tint = if has_marker {
-                    active_tint
-                } else {
-                    inactive_tint
-                };
-                let marker_hover = if has_marker {
-                    "Remove measuring marker"
-                } else {
-                    "Add measuring marker at playhead"
-                };
-                if ui
-                    .add_enabled_ui(has_marker || global_range.is_some(), |ui| {
-                        icon_button(
-                            ui,
-                            "toolbar-measuring-marker",
-                            crate::ui::icons::ruler_dimension_line(),
-                            marker_tint,
-                            has_marker,
-                        )
-                    })
-                    .inner
-                    .on_hover_text(marker_hover)
-                    .clicked()
-                {
-                    self.marker_us = if has_marker {
-                        None
-                    } else {
-                        Some(self.playback.t_us)
-                    };
-                }
-
-                if icon_button(
-                    ui,
-                    "toolbar-equal-plot-heights",
-                    crate::ui::icons::grid_2x2_check(),
-                    inactive_tint,
-                    false,
-                )
-                .on_hover_text("Resize all plots")
-                .clicked()
-                {
-                    self.workspace.equalize_plot_heights();
-                }
-
-                ui.separator();
-
-                if icon_button(
-                    ui,
-                    "toolbar-legend-position",
-                    legend_position_icon(self.settings.plot.legend_position),
-                    active_tint,
-                    true,
-                )
-                .on_hover_text("Cycle legend position")
-                .clicked()
-                {
-                    self.settings.plot.legend_position =
-                        next_legend_position(self.settings.plot.legend_position);
-                }
-
-                let legends_hidden = !self.workspace.all_plot_legends_visible();
-                let legend_tint = if legends_hidden {
-                    active_tint
-                } else {
-                    inactive_tint
-                };
-                if icon_button(
-                    ui,
-                    "toolbar-legends",
-                    crate::ui::icons::eye_off(),
-                    legend_tint,
-                    legends_hidden,
-                )
-                .on_hover_text("Toggle legends")
-                .clicked()
-                {
-                    self.workspace.set_all_plot_legends(legends_hidden);
-                }
-
-                ui.separator();
-
-                if icon_button(
-                    ui,
-                    "toolbar-export-workspace-png",
-                    crate::ui::icons::export(),
-                    inactive_tint,
-                    false,
-                )
-                .on_hover_text("Export workspace PNG")
-                .clicked()
-                {
-                    self.queue_image_capture(
-                        ui.ctx(),
-                        crate::export::image_export::ImageCaptureIntent::workspace(
-                            crate::export::image_export::ImageCaptureAction::Export,
-                            self.frame,
-                        ),
-                    );
-                }
-
-                let mut disconnect = None;
-                for (i, status) in self.session.live_statuses().into_iter().enumerate() {
-                    ui.separator();
-                    ui.weak(format!(
-                        "{} {} · {} frames · {} rows{}",
-                        status.state.label(),
-                        status.endpoint,
-                        status.link.rx_frames,
-                        status.ingest.rows,
-                        recording_status(&status)
-                    ));
-                    if ui
-                        .button("Disconnect")
-                        .on_hover_text("Stop this telemetry stream")
-                        .clicked()
-                    {
-                        disconnect = Some(i);
-                    }
-                }
-                if let Some(i) = disconnect {
-                    self.session.stop_live(i);
-                }
-
-                let native_load_active = self.session.has_active_loads();
-                #[cfg(feature = "scripting")]
-                let parser_label = self
-                    .scripts
-                    .is_parser_running()
-                    .then(|| self.scripts.parser_active_label());
-                #[cfg(not(feature = "scripting"))]
-                let parser_label: Option<String> = None;
-                let load_state = combined_load_state(
-                    native_load_active,
-                    self.session.active_labels(),
-                    parser_label.as_deref(),
-                );
-                if load_state.active {
-                    ui.separator();
-                    if ui.button("Cancel").clicked() {
-                        self.session.cancel_all();
-                        #[cfg(feature = "scripting")]
-                        if load_state.parser_active {
-                            self.scripts.cancel_parsers();
-                        }
-                    }
-                    if !load_state.native_labels.is_empty() {
-                        ui.label(format!("loading {}", load_state.native_labels.join(", ")));
-                    }
-                    if let Some(label) = &load_state.parser_label {
-                        ui.label(label);
-                    }
-                    if !load_state.parser_active
-                        && let Some(frac) = self.session.overall_progress()
-                    {
-                        ui.add(egui::ProgressBar::new(frac).desired_width(120.0));
-                    } else {
-                        ui.spinner();
-                    }
-                }
-            });
-        });
-
-        drop(ui_toolbar_timer);
         let range = timeline_range_for_ui(global_range);
+        let command_presentations = self.command_presentations(&snapshot);
+        let native_load_active = self.session.has_active_loads();
+        #[cfg(feature = "scripting")]
+        let parser_label = self
+            .scripts
+            .is_parser_running()
+            .then(|| self.scripts.parser_active_label());
+        #[cfg(not(feature = "scripting"))]
+        let parser_label: Option<String> = None;
+        let load_state = combined_load_state(
+            native_load_active,
+            self.session.active_labels(),
+            parser_label.as_deref(),
+        );
+        let load = if load_state.active {
+            let mut labels = load_state.native_labels;
+            if let Some(label) = load_state.parser_label {
+                labels.push(label);
+            }
+            context_header::LoadStatusView::Active {
+                label: if labels.is_empty() {
+                    "Working…".to_owned()
+                } else {
+                    labels.join(" · ")
+                },
+                progress: (!load_state.parser_active)
+                    .then(|| self.session.overall_progress())
+                    .flatten(),
+            }
+        } else {
+            context_header::LoadStatusView::Idle
+        };
+        let active_source_label = snapshot
+            .sources
+            .iter()
+            .find(|source| !source.entry.removed)
+            .map(|source| source.entry.label.clone());
+        let live_statuses = self
+            .session
+            .live_statuses()
+            .into_iter()
+            .enumerate()
+            .map(|(index, status)| {
+                let recording = recording_status(&status);
+                context_header::LiveStatusView {
+                    index,
+                    endpoint: status.endpoint.to_string(),
+                    state: status.state.label().to_owned(),
+                    rx_frames: status.link.rx_frames,
+                    rows: status.ingest.rows,
+                    recording: (!recording.is_empty()).then_some(recording),
+                }
+            })
+            .collect();
+        let header_model = context_header::HeaderModel {
+            emphasis: self.shell_emphasis,
+            active_source_label,
+            live_statuses,
+            load,
+            fps: self.settings.show_fps.then_some(self.fps_ema).flatten(),
+            theme: self.settings.theme,
+        };
+        let header_commands = egui::Panel::top("context_header")
+            .show_inside(ui, |ui| {
+                context_header::show(ui, &header_model, &command_presentations)
+            })
+            .inner;
+        drop(ui_menu_timer);
+        for command in header_commands {
+            self.dispatch_command(command, ui.ctx(), frame, &snapshot, range);
+        }
 
         let wants_keyboard = ui.ctx().egui_wants_keyboard_input();
         let ctrl_k = ui.ctx().input(|input| {
@@ -3390,7 +2996,7 @@ impl eframe::App for DelogApp {
             }
         }
 
-        let palette_entries = self.command_palette_entries(&snapshot);
+        let palette_entries = Self::command_palette_entries(command_presentations);
         if let Some(command) = self.command_palette.show(ui.ctx(), &palette_entries) {
             self.dispatch_command(command, ui.ctx(), frame, &snapshot, range);
         }
@@ -4546,15 +4152,6 @@ impl egui_dock::TabViewer for AppDockViewer<'_> {
     }
 }
 
-/// Fixed footprint of a toolbar icon button. Allocating an explicit size
-/// keeps the button's rect independent of the SVG's load state, so the
-/// toolbar's height can't change between egui's layout passes (which would
-/// otherwise shift every panel below and spam "changed id between passes").
-const ICON_BUTTON_SIZE: egui::Vec2 = egui::vec2(40.0, 40.0);
-
-const TOOLBAR_MARGIN: egui::Margin = egui::Margin::symmetric(10, 6);
-const TOOLBAR_ITEM_SPACING: egui::Vec2 = egui::vec2(6.0, 6.0);
-
 fn next_legend_position(
     position: crate::config::settings::LegendPosition,
 ) -> crate::config::settings::LegendPosition {
@@ -4564,63 +4161,6 @@ fn next_legend_position(
         crate::config::settings::LegendPosition::BottomLeft => crate::config::settings::LegendPosition::BottomRight,
         crate::config::settings::LegendPosition::BottomRight => crate::config::settings::LegendPosition::TopLeft,
     }
-}
-
-fn legend_position_icon(position: crate::config::settings::LegendPosition) -> egui::ImageSource<'static> {
-    match position {
-        crate::config::settings::LegendPosition::TopLeft => crate::ui::icons::dice_top_left(),
-        crate::config::settings::LegendPosition::TopRight => crate::ui::icons::dice_top_right(),
-        crate::config::settings::LegendPosition::BottomLeft => crate::ui::icons::dice_bottom_left(),
-        crate::config::settings::LegendPosition::BottomRight => crate::ui::icons::dice_bottom_right(),
-    }
-}
-
-/// A compact toolbar icon button rendering one of the bundled SVG icons.
-/// `salt` gives the button a stable id; `tint` colors the (white) glyph;
-/// `active` draws a selected background.
-fn icon_button(
-    ui: &mut egui::Ui,
-    salt: &str,
-    icon: egui::ImageSource<'_>,
-    tint: egui::Color32,
-    active: bool,
-) -> egui::Response {
-    let image = toolbar_icon_image(icon, tint);
-    ui.push_id(salt, |ui| {
-        ui.add_sized(
-            ICON_BUTTON_SIZE,
-            egui::Button::image(image).selected(active),
-        )
-    })
-    .inner
-}
-
-fn hover_mode_menu_button(
-    ui: &mut egui::Ui,
-    salt: &str,
-    icon: egui::ImageSource<'_>,
-    tint: egui::Color32,
-    active: bool,
-    add_contents: impl FnOnce(&mut egui::Ui),
-) -> egui::Response {
-    let image = toolbar_icon_image(icon, tint);
-    ui.push_id(salt, |ui| {
-        egui::containers::menu::MenuButton::from_button(
-            egui::Button::image(image)
-                .selected(active)
-                .min_size(ICON_BUTTON_SIZE),
-        )
-        .ui(ui, add_contents)
-        .0
-    })
-    .inner
-}
-
-fn toolbar_icon_image(icon: egui::ImageSource<'_>, tint: egui::Color32) -> egui::Image<'_> {
-    let image = egui::Image::new(icon)
-        .fit_to_exact_size(egui::vec2(22.0, 22.0))
-        .tint(tint);
-    image
 }
 
 #[cfg(test)]
