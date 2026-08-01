@@ -261,6 +261,37 @@ fn moved_plot_controls_remain_reachable_without_the_global_toolbar() {
 }
 
 #[test]
+fn plot_controls_respect_global_and_local_scope() {
+    assert!(!WORKSPACE_SOURCE.contains("fn plot_toolbar("));
+    for label in [
+        "Split horizontally",
+        "Split vertically",
+        "Toggle measuring marker",
+        "Show legend",
+        "Show tooltip",
+        "Field stats",
+        "Plot Info",
+    ] {
+        assert!(
+            WORKSPACE_SOURCE.contains(label),
+            "missing pane action {label}"
+        );
+    }
+}
+
+#[test]
+fn scene_controls_share_one_horizontal_toolbar() {
+    let overlay = between(
+        WORKSPACE_SOURCE,
+        "fn scene_overlay_buttons(",
+        "fn menu_icon(",
+    );
+    assert!(overlay.contains("ui.horizontal(|ui|"));
+    assert!(!overlay.contains("ui.vertical(|ui|"));
+    assert_eq!(overlay.matches("components::icon_button(").count(), 3);
+}
+
+#[test]
 fn plot_field_stats_is_one_direct_action_for_all_pane_traces() {
     let context_menu = between(
         WORKSPACE_SOURCE,
