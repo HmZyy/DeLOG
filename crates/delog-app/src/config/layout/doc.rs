@@ -233,26 +233,33 @@ pub fn layout_dir() -> Result<PathBuf, LayoutError> {
     Ok(base.join("layouts"))
 }
 
-pub fn list_layouts() -> Vec<String> {
-    let Ok(dir) = layout_dir() else {
-        return Vec::new();
+pub fn try_list_layouts() -> Result<Vec<String>, LayoutError> {
+    list_layouts_in(&layout_dir()?)
+}
+
+fn list_layouts_in(dir: &Path) -> Result<Vec<String>, LayoutError> {
+    let read = match fs::read_dir(dir) {
+        Ok(read) => read,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(LayoutError::Io(error.to_string())),
     };
-    let Ok(read) = fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut names = read
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            (path.extension().and_then(|s| s.to_str()) == Some("json"))
-                .then_some(path)?
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .map(str::to_owned)
-        })
-        .collect::<Vec<_>>();
+    let mut names = Vec::new();
+    for entry in read {
+        let path = entry
+            .map_err(|error| LayoutError::Io(error.to_string()))?
+            .path();
+        if path.extension().and_then(|s| s.to_str()) == Some("json")
+            && let Some(name) = path.file_stem().and_then(|s| s.to_str())
+        {
+            names.push(name.to_owned());
+        }
+    }
     names.sort();
-    names
+    Ok(names)
+}
+
+pub fn list_layouts() -> Vec<String> {
+    try_list_layouts().unwrap_or_default()
 }
 
 pub fn delete_named(name: &str) -> Result<(), LayoutError> {

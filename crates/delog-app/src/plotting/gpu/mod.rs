@@ -1931,4 +1931,12 @@ pub fn zoom_drag_view(
 }
 
 #[cfg(test)]
+pub(crate) fn test_bridge(available: bool) -> GpuBridge {
+    GpuBridge {
+        available,
+        srgb_target: false,
+    }
+}
+
+#[cfg(test)]
 mod tests;

@@ -112,6 +112,46 @@ fn timeline_range_for_ui(snapshot_range: Option<TimeRange>) -> TimeRange {
     snapshot_range.unwrap_or(EMPTY_SESSION_TIMELINE_RANGE)
 }
 
+fn dynamic_palette_metadata(command: &commands::AppCommand) -> (&'static str, String) {
+    use commands::AppCommand;
+
+    match command {
+        AppCommand::OpenWithBuiltInParser(name) => (
+            "File › Open With",
+            format!("built-in native parser open with {name}"),
+        ),
+        AppCommand::OpenWithParser(name) => (
+            "Tools › Parsers › Run Parser",
+            format!("custom parser run parse file {name}"),
+        ),
+        AppCommand::RunScript(name) => (
+            "Tools › Scripts › Run Scripts",
+            format!("script run execute {name}"),
+        ),
+        AppCommand::LoadNamedLayout(name) => (
+            "Tools › Layouts › Load Layout",
+            format!("layout load workspace {name}"),
+        ),
+        AppCommand::DisconnectLink(_) => (
+            "File › Disconnect live link",
+            "live link disconnect connection endpoint".to_owned(),
+        ),
+        AppCommand::ToggleShellEmphasis => (
+            "Header › Workflow emphasis",
+            "shell emphasis workflow offline live".to_owned(),
+        ),
+        AppCommand::FitAll => (
+            "View › Plot range",
+            "fit all plots reset zoom range".to_owned(),
+        ),
+        AppCommand::SetCursorSampling(_) => (
+            "Analyze › Cursor sampling",
+            "cursor sampling interpolation previous next linear".to_owned(),
+        ),
+        AppCommand::Static(_) => unreachable!("static commands use their command specification"),
+    }
+}
+
 #[derive(Serialize)]
 struct DiagnosticsExportDoc {
     delog_diagnostics: u32,
@@ -1583,22 +1623,26 @@ impl DelogApp {
             let scripts = &mut self.scripts;
             let previous = self.dynamic_command_catalog.names().clone();
             self.dynamic_command_catalog.ensure_with(|| {
-                Ok::<_, ()>(commands::merge_dynamic_command_refresh(
+                Ok::<_, ()>(commands::merge_fallible_dynamic_command_refresh(
                     &previous,
-                    Some(crate::config::layout::doc::list_layouts()),
-                    Some(scripts.script_names()),
-                    scripts.parser_names().ok(),
+                    crate::config::layout::doc::try_list_layouts(),
+                    scripts.try_script_names(),
+                    scripts.parser_names(),
                 ))
             });
         }
         #[cfg(not(feature = "scripting"))]
-        self.dynamic_command_catalog.ensure_with(|| {
-            Ok::<_, ()>(dynamic_commands::DynamicCommandNames {
-                layouts: crate::config::layout::doc::list_layouts(),
-                scripts: Vec::new(),
-                parsers: Vec::new(),
-            })
-        });
+        {
+            let previous = self.dynamic_command_catalog.names().clone();
+            self.dynamic_command_catalog.ensure_with(|| {
+                Ok::<_, ()>(commands::merge_fallible_dynamic_command_refresh(
+                    &previous,
+                    crate::config::layout::doc::try_list_layouts(),
+                    Ok::<_, ()>(Vec::new()),
+                    Ok::<_, ()>(Vec::new()),
+                ))
+            });
+        }
     }
 
     fn open_command_palette(&mut self) {
@@ -1715,7 +1759,7 @@ impl DelogApp {
     ) -> Vec<command_palette::PaletteEntry> {
         let mut entries = command_palette::CommandPaletteState::entries(presentations);
         for entry in &mut entries {
-            let terms = match &entry.command {
+            match &entry.command {
                 commands::AppCommand::Static(id) => {
                     let spec = id.spec();
                     entry.search_text.push_str(&format!(
@@ -1727,12 +1771,16 @@ impl DelogApp {
                         entry.search_text.push(' ');
                         entry.search_text.push_str(route.search_term());
                     }
-                    spec.search_terms
+                    entry.search_text.push(' ');
+                    entry.search_text.push_str(spec.search_terms);
                 }
-                _ => "dynamic recent named",
-            };
-            entry.search_text.push(' ');
-            entry.search_text.push_str(terms);
+                command => {
+                    let (subtitle, terms) = dynamic_palette_metadata(command);
+                    entry.subtitle = Some(subtitle.to_owned());
+                    entry.search_text.push(' ');
+                    entry.search_text.push_str(&terms);
+                }
+            }
         }
         entries
     }
@@ -2748,7 +2796,7 @@ impl eframe::App for DelogApp {
             &mut self.field_stats,
         );
         if self.inspector.open {
-            let focused_tile = self.workspace.focused;
+            let focused_tile = self.workspace.focused_plot_id();
             let cursor_fields = inspector::cursor_fields_for_frame(
                 &self.inspector.selection,
                 focused_tile,
@@ -2914,6 +2962,7 @@ impl eframe::App for DelogApp {
                     self.workspace.tree.ui(&mut behavior, ui);
                     drop(tree_timer);
                     let actions = behavior.into_actions();
+                    self.workspace.repair_focus();
                     let hovered_cursor = actions.hovered_cursor;
                     // Share the widest pane gutter so stacked plots align next
                     // frame. Converges in one frame; until then each
@@ -2975,7 +3024,7 @@ impl eframe::App for DelogApp {
                         inspector::cursor_readout_for_frame(
                             hovered_cursor.map(|hover| (hover.tile_id, hover.t_us)),
                             self.playback.t_us,
-                            self.workspace.focused,
+                            self.workspace.focused_plot_id(),
                         ),
                     );
                     if cursor_changed {

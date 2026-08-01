@@ -41,20 +41,101 @@ fn hovered_pane_fields_include_only_visible_traces() {
     assert_eq!(workspace.visible_fields(pane), vec![FieldId(7)]);
 }
 
-#[test]
-fn inspector_hover_capture_is_independent_of_tooltip_rendering() {
-    let source = include_str!("mod.rs");
-    let capture = source
-        .find("let hovered_cursor_us = response.hover_pos()")
-        .expect("plot hover should be captured for Inspector");
-    let tooltip_guard = source
-        .find("if pane.show_tooltip && !ui.ctx().any_popup_open()")
-        .expect("tooltip rendering should remain optional");
+fn render_plot_hover(pane: &mut PlotPane, gpu_available: bool) -> Option<PlotHover> {
+    let ctx = egui::Context::default();
+    let frame = eframe::Frame::_new_kittest();
+    let snapshot = Arc::new(StoreSnapshot::empty());
+    let metrics = Arc::new(delog_core::metrics::MetricsRegistry::new());
+    let mut gpu = gpu::test_bridge(gpu_available);
+    let mut caches = CacheManager::new();
+    let mut view = Some(ViewX::new(0, 1_000_000));
+    let mut hover_mode = delog_core::field_view::SampleMode::Prev;
+    let mut snap_playhead = false;
+    let mut marker_us = None;
+    let markers = Vec::new();
+    let tile_id = egui_tiles::TileId::from_u64(7);
+    let mut hovered = None;
 
-    assert!(
-        capture < tooltip_guard,
-        "Inspector hover capture must not be guarded by tooltip visibility"
-    );
+    let mut frame_with = |events| {
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(500.0, 300.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                let services = PlotServices {
+                    frame: &frame,
+                    snapshot: &snapshot,
+                    metrics: &metrics,
+                    gpu: &mut gpu,
+                    tile_manager: None,
+                    tile_manager_error: None,
+                    caches: &mut caches,
+                    view: &mut view,
+                    origin_us: 0,
+                    hover_mode: &mut hover_mode,
+                    snap_playhead: &mut snap_playhead,
+                    marker_us: &mut marker_us,
+                    render_tuning: crate::config::settings::RenderTuning::default(),
+                    scene3d: crate::config::settings::Scene3dSettings::default(),
+                    playhead_us: None,
+                    playing: false,
+                    vehicles: &[],
+                    trajectories: &[],
+                    traj_generation: 0,
+                    shared_y_gutter: 0.0,
+                    plot_display: crate::config::settings::PlotDisplay::default(),
+                    markers: &markers,
+                };
+                let mut behavior = Behavior::new(services);
+                let _ = behavior.plot_body(ui, tile_id, pane);
+                hovered = behavior.into_actions().hovered_cursor;
+            },
+        );
+    };
+    frame_with(Vec::new());
+    frame_with(vec![egui::Event::PointerMoved(egui::pos2(250.0, 120.0))]);
+
+    hovered
+}
+
+#[test]
+fn empty_plot_publishes_hover_before_its_rendering_only_return() {
+    let mut pane = PlotPane::default();
+    pane.show_tooltip = false;
+
+    let hovered = render_plot_hover(&mut pane, false).expect("empty plot hover should publish");
+
+    assert_eq!(hovered.tile_id, egui_tiles::TileId::from_u64(7));
+}
+
+#[test]
+fn gpu_unavailable_plot_publishes_hover_before_its_rendering_only_return() {
+    let mut pane = PlotPane::default();
+    pane.show_tooltip = false;
+    pane.show_legend = false;
+    assert!(pane.add_trace(FieldId(0)));
+
+    let hovered =
+        render_plot_hover(&mut pane, false).expect("GPU-unavailable plot hover should publish");
+
+    assert_eq!(hovered.tile_id, egui_tiles::TileId::from_u64(7));
+}
+
+#[test]
+fn fully_rendered_plot_keeps_publishing_normal_hover() {
+    let mut pane = PlotPane::default();
+    pane.show_tooltip = false;
+    pane.show_legend = false;
+    assert!(pane.add_trace(FieldId(0)));
+
+    let hovered = render_plot_hover(&mut pane, true).expect("normal plot hover should publish");
+
+    assert_eq!(hovered.tile_id, egui_tiles::TileId::from_u64(7));
 }
 
 #[test]
@@ -292,6 +373,79 @@ fn scene_pane_toggles_a_single_instance_on_and_off() {
     workspace.toggle_scene_pane();
     assert_eq!(scene_count(&workspace), 1);
     assert_ne!(workspace.scene_pane_id(), Some(id));
+}
+
+#[test]
+fn closing_the_focused_plot_reassigns_focus_to_the_surviving_plot() {
+    let mut workspace = Workspace::new();
+    let closing = workspace.tree.root().unwrap();
+    workspace.split_plot(closing, SplitDirection::Horizontal);
+    let surviving = workspace
+        .tree
+        .tiles
+        .iter()
+        .find_map(|(id, tile)| {
+            (*id != closing && matches!(tile, egui_tiles::Tile::Pane(Pane::Plot(_))))
+                .then_some(*id)
+        })
+        .expect("split should create a surviving plot");
+    workspace.focused = Some(closing);
+
+    workspace.close_plot(closing);
+
+    assert_eq!(workspace.focused, Some(surviving));
+}
+
+#[test]
+fn focus_repair_chooses_the_lowest_surviving_plot_id() {
+    let mut workspace = Workspace::new();
+    let closing = workspace.tree.root().unwrap();
+    workspace.split_plot(closing, SplitDirection::Horizontal);
+    workspace.split_plot(closing, SplitDirection::Horizontal);
+    let expected = workspace
+        .tree
+        .tiles
+        .iter()
+        .filter_map(|(id, tile)| {
+            (*id != closing && matches!(tile, egui_tiles::Tile::Pane(Pane::Plot(_))))
+                .then_some(*id)
+        })
+        .min_by_key(|id| id.0)
+        .expect("two plots should survive");
+    workspace.focused = Some(closing);
+    workspace.tree.remove_recursively(closing);
+    assert_eq!(workspace.deterministic_plot_fallback(), Some(expected));
+
+    workspace.repair_focus();
+
+    assert_eq!(workspace.focused, Some(expected));
+}
+
+#[test]
+fn closing_the_focused_scene_reassigns_focus_to_the_surviving_plot() {
+    let mut workspace = Workspace::new();
+    let plot = workspace.tree.root().unwrap();
+    workspace.toggle_scene_pane();
+    let scene = workspace.scene_pane_id().expect("scene should be open");
+    assert_eq!(workspace.focused, Some(scene));
+
+    workspace.toggle_scene_pane();
+
+    assert_eq!(workspace.focused, Some(plot));
+}
+
+#[test]
+fn inspector_fallback_accepts_only_an_existing_focused_plot() {
+    let mut workspace = Workspace::new();
+    let plot = workspace.tree.root().unwrap();
+    workspace.focused = Some(plot);
+    assert_eq!(workspace.focused_plot_id(), Some(plot));
+
+    workspace.toggle_scene_pane();
+    assert!(workspace.focused_plot_id().is_none());
+
+    workspace.focused = Some(egui_tiles::TileId::from_u64(u64::MAX));
+    assert!(workspace.focused_plot_id().is_none());
 }
 
 #[test]

@@ -1,8 +1,10 @@
 use delog_core::field_view::SampleMode;
 
 pub use super::dynamic_commands::{
-    DynamicCommandCatalog, dynamic_command_families, merge_dynamic_command_refresh,
+    DynamicCommandCatalog, dynamic_command_families, merge_fallible_dynamic_command_refresh,
 };
+#[cfg(test)]
+use super::dynamic_commands::merge_dynamic_command_refresh;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CommandId {
@@ -1066,6 +1068,26 @@ mod tests {
 
         assert_eq!(refreshed.layouts, ["new-layout"]);
         assert_eq!(refreshed.scripts, ["new-script"]);
+        assert_eq!(refreshed.parsers, ["old-parser"]);
+    }
+
+    #[test]
+    fn fallible_refresh_preserves_failures_but_accepts_a_successful_empty_scan() {
+        let previous = DynamicCommandNames {
+            layouts: vec!["old-layout".to_owned()],
+            scripts: vec!["old-script".to_owned()],
+            parsers: vec!["old-parser".to_owned()],
+        };
+
+        let refreshed = merge_fallible_dynamic_command_refresh(
+            &previous,
+            Err::<Vec<String>, _>("layout read failed"),
+            Ok::<_, &str>(Vec::new()),
+            Err::<Vec<String>, _>("parser read failed"),
+        );
+
+        assert_eq!(refreshed.layouts, ["old-layout"]);
+        assert!(refreshed.scripts.is_empty());
         assert_eq!(refreshed.parsers, ["old-parser"]);
     }
 

@@ -329,7 +329,11 @@ impl ScriptsPanel {
 
     /// Read fresh from disk so newly-saved scripts appear without restarting.
     pub fn script_names(&self) -> Vec<String> {
-        self.library.list().unwrap_or_default()
+        self.try_script_names().unwrap_or_default()
+    }
+
+    pub fn try_script_names(&self) -> std::io::Result<Vec<String>> {
+        self.library.list()
     }
 
     pub fn run_named(
@@ -1643,6 +1647,27 @@ mod tests {
         assert_eq!(panel.take_parser_diagnostics().len(), 1);
 
         std::fs::remove_file(root).unwrap();
+    }
+
+    #[test]
+    fn script_names_propagates_library_errors_instead_of_reporting_an_empty_scan() {
+        let temp = tempfile::tempdir().expect("temporary script root");
+        let empty_panel = ScriptsPanel::new(
+            temp.path().join("empty-scripts"),
+            temp.path().join("empty-parsers"),
+            temp.path().join("empty-params.json"),
+        );
+        assert_eq!(empty_panel.try_script_names().unwrap(), Vec::<String>::new());
+
+        let not_a_directory = temp.path().join("not-a-directory");
+        std::fs::write(&not_a_directory, "file where a directory is required").unwrap();
+        let panel = ScriptsPanel::new(
+            not_a_directory,
+            temp.path().join("parsers"),
+            temp.path().join("params.json"),
+        );
+
+        assert!(panel.try_script_names().is_err());
     }
 
     #[test]

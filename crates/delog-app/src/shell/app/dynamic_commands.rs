@@ -35,6 +35,15 @@ pub fn merge_dynamic_command_refresh(
     }
 }
 
+pub fn merge_fallible_dynamic_command_refresh<LayoutError, ScriptError, ParserError>(
+    previous: &DynamicCommandNames,
+    layouts: Result<Vec<String>, LayoutError>,
+    scripts: Result<Vec<String>, ScriptError>,
+    parsers: Result<Vec<String>, ParserError>,
+) -> DynamicCommandNames {
+    merge_dynamic_command_refresh(previous, layouts.ok(), scripts.ok(), parsers.ok())
+}
+
 #[derive(Debug, Default)]
 pub struct DynamicCommandCatalog {
     names: DynamicCommandNames,
