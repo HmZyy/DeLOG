@@ -1668,6 +1668,7 @@ impl Behavior<'_> {
 
             ui.separator();
 
+            ui.checkbox(&mut pane.show_legend, "Show legend");
             ui.checkbox(&mut pane.show_tooltip, "Show tooltip");
 
             if ui
