@@ -77,6 +77,8 @@ const VIEW_LAYOUTS_MENU: &[CommandId] = &[
     CommandId::ManageLayouts,
     CommandId::ImportLayout,
     CommandId::ExportLayout,
+    CommandId::ClearLayout,
+    CommandId::EqualizePlots,
 ];
 const ANALYZE_MENU: &[CommandId] = &[
     CommandId::SyncSources,
@@ -346,6 +348,42 @@ mod tests {
     #[test]
     fn classic_menus_own_each_static_command_once() {
         let ids = classic_menu_command_ids();
+        assert_eq!(
+            ids,
+            vec![
+                CommandId::Open,
+                CommandId::ConnectLive,
+                CommandId::DisconnectLive,
+                CommandId::CancelTasks,
+                CommandId::Exit,
+                CommandId::ExportData,
+                CommandId::ExportDiagnostics,
+                CommandId::ExportProfiling,
+                CommandId::ExportWorkspacePng,
+                CommandId::ToggleDataBrowser,
+                CommandId::ToggleInspector,
+                CommandId::ToggleScene3d,
+                CommandId::OpenDiagnostics,
+                CommandId::OpenPerformance,
+                CommandId::OpenLogging,
+                CommandId::SaveLayout,
+                CommandId::LoadLayout,
+                CommandId::ManageLayouts,
+                CommandId::ImportLayout,
+                CommandId::ExportLayout,
+                CommandId::ClearLayout,
+                CommandId::EqualizePlots,
+                CommandId::SyncSources,
+                CommandId::AddMarker,
+                CommandId::OpenMarkers,
+                CommandId::OpenDataFlow,
+                CommandId::OpenSettings,
+                CommandId::OpenScripting,
+                CommandId::OpenScriptEditor,
+                CommandId::OpenScriptVariables,
+                CommandId::OpenParserEditor,
+            ]
+        );
         for id in &ids {
             assert_eq!(
                 ids.iter().filter(|candidate| *candidate == id).count(),
