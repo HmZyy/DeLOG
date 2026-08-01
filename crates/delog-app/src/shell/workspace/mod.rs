@@ -1447,7 +1447,8 @@ impl Behavior<'_> {
         let id = egui::Id::new(("plot-toolbar", tile_id));
         egui::Area::new(id)
             .order(egui::Order::Foreground)
-            .fixed_pos(pane_rect.right_top() + egui::vec2(-300.0, 8.0))
+            .pivot(egui::Align2::RIGHT_TOP)
+            .fixed_pos(pane_rect.right_top() + egui::vec2(-8.0, 8.0))
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.horizontal(|ui| {
@@ -1481,6 +1482,25 @@ impl Behavior<'_> {
                             "X axes are linked across plots",
                             true,
                         );
+                        let hover = toolbar_menu_image(ui, crate::ui::icons::mouse_pointer());
+                        egui::containers::menu::MenuButton::from_button(
+                            egui::Button::image(hover).min_size(egui::vec2(30.0, 30.0)),
+                        )
+                        .ui(ui, |ui| {
+                            ui.weak("Cursor sampling");
+                            for (mode, label) in [
+                                (delog_core::field_view::SampleMode::Prev, "Previous"),
+                                (delog_core::field_view::SampleMode::Next, "Next"),
+                                (delog_core::field_view::SampleMode::Linear, "Linear"),
+                            ] {
+                                if ui
+                                    .radio_value(self.services.hover_mode, mode, label)
+                                    .clicked()
+                                {
+                                    ui.close();
+                                }
+                            }
+                        });
                         if crate::ui::components::icon_button(
                             ui,
                             crate::ui::icons::magnet(),
@@ -1526,7 +1546,13 @@ impl Behavior<'_> {
                             self.actions.cycle_legend_position = true;
                         }
                         ui.menu_button("•••", |ui| {
-                            if ui.button("Equalize plot heights").clicked() {
+                            if ui
+                                .add(egui::Button::image_and_text(
+                                    toolbar_menu_image(ui, crate::ui::icons::grid_2x2_check()),
+                                    "Equalize plot heights",
+                                ))
+                                .clicked()
+                            {
                                 self.actions.equalize_plots = true;
                                 ui.close();
                             }

@@ -47,6 +47,7 @@ pub enum AppCommand {
     Static(CommandId),
     ToggleShellEmphasis,
     OpenWithParser(String),
+    #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
     RunScript(String),
     LoadNamedLayout(String),
     DisconnectLink(usize),
@@ -655,5 +656,14 @@ mod tests {
                 DynamicFamily::LiveLink
             ],
         );
+    }
+
+    #[test]
+    fn redesigned_shell_covers_static_and_dynamic_command_families() {
+        assert!(CommandId::ALL.iter().all(|id| !id.spec().routes.is_empty()));
+        assert!(dynamic_command_families().contains(&DynamicFamily::Parser));
+        assert!(dynamic_command_families().contains(&DynamicFamily::Script));
+        assert!(dynamic_command_families().contains(&DynamicFamily::Layout));
+        assert!(dynamic_command_families().contains(&DynamicFamily::LiveLink));
     }
 }

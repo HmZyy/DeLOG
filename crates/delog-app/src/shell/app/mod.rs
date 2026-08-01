@@ -1,8 +1,6 @@
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
-// Removed when the redesigned menus and command palette consume the registry.
-#[allow(dead_code)]
 pub mod commands;
 pub mod command_palette;
 pub mod context_header;
@@ -1575,6 +1573,7 @@ impl DelogApp {
             AppCommand, CommandAvailability, CommandPresentation,
         };
         let context = self.command_context(snapshot);
+        debug_assert_eq!(commands::dynamic_command_families().len(), 4);
         let mut dynamic = Vec::new();
         for name in self.session.parser_names() {
             dynamic.push(CommandPresentation {
@@ -1641,7 +1640,13 @@ impl DelogApp {
         let mut entries = command_palette::CommandPaletteState::entries(presentations);
         for entry in &mut entries {
             let terms = match entry.command {
-                AppCommand::Static(id) => id.spec().search_terms,
+                AppCommand::Static(id) => {
+                    let spec = id.spec();
+                    entry
+                        .search_text
+                        .push_str(&format!(" {:?} {:?}", spec.group, spec.routes));
+                    spec.search_terms
+                }
                 _ => "dynamic recent named",
             };
             entry.search_text.push(' ');
