@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 pub mod commands;
 pub mod command_palette;
 pub mod context_header;
+pub mod global_plot_toolbar;
 pub mod inspector;
 pub mod empty_state;
 
@@ -2762,6 +2763,40 @@ impl eframe::App for DelogApp {
             // The workspace renders even before any log loads, so plots can be
             // arranged and the 3D view opened on an empty session.
 
+            let toolbar_model = global_plot_toolbar::GlobalPlotToolbarModel {
+                cursor_sampling: self.hover_mode,
+                playhead_snap: self.snap_playhead,
+                all_legends_visible: self.workspace.all_plot_legends_visible(),
+                legend_position: self.settings.plot.legend_position,
+            };
+            for action in global_plot_toolbar::show(ui, &toolbar_model) {
+                match action {
+                    global_plot_toolbar::GlobalPlotToolbarAction::FitAll => {
+                        if let Some(range) = snapshot.global_time_range() {
+                            self.view = Some(ViewX::from_range(range));
+                            self.fit_view_all = true;
+                        }
+                    }
+                    global_plot_toolbar::GlobalPlotToolbarAction::SetCursorSampling(mode) => {
+                        self.hover_mode = mode;
+                    }
+                    global_plot_toolbar::GlobalPlotToolbarAction::TogglePlayheadSnap => {
+                        self.snap_playhead = !self.snap_playhead;
+                    }
+                    global_plot_toolbar::GlobalPlotToolbarAction::ToggleAllLegends => {
+                        let visible = !self.workspace.all_plot_legends_visible();
+                        self.workspace.set_all_plot_legends(visible);
+                    }
+                    global_plot_toolbar::GlobalPlotToolbarAction::CycleLegendPosition => {
+                        self.settings.plot.legend_position =
+                            next_legend_position(self.settings.plot.legend_position);
+                    }
+                    global_plot_toolbar::GlobalPlotToolbarAction::EqualizePlotHeights => {
+                        self.workspace.equalize_plot_heights();
+                    }
+                }
+            }
+
             let workspace_rect = ui.available_rect_before_wrap();
 
             if adaptive_shell.show_empty_state {
@@ -2902,23 +2937,6 @@ impl eframe::App for DelogApp {
                     }
                     if let Some((tile_id, field)) = actions.inspect_trace {
                         self.inspector.focus_trace(tile_id, field);
-                    }
-                    if actions.fit_all
-                        && let Some(range) = snapshot.global_time_range()
-                    {
-                        self.view = Some(ViewX::from_range(range));
-                        self.fit_view_all = true;
-                    }
-                    if actions.equalize_plots {
-                        self.workspace.equalize_plot_heights();
-                    }
-                    if actions.cycle_legend_position {
-                        self.settings.plot.legend_position =
-                            next_legend_position(self.settings.plot.legend_position);
-                    }
-                    if actions.toggle_all_legends {
-                        let visible = !self.workspace.all_plot_legends_visible();
-                        self.workspace.set_all_plot_legends(visible);
                     }
                     if let Some(action) = actions.image {
                         match action {
