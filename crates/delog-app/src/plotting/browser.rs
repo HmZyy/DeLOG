@@ -51,6 +51,14 @@ pub struct FieldNode {
     search_path: String,
 }
 
+const fn default_openness(node: BrowserNode) -> Option<bool> {
+    match node {
+        BrowserNode::Source(_) => Some(true),
+        BrowserNode::Topic(_) => Some(false),
+        BrowserNode::SourceMeta(_) | BrowserNode::TopicHeader(_) | BrowserNode::Field(_) => None,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum BrowserNode {
     Source(u32),
@@ -611,8 +619,12 @@ pub fn ui(
             ui.spacing_mut().item_spacing.y = tokens.dense_row_gap;
             ui.set_width(ui.available_width());
 
-            let mut state =
-                egui_ltreeview::TreeViewState::<BrowserNode>::load(ui, tree_id).unwrap_or_default();
+            let mut open_nodes: std::collections::HashMap<BrowserNode, bool> =
+                ui.data(|data| data.get_temp(tree_id)).unwrap_or_default();
+            let mut state = egui_ltreeview::TreeViewState::<BrowserNode>::default();
+            for (node, open) in &open_nodes {
+                state.set_openness(*node, *open);
+            }
             if filtering {
                 for visible_source in &view.sources {
                     let source = &model.sources[visible_source.source];
@@ -761,14 +773,14 @@ pub fn ui(
                     continue;
                 };
                 for node in clicked {
-                    if matches!(node, BrowserNode::Source(_) | BrowserNode::Topic(_)) {
-                        let open = state.is_open(&node).unwrap_or(false);
-                        state.set_openness(node, !open);
-                    }
+                    let Some(default_open) = default_openness(node) else {
+                        continue;
+                    };
+                    let open = open_nodes.get(&node).copied().unwrap_or(default_open);
+                    open_nodes.insert(node, !open);
                 }
             }
-            state.set_selected(Vec::new());
-            state.store(ui, tree_id);
+            ui.data_mut(|data| data.insert_temp(tree_id, open_nodes));
         });
 
 
@@ -1598,6 +1610,78 @@ mod tests {
             "after being shown wide the browser still demands {narrow} points, \
              which blocks resizing the panel back down"
         );
+    }
+
+    #[test]
+    fn browser_columns_stay_visible_after_shrinking_the_panel() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let model = synth_model(1, 2, 4);
+        let mut query = "field".to_owned();
+        let mut filter_cache = BrowserFilterCache::default();
+        let mut selection = Selection::default();
+        let mut offset_dialog = None;
+
+        let render = |panel_width: f32,
+                          query: &mut String,
+                          filter_cache: &mut BrowserFilterCache,
+                          selection: &mut Selection,
+                          offset_dialog: &mut Option<(SourceId, i64)>| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1_400.0, 800.0),
+                )),
+                ..Default::default()
+            };
+            ctx.run_ui(input, |ui| {
+                egui::Panel::left("browser-column-visibility")
+                    .resizable(false)
+                    .exact_size(panel_width)
+                    .show_inside(ui, |ui| {
+                        super::ui(
+                            ui,
+                            0,
+                            &model,
+                            query,
+                            filter_cache,
+                            selection,
+                            offset_dialog,
+                        );
+                    });
+            })
+        };
+
+        for width in [900.0, 900.0] {
+            render(
+                width,
+                &mut query,
+                &mut filter_cache,
+                &mut selection,
+                &mut offset_dialog,
+            );
+        }
+        let narrow = render(
+            380.0,
+            &mut query,
+            &mut filter_cache,
+            &mut selection,
+            &mut offset_dialog,
+        );
+
+        for label in ["type", "unit", "(10000)"] {
+            let rect = narrow
+                .shapes
+                .iter()
+                .find_map(|clipped| find_text_rect(&clipped.shape, label))
+                .unwrap_or_else(|| panic!("{label} should still be painted in a 380 point panel"));
+            assert!(
+                rect.right() <= 380.0,
+                "{label} is drawn out to x={} which is outside a 380 point panel",
+                rect.right()
+            );
+        }
     }
 
     #[test]

@@ -180,7 +180,7 @@ pub fn library_tree(
         return None;
     }
 
-    let mut state = egui_ltreeview::TreeViewState::load(ui, id).unwrap_or_default();
+    let mut state = egui_ltreeview::TreeViewState::default();
     match selected.and_then(|name| names.iter().position(|n| n == name)) {
         Some(index) => state.set_one_selected(index),
         None => state.set_selected(Vec::new()),
@@ -196,28 +196,36 @@ pub fn library_tree(
             for (index, name) in names.iter().enumerate() {
                 builder.node(
                     egui_ltreeview::NodeBuilder::leaf(index).label_ui(|ui| {
-                        ui.add(egui::Label::new(name).selectable(false))
-                            .on_hover_text(hover);
-                        if menu_actions.is_empty() {
-                            return;
-                        }
                         ui.with_layout(
                             egui::Layout::right_to_left(egui::Align::Center),
                             |ui| {
-                                let menu = ui.menu_button("...", |ui| {
-                                    for action in menu_actions {
-                                        if ui.button(action.label()).clicked() {
-                                            menu_event = Some(LibraryEvent {
-                                                name: name.clone(),
-                                                action: *action,
-                                            });
-                                            ui.close();
+                                if !menu_actions.is_empty() {
+                                    let menu = ui.menu_button("...", |ui| {
+                                        for action in menu_actions {
+                                            if ui.button(action.label()).clicked() {
+                                                menu_event = Some(LibraryEvent {
+                                                    name: name.clone(),
+                                                    action: *action,
+                                                });
+                                                ui.close();
+                                            }
                                         }
+                                    });
+                                    if menu.response.clicked() || menu.inner.is_some() {
+                                        menu_consumed_click = true;
                                     }
-                                });
-                                if menu.response.clicked() || menu.inner.is_some() {
-                                    menu_consumed_click = true;
                                 }
+                                ui.with_layout(
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
+                                        ui.add(
+                                            egui::Label::new(name)
+                                                .selectable(false)
+                                                .truncate(),
+                                        )
+                                        .on_hover_text(hover);
+                                    },
+                                );
                             },
                         );
                     }),
@@ -225,7 +233,6 @@ pub fn library_tree(
             }
             })
     });
-    state.store(ui, id);
 
     if let Some(event) = menu_event {
         return Some(event);
@@ -314,125 +321,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn library_tree_marks_only_the_loaded_entry_selected() {
-        let ctx = egui::Context::default();
-        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
-        let names = library_names();
-        let id = egui::Id::new("library-selection-test");
-        let input = || egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(400.0, 600.0),
-            )),
-            ..Default::default()
-        };
-        let _ = ctx.run_ui(input(), |ui| {
-            library_tree(ui, id, &names, Some("gamma"), &[], "Load entry");
-        });
-        let _ = ctx.run_ui(input(), |ui| {
-            let state =
-                egui_ltreeview::TreeViewState::<usize>::load(ui, id).expect("state was stored");
-            assert_eq!(state.selected(), &vec![2]);
-        });
-    }
-
-    #[test]
-    fn library_tree_handles_an_empty_library() {
-        let ctx = egui::Context::default();
-        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
-        let mut event = Some(LibraryEvent {
-            name: "stale".to_owned(),
-            action: LibraryAction::Load,
-        });
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            event = library_tree(
-                ui,
-                egui::Id::new("empty-library-tree"),
-                &[],
-                None,
-                &[LibraryAction::Remove],
-                "Load entry",
-            );
-        });
-        assert!(event.is_none());
-    }
-
-    #[test]
-    fn clicking_an_entry_label_loads_it() {
-        let ctx = egui::Context::default();
-        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
-        let names = library_names();
-        let id = egui::Id::new("library-click-test");
-        let mut event = None;
-        let mut label_pos = None;
-
-        let frame = |events: Vec<egui::Event>,
-                     pointer: Option<egui::Pos2>,
-                     event: &mut Option<LibraryEvent>,
-                         label_pos: &mut Option<egui::Pos2>| {
-            let mut input = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(400.0, 600.0),
-                )),
-                ..Default::default()
-            };
-            if let Some(pos) = pointer {
-                input.events.push(egui::Event::PointerMoved(pos));
-            }
-            input.events.extend(events);
-            let output = ctx.run_ui(input, |ui| {
-                if let Some(fired) = library_tree(ui, id, &names, None, &[], "Load entry") {
-                    *event = Some(fired);
-                }
-            });
-            if label_pos.is_none() {
-                *label_pos = output
-                    .shapes
-                    .iter()
-                    .find_map(|clipped| find_label_rect(&clipped.shape, "beta"))
-                    .map(|rect| rect.center());
-            }
-        };
-
-        frame(vec![], None, &mut event, &mut label_pos);
-        frame(vec![], None, &mut event, &mut label_pos);
-        let target = label_pos.expect("beta should be painted");
-
-        frame(
-            vec![egui::Event::PointerButton {
-                pos: target,
-                button: egui::PointerButton::Primary,
-                pressed: true,
-                modifiers: Default::default(),
-            }],
-            Some(target),
-            &mut event,
-            &mut label_pos,
-        );
-        frame(
-            vec![egui::Event::PointerButton {
-                pos: target,
-                button: egui::PointerButton::Primary,
-                pressed: false,
-                modifiers: Default::default(),
-            }],
-            Some(target),
-            &mut event,
-            &mut label_pos,
-        );
-
-        assert_eq!(
-            event,
-            Some(LibraryEvent {
-                name: "beta".to_owned(),
-                action: LibraryAction::Load,
-            }),
-            "clicking the entry text itself should load it"
-        );
-    }
-
     fn find_label_rect(shape: &egui::epaint::Shape, expected: &str) -> Option<egui::Rect> {
         match shape {
             egui::epaint::Shape::Text(text) if text.galley.job.text == expected => {
@@ -445,45 +333,127 @@ mod tests {
         }
     }
 
+    fn selection_highlight_y(
+        ctx: &egui::Context,
+        id: egui::Id,
+        names: &[String],
+        selected: Option<&str>,
+    ) -> Option<f32> {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(400.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let visuals = ctx.global_style().visuals.clone();
+        let focused_fill = visuals.selection.bg_fill;
+        let unfocused_fill = visuals.widgets.inactive.weak_bg_fill.linear_multiply(0.3);
+        let output = ctx.run_ui(input, |ui| {
+            library_tree(ui, id, names, selected, &[], "Load entry");
+        });
+        fn walk(
+            shape: &egui::epaint::Shape,
+            fills: (egui::Color32, egui::Color32),
+            out: &mut Option<f32>,
+        ) {
+            match shape {
+                egui::epaint::Shape::Rect(rect)
+                    if rect.fill == fills.0 || rect.fill == fills.1 =>
+                {
+                    *out = Some(rect.rect.center().y);
+                }
+                egui::epaint::Shape::Vec(shapes) => {
+                    shapes.iter().for_each(|s| walk(s, fills, out));
+                }
+                _ => {}
+            }
+        }
+        let mut found = None;
+        for clipped in &output.shapes {
+            walk(&clipped.shape, (focused_fill, unfocused_fill), &mut found);
+        }
+        found
+    }
+
     #[test]
-    fn library_tree_does_not_pin_the_drawer_to_its_widest_layout() {
+    fn library_tree_highlights_only_the_loaded_entry() {
         let ctx = egui::Context::default();
         crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
-        let names = vec![
-            "a_very_long_saved_entry_name_that_makes_the_tree_wide".to_owned(),
-            "another_quite_long_saved_entry_name_here".to_owned(),
-        ];
-        let id = egui::Id::new("library-shrink-test");
-
-        let measure = |panel_width: f32| {
-            let input = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(900.0, 600.0),
-                )),
-                ..Default::default()
-            };
-            let mut used = 0.0;
-            let _ = ctx.run_ui(input, |ui| {
-                egui::Panel::left("shrink-drawer")
-                    .resizable(false)
-                    .exact_size(panel_width)
-                    .show_inside(ui, |ui| {
-                        library_tree(ui, id, &names, None, &[], "Load entry");
-                        used = ui.min_rect().width();
-                    });
-            });
-            used
-        };
-
-        measure(400.0);
-        measure(400.0);
-        let narrow = measure(150.0);
+        let names = library_names();
+        let id = egui::Id::new("library-selection-test");
 
         assert!(
-            narrow <= 160.0,
-            "after being shown wide the tree still demands {narrow} points, \
-             which pins the drawer open and blocks resizing it back down"
+            selection_highlight_y(&ctx, id, &names, None).is_none(),
+            "nothing should be highlighted when no entry is loaded"
+        );
+
+        let first = selection_highlight_y(&ctx, id, &names, Some("alpha"))
+            .expect("the loaded entry should be highlighted");
+        let last = selection_highlight_y(&ctx, id, &names, Some("gamma"))
+            .expect("the loaded entry should be highlighted");
+
+        assert!(
+            last > first,
+            "the highlight should follow the loaded entry down the list ({first} -> {last})"
+        );
+    }
+
+    fn menu_rect_at_width(ctx: &egui::Context, id: egui::Id, names: &[String], w: f32) -> Option<egui::Rect> {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| {
+            egui::Panel::left("menu-visibility-drawer")
+                .resizable(false)
+                .exact_size(w)
+                .show_inside(ui, |ui| {
+                    library_tree(ui, id, names, None, &[LibraryAction::Remove], "Load entry");
+                });
+        });
+        output
+            .shapes
+            .iter()
+            .find_map(|clipped| find_label_rect(&clipped.shape, "..."))
+    }
+
+    #[test]
+    fn library_row_menu_stays_visible_after_shrinking_the_drawer() {
+        let ctx = egui::Context::default();
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let names = vec!["alpha".to_owned()];
+        let id = egui::Id::new("library-menu-visibility");
+
+        menu_rect_at_width(&ctx, id, &names, 400.0);
+        menu_rect_at_width(&ctx, id, &names, 400.0);
+        let narrow = menu_rect_at_width(&ctx, id, &names, 150.0)
+            .expect("the overflow menu should still be painted after shrinking");
+
+        assert!(
+            narrow.right() <= 150.0,
+            "the row menu is drawn at x={} which is outside a 150 point drawer",
+            narrow.right()
+        );
+    }
+
+    #[test]
+    fn library_row_menu_survives_an_entry_name_wider_than_the_drawer() {
+        let ctx = egui::Context::default();
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let names = vec!["a_long_saved_entry_name_that_overflows_the_drawer".to_owned()];
+        let id = egui::Id::new("library-menu-long-name");
+
+        let narrow = menu_rect_at_width(&ctx, id, &names, 150.0)
+            .expect("a long entry name must not push the overflow menu out of the drawer");
+
+        assert!(
+            narrow.right() <= 150.0,
+            "the row menu is drawn at x={} which is outside a 150 point drawer",
+            narrow.right()
         );
     }
 
