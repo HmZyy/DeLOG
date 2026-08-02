@@ -42,6 +42,7 @@ impl CommandPaletteState {
                         CommandAvailability::Enabled => None,
                     },
                     checked: entry.selected == Some(true),
+                    separator_before: false,
                 }
             })
             .collect()
@@ -142,6 +143,7 @@ pub fn ranked_entries<'a>(query: &str, entries: &'a [PaletteEntry]) -> Vec<&'a P
             search_text: entry.search_text.clone(),
             disabled_reason: None,
             checked: false,
+            separator_before: false,
         })
         .collect();
     crate::ui::palette::ranked_items(query, &items)
