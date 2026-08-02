@@ -51,6 +51,23 @@ pub struct FieldNode {
     search_path: String,
 }
 
+const fn default_openness(node: BrowserNode) -> Option<bool> {
+    match node {
+        BrowserNode::Source(_) => Some(true),
+        BrowserNode::Topic(_) => Some(false),
+        BrowserNode::SourceMeta(_) | BrowserNode::TopicHeader(_) | BrowserNode::Field(_) => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum BrowserNode {
+    Source(u32),
+    SourceMeta(u32),
+    Topic(u32),
+    TopicHeader(u32),
+    Field(u32),
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct BrowserFilter {
     pub sources: Vec<VisibleSource>,
@@ -495,9 +512,24 @@ fn display_endpoint(value: Option<&str>) -> &str {
     value.unwrap_or("-")
 }
 
-pub fn panel_toggle_button_size(ui: &egui::Ui) -> egui::Vec2 {
-    let side = ui.spacing().interact_size.y + ui.spacing().button_padding.x * 2.0;
-    egui::Vec2::splat(side)
+pub fn data_browser_toggle_button_size(ui: &egui::Ui) -> egui::Vec2 {
+    let tokens = crate::ui::design_tokens::DesignTokens::from_style(ui.style());
+    egui::Vec2::splat(tokens.control_height)
+}
+
+pub fn data_browser_toggle_button(
+    ui: &mut egui::Ui,
+    icon: egui::ImageSource<'static>,
+    tooltip: &str,
+) -> egui::Response {
+    let tokens = crate::ui::design_tokens::DesignTokens::from_style(ui.style());
+    let button_size = egui::Vec2::splat(tokens.control_height);
+    let icon_size = egui::Vec2::splat(tokens.icon_size);
+    ui.scope(|ui| {
+        ui.spacing_mut().button_padding = (button_size - icon_size) * 0.5;
+        crate::ui::components::icon_button_sized(ui, icon, tooltip, false, button_size, icon_size)
+    })
+    .inner
 }
 
 pub fn ui(
@@ -510,25 +542,25 @@ pub fn ui(
     offset_dialog: &mut Option<(SourceId, i64)>,
 ) -> BrowserResponse {
     let mut response = BrowserResponse::default();
-    ui.add_space(6.0);
+    let tokens = crate::ui::design_tokens::DesignTokens::from_style(ui.style());
+    ui.add_space(5.0 + tokens.space_sm);
     ui.horizontal(|ui| {
-        let button_size = panel_toggle_button_size(ui);
+        let button_size = data_browser_toggle_button_size(ui);
+        let filter_height = button_size.y;
         let filter_width = (ui.available_width() - button_size.x - ui.spacing().item_spacing.x)
             .max(ui.spacing().interact_size.x);
         ui.add_sized(
-            egui::vec2(filter_width, button_size.y),
+            egui::vec2(filter_width, filter_height),
             egui::TextEdit::singleline(query)
                 .hint_text("Filter...")
                 .desired_width(filter_width),
         );
-        let icon_size = button_size - ui.spacing().button_padding * 2.0;
-        let icon = egui::Image::new(crate::ui::icons::panel_left_close())
-            .fit_to_exact_size(icon_size)
-            .tint(ui.visuals().text_color());
-        if ui
-            .add_sized(button_size, egui::Button::image(icon))
-            .on_hover_text("Hide data browser")
-            .clicked()
+        if data_browser_toggle_button(
+            ui,
+            crate::ui::icons::panel_left_close(),
+            "Hide data browser",
+        )
+        .clicked()
         {
             response.collapse_requested = true;
         }
@@ -574,58 +606,156 @@ pub fn ui(
     let mut inspect_field_metadata = None;
     let mut inspect_field_stats = None;
     let mut generate_markers = None;
+    let tree_id = if filtering {
+        egui::Id::new("browser_tree_filtered")
+    } else {
+        egui::Id::new("browser_tree")
+    };
     egui::ScrollArea::vertical()
         .auto_shrink([false, true])
         .show(ui, |ui| {
+            let tokens = crate::ui::design_tokens::DesignTokens::from_style(ui.style());
+            ui.spacing_mut().interact_size.y = tokens.dense_row_height;
+            ui.spacing_mut().item_spacing.y = tokens.dense_row_gap;
             ui.set_width(ui.available_width());
-            for visible_source in &view.sources {
-                let source = &model.sources[visible_source.source];
-                let header = format!("{}  ({} rows)", source.label, source.rows);
-                let collapsing = egui::CollapsingHeader::new(header)
-                    .id_salt(("source", source.id.0))
-                    .default_open(true)
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            if let Some(range) = source.range {
-                                ui.weak(format!(
-                                    "{:.3}–{:.3} s",
-                                    range.min_us as f64 / 1e6,
-                                    range.max_us as f64 / 1e6
-                                ));
-                            }
-                            if let Some(change) = offset_widget(ui, source, offset_dialog) {
-                                offset_change = Some(change);
-                            }
-                        });
+
+            let mut open_nodes: std::collections::HashMap<BrowserNode, bool> =
+                ui.data(|data| data.get_temp(tree_id)).unwrap_or_default();
+            let width_id = tree_id.with("rendered_width");
+            let available_width = ui.available_width();
+            let width_changed = ui
+                .data(|data| data.get_temp::<f32>(width_id))
+                .is_none_or(|last| (last - available_width).abs() > 0.5);
+            let mut state = if width_changed {
+                egui_ltreeview::TreeViewState::<BrowserNode>::default()
+            } else {
+                egui_ltreeview::TreeViewState::<BrowserNode>::load(ui, tree_id).unwrap_or_default()
+            };
+            for (node, open) in &open_nodes {
+                state.set_openness(*node, *open);
+            }
+            if filtering {
+                for visible_source in &view.sources {
+                    let source = &model.sources[visible_source.source];
+                    state.set_openness(BrowserNode::Source(source.id.0), true);
+                    for visible_topic in &visible_source.topics {
+                        let topic = &source.topics[visible_topic.topic];
+                        state.set_openness(BrowserNode::Topic(topic.id.0), true);
+                    }
+                }
+            }
+
+            let (_, tree_actions) = egui_ltreeview::TreeView::new(tree_id)
+                .allow_multi_selection(false)
+                .allow_drag_and_drop(false)
+                .show_state(ui, &mut state, |builder| {
+                    for visible_source in &view.sources {
+                        let source = &model.sources[visible_source.source];
+                        let header = format!("{}  ({} rows)", source.label, source.rows);
+                        let source_open = builder.node(
+                            egui_ltreeview::NodeBuilder::dir(BrowserNode::Source(source.id.0))
+                                .default_open(true)
+                                .label_ui(|ui| {
+                                    ui.add(egui::Label::new(&header).selectable(false));
+                                })
+                                .context_menu(|ui| {
+                                    crate::ui::components::dense_rows(ui);
+                                    let info = egui::Image::new(crate::ui::icons::info())
+                                        .fit_to_exact_size(egui::Vec2::splat(
+                                            ui.spacing().icon_width,
+                                        ))
+                                        .tint(ui.visuals().text_color());
+                                    if ui
+                                        .add(egui::Button::image_and_text(info, "Source metadata"))
+                                        .clicked()
+                                    {
+                                        inspect_source = Some(source.id);
+                                        ui.close();
+                                    }
+                                    let trash = egui::Image::new(crate::ui::icons::trash())
+                                        .fit_to_exact_size(egui::Vec2::splat(
+                                            ui.spacing().icon_width,
+                                        ))
+                                        .tint(ui.visuals().error_fg_color);
+                                    if ui
+                                        .add(egui::Button::image_and_text(trash, "Remove source"))
+                                        .clicked()
+                                    {
+                                        remove_source = Some(source.id);
+                                        ui.close();
+                                    }
+                                }),
+                        );
+                        if !source_open {
+                            builder.close_dir();
+                            continue;
+                        }
+
+                        builder.node(
+                            egui_ltreeview::NodeBuilder::leaf(BrowserNode::SourceMeta(source.id.0))
+                                .label_ui(|ui| {
+                                    ui.horizontal(|ui| {
+                                        if let Some(range) = source.range {
+                                            ui.weak(format!(
+                                                "{:.3}–{:.3} s",
+                                                range.min_us as f64 / 1e6,
+                                                range.max_us as f64 / 1e6
+                                            ));
+                                        }
+                                        if let Some(change) = offset_widget(ui, source, offset_dialog)
+                                        {
+                                            offset_change = Some(change);
+                                        }
+                                    });
+                                }),
+                        );
+
                         for visible_topic in &visible_source.topics {
                             let topic = &source.topics[visible_topic.topic];
-                            let topic_id = ui.make_persistent_id(("topic", topic.id.0));
-                            let mut state =
-                                egui::collapsing_header::CollapsingState::load_with_default_open(
-                                    ui.ctx(),
-                                    topic_id,
-                                    false,
-                                );
-                            // Filtering force-opens for display only; restore
-                            // the real state afterwards.
-                            let stored_open = state.is_open();
-                            if filtering {
-                                state.set_open(true);
+                            let topic_open = builder.node(
+                                egui_ltreeview::NodeBuilder::dir(BrowserNode::Topic(topic.id.0))
+                                    .default_open(false)
+                                    .label_ui(|ui| {
+                                        ui.add(
+                                            egui::Label::new(&topic.name).selectable(false),
+                                        );
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        egui::RichText::new(format!(
+                                                            "({})",
+                                                            topic.rows
+                                                        ))
+                                                        .weak(),
+                                                    )
+                                                    .selectable(false),
+                                                );
+                                            },
+                                        );
+                                    }),
+                            );
+                            if !topic_open {
+                                builder.close_dir();
+                                continue;
                             }
-                            let (toggle_button, header_inner, _body) = state
-                                .show_header(ui, |ui| {
-                                    ui.label(&topic.name);
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            ui.weak(format!("({})", topic.rows));
-                                        },
-                                    );
-                                })
-                                .body(|ui| {
+
+                            builder.node(
+                                egui_ltreeview::NodeBuilder::leaf(BrowserNode::TopicHeader(
+                                    topic.id.0,
+                                ))
+                                .label_ui(|ui| {
                                     field_table_header(ui);
-                                    for &field_idx in &visible_topic.fields {
-                                        let field = &topic.fields[field_idx];
+                                }),
+                            );
+                            for &field_idx in &visible_topic.fields {
+                                let field = &topic.fields[field_idx];
+                                builder.node(
+                                    egui_ltreeview::NodeBuilder::leaf(BrowserNode::Field(
+                                        field.id.0,
+                                    ))
+                                    .label_ui(|ui| {
                                         match field_table_row(ui, field, selection, &visible) {
                                             Some(FieldRowAction::InspectMetadata(f)) => {
                                                 inspect_field_metadata = Some(f);
@@ -638,63 +768,34 @@ pub fn ui(
                                             }
                                             None => {}
                                         }
-                                    }
-                                });
-                            // Overlay click target on top of the labels (which
-                            // would otherwise swallow clicks) so the whole row
-                            // toggles the topic.
-                            let header_click = ui
-                                .interact(
-                                    header_inner.response.rect,
-                                    topic_id.with("header_click"),
-                                    egui::Sense::click(),
-                                )
-                                .on_hover_cursor(egui::CursorIcon::PointingHand);
-                            if header_click.clicked() && !toggle_button.clicked() {
-                                let mut clicked_state =
-                                    egui::collapsing_header::CollapsingState::load_with_default_open(
-                                        ui.ctx(),
-                                        topic_id,
-                                        false,
-                                    );
-                                clicked_state.toggle(ui);
-                                clicked_state.store(ui.ctx());
-                            }
-                            if filtering {
-                                let mut restored = egui::collapsing_header::CollapsingState::load_with_default_open(
-                                    ui.ctx(),
-                                    topic_id,
-                                    false,
+                                    }),
                                 );
-                                restored.set_open(stored_open);
-                                restored.store(ui.ctx());
                             }
+                            builder.close_dir();
                         }
-                    });
-                collapsing.header_response.context_menu(|ui| {
-                    let info = egui::Image::new(crate::ui::icons::info())
-                        .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
-                        .tint(ui.visuals().text_color());
-                    if ui
-                        .add(egui::Button::image_and_text(info, "Source metadata"))
-                        .clicked()
-                    {
-                        inspect_source = Some(source.id);
-                        ui.close();
-                    }
-                    let trash = egui::Image::new(crate::ui::icons::trash())
-                        .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
-                        .tint(ui.visuals().error_fg_color);
-                    if ui
-                        .add(egui::Button::image_and_text(trash, "Remove source"))
-                        .clicked()
-                    {
-                        remove_source = Some(source.id);
-                        ui.close();
+                        builder.close_dir();
                     }
                 });
+            for action in tree_actions {
+                let egui_ltreeview::Action::SetSelected(clicked) = action else {
+                    continue;
+                };
+                for node in clicked {
+                    let Some(default_open) = default_openness(node) else {
+                        continue;
+                    };
+                    let open = open_nodes.get(&node).copied().unwrap_or(default_open);
+                    open_nodes.insert(node, !open);
+                }
             }
+            state.set_selected(Vec::new());
+            state.store(ui, tree_id);
+            ui.data_mut(|data| {
+                data.insert_temp(tree_id, open_nodes);
+                data.insert_temp(width_id, available_width);
+            });
         });
+
 
     if let Some(change) = offset_dialog_window(ui, model, offset_dialog) {
         offset_change = Some(change);
@@ -786,7 +887,7 @@ const TYPE_COL: f32 = 0.11;
 
 fn field_table_header(ui: &mut egui::Ui) {
     egui::Frame::new()
-        .inner_margin(egui::Margin::symmetric(4, 1))
+        .inner_margin(egui::Margin::symmetric(4, 0))
         .show(ui, |ui| {
             let width = (ui.available_width() - ui.spacing().item_spacing.x * 4.0).max(0.0);
             ui.horizontal(|ui| {
@@ -855,9 +956,11 @@ fn field_table_cell(
     width: f32,
     text: impl Into<egui::WidgetText>,
     hover_text: Option<&str>,
-) {
+) -> egui::InnerResponse<()> {
+    let row_height =
+        crate::ui::design_tokens::DesignTokens::from_style(ui.style()).dense_row_height;
     ui.allocate_ui_with_layout(
-        egui::vec2(width, 18.0),
+        egui::vec2(width, row_height),
         egui::Layout::left_to_right(egui::Align::Center),
         |ui| {
             ui.set_min_width(width);
@@ -866,7 +969,7 @@ fn field_table_cell(
                 response.on_hover_text(hover_text);
             }
         },
-    );
+    )
 }
 
 fn cell_hover_text(value: &str) -> Option<&str> {
@@ -902,7 +1005,7 @@ fn field_row(
         };
         egui::Frame::new()
             .fill(fill)
-            .inner_margin(egui::Margin::symmetric(4, 1))
+            .inner_margin(egui::Margin::symmetric(4, 0))
             .show(ui, |ui| {
                 add_contents(ui, field, selected);
             });
@@ -921,6 +1024,7 @@ fn field_row(
         }
     }
     response.context_menu(|ui| {
+        crate::ui::components::dense_rows(ui);
         let metadata_info = egui::Image::new(crate::ui::icons::info())
             .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
             .tint(ui.visuals().text_color());
@@ -939,6 +1043,7 @@ fn field_row(
             .tint(ui.visuals().text_color());
         if ui
             .add(egui::Button::image_and_text(stats_info, "Field stats"))
+            .on_hover_text("Open field statistics")
             .clicked()
         {
             action = Some(FieldRowAction::InspectStats(field.id));
@@ -1024,6 +1129,1073 @@ mod tests {
     use delog_core::store::TopicStore;
 
     use super::*;
+
+    fn find_text_rect(shape: &egui::epaint::Shape, expected: &str) -> Option<egui::Rect> {
+        match shape {
+            egui::epaint::Shape::Text(text) if text.galley.job.text == expected => {
+                Some(text.visual_bounding_rect())
+            }
+            egui::epaint::Shape::Vec(shapes) => shapes
+                .iter()
+                .find_map(|shape| find_text_rect(shape, expected)),
+            _ => None,
+        }
+    }
+
+
+    fn synth_model(sources: usize, topics: usize, fields: usize) -> BrowserModel {
+        let mut model = BrowserModel::default();
+        let mut fid = 0u32;
+        for s in 0..sources {
+            let mut source = SourceNode {
+                id: SourceId(s as u32),
+                label: format!("flight_{s}.bin"),
+                rows: 1_000_000,
+                range: None,
+                offset_us: 0,
+                topics: Vec::new(),
+                search_path: format!("flight_{s}.bin"),
+            };
+            for t in 0..topics {
+                let mut topic = TopicNode {
+                    id: TopicId(((s * topics) + t) as u32),
+                    name: format!("TOPIC{t:03}"),
+                    rows: 10_000,
+                    fields: Vec::new(),
+                    search_path: format!("flight_{s}.bin.topic{t:03}"),
+                };
+                for f in 0..fields {
+                    fid += 1;
+                    topic.fields.push(FieldNode {
+                        id: FieldId(fid),
+                        name: format!("field_{f:02}"),
+                        dtype: "f64",
+                        unit: Some("m/s".into()),
+                        description: None,
+                        count: 10_000,
+                        first_raw: Some("0.000".into()),
+                        last_raw: Some("1.000".into()),
+                        search_path: format!("flight_{s}.bin.topic{t:03}.field_{f:02}"),
+                    });
+                }
+                source.topics.push(topic);
+            }
+            model.sources.push(source);
+        }
+        model
+    }
+
+    fn painted_shape_count(model: &BrowserModel, query: &str) -> usize {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let mut query = query.to_owned();
+        let mut filter_cache = BrowserFilterCache::default();
+        let mut selection = Selection::default();
+        let mut offset_dialog = None;
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1_600.0, 1_000.0),
+            )),
+            ..Default::default()
+        };
+        let mut run = || {
+            ctx.run_ui(input(), |ui| {
+                egui::Panel::left("culling-test")
+                    .default_size(320.0)
+                    .show_inside(ui, |ui| {
+                        super::ui(
+                            ui,
+                            0,
+                            model,
+                            &mut query,
+                            &mut filter_cache,
+                            &mut selection,
+                            &mut offset_dialog,
+                        );
+                    });
+            })
+        };
+        let _ = run();
+        let _ = run();
+        run().shapes.len()
+    }
+
+    #[test]
+    fn dragging_a_field_row_delivers_the_payload_to_a_drop_zone() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let model = synth_model(1, 1, 3);
+        let dragged = model.sources[0].topics[0].fields[0].id;
+        let mut query = "field".to_owned();
+        let mut filter_cache = BrowserFilterCache::default();
+        let mut selection = Selection::default();
+        let mut offset_dialog = None;
+        let mut dropped: Option<Vec<FieldId>> = None;
+        let mut row_pos = None;
+        let mut zone_rect = egui::Rect::NOTHING;
+
+        let mut frame = |events: Vec<egui::Event>,
+                         pointer: Option<egui::Pos2>,
+                         row_pos: &mut Option<egui::Pos2>,
+                         zone_rect: &mut egui::Rect,
+                         dropped: &mut Option<Vec<FieldId>>| {
+            let mut input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1_200.0, 800.0),
+                )),
+                ..Default::default()
+            };
+            if let Some(pos) = pointer {
+                input.events.push(egui::Event::PointerMoved(pos));
+            }
+            input.events.extend(events);
+
+            let output = ctx.run_ui(input, |ui| {
+                egui::Panel::left("drag-browser")
+                    .exact_size(420.0)
+                    .show_inside(ui, |ui| {
+                        super::ui(
+                            ui,
+                            0,
+                            &model,
+                            &mut query,
+                            &mut filter_cache,
+                            &mut selection,
+                            &mut offset_dialog,
+                        );
+                    });
+                egui::Frame::central_panel(ui.style()).show(ui, |ui| {
+                    let (inner, payload) =
+                        ui.dnd_drop_zone::<Vec<FieldId>, ()>(egui::Frame::default(), |ui| {
+                            ui.allocate_space(ui.available_size());
+                        });
+                    *zone_rect = inner.response.rect;
+                    if let Some(payload) = payload {
+                        *dropped = Some((*payload).clone());
+                    }
+                });
+            });
+
+            if row_pos.is_none() {
+                *row_pos = find_text_rect_in(&output, "field_00").map(|rect| rect.center());
+            }
+        };
+
+        frame(vec![], None, &mut row_pos, &mut zone_rect, &mut dropped);
+        frame(vec![], None, &mut row_pos, &mut zone_rect, &mut dropped);
+        let row = row_pos.expect("the field row should be painted");
+        let target = zone_rect.center();
+
+        frame(
+            vec![egui::Event::PointerButton {
+                pos: row,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Default::default(),
+            }],
+            Some(row),
+            &mut row_pos,
+            &mut zone_rect,
+            &mut dropped,
+        );
+        frame(
+            vec![],
+            Some(row + egui::vec2(0.0, 20.0)),
+            &mut row_pos,
+            &mut zone_rect,
+            &mut dropped,
+        );
+        for step in 0..4 {
+            frame(
+                vec![],
+                Some(target + egui::vec2(step as f32 * 2.0, 0.0)),
+                &mut row_pos,
+                &mut zone_rect,
+                &mut dropped,
+            );
+        }
+        let release_at = target + egui::vec2(8.0, 0.0);
+        frame(
+            vec![egui::Event::PointerButton {
+                pos: release_at,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Default::default(),
+            }],
+            Some(release_at),
+            &mut row_pos,
+            &mut zone_rect,
+            &mut dropped,
+        );
+
+        assert_eq!(
+            dropped.as_deref(),
+            Some(&[dragged][..]),
+            "dragging a browser field row must hand a Vec<FieldId> to the plot drop zone"
+        );
+    }
+
+    fn find_text_rect_in(output: &egui::FullOutput, expected: &str) -> Option<egui::Rect> {
+        output
+            .shapes
+            .iter()
+            .find_map(|clipped| find_text_rect(&clipped.shape, expected))
+    }
+
+    #[test]
+    fn clicking_a_topic_label_expands_it() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let model = synth_model(1, 1, 3);
+        let mut query = String::new();
+        let mut filter_cache = BrowserFilterCache::default();
+        let mut selection = Selection::default();
+        let mut offset_dialog = None;
+        let mut topic_pos = None;
+        let mut painted = Vec::new();
+
+        let mut clock = 0.0f64;
+        let mut frame = |events: Vec<egui::Event>,
+                         pointer: Option<egui::Pos2>,
+                         topic_pos: &mut Option<egui::Pos2>,
+                         painted: &mut Vec<String>| {
+            clock += 0.5;
+            let mut input = egui::RawInput {
+                time: Some(clock),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1_200.0, 800.0),
+                )),
+                ..Default::default()
+            };
+            if let Some(pos) = pointer {
+                input.events.push(egui::Event::PointerMoved(pos));
+            }
+            input.events.extend(events);
+            let output = ctx.run_ui(input, |ui| {
+                egui::Panel::left("topic-click")
+                    .exact_size(420.0)
+                    .show_inside(ui, |ui| {
+                        super::ui(
+                            ui,
+                            0,
+                            &model,
+                            &mut query,
+                            &mut filter_cache,
+                            &mut selection,
+                            &mut offset_dialog,
+                        );
+                    });
+            });
+            if topic_pos.is_none() {
+                *topic_pos = output
+                    .shapes
+                    .iter()
+                    .find_map(|clipped| find_text_rect(&clipped.shape, "TOPIC000"))
+                    .map(|rect| rect.center());
+            }
+            painted.clear();
+            fn walk(shape: &egui::epaint::Shape, out: &mut Vec<String>) {
+                match shape {
+                    egui::epaint::Shape::Text(text) => out.push(text.galley.job.text.clone()),
+                    egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                    _ => {}
+                }
+            }
+            for clipped in &output.shapes {
+                walk(&clipped.shape, painted);
+            }
+        };
+
+        frame(vec![], None, &mut topic_pos, &mut painted);
+        frame(vec![], None, &mut topic_pos, &mut painted);
+        let target = topic_pos.expect("the topic row should be painted");
+        assert!(
+            !painted.iter().any(|text| text == "field_00"),
+            "topics start collapsed"
+        );
+
+        frame(
+            vec![egui::Event::PointerButton {
+                pos: target,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Default::default(),
+            }],
+            Some(target),
+            &mut topic_pos,
+            &mut painted,
+        );
+        frame(
+            vec![egui::Event::PointerButton {
+                pos: target,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Default::default(),
+            }],
+            Some(target),
+            &mut topic_pos,
+            &mut painted,
+        );
+        frame(vec![], Some(target), &mut topic_pos, &mut painted);
+
+        assert!(
+            painted.iter().any(|text| text == "field_00"),
+            "clicking the topic label should expand it, got {painted:?}"
+        );
+
+        for pressed in [true, false] {
+            frame(
+                vec![egui::Event::PointerButton {
+                    pos: target,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                }],
+                Some(target),
+                &mut topic_pos,
+                &mut painted,
+            );
+        }
+        frame(vec![], Some(target), &mut topic_pos, &mut painted);
+        assert!(
+            !painted.iter().any(|text| text == "field_00"),
+            "clicking the topic label again should collapse it, got {painted:?}"
+        );
+    }
+
+    #[test]
+    fn clicking_a_topic_row_count_expands_it() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let model = synth_model(1, 1, 3);
+        let mut query = String::new();
+        let mut filter_cache = BrowserFilterCache::default();
+        let mut selection = Selection::default();
+        let mut offset_dialog = None;
+        let mut count_pos = None;
+        let mut painted = Vec::new();
+
+        let mut clock = 0.0f64;
+        let mut frame = |events: Vec<egui::Event>,
+                         pointer: Option<egui::Pos2>,
+                         count_pos: &mut Option<egui::Pos2>,
+                         painted: &mut Vec<String>| {
+            clock += 0.5;
+            let mut input = egui::RawInput {
+                time: Some(clock),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1_200.0, 800.0),
+                )),
+                ..Default::default()
+            };
+            if let Some(pos) = pointer {
+                input.events.push(egui::Event::PointerMoved(pos));
+            }
+            input.events.extend(events);
+            let output = ctx.run_ui(input, |ui| {
+                egui::Panel::left("topic-count-click")
+                    .exact_size(420.0)
+                    .show_inside(ui, |ui| {
+                        super::ui(
+                            ui,
+                            0,
+                            &model,
+                            &mut query,
+                            &mut filter_cache,
+                            &mut selection,
+                            &mut offset_dialog,
+                        );
+                    });
+            });
+            if count_pos.is_none() {
+                *count_pos = output
+                    .shapes
+                    .iter()
+                    .find_map(|clipped| find_text_rect(&clipped.shape, "(10000)"))
+                    .map(|rect| rect.center());
+            }
+            painted.clear();
+            fn walk(shape: &egui::epaint::Shape, out: &mut Vec<String>) {
+                match shape {
+                    egui::epaint::Shape::Text(text) => out.push(text.galley.job.text.clone()),
+                    egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                    _ => {}
+                }
+            }
+            for clipped in &output.shapes {
+                walk(&clipped.shape, painted);
+            }
+        };
+
+        frame(vec![], None, &mut count_pos, &mut painted);
+        frame(vec![], None, &mut count_pos, &mut painted);
+        let target = count_pos.expect("the topic row count should be painted");
+        for pressed in [true, false] {
+            frame(
+                vec![egui::Event::PointerButton {
+                    pos: target,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                }],
+                Some(target),
+                &mut count_pos,
+                &mut painted,
+            );
+        }
+        frame(vec![], Some(target), &mut count_pos, &mut painted);
+
+        assert!(
+            painted.iter().any(|text| text == "field_00"),
+            "clicking the row count should expand the topic too, got {painted:?}"
+        );
+    }
+
+    #[test]
+    fn browser_does_not_pin_the_panel_to_its_widest_layout() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let model = synth_model(1, 2, 6);
+        let mut query = "field".to_owned();
+        let mut filter_cache = BrowserFilterCache::default();
+        let mut selection = Selection::default();
+        let mut offset_dialog = None;
+
+        let measure = |panel_width: f32,
+                           query: &mut String,
+                           filter_cache: &mut BrowserFilterCache,
+                           selection: &mut Selection,
+                           offset_dialog: &mut Option<(SourceId, i64)>| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1_400.0, 800.0),
+                )),
+                ..Default::default()
+            };
+            let mut used = 0.0;
+            let _ = ctx.run_ui(input, |ui| {
+                egui::Panel::left("browser-shrink")
+                    .resizable(false)
+                    .exact_size(panel_width)
+                    .show_inside(ui, |ui| {
+                        super::ui(
+                            ui,
+                            0,
+                            &model,
+                            query,
+                            filter_cache,
+                            selection,
+                            offset_dialog,
+                        );
+                        used = ui.min_rect().width();
+                    });
+            });
+            used
+        };
+
+        measure(
+            900.0,
+            &mut query,
+            &mut filter_cache,
+            &mut selection,
+            &mut offset_dialog,
+        );
+        measure(
+            900.0,
+            &mut query,
+            &mut filter_cache,
+            &mut selection,
+            &mut offset_dialog,
+        );
+        let narrow = measure(
+            380.0,
+            &mut query,
+            &mut filter_cache,
+            &mut selection,
+            &mut offset_dialog,
+        );
+
+        assert!(
+            narrow <= 400.0,
+            "after being shown wide the browser still demands {narrow} points, \
+             which blocks resizing the panel back down"
+        );
+    }
+
+    #[test]
+    fn browser_columns_stay_visible_after_shrinking_the_panel() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let model = synth_model(1, 2, 4);
+        let mut query = "field".to_owned();
+        let mut filter_cache = BrowserFilterCache::default();
+        let mut selection = Selection::default();
+        let mut offset_dialog = None;
+
+        let render = |panel_width: f32,
+                          query: &mut String,
+                          filter_cache: &mut BrowserFilterCache,
+                          selection: &mut Selection,
+                          offset_dialog: &mut Option<(SourceId, i64)>| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1_400.0, 800.0),
+                )),
+                ..Default::default()
+            };
+            ctx.run_ui(input, |ui| {
+                egui::Panel::left("browser-column-visibility")
+                    .resizable(false)
+                    .exact_size(panel_width)
+                    .show_inside(ui, |ui| {
+                        super::ui(
+                            ui,
+                            0,
+                            &model,
+                            query,
+                            filter_cache,
+                            selection,
+                            offset_dialog,
+                        );
+                    });
+            })
+        };
+
+        for width in [900.0, 900.0] {
+            render(
+                width,
+                &mut query,
+                &mut filter_cache,
+                &mut selection,
+                &mut offset_dialog,
+            );
+        }
+        let narrow = render(
+            380.0,
+            &mut query,
+            &mut filter_cache,
+            &mut selection,
+            &mut offset_dialog,
+        );
+
+        for label in ["type", "unit", "(10000)"] {
+            let rect = narrow
+                .shapes
+                .iter()
+                .find_map(|clipped| find_text_rect(&clipped.shape, label))
+                .unwrap_or_else(|| panic!("{label} should still be painted in a 380 point panel"));
+            assert!(
+                rect.right() <= 380.0,
+                "{label} is drawn out to x={} which is outside a 380 point panel",
+                rect.right()
+            );
+        }
+    }
+
+    #[test]
+    fn browser_still_paints_rows_after_scrolling_down() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let model = synth_model(1, 12, 10);
+        let mut query = "field".to_owned();
+        let mut filter_cache = BrowserFilterCache::default();
+        let mut selection = Selection::default();
+        let mut offset_dialog = None;
+
+        let frame = |events: Vec<egui::Event>,
+                     query: &mut String,
+                     filter_cache: &mut BrowserFilterCache,
+                     selection: &mut Selection,
+                     offset_dialog: &mut Option<(SourceId, i64)>| {
+            let mut input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1_000.0, 400.0),
+                )),
+                ..Default::default()
+            };
+            input
+                .events
+                .push(egui::Event::PointerMoved(egui::pos2(200.0, 200.0)));
+            input.events.extend(events);
+            let output = ctx.run_ui(input, |ui| {
+                egui::Panel::left("browser-scroll")
+                    .exact_size(420.0)
+                    .show_inside(ui, |ui| {
+                        super::ui(
+                            ui,
+                            0,
+                            &model,
+                            query,
+                            filter_cache,
+                            selection,
+                            offset_dialog,
+                        );
+                    });
+            });
+            let mut texts = Vec::new();
+            fn walk(shape: &egui::epaint::Shape, out: &mut Vec<String>) {
+                match shape {
+                    egui::epaint::Shape::Text(text) => out.push(text.galley.job.text.clone()),
+                    egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                    _ => {}
+                }
+            }
+            for clipped in &output.shapes {
+                walk(&clipped.shape, &mut texts);
+            }
+            texts
+        };
+
+        let before = frame(
+            vec![],
+            &mut query,
+            &mut filter_cache,
+            &mut selection,
+            &mut offset_dialog,
+        );
+        assert!(
+            before.iter().any(|text| text.starts_with("field_")),
+            "rows should be painted before scrolling, got {before:?}"
+        );
+
+        let mut after = Vec::new();
+        for _ in 0..6 {
+            after = frame(
+                vec![egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, -400.0),
+                    modifiers: Default::default(),
+                    phase: egui::TouchPhase::Move,
+                }],
+                &mut query,
+                &mut filter_cache,
+                &mut selection,
+                &mut offset_dialog,
+            );
+        }
+
+        assert!(
+            after.iter().any(|text| text.starts_with("field_")),
+            "rows should still be painted after scrolling down, got {after:?}"
+        );
+        assert_ne!(
+            before
+                .iter()
+                .filter(|t| t.starts_with("field_"))
+                .count(),
+            0,
+            "sanity"
+        );
+    }
+
+    #[test]
+    fn topics_still_expand_after_scrolling_the_browser() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let model = synth_model(1, 40, 4);
+        let mut query = String::new();
+        let mut filter_cache = BrowserFilterCache::default();
+        let mut selection = Selection::default();
+        let mut offset_dialog = None;
+
+        let clock = std::cell::Cell::new(0.0f64);
+        let frame = |events: Vec<egui::Event>,
+                     pointer: Option<egui::Pos2>,
+                     query: &mut String,
+                     filter_cache: &mut BrowserFilterCache,
+                     selection: &mut Selection,
+                     offset_dialog: &mut Option<(SourceId, i64)>| {
+            clock.set(clock.get() + 0.5);
+            let mut input = egui::RawInput {
+                time: Some(clock.get()),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1_000.0, 300.0),
+                )),
+                ..Default::default()
+            };
+            if let Some(pos) = pointer {
+                input.events.push(egui::Event::PointerMoved(pos));
+            }
+            input.events.extend(events);
+            let output = ctx.run_ui(input, |ui| {
+                egui::Panel::left("browser-scroll-click")
+                    .exact_size(420.0)
+                    .show_inside(ui, |ui| {
+                        super::ui(
+                            ui,
+                            0,
+                            &model,
+                            query,
+                            filter_cache,
+                            selection,
+                            offset_dialog,
+                        );
+                    });
+            });
+            let mut texts = Vec::new();
+            fn walk(shape: &egui::epaint::Shape, out: &mut Vec<(String, egui::Rect)>) {
+                match shape {
+                    egui::epaint::Shape::Text(text) => {
+                        out.push((text.galley.job.text.clone(), text.visual_bounding_rect()));
+                    }
+                    egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                    _ => {}
+                }
+            }
+            for clipped in &output.shapes {
+                walk(&clipped.shape, &mut texts);
+            }
+            texts
+        };
+
+        let scroll = |n: usize,
+                      query: &mut String,
+                      filter_cache: &mut BrowserFilterCache,
+                      selection: &mut Selection,
+                      offset_dialog: &mut Option<(SourceId, i64)>| {
+            let mut last = Vec::new();
+            for _ in 0..n {
+                last = frame(
+                    vec![egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::vec2(0.0, -200.0),
+                        modifiers: Default::default(),
+                        phase: egui::TouchPhase::Move,
+                    }],
+                    Some(egui::pos2(200.0, 150.0)),
+                    query,
+                    filter_cache,
+                    selection,
+                    offset_dialog,
+                );
+            }
+            last
+        };
+
+        frame(
+            vec![],
+            None,
+            &mut query,
+            &mut filter_cache,
+            &mut selection,
+            &mut offset_dialog,
+        );
+        scroll(
+            4,
+            &mut query,
+            &mut filter_cache,
+            &mut selection,
+            &mut offset_dialog,
+        );
+        let mut scrolled = Vec::new();
+        for _ in 0..30 {
+            let next = frame(
+                vec![],
+                None,
+                &mut query,
+                &mut filter_cache,
+                &mut selection,
+                &mut offset_dialog,
+            );
+            let same = next
+                .iter()
+                .map(|(text, rect)| (text.clone(), rect.top().round() as i32))
+                .eq(scrolled
+                    .iter()
+                    .map(|(text, rect): &(String, egui::Rect)| {
+                        (text.clone(), rect.top().round() as i32)
+                    }));
+            scrolled = next;
+            if same {
+                break;
+            }
+        }
+
+        let (label, rect) = scrolled
+            .iter()
+            .find(|(text, rect)| text.starts_with("TOPIC") && rect.top() > 80.0)
+            .cloned()
+            .unwrap_or_else(|| panic!("a topic row should be visible after scrolling: {scrolled:?}"));
+        let target = rect.center();
+
+        for pressed in [true, false] {
+            frame(
+                vec![egui::Event::PointerButton {
+                    pos: target,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                }],
+                Some(target),
+                &mut query,
+                &mut filter_cache,
+                &mut selection,
+                &mut offset_dialog,
+            );
+        }
+        let after = frame(
+            vec![],
+            Some(target),
+            &mut query,
+            &mut filter_cache,
+            &mut selection,
+            &mut offset_dialog,
+        );
+
+        assert!(
+            after.iter().any(|(text, _)| text.starts_with("field_")),
+            "clicking {label} after scrolling should expand it, got {after:?}"
+        );
+    }
+
+    #[test]
+    fn browser_culls_rows_outside_the_viewport() {
+        let small = synth_model(1, 10, 8);
+        let huge = synth_model(4, 250, 12);
+
+        let small_shapes = painted_shape_count(&small, "field");
+        let huge_shapes = painted_shape_count(&huge, "field");
+
+        assert!(
+            huge_shapes < small_shapes * 2,
+            "a 150x larger tree must not paint proportionally more shapes \
+             (small={small_shapes}, huge={huge_shapes}) - viewport culling regressed"
+        );
+    }
+
+    #[test]
+    fn data_browser_toggle_matches_global_toolbar_metrics_and_alignment() {
+        let ctx = egui::Context::default();
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        ctx.enable_accesskit();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1_200.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        let mut query = String::new();
+        let mut filter_cache = BrowserFilterCache::default();
+        let mut selection = Selection::default();
+        let mut offset_dialog = None;
+        let output = ctx.run_ui(input, |ui| {
+            egui::Panel::left("browser-alignment-test")
+                .default_size(280.0)
+                .show_inside(ui, |ui| {
+                    super::ui(
+                        ui,
+                        0,
+                        &BrowserModel::default(),
+                        &mut query,
+                        &mut filter_cache,
+                        &mut selection,
+                        &mut offset_dialog,
+                    );
+                });
+            let button_size = super::data_browser_toggle_button_size(ui);
+            let collapsed_left_margin = ui.spacing().item_spacing.x;
+            let collapsed_frame =
+                egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::ZERO);
+            egui::Panel::left("collapsed-browser-alignment-test")
+                .resizable(false)
+                .show_separator_line(false)
+                .frame(collapsed_frame)
+                .exact_size(collapsed_left_margin + button_size.x)
+                .show_inside(ui, |ui| {
+                    ui.vertical(|ui| {
+                        ui.add_space(15.0);
+                        ui.horizontal(|ui| {
+                            ui.add_space(collapsed_left_margin);
+                            super::data_browser_toggle_button(
+                                ui,
+                                crate::ui::icons::panel_left_open(),
+                                "Show data browser",
+                            );
+                        });
+                    });
+                });
+            egui::Frame::central_panel(ui.style()).show(ui, |ui| {
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    crate::ui::components::icon_button(
+                        ui,
+                        crate::ui::icons::magnet(),
+                        "Toolbar control",
+                        false,
+                    );
+                });
+            });
+        });
+        let update = output
+            .platform_output
+            .accesskit_update
+            .expect("accessibility tree should be emitted");
+        let bounds = |label: &str| {
+            update
+                .nodes
+                .iter()
+                .map(|(_, node)| node)
+                .find(|node| node.label() == Some(label))
+                .and_then(|node| node.bounds())
+                .unwrap_or_else(|| panic!("{label} button should have bounds"))
+        };
+        let browser_bounds = bounds("Hide data browser");
+        let collapsed_browser_bounds = bounds("Show data browser");
+        let toolbar_bounds = bounds("Toolbar control");
+
+        assert_eq!(browser_bounds.size(), toolbar_bounds.size());
+        assert_eq!(collapsed_browser_bounds.size(), toolbar_bounds.size());
+        let center_y = |rect: egui::accesskit::Rect| (rect.y0 + rect.y1) * 0.5;
+        assert_eq!(center_y(browser_bounds), center_y(toolbar_bounds));
+        assert_eq!(center_y(collapsed_browser_bounds), center_y(toolbar_bounds));
+        assert_eq!(browser_bounds.width(), 30.0);
+        assert_eq!(browser_bounds.height(), 30.0);
+    }
+
+    #[test]
+    fn data_browser_toggle_response_is_exactly_thirty_points() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let mut response_rect = egui::Rect::NOTHING;
+
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            response_rect = super::data_browser_toggle_button(
+                ui,
+                crate::ui::icons::panel_left_close(),
+                "Hide data browser",
+            )
+            .rect;
+        });
+
+        assert_eq!(response_rect.size(), egui::Vec2::splat(30.0));
+    }
+
+    #[test]
+    fn data_browser_filter_matches_toggle_height_and_center() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        ctx.enable_accesskit();
+        let mut query = String::new();
+        let mut filter_cache = BrowserFilterCache::default();
+        let mut selection = Selection::default();
+        let mut offset_dialog = None;
+
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            super::ui(
+                ui,
+                0,
+                &BrowserModel::default(),
+                &mut query,
+                &mut filter_cache,
+                &mut selection,
+                &mut offset_dialog,
+            );
+        });
+        let update = output
+            .platform_output
+            .accesskit_update
+            .expect("accessibility tree should be emitted");
+        let filter_bounds = update
+            .nodes
+            .iter()
+            .map(|(_, node)| node)
+            .find(|node| node.role() == egui::accesskit::Role::TextInput)
+            .and_then(|node| node.bounds())
+            .expect("filter input should have bounds");
+        let button_bounds = update
+            .nodes
+            .iter()
+            .map(|(_, node)| node)
+            .find(|node| node.label() == Some("Hide data browser"))
+            .and_then(|node| node.bounds())
+            .expect("browser toggle should have bounds");
+        let center_y = |rect: egui::accesskit::Rect| (rect.y0 + rect.y1) * 0.5;
+
+        assert_eq!(filter_bounds.height(), 30.0);
+        assert_eq!(button_bounds.height(), 30.0);
+        assert_eq!(center_y(filter_bounds), center_y(button_bounds));
+    }
+
+    #[test]
+    fn field_table_cells_use_the_dense_row_height_token() {
+        let ctx = egui::Context::default();
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let mut cell_height = 0.0;
+
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            cell_height = super::field_table_cell(ui, 120.0, "ATT.Roll", None)
+                .response
+                .rect
+                .height();
+        });
+
+        let tokens = crate::ui::design_tokens::DesignTokens::from_style(&ctx.global_style());
+        assert_eq!(cell_height, tokens.dense_row_height);
+    }
+
+    #[test]
+    fn rendered_browser_field_rows_use_dense_vertical_metrics() {
+        let ctx = egui::Context::default();
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let model = BrowserModel::from_snapshot(&snapshot());
+        let mut query = "a".to_owned();
+        let mut filter_cache = BrowserFilterCache::default();
+        let mut selection = Selection::default();
+        let mut offset_dialog = None;
+
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                super::ui(
+                    ui,
+                    0,
+                    &model,
+                    &mut query,
+                    &mut filter_cache,
+                    &mut selection,
+                    &mut offset_dialog,
+                );
+            },
+        );
+        let text_rect = |expected| {
+            output
+                .shapes
+                .iter()
+                .find_map(|shape| find_text_rect(&shape.shape, expected))
+                .unwrap_or_else(|| panic!("{expected} should be painted"))
+        };
+        let alt = text_rect("Alt");
+        let lat = text_rect("Lat");
+        let tokens = crate::ui::design_tokens::DesignTokens::from_style(&ctx.global_style());
+        let expected_stride = tokens.dense_row_height + tokens.dense_row_gap;
+
+        let actual_stride = (lat.center().y - alt.center().y).round();
+        assert!((actual_stride - expected_stride).abs() <= 1.0);
+    }
 
     fn snapshot() -> StoreSnapshot {
         let mut identity = IdentityRegistry::new();

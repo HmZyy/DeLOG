@@ -1,6 +1,13 @@
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
+pub mod commands;
+pub mod command_palette;
+pub mod context_header;
+mod dynamic_commands;
+pub mod global_plot_toolbar;
+pub mod inspector;
+
 use delog_cache::CacheManager;
 use delog_core::diagnostics::{DiagRecord, Severity};
 use delog_core::time::TimeRange;
@@ -24,6 +31,24 @@ use crate::scripting::scripts;
 use crate::session::session::Session;
 use crate::config::settings::{AppSettings, RenderMode, SettingsDialog, TileCacheUiState};
 use crate::sync::sync_window::SyncWindow;
+
+fn data_browser_panel(preferred_width: f32) -> egui::Panel {
+    egui::Panel::left("data_browser_expanded")
+        .resizable(true)
+        .min_size(360.0)
+        .default_size(preferred_width)
+}
+
+fn collapsed_data_browser_width(style: &egui::Style) -> f32 {
+    let tokens = crate::ui::design_tokens::DesignTokens::from_style(style);
+    tokens.space_sm + tokens.control_height + tokens.space_sm
+}
+
+fn central_workspace_frame(style: &egui::Style) -> egui::Frame {
+    let mut frame = egui::Frame::central_panel(style);
+    frame.inner_margin.left = 0;
+    frame
+}
 
 fn tile_cache_needs_repaint(clear_submitted: bool, cache_action_pending: bool) -> bool {
     clear_submitted || cache_action_pending
@@ -103,6 +128,46 @@ fn should_auto_open_diagnostics(enabled: bool, last_seen: Option<u64>, newest: u
 
 fn timeline_range_for_ui(snapshot_range: Option<TimeRange>) -> TimeRange {
     snapshot_range.unwrap_or(EMPTY_SESSION_TIMELINE_RANGE)
+}
+
+fn dynamic_palette_metadata(command: &commands::AppCommand) -> (&'static str, String) {
+    use commands::AppCommand;
+
+    match command {
+        AppCommand::OpenWithBuiltInParser(name) => (
+            "File › Open With",
+            format!("built-in native parser open with {name}"),
+        ),
+        AppCommand::OpenWithParser(name) => (
+            "Tools › Parsers › Run Parser",
+            format!("custom parser run parse file {name}"),
+        ),
+        AppCommand::RunScript(name) => (
+            "Tools › Scripts › Run Scripts",
+            format!("script run execute {name}"),
+        ),
+        AppCommand::LoadNamedLayout(name) => (
+            "Tools › Layouts › Load Layout",
+            format!("layout load workspace {name}"),
+        ),
+        AppCommand::DisconnectLink(_) => (
+            "Header › Live link",
+            "live link disconnect connection endpoint".to_owned(),
+        ),
+        AppCommand::ToggleShellEmphasis => (
+            "Header › Workflow emphasis",
+            "shell emphasis workflow offline live".to_owned(),
+        ),
+        AppCommand::FitAll => (
+            "View › Plot range",
+            "fit all plots reset zoom range".to_owned(),
+        ),
+        AppCommand::SetCursorSampling(_) => (
+            "Analyze › Cursor sampling",
+            "cursor sampling interpolation previous next linear".to_owned(),
+        ),
+        AppCommand::Static(_) => unreachable!("static commands use their command specification"),
+    }
 }
 
 #[derive(Serialize)]
@@ -213,11 +278,16 @@ struct SaveLayoutDialog {
     name: String,
 }
 
+#[derive(Clone, PartialEq)]
+enum LayoutPick {
+    Clear,
+    Load(String),
+}
+
 #[derive(Default)]
 struct LoadLayoutDialog {
-    open: bool,
+    picker: crate::ui::palette::PickerState,
     layouts: Vec<String>,
-    selected: Option<usize>,
 }
 
 #[derive(Default)]
@@ -291,6 +361,10 @@ pub struct DelogApp {
     next_image_capture_id: u64,
     image_clipboard: Option<arboard::Clipboard>,
     browser_collapsed: bool,
+    inspector: inspector::InspectorState,
+    shell_emphasis: context_header::ShellEmphasis,
+    command_palette: command_palette::CommandPaletteState,
+    dynamic_command_catalog: commands::DynamicCommandCatalog,
     docks: AppDockController,
     diagnostics_dock: DiagnosticsDock,
     last_diagnostic_seq: Option<u64>,
@@ -435,6 +509,10 @@ impl DelogApp {
             next_image_capture_id: 1,
             image_clipboard: None,
             browser_collapsed: false,
+            inspector: inspector::InspectorState::default(),
+            shell_emphasis: context_header::ShellEmphasis::default(),
+            command_palette: command_palette::CommandPaletteState::default(),
+            dynamic_command_catalog: commands::DynamicCommandCatalog::default(),
             docks: AppDockController::new_empty(),
             diagnostics_dock: DiagnosticsDock::default(),
             last_diagnostic_seq: None,
@@ -487,26 +565,15 @@ impl DelogApp {
         }
     }
 
-    fn dock_open_checkbox(&mut self, ui: &mut egui::Ui, tab: AppDockTab, label: &str) {
-        let mut open = self.docks.is_open(tab);
-        if ui.checkbox(&mut open, label).clicked() {
-            if open {
-                self.open_dock(tab);
-            } else {
-                self.close_dock(tab);
-            }
-            ui.close();
-        }
-    }
-
     fn open_dock(&mut self, tab: AppDockTab) {
         self.set_legacy_dock_open(tab, true);
         self.docks.open_or_focus(tab);
     }
 
-    fn close_dock(&mut self, tab: AppDockTab) {
-        self.set_legacy_dock_open(tab, false);
-        self.docks.close(tab);
+    fn toggle_dock(&mut self, tab: AppDockTab) {
+        let open = !self.docks.is_open(tab);
+        self.set_legacy_dock_open(tab, open);
+        self.docks.toggle(tab);
     }
 
     fn set_legacy_dock_open(&mut self, tab: AppDockTab, open: bool) {
@@ -553,13 +620,14 @@ impl DelogApp {
     }
 
     /// On a worker thread so the native dialog never blocks the UI.
-    fn spawn_open_dialog(&self, ctx: &egui::Context, parser: Option<&'static str>) {
+    fn spawn_open_dialog(&self, ctx: &egui::Context, parser: Option<&str>) {
         let tx = self.picked_files_tx.clone();
         let ctx = ctx.clone();
+        let parser = parser.map(str::to_owned);
         std::thread::Builder::new()
             .name("delog-open-dialog".into())
             .spawn(move || {
-                let dialog = match parser {
+                let dialog = match parser.as_deref() {
                     Some(name) => rfd::FileDialog::new()
                         .add_filter("All files", &["*"])
                         .set_title(format!("Open with {}", parser_label(name))),
@@ -574,7 +642,7 @@ impl DelogApp {
                 if let Some(paths) = dialog.pick_files() {
                     let _ = tx.send(PickedFiles {
                         paths,
-                        parser: parser.map(str::to_owned),
+                        parser,
                     });
                     ctx.request_repaint();
                 }
@@ -1251,18 +1319,19 @@ impl DelogApp {
 
     fn save_layout(&mut self, snapshot: &delog_core::snapshot::StoreSnapshot) {
         let name = if self.save_layout_dialog.name.trim().is_empty() {
-            "default"
+            "default".to_owned()
         } else {
-            self.save_layout_dialog.name.trim()
+            self.save_layout_dialog.name.trim().to_owned()
         };
-        let doc = self.current_layout_doc(name.to_owned(), snapshot);
-        match crate::config::layout::doc::save_named(name, &doc) {
-            Ok(()) => self
-                .session
-                .push_diagnostic(delog_core::diagnostics::Diag::info(
+        let doc = self.current_layout_doc(name.clone(), snapshot);
+        match crate::config::layout::doc::save_named(&name, &doc) {
+            Ok(()) => {
+                self.dynamic_command_catalog.invalidate();
+                self.session.push_diagnostic(delog_core::diagnostics::Diag::info(
                     "layout-save",
                     format!("saved layout `{name}`"),
-                )),
+                ));
+            }
             Err(err) => self
                 .session
                 .push_diagnostic(delog_core::diagnostics::Diag::error(
@@ -1548,6 +1617,351 @@ impl DelogApp {
         self.refresh_layout_manager(None);
     }
 
+    fn command_context(
+        &self,
+        snapshot: &delog_core::snapshot::StoreSnapshot,
+        parser_task_active: bool,
+    ) -> commands::CommandContext {
+        let offline_source_count = snapshot
+            .sources
+            .iter()
+            .filter(|source| {
+                !source.entry.removed
+                    && source.entry.kind == delog_core::identity::SourceKind::File
+            })
+            .count();
+        commands::CommandContext::for_frame(
+            snapshot.global_time_range().is_some(),
+            offline_source_count,
+            self.session.live_statuses().len(),
+            self.session.has_active_loads(),
+            parser_task_active,
+            cfg!(feature = "scripting"),
+            self.workspace.fields().next().is_some(),
+        )
+    }
+
+    fn ensure_dynamic_command_catalog(&mut self) {
+        #[cfg(feature = "scripting")]
+        {
+            let scripts = &mut self.scripts;
+            let previous = self.dynamic_command_catalog.names().clone();
+            self.dynamic_command_catalog.ensure_with(|| {
+                Ok::<_, ()>(commands::merge_fallible_dynamic_command_refresh(
+                    &previous,
+                    crate::config::layout::doc::try_list_layouts(),
+                    scripts.try_script_names(),
+                    scripts.parser_names(),
+                ))
+            });
+        }
+        #[cfg(not(feature = "scripting"))]
+        {
+            let previous = self.dynamic_command_catalog.names().clone();
+            self.dynamic_command_catalog.ensure_with(|| {
+                Ok::<_, ()>(commands::merge_fallible_dynamic_command_refresh(
+                    &previous,
+                    crate::config::layout::doc::try_list_layouts(),
+                    Ok::<_, ()>(Vec::new()),
+                    Ok::<_, ()>(Vec::new()),
+                ))
+            });
+        }
+    }
+
+    fn open_command_palette(&mut self) {
+        self.dynamic_command_catalog.invalidate();
+        self.command_palette.open();
+    }
+
+    fn command_presentations(
+        &self,
+        context: commands::CommandContext,
+    ) -> Vec<commands::CommandPresentation> {
+        use commands::{
+            AppCommand, CommandAvailability, CommandPresentation,
+        };
+        debug_assert_eq!(commands::dynamic_command_families().len(), 4);
+        debug_assert!(
+            self.session
+                .parser_names()
+                .into_iter()
+                .eq(BUILT_IN_PARSER_PRESENTATIONS.iter().map(|(name, _)| *name))
+        );
+        let mut dynamic = Vec::new();
+        for &(name, label) in BUILT_IN_PARSER_PRESENTATIONS {
+            dynamic.push(CommandPresentation {
+                command: AppCommand::OpenWithBuiltInParser(name.to_owned()),
+                label: label.to_owned(),
+                shortcut: None,
+                availability: CommandAvailability::Enabled,
+                selected: None,
+            });
+        }
+        for name in &self.dynamic_command_catalog.names().layouts {
+            dynamic.push(CommandPresentation {
+                command: AppCommand::LoadNamedLayout(name.clone()),
+                label: name.clone(),
+                shortcut: None,
+                availability: CommandAvailability::Enabled,
+                selected: None,
+            });
+        }
+        for (index, status) in self.session.live_statuses().into_iter().enumerate() {
+            dynamic.push(CommandPresentation {
+                command: AppCommand::DisconnectLink(index),
+                label: format!("Disconnect {}", status.endpoint),
+                shortcut: None,
+                availability: CommandAvailability::Enabled,
+                selected: None,
+            });
+        }
+        #[cfg(feature = "scripting")]
+        {
+            let script_availability = if self.scripts.ordinary_dispatch_enabled() {
+                CommandAvailability::Enabled
+            } else {
+                CommandAvailability::Disabled("Another script is already running")
+            };
+            for name in &self.dynamic_command_catalog.names().scripts {
+                dynamic.push(CommandPresentation {
+                    command: AppCommand::RunScript(name.clone()),
+                    label: name.clone(),
+                    shortcut: None,
+                    availability: script_availability.clone(),
+                    selected: None,
+                });
+            }
+            let parser_availability = if self.scripts.parser_dispatch_enabled() {
+                CommandAvailability::Enabled
+            } else {
+                CommandAvailability::Disabled("Another parser is already running")
+            };
+            for name in &self.dynamic_command_catalog.names().parsers {
+                dynamic.push(CommandPresentation {
+                    command: AppCommand::OpenWithParser(name.clone()),
+                    label: name.clone(),
+                    shortcut: None,
+                    availability: parser_availability.clone(),
+                    selected: None,
+                });
+            }
+        }
+        commands::present_commands(
+            &context,
+            &commands::PresentationState {
+                shell_emphasis_live: self.shell_emphasis
+                    == context_header::ShellEmphasis::Live,
+                cursor_sampling: self.hover_mode,
+                data_browser_open: !self.browser_collapsed,
+                inspector_open: self.inspector.open,
+                scene_3d_open: self.workspace.scene_pane_id().is_some(),
+                diagnostics_open: self.docks.is_open(AppDockTab::Diagnostics),
+                performance_open: self.docks.is_open(AppDockTab::Performance),
+                markers_open: self.docks.is_open(AppDockTab::Markers),
+                scripting_console_open: {
+                    #[cfg(feature = "scripting")]
+                    {
+                        self.docks.is_open(AppDockTab::ScriptingConsole)
+                    }
+                    #[cfg(not(feature = "scripting"))]
+                    {
+                        false
+                    }
+                },
+                logging_open: self.docks.is_open(AppDockTab::Logging),
+                playhead_snap: self.snap_playhead,
+                measuring_marker: self.marker_us.is_some(),
+                legends_visible: self.workspace.all_plot_legends_visible(),
+            },
+            dynamic,
+        )
+    }
+
+    fn command_palette_entries(
+        presentations: Vec<commands::CommandPresentation>,
+    ) -> Vec<command_palette::PaletteEntry> {
+        let mut entries = command_palette::CommandPaletteState::entries(presentations);
+        for entry in &mut entries {
+            match &entry.command {
+                commands::AppCommand::Static(id) => {
+                    let spec = id.spec();
+                    entry.search_text.push_str(&format!(
+                        " {:?} {}",
+                        spec.group,
+                        spec.classic_menu_owner.title()
+                    ));
+                    for route in spec.routes {
+                        entry.search_text.push(' ');
+                        entry.search_text.push_str(route.search_term());
+                    }
+                    entry.search_text.push(' ');
+                    entry.search_text.push_str(spec.search_terms);
+                }
+                command => {
+                    let (subtitle, terms) = dynamic_palette_metadata(command);
+                    entry.subtitle = Some(subtitle.to_owned());
+                    entry.search_text.push(' ');
+                    entry.search_text.push_str(&terms);
+                }
+            }
+        }
+        entries
+    }
+
+    fn dispatch_command(
+        &mut self,
+        command: commands::AppCommand,
+        ctx: &egui::Context,
+        frame: &eframe::Frame,
+        snapshot: &delog_core::snapshot::StoreSnapshot,
+        range: TimeRange,
+    ) {
+        use commands::{AppCommand, CommandId};
+        match command {
+            AppCommand::ToggleShellEmphasis => {
+                self.shell_emphasis = self.shell_emphasis.toggle();
+            }
+            AppCommand::FitAll => {
+                if let Some(range) = snapshot.global_time_range() {
+                    self.view = Some(ViewX::from_range(range));
+                    self.fit_view_all = true;
+                }
+            }
+            AppCommand::SetCursorSampling(mode) => self.hover_mode = mode,
+            AppCommand::OpenWithBuiltInParser(name) => {
+                self.spawn_open_dialog(ctx, Some(&name));
+            }
+            AppCommand::OpenWithParser(name) => {
+                #[cfg(feature = "scripting")]
+                let _ = self.scripts.request_open(ctx, &name);
+                #[cfg(not(feature = "scripting"))]
+                let _ = name;
+            }
+            AppCommand::RunScript(name) => {
+                #[cfg(feature = "scripting")]
+                let _ = self.scripts.run_named(
+                    &name,
+                    self.session.store(),
+                    self.session.ingest_sender(),
+                    Arc::clone(self.session.metrics()),
+                );
+                #[cfg(not(feature = "scripting"))]
+                let _ = name;
+            }
+            AppCommand::LoadNamedLayout(name) => self.load_layout(&name, snapshot),
+            AppCommand::DisconnectLink(index) => self.session.stop_live(index),
+            AppCommand::Static(id) => match id {
+                CommandId::Open => self.spawn_open_dialog(ctx, None),
+                CommandId::ConnectLive => self.show_connection_dialog = true,
+                CommandId::SyncSources => self.sync_window = SyncWindow::open(snapshot),
+                CommandId::DisconnectLive => {
+                    self.session.stop_all_live();
+                }
+                CommandId::CancelTasks => {
+                    self.session.cancel_all();
+                    #[cfg(feature = "scripting")]
+                    self.scripts.cancel_parsers();
+                }
+                CommandId::ExportData => self.data_export.open(),
+                CommandId::ExportDiagnostics => self.spawn_export_diagnostics_dialog(
+                    ctx,
+                    self.session.diagnostic_records(),
+                    snapshot,
+                ),
+                CommandId::ExportProfiling => {
+                    self.spawn_export_profiling_dialog(ctx, frame, snapshot)
+                }
+                CommandId::ExportWorkspacePng => self.queue_image_capture(
+                    ctx,
+                    crate::export::image_export::ImageCaptureIntent::workspace(
+                        crate::export::image_export::ImageCaptureAction::Export,
+                        self.frame,
+                    ),
+                ),
+                CommandId::ToggleDataBrowser => self.browser_collapsed = !self.browser_collapsed,
+                CommandId::ToggleInspector => self.inspector.open = !self.inspector.open,
+                CommandId::ToggleScene3d => self.workspace.toggle_scene_pane(),
+                CommandId::OpenDiagnostics => self.toggle_dock(AppDockTab::Diagnostics),
+                CommandId::OpenPerformance => self.toggle_dock(AppDockTab::Performance),
+                CommandId::OpenMarkers => self.toggle_dock(AppDockTab::Markers),
+                CommandId::OpenScripting => {
+                    #[cfg(feature = "scripting")]
+                    self.toggle_dock(AppDockTab::ScriptingConsole);
+                }
+                CommandId::OpenLogging => self.toggle_dock(AppDockTab::Logging),
+                CommandId::SaveLayout => self.save_layout_dialog.open = true,
+                CommandId::LoadLayout => {
+                    self.load_layout_dialog.layouts =
+                        crate::config::layout::doc::list_layouts();
+                    self.load_layout_dialog.picker.open();
+                }
+                CommandId::ManageLayouts => self.open_layout_manager(),
+                CommandId::ClearLayout => self.clear_current_layout(),
+                CommandId::ImportLayout => self.spawn_import_layout_dialog(ctx),
+                CommandId::ExportLayout => self.spawn_export_layout_dialog(ctx, snapshot),
+                CommandId::EqualizePlots => self.workspace.equalize_plot_heights(),
+                CommandId::OpenDataFlow => self.dataflow.open = true,
+                CommandId::OpenScriptEditor => {
+                    #[cfg(feature = "scripting")]
+                    {
+                        self.scripts.open = true;
+                    }
+                }
+                CommandId::OpenScriptVariables => {
+                    #[cfg(feature = "scripting")]
+                    {
+                        self.scripts.variables_open = true;
+                    }
+                }
+                CommandId::OpenParserEditor => {
+                    #[cfg(feature = "scripting")]
+                    self.scripts.open_parser_editor();
+                }
+                CommandId::TogglePlayheadSnap => self.snap_playhead = !self.snap_playhead,
+                CommandId::AddMeasuringMarker => {
+                    self.marker_us = self.marker_us.is_none().then_some(self.playback.t_us)
+                }
+                CommandId::CycleLegendPosition => {
+                    self.settings.plot.legend_position =
+                        next_legend_position(self.settings.plot.legend_position)
+                }
+                CommandId::ToggleLegends => {
+                    let visible = !self.workspace.all_plot_legends_visible();
+                    self.workspace.set_all_plot_legends(visible);
+                }
+                CommandId::OpenFieldStats => {
+                    self.field_stats.open_plotted(self.workspace.unique_fields());
+                }
+                CommandId::OpenSettings => self.settings_dialog.open(),
+                CommandId::Exit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                CommandId::TogglePlayback => self.playback.toggle(),
+                CommandId::JumpStart => self.playback.jump_start(range),
+                CommandId::JumpEnd => {
+                    if self.session.has_live_links() {
+                        self.lock_to_live(range);
+                    } else {
+                        self.playback.jump_end(range);
+                    }
+                }
+                CommandId::StepLeft | CommandId::StepRight => {
+                    let reference = self.workspace.focused_first_field();
+                    let right = id == CommandId::StepRight;
+                    let target = crate::plotting::timeline::step_target(
+                        snapshot,
+                        reference,
+                        self.playback.t_us,
+                        right,
+                    );
+                    self.playback.scrub(target, range);
+                }
+                CommandId::AddMarker => {
+                    self.markers.add_at(self.playback.t_us);
+                }
+            },
+        }
+    }
+
     fn refresh_layout_manager(&mut self, preferred: Option<String>) {
         self.layout_manager_dialog.layouts = crate::config::layout::doc::list_layouts();
         self.layout_manager_dialog.selected = preferred
@@ -1585,6 +1999,7 @@ impl DelogApp {
                 let display = to.trim().to_owned();
                 match crate::config::layout::doc::rename_named(&from, &display) {
                     Ok(()) => {
+                        self.dynamic_command_catalog.invalidate();
                         self.refresh_layout_manager(Some(display.clone()));
                         self.session
                             .push_diagnostic(delog_core::diagnostics::Diag::info(
@@ -1604,6 +2019,7 @@ impl DelogApp {
                 let display = to.trim().to_owned();
                 match crate::config::layout::doc::duplicate_named(&from, &display) {
                     Ok(()) => {
+                        self.dynamic_command_catalog.invalidate();
                         self.refresh_layout_manager(Some(display.clone()));
                         self.session
                             .push_diagnostic(delog_core::diagnostics::Diag::info(
@@ -1621,6 +2037,7 @@ impl DelogApp {
             }
             LayoutManagerAction::Delete(name) => match crate::config::layout::doc::delete_named(&name) {
                 Ok(()) => {
+                    self.dynamic_command_catalog.invalidate();
                     self.refresh_layout_manager(None);
                     self.session
                         .push_diagnostic(delog_core::diagnostics::Diag::info(
@@ -1682,44 +2099,35 @@ impl DelogApp {
             self.save_layout_dialog.open &= open;
         }
 
-        if self.load_layout_dialog.open {
-            let mut open = self.load_layout_dialog.open;
-            egui::Window::new("Load Layout")
-                .open(&mut open)
-                .collapsible(false)
-                .default_pos(ctx.content_rect().center())
-                .pivot(egui::Align2::CENTER_CENTER)
-                .default_width(320.0)
-                .show(ctx, |ui| {
-                    if self.load_layout_dialog.layouts.is_empty() {
-                        ui.weak("No saved layouts.");
-                    } else {
-                        for (i, name) in self.load_layout_dialog.layouts.iter().enumerate() {
-                            ui.selectable_value(
-                                &mut self.load_layout_dialog.selected,
-                                Some(i),
-                                name,
-                            );
-                        }
-                    }
-                    ui.horizontal(|ui| {
-                        let can_load = self.load_layout_dialog.selected.is_some();
-                        if ui
-                            .add_enabled(can_load, egui::Button::new("Load"))
-                            .clicked()
-                            && let Some(i) = self.load_layout_dialog.selected
-                            && let Some(name) = self.load_layout_dialog.layouts.get(i).cloned()
-                        {
-                            let snapshot = self.session.snapshot();
-                            self.load_layout(&name, &snapshot);
-                            self.load_layout_dialog.open = false;
-                        }
-                        if ui.button("Cancel").clicked() {
-                            self.load_layout_dialog.open = false;
-                        }
-                    });
-                });
-            self.load_layout_dialog.open &= open;
+        if self.load_layout_dialog.picker.open {
+            let mut items = vec![crate::ui::palette::PickerItem::new(
+                LayoutPick::Clear,
+                commands::CommandId::ClearLayout.spec().label,
+            )];
+            items.extend(self.load_layout_dialog.layouts.iter().enumerate().map(
+                |(index, name)| {
+                    let mut item = crate::ui::palette::PickerItem::new(
+                        LayoutPick::Load(name.clone()),
+                        name.clone(),
+                    );
+                    item.separator_before = index == 0;
+                    item
+                },
+            ));
+            match self.load_layout_dialog.picker.show(
+                ctx,
+                "load-layout-picker",
+                "Search layouts…",
+                "No saved layouts.",
+                &items,
+            ) {
+                Some(LayoutPick::Clear) => self.clear_current_layout(),
+                Some(LayoutPick::Load(name)) => {
+                    let snapshot = self.session.snapshot();
+                    self.load_layout(&name, &snapshot);
+                }
+                None => {}
+            }
         }
 
         if self.layout_manager_dialog.open {
@@ -1904,7 +2312,14 @@ impl eframe::App for DelogApp {
         self.handle_picked_files();
         self.handle_layout_io_results();
         self.parquet_import.poll_requests();
-        keep_active_loads_repainting(ui.ctx(), self.session.has_active_loads());
+        #[cfg(feature = "scripting")]
+        let parser_task_active = self.scripts.is_parser_running();
+        #[cfg(not(feature = "scripting"))]
+        let parser_task_active = false;
+        keep_active_loads_repainting(
+            ui.ctx(),
+            self.session.has_active_loads() || parser_task_active,
+        );
         self.session.prune_finished();
         self.poll_trajectory_builds();
         self.frame = self.frame.wrapping_add(1);
@@ -2024,539 +2439,119 @@ impl eframe::App for DelogApp {
         // sum of these scopes is egui's own tessellation/bookkeeping, so the
         // breakdown attributes the frame to the panel that actually costs it.
         let ui_menu_timer = self.session.metrics().scope("ui_menu");
-        egui::Panel::top("main_menu").show_inside(ui, |ui| {
-            egui::MenuBar::new().ui(ui, |ui| {
-                ui.menu_button("File", |ui| {
-                    if ui.button("Open").clicked() {
-                        self.spawn_open_dialog(ui.ctx(), None);
-                        ui.close();
-                    }
-                    ui.menu_button("Open With", |ui| {
-                        for name in self.session.parser_names() {
-                            if ui.button(parser_label(name)).clicked() {
-                                self.spawn_open_dialog(ui.ctx(), Some(name));
-                                ui.close();
-                            }
-                        }
-                    });
-                    ui.menu_button("Export", |ui| {
-                        if ui.button("Export Data").clicked() {
-                            self.data_export.open();
-                            ui.close();
-                        }
-                        ui.separator();
-                        if ui.button("Export Diagnostics").clicked() {
-                            self.spawn_export_diagnostics_dialog(
-                                ui.ctx(),
-                                self.session.diagnostic_records(),
-                                &snapshot,
-                            );
-                            ui.close();
-                        }
-                        if ui.button("Export Profiling").clicked() {
-                            self.spawn_export_profiling_dialog(ui.ctx(), frame, &snapshot);
-                            ui.close();
-                        }
-                    });
-                    let offline_sources = snapshot
-                        .sources
-                        .iter()
-                        .filter(|source| {
-                            !source.entry.removed
-                                && source.entry.kind == delog_core::identity::SourceKind::File
-                        })
-                        .count();
-                    if ui
-                        .add_enabled(offline_sources >= 2, egui::Button::new("Sync Sources"))
-                        .clicked()
-                    {
-                        self.sync_window = SyncWindow::open(&snapshot);
-                        ui.close();
-                    }
-                    if ui.button("Data Flow").clicked() {
-                        self.dataflow.open = true;
-                        ui.close();
-                    }
-                    ui.separator();
-                    if ui.button("Settings").clicked() {
-                        self.settings_dialog.open();
-                        ui.close();
-                    }
-                    ui.separator();
-                    if ui.button("Exit").clicked() {
-                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-                        ui.close();
-                    }
-                });
-                ui.separator();
-                ui.menu_button("View", |ui| {
-                    self.dock_open_checkbox(ui, AppDockTab::Diagnostics, "Diagnostic (F1)");
-                    self.dock_open_checkbox(ui, AppDockTab::Performance, "Performance (F2)");
-                    self.dock_open_checkbox(ui, AppDockTab::Markers, "Markers (F3)");
-                    #[cfg(feature = "scripting")]
-                    self.dock_open_checkbox(ui, AppDockTab::ScriptingConsole, "Scripting (F9)");
-                    self.dock_open_checkbox(ui, AppDockTab::Logging, "Logging (F12)");
-                });
-                ui.separator();
-                ui.menu_button("Layout", |ui| {
-                    if ui.button("Save Layout...").clicked() {
-                        self.save_layout_dialog.open = true;
-                        ui.close();
-                    }
-                    ui.menu_button("Load Layout", |ui| {
-                        let layouts = crate::config::layout::doc::list_layouts();
-                        if layouts.is_empty() {
-                            ui.add_enabled(false, egui::Button::new("No saved layouts"));
-                        } else {
-                            for name in layouts {
-                                if ui.button(&name).clicked() {
-                                    self.load_layout(&name, &snapshot);
-                                    ui.close();
-                                }
-                            }
-                        }
-                    });
-                    if ui.button("Manage Layouts...").clicked() {
-                        self.open_layout_manager();
-                        ui.close();
-                    }
-                    if ui.button("Clear current layout").clicked() {
-                        self.clear_current_layout();
-                        ui.close();
-                    }
-                    ui.separator();
-                    if ui.button("Export JSON...").clicked() {
-                        self.spawn_export_layout_dialog(ui.ctx(), &snapshot);
-                        ui.close();
-                    }
-                    if ui.button("Import JSON...").clicked() {
-                        self.spawn_import_layout_dialog(ui.ctx());
-                        ui.close();
-                    }
-                });
-                #[cfg(feature = "scripting")]
-                {
-                    ui.separator();
-                    ui.menu_button("Scripts", |ui| {
-                        if ui.button("Editor...").clicked() {
-                            self.scripts.open = true;
-                            ui.close();
-                        }
-                        if ui.button("Variables...").clicked() {
-                            self.scripts.variables_open = true;
-                            ui.close();
-                        }
-                        ui.separator();
-                        ui.menu_button("Run", |ui| {
-                            let names = self.scripts.script_names();
-                            if names.is_empty() {
-                                ui.add_enabled(false, egui::Button::new("No saved scripts"));
-                            } else {
-                                let run_enabled = self.scripts.ordinary_dispatch_enabled();
-                                for name in names {
-                                    if ui
-                                        .add_enabled(run_enabled, egui::Button::new(name.as_str()))
-                                        .clicked()
-                                    {
-                                        let _ = self.scripts.run_named(
-                                            &name,
-                                            self.session.store(),
-                                            self.session.ingest_sender(),
-                                            Arc::clone(self.session.metrics()),
-                                        );
-                                        ui.close();
-                                    }
-                                }
-                            }
-                        });
-                    });
-                    ui.separator();
-                    ui.menu_button("Parsers", |ui| {
-                        if ui.button("Editor...").clicked() {
-                            self.scripts.open_parser_editor();
-                            ui.close();
-                        }
-                        ui.separator();
-                        ui.menu_button("Parse File", |ui| match self.scripts.parser_names() {
-                            Ok(names) if names.is_empty() => {
-                                ui.add_enabled(false, egui::Button::new("No saved parsers"));
-                            }
-                            Ok(names) => {
-                                let parser_open_enabled = self.scripts.parser_dispatch_enabled();
-                                for name in names {
-                                    if ui
-                                        .add_enabled(
-                                            parser_open_enabled,
-                                            egui::Button::new(name.as_str()),
-                                        )
-                                        .on_hover_text("Open file with parser")
-                                        .clicked()
-                                    {
-                                        let _ = self.scripts.request_open(ui.ctx(), &name);
-                                        ui.close();
-                                    }
-                                }
-                            }
-                            Err(_) => {
-                                ui.add_enabled(false, egui::Button::new("Could not list parsers"));
-                            }
-                        });
-                    });
-                }
-                if self.settings.show_fps {
-                    ui.with_layout(
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| match self.fps_ema {
-                            Some(fps) => {
-                                let color = if fps > 59.0 {
-                                    self.settings.theme.success()
-                                } else if fps >= 30.0 {
-                                    self.settings.theme.warning()
-                                } else {
-                                    self.settings.theme.error()
-                                };
-                                ui.colored_label(color, format!("{fps:.0} FPS"));
-                            }
-                            None => {
-                                ui.weak("idle");
-                            }
-                        },
-                    );
-                }
-            });
-        });
-
-        drop(ui_menu_timer);
-
-        let ui_toolbar_timer = self.session.metrics().scope("ui_toolbar");
-        let toolbar_frame = egui::Frame::side_top_panel(ui.style()).inner_margin(TOOLBAR_MARGIN);
-        egui::Panel::top("tool_icons").frame(toolbar_frame).show_inside(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing = TOOLBAR_ITEM_SPACING;
-                let streaming = self.session.has_live_links();
-                let stream_tint = if streaming {
-                    self.settings.theme.accent()
-                } else {
-                    ui.visuals().weak_text_color()
-                };
-                if icon_button(
-                    ui,
-                    "toolbar-stream",
-                    crate::ui::icons::satellite_dish(),
-                    stream_tint,
-                    streaming,
-                )
-                .on_hover_text("Connect to a MAVLink telemetry stream")
-                .clicked()
-                {
-                    self.show_connection_dialog = true;
-                }
-
-                let scene_open = self.workspace.scene_pane_id().is_some();
-                let cube_tint = if scene_open {
-                    self.settings.theme.accent()
-                } else {
-                    ui.visuals().weak_text_color()
-                };
-                if icon_button(
-                    ui,
-                    "toolbar-3d",
-                    crate::ui::icons::cube(),
-                    cube_tint,
-                    scene_open,
-                )
-                .on_hover_text("Show or hide the 3D scene view")
-                .clicked()
-                {
-                    self.workspace.toggle_scene_pane();
-                }
-
-                ui.separator();
-
-                let active_tint = self.settings.theme.accent();
-                let inactive_tint = ui.visuals().weak_text_color();
-                hover_mode_menu_button(
-                    ui,
-                    "toolbar-hover-mode",
-                    crate::ui::icons::mouse_pointer(),
-                    active_tint,
-                    true,
-                    |ui| {
-                        use delog_core::field_view::SampleMode::{Linear, Next, Prev};
-                        if ui
-                            .radio_value(&mut self.hover_mode, Prev, "Previous")
-                            .clicked()
-                        {
-                            ui.close();
-                        }
-                        if ui.radio_value(&mut self.hover_mode, Next, "Next").clicked() {
-                            ui.close();
-                        }
-                        if ui
-                            .radio_value(&mut self.hover_mode, Linear, "Linear")
-                            .clicked()
-                        {
-                            ui.close();
-                        }
-                    },
-                )
-                .on_hover_text(format!("Select hover mode"));
-
-                let snap_tint = if self.snap_playhead {
-                    active_tint
-                } else {
-                    inactive_tint
-                };
-                if icon_button(
-                    ui,
-                    "toolbar-snap-playhead",
-                    crate::ui::icons::magnet(),
-                    snap_tint,
-                    self.snap_playhead,
-                )
-                .on_hover_text("Toggle playhead snap")
-                .clicked()
-                {
-                    self.snap_playhead = !self.snap_playhead;
-                }
-
-                let has_marker = self.marker_us.is_some();
-                let marker_tint = if has_marker {
-                    active_tint
-                } else {
-                    inactive_tint
-                };
-                let marker_hover = if has_marker {
-                    "Remove measuring marker"
-                } else {
-                    "Add measuring marker at playhead"
-                };
-                if ui
-                    .add_enabled_ui(has_marker || global_range.is_some(), |ui| {
-                        icon_button(
-                            ui,
-                            "toolbar-measuring-marker",
-                            crate::ui::icons::ruler_dimension_line(),
-                            marker_tint,
-                            has_marker,
-                        )
-                    })
-                    .inner
-                    .on_hover_text(marker_hover)
-                    .clicked()
-                {
-                    self.marker_us = if has_marker {
-                        None
-                    } else {
-                        Some(self.playback.t_us)
-                    };
-                }
-
-                if icon_button(
-                    ui,
-                    "toolbar-equal-plot-heights",
-                    crate::ui::icons::grid_2x2_check(),
-                    inactive_tint,
-                    false,
-                )
-                .on_hover_text("Resize all plots")
-                .clicked()
-                {
-                    self.workspace.equalize_plot_heights();
-                }
-
-                ui.separator();
-
-                if icon_button(
-                    ui,
-                    "toolbar-legend-position",
-                    legend_position_icon(self.settings.plot.legend_position),
-                    active_tint,
-                    true,
-                )
-                .on_hover_text("Cycle legend position")
-                .clicked()
-                {
-                    self.settings.plot.legend_position =
-                        next_legend_position(self.settings.plot.legend_position);
-                }
-
-                let legends_hidden = !self.workspace.all_plot_legends_visible();
-                let legend_tint = if legends_hidden {
-                    active_tint
-                } else {
-                    inactive_tint
-                };
-                if icon_button(
-                    ui,
-                    "toolbar-legends",
-                    crate::ui::icons::eye_off(),
-                    legend_tint,
-                    legends_hidden,
-                )
-                .on_hover_text("Toggle legends")
-                .clicked()
-                {
-                    self.workspace.set_all_plot_legends(legends_hidden);
-                }
-
-                ui.separator();
-
-                if icon_button(
-                    ui,
-                    "toolbar-export-workspace-png",
-                    crate::ui::icons::export(),
-                    inactive_tint,
-                    false,
-                )
-                .on_hover_text("Export workspace PNG")
-                .clicked()
-                {
-                    self.queue_image_capture(
-                        ui.ctx(),
-                        crate::export::image_export::ImageCaptureIntent::workspace(
-                            crate::export::image_export::ImageCaptureAction::Export,
-                            self.frame,
-                        ),
-                    );
-                }
-
-                let mut disconnect = None;
-                for (i, status) in self.session.live_statuses().into_iter().enumerate() {
-                    ui.separator();
-                    ui.weak(format!(
-                        "{} {} · {} frames · {} rows{}",
-                        status.state.label(),
-                        status.endpoint,
-                        status.link.rx_frames,
-                        status.ingest.rows,
-                        recording_status(&status)
-                    ));
-                    if ui
-                        .button("Disconnect")
-                        .on_hover_text("Stop this telemetry stream")
-                        .clicked()
-                    {
-                        disconnect = Some(i);
-                    }
-                }
-                if let Some(i) = disconnect {
-                    self.session.stop_live(i);
-                }
-
-                let native_load_active = self.session.has_active_loads();
-                #[cfg(feature = "scripting")]
-                let parser_label = self
-                    .scripts
-                    .is_parser_running()
-                    .then(|| self.scripts.parser_active_label());
-                #[cfg(not(feature = "scripting"))]
-                let parser_label: Option<String> = None;
-                let load_state = combined_load_state(
-                    native_load_active,
-                    self.session.active_labels(),
-                    parser_label.as_deref(),
-                );
-                if load_state.active {
-                    ui.separator();
-                    if ui.button("Cancel").clicked() {
-                        self.session.cancel_all();
-                        #[cfg(feature = "scripting")]
-                        if load_state.parser_active {
-                            self.scripts.cancel_parsers();
-                        }
-                    }
-                    if !load_state.native_labels.is_empty() {
-                        ui.label(format!("loading {}", load_state.native_labels.join(", ")));
-                    }
-                    if let Some(label) = &load_state.parser_label {
-                        ui.label(label);
-                    }
-                    if !load_state.parser_active
-                        && let Some(frac) = self.session.overall_progress()
-                    {
-                        ui.add(egui::ProgressBar::new(frac).desired_width(120.0));
-                    } else {
-                        ui.spinner();
-                    }
-                }
-            });
-        });
-
-        drop(ui_toolbar_timer);
         let range = timeline_range_for_ui(global_range);
-
-        let (focus_diagnostics, focus_performance, focus_markers, focus_logging) =
-            ui.ctx().input(|i| {
-                (
-                    i.key_pressed(egui::Key::F1),
-                    i.key_pressed(egui::Key::F2),
-                    i.key_pressed(egui::Key::F3),
-                    i.key_pressed(egui::Key::F12),
-                )
-            });
-        if focus_diagnostics {
-            self.open_dock(AppDockTab::Diagnostics);
-        }
-        if focus_performance {
-            self.open_dock(AppDockTab::Performance);
-        }
-        if focus_markers {
-            self.open_dock(AppDockTab::Markers);
-        }
-        if focus_logging {
-            self.open_dock(AppDockTab::Logging);
-        }
+        let native_load_active = self.session.has_active_loads();
         #[cfg(feature = "scripting")]
-        if ui.ctx().input(|i| i.key_pressed(egui::Key::F9)) {
-            self.open_dock(AppDockTab::ScriptingConsole);
+        let parser_label = parser_task_active.then(|| self.scripts.parser_active_label());
+        #[cfg(not(feature = "scripting"))]
+        let parser_label: Option<String> = None;
+        self.ensure_dynamic_command_catalog();
+        let command_context = self.command_context(&snapshot, parser_task_active);
+        let command_presentations = self.command_presentations(command_context);
+        let load_state = combined_load_state(
+            native_load_active,
+            self.session.active_labels(),
+            parser_label.as_deref(),
+        );
+        let load = if load_state.active {
+            let mut labels = load_state.native_labels;
+            if let Some(label) = load_state.parser_label {
+                labels.push(label);
+            }
+            context_header::LoadStatusView::Active {
+                label: if labels.is_empty() {
+                    "Working…".to_owned()
+                } else {
+                    labels.join(" · ")
+                },
+                progress: (!load_state.parser_active)
+                    .then(|| self.session.overall_progress())
+                    .flatten(),
+            }
+        } else {
+            context_header::LoadStatusView::Idle
+        };
+        let live_statuses = self
+            .session
+            .live_statuses()
+            .into_iter()
+            .enumerate()
+            .map(|(index, status)| {
+                let recording = recording_status(&status);
+                context_header::LiveSummary {
+                    index,
+                    endpoint: status.endpoint.to_string(),
+                    state: status.state.label().to_owned(),
+                    rx_frames: status.link.rx_frames,
+                    rows: status.ingest.rows,
+                    recording: (!recording.is_empty()).then_some(recording),
+                }
+            })
+            .collect();
+        let header_model = context_header::HeaderModel {
+            emphasis: self.shell_emphasis,
+            live_statuses,
+            load,
+            fps: self.settings.show_fps.then_some(self.fps_ema).flatten(),
+            theme: self.settings.theme,
+        };
+        let toolbar_model = global_plot_toolbar::GlobalPlotToolbarModel {
+            cursor_sampling: self.hover_mode,
+            playhead_snap: self.snap_playhead,
+            measuring_marker: self.marker_us.is_some(),
+            legend_position: self.settings.plot.legend_position,
+        };
+        let header_output = egui::Panel::top("context_header")
+            .show_inside(ui, |ui| {
+                context_header::show(ui, &header_model, &command_presentations, |ui| {
+                    global_plot_toolbar::show(ui, &toolbar_model, &command_presentations)
+                })
+            })
+            .inner;
+        drop(ui_menu_timer);
+        for command in header_output.commands {
+            self.dispatch_command(command, ui.ctx(), frame, &snapshot, range);
+        }
+        if header_output.refresh_dynamic_catalog {
+            self.dynamic_command_catalog.invalidate();
         }
 
-        // Transport keys - skipped while a widget owns the
-        // keyboard (e.g. the browser filter box).
-        if !ui.ctx().egui_wants_keyboard_input() {
-            let (space, home, end, left, right, save_layout, load_layout, add_marker) =
-                ui.ctx().input(|i| {
-                    (
-                        i.key_pressed(egui::Key::Space),
-                        i.key_pressed(egui::Key::Home),
-                        i.key_pressed(egui::Key::End),
-                        i.key_pressed(egui::Key::ArrowLeft),
-                        i.key_pressed(egui::Key::ArrowRight),
-                        i.modifiers.command && i.key_pressed(egui::Key::S),
-                        i.modifiers.command && i.key_pressed(egui::Key::L),
-                        i.key_pressed(egui::Key::M),
-                    )
-                });
-            if save_layout {
-                self.save_layout_dialog.open = true;
+        let wants_keyboard = ui.ctx().egui_wants_keyboard_input();
+        let ctrl_k = ui.ctx().input(|input| {
+            input.modifiers.command && input.key_pressed(egui::Key::K)
+        });
+        if command_palette::should_toggle_palette(ctrl_k, wants_keyboard) {
+            if self.command_palette.is_open() {
+                self.command_palette.close();
+            } else {
+                self.open_command_palette();
             }
-            if load_layout {
-                self.load_layout_dialog.layouts = crate::config::layout::doc::list_layouts();
-                self.load_layout_dialog.selected = None;
-                self.load_layout_dialog.open = true;
-            }
-            if space {
-                self.playback.toggle();
-            }
-            if home {
-                self.playback.jump_start(range);
-            }
-            if end {
-                if self.session.has_live_links() {
-                    self.lock_to_live(range);
+        }
+
+        // Existing shortcuts and palette selections share dispatch. Commands
+        // stay dormant while an editor or the palette owns keyboard input.
+        if !wants_keyboard && !self.command_palette.is_open() {
+            use commands::AppCommand;
+            let shortcuts = ui.ctx().input(|input| {
+                SHORTCUT_KEYS
+                    .iter()
+                    .copied()
+                    .filter(|key| input.key_pressed(*key))
+                    .filter_map(|key| command_for_shortcut(key, input.modifiers.command))
+                    .collect::<Vec<_>>()
+            });
+            for command in shortcuts {
+                if let Some(dock) = dock_for_command(command) {
+                    self.open_dock(dock);
                 } else {
-                    self.playback.jump_end(range);
+                    self.dispatch_command(
+                        AppCommand::Static(command),
+                        ui.ctx(),
+                        frame,
+                        &snapshot,
+                        range,
+                    );
                 }
-            }
-            if left || right {
-                let reference = self.workspace.focused_first_field();
-                let target =
-                    crate::plotting::timeline::step_target(&snapshot, reference, self.playback.t_us, right);
-                self.playback.scrub(target, range);
-            }
-            if add_marker {
-                self.markers.add_at(self.playback.t_us);
             }
         }
 
@@ -2718,9 +2713,9 @@ impl eframe::App for DelogApp {
 
         let ui_browser_timer = self.session.metrics().scope("ui_browser");
         if self.browser_collapsed {
-            let button_size = browser::panel_toggle_button_size(ui);
-            let collapsed_left_margin = ui.spacing().item_spacing.x;
-            let collapsed_width = collapsed_left_margin + button_size.x;
+            let tokens = crate::ui::design_tokens::DesignTokens::from_style(ui.style());
+            let collapsed_left_margin = tokens.space_sm;
+            let collapsed_width = collapsed_data_browser_width(ui.style());
             let collapsed_frame =
                 egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::ZERO);
             egui::Panel::left("data_browser_collapsed")
@@ -2730,16 +2725,14 @@ impl eframe::App for DelogApp {
                 .exact_size(collapsed_width)
                 .show_inside(ui, |ui| {
                     ui.vertical(|ui| {
-                        ui.add_space(8.0);
+                        ui.add_space(15.0);
                         ui.horizontal(|ui| {
                             ui.add_space(collapsed_left_margin);
-                            let icon_size = button_size - ui.spacing().button_padding * 2.0;
-                            let icon = egui::Image::new(crate::ui::icons::panel_left_open())
-                                .fit_to_exact_size(icon_size)
-                                .tint(ui.visuals().text_color());
-                            if ui
-                                .add_sized(button_size, egui::Button::image(icon))
-                                .on_hover_text("Show data browser")
+                            if browser::data_browser_toggle_button(
+                                ui,
+                                crate::ui::icons::panel_left_open(),
+                                "Show data browser",
+                            )
                                 .clicked()
                             {
                                 self.browser_collapsed = false;
@@ -2759,14 +2752,12 @@ impl eframe::App for DelogApp {
                     BrowserModel::from_snapshot(&snapshot)
                 }
             };
-            let browser_panel = egui::Panel::left("data_browser_expanded")
-                .resizable(true)
-                .min_size(360.0);
-            let browser_panel = if model.is_empty() {
-                browser_panel.default_size(ui.spacing().text_edit_width)
+            let preferred_width = if model.is_empty() {
+                ui.spacing().text_edit_width
             } else {
-                browser_panel.default_size(360.0)
+                360.0
             };
+            let browser_panel = data_browser_panel(preferred_width);
             browser_panel.show_inside(ui, |ui| {
                 // Offset edits go through the ingest thread (the single
                 // registry writer) and come back as a new epoch.
@@ -2815,6 +2806,9 @@ impl eframe::App for DelogApp {
             self.playback.scrub(t_us, range);
         }
         show_field_metadata_window(ui.ctx(), &snapshot, &mut self.field_metadata_dialog);
+        if self.field_stats.is_tracking_plots() {
+            self.field_stats.sync_plotted(self.workspace.unique_fields());
+        }
         show_field_stats_window(
             ui.ctx(),
             &snapshot,
@@ -2822,6 +2816,26 @@ impl eframe::App for DelogApp {
             &mut self.caches,
             &mut self.field_stats,
         );
+        if self.inspector.open {
+            let traces = self.workspace.inspector_traces(&snapshot);
+            let playhead_us = snapshot.global_time_range().map(|_| self.playback.t_us);
+            egui::Panel::right("analysis_inspector")
+                .resizable(true)
+                .default_size(320.0)
+                .min_size(260.0)
+                .max_size(520.0)
+                .show_inside(ui, |ui| {
+                    inspector::show(
+                        ui,
+                        &mut self.inspector,
+                        &snapshot,
+                        playhead_us,
+                        self.marker_us,
+                        self.hover_mode,
+                        &traces,
+                    )
+                });
+        }
         for (t_us, name, color) in crate::shell::generate_markers::generate_markers_window(
             ui.ctx(),
             &mut self.generate_markers_dialog,
@@ -2854,7 +2868,7 @@ impl eframe::App for DelogApp {
         }
 
         let ui_workspace_timer = self.session.metrics().scope("ui_workspace");
-        egui::Frame::central_panel(ui.style()).show(ui, |ui| {
+        central_workspace_frame(ui.style()).show(ui, |ui| {
             // The workspace renders even before any log loads, so plots can be
             // arranged and the 3D view opened on an empty session.
 
@@ -2890,7 +2904,6 @@ impl eframe::App for DelogApp {
                         marker_us: &mut self.marker_us,
                         render_tuning: self.settings.render,
                         scene3d: self.settings.scene3d,
-                        accent: self.settings.theme.accent(),
                         playhead_us: snapshot.global_time_range().map(|_| self.playback.t_us),
                         playing: self.playback.playing,
                         vehicles: &self.vehicles,
@@ -2910,6 +2923,7 @@ impl eframe::App for DelogApp {
                     self.workspace.tree.ui(&mut behavior, ui);
                     drop(tree_timer);
                     let actions = behavior.into_actions();
+                    self.workspace.repair_focus();
                     // Share the widest pane gutter so stacked plots align next
                     // frame. Converges in one frame; until then each
                     // pane never drops below its own gutter, so labels never
@@ -2958,9 +2972,6 @@ impl eframe::App for DelogApp {
                     }
                     if actions.export_kml {
                         self.spawn_export_kml_dialog(ui.ctx(), &snapshot);
-                    }
-                    if let Some(fields) = actions.inspect_field_stats {
-                        self.field_stats.open_fields(fields);
                     }
                     if let Some(action) = actions.image {
                         match action {
@@ -3062,7 +3073,10 @@ impl eframe::App for DelogApp {
         crate::export::data_export::progress_ui(ui.ctx(), &self.data_exports);
         self.show_layout_windows(ui.ctx());
         crate::ui::message_popup::show_all(&mut self.message_popups, ui.ctx());
-        let settings_before = self.settings.clone();
+        let settings_before = self
+            .settings_dialog
+            .is_open()
+            .then(|| self.settings.clone());
         let tile_cache =
             self.tile_manager
                 .as_ref()
@@ -3104,7 +3118,7 @@ impl eframe::App for DelogApp {
         {
             ui.ctx().request_repaint();
         }
-        if self.settings != settings_before
+        if settings_before.is_some_and(|before| self.settings != before)
             && let Err(err) = crate::config::layout::doc::save_app_settings(&self.settings)
         {
             self.session
@@ -3181,6 +3195,13 @@ impl eframe::App for DelogApp {
             }
             for log in self.scripts.take_logs() {
                 self.push_log(log);
+            }
+        }
+
+        if self.command_palette.is_open() {
+            let palette_entries = Self::command_palette_entries(command_presentations);
+            if let Some(command) = self.command_palette.show(ui.ctx(), &palette_entries) {
+                self.dispatch_command(command, ui.ctx(), frame, &snapshot, range);
             }
         }
     }
@@ -3451,7 +3472,7 @@ fn show_source_metadata_window(
             };
             egui_dock::DockArea::new(&mut dock_state)
                 .id(egui::Id::new(("source_metadata_dock_area", source_id.0)))
-                .style(egui_dock::Style::from_egui(ui.style().as_ref()))
+                .style(crate::ui::docks::dock_style(ui.style().as_ref()))
                 .allowed_splits(egui_dock::AllowedSplits::None)
                 .draggable_tabs(false)
                 .tab_context_menus(false)
@@ -3796,7 +3817,7 @@ fn show_field_stats_window(
             };
             egui_dock::DockArea::new(&mut dock_state)
                 .id(egui::Id::new("field_stats_dock_area"))
-                .style(egui_dock::Style::from_egui(ui.style().as_ref()))
+                .style(crate::ui::docks::dock_style(ui.style().as_ref()))
                 .allowed_splits(egui_dock::AllowedSplits::None)
                 .draggable_tabs(false)
                 .tab_context_menus(false)
@@ -4134,13 +4155,71 @@ struct PickedFiles {
     parser: Option<String>,
 }
 
+const BUILT_IN_PARSER_PRESENTATIONS: &[(&str, &str)] = &[
+    ("ardupilot-bin", "ArduPilot"),
+    ("ulog", "PX4"),
+    ("tlog", "MAVLink"),
+    ("parquet", "Parquet"),
+];
+
 fn parser_label(name: &str) -> &str {
-    match name {
-        "ardupilot-bin" => "ArduPilot DataFlash",
-        "ulog" => "PX4 ULog",
-        "tlog" => "MAVLink Telemetry",
-        "parquet" => "Parquet",
-        other => other,
+    BUILT_IN_PARSER_PRESENTATIONS
+        .iter()
+        .find_map(|(parser, label)| (*parser == name).then_some(*label))
+        .unwrap_or(name)
+}
+
+const SHORTCUT_KEYS: &[egui::Key] = &[
+    egui::Key::F1,
+    egui::Key::F2,
+    egui::Key::F3,
+    egui::Key::F9,
+    egui::Key::F12,
+    egui::Key::Space,
+    egui::Key::Home,
+    egui::Key::End,
+    egui::Key::ArrowLeft,
+    egui::Key::ArrowRight,
+    egui::Key::S,
+    egui::Key::L,
+    egui::Key::M,
+];
+
+fn dock_for_command(command: commands::CommandId) -> Option<AppDockTab> {
+    use commands::CommandId;
+    match command {
+        CommandId::OpenDiagnostics => Some(AppDockTab::Diagnostics),
+        CommandId::OpenPerformance => Some(AppDockTab::Performance),
+        CommandId::OpenMarkers => Some(AppDockTab::Markers),
+        #[cfg(feature = "scripting")]
+        CommandId::OpenScripting => Some(AppDockTab::ScriptingConsole),
+        #[cfg(not(feature = "scripting"))]
+        CommandId::OpenScripting => None,
+        CommandId::OpenLogging => Some(AppDockTab::Logging),
+        _ => None,
+    }
+}
+
+fn command_for_shortcut(
+    key: egui::Key,
+    command_modifier: bool,
+) -> Option<commands::CommandId> {
+    use commands::CommandId;
+    match (key, command_modifier) {
+        (egui::Key::S, true) => Some(CommandId::SaveLayout),
+        (egui::Key::L, true) => Some(CommandId::LoadLayout),
+        (egui::Key::F1, _) => Some(CommandId::OpenDiagnostics),
+        (egui::Key::F2, _) => Some(CommandId::OpenPerformance),
+        (egui::Key::F3, _) => Some(CommandId::OpenMarkers),
+        (egui::Key::F9, _) => Some(CommandId::OpenScripting),
+        (egui::Key::F12, _) => Some(CommandId::OpenLogging),
+        (egui::Key::Space, _) => Some(CommandId::TogglePlayback),
+        (egui::Key::Home, _) => Some(CommandId::JumpStart),
+        (egui::Key::End, _) => Some(CommandId::JumpEnd),
+        (egui::Key::ArrowLeft, _) => Some(CommandId::StepLeft),
+        (egui::Key::ArrowRight, _) => Some(CommandId::StepRight),
+        (egui::Key::M, _) => Some(CommandId::AddMarker),
+        _ => None,
     }
 }
 
@@ -4296,15 +4375,6 @@ impl egui_dock::TabViewer for AppDockViewer<'_> {
     }
 }
 
-/// Fixed footprint of a toolbar icon button. Allocating an explicit size
-/// keeps the button's rect independent of the SVG's load state, so the
-/// toolbar's height can't change between egui's layout passes (which would
-/// otherwise shift every panel below and spam "changed id between passes").
-const ICON_BUTTON_SIZE: egui::Vec2 = egui::vec2(40.0, 40.0);
-
-const TOOLBAR_MARGIN: egui::Margin = egui::Margin::symmetric(10, 6);
-const TOOLBAR_ITEM_SPACING: egui::Vec2 = egui::vec2(6.0, 6.0);
-
 fn next_legend_position(
     position: crate::config::settings::LegendPosition,
 ) -> crate::config::settings::LegendPosition {
@@ -4314,63 +4384,6 @@ fn next_legend_position(
         crate::config::settings::LegendPosition::BottomLeft => crate::config::settings::LegendPosition::BottomRight,
         crate::config::settings::LegendPosition::BottomRight => crate::config::settings::LegendPosition::TopLeft,
     }
-}
-
-fn legend_position_icon(position: crate::config::settings::LegendPosition) -> egui::ImageSource<'static> {
-    match position {
-        crate::config::settings::LegendPosition::TopLeft => crate::ui::icons::dice_top_left(),
-        crate::config::settings::LegendPosition::TopRight => crate::ui::icons::dice_top_right(),
-        crate::config::settings::LegendPosition::BottomLeft => crate::ui::icons::dice_bottom_left(),
-        crate::config::settings::LegendPosition::BottomRight => crate::ui::icons::dice_bottom_right(),
-    }
-}
-
-/// A compact toolbar icon button rendering one of the bundled SVG icons.
-/// `salt` gives the button a stable id; `tint` colors the (white) glyph;
-/// `active` draws a selected background.
-fn icon_button(
-    ui: &mut egui::Ui,
-    salt: &str,
-    icon: egui::ImageSource<'_>,
-    tint: egui::Color32,
-    active: bool,
-) -> egui::Response {
-    let image = toolbar_icon_image(icon, tint);
-    ui.push_id(salt, |ui| {
-        ui.add_sized(
-            ICON_BUTTON_SIZE,
-            egui::Button::image(image).selected(active),
-        )
-    })
-    .inner
-}
-
-fn hover_mode_menu_button(
-    ui: &mut egui::Ui,
-    salt: &str,
-    icon: egui::ImageSource<'_>,
-    tint: egui::Color32,
-    active: bool,
-    add_contents: impl FnOnce(&mut egui::Ui),
-) -> egui::Response {
-    let image = toolbar_icon_image(icon, tint);
-    ui.push_id(salt, |ui| {
-        egui::containers::menu::MenuButton::from_button(
-            egui::Button::image(image)
-                .selected(active)
-                .min_size(ICON_BUTTON_SIZE),
-        )
-        .ui(ui, add_contents)
-        .0
-    })
-    .inner
-}
-
-fn toolbar_icon_image(icon: egui::ImageSource<'_>, tint: egui::Color32) -> egui::Image<'_> {
-    let image = egui::Image::new(icon)
-        .fit_to_exact_size(egui::vec2(22.0, 22.0))
-        .tint(tint);
-    image
 }
 
 #[cfg(test)]

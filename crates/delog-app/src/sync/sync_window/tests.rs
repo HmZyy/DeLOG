@@ -1108,6 +1108,28 @@ fn invalid_exact_edit_counts_as_dirty_for_close_policy() {
 }
 
 #[test]
+fn newly_opened_sync_window_defaults_to_stacked() {
+    let snapshot = fixture_snapshot();
+    let sync = SyncWindow::open(&snapshot).unwrap();
+    assert_eq!(sync.mode, CompareMode::Stacked);
+}
+
+#[test]
+fn stacked_toggle_is_offered_before_overlay() {
+    let source = include_str!("mod.rs");
+    let stacked = source
+        .find("CompareMode::Stacked, \"Stacked\"")
+        .expect("stacked toggle should exist");
+    let overlay = source
+        .find("CompareMode::Overlay, \"Overlay\"")
+        .expect("overlay toggle should exist");
+    assert!(
+        stacked < overlay,
+        "Stacked should be the first compare-mode toggle"
+    );
+}
+
+#[test]
 fn conflict_reload_captures_current_offsets_and_preserves_presentation() {
     let snapshot = fixture_snapshot();
     let mut sync = SyncWindow::open(&snapshot).unwrap();

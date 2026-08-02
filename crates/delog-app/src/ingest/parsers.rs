@@ -510,38 +510,34 @@ impl ParsersPanel {
             ui.weak("No saved parsers.");
             return;
         }
-        egui::ScrollArea::vertical()
+        let selected = self.saved_original_name.clone();
+        let event = egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                for name in names {
-                    ui.horizontal(|ui| {
-                        let selected = self.saved_original_name.as_deref() == Some(name.as_str());
-                        if ui
-                            .selectable_label(selected, name.as_str())
-                            .on_hover_text("Load parser")
-                            .clicked()
-                        {
-                            self.edit(&name);
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.menu_button("...", |ui| {
-                                if ui.button("Edit").clicked() {
-                                    self.edit(&name);
-                                    ui.close();
-                                }
-                                if ui.button("Duplicate").clicked() {
-                                    self.duplicate(&name);
-                                    ui.close();
-                                }
-                                if ui.button("Remove").clicked() {
-                                    self.request_delete_named(&name);
-                                    ui.close();
-                                }
-                            });
-                        });
-                    });
+                crate::ui::components::library_tree(
+                    ui,
+                    egui::Id::new("parsers_library_tree"),
+                    &names,
+                    selected.as_deref(),
+                    &[
+                        crate::ui::components::LibraryAction::Edit,
+                        crate::ui::components::LibraryAction::Duplicate,
+                        crate::ui::components::LibraryAction::Remove,
+                    ],
+                    "Load parser",
+                )
+            })
+            .inner;
+        if let Some(event) = event {
+            match event.action {
+                crate::ui::components::LibraryAction::Load
+                | crate::ui::components::LibraryAction::Edit => self.edit(&event.name),
+                crate::ui::components::LibraryAction::Duplicate => self.duplicate(&event.name),
+                crate::ui::components::LibraryAction::Remove => {
+                    self.request_delete_named(&event.name);
                 }
-            });
+            }
+        }
     }
 
     fn delete_confirm_ui(&mut self, ctx: &egui::Context) {
