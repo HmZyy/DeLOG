@@ -629,6 +629,10 @@ impl Default for SettingsDialog {
 }
 
 impl SettingsDialog {
+    pub fn is_open(&self) -> bool {
+        self.open
+    }
+
     pub fn open(&mut self) {
         self.open = true;
     }
