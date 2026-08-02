@@ -1687,6 +1687,104 @@ mod tests {
     }
 
     #[test]
+    fn browser_still_paints_rows_after_scrolling_down() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let model = synth_model(1, 12, 10);
+        let mut query = "field".to_owned();
+        let mut filter_cache = BrowserFilterCache::default();
+        let mut selection = Selection::default();
+        let mut offset_dialog = None;
+
+        let frame = |events: Vec<egui::Event>,
+                     query: &mut String,
+                     filter_cache: &mut BrowserFilterCache,
+                     selection: &mut Selection,
+                     offset_dialog: &mut Option<(SourceId, i64)>| {
+            let mut input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1_000.0, 400.0),
+                )),
+                ..Default::default()
+            };
+            input
+                .events
+                .push(egui::Event::PointerMoved(egui::pos2(200.0, 200.0)));
+            input.events.extend(events);
+            let output = ctx.run_ui(input, |ui| {
+                egui::Panel::left("browser-scroll")
+                    .exact_size(420.0)
+                    .show_inside(ui, |ui| {
+                        super::ui(
+                            ui,
+                            0,
+                            &model,
+                            query,
+                            filter_cache,
+                            selection,
+                            offset_dialog,
+                        );
+                    });
+            });
+            let mut texts = Vec::new();
+            fn walk(shape: &egui::epaint::Shape, out: &mut Vec<String>) {
+                match shape {
+                    egui::epaint::Shape::Text(text) => out.push(text.galley.job.text.clone()),
+                    egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                    _ => {}
+                }
+            }
+            for clipped in &output.shapes {
+                walk(&clipped.shape, &mut texts);
+            }
+            texts
+        };
+
+        let before = frame(
+            vec![],
+            &mut query,
+            &mut filter_cache,
+            &mut selection,
+            &mut offset_dialog,
+        );
+        assert!(
+            before.iter().any(|text| text.starts_with("field_")),
+            "rows should be painted before scrolling, got {before:?}"
+        );
+
+        let mut after = Vec::new();
+        for _ in 0..6 {
+            after = frame(
+                vec![egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, -400.0),
+                    modifiers: Default::default(),
+                    phase: egui::TouchPhase::Move,
+                }],
+                &mut query,
+                &mut filter_cache,
+                &mut selection,
+                &mut offset_dialog,
+            );
+        }
+
+        assert!(
+            after.iter().any(|text| text.starts_with("field_")),
+            "rows should still be painted after scrolling down, got {after:?}"
+        );
+        assert_ne!(
+            before
+                .iter()
+                .filter(|t| t.starts_with("field_"))
+                .count(),
+            0,
+            "sanity"
+        );
+    }
+
+    #[test]
     fn browser_culls_rows_outside_the_viewport() {
         let small = synth_model(1, 10, 8);
         let huge = synth_model(4, 250, 12);

@@ -165,7 +165,9 @@ pub fn clamp_to_available_width<R>(
 ) -> R {
     let max_rect = ui.available_rect_before_wrap();
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(max_rect));
-    child.set_clip_rect(ui.clip_rect().intersect(max_rect));
+    let mut clip = ui.clip_rect();
+    clip.max.x = clip.max.x.min(max_rect.max.x);
+    child.set_clip_rect(clip);
     let result = add_contents(&mut child);
     let height = child.min_rect().height();
     ui.allocate_rect(
