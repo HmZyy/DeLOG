@@ -403,7 +403,6 @@ fn plot_controls_respect_global_and_local_scope() {
         "Split vertically",
         "Show legend",
         "Show tooltip",
-        "Field stats",
         "Plot Info",
     ] {
         assert!(
@@ -427,26 +426,37 @@ fn scene_controls_share_one_horizontal_toolbar() {
 }
 
 #[test]
-fn plot_field_stats_is_one_direct_action_for_all_pane_traces() {
+fn field_stats_is_a_global_toolbar_action_not_a_per_plot_one() {
     let context_menu = between(
         WORKSPACE_SOURCE,
         "fn plot_context_menu(",
         "fn plot_info_window(",
     );
-    let stats = between(
-        context_menu,
-        "let fields: Vec<FieldId>",
-        "ui.menu_image_text_button(menu_icon(ui, crate::ui::icons::pencil())",
-    );
 
-    assert!(stats.contains("pane.traces.iter().map(|trace| trace.field).collect"));
-    assert!(stats.contains("Button::image_and_text"));
-    assert!(stats.contains("self.actions.inspect_field_stats = Some(fields)"));
-    assert!(!stats.contains("menu_image_text_button"));
-    assert!(!stats.contains("ui.button(label)"));
+    assert!(
+        !context_menu.contains("Field stats"),
+        "field stats should no longer be offered per plot"
+    );
+    assert!(
+        !WORKSPACE_SOURCE.contains("inspect_field_stats"),
+        "the per-plot field stats action should be gone entirely"
+    );
     assert!(!context_menu.contains("Inspect trace"));
     assert!(!context_menu.contains("self.actions.inspect_trace"));
     assert!(!BROWSER.contains("focus the Inspector"));
+
+    assert!(
+        GLOBAL_TOOLBAR_SOURCE.contains("GlobalPlotControl::OpenFieldStats"),
+        "the global toolbar should offer field stats"
+    );
+    assert!(
+        GLOBAL_TOOLBAR_SOURCE.contains("crate::ui::icons::sigma()"),
+        "the global field stats button should use the sigma icon"
+    );
+    assert!(
+        APP_SOURCE.contains("self.field_stats.open_plotted(self.workspace.unique_fields())"),
+        "the global action should open stats for every plotted trace"
+    );
 }
 
 #[test]

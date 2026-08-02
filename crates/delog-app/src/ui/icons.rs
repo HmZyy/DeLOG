@@ -116,6 +116,10 @@ pub fn clock() -> ImageSource<'static> {
     egui::include_image!("../../assets/icons/clock-3.svg")
 }
 
+pub fn sigma() -> ImageSource<'static> {
+    egui::include_image!("../../assets/icons/sigma.svg")
+}
+
 pub fn ruler() -> ImageSource<'static> {
     egui::include_image!("../../assets/icons/ruler.svg")
 }
