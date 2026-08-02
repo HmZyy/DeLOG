@@ -592,6 +592,9 @@ pub fn ui(
     egui::ScrollArea::vertical()
         .auto_shrink([false, true])
         .show(ui, |ui| {
+            let tokens = crate::ui::design_tokens::DesignTokens::from_style(ui.style());
+            ui.spacing_mut().interact_size.y = tokens.dense_row_height;
+            ui.spacing_mut().item_spacing.y = tokens.dense_row_gap;
             ui.set_width(ui.available_width());
             for visible_source in &view.sources {
                 let source = &model.sources[visible_source.source];
@@ -801,7 +804,7 @@ const TYPE_COL: f32 = 0.11;
 
 fn field_table_header(ui: &mut egui::Ui) {
     egui::Frame::new()
-        .inner_margin(egui::Margin::symmetric(4, 1))
+        .inner_margin(egui::Margin::symmetric(4, 0))
         .show(ui, |ui| {
             let width = (ui.available_width() - ui.spacing().item_spacing.x * 4.0).max(0.0);
             ui.horizontal(|ui| {
@@ -870,9 +873,11 @@ fn field_table_cell(
     width: f32,
     text: impl Into<egui::WidgetText>,
     hover_text: Option<&str>,
-) {
+) -> egui::InnerResponse<()> {
+    let row_height =
+        crate::ui::design_tokens::DesignTokens::from_style(ui.style()).dense_row_height;
     ui.allocate_ui_with_layout(
-        egui::vec2(width, 18.0),
+        egui::vec2(width, row_height),
         egui::Layout::left_to_right(egui::Align::Center),
         |ui| {
             ui.set_min_width(width);
@@ -881,7 +886,7 @@ fn field_table_cell(
                 response.on_hover_text(hover_text);
             }
         },
-    );
+    )
 }
 
 fn cell_hover_text(value: &str) -> Option<&str> {
@@ -917,7 +922,7 @@ fn field_row(
         };
         egui::Frame::new()
             .fill(fill)
-            .inner_margin(egui::Margin::symmetric(4, 1))
+            .inner_margin(egui::Margin::symmetric(4, 0))
             .show(ui, |ui| {
                 add_contents(ui, field, selected);
             });
@@ -1040,6 +1045,18 @@ mod tests {
     use delog_core::store::TopicStore;
 
     use super::*;
+
+    fn find_text_rect(shape: &egui::epaint::Shape, expected: &str) -> Option<egui::Rect> {
+        match shape {
+            egui::epaint::Shape::Text(text) if text.galley.job.text == expected => {
+                Some(text.visual_bounding_rect())
+            }
+            egui::epaint::Shape::Vec(shapes) => shapes
+                .iter()
+                .find_map(|shape| find_text_rect(shape, expected)),
+            _ => None,
+        }
+    }
 
     #[test]
     fn data_browser_toggle_matches_global_toolbar_metrics_and_alignment() {
@@ -1194,6 +1211,69 @@ mod tests {
         assert_eq!(filter_bounds.height(), 30.0);
         assert_eq!(button_bounds.height(), 30.0);
         assert_eq!(center_y(filter_bounds), center_y(button_bounds));
+    }
+
+    #[test]
+    fn field_table_cells_use_the_dense_row_height_token() {
+        let ctx = egui::Context::default();
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let mut cell_height = 0.0;
+
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            cell_height = super::field_table_cell(ui, 120.0, "ATT.Roll", None)
+                .response
+                .rect
+                .height();
+        });
+
+        let tokens = crate::ui::design_tokens::DesignTokens::from_style(&ctx.global_style());
+        assert_eq!(cell_height, tokens.dense_row_height);
+    }
+
+    #[test]
+    fn rendered_browser_field_rows_use_dense_vertical_metrics() {
+        let ctx = egui::Context::default();
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let model = BrowserModel::from_snapshot(&snapshot());
+        let mut query = "a".to_owned();
+        let mut filter_cache = BrowserFilterCache::default();
+        let mut selection = Selection::default();
+        let mut offset_dialog = None;
+
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                super::ui(
+                    ui,
+                    0,
+                    &model,
+                    &mut query,
+                    &mut filter_cache,
+                    &mut selection,
+                    &mut offset_dialog,
+                );
+            },
+        );
+        let text_rect = |expected| {
+            output
+                .shapes
+                .iter()
+                .find_map(|shape| find_text_rect(&shape.shape, expected))
+                .unwrap_or_else(|| panic!("{expected} should be painted"))
+        };
+        let alt = text_rect("Alt");
+        let lat = text_rect("Lat");
+        let tokens = crate::ui::design_tokens::DesignTokens::from_style(&ctx.global_style());
+        let expected_stride = tokens.dense_row_height + tokens.dense_row_gap;
+
+        let actual_stride = (lat.center().y - alt.center().y).round();
+        assert!((actual_stride - expected_stride).abs() <= 1.0);
     }
 
     fn snapshot() -> StoreSnapshot {
