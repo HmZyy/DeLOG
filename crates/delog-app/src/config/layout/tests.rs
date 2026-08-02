@@ -34,6 +34,21 @@ fn load_app_settings_defaults_when_file_missing() {
 }
 
 #[test]
+fn fallible_layout_listing_distinguishes_an_empty_scan_from_an_io_failure() {
+    let temp = tempfile::tempdir().expect("temporary layout root");
+    let empty = temp.path().join("empty");
+
+    assert_eq!(list_layouts_in(&empty).unwrap(), Vec::<String>::new());
+
+    let not_a_directory = temp.path().join("not-a-directory");
+    fs::write(&not_a_directory, "file where a directory is required").unwrap();
+    assert!(matches!(
+        list_layouts_in(&not_a_directory),
+        Err(LayoutError::Io(_))
+    ));
+}
+
+#[test]
 fn sanitize_layout_name_blocks_paths() {
     assert_eq!(sanitize_name("../bad/name"), "bad_name");
     assert_eq!(sanitize_name(""), "default");

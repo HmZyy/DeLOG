@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use delog_core::identity::FieldId;
 use delog_core::snapshot::StoreSnapshot;
 
-use crate::plotting::plot::{PlotPane, TraceMode, TraceRef};
 use crate::config::settings::LegendPosition;
+use crate::plotting::plot::{PlotPane, TraceMode, TraceRef};
 use egui_tiles::TileId;
 
 pub fn with_bg_opacity(color: egui::Color32, opacity: f32) -> egui::Color32 {
@@ -112,6 +112,12 @@ fn legend_can_show_color_picker(available_width: f32, interact_width: f32, spaci
     available_width.max(0.0) >= interact_width.max(0.0) + spacing.max(0.0)
 }
 
+fn apply_legend_row_metrics(ui: &mut egui::Ui) {
+    let tokens = crate::ui::design_tokens::DesignTokens::from_style(ui.style());
+    ui.spacing_mut().interact_size.y = tokens.dense_row_height;
+    ui.spacing_mut().item_spacing.y = tokens.dense_row_gap;
+}
+
 fn legend_anchor(position: LegendPosition, bounds: egui::Rect) -> (egui::Pos2, egui::Align2) {
     match position {
         LegendPosition::TopLeft => (bounds.left_top(), egui::Align2::LEFT_TOP),
@@ -193,8 +199,10 @@ pub fn ui(
                         content_max_size.y.min(64.0).max(MIN_LEGEND_CONTENT_EXTENT),
                     )
                     .show(ui, |ui| {
+                        apply_legend_row_metrics(ui);
                         for (field, label) in labels {
-                            let is_text = crate::plotting::text_overlay::field_is_string(snapshot, *field);
+                            let is_text =
+                                crate::plotting::text_overlay::field_is_string(snapshot, *field);
                             let mut filter = if is_text {
                                 pane.text_filters.get(field).cloned().unwrap_or_default()
                             } else {
@@ -319,7 +327,9 @@ pub fn ui(
                                     filter_edits.push((*field, filter.clone()));
                                 }
                                 resp.context_menu(|ui| {
+                                    crate::ui::components::dense_rows(ui);
                                     ui.menu_button("Mode", |ui| {
+                                        crate::ui::components::dense_rows(ui);
                                         for mode in TraceMode::ALL {
                                             ui.radio_value(&mut trace.mode, mode, mode.label());
                                         }
@@ -374,6 +384,7 @@ pub fn ui(
                                     )
                                     .inner;
                                 resp.context_menu(|ui| {
+                                    crate::ui::components::dense_rows(ui);
                                     if ui.button("Remove").clicked() {
                                         removed_ghost = Some(index);
                                         ui.close();
@@ -480,6 +491,25 @@ mod tests {
         assert!(legend_can_show_color_picker(32.0, 24.0, 4.0));
         assert!(!legend_can_show_color_picker(26.0, 24.0, 4.0));
         assert!(!legend_can_show_color_picker(-1.0, 24.0, 4.0));
+    }
+
+    #[test]
+    fn legend_row_metrics_use_the_dense_row_height_token() {
+        let ctx = egui::Context::default();
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let mut actual = egui::Vec2::ZERO;
+
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            super::apply_legend_row_metrics(ui);
+            actual = egui::vec2(
+                ui.spacing().interact_size.y,
+                ui.spacing().item_spacing.y,
+            );
+        });
+
+        let tokens = crate::ui::design_tokens::DesignTokens::from_style(&ctx.global_style());
+        assert_eq!(actual.x, tokens.dense_row_height);
+        assert_eq!(actual.y, tokens.dense_row_gap);
     }
 
     #[test]

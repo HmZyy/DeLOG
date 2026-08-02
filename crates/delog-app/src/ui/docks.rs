@@ -62,6 +62,14 @@ impl AppDockController {
         }
     }
 
+    pub fn toggle(&mut self, tab: AppDockTab) {
+        if self.is_open(tab) {
+            self.close(tab);
+        } else {
+            self.open_or_focus(tab);
+        }
+    }
+
     pub fn is_open(&self, tab: AppDockTab) -> bool {
         self.state.find_tab(&tab).is_some()
     }
@@ -97,7 +105,7 @@ impl AppDockController {
     ) {
         egui_dock::DockArea::new(&mut self.state)
             .id(egui::Id::new("app_dock_area"))
-            .style(egui_dock::Style::from_egui(ui.style().as_ref()))
+            .style(dock_style(ui.style().as_ref()))
             .allowed_splits(egui_dock::AllowedSplits::None)
             .draggable_tabs(false)
             .tab_context_menus(false)
@@ -140,6 +148,13 @@ impl AppDockController {
     }
 }
 
+pub fn dock_style(style: &egui::Style) -> egui_dock::Style {
+    let mut dock = egui_dock::Style::from_egui(style);
+    dock.tab.tab_body.corner_radius.nw = 0;
+    dock.tab.tab_body.corner_radius.ne = 0;
+    dock
+}
+
 fn ordered_tabs(tabs: Vec<AppDockTab>) -> Vec<AppDockTab> {
     FIXED_ORDER
         .iter()
@@ -151,6 +166,30 @@ fn ordered_tabs(tabs: Vec<AppDockTab>) -> Vec<AppDockTab> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dock_style_squares_tab_body_top_corners() {
+        let mut style = egui::Style::default();
+        style.visuals.widgets.active.corner_radius = egui::CornerRadius::same(6);
+
+        let dock = dock_style(&style);
+
+        assert_eq!(dock.tab.tab_body.corner_radius.nw, 0);
+        assert_eq!(dock.tab.tab_body.corner_radius.ne, 0);
+        assert_eq!(dock.tab.tab_body.corner_radius.sw, 6);
+        assert_eq!(dock.tab.tab_body.corner_radius.se, 6);
+    }
+
+    #[test]
+    fn dock_style_keeps_rounded_tab_tops() {
+        let mut style = egui::Style::default();
+        style.visuals.widgets.active.corner_radius = egui::CornerRadius::same(6);
+
+        let dock = dock_style(&style);
+
+        assert_eq!(dock.tab.active.corner_radius.nw, 6);
+        assert_eq!(dock.tab.active.corner_radius.ne, 6);
+    }
 
     #[test]
     fn starts_empty() {
@@ -175,6 +214,19 @@ mod tests {
         docks.open_or_focus(AppDockTab::Logging);
         assert_eq!(docks.tab_count(), 1);
         assert_eq!(docks.active_tab(), Some(AppDockTab::Logging));
+    }
+
+    #[test]
+    fn toggle_closes_an_open_tab_while_open_or_focus_keeps_it_open() {
+        let mut docks = AppDockController::new_empty();
+        docks.open_or_focus(AppDockTab::Diagnostics);
+        docks.toggle(AppDockTab::Diagnostics);
+        assert!(!docks.is_open(AppDockTab::Diagnostics));
+
+        docks.open_or_focus(AppDockTab::Diagnostics);
+        docks.open_or_focus(AppDockTab::Diagnostics);
+        assert!(docks.is_open(AppDockTab::Diagnostics));
+        assert_eq!(docks.tab_count(), 1);
     }
 
     #[test]

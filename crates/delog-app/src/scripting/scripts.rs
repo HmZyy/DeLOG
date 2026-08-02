@@ -329,7 +329,11 @@ impl ScriptsPanel {
 
     /// Read fresh from disk so newly-saved scripts appear without restarting.
     pub fn script_names(&self) -> Vec<String> {
-        self.library.list().unwrap_or_default()
+        self.try_script_names().unwrap_or_default()
+    }
+
+    pub fn try_script_names(&self) -> std::io::Result<Vec<String>> {
+        self.library.list()
     }
 
     pub fn run_named(
@@ -1113,38 +1117,36 @@ impl ScriptsPanel {
             ui.weak("No saved scripts.");
             return;
         }
-        egui::ScrollArea::vertical()
+        let selected = self.editing_original_name.clone();
+        let event = egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                for name in names {
-                    ui.horizontal(|ui| {
-                        let selected = self.editing_original_name.as_deref() == Some(name.as_str());
-                        if ui
-                            .selectable_label(selected, name.as_str())
-                            .on_hover_text("Load script")
-                            .clicked()
-                        {
-                            self.edit_named(&name);
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.menu_button("...", |ui| {
-                                if ui.button("Edit").clicked() {
-                                    self.edit_named(&name);
-                                    ui.close();
-                                }
-                                if ui.button("Duplicate").clicked() {
-                                    self.duplicate_script(&name);
-                                    ui.close();
-                                }
-                                if ui.button("Remove").clicked() {
-                                    self.request_delete(&name);
-                                    ui.close();
-                                }
-                            });
-                        });
-                    });
+                crate::ui::components::library_tree(
+                    ui,
+                    egui::Id::new("scripts_library_tree"),
+                    &names,
+                    selected.as_deref(),
+                    &[
+                        crate::ui::components::LibraryAction::Edit,
+                        crate::ui::components::LibraryAction::Duplicate,
+                        crate::ui::components::LibraryAction::Remove,
+                    ],
+                    "Load script",
+                )
+            })
+            .inner;
+        if let Some(event) = event {
+            match event.action {
+                crate::ui::components::LibraryAction::Load
+                | crate::ui::components::LibraryAction::Edit => self.edit_named(&event.name),
+                crate::ui::components::LibraryAction::Duplicate => {
+                    self.duplicate_script(&event.name);
                 }
-            });
+                crate::ui::components::LibraryAction::Remove => {
+                    self.request_delete(&event.name);
+                }
+            }
+        }
     }
 }
 
@@ -1643,6 +1645,27 @@ mod tests {
         assert_eq!(panel.take_parser_diagnostics().len(), 1);
 
         std::fs::remove_file(root).unwrap();
+    }
+
+    #[test]
+    fn script_names_propagates_library_errors_instead_of_reporting_an_empty_scan() {
+        let temp = tempfile::tempdir().expect("temporary script root");
+        let empty_panel = ScriptsPanel::new(
+            temp.path().join("empty-scripts"),
+            temp.path().join("empty-parsers"),
+            temp.path().join("empty-params.json"),
+        );
+        assert_eq!(empty_panel.try_script_names().unwrap(), Vec::<String>::new());
+
+        let not_a_directory = temp.path().join("not-a-directory");
+        std::fs::write(&not_a_directory, "file where a directory is required").unwrap();
+        let panel = ScriptsPanel::new(
+            not_a_directory,
+            temp.path().join("parsers"),
+            temp.path().join("params.json"),
+        );
+
+        assert!(panel.try_script_names().is_err());
     }
 
     #[test]

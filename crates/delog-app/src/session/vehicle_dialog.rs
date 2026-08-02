@@ -853,7 +853,7 @@ pub fn show(
             let mut viewer = VehicleDialogTabViewer { state, snapshot };
             egui_dock::DockArea::new(&mut dock_state)
                 .id(egui::Id::new("vehicle_dialog_dock_area"))
-                .style(egui_dock::Style::from_egui(ui.style().as_ref()))
+                .style(crate::ui::docks::dock_style(ui.style().as_ref()))
                 .allowed_splits(egui_dock::AllowedSplits::None)
                 .draggable_tabs(false)
                 .tab_context_menus(false)

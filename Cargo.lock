@@ -1002,6 +1002,7 @@ dependencies = [
  "egui_dock",
  "egui_extras",
  "egui_graph",
+ "egui_ltreeview",
  "egui_tiles",
  "glam",
  "image",
@@ -1372,6 +1373,15 @@ dependencies = [
 [[package]]
 name = "egui_graph"
 version = "0.16.2"
+dependencies = [
+ "egui",
+]
+
+[[package]]
+name = "egui_ltreeview"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0965f8d97626fed9ce7e533feeb956a5c720bd83ff59266badf7073831fc22bf"
 dependencies = [
  "egui",
 ]

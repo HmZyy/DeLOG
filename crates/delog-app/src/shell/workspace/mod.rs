@@ -21,8 +21,16 @@ use crate::map::provider::{MapProviderId, provider};
 use crate::map::worker::{MapScopeId, TileFailureClass, TileManager, TileRequest};
 use crate::plotting::plot::{GhostTrace, PlotPane, TraceMode, TraceRef, ViewX, draw_zoom_drag_overlay};
 use crate::scene3d::vehicle;
+use crate::ui::components;
 
 pub type TileTree = egui_tiles::Tree<Pane>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InspectorTrace {
+    pub field: FieldId,
+    pub label: String,
+    pub color: egui::Color32,
+}
 
 #[derive(Debug)]
 pub enum Pane {
@@ -166,15 +174,95 @@ impl Workspace {
     }
 
     pub fn focused_first_field(&self) -> Option<FieldId> {
-        let tile_id = self.focused?;
+        let tile_id = self.focused_plot_id()?;
         match self.tree.tiles.get(tile_id) {
             Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) => pane.traces.first().map(|t| t.field),
             _ => None,
         }
     }
 
+    pub fn focused_plot_id(&self) -> Option<egui_tiles::TileId> {
+        self.focused.filter(|&tile_id| {
+            matches!(
+                self.tree.tiles.get(tile_id),
+                Some(egui_tiles::Tile::Pane(Pane::Plot(_)))
+            )
+        })
+    }
+
+    pub fn repair_focus(&mut self) {
+        let Some(focused) = self.focused else {
+            return;
+        };
+        if self.tree.tiles.get(focused).is_some() {
+            return;
+        }
+        self.focused = self.deterministic_plot_fallback();
+    }
+
+    fn deterministic_plot_fallback(&self) -> Option<egui_tiles::TileId> {
+        self.tree
+            .tiles
+            .iter()
+            .filter_map(|(tile_id, tile)| {
+                matches!(tile, egui_tiles::Tile::Pane(Pane::Plot(_))).then_some(*tile_id)
+            })
+            .min_by_key(|tile_id| tile_id.0)
+    }
+
+    #[cfg(test)]
+    pub fn focused_fields(&self) -> Vec<FieldId> {
+        let Some(tile_id) = self.focused_plot_id() else {
+            return Vec::new();
+        };
+        match self.tree.tiles.get(tile_id) {
+            Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) => pane.fields().collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    pub fn inspector_traces(&self, snapshot: &StoreSnapshot) -> Vec<InspectorTrace> {
+        fn visit(
+            workspace: &Workspace,
+            snapshot: &StoreSnapshot,
+            tile_id: egui_tiles::TileId,
+            traces: &mut Vec<InspectorTrace>,
+        ) {
+            match workspace.tree.tiles.get(tile_id) {
+                Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) => {
+                    traces.extend(pane.visible_traces().map(|trace| {
+                        let canonical = legend::trace_label(snapshot, trace.field);
+                        InspectorTrace {
+                            field: trace.field,
+                            label: trace.display_label(&canonical).to_owned(),
+                            color: trace.color32(),
+                        }
+                    }));
+                }
+                Some(egui_tiles::Tile::Pane(Pane::Scene3D(_))) | None => {}
+                Some(egui_tiles::Tile::Container(container)) => {
+                    let children = container.children_vec();
+                    for child in children {
+                        visit(workspace, snapshot, child, traces);
+                    }
+                }
+            }
+        }
+
+        let mut traces = Vec::new();
+        if let Some(root) = self.tree.root() {
+            visit(self, snapshot, root, &mut traces);
+        }
+        traces
+    }
+
     pub fn fields(&self) -> impl Iterator<Item = FieldId> + '_ {
         self.plot_panes().flat_map(PlotPane::fields)
+    }
+
+    pub fn unique_fields(&self) -> Vec<FieldId> {
+        let mut seen = std::collections::HashSet::new();
+        self.fields().filter(|field| seen.insert(*field)).collect()
     }
 
     pub fn map_scopes(&self) -> Vec<MapScopeId> {
@@ -364,11 +452,14 @@ impl Workspace {
 
     pub fn toggle_scene_pane(&mut self) {
         if let Some(id) = self.scene_pane_id() {
+            let previous_focus = self.focused;
             let closing_root = self.tree.root() == Some(id);
             self.tree.remove_recursively(id);
             if closing_root || self.tree.tiles.tiles().next().is_none() {
                 *self = Self::new();
+                self.focused = previous_focus;
             }
+            self.repair_focus();
             return;
         }
         let pane = self
@@ -484,11 +575,14 @@ impl Workspace {
     }
 
     pub fn close_plot(&mut self, tile_id: egui_tiles::TileId) -> Vec<FieldId> {
+        let previous_focus = self.focused;
         let closing_root = self.tree.root() == Some(tile_id);
         let removed = self.tree.remove_recursively(tile_id);
         if closing_root || self.plot_panes().next().is_none() {
             *self = Self::new();
+            self.focused = previous_focus;
         }
+        self.repair_focus();
         removed
             .into_iter()
             .flat_map(fields_from_removed_tile)
@@ -553,7 +647,6 @@ pub struct WorkspaceActions {
     pub view_changed: bool,
     pub open_vehicle_config: bool,
     pub export_kml: bool,
-    pub inspect_field_stats: Option<Vec<FieldId>>,
     /// Widest Y gutter any pane needed; fed into `Workspace::shared_y_gutter`.
     pub max_y_gutter: f32,
 }
@@ -575,7 +668,6 @@ pub struct PlotServices<'a> {
     pub marker_us: &'a mut Option<i64>,
     pub render_tuning: crate::config::settings::RenderTuning,
     pub scene3d: crate::config::settings::Scene3dSettings,
-    pub accent: egui::Color32,
     /// Playhead cursor time; `None` before any data loads.
     pub playhead_us: Option<i64>,
     pub playing: bool,
@@ -925,7 +1017,7 @@ impl Behavior<'_> {
             scene_map_status(ui, rect, message.as_deref());
         }
 
-        let overlay = scene_overlay_buttons(ui, rect, pane.trail_to_playhead, self.services.accent);
+        let overlay = scene_overlay_buttons(ui, rect, pane.trail_to_playhead);
         if overlay.vehicle_config {
             self.actions.open_vehicle_config = true;
         }
@@ -1039,10 +1131,10 @@ impl Behavior<'_> {
             self.actions.max_y_gutter = self.actions.max_y_gutter.max(own_gutter);
             self.handle_plot_interaction(&response, plot_rect);
             self.handle_zoom_drag(&response, plot_rect, pane);
+            let x_range = (*self.services.view)
+                .map(|view| view.seconds(self.services.origin_us))
+                .unwrap_or((0.0, 1.0));
             if plot_rect.width() > 8.0 {
-                let x_range = (*self.services.view)
-                    .map(|v| v.seconds(self.services.origin_us))
-                    .unwrap_or((0.0, 1.0));
                 axes::draw(ui, plot_rect, x_range, y_range, None);
             }
             self.plot_context_menu(tile_id, &response, pane);
@@ -1283,7 +1375,7 @@ impl Behavior<'_> {
                 self.actions.scrub_to = Some(target);
             }
 
-            hover::draw(
+            let _ = hover::draw(
                 ui,
                 HoverTarget {
                     id: egui::Id::new(("plot_hover", tile_id)),
@@ -1357,6 +1449,7 @@ impl Behavior<'_> {
         pane: &mut PlotPane,
     ) {
         response.context_menu(|ui| {
+            crate::ui::components::dense_rows(ui);
             if ui
                 .add(egui::Button::image_and_text(
                     menu_icon(ui, crate::ui::icons::trash()),
@@ -1373,6 +1466,7 @@ impl Behavior<'_> {
             }
 
             ui.menu_image_text_button(menu_icon(ui, crate::ui::icons::ban()), "Remove trace", |ui| {
+                crate::ui::components::dense_rows(ui);
                 let entries: Vec<_> = pane
                     .traces
                     .iter()
@@ -1427,22 +1521,8 @@ impl Behavior<'_> {
                 }
             });
 
-            let fields: Vec<FieldId> = pane.traces.iter().map(|trace| trace.field).collect();
-            let stats_info = egui::Image::new(crate::ui::icons::info())
-                .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
-                .tint(ui.visuals().text_color());
-            if ui
-                .add_enabled(
-                    !fields.is_empty(),
-                    egui::Button::image_and_text(stats_info, "Field stats"),
-                )
-                .clicked()
-            {
-                self.actions.inspect_field_stats = Some(fields);
-                ui.close();
-            }
-
             ui.menu_image_text_button(menu_icon(ui, crate::ui::icons::pencil()), "Edit trace", |ui| {
+                crate::ui::components::dense_rows(ui);
                 let entries: Vec<_> = pane
                     .traces
                     .iter()
@@ -1468,6 +1548,7 @@ impl Behavior<'_> {
                         continue;
                     };
                     ui.menu_button(label, |ui| {
+                        crate::ui::components::dense_rows(ui);
                         ui.horizontal(|ui| {
                             let mut color = color;
                             if egui::color_picker::color_edit_button_srgba(
@@ -1496,6 +1577,7 @@ impl Behavior<'_> {
                         continue;
                     };
                     ui.menu_button(label, |ui| {
+                        crate::ui::components::dense_rows(ui);
                         ui.horizontal(|ui| {
                             let mut color = ghost.color32();
                             if egui::color_picker::color_edit_button_srgba(
@@ -1573,6 +1655,7 @@ impl Behavior<'_> {
 
             ui.separator();
 
+            ui.checkbox(&mut pane.show_legend, "Show legend");
             ui.checkbox(&mut pane.show_tooltip, "Show tooltip");
 
             if ui
@@ -2150,44 +2233,38 @@ fn scene_overlay_buttons(
     ui: &mut egui::Ui,
     scene_rect: egui::Rect,
     trail_to_playhead: bool,
-    accent: egui::Color32,
 ) -> SceneOverlayClicks {
     let id = ui.make_persistent_id("scene-overlay-buttons");
     let mut clicks = SceneOverlayClicks::default();
     egui::Area::new(id)
         .order(egui::Order::Foreground)
-        .fixed_pos(scene_rect.right_top() + egui::vec2(-36.0, 8.0))
+        .fixed_pos(scene_rect.right_top() + egui::vec2(-8.0, 8.0))
+        .pivot(egui::Align2::RIGHT_TOP)
         .show(ui.ctx(), |ui| {
-            ui.vertical(|ui| {
-                let gear = egui::Image::new(crate::ui::icons::gear())
-                    .fit_to_exact_size(egui::vec2(18.0, 18.0))
-                    .tint(ui.visuals().weak_text_color());
-                clicks.vehicle_config = ui
-                    .add_sized(egui::vec2(28.0, 24.0), egui::Button::image(gear))
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    clicks.vehicle_config = components::icon_button(
+                        ui,
+                        crate::ui::icons::gear(),
+                        "Configure vehicles",
+                        false,
+                    )
                     .clicked();
-
-                // Route toggle: accent when the path is clipped to the playhead,
-                // dimmed when the full path is shown (mirrors the toolbar's
-                // active/inactive icon-tint convention).
-                let route_tint = if trail_to_playhead {
-                    accent
-                } else {
-                    ui.visuals().weak_text_color()
-                };
-                let route = egui::Image::new(crate::ui::icons::route())
-                    .fit_to_exact_size(egui::vec2(18.0, 18.0))
-                    .tint(route_tint);
-                clicks.toggle_trail = ui
-                    .add_sized(egui::vec2(28.0, 24.0), egui::Button::image(route))
+                    clicks.toggle_trail = components::icon_button(
+                        ui,
+                        crate::ui::icons::route(),
+                        "Clip trails to playhead",
+                        trail_to_playhead,
+                    )
                     .clicked();
-
-                let earth = egui::Image::new(crate::ui::icons::earth())
-                    .fit_to_exact_size(egui::vec2(18.0, 18.0))
-                    .tint(ui.visuals().weak_text_color());
-                clicks.export_kml = ui
-                    .add_sized(egui::vec2(28.0, 24.0), egui::Button::image(earth))
-                    .on_hover_text("Export trajectories to KML")
+                    clicks.export_kml = components::icon_button(
+                        ui,
+                        crate::ui::icons::earth(),
+                        "Export trajectories to KML",
+                        false,
+                    )
                     .clicked();
+                });
             });
         });
     clicks

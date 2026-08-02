@@ -203,16 +203,7 @@ impl ThemeChoice {
                 }
             },
         }
-    }
-
-    pub const fn accent(self) -> egui::Color32 {
-        match self.palette() {
-            Some(p) => p.accent,
-            None => match self {
-                Self::Light => egui::Color32::from_rgb(30, 102, 245),
-                _ => egui::Color32::from_rgb(90, 170, 255),
-            },
-        }
+        crate::ui::design_tokens::apply_design_metrics(ctx);
     }
 
     pub const fn success(self) -> egui::Color32 {

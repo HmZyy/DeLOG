@@ -8,6 +8,99 @@ fn workspace_starts_with_one_plot_pane() {
 }
 
 #[test]
+fn focused_fields_preserve_the_focused_plot_trace_order() {
+    let mut workspace = Workspace::new();
+    let pane = workspace.tree.root().unwrap();
+    workspace.add_trace_to_first_plot(FieldId(7));
+    workspace.add_trace_to_first_plot(FieldId(3));
+    workspace.focused = Some(pane);
+
+    assert_eq!(workspace.focused_fields(), vec![FieldId(7), FieldId(3)]);
+}
+
+#[test]
+fn unique_fields_dedupes_traces_shared_between_plots() {
+    let mut workspace = Workspace::new();
+    let first = workspace.tree.root().unwrap();
+    workspace.add_trace_to_first_plot(FieldId(7));
+    workspace.add_trace_to_first_plot(FieldId(3));
+    workspace.split_plot(first, SplitDirection::Horizontal);
+
+    let second = workspace
+        .tree
+        .tiles
+        .iter()
+        .filter(|(id, tile)| {
+            **id != first && matches!(tile, egui_tiles::Tile::Pane(Pane::Plot(_)))
+        })
+        .map(|(id, _)| *id)
+        .next()
+        .expect("the split should have produced a second plot");
+    let Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) = workspace.tree.tiles.get_mut(second) else {
+        panic!("expected a plot pane");
+    };
+    pane.add_trace(FieldId(3));
+    pane.add_trace(FieldId(9));
+
+    let unique = workspace.unique_fields();
+    let mut sorted = unique.clone();
+    sorted.sort_by_key(|field| field.0);
+    assert_eq!(
+        sorted,
+        vec![FieldId(3), FieldId(7), FieldId(9)],
+        "every plotted trace should be present"
+    );
+    assert_eq!(
+        unique.len(),
+        3,
+        "a trace plotted in two panes should appear once, got {unique:?}"
+    );
+}
+
+#[test]
+fn plot_context_menu_keeps_every_existing_action() {
+    let source = include_str!("mod.rs");
+    for label in [
+        "Clear all traces",
+        "Remove trace",
+        "Edit trace",
+        "Copy Image",
+        "Export PNG...",
+        "Split horizontally",
+        "Split vertically",
+        "Show legend",
+        "Show tooltip",
+        "Plot Info",
+        "Close",
+    ] {
+        assert!(source.contains(label), "missing plot action: {label}");
+    }
+    assert!(
+        !source.contains("Field stats"),
+        "field stats moved to the global toolbar"
+    );
+}
+
+#[test]
+fn data_browser_and_legend_keep_contextual_actions() {
+    let browser = include_str!("../../plotting/browser.rs");
+    for label in [
+        "Source metadata",
+        "Remove source",
+        "Set exact offset (us)",
+        "Field metadata",
+        "Field stats",
+        "Generate markers",
+    ] {
+        assert!(browser.contains(label), "missing browser action: {label}");
+    }
+    let legend = include_str!("../../plotting/legend.rs");
+    for label in ["Mode", "Rename", "Remove"] {
+        assert!(legend.contains(label), "missing legend action: {label}");
+    }
+}
+
+#[test]
 fn workspace_image_actions_carry_plot_rects() {
     let rect = egui::Rect::from_min_size(egui::pos2(4.0, 8.0), egui::vec2(120.0, 80.0));
 
@@ -183,6 +276,79 @@ fn scene_pane_toggles_a_single_instance_on_and_off() {
     workspace.toggle_scene_pane();
     assert_eq!(scene_count(&workspace), 1);
     assert_ne!(workspace.scene_pane_id(), Some(id));
+}
+
+#[test]
+fn closing_the_focused_plot_reassigns_focus_to_the_surviving_plot() {
+    let mut workspace = Workspace::new();
+    let closing = workspace.tree.root().unwrap();
+    workspace.split_plot(closing, SplitDirection::Horizontal);
+    let surviving = workspace
+        .tree
+        .tiles
+        .iter()
+        .find_map(|(id, tile)| {
+            (*id != closing && matches!(tile, egui_tiles::Tile::Pane(Pane::Plot(_))))
+                .then_some(*id)
+        })
+        .expect("split should create a surviving plot");
+    workspace.focused = Some(closing);
+
+    workspace.close_plot(closing);
+
+    assert_eq!(workspace.focused, Some(surviving));
+}
+
+#[test]
+fn focus_repair_chooses_the_lowest_surviving_plot_id() {
+    let mut workspace = Workspace::new();
+    let closing = workspace.tree.root().unwrap();
+    workspace.split_plot(closing, SplitDirection::Horizontal);
+    workspace.split_plot(closing, SplitDirection::Horizontal);
+    let expected = workspace
+        .tree
+        .tiles
+        .iter()
+        .filter_map(|(id, tile)| {
+            (*id != closing && matches!(tile, egui_tiles::Tile::Pane(Pane::Plot(_))))
+                .then_some(*id)
+        })
+        .min_by_key(|id| id.0)
+        .expect("two plots should survive");
+    workspace.focused = Some(closing);
+    workspace.tree.remove_recursively(closing);
+    assert_eq!(workspace.deterministic_plot_fallback(), Some(expected));
+
+    workspace.repair_focus();
+
+    assert_eq!(workspace.focused, Some(expected));
+}
+
+#[test]
+fn closing_the_focused_scene_reassigns_focus_to_the_surviving_plot() {
+    let mut workspace = Workspace::new();
+    let plot = workspace.tree.root().unwrap();
+    workspace.toggle_scene_pane();
+    let scene = workspace.scene_pane_id().expect("scene should be open");
+    assert_eq!(workspace.focused, Some(scene));
+
+    workspace.toggle_scene_pane();
+
+    assert_eq!(workspace.focused, Some(plot));
+}
+
+#[test]
+fn inspector_fallback_accepts_only_an_existing_focused_plot() {
+    let mut workspace = Workspace::new();
+    let plot = workspace.tree.root().unwrap();
+    workspace.focused = Some(plot);
+    assert_eq!(workspace.focused_plot_id(), Some(plot));
+
+    workspace.toggle_scene_pane();
+    assert!(workspace.focused_plot_id().is_none());
+
+    workspace.focused = Some(egui_tiles::TileId::from_u64(u64::MAX));
+    assert!(workspace.focused_plot_id().is_none());
 }
 
 #[test]
@@ -745,6 +911,69 @@ fn trace_of(ws: &Workspace, tile: egui_tiles::TileId, field: FieldId) -> Option<
         }
         _ => None,
     }
+}
+
+#[test]
+fn inspector_flattens_visible_trace_instances_in_layout_order() {
+    let mut identity = delog_core::identity::IdentityRegistry::new();
+    let source = identity.add_source("flight");
+    let topic = identity.add_topic(source, "ATT").unwrap();
+    let roll = identity.add_field(topic, "Roll").unwrap();
+    let pitch = identity.add_field(topic, "Pitch").unwrap();
+    let snapshot = delog_core::snapshot::StoreSnapshot::from_registry(&identity, [], 0).unwrap();
+    let mut workspace = Workspace::new();
+    let first = workspace.tree.root().unwrap();
+    seed_trace(
+        &mut workspace,
+        first,
+        TraceRef {
+            field: roll,
+            color: [1.0, 0.0, 0.0, 1.0],
+            width_px: 1.5,
+            mode: TraceMode::Line,
+            visible: true,
+            label_override: Some("Bank".to_owned()),
+        },
+    );
+    seed_trace(
+        &mut workspace,
+        first,
+        TraceRef {
+            field: pitch,
+            color: [0.0, 1.0, 0.0, 1.0],
+            width_px: 1.5,
+            mode: TraceMode::Line,
+            visible: false,
+            label_override: None,
+        },
+    );
+    workspace.split_plot(first, SplitDirection::Horizontal);
+    let second = plot_tile_ids(&workspace)
+        .into_iter()
+        .find(|tile| *tile != first)
+        .unwrap();
+    seed_trace(
+        &mut workspace,
+        second,
+        TraceRef {
+            field: roll,
+            color: [0.0, 0.0, 1.0, 1.0],
+            width_px: 1.5,
+            mode: TraceMode::Line,
+            visible: true,
+            label_override: None,
+        },
+    );
+
+    let traces = workspace.inspector_traces(&snapshot);
+
+    assert_eq!(traces.len(), 2);
+    assert_eq!(traces[0].field, roll);
+    assert_eq!(traces[0].label, "Bank");
+    assert_eq!(traces[0].color, egui::Color32::RED);
+    assert_eq!(traces[1].field, roll);
+    assert_eq!(traces[1].label, "ATT.Roll");
+    assert_eq!(traces[1].color, egui::Color32::BLUE);
 }
 
 #[test]
