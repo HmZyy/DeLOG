@@ -62,6 +62,7 @@ pub struct FieldStatsController {
     tx: mpsc::Sender<WorkerBatch>,
     rx: mpsc::Receiver<WorkerBatch>,
     last_launch: Option<Instant>,
+    tracking_plots: bool,
 }
 
 impl Default for FieldStatsController {
@@ -79,6 +80,7 @@ impl Default for FieldStatsController {
             tx,
             rx,
             last_launch: None,
+            tracking_plots: false,
         }
     }
 }
@@ -86,6 +88,27 @@ impl Default for FieldStatsController {
 impl FieldStatsController {
     pub fn open(&mut self, field: FieldId) {
         self.open_fields(vec![field]);
+        self.tracking_plots = false;
+    }
+
+    pub fn open_plotted(&mut self, fields: Vec<FieldId>) {
+        self.open_fields(fields);
+        self.tracking_plots = true;
+    }
+
+    pub fn is_tracking_plots(&self) -> bool {
+        self.tracking_plots
+    }
+
+    pub fn sync_plotted(&mut self, fields: Vec<FieldId>) {
+        if !self.tracking_plots || self.fields == fields {
+            return;
+        }
+        self.fields = fields;
+        self.current.clear();
+        self.pending = None;
+        self.displayed.retain(|field, _| self.fields.contains(field));
+        self.errors.retain(|field, _| self.fields.contains(field));
     }
 
     pub fn open_fields(&mut self, fields: Vec<FieldId>) {
@@ -272,6 +295,42 @@ impl FieldStatsController {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opening_from_a_plot_tracks_later_trace_changes() {
+        let mut controller = FieldStatsController::default();
+        controller.open_plotted(vec![FieldId(1), FieldId(2)]);
+        assert!(controller.is_tracking_plots());
+        assert_eq!(controller.fields(), &[FieldId(1), FieldId(2)]);
+
+        controller.sync_plotted(vec![FieldId(1), FieldId(2), FieldId(5)]);
+        assert_eq!(
+            controller.fields(),
+            &[FieldId(1), FieldId(2), FieldId(5)],
+            "a newly plotted trace should join the stats view"
+        );
+
+        controller.sync_plotted(vec![FieldId(5)]);
+        assert_eq!(
+            controller.fields(),
+            &[FieldId(5)],
+            "removing a trace from every plot should drop it from the stats view"
+        );
+    }
+
+    #[test]
+    fn opening_a_single_field_does_not_track_the_plots() {
+        let mut controller = FieldStatsController::default();
+        controller.open(FieldId(9));
+        assert!(!controller.is_tracking_plots());
+
+        controller.sync_plotted(vec![FieldId(1), FieldId(2)]);
+        assert_eq!(
+            controller.fields(),
+            &[FieldId(9)],
+            "a browser-opened field should stay put when plots change"
+        );
+    }
 
     #[test]
     fn open_captures_fields_in_order_and_resets_to_visible_tab() {

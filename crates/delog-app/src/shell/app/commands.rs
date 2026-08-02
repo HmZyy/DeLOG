@@ -40,6 +40,7 @@ pub enum CommandId {
     AddMeasuringMarker,
     CycleLegendPosition,
     ToggleLegends,
+    OpenFieldStats,
     OpenSettings,
     Exit,
     TogglePlayback,
@@ -153,6 +154,7 @@ pub struct CommandContext {
     pub live_link_count: usize,
     pub has_active_tasks: bool,
     pub scripting_enabled: bool,
+    pub has_plotted_traces: bool,
 }
 
 impl CommandContext {
@@ -163,6 +165,7 @@ impl CommandContext {
         native_tasks_active: bool,
         parser_task_active: bool,
         scripting_enabled: bool,
+        has_plotted_traces: bool,
     ) -> Self {
         Self {
             has_data,
@@ -170,6 +173,7 @@ impl CommandContext {
             live_link_count,
             has_active_tasks: native_tasks_active || parser_task_active,
             scripting_enabled,
+            has_plotted_traces,
         }
     }
 }
@@ -294,6 +298,7 @@ impl CommandId {
         Self::AddMeasuringMarker,
         Self::CycleLegendPosition,
         Self::ToggleLegends,
+        Self::OpenFieldStats,
         Self::OpenSettings,
         Self::Exit,
         Self::TogglePlayback,
@@ -575,6 +580,9 @@ impl CommandId {
                 "plot key visibility",
                 Palette
             ),
+            OpenFieldStats => {
+                spec!("Field stats", Workspace, None, "statistics traces", GlobalToolbar, Palette)
+            }
             OpenSettings => spec!(
                 "Settings…",
                 Application,
@@ -665,7 +673,8 @@ impl CommandId {
             | OpenLogging
             | EqualizePlots
             | CycleLegendPosition
-            | ToggleLegends => ClassicMenuOwner::View,
+            | ToggleLegends
+            | OpenFieldStats => ClassicMenuOwner::View,
             SyncSources
             | OpenDataFlow
             | TogglePlayheadSnap
@@ -707,6 +716,9 @@ impl CommandId {
                 if !context.scripting_enabled =>
             {
                 CommandAvailability::Disabled("Scripting support is not enabled in this build")
+            }
+            Self::OpenFieldStats if !context.has_plotted_traces => {
+                CommandAvailability::Disabled("Plot at least one trace first")
             }
             Self::AddMeasuringMarker if !context.has_data => {
                 CommandAvailability::Disabled("Open a log or connect a live source first")
@@ -1022,7 +1034,7 @@ mod tests {
 
     #[test]
     fn parser_only_work_enables_the_shared_cancel_presentation() {
-        let context = CommandContext::for_frame(false, 0, 0, false, true, true);
+        let context = CommandContext::for_frame(false, 0, 0, false, true, true, false);
         assert!(context.has_active_tasks);
         assert_eq!(
             CommandId::CancelTasks.availability(&context),

@@ -9,15 +9,17 @@ pub enum GlobalPlotControl {
     TogglePlayheadSnap,
     ToggleMeasuringMarker,
     CycleLegendPosition,
+    OpenFieldStats,
 }
 
 #[cfg(test)]
 impl GlobalPlotControl {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::CursorSampling(SampleMode::Prev),
         Self::TogglePlayheadSnap,
         Self::ToggleMeasuringMarker,
         Self::CycleLegendPosition,
+        Self::OpenFieldStats,
     ];
 }
 
@@ -29,6 +31,7 @@ pub const fn command_for_control(control: GlobalPlotControl) -> AppCommand {
             AppCommand::Static(CommandId::AddMeasuringMarker)
         }
         GlobalPlotControl::CycleLegendPosition => AppCommand::Static(CommandId::CycleLegendPosition),
+        GlobalPlotControl::OpenFieldStats => AppCommand::Static(CommandId::OpenFieldStats),
     }
 }
 
@@ -127,6 +130,35 @@ pub fn show(
                 commands.push(command_for_control(GlobalPlotControl::CycleLegendPosition));
             }
 
+            let stats = command_for_control(GlobalPlotControl::OpenFieldStats);
+            let stats_presentation = presentations
+                .iter()
+                .find(|presentation| presentation.command == stats);
+            let stats_enabled = stats_presentation.is_none_or(|presentation| {
+                presentation.availability == CommandAvailability::Enabled
+            });
+            let stats_response = ui
+                .add_enabled_ui(stats_enabled, |ui| {
+                    crate::ui::components::icon_button(
+                        ui,
+                        crate::ui::icons::sigma(),
+                        "Field stats for every plotted trace",
+                        false,
+                    )
+                })
+                .inner;
+            let stats_response = match stats_presentation
+                .map(|presentation| &presentation.availability)
+            {
+                Some(CommandAvailability::Disabled(reason)) => {
+                    stats_response.on_disabled_hover_text(*reason)
+                }
+                _ => stats_response,
+            };
+            if stats_response.clicked() {
+                commands.push(stats);
+            }
+
         });
     });
     commands
@@ -199,13 +231,53 @@ mod tests {
     }
 
     #[test]
+    fn toolbar_builds_and_the_sigma_icon_follows_the_tint_convention() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let model = GlobalPlotToolbarModel {
+            cursor_sampling: SampleMode::Prev,
+            playhead_snap: false,
+            measuring_marker: false,
+            legend_position: LegendPosition::TopRight,
+        };
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1_200.0, 200.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input(), |ui| {
+            show(ui, &model, &[]);
+        });
+        let _ = ctx.run_ui(input(), |ui| {
+            show(ui, &model, &[]);
+        });
+
+        ctx.forget_all_images();
+        let bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/icons/sigma.svg"
+        ))
+        .expect("the sigma icon should be bundled");
+        let text = String::from_utf8(bytes).expect("svg is utf8");
+        assert!(
+            text.contains("stroke=\"#ffffff\""),
+            "icons must use a white stroke so the runtime tint colors them"
+        );
+        assert!(text.contains("<path"), "the sigma icon should have geometry");
+    }
+
+    #[test]
     fn toolbar_actions_are_all_global() {
-        assert_eq!(GlobalPlotControl::ALL.len(), 4);
+        assert_eq!(GlobalPlotControl::ALL.len(), 5);
         assert!(!format!("{:?}", GlobalPlotControl::ALL).contains("Split"));
         assert!(!format!("{:?}", GlobalPlotControl::ALL).contains("FitAll"));
         assert!(!format!("{:?}", GlobalPlotControl::ALL).contains("ToggleAllLegends"));
         assert!(!format!("{:?}", GlobalPlotControl::ALL).contains("EqualizePlotHeights"));
         assert!(GlobalPlotControl::ALL.contains(&GlobalPlotControl::ToggleMeasuringMarker));
+        assert!(GlobalPlotControl::ALL.contains(&GlobalPlotControl::OpenFieldStats));
     }
 
     #[test]
