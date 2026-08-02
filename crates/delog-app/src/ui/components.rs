@@ -159,24 +159,6 @@ pub fn dense_rows(ui: &mut egui::Ui) {
     ui.spacing_mut().button_padding.y = tokens.dense_row_gap;
 }
 
-pub fn clamp_to_available_width<R>(
-    ui: &mut egui::Ui,
-    add_contents: impl FnOnce(&mut egui::Ui) -> R,
-) -> R {
-    let max_rect = ui.available_rect_before_wrap();
-    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(max_rect));
-    let mut clip = ui.clip_rect();
-    clip.max.x = clip.max.x.min(max_rect.max.x);
-    child.set_clip_rect(clip);
-    let result = add_contents(&mut child);
-    let height = child.min_rect().height();
-    ui.allocate_rect(
-        egui::Rect::from_min_size(max_rect.min, egui::vec2(max_rect.width(), height)),
-        egui::Sense::hover(),
-    );
-    result
-}
-
 pub fn library_tree(
     ui: &mut egui::Ui,
     id: egui::Id,
@@ -197,8 +179,7 @@ pub fn library_tree(
 
     let mut menu_event = None;
     let mut menu_consumed_click = false;
-    let (_, actions) = clamp_to_available_width(ui, |ui| {
-        egui_ltreeview::TreeView::new(id)
+    let (_, actions) = egui_ltreeview::TreeView::new(id)
         .allow_multi_selection(false)
         .allow_drag_and_drop(false)
         .show_state(ui, &mut state, |builder| {
@@ -241,8 +222,7 @@ pub fn library_tree(
                     }),
                 );
             }
-            })
-    });
+            });
 
     if let Some(event) = menu_event {
         return Some(event);
