@@ -127,9 +127,224 @@ pub fn menu_row(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LibraryAction {
+    Load,
+    Edit,
+    Duplicate,
+    Remove,
+}
+
+impl LibraryAction {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Load => "Load",
+            Self::Edit => "Edit",
+            Self::Duplicate => "Duplicate",
+            Self::Remove => "Remove",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibraryEvent {
+    pub name: String,
+    pub action: LibraryAction,
+}
+
+pub fn library_tree(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    names: &[String],
+    selected: Option<&str>,
+    menu_actions: &[LibraryAction],
+    hover: &str,
+) -> Option<LibraryEvent> {
+    if names.is_empty() {
+        return None;
+    }
+
+    let mut state = egui_ltreeview::TreeViewState::load(ui, id).unwrap_or_default();
+    match selected.and_then(|name| names.iter().position(|n| n == name)) {
+        Some(index) => state.set_one_selected(index),
+        None => state.set_selected(Vec::new()),
+    }
+
+    let mut menu_event = None;
+    let mut menu_consumed_click = false;
+    let (_, actions) = egui_ltreeview::TreeView::new(id)
+        .allow_multi_selection(false)
+        .allow_drag_and_drop(false)
+        .show_state(ui, &mut state, |builder| {
+            for (index, name) in names.iter().enumerate() {
+                builder.node(
+                    egui_ltreeview::NodeBuilder::leaf(index).label_ui(|ui| {
+                        ui.label(name).on_hover_text(hover);
+                        if menu_actions.is_empty() {
+                            return;
+                        }
+                        ui.with_layout(
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                let menu = ui.menu_button("...", |ui| {
+                                    for action in menu_actions {
+                                        if ui.button(action.label()).clicked() {
+                                            menu_event = Some(LibraryEvent {
+                                                name: name.clone(),
+                                                action: *action,
+                                            });
+                                            ui.close();
+                                        }
+                                    }
+                                });
+                                if menu.response.clicked() || menu.inner.is_some() {
+                                    menu_consumed_click = true;
+                                }
+                            },
+                        );
+                    }),
+                );
+            }
+        });
+    state.store(ui, id);
+
+    if let Some(event) = menu_event {
+        return Some(event);
+    }
+    if menu_consumed_click {
+        return None;
+    }
+    actions.into_iter().find_map(|action| match action {
+        egui_ltreeview::Action::SetSelected(selected) => selected
+            .first()
+            .and_then(|index| names.get(*index))
+            .map(|name| LibraryEvent {
+                name: name.clone(),
+                action: LibraryAction::Load,
+            }),
+        _ => None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn library_names() -> Vec<String> {
+        vec!["alpha".to_owned(), "beta".to_owned(), "gamma".to_owned()]
+    }
+
+    fn run_library_tree(
+        selected: Option<&str>,
+    ) -> (Option<LibraryEvent>, egui::FullOutput, Vec<String>) {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let names = library_names();
+        let mut event = None;
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(400.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| {
+            event = library_tree(
+                ui,
+                egui::Id::new("library-tree-test"),
+                &names,
+                selected,
+                &[LibraryAction::Edit, LibraryAction::Remove],
+                "Load entry",
+            );
+        });
+        (event, output, names)
+    }
+
+    fn painted_text(output: &egui::FullOutput) -> Vec<String> {
+        fn walk(shape: &egui::epaint::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::epaint::Shape::Text(text) => out.push(text.galley.job.text.clone()),
+                egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut out);
+        }
+        out
+    }
+
+    #[test]
+    fn library_tree_renders_every_entry_with_its_menu() {
+        let (event, output, names) = run_library_tree(Some("beta"));
+        assert!(event.is_none());
+        let painted = painted_text(&output);
+        for name in &names {
+            assert!(
+                painted.iter().any(|text| text == name),
+                "{name} should be painted as a row, got {painted:?}"
+            );
+        }
+        assert_eq!(
+            painted.iter().filter(|text| text.as_str() == "...").count(),
+            names.len(),
+            "every row should carry its overflow menu"
+        );
+    }
+
+    #[test]
+    fn library_tree_marks_only_the_loaded_entry_selected() {
+        let ctx = egui::Context::default();
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let names = library_names();
+        let id = egui::Id::new("library-selection-test");
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(400.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input(), |ui| {
+            library_tree(ui, id, &names, Some("gamma"), &[], "Load entry");
+        });
+        let _ = ctx.run_ui(input(), |ui| {
+            let state =
+                egui_ltreeview::TreeViewState::<usize>::load(ui, id).expect("state was stored");
+            assert_eq!(state.selected(), &vec![2]);
+        });
+    }
+
+    #[test]
+    fn library_tree_handles_an_empty_library() {
+        let ctx = egui::Context::default();
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let mut event = Some(LibraryEvent {
+            name: "stale".to_owned(),
+            action: LibraryAction::Load,
+        });
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            event = library_tree(
+                ui,
+                egui::Id::new("empty-library-tree"),
+                &[],
+                None,
+                &[LibraryAction::Remove],
+                "Load entry",
+            );
+        });
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn library_action_labels_are_stable() {
+        assert_eq!(LibraryAction::Edit.label(), "Edit");
+        assert_eq!(LibraryAction::Duplicate.label(), "Duplicate");
+        assert_eq!(LibraryAction::Remove.label(), "Remove");
+    }
 
     #[test]
     fn status_chip_uses_text_and_not_only_color() {

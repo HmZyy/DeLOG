@@ -48,6 +48,7 @@ egui = { workspace = true }
 egui_graph = { version = "0.16.2", default-features = false }
 egui_extras = { workspace = true }
 egui_dock = { workspace = true }
+egui_ltreeview = { workspace = true }
 egui_tiles = { workspace = true }
 glam = { workspace = true }
 image = { workspace = true }
