@@ -126,6 +126,7 @@ impl FieldStatsController {
         self.pending = None;
         self.displayed.clear();
         self.errors.clear();
+        self.tracking_plots = false;
     }
 
     pub fn fields(&self) -> &[FieldId] {
@@ -316,6 +317,31 @@ mod tests {
             &[FieldId(5)],
             "removing a trace from every plot should drop it from the stats view"
         );
+    }
+
+    #[test]
+    fn closing_the_window_stops_it_reopening_from_plotted_traces() {
+        let mut controller = FieldStatsController::default();
+        controller.open_plotted(vec![FieldId(1), FieldId(2)]);
+        assert!(!controller.fields().is_empty());
+
+        controller.close();
+        assert!(controller.fields().is_empty(), "closing should empty the view");
+
+        controller.sync_plotted(vec![FieldId(1), FieldId(2)]);
+        assert!(
+            controller.fields().is_empty(),
+            "a closed window must not be reopened by the traces still on the plots"
+        );
+        assert!(!controller.is_tracking_plots());
+
+        controller.open_plotted(vec![FieldId(1)]);
+        assert_eq!(
+            controller.fields(),
+            &[FieldId(1)],
+            "the toolbar button should still reopen the window after a close"
+        );
+        assert!(controller.is_tracking_plots());
     }
 
     #[test]
