@@ -60,7 +60,7 @@ mod tests {
         let tokens = DesignTokens::default();
         assert_eq!(tokens.control_height, 30.0);
         assert_eq!(tokens.dense_row_height, 20.0);
-        assert_eq!(tokens.dense_row_gap, 4.0);
+        assert_eq!(tokens.dense_row_gap, 2.0);
         assert_eq!(tokens.icon_size, 18.0);
         assert!(tokens.dense_row_gap < tokens.space_sm);
         assert!(tokens.dense_row_height < tokens.control_height);
