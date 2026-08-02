@@ -464,13 +464,21 @@ fn browser_topic_tables_keep_field_drag_source() {
     let visible_loop = browser
         .find("for &field_idx in &visible_topic.fields")
         .expect("topic tables should iterate the filtered field indexes");
-    let table_row_call = browser[visible_loop..]
-        .find("field_table_row(ui, field, selection, &visible)")
+    let leaf_node = browser[visible_loop..]
+        .find("NodeBuilder::leaf(BrowserNode::Field(")
         .map(|offset| visible_loop + offset)
-        .expect("filtered field loop should render field table rows");
+        .expect("filtered field loop should build one tree leaf per field");
     assert!(
-        table_row_call - visible_loop < 200,
-        "field_table_row should be called directly from the visible field loop"
+        leaf_node - visible_loop < 320,
+        "each visible field should become a tree leaf directly in the loop"
+    );
+    let table_row_call = browser[leaf_node..]
+        .find("field_table_row(ui, field, selection, &visible)")
+        .map(|offset| leaf_node + offset)
+        .expect("field leaves should render field table rows");
+    assert!(
+        table_row_call - leaf_node < 320,
+        "field_table_row should be rendered by the field leaf label"
     );
 
     let table_row = browser
