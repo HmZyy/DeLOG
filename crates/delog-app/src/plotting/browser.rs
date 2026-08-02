@@ -621,7 +621,16 @@ pub fn ui(
 
             let mut open_nodes: std::collections::HashMap<BrowserNode, bool> =
                 ui.data(|data| data.get_temp(tree_id)).unwrap_or_default();
-            let mut state = egui_ltreeview::TreeViewState::<BrowserNode>::default();
+            let width_id = tree_id.with("rendered_width");
+            let available_width = ui.available_width();
+            let width_changed = ui
+                .data(|data| data.get_temp::<f32>(width_id))
+                .is_none_or(|last| (last - available_width).abs() > 0.5);
+            let mut state = if width_changed {
+                egui_ltreeview::TreeViewState::<BrowserNode>::default()
+            } else {
+                egui_ltreeview::TreeViewState::<BrowserNode>::load(ui, tree_id).unwrap_or_default()
+            };
             for (node, open) in &open_nodes {
                 state.set_openness(*node, *open);
             }
@@ -636,8 +645,7 @@ pub fn ui(
                 }
             }
 
-            let (_, tree_actions) = crate::ui::components::clamp_to_available_width(ui, |ui| {
-                egui_ltreeview::TreeView::new(tree_id)
+            let (_, tree_actions) = egui_ltreeview::TreeView::new(tree_id)
                 .allow_multi_selection(false)
                 .allow_drag_and_drop(false)
                 .show_state(ui, &mut state, |builder| {
@@ -767,8 +775,7 @@ pub fn ui(
                         }
                         builder.close_dir();
                     }
-                })
-            });
+                });
             for action in tree_actions {
                 let egui_ltreeview::Action::SetSelected(clicked) = action else {
                     continue;
@@ -781,7 +788,12 @@ pub fn ui(
                     open_nodes.insert(node, !open);
                 }
             }
-            ui.data_mut(|data| data.insert_temp(tree_id, open_nodes));
+            state.set_selected(Vec::new());
+            state.store(ui, tree_id);
+            ui.data_mut(|data| {
+                data.insert_temp(tree_id, open_nodes);
+                data.insert_temp(width_id, available_width);
+            });
         });
 
 
@@ -1347,11 +1359,14 @@ mod tests {
         let mut topic_pos = None;
         let mut painted = Vec::new();
 
+        let mut clock = 0.0f64;
         let mut frame = |events: Vec<egui::Event>,
                          pointer: Option<egui::Pos2>,
                          topic_pos: &mut Option<egui::Pos2>,
                          painted: &mut Vec<String>| {
+            clock += 0.5;
             let mut input = egui::RawInput {
+                time: Some(clock),
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
                     egui::vec2(1_200.0, 800.0),
@@ -1467,11 +1482,14 @@ mod tests {
         let mut count_pos = None;
         let mut painted = Vec::new();
 
+        let mut clock = 0.0f64;
         let mut frame = |events: Vec<egui::Event>,
                          pointer: Option<egui::Pos2>,
                          count_pos: &mut Option<egui::Pos2>,
                          painted: &mut Vec<String>| {
+            clock += 0.5;
             let mut input = egui::RawInput {
+                time: Some(clock),
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
                     egui::vec2(1_200.0, 800.0),
@@ -1781,6 +1799,168 @@ mod tests {
                 .count(),
             0,
             "sanity"
+        );
+    }
+
+    #[test]
+    fn topics_still_expand_after_scrolling_the_browser() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let model = synth_model(1, 40, 4);
+        let mut query = String::new();
+        let mut filter_cache = BrowserFilterCache::default();
+        let mut selection = Selection::default();
+        let mut offset_dialog = None;
+
+        let clock = std::cell::Cell::new(0.0f64);
+        let frame = |events: Vec<egui::Event>,
+                     pointer: Option<egui::Pos2>,
+                     query: &mut String,
+                     filter_cache: &mut BrowserFilterCache,
+                     selection: &mut Selection,
+                     offset_dialog: &mut Option<(SourceId, i64)>| {
+            clock.set(clock.get() + 0.5);
+            let mut input = egui::RawInput {
+                time: Some(clock.get()),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1_000.0, 300.0),
+                )),
+                ..Default::default()
+            };
+            if let Some(pos) = pointer {
+                input.events.push(egui::Event::PointerMoved(pos));
+            }
+            input.events.extend(events);
+            let output = ctx.run_ui(input, |ui| {
+                egui::Panel::left("browser-scroll-click")
+                    .exact_size(420.0)
+                    .show_inside(ui, |ui| {
+                        super::ui(
+                            ui,
+                            0,
+                            &model,
+                            query,
+                            filter_cache,
+                            selection,
+                            offset_dialog,
+                        );
+                    });
+            });
+            let mut texts = Vec::new();
+            fn walk(shape: &egui::epaint::Shape, out: &mut Vec<(String, egui::Rect)>) {
+                match shape {
+                    egui::epaint::Shape::Text(text) => {
+                        out.push((text.galley.job.text.clone(), text.visual_bounding_rect()));
+                    }
+                    egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                    _ => {}
+                }
+            }
+            for clipped in &output.shapes {
+                walk(&clipped.shape, &mut texts);
+            }
+            texts
+        };
+
+        let scroll = |n: usize,
+                      query: &mut String,
+                      filter_cache: &mut BrowserFilterCache,
+                      selection: &mut Selection,
+                      offset_dialog: &mut Option<(SourceId, i64)>| {
+            let mut last = Vec::new();
+            for _ in 0..n {
+                last = frame(
+                    vec![egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::vec2(0.0, -200.0),
+                        modifiers: Default::default(),
+                        phase: egui::TouchPhase::Move,
+                    }],
+                    Some(egui::pos2(200.0, 150.0)),
+                    query,
+                    filter_cache,
+                    selection,
+                    offset_dialog,
+                );
+            }
+            last
+        };
+
+        frame(
+            vec![],
+            None,
+            &mut query,
+            &mut filter_cache,
+            &mut selection,
+            &mut offset_dialog,
+        );
+        scroll(
+            4,
+            &mut query,
+            &mut filter_cache,
+            &mut selection,
+            &mut offset_dialog,
+        );
+        let mut scrolled = Vec::new();
+        for _ in 0..30 {
+            let next = frame(
+                vec![],
+                None,
+                &mut query,
+                &mut filter_cache,
+                &mut selection,
+                &mut offset_dialog,
+            );
+            let same = next
+                .iter()
+                .map(|(text, rect)| (text.clone(), rect.top().round() as i32))
+                .eq(scrolled
+                    .iter()
+                    .map(|(text, rect): &(String, egui::Rect)| {
+                        (text.clone(), rect.top().round() as i32)
+                    }));
+            scrolled = next;
+            if same {
+                break;
+            }
+        }
+
+        let (label, rect) = scrolled
+            .iter()
+            .find(|(text, rect)| text.starts_with("TOPIC") && rect.top() > 80.0)
+            .cloned()
+            .unwrap_or_else(|| panic!("a topic row should be visible after scrolling: {scrolled:?}"));
+        let target = rect.center();
+
+        for pressed in [true, false] {
+            frame(
+                vec![egui::Event::PointerButton {
+                    pos: target,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                }],
+                Some(target),
+                &mut query,
+                &mut filter_cache,
+                &mut selection,
+                &mut offset_dialog,
+            );
+        }
+        let after = frame(
+            vec![],
+            Some(target),
+            &mut query,
+            &mut filter_cache,
+            &mut selection,
+            &mut offset_dialog,
+        );
+
+        assert!(
+            after.iter().any(|(text, _)| text.starts_with("field_")),
+            "clicking {label} after scrolling should expand it, got {after:?}"
         );
     }
 
