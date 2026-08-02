@@ -1,6 +1,8 @@
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DesignTokens {
     pub control_height: f32,
+    pub dense_row_height: f32,
+    pub dense_row_gap: f32,
     pub icon_size: f32,
     pub radius: u8,
     pub space_xs: f32,
@@ -13,6 +15,8 @@ impl Default for DesignTokens {
     fn default() -> Self {
         Self {
             control_height: 30.0,
+            dense_row_height: 20.0,
+            dense_row_gap: 2.0,
             icon_size: 18.0,
             radius: 6,
             space_xs: 4.0,
@@ -55,7 +59,11 @@ mod tests {
     fn design_tokens_keep_compact_controls_touchable() {
         let tokens = DesignTokens::default();
         assert_eq!(tokens.control_height, 30.0);
+        assert_eq!(tokens.dense_row_height, 20.0);
+        assert_eq!(tokens.dense_row_gap, 4.0);
         assert_eq!(tokens.icon_size, 18.0);
+        assert!(tokens.dense_row_gap < tokens.space_sm);
+        assert!(tokens.dense_row_height < tokens.control_height);
         assert!(tokens.control_height >= tokens.icon_size + 8.0);
     }
 }
