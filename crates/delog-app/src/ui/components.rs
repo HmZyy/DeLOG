@@ -179,7 +179,8 @@ pub fn library_tree(
             for (index, name) in names.iter().enumerate() {
                 builder.node(
                     egui_ltreeview::NodeBuilder::leaf(index).label_ui(|ui| {
-                        ui.label(name).on_hover_text(hover);
+                        ui.add(egui::Label::new(name).selectable(false))
+                            .on_hover_text(hover);
                         if menu_actions.is_empty() {
                             return;
                         }
@@ -337,6 +338,93 @@ mod tests {
             );
         });
         assert!(event.is_none());
+    }
+
+    #[test]
+    fn clicking_an_entry_label_loads_it() {
+        let ctx = egui::Context::default();
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let names = library_names();
+        let id = egui::Id::new("library-click-test");
+        let mut event = None;
+        let mut label_pos = None;
+
+        let frame = |events: Vec<egui::Event>,
+                     pointer: Option<egui::Pos2>,
+                     event: &mut Option<LibraryEvent>,
+                         label_pos: &mut Option<egui::Pos2>| {
+            let mut input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 600.0),
+                )),
+                ..Default::default()
+            };
+            if let Some(pos) = pointer {
+                input.events.push(egui::Event::PointerMoved(pos));
+            }
+            input.events.extend(events);
+            let output = ctx.run_ui(input, |ui| {
+                if let Some(fired) = library_tree(ui, id, &names, None, &[], "Load entry") {
+                    *event = Some(fired);
+                }
+            });
+            if label_pos.is_none() {
+                *label_pos = output
+                    .shapes
+                    .iter()
+                    .find_map(|clipped| find_label_rect(&clipped.shape, "beta"))
+                    .map(|rect| rect.center());
+            }
+        };
+
+        frame(vec![], None, &mut event, &mut label_pos);
+        frame(vec![], None, &mut event, &mut label_pos);
+        let target = label_pos.expect("beta should be painted");
+
+        frame(
+            vec![egui::Event::PointerButton {
+                pos: target,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Default::default(),
+            }],
+            Some(target),
+            &mut event,
+            &mut label_pos,
+        );
+        frame(
+            vec![egui::Event::PointerButton {
+                pos: target,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Default::default(),
+            }],
+            Some(target),
+            &mut event,
+            &mut label_pos,
+        );
+
+        assert_eq!(
+            event,
+            Some(LibraryEvent {
+                name: "beta".to_owned(),
+                action: LibraryAction::Load,
+            }),
+            "clicking the entry text itself should load it"
+        );
+    }
+
+    fn find_label_rect(shape: &egui::epaint::Shape, expected: &str) -> Option<egui::Rect> {
+        match shape {
+            egui::epaint::Shape::Text(text) if text.galley.job.text == expected => {
+                Some(text.visual_bounding_rect())
+            }
+            egui::epaint::Shape::Vec(shapes) => shapes
+                .iter()
+                .find_map(|shape| find_label_rect(shape, expected)),
+            _ => None,
+        }
     }
 
     #[test]

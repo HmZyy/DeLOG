@@ -624,7 +624,7 @@ pub fn ui(
                 }
             }
 
-            egui_ltreeview::TreeView::new(tree_id)
+            let (_, tree_actions) = egui_ltreeview::TreeView::new(tree_id)
                 .allow_multi_selection(false)
                 .allow_drag_and_drop(false)
                 .show_state(ui, &mut state, |builder| {
@@ -700,7 +700,16 @@ pub fn ui(
                                         ui.with_layout(
                                             egui::Layout::right_to_left(egui::Align::Center),
                                             |ui| {
-                                                ui.weak(format!("({})", topic.rows));
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        egui::RichText::new(format!(
+                                                            "({})",
+                                                            topic.rows
+                                                        ))
+                                                        .weak(),
+                                                    )
+                                                    .selectable(false),
+                                                );
                                             },
                                         );
                                     }),
@@ -745,6 +754,17 @@ pub fn ui(
                         builder.close_dir();
                     }
                 });
+            for action in tree_actions {
+                let egui_ltreeview::Action::SetSelected(clicked) = action else {
+                    continue;
+                };
+                for node in clicked {
+                    if matches!(node, BrowserNode::Source(_) | BrowserNode::Topic(_)) {
+                        let open = state.is_open(&node).unwrap_or(false);
+                        state.set_openness(node, !open);
+                    }
+                }
+            }
             state.set_selected(Vec::new());
             state.store(ui, tree_id);
         });
@@ -1296,6 +1316,213 @@ mod tests {
             .shapes
             .iter()
             .find_map(|clipped| find_text_rect(&clipped.shape, expected))
+    }
+
+    #[test]
+    fn clicking_a_topic_label_expands_it() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let model = synth_model(1, 1, 3);
+        let mut query = String::new();
+        let mut filter_cache = BrowserFilterCache::default();
+        let mut selection = Selection::default();
+        let mut offset_dialog = None;
+        let mut topic_pos = None;
+        let mut painted = Vec::new();
+
+        let mut frame = |events: Vec<egui::Event>,
+                         pointer: Option<egui::Pos2>,
+                         topic_pos: &mut Option<egui::Pos2>,
+                         painted: &mut Vec<String>| {
+            let mut input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1_200.0, 800.0),
+                )),
+                ..Default::default()
+            };
+            if let Some(pos) = pointer {
+                input.events.push(egui::Event::PointerMoved(pos));
+            }
+            input.events.extend(events);
+            let output = ctx.run_ui(input, |ui| {
+                egui::Panel::left("topic-click")
+                    .exact_size(420.0)
+                    .show_inside(ui, |ui| {
+                        super::ui(
+                            ui,
+                            0,
+                            &model,
+                            &mut query,
+                            &mut filter_cache,
+                            &mut selection,
+                            &mut offset_dialog,
+                        );
+                    });
+            });
+            if topic_pos.is_none() {
+                *topic_pos = output
+                    .shapes
+                    .iter()
+                    .find_map(|clipped| find_text_rect(&clipped.shape, "TOPIC000"))
+                    .map(|rect| rect.center());
+            }
+            painted.clear();
+            fn walk(shape: &egui::epaint::Shape, out: &mut Vec<String>) {
+                match shape {
+                    egui::epaint::Shape::Text(text) => out.push(text.galley.job.text.clone()),
+                    egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                    _ => {}
+                }
+            }
+            for clipped in &output.shapes {
+                walk(&clipped.shape, painted);
+            }
+        };
+
+        frame(vec![], None, &mut topic_pos, &mut painted);
+        frame(vec![], None, &mut topic_pos, &mut painted);
+        let target = topic_pos.expect("the topic row should be painted");
+        assert!(
+            !painted.iter().any(|text| text == "field_00"),
+            "topics start collapsed"
+        );
+
+        frame(
+            vec![egui::Event::PointerButton {
+                pos: target,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Default::default(),
+            }],
+            Some(target),
+            &mut topic_pos,
+            &mut painted,
+        );
+        frame(
+            vec![egui::Event::PointerButton {
+                pos: target,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Default::default(),
+            }],
+            Some(target),
+            &mut topic_pos,
+            &mut painted,
+        );
+        frame(vec![], Some(target), &mut topic_pos, &mut painted);
+
+        assert!(
+            painted.iter().any(|text| text == "field_00"),
+            "clicking the topic label should expand it, got {painted:?}"
+        );
+
+        for pressed in [true, false] {
+            frame(
+                vec![egui::Event::PointerButton {
+                    pos: target,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                }],
+                Some(target),
+                &mut topic_pos,
+                &mut painted,
+            );
+        }
+        frame(vec![], Some(target), &mut topic_pos, &mut painted);
+        assert!(
+            !painted.iter().any(|text| text == "field_00"),
+            "clicking the topic label again should collapse it, got {painted:?}"
+        );
+    }
+
+    #[test]
+    fn clicking_a_topic_row_count_expands_it() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let model = synth_model(1, 1, 3);
+        let mut query = String::new();
+        let mut filter_cache = BrowserFilterCache::default();
+        let mut selection = Selection::default();
+        let mut offset_dialog = None;
+        let mut count_pos = None;
+        let mut painted = Vec::new();
+
+        let mut frame = |events: Vec<egui::Event>,
+                         pointer: Option<egui::Pos2>,
+                         count_pos: &mut Option<egui::Pos2>,
+                         painted: &mut Vec<String>| {
+            let mut input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1_200.0, 800.0),
+                )),
+                ..Default::default()
+            };
+            if let Some(pos) = pointer {
+                input.events.push(egui::Event::PointerMoved(pos));
+            }
+            input.events.extend(events);
+            let output = ctx.run_ui(input, |ui| {
+                egui::Panel::left("topic-count-click")
+                    .exact_size(420.0)
+                    .show_inside(ui, |ui| {
+                        super::ui(
+                            ui,
+                            0,
+                            &model,
+                            &mut query,
+                            &mut filter_cache,
+                            &mut selection,
+                            &mut offset_dialog,
+                        );
+                    });
+            });
+            if count_pos.is_none() {
+                *count_pos = output
+                    .shapes
+                    .iter()
+                    .find_map(|clipped| find_text_rect(&clipped.shape, "(10000)"))
+                    .map(|rect| rect.center());
+            }
+            painted.clear();
+            fn walk(shape: &egui::epaint::Shape, out: &mut Vec<String>) {
+                match shape {
+                    egui::epaint::Shape::Text(text) => out.push(text.galley.job.text.clone()),
+                    egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                    _ => {}
+                }
+            }
+            for clipped in &output.shapes {
+                walk(&clipped.shape, painted);
+            }
+        };
+
+        frame(vec![], None, &mut count_pos, &mut painted);
+        frame(vec![], None, &mut count_pos, &mut painted);
+        let target = count_pos.expect("the topic row count should be painted");
+        for pressed in [true, false] {
+            frame(
+                vec![egui::Event::PointerButton {
+                    pos: target,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                }],
+                Some(target),
+                &mut count_pos,
+                &mut painted,
+            );
+        }
+        frame(vec![], Some(target), &mut count_pos, &mut painted);
+
+        assert!(
+            painted.iter().any(|text| text == "field_00"),
+            "clicking the row count should expand the topic too, got {painted:?}"
+        );
     }
 
     #[test]
