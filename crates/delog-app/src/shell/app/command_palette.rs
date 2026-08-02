@@ -8,6 +8,7 @@ pub struct CommandPaletteState {
     pub query: String,
     pub selected: usize,
     focus_search: bool,
+    scroll_to_selected: bool,
 }
 
 #[derive(Clone)]
@@ -60,6 +61,7 @@ impl CommandPaletteState {
         self.query.clear();
         self.selected = 0;
         self.focus_search = true;
+        self.scroll_to_selected = true;
     }
 
     pub fn entries(
@@ -84,15 +86,24 @@ impl CommandPaletteState {
         let ranked = ranked_entries(&self.query, entries);
         if ranked.is_empty() {
             self.selected = 0;
+            self.scroll_to_selected = false;
             return None;
         }
-        if ctx.input(|input| input.key_pressed(egui::Key::ArrowDown)) {
+        let selected_before_key = self.selected;
+        if ctx.input(|input| {
+            input.key_pressed(egui::Key::ArrowDown)
+                || (input.modifiers.ctrl && input.key_pressed(egui::Key::N))
+        }) {
             self.selected = (self.selected + 1).min(ranked.len() - 1);
         }
-        if ctx.input(|input| input.key_pressed(egui::Key::ArrowUp)) {
+        if ctx.input(|input| {
+            input.key_pressed(egui::Key::ArrowUp)
+                || (input.modifiers.ctrl && input.key_pressed(egui::Key::P))
+        }) {
             self.selected = self.selected.saturating_sub(1);
         }
         self.selected = self.selected.min(ranked.len() - 1);
+        self.scroll_to_selected |= self.selected != selected_before_key;
         if ctx.input(|input| input.key_pressed(egui::Key::Enter))
             && ranked[self.selected].availability == CommandAvailability::Enabled
         {
@@ -108,6 +119,7 @@ impl CommandPaletteState {
         }
         let mut selected_command = self.handle_key(ctx, entries);
         let ranked = ranked_entries(&self.query, entries);
+        let scroll_to_selected = std::mem::take(&mut self.scroll_to_selected);
         let screen = ctx.content_rect();
         egui::Window::new("Command palette")
             .id(egui::Id::new("command-palette"))
@@ -165,6 +177,9 @@ impl CommandPaletteState {
                             }
                             CommandAvailability::Enabled => response,
                         };
+                        if scroll_to_selected && index == self.selected {
+                            response.scroll_to_me(None);
+                        }
                         if response.hovered() {
                             self.selected = index;
                         }
@@ -250,12 +265,20 @@ mod tests {
         events: Vec<egui::Event>,
     ) -> (egui::FullOutput, Option<AppCommand>) {
         let mut selected = None;
+        let modifiers = events
+            .iter()
+            .find_map(|event| match event {
+                egui::Event::Key { modifiers, .. } => Some(*modifiers),
+                _ => None,
+            })
+            .unwrap_or_default();
         let output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
                     egui::vec2(900.0, 700.0),
                 )),
+                modifiers,
                 events,
                 ..Default::default()
             },
@@ -271,6 +294,23 @@ mod tests {
             pressed,
             modifiers: egui::Modifiers::NONE,
         }
+    }
+
+    fn ctrl_key(key: egui::Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::CTRL,
+        }
+    }
+
+    fn painted_inside_clip(output: &egui::FullOutput, expected: &str) -> bool {
+        output.shapes.iter().any(|clipped| {
+            find_text_rect(&clipped.shape, expected)
+                .is_some_and(|rect| clipped.clip_rect.contains(rect.center()))
+        })
     }
 
     #[test]
@@ -295,6 +335,73 @@ mod tests {
     fn ctrl_k_is_ignored_when_an_editor_owns_text_input() {
         assert!(!should_toggle_palette(true, true));
         assert!(should_toggle_palette(true, false));
+    }
+
+    #[test]
+    fn ctrl_n_and_ctrl_p_move_the_palette_selection() {
+        let entries = vec![
+            PaletteEntry::enabled(AppCommand::Static(CommandId::Open), "First", ""),
+            PaletteEntry::enabled(AppCommand::Static(CommandId::OpenLogging), "Second", ""),
+            PaletteEntry::enabled(AppCommand::Static(CommandId::OpenSettings), "Third", ""),
+        ];
+        let context = egui::Context::default();
+        let mut palette = CommandPaletteState {
+            open: true,
+            selected: 1,
+            ..Default::default()
+        };
+
+        for (key, expected) in [(egui::Key::N, 2), (egui::Key::P, 1)] {
+            context.begin_pass(egui::RawInput {
+                modifiers: egui::Modifiers::CTRL,
+                events: vec![egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::CTRL,
+                }],
+                ..Default::default()
+            });
+            assert_eq!(palette.handle_key(&context, &entries), None);
+            assert_eq!(palette.selected, expected);
+            let _ = context.end_pass();
+        }
+    }
+
+    #[test]
+    fn ctrl_n_scrolls_the_selected_palette_row_into_view() {
+        let entries = (0..30)
+            .map(|index| {
+                PaletteEntry::enabled(
+                    AppCommand::Static(CommandId::Open),
+                    &format!("Command {index:02}"),
+                    "",
+                )
+            })
+            .collect::<Vec<_>>();
+        let context = egui::Context::default();
+        let mut palette = CommandPaletteState::default();
+        palette.open();
+        let _ = palette_frame(&context, &mut palette, &entries, vec![]);
+
+        let mut output = None;
+        for _ in 0..20 {
+            let (frame, _) = palette_frame(
+                &context,
+                &mut palette,
+                &entries,
+                vec![ctrl_key(egui::Key::N)],
+            );
+            output = Some(frame);
+        }
+        for _ in 0..8 {
+            let (frame, _) = palette_frame(&context, &mut palette, &entries, vec![]);
+            output = Some(frame);
+        }
+
+        assert_eq!(palette.selected, 20);
+        assert!(painted_inside_clip(&output.unwrap(), "Command 20"));
     }
 
     #[test]
