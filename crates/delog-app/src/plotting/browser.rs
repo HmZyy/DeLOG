@@ -51,6 +51,15 @@ pub struct FieldNode {
     search_path: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum BrowserNode {
+    Source(u32),
+    SourceMeta(u32),
+    Topic(u32),
+    TopicHeader(u32),
+    Field(u32),
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct BrowserFilter {
     pub sources: Vec<VisibleSource>,
@@ -589,6 +598,11 @@ pub fn ui(
     let mut inspect_field_metadata = None;
     let mut inspect_field_stats = None;
     let mut generate_markers = None;
+    let tree_id = if filtering {
+        egui::Id::new("browser_tree_filtered")
+    } else {
+        egui::Id::new("browser_tree")
+    };
     egui::ScrollArea::vertical()
         .auto_shrink([false, true])
         .show(ui, |ui| {
@@ -596,54 +610,121 @@ pub fn ui(
             ui.spacing_mut().interact_size.y = tokens.dense_row_height;
             ui.spacing_mut().item_spacing.y = tokens.dense_row_gap;
             ui.set_width(ui.available_width());
-            for visible_source in &view.sources {
-                let source = &model.sources[visible_source.source];
-                let header = format!("{}  ({} rows)", source.label, source.rows);
-                let collapsing = egui::CollapsingHeader::new(header)
-                    .id_salt(("source", source.id.0))
-                    .default_open(true)
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            if let Some(range) = source.range {
-                                ui.weak(format!(
-                                    "{:.3}–{:.3} s",
-                                    range.min_us as f64 / 1e6,
-                                    range.max_us as f64 / 1e6
-                                ));
-                            }
-                            if let Some(change) = offset_widget(ui, source, offset_dialog) {
-                                offset_change = Some(change);
-                            }
-                        });
+
+            let mut state =
+                egui_ltreeview::TreeViewState::<BrowserNode>::load(ui, tree_id).unwrap_or_default();
+            if filtering {
+                for visible_source in &view.sources {
+                    let source = &model.sources[visible_source.source];
+                    state.set_openness(BrowserNode::Source(source.id.0), true);
+                    for visible_topic in &visible_source.topics {
+                        let topic = &source.topics[visible_topic.topic];
+                        state.set_openness(BrowserNode::Topic(topic.id.0), true);
+                    }
+                }
+            }
+
+            egui_ltreeview::TreeView::new(tree_id)
+                .allow_multi_selection(false)
+                .allow_drag_and_drop(false)
+                .show_state(ui, &mut state, |builder| {
+                    for visible_source in &view.sources {
+                        let source = &model.sources[visible_source.source];
+                        let header = format!("{}  ({} rows)", source.label, source.rows);
+                        let source_open = builder.node(
+                            egui_ltreeview::NodeBuilder::dir(BrowserNode::Source(source.id.0))
+                                .default_open(true)
+                                .label_ui(|ui| {
+                                    ui.add(egui::Label::new(&header).selectable(false));
+                                })
+                                .context_menu(|ui| {
+                                    let info = egui::Image::new(crate::ui::icons::info())
+                                        .fit_to_exact_size(egui::Vec2::splat(
+                                            ui.spacing().icon_width,
+                                        ))
+                                        .tint(ui.visuals().text_color());
+                                    if ui
+                                        .add(egui::Button::image_and_text(info, "Source metadata"))
+                                        .clicked()
+                                    {
+                                        inspect_source = Some(source.id);
+                                        ui.close();
+                                    }
+                                    let trash = egui::Image::new(crate::ui::icons::trash())
+                                        .fit_to_exact_size(egui::Vec2::splat(
+                                            ui.spacing().icon_width,
+                                        ))
+                                        .tint(ui.visuals().error_fg_color);
+                                    if ui
+                                        .add(egui::Button::image_and_text(trash, "Remove source"))
+                                        .clicked()
+                                    {
+                                        remove_source = Some(source.id);
+                                        ui.close();
+                                    }
+                                }),
+                        );
+                        if !source_open {
+                            builder.close_dir();
+                            continue;
+                        }
+
+                        builder.node(
+                            egui_ltreeview::NodeBuilder::leaf(BrowserNode::SourceMeta(source.id.0))
+                                .label_ui(|ui| {
+                                    ui.horizontal(|ui| {
+                                        if let Some(range) = source.range {
+                                            ui.weak(format!(
+                                                "{:.3}–{:.3} s",
+                                                range.min_us as f64 / 1e6,
+                                                range.max_us as f64 / 1e6
+                                            ));
+                                        }
+                                        if let Some(change) = offset_widget(ui, source, offset_dialog)
+                                        {
+                                            offset_change = Some(change);
+                                        }
+                                    });
+                                }),
+                        );
+
                         for visible_topic in &visible_source.topics {
                             let topic = &source.topics[visible_topic.topic];
-                            let topic_id = ui.make_persistent_id(("topic", topic.id.0));
-                            let mut state =
-                                egui::collapsing_header::CollapsingState::load_with_default_open(
-                                    ui.ctx(),
-                                    topic_id,
-                                    false,
-                                );
-                            // Filtering force-opens for display only; restore
-                            // the real state afterwards.
-                            let stored_open = state.is_open();
-                            if filtering {
-                                state.set_open(true);
+                            let topic_open = builder.node(
+                                egui_ltreeview::NodeBuilder::dir(BrowserNode::Topic(topic.id.0))
+                                    .default_open(false)
+                                    .label_ui(|ui| {
+                                        ui.add(
+                                            egui::Label::new(&topic.name).selectable(false),
+                                        );
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                ui.weak(format!("({})", topic.rows));
+                                            },
+                                        );
+                                    }),
+                            );
+                            if !topic_open {
+                                builder.close_dir();
+                                continue;
                             }
-                            let (toggle_button, header_inner, _body) = state
-                                .show_header(ui, |ui| {
-                                    ui.label(&topic.name);
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            ui.weak(format!("({})", topic.rows));
-                                        },
-                                    );
-                                })
-                                .body(|ui| {
+
+                            builder.node(
+                                egui_ltreeview::NodeBuilder::leaf(BrowserNode::TopicHeader(
+                                    topic.id.0,
+                                ))
+                                .label_ui(|ui| {
                                     field_table_header(ui);
-                                    for &field_idx in &visible_topic.fields {
-                                        let field = &topic.fields[field_idx];
+                                }),
+                            );
+                            for &field_idx in &visible_topic.fields {
+                                let field = &topic.fields[field_idx];
+                                builder.node(
+                                    egui_ltreeview::NodeBuilder::leaf(BrowserNode::Field(
+                                        field.id.0,
+                                    ))
+                                    .label_ui(|ui| {
                                         match field_table_row(ui, field, selection, &visible) {
                                             Some(FieldRowAction::InspectMetadata(f)) => {
                                                 inspect_field_metadata = Some(f);
@@ -656,63 +737,18 @@ pub fn ui(
                                             }
                                             None => {}
                                         }
-                                    }
-                                });
-                            // Overlay click target on top of the labels (which
-                            // would otherwise swallow clicks) so the whole row
-                            // toggles the topic.
-                            let header_click = ui
-                                .interact(
-                                    header_inner.response.rect,
-                                    topic_id.with("header_click"),
-                                    egui::Sense::click(),
-                                )
-                                .on_hover_cursor(egui::CursorIcon::PointingHand);
-                            if header_click.clicked() && !toggle_button.clicked() {
-                                let mut clicked_state =
-                                    egui::collapsing_header::CollapsingState::load_with_default_open(
-                                        ui.ctx(),
-                                        topic_id,
-                                        false,
-                                    );
-                                clicked_state.toggle(ui);
-                                clicked_state.store(ui.ctx());
-                            }
-                            if filtering {
-                                let mut restored = egui::collapsing_header::CollapsingState::load_with_default_open(
-                                    ui.ctx(),
-                                    topic_id,
-                                    false,
+                                    }),
                                 );
-                                restored.set_open(stored_open);
-                                restored.store(ui.ctx());
                             }
+                            builder.close_dir();
                         }
-                    });
-                collapsing.header_response.context_menu(|ui| {
-                    let info = egui::Image::new(crate::ui::icons::info())
-                        .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
-                        .tint(ui.visuals().text_color());
-                    if ui
-                        .add(egui::Button::image_and_text(info, "Source metadata"))
-                        .clicked()
-                    {
-                        inspect_source = Some(source.id);
-                        ui.close();
-                    }
-                    let trash = egui::Image::new(crate::ui::icons::trash())
-                        .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
-                        .tint(ui.visuals().error_fg_color);
-                    if ui
-                        .add(egui::Button::image_and_text(trash, "Remove source"))
-                        .clicked()
-                    {
-                        remove_source = Some(source.id);
-                        ui.close();
+                        builder.close_dir();
                     }
                 });
-            }
+            state.set_selected(Vec::new());
+            state.store(ui, tree_id);
         });
+
 
     if let Some(change) = offset_dialog_window(ui, model, offset_dialog) {
         offset_change = Some(change);
@@ -1056,6 +1092,101 @@ mod tests {
                 .find_map(|shape| find_text_rect(shape, expected)),
             _ => None,
         }
+    }
+
+
+    fn synth_model(sources: usize, topics: usize, fields: usize) -> BrowserModel {
+        let mut model = BrowserModel::default();
+        let mut fid = 0u32;
+        for s in 0..sources {
+            let mut source = SourceNode {
+                id: SourceId(s as u32),
+                label: format!("flight_{s}.bin"),
+                rows: 1_000_000,
+                range: None,
+                offset_us: 0,
+                topics: Vec::new(),
+                search_path: format!("flight_{s}.bin"),
+            };
+            for t in 0..topics {
+                let mut topic = TopicNode {
+                    id: TopicId(((s * topics) + t) as u32),
+                    name: format!("TOPIC{t:03}"),
+                    rows: 10_000,
+                    fields: Vec::new(),
+                    search_path: format!("flight_{s}.bin.topic{t:03}"),
+                };
+                for f in 0..fields {
+                    fid += 1;
+                    topic.fields.push(FieldNode {
+                        id: FieldId(fid),
+                        name: format!("field_{f:02}"),
+                        dtype: "f64",
+                        unit: Some("m/s".into()),
+                        description: None,
+                        count: 10_000,
+                        first_raw: Some("0.000".into()),
+                        last_raw: Some("1.000".into()),
+                        search_path: format!("flight_{s}.bin.topic{t:03}.field_{f:02}"),
+                    });
+                }
+                source.topics.push(topic);
+            }
+            model.sources.push(source);
+        }
+        model
+    }
+
+    fn painted_shape_count(model: &BrowserModel, query: &str) -> usize {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let mut query = query.to_owned();
+        let mut filter_cache = BrowserFilterCache::default();
+        let mut selection = Selection::default();
+        let mut offset_dialog = None;
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1_600.0, 1_000.0),
+            )),
+            ..Default::default()
+        };
+        let mut run = || {
+            ctx.run_ui(input(), |ui| {
+                egui::Panel::left("culling-test")
+                    .default_size(320.0)
+                    .show_inside(ui, |ui| {
+                        super::ui(
+                            ui,
+                            0,
+                            model,
+                            &mut query,
+                            &mut filter_cache,
+                            &mut selection,
+                            &mut offset_dialog,
+                        );
+                    });
+            })
+        };
+        let _ = run();
+        let _ = run();
+        run().shapes.len()
+    }
+
+    #[test]
+    fn browser_culls_rows_outside_the_viewport() {
+        let small = synth_model(1, 10, 8);
+        let huge = synth_model(4, 250, 12);
+
+        let small_shapes = painted_shape_count(&small, "field");
+        let huge_shapes = painted_shape_count(&huge, "field");
+
+        assert!(
+            huge_shapes < small_shapes * 2,
+            "a 150x larger tree must not paint proportionally more shapes \
+             (small={small_shapes}, huge={huge_shapes}) - viewport culling regressed"
+        );
     }
 
     #[test]
