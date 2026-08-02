@@ -152,6 +152,22 @@ pub struct LibraryEvent {
     pub action: LibraryAction,
 }
 
+pub fn clamp_to_available_width<R>(
+    ui: &mut egui::Ui,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let max_rect = ui.available_rect_before_wrap();
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(max_rect));
+    child.set_clip_rect(ui.clip_rect().intersect(max_rect));
+    let result = add_contents(&mut child);
+    let height = child.min_rect().height();
+    ui.allocate_rect(
+        egui::Rect::from_min_size(max_rect.min, egui::vec2(max_rect.width(), height)),
+        egui::Sense::hover(),
+    );
+    result
+}
+
 pub fn library_tree(
     ui: &mut egui::Ui,
     id: egui::Id,
@@ -172,7 +188,8 @@ pub fn library_tree(
 
     let mut menu_event = None;
     let mut menu_consumed_click = false;
-    let (_, actions) = egui_ltreeview::TreeView::new(id)
+    let (_, actions) = clamp_to_available_width(ui, |ui| {
+        egui_ltreeview::TreeView::new(id)
         .allow_multi_selection(false)
         .allow_drag_and_drop(false)
         .show_state(ui, &mut state, |builder| {
@@ -206,7 +223,8 @@ pub fn library_tree(
                     }),
                 );
             }
-        });
+            })
+    });
     state.store(ui, id);
 
     if let Some(event) = menu_event {
@@ -425,6 +443,48 @@ mod tests {
                 .find_map(|shape| find_label_rect(shape, expected)),
             _ => None,
         }
+    }
+
+    #[test]
+    fn library_tree_does_not_pin_the_drawer_to_its_widest_layout() {
+        let ctx = egui::Context::default();
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let names = vec![
+            "a_very_long_saved_entry_name_that_makes_the_tree_wide".to_owned(),
+            "another_quite_long_saved_entry_name_here".to_owned(),
+        ];
+        let id = egui::Id::new("library-shrink-test");
+
+        let measure = |panel_width: f32| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(900.0, 600.0),
+                )),
+                ..Default::default()
+            };
+            let mut used = 0.0;
+            let _ = ctx.run_ui(input, |ui| {
+                egui::Panel::left("shrink-drawer")
+                    .resizable(false)
+                    .exact_size(panel_width)
+                    .show_inside(ui, |ui| {
+                        library_tree(ui, id, &names, None, &[], "Load entry");
+                        used = ui.min_rect().width();
+                    });
+            });
+            used
+        };
+
+        measure(400.0);
+        measure(400.0);
+        let narrow = measure(150.0);
+
+        assert!(
+            narrow <= 160.0,
+            "after being shown wide the tree still demands {narrow} points, \
+             which pins the drawer open and blocks resizing it back down"
+        );
     }
 
     #[test]

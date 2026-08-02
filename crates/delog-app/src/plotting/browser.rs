@@ -624,7 +624,8 @@ pub fn ui(
                 }
             }
 
-            let (_, tree_actions) = egui_ltreeview::TreeView::new(tree_id)
+            let (_, tree_actions) = crate::ui::components::clamp_to_available_width(ui, |ui| {
+                egui_ltreeview::TreeView::new(tree_id)
                 .allow_multi_selection(false)
                 .allow_drag_and_drop(false)
                 .show_state(ui, &mut state, |builder| {
@@ -753,7 +754,8 @@ pub fn ui(
                         }
                         builder.close_dir();
                     }
-                });
+                })
+            });
             for action in tree_actions {
                 let egui_ltreeview::Action::SetSelected(clicked) = action else {
                     continue;
@@ -1522,6 +1524,79 @@ mod tests {
         assert!(
             painted.iter().any(|text| text == "field_00"),
             "clicking the row count should expand the topic too, got {painted:?}"
+        );
+    }
+
+    #[test]
+    fn browser_does_not_pin_the_panel_to_its_widest_layout() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let model = synth_model(1, 2, 6);
+        let mut query = "field".to_owned();
+        let mut filter_cache = BrowserFilterCache::default();
+        let mut selection = Selection::default();
+        let mut offset_dialog = None;
+
+        let measure = |panel_width: f32,
+                           query: &mut String,
+                           filter_cache: &mut BrowserFilterCache,
+                           selection: &mut Selection,
+                           offset_dialog: &mut Option<(SourceId, i64)>| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1_400.0, 800.0),
+                )),
+                ..Default::default()
+            };
+            let mut used = 0.0;
+            let _ = ctx.run_ui(input, |ui| {
+                egui::Panel::left("browser-shrink")
+                    .resizable(false)
+                    .exact_size(panel_width)
+                    .show_inside(ui, |ui| {
+                        super::ui(
+                            ui,
+                            0,
+                            &model,
+                            query,
+                            filter_cache,
+                            selection,
+                            offset_dialog,
+                        );
+                        used = ui.min_rect().width();
+                    });
+            });
+            used
+        };
+
+        measure(
+            900.0,
+            &mut query,
+            &mut filter_cache,
+            &mut selection,
+            &mut offset_dialog,
+        );
+        measure(
+            900.0,
+            &mut query,
+            &mut filter_cache,
+            &mut selection,
+            &mut offset_dialog,
+        );
+        let narrow = measure(
+            380.0,
+            &mut query,
+            &mut filter_cache,
+            &mut selection,
+            &mut offset_dialog,
+        );
+
+        assert!(
+            narrow <= 400.0,
+            "after being shown wide the browser still demands {narrow} points, \
+             which blocks resizing the panel back down"
         );
     }
 
