@@ -211,7 +211,18 @@ pub fn show(
                 ui.separator();
                 ui.label(label);
                 if let Some(progress) = progress {
-                    ui.add(egui::ProgressBar::new(*progress).desired_width(90.0));
+                    let bar = ui.add(
+                        egui::ProgressBar::new(*progress)
+                            .desired_width(180.0)
+                            .desired_height(14.0),
+                    );
+                    ui.painter().text(
+                        bar.rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        format!("{}%", (progress * 100.0) as usize),
+                        egui::TextStyle::Button.resolve(ui.style()),
+                        ui.visuals().selection.stroke.color,
+                    );
                 } else {
                     ui.spinner();
                 }
@@ -499,6 +510,115 @@ mod tests {
             |ui| presentation_row(ui, presentation, true, &mut selected),
         );
         (output, selected)
+    }
+
+    #[test]
+    fn parsing_progress_bar_is_slim_wide_and_labelled() {
+        let ctx = egui::Context::default();
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let tokens = crate::ui::design_tokens::DesignTokens::default();
+        let model = HeaderModel {
+            emphasis: ShellEmphasis::Offline,
+            live_statuses: Vec::new(),
+            load: LoadStatusView::Active {
+                label: "Parsing flight.bin".to_owned(),
+                progress: Some(0.42),
+            },
+            fps: None,
+            theme: crate::ui::theme::ThemeChoice::CatppuccinMocha,
+        };
+        let presentations = crate::shell::app::commands::present_commands(
+            &crate::shell::app::commands::CommandContext::default(),
+            &crate::shell::app::commands::PresentationState::default(),
+            [],
+        );
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1_400.0, 300.0),
+            )),
+            ..Default::default()
+        };
+        let render = || {
+            ctx.run_ui(input(), |ui| {
+                show(ui, &model, &presentations, |_| Vec::new());
+            })
+        };
+        let _ = render();
+        let output = render();
+
+        let mut texts = Vec::new();
+        fn walk(shape: &egui::epaint::Shape, out: &mut Vec<(String, egui::Rect)>) {
+            match shape {
+                egui::epaint::Shape::Text(text) => {
+                    out.push((text.galley.job.text.clone(), text.visual_bounding_rect()));
+                }
+                egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut texts);
+        }
+
+        let percent = texts
+            .iter()
+            .find(|(text, _)| text.contains("42"))
+            .unwrap_or_else(|| panic!("the bar should show its percentage, got {texts:?}"));
+        let label = texts
+            .iter()
+            .find(|(text, _)| text == "Parsing flight.bin")
+            .expect("the load label should still be shown");
+
+        assert!(
+            percent.1.left() > label.1.right(),
+            "the percentage belongs inside the bar, after the label"
+        );
+        assert!(
+            percent.1.height() < tokens.control_height,
+            "the percentage text should fit a slimmer bar"
+        );
+
+        let mut bars = Vec::new();
+        fn rects(shape: &egui::epaint::Shape, out: &mut Vec<egui::Rect>) {
+            match shape {
+                egui::epaint::Shape::Rect(rect) => out.push(rect.rect),
+                egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|s| rects(s, out)),
+                _ => {}
+            }
+        }
+        for clipped in &output.shapes {
+            rects(&clipped.shape, &mut bars);
+        }
+        let bar = bars
+            .iter()
+            .find(|rect| {
+                rect.contains(percent.1.center()) && rect.width() > 100.0
+            })
+            .unwrap_or_else(|| panic!("the progress bar should enclose its percentage"));
+
+        assert!(
+            bar.height() < tokens.dense_row_height,
+            "the bar should be slimmer than a dense row, got {}",
+            bar.height()
+        );
+        assert!(
+            bar.width() >= 170.0,
+            "the bar should be wide, got {}",
+            bar.width()
+        );
+        assert!(
+            (percent.1.center().x - bar.center().x).abs() < 2.0,
+            "the percentage should be centered in the bar, text at {} vs bar center {}",
+            percent.1.center().x,
+            bar.center().x
+        );
+        assert!(
+            percent.1.height() <= bar.height(),
+            "the percentage must fit inside the bar, text {} vs bar {}",
+            percent.1.height(),
+            bar.height()
+        );
     }
 
     fn header_with_toolbar_probe(
