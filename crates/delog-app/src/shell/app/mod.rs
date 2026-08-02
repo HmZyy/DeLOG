@@ -3073,7 +3073,10 @@ impl eframe::App for DelogApp {
         crate::export::data_export::progress_ui(ui.ctx(), &self.data_exports);
         self.show_layout_windows(ui.ctx());
         crate::ui::message_popup::show_all(&mut self.message_popups, ui.ctx());
-        let settings_before = self.settings.clone();
+        let settings_before = self
+            .settings_dialog
+            .is_open()
+            .then(|| self.settings.clone());
         let tile_cache =
             self.tile_manager
                 .as_ref()
@@ -3115,7 +3118,7 @@ impl eframe::App for DelogApp {
         {
             ui.ctx().request_repaint();
         }
-        if self.settings != settings_before
+        if settings_before.is_some_and(|before| self.settings != before)
             && let Err(err) = crate::config::layout::doc::save_app_settings(&self.settings)
         {
             self.session
