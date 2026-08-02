@@ -1445,6 +1445,7 @@ impl Behavior<'_> {
         pane: &mut PlotPane,
     ) {
         response.context_menu(|ui| {
+            crate::ui::components::dense_menu(ui);
             if ui
                 .add(egui::Button::image_and_text(
                     menu_icon(ui, crate::ui::icons::trash()),
@@ -1461,6 +1462,7 @@ impl Behavior<'_> {
             }
 
             ui.menu_image_text_button(menu_icon(ui, crate::ui::icons::ban()), "Remove trace", |ui| {
+                crate::ui::components::dense_menu(ui);
                 let entries: Vec<_> = pane
                     .traces
                     .iter()
@@ -1531,6 +1533,7 @@ impl Behavior<'_> {
             }
 
             ui.menu_image_text_button(menu_icon(ui, crate::ui::icons::pencil()), "Edit trace", |ui| {
+                crate::ui::components::dense_menu(ui);
                 let entries: Vec<_> = pane
                     .traces
                     .iter()
@@ -1556,6 +1559,7 @@ impl Behavior<'_> {
                         continue;
                     };
                     ui.menu_button(label, |ui| {
+                        crate::ui::components::dense_menu(ui);
                         ui.horizontal(|ui| {
                             let mut color = color;
                             if egui::color_picker::color_edit_button_srgba(
@@ -1584,6 +1588,7 @@ impl Behavior<'_> {
                         continue;
                     };
                     ui.menu_button(label, |ui| {
+                        crate::ui::components::dense_menu(ui);
                         ui.horizontal(|ui| {
                             let mut color = ghost.color32();
                             if egui::color_picker::color_edit_button_srgba(

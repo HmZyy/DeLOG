@@ -10,11 +10,6 @@ use policy_sources::{
 };
 
 const CONTEXT_HEADER_SOURCE: &str = include_str!("../src/shell/app/context_header.rs");
-const DENSE_MENU_SOURCES: &[(&str, &str)] = &[
-    ("browser.rs", include_str!("../src/plotting/browser.rs")),
-    ("legend.rs", include_str!("../src/plotting/legend.rs")),
-    ("timeline.rs", include_str!("../src/plotting/timeline.rs")),
-];
 const COMMANDS_SOURCE: &str = include_str!("../src/shell/app/commands.rs");
 const GLOBAL_TOOLBAR_SOURCE: &str = include_str!("../src/shell/app/global_plot_toolbar.rs");
 
@@ -906,17 +901,36 @@ fn every_popup_is_non_collapsible_and_centered_by_default() {
 
 #[test]
 fn every_context_menu_uses_the_dense_row_tokens() {
-    for (name, source) in DENSE_MENU_SOURCES {
-        let mut searched = 0usize;
+    fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("readable directory") {
+            let path = entry.expect("readable entry").path();
+            if path.is_dir() {
+                rust_files(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    rust_files(&src, &mut files);
+
+    let mut checked = 0usize;
+    for file in files {
+        let source = std::fs::read_to_string(&file).expect("readable source");
         for (index, _) in source.match_indices(".context_menu(|ui| {") {
-            searched += 1;
-            let body = &source[index..];
-            let head: String = body.chars().take(140).collect();
+            checked += 1;
+            let head: String = source[index..].chars().take(140).collect();
             assert!(
                 head.contains("dense_menu(ui);"),
-                "a context menu in {name} does not apply the dense row tokens: {head}"
+                "a context menu in {} does not apply the dense row tokens: {head}",
+                file.display()
             );
         }
-        assert!(searched > 0, "{name} should contain at least one context menu");
     }
+    assert!(
+        checked >= 6,
+        "expected to audit every context menu, only found {checked}"
+    );
 }

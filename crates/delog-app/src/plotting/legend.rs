@@ -329,6 +329,7 @@ pub fn ui(
                                 resp.context_menu(|ui| {
                                     crate::ui::components::dense_menu(ui);
                                     ui.menu_button("Mode", |ui| {
+                                        crate::ui::components::dense_menu(ui);
                                         for mode in TraceMode::ALL {
                                             ui.radio_value(&mut trace.mode, mode, mode.label());
                                         }
