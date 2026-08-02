@@ -278,6 +278,12 @@ struct SaveLayoutDialog {
     name: String,
 }
 
+#[derive(Clone, PartialEq)]
+enum LayoutPick {
+    Clear,
+    Load(String),
+}
+
 #[derive(Default)]
 struct LoadLayoutDialog {
     picker: crate::ui::palette::PickerState,
@@ -2094,21 +2100,33 @@ impl DelogApp {
         }
 
         if self.load_layout_dialog.picker.open {
-            let items: Vec<crate::ui::palette::PickerItem<String>> = self
-                .load_layout_dialog
-                .layouts
-                .iter()
-                .map(|name| crate::ui::palette::PickerItem::new(name.clone(), name.clone()))
-                .collect();
-            if let Some(name) = self.load_layout_dialog.picker.show(
+            let mut items = vec![crate::ui::palette::PickerItem::new(
+                LayoutPick::Clear,
+                commands::CommandId::ClearLayout.spec().label,
+            )];
+            items.extend(self.load_layout_dialog.layouts.iter().enumerate().map(
+                |(index, name)| {
+                    let mut item = crate::ui::palette::PickerItem::new(
+                        LayoutPick::Load(name.clone()),
+                        name.clone(),
+                    );
+                    item.separator_before = index == 0;
+                    item
+                },
+            ));
+            match self.load_layout_dialog.picker.show(
                 ctx,
                 "load-layout-picker",
                 "Search layouts…",
                 "No saved layouts.",
                 &items,
             ) {
-                let snapshot = self.session.snapshot();
-                self.load_layout(&name, &snapshot);
+                Some(LayoutPick::Clear) => self.clear_current_layout(),
+                Some(LayoutPick::Load(name)) => {
+                    let snapshot = self.session.snapshot();
+                    self.load_layout(&name, &snapshot);
+                }
+                None => {}
             }
         }
 

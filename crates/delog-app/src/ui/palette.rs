@@ -6,6 +6,7 @@ pub struct PickerItem<T> {
     pub search_text: String,
     pub disabled_reason: Option<&'static str>,
     pub checked: bool,
+    pub separator_before: bool,
 }
 
 impl<T> PickerItem<T> {
@@ -18,6 +19,7 @@ impl<T> PickerItem<T> {
             subtitle: None,
             disabled_reason: None,
             checked: false,
+            separator_before: false,
         }
     }
 
@@ -157,6 +159,9 @@ impl PickerState {
                         ui.weak(empty_text);
                     }
                     for (index, item) in ranked.iter().enumerate() {
+                        if item.separator_before && index > 0 {
+                            ui.separator();
+                        }
                         let mut label = item.label.clone();
                         if item.checked {
                             label.insert_str(0, "✓  ");
@@ -330,6 +335,61 @@ mod tests {
 
         assert!(picked.is_none());
         assert!(state.open, "a disabled item should not close the picker");
+    }
+
+    fn second_row_top(ctx: &egui::Context, separator: bool) -> f32 {
+        let mut items = layouts();
+        items[1].separator_before = separator;
+        let mut state = PickerState::default();
+        state.open();
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1_000.0, 700.0),
+            )),
+            ..Default::default()
+        };
+        let render = |state: &mut PickerState, items: &[PickerItem<String>]| {
+            ctx.run_ui(input(), |ui| {
+                state.show(ui.ctx(), "sep-test", "hint", "empty", items);
+            })
+        };
+        let _ = render(&mut state, &items);
+        let output = render(&mut state, &items);
+
+        fn walk(shape: &egui::epaint::Shape, out: &mut Vec<(String, egui::Rect)>) {
+            match shape {
+                egui::epaint::Shape::Text(text) => {
+                    out.push((text.galley.job.text.clone(), text.visual_bounding_rect()));
+                }
+                egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut texts = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut texts);
+        }
+        texts
+            .iter()
+            .find(|(text, _)| text == "beta")
+            .expect("the second row should be painted")
+            .1
+            .top()
+    }
+
+    #[test]
+    fn a_separator_pushes_the_following_row_down() {
+        let ctx = egui::Context::default();
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+
+        let without = second_row_top(&ctx, false);
+        let with = second_row_top(&ctx, true);
+
+        assert!(
+            with > without,
+            "a separator should occupy space above its row ({without} -> {with})"
+        );
     }
 
     #[test]
