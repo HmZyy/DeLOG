@@ -187,6 +187,7 @@ fn show_tooltip(
                 ..base
             }
             .show(ui, |ui| {
+                crate::ui::components::dense_rows(ui);
                 if show_time {
                     ui.label(egui::RichText::new(format!("t = {t_sec:.3} s")).weak());
                 }
@@ -510,7 +511,94 @@ fn format_value(v: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_delta, plot_to_screen};
+    use super::{format_delta, plot_to_screen, show_tooltip, Row};
+    use std::collections::HashMap;
+
+    fn tooltip_row(field: u32, label: &str, value: f64) -> Row {
+        Row {
+            field: delog_core::identity::FieldId(field),
+            label: label.to_owned(),
+            value,
+            unit: Some("m/s".to_owned()),
+            color: egui::Color32::RED,
+            effective_time_us: 0,
+        }
+    }
+
+    #[test]
+    fn tooltip_rows_use_the_dense_row_gap() {
+        let ctx = egui::Context::default();
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let tokens = crate::ui::design_tokens::DesignTokens::default();
+        let rows = vec![
+            tooltip_row(1, "alpha", 1.0),
+            tooltip_row(2, "beta", 2.0),
+            tooltip_row(3, "gamma", 3.0),
+        ];
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            ..Default::default()
+        };
+
+        let render = || {
+            ctx.run_ui(input.clone(), |ui| {
+                show_tooltip(
+                    ui,
+                    egui::Id::new("tooltip-density"),
+                    egui::pos2(100.0, 100.0),
+                    egui::Align2::LEFT_TOP,
+                    1.0,
+                    &rows,
+                    &HashMap::new(),
+                    true,
+                    false,
+                    1.0,
+                );
+            })
+        };
+        render();
+        let output = render();
+
+        fn walk(shape: &egui::epaint::Shape, out: &mut Vec<(String, egui::Rect)>) {
+            match shape {
+                egui::epaint::Shape::Text(text) => {
+                    out.push((text.galley.job.text.clone(), text.visual_bounding_rect()));
+                }
+                egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut texts = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut texts);
+        }
+        let row_top = |label: &str| {
+            texts
+                .iter()
+                .find(|(text, _)| text.starts_with(label))
+                .unwrap_or_else(|| panic!("{label} row should be painted, got {texts:?}"))
+                .1
+                .top()
+        };
+
+        let first = row_top("alpha");
+        let second = row_top("beta");
+        let third = row_top("gamma");
+        let pitch = second - first;
+
+        assert!(
+            (third - second - pitch).abs() < 0.5,
+            "tooltip rows should be evenly spaced ({first}, {second}, {third})"
+        );
+        assert!(
+            pitch <= tokens.dense_row_height + tokens.dense_row_gap + 0.5,
+            "tooltip rows are {pitch} apart, denser layout expects at most {}",
+            tokens.dense_row_height + tokens.dense_row_gap
+        );
+    }
 
     #[test]
     fn sample_circle_maps_in_f64_at_large_magnitude() {

@@ -923,7 +923,7 @@ fn every_context_menu_uses_the_dense_row_tokens() {
             checked += 1;
             let head: String = source[index..].chars().take(140).collect();
             assert!(
-                head.contains("dense_menu(ui);"),
+                head.contains("dense_rows(ui);"),
                 "a context menu in {} does not apply the dense row tokens: {head}",
                 file.display()
             );
