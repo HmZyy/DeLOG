@@ -1175,6 +1175,130 @@ mod tests {
     }
 
     #[test]
+    fn dragging_a_field_row_delivers_the_payload_to_a_drop_zone() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let model = synth_model(1, 1, 3);
+        let dragged = model.sources[0].topics[0].fields[0].id;
+        let mut query = "field".to_owned();
+        let mut filter_cache = BrowserFilterCache::default();
+        let mut selection = Selection::default();
+        let mut offset_dialog = None;
+        let mut dropped: Option<Vec<FieldId>> = None;
+        let mut row_pos = None;
+        let mut zone_rect = egui::Rect::NOTHING;
+
+        let mut frame = |events: Vec<egui::Event>,
+                         pointer: Option<egui::Pos2>,
+                         row_pos: &mut Option<egui::Pos2>,
+                         zone_rect: &mut egui::Rect,
+                         dropped: &mut Option<Vec<FieldId>>| {
+            let mut input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1_200.0, 800.0),
+                )),
+                ..Default::default()
+            };
+            if let Some(pos) = pointer {
+                input.events.push(egui::Event::PointerMoved(pos));
+            }
+            input.events.extend(events);
+
+            let output = ctx.run_ui(input, |ui| {
+                egui::Panel::left("drag-browser")
+                    .exact_size(420.0)
+                    .show_inside(ui, |ui| {
+                        super::ui(
+                            ui,
+                            0,
+                            &model,
+                            &mut query,
+                            &mut filter_cache,
+                            &mut selection,
+                            &mut offset_dialog,
+                        );
+                    });
+                egui::Frame::central_panel(ui.style()).show(ui, |ui| {
+                    let (inner, payload) =
+                        ui.dnd_drop_zone::<Vec<FieldId>, ()>(egui::Frame::default(), |ui| {
+                            ui.allocate_space(ui.available_size());
+                        });
+                    *zone_rect = inner.response.rect;
+                    if let Some(payload) = payload {
+                        *dropped = Some((*payload).clone());
+                    }
+                });
+            });
+
+            if row_pos.is_none() {
+                *row_pos = find_text_rect_in(&output, "field_00").map(|rect| rect.center());
+            }
+        };
+
+        frame(vec![], None, &mut row_pos, &mut zone_rect, &mut dropped);
+        frame(vec![], None, &mut row_pos, &mut zone_rect, &mut dropped);
+        let row = row_pos.expect("the field row should be painted");
+        let target = zone_rect.center();
+
+        frame(
+            vec![egui::Event::PointerButton {
+                pos: row,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Default::default(),
+            }],
+            Some(row),
+            &mut row_pos,
+            &mut zone_rect,
+            &mut dropped,
+        );
+        frame(
+            vec![],
+            Some(row + egui::vec2(0.0, 20.0)),
+            &mut row_pos,
+            &mut zone_rect,
+            &mut dropped,
+        );
+        for step in 0..4 {
+            frame(
+                vec![],
+                Some(target + egui::vec2(step as f32 * 2.0, 0.0)),
+                &mut row_pos,
+                &mut zone_rect,
+                &mut dropped,
+            );
+        }
+        let release_at = target + egui::vec2(8.0, 0.0);
+        frame(
+            vec![egui::Event::PointerButton {
+                pos: release_at,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Default::default(),
+            }],
+            Some(release_at),
+            &mut row_pos,
+            &mut zone_rect,
+            &mut dropped,
+        );
+
+        assert_eq!(
+            dropped.as_deref(),
+            Some(&[dragged][..]),
+            "dragging a browser field row must hand a Vec<FieldId> to the plot drop zone"
+        );
+    }
+
+    fn find_text_rect_in(output: &egui::FullOutput, expected: &str) -> Option<egui::Rect> {
+        output
+            .shapes
+            .iter()
+            .find_map(|clipped| find_text_rect(&clipped.shape, expected))
+    }
+
+    #[test]
     fn browser_culls_rows_outside_the_viewport() {
         let small = synth_model(1, 10, 8);
         let huge = synth_model(4, 250, 12);
