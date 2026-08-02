@@ -10,6 +10,11 @@ use policy_sources::{
 };
 
 const CONTEXT_HEADER_SOURCE: &str = include_str!("../src/shell/app/context_header.rs");
+const DENSE_MENU_SOURCES: &[(&str, &str)] = &[
+    ("browser.rs", include_str!("../src/plotting/browser.rs")),
+    ("legend.rs", include_str!("../src/plotting/legend.rs")),
+    ("timeline.rs", include_str!("../src/plotting/timeline.rs")),
+];
 const COMMANDS_SOURCE: &str = include_str!("../src/shell/app/commands.rs");
 const GLOBAL_TOOLBAR_SOURCE: &str = include_str!("../src/shell/app/global_plot_toolbar.rs");
 
@@ -897,4 +902,21 @@ fn every_popup_is_non_collapsible_and_centered_by_default() {
         occurrence_count(".pivot(egui::Align2::CENTER_CENTER)"),
         popup_count
     );
+}
+
+#[test]
+fn every_context_menu_uses_the_dense_row_tokens() {
+    for (name, source) in DENSE_MENU_SOURCES {
+        let mut searched = 0usize;
+        for (index, _) in source.match_indices(".context_menu(|ui| {") {
+            searched += 1;
+            let body = &source[index..];
+            let head: String = body.chars().take(140).collect();
+            assert!(
+                head.contains("dense_menu(ui);"),
+                "a context menu in {name} does not apply the dense row tokens: {head}"
+            );
+        }
+        assert!(searched > 0, "{name} should contain at least one context menu");
+    }
 }
