@@ -3195,9 +3195,11 @@ impl eframe::App for DelogApp {
             }
         }
 
-        let palette_entries = Self::command_palette_entries(command_presentations);
-        if let Some(command) = self.command_palette.show(ui.ctx(), &palette_entries) {
-            self.dispatch_command(command, ui.ctx(), frame, &snapshot, range);
+        if self.command_palette.is_open() {
+            let palette_entries = Self::command_palette_entries(command_presentations);
+            if let Some(command) = self.command_palette.show(ui.ctx(), &palette_entries) {
+                self.dispatch_command(command, ui.ctx(), frame, &snapshot, range);
+            }
         }
     }
 }
