@@ -327,6 +327,7 @@ pub fn ui(
                                     filter_edits.push((*field, filter.clone()));
                                 }
                                 resp.context_menu(|ui| {
+                                    crate::ui::components::dense_menu(ui);
                                     ui.menu_button("Mode", |ui| {
                                         for mode in TraceMode::ALL {
                                             ui.radio_value(&mut trace.mode, mode, mode.label());
@@ -382,6 +383,7 @@ pub fn ui(
                                     )
                                     .inner;
                                 resp.context_menu(|ui| {
+                                    crate::ui::components::dense_menu(ui);
                                     if ui.button("Remove").clicked() {
                                         removed_ghost = Some(index);
                                         ui.close();

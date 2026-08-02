@@ -152,6 +152,13 @@ pub struct LibraryEvent {
     pub action: LibraryAction,
 }
 
+pub fn dense_menu(ui: &mut egui::Ui) {
+    let tokens = DesignTokens::from_style(ui.style());
+    ui.spacing_mut().interact_size.y = tokens.dense_row_height;
+    ui.spacing_mut().item_spacing.y = tokens.dense_row_gap;
+    ui.spacing_mut().button_padding.y = tokens.dense_row_gap;
+}
+
 pub fn clamp_to_available_width<R>(
     ui: &mut egui::Ui,
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
@@ -201,6 +208,7 @@ pub fn library_tree(
                             |ui| {
                                 if !menu_actions.is_empty() {
                                     let menu = ui.menu_button("...", |ui| {
+                                        dense_menu(ui);
                                         for action in menu_actions {
                                             if ui.button(action.label()).clicked() {
                                                 menu_event = Some(LibraryEvent {
@@ -455,6 +463,22 @@ mod tests {
             "the row menu is drawn at x={} which is outside a 150 point drawer",
             narrow.right()
         );
+    }
+
+    #[test]
+    fn dense_menu_applies_the_dense_row_tokens() {
+        let ctx = egui::Context::default();
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let tokens = DesignTokens::default();
+        let mut spacing = None;
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            dense_menu(ui);
+            spacing = Some(ui.spacing().clone());
+        });
+        let spacing = spacing.expect("the menu ui should have been built");
+        assert_eq!(spacing.interact_size.y, tokens.dense_row_height);
+        assert_eq!(spacing.item_spacing.y, tokens.dense_row_gap);
+        assert_eq!(spacing.button_padding.y, tokens.dense_row_gap);
     }
 
     #[test]
