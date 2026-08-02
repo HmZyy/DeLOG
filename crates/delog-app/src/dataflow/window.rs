@@ -465,7 +465,7 @@ impl DataFlowUi {
     }
 
     fn collapsed_library_drawer(&mut self, ui: &mut egui::Ui) {
-        let button_size = crate::plotting::browser::panel_toggle_button_size(ui);
+        let button_size = crate::plotting::browser::data_browser_toggle_button_size(ui);
         let collapsed_left_margin = ui.spacing().item_spacing.x;
         let collapsed_right_margin = ui.spacing().item_spacing.x;
         let collapsed_width = collapsed_left_margin + button_size.x + collapsed_right_margin;
@@ -480,14 +480,12 @@ impl DataFlowUi {
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     ui.add_space(collapsed_left_margin);
-                    let icon_size = button_size - ui.spacing().button_padding * 2.0;
-                    let icon = egui::Image::new(crate::ui::icons::panel_left_open())
-                        .fit_to_exact_size(icon_size)
-                        .tint(ui.visuals().text_color());
-                    if ui
-                        .add_sized(button_size, egui::Button::image(icon))
-                        .on_hover_text("Show data flows")
-                        .clicked()
+                    if crate::plotting::browser::data_browser_toggle_button(
+                        ui,
+                        crate::ui::icons::panel_left_open(),
+                        "Show data flows",
+                    )
+                    .clicked()
                     {
                         self.library_collapsed = false;
                     }
@@ -498,15 +496,12 @@ impl DataFlowUi {
     fn library_drawer(&mut self, ui: &mut egui::Ui, logs: &mut Vec<(LogLevel, String)>) {
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let button_size = crate::plotting::browser::panel_toggle_button_size(ui);
-                let icon_size = button_size - ui.spacing().button_padding * 2.0;
-                let icon = egui::Image::new(crate::ui::icons::panel_left_close())
-                    .fit_to_exact_size(icon_size)
-                    .tint(ui.visuals().text_color());
-                if ui
-                    .add_sized(button_size, egui::Button::image(icon))
-                    .on_hover_text("Hide data flows")
-                    .clicked()
+                if crate::plotting::browser::data_browser_toggle_button(
+                    ui,
+                    crate::ui::icons::panel_left_close(),
+                    "Hide data flows",
+                )
+                .clicked()
                 {
                     self.library_collapsed = true;
                 }
@@ -1286,6 +1281,55 @@ mod tests {
     use delog_flow::graph::{NodeId, OutputSpec, Viewport};
 
     use super::*;
+
+    fn data_flow_toggle_bounds(collapsed: bool) -> egui::accesskit::Rect {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        ctx.enable_accesskit();
+        let mut flow = DataFlowUi::new();
+        let mut logs = Vec::new();
+        let label = if collapsed {
+            "Show data flows"
+        } else {
+            "Hide data flows"
+        };
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                if collapsed {
+                    flow.collapsed_library_drawer(ui);
+                } else {
+                    flow.library_drawer(ui, &mut logs);
+                }
+            },
+        );
+        output
+            .platform_output
+            .accesskit_update
+            .expect("accessibility tree should be emitted")
+            .nodes
+            .iter()
+            .map(|(_, node)| node)
+            .find(|node| node.label() == Some(label))
+            .and_then(|node| node.bounds())
+            .unwrap_or_else(|| panic!("{label} button should have bounds"))
+    }
+
+    #[test]
+    fn data_flow_drawer_toggles_match_data_browser_button_size() {
+        for collapsed in [false, true] {
+            let bounds = data_flow_toggle_bounds(collapsed);
+            assert_eq!(bounds.width(), 30.0);
+            assert_eq!(bounds.height(), 30.0);
+        }
+    }
 
     fn node_kinds_that_must_not_expand_the_window() -> Vec<NodeKind> {
         #[allow(unused_mut)]
