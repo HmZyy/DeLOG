@@ -651,7 +651,7 @@ pub fn ui(
                                     ui.add(egui::Label::new(&header).selectable(false));
                                 })
                                 .context_menu(|ui| {
-                                    crate::ui::components::dense_menu(ui);
+                                    crate::ui::components::dense_rows(ui);
                                     let info = egui::Image::new(crate::ui::icons::info())
                                         .fit_to_exact_size(egui::Vec2::splat(
                                             ui.spacing().icon_width,
@@ -1012,7 +1012,7 @@ fn field_row(
         }
     }
     response.context_menu(|ui| {
-        crate::ui::components::dense_menu(ui);
+        crate::ui::components::dense_rows(ui);
         let metadata_info = egui::Image::new(crate::ui::icons::info())
             .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
             .tint(ui.visuals().text_color());

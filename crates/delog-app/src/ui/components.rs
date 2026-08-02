@@ -152,7 +152,7 @@ pub struct LibraryEvent {
     pub action: LibraryAction,
 }
 
-pub fn dense_menu(ui: &mut egui::Ui) {
+pub fn dense_rows(ui: &mut egui::Ui) {
     let tokens = DesignTokens::from_style(ui.style());
     ui.spacing_mut().interact_size.y = tokens.dense_row_height;
     ui.spacing_mut().item_spacing.y = tokens.dense_row_gap;
@@ -208,7 +208,7 @@ pub fn library_tree(
                             |ui| {
                                 if !menu_actions.is_empty() {
                                     let menu = ui.menu_button("...", |ui| {
-                                        dense_menu(ui);
+                                        dense_rows(ui);
                                         for action in menu_actions {
                                             if ui.button(action.label()).clicked() {
                                                 menu_event = Some(LibraryEvent {
@@ -466,13 +466,13 @@ mod tests {
     }
 
     #[test]
-    fn dense_menu_applies_the_dense_row_tokens() {
+    fn dense_rows_applies_the_dense_row_tokens() {
         let ctx = egui::Context::default();
         crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
         let tokens = DesignTokens::default();
         let mut spacing = None;
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            dense_menu(ui);
+            dense_rows(ui);
             spacing = Some(ui.spacing().clone());
         });
         let spacing = spacing.expect("the menu ui should have been built");
