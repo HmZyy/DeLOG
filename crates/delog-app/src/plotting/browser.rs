@@ -495,11 +495,6 @@ fn display_endpoint(value: Option<&str>) -> &str {
     value.unwrap_or("-")
 }
 
-pub fn panel_toggle_button_size(ui: &egui::Ui) -> egui::Vec2 {
-    let side = ui.spacing().interact_size.y + ui.spacing().button_padding.x * 2.0;
-    egui::Vec2::splat(side)
-}
-
 pub fn data_browser_toggle_button_size(ui: &egui::Ui) -> egui::Vec2 {
     let tokens = crate::ui::design_tokens::DesignTokens::from_style(ui.style());
     egui::Vec2::splat(tokens.control_height)
