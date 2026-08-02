@@ -516,34 +516,35 @@ impl DataFlowUi {
             ui.weak("No saved data flows.");
             return;
         }
-        egui::ScrollArea::vertical()
+        let selected = self.loaded_name.clone();
+        let event = egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                for name in names {
-                    ui.horizontal(|ui| {
-                        let selected = self.loaded_name.as_deref() == Some(name.as_str());
-                        if ui
-                            .selectable_label(selected, name.as_str())
-                            .on_hover_text("Load data flow")
-                            .clicked()
-                        {
-                            self.edit_named(&name, logs);
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.menu_button("...", |ui| {
-                                if ui.button("Duplicate").clicked() {
-                                    self.duplicate(&name, logs);
-                                    ui.close();
-                                }
-                                if ui.button("Remove").clicked() {
-                                    self.pending_delete = Some(name.clone());
-                                    ui.close();
-                                }
-                            });
-                        });
-                    });
+                crate::ui::components::library_tree(
+                    ui,
+                    egui::Id::new("dataflow_library_tree"),
+                    &names,
+                    selected.as_deref(),
+                    &[
+                        crate::ui::components::LibraryAction::Duplicate,
+                        crate::ui::components::LibraryAction::Remove,
+                    ],
+                    "Load data flow",
+                )
+            })
+            .inner;
+        if let Some(event) = event {
+            match event.action {
+                crate::ui::components::LibraryAction::Load
+                | crate::ui::components::LibraryAction::Edit => self.edit_named(&event.name, logs),
+                crate::ui::components::LibraryAction::Duplicate => {
+                    self.duplicate(&event.name, logs);
                 }
-            });
+                crate::ui::components::LibraryAction::Remove => {
+                    self.pending_delete = Some(event.name.clone());
+                }
+            }
+        }
     }
 
     fn save(&mut self, logs: &mut Vec<(LogLevel, String)>) {
