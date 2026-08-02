@@ -1632,6 +1632,7 @@ impl DelogApp {
             self.session.has_active_loads(),
             parser_task_active,
             cfg!(feature = "scripting"),
+            self.workspace.fields().next().is_some(),
         )
     }
 
@@ -1924,6 +1925,9 @@ impl DelogApp {
                 CommandId::ToggleLegends => {
                     let visible = !self.workspace.all_plot_legends_visible();
                     self.workspace.set_all_plot_legends(visible);
+                }
+                CommandId::OpenFieldStats => {
+                    self.field_stats.open_plotted(self.workspace.unique_fields());
                 }
                 CommandId::OpenSettings => self.settings_dialog.open(),
                 CommandId::Exit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
@@ -2807,6 +2811,9 @@ impl eframe::App for DelogApp {
             self.playback.scrub(t_us, range);
         }
         show_field_metadata_window(ui.ctx(), &snapshot, &mut self.field_metadata_dialog);
+        if self.field_stats.is_tracking_plots() {
+            self.field_stats.sync_plotted(self.workspace.unique_fields());
+        }
         show_field_stats_window(
             ui.ctx(),
             &snapshot,
@@ -2970,9 +2977,6 @@ impl eframe::App for DelogApp {
                     }
                     if actions.export_kml {
                         self.spawn_export_kml_dialog(ui.ctx(), &snapshot);
-                    }
-                    if let Some(fields) = actions.inspect_field_stats {
-                        self.field_stats.open_fields(fields);
                     }
                     if let Some(action) = actions.image {
                         match action {

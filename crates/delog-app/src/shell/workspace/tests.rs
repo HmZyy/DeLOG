@@ -19,12 +19,50 @@ fn focused_fields_preserve_the_focused_plot_trace_order() {
 }
 
 #[test]
+fn unique_fields_dedupes_traces_shared_between_plots() {
+    let mut workspace = Workspace::new();
+    let first = workspace.tree.root().unwrap();
+    workspace.add_trace_to_first_plot(FieldId(7));
+    workspace.add_trace_to_first_plot(FieldId(3));
+    workspace.split_plot(first, SplitDirection::Horizontal);
+
+    let second = workspace
+        .tree
+        .tiles
+        .iter()
+        .filter(|(id, tile)| {
+            **id != first && matches!(tile, egui_tiles::Tile::Pane(Pane::Plot(_)))
+        })
+        .map(|(id, _)| *id)
+        .next()
+        .expect("the split should have produced a second plot");
+    let Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) = workspace.tree.tiles.get_mut(second) else {
+        panic!("expected a plot pane");
+    };
+    pane.add_trace(FieldId(3));
+    pane.add_trace(FieldId(9));
+
+    let unique = workspace.unique_fields();
+    let mut sorted = unique.clone();
+    sorted.sort_by_key(|field| field.0);
+    assert_eq!(
+        sorted,
+        vec![FieldId(3), FieldId(7), FieldId(9)],
+        "every plotted trace should be present"
+    );
+    assert_eq!(
+        unique.len(),
+        3,
+        "a trace plotted in two panes should appear once, got {unique:?}"
+    );
+}
+
+#[test]
 fn plot_context_menu_keeps_every_existing_action() {
     let source = include_str!("mod.rs");
     for label in [
         "Clear all traces",
         "Remove trace",
-        "Field stats",
         "Edit trace",
         "Copy Image",
         "Export PNG...",
@@ -37,6 +75,10 @@ fn plot_context_menu_keeps_every_existing_action() {
     ] {
         assert!(source.contains(label), "missing plot action: {label}");
     }
+    assert!(
+        !source.contains("Field stats"),
+        "field stats moved to the global toolbar"
+    );
 }
 
 #[test]

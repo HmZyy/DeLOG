@@ -260,6 +260,11 @@ impl Workspace {
         self.plot_panes().flat_map(PlotPane::fields)
     }
 
+    pub fn unique_fields(&self) -> Vec<FieldId> {
+        let mut seen = std::collections::HashSet::new();
+        self.fields().filter(|field| seen.insert(*field)).collect()
+    }
+
     pub fn map_scopes(&self) -> Vec<MapScopeId> {
         self.tree
             .tiles
@@ -642,7 +647,6 @@ pub struct WorkspaceActions {
     pub view_changed: bool,
     pub open_vehicle_config: bool,
     pub export_kml: bool,
-    pub inspect_field_stats: Option<Vec<FieldId>>,
     /// Widest Y gutter any pane needed; fed into `Workspace::shared_y_gutter`.
     pub max_y_gutter: f32,
 }
@@ -1516,21 +1520,6 @@ impl Behavior<'_> {
                     }
                 }
             });
-
-            let fields: Vec<FieldId> = pane.traces.iter().map(|trace| trace.field).collect();
-            let stats_info = egui::Image::new(crate::ui::icons::info())
-                .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
-                .tint(ui.visuals().text_color());
-            if ui
-                .add_enabled(
-                    !fields.is_empty(),
-                    egui::Button::image_and_text(stats_info, "Field stats"),
-                )
-                .clicked()
-            {
-                self.actions.inspect_field_stats = Some(fields);
-                ui.close();
-            }
 
             ui.menu_image_text_button(menu_icon(ui, crate::ui::icons::pencil()), "Edit trace", |ui| {
                 crate::ui::components::dense_rows(ui);
