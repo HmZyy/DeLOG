@@ -189,7 +189,7 @@ fn show_tooltip(
             .show(ui, |ui| {
                 crate::ui::components::dense_rows(ui);
                 if show_time {
-                    ui.label(egui::RichText::new(format!("t = {t_sec:.3} s")).weak());
+                    ui.label(egui::RichText::new(format!("{t_sec:.3} s")).weak());
                 }
                 for row in rows {
                     ui.horizontal(|ui| {
@@ -523,6 +523,59 @@ mod tests {
             color: egui::Color32::RED,
             effective_time_us: 0,
         }
+    }
+
+    #[test]
+    fn tooltip_time_is_shown_without_a_t_prefix() {
+        let ctx = egui::Context::default();
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let rows = vec![tooltip_row(1, "alpha", 1.0)];
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let render = || {
+            ctx.run_ui(input.clone(), |ui| {
+                show_tooltip(
+                    ui,
+                    egui::Id::new("tooltip-time"),
+                    egui::pos2(100.0, 100.0),
+                    egui::Align2::LEFT_TOP,
+                    1.25,
+                    &rows,
+                    &HashMap::new(),
+                    true,
+                    true,
+                    1.0,
+                );
+            })
+        };
+        render();
+        let output = render();
+
+        fn walk(shape: &egui::epaint::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::epaint::Shape::Text(text) => out.push(text.galley.job.text.clone()),
+                egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut texts = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut texts);
+        }
+
+        assert!(
+            texts.iter().any(|text| text == "1.250 s"),
+            "the readout should show the bare timestamp, got {texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|text| text.contains("t =")),
+            "the readout should not prefix the timestamp, got {texts:?}"
+        );
     }
 
     #[test]
