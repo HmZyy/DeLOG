@@ -9,6 +9,15 @@ pub struct CommandPaletteState {
     pub selected: usize,
     focus_search: bool,
     scroll_to_selected: bool,
+    hover: HoverGate,
+}
+
+#[derive(Default, PartialEq)]
+enum HoverGate {
+    #[default]
+    JustOpened,
+    Waiting(Option<egui::Pos2>),
+    Armed,
 }
 
 #[derive(Clone)]
@@ -62,6 +71,7 @@ impl CommandPaletteState {
         self.selected = 0;
         self.focus_search = true;
         self.scroll_to_selected = true;
+        self.hover = HoverGate::JustOpened;
     }
 
     pub fn entries(
@@ -142,6 +152,23 @@ impl CommandPaletteState {
                     self.focus_search = false;
                 }
                 ui.separator();
+                let pointer = ui.ctx().pointer_latest_pos();
+                self.hover = match self.hover {
+                    HoverGate::JustOpened => HoverGate::Waiting(pointer),
+                    HoverGate::Waiting(anchor) => {
+                        let moved = match (anchor, pointer) {
+                            (Some(from), Some(to)) => from.distance(to) > 2.0,
+                            (from, to) => from.is_some() != to.is_some(),
+                        };
+                        if moved {
+                            HoverGate::Armed
+                        } else {
+                            HoverGate::Waiting(anchor)
+                        }
+                    }
+                    HoverGate::Armed => HoverGate::Armed,
+                };
+                let hover_armed = self.hover == HoverGate::Armed;
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     if ranked.is_empty() {
                         ui.weak("No matching commands");
@@ -172,15 +199,15 @@ impl CommandPaletteState {
                                 )),
                         );
                         let response = match &entry.availability {
-                            CommandAvailability::Disabled(reason) => {
+                            CommandAvailability::Disabled(reason) if hover_armed => {
                                 response.on_disabled_hover_text(*reason)
                             }
-                            CommandAvailability::Enabled => response,
+                            _ => response,
                         };
                         if scroll_to_selected && index == self.selected {
                             response.scroll_to_me(None);
                         }
-                        if response.hovered() {
+                        if hover_armed && response.hovered() {
                             self.selected = index;
                         }
                         if response.clicked() {
@@ -482,6 +509,79 @@ mod tests {
 
             assert_eq!(selected, expected);
         }
+    }
+
+    #[test]
+    fn opening_under_the_pointer_keeps_the_first_entry_selected() {
+        let ctx = egui::Context::default();
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let entries = [
+            PaletteEntry::enabled(AppCommand::Static(CommandId::Open), "First", ""),
+            PaletteEntry::enabled(AppCommand::Static(CommandId::ConnectLive), "Second", ""),
+            PaletteEntry::enabled(AppCommand::Static(CommandId::OpenSettings), "Third", ""),
+        ];
+
+        let mut palette = CommandPaletteState::default();
+        palette.open();
+        let _ = palette_frame(&ctx, &mut palette, &entries, vec![]);
+        let (output, _) = palette_frame(&ctx, &mut palette, &entries, vec![]);
+        let third = output
+            .shapes
+            .iter()
+            .find_map(|shape| find_text_rect(&shape.shape, "Third"))
+            .expect("the third row should be painted")
+            .center();
+
+        // Park the pointer over the third row, then reopen underneath it.
+        let _ = palette_frame(
+            &ctx,
+            &mut palette,
+            &entries,
+            vec![egui::Event::PointerMoved(third)],
+        );
+        palette.open();
+        let _ = palette_frame(&ctx, &mut palette, &entries, vec![]);
+        let _ = palette_frame(&ctx, &mut palette, &entries, vec![]);
+
+        assert_eq!(
+            palette.selected, 0,
+            "a palette opened under the pointer should still start on the first entry"
+        );
+    }
+
+    #[test]
+    fn moving_the_pointer_after_opening_selects_the_hovered_entry() {
+        let ctx = egui::Context::default();
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let entries = [
+            PaletteEntry::enabled(AppCommand::Static(CommandId::Open), "First", ""),
+            PaletteEntry::enabled(AppCommand::Static(CommandId::ConnectLive), "Second", ""),
+            PaletteEntry::enabled(AppCommand::Static(CommandId::OpenSettings), "Third", ""),
+        ];
+
+        let mut palette = CommandPaletteState::default();
+        palette.open();
+        let _ = palette_frame(&ctx, &mut palette, &entries, vec![]);
+        let (output, _) = palette_frame(&ctx, &mut palette, &entries, vec![]);
+        let third = output
+            .shapes
+            .iter()
+            .find_map(|shape| find_text_rect(&shape.shape, "Third"))
+            .expect("the third row should be painted")
+            .center();
+
+        let _ = palette_frame(
+            &ctx,
+            &mut palette,
+            &entries,
+            vec![egui::Event::PointerMoved(third)],
+        );
+        let _ = palette_frame(&ctx, &mut palette, &entries, vec![]);
+
+        assert_eq!(
+            palette.selected, 2,
+            "deliberately moving onto a row should select it"
+        );
     }
 
     #[test]
