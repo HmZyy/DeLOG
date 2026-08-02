@@ -1,7 +1,7 @@
 #[path = "policy_sources.rs"]
 mod policy_sources;
 
-use policy_sources::{APP, CORE_INGEST, SYNC_WINDOW};
+use policy_sources::{APP, APP_COMMANDS, CORE_INGEST, SYNC_WINDOW};
 
 fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
     let start = source.find(start).expect("start marker should exist");
@@ -18,10 +18,8 @@ fn sync_window_is_modeless_private_and_atomically_applied() {
             .count(),
         1
     );
-    assert_eq!(
-        APP.matches("egui::Button::new(\"Sync Sources\")").count(),
-        1
-    );
+    assert_eq!(APP_COMMANDS.matches("SyncSources => spec!(").count(), 1);
+    assert_eq!(APP_COMMANDS.matches("\"Sync sources…\"").count(), 1);
     for source in [APP, SYNC_WINDOW] {
         assert!(!source.contains("Synchronize Data Sources"));
     }

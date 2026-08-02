@@ -519,7 +519,7 @@ impl SyncWindow {
             sources,
             reference,
             active,
-            mode: CompareMode::Overlay,
+            mode: CompareMode::Stacked,
             view: None,
             confirm_discard: false,
             pending_apply: None,
@@ -1130,8 +1130,8 @@ impl SyncWindow {
             self.cancel_sample_pick();
         }
         ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.mode, CompareMode::Overlay, "Overlay");
             ui.selectable_value(&mut self.mode, CompareMode::Stacked, "Stacked");
+            ui.selectable_value(&mut self.mode, CompareMode::Overlay, "Overlay");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Reset all").clicked() {
                     self.reset_all();
