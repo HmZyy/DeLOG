@@ -496,6 +496,7 @@ fn scrubber(
             )
             .on_hover_text(tip);
         fr.context_menu(|ui| {
+            crate::ui::components::dense_menu(ui);
             let mut label = m.label.clone();
             if ui
                 .add(egui::TextEdit::singleline(&mut label).hint_text("label"))
