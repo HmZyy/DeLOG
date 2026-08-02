@@ -280,9 +280,8 @@ struct SaveLayoutDialog {
 
 #[derive(Default)]
 struct LoadLayoutDialog {
-    open: bool,
+    picker: crate::ui::palette::PickerState,
     layouts: Vec<String>,
-    selected: Option<usize>,
 }
 
 #[derive(Default)]
@@ -1889,8 +1888,7 @@ impl DelogApp {
                 CommandId::LoadLayout => {
                     self.load_layout_dialog.layouts =
                         crate::config::layout::doc::list_layouts();
-                    self.load_layout_dialog.selected = None;
-                    self.load_layout_dialog.open = true;
+                    self.load_layout_dialog.picker.open();
                 }
                 CommandId::ManageLayouts => self.open_layout_manager(),
                 CommandId::ClearLayout => self.clear_current_layout(),
@@ -2095,44 +2093,23 @@ impl DelogApp {
             self.save_layout_dialog.open &= open;
         }
 
-        if self.load_layout_dialog.open {
-            let mut open = self.load_layout_dialog.open;
-            egui::Window::new("Load Layout")
-                .open(&mut open)
-                .collapsible(false)
-                .default_pos(ctx.content_rect().center())
-                .pivot(egui::Align2::CENTER_CENTER)
-                .default_width(320.0)
-                .show(ctx, |ui| {
-                    if self.load_layout_dialog.layouts.is_empty() {
-                        ui.weak("No saved layouts.");
-                    } else {
-                        for (i, name) in self.load_layout_dialog.layouts.iter().enumerate() {
-                            ui.selectable_value(
-                                &mut self.load_layout_dialog.selected,
-                                Some(i),
-                                name,
-                            );
-                        }
-                    }
-                    ui.horizontal(|ui| {
-                        let can_load = self.load_layout_dialog.selected.is_some();
-                        if ui
-                            .add_enabled(can_load, egui::Button::new("Load"))
-                            .clicked()
-                            && let Some(i) = self.load_layout_dialog.selected
-                            && let Some(name) = self.load_layout_dialog.layouts.get(i).cloned()
-                        {
-                            let snapshot = self.session.snapshot();
-                            self.load_layout(&name, &snapshot);
-                            self.load_layout_dialog.open = false;
-                        }
-                        if ui.button("Cancel").clicked() {
-                            self.load_layout_dialog.open = false;
-                        }
-                    });
-                });
-            self.load_layout_dialog.open &= open;
+        if self.load_layout_dialog.picker.open {
+            let items: Vec<crate::ui::palette::PickerItem<String>> = self
+                .load_layout_dialog
+                .layouts
+                .iter()
+                .map(|name| crate::ui::palette::PickerItem::new(name.clone(), name.clone()))
+                .collect();
+            if let Some(name) = self.load_layout_dialog.picker.show(
+                ctx,
+                "load-layout-picker",
+                "Search layouts…",
+                "No saved layouts.",
+                &items,
+            ) {
+                let snapshot = self.session.snapshot();
+                self.load_layout(&name, &snapshot);
+            }
         }
 
         if self.layout_manager_dialog.open {
@@ -2526,8 +2503,8 @@ impl eframe::App for DelogApp {
             input.modifiers.command && input.key_pressed(egui::Key::K)
         });
         if command_palette::should_toggle_palette(ctrl_k, wants_keyboard) {
-            if self.command_palette.open {
-                self.command_palette.open = false;
+            if self.command_palette.is_open() {
+                self.command_palette.close();
             } else {
                 self.open_command_palette();
             }
@@ -2535,7 +2512,7 @@ impl eframe::App for DelogApp {
 
         // Existing shortcuts and palette selections share dispatch. Commands
         // stay dormant while an editor or the palette owns keyboard input.
-        if !wants_keyboard && !self.command_palette.open {
+        if !wants_keyboard && !self.command_palette.is_open() {
             use commands::AppCommand;
             let shortcuts = ui.ctx().input(|input| {
                 SHORTCUT_KEYS

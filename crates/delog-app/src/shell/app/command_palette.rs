@@ -2,22 +2,50 @@ use crate::shell::app::commands::{
     AppCommand, CommandAvailability, CommandId, CommandPresentation,
 };
 
+use crate::ui::palette::{PickerItem, PickerState};
+
 #[derive(Default)]
 pub struct CommandPaletteState {
-    pub open: bool,
-    pub query: String,
-    pub selected: usize,
-    focus_search: bool,
-    scroll_to_selected: bool,
-    hover: HoverGate,
+    pub(crate) picker: PickerState,
 }
 
-#[derive(Default, PartialEq)]
-enum HoverGate {
-    #[default]
-    JustOpened,
-    Waiting(Option<egui::Pos2>),
-    Armed,
+impl CommandPaletteState {
+    pub fn is_open(&self) -> bool {
+        self.picker.open
+    }
+
+    pub fn close(&mut self) {
+        self.picker.close();
+    }
+
+    fn picker_items(entries: &[PaletteEntry]) -> Vec<PickerItem<AppCommand>> {
+        entries
+            .iter()
+            .map(|entry| {
+                let mut label = entry.label.clone();
+                let subtitle = match &entry.command {
+                    AppCommand::Static(_) => {
+                        if let Some(shortcut) = &entry.subtitle {
+                            label.push_str(&format!("    {shortcut}"));
+                        }
+                        None
+                    }
+                    _ => entry.subtitle.clone(),
+                };
+                PickerItem {
+                    key: entry.command.clone(),
+                    label,
+                    subtitle,
+                    search_text: entry.search_text.clone(),
+                    disabled_reason: match &entry.availability {
+                        CommandAvailability::Disabled(reason) => Some(reason),
+                        CommandAvailability::Enabled => None,
+                    },
+                    checked: entry.selected == Some(true),
+                }
+            })
+            .collect()
+    }
 }
 
 #[derive(Clone)]
@@ -66,12 +94,7 @@ impl PaletteEntry {
 
 impl CommandPaletteState {
     pub fn open(&mut self) {
-        self.open = true;
-        self.query.clear();
-        self.selected = 0;
-        self.focus_search = true;
-        self.scroll_to_selected = true;
-        self.hover = HoverGate::JustOpened;
+        self.picker.open();
     }
 
     pub fn entries(
@@ -83,189 +106,48 @@ impl CommandPaletteState {
             .collect()
     }
 
+    #[cfg(test)]
     pub fn handle_key(
         &mut self,
         ctx: &egui::Context,
         entries: &[PaletteEntry],
     ) -> Option<AppCommand> {
-        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
-            self.open = false;
-            return None;
-        }
-
-        let ranked = ranked_entries(&self.query, entries);
-        if ranked.is_empty() {
-            self.selected = 0;
-            self.scroll_to_selected = false;
-            return None;
-        }
-        let selected_before_key = self.selected;
-        if ctx.input(|input| {
-            input.key_pressed(egui::Key::ArrowDown)
-                || (input.modifiers.ctrl && input.key_pressed(egui::Key::N))
-        }) {
-            self.selected = (self.selected + 1).min(ranked.len() - 1);
-        }
-        if ctx.input(|input| {
-            input.key_pressed(egui::Key::ArrowUp)
-                || (input.modifiers.ctrl && input.key_pressed(egui::Key::P))
-        }) {
-            self.selected = self.selected.saturating_sub(1);
-        }
-        self.selected = self.selected.min(ranked.len() - 1);
-        self.scroll_to_selected |= self.selected != selected_before_key;
-        if ctx.input(|input| input.key_pressed(egui::Key::Enter))
-            && ranked[self.selected].availability == CommandAvailability::Enabled
-        {
-            self.open = false;
-            return Some(ranked[self.selected].command.clone());
-        }
-        None
+        self.picker.handle_key(ctx, &Self::picker_items(entries))
     }
 
     pub fn show(&mut self, ctx: &egui::Context, entries: &[PaletteEntry]) -> Option<AppCommand> {
-        if !self.open {
-            return None;
-        }
-        let mut selected_command = self.handle_key(ctx, entries);
-        let ranked = ranked_entries(&self.query, entries);
-        let scroll_to_selected = std::mem::take(&mut self.scroll_to_selected);
-        let screen = ctx.content_rect();
-        egui::Window::new("Command palette")
-            .id(egui::Id::new("command-palette"))
-            .title_bar(false)
-            .collapsible(false)
-            .resizable(false)
-            .fixed_size(egui::vec2(
-                (screen.width() * 0.42).clamp(420.0, 680.0),
-                420.0,
-            ))
-            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 72.0))
-            .show(ctx, |ui| {
-                let search = ui.add(
-                    egui::TextEdit::singleline(&mut self.query)
-                        .hint_text("Search commands…")
-                        .desired_width(f32::INFINITY),
-                );
-                if self.focus_search {
-                    search.request_focus();
-                    self.focus_search = false;
-                }
-                ui.separator();
-                let pointer = ui.ctx().pointer_latest_pos();
-                self.hover = match self.hover {
-                    HoverGate::JustOpened => HoverGate::Waiting(pointer),
-                    HoverGate::Waiting(anchor) => {
-                        let moved = match (anchor, pointer) {
-                            (Some(from), Some(to)) => from.distance(to) > 2.0,
-                            (from, to) => from.is_some() != to.is_some(),
-                        };
-                        if moved {
-                            HoverGate::Armed
-                        } else {
-                            HoverGate::Waiting(anchor)
-                        }
-                    }
-                    HoverGate::Armed => HoverGate::Armed,
-                };
-                let hover_armed = self.hover == HoverGate::Armed;
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    if ranked.is_empty() {
-                        ui.weak("No matching commands");
-                    }
-                    for (index, entry) in ranked.iter().enumerate() {
-                        let enabled = entry.availability == CommandAvailability::Enabled;
-                        let mut label = entry.label.clone();
-                        if entry.selected == Some(true) {
-                            label.insert_str(0, "✓  ");
-                        }
-                        let subtitle = match &entry.command {
-                            AppCommand::Static(_) => {
-                                if let Some(shortcut) = &entry.subtitle {
-                                    label.push_str(&format!("    {shortcut}"));
-                                }
-                                None
-                            }
-                            _ => entry.subtitle.as_deref(),
-                        };
-                        let label = palette_row_text(ui, &label, subtitle);
-                        let response = ui.add_enabled(
-                            enabled,
-                            egui::Button::new(label)
-                                .selected(index == self.selected)
-                                .min_size(egui::vec2(
-                                    ui.available_width(),
-                                    if subtitle.is_some() { 42.0 } else { 30.0 },
-                                )),
-                        );
-                        let response = match &entry.availability {
-                            CommandAvailability::Disabled(reason) if hover_armed => {
-                                response.on_disabled_hover_text(*reason)
-                            }
-                            _ => response,
-                        };
-                        if scroll_to_selected && index == self.selected {
-                            response.scroll_to_me(None);
-                        }
-                        if hover_armed && response.hovered() {
-                            self.selected = index;
-                        }
-                        if response.clicked() {
-                            selected_command = Some(entry.command.clone());
-                            self.open = false;
-                        }
-                    }
-                });
-            });
-        selected_command
+        self.picker.show(
+            ctx,
+            "command-palette",
+            "Search commands…",
+            "No matching commands",
+            &Self::picker_items(entries),
+        )
     }
-}
-
-fn palette_row_text(ui: &egui::Ui, label: &str, subtitle: Option<&str>) -> egui::text::LayoutJob {
-    let mut job = egui::text::LayoutJob::default();
-    job.append(
-        label,
-        0.0,
-        egui::TextFormat {
-            font_id: egui::TextStyle::Button.resolve(ui.style()),
-            color: ui.visuals().text_color(),
-            ..Default::default()
-        },
-    );
-    if let Some(subtitle) = subtitle {
-        job.append("\n", 0.0, egui::TextFormat::default());
-        job.append(
-            subtitle,
-            0.0,
-            egui::TextFormat {
-                font_id: egui::TextStyle::Small.resolve(ui.style()),
-                color: ui.visuals().weak_text_color(),
-                ..Default::default()
-            },
-        );
-    }
-    job
 }
 
 pub fn should_toggle_palette(ctrl_k: bool, wants_keyboard_input: bool) -> bool {
     ctrl_k && !wants_keyboard_input
 }
 
+#[cfg(test)]
 pub fn ranked_entries<'a>(query: &str, entries: &'a [PaletteEntry]) -> Vec<&'a PaletteEntry> {
-    if query.trim().is_empty() {
-        return entries.iter().collect();
-    }
-    let mut ranked: Vec<_> = entries
+    let items: Vec<PickerItem<usize>> = entries
         .iter()
-        .filter_map(|entry| {
-            crate::ui::fuzzy::fuzzy_match_score(query, &entry.search_text)
-                .map(|score| (score, entry))
+        .enumerate()
+        .map(|(index, entry)| PickerItem {
+            key: index,
+            label: entry.label.clone(),
+            subtitle: None,
+            search_text: entry.search_text.clone(),
+            disabled_reason: None,
+            checked: false,
         })
         .collect();
-    ranked.sort_by(|(a_score, a), (b_score, b)| {
-        a_score.cmp(b_score).then_with(|| a.label.cmp(&b.label))
-    });
-    ranked.into_iter().map(|(_, entry)| entry).collect()
+    crate::ui::palette::ranked_items(query, &items)
+        .into_iter()
+        .map(|item| &entries[item.key])
+        .collect()
 }
 
 #[cfg(test)]
@@ -372,11 +254,9 @@ mod tests {
             PaletteEntry::enabled(AppCommand::Static(CommandId::OpenSettings), "Third", ""),
         ];
         let context = egui::Context::default();
-        let mut palette = CommandPaletteState {
-            open: true,
-            selected: 1,
-            ..Default::default()
-        };
+        let mut palette = CommandPaletteState::default();
+        palette.picker.open = true;
+        palette.picker.selected = 1;
 
         for (key, expected) in [(egui::Key::N, 2), (egui::Key::P, 1)] {
             context.begin_pass(egui::RawInput {
@@ -391,7 +271,7 @@ mod tests {
                 ..Default::default()
             });
             assert_eq!(palette.handle_key(&context, &entries), None);
-            assert_eq!(palette.selected, expected);
+            assert_eq!(palette.picker.selected, expected);
             let _ = context.end_pass();
         }
     }
@@ -427,16 +307,14 @@ mod tests {
             output = Some(frame);
         }
 
-        assert_eq!(palette.selected, 20);
+        assert_eq!(palette.picker.selected, 20);
         assert!(painted_inside_clip(&output.unwrap(), "Command 20"));
     }
 
     #[test]
     fn disabled_entries_cannot_be_dispatched_with_enter() {
-        let mut palette = CommandPaletteState {
-            open: true,
-            ..Default::default()
-        };
+        let mut palette = CommandPaletteState::default();
+        palette.picker.open = true;
         let entries = vec![PaletteEntry {
             command: AppCommand::Static(CommandId::SyncSources),
             label: "Sync sources".to_owned(),
@@ -544,7 +422,7 @@ mod tests {
         let _ = palette_frame(&ctx, &mut palette, &entries, vec![]);
 
         assert_eq!(
-            palette.selected, 0,
+            palette.picker.selected, 0,
             "a palette opened under the pointer should still start on the first entry"
         );
     }
@@ -579,7 +457,7 @@ mod tests {
         let _ = palette_frame(&ctx, &mut palette, &entries, vec![]);
 
         assert_eq!(
-            palette.selected, 2,
+            palette.picker.selected, 2,
             "deliberately moving onto a row should select it"
         );
     }
