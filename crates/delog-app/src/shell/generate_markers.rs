@@ -110,7 +110,6 @@ pub fn generate_markers_window(
                 .map(|r| r.transitions.len())
                 .sum();
 
-            ui.set_min_width(520.0);
             if d.rows.is_empty() {
                 ui.weak("No repeated values to turn into markers.");
                 return;
@@ -119,7 +118,13 @@ pub fn generate_markers_window(
             let row_height = ui.spacing().interact_size.y.max(body_font.size);
             let include_w = 28.0;
             let value_w = 110.0;
+            let name_min_w = 140.0;
             let color_w = 48.0;
+            let spacing = ui.spacing().item_spacing.x;
+            ui.set_min_width(
+                include_w + value_w + name_min_w + color_w + spacing * 5.0
+                    + ui.spacing().scroll.bar_width,
+            );
 
             TableBuilder::new(ui)
                 .id_salt(("generate-markers-table", d.field.0))
@@ -129,8 +134,8 @@ pub fn generate_markers_window(
                 .auto_shrink([false, false])
                 .max_scroll_height(320.0)
                 .column(Column::exact(include_w))
-                .column(Column::initial(value_w).clip(true))
-                .column(Column::remainder().at_least(140.0))
+                .column(Column::initial(value_w).at_least(value_w).clip(true))
+                .column(Column::remainder().at_least(name_min_w))
                 .column(Column::exact(color_w))
                 .header(row_height, |mut header| {
                     header.col(|_ui| {});
@@ -247,40 +252,39 @@ mod tests {
     }
 
     #[test]
-    fn marker_table_columns_recover_after_a_narrow_first_layout() {
+    fn marker_table_fills_the_window_width_at_the_default_size() {
         let ctx = egui::Context::default();
         crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
         let mut dialog = Some(dialog_with_rows());
-        let render = |width: f32, dialog: &mut Option<GenerateMarkersDialog>| {
-            let input = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(width, 700.0),
-                )),
-                ..Default::default()
-            };
-            ctx.run_ui(input, |ui| {
-                generate_markers_window(ui.ctx(), dialog);
-            })
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1_400.0, 900.0),
+            )),
+            ..Default::default()
         };
+        let _ = ctx.run_ui(input(), |ui| {
+            generate_markers_window(ui.ctx(), &mut dialog);
+        });
+        let output = ctx.run_ui(input(), |ui| {
+            generate_markers_window(ui.ctx(), &mut dialog);
+        });
 
-        render(320.0, &mut dialog);
-        render(320.0, &mut dialog);
-        render(1_200.0, &mut dialog);
-        let output = render(1_200.0, &mut dialog);
-
+        let window = ctx
+            .memory(|m| m.area_rect(egui::Id::new(("generate_markers", 1u32))))
+            .expect("the dialog should be laid out");
         let texts = painted(&output);
-        let find = |label: &str| {
-            texts
-                .iter()
-                .find(|(text, _)| text == label)
-                .unwrap_or_else(|| panic!("{label} header should be painted"))
-                .1
-        };
-        let name_w = find("Color").left() - find("Name").left();
+        let color_left = texts
+            .iter()
+            .find(|(text, _)| text == "Color")
+            .expect("the color header should be painted")
+            .1
+            .left();
+
+        let trailing = window.right() - color_left;
         assert!(
-            name_w > 200.0,
-            "after the window grows the name column should expand too, got {name_w} points"
+            trailing < 80.0,
+            "the table should reach the window edge, {trailing} points sit unused past Color"
         );
     }
 
