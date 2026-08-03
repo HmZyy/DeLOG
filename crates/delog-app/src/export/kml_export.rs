@@ -207,6 +207,7 @@ mod tests {
             source: SourceId(0),
             label: "Drone <1>".into(),
             show: true,
+            show_path: true,
             pos: PosMapping::Gps {
                 lat: fields[0],
                 lon: fields[1],

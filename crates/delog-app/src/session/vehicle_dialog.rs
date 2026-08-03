@@ -43,6 +43,7 @@ enum OriMode {
 struct Draft {
     label: String,
     show: bool,
+    show_path: bool,
     source: Option<SourceId>,
     pos_topic: Option<TopicId>,
     pos_mode: PosMode,
@@ -90,6 +91,7 @@ impl Default for Draft {
         Self {
             label: "Vehicle".into(),
             show: true,
+            show_path: true,
             source: None,
             pos_topic: None,
             pos_mode: PosMode::Ned,
@@ -136,6 +138,7 @@ impl Draft {
         let mut d = Draft {
             label: cfg.label.clone(),
             show: cfg.show,
+            show_path: cfg.show_path,
             source: Some(cfg.source),
             model: cfg.model.clone(),
             custom_path: match &cfg.model {
@@ -286,6 +289,7 @@ impl Draft {
             source,
             label: self.label.clone(),
             show: self.show,
+            show_path: self.show_path,
             pos,
             ori,
             model,
@@ -300,6 +304,7 @@ impl Draft {
 struct ProfileDraft {
     label: String,
     show: bool,
+    show_path: bool,
     pos_mode: PosMode,
     pos_topic: String,
     north: String,
@@ -341,6 +346,7 @@ impl Default for ProfileDraft {
         Self {
             label: "Vehicle".to_owned(),
             show: true,
+            show_path: true,
             pos_mode: PosMode::Gps,
             pos_topic: "GLOBAL_POSITION_INT".to_owned(),
             north: String::new(),
@@ -385,6 +391,7 @@ impl ProfileDraft {
         let mut draft = Self {
             label: vehicle.label.clone(),
             show: vehicle.show,
+            show_path: vehicle.show_path,
             model: profile_model_from_layout(&vehicle.model),
             custom_path: match &vehicle.model {
                 ModelLayout::CustomGlb { path } => path.clone(),
@@ -530,6 +537,7 @@ impl ProfileDraft {
             vehicle: VehicleLayout {
                 label: self.label.clone(),
                 show: self.show,
+                show_path: self.show_path,
                 model: profile_model_to_layout(&self.model, &self.custom_path),
                 color: color_to_rgba(self.color),
                 path_color: color_to_rgba(self.path_color),
@@ -1091,6 +1099,10 @@ fn profile_editor_form(ui: &mut egui::Ui, draft: &mut ProfileDraft) {
             ui.checkbox(&mut draft.show, "");
             ui.end_row();
 
+            ui.label("Path Visible");
+            ui.checkbox(&mut draft.show_path, "");
+            ui.end_row();
+
             ui.label("Type");
             egui::ComboBox::from_id_salt("vehicle-profile-model")
                 .selected_text(draft.model.label())
@@ -1296,6 +1308,7 @@ fn profile_field_ref(topic: &str, field: &str, label: &str) -> Result<FieldRef, 
 
 fn profile_model_to_layout(model: &ModelKind, custom_path: &str) -> ModelLayout {
     match model {
+        ModelKind::None => ModelLayout::None,
         ModelKind::Quad => ModelLayout::Quad,
         ModelKind::FixedWing => ModelLayout::FixedWing,
         ModelKind::DeltaWing => ModelLayout::DeltaWing,
@@ -1310,6 +1323,7 @@ fn profile_model_to_layout(model: &ModelKind, custom_path: &str) -> ModelLayout 
 
 fn profile_model_from_layout(model: &ModelLayout) -> ModelKind {
     match model {
+        ModelLayout::None => ModelKind::None,
         ModelLayout::Quad => ModelKind::Quad,
         ModelLayout::FixedWing => ModelKind::FixedWing,
         ModelLayout::DeltaWing => ModelKind::DeltaWing,
@@ -1567,6 +1581,10 @@ fn draft_editor(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapshot) 
             ui.checkbox(&mut draft.show, "");
             ui.end_row();
 
+            ui.label("Path Visible");
+            ui.checkbox(&mut draft.show_path, "");
+            ui.end_row();
+
             ui.label("Source");
             egui::ComboBox::from_id_salt("veh-source")
                 .selected_text(combo_label(&sources, &draft.source))
@@ -1581,6 +1599,7 @@ fn draft_editor(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapshot) 
                                 source: Some(*id),
                                 label: draft.label.clone(),
                                 show: draft.show,
+                                show_path: draft.show_path,
                                 model: draft.model.clone(),
                                 custom_path: draft.custom_path.clone(),
                                 color: draft.color,

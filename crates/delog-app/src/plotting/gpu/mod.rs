@@ -36,7 +36,7 @@ pub struct MapTileSelection {
 
 pub struct VehicleDraw<'a> {
     pub key: u32,
-    pub model: &'a ModelKind,
+    pub model: Option<&'a ModelKind>,
     pub model_matrix: [[f32; 4]; 4],
     pub normal_matrix: [[f32; 4]; 4],
     pub color: [f32; 4],
@@ -1198,7 +1198,9 @@ impl SceneResources {
         // Light from upper front-right; ambient keeps shadowed faces readable.
         let light = glam::Vec3::new(0.4, 1.0, 0.6).normalize().to_array();
         for v in vehicles {
-            self.model_mesh(v.model);
+            if let Some(model) = v.model {
+                self.model_mesh(model);
+            }
 
             let needed = v.trajectory.len() as u32;
             let mut realloc = false;
@@ -1299,7 +1301,7 @@ impl SceneResources {
             };
             self.traj
                 .draw(pass, &vg.traj_bind, v.visible_count.min(vg.traj_count));
-            if let Some(mesh) = self.model_cache.get(v.model) {
+            if let Some(mesh) = v.model.and_then(|model| self.model_cache.get(model)) {
                 self.mesh.draw(pass, &vg.mesh_bind, mesh);
             }
         }
