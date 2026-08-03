@@ -361,6 +361,7 @@ pub struct DelogApp {
     next_image_capture_id: u64,
     image_clipboard: Option<arboard::Clipboard>,
     browser_collapsed: bool,
+    browser_focus_filter: bool,
     inspector: inspector::InspectorState,
     shell_emphasis: context_header::ShellEmphasis,
     command_palette: command_palette::CommandPaletteState,
@@ -509,6 +510,7 @@ impl DelogApp {
             next_image_capture_id: 1,
             image_clipboard: None,
             browser_collapsed: false,
+            browser_focus_filter: false,
             inspector: inspector::InspectorState::default(),
             shell_emphasis: context_header::ShellEmphasis::default(),
             command_palette: command_palette::CommandPaletteState::default(),
@@ -1879,7 +1881,10 @@ impl DelogApp {
                         self.frame,
                     ),
                 ),
-                CommandId::ToggleDataBrowser => self.browser_collapsed = !self.browser_collapsed,
+                CommandId::ToggleDataBrowser => {
+                    self.browser_collapsed = !self.browser_collapsed;
+                    self.browser_focus_filter = !self.browser_collapsed;
+                }
                 CommandId::ToggleInspector => self.inspector.open = !self.inspector.open,
                 CommandId::ToggleScene3d => self.workspace.toggle_scene_pane(),
                 CommandId::OpenDiagnostics => self.toggle_dock(AppDockTab::Diagnostics),
@@ -2736,6 +2741,7 @@ impl eframe::App for DelogApp {
                                 .clicked()
                             {
                                 self.browser_collapsed = false;
+                                self.browser_focus_filter = true;
                             }
                         });
                     });
@@ -2758,6 +2764,10 @@ impl eframe::App for DelogApp {
                 360.0
             };
             let browser_panel = data_browser_panel(preferred_width);
+            if std::mem::take(&mut self.browser_focus_filter) {
+                ui.ctx()
+                    .memory_mut(|memory| memory.request_focus(browser::filter_id()));
+            }
             browser_panel.show_inside(ui, |ui| {
                 // Offset edits go through the ingest thread (the single
                 // registry writer) and come back as a new epoch.
@@ -4183,6 +4193,7 @@ const SHORTCUT_KEYS: &[egui::Key] = &[
     egui::Key::S,
     egui::Key::L,
     egui::Key::M,
+    egui::Key::E,
 ];
 
 fn dock_for_command(command: commands::CommandId) -> Option<AppDockTab> {
@@ -4208,6 +4219,7 @@ fn command_for_shortcut(
     match (key, command_modifier) {
         (egui::Key::S, true) => Some(CommandId::SaveLayout),
         (egui::Key::L, true) => Some(CommandId::LoadLayout),
+        (egui::Key::E, true) => Some(CommandId::ToggleDataBrowser),
         (egui::Key::F1, _) => Some(CommandId::OpenDiagnostics),
         (egui::Key::F2, _) => Some(CommandId::OpenPerformance),
         (egui::Key::F3, _) => Some(CommandId::OpenMarkers),

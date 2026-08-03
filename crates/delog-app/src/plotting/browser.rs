@@ -532,6 +532,10 @@ pub fn data_browser_toggle_button(
     .inner
 }
 
+pub fn filter_id() -> egui::Id {
+    egui::Id::new("data_browser_filter")
+}
+
 pub fn ui(
     ui: &mut egui::Ui,
     model_epoch: u64,
@@ -552,6 +556,7 @@ pub fn ui(
         ui.add_sized(
             egui::vec2(filter_width, filter_height),
             egui::TextEdit::singleline(query)
+                .id(filter_id())
                 .hint_text("Filter...")
                 .desired_width(filter_width),
         );
@@ -1220,6 +1225,59 @@ mod tests {
         let _ = run();
         let _ = run();
         run().shapes.len()
+    }
+
+    #[test]
+    fn requesting_filter_focus_routes_typing_into_the_browser_filter() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let model = synth_model(1, 1, 2);
+        let mut query = String::new();
+        let mut filter_cache = BrowserFilterCache::default();
+        let mut selection = Selection::default();
+        let mut offset_dialog = None;
+
+        let mut frame = |events: Vec<egui::Event>, request_focus: bool| {
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1_600.0, 1_000.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    if request_focus {
+                        ui.ctx()
+                            .memory_mut(|memory| memory.request_focus(super::filter_id()));
+                    }
+                    egui::Panel::left("filter-focus-test")
+                        .default_size(320.0)
+                        .show_inside(ui, |ui| {
+                            super::ui(
+                                ui,
+                                0,
+                                &model,
+                                &mut query,
+                                &mut filter_cache,
+                                &mut selection,
+                                &mut offset_dialog,
+                            );
+                        });
+                },
+            );
+        };
+
+        frame(vec![], false);
+        assert!(!ctx.memory(|memory| memory.has_focus(super::filter_id())));
+
+        frame(vec![], true);
+        assert!(ctx.memory(|memory| memory.has_focus(super::filter_id())));
+
+        frame(vec![egui::Event::Text("gy".to_owned())], false);
+        assert_eq!(query, "gy");
     }
 
     #[test]
