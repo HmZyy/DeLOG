@@ -933,6 +933,7 @@ impl Behavior<'_> {
                 // full path stays resident on the GPU, so toggling never
                 // re-uploads.
                 let visible_count = match (traj, playhead) {
+                    _ if !v.show_path => 0,
                     (Some(t), Some(ph)) if trail_to_playhead => {
                         t.times_us.partition_point(|&ts| ts <= ph) as u32
                     }
@@ -940,7 +941,7 @@ impl Behavior<'_> {
                 };
                 Some(VehicleDraw {
                     key: i as u32,
-                    model: &v.model,
+                    model: v.model.has_mesh().then_some(&v.model),
                     model_matrix: pose.model_matrix(v.scale).to_cols_array_2d(),
                     normal_matrix: glam::Mat4::from_mat3(pose.rot).to_cols_array_2d(),
                     color: legend::color32_to_srgb(v.color),

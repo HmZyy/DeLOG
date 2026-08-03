@@ -266,6 +266,7 @@ mod tests {
             vehicle: VehicleLayout {
                 label: "Vehicle".to_owned(),
                 show: true,
+                show_path: true,
                 model: ModelLayout::FixedWing,
                 color: [90, 170, 255, 255],
                 path_color: [255, 170, 60, 255],
@@ -313,6 +314,7 @@ mod tests {
             source,
             label: "Rover".to_owned(),
             show: true,
+            show_path: true,
             pos: PosMapping::Ned {
                 north: field_id(&snapshot, "LOCAL_POSITION_NED", "x"),
                 east: field_id(&snapshot, "LOCAL_POSITION_NED", "y"),
@@ -347,6 +349,7 @@ mod tests {
             vehicle: VehicleLayout {
                 label: "Rover".to_owned(),
                 show: true,
+                show_path: true,
                 model: ModelLayout::Cone,
                 color: [255, 255, 255, 255],
                 path_color: [0, 0, 0, 255],

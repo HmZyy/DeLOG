@@ -26,7 +26,7 @@ pub fn mesh_for(kind: &ModelKind) -> MeshCpu {
         ModelKind::Quad => QUAD_GLB,
         ModelKind::FixedWing => FIXEDWING_GLB,
         ModelKind::DeltaWing => DELTAWING_GLB,
-        ModelKind::Cone => return cone_mesh(),
+        ModelKind::None | ModelKind::Cone => return cone_mesh(),
         ModelKind::Sphere => return sphere_mesh(),
         ModelKind::Cube => return cube_mesh(),
         ModelKind::CustomGlb(path) => {
