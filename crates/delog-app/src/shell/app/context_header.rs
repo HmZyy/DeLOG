@@ -428,6 +428,13 @@ fn menu_item(
     }
 }
 
+fn checked_row_text(presentation: &CommandPresentation) -> String {
+    presentation.shortcut.map_or_else(
+        || presentation.label.clone(),
+        |shortcut| format!("{}\t{shortcut}", presentation.label),
+    )
+}
+
 fn presentation_row(
     ui: &mut egui::Ui,
     presentation: &CommandPresentation,
@@ -440,10 +447,7 @@ fn presentation_row(
     };
     let response = if checked {
         let mut is_selected = presentation.selected.unwrap_or(false);
-        let text = presentation.shortcut.map_or_else(
-            || presentation.label.clone(),
-            |shortcut| format!("{}\t{shortcut}", presentation.label),
-        );
+        let text = checked_row_text(presentation);
         let response = ui.add_enabled(
             enabled,
             egui::Checkbox::new(&mut is_selected, text),
@@ -900,10 +904,11 @@ mod tests {
         let ctx = egui::Context::default();
         let _ = checked_row_frame(&ctx, &presentation, vec![]);
         let (output, _) = checked_row_frame(&ctx, &presentation, vec![]);
+        let painted = checked_row_text(&presentation);
         let rect = output
             .shapes
             .iter()
-            .find_map(|shape| find_text_rect(&shape.shape, &presentation.label))
+            .find_map(|shape| find_text_rect(&shape.shape, &painted))
             .expect("checked menu label should be painted");
         let pos = rect.center();
         let _ = checked_row_frame(
