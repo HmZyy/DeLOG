@@ -391,10 +391,11 @@ impl CommandId {
             ToggleDataBrowser => spec!(
                 "Data Browser",
                 Panels,
-                None,
+                Some("Ctrl+E"),
                 "signals topics sidebar",
                 Header,
                 ClassicMenu,
+                Shortcut,
                 Palette
             ),
             ToggleInspector => spec!(
@@ -816,6 +817,7 @@ mod tests {
         assert_eq!(CommandId::TogglePlayback.spec().shortcut, Some("Space"));
         assert_eq!(CommandId::SaveLayout.spec().shortcut, Some("Ctrl+S"));
         assert_eq!(CommandId::LoadLayout.spec().shortcut, Some("Ctrl+L"));
+        assert_eq!(CommandId::ToggleDataBrowser.spec().shortcut, Some("Ctrl+E"));
         assert_eq!(CommandId::AddMarker.spec().shortcut, Some("M"));
         assert_eq!(CommandId::OpenDiagnostics.spec().shortcut, Some("F1"));
         assert_eq!(CommandId::OpenPerformance.spec().shortcut, Some("F2"));
