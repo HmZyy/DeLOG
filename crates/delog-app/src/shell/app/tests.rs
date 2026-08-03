@@ -180,6 +180,7 @@ fn clear_current_layout_resets_layout_and_vehicle_state() {
         source: delog_core::identity::SourceId(0),
         label: "Vehicle".into(),
         show: true,
+        show_path: true,
         pos: crate::scene3d::vehicle::PosMapping::Ned {
             north: delog_core::identity::FieldId(0),
             east: delog_core::identity::FieldId(1),

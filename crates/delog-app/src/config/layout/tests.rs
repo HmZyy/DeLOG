@@ -121,6 +121,30 @@ fn missing_version_is_rejected_by_decoder() {
 }
 
 #[test]
+fn legacy_vehicle_layout_without_show_path_defaults_to_visible_path() {
+    let layout: VehicleLayout = serde_json::from_str(
+        r#"{
+            "label": "Rover",
+            "show": true,
+            "model": "cone",
+            "color": [1, 2, 3, 255],
+            "path_color": [4, 5, 6, 255],
+            "scale": 1.0,
+            "position": {"ned": {
+                "north": {"topic": "LOCAL_POSITION_NED", "field": "x"},
+                "east": {"topic": "LOCAL_POSITION_NED", "field": "y"},
+                "down": {"topic": "LOCAL_POSITION_NED", "field": "z"},
+                "reference": null
+            }},
+            "orientation": "static"
+        }"#,
+    )
+    .expect("legacy vehicle layout should decode");
+
+    assert!(layout.show_path);
+}
+
+#[test]
 fn vehicle_layout_helpers_round_trip_static_ned_vehicle() {
     let snapshot = snapshot_with_topics(&[("log", "LOCAL_POSITION_NED", &["x", "y", "z"])]);
     let source = snapshot
@@ -144,6 +168,7 @@ fn vehicle_layout_helpers_round_trip_static_ned_vehicle() {
         source,
         label: "Vehicle".to_owned(),
         show: true,
+        show_path: true,
         pos: PosMapping::Ned {
             north,
             east,
@@ -172,6 +197,7 @@ fn vehicle_layout_helpers_round_trip_static_ned_vehicle() {
             .unwrap_or_else(|| panic!("{} should serialize", model.label()));
         let json = serde_json::to_string(&layout.model).expect("model should encode");
         let expected = match model {
+            ModelKind::None => r#""none""#,
             ModelKind::Quad => r#""quad""#,
             ModelKind::FixedWing => r#""fixed_wing""#,
             ModelKind::DeltaWing => r#""delta_wing""#,
@@ -202,6 +228,7 @@ fn vehicle_config_from_layout_for_source_resolves_duplicate_topic_fields() {
     let layout = VehicleLayout {
         label: "Rover".to_owned(),
         show: true,
+        show_path: true,
         model: ModelLayout::Cone,
         color: [255, 255, 255, 255],
         path_color: [0, 0, 0, 255],

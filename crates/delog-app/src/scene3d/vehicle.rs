@@ -16,6 +16,7 @@ use crate::scene3d::geo;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ModelKind {
+    None,
     Quad,
     FixedWing,
     DeltaWing,
@@ -26,7 +27,8 @@ pub enum ModelKind {
 }
 
 impl ModelKind {
-    pub const PRESETS: [ModelKind; 6] = [
+    pub const PRESETS: [ModelKind; 7] = [
+        ModelKind::None,
         ModelKind::Quad,
         ModelKind::FixedWing,
         ModelKind::DeltaWing,
@@ -37,6 +39,7 @@ impl ModelKind {
 
     pub fn label(&self) -> &str {
         match self {
+            ModelKind::None => "None",
             ModelKind::Quad => "Quad",
             ModelKind::FixedWing => "Fixed-wing",
             ModelKind::DeltaWing => "Delta-wing",
@@ -45,6 +48,10 @@ impl ModelKind {
             ModelKind::Cube => "Cube",
             ModelKind::CustomGlb(_) => "Custom GLB",
         }
+    }
+
+    pub fn has_mesh(&self) -> bool {
+        !matches!(self, ModelKind::None)
     }
 
     /// Mesh→body correction: meshes are authored Y-up (glTF), body frame is
@@ -56,7 +63,8 @@ impl ModelKind {
             ModelKind::Quad | ModelKind::DeltaWing => {
                 base * Mat3::from_rotation_y(-std::f32::consts::FRAC_PI_2)
             }
-            ModelKind::FixedWing
+            ModelKind::None
+            | ModelKind::FixedWing
             | ModelKind::Cone
             | ModelKind::Sphere
             | ModelKind::Cube
@@ -142,6 +150,7 @@ pub struct VehicleConfig {
     pub source: SourceId,
     pub label: String,
     pub show: bool,
+    pub show_path: bool,
     pub pos: PosMapping,
     pub ori: OriMapping,
     pub model: ModelKind,
@@ -769,6 +778,7 @@ mod tests {
             source: SourceId(0),
             label: "v".into(),
             show: true,
+            show_path: true,
             pos: PosMapping::Gps {
                 lat: fields[0],
                 lon: fields[1],
@@ -807,6 +817,7 @@ mod tests {
             source: SourceId(0),
             label: "v".into(),
             show: true,
+            show_path: true,
             pos: PosMapping::Ned {
                 north: fields[0],
                 east: fields[1],
@@ -818,6 +829,23 @@ mod tests {
             color: Color32::WHITE,
             path_color: Color32::WHITE,
             scale: 1.0,
+        }
+    }
+
+    #[test]
+    fn none_model_is_a_preset_that_draws_no_mesh() {
+        assert!(ModelKind::PRESETS.contains(&ModelKind::None));
+        assert!(!ModelKind::None.has_mesh());
+        for kind in [
+            ModelKind::Quad,
+            ModelKind::FixedWing,
+            ModelKind::DeltaWing,
+            ModelKind::Cone,
+            ModelKind::Sphere,
+            ModelKind::Cube,
+            ModelKind::CustomGlb("x.glb".into()),
+        ] {
+            assert!(kind.has_mesh(), "{}", kind.label());
         }
     }
 

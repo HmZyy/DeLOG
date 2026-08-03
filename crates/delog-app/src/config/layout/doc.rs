@@ -116,6 +116,8 @@ pub struct CameraLayout {
 pub struct VehicleLayout {
     pub label: String,
     pub show: bool,
+    #[serde(default = "default_true")]
+    pub show_path: bool,
     pub model: ModelLayout,
     pub color: [u8; 4],
     pub path_color: [u8; 4],
@@ -127,6 +129,7 @@ pub struct VehicleLayout {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelLayout {
+    None,
     Quad,
     FixedWing,
     DeltaWing,
@@ -447,6 +450,7 @@ pub(crate) fn vehicle_to_layout(v: &VehicleConfig, snapshot: &StoreSnapshot) -> 
     Some(VehicleLayout {
         label: v.label.clone(),
         show: v.show,
+        show_path: v.show_path,
         model: model_to_layout(&v.model),
         color: color_to_rgba(v.color),
         path_color: color_to_rgba(v.path_color),
@@ -736,6 +740,7 @@ pub(crate) fn vehicle_from_layout(v: &VehicleLayout, resolver: &mut Resolver<'_>
         source,
         label: v.label.clone(),
         show: v.show,
+        show_path: v.show_path,
         pos: pos_from_layout(&v.position, resolver)?,
         ori: ori_from_layout(&v.orientation, resolver)?,
         model: model_from_layout(&v.model),
@@ -897,6 +902,7 @@ fn ori_from_layout(ori: &OriLayout, resolver: &mut Resolver<'_>) -> Option<OriMa
 
 fn model_to_layout(model: &ModelKind) -> ModelLayout {
     match model {
+        ModelKind::None => ModelLayout::None,
         ModelKind::Quad => ModelLayout::Quad,
         ModelKind::FixedWing => ModelLayout::FixedWing,
         ModelKind::DeltaWing => ModelLayout::DeltaWing,
@@ -911,6 +917,7 @@ fn model_to_layout(model: &ModelKind) -> ModelLayout {
 
 fn model_from_layout(model: &ModelLayout) -> ModelKind {
     match model {
+        ModelLayout::None => ModelKind::None,
         ModelLayout::Quad => ModelKind::Quad,
         ModelLayout::FixedWing => ModelKind::FixedWing,
         ModelLayout::DeltaWing => ModelKind::DeltaWing,
