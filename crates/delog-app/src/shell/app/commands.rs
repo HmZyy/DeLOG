@@ -315,10 +315,11 @@ impl CommandId {
             Open => spec!(
                 "Open log…",
                 Source,
-                None,
+                Some("Ctrl+O"),
                 "file import load",
                 Header,
                 ClassicMenu,
+                Shortcut,
                 Palette
             ),
             ConnectLive => spec!(
@@ -818,6 +819,7 @@ mod tests {
         assert_eq!(CommandId::SaveLayout.spec().shortcut, Some("Ctrl+S"));
         assert_eq!(CommandId::LoadLayout.spec().shortcut, Some("Ctrl+L"));
         assert_eq!(CommandId::ToggleDataBrowser.spec().shortcut, Some("Ctrl+E"));
+        assert_eq!(CommandId::Open.spec().shortcut, Some("Ctrl+O"));
         assert_eq!(CommandId::AddMarker.spec().shortcut, Some("M"));
         assert_eq!(CommandId::OpenDiagnostics.spec().shortcut, Some("F1"));
         assert_eq!(CommandId::OpenPerformance.spec().shortcut, Some("F2"));
