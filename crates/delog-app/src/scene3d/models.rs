@@ -13,12 +13,22 @@ pub fn cone_mesh() -> MeshCpu {
     MeshCpu::cone(4, 0.5, 1.4)
 }
 
+fn sphere_mesh() -> MeshCpu {
+    MeshCpu::sphere(24, 16, 0.5)
+}
+
+fn cube_mesh() -> MeshCpu {
+    MeshCpu::cube(1.0)
+}
+
 pub fn mesh_for(kind: &ModelKind) -> MeshCpu {
     let bytes: &[u8] = match kind {
         ModelKind::Quad => QUAD_GLB,
         ModelKind::FixedWing => FIXEDWING_GLB,
         ModelKind::DeltaWing => DELTAWING_GLB,
         ModelKind::Cone => return cone_mesh(),
+        ModelKind::Sphere => return sphere_mesh(),
+        ModelKind::Cube => return cube_mesh(),
         ModelKind::CustomGlb(path) => {
             return std::fs::read(path)
                 .ok()
@@ -67,6 +77,38 @@ mod tests {
                     .iter()
                     .all(|&i| (i as usize) < mesh.vertices.len()),
                 "{} has out-of-range indices",
+                kind.label()
+            );
+        }
+    }
+
+    #[test]
+    fn procedural_primitives_build_distinct_closed_meshes() {
+        let cone = mesh_for(&ModelKind::Cone);
+        for kind in [ModelKind::Sphere, ModelKind::Cube] {
+            let mesh = mesh_for(&kind);
+            assert!(
+                !mesh.vertices.is_empty() && !mesh.indices.is_empty(),
+                "{} should build geometry",
+                kind.label()
+            );
+            assert_eq!(
+                mesh.indices.len() % 3,
+                0,
+                "{} should be triangulated",
+                kind.label()
+            );
+            assert!(
+                mesh.indices
+                    .iter()
+                    .all(|&i| (i as usize) < mesh.vertices.len()),
+                "{} has out-of-range indices",
+                kind.label()
+            );
+            assert_ne!(
+                mesh.vertices.len(),
+                cone.vertices.len(),
+                "{} should not be the cone fallback",
                 kind.label()
             );
         }
