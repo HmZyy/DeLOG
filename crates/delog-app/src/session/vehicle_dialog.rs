@@ -1300,6 +1300,8 @@ fn profile_model_to_layout(model: &ModelKind, custom_path: &str) -> ModelLayout 
         ModelKind::FixedWing => ModelLayout::FixedWing,
         ModelKind::DeltaWing => ModelLayout::DeltaWing,
         ModelKind::Cone => ModelLayout::Cone,
+        ModelKind::Sphere => ModelLayout::Sphere,
+        ModelKind::Cube => ModelLayout::Cube,
         ModelKind::CustomGlb(_) => ModelLayout::CustomGlb {
             path: custom_path.trim().to_owned(),
         },
@@ -1312,6 +1314,8 @@ fn profile_model_from_layout(model: &ModelLayout) -> ModelKind {
         ModelLayout::FixedWing => ModelKind::FixedWing,
         ModelLayout::DeltaWing => ModelKind::DeltaWing,
         ModelLayout::Cone => ModelKind::Cone,
+        ModelLayout::Sphere => ModelKind::Sphere,
+        ModelLayout::Cube => ModelKind::Cube,
         ModelLayout::CustomGlb { path } => ModelKind::CustomGlb(path.into()),
     }
 }

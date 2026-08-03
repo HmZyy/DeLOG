@@ -99,6 +99,72 @@ impl MeshCpu {
         indices.extend([b, b + 1, b + 2]);
         Self { vertices, indices }
     }
+
+    pub fn sphere(segments: u32, rings: u32, radius: f32) -> Self {
+        let segments = segments.max(3);
+        let rings = rings.max(2);
+        let pi = std::f32::consts::PI;
+        let mut positions = Vec::new();
+        let mut normals = Vec::new();
+        for ring in 0..=rings {
+            let phi = ring as f32 / rings as f32 * pi;
+            let (sin_phi, cos_phi) = phi.sin_cos();
+            for segment in 0..=segments {
+                let theta = segment as f32 / segments as f32 * 2.0 * pi;
+                let (sin_theta, cos_theta) = theta.sin_cos();
+                let dir = [sin_phi * cos_theta, cos_phi, sin_phi * sin_theta];
+                positions.push([radius * dir[0], radius * dir[1], radius * dir[2]]);
+                normals.push(dir);
+            }
+        }
+        let stride = segments + 1;
+        let mut indices = Vec::new();
+        for ring in 0..rings {
+            for segment in 0..segments {
+                let a = ring * stride + segment;
+                let b = a + stride;
+                if ring > 0 {
+                    indices.extend([a, a + 1, b]);
+                }
+                if ring + 1 < rings {
+                    indices.extend([a + 1, b + 1, b]);
+                }
+            }
+        }
+        Self::new(positions, Some(normals), indices)
+    }
+
+    pub fn cube(size: f32) -> Self {
+        let half = size * 0.5;
+        let unit = |axis: usize| {
+            let mut e = [0.0f32; 3];
+            e[axis] = 1.0;
+            e
+        };
+        let scale = |v: [f32; 3], k: f32| [v[0] * k, v[1] * k, v[2] * k];
+        let add = |a: [f32; 3], b: [f32; 3]| [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+        let mut positions = Vec::new();
+        let mut normals = Vec::new();
+        let mut indices = Vec::new();
+        for axis in 0..3 {
+            for sign in [1.0f32, -1.0] {
+                let normal = scale(unit(axis), sign);
+                let (u, v) = if sign > 0.0 {
+                    (unit((axis + 1) % 3), unit((axis + 2) % 3))
+                } else {
+                    (unit((axis + 2) % 3), unit((axis + 1) % 3))
+                };
+                let center = scale(normal, half);
+                let base = positions.len() as u32;
+                for (su, sv) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+                    positions.push(add(center, add(scale(u, su * half), scale(v, sv * half))));
+                    normals.push(normal);
+                }
+                indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+            }
+        }
+        Self::new(positions, Some(normals), indices)
+    }
 }
 
 fn face_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> [f32; 3] {
@@ -529,6 +595,64 @@ mod tests {
             let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
             assert!((len - 1.0).abs() < 1e-4, "normal not unit: {len}");
         }
+    }
+
+    fn outward_wound(mesh: &MeshCpu) -> bool {
+        mesh.indices.chunks_exact(3).all(|tri| {
+            let p = |i: u32| Vec3::from_array(mesh.vertices[i as usize].pos);
+            let (a, b, c) = (p(tri[0]), p(tri[1]), p(tri[2]));
+            let winding = Vec3::from_array(face_normal(a.to_array(), b.to_array(), c.to_array()));
+            let centroid = (a + b + c) / 3.0;
+            centroid.length() > 1e-6 && winding.dot(centroid) > 0.0
+        })
+    }
+
+    #[test]
+    fn sphere_vertices_sit_on_the_radius_and_face_outward() {
+        let radius = 0.5_f32;
+        let sphere = MeshCpu::sphere(24, 16, radius);
+        assert!(!sphere.indices.is_empty());
+        assert!(
+            sphere
+                .indices
+                .iter()
+                .all(|&i| (i as usize) < sphere.vertices.len())
+        );
+        for v in &sphere.vertices {
+            let pos = Vec3::from_array(v.pos);
+            let normal = Vec3::from_array(v.normal);
+            assert!((pos.length() - radius).abs() < 1e-5, "{pos:?}");
+            assert!((normal.length() - 1.0).abs() < 1e-5, "{normal:?}");
+            assert!(normal.dot(pos.normalize()) > 0.999, "{normal:?} at {pos:?}");
+        }
+        assert!(outward_wound(&sphere), "sphere triangles should face outward");
+    }
+
+    #[test]
+    fn cube_spans_the_requested_size_with_outward_faces() {
+        let cube = MeshCpu::cube(1.0);
+        assert_eq!(cube.vertices.len(), 24);
+        assert_eq!(cube.indices.len(), 36);
+        for axis in 0..3 {
+            let min = cube
+                .vertices
+                .iter()
+                .map(|v| v.pos[axis])
+                .fold(f32::INFINITY, f32::min);
+            let max = cube
+                .vertices
+                .iter()
+                .map(|v| v.pos[axis])
+                .fold(f32::NEG_INFINITY, f32::max);
+            assert!((min + 0.5).abs() < 1e-6, "axis {axis} min {min}");
+            assert!((max - 0.5).abs() < 1e-6, "axis {axis} max {max}");
+        }
+        for v in &cube.vertices {
+            let normal = Vec3::from_array(v.normal);
+            assert!((normal.length() - 1.0).abs() < 1e-6, "{normal:?}");
+            assert!(normal.dot(Vec3::from_array(v.pos)) > 0.0, "{normal:?}");
+        }
+        assert!(outward_wound(&cube), "cube triangles should face outward");
     }
 
     #[test]

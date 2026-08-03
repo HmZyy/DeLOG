@@ -20,15 +20,19 @@ pub enum ModelKind {
     FixedWing,
     DeltaWing,
     Cone,
+    Sphere,
+    Cube,
     CustomGlb(PathBuf),
 }
 
 impl ModelKind {
-    pub const PRESETS: [ModelKind; 4] = [
+    pub const PRESETS: [ModelKind; 6] = [
         ModelKind::Quad,
         ModelKind::FixedWing,
         ModelKind::DeltaWing,
         ModelKind::Cone,
+        ModelKind::Sphere,
+        ModelKind::Cube,
     ];
 
     pub fn label(&self) -> &str {
@@ -37,6 +41,8 @@ impl ModelKind {
             ModelKind::FixedWing => "Fixed-wing",
             ModelKind::DeltaWing => "Delta-wing",
             ModelKind::Cone => "Cone",
+            ModelKind::Sphere => "Sphere",
+            ModelKind::Cube => "Cube",
             ModelKind::CustomGlb(_) => "Custom GLB",
         }
     }
@@ -50,7 +56,11 @@ impl ModelKind {
             ModelKind::Quad | ModelKind::DeltaWing => {
                 base * Mat3::from_rotation_y(-std::f32::consts::FRAC_PI_2)
             }
-            ModelKind::FixedWing | ModelKind::Cone | ModelKind::CustomGlb(_) => base,
+            ModelKind::FixedWing
+            | ModelKind::Cone
+            | ModelKind::Sphere
+            | ModelKind::Cube
+            | ModelKind::CustomGlb(_) => base,
         }
     }
 }
@@ -820,6 +830,8 @@ mod tests {
             ModelKind::FixedWing,
             ModelKind::DeltaWing,
             ModelKind::Cone,
+            ModelKind::Sphere,
+            ModelKind::Cube,
             ModelKind::CustomGlb("x.glb".into()),
         ] {
             let m = kind.orientation_offset();

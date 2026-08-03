@@ -131,6 +131,8 @@ pub enum ModelLayout {
     FixedWing,
     DeltaWing,
     Cone,
+    Sphere,
+    Cube,
     CustomGlb { path: String },
 }
 
@@ -899,6 +901,8 @@ fn model_to_layout(model: &ModelKind) -> ModelLayout {
         ModelKind::FixedWing => ModelLayout::FixedWing,
         ModelKind::DeltaWing => ModelLayout::DeltaWing,
         ModelKind::Cone => ModelLayout::Cone,
+        ModelKind::Sphere => ModelLayout::Sphere,
+        ModelKind::Cube => ModelLayout::Cube,
         ModelKind::CustomGlb(path) => ModelLayout::CustomGlb {
             path: path.to_string_lossy().into_owned(),
         },
@@ -911,6 +915,8 @@ fn model_from_layout(model: &ModelLayout) -> ModelKind {
         ModelLayout::FixedWing => ModelKind::FixedWing,
         ModelLayout::DeltaWing => ModelKind::DeltaWing,
         ModelLayout::Cone => ModelKind::Cone,
+        ModelLayout::Sphere => ModelKind::Sphere,
+        ModelLayout::Cube => ModelKind::Cube,
         ModelLayout::CustomGlb { path } => ModelKind::CustomGlb(path.into()),
     }
 }
