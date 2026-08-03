@@ -4194,6 +4194,7 @@ const SHORTCUT_KEYS: &[egui::Key] = &[
     egui::Key::L,
     egui::Key::M,
     egui::Key::E,
+    egui::Key::O,
 ];
 
 fn dock_for_command(command: commands::CommandId) -> Option<AppDockTab> {
@@ -4220,6 +4221,7 @@ fn command_for_shortcut(
         (egui::Key::S, true) => Some(CommandId::SaveLayout),
         (egui::Key::L, true) => Some(CommandId::LoadLayout),
         (egui::Key::E, true) => Some(CommandId::ToggleDataBrowser),
+        (egui::Key::O, true) => Some(CommandId::Open),
         (egui::Key::F1, _) => Some(CommandId::OpenDiagnostics),
         (egui::Key::F2, _) => Some(CommandId::OpenPerformance),
         (egui::Key::F3, _) => Some(CommandId::OpenMarkers),
