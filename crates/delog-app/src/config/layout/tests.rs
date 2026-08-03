@@ -162,6 +162,29 @@ fn vehicle_layout_helpers_round_trip_static_ned_vehicle() {
         vehicle_config_from_layout(&layout, &snapshot).expect("vehicle should resolve");
 
     assert_eq!(resolved, cfg);
+
+    for model in ModelKind::PRESETS {
+        let cfg = VehicleConfig {
+            model: model.clone(),
+            ..cfg.clone()
+        };
+        let layout = vehicle_config_to_layout(&cfg, &snapshot)
+            .unwrap_or_else(|| panic!("{} should serialize", model.label()));
+        let json = serde_json::to_string(&layout.model).expect("model should encode");
+        let expected = match model {
+            ModelKind::Quad => r#""quad""#,
+            ModelKind::FixedWing => r#""fixed_wing""#,
+            ModelKind::DeltaWing => r#""delta_wing""#,
+            ModelKind::Cone => r#""cone""#,
+            ModelKind::Sphere => r#""sphere""#,
+            ModelKind::Cube => r#""cube""#,
+            ModelKind::CustomGlb(_) => unreachable!("presets carry no path"),
+        };
+        assert_eq!(json, expected);
+        let resolved = vehicle_config_from_layout(&layout, &snapshot)
+            .unwrap_or_else(|| panic!("{} should resolve", model.label()));
+        assert_eq!(resolved.model, model, "{json}");
+    }
 }
 
 #[test]
