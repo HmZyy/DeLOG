@@ -792,6 +792,11 @@ fn keyboard_shortcuts_produce_registry_commands() {
         command_for_shortcut(egui::Key::M, false),
         Some(CommandId::AddMarker)
     );
+    assert_eq!(
+        command_for_shortcut(egui::Key::Equals, false),
+        Some(CommandId::EqualizePlots)
+    );
+    assert!(SHORTCUT_KEYS.contains(&egui::Key::Equals));
     assert_eq!(command_for_shortcut(egui::Key::K, true), None);
 }
 
