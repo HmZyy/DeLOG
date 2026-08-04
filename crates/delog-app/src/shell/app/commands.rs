@@ -515,8 +515,9 @@ impl CommandId {
             EqualizePlots => spec!(
                 "Equalize plot heights",
                 Workspace,
-                None,
+                Some("="),
                 "resize panels",
+                Shortcut,
                 Palette
             ),
             OpenDataFlow => spec!(
@@ -826,6 +827,7 @@ mod tests {
         assert_eq!(CommandId::OpenMarkers.spec().shortcut, Some("F3"));
         assert_eq!(CommandId::OpenScripting.spec().shortcut, Some("F9"));
         assert_eq!(CommandId::OpenLogging.spec().shortcut, Some("F12"));
+        assert_eq!(CommandId::EqualizePlots.spec().shortcut, Some("="));
     }
 
     #[test]
