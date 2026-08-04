@@ -120,6 +120,29 @@ fn write_generic_parquet(path: &Path) {
     writer.close().unwrap();
 }
 
+fn write_unsorted_generic_parquet(path: &Path) {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(
+            "time",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        ),
+        Field::new("value", DataType::Float32, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(TimestampMillisecondArray::from(vec![4, 1, 3, 2])) as ArrayRef,
+            Arc::new(Float32Array::from(vec![40.0, 10.0, 30.0, 20.0])) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    let file = File::create(path).unwrap();
+    let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+}
+
 fn write_all_invalid_parquet(path: &Path) {
     let rows = delog_parsers::parquet::PARQUET_BATCH_ROWS * 32;
     let schema = Arc::new(Schema::new(vec![
@@ -622,6 +645,48 @@ fn open_path_loads_a_generic_parquet_into_the_store() {
     assert_eq!(store.schema.name(), source_label(path.as_path()));
     assert_eq!(store.chunks[0].t.values(), &[1_000, 2_000]);
     assert_eq!(store.schema.fields()[0].dtype, DataType::Float32);
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn a_generic_parquet_load_never_reports_an_unsorted_batch() {
+    let path = temp_parquet_path("unsorted");
+    write_unsorted_generic_parquet(&path);
+
+    let mut session = Session::new(egui::Context::default());
+    session.open_path(path.clone(), None);
+    session.join_workers();
+    session.wait_until(|session| {
+        session
+            .snapshot()
+            .topics
+            .iter()
+            .filter_map(|topic| topic.store.as_ref())
+            .any(|store| store.rows == 4)
+    });
+
+    assert!(
+        session
+            .diagnostic_records()
+            .iter()
+            .all(|record| record.diag.code != "unsorted-batch"),
+        "the parser sorts each batch, so the ingestor must not have to"
+    );
+
+    let snapshot = session.snapshot();
+    let store = snapshot
+        .topics
+        .iter()
+        .find_map(|topic| topic.store.as_ref())
+        .expect("generic Parquet creates a topic store");
+    let times = topic_times(store);
+    let mut sorted_times = times.clone();
+    sorted_times.sort_unstable();
+    assert_eq!(
+        times, sorted_times,
+        "the parser must sort each batch by timestamp before it reaches the store"
+    );
 
     let _ = std::fs::remove_file(&path);
 }
