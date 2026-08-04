@@ -386,17 +386,24 @@ pub(super) fn parse(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::io::Cursor;
     use std::sync::Arc;
 
     use arrow::array::{
-        Array, ArrayRef, BooleanArray, Float32Array, Int64Array, StringArray,
-        TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray,
+        Array, ArrayRef, BinaryArray, BooleanArray, Float32Array, Int32Builder, Int64Array,
+        LargeStringArray, ListBuilder, StringArray, TimestampMicrosecondArray,
+        TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, UInt64Array,
     };
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use arrow::record_batch::RecordBatch;
+    use delog_core::identity::SourceId;
+    use delog_core::parse_ctl::{CancelToken, ParseCtl};
     use delog_core::time::TimeRange;
 
-    use super::super::testing::{drive_parquet, parquet_bytes};
+    use crate::parser::LogParser;
+
+    use super::super::ParquetParser;
+    use super::super::testing::{RecordingSink, drive_parquet, parquet_bytes};
     use super::*;
 
     #[test]
@@ -728,5 +735,403 @@ mod tests {
         assert_eq!(summary.time_range, None);
         assert!(sink.batches.is_empty());
         assert!(sink.closed.is_some());
+    }
+
+    #[test]
+    fn an_unsorted_timestamp_column_is_sorted_with_values_still_aligned() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "stamp",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                true,
+            ),
+            Field::new("value", DataType::Float32, true),
+            Field::new("mode", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(TimestampMicrosecondArray::from(vec![
+                    Some(30),
+                    Some(10),
+                    Some(20),
+                ])) as ArrayRef,
+                Arc::new(Float32Array::from(vec![Some(3.0), Some(1.0), Some(2.0)])) as ArrayRef,
+                Arc::new(StringArray::from(vec![Some("C"), Some("A"), Some("B")])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+
+        let (result, sink) = drive_parquet(parquet_bytes(schema, &[batch]));
+
+        assert_eq!(result.unwrap().row_count, 3);
+        assert_eq!(sink.batches[0].timestamps.values(), &[10, 20, 30]);
+        assert_eq!(
+            sink.batches[0].columns[0]
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .unwrap()
+                .values(),
+            &[1.0, 2.0, 3.0]
+        );
+        let modes = sink.batches[0].columns[1]
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(
+            (0..modes.len())
+                .map(|row| modes.value(row))
+                .collect::<Vec<_>>(),
+            ["A", "B", "C"]
+        );
+    }
+
+    #[test]
+    fn duplicate_timestamps_keep_their_file_order() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "stamp",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                true,
+            ),
+            Field::new("seq", DataType::Int64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(TimestampMicrosecondArray::from(vec![
+                    Some(20),
+                    Some(10),
+                    Some(10),
+                    Some(10),
+                ])) as ArrayRef,
+                Arc::new(Int64Array::from(vec![Some(0), Some(1), Some(2), Some(3)])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+
+        let (result, sink) = drive_parquet(parquet_bytes(schema, &[batch]));
+
+        assert_eq!(result.unwrap().row_count, 4);
+        assert_eq!(sink.batches[0].timestamps.values(), &[10, 10, 10, 20]);
+        assert_eq!(
+            sink.batches[0].columns[0]
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .values(),
+            &[1, 2, 3, 0]
+        );
+
+        let schema_large = Arc::new(Schema::new(vec![
+            Field::new(
+                "stamp",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                true,
+            ),
+            Field::new("seq", DataType::Int64, true),
+        ]));
+        let timestamps = vec![Some(100i64); 40];
+        let seq_values = (0i64..40).map(|i| Some(i)).collect::<Vec<_>>();
+        let batch_large = RecordBatch::try_new(
+            Arc::clone(&schema_large),
+            vec![
+                Arc::new(TimestampMicrosecondArray::from(timestamps)) as ArrayRef,
+                Arc::new(Int64Array::from(seq_values)) as ArrayRef,
+            ],
+        )
+        .unwrap();
+
+        let (result, sink) = drive_parquet(parquet_bytes(schema_large, &[batch_large]));
+
+        assert_eq!(result.unwrap().row_count, 40);
+        let seq_array = sink.batches[0].columns[0]
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .values();
+        assert_eq!(seq_array.len(), 40);
+        for i in 0..40 {
+            assert_eq!(seq_array[i], i as i64);
+        }
+    }
+
+    #[test]
+    fn every_emitted_batch_is_internally_sorted() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "stamp",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                true,
+            ),
+            Field::new("value", DataType::Float32, true),
+        ]));
+        let batch = |stamps: Vec<i64>| {
+            let values = stamps.iter().map(|&s| Some(s as f32)).collect::<Vec<_>>();
+            RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![
+                    Arc::new(TimestampMicrosecondArray::from(
+                        stamps.into_iter().map(Some).collect::<Vec<_>>(),
+                    )) as ArrayRef,
+                    Arc::new(Float32Array::from(values)) as ArrayRef,
+                ],
+            )
+            .unwrap()
+        };
+        let batches = [batch(vec![50, 40]), batch(vec![10, 30, 20])];
+
+        let (result, sink) = drive_parquet(parquet_bytes(schema, &batches));
+
+        assert_eq!(result.unwrap().row_count, 5);
+        assert!(sink.batches.iter().all(|batch| {
+            batch
+                .timestamps
+                .values()
+                .windows(2)
+                .all(|pair| pair[0] <= pair[1])
+        }));
+    }
+
+    #[test]
+    fn unsupported_columns_are_skipped_with_one_named_warning() {
+        let mut list = ListBuilder::new(Int32Builder::new());
+        list.values().append_value(1);
+        list.append(true);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "stamp",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                true,
+            ),
+            Field::new("blob", DataType::Binary, true),
+            Field::new("value", DataType::Float32, true),
+            Field::new(
+                "items",
+                DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
+                true,
+            ),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(TimestampMicrosecondArray::from(vec![Some(10)])) as ArrayRef,
+                Arc::new(BinaryArray::from_vec(vec![b"x".as_slice()])) as ArrayRef,
+                Arc::new(Float32Array::from(vec![Some(1.0)])) as ArrayRef,
+                Arc::new(list.finish()) as ArrayRef,
+            ],
+        )
+        .unwrap();
+
+        let (result, sink) = drive_parquet(parquet_bytes(schema, &[batch]));
+
+        assert_eq!(result.unwrap().row_count, 1);
+        assert_eq!(
+            sink.batches[0]
+                .schema
+                .fields()
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect::<Vec<_>>(),
+            ["value"]
+        );
+        let warning = sink
+            .diagnostics
+            .iter()
+            .find(|diag| diag.code == "parquet-unsupported-columns")
+            .expect("unsupported columns warning");
+        assert!(warning.message.contains("blob"));
+        assert!(warning.message.contains("items"));
+    }
+
+    #[test]
+    fn a_second_timestamp_column_becomes_an_int64_micros_field() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "sent",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                true,
+            ),
+            Field::new("recv", DataType::Timestamp(TimeUnit::Second, None), true),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![Some(1), Some(2)])) as ArrayRef,
+                Arc::new(TimestampSecondArray::from(vec![Some(7), None])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+
+        let (result, sink) = drive_parquet(parquet_bytes(schema, &[batch]));
+
+        assert_eq!(result.unwrap().row_count, 2);
+        assert_eq!(sink.batches[0].timestamps.values(), &[1_000, 2_000]);
+        assert_eq!(sink.batches[0].schema.fields()[0].name, "recv");
+        assert_eq!(sink.batches[0].schema.fields()[0].dtype, DataType::Int64);
+        let recv = sink.batches[0].columns[0]
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(recv.value(0), 7_000_000);
+        assert!(recv.is_null(1));
+    }
+
+    #[test]
+    fn value_columns_keep_their_native_dtypes_and_full_precision() {
+        let exact = (1i64 << 53) + 1;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "stamp",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                true,
+            ),
+            Field::new("big", DataType::Int64, true),
+            Field::new("unsigned", DataType::UInt64, true),
+            Field::new("armed", DataType::Boolean, true),
+            Field::new("small", DataType::Float32, true),
+            Field::new("mode", DataType::LargeUtf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(TimestampMicrosecondArray::from(vec![Some(10)])) as ArrayRef,
+                Arc::new(Int64Array::from(vec![Some(exact)])) as ArrayRef,
+                Arc::new(UInt64Array::from(vec![Some(u64::MAX)])) as ArrayRef,
+                Arc::new(BooleanArray::from(vec![Some(true)])) as ArrayRef,
+                Arc::new(Float32Array::from(vec![Some(1.5)])) as ArrayRef,
+                Arc::new(LargeStringArray::from(vec![Some("AUTO")])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+
+        let (result, sink) = drive_parquet(parquet_bytes(schema, &[batch]));
+
+        assert_eq!(result.unwrap().row_count, 1);
+        assert_eq!(
+            sink.batches[0]
+                .schema
+                .fields()
+                .iter()
+                .map(|field| field.dtype.clone())
+                .collect::<Vec<_>>(),
+            [
+                DataType::Int64,
+                DataType::UInt64,
+                DataType::Boolean,
+                DataType::Float32,
+                DataType::LargeUtf8,
+            ]
+        );
+        assert_eq!(
+            sink.batches[0].columns[0]
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(0),
+            exact
+        );
+        assert_eq!(
+            sink.batches[0].columns[1]
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap()
+                .value(0),
+            u64::MAX
+        );
+        assert!(sink.batches[0].schema.fields()[0].is_discrete());
+    }
+
+    #[test]
+    fn a_file_with_only_unsupported_columns_fails_setup() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "blob",
+            DataType::Binary,
+            true,
+        )]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(BinaryArray::from_vec(vec![b"x".as_slice()])) as ArrayRef],
+        )
+        .unwrap();
+
+        let (result, sink) = drive_parquet(parquet_bytes(schema, &[batch]));
+
+        assert!(matches!(result, Err(ParseError::Setup { .. })));
+        assert!(sink.batches.is_empty());
+        assert!(sink.closed.is_none());
+    }
+
+    fn single_float_generic_bytes(rows: usize) -> Vec<u8> {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "stamp",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                true,
+            ),
+            Field::new("value", DataType::Float32, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(TimestampMicrosecondArray::from(
+                    (0..rows as i64).map(Some).collect::<Vec<_>>(),
+                )) as ArrayRef,
+                Arc::new(Float32Array::from(
+                    (0..rows).map(|row| Some(row as f32)).collect::<Vec<_>>(),
+                )) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        parquet_bytes(schema, &[batch])
+    }
+
+    #[test]
+    fn emitted_batches_are_bounded_to_the_parquet_batch_size() {
+        let (result, sink) = drive_parquet(single_float_generic_bytes(PARQUET_BATCH_ROWS + 1));
+
+        assert_eq!(result.unwrap().row_count, PARQUET_BATCH_ROWS as u64 + 1);
+        assert_eq!(
+            sink.batches
+                .iter()
+                .map(|batch| batch.rows())
+                .collect::<Vec<_>>(),
+            [PARQUET_BATCH_ROWS, 1]
+        );
+    }
+
+    #[test]
+    fn cancellation_before_the_first_submission_is_setup_cancelled() {
+        let bytes = single_float_generic_bytes(4);
+        let token = CancelToken::new();
+        token.cancel();
+        let ctl = ParseCtl::new(token, SourceId(4), bytes.len() as u64).with_label("generic");
+        let mut sink = RecordingSink::default();
+
+        let result = ParquetParser.parse(Box::new(Cursor::new(bytes)), &mut sink, &ctl);
+
+        assert!(matches!(result, Err(ParseError::SetupCancelled)));
+        assert!(sink.batches.is_empty());
+        assert!(sink.closed.is_none());
+    }
+
+    #[test]
+    fn cancellation_after_the_first_submission_closes_a_partial_summary() {
+        let bytes = single_float_generic_bytes(PARQUET_BATCH_ROWS + 1);
+        let token = CancelToken::new();
+        let ctl =
+            ParseCtl::new(token.clone(), SourceId(4), bytes.len() as u64).with_label("generic");
+        let mut sink = RecordingSink {
+            cancel_after_first: Some(token),
+            ..RecordingSink::default()
+        };
+
+        let result = ParquetParser.parse(Box::new(Cursor::new(bytes)), &mut sink, &ctl);
+
+        assert!(matches!(result, Err(ParseError::Cancelled)));
+        assert_eq!(sink.batches.len(), 1);
+        let summary = sink.closed.expect("partial summary is closed out");
+        assert_eq!(summary.topic_count, 1);
+        assert_eq!(summary.row_count, PARQUET_BATCH_ROWS as u64);
     }
 }
