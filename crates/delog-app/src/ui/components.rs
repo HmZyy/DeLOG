@@ -171,7 +171,16 @@ pub fn library_tree(
         return None;
     }
 
-    let mut state = egui_ltreeview::TreeViewState::default();
+    let width_id = id.with("rendered_width");
+    let available_width = ui.available_width();
+    let width_changed = ui
+        .data(|data| data.get_temp::<f32>(width_id))
+        .is_none_or(|last| (last - available_width).abs() > 0.5);
+    let mut state = if width_changed {
+        egui_ltreeview::TreeViewState::<usize>::default()
+    } else {
+        egui_ltreeview::TreeViewState::<usize>::load(ui, id).unwrap_or_default()
+    };
     match selected.and_then(|name| names.iter().position(|n| n == name)) {
         Some(index) => state.set_one_selected(index),
         None => state.set_selected(Vec::new()),
@@ -223,6 +232,10 @@ pub fn library_tree(
                 );
             }
             });
+
+    state.set_selected(Vec::new());
+    state.store(ui, id);
+    ui.data_mut(|data| data.insert_temp(width_id, available_width));
 
     if let Some(event) = menu_event {
         return Some(event);
@@ -444,6 +457,116 @@ mod tests {
             narrow.right() <= 150.0,
             "the row menu is drawn at x={} which is outside a 150 point drawer",
             narrow.right()
+        );
+    }
+
+    #[test]
+    fn library_rows_stay_clickable_after_scrolling() {
+        let ctx = egui::Context::default();
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let names: Vec<String> = (0..60).map(|index| format!("entry_{index:02}")).collect();
+        let id = egui::Id::new("library-scroll-click");
+
+        let mut clock = 0.0f64;
+        let mut frame = |events: Vec<egui::Event>,
+                         pointer: Option<egui::Pos2>|
+         -> (Option<LibraryEvent>, Vec<(String, egui::Rect)>) {
+            clock += 0.5;
+            let mut input = egui::RawInput {
+                time: Some(clock),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 200.0),
+                )),
+                ..Default::default()
+            };
+            if let Some(pos) = pointer {
+                input.events.push(egui::Event::PointerMoved(pos));
+            }
+            input.events.extend(events);
+            let mut event = None;
+            let output = ctx.run_ui(input, |ui| {
+                event = egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        library_tree(ui, id, &names, None, &[], "Load entry")
+                    })
+                    .inner;
+            });
+            fn walk(shape: &egui::epaint::Shape, out: &mut Vec<(String, egui::Rect)>) {
+                match shape {
+                    egui::epaint::Shape::Text(text) => {
+                        out.push((text.galley.job.text.clone(), text.visual_bounding_rect()));
+                    }
+                    egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                    _ => {}
+                }
+            }
+            let mut rows = Vec::new();
+            for clipped in &output.shapes {
+                walk(&clipped.shape, &mut rows);
+            }
+            (event, rows)
+        };
+
+        frame(vec![], None);
+        let mut rows = Vec::new();
+        for _ in 0..8 {
+            rows = frame(
+                vec![egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, -120.0),
+                    modifiers: Default::default(),
+                    phase: egui::TouchPhase::Move,
+                }],
+                Some(egui::pos2(200.0, 100.0)),
+            )
+            .1;
+        }
+
+        for _ in 0..30 {
+            let next = frame(vec![], None).1;
+            let settled = next
+                .iter()
+                .map(|(text, rect)| (text.clone(), rect.top().round() as i32))
+                .eq(rows.iter().map(|(text, rect): &(String, egui::Rect)| {
+                    (text.clone(), rect.top().round() as i32)
+                }));
+            rows = next;
+            if settled {
+                break;
+            }
+        }
+
+        let (label, rect) = rows
+            .iter()
+            .filter(|(text, rect)| text.starts_with("entry_") && rect.top() > 100.0)
+            .max_by(|a, b| a.1.top().total_cmp(&b.1.top()))
+            .cloned()
+            .unwrap_or_else(|| panic!("rows should be painted after scrolling, got {rows:?}"));
+        let target = rect.center();
+
+        let mut clicked = None;
+        for pressed in [true, false] {
+            let (event, _) = frame(
+                vec![egui::Event::PointerButton {
+                    pos: target,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                }],
+                Some(target),
+            );
+            clicked = clicked.or(event);
+        }
+
+        assert_eq!(
+            clicked,
+            Some(LibraryEvent {
+                name: label.clone(),
+                action: LibraryAction::Load,
+            }),
+            "clicking {label} at {target:?} after scrolling should load it"
         );
     }
 
