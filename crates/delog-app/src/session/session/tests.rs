@@ -1,21 +1,17 @@
 use std::io::Write;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use arrow::array::{
     Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int64Array, LargeStringArray,
-    StringArray, UInt16Array,
+    StringArray, TimestampMillisecondArray, UInt16Array,
 };
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use delog_core::chunk::Chunk;
 use delog_core::identity::IdentityRegistry;
 use delog_core::schema::{FieldSchema, TopicSchema};
 use delog_core::snapshot::StoreSnapshot;
 use delog_core::store::TopicStore;
-use delog_parsers::{
-    LogParser, ParseError, ReadSeek, Sniff, TimestampSelection, TimestampSelectionError,
-    TimestampSelectionProvider, TimestampSelectionRequest, TimestampUnit,
-};
+use delog_parsers::{LogParser, ParseError, ReadSeek, Sniff};
 use parquet::arrow::ArrowWriter;
 
 use super::*;
@@ -24,30 +20,6 @@ use crate::export::data_export::{
     ExportCtl, ExportField, ExportFormat, available_fields, write_export_file,
 };
 use delog_core::export::ResampleMode;
-
-struct FixedSelectionProvider {
-    response: Result<TimestampSelection, TimestampSelectionError>,
-}
-
-impl TimestampSelectionProvider for FixedSelectionProvider {
-    fn select(
-        &self,
-        _request: TimestampSelectionRequest,
-        _ctl: &ParseCtl,
-    ) -> Result<TimestampSelection, TimestampSelectionError> {
-        self.response
-    }
-}
-
-fn fixed_selection_provider(
-    response: Result<TimestampSelection, TimestampSelectionError>,
-) -> Arc<dyn TimestampSelectionProvider> {
-    Arc::new(FixedSelectionProvider { response })
-}
-
-fn cancelling_selection_provider() -> Arc<dyn TimestampSelectionProvider> {
-    fixed_selection_provider(Err(TimestampSelectionError::Cancelled))
-}
 
 #[cfg(feature = "scripting")]
 #[test]
@@ -127,13 +99,17 @@ fn temp_parquet_path(name: &str) -> PathBuf {
 
 fn write_generic_parquet(path: &Path) {
     let schema = Arc::new(Schema::new(vec![
-        Field::new("time_ms", DataType::Int64, false),
+        Field::new(
+            "time",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        ),
         Field::new("value", DataType::Float32, false),
     ]));
     let batch = RecordBatch::try_new(
         Arc::clone(&schema),
         vec![
-            Arc::new(Int64Array::from(vec![1, 2])) as ArrayRef,
+            Arc::new(TimestampMillisecondArray::from(vec![1, 2])) as ArrayRef,
             Arc::new(Float32Array::from(vec![1.5, 2.5])) as ArrayRef,
         ],
     )
@@ -147,14 +123,14 @@ fn write_generic_parquet(path: &Path) {
 fn write_all_invalid_parquet(path: &Path) {
     let rows = delog_parsers::parquet::PARQUET_BATCH_ROWS * 32;
     let schema = Arc::new(Schema::new(vec![
-        Field::new("time", DataType::Float64, false),
-        Field::new("value", DataType::Float32, false),
+        Field::new("time", DataType::Timestamp(TimeUnit::Millisecond, None), true),
+        Field::new("value", DataType::Float32, true),
     ]));
     let batch = RecordBatch::try_new(
         Arc::clone(&schema),
         vec![
-            Arc::new(Float64Array::from(vec![f64::NAN; rows])) as ArrayRef,
-            Arc::new(Float32Array::from(vec![1.0; rows])) as ArrayRef,
+            Arc::new(TimestampMillisecondArray::from(vec![None; rows])) as ArrayRef,
+            Arc::new(Float32Array::from(vec![Some(1.0); rows])) as ArrayRef,
         ],
     )
     .unwrap();
@@ -162,22 +138,6 @@ fn write_all_invalid_parquet(path: &Path) {
     let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
     writer.write(&batch).unwrap();
     writer.close().unwrap();
-}
-
-#[derive(Default)]
-struct NeverSelectionProvider {
-    calls: AtomicUsize,
-}
-
-impl TimestampSelectionProvider for NeverSelectionProvider {
-    fn select(
-        &self,
-        _request: TimestampSelectionRequest,
-        _ctl: &ParseCtl,
-    ) -> Result<TimestampSelection, TimestampSelectionError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        panic!("structured Parquet must not request a timestamp selection");
-    }
 }
 
 fn structured_export_fixture() -> (StoreSnapshot, Vec<ExportField>) {
@@ -321,7 +281,6 @@ fn structured_export_fixture() -> (StoreSnapshot, Vec<ExportField>) {
 
 struct LoadedStructuredExport {
     snapshot: Arc<StoreSnapshot>,
-    provider_calls: usize,
     exported_rows: u64,
     terminal: LoadTerminal,
     diagnostics: Vec<DiagRecord>,
@@ -332,8 +291,7 @@ fn open_parquet_path(
     exported_rows: u64,
     expected_diagnostic: Option<&str>,
 ) -> LoadedStructuredExport {
-    let provider = Arc::new(NeverSelectionProvider::default());
-    let mut session = Session::new(egui::Context::default(), provider.clone());
+    let mut session = Session::new(egui::Context::default());
     session.open_path(path, None);
     session.join_workers();
     session.wait_until(|session| {
@@ -355,7 +313,6 @@ fn open_parquet_path(
         .expect("one parser terminal event");
     LoadedStructuredExport {
         snapshot: session.snapshot(),
-        provider_calls: provider.calls.load(Ordering::SeqCst),
         exported_rows,
         terminal,
         diagnostics: session.diagnostic_records(),
@@ -382,7 +339,6 @@ fn load_structured_export(window: (i64, i64), file_stem: &str) -> LoadedStructur
 
 pub(crate) fn structured_round_trip_snapshot() -> Arc<StoreSnapshot> {
     let loaded = load_structured_export((1_100, 3_300), "structured-metadata");
-    assert_eq!(loaded.provider_calls, 0);
     assert_eq!(loaded.exported_rows, 7);
     assert!(matches!(loaded.terminal, LoadTerminal::Closed(_)));
     loaded.snapshot
@@ -423,7 +379,6 @@ fn float32_values(store: &TopicStore, field_name: &str) -> Vec<Option<f32>> {
 #[test]
 fn structured_parquet_round_trip_preserves_topics_and_fields() {
     let loaded = load_structured_export((1_100, 3_300), "structured-round-trip");
-    assert_eq!(loaded.provider_calls, 0);
     assert_eq!(loaded.exported_rows, 7);
     assert_eq!(
         loaded.terminal,
@@ -530,7 +485,6 @@ fn structured_parquet_round_trip_preserves_topics_and_fields() {
 fn structured_parquet_empty_window_opens_without_topics_or_picker() {
     let loaded = load_structured_export((9_000, 10_000), "structured-empty-window");
 
-    assert_eq!(loaded.provider_calls, 0);
     assert_eq!(loaded.exported_rows, 0);
     assert_eq!(
         loaded.terminal,
@@ -563,7 +517,6 @@ fn invalid_marked_parquet_records_removal_instead_of_successful_close() {
 
     let loaded = open_parquet_path(path, 0, Some("parse-setup"));
 
-    assert_eq!(loaded.provider_calls, 0);
     assert_eq!(loaded.terminal, LoadTerminal::Removed);
     assert!(loaded.snapshot.topics.is_empty());
     assert!(
@@ -579,7 +532,7 @@ fn open_path_loads_a_bin_into_the_store() {
     let path = temp_path("load");
     File::create(&path).unwrap().write_all(&tiny_bin()).unwrap();
 
-    let mut session = Session::new(egui::Context::default(), cancelling_selection_provider());
+    let mut session = Session::new(egui::Context::default());
     session.open_path(path.clone(), None);
     session.join_workers();
     session.wait_until(|s| {
@@ -602,7 +555,7 @@ fn a_forced_parser_bypasses_sniffing() {
     let path = temp_path("forced-wrong");
     File::create(&path).unwrap().write_all(&tiny_bin()).unwrap();
 
-    let mut session = Session::new(egui::Context::default(), cancelling_selection_provider());
+    let mut session = Session::new(egui::Context::default());
     session.open_path(path.clone(), Some("ulog".to_owned()));
     session.join_workers();
     session.wait_until(|s| !s.diagnostic_records().is_empty());
@@ -621,7 +574,7 @@ fn an_unknown_forced_parser_name_is_reported() {
     let path = temp_path("forced-missing");
     File::create(&path).unwrap().write_all(&tiny_bin()).unwrap();
 
-    let mut session = Session::new(egui::Context::default(), cancelling_selection_provider());
+    let mut session = Session::new(egui::Context::default());
     session.open_path(path.clone(), Some("nope".to_owned()));
     session.join_workers();
     session.wait_until(|s| {
@@ -635,7 +588,7 @@ fn an_unknown_forced_parser_name_is_reported() {
 
 #[test]
 fn parser_names_lists_every_registered_parser() {
-    let session = Session::new(egui::Context::default(), cancelling_selection_provider());
+    let session = Session::new(egui::Context::default());
     assert_eq!(
         session.parser_names(),
         ["ardupilot-bin", "ulog", "tlog", "parquet"]
@@ -646,12 +599,8 @@ fn parser_names_lists_every_registered_parser() {
 fn open_path_loads_a_generic_parquet_into_the_store() {
     let path = temp_parquet_path("generic-load");
     write_generic_parquet(&path);
-    let provider = fixed_selection_provider(Ok(TimestampSelection {
-        column_index: 0,
-        unit: TimestampUnit::Milliseconds,
-    }));
 
-    let mut session = Session::new(egui::Context::default(), provider);
+    let mut session = Session::new(egui::Context::default());
     session.open_path(path.clone(), None);
     session.join_workers();
     session.wait_until(|session| {
@@ -678,31 +627,6 @@ fn open_path_loads_a_generic_parquet_into_the_store() {
 }
 
 #[test]
-fn cancelled_parquet_selection_tombstones_the_provisional_source() {
-    let path = temp_parquet_path("cancelled");
-    write_generic_parquet(&path);
-
-    let mut session = Session::new(egui::Context::default(), cancelling_selection_provider());
-    session.open_path(path.clone(), None);
-    session.join_workers();
-    session.wait_until(|session| {
-        session.snapshot().sources.iter().any(|source| {
-            source.entry.label == source_label(path.as_path()) && source.entry.removed
-        })
-    });
-
-    let snapshot = session.snapshot();
-    let source = snapshot
-        .sources
-        .iter()
-        .find(|source| source.entry.label == source_label(path.as_path()))
-        .expect("Parquet parser opens a provisional source");
-    assert!(source.entry.removed);
-
-    let _ = std::fs::remove_file(&path);
-}
-
-#[test]
 fn pre_submit_cancellation_after_progress_does_not_contaminate_the_next_load() {
     let invalid_path = temp_parquet_path("invalid-progress-cancel");
     write_all_invalid_parquet(&invalid_path);
@@ -711,11 +635,7 @@ fn pre_submit_cancellation_after_progress_does_not_contaminate_the_next_load() {
         .unwrap()
         .write_all(&tiny_bin())
         .unwrap();
-    let provider = fixed_selection_provider(Ok(TimestampSelection {
-        column_index: 0,
-        unit: TimestampUnit::Seconds,
-    }));
-    let mut session = Session::new(egui::Context::default(), provider);
+    let mut session = Session::new(egui::Context::default());
 
     session.open_path(invalid_path.clone(), None);
     let cancel = session.active[0].cancel.clone();
@@ -812,7 +732,7 @@ fn unknown_format_reports_a_diagnostic_and_no_topics() {
         .write_all(b"this is not a flight log")
         .unwrap();
 
-    let mut session = Session::new(egui::Context::default(), cancelling_selection_provider());
+    let mut session = Session::new(egui::Context::default());
     session.open_path(path.clone(), None);
     session.join_workers();
     session.wait_until(|s| {
@@ -855,7 +775,7 @@ fn setup_failure_removes_the_provisional_source() {
     let path = temp_path("setup-failure");
     File::create(&path).unwrap().write_all(b"setup").unwrap();
 
-    let session = Session::new(egui::Context::default(), cancelling_selection_provider());
+    let session = Session::new(egui::Context::default());
     let mut registry = ParserRegistry::new();
     registry.register(Arc::new(StubSetupParser));
     run_parse(

@@ -3,10 +3,9 @@ mod policy_sources;
 
 use policy_sources::{
     APP as APP_SOURCE, BROWSER, DATA_EXPORT as DATA_EXPORT_SOURCE, DIAGNOSTICS,
-    DOCKS as DOCKS_SOURCE, GENERATE_MARKERS, LIVE, LOGGING, MARKERS, MESSAGE_POPUP,
-    PARQUET_IMPORT as PARQUET_IMPORT_SOURCE, PARSERS, PERFORMANCE, SCRIPTS as SCRIPTS_SOURCE,
-    SETTINGS as SETTINGS_SOURCE, SYNC_WINDOW as SYNC_WINDOW_SOURCE, VEHICLE_DIALOG,
-    WORKSPACE as WORKSPACE_SOURCE,
+    DOCKS as DOCKS_SOURCE, GENERATE_MARKERS, LIVE, LOGGING, MARKERS, MESSAGE_POPUP, PARSERS,
+    PERFORMANCE, SCRIPTS as SCRIPTS_SOURCE, SETTINGS as SETTINGS_SOURCE,
+    SYNC_WINDOW as SYNC_WINDOW_SOURCE, VEHICLE_DIALOG, WORKSPACE as WORKSPACE_SOURCE,
 };
 
 const CONTEXT_HEADER_SOURCE: &str = include_str!("../src/shell/app/context_header.rs");
@@ -26,38 +25,11 @@ const POPUP_SOURCES: &[&str] = &[
     WORKSPACE_SOURCE,
 ];
 
-const PARQUET_UI_SOURCES: &[&str] = &[APP_SOURCE, DATA_EXPORT_SOURCE, PARQUET_IMPORT_SOURCE];
-
 fn occurrence_count(needle: &str) -> usize {
     POPUP_SOURCES
         .iter()
         .map(|source| source.matches(needle).count())
         .sum()
-}
-
-fn parquet_ui_occurrence_count(needle: &str) -> usize {
-    PARQUET_UI_SOURCES
-        .iter()
-        .map(|source| source.matches(needle).count())
-        .sum()
-}
-
-#[test]
-fn parquet_import_uses_an_in_app_non_collapsible_window_and_picker_filter() {
-    assert!(APP_SOURCE.contains("\"parquet\""));
-    assert!(PARQUET_IMPORT_SOURCE.contains("egui::Window::new(\"Import Parquet\")"));
-    assert!(PARQUET_IMPORT_SOURCE.contains(".collapsible(false)"));
-    assert!(!PARQUET_IMPORT_SOURCE.contains("rfd::MessageDialog"));
-}
-
-#[test]
-fn structured_parquet_adds_no_second_import_dialog() {
-    assert_eq!(
-        parquet_ui_occurrence_count("egui::Window::new(\"Import"),
-        1,
-        "the generic timestamp picker is the only import window in the Parquet UI path"
-    );
-    assert_eq!(parquet_ui_occurrence_count("self.parquet_import.show("), 1);
 }
 
 fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
@@ -944,3 +916,4 @@ fn every_context_menu_uses_the_dense_row_tokens() {
         "expected to audit every context menu, only found {checked}"
     );
 }
+
