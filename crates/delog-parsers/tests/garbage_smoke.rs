@@ -4,7 +4,6 @@
 use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use arrow::array::{ArrayRef, Float32Array, Int64Array};
 use arrow::datatypes::{DataType, Field, Schema};
@@ -14,11 +13,7 @@ use delog_core::identity::SourceId;
 use delog_core::ingest::{IngestSink, ParseSummary, ParsedBatch, SourceKind};
 use delog_core::parse_ctl::{CancelToken, ParseCtl};
 use delog_parsers::mavlink::{FrameDecoder, extract_fields};
-use delog_parsers::{
-    ArduPilotParser, LogParser, ParquetParser, ParseError, TimestampSelection,
-    TimestampSelectionError, TimestampSelectionProvider, TimestampSelectionRequest, TlogParser,
-    ULogParser,
-};
+use delog_parsers::{ArduPilotParser, LogParser, ParquetParser, ParseError, TlogParser, ULogParser};
 use parquet::arrow::ArrowWriter;
 
 #[derive(Default)]
@@ -34,33 +29,6 @@ impl IngestSink for NullSink {
     fn close_source(&mut self, _source: SourceId, _summary: ParseSummary) {}
 }
 
-struct CancelSelection;
-
-impl TimestampSelectionProvider for CancelSelection {
-    fn select(
-        &self,
-        _request: TimestampSelectionRequest,
-        _ctl: &ParseCtl,
-    ) -> Result<TimestampSelection, TimestampSelectionError> {
-        Err(TimestampSelectionError::Cancelled)
-    }
-}
-
-struct PanicSelection {
-    calls: Arc<AtomicUsize>,
-}
-
-impl TimestampSelectionProvider for PanicSelection {
-    fn select(
-        &self,
-        _request: TimestampSelectionRequest,
-        _ctl: &ParseCtl,
-    ) -> Result<TimestampSelection, TimestampSelectionError> {
-        self.calls.fetch_add(1, Ordering::Relaxed);
-        panic!("timestamp provider must not be called for marked DéLOG Parquet")
-    }
-}
-
 fn drive(parser: &dyn LogParser, data: &[u8]) {
     let mut sink = NullSink;
     let ctl = ParseCtl::new(CancelToken::new(), SourceId(0), data.len() as u64);
@@ -71,7 +39,7 @@ fn drive_all(data: &[u8]) {
     drive(&ArduPilotParser, data);
     drive(&ULogParser, data);
     drive(&TlogParser, data);
-    let parquet = ParquetParser::new(Arc::new(CancelSelection));
+    let parquet = ParquetParser;
     drive(&parquet, data);
 
     let mut decoder = FrameDecoder::new();
@@ -127,10 +95,7 @@ fn marked_parquet(
 }
 
 fn assert_marked_setup_failure(bytes: Vec<u8>, case: &str) {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let parser = ParquetParser::new(Arc::new(PanicSelection {
-        calls: Arc::clone(&calls),
-    }));
+    let parser = ParquetParser;
     let ctl = ParseCtl::new(CancelToken::new(), SourceId(0), bytes.len() as u64)
         .with_label(format!("{case}.parquet"));
     let mut sink = NullSink;
@@ -140,11 +105,6 @@ fn assert_marked_setup_failure(bytes: Vec<u8>, case: &str) {
     assert!(
         matches!(result, Err(ParseError::Setup { .. })),
         "{case} should report setup failure, got {result:?}"
-    );
-    assert_eq!(
-        calls.load(Ordering::Relaxed),
-        0,
-        "{case} fell back to generic timestamp selection"
     );
 }
 
@@ -236,10 +196,7 @@ fn marked_parquet_tolerates_stray_data_in_padding_rows_without_fallback() {
         vec![Some(2.0), Some(3.0)],
     );
 
-    let calls = Arc::new(AtomicUsize::new(0));
-    let parser = ParquetParser::new(Arc::new(PanicSelection {
-        calls: Arc::clone(&calls),
-    }));
+    let parser = ParquetParser;
     let ctl = ParseCtl::new(CancelToken::new(), SourceId(0), bytes.len() as u64)
         .with_label("non-null padding.parquet");
     let mut sink = NullSink;
@@ -247,5 +204,4 @@ fn marked_parquet_tolerates_stray_data_in_padding_rows_without_fallback() {
     let result = parser.parse(Box::new(Cursor::new(bytes)), &mut sink, &ctl);
 
     assert!(result.is_ok(), "expected lenient parse, got {result:?}");
-    assert_eq!(calls.load(Ordering::Relaxed), 0);
 }
