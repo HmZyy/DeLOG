@@ -5,6 +5,7 @@
 
 use delog_core::time::TimeRange;
 
+use crate::plotting::hover::PLAYHEAD_COLOR;
 use crate::plotting::plot::ViewX;
 
 pub const MIN_SPEED: f32 = 0.1;
@@ -455,9 +456,9 @@ fn scrubber(
     }
 
     let stroke_color = if response.hovered() || response.dragged() {
-        visuals.strong_text_color()
+        PLAYHEAD_COLOR
     } else {
-        visuals.text_color()
+        PLAYHEAD_COLOR.gamma_multiply(0.85)
     };
     painter.vline(x, rect.y_range(), egui::Stroke::new(2.0, stroke_color));
     painter.circle_filled(egui::pos2(x, rect.center().y), 4.0, stroke_color);

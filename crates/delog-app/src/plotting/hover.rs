@@ -12,6 +12,9 @@ use crate::plotting::plot::PlotPane;
 
 const READOUT_ORDER: egui::Order = egui::Order::Background;
 
+pub const PLAYHEAD_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 59, 59);
+const PLAYHEAD_CASING: egui::Color32 = egui::Color32::from_black_alpha(110);
+
 pub struct HoverTarget {
     pub id: egui::Id,
     pub view: PaneView,
@@ -86,10 +89,7 @@ fn cursor_position(
         return None;
     }
     let cursor_x_sec = x0 + (pos.x - rect.left()) / rect.width() * (x1 - x0);
-    Some((
-        cursor_x_sec,
-        origin_us + (cursor_x_sec as f64 * 1e6) as i64,
-    ))
+    Some((cursor_x_sec, origin_us + (cursor_x_sec as f64 * 1e6) as i64))
 }
 
 fn draw_sample_circles(ui: &egui::Ui, view: PaneView, origin_us: i64, rows: &[Row]) {
@@ -247,8 +247,9 @@ pub fn draw_playhead(
     let x = rect.left() + frac * rect.width();
 
     let painter = ui.painter();
-    let color = ui.visuals().warn_fg_color;
-    painter.vline(x, rect.y_range(), egui::Stroke::new(1.5, color));
+    let color = PLAYHEAD_COLOR;
+    painter.vline(x, rect.y_range(), egui::Stroke::new(4.0, PLAYHEAD_CASING));
+    painter.vline(x, rect.y_range(), egui::Stroke::new(2.0, color));
 
     let Some(mode) = readout else {
         return;
@@ -511,7 +512,7 @@ fn format_value(v: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_delta, plot_to_screen, show_tooltip, Row};
+    use super::{Row, format_delta, plot_to_screen, show_tooltip};
     use std::collections::HashMap;
 
     fn tooltip_row(field: u32, label: &str, value: f64) -> Row {
