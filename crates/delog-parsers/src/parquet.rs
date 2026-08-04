@@ -799,4 +799,9 @@ mod tests {
         assert_eq!(out, "789");
     }
 
+    #[test]
+    fn parquet_magic_is_a_confident_match() {
+        assert_eq!(ParquetParser.sniff(b"PAR1rest of the file").score, 100);
+        assert_eq!(ParquetParser.sniff(b"not parquet at all").score, 0);
+    }
 }
