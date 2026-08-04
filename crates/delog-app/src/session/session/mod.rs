@@ -19,7 +19,7 @@ use delog_core::parse_ctl::{CancelToken, ParseCtl};
 use delog_core::snapshot::{DataStore, StoreSnapshot};
 use delog_parsers::{
     ArduPilotParser, Detection, LogParser, ParquetParser, ParseError, ParserRegistry,
-    SNIFF_HEAD_LEN, TimestampSelectionProvider, TlogParser, ULogParser,
+    SNIFF_HEAD_LEN, TlogParser, ULogParser,
 };
 
 #[cfg(feature = "scripting")]
@@ -150,7 +150,7 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(ctx: egui::Context, parquet_selection: Arc<dyn TimestampSelectionProvider>) -> Self {
+    pub fn new(ctx: egui::Context) -> Self {
         let loads: Loads = Arc::default();
         #[cfg(test)]
         let load_terminals: LoadTerminals = Arc::default();
@@ -185,7 +185,7 @@ impl Session {
         registry.register(Arc::new(ArduPilotParser));
         registry.register(Arc::new(ULogParser));
         registry.register(Arc::new(TlogParser));
-        registry.register(Arc::new(ParquetParser::new(parquet_selection)));
+        registry.register(Arc::new(ParquetParser));
 
         Self {
             store,
