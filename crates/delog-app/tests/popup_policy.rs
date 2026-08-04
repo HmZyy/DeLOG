@@ -917,3 +917,43 @@ fn every_context_menu_uses_the_dense_row_tokens() {
     );
 }
 
+#[test]
+fn the_parquet_path_has_no_import_dialog() {
+    assert!(APP_SOURCE.contains("\"parquet\""));
+
+    fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("readable directory") {
+            let path = entry.expect("readable entry").path();
+            if path.is_dir() {
+                rust_files(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    rust_files(&src, &mut files);
+
+    assert!(
+        files.len() >= 20,
+        "expected to walk a substantial number of source files under {}, only found {}",
+        src.display(),
+        files.len()
+    );
+
+    for file in files {
+        let source = std::fs::read_to_string(&file).expect("readable source");
+        assert!(
+            !source.contains("TimestampSelection"),
+            "{} still references TimestampSelection; generic Parquet loads without a timestamp picker",
+            file.display()
+        );
+        assert!(
+            !source.contains("egui::Window::new(\"Import"),
+            "{} still opens an Import window; generic Parquet loads without a timestamp picker",
+            file.display()
+        );
+    }
+}
