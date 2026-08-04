@@ -308,7 +308,6 @@ enum LayoutManagerAction {
 
 pub struct DelogApp {
     session: Session,
-    parquet_import: crate::ingest::parquet_import::ParquetImportUi,
     #[cfg(feature = "scripting")]
     scripts: scripts::ScriptsPanel,
     gpu: GpuBridge,
@@ -452,13 +451,11 @@ impl DelogApp {
         let (exported_profiling_tx, exported_profiling) = mpsc::channel();
         let (data_export_tx, data_export_rx) = mpsc::channel();
         let (image_export_writes_tx, image_export_writes) = mpsc::channel();
-        let (parquet_import, parquet_selection) = crate::ingest::parquet_import::ParquetImportUi::new();
-        let session = Session::new(cc.egui_ctx.clone(), parquet_selection);
+        let session = Session::new(cc.egui_ctx.clone());
         // Shared metrics registry so cache metrics land in the same dock.
         let caches = CacheManager::new().with_metrics(std::sync::Arc::clone(session.metrics()));
         Self {
             session,
-            parquet_import,
             #[cfg(feature = "scripting")]
             scripts: {
                 let config_dir =
@@ -2316,7 +2313,6 @@ impl eframe::App for DelogApp {
         let ui_prelude_timer = self.session.metrics().scope("ui_prelude");
         self.handle_picked_files();
         self.handle_layout_io_results();
-        self.parquet_import.poll_requests();
         #[cfg(feature = "scripting")]
         let parser_task_active = self.scripts.is_parser_running();
         #[cfg(not(feature = "scripting"))]
@@ -3079,7 +3075,6 @@ impl eframe::App for DelogApp {
         // Floating windows/dialogs + overlays; drops with the function (still
         // inside `frame_total`, after every other section).
         let _ui_windows_timer = self.session.metrics().scope("ui_windows");
-        self.parquet_import.show(ui.ctx());
         crate::export::data_export::progress_ui(ui.ctx(), &self.data_exports);
         self.show_layout_windows(ui.ctx());
         crate::ui::message_popup::show_all(&mut self.message_popups, ui.ctx());
