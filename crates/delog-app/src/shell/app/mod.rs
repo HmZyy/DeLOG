@@ -4190,6 +4190,7 @@ const SHORTCUT_KEYS: &[egui::Key] = &[
     egui::Key::M,
     egui::Key::E,
     egui::Key::O,
+    egui::Key::Equals,
 ];
 
 fn dock_for_command(command: commands::CommandId) -> Option<AppDockTab> {
@@ -4228,6 +4229,7 @@ fn command_for_shortcut(
         (egui::Key::ArrowLeft, _) => Some(CommandId::StepLeft),
         (egui::Key::ArrowRight, _) => Some(CommandId::StepRight),
         (egui::Key::M, _) => Some(CommandId::AddMarker),
+        (egui::Key::Equals, _) => Some(CommandId::EqualizePlots),
         _ => None,
     }
 }
