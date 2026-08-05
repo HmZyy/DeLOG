@@ -75,7 +75,7 @@ impl Sum for MemBreakdown {
 
 /// Per-entity vectors indexed by the dense runtime ID (`id.index()`). A topic's
 /// bytes include its shared timestamp buffers, which are not attributed to any
-/// field — so `topic.canonical == timestamp_bytes + Σ field.canonical`.
+/// field - so `topic.canonical == timestamp_bytes + Σ field.canonical`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemReport {
     fields: Vec<MemBreakdown>,

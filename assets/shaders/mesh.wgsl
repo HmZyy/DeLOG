@@ -1,7 +1,7 @@
 // Vehicle mesh shading. "PBR-lite": a single directional light with Lambert
 // N·L plus a constant ambient term, which is plenty to read a vehicle's
 // orientation against the grid. Unlike the trace pipelines this uses a real
-// vertex+index buffer — meshes are small, static geometry, not data that scales
+// vertex+index buffer - meshes are small, static geometry, not data that scales
 // with sample count, so the no-vertex-buffer rule doesn't apply.
 
 struct MeshU {

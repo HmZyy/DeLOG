@@ -14,7 +14,7 @@ members = [
 exclude = ["third_party/egui_graph"]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/HmZyy/DeLOG"
@@ -52,6 +52,7 @@ eframe = { version = "0.34.3", default-features = false, features = [
 egui-wgpu = "0.34.3"
 egui_extras = { version = "0.34.3", default-features = false, features = ["svg"] }
 egui_dock = "0.19.1"
+egui_ltreeview = "0.7.1"
 egui_tiles = "0.15.0"
 rfd = "0.17.2"
 wgpu = "29.0.3"
@@ -61,6 +62,7 @@ pollster = "0.4.0"
 # telemetry I/O
 mavlink = { version = "0.18.0", default-features = false, features = [
   "dialect-all",
+  "mav2-message-extensions",
   "serde",
   "std",
 ] }

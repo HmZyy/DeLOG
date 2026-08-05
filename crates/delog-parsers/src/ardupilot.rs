@@ -51,7 +51,7 @@ impl LogParser for ArduPilotParser {
 
     fn sniff(&self, head: &[u8]) -> Sniff {
         match head {
-            // Sync pair + FMT msgid + FMT-defining-FMT (type 128) — unmistakable.
+            // Sync pair + FMT msgid + FMT-defining-FMT (type 128) - unmistakable.
             [HEAD1, HEAD2, FMT_MSGID, FMT_MSGID, ..] => Sniff::new(99, "DataFlash FMT header"),
             [HEAD1, HEAD2, ..] => Sniff::new(90, "DataFlash sync pair"),
             _ => Sniff::no(),
@@ -1028,7 +1028,7 @@ fn type_size(chr: u8) -> Option<usize> {
         b'd' | b'q' | b'Q' => 8,
         b'N' => 16,
         b'Z' => 64,
-        b'a' => 64, // int16[32] array — consumed but not emitted
+        b'a' => 64, // int16[32] array - consumed but not emitted
         _ => return None,
     })
 }

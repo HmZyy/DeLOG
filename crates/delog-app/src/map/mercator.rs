@@ -131,7 +131,7 @@ struct GroundView {
 impl GroundView {
     fn new(inv_vp: DMat4, viewport_px: [u32; 2], anchor_rad: [f64; 2]) -> Option<Self> {
         let to_mercator = |world: DVec3, reference: &mut Option<f64>| {
-            let (lat, lon, _) = crate::geo::ned_to_geodetic(
+            let (lat, lon, _) = crate::scene3d::geo::ned_to_geodetic(
                 DVec3::new(-world.z, world.x, 0.0),
                 anchor_rad[0],
                 anchor_rad[1],
@@ -352,7 +352,7 @@ pub fn tile_corners_render(tile: TileId, anchor_rad_alt: [f64; 3]) -> [[f32; 3];
         return [[0.0; 3]; 4];
     };
     [[north, west], [north, east], [south, east], [south, west]].map(|[lat, lon]| {
-        let ned = crate::geo::geodetic_to_ned(
+        let ned = crate::scene3d::geo::geodetic_to_ned(
             lat,
             lon,
             0.0,
@@ -388,7 +388,7 @@ mod tests {
     fn ground_geodetic(inv_vp: DMat4, ndc: [f64; 2], anchor: [f64; 2]) -> Option<(f64, f64)> {
         let hit = ground_hit(inv_vp, ndc[0], ndc[1])?;
         let (lat, lon, _) =
-            crate::geo::ned_to_geodetic(DVec3::new(-hit.z, hit.x, 0.0), anchor[0], anchor[1], 0.0);
+            crate::scene3d::geo::ned_to_geodetic(DVec3::new(-hit.z, hit.x, 0.0), anchor[0], anchor[1], 0.0);
         Some((lat, lon))
     }
 

@@ -2,7 +2,7 @@ use delog_core::identity::parse_topic_instance;
 use delog_core::snapshot::StoreSnapshot;
 use delog_flow::graph::FieldSelector;
 
-use crate::fuzzy::fuzzy_match_score;
+use crate::ui::fuzzy::fuzzy_match_score;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataHit {

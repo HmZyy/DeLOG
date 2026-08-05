@@ -168,7 +168,7 @@ mod tests {
     #[test]
     fn points_render_as_screen_space_quads() {
         let Some(ctx) = RenderContext::headless() else {
-            eprintln!("no wgpu adapter — skipping scatter pipeline test");
+            eprintln!("no wgpu adapter - skipping scatter pipeline test");
             return;
         };
         let (w, h) = (64u32, 64u32);
