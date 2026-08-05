@@ -691,6 +691,7 @@ impl Graph {
                     &pointer,
                     closest_socket_for_interaction,
                     ptr_on_graph,
+                    ptr_over_node_prev,
                     ptr_graph,
                     gmem.pressed.as_ref(),
                 );
@@ -1205,9 +1206,51 @@ impl Default for View {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct SocketReach {
+    outward: f32,
+    across: f32,
+    inward: f32,
+}
+
+const SOCKET_INWARD_REACH_FACTOR: f32 = 0.25;
+
+impl SocketReach {
+    fn from_interact_len_px(len: f32, scale: f32) -> Self {
+        let scale = if scale.is_finite() && scale > 0.0 {
+            scale
+        } else {
+            1.0
+        };
+        let outward = len / scale;
+        Self {
+            outward,
+            across: outward,
+            inward: outward * SOCKET_INWARD_REACH_FACTOR,
+        }
+    }
+}
+
+fn socket_hit_score(offset: egui::Vec2, normal: egui::Vec2, reach: SocketReach) -> Option<f32> {
+    let along = offset.dot(normal);
+    let across = (offset - normal * along).length();
+    let along_reach = if along >= 0.0 {
+        reach.outward
+    } else {
+        reach.inward
+    };
+    if along_reach <= 0.0 || reach.across <= 0.0 {
+        return None;
+    }
+    let along_norm = along / along_reach;
+    let across_norm = across / reach.across;
+    let score = along_norm * along_norm + across_norm * across_norm;
+    (score <= 1.0).then_some(score)
+}
+
 /// Find the socket that is closest to the given point.
 ///
-/// Returns the socket alongside the squared distance from the socket.
+/// Returns the socket alongside its hit score (see [`socket_hit_score`]).
 fn find_closest_socket(
     pos_graph: egui::Pos2,
     layout: &Layout,
@@ -1217,13 +1260,18 @@ fn find_closest_socket(
     // TODO: if we wanted to be super efficient, we could maintain a quadtree of
     // nodes and sockets...
     let mut closest_socket = None;
-    let socket_radius = ui
+    let interact_len = ui
         .spacing()
         .interact_size
         .x
         .min(ui.spacing().interact_size.y);
+    let scale = ui
+        .ctx()
+        .layer_transform_to_global(ui.layer_id())
+        .map(|t| t.scaling)
+        .unwrap_or(1.0);
+    let reach = SocketReach::from_interact_len_px(interact_len, scale);
     let visible_rect = ui.clip_rect();
-    let socket_radius_sq = socket_radius * socket_radius;
     for (&n_id, &n_graph) in layout {
         // Only check visible nodes.
         let n_screen = n_graph;
@@ -1232,7 +1280,7 @@ fn find_closest_socket(
             Some(&size) => size,
         };
         let rect = egui::Rect::from_min_size(n_screen, size);
-        if !visible_rect.intersects(rect) {
+        if !visible_rect.intersects(rect.expand(reach.outward)) {
             continue;
         }
         let sockets = match gmem.sockets.get(&n_id) {
@@ -1240,38 +1288,27 @@ fn find_closest_socket(
             Some(sockets) => sockets,
         };
 
-        // Check inputs.
-        for (ix, p, _) in sockets.inputs() {
-            let dist_sq = pos_graph.distance_sq(p);
-            if dist_sq < socket_radius_sq {
-                let socket = socket::Socket {
-                    node: n_id,
-                    kind: socket::SocketKind::Input,
-                    index: ix,
-                };
-                closest_socket = match closest_socket {
-                    None => Some((socket, dist_sq)),
-                    Some((_, d_sq)) if dist_sq < d_sq => Some((socket, dist_sq)),
-                    _ => closest_socket,
-                }
-            }
-        }
+        let mut check = |kind, ix, p: egui::Pos2, normal| {
+            let Some(score) = socket_hit_score(pos_graph - p, normal, reach) else {
+                return;
+            };
+            let socket = socket::Socket {
+                node: n_id,
+                kind,
+                index: ix,
+            };
+            closest_socket = match closest_socket {
+                None => Some((socket, score)),
+                Some((_, best)) if score < best => Some((socket, score)),
+                _ => closest_socket,
+            };
+        };
 
-        // Check outputs.
-        for (ix, p, _) in sockets.outputs() {
-            let dist_sq = pos_graph.distance_sq(p);
-            if dist_sq < socket_radius_sq {
-                let socket = socket::Socket {
-                    node: n_id,
-                    kind: socket::SocketKind::Output,
-                    index: ix,
-                };
-                closest_socket = match closest_socket {
-                    None => Some((socket, dist_sq)),
-                    Some((_, d_sq)) if dist_sq < d_sq => Some((socket, dist_sq)),
-                    _ => closest_socket,
-                }
-            }
+        for (ix, p, normal) in sockets.inputs() {
+            check(socket::SocketKind::Input, ix, p, normal);
+        }
+        for (ix, p, normal) in sockets.outputs() {
+            check(socket::SocketKind::Output, ix, p, normal);
         }
     }
 
@@ -1284,6 +1321,7 @@ fn graph_interaction(
     pointer: &egui::PointerState,
     closest_socket: Option<socket::Socket>,
     ptr_on_graph: bool,
+    ptr_over_node: bool,
     ptr_graph: egui::Pos2,
     pressed: Option<&Pressed>,
 ) -> GraphInteraction {
@@ -1328,7 +1366,7 @@ fn graph_interaction(
             })
         }
     // Check for the beginning of a socket press or rectangular selection.
-    } else if ptr_on_graph
+    } else if (ptr_on_graph || (ptr_over_node && closest_socket.is_some()))
         && pointer.button_down(egui::PointerButton::Primary)
         && pointer.button_pressed(egui::PointerButton::Primary)
     {
@@ -1738,10 +1776,79 @@ fn memory(ui: &egui::Ui, graph_id: egui::Id) -> Arc<Mutex<GraphTempMemory>> {
 mod tests {
     use super::{
         align_adjust, align_nodes, dot_grid_step, infer_alignment, maintain_zoom_scene_rect,
-        snap_f32, AlignBy, AlignTargets, Alignment, Layout, NodeId, Snap,
+        snap_f32, socket_hit_score, AlignBy, AlignTargets, Alignment, Layout, NodeId, Snap,
+        SocketReach,
     };
     use egui::{Rangef, Rect, Vec2};
     use std::collections::HashMap;
+
+    const OUTWARD: Vec2 = Vec2::new(-1.0, 0.0);
+
+    fn reach() -> SocketReach {
+        SocketReach::from_interact_len_px(30.0, 1.0)
+    }
+
+    #[test]
+    fn socket_hit_reaches_out_into_the_graph() {
+        let r = reach();
+        let outside = OUTWARD * (r.outward * 0.9);
+        assert!(socket_hit_score(outside, OUTWARD, r).is_some());
+    }
+
+    #[test]
+    fn socket_hit_stops_beyond_the_outward_reach() {
+        let r = reach();
+        let far = OUTWARD * (r.outward * 1.1);
+        assert!(socket_hit_score(far, OUTWARD, r).is_none());
+    }
+
+    #[test]
+    fn socket_hit_forgives_pressing_just_inside_the_frame() {
+        let r = reach();
+        let inside = -OUTWARD * (r.inward * 0.9);
+        assert!(socket_hit_score(inside, OUTWARD, r).is_some());
+    }
+
+    #[test]
+    fn socket_hit_leaves_node_content_alone() {
+        let r = reach();
+        let deep = -OUTWARD * (r.inward * 1.5);
+        assert!(deep.length() < r.outward);
+        assert!(socket_hit_score(deep, OUTWARD, r).is_none());
+    }
+
+    #[test]
+    fn socket_hit_stops_beyond_the_across_reach() {
+        let r = reach();
+        let along_edge = Vec2::new(0.0, r.across * 1.1);
+        assert!(socket_hit_score(along_edge, OUTWARD, r).is_none());
+    }
+
+    #[test]
+    fn socket_hit_scores_the_nearer_socket_lower() {
+        let r = reach();
+        let near = socket_hit_score(OUTWARD * (r.outward * 0.2), OUTWARD, r).unwrap();
+        let far = socket_hit_score(OUTWARD * (r.outward * 0.8), OUTWARD, r).unwrap();
+        assert!(near < far);
+    }
+
+    #[test]
+    fn socket_reach_keeps_a_constant_size_on_screen() {
+        let full = SocketReach::from_interact_len_px(30.0, 1.0);
+        let zoomed_out = SocketReach::from_interact_len_px(30.0, 0.5);
+        assert!((zoomed_out.outward - full.outward * 2.0).abs() < 1e-4);
+        assert!((zoomed_out.inward - full.inward * 2.0).abs() < 1e-4);
+        assert!((zoomed_out.across - full.across * 2.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn socket_reach_ignores_a_degenerate_zoom() {
+        let full = SocketReach::from_interact_len_px(30.0, 1.0);
+        for scale in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            let r = SocketReach::from_interact_len_px(30.0, scale);
+            assert!((r.outward - full.outward).abs() < 1e-4, "scale {scale}");
+        }
+    }
 
     /// The scale egui's `Scene` would apply when fitting `scene_rect` into a
     /// viewport of `size` (the binding/letterbox axis).
