@@ -423,9 +423,21 @@ impl Node {
 
             let ctrl_down = ui.input(|i| i.modifiers.ctrl);
 
-            // If the window is pressed, select the node.
             let pointer = &ui.input(|i| i.pointer.clone());
-            if response.is_pointer_button_down_on() && pointer.primary_pressed() {
+            let socket_pressed = match gmem.pressed.as_ref().map(|p| &p.action) {
+                Some(&crate::PressAction::Socket(socket)) if socket.node == self.id => Some(socket),
+                _ => None,
+            };
+
+            if let Some(socket) = socket_pressed.filter(|_| !immutable && pointer.primary_pressed())
+            {
+                edge_event = Some(EdgeEvent::Started {
+                    kind: socket.kind,
+                    index: socket.index,
+                });
+
+            // If the window is pressed, select the node.
+            } else if response.is_pointer_button_down_on() && pointer.primary_pressed() {
                 // If ctrl is down, check for deselection.
                 let was_selected = gmem.selection.nodes.contains(&self.id);
                 if ctrl_down && was_selected {
@@ -456,23 +468,10 @@ impl Node {
                     }
                 }
 
-            // If the primary button was pressed, check for edge events (skip when immutable).
             } else if !immutable
                 && !response.is_pointer_button_down_on()
                 && pointer.primary_pressed()
             {
-                // If this node's socket was pressed, create a start event.
-                if let Some(ref pressed) = gmem.pressed {
-                    if let crate::PressAction::Socket(socket) = pressed.action {
-                        if self.id == socket.node {
-                            let kind = socket.kind;
-                            let index = socket.index;
-                            edge_event = Some(EdgeEvent::Started { kind, index });
-                        }
-                    }
-                }
-
-                // Also check for deselection.
                 if !ctrl_down
                     && !gmem
                         .pressed
