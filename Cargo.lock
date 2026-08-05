@@ -981,7 +981,7 @@ checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 
 [[package]]
 name = "delog-app"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "arboard",
  "arrow",
@@ -1002,6 +1002,7 @@ dependencies = [
  "egui_dock",
  "egui_extras",
  "egui_graph",
+ "egui_ltreeview",
  "egui_tiles",
  "glam",
  "image",
@@ -1020,7 +1021,7 @@ dependencies = [
 
 [[package]]
 name = "delog-cache"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "arrow",
  "criterion",
@@ -1030,7 +1031,7 @@ dependencies = [
 
 [[package]]
 name = "delog-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "arc-swap",
  "arrow",
@@ -1040,7 +1041,7 @@ dependencies = [
 
 [[package]]
 name = "delog-flow"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "arrow",
  "delog-core",
@@ -1050,7 +1051,7 @@ dependencies = [
 
 [[package]]
 name = "delog-parquet-format"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "arrow",
  "serde",
@@ -1060,7 +1061,7 @@ dependencies = [
 
 [[package]]
 name = "delog-parsers"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "arrow",
  "bytes",
@@ -1074,7 +1075,7 @@ dependencies = [
 
 [[package]]
 name = "delog-render"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "arrow",
  "bytemuck",
@@ -1091,7 +1092,7 @@ dependencies = [
 
 [[package]]
 name = "delog-script"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "arrow",
  "criterion",
@@ -1108,7 +1109,7 @@ dependencies = [
 
 [[package]]
 name = "delog-stream"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "arrow",
  "criterion",
@@ -1372,6 +1373,15 @@ dependencies = [
 [[package]]
 name = "egui_graph"
 version = "0.16.2"
+dependencies = [
+ "egui",
+]
+
+[[package]]
+name = "egui_ltreeview"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0965f8d97626fed9ce7e533feeb956a5c720bd83ff59266badf7073831fc22bf"
 dependencies = [
  "egui",
 ]

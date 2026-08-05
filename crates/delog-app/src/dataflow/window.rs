@@ -13,7 +13,7 @@ use super::controller::{Clipboard, DataFlowController};
 use super::picker::{DataHit, search_fields};
 use super::registry::{ADD_DATA_INDEX, search_templates, templates};
 use super::store::GraphStore;
-use crate::logging::LogLevel;
+use crate::ui::logging::LogLevel;
 
 #[cfg(feature = "scripting")]
 use delog_flow::script::{ScriptInputSpec, ScriptOutputSpec};
@@ -130,7 +130,7 @@ impl DataFlowUi {
         }
     }
 
-    /// Whether the graph currently contains a script node — the app layer
+    /// Whether the graph currently contains a script node - the app layer
     /// uses this to decide whether the Python engine needs to be running.
     #[cfg(feature = "scripting")]
     pub fn has_script_node(&self) -> bool {
@@ -271,7 +271,7 @@ impl DataFlowUi {
     /// and suppressed while a text field or code editor has keyboard focus.
     ///
     /// egui-winit turns Ctrl+C/Ctrl+V into `Event::Copy`/`Event::Paste` (not key
-    /// presses), and `Event::Paste` only fires when the OS clipboard holds text —
+    /// presses), and `Event::Paste` only fires when the OS clipboard holds text -
     /// so a copy seeds the OS clipboard with a sentinel to make later pastes fire.
     fn handle_shortcuts(
         &mut self,
@@ -326,7 +326,7 @@ impl DataFlowUi {
         snapshot: &Arc<StoreSnapshot>,
         sender: &IngestSender,
         live_connected: bool,
-        settings: crate::settings::DataFlowSettings,
+        settings: crate::config::settings::DataFlowSettings,
     ) -> Vec<(LogLevel, String)> {
         let mut logs = Vec::new();
 
@@ -402,25 +402,25 @@ impl DataFlowUi {
                 self.controller.graph.name.clone_from(&self.name_edit);
                 self.controller.dirty = true;
             }
-            if icon_btn_enabled(ui, !self.name_edit.is_empty(), crate::icons::save(), "Save")
+            if icon_btn_enabled(ui, !self.name_edit.is_empty(), crate::ui::icons::save(), "Save")
                 .clicked()
             {
                 self.save(logs);
             }
             ui.separator();
-            if icon_btn_enabled(ui, self.controller.can_undo(), crate::icons::rotate_ccw(), "Undo")
+            if icon_btn_enabled(ui, self.controller.can_undo(), crate::ui::icons::rotate_ccw(), "Undo")
                 .clicked()
             {
                 self.controller.undo();
             }
-            if icon_btn_enabled(ui, self.controller.can_redo(), crate::icons::rotate_cw(), "Redo")
+            if icon_btn_enabled(ui, self.controller.can_redo(), crate::ui::icons::rotate_cw(), "Redo")
                 .clicked()
             {
                 self.controller.redo();
             }
             ui.separator();
             let has_selection = !self.controller.selection.is_empty();
-            if icon_btn_enabled(ui, has_selection, crate::icons::copy(), "Duplicate selected")
+            if icon_btn_enabled(ui, has_selection, crate::ui::icons::copy(), "Duplicate selected")
                 .clicked()
             {
                 let clipboard = self.controller.copy_selection();
@@ -428,7 +428,7 @@ impl DataFlowUi {
                     logs.push((LogLevel::Error, format!("Duplicate failed: {error}")));
                 }
             }
-            if icon_btn_enabled(ui, has_selection, crate::icons::trash(), "Delete selected")
+            if icon_btn_enabled(ui, has_selection, crate::ui::icons::trash(), "Delete selected")
                 .clicked()
                 && let Err(error) = self.controller.delete_selection()
             {
@@ -440,7 +440,7 @@ impl DataFlowUi {
                     .on_hover_text("Running");
             } else {
                 let tooltip = if live_connected { "Run (publish live output)" } else { "Run" };
-                if icon_btn_enabled(ui, true, crate::icons::play(), tooltip).clicked() {
+                if icon_btn_enabled(ui, true, crate::ui::icons::play(), tooltip).clicked() {
                     if live_connected {
                         self.pending_live_publish = true;
                     } else {
@@ -465,7 +465,7 @@ impl DataFlowUi {
     }
 
     fn collapsed_library_drawer(&mut self, ui: &mut egui::Ui) {
-        let button_size = crate::browser::panel_toggle_button_size(ui);
+        let button_size = crate::plotting::browser::data_browser_toggle_button_size(ui);
         let collapsed_left_margin = ui.spacing().item_spacing.x;
         let collapsed_right_margin = ui.spacing().item_spacing.x;
         let collapsed_width = collapsed_left_margin + button_size.x + collapsed_right_margin;
@@ -480,14 +480,12 @@ impl DataFlowUi {
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     ui.add_space(collapsed_left_margin);
-                    let icon_size = button_size - ui.spacing().button_padding * 2.0;
-                    let icon = egui::Image::new(crate::icons::panel_left_open())
-                        .fit_to_exact_size(icon_size)
-                        .tint(ui.visuals().text_color());
-                    if ui
-                        .add_sized(button_size, egui::Button::image(icon))
-                        .on_hover_text("Show data flows")
-                        .clicked()
+                    if crate::plotting::browser::data_browser_toggle_button(
+                        ui,
+                        crate::ui::icons::panel_left_open(),
+                        "Show data flows",
+                    )
+                    .clicked()
                     {
                         self.library_collapsed = false;
                     }
@@ -498,15 +496,12 @@ impl DataFlowUi {
     fn library_drawer(&mut self, ui: &mut egui::Ui, logs: &mut Vec<(LogLevel, String)>) {
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let button_size = crate::browser::panel_toggle_button_size(ui);
-                let icon_size = button_size - ui.spacing().button_padding * 2.0;
-                let icon = egui::Image::new(crate::icons::panel_left_close())
-                    .fit_to_exact_size(icon_size)
-                    .tint(ui.visuals().text_color());
-                if ui
-                    .add_sized(button_size, egui::Button::image(icon))
-                    .on_hover_text("Hide data flows")
-                    .clicked()
+                if crate::plotting::browser::data_browser_toggle_button(
+                    ui,
+                    crate::ui::icons::panel_left_close(),
+                    "Hide data flows",
+                )
+                .clicked()
                 {
                     self.library_collapsed = true;
                 }
@@ -521,34 +516,35 @@ impl DataFlowUi {
             ui.weak("No saved data flows.");
             return;
         }
-        egui::ScrollArea::vertical()
+        let selected = self.loaded_name.clone();
+        let event = egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                for name in names {
-                    ui.horizontal(|ui| {
-                        let selected = self.loaded_name.as_deref() == Some(name.as_str());
-                        if ui
-                            .selectable_label(selected, name.as_str())
-                            .on_hover_text("Load data flow")
-                            .clicked()
-                        {
-                            self.edit_named(&name, logs);
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.menu_button("...", |ui| {
-                                if ui.button("Duplicate").clicked() {
-                                    self.duplicate(&name, logs);
-                                    ui.close();
-                                }
-                                if ui.button("Remove").clicked() {
-                                    self.pending_delete = Some(name.clone());
-                                    ui.close();
-                                }
-                            });
-                        });
-                    });
+                crate::ui::components::library_tree(
+                    ui,
+                    egui::Id::new("dataflow_library_tree"),
+                    &names,
+                    selected.as_deref(),
+                    &[
+                        crate::ui::components::LibraryAction::Duplicate,
+                        crate::ui::components::LibraryAction::Remove,
+                    ],
+                    "Load data flow",
+                )
+            })
+            .inner;
+        if let Some(event) = event {
+            match event.action {
+                crate::ui::components::LibraryAction::Load
+                | crate::ui::components::LibraryAction::Edit => self.edit_named(&event.name, logs),
+                crate::ui::components::LibraryAction::Duplicate => {
+                    self.duplicate(&event.name, logs);
                 }
-            });
+                crate::ui::components::LibraryAction::Remove => {
+                    self.pending_delete = Some(event.name.clone());
+                }
+            }
+        }
     }
 
     fn save(&mut self, logs: &mut Vec<(LogLevel, String)>) {
@@ -1287,6 +1283,55 @@ mod tests {
 
     use super::*;
 
+    fn data_flow_toggle_bounds(collapsed: bool) -> egui::accesskit::Rect {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        ctx.enable_accesskit();
+        let mut flow = DataFlowUi::new();
+        let mut logs = Vec::new();
+        let label = if collapsed {
+            "Show data flows"
+        } else {
+            "Hide data flows"
+        };
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                if collapsed {
+                    flow.collapsed_library_drawer(ui);
+                } else {
+                    flow.library_drawer(ui, &mut logs);
+                }
+            },
+        );
+        output
+            .platform_output
+            .accesskit_update
+            .expect("accessibility tree should be emitted")
+            .nodes
+            .iter()
+            .map(|(_, node)| node)
+            .find(|node| node.label() == Some(label))
+            .and_then(|node| node.bounds())
+            .unwrap_or_else(|| panic!("{label} button should have bounds"))
+    }
+
+    #[test]
+    fn data_flow_drawer_toggles_match_data_browser_button_size() {
+        for collapsed in [false, true] {
+            let bounds = data_flow_toggle_bounds(collapsed);
+            assert_eq!(bounds.width(), 30.0);
+            assert_eq!(bounds.height(), 30.0);
+        }
+    }
+
     fn node_kinds_that_must_not_expand_the_window() -> Vec<NodeKind> {
         #[allow(unused_mut)]
         let mut kinds = vec![
@@ -1354,7 +1399,7 @@ mod tests {
                 snapshot,
                 sender,
                 false,
-                crate::settings::DataFlowSettings::default(),
+                crate::config::settings::DataFlowSettings::default(),
             );
         });
         ctx.memory(|memory| memory.area_rect(egui::Id::new("Data Flow")).unwrap())

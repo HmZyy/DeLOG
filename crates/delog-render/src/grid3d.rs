@@ -2,7 +2,7 @@
 //!
 //! A single full-screen triangle whose fragment shader unprojects each pixel to
 //! a ray, intersects the `y = 0` plane, and draws a derivative-antialiased grid
-//! that fades with distance — "infinite" without tessellated geometry. It writes
+//! that fades with distance - "infinite" without tessellated geometry. It writes
 //! per-fragment depth so later meshes/trajectories occlude it correctly.
 //! Ground axes follow the render mapping `(E, −D, −N)`: X = East → red,
 //! Z = South → blue.
@@ -187,7 +187,7 @@ mod tests {
     #[test]
     fn grid_draws_faded_lines_and_colored_axes() {
         let Some(ctx) = RenderContext::headless() else {
-            eprintln!("no wgpu adapter — skipping grid3d test");
+            eprintln!("no wgpu adapter - skipping grid3d test");
             return;
         };
         let (w, h) = (128u32, 128u32);

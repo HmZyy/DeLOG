@@ -151,7 +151,7 @@ struct PendingField {
 /// Split a legacy field name into its base name and engineering unit.
 ///
 /// Only a trailing `[...]` (optionally preceded by whitespace) is treated as a
-/// unit, and only when its content is not purely numeric — numeric brackets such
+/// unit, and only when its content is not purely numeric - numeric brackets such
 /// as `distance[0]` are array indices and are kept verbatim with no unit.
 fn split_unit(field: &str) -> (String, Option<String>) {
     if let Some(before_close) = field.strip_suffix(']')
@@ -176,7 +176,7 @@ fn value_error(message: impl Into<String>) -> PyErr {
 /// Materialize a field value as one Arrow array per 1-D lane.
 ///
 /// 1-D values yield a single lane (`None` index). 2-D values are split along the
-/// first axis — the last axis is the sample/time axis — into one lane per row,
+/// first axis - the last axis is the sample/time axis - into one lane per row,
 /// tagged with the row index so the caller can suffix the field name `[k]`.
 /// Higher dimensions are rejected.
 fn numpy_lanes(

@@ -1,6 +1,6 @@
 [package]
 name = "delog-script"
-description = "DeLOG — optional embedded-Python scripting for derived fields"
+description = "DeLOG - optional embedded-Python scripting for derived fields"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

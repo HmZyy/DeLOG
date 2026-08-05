@@ -95,7 +95,7 @@ mod tests {
     #[test]
     fn validation_error_inside_scopes_drains_as_a_message() {
         let Some(ctx) = RenderContext::headless() else {
-            eprintln!("no wgpu adapter — skipping error hub test");
+            eprintln!("no wgpu adapter - skipping error hub test");
             return;
         };
         let mut hub = GpuErrorHub::new();
@@ -120,7 +120,7 @@ mod tests {
     #[test]
     fn clean_scopes_drain_to_nothing() {
         let Some(ctx) = RenderContext::headless() else {
-            eprintln!("no wgpu adapter — skipping error hub test");
+            eprintln!("no wgpu adapter - skipping error hub test");
             return;
         };
         let mut hub = GpuErrorHub::new();

@@ -1,4 +1,4 @@
-// Keep this file `include!`-safe — no leading `//!` inner docs, since the
+// Keep this file `include!`-safe - no leading `//!` inner docs, since the
 // contents are spliced into the middle of an enclosing module.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

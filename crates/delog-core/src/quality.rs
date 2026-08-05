@@ -91,7 +91,7 @@ fn scan_topic(store: &TopicStore, topic: &str, source: SourceId, diags: &mut Vec
         }
     }
 
-    // NaN/Inf come from seal-time column stats — no per-sample re-scan.
+    // NaN/Inf come from seal-time column stats - no per-sample re-scan.
     let mut nan_cells = 0u64;
     let mut inf_fields: Vec<&str> = Vec::new();
     let mut numeric_cells = 0u64;

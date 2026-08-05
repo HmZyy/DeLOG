@@ -670,7 +670,7 @@ mod tests {
     }
 
     /// A clean log with two `(sysid, compid)` streams of the same message and a
-    /// third unsuffixed message — covers v1+v2 mixing and instance suffixing.
+    /// third unsuffixed message - covers v1+v2 mixing and instance suffixing.
     fn golden_tlog() -> Vec<u8> {
         let mut buf = Vec::new();
         buf.extend(record(1_000_000, &v2(1, 1, 0, &attitude(1.0))));

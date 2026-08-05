@@ -1,4 +1,4 @@
-<!-- Lucide (ISC License) — box. Stroke set to #ffffff so egui's multiply
+<!-- Lucide (ISC License) - box. Stroke set to #ffffff so egui's multiply
      tint colors it at runtime (white * tint = tint). -->
 <svg
   xmlns="http://www.w3.org/2000/svg"

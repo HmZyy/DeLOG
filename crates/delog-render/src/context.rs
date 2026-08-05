@@ -60,7 +60,7 @@ mod tests {
                 assert!(Arc::strong_count(&ctx.queue_arc()) >= 2);
             }
             None => {
-                eprintln!("no wgpu adapter available — skipping GPU context test");
+                eprintln!("no wgpu adapter available - skipping GPU context test");
             }
         }
     }
