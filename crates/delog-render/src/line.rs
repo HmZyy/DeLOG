@@ -168,7 +168,7 @@ mod tests {
     #[test]
     fn pipeline_encodes_a_vertex_pulled_trace() {
         let Some(ctx) = RenderContext::headless() else {
-            eprintln!("no wgpu adapter — skipping line pipeline test");
+            eprintln!("no wgpu adapter - skipping line pipeline test");
             return;
         };
 
