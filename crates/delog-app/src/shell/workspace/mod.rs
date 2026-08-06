@@ -1170,8 +1170,21 @@ impl Behavior<'_> {
         let view_before_interaction = *self.services.view;
         // Marker drag takes priority over panning so a grab near the marker
         // moves it instead of scrolling the view.
-        let marker_active = self.handle_marker_drag(&response, plot_rect, x_range, pane);
-        if !marker_active {
+        let annot_view = PaneView {
+            rect: plot_rect,
+            x_range,
+            y_range,
+        };
+        let annot_active = crate::plotting::annotations::interact::interact(
+            ui,
+            &response,
+            annot_view,
+            self.services.origin_us,
+            &mut pane.annotations,
+        );
+        let marker_active =
+            !annot_active && self.handle_marker_drag(&response, plot_rect, x_range, pane);
+        if !annot_active && !marker_active {
             self.handle_plot_interaction(&response, plot_rect);
         }
         self.handle_zoom_drag(&response, plot_rect, pane);
