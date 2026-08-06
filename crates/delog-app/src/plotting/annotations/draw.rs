@@ -6,12 +6,15 @@ const ARROW_HEAD_PX: f32 = 8.0;
 const SELECTED_STROKE_BOOST: f32 = 1.0;
 const LABEL_PAD_PX: f32 = 3.0;
 
-pub fn is_visible(geom: &Geometry, tf: &PlotTransform) -> bool {
-    let bb = hit::screen_rect(geom, tf);
+pub fn is_visible(annot: &Annotation, tf: &PlotTransform) -> bool {
+    let bb = match annot.geom {
+        Geometry::Text { .. } => hit::text_rect(annot, tf),
+        _ => hit::screen_rect(&annot.geom, tf),
+    };
     if !bb.is_finite() {
         return false;
     }
-    match geom {
+    match annot.geom {
         Geometry::HLine { .. } => {
             let y = bb.top();
             y >= tf.rect().top() && y <= tf.rect().bottom()
@@ -31,7 +34,7 @@ pub fn label_anchor(geom: &Geometry, tf: &PlotTransform) -> (egui::Pos2, egui::A
             (hit::screen_rect(geom, tf).left_top(), egui::Align2::LEFT_BOTTOM)
         }
         Geometry::HLine { y } => (
-            egui::pos2(tf.rect().right(), tf.y_of(y) - LABEL_PAD_PX),
+            egui::pos2(tf.rect().right() - LABEL_PAD_PX, tf.y_of(y) - LABEL_PAD_PX),
             egui::Align2::RIGHT_BOTTOM,
         ),
     }
@@ -44,7 +47,7 @@ pub fn draw(ui: &egui::Ui, view: PaneView, origin_us: i64, layer: &AnnotationLay
     let tf = PlotTransform::new(view, origin_us);
     let painter = ui.painter().with_clip_rect(tf.rect());
     for annot in layer.items() {
-        if !is_visible(&annot.geom, &tf) {
+        if !is_visible(annot, &tf) {
             continue;
         }
         let selected = layer.selected == Some(annot.id);
