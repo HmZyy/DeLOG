@@ -33,6 +33,7 @@ pub struct InspectorTrace {
 }
 
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum Pane {
     Plot(PlotPane),
     Scene3D(Scene3dPane),

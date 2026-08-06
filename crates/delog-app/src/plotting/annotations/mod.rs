@@ -294,7 +294,6 @@ pub struct PlotTransform {
     y_span: f64,
 }
 
-#[allow(clippy::wrong_self_convention)]
 impl PlotTransform {
     pub fn new(view: PaneView, origin_us: i64) -> Self {
         let (x0, x1) = view.x_range;
@@ -326,11 +325,11 @@ impl PlotTransform {
         self.rect.bottom() - (frac * self.rect.height() as f64) as f32
     }
 
-    pub fn to_screen(&self, p: DataPos) -> egui::Pos2 {
+    pub fn to_screen(self, p: DataPos) -> egui::Pos2 {
         egui::pos2(self.x_of(p.t_us), self.y_of(p.y))
     }
 
-    pub fn to_data(&self, pos: egui::Pos2) -> DataPos {
+    pub fn to_data(self, pos: egui::Pos2) -> DataPos {
         let x_frac = (pos.x - self.rect.left()) as f64 / self.rect.width().max(1.0) as f64;
         let t_sec = self.x0 + x_frac * self.x_span;
         let y_frac = (self.rect.bottom() - pos.y) as f64 / self.rect.height().max(1.0) as f64;
