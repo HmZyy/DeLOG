@@ -1,3 +1,4 @@
+pub mod annotations;
 pub mod axes;
 pub mod browser;
 pub mod compare;
