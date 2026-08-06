@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+pub mod hit;
+
 use crate::plotting::gpu::PaneView;
 
 const DEFAULT_SPAN_FRACTION: f64 = 0.12;
