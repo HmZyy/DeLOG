@@ -1139,7 +1139,7 @@ impl Behavior<'_> {
             if plot_rect.width() > 8.0 {
                 axes::draw(ui, plot_rect, x_range, y_range, None);
             }
-            self.plot_context_menu(tile_id, &response, pane);
+            self.plot_context_menu(tile_id, &response, pane, None);
             self.plot_info_window(ui, tile_id, pane, None);
             return tile_response;
         }
@@ -1149,7 +1149,7 @@ impl Behavior<'_> {
             self.actions.max_y_gutter = self.actions.max_y_gutter.max(own_gutter);
             self.handle_plot_interaction(&response, plot_rect);
             self.handle_zoom_drag(&response, plot_rect, pane);
-            self.plot_context_menu(tile_id, &response, pane);
+            self.plot_context_menu(tile_id, &response, pane, None);
             self.plot_info_window(ui, tile_id, pane, None);
             return tile_response;
         };
@@ -1210,7 +1210,7 @@ impl Behavior<'_> {
         drop(pane_setup_timer);
 
         if !self.services.gpu.is_available() || plot_rect.width() <= 8.0 {
-            self.plot_context_menu(tile_id, &response, pane);
+            self.plot_context_menu(tile_id, &response, pane, None);
             self.plot_info_window(ui, tile_id, pane, None);
             return tile_response;
         }
@@ -1274,7 +1274,7 @@ impl Behavior<'_> {
                 p.x,
             );
         }
-        self.plot_context_menu(tile_id, &response, pane);
+        self.plot_context_menu(tile_id, &response, pane, Some((view.span_us(), y_range)));
 
         // Measurement marker (delta cursor): a dashed second
         // vertical with a ΔT readout vs the playhead. The per-trace ΔY computed
@@ -1450,9 +1450,29 @@ impl Behavior<'_> {
         tile_id: egui_tiles::TileId,
         response: &egui::Response,
         pane: &mut PlotPane,
+        view_span: Option<(i64, (f64, f64))>,
     ) {
         response.context_menu(|ui| {
             crate::ui::components::dense_rows(ui);
+            if let Some((span_us, y_range)) = view_span {
+                ui.menu_image_text_button(
+                    menu_icon(ui, crate::ui::icons::pencil()),
+                    "Add annotation",
+                    |ui| {
+                        let fallback = crate::plotting::annotations::DataPos {
+                            t_us: self.services.origin_us,
+                            y: (y_range.0 + y_range.1) / 2.0,
+                        };
+                        crate::plotting::annotations::edit::menu(
+                            ui,
+                            &mut pane.annotations,
+                            span_us,
+                            y_range.1 - y_range.0,
+                            fallback,
+                        );
+                    },
+                );
+            }
             if ui
                 .add(egui::Button::image_and_text(
                     menu_icon(ui, crate::ui::icons::trash()),

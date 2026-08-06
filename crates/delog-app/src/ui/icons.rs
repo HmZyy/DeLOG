@@ -171,3 +171,15 @@ pub fn rotate_ccw() -> ImageSource<'static> {
 pub fn rotate_cw() -> ImageSource<'static> {
     egui::include_image!("../../assets/icons/rotate-cw.svg")
 }
+
+pub fn text_cursor() -> ImageSource<'static> {
+    egui::include_image!("../../assets/icons/type.svg")
+}
+
+pub fn circle() -> ImageSource<'static> {
+    egui::include_image!("../../assets/icons/circle.svg")
+}
+
+pub fn minus() -> ImageSource<'static> {
+    egui::include_image!("../../assets/icons/minus.svg")
+}
