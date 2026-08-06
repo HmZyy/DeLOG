@@ -1230,3 +1230,62 @@ fn a_single_open_annotation_editor_is_left_alone() {
     };
     assert_eq!(pane.annotations.editing, Some(id));
 }
+
+#[test]
+fn opening_annotation_editors_without_a_focused_pane_keeps_the_lowest_tile_id() {
+    use crate::plotting::annotations::{DataPos, Kind};
+
+    let mut workspace = Workspace::new();
+    let first = workspace.tree.root().unwrap();
+    workspace.split_plot(first, SplitDirection::Horizontal);
+    workspace.split_plot(first, SplitDirection::Horizontal);
+    let plots: Vec<egui_tiles::TileId> = workspace
+        .tree
+        .tiles
+        .iter()
+        .filter_map(|(id, tile)| {
+            matches!(tile, egui_tiles::Tile::Pane(Pane::Plot(_))).then_some(*id)
+        })
+        .collect();
+    assert_eq!(plots.len(), 3, "two splits from one root should produce three plots");
+    let expected = *plots.iter().min_by_key(|id| id.0).unwrap();
+
+    let open_editor = |workspace: &mut Workspace, tile| {
+        let Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) = workspace.tree.tiles.get_mut(tile)
+        else {
+            panic!("expected a plot pane");
+        };
+        let id = pane
+            .annotations
+            .add(Kind::Rect, DataPos { t_us: 0, y: 0.0 }, 1_000_000, 10.0);
+        pane.annotations.editing = Some(id);
+    };
+    for &tile in &plots {
+        open_editor(&mut workspace, tile);
+    }
+
+    let editing = |workspace: &Workspace, tile| {
+        let Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) = workspace.tree.tiles.get(tile) else {
+            panic!("expected a plot pane");
+        };
+        pane.annotations.editing
+    };
+
+    workspace.focused = None;
+    workspace.enforce_single_annotation_editor();
+
+    for &tile in &plots {
+        if tile == expected {
+            assert!(
+                editing(&workspace, tile).is_some(),
+                "the lowest tile id should keep its editor open"
+            );
+        } else {
+            assert_eq!(
+                editing(&workspace, tile),
+                None,
+                "non-minimal tiles should have their editor closed"
+            );
+        }
+    }
+}
