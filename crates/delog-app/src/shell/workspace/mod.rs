@@ -1263,6 +1263,7 @@ impl Behavior<'_> {
         };
 
         let pane_overlay_timer = self.services.metrics.scope("pane_overlay");
+        crate::plotting::annotations::draw::draw(ui, pview, self.services.origin_us, &pane.annotations);
         if let Some(anchor_us) = pane.zoom_drag_anchor_us
             && let Some(p) = response.interact_pointer_pos()
         {

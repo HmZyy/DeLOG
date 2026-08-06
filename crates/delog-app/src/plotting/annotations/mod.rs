@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+pub mod draw;
 pub mod hit;
 
 use crate::plotting::gpu::PaneView;
