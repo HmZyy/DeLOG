@@ -1460,7 +1460,9 @@ impl Behavior<'_> {
                     "Add annotation",
                     |ui| {
                         let fallback = crate::plotting::annotations::DataPos {
-                            t_us: self.services.origin_us,
+                            t_us: (*self.services.view)
+                                .map(|v| v.min_us + span_us / 2)
+                                .unwrap_or(self.services.origin_us),
                             y: (y_range.0 + y_range.1) / 2.0,
                         };
                         crate::plotting::annotations::edit::menu(
