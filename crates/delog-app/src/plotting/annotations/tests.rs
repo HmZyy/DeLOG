@@ -523,3 +523,48 @@ fn closing_the_editor_keeps_an_unlabelled_shape() {
     edit::close_editor(&mut layer);
     assert!(layer.get(id).is_some());
 }
+
+#[test]
+fn creating_a_new_shape_sweeps_a_stale_empty_text_editor() {
+    let mut layer = AnnotationLayer::default();
+    let text_id = edit::create_at(
+        &mut layer,
+        Kind::Text,
+        DataPos { t_us: 0, y: 0.0 },
+        1_000_000,
+        10.0,
+    );
+    let rect_id = edit::create_at(
+        &mut layer,
+        Kind::Rect,
+        DataPos { t_us: 5, y: 1.0 },
+        1_000_000,
+        10.0,
+    );
+    assert!(layer.get(text_id).is_none());
+    assert!(layer.get(rect_id).is_some());
+    assert_eq!(layer.selected, Some(rect_id));
+}
+
+#[test]
+fn creating_a_new_shape_does_not_sweep_a_labelled_stale_text() {
+    let mut layer = AnnotationLayer::default();
+    let text_id = edit::create_at(
+        &mut layer,
+        Kind::Text,
+        DataPos { t_us: 0, y: 0.0 },
+        1_000_000,
+        10.0,
+    );
+    layer.get_mut(text_id).expect("exists").label = "spike".to_string();
+    let rect_id = edit::create_at(
+        &mut layer,
+        Kind::Rect,
+        DataPos { t_us: 5, y: 1.0 },
+        1_000_000,
+        10.0,
+    );
+    assert!(layer.get(text_id).is_some());
+    assert!(layer.get(rect_id).is_some());
+    assert_eq!(layer.selected, Some(rect_id));
+}

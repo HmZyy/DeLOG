@@ -7,6 +7,7 @@ pub fn create_at(
     span_us: i64,
     y_span: f64,
 ) -> u64 {
+    close_editor(layer);
     let id = layer.add(kind, at, span_us, y_span);
     layer.selected = Some(id);
     layer.editing = (kind == Kind::Text).then_some(id);
