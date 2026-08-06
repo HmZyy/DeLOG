@@ -208,6 +208,15 @@ fn removing_the_selected_annotation_clears_selection_and_editor() {
 }
 
 #[test]
+fn removing_an_annotation_clears_a_grab_on_it() {
+    let mut layer = AnnotationLayer::default();
+    let id = layer.add(Kind::Rect, DataPos { t_us: 0, y: 0.0 }, 1_000_000, 10.0);
+    layer.grab = Some(Grab::Handle { id, index: 0 });
+    layer.remove(id);
+    assert_eq!(layer.grab, None);
+}
+
+#[test]
 fn added_annotations_take_distinct_palette_colors() {
     let mut layer = AnnotationLayer::default();
     let at = DataPos { t_us: 0, y: 0.0 };
