@@ -647,17 +647,31 @@ fn dragging_the_body_translates_the_whole_shape() {
 }
 
 #[test]
-fn repeated_body_drags_do_not_accumulate_drift() {
+fn body_drag_final_geometry_ignores_the_intermediate_path() {
     let (mut layer, id) = layer_with_box();
     let tf = unit_transform();
     interact::begin_grab(&mut layer, &tf, egui::pos2(20.0, 50.0));
-    for _ in 0..500 {
-        interact::apply_grab(&mut layer, tf.to_data(egui::pos2(25.0, 50.0)));
+    let from = match layer.grab {
+        Some(Grab::Body { from, .. }) => from,
+        other => panic!("expected a body grab, got {other:?}"),
+    };
+    for pos in [
+        egui::pos2(25.0, 55.0),
+        egui::pos2(60.0, 15.0),
+        egui::pos2(5.0, 90.0),
+    ] {
+        interact::apply_grab(&mut layer, tf.to_data(pos));
     }
-    let Geometry::Rect { a, .. } = layer.get(id).expect("exists").geom else {
+    let final_pos = egui::pos2(35.0, 45.0);
+    interact::apply_grab(&mut layer, tf.to_data(final_pos));
+    let Geometry::Rect { a, b } = layer.get(id).expect("exists").geom else {
         panic!("expected a rect");
     };
-    assert!((a.t_us as f64 - 25_000_000.0).abs() < 1e6);
+    assert_eq!(b.t_us - a.t_us, 60_000_000);
+    assert!((b.y - a.y - 60.0).abs() < 1e-9);
+    let at = tf.to_data(final_pos);
+    let expected = box_geom().translated(at.t_us - from.t_us, at.y - from.y);
+    assert_eq!(Geometry::Rect { a, b }, expected);
 }
 
 #[test]
