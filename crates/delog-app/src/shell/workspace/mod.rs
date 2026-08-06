@@ -622,7 +622,7 @@ impl Workspace {
         let keep = self
             .focused
             .filter(|id| open.contains(id))
-            .unwrap_or(open[0]);
+            .unwrap_or_else(|| open.iter().min_by_key(|id| id.0).copied().unwrap());
         for id in open {
             if id == keep {
                 continue;

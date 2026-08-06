@@ -705,7 +705,26 @@ fn anchor_rows_cover_each_geometry() {
         edit::anchor_seconds(&Geometry::Text { at: DataPos { t_us: 0, y: 0.0 } }, origin).len(),
         2
     );
+    assert_eq!(
+        edit::anchor_seconds(
+            &Geometry::Segment {
+                from: DataPos { t_us: 0, y: 0.0 },
+                to: DataPos { t_us: 1_000_000, y: 1.0 },
+            },
+            origin
+        )
+        .len(),
+        4
+    );
     assert_eq!(edit::anchor_seconds(&box_geom(), origin).len(), 4);
+    assert_eq!(
+        edit::anchor_seconds(
+            &Geometry::Ellipse { a: DataPos { t_us: 0, y: 0.0 }, b: DataPos { t_us: 1_000_000, y: 1.0 } },
+            origin
+        )
+        .len(),
+        4
+    );
 }
 
 #[test]
@@ -749,4 +768,19 @@ fn rect_anchor_rows_round_trip_through_their_setters() {
         edit::set_anchor_seconds(&mut geom, index, *value, origin);
     }
     assert_eq!(geom, box_geom());
+}
+
+#[test]
+fn segment_anchor_rows_round_trip_through_their_setters() {
+    let origin = 500_000;
+    let segment = Geometry::Segment {
+        from: DataPos { t_us: 20_000_000, y: 20.0 },
+        to: DataPos { t_us: 80_000_000, y: 80.0 },
+    };
+    let mut geom = segment;
+    let rows = edit::anchor_seconds(&geom, origin);
+    for (index, (_, value)) in rows.iter().enumerate() {
+        edit::set_anchor_seconds(&mut geom, index, *value, origin);
+    }
+    assert_eq!(geom, segment);
 }
