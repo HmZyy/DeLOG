@@ -3,6 +3,7 @@
 pub mod draw;
 pub mod edit;
 pub mod hit;
+pub mod interact;
 
 use crate::plotting::gpu::PaneView;
 
