@@ -603,6 +603,35 @@ impl Workspace {
             egui_tiles::Tile::Pane(Pane::Scene3D(_)) | egui_tiles::Tile::Container(_) => None,
         })
     }
+
+    pub fn enforce_single_annotation_editor(&mut self) {
+        let open: Vec<egui_tiles::TileId> = self
+            .tree
+            .tiles
+            .iter()
+            .filter_map(|(id, tile)| match tile {
+                egui_tiles::Tile::Pane(Pane::Plot(pane)) => {
+                    pane.annotations.editing.is_some().then_some(*id)
+                }
+                _ => None,
+            })
+            .collect();
+        if open.len() < 2 {
+            return;
+        }
+        let keep = self
+            .focused
+            .filter(|id| open.contains(id))
+            .unwrap_or(open[0]);
+        for id in open {
+            if id == keep {
+                continue;
+            }
+            if let Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) = self.tree.tiles.get_mut(id) {
+                crate::plotting::annotations::edit::close_editor(&mut pane.annotations);
+            }
+        }
+    }
 }
 
 impl Default for Workspace {
@@ -1452,6 +1481,12 @@ impl Behavior<'_> {
         }
 
         plot_rename_dialog(ui.ctx(), tile_id, pane);
+        crate::plotting::annotations::edit::editor(
+            ui.ctx(),
+            egui::Id::new(("plot_annotation", tile_id)),
+            &mut pane.annotations,
+            self.services.origin_us,
+        );
 
         self.plot_info_window(ui, tile_id, pane, Some(debug));
         drop(pane_overlay_timer);
@@ -1487,6 +1522,17 @@ impl Behavior<'_> {
                         );
                     },
                 );
+            }
+            if let Some(selected) = pane.annotations.selected
+                && ui
+                    .add(egui::Button::image_and_text(
+                        menu_icon(ui, crate::ui::icons::pencil()),
+                        "Edit annotation",
+                    ))
+                    .clicked()
+            {
+                pane.annotations.editing = Some(selected);
+                ui.close();
             }
             if ui
                 .add(egui::Button::image_and_text(

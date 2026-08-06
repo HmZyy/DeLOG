@@ -2930,6 +2930,7 @@ impl eframe::App for DelogApp {
                     drop(tree_timer);
                     let actions = behavior.into_actions();
                     self.workspace.repair_focus();
+                    self.workspace.enforce_single_annotation_editor();
                     // Share the widest pane gutter so stacked plots align next
                     // frame. Converges in one frame; until then each
                     // pane never drops below its own gutter, so labels never
