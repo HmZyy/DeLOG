@@ -160,6 +160,19 @@ pub fn default_style(id: u64) -> Style {
     }
 }
 
+fn corner_box(at: DataPos, dt: i64, dy: f64) -> (DataPos, DataPos) {
+    (
+        DataPos {
+            t_us: at.t_us.saturating_sub(dt / 2),
+            y: at.y - dy / 2.0,
+        },
+        DataPos {
+            t_us: at.t_us.saturating_add(dt / 2),
+            y: at.y + dy / 2.0,
+        },
+    )
+}
+
 pub fn default_geometry(kind: Kind, at: DataPos, span_us: i64, y_span: f64) -> Geometry {
     let span_us = if span_us > 0 { span_us } else { FALLBACK_SPAN_US };
     let y_span = if y_span.is_finite() && y_span.abs() > 0.0 {
@@ -178,26 +191,14 @@ pub fn default_geometry(kind: Kind, at: DataPos, span_us: i64, y_span: f64) -> G
                 y: at.y + dy,
             },
         },
-        Kind::Rect => Geometry::Rect {
-            a: DataPos {
-                t_us: at.t_us.saturating_sub(dt / 2),
-                y: at.y - dy / 2.0,
-            },
-            b: DataPos {
-                t_us: at.t_us.saturating_add(dt / 2),
-                y: at.y + dy / 2.0,
-            },
-        },
-        Kind::Ellipse => Geometry::Ellipse {
-            a: DataPos {
-                t_us: at.t_us.saturating_sub(dt / 2),
-                y: at.y - dy / 2.0,
-            },
-            b: DataPos {
-                t_us: at.t_us.saturating_add(dt / 2),
-                y: at.y + dy / 2.0,
-            },
-        },
+        Kind::Rect => {
+            let (a, b) = corner_box(at, dt, dy);
+            Geometry::Rect { a, b }
+        }
+        Kind::Ellipse => {
+            let (a, b) = corner_box(at, dt, dy);
+            Geometry::Ellipse { a, b }
+        }
         Kind::HLine => Geometry::HLine { y: at.y },
     }
 }
