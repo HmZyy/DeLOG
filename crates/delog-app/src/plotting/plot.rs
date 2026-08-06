@@ -207,7 +207,6 @@ pub struct PlotPane {
     pub zoom_drag_anchor_us: Option<i64>,
     /// Transient rename-dialog state; `Some` while the dialog is open.
     pub rename: Option<RenameDialog>,
-    #[allow(dead_code)]
     pub annotations: crate::plotting::annotations::AnnotationLayer,
 }
 
