@@ -1162,3 +1162,71 @@ fn legend_move_center_into_pane_with_same_field_dedups_and_keeps_target() {
     assert_eq!(kept.label_override.as_deref(), Some("B"));
     assert_eq!(kept.width_px, 8.0);
 }
+
+#[test]
+fn opening_an_annotation_editor_closes_the_others() {
+    use crate::plotting::annotations::{DataPos, Kind};
+
+    let mut workspace = Workspace::new();
+    let first = workspace.tree.root().unwrap();
+    workspace.split_plot(first, SplitDirection::Horizontal);
+    let second = workspace
+        .tree
+        .tiles
+        .iter()
+        .filter(|(id, tile)| {
+            **id != first && matches!(tile, egui_tiles::Tile::Pane(Pane::Plot(_)))
+        })
+        .map(|(id, _)| *id)
+        .next()
+        .expect("the split should have produced a second plot");
+
+    let open_editor = |workspace: &mut Workspace, tile| {
+        let Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) = workspace.tree.tiles.get_mut(tile)
+        else {
+            panic!("expected a plot pane");
+        };
+        let id = pane
+            .annotations
+            .add(Kind::Rect, DataPos { t_us: 0, y: 0.0 }, 1_000_000, 10.0);
+        pane.annotations.editing = Some(id);
+    };
+    open_editor(&mut workspace, first);
+    open_editor(&mut workspace, second);
+
+    let editing = |workspace: &Workspace, tile| {
+        let Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) = workspace.tree.tiles.get(tile) else {
+            panic!("expected a plot pane");
+        };
+        pane.annotations.editing
+    };
+
+    workspace.focused = Some(second);
+    workspace.enforce_single_annotation_editor();
+
+    assert_eq!(editing(&workspace, first), None);
+    assert!(editing(&workspace, second).is_some());
+}
+
+#[test]
+fn a_single_open_annotation_editor_is_left_alone() {
+    use crate::plotting::annotations::{DataPos, Kind};
+
+    let mut workspace = Workspace::new();
+    let first = workspace.tree.root().unwrap();
+    let Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) = workspace.tree.tiles.get_mut(first) else {
+        panic!("expected a plot pane");
+    };
+    let id = pane
+        .annotations
+        .add(Kind::Rect, DataPos { t_us: 0, y: 0.0 }, 1_000_000, 10.0);
+    pane.annotations.editing = Some(id);
+
+    workspace.focused = None;
+    workspace.enforce_single_annotation_editor();
+
+    let Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) = workspace.tree.tiles.get(first) else {
+        panic!("expected a plot pane");
+    };
+    assert_eq!(pane.annotations.editing, Some(id));
+}
