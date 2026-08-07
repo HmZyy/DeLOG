@@ -1523,7 +1523,8 @@ impl Behavior<'_> {
                     },
                 );
             }
-            if let Some(selected) = pane.annotations.selected
+            if view_span.is_some()
+                && let Some(selected) = pane.annotations.selected
                 && ui
                     .add(egui::Button::image_and_text(
                         menu_icon(ui, crate::ui::icons::pencil()),
