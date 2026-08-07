@@ -6,9 +6,10 @@ pub fn create_at(
     at: DataPos,
     span_us: i64,
     y_span: f64,
+    trace_count: usize,
 ) -> u64 {
     close_editor(layer);
-    let id = layer.add(kind, at, span_us, y_span);
+    let id = layer.add(kind, at, span_us, y_span, trace_count);
     layer.selected = Some(id);
     layer.editing = (kind == Kind::Text).then_some(id);
     id
@@ -42,13 +43,20 @@ fn menu_icon(ui: &egui::Ui, source: egui::ImageSource<'static>) -> egui::Image<'
         .tint(ui.visuals().text_color())
 }
 
-pub fn menu(ui: &mut egui::Ui, layer: &mut AnnotationLayer, span_us: i64, y_span: f64, fallback: DataPos) {
+pub fn menu(
+    ui: &mut egui::Ui,
+    layer: &mut AnnotationLayer,
+    span_us: i64,
+    y_span: f64,
+    fallback: DataPos,
+    trace_count: usize,
+) {
     crate::ui::components::dense_rows(ui);
     let at = layer.last_cursor.unwrap_or(fallback);
     for kind in Kind::ALL {
         let button = egui::Button::image_and_text(menu_icon(ui, icon_for(kind)), kind.label());
         if ui.add(button).clicked() {
-            create_at(layer, kind, at, span_us, y_span);
+            create_at(layer, kind, at, span_us, y_span, trace_count);
             ui.close();
         }
     }
