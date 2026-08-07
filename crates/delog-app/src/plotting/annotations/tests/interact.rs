@@ -121,3 +121,44 @@ fn delete_selected_without_a_selection_is_a_no_op() {
     interact::delete_selected(&mut layer);
     assert_eq!(layer.items().len(), 1);
 }
+
+#[test]
+fn a_single_click_on_a_shape_selects_it_without_opening_the_editor() {
+    let (mut layer, id) = layer_with_box();
+    let tf = unit_transform();
+    let consumed = interact::on_click(&mut layer, &tf, egui::pos2(20.0, 50.0), false);
+    assert!(!consumed);
+    assert_eq!(layer.selected, Some(id));
+    assert_eq!(layer.editing, None);
+}
+
+#[test]
+fn a_double_click_on_a_shape_selects_it_opens_the_editor_and_is_consumed() {
+    let (mut layer, id) = layer_with_box();
+    let tf = unit_transform();
+    let consumed = interact::on_click(&mut layer, &tf, egui::pos2(20.0, 50.0), true);
+    assert!(consumed);
+    assert_eq!(layer.selected, Some(id));
+    assert_eq!(layer.editing, Some(id));
+}
+
+#[test]
+fn a_single_click_on_empty_space_clears_the_selection_and_is_not_consumed() {
+    let (mut layer, id) = layer_with_box();
+    layer.selected = Some(id);
+    let tf = unit_transform();
+    let consumed = interact::on_click(&mut layer, &tf, egui::pos2(50.0, 50.0), false);
+    assert!(!consumed);
+    assert_eq!(layer.selected, None);
+}
+
+#[test]
+fn a_double_click_on_empty_space_is_not_consumed_so_the_view_reset_still_happens() {
+    let (mut layer, id) = layer_with_box();
+    layer.selected = Some(id);
+    let tf = unit_transform();
+    let consumed = interact::on_click(&mut layer, &tf, egui::pos2(50.0, 50.0), true);
+    assert!(!consumed);
+    assert_eq!(layer.selected, None);
+    assert_eq!(layer.editing, None);
+}
