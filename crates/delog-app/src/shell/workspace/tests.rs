@@ -1188,7 +1188,7 @@ fn opening_an_annotation_editor_closes_the_others() {
         };
         let id = pane
             .annotations
-            .add(Kind::Rect, DataPos { t_us: 0, y: 0.0 }, 1_000_000, 10.0);
+            .add(Kind::Rect, DataPos { t_us: 0, y: 0.0 }, 1_000_000, 10.0, 0);
         pane.annotations.editing = Some(id);
     };
     open_editor(&mut workspace, first);
@@ -1219,7 +1219,7 @@ fn a_single_open_annotation_editor_is_left_alone() {
     };
     let id = pane
         .annotations
-        .add(Kind::Rect, DataPos { t_us: 0, y: 0.0 }, 1_000_000, 10.0);
+        .add(Kind::Rect, DataPos { t_us: 0, y: 0.0 }, 1_000_000, 10.0, 0);
     pane.annotations.editing = Some(id);
 
     workspace.focused = None;
@@ -1257,7 +1257,7 @@ fn opening_annotation_editors_without_a_focused_pane_keeps_the_lowest_tile_id() 
         };
         let id = pane
             .annotations
-            .add(Kind::Rect, DataPos { t_us: 0, y: 0.0 }, 1_000_000, 10.0);
+            .add(Kind::Rect, DataPos { t_us: 0, y: 0.0 }, 1_000_000, 10.0, 0);
         pane.annotations.editing = Some(id);
     };
     for &tile in &plots {
