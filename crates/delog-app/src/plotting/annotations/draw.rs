@@ -91,21 +91,70 @@ fn paint_geometry(
         }
         Geometry::Ellipse { .. } => {
             let rect = hit::screen_rect(&annot.geom, tf);
-            painter.add(egui::epaint::EllipseShape {
-                center: rect.center(),
-                radius: rect.size() / 2.0,
-                fill: if annot.style.fill_opacity > 0.0 {
-                    fill
-                } else {
-                    egui::Color32::TRANSPARENT
-                },
-                stroke,
-                angle: 0.0,
-            });
+            let clip = tf.rect();
+            match ellipse_paint(rect, clip, annot.style.fill_opacity) {
+                EllipsePaint::Shape(bounded) => {
+                    painter.add(egui::epaint::EllipseShape {
+                        center: bounded.center(),
+                        radius: bounded.size() / 2.0,
+                        fill: if annot.style.fill_opacity > 0.0 {
+                            fill
+                        } else {
+                            egui::Color32::TRANSPARENT
+                        },
+                        stroke,
+                        angle: 0.0,
+                    });
+                }
+                EllipsePaint::FillOnly => {
+                    painter.rect_filled(clip, 0.0, fill);
+                }
+                EllipsePaint::Skip => {}
+            }
         }
         Geometry::HLine { y } => {
             painter.hline(tf.rect().x_range(), tf.y_of(y), stroke);
         }
+    }
+}
+
+fn ellipse_fully_encloses(rect: egui::Rect, clip: egui::Rect) -> bool {
+    let center = rect.center();
+    let rx = (rect.width() / 2.0).max(f32::EPSILON);
+    let ry = (rect.height() / 2.0).max(f32::EPSILON);
+    let inside = |p: egui::Pos2| {
+        let dx = (p.x - center.x) / rx;
+        let dy = (p.y - center.y) / ry;
+        dx * dx + dy * dy < 1.0
+    };
+    [clip.left_top(), clip.right_top(), clip.left_bottom(), clip.right_bottom()]
+        .into_iter()
+        .all(inside)
+}
+
+pub fn clamped_ellipse(rect: egui::Rect, clip: egui::Rect) -> Option<egui::Rect> {
+    if ellipse_fully_encloses(rect, clip) {
+        return None;
+    }
+    let bound = clip.expand2(clip.size() * 4.0);
+    Some(egui::Rect::from_min_max(
+        rect.min.clamp(bound.min, bound.max),
+        rect.max.clamp(bound.min, bound.max),
+    ))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum EllipsePaint {
+    Shape(egui::Rect),
+    FillOnly,
+    Skip,
+}
+
+pub fn ellipse_paint(rect: egui::Rect, clip: egui::Rect, fill_opacity: f32) -> EllipsePaint {
+    match clamped_ellipse(rect, clip) {
+        Some(bounded) => EllipsePaint::Shape(bounded),
+        None if fill_opacity > 0.0 => EllipsePaint::FillOnly,
+        None => EllipsePaint::Skip,
     }
 }
 
