@@ -36,14 +36,29 @@ fn filled(id: u64, geom: Geometry) -> Annotation {
 
 fn box_geom() -> Geometry {
     Geometry::Rect {
-        a: DataPos { t_us: 20_000_000, y: 20.0 },
-        b: DataPos { t_us: 80_000_000, y: 80.0 },
+        a: DataPos {
+            t_us: 20_000_000,
+            y: 20.0,
+        },
+        b: DataPos {
+            t_us: 80_000_000,
+            y: 80.0,
+        },
     }
 }
 
 fn layer_with_box() -> (AnnotationLayer, u64) {
     let mut layer = AnnotationLayer::default();
-    let id = layer.add(Kind::Rect, DataPos { t_us: 50_000_000, y: 50.0 }, 60_000_000, 60.0, 0);
+    let id = layer.add(
+        Kind::Rect,
+        DataPos {
+            t_us: 50_000_000,
+            y: 50.0,
+        },
+        60_000_000,
+        60.0,
+        0,
+    );
     layer.get_mut(id).expect("exists").geom = box_geom();
     (layer, id)
 }

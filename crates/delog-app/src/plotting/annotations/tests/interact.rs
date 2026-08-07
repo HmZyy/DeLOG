@@ -6,7 +6,11 @@ fn grabbing_a_handle_selects_the_annotation() {
     let (mut layer, id) = layer_with_box();
     layer.selected = Some(id);
     let tf = unit_transform();
-    assert!(interact::begin_grab(&mut layer, &tf, egui::pos2(20.0, 80.0)));
+    assert!(interact::begin_grab(
+        &mut layer,
+        &tf,
+        egui::pos2(20.0, 80.0)
+    ));
     assert_eq!(layer.selected, Some(id));
     assert_eq!(layer.grab, Some(Grab::Handle { id, index: 0 }));
 }
@@ -15,7 +19,11 @@ fn grabbing_a_handle_selects_the_annotation() {
 fn an_unselected_annotations_handles_do_not_steal_the_grab() {
     let (mut layer, id) = layer_with_box();
     let tf = unit_transform();
-    assert!(interact::begin_grab(&mut layer, &tf, egui::pos2(20.0, 80.0)));
+    assert!(interact::begin_grab(
+        &mut layer,
+        &tf,
+        egui::pos2(20.0, 80.0)
+    ));
     assert_eq!(layer.selected, Some(id));
     assert!(matches!(layer.grab, Some(Grab::Body { .. })));
 }
@@ -24,9 +32,15 @@ fn an_unselected_annotations_handles_do_not_steal_the_grab() {
 fn grabbing_the_body_records_the_original_geometry() {
     let (mut layer, id) = layer_with_box();
     let tf = unit_transform();
-    assert!(interact::begin_grab(&mut layer, &tf, egui::pos2(20.0, 50.0)));
+    assert!(interact::begin_grab(
+        &mut layer,
+        &tf,
+        egui::pos2(20.0, 50.0)
+    ));
     match layer.grab {
-        Some(Grab::Body { id: got, origin, .. }) => {
+        Some(Grab::Body {
+            id: got, origin, ..
+        }) => {
             assert_eq!(got, id);
             assert_eq!(origin, box_geom());
         }
@@ -39,7 +53,11 @@ fn grabbing_empty_space_clears_the_selection_and_does_not_consume() {
     let (mut layer, id) = layer_with_box();
     layer.selected = Some(id);
     let tf = unit_transform();
-    assert!(!interact::begin_grab(&mut layer, &tf, egui::pos2(50.0, 50.0)));
+    assert!(!interact::begin_grab(
+        &mut layer,
+        &tf,
+        egui::pos2(50.0, 50.0)
+    ));
     assert_eq!(layer.selected, None);
     assert_eq!(layer.grab, None);
 }
