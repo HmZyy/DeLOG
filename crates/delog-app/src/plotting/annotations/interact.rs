@@ -51,7 +51,12 @@ pub fn delete_selected(layer: &mut AnnotationLayer) {
     }
 }
 
-pub fn on_click(layer: &mut AnnotationLayer, tf: &PlotTransform, pos: egui::Pos2, double: bool) -> bool {
+pub fn on_click(
+    layer: &mut AnnotationLayer,
+    tf: &PlotTransform,
+    pos: egui::Pos2,
+    double: bool,
+) -> bool {
     let hit = hit::topmost(layer.items(), tf, pos);
     layer.selected = hit;
     if let Some(id) = hit

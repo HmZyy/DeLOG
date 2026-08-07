@@ -128,12 +128,7 @@ fn set_point(point: &mut DataPos, index: usize, value: f64, origin_us: i64) {
     }
 }
 
-pub fn editor(
-    ctx: &egui::Context,
-    id: egui::Id,
-    layer: &mut AnnotationLayer,
-    origin_us: i64,
-) {
+pub fn editor(ctx: &egui::Context, id: egui::Id, layer: &mut AnnotationLayer, origin_us: i64) {
     let Some(editing) = layer.editing else {
         return;
     };
@@ -181,7 +176,10 @@ pub fn editor(
             let mut edited = value;
             ui.horizontal(|ui| {
                 ui.label(name);
-                if ui.add(egui::DragValue::new(&mut edited).speed(0.01)).changed() {
+                if ui
+                    .add(egui::DragValue::new(&mut edited).speed(0.01))
+                    .changed()
+                {
                     set_anchor_seconds(&mut draft.geom, index, edited, origin_us);
                 }
             });
