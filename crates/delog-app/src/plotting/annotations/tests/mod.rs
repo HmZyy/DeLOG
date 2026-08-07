@@ -24,7 +24,7 @@ fn annot(id: u64, geom: Geometry) -> Annotation {
         id,
         geom,
         label: String::new(),
-        style: default_style(id),
+        style: default_style(id, 0),
     }
 }
 
@@ -43,7 +43,7 @@ fn box_geom() -> Geometry {
 
 fn layer_with_box() -> (AnnotationLayer, u64) {
     let mut layer = AnnotationLayer::default();
-    let id = layer.add(Kind::Rect, DataPos { t_us: 50_000_000, y: 50.0 }, 60_000_000, 60.0);
+    let id = layer.add(Kind::Rect, DataPos { t_us: 50_000_000, y: 50.0 }, 60_000_000, 60.0, 0);
     layer.get_mut(id).expect("exists").geom = box_geom();
     (layer, id)
 }
