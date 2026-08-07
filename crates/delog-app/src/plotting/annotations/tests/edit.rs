@@ -10,7 +10,6 @@ fn creating_text_selects_it_and_opens_the_editor() {
         DataPos { t_us: 5, y: 1.0 },
         1_000_000,
         10.0,
-        0,
     );
     assert_eq!(layer.selected, Some(id));
     assert_eq!(layer.editing, Some(id));
@@ -25,7 +24,6 @@ fn creating_a_shape_selects_it_without_opening_the_editor() {
         DataPos { t_us: 5, y: 1.0 },
         1_000_000,
         10.0,
-        0,
     );
     assert_eq!(layer.selected, Some(id));
     assert_eq!(layer.editing, None);
@@ -40,7 +38,6 @@ fn creation_places_the_shape_at_the_requested_anchor() {
         DataPos { t_us: 5, y: 120.0 },
         1_000_000,
         10.0,
-        0,
     );
     assert_eq!(
         layer.get(id).expect("exists").geom,
@@ -57,7 +54,6 @@ fn closing_the_editor_on_an_empty_text_removes_it() {
         DataPos { t_us: 0, y: 0.0 },
         1_000_000,
         10.0,
-        0,
     );
     edit::close_editor(&mut layer);
     assert!(layer.get(id).is_none());
@@ -73,7 +69,6 @@ fn closing_the_editor_keeps_a_labelled_text() {
         DataPos { t_us: 0, y: 0.0 },
         1_000_000,
         10.0,
-        0,
     );
     layer.get_mut(id).expect("exists").label = "spike".to_string();
     edit::close_editor(&mut layer);
@@ -90,7 +85,6 @@ fn closing_the_editor_keeps_an_unlabelled_shape() {
         DataPos { t_us: 0, y: 0.0 },
         1_000_000,
         10.0,
-        0,
     );
     layer.editing = Some(id);
     edit::close_editor(&mut layer);
@@ -106,7 +100,6 @@ fn creating_a_new_shape_sweeps_a_stale_empty_text_editor() {
         DataPos { t_us: 0, y: 0.0 },
         1_000_000,
         10.0,
-        0,
     );
     let rect_id = edit::create_at(
         &mut layer,
@@ -114,7 +107,6 @@ fn creating_a_new_shape_sweeps_a_stale_empty_text_editor() {
         DataPos { t_us: 5, y: 1.0 },
         1_000_000,
         10.0,
-        0,
     );
     assert!(layer.get(text_id).is_none());
     assert!(layer.get(rect_id).is_some());
@@ -130,7 +122,6 @@ fn creating_a_new_shape_does_not_sweep_a_labelled_stale_text() {
         DataPos { t_us: 0, y: 0.0 },
         1_000_000,
         10.0,
-        0,
     );
     layer.get_mut(text_id).expect("exists").label = "spike".to_string();
     let rect_id = edit::create_at(
@@ -139,7 +130,6 @@ fn creating_a_new_shape_does_not_sweep_a_labelled_stale_text() {
         DataPos { t_us: 5, y: 1.0 },
         1_000_000,
         10.0,
-        0,
     );
     assert!(layer.get(text_id).is_some());
     assert!(layer.get(rect_id).is_some());
