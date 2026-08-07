@@ -167,6 +167,26 @@ fn anchor_rows_cover_each_geometry() {
 }
 
 #[test]
+fn multi_point_anchor_rows_are_individually_named() {
+    let origin = 1_000_000;
+    let names: Vec<&str> = edit::anchor_seconds(&box_geom(), origin)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert_eq!(names, vec!["t1", "y1", "t2", "y2"]);
+
+    let segment = Geometry::Segment {
+        from: DataPos { t_us: 0, y: 0.0 },
+        to: DataPos { t_us: 1_000_000, y: 1.0 },
+    };
+    let names: Vec<&str> = edit::anchor_seconds(&segment, origin)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert_eq!(names, vec!["t1", "y1", "t2", "y2"]);
+}
+
+#[test]
 fn anchor_seconds_are_relative_to_the_origin() {
     let rows = edit::anchor_seconds(
         &Geometry::Text { at: DataPos { t_us: 3_500_000, y: 7.5 } },

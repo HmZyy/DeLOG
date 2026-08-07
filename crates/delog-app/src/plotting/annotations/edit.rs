@@ -56,6 +56,10 @@ pub fn menu(ui: &mut egui::Ui, layer: &mut AnnotationLayer, span_us: i64, y_span
 
 const SECONDS_ROW: &str = "t";
 const VALUE_ROW: &str = "y";
+const T1_ROW: &str = "t1";
+const Y1_ROW: &str = "y1";
+const T2_ROW: &str = "t2";
+const Y2_ROW: &str = "y2";
 
 fn seconds_of(t_us: i64, origin_us: i64) -> f64 {
     (t_us as i128 - origin_us as i128) as f64 * 1e-6
@@ -73,16 +77,16 @@ pub fn anchor_seconds(geom: &Geometry, origin_us: i64) -> Vec<(&'static str, f64
             (VALUE_ROW, at.y),
         ],
         Geometry::Segment { from, to } => vec![
-            (SECONDS_ROW, seconds_of(from.t_us, origin_us)),
-            (VALUE_ROW, from.y),
-            (SECONDS_ROW, seconds_of(to.t_us, origin_us)),
-            (VALUE_ROW, to.y),
+            (T1_ROW, seconds_of(from.t_us, origin_us)),
+            (Y1_ROW, from.y),
+            (T2_ROW, seconds_of(to.t_us, origin_us)),
+            (Y2_ROW, to.y),
         ],
         Geometry::Rect { a, b } | Geometry::Ellipse { a, b } => vec![
-            (SECONDS_ROW, seconds_of(a.t_us, origin_us)),
-            (VALUE_ROW, a.y),
-            (SECONDS_ROW, seconds_of(b.t_us, origin_us)),
-            (VALUE_ROW, b.y),
+            (T1_ROW, seconds_of(a.t_us, origin_us)),
+            (Y1_ROW, a.y),
+            (T2_ROW, seconds_of(b.t_us, origin_us)),
+            (Y2_ROW, b.y),
         ],
     }
 }
