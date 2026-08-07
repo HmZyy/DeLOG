@@ -51,6 +51,18 @@ pub fn delete_selected(layer: &mut AnnotationLayer) {
     }
 }
 
+pub fn on_click(layer: &mut AnnotationLayer, tf: &PlotTransform, pos: egui::Pos2, double: bool) -> bool {
+    let hit = hit::topmost(layer.items(), tf, pos);
+    layer.selected = hit;
+    if let Some(id) = hit
+        && double
+    {
+        layer.editing = Some(id);
+        return true;
+    }
+    false
+}
+
 pub fn interact(
     ui: &egui::Ui,
     response: &egui::Response,
@@ -90,16 +102,9 @@ pub fn interact(
     if response.clicked()
         && let Some(pos) = response.interact_pointer_pos()
         && tf.rect().contains(pos)
+        && on_click(layer, &tf, pos, response.double_clicked())
     {
-        layer.selected = hit::topmost(layer.items(), &tf, pos);
-    }
-
-    if response.double_clicked()
-        && let Some(pos) = response.interact_pointer_pos()
-        && let Some(id) = hit::topmost(layer.items(), &tf, pos)
-    {
-        layer.selected = Some(id);
-        layer.editing = Some(id);
+        consumed = true;
     }
 
     if response.hovered() && layer.editing.is_none() && !ui.ctx().egui_wants_keyboard_input() {
