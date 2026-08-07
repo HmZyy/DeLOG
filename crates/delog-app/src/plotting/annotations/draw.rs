@@ -30,9 +30,10 @@ pub fn label_anchor(geom: &Geometry, tf: &PlotTransform) -> (egui::Pos2, egui::A
             tf.to_screen(to) + egui::vec2(LABEL_PAD_PX, -LABEL_PAD_PX),
             egui::Align2::LEFT_BOTTOM,
         ),
-        Geometry::Rect { .. } | Geometry::Ellipse { .. } => {
-            (hit::screen_rect(geom, tf).left_top(), egui::Align2::LEFT_BOTTOM)
-        }
+        Geometry::Rect { .. } | Geometry::Ellipse { .. } => (
+            hit::screen_rect(geom, tf).left_top(),
+            egui::Align2::LEFT_BOTTOM,
+        ),
         Geometry::HLine { y } => (
             egui::pos2(tf.rect().right() - LABEL_PAD_PX, tf.y_of(y) - LABEL_PAD_PX),
             egui::Align2::RIGHT_BOTTOM,
@@ -59,12 +60,7 @@ pub fn draw(ui: &egui::Ui, view: PaneView, origin_us: i64, layer: &AnnotationLay
     }
 }
 
-fn paint_geometry(
-    painter: &egui::Painter,
-    annot: &Annotation,
-    tf: &PlotTransform,
-    selected: bool,
-) {
+fn paint_geometry(painter: &egui::Painter, annot: &Annotation, tf: &PlotTransform, selected: bool) {
     let width = if selected {
         annot.style.stroke_px + SELECTED_STROKE_BOOST
     } else {
@@ -127,9 +123,14 @@ fn ellipse_fully_encloses(rect: egui::Rect, clip: egui::Rect) -> bool {
         let dy = (p.y - center.y) / ry;
         dx * dx + dy * dy < 1.0
     };
-    [clip.left_top(), clip.right_top(), clip.left_bottom(), clip.right_bottom()]
-        .into_iter()
-        .all(inside)
+    [
+        clip.left_top(),
+        clip.right_top(),
+        clip.left_bottom(),
+        clip.right_bottom(),
+    ]
+    .into_iter()
+    .all(inside)
 }
 
 pub fn clamped_ellipse(rect: egui::Rect, clip: egui::Rect) -> Option<egui::Rect> {
