@@ -42,25 +42,16 @@ fn menu_icon(ui: &egui::Ui, source: egui::ImageSource<'static>) -> egui::Image<'
         .tint(ui.visuals().text_color())
 }
 
-pub fn menu(
-    ui: &mut egui::Ui,
-    layer: &mut AnnotationLayer,
-    span_us: i64,
-    y_span: f64,
-    fallback: DataPos,
-) -> bool {
-    let mut created = false;
+pub fn menu(ui: &mut egui::Ui, layer: &mut AnnotationLayer, span_us: i64, y_span: f64, fallback: DataPos) {
     crate::ui::components::dense_rows(ui);
     let at = layer.last_cursor.unwrap_or(fallback);
     for kind in Kind::ALL {
         let button = egui::Button::image_and_text(menu_icon(ui, icon_for(kind)), kind.label());
         if ui.add(button).clicked() {
             create_at(layer, kind, at, span_us, y_span);
-            created = true;
             ui.close();
         }
     }
-    created
 }
 
 const SECONDS_ROW: &str = "t";
