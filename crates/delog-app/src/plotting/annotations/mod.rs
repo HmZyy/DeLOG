@@ -153,9 +153,9 @@ impl Style {
     }
 }
 
-pub fn default_style(id: u64) -> Style {
+pub fn default_style(id: u64, trace_count: usize) -> Style {
     Style {
-        color: delog_render::palette::trace_color(id as usize).to_srgb_f32(),
+        color: delog_render::palette::trace_color(id as usize + trace_count).to_srgb_f32(),
         stroke_px: DEFAULT_STROKE_PX,
         fill_opacity: 0.0,
         font_px: DEFAULT_FONT_PX,
@@ -262,14 +262,14 @@ impl AnnotationLayer {
         self.items.iter_mut().find(|a| a.id == id)
     }
 
-    pub fn add(&mut self, kind: Kind, at: DataPos, span_us: i64, y_span: f64) -> u64 {
+    pub fn add(&mut self, kind: Kind, at: DataPos, span_us: i64, y_span: f64, trace_count: usize) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         self.items.push(Annotation {
             id,
             geom: default_geometry(kind, at, span_us, y_span),
             label: String::new(),
-            style: default_style(id),
+            style: default_style(id, trace_count),
         });
         id
     }
