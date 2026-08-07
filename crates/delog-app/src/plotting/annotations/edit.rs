@@ -157,10 +157,15 @@ pub fn editor(
                 draft.style.color = crate::plotting::legend::color32_to_srgb(color);
             }
         });
-        ui.add(egui::Slider::new(&mut draft.style.stroke_px, 0.5..=6.0).text("Stroke"));
-        ui.add(egui::Slider::new(&mut draft.style.fill_opacity, 0.0..=1.0).text("Fill"));
+        let kind = draft.geom.kind();
+        if kind != Kind::Text {
+            ui.add(egui::Slider::new(&mut draft.style.stroke_px, 0.5..=6.0).text("Stroke"));
+        }
+        if matches!(kind, Kind::Rect | Kind::Ellipse) {
+            ui.add(egui::Slider::new(&mut draft.style.fill_opacity, 0.0..=1.0).text("Fill"));
+        }
         ui.add(egui::Slider::new(&mut draft.style.font_px, 8.0..=24.0).text("Font"));
-        if draft.geom.kind() == Kind::Segment {
+        if kind == Kind::Segment {
             ui.checkbox(&mut draft.style.arrow, "Arrowhead");
         }
         let rows = anchor_seconds(&draft.geom, origin_us);
