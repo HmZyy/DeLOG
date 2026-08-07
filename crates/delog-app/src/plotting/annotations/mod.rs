@@ -96,9 +96,15 @@ impl Geometry {
             Self::Segment { from, to } => vec![from, to],
             Self::Rect { a, b } | Self::Ellipse { a, b } => vec![
                 a,
-                DataPos { t_us: b.t_us, y: a.y },
+                DataPos {
+                    t_us: b.t_us,
+                    y: a.y,
+                },
                 b,
-                DataPos { t_us: a.t_us, y: b.y },
+                DataPos {
+                    t_us: a.t_us,
+                    y: b.y,
+                },
             ],
         }
     }
@@ -149,7 +155,8 @@ impl Style {
     }
 
     pub fn fill32(&self) -> egui::Color32 {
-        self.color32().gamma_multiply(self.fill_opacity.clamp(0.0, 1.0))
+        self.color32()
+            .gamma_multiply(self.fill_opacity.clamp(0.0, 1.0))
     }
 }
 
@@ -177,7 +184,11 @@ fn corner_box(at: DataPos, dt: i64, dy: f64) -> (DataPos, DataPos) {
 }
 
 pub fn default_geometry(kind: Kind, at: DataPos, span_us: i64, y_span: f64) -> Geometry {
-    let span_us = if span_us > 0 { span_us } else { FALLBACK_SPAN_US };
+    let span_us = if span_us > 0 {
+        span_us
+    } else {
+        FALLBACK_SPAN_US
+    };
     let y_span = if y_span.is_finite() && y_span.abs() > 0.0 {
         y_span.abs()
     } else {
@@ -262,7 +273,14 @@ impl AnnotationLayer {
         self.items.iter_mut().find(|a| a.id == id)
     }
 
-    pub fn add(&mut self, kind: Kind, at: DataPos, span_us: i64, y_span: f64, trace_count: usize) -> u64 {
+    pub fn add(
+        &mut self,
+        kind: Kind,
+        at: DataPos,
+        span_us: i64,
+        y_span: f64,
+        trace_count: usize,
+    ) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         self.items.push(Annotation {

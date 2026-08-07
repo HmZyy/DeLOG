@@ -22,16 +22,28 @@ fn data_round_trip_stays_within_a_pixel() {
     let tf = PlotTransform::new(view(), 1_000_000);
     let us_per_px = (10.0 * 1e6) / 500.0;
     for p in [
-        DataPos { t_us: 1_000_000, y: -5.0 },
-        DataPos { t_us: 4_500_000, y: 3.25 },
-        DataPos { t_us: 11_000_000, y: 15.0 },
+        DataPos {
+            t_us: 1_000_000,
+            y: -5.0,
+        },
+        DataPos {
+            t_us: 4_500_000,
+            y: 3.25,
+        },
+        DataPos {
+            t_us: 11_000_000,
+            y: 15.0,
+        },
     ] {
         let back = tf.to_data(tf.to_screen(p));
         assert!(
             ((back.t_us - p.t_us) as f64).abs() <= us_per_px,
             "{p:?} round-tripped to {back:?}"
         );
-        assert!((back.y - p.y).abs() <= 20.0 / 300.0, "{p:?} round-tripped to {back:?}");
+        assert!(
+            (back.y - p.y).abs() <= 20.0 / 300.0,
+            "{p:?} round-tripped to {back:?}"
+        );
     }
 }
 
@@ -39,7 +51,10 @@ fn data_round_trip_stays_within_a_pixel() {
 fn transform_maps_the_view_corners_to_the_rect_corners() {
     let tf = PlotTransform::new(view(), 0);
     let bottom_left = tf.to_screen(DataPos { t_us: 0, y: -5.0 });
-    let top_right = tf.to_screen(DataPos { t_us: 10_000_000, y: 15.0 });
+    let top_right = tf.to_screen(DataPos {
+        t_us: 10_000_000,
+        y: 15.0,
+    });
     assert!((bottom_left.x - 100.0).abs() < 0.01);
     assert!((bottom_left.y - 350.0).abs() < 0.01);
     assert!((top_right.x - 600.0).abs() < 0.01);
@@ -54,7 +69,10 @@ fn degenerate_view_spans_do_not_divide_by_zero() {
         y_range: (7.0, 7.0),
     };
     let tf = PlotTransform::new(flat, 0);
-    let p = tf.to_screen(DataPos { t_us: 2_000_000, y: 7.0 });
+    let p = tf.to_screen(DataPos {
+        t_us: 2_000_000,
+        y: 7.0,
+    });
     assert!(p.x.is_finite() && p.y.is_finite());
     let d = tf.to_data(egui::pos2(50.0, 50.0));
     assert!(d.y.is_finite());
@@ -62,7 +80,10 @@ fn degenerate_view_spans_do_not_divide_by_zero() {
 
 #[test]
 fn default_geometry_scales_to_the_visible_span() {
-    let at = DataPos { t_us: 5_000_000, y: 2.0 };
+    let at = DataPos {
+        t_us: 5_000_000,
+        y: 2.0,
+    };
     let geom = default_geometry(Kind::Rect, at, 10_000_000, 20.0);
     let Geometry::Rect { a, b } = geom else {
         panic!("expected a rect, got {geom:?}");
@@ -84,7 +105,10 @@ fn default_geometry_stays_grabbable_on_a_degenerate_view() {
 
 #[test]
 fn default_geometry_covers_every_kind() {
-    let at = DataPos { t_us: 1_000, y: 1.0 };
+    let at = DataPos {
+        t_us: 1_000,
+        y: 1.0,
+    };
     for kind in Kind::ALL {
         assert_eq!(default_geometry(kind, at, 1_000_000, 10.0).kind(), kind);
     }
@@ -114,7 +138,10 @@ fn body_translation_preserves_extents() {
 fn translation_is_computed_from_the_origin_not_accumulated() {
     let origin = Geometry::Segment {
         from: DataPos { t_us: 0, y: 0.0 },
-        to: DataPos { t_us: 1_000, y: 1.0 },
+        to: DataPos {
+            t_us: 1_000,
+            y: 1.0,
+        },
     };
     let once = origin.translated(7_000, 0.5);
     assert_eq!(once, origin.translated(7_000, 0.5));
@@ -158,13 +185,22 @@ fn handle_positions_match_the_handle_indices() {
     for (index, expected) in positions.iter().enumerate() {
         let mut moved = geom;
         moved.set_handle(index, *expected);
-        assert_eq!(moved, geom, "handle {index} moved the geometry when set to its own position");
+        assert_eq!(
+            moved, geom,
+            "handle {index} moved the geometry when set to its own position"
+        );
     }
 }
 
 #[test]
 fn text_and_hline_have_no_handles() {
-    assert!(Geometry::Text { at: DataPos { t_us: 0, y: 0.0 } }.handle_positions().is_empty());
+    assert!(
+        Geometry::Text {
+            at: DataPos { t_us: 0, y: 0.0 }
+        }
+        .handle_positions()
+        .is_empty()
+    );
     assert!(Geometry::HLine { y: 0.0 }.handle_positions().is_empty());
 }
 
@@ -223,7 +259,13 @@ fn added_annotations_take_distinct_palette_colors() {
 fn a_new_annotation_does_not_collide_with_an_existing_trace_color() {
     let mut layer = AnnotationLayer::default();
     let trace_count = 1;
-    let id = layer.add(Kind::Rect, DataPos { t_us: 0, y: 0.0 }, 1_000_000, 10.0, trace_count);
+    let id = layer.add(
+        Kind::Rect,
+        DataPos { t_us: 0, y: 0.0 },
+        1_000_000,
+        10.0,
+        trace_count,
+    );
     let annotation_color = layer.get(id).expect("exists").style.color;
     let trace_zero_color = delog_render::palette::trace_color(0).to_srgb_f32();
     assert_ne!(annotation_color, trace_zero_color);

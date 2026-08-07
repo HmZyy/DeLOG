@@ -14,16 +14,29 @@ fn rect_outline_hits_near_the_border_and_misses_the_interior() {
 #[test]
 fn filled_rect_hits_its_interior() {
     let tf = unit_transform();
-    assert!(hit::contains(&filled(0, box_geom()), &tf, egui::pos2(50.0, 50.0)));
+    assert!(hit::contains(
+        &filled(0, box_geom()),
+        &tf,
+        egui::pos2(50.0, 50.0)
+    ));
 }
 
 #[test]
 fn ellipse_outline_hits_near_the_rim_and_misses_the_centre() {
     let tf = unit_transform();
-    let a = annot(0, Geometry::Ellipse {
-        a: DataPos { t_us: 20_000_000, y: 20.0 },
-        b: DataPos { t_us: 80_000_000, y: 80.0 },
-    });
+    let a = annot(
+        0,
+        Geometry::Ellipse {
+            a: DataPos {
+                t_us: 20_000_000,
+                y: 20.0,
+            },
+            b: DataPos {
+                t_us: 80_000_000,
+                y: 80.0,
+            },
+        },
+    );
     assert!(hit::contains(&a, &tf, egui::pos2(20.0, 50.0)));
     assert!(!hit::contains(&a, &tf, egui::pos2(50.0, 50.0)));
     assert!(!hit::contains(&a, &tf, egui::pos2(5.0, 50.0)));
@@ -32,10 +45,16 @@ fn ellipse_outline_hits_near_the_rim_and_misses_the_centre() {
 #[test]
 fn segment_hits_along_its_length_only() {
     let tf = unit_transform();
-    let a = annot(0, Geometry::Segment {
-        from: DataPos { t_us: 0, y: 0.0 },
-        to: DataPos { t_us: 100_000_000, y: 100.0 },
-    });
+    let a = annot(
+        0,
+        Geometry::Segment {
+            from: DataPos { t_us: 0, y: 0.0 },
+            to: DataPos {
+                t_us: 100_000_000,
+                y: 100.0,
+            },
+        },
+    );
     assert!(hit::contains(&a, &tf, egui::pos2(50.0, 50.0)));
     assert!(!hit::contains(&a, &tf, egui::pos2(50.0, 80.0)));
 }
@@ -52,7 +71,15 @@ fn hline_hits_within_tolerance_across_the_pane() {
 #[test]
 fn text_hits_inside_its_approximate_galley() {
     let tf = unit_transform();
-    let mut a = annot(0, Geometry::Text { at: DataPos { t_us: 10_000_000, y: 50.0 } });
+    let mut a = annot(
+        0,
+        Geometry::Text {
+            at: DataPos {
+                t_us: 10_000_000,
+                y: 50.0,
+            },
+        },
+    );
     a.label = "abcd".to_string();
     a.style.font_px = 20.0;
     assert!(hit::contains(&a, &tf, egui::pos2(20.0, 45.0)));
@@ -62,7 +89,15 @@ fn text_hits_inside_its_approximate_galley() {
 #[test]
 fn empty_text_is_not_hittable() {
     let tf = unit_transform();
-    let a = annot(0, Geometry::Text { at: DataPos { t_us: 10_000_000, y: 50.0 } });
+    let a = annot(
+        0,
+        Geometry::Text {
+            at: DataPos {
+                t_us: 10_000_000,
+                y: 50.0,
+            },
+        },
+    );
     assert!(!hit::contains(&a, &tf, egui::pos2(10.0, 50.0)));
 }
 
@@ -93,7 +128,10 @@ fn handles_are_returned_in_data_index_order() {
 fn handle_at_finds_a_corner_and_prefers_the_top_annotation() {
     let tf = unit_transform();
     let items = vec![annot(0, box_geom()), annot(3, box_geom())];
-    assert_eq!(hit::handle_at(&items, &tf, egui::pos2(20.0, 80.0)), Some((3, 0)));
+    assert_eq!(
+        hit::handle_at(&items, &tf, egui::pos2(20.0, 80.0)),
+        Some((3, 0))
+    );
     assert_eq!(hit::handle_at(&items, &tf, egui::pos2(50.0, 50.0)), None);
 }
 
