@@ -216,9 +216,9 @@ fn out_of_range_handle_index_is_ignored() {
 fn ids_are_never_reused_after_removal() {
     let mut layer = AnnotationLayer::default();
     let at = DataPos { t_us: 0, y: 0.0 };
-    let first = layer.add(Kind::Rect, at, 1_000_000, 10.0, 0);
+    let first = layer.add(Kind::Rect, at, 1_000_000, 10.0);
     layer.remove(first);
-    let second = layer.add(Kind::Rect, at, 1_000_000, 10.0, 0);
+    let second = layer.add(Kind::Rect, at, 1_000_000, 10.0);
     assert_ne!(first, second);
     assert_eq!(layer.items().len(), 1);
 }
@@ -226,7 +226,7 @@ fn ids_are_never_reused_after_removal() {
 #[test]
 fn removing_the_selected_annotation_clears_selection_and_editor() {
     let mut layer = AnnotationLayer::default();
-    let id = layer.add(Kind::Text, DataPos { t_us: 0, y: 0.0 }, 1_000_000, 10.0, 0);
+    let id = layer.add(Kind::Text, DataPos { t_us: 0, y: 0.0 }, 1_000_000, 10.0);
     layer.selected = Some(id);
     layer.editing = Some(id);
     layer.remove(id);
@@ -238,7 +238,7 @@ fn removing_the_selected_annotation_clears_selection_and_editor() {
 #[test]
 fn removing_an_annotation_clears_a_grab_on_it() {
     let mut layer = AnnotationLayer::default();
-    let id = layer.add(Kind::Rect, DataPos { t_us: 0, y: 0.0 }, 1_000_000, 10.0, 0);
+    let id = layer.add(Kind::Rect, DataPos { t_us: 0, y: 0.0 }, 1_000_000, 10.0);
     layer.grab = Some(Grab::Handle { id, index: 0 });
     layer.remove(id);
     assert_eq!(layer.grab, None);
@@ -248,32 +248,29 @@ fn removing_an_annotation_clears_a_grab_on_it() {
 fn added_annotations_take_distinct_palette_colors() {
     let mut layer = AnnotationLayer::default();
     let at = DataPos { t_us: 0, y: 0.0 };
-    let first = layer.add(Kind::Rect, at, 1_000_000, 10.0, 0);
-    let second = layer.add(Kind::Rect, at, 1_000_000, 10.0, 0);
+    let first = layer.add(Kind::Rect, at, 1_000_000, 10.0);
+    let second = layer.add(Kind::Rect, at, 1_000_000, 10.0);
     let a = layer.get(first).expect("first exists").style.color;
     let b = layer.get(second).expect("second exists").style.color;
     assert_ne!(a, b);
 }
 
 #[test]
-fn a_new_annotation_does_not_collide_with_an_existing_trace_color() {
+fn a_new_annotation_never_collides_with_any_trace_color() {
     let mut layer = AnnotationLayer::default();
-    let trace_count = 1;
-    let id = layer.add(
-        Kind::Rect,
-        DataPos { t_us: 0, y: 0.0 },
-        1_000_000,
-        10.0,
-        trace_count,
-    );
-    let annotation_color = layer.get(id).expect("exists").style.color;
-    let trace_zero_color = delog_render::palette::trace_color(0).to_srgb_f32();
-    assert_ne!(annotation_color, trace_zero_color);
+    for _ in 0..20 {
+        let id = layer.add(Kind::Rect, DataPos { t_us: 0, y: 0.0 }, 1_000_000, 10.0);
+        let annotation_color = layer.get(id).expect("exists").style.color;
+        for i in 0..delog_render::palette::TRACE_PALETTE.len() {
+            let trace_color = delog_render::palette::trace_color(i).to_srgb_f32();
+            assert_ne!(annotation_color, trace_color);
+        }
+    }
 }
 
 #[test]
 fn default_style_is_outline_only_at_the_trace_stroke_width() {
-    let style = default_style(0, 0);
+    let style = default_style(0);
     assert_eq!(style.fill_opacity, 0.0);
     assert_eq!(style.stroke_px, 1.5);
     assert_eq!(style.font_px, 11.0);

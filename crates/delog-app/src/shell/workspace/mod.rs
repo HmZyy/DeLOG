@@ -1513,14 +1513,12 @@ impl Behavior<'_> {
                                 .unwrap_or(self.services.origin_us),
                             y: (y_range.0 + y_range.1) / 2.0,
                         };
-                        let trace_count = pane.traces.len();
                         crate::plotting::annotations::edit::menu(
                             ui,
                             &mut pane.annotations,
                             span_us,
                             y_range.1 - y_range.0,
                             fallback,
-                            trace_count,
                         );
                     },
                 );
