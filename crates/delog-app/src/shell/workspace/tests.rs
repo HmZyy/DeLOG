@@ -82,6 +82,37 @@ fn plot_context_menu_keeps_every_existing_action() {
 }
 
 #[test]
+fn plot_body_hoists_the_annotation_editor_above_every_early_return() {
+    let source = include_str!("mod.rs");
+    let editor_call = source
+        .find("crate::plotting::annotations::edit::editor(")
+        .expect("plot_body should still call the annotation editor");
+    let first_early_return = source
+        .find("if pane.is_empty() {")
+        .expect("plot_body should still have the empty-pane early return");
+    assert!(
+        editor_call < first_early_return,
+        "the annotation editor must be called above every early return in \
+         plot_body, so a pending editor always has a modal that can clear it \
+         even for a pane with no traces or view"
+    );
+}
+
+#[test]
+fn every_context_menu_early_return_resets_the_stale_annotation_target() {
+    let source = include_str!("mod.rs");
+    let reset_before_menu = "pane.context_target = None;\n            self.plot_context_menu(tile_id, &response, pane);";
+    assert_eq!(
+        source.matches(reset_before_menu).count(),
+        3,
+        "every early return that skips recomputing pane.context_target must \
+         null it immediately before opening the plot context menu, or a stale \
+         annotation target from a prior frame leaks into a pane that never \
+         recomputed it"
+    );
+}
+
+#[test]
 fn data_browser_and_legend_keep_contextual_actions() {
     let browser = include_str!("../../plotting/browser.rs");
     for label in [

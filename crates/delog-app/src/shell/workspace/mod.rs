@@ -1140,6 +1140,14 @@ impl Behavior<'_> {
         } else {
             egui_tiles::UiResponse::None
         };
+        // Hoisted above every early return so a pending editor always has a
+        // modal that can clear it, even for a pane with no traces or view.
+        crate::plotting::annotations::edit::editor(
+            ui.ctx(),
+            egui::Id::new(("plot_annotation", tile_id)),
+            &mut pane.annotations,
+            self.services.origin_us,
+        );
         // Use the widest gutter any pane needed last frame, but never below this
         // pane's own need so labels never clip.
         let shared_gutter = self.services.shared_y_gutter;
@@ -1169,6 +1177,7 @@ impl Behavior<'_> {
             if plot_rect.width() > 8.0 {
                 axes::draw(ui, plot_rect, x_range, y_range, None);
             }
+            pane.context_target = None;
             self.plot_context_menu(tile_id, &response, pane);
             self.plot_info_window(ui, tile_id, pane, None);
             return tile_response;
@@ -1179,6 +1188,7 @@ impl Behavior<'_> {
             self.actions.max_y_gutter = self.actions.max_y_gutter.max(own_gutter);
             self.handle_plot_interaction(&response, plot_rect);
             self.handle_zoom_drag(&response, plot_rect, pane);
+            pane.context_target = None;
             self.plot_context_menu(tile_id, &response, pane);
             self.plot_info_window(ui, tile_id, pane, None);
             return tile_response;
@@ -1268,6 +1278,7 @@ impl Behavior<'_> {
         drop(pane_setup_timer);
 
         if !self.services.gpu.is_available() || plot_rect.width() <= 8.0 {
+            pane.context_target = None;
             self.plot_context_menu(tile_id, &response, pane);
             self.plot_info_window(ui, tile_id, pane, None);
             return tile_response;
@@ -1323,7 +1334,8 @@ impl Behavior<'_> {
         let pane_overlay_timer = self.services.metrics.scope("pane_overlay");
         let annot_preview = self.services.armed_tool.as_ref().and_then(|tool| {
             let pos = response.hover_pos()?;
-            let tf = crate::plotting::annotations::PlotTransform::new(pview, self.services.origin_us);
+            let tf =
+                crate::plotting::annotations::PlotTransform::new(pview, self.services.origin_us);
             tf.rect().contains(pos).then(|| {
                 crate::plotting::annotations::place::preview(tool, tile_id.0, tf.to_data(pos))
             })?
@@ -1510,12 +1522,6 @@ impl Behavior<'_> {
         }
 
         plot_rename_dialog(ui.ctx(), tile_id, pane);
-        crate::plotting::annotations::edit::editor(
-            ui.ctx(),
-            egui::Id::new(("plot_annotation", tile_id)),
-            &mut pane.annotations,
-            self.services.origin_us,
-        );
 
         self.plot_info_window(ui, tile_id, pane, Some(debug));
         drop(pane_overlay_timer);
