@@ -122,6 +122,7 @@ pub fn interact(
     let y_span = view.y_range.1 - view.y_range.0;
 
     if armed.is_some() {
+        layer.grab = None;
         if response.clicked()
             && let Some(pos) = response.interact_pointer_pos()
             && tf.rect().contains(pos)

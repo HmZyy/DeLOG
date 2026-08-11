@@ -399,6 +399,106 @@ fn an_unarmed_drag_over_empty_space_is_not_consumed_so_panning_still_runs() {
 }
 
 #[test]
+fn an_unarmed_drag_over_an_existing_annotation_is_consumed_and_moves_it() {
+    let ctx = egui::Context::default();
+    let view = armed_test_view();
+    prime_interact(&ctx, view);
+    let (mut layer, id) = layer_with_box();
+    let mut armed = None;
+    let start = egui::pos2(20.0, 50.0);
+
+    drive_interact(
+        &ctx,
+        view,
+        &mut layer,
+        &mut armed,
+        IPANE,
+        vec![pointer_button(start, true)],
+    );
+    let mut consumed = false;
+    for offset in [10.0, 15.0, 20.0] {
+        let pos = start + egui::vec2(0.0, offset);
+        consumed = drive_interact(
+            &ctx,
+            view,
+            &mut layer,
+            &mut armed,
+            IPANE,
+            vec![egui::Event::PointerMoved(pos)],
+        );
+    }
+
+    assert!(
+        consumed,
+        "an unarmed drag over an existing annotation must be consumed"
+    );
+    assert_ne!(
+        layer.get(id).expect("exists").geom,
+        box_geom(),
+        "the drag must actually move the grabbed annotation's geometry"
+    );
+}
+
+#[test]
+fn arming_a_tool_mid_drag_clears_the_stale_grab() {
+    let ctx = egui::Context::default();
+    let view = armed_test_view();
+    prime_interact(&ctx, view);
+    let (mut layer, id) = layer_with_box();
+    let mut armed = None;
+    let start = egui::pos2(20.0, 50.0);
+
+    drive_interact(
+        &ctx,
+        view,
+        &mut layer,
+        &mut armed,
+        IPANE,
+        vec![pointer_button(start, true)],
+    );
+    for offset in [10.0, 15.0, 20.0] {
+        let pos = start + egui::vec2(0.0, offset);
+        drive_interact(
+            &ctx,
+            view,
+            &mut layer,
+            &mut armed,
+            IPANE,
+            vec![egui::Event::PointerMoved(pos)],
+        );
+    }
+    assert!(
+        layer.grab.is_some(),
+        "the primary drag should have grabbed the box"
+    );
+    let geom_before_arming = layer.get(id).expect("exists").geom;
+
+    armed = Some(ArmedTool::new(Kind::Rect));
+    drive_interact(&ctx, view, &mut layer, &mut armed, IPANE, vec![]);
+
+    assert_eq!(
+        layer.grab, None,
+        "arming a tool mid-drag must clear the stale grab"
+    );
+
+    let elsewhere = egui::pos2(80.0, 80.0);
+    drive_interact(
+        &ctx,
+        view,
+        &mut layer,
+        &mut armed,
+        IPANE,
+        vec![pointer_button(elsewhere, true)],
+    );
+
+    assert_eq!(
+        layer.get(id).expect("exists").geom,
+        geom_before_arming,
+        "the previously grabbed annotation must not teleport to the new click"
+    );
+}
+
+#[test]
 fn an_armed_click_inside_the_plot_is_consumed_and_creates_the_annotation() {
     let ctx = egui::Context::default();
     let view = armed_test_view();
