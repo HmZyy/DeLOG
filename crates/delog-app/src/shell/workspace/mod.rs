@@ -696,6 +696,7 @@ pub struct PlotServices<'a> {
     pub snap_playhead: &'a mut bool,
     /// Shared measurement marker time.
     pub marker_us: &'a mut Option<i64>,
+    pub armed_tool: &'a mut Option<crate::plotting::annotations::place::ArmedTool>,
     pub render_tuning: crate::config::settings::RenderTuning,
     pub scene3d: crate::config::settings::Scene3dSettings,
     /// Playhead cursor time; `None` before any data loads.
@@ -1210,6 +1211,8 @@ impl Behavior<'_> {
             annot_view,
             self.services.origin_us,
             &mut pane.annotations,
+            self.services.armed_tool,
+            tile_id.0,
         );
         let marker_active =
             !annot_active && self.handle_marker_drag(&response, plot_rect, x_range, pane);
@@ -1305,7 +1308,20 @@ impl Behavior<'_> {
         };
 
         let pane_overlay_timer = self.services.metrics.scope("pane_overlay");
-        crate::plotting::annotations::draw::draw(ui, pview, self.services.origin_us, &pane.annotations);
+        let annot_preview = self.services.armed_tool.as_ref().and_then(|tool| {
+            let pos = response.hover_pos()?;
+            let tf = crate::plotting::annotations::PlotTransform::new(pview, self.services.origin_us);
+            tf.rect().contains(pos).then(|| {
+                crate::plotting::annotations::place::preview(tool, tile_id.0, tf.to_data(pos))
+            })?
+        });
+        crate::plotting::annotations::draw::draw(
+            ui,
+            pview,
+            self.services.origin_us,
+            &pane.annotations,
+            annot_preview,
+        );
         if let Some(anchor_us) = pane.zoom_drag_anchor_us
             && let Some(p) = response.interact_pointer_pos()
         {
