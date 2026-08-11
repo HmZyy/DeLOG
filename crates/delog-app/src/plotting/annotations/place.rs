@@ -72,6 +72,7 @@ pub fn preview(tool: &ArmedTool, pane: u64, cursor: DataPos) -> Option<Geometry>
 }
 
 pub fn commit(layer: &mut AnnotationLayer, geom: Geometry) -> u64 {
+    super::edit::close_editor(layer);
     let id = layer.add_geometry(geom);
     layer.selected = Some(id);
     layer.editing = (geom.kind() == Kind::Text).then_some(id);
