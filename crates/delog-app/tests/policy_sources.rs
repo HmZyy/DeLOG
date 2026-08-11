@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 pub const APP: &str = include_str!("../src/shell/app/mod.rs");
-pub const APP_COMMANDS: &str = include_str!("../src/shell/app/commands.rs");
+pub const APP_COMMANDS: &str = include_str!("../src/shell/app/commands/specs.rs");
 pub const BROWSER: &str = include_str!("../src/plotting/browser.rs");
 pub const DATAFLOW_CANVAS: &str = include_str!("../src/dataflow/canvas.rs");
 pub const DATAFLOW_WINDOW: &str = include_str!("../src/dataflow/window.rs");

@@ -9,7 +9,10 @@ use policy_sources::{
 };
 
 const CONTEXT_HEADER_SOURCE: &str = include_str!("../src/shell/app/context_header.rs");
-const COMMANDS_SOURCE: &str = include_str!("../src/shell/app/commands.rs");
+const COMMANDS_SOURCE: &str = concat!(
+    include_str!("../src/shell/app/commands/mod.rs"),
+    include_str!("../src/shell/app/commands/specs.rs"),
+);
 const GLOBAL_TOOLBAR_SOURCE: &str = include_str!("../src/shell/app/global_plot_toolbar.rs");
 
 const POPUP_SOURCES: &[&str] = &[
