@@ -35,10 +35,13 @@ fn from_two_points(kind: Kind, first: DataPos, second: DataPos) -> Geometry {
             a: first,
             b: second,
         },
-        _ => Geometry::Rect {
+        Kind::Rect => Geometry::Rect {
             a: first,
             b: second,
         },
+        Kind::Text | Kind::HLine => {
+            unreachable!("from_two_points is only called for two-click kinds")
+        }
     }
 }
 
