@@ -1776,6 +1776,7 @@ impl DelogApp {
                 playhead_snap: self.snap_playhead,
                 measuring_marker: self.marker_us.is_some(),
                 legends_visible: self.workspace.all_plot_legends_visible(),
+                annotation_toolbar_open: self.annotation_toolbar_open,
             },
             dynamic,
         )
@@ -2508,6 +2509,7 @@ impl eframe::App for DelogApp {
             playhead_snap: self.snap_playhead,
             measuring_marker: self.marker_us.is_some(),
             legend_position: self.settings.plot.legend_position,
+            annotation_toolbar_open: self.annotation_toolbar_open,
         };
         let header_output = egui::Panel::top("context_header")
             .show_inside(ui, |ui| {
