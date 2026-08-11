@@ -2023,9 +2023,7 @@ fn scene_map_overlay(
 ) -> Option<std::borrow::Cow<'static, str>> {
     if !reference_available {
         Some("Map unavailable: no georeference".into())
-    } else if manager_error.is_some() {
-        Some("Map cache error".into())
-    } else if failure == Some(TileFailureClass::Cache) {
+    } else if manager_error.is_some() || failure == Some(TileFailureClass::Cache) {
         Some("Map cache error".into())
     } else if failure == Some(TileFailureClass::NetworkTransient) && cached {
         Some("Map tiles offline - showing cached imagery".into())
