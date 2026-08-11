@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use super::{AnnotationLayer, DataPos, Geometry, Kind, default_geometry};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
