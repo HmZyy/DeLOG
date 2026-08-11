@@ -41,6 +41,7 @@ pub enum CommandId {
     CycleLegendPosition,
     ToggleLegends,
     OpenFieldStats,
+    ToggleAnnotationToolbar,
     OpenSettings,
     Exit,
     TogglePlayback,
@@ -299,6 +300,7 @@ impl CommandId {
         Self::CycleLegendPosition,
         Self::ToggleLegends,
         Self::OpenFieldStats,
+        Self::ToggleAnnotationToolbar,
         Self::OpenSettings,
         Self::Exit,
         Self::TogglePlayback,
@@ -339,14 +341,9 @@ impl CommandId {
                 ClassicMenu,
                 Palette
             ),
-            DisconnectLive => spec!(
-                "Disconnect all live links",
-                Source,
-                None,
-                "stop stream",
-                Header,
-                Palette
-            ),
+            DisconnectLive => {
+                spec!("Disconnect all live links", Source, None, "stop stream", Header, Palette)
+            }
             CancelTasks => spec!(
                 "Cancel active tasks",
                 Source,
@@ -356,14 +353,9 @@ impl CommandId {
                 ClassicMenu,
                 Palette
             ),
-            ExportData => spec!(
-                "Export data…",
-                Export,
-                None,
-                "csv parquet",
-                ClassicMenu,
-                Palette
-            ),
+            ExportData => {
+                spec!("Export data…", Export, None, "csv parquet", ClassicMenu, Palette)
+            }
             ExportDiagnostics => spec!(
                 "Export diagnostics…",
                 Export,
@@ -480,14 +472,9 @@ impl CommandId {
                 Shortcut,
                 Palette
             ),
-            ManageLayouts => spec!(
-                "Manage layouts…",
-                Workspace,
-                None,
-                "rename delete",
-                ClassicMenu,
-                Palette
-            ),
+            ManageLayouts => {
+                spec!("Manage layouts…", Workspace, None, "rename delete", ClassicMenu, Palette)
+            }
             ClearLayout => spec!(
                 "Clear current layout",
                 Workspace,
@@ -520,22 +507,12 @@ impl CommandId {
                 Shortcut,
                 Palette
             ),
-            OpenDataFlow => spec!(
-                "Data flow",
-                Analysis,
-                None,
-                "pipeline graph",
-                ClassicMenu,
-                Palette
-            ),
-            OpenScriptEditor => spec!(
-                "Script editor…",
-                Extensions,
-                None,
-                "automation code",
-                ClassicMenu,
-                Palette
-            ),
+            OpenDataFlow => {
+                spec!("Data flow", Analysis, None, "pipeline graph", ClassicMenu, Palette)
+            }
+            OpenScriptEditor => {
+                spec!("Script editor…", Extensions, None, "automation code", ClassicMenu, Palette)
+            }
             OpenScriptVariables => spec!(
                 "Script variables…",
                 Extensions,
@@ -544,14 +521,9 @@ impl CommandId {
                 ClassicMenu,
                 Palette
             ),
-            OpenParserEditor => spec!(
-                "Parser editor…",
-                Extensions,
-                None,
-                "custom decoder",
-                ClassicMenu,
-                Palette
-            ),
+            OpenParserEditor => {
+                spec!("Parser editor…", Extensions, None, "custom decoder", ClassicMenu, Palette)
+            }
             TogglePlayheadSnap => spec!(
                 "Toggle playhead snap",
                 Analysis,
@@ -576,16 +548,20 @@ impl CommandId {
                 GlobalToolbar,
                 Palette
             ),
-            ToggleLegends => spec!(
-                "Toggle legends",
-                Workspace,
-                None,
-                "plot key visibility",
-                Palette
-            ),
+            ToggleLegends => {
+                spec!("Toggle legends", Workspace, None, "plot key visibility", Palette)
+            }
             OpenFieldStats => {
                 spec!("Field stats", Workspace, None, "statistics traces", GlobalToolbar, Palette)
             }
+            ToggleAnnotationToolbar => spec!(
+                "Annotation toolbar",
+                Workspace,
+                None,
+                "annotation annotate draw shapes toolbar",
+                GlobalToolbar,
+                Palette
+            ),
             OpenSettings => spec!(
                 "Settings…",
                 Application,
@@ -677,7 +653,8 @@ impl CommandId {
             | EqualizePlots
             | CycleLegendPosition
             | ToggleLegends
-            | OpenFieldStats => ClassicMenuOwner::View,
+            | OpenFieldStats
+            | ToggleAnnotationToolbar => ClassicMenuOwner::View,
             SyncSources
             | OpenDataFlow
             | TogglePlayheadSnap
@@ -721,6 +698,9 @@ impl CommandId {
                 CommandAvailability::Disabled("Scripting support is not enabled in this build")
             }
             Self::OpenFieldStats if !context.has_plotted_traces => {
+                CommandAvailability::Disabled("Plot at least one trace first")
+            }
+            Self::ToggleAnnotationToolbar if !context.has_plotted_traces => {
                 CommandAvailability::Disabled("Plot at least one trace first")
             }
             Self::AddMeasuringMarker if !context.has_data => {
