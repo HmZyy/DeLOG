@@ -1169,7 +1169,7 @@ impl Behavior<'_> {
             if plot_rect.width() > 8.0 {
                 axes::draw(ui, plot_rect, x_range, y_range, None);
             }
-            self.plot_context_menu(tile_id, &response, pane, None);
+            self.plot_context_menu(tile_id, &response, pane);
             self.plot_info_window(ui, tile_id, pane, None);
             return tile_response;
         }
@@ -1179,7 +1179,7 @@ impl Behavior<'_> {
             self.actions.max_y_gutter = self.actions.max_y_gutter.max(own_gutter);
             self.handle_plot_interaction(&response, plot_rect);
             self.handle_zoom_drag(&response, plot_rect, pane);
-            self.plot_context_menu(tile_id, &response, pane, None);
+            self.plot_context_menu(tile_id, &response, pane);
             self.plot_info_window(ui, tile_id, pane, None);
             return tile_response;
         };
@@ -1214,6 +1214,19 @@ impl Behavior<'_> {
             self.services.armed_tool,
             tile_id.0,
         );
+        if response.secondary_clicked()
+            && let Some(pos) = response.interact_pointer_pos()
+        {
+            let tf = crate::plotting::annotations::PlotTransform::new(
+                annot_view,
+                self.services.origin_us,
+            );
+            pane.context_target =
+                crate::plotting::annotations::interact::context_target(&pane.annotations, &tf, pos);
+            if pane.context_target.is_some() {
+                pane.annotations.selected = pane.context_target;
+            }
+        }
         let marker_active =
             !annot_active && self.handle_marker_drag(&response, plot_rect, x_range, pane);
         if !annot_active && !marker_active {
@@ -1255,7 +1268,7 @@ impl Behavior<'_> {
         drop(pane_setup_timer);
 
         if !self.services.gpu.is_available() || plot_rect.width() <= 8.0 {
-            self.plot_context_menu(tile_id, &response, pane, None);
+            self.plot_context_menu(tile_id, &response, pane);
             self.plot_info_window(ui, tile_id, pane, None);
             return tile_response;
         }
@@ -1332,7 +1345,7 @@ impl Behavior<'_> {
                 p.x,
             );
         }
-        self.plot_context_menu(tile_id, &response, pane, Some((view.span_us(), y_range)));
+        self.plot_context_menu(tile_id, &response, pane);
 
         // Measurement marker (delta cursor): a dashed second
         // vertical with a ΔT readout vs the playhead. The per-trace ΔY computed
@@ -1514,42 +1527,31 @@ impl Behavior<'_> {
         tile_id: egui_tiles::TileId,
         response: &egui::Response,
         pane: &mut PlotPane,
-        view_span: Option<(i64, (f64, f64))>,
     ) {
         response.context_menu(|ui| {
             crate::ui::components::dense_rows(ui);
-            if let Some((span_us, y_range)) = view_span {
-                ui.menu_image_text_button(
-                    menu_icon(ui, crate::ui::icons::pencil()),
-                    "Add annotation",
-                    |ui| {
-                        let fallback = crate::plotting::annotations::DataPos {
-                            t_us: (*self.services.view)
-                                .map(|v| v.min_us + span_us / 2)
-                                .unwrap_or(self.services.origin_us),
-                            y: (y_range.0 + y_range.1) / 2.0,
-                        };
-                        crate::plotting::annotations::edit::menu(
-                            ui,
-                            &mut pane.annotations,
-                            span_us,
-                            y_range.1 - y_range.0,
-                            fallback,
-                        );
-                    },
-                );
-            }
-            if view_span.is_some()
-                && let Some(selected) = pane.annotations.selected
-                && ui
+            if let Some(target) = pane.context_target {
+                if ui
                     .add(egui::Button::image_and_text(
                         menu_icon(ui, crate::ui::icons::pencil()),
-                        "Edit annotation",
+                        "Edit",
                     ))
                     .clicked()
-            {
-                pane.annotations.editing = Some(selected);
-                ui.close();
+                {
+                    pane.annotations.editing = Some(target);
+                    ui.close();
+                }
+                if ui
+                    .add(egui::Button::image_and_text(
+                        menu_icon(ui, crate::ui::icons::trash()),
+                        "Delete",
+                    ))
+                    .clicked()
+                {
+                    pane.annotations.remove(target);
+                    ui.close();
+                }
+                return;
             }
             if ui
                 .add(egui::Button::image_and_text(

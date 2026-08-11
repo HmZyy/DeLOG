@@ -473,3 +473,33 @@ fn an_armed_drag_over_an_existing_annotation_does_not_move_it_and_is_not_consume
         "the existing annotation must not move while a tool is armed"
     );
 }
+
+#[test]
+fn a_secondary_click_on_a_shape_targets_it() {
+    let (layer, id) = layer_with_box();
+    let tf = unit_transform();
+    assert_eq!(
+        interact::context_target(&layer, &tf, egui::pos2(20.0, 50.0)),
+        Some(id)
+    );
+}
+
+#[test]
+fn a_secondary_click_on_empty_space_targets_nothing() {
+    let (layer, _) = layer_with_box();
+    let tf = unit_transform();
+    assert_eq!(
+        interact::context_target(&layer, &tf, egui::pos2(50.0, 50.0)),
+        None
+    );
+}
+
+#[test]
+fn a_secondary_click_outside_the_plot_rect_targets_nothing() {
+    let (layer, _) = layer_with_box();
+    let tf = unit_transform();
+    assert_eq!(
+        interact::context_target(&layer, &tf, egui::pos2(-40.0, 50.0)),
+        None
+    );
+}

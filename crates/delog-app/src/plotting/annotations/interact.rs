@@ -90,6 +90,13 @@ pub fn on_armed_click(
     }
 }
 
+pub fn context_target(layer: &AnnotationLayer, tf: &PlotTransform, pos: egui::Pos2) -> Option<u64> {
+    tf.rect()
+        .contains(pos)
+        .then(|| hit::topmost(layer.items(), tf, pos))
+        .flatten()
+}
+
 pub fn cancel_armed(armed: &mut Option<ArmedTool>) -> bool {
     let Some(tool) = armed.as_mut() else {
         return false;
