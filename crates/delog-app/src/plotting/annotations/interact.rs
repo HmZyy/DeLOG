@@ -129,6 +129,7 @@ pub fn interact(
         {
             return true;
         }
+        return false;
     }
 
     let mut consumed = layer.grab.is_some();
