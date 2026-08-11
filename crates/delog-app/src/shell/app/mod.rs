@@ -3046,10 +3046,10 @@ impl eframe::App for DelogApp {
             }
             let response =
                 sync_window.show(ui.ctx(), &snapshot, &self.gpu, frame, &mut self.caches);
-            if let Some(offsets) = response.apply {
-                if self.session.set_source_offsets(offsets).is_err() {
-                    sync_window.apply_dispatch_failed();
-                }
+            if let Some(offsets) = response.apply
+                && self.session.set_source_offsets(offsets).is_err()
+            {
+                sync_window.apply_dispatch_failed();
             }
             if sync_window.open {
                 self.sync_window = Some(sync_window);
