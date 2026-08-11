@@ -386,6 +386,8 @@ pub struct DelogApp {
     source_metadata_dialog: Option<delog_core::identity::SourceId>,
     field_metadata_dialog: Option<delog_core::identity::FieldId>,
     field_stats: FieldStatsController,
+    annotation_toolbar_open: bool,
+    armed_tool: Option<crate::plotting::annotations::place::ArmedTool>,
     sync_window: Option<SyncWindow>,
     dataflow: crate::dataflow::window::DataFlowUi,
     generate_markers_dialog: Option<crate::shell::generate_markers::GenerateMarkersDialog>,
@@ -531,6 +533,8 @@ impl DelogApp {
             source_metadata_dialog: None,
             field_metadata_dialog: None,
             field_stats: FieldStatsController::default(),
+            annotation_toolbar_open: false,
+            armed_tool: None,
             sync_window: None,
             dataflow: crate::dataflow::window::DataFlowUi::new(),
             generate_markers_dialog: None,
@@ -1935,6 +1939,9 @@ impl DelogApp {
                 CommandId::OpenFieldStats => {
                     self.field_stats.open_plotted(self.workspace.unique_fields());
                 }
+                CommandId::ToggleAnnotationToolbar => {
+                    self.annotation_toolbar_open = !self.annotation_toolbar_open;
+                }
                 CommandId::OpenSettings => self.settings_dialog.open(),
                 CommandId::Exit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
                 CommandId::TogglePlayback => self.playback.toggle(),
@@ -2822,6 +2829,13 @@ impl eframe::App for DelogApp {
             &mut self.caches,
             &mut self.field_stats,
         );
+        if self.annotation_toolbar_open {
+            crate::plotting::annotations::toolbar::show(
+                ui.ctx(),
+                &mut self.annotation_toolbar_open,
+                &mut self.armed_tool,
+            );
+        }
         if self.inspector.open {
             let traces = self.workspace.inspector_traces(&snapshot);
             let playhead_us = snapshot.global_time_range().map(|_| self.playback.t_us);
