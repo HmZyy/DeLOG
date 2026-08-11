@@ -1,4 +1,5 @@
 use super::hit;
+use super::place::{self, ArmedTool, Placed};
 use super::{AnnotationLayer, DataPos, Grab, PlotTransform};
 use crate::plotting::gpu::PaneView;
 
@@ -68,19 +69,66 @@ pub fn on_click(
     false
 }
 
+pub fn on_armed_click(
+    layer: &mut AnnotationLayer,
+    armed: &mut Option<ArmedTool>,
+    pane_key: u64,
+    at: DataPos,
+    span_us: i64,
+    y_span: f64,
+) -> bool {
+    let Some(tool) = armed.as_mut() else {
+        return false;
+    };
+    match place::on_plot_click(tool, pane_key, at, span_us, y_span) {
+        Placed::Pending => true,
+        Placed::Complete(geom) => {
+            place::commit(layer, geom);
+            *armed = None;
+            true
+        }
+    }
+}
+
+pub fn cancel_armed(armed: &mut Option<ArmedTool>) -> bool {
+    let Some(tool) = armed.as_mut() else {
+        return false;
+    };
+    if tool.pending.take().is_some() {
+        return true;
+    }
+    *armed = None;
+    true
+}
+
 pub fn interact(
     ui: &egui::Ui,
     response: &egui::Response,
     view: PaneView,
     origin_us: i64,
     layer: &mut AnnotationLayer,
+    armed: &mut Option<ArmedTool>,
+    pane_key: u64,
 ) -> bool {
     let tf = PlotTransform::new(view, origin_us);
+    let span_us = (((view.x_range.1 - view.x_range.0) as f64) * 1e6) as i64;
+    let y_span = view.y_range.1 - view.y_range.0;
 
-    if let Some(pos) = response.hover_pos()
-        && tf.rect().contains(pos)
-    {
-        layer.last_cursor = Some(tf.to_data(pos));
+    if armed.is_some() {
+        if response.clicked()
+            && let Some(pos) = response.interact_pointer_pos()
+            && tf.rect().contains(pos)
+            && on_armed_click(layer, armed, pane_key, tf.to_data(pos), span_us, y_span)
+        {
+            return true;
+        }
+        if response.hovered()
+            && !ui.ctx().egui_wants_keyboard_input()
+            && ui.input(|i| i.key_pressed(egui::Key::Escape))
+            && cancel_armed(armed)
+        {
+            return true;
+        }
     }
 
     let mut consumed = layer.grab.is_some();

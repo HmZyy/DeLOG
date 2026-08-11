@@ -41,12 +41,29 @@ pub fn label_anchor(geom: &Geometry, tf: &PlotTransform) -> (egui::Pos2, egui::A
     }
 }
 
-pub fn draw(ui: &egui::Ui, view: PaneView, origin_us: i64, layer: &AnnotationLayer) {
-    if layer.is_empty() {
+pub fn draw(
+    ui: &egui::Ui,
+    view: PaneView,
+    origin_us: i64,
+    layer: &AnnotationLayer,
+    preview: Option<Geometry>,
+) {
+    if layer.is_empty() && preview.is_none() {
         return;
     }
     let tf = PlotTransform::new(view, origin_us);
     let painter = ui.painter().with_clip_rect(tf.rect());
+    if let Some(geom) = preview {
+        let ghost = Annotation {
+            id: u64::MAX,
+            geom,
+            label: String::new(),
+            style: super::default_style(0),
+        };
+        if is_visible(&ghost, &tf) {
+            paint_geometry(&painter, &ghost, &tf, false);
+        }
+    }
     for annot in layer.items() {
         if !is_visible(annot, &tf) {
             continue;

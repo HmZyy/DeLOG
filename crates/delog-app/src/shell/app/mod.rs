@@ -2920,6 +2920,7 @@ impl eframe::App for DelogApp {
                         hover_mode: &mut self.hover_mode,
                         snap_playhead: &mut self.snap_playhead,
                         marker_us: &mut self.marker_us,
+                        armed_tool: &mut self.armed_tool,
                         render_tuning: self.settings.render,
                         scene3d: self.settings.scene3d,
                         playhead_us: snapshot.global_time_range().map(|_| self.playback.t_us),

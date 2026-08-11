@@ -180,3 +180,137 @@ fn a_double_click_on_empty_space_is_not_consumed_so_the_view_reset_still_happens
     assert_eq!(layer.selected, None);
     assert_eq!(layer.editing, None);
 }
+
+use crate::plotting::annotations::place::ArmedTool;
+
+const IPANE: u64 = 7;
+const ISPAN_US: i64 = 100_000_000;
+const IY_SPAN: f64 = 100.0;
+
+#[test]
+fn an_armed_one_click_tool_consumes_the_click_and_creates_a_shape() {
+    let mut layer = AnnotationLayer::default();
+    let mut armed = Some(ArmedTool::new(Kind::HLine));
+    let consumed = interact::on_armed_click(
+        &mut layer,
+        &mut armed,
+        IPANE,
+        DataPos { t_us: 0, y: 40.0 },
+        ISPAN_US,
+        IY_SPAN,
+    );
+    assert!(consumed);
+    assert_eq!(layer.items().len(), 1);
+    assert_eq!(armed, None, "the tool disarms once a shape completes");
+    assert_eq!(layer.items()[0].geom, Geometry::HLine { y: 40.0 });
+}
+
+#[test]
+fn an_armed_two_click_tool_consumes_both_clicks_and_creates_one_shape() {
+    let mut layer = AnnotationLayer::default();
+    let mut armed = Some(ArmedTool::new(Kind::Rect));
+    let first = interact::on_armed_click(
+        &mut layer,
+        &mut armed,
+        IPANE,
+        DataPos {
+            t_us: 10_000_000,
+            y: 10.0,
+        },
+        ISPAN_US,
+        IY_SPAN,
+    );
+    assert!(first);
+    assert!(
+        layer.items().is_empty(),
+        "nothing is created until the second click"
+    );
+    assert!(armed.is_some_and(|t| t.pending.is_some()));
+
+    let second = interact::on_armed_click(
+        &mut layer,
+        &mut armed,
+        IPANE,
+        DataPos {
+            t_us: 40_000_000,
+            y: 60.0,
+        },
+        ISPAN_US,
+        IY_SPAN,
+    );
+    assert!(second);
+    assert_eq!(layer.items().len(), 1);
+    assert_eq!(armed, None);
+}
+
+#[test]
+fn a_completed_placement_selects_the_new_annotation() {
+    let mut layer = AnnotationLayer::default();
+    let mut armed = Some(ArmedTool::new(Kind::HLine));
+    interact::on_armed_click(
+        &mut layer,
+        &mut armed,
+        IPANE,
+        DataPos { t_us: 0, y: 5.0 },
+        ISPAN_US,
+        IY_SPAN,
+    );
+    let id = layer.items()[0].id;
+    assert_eq!(layer.selected, Some(id));
+}
+
+#[test]
+fn placing_text_opens_its_editor() {
+    let mut layer = AnnotationLayer::default();
+    let mut armed = Some(ArmedTool::new(Kind::Text));
+    interact::on_armed_click(
+        &mut layer,
+        &mut armed,
+        IPANE,
+        DataPos { t_us: 0, y: 5.0 },
+        ISPAN_US,
+        IY_SPAN,
+    );
+    assert_eq!(layer.editing, Some(layer.items()[0].id));
+}
+
+#[test]
+fn no_armed_tool_means_the_click_is_not_consumed_for_placement() {
+    let mut layer = AnnotationLayer::default();
+    let mut armed = None;
+    let consumed = interact::on_armed_click(
+        &mut layer,
+        &mut armed,
+        IPANE,
+        DataPos { t_us: 0, y: 5.0 },
+        ISPAN_US,
+        IY_SPAN,
+    );
+    assert!(!consumed);
+    assert!(layer.items().is_empty());
+}
+
+#[test]
+fn cancel_clears_a_pending_anchor_before_disarming() {
+    let mut armed = Some(ArmedTool::new(Kind::Rect));
+    let mut layer = AnnotationLayer::default();
+    interact::on_armed_click(
+        &mut layer,
+        &mut armed,
+        IPANE,
+        DataPos { t_us: 0, y: 5.0 },
+        ISPAN_US,
+        IY_SPAN,
+    );
+    assert!(
+        interact::cancel_armed(&mut armed),
+        "first cancel clears the anchor"
+    );
+    assert!(armed.is_some_and(|t| t.pending.is_none()));
+    assert!(interact::cancel_armed(&mut armed), "second cancel disarms");
+    assert_eq!(armed, None);
+    assert!(
+        !interact::cancel_armed(&mut armed),
+        "nothing left to cancel"
+    );
+}
