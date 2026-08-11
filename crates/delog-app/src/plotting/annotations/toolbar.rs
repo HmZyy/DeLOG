@@ -34,3 +34,29 @@ pub fn show(ctx: &egui::Context, open: &mut bool, armed: &mut Option<ArmedTool>)
         *armed = None;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn closing_the_toolbar_disarms_the_active_tool() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        let mut open = true;
+        let mut armed = Some(ArmedTool::new(Kind::Text));
+        let raw_input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(raw_input(), |ui| show(ui.ctx(), &mut open, &mut armed));
+        assert_eq!(armed, Some(ArmedTool::new(Kind::Text)));
+
+        open = false;
+        let _ = ctx.run_ui(raw_input(), |ui| show(ui.ctx(), &mut open, &mut armed));
+        assert_eq!(armed, None);
+    }
+}
