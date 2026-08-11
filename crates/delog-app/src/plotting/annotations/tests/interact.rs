@@ -314,3 +314,162 @@ fn cancel_clears_a_pending_anchor_before_disarming() {
         "nothing left to cancel"
     );
 }
+
+fn armed_test_view() -> PaneView {
+    PaneView {
+        rect: egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(100.0, 100.0)),
+        x_range: (0.0, 100.0),
+        y_range: (0.0, 100.0),
+    }
+}
+
+fn pointer_button(pos: egui::Pos2, pressed: bool) -> egui::Event {
+    egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::default(),
+    }
+}
+
+fn drive_interact(
+    ctx: &egui::Context,
+    view: PaneView,
+    layer: &mut AnnotationLayer,
+    armed: &mut Option<ArmedTool>,
+    pane_key: u64,
+    events: Vec<egui::Event>,
+) -> bool {
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(200.0, 200.0),
+        )),
+        events,
+        ..Default::default()
+    };
+    let mut consumed = false;
+    let _ = ctx.run_ui(input, |ui| {
+        let response = ui.interact(
+            view.rect,
+            egui::Id::new("interact_test_pane"),
+            egui::Sense::click_and_drag(),
+        );
+        consumed = interact::interact(ui, &response, view, 0, layer, armed, pane_key);
+    });
+    consumed
+}
+
+fn prime_interact(ctx: &egui::Context, view: PaneView) {
+    for _ in 0..2 {
+        let mut layer = AnnotationLayer::default();
+        let mut armed = None;
+        drive_interact(ctx, view, &mut layer, &mut armed, IPANE, vec![]);
+    }
+}
+
+#[test]
+fn an_unarmed_drag_over_empty_space_is_not_consumed_so_panning_still_runs() {
+    let ctx = egui::Context::default();
+    let view = armed_test_view();
+    prime_interact(&ctx, view);
+    let mut layer = AnnotationLayer::default();
+    let mut armed = None;
+    let start = egui::pos2(50.0, 50.0);
+
+    drive_interact(
+        &ctx,
+        view,
+        &mut layer,
+        &mut armed,
+        IPANE,
+        vec![pointer_button(start, true)],
+    );
+    let consumed = drive_interact(
+        &ctx,
+        view,
+        &mut layer,
+        &mut armed,
+        IPANE,
+        vec![egui::Event::PointerMoved(start + egui::vec2(20.0, 0.0))],
+    );
+
+    assert!(!consumed, "a drag over empty space must not be consumed");
+    assert_eq!(layer.grab, None);
+}
+
+#[test]
+fn an_armed_click_inside_the_plot_is_consumed_and_creates_the_annotation() {
+    let ctx = egui::Context::default();
+    let view = armed_test_view();
+    prime_interact(&ctx, view);
+    let mut layer = AnnotationLayer::default();
+    let mut armed = Some(ArmedTool::new(Kind::HLine));
+    let pos = egui::pos2(50.0, 50.0);
+
+    drive_interact(
+        &ctx,
+        view,
+        &mut layer,
+        &mut armed,
+        IPANE,
+        vec![pointer_button(pos, true)],
+    );
+    let consumed = drive_interact(
+        &ctx,
+        view,
+        &mut layer,
+        &mut armed,
+        IPANE,
+        vec![pointer_button(pos, false)],
+    );
+
+    assert!(consumed);
+    assert_eq!(layer.items().len(), 1);
+    assert_eq!(armed, None);
+}
+
+#[test]
+fn an_armed_drag_over_an_existing_annotation_does_not_move_it_and_is_not_consumed() {
+    let ctx = egui::Context::default();
+    let view = armed_test_view();
+    prime_interact(&ctx, view);
+    let (mut layer, id) = layer_with_box();
+    let mut armed = Some(ArmedTool::new(Kind::Rect));
+    let start = egui::pos2(20.0, 50.0);
+
+    drive_interact(
+        &ctx,
+        view,
+        &mut layer,
+        &mut armed,
+        IPANE,
+        vec![pointer_button(start, true)],
+    );
+    let mut drag_consumed = Vec::new();
+    for offset in [10.0, 15.0, 20.0] {
+        let pos = start + egui::vec2(0.0, offset);
+        drag_consumed.push(drive_interact(
+            &ctx,
+            view,
+            &mut layer,
+            &mut armed,
+            IPANE,
+            vec![egui::Event::PointerMoved(pos)],
+        ));
+    }
+
+    assert!(
+        !drag_consumed.iter().any(|&c| c),
+        "an armed drag over an existing annotation must not be consumed, so panning still runs"
+    );
+    assert_eq!(
+        layer.grab, None,
+        "an armed drag must never grab an existing annotation"
+    );
+    assert_eq!(
+        layer.get(id).expect("exists").geom,
+        box_geom(),
+        "the existing annotation must not move while a tool is armed"
+    );
+}
