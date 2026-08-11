@@ -67,3 +67,4 @@ mod edit;
 mod geometry;
 mod hit;
 mod interact;
+mod place;

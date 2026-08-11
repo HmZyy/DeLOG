@@ -2,6 +2,7 @@ pub mod draw;
 pub mod edit;
 pub mod hit;
 pub mod interact;
+pub mod place;
 
 use crate::plotting::gpu::PaneView;
 
@@ -274,11 +275,15 @@ impl AnnotationLayer {
     }
 
     pub fn add(&mut self, kind: Kind, at: DataPos, span_us: i64, y_span: f64) -> u64 {
+        self.add_geometry(default_geometry(kind, at, span_us, y_span))
+    }
+
+    pub fn add_geometry(&mut self, geom: Geometry) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         self.items.push(Annotation {
             id,
-            geom: default_geometry(kind, at, span_us, y_span),
+            geom,
             label: String::new(),
             style: default_style(id),
         });
