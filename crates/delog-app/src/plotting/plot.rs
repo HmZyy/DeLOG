@@ -208,6 +208,7 @@ pub struct PlotPane {
     /// Transient rename-dialog state; `Some` while the dialog is open.
     pub rename: Option<RenameDialog>,
     pub annotations: crate::plotting::annotations::AnnotationLayer,
+    pub context_target: Option<u64>,
 }
 
 impl Default for PlotPane {
@@ -224,6 +225,7 @@ impl Default for PlotPane {
             zoom_drag_anchor_us: None,
             rename: None,
             annotations: crate::plotting::annotations::AnnotationLayer::default(),
+            context_target: None,
         }
     }
 }

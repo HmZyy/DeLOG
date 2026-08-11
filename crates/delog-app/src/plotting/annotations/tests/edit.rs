@@ -2,59 +2,10 @@ use super::*;
 use crate::plotting::annotations::edit;
 
 #[test]
-fn creating_text_selects_it_and_opens_the_editor() {
-    let mut layer = AnnotationLayer::default();
-    let id = edit::create_at(
-        &mut layer,
-        Kind::Text,
-        DataPos { t_us: 5, y: 1.0 },
-        1_000_000,
-        10.0,
-    );
-    assert_eq!(layer.selected, Some(id));
-    assert_eq!(layer.editing, Some(id));
-}
-
-#[test]
-fn creating_a_shape_selects_it_without_opening_the_editor() {
-    let mut layer = AnnotationLayer::default();
-    let id = edit::create_at(
-        &mut layer,
-        Kind::Rect,
-        DataPos { t_us: 5, y: 1.0 },
-        1_000_000,
-        10.0,
-    );
-    assert_eq!(layer.selected, Some(id));
-    assert_eq!(layer.editing, None);
-}
-
-#[test]
-fn creation_places_the_shape_at_the_requested_anchor() {
-    let mut layer = AnnotationLayer::default();
-    let id = edit::create_at(
-        &mut layer,
-        Kind::HLine,
-        DataPos { t_us: 5, y: 120.0 },
-        1_000_000,
-        10.0,
-    );
-    assert_eq!(
-        layer.get(id).expect("exists").geom,
-        Geometry::HLine { y: 120.0 }
-    );
-}
-
-#[test]
 fn closing_the_editor_on_an_empty_text_removes_it() {
     let mut layer = AnnotationLayer::default();
-    let id = edit::create_at(
-        &mut layer,
-        Kind::Text,
-        DataPos { t_us: 0, y: 0.0 },
-        1_000_000,
-        10.0,
-    );
+    let id = layer.add(Kind::Text, DataPos { t_us: 0, y: 0.0 }, 1_000_000, 10.0);
+    layer.editing = Some(id);
     edit::close_editor(&mut layer);
     assert!(layer.get(id).is_none());
     assert_eq!(layer.editing, None);
@@ -63,13 +14,8 @@ fn closing_the_editor_on_an_empty_text_removes_it() {
 #[test]
 fn closing_the_editor_keeps_a_labelled_text() {
     let mut layer = AnnotationLayer::default();
-    let id = edit::create_at(
-        &mut layer,
-        Kind::Text,
-        DataPos { t_us: 0, y: 0.0 },
-        1_000_000,
-        10.0,
-    );
+    let id = layer.add(Kind::Text, DataPos { t_us: 0, y: 0.0 }, 1_000_000, 10.0);
+    layer.editing = Some(id);
     layer.get_mut(id).expect("exists").label = "spike".to_string();
     edit::close_editor(&mut layer);
     assert!(layer.get(id).is_some());
@@ -79,61 +25,10 @@ fn closing_the_editor_keeps_a_labelled_text() {
 #[test]
 fn closing_the_editor_keeps_an_unlabelled_shape() {
     let mut layer = AnnotationLayer::default();
-    let id = edit::create_at(
-        &mut layer,
-        Kind::Rect,
-        DataPos { t_us: 0, y: 0.0 },
-        1_000_000,
-        10.0,
-    );
+    let id = layer.add(Kind::Rect, DataPos { t_us: 0, y: 0.0 }, 1_000_000, 10.0);
     layer.editing = Some(id);
     edit::close_editor(&mut layer);
     assert!(layer.get(id).is_some());
-}
-
-#[test]
-fn creating_a_new_shape_sweeps_a_stale_empty_text_editor() {
-    let mut layer = AnnotationLayer::default();
-    let text_id = edit::create_at(
-        &mut layer,
-        Kind::Text,
-        DataPos { t_us: 0, y: 0.0 },
-        1_000_000,
-        10.0,
-    );
-    let rect_id = edit::create_at(
-        &mut layer,
-        Kind::Rect,
-        DataPos { t_us: 5, y: 1.0 },
-        1_000_000,
-        10.0,
-    );
-    assert!(layer.get(text_id).is_none());
-    assert!(layer.get(rect_id).is_some());
-    assert_eq!(layer.selected, Some(rect_id));
-}
-
-#[test]
-fn creating_a_new_shape_does_not_sweep_a_labelled_stale_text() {
-    let mut layer = AnnotationLayer::default();
-    let text_id = edit::create_at(
-        &mut layer,
-        Kind::Text,
-        DataPos { t_us: 0, y: 0.0 },
-        1_000_000,
-        10.0,
-    );
-    layer.get_mut(text_id).expect("exists").label = "spike".to_string();
-    let rect_id = edit::create_at(
-        &mut layer,
-        Kind::Rect,
-        DataPos { t_us: 5, y: 1.0 },
-        1_000_000,
-        10.0,
-    );
-    assert!(layer.get(text_id).is_some());
-    assert!(layer.get(rect_id).is_some());
-    assert_eq!(layer.selected, Some(rect_id));
 }
 
 #[test]
