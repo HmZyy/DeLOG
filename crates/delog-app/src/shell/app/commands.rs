@@ -211,6 +211,7 @@ pub struct PresentationState {
     pub playhead_snap: bool,
     pub measuring_marker: bool,
     pub legends_visible: bool,
+    pub annotation_toolbar_open: bool,
 }
 
 impl Default for PresentationState {
@@ -229,6 +230,7 @@ impl Default for PresentationState {
             playhead_snap: false,
             measuring_marker: false,
             legends_visible: true,
+            annotation_toolbar_open: false,
         }
     }
 }
@@ -247,6 +249,7 @@ impl PresentationState {
             CommandId::TogglePlayheadSnap => Some(self.playhead_snap),
             CommandId::AddMeasuringMarker => Some(self.measuring_marker),
             CommandId::ToggleLegends => Some(self.legends_visible),
+            CommandId::ToggleAnnotationToolbar => Some(self.annotation_toolbar_open),
             _ => None,
         }
     }
