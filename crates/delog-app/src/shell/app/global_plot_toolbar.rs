@@ -10,16 +10,18 @@ pub enum GlobalPlotControl {
     ToggleMeasuringMarker,
     CycleLegendPosition,
     OpenFieldStats,
+    ToggleAnnotationToolbar,
 }
 
 #[cfg(test)]
 impl GlobalPlotControl {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::CursorSampling(SampleMode::Prev),
         Self::TogglePlayheadSnap,
         Self::ToggleMeasuringMarker,
         Self::CycleLegendPosition,
         Self::OpenFieldStats,
+        Self::ToggleAnnotationToolbar,
     ];
 }
 
@@ -32,6 +34,9 @@ pub const fn command_for_control(control: GlobalPlotControl) -> AppCommand {
         }
         GlobalPlotControl::CycleLegendPosition => AppCommand::Static(CommandId::CycleLegendPosition),
         GlobalPlotControl::OpenFieldStats => AppCommand::Static(CommandId::OpenFieldStats),
+        GlobalPlotControl::ToggleAnnotationToolbar => {
+            AppCommand::Static(CommandId::ToggleAnnotationToolbar)
+        }
     }
 }
 
@@ -40,6 +45,7 @@ pub struct GlobalPlotToolbarModel {
     pub playhead_snap: bool,
     pub measuring_marker: bool,
     pub legend_position: LegendPosition,
+    pub annotation_toolbar_open: bool,
 }
 
 fn toolbar_container_frame(_style: &egui::Style) -> egui::Frame {
@@ -159,6 +165,38 @@ pub fn show(
                 commands.push(stats);
             }
 
+            let annotations = command_for_control(GlobalPlotControl::ToggleAnnotationToolbar);
+            let annotations_presentation = presentations
+                .iter()
+                .find(|presentation| presentation.command == annotations);
+            let annotations_enabled = annotations_presentation.is_none_or(|presentation| {
+                presentation.availability == CommandAvailability::Enabled
+            });
+            let annotations_response = ui
+                .add_enabled_ui(annotations_enabled, |ui| {
+                    crate::ui::components::icon_button(
+                        ui,
+                        crate::ui::icons::pencil(),
+                        annotations_presentation
+                            .map(|presentation| presentation.label.as_str())
+                            .unwrap_or("Annotation toolbar"),
+                        annotations_presentation
+                            .and_then(|presentation| presentation.selected)
+                            .unwrap_or(model.annotation_toolbar_open),
+                    )
+                })
+                .inner;
+            let annotations_response = match annotations_presentation
+                .map(|presentation| &presentation.availability)
+            {
+                Some(CommandAvailability::Disabled(reason)) => {
+                    annotations_response.on_disabled_hover_text(*reason)
+                }
+                _ => annotations_response,
+            };
+            if annotations_response.clicked() {
+                commands.push(annotations);
+            }
         });
     });
     commands
@@ -240,6 +278,7 @@ mod tests {
             playhead_snap: false,
             measuring_marker: false,
             legend_position: LegendPosition::TopRight,
+            annotation_toolbar_open: false,
         };
         let input = || egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
@@ -271,13 +310,35 @@ mod tests {
 
     #[test]
     fn toolbar_actions_are_all_global() {
-        assert_eq!(GlobalPlotControl::ALL.len(), 5);
+        assert_eq!(GlobalPlotControl::ALL.len(), 6);
         assert!(!format!("{:?}", GlobalPlotControl::ALL).contains("Split"));
         assert!(!format!("{:?}", GlobalPlotControl::ALL).contains("FitAll"));
         assert!(!format!("{:?}", GlobalPlotControl::ALL).contains("ToggleAllLegends"));
         assert!(!format!("{:?}", GlobalPlotControl::ALL).contains("EqualizePlotHeights"));
         assert!(GlobalPlotControl::ALL.contains(&GlobalPlotControl::ToggleMeasuringMarker));
         assert!(GlobalPlotControl::ALL.contains(&GlobalPlotControl::OpenFieldStats));
+        assert!(GlobalPlotControl::ALL.contains(&GlobalPlotControl::ToggleAnnotationToolbar));
+    }
+
+    #[test]
+    fn every_global_toolbar_command_is_reachable_from_a_toolbar_control() {
+        let missing: Vec<_> = CommandId::ALL
+            .iter()
+            .filter(|id| {
+                id.spec()
+                    .routes
+                    .contains(&crate::shell::app::commands::AccessRoute::GlobalToolbar)
+            })
+            .filter(|id| {
+                !GlobalPlotControl::ALL
+                    .iter()
+                    .any(|control| command_for_control(*control) == AppCommand::Static(**id))
+            })
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "commands routed to the global toolbar but never rendered there: {missing:?}"
+        );
     }
 
     #[test]
@@ -350,6 +411,7 @@ mod tests {
             playhead_snap: false,
             measuring_marker: false,
             legend_position: LegendPosition::TopLeft,
+            annotation_toolbar_open: false,
         };
         let presentations = crate::shell::app::commands::present_commands(
             &crate::shell::app::commands::CommandContext::default(),
