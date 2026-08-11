@@ -160,6 +160,43 @@ fn commit_adds_selects_and_opens_the_editor_only_for_text() {
 }
 
 #[test]
+fn commit_sweeps_a_pending_empty_label_text_left_over_from_before() {
+    let mut layer = AnnotationLayer::default();
+    let abandoned = place::commit(&mut layer, Geometry::Text { at: pos(0, 0.0) });
+    assert_eq!(layer.editing, Some(abandoned));
+    assert_eq!(layer.items().len(), 1);
+
+    let created = place::commit(&mut layer, Geometry::HLine { y: 1.0 });
+
+    assert!(
+        layer.get(abandoned).is_none(),
+        "the abandoned empty-label text annotation must be swept"
+    );
+    assert_eq!(layer.items().len(), 1);
+    assert_eq!(layer.selected, Some(created));
+    assert_eq!(layer.editing, None);
+    assert_eq!(
+        layer.get(created).expect("exists").geom,
+        Geometry::HLine { y: 1.0 }
+    );
+}
+
+#[test]
+fn commit_leaves_a_pending_text_with_a_label_alone() {
+    let mut layer = AnnotationLayer::default();
+    let labelled = place::commit(&mut layer, Geometry::Text { at: pos(0, 0.0) });
+    layer.get_mut(labelled).expect("exists").label = "keep me".to_string();
+
+    place::commit(&mut layer, Geometry::HLine { y: 1.0 });
+
+    assert!(
+        layer.get(labelled).is_some(),
+        "a text annotation with a label must not be swept"
+    );
+    assert_eq!(layer.items().len(), 2);
+}
+
+#[test]
 fn add_geometry_stores_the_exact_geometry_given() {
     let mut layer = AnnotationLayer::default();
     let geom = Geometry::Rect {
