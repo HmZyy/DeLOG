@@ -61,7 +61,7 @@ pub fn draw(
             style: super::default_style(0),
         };
         if is_visible(&ghost, &tf) {
-            paint_geometry(&painter, &ghost, &tf, false);
+            paint_geometry(&painter, &ghost, &tf, false, true);
         }
     }
     for annot in layer.items() {
@@ -69,7 +69,7 @@ pub fn draw(
             continue;
         }
         let selected = layer.selected == Some(annot.id);
-        paint_geometry(&painter, annot, &tf, selected);
+        paint_geometry(&painter, annot, &tf, selected, false);
         paint_label(&painter, annot, &tf);
         if selected {
             paint_handles(&painter, annot, &tf);
@@ -77,14 +77,21 @@ pub fn draw(
     }
 }
 
-fn paint_geometry(painter: &egui::Painter, annot: &Annotation, tf: &PlotTransform, selected: bool) {
+fn paint_geometry(
+    painter: &egui::Painter,
+    annot: &Annotation,
+    tf: &PlotTransform,
+    selected: bool,
+    dim: bool,
+) {
     let width = if selected {
         annot.style.stroke_px + SELECTED_STROKE_BOOST
     } else {
         annot.style.stroke_px
     };
-    let stroke = egui::Stroke::new(width, annot.style.color32());
-    let fill = annot.style.fill32();
+    let dim_factor = if dim { 0.5 } else { 1.0 };
+    let stroke = egui::Stroke::new(width, annot.style.color32().gamma_multiply(dim_factor));
+    let fill = annot.style.fill32().gamma_multiply(dim_factor);
     match annot.geom {
         Geometry::Text { .. } => {}
         Geometry::Segment { from, to } => {
