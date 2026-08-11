@@ -255,7 +255,6 @@ pub struct AnnotationLayer {
     pub selected: Option<u64>,
     pub grab: Option<Grab>,
     pub editing: Option<u64>,
-    pub last_cursor: Option<DataPos>,
 }
 
 impl AnnotationLayer {
@@ -275,6 +274,7 @@ impl AnnotationLayer {
         self.items.iter_mut().find(|a| a.id == id)
     }
 
+    #[cfg(test)]
     pub fn add(&mut self, kind: Kind, at: DataPos, span_us: i64, y_span: f64) -> u64 {
         self.add_geometry(default_geometry(kind, at, span_us, y_span))
     }
