@@ -12,7 +12,7 @@ pub fn icon_for(kind: Kind) -> egui::ImageSource<'static> {
 }
 
 pub fn show(ctx: &egui::Context, open: &mut bool, armed: &mut Option<ArmedTool>) {
-    egui::Window::new("Annotations")
+    egui::Window::new("Annotation toolbar")
         .id(egui::Id::new("annotation_toolbar"))
         .open(open)
         .resizable(false)
