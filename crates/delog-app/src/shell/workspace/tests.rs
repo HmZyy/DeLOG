@@ -1320,3 +1320,121 @@ fn opening_annotation_editors_without_a_focused_pane_keeps_the_lowest_tile_id() 
         }
     }
 }
+
+fn three_plot_workspace() -> (Workspace, Vec<egui_tiles::TileId>) {
+    let mut workspace = Workspace::new();
+    let first = workspace.tree.root().unwrap();
+    workspace.split_plot(first, SplitDirection::Horizontal);
+    workspace.split_plot(first, SplitDirection::Vertical);
+    let mut plots: Vec<egui_tiles::TileId> = workspace
+        .tree
+        .tiles
+        .iter()
+        .filter(|(_, tile)| matches!(tile, egui_tiles::Tile::Pane(Pane::Plot(_))))
+        .map(|(id, _)| *id)
+        .collect();
+    plots.sort_by_key(|id| id.0);
+    assert_eq!(plots.len(), 3);
+    (workspace, plots)
+}
+
+fn seed_annotation(
+    workspace: &mut Workspace,
+    tile: egui_tiles::TileId,
+    kind: crate::plotting::annotations::Kind,
+) -> u64 {
+    use crate::plotting::annotations::DataPos;
+    let Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) = workspace.tree.tiles.get_mut(tile) else {
+        panic!("expected a plot pane");
+    };
+    pane.annotations
+        .add(kind, DataPos { t_us: 0, y: 0.0 }, 1_000_000, 10.0)
+}
+
+fn annotation_count(workspace: &Workspace, tile: egui_tiles::TileId) -> usize {
+    let Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) = workspace.tree.tiles.get(tile) else {
+        panic!("expected a plot pane");
+    };
+    pane.annotations.items().len()
+}
+
+#[test]
+fn annotation_rows_are_labelled_in_tile_id_order() {
+    use crate::plotting::annotations::Kind;
+
+    let (mut workspace, plots) = three_plot_workspace();
+    for tile in &plots {
+        seed_annotation(&mut workspace, *tile, Kind::Rect);
+    }
+
+    let rows = workspace.annotation_rows();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(
+        rows.iter().map(|r| r.pane).collect::<Vec<_>>(),
+        plots.iter().map(|id| id.0).collect::<Vec<_>>(),
+        "rows must follow tile-id order, not the tile map's hash order"
+    );
+    assert_eq!(
+        rows.iter().map(|r| r.plot_label.as_str()).collect::<Vec<_>>(),
+        vec!["Plot 1", "Plot 2", "Plot 3"]
+    );
+}
+
+#[test]
+fn annotation_rows_carry_kind_and_repeat_ids_across_plots() {
+    use crate::plotting::annotations::Kind;
+
+    let (mut workspace, plots) = three_plot_workspace();
+    let first_id = seed_annotation(&mut workspace, plots[0], Kind::HLine);
+    let second_id = seed_annotation(&mut workspace, plots[1], Kind::Text);
+
+    let rows = workspace.annotation_rows();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].id, first_id);
+    assert_eq!(rows[1].id, second_id);
+    assert_eq!(rows[0].id, rows[1].id, "ids are per pane, so they repeat");
+    assert_eq!(rows[0].kind, Kind::HLine);
+    assert_eq!(rows[1].kind, Kind::Text);
+    assert_ne!(rows[0].pane, rows[1].pane);
+}
+
+#[test]
+fn removing_one_annotation_leaves_the_same_id_in_other_plots() {
+    use crate::plotting::annotations::Kind;
+    use crate::plotting::annotations::toolbar::ToolbarAction;
+
+    let (mut workspace, plots) = three_plot_workspace();
+    let id = seed_annotation(&mut workspace, plots[0], Kind::Rect);
+    seed_annotation(&mut workspace, plots[1], Kind::Rect);
+
+    workspace.apply_annotation_action(ToolbarAction::Remove {
+        pane: plots[0].0,
+        id,
+    });
+
+    assert_eq!(annotation_count(&workspace, plots[0]), 0);
+    assert_eq!(
+        annotation_count(&workspace, plots[1]),
+        1,
+        "the same id in another plot must survive"
+    );
+}
+
+#[test]
+fn remove_all_clears_every_plot() {
+    use crate::plotting::annotations::Kind;
+    use crate::plotting::annotations::toolbar::ToolbarAction;
+
+    let (mut workspace, plots) = three_plot_workspace();
+    for tile in &plots {
+        seed_annotation(&mut workspace, *tile, Kind::Ellipse);
+        seed_annotation(&mut workspace, *tile, Kind::Segment);
+    }
+
+    workspace.apply_annotation_action(ToolbarAction::RemoveAll);
+
+    for tile in &plots {
+        assert_eq!(annotation_count(&workspace, *tile), 0);
+    }
+    assert!(workspace.annotation_rows().is_empty());
+}

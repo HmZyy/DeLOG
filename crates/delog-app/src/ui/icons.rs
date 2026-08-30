@@ -183,3 +183,7 @@ pub fn circle() -> ImageSource<'static> {
 pub fn minus() -> ImageSource<'static> {
     egui::include_image!("../../assets/icons/minus.svg")
 }
+
+pub fn slash() -> ImageSource<'static> {
+    egui::include_image!("../../assets/icons/slash.svg")
+}

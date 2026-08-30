@@ -313,7 +313,7 @@ impl CommandId {
                 )
             }
             ToggleAnnotationToolbar => spec!(
-                "Annotation toolbar",
+                "Annotations",
                 Workspace,
                 None,
                 "annotation annotate draw shapes toolbar",
