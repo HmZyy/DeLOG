@@ -3,6 +3,7 @@ use delog_core::snapshot::StoreSnapshot;
 use crate::session::vehicle_profiles::{VehicleProfileDoc, VehicleProfileLibrary};
 use crate::ui::logging::LogLevel;
 
+use super::draft::Draft;
 use super::profile_draft::ProfileDraft;
 use super::{ProfileAction, VehicleDialog, log_profile};
 
@@ -263,24 +264,69 @@ pub(super) fn apply_profile_to_draft(
         );
         return;
     };
+    let resolved = apply_profile_doc_to_draft(draft, &doc, snapshot);
+    draft.selected_profile = Some(name.to_owned());
+    if resolved {
+        log_profile(
+            state,
+            LogLevel::Info,
+            format!("applied vehicle profile '{name}'"),
+        );
+    } else {
+        log_profile(
+            state,
+            LogLevel::Warning,
+            format!(
+                "vehicle profile '{name}' maps topics or fields this source does not have; cleared the topic and field selections"
+            ),
+        );
+    }
+}
+
+pub(super) fn apply_profile_doc_to_draft(
+    draft: &mut Draft,
+    doc: &VehicleProfileDoc,
+    snapshot: &StoreSnapshot,
+) -> bool {
     let cfg = match draft.source {
         Some(source) => doc.to_config_for_source(snapshot, source),
         None => doc.to_config(snapshot),
     };
-    let Some(cfg) = cfg else {
-        log_profile(
-            state,
-            LogLevel::Warning,
-            format!("vehicle profile '{name}' does not match the current data"),
-        );
-        return;
-    };
+    match cfg {
+        Some(cfg) => {
+            draft.apply_config_preserving_label(&cfg, snapshot);
+            true
+        }
+        None => {
+            apply_profile_without_mappings(draft, &ProfileDraft::from_doc(doc));
+            false
+        }
+    }
+}
 
-    draft.apply_config_preserving_label(&cfg, snapshot);
-    draft.selected_profile = Some(name.to_owned());
-    log_profile(
-        state,
-        LogLevel::Info,
-        format!("applied vehicle profile '{name}'"),
-    );
+fn apply_profile_without_mappings(draft: &mut Draft, profile: &ProfileDraft) {
+    *draft = Draft {
+        label: draft.label.clone(),
+        source: draft.source,
+        selected_profile: draft.selected_profile.clone(),
+        show: profile.show,
+        show_path: profile.show_path,
+        pos_mode: profile.pos_mode,
+        lat_lon_dege7: profile.lat_lon_dege7,
+        alt_mm: profile.alt_mm,
+        alt_offset_m: profile.alt_offset_m,
+        ned_has_ref: profile.ned_has_ref,
+        ned_ref_manual: profile.ned_ref_manual,
+        ref_lat: profile.ref_lat,
+        ref_lon: profile.ref_lon,
+        ref_alt: profile.ref_alt,
+        ori_mode: profile.ori_mode,
+        euler_degrees: profile.euler_degrees,
+        model: profile.model.clone(),
+        custom_path: profile.custom_path.clone(),
+        color: profile.color,
+        path_color: profile.path_color,
+        scale: profile.scale,
+        ..Draft::default()
+    };
 }
