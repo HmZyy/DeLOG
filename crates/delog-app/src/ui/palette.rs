@@ -85,7 +85,9 @@ impl PickerState {
         }
         if ctx.input(|input| {
             input.key_pressed(egui::Key::ArrowUp)
-                || (input.modifiers.ctrl && input.key_pressed(egui::Key::P))
+                || (input.modifiers.ctrl
+                    && !input.modifiers.shift
+                    && input.key_pressed(egui::Key::P))
         }) {
             self.selected = self.selected.saturating_sub(1);
         }
@@ -307,6 +309,38 @@ mod tests {
         assert_eq!(state.selected, 2, "selection should stop at the last item");
         press(&ctx, &mut state, &items, egui::Key::P, true);
         assert_eq!(state.selected, 1);
+    }
+
+    #[test]
+    fn ctrl_shift_p_does_not_walk_the_list() {
+        let ctx = egui::Context::default();
+        let items = layouts();
+        let mut state = PickerState::default();
+        state.open();
+        state.selected = 2;
+
+        let modifiers = egui::Modifiers {
+            shift: true,
+            ..egui::Modifiers::CTRL
+        };
+        ctx.begin_pass(egui::RawInput {
+            modifiers,
+            events: vec![egui::Event::Key {
+                key: egui::Key::P,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            }],
+            ..Default::default()
+        });
+        state.show(&ctx, "probe", "search", "empty", &items);
+        let _ = ctx.end_pass();
+
+        assert_eq!(
+            state.selected, 2,
+            "the palette shortcut must not double as a move-up while a picker is open"
+        );
     }
 
     #[test]
