@@ -307,3 +307,61 @@ pub(super) fn color_to_rgba(c: Color32) -> [u8; 4] {
 pub(super) fn rgba_to_color(rgba: [u8; 4]) -> Color32 {
     Color32::from_rgba_unmultiplied(rgba[0], rgba[1], rgba[2], rgba[3])
 }
+
+fn joined(parts: Vec<String>) -> String {
+    parts.join(" \u{b7} ")
+}
+
+fn named(topic: &str) -> Option<String> {
+    let topic = topic.trim();
+    (!topic.is_empty()).then(|| topic.to_owned())
+}
+
+pub(super) fn profile_general_summary(draft: &ProfileDraft) -> String {
+    joined(vec![draft.label.clone(), draft.model.label().to_owned()])
+}
+
+pub(super) fn profile_position_summary(draft: &ProfileDraft) -> String {
+    let mut parts = Vec::new();
+    match draft.pos_mode {
+        PosMode::Ned => {
+            parts.push("Local NED".to_owned());
+            parts.extend(named(&draft.pos_topic));
+            if draft.ned_has_ref {
+                parts.push("georeferenced".to_owned());
+            }
+        }
+        PosMode::Gps => {
+            parts.push("Global GPS".to_owned());
+            parts.extend(named(&draft.pos_topic));
+            if draft.lat_lon_dege7 {
+                parts.push("degE7".to_owned());
+            }
+            if draft.alt_mm {
+                parts.push("mm".to_owned());
+            }
+        }
+    }
+    joined(parts)
+}
+
+pub(super) fn profile_orientation_summary(draft: &ProfileDraft) -> String {
+    let mut parts = Vec::new();
+    match draft.ori_mode {
+        OriMode::Static => return "Static".to_owned(),
+        OriMode::Euler => parts.push("Euler".to_owned()),
+        OriMode::Quat => parts.push("Quaternion".to_owned()),
+    }
+    parts.extend(named(&draft.ori_topic));
+    if draft.ori_mode == OriMode::Euler {
+        parts.push(
+            if draft.euler_degrees {
+                "degrees"
+            } else {
+                "radians"
+            }
+            .to_owned(),
+        );
+    }
+    joined(parts)
+}

@@ -33,6 +33,10 @@ pub fn copy() -> ImageSource<'static> {
     egui::include_image!("../../assets/icons/copy.svg")
 }
 
+pub fn ellipsis() -> ImageSource<'static> {
+    egui::include_image!("../../assets/icons/ellipsis.svg")
+}
+
 pub fn folder_open() -> ImageSource<'static> {
     egui::include_image!("../../assets/icons/folder-open.svg")
 }
