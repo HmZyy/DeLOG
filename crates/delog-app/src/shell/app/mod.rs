@@ -386,6 +386,8 @@ pub struct DelogApp {
     source_metadata_dialog: Option<delog_core::identity::SourceId>,
     field_metadata_dialog: Option<delog_core::identity::FieldId>,
     field_stats: FieldStatsController,
+    annotation_toolbar_open: bool,
+    armed_tool: Option<crate::plotting::annotations::place::ArmedTool>,
     sync_window: Option<SyncWindow>,
     dataflow: crate::dataflow::window::DataFlowUi,
     generate_markers_dialog: Option<crate::shell::generate_markers::GenerateMarkersDialog>,
@@ -531,6 +533,8 @@ impl DelogApp {
             source_metadata_dialog: None,
             field_metadata_dialog: None,
             field_stats: FieldStatsController::default(),
+            annotation_toolbar_open: false,
+            armed_tool: None,
             sync_window: None,
             dataflow: crate::dataflow::window::DataFlowUi::new(),
             generate_markers_dialog: None,
@@ -1772,6 +1776,7 @@ impl DelogApp {
                 playhead_snap: self.snap_playhead,
                 measuring_marker: self.marker_us.is_some(),
                 legends_visible: self.workspace.all_plot_legends_visible(),
+                annotation_toolbar_open: self.annotation_toolbar_open,
             },
             dynamic,
         )
@@ -1934,6 +1939,9 @@ impl DelogApp {
                 }
                 CommandId::OpenFieldStats => {
                     self.field_stats.open_plotted(self.workspace.unique_fields());
+                }
+                CommandId::ToggleAnnotationToolbar => {
+                    self.annotation_toolbar_open = !self.annotation_toolbar_open;
                 }
                 CommandId::OpenSettings => self.settings_dialog.open(),
                 CommandId::Exit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
@@ -2501,6 +2509,7 @@ impl eframe::App for DelogApp {
             playhead_snap: self.snap_playhead,
             measuring_marker: self.marker_us.is_some(),
             legend_position: self.settings.plot.legend_position,
+            annotation_toolbar_open: self.annotation_toolbar_open,
         };
         let header_output = egui::Panel::top("context_header")
             .show_inside(ui, |ui| {
@@ -2822,6 +2831,15 @@ impl eframe::App for DelogApp {
             &mut self.caches,
             &mut self.field_stats,
         );
+        let annotation_rows = self.workspace.annotation_rows();
+        if let Some(action) = crate::plotting::annotations::toolbar::show(
+            ui.ctx(),
+            &mut self.annotation_toolbar_open,
+            &mut self.armed_tool,
+            &annotation_rows,
+        ) {
+            self.workspace.apply_annotation_action(action);
+        }
         if self.inspector.open {
             let traces = self.workspace.inspector_traces(&snapshot);
             let playhead_us = snapshot.global_time_range().map(|_| self.playback.t_us);
@@ -2908,6 +2926,7 @@ impl eframe::App for DelogApp {
                         hover_mode: &mut self.hover_mode,
                         snap_playhead: &mut self.snap_playhead,
                         marker_us: &mut self.marker_us,
+                        armed_tool: &mut self.armed_tool,
                         render_tuning: self.settings.render,
                         scene3d: self.settings.scene3d,
                         playhead_us: snapshot.global_time_range().map(|_| self.playback.t_us),
@@ -2930,6 +2949,7 @@ impl eframe::App for DelogApp {
                     drop(tree_timer);
                     let actions = behavior.into_actions();
                     self.workspace.repair_focus();
+                    self.workspace.enforce_single_annotation_editor();
                     // Share the widest pane gutter so stacked plots align next
                     // frame. Converges in one frame; until then each
                     // pane never drops below its own gutter, so labels never
@@ -3030,10 +3050,10 @@ impl eframe::App for DelogApp {
             }
             let response =
                 sync_window.show(ui.ctx(), &snapshot, &self.gpu, frame, &mut self.caches);
-            if let Some(offsets) = response.apply {
-                if self.session.set_source_offsets(offsets).is_err() {
-                    sync_window.apply_dispatch_failed();
-                }
+            if let Some(offsets) = response.apply
+                && self.session.set_source_offsets(offsets).is_err()
+            {
+                sync_window.apply_dispatch_failed();
             }
             if sync_window.open {
                 self.sync_window = Some(sync_window);

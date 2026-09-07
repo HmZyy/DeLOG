@@ -33,6 +33,7 @@ pub struct InspectorTrace {
 }
 
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum Pane {
     Plot(PlotPane),
     Scene3D(Scene3dPane),
@@ -602,6 +603,116 @@ impl Workspace {
             egui_tiles::Tile::Pane(Pane::Scene3D(_)) | egui_tiles::Tile::Container(_) => None,
         })
     }
+
+    fn plot_tiles_in_order(&self) -> Vec<egui_tiles::TileId> {
+        let mut plots: Vec<egui_tiles::TileId> = self
+            .tree
+            .tiles
+            .iter()
+            .filter_map(|(id, tile)| {
+                matches!(tile, egui_tiles::Tile::Pane(Pane::Plot(_))).then_some(*id)
+            })
+            .collect();
+        plots.sort_by_key(|id| id.0);
+        plots
+    }
+
+    pub fn annotation_rows(&self) -> Vec<crate::plotting::annotations::toolbar::AnnotationRow> {
+        let mut rows = Vec::new();
+        for (index, tile) in self.plot_tiles_in_order().into_iter().enumerate() {
+            let Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) = self.tree.tiles.get(tile) else {
+                continue;
+            };
+            let plot_label = format!("Plot {}", index + 1);
+            rows.extend(pane.annotations.items().iter().map(|annot| {
+                crate::plotting::annotations::toolbar::AnnotationRow {
+                    pane: tile.0,
+                    plot_label: plot_label.clone(),
+                    id: annot.id,
+                    kind: annot.geom.kind(),
+                    color: annot.style.color32(),
+                }
+            }));
+        }
+        rows
+    }
+
+    pub fn apply_annotation_action(
+        &mut self,
+        action: crate::plotting::annotations::toolbar::ToolbarAction,
+    ) {
+        use crate::plotting::annotations::toolbar::ToolbarAction;
+        match action {
+            ToolbarAction::Edit { pane, id } => {
+                let tile = egui_tiles::TileId(pane);
+                let Some(egui_tiles::Tile::Pane(Pane::Plot(plot))) = self.tree.tiles.get_mut(tile)
+                else {
+                    return;
+                };
+                if plot.annotations.get(id).is_none() {
+                    return;
+                }
+                if plot.annotations.editing != Some(id) {
+                    crate::plotting::annotations::edit::close_editor(&mut plot.annotations);
+                }
+                plot.annotations.selected = Some(id);
+                plot.annotations.editing = Some(id);
+                self.focused = Some(tile);
+                self.tree.make_active(|candidate, _| candidate == tile);
+                self.enforce_single_annotation_editor();
+            }
+            ToolbarAction::Remove { pane, id } => {
+                for tile in self.plot_tiles_in_order() {
+                    if tile.0 != pane {
+                        continue;
+                    }
+                    if let Some(egui_tiles::Tile::Pane(Pane::Plot(plot))) =
+                        self.tree.tiles.get_mut(tile)
+                    {
+                        plot.annotations.remove(id);
+                    }
+                }
+            }
+            ToolbarAction::RemoveAll => {
+                for tile in self.plot_tiles_in_order() {
+                    if let Some(egui_tiles::Tile::Pane(Pane::Plot(plot))) =
+                        self.tree.tiles.get_mut(tile)
+                    {
+                        plot.annotations.clear();
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn enforce_single_annotation_editor(&mut self) {
+        let open: Vec<egui_tiles::TileId> = self
+            .tree
+            .tiles
+            .iter()
+            .filter_map(|(id, tile)| match tile {
+                egui_tiles::Tile::Pane(Pane::Plot(pane)) => {
+                    pane.annotations.editing.is_some().then_some(*id)
+                }
+                _ => None,
+            })
+            .collect();
+        if open.len() < 2 {
+            return;
+        }
+        let keep = self
+            .focused
+            .filter(|id| open.contains(id))
+            .unwrap_or_else(|| open.iter().min_by_key(|id| id.0).copied().unwrap());
+        for id in open {
+            if id == keep {
+                continue;
+            }
+            if let Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) = self.tree.tiles.get_mut(id) {
+                crate::plotting::annotations::edit::close_editor(&mut pane.annotations);
+            }
+        }
+    }
 }
 
 impl Default for Workspace {
@@ -666,6 +777,7 @@ pub struct PlotServices<'a> {
     pub snap_playhead: &'a mut bool,
     /// Shared measurement marker time.
     pub marker_us: &'a mut Option<i64>,
+    pub armed_tool: &'a mut Option<crate::plotting::annotations::place::ArmedTool>,
     pub render_tuning: crate::config::settings::RenderTuning,
     pub scene3d: crate::config::settings::Scene3dSettings,
     /// Playhead cursor time; `None` before any data loads.
@@ -1109,6 +1221,14 @@ impl Behavior<'_> {
         } else {
             egui_tiles::UiResponse::None
         };
+        // Hoisted above every early return so a pending editor always has a
+        // modal that can clear it, even for a pane with no traces or view.
+        crate::plotting::annotations::edit::editor(
+            ui.ctx(),
+            egui::Id::new(("plot_annotation", tile_id)),
+            &mut pane.annotations,
+            self.services.origin_us,
+        );
         // Use the widest gutter any pane needed last frame, but never below this
         // pane's own need so labels never clip.
         let shared_gutter = self.services.shared_y_gutter;
@@ -1138,6 +1258,7 @@ impl Behavior<'_> {
             if plot_rect.width() > 8.0 {
                 axes::draw(ui, plot_rect, x_range, y_range, None);
             }
+            pane.context_target = None;
             self.plot_context_menu(tile_id, &response, pane);
             self.plot_info_window(ui, tile_id, pane, None);
             return tile_response;
@@ -1148,6 +1269,7 @@ impl Behavior<'_> {
             self.actions.max_y_gutter = self.actions.max_y_gutter.max(own_gutter);
             self.handle_plot_interaction(&response, plot_rect);
             self.handle_zoom_drag(&response, plot_rect, pane);
+            pane.context_target = None;
             self.plot_context_menu(tile_id, &response, pane);
             self.plot_info_window(ui, tile_id, pane, None);
             return tile_response;
@@ -1169,8 +1291,36 @@ impl Behavior<'_> {
         let view_before_interaction = *self.services.view;
         // Marker drag takes priority over panning so a grab near the marker
         // moves it instead of scrolling the view.
-        let marker_active = self.handle_marker_drag(&response, plot_rect, x_range, pane);
-        if !marker_active {
+        let annot_view = PaneView {
+            rect: plot_rect,
+            x_range,
+            y_range,
+        };
+        let annot_active = crate::plotting::annotations::interact::interact(
+            ui,
+            &response,
+            annot_view,
+            self.services.origin_us,
+            &mut pane.annotations,
+            self.services.armed_tool,
+            tile_id.0,
+        );
+        if response.secondary_clicked()
+            && let Some(pos) = response.interact_pointer_pos()
+        {
+            let tf = crate::plotting::annotations::PlotTransform::new(
+                annot_view,
+                self.services.origin_us,
+            );
+            pane.context_target =
+                crate::plotting::annotations::interact::context_target(&pane.annotations, &tf, pos);
+            if pane.context_target.is_some() {
+                pane.annotations.selected = pane.context_target;
+            }
+        }
+        let marker_active =
+            !annot_active && self.handle_marker_drag(&response, plot_rect, x_range, pane);
+        if !annot_active && !marker_active {
             self.handle_plot_interaction(&response, plot_rect);
         }
         self.handle_zoom_drag(&response, plot_rect, pane);
@@ -1209,6 +1359,7 @@ impl Behavior<'_> {
         drop(pane_setup_timer);
 
         if !self.services.gpu.is_available() || plot_rect.width() <= 8.0 {
+            pane.context_target = None;
             self.plot_context_menu(tile_id, &response, pane);
             self.plot_info_window(ui, tile_id, pane, None);
             return tile_response;
@@ -1262,6 +1413,21 @@ impl Behavior<'_> {
         };
 
         let pane_overlay_timer = self.services.metrics.scope("pane_overlay");
+        let annot_preview = self.services.armed_tool.as_ref().and_then(|tool| {
+            let pos = response.hover_pos()?;
+            let tf =
+                crate::plotting::annotations::PlotTransform::new(pview, self.services.origin_us);
+            tf.rect().contains(pos).then(|| {
+                crate::plotting::annotations::place::preview(tool, tile_id.0, tf.to_data(pos))
+            })?
+        });
+        crate::plotting::annotations::draw::draw(
+            ui,
+            pview,
+            self.services.origin_us,
+            &pane.annotations,
+            annot_preview,
+        );
         if let Some(anchor_us) = pane.zoom_drag_anchor_us
             && let Some(p) = response.interact_pointer_pos()
         {
@@ -1451,6 +1617,29 @@ impl Behavior<'_> {
     ) {
         response.context_menu(|ui| {
             crate::ui::components::dense_rows(ui);
+            if let Some(target) = pane.context_target {
+                if ui
+                    .add(egui::Button::image_and_text(
+                        menu_icon(ui, crate::ui::icons::pencil()),
+                        "Edit",
+                    ))
+                    .clicked()
+                {
+                    pane.annotations.editing = Some(target);
+                    ui.close();
+                }
+                if ui
+                    .add(egui::Button::image_and_text(
+                        menu_icon(ui, crate::ui::icons::trash()),
+                        "Delete",
+                    ))
+                    .clicked()
+                {
+                    pane.annotations.remove(target);
+                    ui.close();
+                }
+                return;
+            }
             if ui
                 .add(egui::Button::image_and_text(
                     menu_icon(ui, crate::ui::icons::trash()),
@@ -1915,9 +2104,7 @@ fn scene_map_overlay(
 ) -> Option<std::borrow::Cow<'static, str>> {
     if !reference_available {
         Some("Map unavailable: no georeference".into())
-    } else if manager_error.is_some() {
-        Some("Map cache error".into())
-    } else if failure == Some(TileFailureClass::Cache) {
+    } else if manager_error.is_some() || failure == Some(TileFailureClass::Cache) {
         Some("Map cache error".into())
     } else if failure == Some(TileFailureClass::NetworkTransient) && cached {
         Some("Map tiles offline - showing cached imagery".into())
