@@ -78,12 +78,15 @@ fn swatch(ui: &mut egui::Ui, color: egui::Color32) {
 
 fn list(ui: &mut egui::Ui, rows: &[AnnotationRow]) -> Option<ToolbarAction> {
     if rows.is_empty() {
-        ui.weak("No annotations");
+        ui.vertical_centered(|ui| {
+            ui.weak("No annotations");
+        });
         return None;
     }
     let mut action = None;
     egui::ScrollArea::vertical()
         .max_height(LIST_MAX_HEIGHT)
+        .auto_shrink([false, true])
         .show(ui, |ui| {
             egui::Grid::new("annotation_list")
                 .num_columns(4)
@@ -146,6 +149,10 @@ pub fn show(
         .collapsible(false)
         .resizable(false)
         .show(ctx, |ui| {
+            let width_id = ui.make_persistent_id("annotation_toolbar_width");
+            if let Some(width) = ui.data(|data| data.get_temp::<f32>(width_id)) {
+                ui.set_min_width(width);
+            }
             let mut list_state = egui::collapsing_header::CollapsingState::load_with_default_open(
                 ui.ctx(),
                 ui.make_persistent_id("annotation_list_visibility"),
@@ -156,6 +163,8 @@ pub fn show(
                 ui.separator();
                 action = action.or(list(ui, rows));
             });
+            let width = ui.min_rect().width();
+            ui.data_mut(|data| data.insert_temp(width_id, width));
         });
     if !*open {
         *armed = None;
