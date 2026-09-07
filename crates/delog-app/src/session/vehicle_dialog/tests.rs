@@ -745,3 +745,71 @@ fn the_topic_button_left_aligns_its_text_like_every_other_dropdown() {
         WIDTH / 2.0
     );
 }
+
+fn gps_profile_doc(topic: &str) -> crate::session::vehicle_profiles::VehicleProfileDoc {
+    let mut profile = ProfileDraft {
+        model: ModelKind::Quad,
+        ..ProfileDraft::default()
+    };
+    profile.pos_topic = topic.to_owned();
+    profile.to_doc("probe").expect("the probe profile is valid")
+}
+
+#[test]
+fn a_matching_profile_fills_in_the_mappings() {
+    let snapshot = test_snapshot();
+    let mut draft = Draft {
+        source: Some(SourceId(0)),
+        ..Draft::default()
+    };
+
+    let resolved = super::profiles::apply_profile_doc_to_draft(
+        &mut draft,
+        &gps_profile_doc("GLOBAL_POSITION_INT"),
+        &snapshot,
+    );
+
+    assert!(resolved, "a profile matching the source should resolve");
+    assert_eq!(draft.pos_topic, Some(TopicId(0)));
+    assert_eq!(draft.lat, Some(FieldId(0)));
+    assert!(draft.missing().is_empty());
+}
+
+#[test]
+fn a_profile_the_source_cannot_satisfy_clears_the_previous_mappings() {
+    let snapshot = test_snapshot();
+    let mut draft = mapped_gps_draft();
+    draft.selected_profile = Some("probe".to_owned());
+    assert!(
+        draft.missing().is_empty(),
+        "the draft starts fully mapped by an earlier profile"
+    );
+
+    let resolved = super::profiles::apply_profile_doc_to_draft(
+        &mut draft,
+        &gps_profile_doc("NOT_IN_THIS_LOG"),
+        &snapshot,
+    );
+
+    assert!(!resolved, "the profile cannot be satisfied by this source");
+    assert_eq!(draft.pos_topic, None, "the stale topic must be cleared");
+    assert_eq!(draft.lat, None, "the stale latitude must be cleared");
+    assert_eq!(draft.lon, None, "the stale longitude must be cleared");
+    assert_eq!(draft.alt, None, "the stale altitude must be cleared");
+    assert!(
+        !draft.missing().is_empty(),
+        "the vehicle should now read as incomplete rather than silently wrong"
+    );
+
+    assert_eq!(draft.source, Some(SourceId(0)), "the chosen source stays");
+    assert_eq!(
+        draft.selected_profile,
+        Some("probe".to_owned()),
+        "the profile stays selected so the picker and the fields agree"
+    );
+    assert_eq!(
+        draft.model,
+        ModelKind::Quad,
+        "settings that do not depend on the source still come from the new profile"
+    );
+}
