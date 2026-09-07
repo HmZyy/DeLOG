@@ -1,6 +1,6 @@
 use delog_core::snapshot::StoreSnapshot;
 
-use crate::session::vehicle_profiles::VehicleProfileLibrary;
+use crate::session::vehicle_profiles::{VehicleProfileDoc, VehicleProfileLibrary};
 use crate::ui::logging::LogLevel;
 
 use super::profile_draft::ProfileDraft;
@@ -70,6 +70,7 @@ pub(super) fn handle_profile_action(
         ProfileAction::Apply { draft, name } => {
             apply_profile_to_draft(state, draft, &name, snapshot)
         }
+        ProfileAction::SaveAs { draft } => save_draft_as_profile(state, draft, snapshot),
         ProfileAction::Delete(name) => {
             state.pending_profile_delete = Some(name);
         }
@@ -146,6 +147,86 @@ pub(super) fn save_profile_from_editor(state: &mut VehicleDialog) {
         state,
         LogLevel::Info,
         format!("saved vehicle profile '{name}'"),
+    );
+}
+
+pub(super) fn unique_profile_name(existing: &[String], label: &str) -> String {
+    let base = match label.trim() {
+        "" => "Vehicle",
+        trimmed => trimmed,
+    };
+    if !existing.iter().any(|name| name == base) {
+        return base.to_owned();
+    }
+    let mut suffix = 2u32;
+    loop {
+        let candidate = format!("{base} {suffix}");
+        if !existing.iter().any(|name| name == &candidate) {
+            return candidate;
+        }
+        suffix += 1;
+    }
+}
+
+pub(super) fn save_draft_as_profile(
+    state: &mut VehicleDialog,
+    draft_index: usize,
+    snapshot: &StoreSnapshot,
+) {
+    let Some(draft) = state.drafts.get(draft_index) else {
+        log_profile(
+            state,
+            LogLevel::Warning,
+            format!("missing vehicle draft {draft_index}"),
+        );
+        return;
+    };
+    let label = draft.label.clone();
+    let Some(config) = draft.build() else {
+        log_profile(
+            state,
+            LogLevel::Warning,
+            "finish mapping the vehicle source, position and orientation before saving a profile",
+        );
+        return;
+    };
+    let Some(library) = profile_library() else {
+        log_profile(
+            state,
+            LogLevel::Warning,
+            "vehicle profile config directory is unavailable",
+        );
+        return;
+    };
+
+    let name = unique_profile_name(&state.profiles, &label);
+    let Some(doc) = VehicleProfileDoc::from_config(&name, &config, snapshot) else {
+        log_profile(
+            state,
+            LogLevel::Warning,
+            format!("vehicle '{label}' cannot be described as a profile"),
+        );
+        return;
+    };
+    if let Err(err) = library.save(&name, &doc) {
+        log_profile(
+            state,
+            LogLevel::Error,
+            format!("failed to save vehicle profile '{name}': {err}"),
+        );
+        return;
+    }
+
+    refresh_profiles(state);
+    if let Some(draft) = state.drafts.get_mut(draft_index) {
+        draft.selected_profile = Some(name.clone());
+    }
+    state.profile_editor_selected = Some(name.clone());
+    load_profile_editor(state);
+    log_profile(
+        state,
+        LogLevel::Info,
+        format!("saved vehicle '{label}' as profile '{name}'"),
     );
 }
 

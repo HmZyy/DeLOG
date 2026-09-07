@@ -19,7 +19,10 @@ use profiles::{profile_library, refresh_profiles};
 use profiles_tab::show_profiles_tab;
 use vehicles_tab::show_vehicle_config_tab;
 
-const DIALOG_WIDTH: f32 = 320.0;
+const DIALOG_WIDTH: f32 = 760.0;
+const DIALOG_HEIGHT: f32 = 520.0;
+const DIALOG_MIN_WIDTH: f32 = 520.0;
+const DIALOG_MIN_HEIGHT: f32 = 320.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum VehicleDialogTab {
@@ -41,6 +44,7 @@ impl VehicleDialogTab {
 pub struct VehicleDialog {
     pub open: bool,
     drafts: Vec<Draft>,
+    selected_vehicle: usize,
     was_open: bool,
     dock_state: egui_dock::DockState<VehicleDialogTab>,
     profiles: Vec<String>,
@@ -56,6 +60,7 @@ impl Default for VehicleDialog {
         Self {
             open: false,
             drafts: Vec::new(),
+            selected_vehicle: 0,
             was_open: false,
             dock_state: egui_dock::DockState::new(VehicleDialogTab::ALL.to_vec()),
             profiles: Vec::new(),
@@ -72,6 +77,12 @@ impl VehicleDialog {
     pub fn take_logs(&mut self) -> Vec<PendingLog> {
         std::mem::take(&mut self.pending_logs)
     }
+
+    fn clamp_selection(&mut self) {
+        self.selected_vehicle = self
+            .selected_vehicle
+            .min(self.drafts.len().saturating_sub(1));
+    }
 }
 
 #[track_caller]
@@ -81,6 +92,7 @@ fn log_profile(state: &mut VehicleDialog, level: LogLevel, message: impl Into<St
 
 enum ProfileAction {
     Apply { draft: usize, name: String },
+    SaveAs { draft: usize },
     Delete(String),
 }
 
@@ -98,6 +110,7 @@ pub fn show(
             .iter()
             .map(|v| Draft::from_config(v, snapshot))
             .collect();
+        state.clamp_selection();
         refresh_profiles(state);
     }
     state.was_open = state.open;
@@ -112,11 +125,11 @@ pub fn show(
         .collapsible(false)
         .default_pos(ctx.content_rect().center())
         .pivot(egui::Align2::CENTER_CENTER)
-        .default_width(DIALOG_WIDTH)
+        .resizable(true)
+        .default_size([DIALOG_WIDTH, DIALOG_HEIGHT])
+        .min_width(DIALOG_MIN_WIDTH)
+        .min_height(DIALOG_MIN_HEIGHT)
         .show(ctx, |ui| {
-            ui.set_min_width(DIALOG_WIDTH);
-            ui.add_space(8.0);
-
             let mut dock_state = std::mem::replace(
                 &mut state.dock_state,
                 egui_dock::DockState::new(VehicleDialogTab::ALL.to_vec()),

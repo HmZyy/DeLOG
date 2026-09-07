@@ -216,6 +216,92 @@ impl Draft {
         self.label = previous_label;
     }
 
+    pub(super) fn missing(&self) -> Vec<&'static str> {
+        let mut missing = Vec::new();
+        if self.source.is_none() {
+            missing.push("a data source");
+            return missing;
+        }
+        match self.pos_mode {
+            PosMode::Ned => {
+                if self.north.is_none() || self.east.is_none() || self.down.is_none() {
+                    if self.pos_topic.is_none() {
+                        missing.push("a position topic");
+                    } else {
+                        if self.north.is_none() {
+                            missing.push("North (X)");
+                        }
+                        if self.east.is_none() {
+                            missing.push("East (Y)");
+                        }
+                        if self.down.is_none() {
+                            missing.push("Down (Z)");
+                        }
+                    }
+                }
+            }
+            PosMode::Gps => {
+                if self.lat.is_none() || self.lon.is_none() || self.alt.is_none() {
+                    if self.pos_topic.is_none() {
+                        missing.push("a position topic");
+                    } else {
+                        if self.lat.is_none() {
+                            missing.push("Latitude");
+                        }
+                        if self.lon.is_none() {
+                            missing.push("Longitude");
+                        }
+                        if self.alt.is_none() {
+                            missing.push("Altitude");
+                        }
+                    }
+                }
+            }
+        }
+        match self.ori_mode {
+            OriMode::Static => {}
+            OriMode::Euler => {
+                if self.roll.is_none() || self.pitch.is_none() || self.yaw.is_none() {
+                    if self.ori_topic.is_none() {
+                        missing.push("an orientation topic");
+                    } else {
+                        if self.roll.is_none() {
+                            missing.push("Roll");
+                        }
+                        if self.pitch.is_none() {
+                            missing.push("Pitch");
+                        }
+                        if self.yaw.is_none() {
+                            missing.push("Yaw");
+                        }
+                    }
+                }
+            }
+            OriMode::Quat => {
+                if self.qw.is_none() || self.qx.is_none() || self.qy.is_none() || self.qz.is_none()
+                {
+                    if self.ori_topic.is_none() {
+                        missing.push("an orientation topic");
+                    } else {
+                        if self.qw.is_none() {
+                            missing.push("QW");
+                        }
+                        if self.qx.is_none() {
+                            missing.push("QX");
+                        }
+                        if self.qy.is_none() {
+                            missing.push("QY");
+                        }
+                        if self.qz.is_none() {
+                            missing.push("QZ");
+                        }
+                    }
+                }
+            }
+        }
+        missing
+    }
+
     pub(super) fn build(&self) -> Option<VehicleConfig> {
         let source = self.source?;
         let pos = match self.pos_mode {
@@ -313,4 +399,60 @@ pub(super) fn topic_fields(snapshot: &StoreSnapshot, topic: TopicId) -> Vec<(Fie
         .filter(|f| f.topic == topic && !f.removed)
         .map(|f| (f.id, f.name.clone()))
         .collect()
+}
+
+pub(super) fn general_summary(draft: &Draft, source_name: Option<&str>) -> String {
+    let source = source_name.unwrap_or("No source");
+    format!("{source} \u{b7} {}", draft.model.label())
+}
+
+pub(super) fn position_summary(draft: &Draft, topic_name: Option<&str>) -> String {
+    let mut parts = Vec::new();
+    match draft.pos_mode {
+        PosMode::Ned => {
+            parts.push("Local NED".to_owned());
+            if let Some(topic) = topic_name {
+                parts.push(topic.to_owned());
+            }
+            if draft.ned_has_ref {
+                parts.push("georeferenced".to_owned());
+            }
+        }
+        PosMode::Gps => {
+            parts.push("Global GPS".to_owned());
+            if let Some(topic) = topic_name {
+                parts.push(topic.to_owned());
+            }
+            if draft.lat_lon_dege7 {
+                parts.push("degE7".to_owned());
+            }
+            if draft.alt_mm {
+                parts.push("mm".to_owned());
+            }
+        }
+    }
+    parts.join(" \u{b7} ")
+}
+
+pub(super) fn orientation_summary(draft: &Draft, topic_name: Option<&str>) -> String {
+    let mut parts = Vec::new();
+    match draft.ori_mode {
+        OriMode::Static => return "Static".to_owned(),
+        OriMode::Euler => parts.push("Euler".to_owned()),
+        OriMode::Quat => parts.push("Quaternion".to_owned()),
+    }
+    if let Some(topic) = topic_name {
+        parts.push(topic.to_owned());
+    }
+    if draft.ori_mode == OriMode::Euler {
+        parts.push(
+            if draft.euler_degrees {
+                "degrees"
+            } else {
+                "radians"
+            }
+            .to_owned(),
+        );
+    }
+    parts.join(" \u{b7} ")
 }
