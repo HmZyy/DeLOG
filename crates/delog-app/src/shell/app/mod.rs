@@ -2831,11 +2831,15 @@ impl eframe::App for DelogApp {
             &mut self.caches,
             &mut self.field_stats,
         );
-        crate::plotting::annotations::toolbar::show(
+        let annotation_rows = self.workspace.annotation_rows();
+        if let Some(action) = crate::plotting::annotations::toolbar::show(
             ui.ctx(),
             &mut self.annotation_toolbar_open,
             &mut self.armed_tool,
-        );
+            &annotation_rows,
+        ) {
+            self.workspace.apply_annotation_action(action);
+        }
         if self.inspector.open {
             let traces = self.workspace.inspector_traces(&snapshot);
             let playhead_us = snapshot.global_time_range().map(|_| self.playback.t_us);

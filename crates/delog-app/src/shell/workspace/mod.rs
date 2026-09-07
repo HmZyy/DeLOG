@@ -604,6 +604,87 @@ impl Workspace {
         })
     }
 
+    fn plot_tiles_in_order(&self) -> Vec<egui_tiles::TileId> {
+        let mut plots: Vec<egui_tiles::TileId> = self
+            .tree
+            .tiles
+            .iter()
+            .filter_map(|(id, tile)| {
+                matches!(tile, egui_tiles::Tile::Pane(Pane::Plot(_))).then_some(*id)
+            })
+            .collect();
+        plots.sort_by_key(|id| id.0);
+        plots
+    }
+
+    pub fn annotation_rows(&self) -> Vec<crate::plotting::annotations::toolbar::AnnotationRow> {
+        let mut rows = Vec::new();
+        for (index, tile) in self.plot_tiles_in_order().into_iter().enumerate() {
+            let Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) = self.tree.tiles.get(tile) else {
+                continue;
+            };
+            let plot_label = format!("Plot {}", index + 1);
+            rows.extend(pane.annotations.items().iter().map(|annot| {
+                crate::plotting::annotations::toolbar::AnnotationRow {
+                    pane: tile.0,
+                    plot_label: plot_label.clone(),
+                    id: annot.id,
+                    kind: annot.geom.kind(),
+                    color: annot.style.color32(),
+                }
+            }));
+        }
+        rows
+    }
+
+    pub fn apply_annotation_action(
+        &mut self,
+        action: crate::plotting::annotations::toolbar::ToolbarAction,
+    ) {
+        use crate::plotting::annotations::toolbar::ToolbarAction;
+        match action {
+            ToolbarAction::Edit { pane, id } => {
+                let tile = egui_tiles::TileId(pane);
+                let Some(egui_tiles::Tile::Pane(Pane::Plot(plot))) = self.tree.tiles.get_mut(tile)
+                else {
+                    return;
+                };
+                if plot.annotations.get(id).is_none() {
+                    return;
+                }
+                if plot.annotations.editing != Some(id) {
+                    crate::plotting::annotations::edit::close_editor(&mut plot.annotations);
+                }
+                plot.annotations.selected = Some(id);
+                plot.annotations.editing = Some(id);
+                self.focused = Some(tile);
+                self.tree.make_active(|candidate, _| candidate == tile);
+                self.enforce_single_annotation_editor();
+            }
+            ToolbarAction::Remove { pane, id } => {
+                for tile in self.plot_tiles_in_order() {
+                    if tile.0 != pane {
+                        continue;
+                    }
+                    if let Some(egui_tiles::Tile::Pane(Pane::Plot(plot))) =
+                        self.tree.tiles.get_mut(tile)
+                    {
+                        plot.annotations.remove(id);
+                    }
+                }
+            }
+            ToolbarAction::RemoveAll => {
+                for tile in self.plot_tiles_in_order() {
+                    if let Some(egui_tiles::Tile::Pane(Pane::Plot(plot))) =
+                        self.tree.tiles.get_mut(tile)
+                    {
+                        plot.annotations.clear();
+                    }
+                }
+            }
+        }
+    }
+
     pub fn enforce_single_annotation_editor(&mut self) {
         let open: Vec<egui_tiles::TileId> = self
             .tree

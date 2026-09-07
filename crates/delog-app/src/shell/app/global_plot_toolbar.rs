@@ -179,7 +179,7 @@ pub fn show(
                         crate::ui::icons::pencil(),
                         annotations_presentation
                             .map(|presentation| presentation.label.as_str())
-                            .unwrap_or("Annotation toolbar"),
+                            .unwrap_or("Annotations"),
                         annotations_presentation
                             .and_then(|presentation| presentation.selected)
                             .unwrap_or(model.annotation_toolbar_open),
