@@ -303,6 +303,13 @@ impl AnnotationLayer {
             self.grab = None;
         }
     }
+
+    pub fn clear(&mut self) {
+        self.items.clear();
+        self.selected = None;
+        self.editing = None;
+        self.grab = None;
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
