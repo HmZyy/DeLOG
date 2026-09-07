@@ -45,6 +45,14 @@ pub fn pencil() -> ImageSource<'static> {
     egui::include_image!("../../assets/icons/pencil.svg")
 }
 
+pub fn chevron_up() -> ImageSource<'static> {
+    egui::include_image!("../../assets/icons/chevron-up.svg")
+}
+
+pub fn chevron_down() -> ImageSource<'static> {
+    egui::include_image!("../../assets/icons/chevron-down.svg")
+}
+
 pub fn maximize() -> ImageSource<'static> {
     egui::include_image!("../../assets/icons/maximize.svg")
 }
@@ -170,4 +178,20 @@ pub fn rotate_ccw() -> ImageSource<'static> {
 
 pub fn rotate_cw() -> ImageSource<'static> {
     egui::include_image!("../../assets/icons/rotate-cw.svg")
+}
+
+pub fn text_cursor() -> ImageSource<'static> {
+    egui::include_image!("../../assets/icons/type.svg")
+}
+
+pub fn circle() -> ImageSource<'static> {
+    egui::include_image!("../../assets/icons/circle.svg")
+}
+
+pub fn minus() -> ImageSource<'static> {
+    egui::include_image!("../../assets/icons/minus.svg")
+}
+
+pub fn slash() -> ImageSource<'static> {
+    egui::include_image!("../../assets/icons/slash.svg")
 }
