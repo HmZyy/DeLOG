@@ -1467,3 +1467,94 @@ fn remove_all_clears_every_plot() {
     }
     assert!(workspace.annotation_rows().is_empty());
 }
+
+fn scene_overlay_probe(with_window: bool) -> (egui::Context, egui::Rect) {
+    let scene_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 400.0));
+    let vehicles = vec![vehicle::VehicleConfig {
+        source: delog_core::identity::SourceId(0),
+        label: "Vehicle #1".into(),
+        show: true,
+        show_path: true,
+        pos: vehicle::PosMapping::Ned {
+            north: delog_core::identity::FieldId(0),
+            east: delog_core::identity::FieldId(1),
+            down: delog_core::identity::FieldId(2),
+            reference: None,
+        },
+        ori: vehicle::OriMapping::Static,
+        model: vehicle::ModelKind::Cone,
+        color: egui::Color32::WHITE,
+        path_color: egui::Color32::WHITE,
+        scale: 1.0,
+    }];
+    let mut pane = Scene3dPane::default();
+    let ctx = egui::Context::default();
+
+    for _ in 0..3 {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input, |ui| {
+            egui::CentralPanel::default().show_inside(ui, |ui| {
+                ui.allocate_space(ui.available_size());
+            });
+            if with_window {
+                egui::Window::new("Vehicles")
+                    .fixed_pos(egui::Pos2::ZERO)
+                    .title_bar(false)
+                    .resizable(false)
+                    .show(ui.ctx(), |ui| {
+                        ui.allocate_space(egui::vec2(620.0, 400.0));
+                    });
+            }
+            tracked_vehicle_picker(ui, scene_rect, &mut pane, &vehicles);
+            scene_overlay_buttons(ui, scene_rect, false);
+        });
+    }
+    (ctx, scene_rect)
+}
+
+const OVERLAY_PROBES: [(f32, f32, &str); 2] = [
+    (20.0, 20.0, "the tracked-vehicle picker"),
+    (580.0, 20.0, "the scene overlay buttons"),
+];
+
+#[test]
+fn scene_overlays_sit_under_floating_windows() {
+    let (ctx, _) = scene_overlay_probe(true);
+
+    let window_layer = ctx
+        .layer_id_at(egui::pos2(300.0, 200.0))
+        .expect("the window should own the middle of the scene");
+    assert_eq!(window_layer.order, egui::Order::Middle);
+
+    for (x, y, what) in OVERLAY_PROBES {
+        let hit = ctx
+            .layer_id_at(egui::pos2(x, y))
+            .expect("something should be laid out at this corner");
+        assert_eq!(
+            hit, window_layer,
+            "{what} covers a window that overlaps it; scene overlays belong under floating windows"
+        );
+    }
+}
+
+#[test]
+fn scene_overlays_still_sit_above_the_scene_itself() {
+    let (ctx, _) = scene_overlay_probe(false);
+
+    for (x, y, what) in OVERLAY_PROBES {
+        let hit = ctx
+            .layer_id_at(egui::pos2(x, y))
+            .expect("something should be laid out at this corner");
+        assert_ne!(
+            hit,
+            egui::LayerId::background(),
+            "{what} fell behind the scene; with no window over it, it must still be clickable"
+        );
+    }
+}
