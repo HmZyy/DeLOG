@@ -76,6 +76,19 @@ pub fn trace_color(i: usize) -> Rgba8 {
     TRACE_PALETTE[i % TRACE_PALETTE.len()]
 }
 
+pub const ANNOTATION_PALETTE: [Rgba8; 5] = [
+    Rgba8::hex(0xf5f5f5),
+    Rgba8::hex(0xffd166),
+    Rgba8::hex(0xef476f),
+    Rgba8::hex(0x06d6a0),
+    Rgba8::hex(0x8338ec),
+];
+
+#[must_use]
+pub fn annotation_color(i: usize) -> Rgba8 {
+    ANNOTATION_PALETTE[i % ANNOTATION_PALETTE.len()]
+}
+
 #[cfg(test)]
 mod palette_tests {
     use super::*;
@@ -92,6 +105,34 @@ mod palette_tests {
                 assert_ne!(a, b, "duplicate palette color {a:?}");
             }
         }
+    }
+
+    #[test]
+    fn annotation_palette_is_distinct_opaque_colors() {
+        for c in ANNOTATION_PALETTE {
+            assert_eq!(c.a, 0xff, "annotation palette colors are opaque");
+        }
+        for (i, a) in ANNOTATION_PALETTE.iter().enumerate() {
+            for b in &ANNOTATION_PALETTE[i + 1..] {
+                assert_ne!(a, b, "duplicate annotation palette color {a:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn annotation_palette_shares_no_color_with_the_trace_palette() {
+        for a in ANNOTATION_PALETTE {
+            for b in TRACE_PALETTE {
+                assert_ne!(a, b, "annotation color {a:?} collides with a trace color");
+            }
+        }
+    }
+
+    #[test]
+    fn annotation_color_cycles_after_exhaustion() {
+        assert_eq!(annotation_color(0), ANNOTATION_PALETTE[0]);
+        assert_eq!(annotation_color(4), ANNOTATION_PALETTE[4]);
+        assert_eq!(annotation_color(5), ANNOTATION_PALETTE[0]);
     }
 
     #[test]

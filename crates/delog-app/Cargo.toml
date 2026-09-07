@@ -62,6 +62,10 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tempfile = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# Enable Wayland title-bar decorations with double-click maximize/restore.
+winit = { version = "0.30.13", default-features = false, features = ["wayland-csd-adwaita"] }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [
   "Win32_Storage_FileSystem",
