@@ -493,6 +493,16 @@ fn build_trajectory_from_rows(
     let mut times_us = Vec::with_capacity(total_rows);
     for chunk in rows.store.chunks.iter() {
         for row in 0..chunk.len() {
+            // Merged timelines include rows belonging only to other signals.
+            // Nulls and NaNs both represent absent samples (as in FieldView).
+            // Partial fixes and infinities still pass through and break the path.
+            if rows
+                .col_indices
+                .iter()
+                .all(|&col| array_row_as_f64(chunk.cols[col].as_ref(), row).is_nan())
+            {
+                continue;
+            }
             times_us.push(chunk.t.value(row).checked_add(rows.offset_us)?);
             match position_from_row(&config.pos, &rows, gps_ref, chunk, row) {
                 Some(p) => points.push([p.x, p.y, p.z]),
@@ -675,6 +685,20 @@ mod tests {
         lat: Vec<f64>,
         lon: Vec<f64>,
         alt: Vec<f64>,
+    ) -> (StoreSnapshot, [FieldId; 3]) {
+        nullable_gps_snapshot(
+            times,
+            lat.into_iter().map(Some).collect(),
+            lon.into_iter().map(Some).collect(),
+            alt.into_iter().map(Some).collect(),
+        )
+    }
+
+    fn nullable_gps_snapshot(
+        times: Vec<i64>,
+        lat: Vec<Option<f64>>,
+        lon: Vec<Option<f64>>,
+        alt: Vec<Option<f64>>,
     ) -> (StoreSnapshot, [FieldId; 3]) {
         let mut id = IdentityRegistry::new();
         let src = id.add_source("veh");
@@ -997,6 +1021,55 @@ mod tests {
             traj.times_us.partition_point(|&t| t <= 2_000_000),
             traj.points.len()
         );
+    }
+
+    #[test]
+    fn trajectory_connects_sparse_gps_samples_and_keeps_playhead_times() {
+        // Other signals contribute rows between each GPS fix in a merged export.
+        let (snap, fields) = nullable_gps_snapshot(
+            vec![0, 1_000_000, 2_000_000, 3_000_000, 4_000_000],
+            vec![None, Some(47.0), Some(f64::NAN), Some(47.001), None],
+            vec![None, Some(8.0), Some(f64::NAN), Some(8.0), None],
+            vec![None, Some(400.0), Some(f64::NAN), Some(400.0), None],
+        );
+        let traj = build_trajectory(&snap, &gps_config(fields, 0.0));
+        assert_eq!(traj.times_us, vec![1_000_000, 3_000_000]);
+        assert_eq!(traj.points.len(), 2);
+        assert!(traj.points.iter().flatten().all(|v| v.is_finite()));
+        assert!(traj.points[0][2].abs() < 0.01);
+        assert!((traj.points[1][2] + 111.18).abs() < 0.1);
+        assert_eq!(traj.times_us.partition_point(|&t| t <= 2_000_000), 1);
+    }
+
+    #[test]
+    fn trajectory_preserves_partial_and_nonfinite_gps_gaps() {
+        let (snap, fields) = nullable_gps_snapshot(
+            vec![0, 1_000_000, 2_000_000, 3_000_000, 4_000_000],
+            vec![
+                Some(47.0),
+                Some(47.001),
+                Some(f64::NAN),
+                Some(f64::INFINITY),
+                Some(47.004),
+            ],
+            vec![Some(8.0), None, Some(f64::NAN), Some(8.0), Some(8.0)],
+            vec![
+                Some(400.0),
+                Some(400.0),
+                Some(400.0),
+                Some(400.0),
+                Some(400.0),
+            ],
+        );
+        let traj = build_trajectory(&snap, &gps_config(fields, 0.0));
+        assert_eq!(
+            traj.times_us,
+            vec![0, 1_000_000, 2_000_000, 3_000_000, 4_000_000]
+        );
+        assert_eq!(traj.points.len(), 5);
+        assert!(traj.points[0].iter().all(|v| v.is_finite()));
+        assert!(traj.points[1..4].iter().flatten().all(|v| v.is_nan()));
+        assert!(traj.points[4].iter().all(|v| v.is_finite()));
     }
 
     #[test]
