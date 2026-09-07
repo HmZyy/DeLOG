@@ -801,6 +801,27 @@ fn keyboard_shortcuts_produce_registry_commands() {
 }
 
 #[test]
+fn the_command_palette_opens_on_ctrl_shift_p_not_ctrl_k() {
+    const APP: &str = include_str!("mod.rs");
+    let toggle = APP
+        .split("should_toggle_palette(")
+        .next()
+        .expect("the palette toggle should exist");
+    let shortcut = toggle
+        .rsplit("let palette_shortcut = ")
+        .next()
+        .expect("the palette shortcut should be read from input");
+
+    assert!(shortcut.contains("input.modifiers.command"));
+    assert!(shortcut.contains("input.modifiers.shift"));
+    assert!(shortcut.contains("egui::Key::P"));
+    assert!(
+        !shortcut.contains("egui::Key::K"),
+        "Ctrl+K now runs a script; the palette moved to Ctrl+Shift+P"
+    );
+}
+
+#[test]
 fn dock_commands_share_one_mapping_for_toggle_and_open_only_routes() {
     use crate::shell::app::commands::CommandId;
 
