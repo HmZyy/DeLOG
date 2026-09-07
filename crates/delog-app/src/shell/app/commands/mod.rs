@@ -29,6 +29,7 @@ pub enum CommandId {
     OpenLogging,
     SaveLayout,
     LoadLayout,
+    RunScript,
     ManageLayouts,
     ClearLayout,
     ImportLayout,
@@ -278,6 +279,7 @@ impl CommandId {
         Self::OpenLogging,
         Self::SaveLayout,
         Self::LoadLayout,
+        Self::RunScript,
         Self::ManageLayouts,
         Self::ClearLayout,
         Self::ImportLayout,
@@ -325,8 +327,9 @@ impl CommandId {
             | TogglePlayback | JumpStart | JumpEnd | StepLeft | StepRight | AddMarker => {
                 ClassicMenuOwner::Analyze
             }
-            OpenScriptEditor | OpenScriptVariables | OpenParserEditor | SaveLayout | LoadLayout
-            | ManageLayouts | ClearLayout | ImportLayout | ExportLayout | OpenSettings => {
+            OpenScriptEditor | OpenScriptVariables | OpenParserEditor | RunScript | SaveLayout
+            | LoadLayout | ManageLayouts | ClearLayout | ImportLayout | ExportLayout
+            | OpenSettings => {
                 ClassicMenuOwner::Tools
             }
         }
@@ -345,6 +348,7 @@ impl CommandId {
             }
             Self::OpenScripting
             | Self::OpenScriptEditor
+            | Self::RunScript
             | Self::OpenScriptVariables
             | Self::OpenParserEditor
                 if !context.scripting_enabled =>
