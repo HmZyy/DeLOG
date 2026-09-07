@@ -2382,7 +2382,7 @@ fn tracked_vehicle_picker(
 ) {
     let id = ui.make_persistent_id("scene-tracked-vehicle");
     egui::Area::new(id)
-        .order(egui::Order::Foreground)
+        .order(egui::Order::Background)
         .fixed_pos(scene_rect.min + egui::vec2(8.0, 8.0))
         .show(ui.ctx(), |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
@@ -2425,7 +2425,7 @@ fn scene_overlay_buttons(
     let id = ui.make_persistent_id("scene-overlay-buttons");
     let mut clicks = SceneOverlayClicks::default();
     egui::Area::new(id)
-        .order(egui::Order::Foreground)
+        .order(egui::Order::Background)
         .fixed_pos(scene_rect.right_top() + egui::vec2(-8.0, 8.0))
         .pivot(egui::Align2::RIGHT_TOP)
         .show(ui.ctx(), |ui| {
