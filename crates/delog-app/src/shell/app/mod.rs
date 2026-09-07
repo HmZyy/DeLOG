@@ -291,6 +291,12 @@ struct LoadLayoutDialog {
 }
 
 #[derive(Default)]
+struct RunScriptDialog {
+    picker: crate::ui::palette::PickerState,
+    scripts: Vec<String>,
+}
+
+#[derive(Default)]
 struct LayoutManagerDialog {
     open: bool,
     layouts: Vec<String>,
@@ -393,6 +399,7 @@ pub struct DelogApp {
     generate_markers_dialog: Option<crate::shell::generate_markers::GenerateMarkersDialog>,
     save_layout_dialog: SaveLayoutDialog,
     load_layout_dialog: LoadLayoutDialog,
+    run_script_dialog: RunScriptDialog,
     layout_manager_dialog: LayoutManagerDialog,
     settings: AppSettings,
     settings_dialog: SettingsDialog,
@@ -543,6 +550,7 @@ impl DelogApp {
                 name: "default".into(),
             },
             load_layout_dialog: LoadLayoutDialog::default(),
+            run_script_dialog: RunScriptDialog::default(),
             layout_manager_dialog: LayoutManagerDialog::default(),
             settings,
             settings_dialog: SettingsDialog::default(),
@@ -1672,6 +1680,18 @@ impl DelogApp {
         }
     }
 
+    fn run_named_script(&mut self, name: &str) {
+        #[cfg(feature = "scripting")]
+        let _ = self.scripts.run_named(
+            name,
+            self.session.store(),
+            self.session.ingest_sender(),
+            Arc::clone(self.session.metrics()),
+        );
+        #[cfg(not(feature = "scripting"))]
+        let _ = name;
+    }
+
     fn open_command_palette(&mut self) {
         self.dynamic_command_catalog.invalidate();
         self.command_palette.open();
@@ -1785,6 +1805,18 @@ impl DelogApp {
     fn command_palette_entries(
         presentations: Vec<commands::CommandPresentation>,
     ) -> Vec<command_palette::PaletteEntry> {
+        let presentations: Vec<commands::CommandPresentation> = presentations
+            .into_iter()
+            .filter(|presentation| {
+                !matches!(
+                    presentation.command,
+                    commands::AppCommand::LoadNamedLayout(_)
+                        | commands::AppCommand::RunScript(_)
+                        | commands::AppCommand::OpenWithParser(_)
+                        | commands::AppCommand::OpenWithBuiltInParser(_)
+                )
+            })
+            .collect();
         let mut entries = command_palette::CommandPaletteState::entries(presentations);
         for entry in &mut entries {
             match &entry.command {
@@ -1842,17 +1874,7 @@ impl DelogApp {
                 #[cfg(not(feature = "scripting"))]
                 let _ = name;
             }
-            AppCommand::RunScript(name) => {
-                #[cfg(feature = "scripting")]
-                let _ = self.scripts.run_named(
-                    &name,
-                    self.session.store(),
-                    self.session.ingest_sender(),
-                    Arc::clone(self.session.metrics()),
-                );
-                #[cfg(not(feature = "scripting"))]
-                let _ = name;
-            }
+            AppCommand::RunScript(name) => self.run_named_script(&name),
             AppCommand::LoadNamedLayout(name) => self.load_layout(&name, snapshot),
             AppCommand::DisconnectLink(index) => self.session.stop_live(index),
             AppCommand::Static(id) => match id {
@@ -1902,6 +1924,14 @@ impl DelogApp {
                     self.load_layout_dialog.layouts =
                         crate::config::layout::doc::list_layouts();
                     self.load_layout_dialog.picker.open();
+                }
+                CommandId::RunScript => {
+                    #[cfg(feature = "scripting")]
+                    {
+                        self.run_script_dialog.scripts =
+                            self.scripts.try_script_names().unwrap_or_default();
+                    }
+                    self.run_script_dialog.picker.open();
                 }
                 CommandId::ManageLayouts => self.open_layout_manager(),
                 CommandId::ClearLayout => self.clear_current_layout(),
@@ -2137,6 +2167,26 @@ impl DelogApp {
                     self.load_layout(&name, &snapshot);
                 }
                 None => {}
+            }
+        }
+
+        if self.run_script_dialog.picker.open {
+            let items: Vec<_> = self
+                .run_script_dialog
+                .scripts
+                .iter()
+                .map(|name| {
+                    crate::ui::palette::PickerItem::new(name.clone(), name.clone())
+                })
+                .collect();
+            if let Some(name) = self.run_script_dialog.picker.show(
+                ctx,
+                "run-script-picker",
+                "Search scripts…",
+                "No saved scripts.",
+                &items,
+            ) {
+                self.run_named_script(&name);
             }
         }
 
@@ -4209,6 +4259,7 @@ const SHORTCUT_KEYS: &[egui::Key] = &[
     egui::Key::ArrowRight,
     egui::Key::S,
     egui::Key::L,
+    egui::Key::K,
     egui::Key::M,
     egui::Key::E,
     egui::Key::O,
@@ -4238,6 +4289,7 @@ fn command_for_shortcut(
     match (key, command_modifier) {
         (egui::Key::S, true) => Some(CommandId::SaveLayout),
         (egui::Key::L, true) => Some(CommandId::LoadLayout),
+        (egui::Key::K, true) => Some(CommandId::RunScript),
         (egui::Key::E, true) => Some(CommandId::ToggleDataBrowser),
         (egui::Key::O, true) => Some(CommandId::Open),
         (egui::Key::F1, _) => Some(CommandId::OpenDiagnostics),

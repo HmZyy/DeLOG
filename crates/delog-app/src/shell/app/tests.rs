@@ -282,26 +282,6 @@ fn non_static_palette_entries_have_variant_specific_search_metadata() {
 
     for (command, search_terms, subtitle) in [
         (
-            AppCommand::OpenWithBuiltInParser("ulog".into()),
-            "built-in native parser open with ulog",
-            "File › Open With",
-        ),
-        (
-            AppCommand::OpenWithParser("shared".into()),
-            "custom parser run parse file shared",
-            "Tools › Parsers › Run Parser",
-        ),
-        (
-            AppCommand::RunScript("shared".into()),
-            "script run execute shared",
-            "Tools › Scripts › Run Scripts",
-        ),
-        (
-            AppCommand::LoadNamedLayout("shared".into()),
-            "layout load workspace shared",
-            "Tools › Layouts › Load Layout",
-        ),
-        (
             AppCommand::DisconnectLink(0),
             "live link disconnect connection endpoint",
             "Header › Live link",
@@ -334,20 +314,19 @@ fn non_static_palette_entries_have_variant_specific_search_metadata() {
         assert_eq!(entry.subtitle.as_deref(), Some(subtitle));
     }
 
+    for excluded in [
+        AppCommand::RunScript("shared".into()),
+        AppCommand::LoadNamedLayout("shared".into()),
+        AppCommand::OpenWithParser("shared".into()),
+        AppCommand::OpenWithBuiltInParser("ulog".into()),
+    ] {
+        assert!(
+            !entries.iter().any(|entry| entry.command == excluded),
+            "{excluded:?} should be reachable by its own shortcut, not by name in the palette"
+        );
+    }
+
     for (query, command) in [
-        (
-            "native ulog",
-            AppCommand::OpenWithBuiltInParser("ulog".into()),
-        ),
-        (
-            "custom parser",
-            AppCommand::OpenWithParser("shared".into()),
-        ),
-        ("execute script", AppCommand::RunScript("shared".into())),
-        (
-            "load workspace layout",
-            AppCommand::LoadNamedLayout("shared".into()),
-        ),
         ("disconnect endpoint", AppCommand::DisconnectLink(0)),
         ("workflow emphasis", AppCommand::ToggleShellEmphasis),
         ("reset zoom range", AppCommand::FitAll),
@@ -362,7 +341,7 @@ fn non_static_palette_entries_have_variant_specific_search_metadata() {
 }
 
 #[test]
-fn identical_dynamic_names_keep_raw_primary_labels_and_distinct_palette_context() {
+fn name_backed_dynamic_commands_stay_out_of_the_palette() {
     use commands::AppCommand;
 
     let entries = DelogApp::command_palette_entries(vec![
@@ -373,28 +352,19 @@ fn identical_dynamic_names_keep_raw_primary_labels_and_distinct_palette_context(
         enabled_presentation(AppCommand::DisconnectLink(0), "shared"),
     ]);
 
-    assert!(entries.iter().all(|entry| entry.label == "shared"));
     assert_eq!(
         entries
             .iter()
-            .map(|entry| entry.subtitle.as_deref())
-            .collect::<std::collections::HashSet<_>>()
-            .len(),
-        5
+            .map(|entry| entry.command.clone())
+            .collect::<Vec<_>>(),
+        vec![AppCommand::DisconnectLink(0)],
+        "typing a script, parser or layout name must not surface it in the palette"
     );
-    for (query, command) in [
-        (
-            "native open with",
-            AppCommand::OpenWithBuiltInParser("shared".into()),
-        ),
-        ("custom parser", AppCommand::OpenWithParser("shared".into())),
-        ("execute script", AppCommand::RunScript("shared".into())),
-        ("load layout", AppCommand::LoadNamedLayout("shared".into())),
-        ("disconnect endpoint", AppCommand::DisconnectLink(0)),
-    ] {
-        let ranked = command_palette::ranked_entries(query, &entries);
-        assert_eq!(ranked.first().map(|entry| &entry.command), Some(&command));
-    }
+    let ranked = command_palette::ranked_entries("disconnect endpoint", &entries);
+    assert_eq!(
+        ranked.first().map(|entry| &entry.command),
+        Some(&AppCommand::DisconnectLink(0))
+    );
 }
 
 #[test]
@@ -797,7 +767,11 @@ fn keyboard_shortcuts_produce_registry_commands() {
         Some(CommandId::EqualizePlots)
     );
     assert!(SHORTCUT_KEYS.contains(&egui::Key::Equals));
-    assert_eq!(command_for_shortcut(egui::Key::K, true), None);
+    assert_eq!(
+        command_for_shortcut(egui::Key::K, true),
+        Some(CommandId::RunScript)
+    );
+    assert!(SHORTCUT_KEYS.contains(&egui::Key::K));
 }
 
 #[test]
