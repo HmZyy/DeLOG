@@ -2527,10 +2527,12 @@ impl eframe::App for DelogApp {
         }
 
         let wants_keyboard = ui.ctx().egui_wants_keyboard_input();
-        let ctrl_k = ui.ctx().input(|input| {
-            input.modifiers.command && input.key_pressed(egui::Key::K)
+        let palette_shortcut = ui.ctx().input(|input| {
+            input.modifiers.command
+                && input.modifiers.shift
+                && input.key_pressed(egui::Key::P)
         });
-        if command_palette::should_toggle_palette(ctrl_k, wants_keyboard) {
+        if command_palette::should_toggle_palette(palette_shortcut, wants_keyboard) {
             if self.command_palette.is_open() {
                 self.command_palette.close();
             } else {
