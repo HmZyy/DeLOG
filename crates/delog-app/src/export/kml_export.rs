@@ -343,6 +343,7 @@ mod tests {
         let traj = VehicleTrajectory {
             points: vec![[0.0, 50.0, -100.0], [f32::NAN; 3], [0.0, 50.0, -100.0]],
             times_us: vec![0, 1_000_000, 2_000_000],
+            reference: None,
         };
         let out = build_kml(&snap, &[v], std::slice::from_ref(&traj));
         assert_eq!(out.exported, 1);

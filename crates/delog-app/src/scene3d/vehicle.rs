@@ -168,6 +168,13 @@ pub struct Pose {
 }
 
 impl Pose {
+    pub fn transformed(self, transform: glam::DMat4) -> Self {
+        Self {
+            pos: transform.transform_point3(self.pos.as_dvec3()).as_vec3(),
+            rot: glam::DMat3::from_mat4(transform).as_mat3() * self.rot,
+        }
+    }
+
     pub fn model_matrix(&self, scale: f32) -> Mat4 {
         Mat4::from_translation(self.pos)
             * Mat4::from_mat3(self.rot)
@@ -511,7 +518,11 @@ fn build_trajectory_from_rows(
         }
     }
 
-    Some(VehicleTrajectory { points, times_us })
+    Some(VehicleTrajectory {
+        points,
+        times_us,
+        reference: geodetic_reference(snapshot, config),
+    })
 }
 
 fn build_trajectory_by_time(snapshot: &StoreSnapshot, config: &VehicleConfig) -> VehicleTrajectory {
@@ -531,11 +542,16 @@ fn build_trajectory_by_time(snapshot: &StoreSnapshot, config: &VehicleConfig) ->
             None => points.push([f32::NAN, f32::NAN, f32::NAN]),
         }
     }
-    VehicleTrajectory { points, times_us }
+    VehicleTrajectory {
+        points,
+        times_us,
+        reference: geodetic_reference(snapshot, config),
+    }
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct VehicleTrajectory {
+    pub reference: Option<[f64; 3]>,
     /// NaN = gap, so the line shader breaks there.
     pub points: Vec<[f32; 3]>,
     /// Canonical µs timestamp, 1:1 with `points`.
@@ -834,6 +850,95 @@ mod tests {
             "up offset, got {:?}",
             pose.pos
         );
+    }
+
+    #[test]
+    fn shared_frame_aligns_gps_vehicles_with_different_first_fixes() {
+        let (first, f) = gps_snapshot(
+            vec![0, 1_000_000],
+            vec![47.0, 47.01],
+            vec![8.0, 8.01],
+            vec![300.0, 450.0],
+        );
+        let (second, g) = gps_snapshot(vec![0], vec![47.01], vec![8.01], vec![450.0]);
+        let a = gps_config(f, 0.0);
+        let b = gps_config(g, 0.0);
+        let frame = crate::scene3d::frame::SceneFrame {
+            reference: geodetic_reference(&first, &a),
+        };
+        let a_pose = pose_at(&first, &a, 1_000_000).unwrap();
+        let b_pose = pose_at(&second, &b, 0)
+            .unwrap()
+            .transformed(frame.transform(geodetic_reference(&second, &b)));
+        assert!((a_pose.pos - b_pose.pos).length() < 0.01);
+    }
+
+    #[test]
+    fn shared_frame_aligns_referenced_ned_with_gps() {
+        let (gps, f) = gps_snapshot(
+            vec![0, 1_000_000],
+            vec![47.0, 47.0],
+            vec![8.0, 8.0],
+            vec![300.0, 450.0],
+        );
+        let (ned, g) = ned_snapshot(vec![0], vec![0.0], vec![0.0], vec![-50.0]);
+        let a = gps_config(f, 0.0);
+        let mut b = ned_config(g);
+        if let PosMapping::Ned { reference, .. } = &mut b.pos {
+            *reference = Some(NedReference::Manual(GeoRef {
+                lat_deg: 47.0,
+                lon_deg: 8.0,
+                alt_m: 400.0,
+            }));
+        }
+        let frame = crate::scene3d::frame::SceneFrame {
+            reference: geodetic_reference(&gps, &a),
+        };
+        let a_pose = pose_at(&gps, &a, 1_000_000).unwrap();
+        let b_pose = pose_at(&ned, &b, 0)
+            .unwrap()
+            .transformed(frame.transform(geodetic_reference(&ned, &b)));
+        assert!((a_pose.pos - b_pose.pos).length() < 0.001);
+        assert!((b_pose.pos.y - 150.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn shared_frame_rotates_vehicle_attitude() {
+        let frame = crate::scene3d::frame::SceneFrame {
+            reference: Some([0.0, 0.0, 0.0]),
+        };
+        let pose = Pose {
+            pos: Vec3::ZERO,
+            rot: Mat3::IDENTITY,
+        }
+        .transformed(frame.transform(Some([0.0, std::f64::consts::FRAC_PI_2, 0.0])));
+        assert!((pose.rot * Vec3::Y - Vec3::X).length() < 1e-6);
+    }
+
+    #[test]
+    fn shared_frame_keeps_trajectory_aligned_when_the_scene_origin_changes() {
+        let (snap, f) = gps_snapshot(
+            vec![0, 1_000_000],
+            vec![47.0, 47.0],
+            vec![8.0, 8.0],
+            vec![400.0, 450.0],
+        );
+        let config = gps_config(f, 20.0);
+        let trajectory = build_trajectory(&snap, &config);
+        for altitude in [300.0, 350.0] {
+            let frame = crate::scene3d::frame::SceneFrame {
+                reference: Some([47.0_f64.to_radians(), 8.0_f64.to_radians(), altitude]),
+            };
+            let transform = frame.transform(trajectory.reference);
+            let point = transform
+                .transform_point3(Vec3::from_array(trajectory.points[1]).as_dvec3())
+                .as_vec3();
+            assert!((point.y - (470.0 - altitude) as f32).abs() < 0.001);
+            let pose = pose_at(&snap, &config, 1_000_000)
+                .unwrap()
+                .transformed(frame.transform(geodetic_reference(&snap, &config)));
+            assert!((point - pose.pos).length() < 0.001);
+        }
     }
 
     fn ned_config(fields: [FieldId; 3]) -> VehicleConfig {

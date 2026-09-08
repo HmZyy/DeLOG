@@ -454,20 +454,27 @@ fn scene_map_overlay_only_reports_actionable_states() {
 }
 
 #[test]
-fn scene_map_tracked_vehicle_switch_changes_generation() {
+fn scene_map_tracking_switch_preserves_frame_and_generation() {
     let mut pane = Scene3dPane::default();
-    let first = pane.update_map_selection(Some((0, MapProviderId::BingSatellite, [0; 3])));
-    assert_eq!(
-        pane.update_map_selection(Some((0, MapProviderId::BingSatellite, [0; 3]))),
-        first
-    );
-    assert!(pane.update_map_selection(Some((1, MapProviderId::BingSatellite, [0; 3]))) > first);
+    let references = [Some([0.5, 0.2, 100.0]), Some([0.6, 0.3, 200.0])];
+    pane.scene_frame.update(&references);
+    let anchor = pane.scene_frame.reference.unwrap();
+    let selection = Some((MapProviderId::BingSatellite, anchor.map(f64::to_bits)));
+    let generation = pane.update_map_selection(selection);
+    let transform = pane.scene_frame.transform(references[1]);
+    for tracked in [Some(0), Some(1), Some(0)] {
+        pane.tracked_vehicle = tracked;
+        pane.scene_frame.update(&references);
+        assert_eq!(pane.scene_frame.reference, Some(anchor));
+        assert_eq!(pane.scene_frame.transform(references[1]), transform);
+        assert_eq!(pane.update_map_selection(selection), generation);
+    }
 }
 
 #[test]
 fn scene_map_selection_change_clears_current_tiles() {
     let tile = |zoom, x| crate::map::provider::TileId { zoom, x, y: 4 };
-    let selection = Some((0, MapProviderId::BingSatellite, [0; 3]));
+    let selection = Some((MapProviderId::BingSatellite, [0; 3]));
     let mut pane = Scene3dPane::default();
     let generation = pane.update_map_selection(selection);
     pane.update_visible_map_tiles(vec![tile(8, 1)]);
@@ -476,9 +483,7 @@ fn scene_map_selection_change_clears_current_tiles() {
     assert_eq!(pane.update_map_selection(selection), generation);
     assert_eq!(pane.map_tiles, vec![(tile(9, 2), 0)]);
 
-    assert!(
-        pane.update_map_selection(Some((1, MapProviderId::BingSatellite, [1; 3]))) > generation
-    );
+    assert!(pane.update_map_selection(Some((MapProviderId::BingSatellite, [1; 3]))) > generation);
     assert!(pane.map_tiles.is_empty());
 }
 
