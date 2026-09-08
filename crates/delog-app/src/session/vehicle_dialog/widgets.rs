@@ -212,32 +212,6 @@ pub(super) fn section(
         .body(add);
 }
 
-pub(super) fn status_banner(ui: &mut egui::Ui, missing: &[&'static str]) {
-    if missing.is_empty() {
-        return;
-    }
-    let tokens = crate::ui::design_tokens::DesignTokens::from_style(ui.style());
-    let color = ui.visuals().warn_fg_color;
-    egui::Frame::new()
-        .fill(color.gamma_multiply(0.12))
-        .corner_radius(tokens.radius)
-        .inner_margin(tokens.space_sm)
-        .show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = tokens.space_xs;
-                ui.add(
-                    egui::Image::new(crate::ui::icons::circle_alert())
-                        .fit_to_exact_size(egui::vec2(14.0, 14.0))
-                        .tint(color),
-                );
-                ui.label(
-                    egui::RichText::new(format!("Not rendered yet - set {}", missing.join(", ")))
-                        .color(color),
-                );
-            });
-        });
-}
-
 pub(super) fn swatch(ui: &egui::Ui, rect: egui::Rect, color: egui::Color32) {
     ui.painter().rect_filled(rect, 3.0, color);
     ui.painter().rect_stroke(
