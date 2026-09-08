@@ -20,6 +20,7 @@ use crate::map::mercator;
 use crate::map::provider::{MapProviderId, provider};
 use crate::map::worker::{MapScopeId, TileFailureClass, TileManager, TileRequest};
 use crate::plotting::plot::{GhostTrace, PlotPane, TraceMode, TraceRef, ViewX, draw_zoom_drag_overlay};
+use crate::scene3d::frame::SceneFrame;
 use crate::scene3d::vehicle;
 use crate::ui::components;
 
@@ -44,16 +45,17 @@ pub struct Scene3dPane {
     pub(crate) map_scope: MapScopeId,
     pub camera: OrbitCamera,
     pub tracked_vehicle: Option<usize>,
+    pub(crate) scene_frame: SceneFrame,
     /// When true, each vehicle's path is clipped to the playhead time; when
     /// false, the full flight path is drawn.
     pub trail_to_playhead: bool,
-    pub(crate) map_selection: Option<(usize, MapProviderId, [u64; 3])>,
+    pub(crate) map_selection: Option<(MapProviderId, [u64; 3])>,
     pub(crate) map_generation: u64,
     pub(crate) map_tiles: Vec<(crate::map::provider::TileId, i32)>,
 }
 
 impl Scene3dPane {
-    fn update_map_selection(&mut self, selection: Option<(usize, MapProviderId, [u64; 3])>) -> u64 {
+    fn update_map_selection(&mut self, selection: Option<(MapProviderId, [u64; 3])>) -> u64 {
         if self.map_selection != selection {
             self.map_selection = selection;
             self.map_generation = self.map_generation.wrapping_add(1).max(1);
@@ -80,6 +82,7 @@ impl Default for Scene3dPane {
             map_scope: MapScopeId(NEXT_SCOPE.fetch_add(1, Ordering::Relaxed)),
             camera: OrbitCamera::default(),
             tracked_vehicle: None,
+            scene_frame: SceneFrame::default(),
             trail_to_playhead: true,
             map_selection: None,
             map_generation: 0,
@@ -926,20 +929,26 @@ impl Behavior<'_> {
         let snapshot = self.services.snapshot;
         let playhead = self.services.playhead_us;
         let trail_to_playhead = pane.trail_to_playhead;
-        // GPS-ref resolution split out of `pose_at` so it runs once per frame
-        // and can be profiled (and later cached) separately from the reads.
-        let gps_refs: Vec<Option<(f64, f64, f64)>> = {
+        let position_references: Vec<_> = {
             let _t = self.services.metrics.scope("scene_gpsref");
             self.services
                 .vehicles
                 .iter()
                 .map(|v| {
-                    (v.show && playhead.is_some())
-                        .then(|| vehicle::gps_reference(snapshot, v))
-                        .flatten()
+                    vehicle::position_reference(
+                        snapshot,
+                        v,
+                        self.services.scene3d.ignore_initial_zero_gps,
+                    )
                 })
                 .collect()
         };
+        let references: Vec<_> = position_references.iter().map(|r| r.origin).collect();
+        pane.scene_frame.update(&references);
+        let transforms: Vec<_> = references
+            .iter()
+            .map(|&reference| pane.scene_frame.transform(reference))
+            .collect();
         let poses: Vec<Option<vehicle::Pose>> = {
             let _t = self.services.metrics.scope("scene_poses");
             self.services
@@ -947,7 +956,13 @@ impl Behavior<'_> {
                 .iter()
                 .enumerate()
                 .map(|(i, v)| match (v.show, playhead) {
-                    (true, Some(t)) => vehicle::pose_at_with_ref(snapshot, v, gps_refs[i], t),
+                    (true, Some(t)) => vehicle::pose_at_with_position_reference(
+                        snapshot,
+                        v,
+                        position_references[i],
+                        t,
+                    )
+                    .map(|pose| pose.transformed(transforms[i])),
                     _ => None,
                 })
                 .collect()
@@ -974,18 +989,15 @@ impl Behavior<'_> {
             .map(|p| p.pos);
         pane.camera.target = tracked.unwrap_or(glam::Vec3::ZERO);
 
-        let tracked_reference = pane
-            .tracked_vehicle
-            .and_then(|i| self.services.vehicles.get(i).map(|v| (i, v)))
-            .and_then(|(i, v)| vehicle::geodetic_reference(snapshot, v).map(|r| (i, r)));
+        let scene_reference = pane.scene_frame.reference;
         let provider_id = self.services.scene3d.map_provider;
         let ready_tiles =
-            if let (Some(manager), Some((tracked_index, anchor)), Some(map_provider)) = (
+            if let (Some(manager), Some(anchor), Some(map_provider)) = (
                 self.services.tile_manager.as_deref_mut(),
-                tracked_reference,
+                scene_reference,
                 provider(provider_id),
             ) {
-                let selection = (tracked_index, provider_id, anchor.map(f64::to_bits));
+                let selection = (provider_id, anchor.map(f64::to_bits));
                 pane.update_map_selection(Some(selection));
                 let ppp = ui.ctx().pixels_per_point();
                 let viewport = [
@@ -1059,6 +1071,9 @@ impl Behavior<'_> {
                     color: legend::color32_to_srgb(v.color),
                     path_color: legend::color32_to_srgb(v.path_color),
                     trajectory: points,
+                    trajectory_transform: pane
+                        .scene_frame
+                        .transform(traj.and_then(|t| t.reference)),
                     traj_generation: self.services.traj_generation,
                     visible_count,
                 })
@@ -1118,7 +1133,7 @@ impl Behavior<'_> {
                 .as_deref()
                 .map(TileManager::status);
             let message = scene_map_overlay(
-                tracked_reference.is_some(),
+                scene_reference.is_some(),
                 self.services.tile_manager_error,
                 map_status
                     .as_ref()
