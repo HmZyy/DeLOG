@@ -131,7 +131,7 @@ impl Grid3dPipeline {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: depth_format,
                 depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                depth_compare: Some(wgpu::CompareFunction::Always),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -259,6 +259,141 @@ mod tests {
         assert!(
             (0..w).all(|x| img.matches(x, 0, [10, 12, 16, 255], 6)),
             "top row should be background (above horizon)"
+        );
+    }
+
+    fn ground_coverage(ctx: &RenderContext, cell: f32, lod: bool) -> (f64, f64) {
+        let (w, h) = (256u32, 256u32);
+        let target = Scene3dTarget::new(ctx.clone(), w, h);
+        let grid = Grid3dPipeline::new(
+            ctx,
+            target.color_format(),
+            target.depth_format(),
+            target.sample_count(),
+        );
+        let eye = Vec3::new(0.0, 300.0, 300.0);
+        let proj = Mat4::perspective_rh(0.95, w as f32 / h as f32, 0.05, 20_000.0);
+        let view = Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::Y);
+        let mut view_rot = view;
+        view_rot.w_axis = glam::Vec4::new(0.0, 0.0, 0.0, 1.0);
+        grid.set_uniform(
+            ctx,
+            &GridUniform::new(
+                (proj * view).to_cols_array_2d(),
+                (proj * view_rot).inverse().to_cols_array_2d(),
+                eye.to_array(),
+                cell,
+                1_000.0,
+                20_000.0,
+                false,
+                lod,
+            ),
+        );
+        let mut enc = ctx
+            .device()
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = target.begin_pass(&mut enc, wgpu::Color::BLACK);
+            grid.draw(&mut pass);
+        }
+        ctx.queue().submit([enc.finish()]);
+        ctx.device()
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
+        let img = target.read_rgba();
+        let luma = |p: &[u8]| 0.299 * p[0] as f64 + 0.587 * p[1] as f64 + 0.114 * p[2] as f64;
+        let values: Vec<f64> = img.pixels.chunks_exact(4).map(luma).collect();
+        let lit = values.iter().filter(|v| **v > 6.0).count() as f64 / values.len() as f64;
+        (lit, values.iter().sum::<f64>() / values.len() as f64)
+    }
+
+    #[test]
+    fn unresolvable_grid_levels_dissolve_instead_of_aliasing() {
+        let Some(ctx) = RenderContext::headless() else {
+            eprintln!("no wgpu adapter - skipping grid3d test");
+            return;
+        };
+        for cell in [1e-4_f32, 1e-2, 1e-1] {
+            let (lit, mean) = ground_coverage(&ctx, cell, true);
+            assert!(
+                lit < 0.05,
+                "cell {cell} m is far below a pixel yet lit {:.1}% of the frame",
+                lit * 100.0
+            );
+            assert!(
+                mean < 5.0,
+                "cell {cell} m washed the ground to mean luma {mean:.1}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolvable_grid_levels_are_still_drawn() {
+        let Some(ctx) = RenderContext::headless() else {
+            eprintln!("no wgpu adapter - skipping grid3d test");
+            return;
+        };
+        for cell in [30.0_f32, 100.0, 300.0] {
+            let (lit, _) = ground_coverage(&ctx, cell, true);
+            assert!(
+                lit > 0.02,
+                "cell {cell} m is several pixels wide but only lit {:.2}% of the frame",
+                lit * 100.0
+            );
+        }
+    }
+
+    #[test]
+    fn principal_axes_survive_the_grid_dissolve() {
+        let Some(ctx) = RenderContext::headless() else {
+            eprintln!("no wgpu adapter - skipping grid3d test");
+            return;
+        };
+        let (w, h) = (256u32, 256u32);
+        let target = Scene3dTarget::new(ctx.clone(), w, h);
+        let grid = Grid3dPipeline::new(
+            &ctx,
+            target.color_format(),
+            target.depth_format(),
+            target.sample_count(),
+        );
+        let eye = Vec3::new(0.0, 300.0, 300.0);
+        let proj = Mat4::perspective_rh(0.95, w as f32 / h as f32, 0.05, 20_000.0);
+        let view = Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::Y);
+        let mut view_rot = view;
+        view_rot.w_axis = glam::Vec4::new(0.0, 0.0, 0.0, 1.0);
+        grid.set_uniform(
+            &ctx,
+            &GridUniform::new(
+                (proj * view).to_cols_array_2d(),
+                (proj * view_rot).inverse().to_cols_array_2d(),
+                eye.to_array(),
+                1e-3,
+                1_000.0,
+                20_000.0,
+                false,
+                true,
+            ),
+        );
+        let mut enc = ctx
+            .device()
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = target.begin_pass(&mut enc, wgpu::Color::BLACK);
+            grid.draw(&mut pass);
+        }
+        ctx.queue().submit([enc.finish()]);
+        ctx.device()
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
+        let img = target.read_rgba();
+        assert!(
+            any_pixel(&img, |p| p[0] > 150 && p[1] < 90 && p[2] < 90),
+            "East axis must stay visible after the grid levels dissolve"
+        );
+        assert!(
+            any_pixel(&img, |p| p[2] > 150 && p[0] < 90 && p[1] < 110),
+            "South axis must stay visible after the grid levels dissolve"
         );
     }
 }

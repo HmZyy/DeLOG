@@ -1002,4 +1002,104 @@ fn fs() -> @location(0) vec4<f32> {
             assert!(grid_pixels > 8, "grid disappeared at camera dx={dx}");
         }
     }
+
+    #[test]
+    fn grid_lines_are_not_z_fought_by_the_coplanar_map_tiles() {
+        let ctx = RenderContext::headless().expect("headless adapter");
+        let (w, h) = (256u32, 256u32);
+        let target = Scene3dTarget::new(ctx.clone(), w, h);
+        let mut tiles = MapTilePipeline::new(
+            &ctx,
+            target.color_format(),
+            target.depth_format(),
+            target.sample_count(),
+        );
+        let ground: Vec<u8> = (0..256 * 256).flat_map(|_| [16u8, 28, 72, 255]).collect();
+        tiles
+            .upload(MapTileUpload {
+                key: 1,
+                rgba: &ground,
+                corners: [
+                    [-400.0, 0.0, 400.0],
+                    [400.0, 0.0, 400.0],
+                    [400.0, 0.0, -400.0],
+                    [-400.0, 0.0, -400.0],
+                ],
+            })
+            .unwrap();
+        let grid = Grid3dPipeline::new(
+            &ctx,
+            target.color_format(),
+            target.depth_format(),
+            target.sample_count(),
+        );
+        let visible = MapTileDrawGroups {
+            fallback: vec![],
+            current: vec![1],
+        };
+
+        for (eye, cell) in [
+            (glam::Vec3::new(0.0, 30.0, 30.0), 3.0f32),
+            (glam::Vec3::new(0.0, 300.0, 300.0), 30.0),
+            (glam::Vec3::new(0.0, 3000.0, 3000.0), 300.0),
+        ] {
+            let proj = glam::Mat4::perspective_rh(0.95, w as f32 / h as f32, 0.05, 20_000.0);
+            let view = glam::Mat4::look_at_rh(eye, glam::Vec3::ZERO, glam::Vec3::Y);
+            let mut view_rot = view;
+            view_rot.w_axis = glam::Vec4::new(0.0, 0.0, 0.0, 1.0);
+            tiles.set_view_proj((proj * view).to_cols_array_2d());
+            grid.set_uniform(
+                &ctx,
+                &GridUniform::new(
+                    (proj * view).to_cols_array_2d(),
+                    (proj * view_rot).inverse().to_cols_array_2d(),
+                    eye.to_array(),
+                    cell,
+                    1_000.0,
+                    20_000.0,
+                    false,
+                    true,
+                ),
+            );
+            let shot = |with_map: bool, with_grid: bool| {
+                let mut encoder = ctx.device().create_command_encoder(&Default::default());
+                {
+                    let mut pass = target.begin_pass(&mut encoder, wgpu::Color::BLACK);
+                    if with_map {
+                        tiles.draw_visible(&mut pass, &visible);
+                    }
+                    if with_grid {
+                        grid.draw(&mut pass);
+                    }
+                }
+                ctx.queue().submit([encoder.finish()]);
+                ctx.device()
+                    .poll(wgpu::PollType::wait_indefinitely())
+                    .unwrap();
+                target.read_rgba()
+            };
+            let map_only = shot(true, false);
+            let grid_only = shot(false, true);
+            let both = shot(true, true);
+
+            let luma = |p: [u8; 4]| 0.299 * p[0] as f64 + 0.587 * p[1] as f64 + 0.114 * p[2] as f64;
+            let mut strong = 0usize;
+            let mut dropped = 0usize;
+            for y in 0..h {
+                for x in 0..w {
+                    if luma(grid_only.pixel(x, y)) > 40.0 {
+                        strong += 1;
+                        let delta = luma(both.pixel(x, y)) - luma(map_only.pixel(x, y));
+                        dropped += usize::from(delta.abs() <= 4.0);
+                    }
+                }
+            }
+            assert!(strong > 500, "expected a substantial grid, got {strong} px");
+            assert!(
+                dropped * 1000 <= strong,
+                "eye {eye:?}: {dropped} of {strong} grid line pixels were swallowed by the \
+                 coplanar map tiles - they are z-fighting"
+            );
+        }
+    }
 }

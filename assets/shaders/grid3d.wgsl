@@ -20,6 +20,22 @@ struct Grid {
 
 @group(0) @binding(0) var<uniform> g: Grid;
 
+// Half-widths in pixels: grid lines stay a constant weight on screen, principal
+// axes are drawn a little heavier so they read as reference lines.
+const LINE_HALF_PX: f32 = 1.0;
+const AXIS_HALF_PX: f32 = 1.5;
+
+// A level's screen footprint `w` is measured in cell units, so `w = 0.5` is one
+// cell per two pixels - the Nyquist limit for the line pattern. Point-sampling a
+// level past that point does not draw a fine grid; it beats against the pixel
+// lattice and produces moire that swims whenever the camera moves. So each level
+// dissolves *before* it becomes unresolvable and the next coarser one carries
+// the image. The window is per axis: under a grazing view the lines running away
+// from the camera stay resolvable long after the ones crossing them have bunched
+// up, and fading per axis keeps those "rails" while dropping the "ties".
+const NYQUIST_FADE_START: f32 = 0.12; // ~8 px per cell: begin dissolving
+const NYQUIST_FADE_END: f32 = 0.35;   // ~3 px per cell: fully gone
+
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     // Near/far ray points in CAMERA-RELATIVE world space (world − cam_pos).
@@ -34,12 +50,22 @@ fn unproject(ndc: vec3<f32>) -> vec3<f32> {
 }
 
 // Anti-aliased grid coverage for a single cell size: 1.0 on a line, 0.0 in the
-// empty space between lines, feathered to ~1 px via screen-space derivatives.
-fn grid_line(coord_xz: vec2<f32>, cell: f32) -> f32 {
+// empty space between lines, feathered to ~1 px, and faded out entirely once the
+// cell can no longer be resolved (see NYQUIST_FADE_START).
+//
+// `deriv_xz` is the ground footprint of one pixel in world units. It is passed
+// in rather than taken with fwidth() here so the caller can derive it from
+// camera-relative operands.
+fn grid_line(coord_xz: vec2<f32>, deriv_xz: vec2<f32>, cell: f32) -> f32 {
     let c = coord_xz / cell;
-    let d = fwidth(c);
-    let aa = abs(fract(c - 0.5) - 0.5) / d;
-    return 1.0 - min(min(aa.x, aa.y), 1.0);
+    // Screen footprint of this level, in cell units.
+    let w = max(deriv_xz / cell, vec2<f32>(1e-8));
+    // 0 on a line, 0.5 midway between two.
+    let dist = abs(fract(c - 0.5) - 0.5);
+    let cov = vec2<f32>(1.0) - min(dist / (w * LINE_HALF_PX), vec2<f32>(1.0));
+    let resolvable = vec2<f32>(1.0)
+        - smoothstep(vec2<f32>(NYQUIST_FADE_START), vec2<f32>(NYQUIST_FADE_END), w);
+    return max(cov.x * resolvable.x, cov.y * resolvable.y);
 }
 
 @vertex
@@ -84,10 +110,20 @@ fn fs_main(in: VsOut) -> FsOut {
     let rel = in.near + t * dir;
     let world = vec3<f32>(g.cam_pos.x + rel.x, 0.0, g.cam_pos.z + rel.z);
 
+    // Ground footprint of one pixel. Taken from the camera-relative hit:
+    // `cam_pos` is constant across the quad, so this is exactly fwidth(world.xz)
+    // but evaluated on small operands - `world` itself loses the low bits of the
+    // derivative once the camera is kilometres from the render origin, which
+    // made both the line widths and the axis widths shimmer there.
+    let deriv = max(vec2<f32>(fwidth(rel.x), fwidth(rel.z)), vec2<f32>(1e-8));
+
     // Grid coverage. With LOD blend on (cam_pos.w) the requested `cell` is a
     // continuous value; we draw the two bracketing power-of-ten grids and fade
     // the finer one in/out so the grid never *pops* between sizes as the camera
-    // height changes, yet every line stays anchored to world coordinates.
+    // height changes, yet every line stays anchored to world coordinates. The
+    // per-fragment Nyquist fade inside `grid_line` handles the rest: this global
+    // blend picks the density near the camera, and each level then dissolves on
+    // its own wherever it runs out of pixels.
     let cell = g.params.x;
     var grid_alpha: f32;
     if (g.cam_pos.w > 0.5) {
@@ -95,11 +131,11 @@ fn fs_main(in: VsOut) -> FsOut {
         let lo = pow(10.0, floor(level)); // finer grid
         let hi = lo * 10.0;               // coarser grid (10× lo)
         let blend = fract(level);         // 0 at `lo` → 1 toward `hi`
-        let a_lo = grid_line(world.xz, lo) * (1.0 - blend); // fades out as we rise
-        let a_hi = grid_line(world.xz, hi);                 // always present
+        let a_lo = grid_line(world.xz, deriv, lo) * (1.0 - blend); // fades out as we rise
+        let a_hi = grid_line(world.xz, deriv, hi);                 // always present
         grid_alpha = max(a_lo, a_hi);
     } else {
-        grid_alpha = grid_line(world.xz, cell);
+        grid_alpha = grid_line(world.xz, deriv, cell);
     }
 
     // Distance fade from the camera (fog). Disabled (w == 0) keeps the grid
@@ -108,23 +144,24 @@ fn fs_main(in: VsOut) -> FsOut {
     let dist = length(rel);
     let fade = select(1.0, 1.0 - smoothstep(g.params.y, g.params.z, dist), g.params.w > 0.5);
 
+    // Principal axes: world.z == 0 is the X (East) axis → red;
+    // world.x == 0 is the Z (South) axis → blue. Each is a single line rather
+    // than a periodic pattern, so it cannot alias the way the grid does and
+    // carries its own coverage - that keeps the reference axes readable out
+    // where the grid levels themselves have dissolved.
+    let on_east = 1.0 - smoothstep(AXIS_HALF_PX - 1.0, AXIS_HALF_PX, abs(world.z) / deriv.y);
+    let on_south = 1.0 - smoothstep(AXIS_HALF_PX - 1.0, AXIS_HALF_PX, abs(world.x) / deriv.x);
+
     // Base grid color (cool grey).
     var color = vec3<f32>(0.55, 0.58, 0.62);
-
-    // Principal axes: world.z == 0 is the X (East) axis → red;
-    // world.x == 0 is the Z (South) axis → blue. Width is derived straight from
-    // the world-space derivatives so the highlight stays a constant ~1.5 px
-    // regardless of the (now variable) cell size.
-    let axis_x = abs(world.z) / fwidth(world.z); // proximity to the East axis line
-    let axis_z = abs(world.x) / fwidth(world.x); // proximity to the South axis line
-    if (axis_x < 1.5) {
+    if (on_east > 0.0) {
         color = vec3<f32>(0.90, 0.20, 0.20); // East → red
     }
-    if (axis_z < 1.5) {
+    if (on_south > 0.0) {
         color = vec3<f32>(0.20, 0.35, 0.95); // South → blue
     }
 
-    let alpha = grid_alpha * fade;
+    let alpha = max(grid_alpha, max(on_east, on_south)) * fade;
     if (alpha < 0.02) {
         // Empty ground between lines: leave the background untouched and do
         // not write depth.
