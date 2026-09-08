@@ -9,7 +9,7 @@ use super::draft::{
 use super::profiles::handle_profile_action;
 use super::widgets::{
     choose_custom_glb_path, combo_label, control_width, field_combo, form_grid, form_row, icon,
-    searchable_combo, section, status_banner, swatch,
+    searchable_combo, section, swatch,
 };
 use super::{ProfileAction, VehicleDialog};
 use crate::scene3d::vehicle::ModelKind;
@@ -74,8 +74,8 @@ pub(super) fn show_vehicle_config_tab(
 }
 
 fn row_for(index: usize, draft: &Draft, snapshot: &StoreSnapshot) -> Row {
-    let missing = draft.missing();
-    let status = if !missing.is_empty() {
+    let incomplete = draft.is_incomplete();
+    let status = if incomplete {
         "incomplete".to_owned()
     } else if !draft.show {
         "hidden".to_owned()
@@ -90,7 +90,7 @@ fn row_for(index: usize, draft: &Draft, snapshot: &StoreSnapshot) -> Row {
         },
         color: draft.color,
         status,
-        incomplete: !missing.is_empty(),
+        incomplete,
     }
 }
 
@@ -263,8 +263,6 @@ fn show_detail(
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            ui.add_space(tokens.space_sm);
-            status_banner(ui, &draft.missing());
             ui.add_space(tokens.space_sm);
 
             show_profile_picker(ui, index, &profile_names, draft, &mut pending.profile);
