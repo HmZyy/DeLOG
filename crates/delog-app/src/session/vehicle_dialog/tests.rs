@@ -179,13 +179,6 @@ fn both_tabs_use_a_list_rail_beside_a_detail_pane() {
 }
 
 #[test]
-fn the_detail_pane_explains_why_a_vehicle_is_not_rendered() {
-    assert!(VEHICLES_TAB_SOURCE.contains("status_banner(ui, &draft.missing());"));
-    assert!(VEHICLES_TAB_SOURCE.contains("\"incomplete\""));
-    assert!(WIDGETS_SOURCE.contains("Not rendered yet - set"));
-}
-
-#[test]
 fn form_rows_replace_hand_written_grid_triples() {
     for (name, source) in [
         ("vehicles", VEHICLES_TAB_SOURCE),
@@ -276,23 +269,18 @@ fn mapped_gps_draft() -> Draft {
 }
 
 #[test]
-fn a_draft_reports_every_mapping_that_blocks_rendering() {
-    assert_eq!(Draft::default().missing(), vec!["a data source"]);
+fn a_draft_reads_as_incomplete_until_every_mapping_is_set() {
+    assert!(Draft::default().is_incomplete());
 
     let mut draft = mapped_gps_draft();
-    assert!(draft.missing().is_empty());
+    assert!(!draft.is_incomplete());
 
     draft.lon = None;
-    assert_eq!(draft.missing(), vec!["Longitude"]);
-
-    draft.pos_topic = None;
-    draft.lat = None;
-    draft.alt = None;
-    assert_eq!(draft.missing(), vec!["a position topic"]);
+    assert!(draft.is_incomplete());
 }
 
 #[test]
-fn missing_mappings_agree_with_whether_the_vehicle_builds() {
+fn incompleteness_agrees_with_whether_the_vehicle_builds() {
     let mut cases = vec![Draft::default(), mapped_gps_draft()];
 
     let mut no_orientation_topic = mapped_gps_draft();
@@ -320,8 +308,8 @@ fn missing_mappings_agree_with_whether_the_vehicle_builds() {
 
     for (index, draft) in cases.iter().enumerate() {
         assert_eq!(
-            draft.missing().is_empty(),
-            draft.build().is_some(),
+            draft.is_incomplete(),
+            draft.build().is_none(),
             "case {index} disagrees about whether the vehicle renders"
         );
     }
@@ -442,7 +430,7 @@ fn the_dialog_lays_out_headlessly_with_complete_and_incomplete_vehicles() {
         show(ui.ctx(), &mut dialog, &mut vehicles, &snapshot);
     });
     assert_eq!(dialog.drafts.len(), 1);
-    assert!(dialog.drafts[0].missing().is_empty());
+    assert!(!dialog.drafts[0].is_incomplete());
 
     dialog.drafts.push(Draft::default());
     dialog.selected_vehicle = 1;
@@ -451,7 +439,7 @@ fn the_dialog_lays_out_headlessly_with_complete_and_incomplete_vehicles() {
             show(ui.ctx(), &mut dialog, &mut vehicles, &snapshot);
         });
     }
-    assert_eq!(dialog.drafts[1].missing(), vec!["a data source"]);
+    assert!(dialog.drafts[1].is_incomplete());
 
     dialog.drafts.clear();
     dialog.clamp_selection();
@@ -772,7 +760,7 @@ fn a_matching_profile_fills_in_the_mappings() {
     assert!(resolved, "a profile matching the source should resolve");
     assert_eq!(draft.pos_topic, Some(TopicId(0)));
     assert_eq!(draft.lat, Some(FieldId(0)));
-    assert!(draft.missing().is_empty());
+    assert!(!draft.is_incomplete());
 }
 
 #[test]
@@ -781,7 +769,7 @@ fn a_profile_the_source_cannot_satisfy_clears_the_previous_mappings() {
     let mut draft = mapped_gps_draft();
     draft.selected_profile = Some("probe".to_owned());
     assert!(
-        draft.missing().is_empty(),
+        !draft.is_incomplete(),
         "the draft starts fully mapped by an earlier profile"
     );
 
@@ -797,7 +785,7 @@ fn a_profile_the_source_cannot_satisfy_clears_the_previous_mappings() {
     assert_eq!(draft.lon, None, "the stale longitude must be cleared");
     assert_eq!(draft.alt, None, "the stale altitude must be cleared");
     assert!(
-        !draft.missing().is_empty(),
+        draft.is_incomplete(),
         "the vehicle should now read as incomplete rather than silently wrong"
     );
 
