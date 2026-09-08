@@ -929,14 +929,21 @@ impl Behavior<'_> {
         let snapshot = self.services.snapshot;
         let playhead = self.services.playhead_us;
         let trail_to_playhead = pane.trail_to_playhead;
-        let references: Vec<Option<[f64; 3]>> = {
+        let position_references: Vec<_> = {
             let _t = self.services.metrics.scope("scene_gpsref");
             self.services
                 .vehicles
                 .iter()
-                .map(|v| vehicle::geodetic_reference(snapshot, v))
+                .map(|v| {
+                    vehicle::position_reference(
+                        snapshot,
+                        v,
+                        self.services.scene3d.ignore_initial_zero_gps,
+                    )
+                })
                 .collect()
         };
+        let references: Vec<_> = position_references.iter().map(|r| r.origin).collect();
         pane.scene_frame.update(&references);
         let transforms: Vec<_> = references
             .iter()
@@ -949,10 +956,10 @@ impl Behavior<'_> {
                 .iter()
                 .enumerate()
                 .map(|(i, v)| match (v.show, playhead) {
-                    (true, Some(t)) => vehicle::pose_at_with_ref(
+                    (true, Some(t)) => vehicle::pose_at_with_position_reference(
                         snapshot,
                         v,
-                        references[i].map(|[lat, lon, alt]| (lat, lon, alt)),
+                        position_references[i],
                         t,
                     )
                     .map(|pose| pose.transformed(transforms[i])),
