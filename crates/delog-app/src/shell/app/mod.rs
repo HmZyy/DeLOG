@@ -1295,13 +1295,20 @@ impl DelogApp {
         let ctx = ctx.clone();
         let snapshot = snapshot.clone();
         let vehicles = self.vehicles.clone();
+        let ignore_initial_zero_gps = self.settings.scene3d.ignore_initial_zero_gps;
         self.traj_building = Some((target_epoch, target_revision));
         std::thread::Builder::new()
             .name("delog-trajectory-build".into())
             .spawn(move || {
                 let trajectories = vehicles
                     .iter()
-                    .map(|v| crate::scene3d::vehicle::build_trajectory(&snapshot, v))
+                    .map(|v| {
+                        crate::scene3d::vehicle::build_trajectory(
+                            &snapshot,
+                            v,
+                            ignore_initial_zero_gps,
+                        )
+                    })
                     .collect();
                 let _ = tx.send(TrajectoryBuildResult {
                     epoch: target_epoch,
@@ -3174,6 +3181,11 @@ impl eframe::App for DelogApp {
         let settings_change = self
             .settings_dialog
             .show(ui.ctx(), &mut self.settings, tile_cache);
+        if settings_change.gps_filter_changed {
+            self.vehicle_revision = self.vehicle_revision.wrapping_add(1);
+            self.traj_dirty = true;
+            self.ensure_trajectory_build(ui.ctx(), &snapshot);
+        }
         if settings_change.theme_changed || self.theme_needs_apply {
             self.settings.theme.apply(ui.ctx());
             self.theme_needs_apply = false;
