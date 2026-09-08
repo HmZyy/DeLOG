@@ -488,6 +488,8 @@ fn finite_or(value: f32, fallback: f32) -> f32 {
 /// Distances are render-space metres.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Scene3dSettings {
+    #[serde(default = "default_true")]
+    pub ignore_initial_zero_gps: bool,
     #[serde(default)]
     pub map_provider: MapProviderId,
     #[serde(default = "default_tile_cache_limit_bytes")]
@@ -516,6 +518,7 @@ pub struct Scene3dSettings {
 impl Default for Scene3dSettings {
     fn default() -> Self {
         Self {
+            ignore_initial_zero_gps: true,
             map_provider: MapProviderId::None,
             tile_cache_limit_bytes: default_tile_cache_limit_bytes(),
             far_clip_m: default_scene_far_clip_m(),
@@ -723,6 +726,7 @@ impl egui_dock::TabViewer for SettingsTabViewer<'_> {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct SettingsChange {
+    pub gps_filter_changed: bool,
     pub theme_changed: bool,
     pub map_provider_changed: bool,
     pub tile_cache_limit_changed: bool,
@@ -731,6 +735,7 @@ pub struct SettingsChange {
 
 impl std::ops::BitOrAssign for SettingsChange {
     fn bitor_assign(&mut self, rhs: Self) {
+        self.gps_filter_changed |= rhs.gps_filter_changed;
         self.theme_changed |= rhs.theme_changed;
         self.map_provider_changed |= rhs.map_provider_changed;
         self.tile_cache_limit_changed |= rhs.tile_cache_limit_changed;
@@ -1003,6 +1008,7 @@ fn scene3d_tab(
     settings: &mut AppSettings,
     tile_cache: TileCacheUiState,
 ) -> SettingsChange {
+    let before_gps_filter = settings.scene3d.ignore_initial_zero_gps;
     let before_provider = settings.scene3d.map_provider;
     let before_limit = settings.scene3d.tile_cache_limit_bytes;
     let mut clear_tile_cache = false;
@@ -1111,12 +1117,19 @@ fn scene3d_tab(
                     .suffix(" m"),
             );
             ui.end_row();
+
+            ui.label("Ignore initial zero GPS positions").on_hover_text(
+                "Ignore zero latitude or longitude until both are nonzero. NED positions are unaffected.",
+            );
+            ui.checkbox(&mut s.ignore_initial_zero_gps, "");
+            ui.end_row();
         });
 
     if reset_to_defaults_button(ui) {
         settings.scene3d = Scene3dSettings::default();
     }
     SettingsChange {
+        gps_filter_changed: settings.scene3d.ignore_initial_zero_gps != before_gps_filter,
         map_provider_changed: settings.scene3d.map_provider != before_provider,
         tile_cache_limit_changed: settings.scene3d.tile_cache_limit_bytes != before_limit,
         clear_tile_cache,
@@ -1491,6 +1504,7 @@ mod tests {
     fn app_settings_persist_scene3d_settings() {
         let settings = AppSettings {
             scene3d: Scene3dSettings {
+                ignore_initial_zero_gps: false,
                 map_provider: MapProviderId::BingSatellite,
                 tile_cache_limit_bytes: 2 * 1024 * 1024 * 1024,
                 far_clip_m: 25_000.0,
@@ -1510,6 +1524,23 @@ mod tests {
         assert!(json.contains("scene3d"));
         let decoded: AppSettings = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.scene3d, settings.scene3d);
+    }
+
+    #[test]
+    fn initial_zero_gps_setting_defaults_on_and_persists_both_values() {
+        let old: AppSettings = serde_json::from_str(r#"{"scene3d":{}}"#).unwrap();
+        assert_eq!(
+            serde_json::to_value(old).unwrap()["scene3d"]["ignore_initial_zero_gps"],
+            true,
+        );
+        for enabled in [false, true] {
+            let json = serde_json::json!({"scene3d": {"ignore_initial_zero_gps": enabled}});
+            let settings: AppSettings = serde_json::from_value(json).unwrap();
+            assert_eq!(
+                serde_json::to_value(settings).unwrap()["scene3d"]["ignore_initial_zero_gps"],
+                enabled,
+            );
+        }
     }
 
     #[test]
