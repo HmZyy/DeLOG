@@ -938,7 +938,7 @@ impl Behavior<'_> {
                     vehicle::position_reference(
                         snapshot,
                         v,
-                        self.services.scene3d.ignore_initial_zero_gps,
+                        self.services.scene3d.resolved_reference_alt_step_m(),
                     )
                 })
                 .collect()
