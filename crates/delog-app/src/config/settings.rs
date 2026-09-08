@@ -504,6 +504,8 @@ pub struct Scene3dSettings {
     #[serde(default = "default_scene_max_camera_distance_m")]
     pub max_camera_distance_m: f32,
     #[serde(default = "default_true")]
+    pub show_sky: bool,
+    #[serde(default = "default_true")]
     pub show_grid: bool,
     #[serde(default = "default_true")]
     pub show_axes: bool,
@@ -529,6 +531,7 @@ impl Default for Scene3dSettings {
             tile_cache_limit_bytes: default_tile_cache_limit_bytes(),
             far_clip_m: default_scene_far_clip_m(),
             max_camera_distance_m: default_scene_max_camera_distance_m(),
+            show_sky: true,
             show_grid: true,
             show_axes: true,
             grid_cell_auto: true,
@@ -579,6 +582,10 @@ impl Scene3dSettings {
         } else {
             (self.resolved_grid_cell_m(), false)
         }
+    }
+
+    pub fn sky_enabled(self) -> bool {
+        self.show_sky && self.map_provider != MapProviderId::None
     }
 
     pub fn resolved_fog_m(self) -> (f32, f32) {
@@ -1094,6 +1101,11 @@ fn scene3d_tab(
             );
             ui.end_row();
 
+            ui.label("Sky")
+                .on_hover_text("Draw a procedural sky and horizon haze behind the scene. Only used while a map provider is selected.");
+            ui.checkbox(&mut s.show_sky, "");
+            ui.end_row();
+
             ui.label("Grid");
             ui.checkbox(&mut s.show_grid, "");
             ui.end_row();
@@ -1546,6 +1558,7 @@ mod tests {
                 tile_cache_limit_bytes: 2 * 1024 * 1024 * 1024,
                 far_clip_m: 25_000.0,
                 max_camera_distance_m: 12_000.0,
+                show_sky: false,
                 show_grid: false,
                 show_axes: false,
                 grid_cell_auto: false,
@@ -1743,5 +1756,40 @@ mod scripting_settings_tests {
         assert_eq!(json, "\"on_output\"");
         let back: AutoOpenScriptingConsole = serde_json::from_str(&json).unwrap();
         assert_eq!(back, AutoOpenScriptingConsole::OnOutput);
+    }
+
+    #[test]
+    fn sky_needs_both_the_toggle_and_a_map_provider() {
+        let cases = [
+            (true, MapProviderId::BingSatellite, true),
+            (false, MapProviderId::BingSatellite, false),
+            (true, MapProviderId::None, false),
+            (false, MapProviderId::None, false),
+        ];
+        for (show_sky, map_provider, expected) in cases {
+            let s = Scene3dSettings {
+                show_sky,
+                map_provider,
+                ..Default::default()
+            };
+            assert_eq!(
+                s.sky_enabled(),
+                expected,
+                "show_sky {show_sky} with provider {map_provider:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sky_defaults_on_but_stays_dark_until_a_provider_is_chosen() {
+        let s = Scene3dSettings::default();
+        assert!(s.show_sky);
+        assert!(!s.sky_enabled());
+    }
+
+    #[test]
+    fn old_scene3d_config_without_show_sky_defaults_it_on() {
+        let s: AppSettings = serde_json::from_str(r#"{"scene3d":{"far_clip_m":25000.0}}"#).unwrap();
+        assert!(s.scene3d.show_sky);
     }
 }

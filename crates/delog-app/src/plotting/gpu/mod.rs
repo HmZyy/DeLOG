@@ -8,19 +8,19 @@ use delog_core::metrics::MetricsRegistry;
 use delog_render::{
     BufferManager, GAP_CONNECT, GAP_CUT, GAP_DOTTED, GAP_FORCE_DASH, GpuErrorHub, Grid3dPipeline,
     GridUniform, LinePipeline, MAP_TILE_CAPACITY, MapTileDrawGroups, MapTilePipeline,
-    MapTileUpload, MeshGpu, MeshPipeline, MeshUniform, MinMaxColPipeline, PlotUniform,
-    RenderContext, ScatterPipeline, Scene3dTarget, StepPipeline, Traj3dPipeline, Traj3dUniform,
-    UniformRing,
+    MapTileUniform, MapTileUpload, MeshGpu, MeshPipeline, MeshUniform, MinMaxColPipeline,
+    PlotUniform, RenderContext, ScatterPipeline, Scene3dTarget, SkyPipeline, SkyUniform,
+    StepPipeline, Traj3dPipeline, Traj3dUniform, UniformRing,
 };
 use eframe::{egui_wgpu, wgpu};
 
-use crate::scene3d::camera::OrbitCamera;
+use crate::config::settings::{GapMode, RenderTuning, Scene3dSettings};
 use crate::map::provider::{MapProviderId, TileId};
 use crate::map::worker::{MapScopeId, ReadyTile};
-use crate::scene3d::models;
-use crate::plotting::plot::{PlotPane, TraceMode, ViewX};
-use crate::config::settings::{GapMode, RenderTuning, Scene3dSettings};
 use crate::plotting::compare::CompareMode;
+use crate::plotting::plot::{PlotPane, TraceMode, ViewX};
+use crate::scene3d::camera::OrbitCamera;
+use crate::scene3d::models;
 use crate::scene3d::vehicle::ModelKind;
 
 #[derive(Clone, Debug)]
@@ -656,13 +656,27 @@ impl GpuBridge {
                 0,
                 bytemuck::bytes_of(&Traj3dUniform::new(vp_cols, res.axis_gizmo.color)),
             );
+            let sky_on = scene3d.sky_enabled();
+            if sky_on {
+                res.sky
+                    .set_uniform(&res.ctx, &SkyUniform::new(inv.to_cols_array_2d()));
+            }
             res.prepare_vehicles(vp_cols, camera.eye().to_array(), vehicles);
-            let visible_map_tiles = res.prepare_map_tiles(vp_cols, &map_selection, ready_tiles);
+            let visible_map_tiles = res.prepare_map_tiles(
+                MapTileUniform::new(
+                    vp_cols,
+                    camera.eye().to_array(),
+                    tile_fog_rgb(sky_on),
+                    scene3d.fog_enabled.then(|| scene3d.resolved_fog_m()),
+                ),
+                &map_selection,
+                ready_tiles,
+            );
 
             let clear = wgpu::Color {
-                r: 0.07,
-                g: 0.078,
-                b: 0.10,
+                r: f64::from(SCENE_CLEAR_RGB[0]),
+                g: f64::from(SCENE_CLEAR_RGB[1]),
+                b: f64::from(SCENE_CLEAR_RGB[2]),
                 a: 1.0,
             };
             let mut enc =
@@ -673,6 +687,9 @@ impl GpuBridge {
                     });
             {
                 let mut pass = res.target.begin_pass(&mut enc, clear);
+                if sky_on {
+                    res.sky.draw(&mut pass);
+                }
                 res.map_tiles.draw_visible(&mut pass, &visible_map_tiles);
                 if scene3d.show_grid {
                     res.grid.draw(&mut pass);
@@ -1084,9 +1101,20 @@ struct VehicleGpu {
     traj_bind: wgpu::BindGroup,
 }
 
+pub const SCENE_CLEAR_RGB: [f32; 3] = [0.07, 0.078, 0.10];
+
+pub fn tile_fog_rgb(sky_enabled: bool) -> [f32; 3] {
+    if sky_enabled {
+        delog_render::HORIZON_RGB
+    } else {
+        SCENE_CLEAR_RGB
+    }
+}
+
 struct SceneResources {
     ctx: RenderContext,
     target: Scene3dTarget,
+    sky: SkyPipeline,
     grid: Grid3dPipeline,
     map_tiles: MapTilePipeline,
     map_tile_cache: HashMap<MapScopeId, HashMap<u64, ReadyTile>>,
@@ -1109,6 +1137,12 @@ impl SceneResources {
     fn new(ctx: RenderContext) -> Self {
         // Start at 1×1; the first `render_scene` resizes to the pane.
         let target = Scene3dTarget::new(ctx.clone(), 1, 1);
+        let sky = SkyPipeline::new(
+            &ctx,
+            target.color_format(),
+            target.depth_format(),
+            target.sample_count(),
+        );
         let grid = Grid3dPipeline::new(
             &ctx,
             target.color_format(),
@@ -1141,6 +1175,7 @@ impl SceneResources {
         Self {
             ctx,
             target,
+            sky,
             grid,
             map_tiles,
             map_tile_cache: HashMap::new(),
@@ -1318,11 +1353,11 @@ impl SceneResources {
 
     fn prepare_map_tiles(
         &mut self,
-        vp: [[f32; 4]; 4],
+        view: MapTileUniform,
         selection: &MapTileSelection,
         ready: &[ReadyTile],
     ) -> MapTileDrawGroups {
-        self.map_tiles.set_view_proj(vp);
+        self.map_tiles.set_uniform(&view);
         if self.map_tile_epoch != selection.epoch {
             self.map_tile_epoch = selection.epoch;
             self.map_tile_cache.clear();
