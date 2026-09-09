@@ -19,10 +19,11 @@ pub struct GridUniform {
     /// keeps the shader's f32 unprojection precise far from the render origin
     /// (otherwise the grid crawls while zooming/following).
     pub inv_vp_rel: [[f32; 4]; 4],
-    /// Camera world position (xyz); `w` = LOD blend (1.0 = cross-fade two
-    /// bracketing power-of-ten grids around `cell`, 0.0 = single level).
+    /// Camera world position (xyz); `w` = multi-level mode (1.0 = draw three
+    /// power-of-ten grids and hand emphasis between decades, 0.0 = one level).
     pub cam_pos: [f32; 4],
-    /// `x` = cell size (world units), `y` = fade start, `z` = fade end,
+    /// `x` = grid level in multi-level mode, else cell size (world units),
+    /// `y` = fade start, `z` = fade end,
     /// `w` = fog enabled (1.0 = fade with distance, 0.0 = crisp to far plane).
     pub params: [f32; 4],
 }
@@ -33,7 +34,7 @@ impl GridUniform {
         view_proj: [[f32; 4]; 4],
         inv_vp_rel: [[f32; 4]; 4],
         cam_pos: [f32; 3],
-        cell: f32,
+        level_or_cell: f32,
         fade_start: f32,
         fade_end: f32,
         fog: bool,
@@ -48,7 +49,7 @@ impl GridUniform {
                 cam_pos[2],
                 if lod { 1.0 } else { 0.0 },
             ],
-            params: [cell, fade_start, fade_end, if fog { 1.0 } else { 0.0 }],
+            params: [level_or_cell, fade_start, fade_end, if fog { 1.0 } else { 0.0 }],
         }
     }
 }
@@ -262,7 +263,7 @@ mod tests {
         );
     }
 
-    fn ground_coverage(ctx: &RenderContext, cell: f32, lod: bool) -> (f64, f64) {
+    fn ground_coverage(ctx: &RenderContext, level_or_cell: f32, lod: bool) -> (f64, f64) {
         let (w, h) = (256u32, 256u32);
         let target = Scene3dTarget::new(ctx.clone(), w, h);
         let grid = Grid3dPipeline::new(
@@ -282,7 +283,7 @@ mod tests {
                 (proj * view).to_cols_array_2d(),
                 (proj * view_rot).inverse().to_cols_array_2d(),
                 eye.to_array(),
-                cell,
+                level_or_cell,
                 1_000.0,
                 20_000.0,
                 false,
@@ -313,8 +314,20 @@ mod tests {
             eprintln!("no wgpu adapter - skipping grid3d test");
             return;
         };
+        for level in [-3.0_f32, -2.0, -1.0] {
+            let (lit, mean) = ground_coverage(&ctx, level, true);
+            assert!(
+                lit < 0.05,
+                "level {level} is far below a pixel yet lit {:.1}% of the frame",
+                lit * 100.0
+            );
+            assert!(
+                mean < 5.0,
+                "level {level} washed the ground to mean luma {mean:.1}"
+            );
+        }
         for cell in [1e-4_f32, 1e-2, 1e-1] {
-            let (lit, mean) = ground_coverage(&ctx, cell, true);
+            let (lit, mean) = ground_coverage(&ctx, cell, false);
             assert!(
                 lit < 0.05,
                 "cell {cell} m is far below a pixel yet lit {:.1}% of the frame",
@@ -333,14 +346,105 @@ mod tests {
             eprintln!("no wgpu adapter - skipping grid3d test");
             return;
         };
+        for level in [2.0_f32, 2.5, 3.0] {
+            let (lit, _) = ground_coverage(&ctx, level, true);
+            assert!(
+                lit > 0.02,
+                "level {level} resolves to several pixels but only lit {:.2}% of the frame",
+                lit * 100.0
+            );
+        }
         for cell in [30.0_f32, 100.0, 300.0] {
-            let (lit, _) = ground_coverage(&ctx, cell, true);
+            let (lit, _) = ground_coverage(&ctx, cell, false);
             assert!(
                 lit > 0.02,
                 "cell {cell} m is several pixels wide but only lit {:.2}% of the frame",
                 lit * 100.0
             );
         }
+    }
+
+    #[test]
+    fn emphasized_decade_lines_outshine_their_minor_neighbours() {
+        let Some(ctx) = RenderContext::headless() else {
+            eprintln!("no wgpu adapter - skipping grid3d test");
+            return;
+        };
+        let (w, h) = (512u32, 512u32);
+        let target = Scene3dTarget::new(ctx.clone(), w, h);
+        let grid = Grid3dPipeline::new(
+            &ctx,
+            target.color_format(),
+            target.depth_format(),
+            target.sample_count(),
+        );
+
+        let center = Vec3::new(2_000.0, 0.0, 2_000.0);
+        let eye = center + Vec3::new(0.0, 1_000.0, 0.0);
+        let proj = Mat4::perspective_rh(0.95, w as f32 / h as f32, 0.05, 100_000.0);
+        let view = Mat4::look_at_rh(eye, center, Vec3::Z);
+        let view_proj = proj * view;
+        let mut view_rot = view;
+        view_rot.w_axis = glam::Vec4::new(0.0, 0.0, 0.0, 1.0);
+        grid.set_uniform(
+            &ctx,
+            &GridUniform::new(
+                view_proj.to_cols_array_2d(),
+                (proj * view_rot).inverse().to_cols_array_2d(),
+                eye.to_array(),
+                3.0,
+                0.0,
+                1.0,
+                false,
+                true,
+            ),
+        );
+        let mut enc = ctx
+            .device()
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = target.begin_pass(&mut enc, wgpu::Color::BLACK);
+            grid.draw(&mut pass);
+        }
+        ctx.queue().submit([enc.finish()]);
+        ctx.device()
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
+        let img = target.read_rgba();
+
+        let peak_luma_at = |wx: f32, wz: f32| -> f64 {
+            let clip = view_proj * glam::Vec4::new(wx, 0.0, wz, 1.0);
+            let ndc = clip.truncate() / clip.w;
+            let px = ((ndc.x * 0.5 + 0.5) * w as f32).round() as i32;
+            let py = ((1.0 - (ndc.y * 0.5 + 0.5)) * h as f32).round() as i32;
+            let mut peak = 0.0f64;
+            for dy in -2..=2 {
+                for dx in -2..=2 {
+                    let (x, y) = (px + dx, py + dy);
+                    if x < 0 || y < 0 || x >= w as i32 || y >= h as i32 {
+                        continue;
+                    }
+                    let p = img.pixel(x as u32, y as u32);
+                    let l = 0.299 * f64::from(p[0])
+                        + 0.587 * f64::from(p[1])
+                        + 0.114 * f64::from(p[2]);
+                    peak = peak.max(l);
+                }
+            }
+            peak
+        };
+
+        let major = peak_luma_at(2_000.0, 2_450.0);
+        let minor = peak_luma_at(2_100.0, 2_450.0);
+        assert!(
+            minor > 20.0,
+            "minor line at x=2100 should be drawn, got luma {minor:.1}"
+        );
+        assert!(
+            major > minor * 1.2,
+            "decade line at x=2000 should outshine the minor line at x=2100, \
+             got {major:.1} vs {minor:.1}"
+        );
     }
 
     #[test]

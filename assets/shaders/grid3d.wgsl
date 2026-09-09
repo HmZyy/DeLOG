@@ -14,8 +14,8 @@ struct Grid {
     // from crawling while zooming/following a distant vehicle. See
     // `OrbitCamera::view_proj_and_inverse`.
     inv_vp_rel: mat4x4<f32>,
-    cam_pos: vec4<f32>,  // xyz world, w = LOD blend on
-    params: vec4<f32>,   // x = cell size, y = fade start, z = fade end, w = fog on
+    cam_pos: vec4<f32>,  // xyz world, w = multi-level on
+    params: vec4<f32>,   // x = grid level (or cell size), y = fade start, z = fade end, w = fog on
 };
 
 @group(0) @binding(0) var<uniform> g: Grid;
@@ -35,6 +35,11 @@ const AXIS_HALF_PX: f32 = 1.5;
 // up, and fading per axis keeps those "rails" while dropping the "ties".
 const NYQUIST_FADE_START: f32 = 0.12; // ~8 px per cell: begin dissolving
 const NYQUIST_FADE_END: f32 = 0.35;   // ~3 px per cell: fully gone
+
+const GRID_RGB: vec3<f32> = vec3<f32>(0.55, 0.58, 0.62);
+const EMPHASIS_RGB: vec3<f32> = vec3<f32>(0.85, 0.88, 0.92);
+const LEVELS_DRAWN: i32 = 3;
+const LEVEL_OFFSET: f32 = -1.0;
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
@@ -117,25 +122,22 @@ fn fs_main(in: VsOut) -> FsOut {
     // made both the line widths and the axis widths shimmer there.
     let deriv = max(vec2<f32>(fwidth(rel.x), fwidth(rel.z)), vec2<f32>(1e-8));
 
-    // Grid coverage. With LOD blend on (cam_pos.w) the requested `cell` is a
-    // continuous value; we draw the two bracketing power-of-ten grids and fade
-    // the finer one in/out so the grid never *pops* between sizes as the camera
-    // height changes, yet every line stays anchored to world coordinates. The
-    // per-fragment Nyquist fade inside `grid_line` handles the rest: this global
-    // blend picks the density near the camera, and each level then dissolves on
-    // its own wherever it runs out of pixels.
-    let cell = g.params.x;
     var grid_alpha: f32;
+    var grid_rgb = GRID_RGB;
     if (g.cam_pos.w > 0.5) {
-        let level = log(max(cell, 1e-6)) / log(10.0);
-        let lo = pow(10.0, floor(level)); // finer grid
-        let hi = lo * 10.0;               // coarser grid (10× lo)
-        let blend = fract(level);         // 0 at `lo` → 1 toward `hi`
-        let a_lo = grid_line(world.xz, deriv, lo) * (1.0 - blend); // fades out as we rise
-        let a_hi = grid_line(world.xz, deriv, hi);                 // always present
-        grid_alpha = max(a_lo, a_hi);
+        let f = fract(g.params.x);
+        let base = floor(g.params.x) + LEVEL_OFFSET;
+        grid_alpha = 0.0;
+        for (var j = 0; j < LEVELS_DRAWN; j = j + 1) {
+            let jf = f32(j);
+            let cov = grid_line(world.xz, deriv, pow(10.0, base + jf));
+            let level_alpha = clamp(jf + 1.0 - f, 0.0, 1.0);
+            let emphasis = clamp(jf - f, 0.0, 1.0);
+            grid_rgb = mix(grid_rgb, mix(GRID_RGB, EMPHASIS_RGB, emphasis), cov);
+            grid_alpha = mix(grid_alpha, level_alpha, cov);
+        }
     } else {
-        grid_alpha = grid_line(world.xz, deriv, cell);
+        grid_alpha = grid_line(world.xz, deriv, g.params.x);
     }
 
     // Distance fade from the camera (fog). Disabled (w == 0) keeps the grid
@@ -152,8 +154,7 @@ fn fs_main(in: VsOut) -> FsOut {
     let on_east = 1.0 - smoothstep(AXIS_HALF_PX - 1.0, AXIS_HALF_PX, abs(world.z) / deriv.y);
     let on_south = 1.0 - smoothstep(AXIS_HALF_PX - 1.0, AXIS_HALF_PX, abs(world.x) / deriv.x);
 
-    // Base grid color (cool grey).
-    var color = vec3<f32>(0.55, 0.58, 0.62);
+    var color = grid_rgb;
     if (on_east > 0.0) {
         color = vec3<f32>(0.90, 0.20, 0.20); // East → red
     }

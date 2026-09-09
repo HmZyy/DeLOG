@@ -635,16 +635,16 @@ impl GpuBridge {
                 .view_proj_and_inverse(px_w as f32 / px_h as f32, scene3d.resolved_far_clip_m());
             let vp_cols = vp.to_cols_array_2d();
             let (fade_start, fade_end) = scene3d.resolved_fog_m();
-            // Cell tracks height above the y=0 ground so orbiting low doesn't shimmer
-            // into a fine mesh; lod lets the shader cross-fade levels to avoid popping.
-            let (cell, lod) = scene3d.resolved_grid(camera.eye().y);
+            // Level tracks height above the y=0 ground so orbiting low doesn't shimmer
+            // into a fine mesh; lod lets the shader draw three decades at once.
+            let (level, lod) = scene3d.resolved_grid(camera.eye().y);
             res.grid.set_uniform(
                 &res.ctx,
                 &GridUniform::new(
                     vp_cols,
                     inv.to_cols_array_2d(),
                     camera.eye().to_array(),
-                    cell,
+                    level,
                     fade_start,
                     fade_end,
                     scene3d.fog_enabled,

@@ -1111,10 +1111,10 @@ fn fs() -> @location(0) vec4<f32> {
             current: vec![1],
         };
 
-        for (eye, cell) in [
-            (glam::Vec3::new(0.0, 30.0, 30.0), 3.0f32),
-            (glam::Vec3::new(0.0, 300.0, 300.0), 30.0),
-            (glam::Vec3::new(0.0, 3000.0, 3000.0), 300.0),
+        for (eye, level) in [
+            (glam::Vec3::new(0.0, 30.0, 30.0), 1.222f32),
+            (glam::Vec3::new(0.0, 300.0, 300.0), 2.222),
+            (glam::Vec3::new(0.0, 3000.0, 3000.0), 3.222),
         ] {
             let proj = glam::Mat4::perspective_rh(0.95, w as f32 / h as f32, 0.05, 20_000.0);
             let view = glam::Mat4::look_at_rh(eye, glam::Vec3::ZERO, glam::Vec3::Y);
@@ -1132,7 +1132,7 @@ fn fs() -> @location(0) vec4<f32> {
                     (proj * view).to_cols_array_2d(),
                     (proj * view_rot).inverse().to_cols_array_2d(),
                     eye.to_array(),
-                    cell,
+                    level,
                     1_000.0,
                     20_000.0,
                     false,
