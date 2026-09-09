@@ -656,7 +656,7 @@ impl GpuBridge {
                 0,
                 bytemuck::bytes_of(&Traj3dUniform::new(vp_cols, res.axis_gizmo.color)),
             );
-            let sky_on = scene3d.sky_enabled();
+            let sky_on = scene3d.show_sky;
             if sky_on {
                 res.sky
                     .set_uniform(&res.ctx, &SkyUniform::new(inv.to_cols_array_2d()));

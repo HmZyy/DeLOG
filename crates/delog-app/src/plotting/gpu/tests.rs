@@ -1453,6 +1453,17 @@ fn scene_pass_encodes_sky_before_tiles_before_grid_before_vehicle_overlays() {
 }
 
 #[test]
+fn sky_draws_from_its_own_toggle_and_not_the_map_provider() {
+    let source = include_str!("mod.rs");
+    let gate = source
+        .split("let sky_on = ")
+        .nth(1)
+        .and_then(|rest| rest.split(';').next())
+        .expect("sky gate");
+    assert_eq!(gate, "scene3d.show_sky");
+}
+
+#[test]
 fn tile_fog_tracks_whichever_backdrop_the_scene_is_drawing() {
     assert_eq!(super::tile_fog_rgb(true), delog_render::HORIZON_RGB);
     assert_eq!(super::tile_fog_rgb(false), super::SCENE_CLEAR_RGB);
