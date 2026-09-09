@@ -584,10 +584,6 @@ impl Scene3dSettings {
         }
     }
 
-    pub fn sky_enabled(self) -> bool {
-        self.show_sky && self.map_provider != MapProviderId::None
-    }
-
     pub fn resolved_fog_m(self) -> (f32, f32) {
         let start = finite_or(self.fog_start_m, default_scene_fog_start_m())
             .clamp(0.0, self.resolved_far_clip_m());
@@ -1102,7 +1098,7 @@ fn scene3d_tab(
             ui.end_row();
 
             ui.label("Sky")
-                .on_hover_text("Draw a procedural sky and horizon haze behind the scene. Only used while a map provider is selected.");
+                .on_hover_text("Draw a procedural sky and horizon haze behind the scene.");
             ui.checkbox(&mut s.show_sky, "");
             ui.end_row();
 
@@ -1759,32 +1755,10 @@ mod scripting_settings_tests {
     }
 
     #[test]
-    fn sky_needs_both_the_toggle_and_a_map_provider() {
-        let cases = [
-            (true, MapProviderId::BingSatellite, true),
-            (false, MapProviderId::BingSatellite, false),
-            (true, MapProviderId::None, false),
-            (false, MapProviderId::None, false),
-        ];
-        for (show_sky, map_provider, expected) in cases {
-            let s = Scene3dSettings {
-                show_sky,
-                map_provider,
-                ..Default::default()
-            };
-            assert_eq!(
-                s.sky_enabled(),
-                expected,
-                "show_sky {show_sky} with provider {map_provider:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn sky_defaults_on_but_stays_dark_until_a_provider_is_chosen() {
+    fn sky_defaults_on_without_a_map_provider() {
         let s = Scene3dSettings::default();
+        assert_eq!(s.map_provider, MapProviderId::None);
         assert!(s.show_sky);
-        assert!(!s.sky_enabled());
     }
 
     #[test]
