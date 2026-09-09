@@ -447,6 +447,107 @@ mod tests {
         );
     }
 
+    fn widest_axis_run(ctx: &RenderContext, eye: Vec3, look: Vec3, level: f32) -> (u32, u32, u32) {
+        let (w, h) = (512u32, 512u32);
+        let target = Scene3dTarget::new(ctx.clone(), w, h);
+        let grid = Grid3dPipeline::new(
+            ctx,
+            target.color_format(),
+            target.depth_format(),
+            target.sample_count(),
+        );
+        let proj = Mat4::perspective_rh(0.95, w as f32 / h as f32, 0.05, 100_000.0);
+        let view = Mat4::look_at_rh(eye, look, Vec3::Y);
+        let mut view_rot = view;
+        view_rot.w_axis = glam::Vec4::new(0.0, 0.0, 0.0, 1.0);
+        grid.set_uniform(
+            ctx,
+            &GridUniform::new(
+                (proj * view).to_cols_array_2d(),
+                (proj * view_rot).inverse().to_cols_array_2d(),
+                eye.to_array(),
+                level,
+                0.0,
+                1.0,
+                false,
+                true,
+            ),
+        );
+        let mut enc = ctx
+            .device()
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = target.begin_pass(&mut enc, wgpu::Color::BLACK);
+            grid.draw(&mut pass);
+        }
+        ctx.queue().submit([enc.finish()]);
+        ctx.device()
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
+        let img = target.read_rgba();
+        let tinted = |p: [u8; 4]| {
+            let (r, g, b) = (i32::from(p[0]), i32::from(p[1]), i32::from(p[2]));
+            b - r.max(g) > 40 || r - g.max(b) > 40
+        };
+        let mut best = (0u32, 0u32, 0u32);
+        for y in 0..h {
+            let n = (0..w).filter(|&x| tinted(img.pixel(x, y))).count() as u32;
+            if n > best.0 {
+                best = (n, y, (0..h).filter(|&yy| (0..w).any(|x| tinted(img.pixel(x, yy)))).count() as u32);
+            }
+        }
+        best
+    }
+
+    #[test]
+    fn axes_do_not_smear_along_the_horizon() {
+        let Some(ctx) = RenderContext::headless() else {
+            eprintln!("no wgpu adapter - skipping grid3d test");
+            return;
+        };
+        // Each camera sits 2 km off one axis and looks along the other, so the
+        // perpendicular axis is out of frame and the receding one may only ever
+        // cover a few pixels per row.
+        let cases = [
+            ("east", Vec3::new(2_000.0, 40.0, 0.0), Vec3::new(3_000.0, 20.0, 0.0)),
+            ("south", Vec3::new(0.0, 40.0, 2_000.0), Vec3::new(0.0, 20.0, 3_000.0)),
+        ];
+        for (name, eye, look) in cases {
+            let (widest, row, rows) = widest_axis_run(&ctx, eye, look, 1.333);
+            assert!(
+                widest <= 12,
+                "looking down the {name} axis: row {row} has {widest} axis-colored pixels \
+                 across {rows} tinted rows; a receding axis covers only a few per row, so \
+                 this is the horizon smear"
+            );
+            assert!(
+                rows > 50,
+                "the {name} axis recedes through this view and must still be drawn, \
+                 got {rows} tinted rows"
+            );
+        }
+    }
+
+    #[test]
+    fn the_grazing_guard_spares_an_axis_crossing_the_view() {
+        let Some(ctx) = RenderContext::headless() else {
+            eprintln!("no wgpu adapter - skipping grid3d test");
+            return;
+        };
+        // The South axis sits 1.7 km ahead, broadside to the camera: it should
+        // still paint right across the frame.
+        let (widest, _, _) = widest_axis_run(
+            &ctx,
+            Vec3::new(-1_700.0, 40.0, 0.0),
+            Vec3::new(-700.0, 20.0, 0.0),
+            1.333,
+        );
+        assert!(
+            widest > 200,
+            "a broadside axis 1.7 km out should still cross the view, widest run was {widest} px"
+        );
+    }
+
     #[test]
     fn principal_axes_survive_the_grid_dissolve() {
         let Some(ctx) = RenderContext::headless() else {
