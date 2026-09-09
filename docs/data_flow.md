@@ -13,6 +13,7 @@ one-shot snapshot: publish again after loading or receiving more data.
 
 - [Opening the editor](#opening-the-editor)
 - [Building a graph](#building-a-graph)
+- [Filtering signals](#filtering-signals)
 - [Timelines and alignment](#timelines-and-alignment)
 - [Units and NaN gaps](#units-and-nan-gaps)
 - [Publishing](#publishing)
@@ -52,11 +53,51 @@ and incompatible scalar/signal connections, and reports the reason in the
 Logging dock.
 
 Click a node to select it. Its inspector shows parameters, diagnostics, and the
-latest preview statistics. Constant values and Scale / Offset parameters may
-also be edited directly on the canvas. Drag a node by its body to move it.
+latest preview statistics. Constant values, Scale / Offset parameters, and
+filter limits and Inclusive checkboxes may also be edited directly on the
+canvas. Drag a node by its body to move it.
 Use **Undo** and **Redo** for graph edits; one drag is one undoable move. Press
 <kbd>Delete</kbd> or <kbd>Backspace</kbd> to remove the selected node.
 Select an edge and press <kbd>Delete</kbd> or <kbd>Backspace</kbd> to disconnect it.
+
+## Filtering signals
+
+Choose a node from the **Filters** category in the Add menu and connect a
+signal to its **In** port. A filter keeps values matching its condition and
+replaces rejected values with NaN gaps. Its output preserves the original
+timestamps, sample count, timeline, and unit, so it can still be combined with
+other fields from the same timeline.
+
+| Filter | Values kept |
+| --- | --- |
+| Equal | Equal to Value (`==`) |
+| Not Equal | Different from Value (`!=`) |
+| Less Than | Below Value (`<`), or at or below it (`<=`) with **Inclusive** checked |
+| Greater Than | Above Value (`>`), or at or above it (`>=`) with **Inclusive** checked |
+| Between | From Minimum to Maximum, including both limits |
+| Outside Range | Below Minimum or above Maximum, excluding both limits |
+
+Select a filter to change its condition in the inspector. Edit Value, or
+Minimum and Maximum, on the canvas or in the inspector. Less Than and Greater
+Than have an **Inclusive** checkbox in both places, unchecked by default. The
+symbol beside the threshold shows the active comparison. Changes support
+Undo/Redo and update downstream results.
+
+For example, **Not Equal**, Value `0`, changes `[2, 0, 5]` into `[2, gap, 5]`.
+**Less Than**, Value `5`, keeps the first value of `[2, 5, 8]`; checking
+**Inclusive** also keeps `5`. Chain filters to require several conditions,
+such as Greater Than `0` followed by Less Than `100`.
+
+Equality is exact, with no implicit tolerance. Comparisons use the values
+arriving at the node, including source multipliers and upstream conversions.
+Existing NaN gaps remain gaps, and positive or negative infinity becomes a gap
+for every filter. A filter that rejects every sample keeps the timestamps
+with a gap at each one.
+
+Limits must be finite. Minimum must be at most Maximum; equal limits are
+valid. Invalid limits produce a diagnostic instead of a filtered output.
+New single-value filters start at `0`; range filters start at `0` through `1`.
+These native filters work without Python.
 
 ## Timelines and alignment
 
@@ -92,6 +133,7 @@ Units are metadata. The evaluator does not perform dimensional conversion.
 | Multiply / Divide by a Constant | The signal input's unit |
 | Multiply / Divide two signals | Cleared |
 | Scale / Offset | The input unit |
+| Filters | The input unit |
 | Align to Timeline | The Data input unit |
 | Output field | The configured override, or the incoming signal unit when no override is set |
 

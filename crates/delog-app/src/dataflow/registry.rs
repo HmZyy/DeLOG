@@ -1,4 +1,5 @@
 use delog_core::align::AlignMode;
+use delog_flow::filter::{FilterKind, FilterSpec};
 use delog_flow::graph::{ConversionKind, NodeKind, OutputFieldSpec, OutputSpec};
 
 use crate::ui::fuzzy::fuzzy_match_score;
@@ -58,6 +59,42 @@ pub fn templates() -> &'static [NodeTemplate] {
                 multiplier: 1.0,
                 offset: 0.0,
             },
+        },
+        NodeTemplate {
+            name: "Filter Equal",
+            category: "Filters",
+            aliases: &["==", "equals"],
+            make: || NodeKind::Filter(FilterSpec::new(FilterKind::Equal)),
+        },
+        NodeTemplate {
+            name: "Filter Not Equal",
+            category: "Filters",
+            aliases: &["!=", "exclude"],
+            make: || NodeKind::Filter(FilterSpec::new(FilterKind::NotEqual)),
+        },
+        NodeTemplate {
+            name: "Filter Less Than",
+            category: "Filters",
+            aliases: &["<", "below"],
+            make: || NodeKind::Filter(FilterSpec::new(FilterKind::LessThan)),
+        },
+        NodeTemplate {
+            name: "Filter Greater Than",
+            category: "Filters",
+            aliases: &[">", "above"],
+            make: || NodeKind::Filter(FilterSpec::new(FilterKind::GreaterThan)),
+        },
+        NodeTemplate {
+            name: "Filter Between",
+            category: "Filters",
+            aliases: &["range", "inside"],
+            make: || NodeKind::Filter(FilterSpec::new(FilterKind::Between)),
+        },
+        NodeTemplate {
+            name: "Filter Outside Range",
+            category: "Filters",
+            aliases: &["outside", "exclude range"],
+            make: || NodeKind::Filter(FilterSpec::new(FilterKind::OutsideRange)),
         },
         NodeTemplate {
             name: "Radians to Degrees",
@@ -202,6 +239,27 @@ pub fn search_templates(query: &str) -> Vec<MenuEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn six_contiguous_filters_have_searchable_names_and_top_ranked_aliases() {
+        let filters: Vec<_> = templates()
+            .iter()
+            .enumerate()
+            .filter(|(_, template)| template.category == "Filters")
+            .collect();
+        assert_eq!(filters.len(), 6);
+        assert!(filters.windows(2).all(|pair| pair[1].0 == pair[0].0 + 1));
+        for ((index, template), kind) in filters.into_iter().zip(FilterKind::ALL) {
+            assert_eq!(template.name, kind.label());
+            assert_eq!((template.make)(), NodeKind::Filter(FilterSpec::new(kind)));
+            assert_eq!(search_templates(template.name)[0].index, index);
+            for alias in template.aliases {
+                let hits = search_templates(alias);
+                assert_eq!(hits[0].index, index, "alias {alias}");
+                assert_eq!(hits[0].score, 0);
+            }
+        }
+    }
 
     #[test]
     fn every_conversion_has_a_searchable_template() {
