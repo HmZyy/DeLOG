@@ -1,8 +1,8 @@
 use crate::context::RenderContext;
 
-pub const ZENITH_RGB: [f32; 3] = [0.14, 0.26, 0.48];
+pub const ZENITH_RGB: [f32; 3] = [0.10, 0.28, 0.62];
 
-pub const HORIZON_RGB: [f32; 3] = [0.62, 0.71, 0.80];
+pub const HORIZON_RGB: [f32; 3] = [0.66, 0.80, 0.92];
 
 pub const GROUND_RGB: [f32; 3] = [0.10, 0.11, 0.13];
 
