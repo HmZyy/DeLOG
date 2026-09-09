@@ -469,10 +469,10 @@ fn default_reference_alt_step_m() -> f64 {
     50.0
 }
 fn default_scene_far_clip_m() -> f32 {
-    20_000.0
+    100_000.0
 }
 fn default_scene_max_camera_distance_m() -> f32 {
-    12_000.0
+    5_000.0
 }
 fn default_scene_grid_cell_m() -> f32 {
     1.0
@@ -481,7 +481,7 @@ fn default_scene_fog_start_m() -> f32 {
     1_000.0
 }
 fn default_scene_fog_end_m() -> f32 {
-    20_000.0
+    100_000.0
 }
 
 fn finite_or(value: f32, fallback: f32) -> f32 {
