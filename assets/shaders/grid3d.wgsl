@@ -41,6 +41,9 @@ const EMPHASIS_RGB: vec3<f32> = vec3<f32>(0.85, 0.88, 0.92);
 const LEVELS_DRAWN: i32 = 3;
 const LEVEL_OFFSET: f32 = -1.0;
 
+const AXIS_GRAZE_FADE_START: f32 = 0.25;
+const AXIS_GRAZE_FADE_END: f32 = 0.6;
+
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     // Near/far ray points in CAMERA-RELATIVE world space (world − cam_pos).
@@ -151,8 +154,16 @@ fn fs_main(in: VsOut) -> FsOut {
     // than a periodic pattern, so it cannot alias the way the grid does and
     // carries its own coverage - that keeps the reference axes readable out
     // where the grid levels themselves have dissolved.
-    let on_east = 1.0 - smoothstep(AXIS_HALF_PX - 1.0, AXIS_HALF_PX, abs(world.z) / deriv.y);
-    let on_south = 1.0 - smoothstep(AXIS_HALF_PX - 1.0, AXIS_HALF_PX, abs(world.x) / deriv.x);
+    let axis_resolvable = 1.0
+        - smoothstep(
+            AXIS_GRAZE_FADE_START,
+            AXIS_GRAZE_FADE_END,
+            max(deriv.x, deriv.y) / max(dist, 1e-6),
+        );
+    let on_east = (1.0 - smoothstep(AXIS_HALF_PX - 1.0, AXIS_HALF_PX, abs(world.z) / deriv.y))
+        * axis_resolvable;
+    let on_south = (1.0 - smoothstep(AXIS_HALF_PX - 1.0, AXIS_HALF_PX, abs(world.x) / deriv.x))
+        * axis_resolvable;
 
     var color = grid_rgb;
     if (on_east > 0.0) {
