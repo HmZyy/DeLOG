@@ -2,9 +2,9 @@
 mod policy_sources;
 
 use policy_sources::{
-    APP as APP_SOURCE, BROWSER, DATA_EXPORT as DATA_EXPORT_SOURCE, DIAGNOSTICS,
-    DOCKS as DOCKS_SOURCE, GENERATE_MARKERS, LIVE, LOGGING, MARKERS, MESSAGE_POPUP, PARSERS,
-    PERFORMANCE, SCRIPTS as SCRIPTS_SOURCE, SETTINGS as SETTINGS_SOURCE,
+    ABOUT as ABOUT_SOURCE, APP as APP_SOURCE, BROWSER, DATA_EXPORT as DATA_EXPORT_SOURCE,
+    DIAGNOSTICS, DOCKS as DOCKS_SOURCE, GENERATE_MARKERS, LIVE, LOGGING, MARKERS, MESSAGE_POPUP,
+    PARSERS, PERFORMANCE, SCRIPTS as SCRIPTS_SOURCE, SETTINGS as SETTINGS_SOURCE,
     SYNC_WINDOW as SYNC_WINDOW_SOURCE, VEHICLE_DIALOG, WORKSPACE as WORKSPACE_SOURCE,
 };
 
@@ -16,6 +16,7 @@ const COMMANDS_SOURCE: &str = concat!(
 const GLOBAL_TOOLBAR_SOURCE: &str = include_str!("../src/shell/app/global_plot_toolbar.rs");
 
 const POPUP_SOURCES: &[&str] = &[
+    ABOUT_SOURCE,
     APP_SOURCE,
     BROWSER,
     GENERATE_MARKERS,
@@ -959,4 +960,27 @@ fn the_parquet_path_has_no_import_dialog() {
             file.display()
         );
     }
+}
+
+#[test]
+fn about_dialog_reads_its_version_description_and_link_from_cargo_metadata() {
+    assert!(ABOUT_SOURCE.contains("env!(\"CARGO_PKG_VERSION\")"));
+    assert!(ABOUT_SOURCE.contains("env!(\"CARGO_PKG_DESCRIPTION\")"));
+    assert!(ABOUT_SOURCE.contains("env!(\"CARGO_PKG_REPOSITORY\")"));
+    assert!(
+        !ABOUT_SOURCE.contains("hyperlink_to(\"GitHub\", \"https://"),
+        "the GitHub link should come from the manifest, not a literal URL"
+    );
+}
+
+#[test]
+fn the_brand_opens_the_about_dialog_and_nothing_else_does() {
+    let brand = between(CONTEXT_HEADER_SOURCE, "pub fn show(", "ui.separator();");
+    assert!(brand.contains("AppCommand::ShowAbout"));
+    assert!(APP_SOURCE.contains("AppCommand::ShowAbout => self.show_about = true"));
+    assert!(APP_SOURCE.contains("crate::ui::about::show("));
+    assert!(
+        !COMMANDS_SOURCE.contains("CommandId::ShowAbout"),
+        "About should not be a static command with a menu row or palette entry"
+    );
 }

@@ -154,6 +154,10 @@ fn dynamic_palette_metadata(command: &commands::AppCommand) -> (&'static str, St
             "Header › Live link",
             "live link disconnect connection endpoint".to_owned(),
         ),
+        AppCommand::ShowAbout => (
+            "Header › About",
+            "about version description repository github".to_owned(),
+        ),
         AppCommand::ToggleShellEmphasis => (
             "Header › Workflow emphasis",
             "shell emphasis workflow offline live".to_owned(),
@@ -369,6 +373,7 @@ pub struct DelogApp {
     browser_focus_filter: bool,
     inspector: inspector::InspectorState,
     shell_emphasis: context_header::ShellEmphasis,
+    show_about: bool,
     command_palette: command_palette::CommandPaletteState,
     dynamic_command_catalog: commands::DynamicCommandCatalog,
     docks: AppDockController,
@@ -519,6 +524,7 @@ impl DelogApp {
             browser_focus_filter: false,
             inspector: inspector::InspectorState::default(),
             shell_emphasis: context_header::ShellEmphasis::default(),
+            show_about: false,
             command_palette: command_palette::CommandPaletteState::default(),
             dynamic_command_catalog: commands::DynamicCommandCatalog::default(),
             docks: AppDockController::new_empty(),
@@ -1856,6 +1862,7 @@ impl DelogApp {
     ) {
         use commands::{AppCommand, CommandId};
         match command {
+            AppCommand::ShowAbout => self.show_about = true,
             AppCommand::ToggleShellEmphasis => {
                 self.shell_emphasis = self.shell_emphasis.toggle();
             }
@@ -3151,6 +3158,9 @@ impl eframe::App for DelogApp {
         let _ui_windows_timer = self.session.metrics().scope("ui_windows");
         crate::export::data_export::progress_ui(ui.ctx(), &self.data_exports);
         self.show_layout_windows(ui.ctx());
+        if self.show_about {
+            self.show_about = crate::ui::about::show(ui.ctx());
+        }
         crate::ui::message_popup::show_all(&mut self.message_popups, ui.ctx());
         let settings_before = self
             .settings_dialog

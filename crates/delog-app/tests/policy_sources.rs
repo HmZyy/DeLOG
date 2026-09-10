@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+pub const ABOUT: &str = include_str!("../src/ui/about.rs");
 pub const APP: &str = include_str!("../src/shell/app/mod.rs");
 pub const APP_COMMANDS: &str = include_str!("../src/shell/app/commands/specs.rs");
 pub const BROWSER: &str = include_str!("../src/plotting/browser.rs");
