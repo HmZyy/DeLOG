@@ -469,10 +469,10 @@ fn default_reference_alt_step_m() -> f64 {
     50.0
 }
 fn default_scene_far_clip_m() -> f32 {
-    20_000.0
+    100_000.0
 }
 fn default_scene_max_camera_distance_m() -> f32 {
-    12_000.0
+    5_000.0
 }
 fn default_scene_grid_cell_m() -> f32 {
     1.0
@@ -481,7 +481,7 @@ fn default_scene_fog_start_m() -> f32 {
     1_000.0
 }
 fn default_scene_fog_end_m() -> f32 {
-    20_000.0
+    100_000.0
 }
 
 fn finite_or(value: f32, fallback: f32) -> f32 {
@@ -503,6 +503,8 @@ pub struct Scene3dSettings {
     pub far_clip_m: f32,
     #[serde(default = "default_scene_max_camera_distance_m")]
     pub max_camera_distance_m: f32,
+    #[serde(default = "default_true")]
+    pub show_sky: bool,
     #[serde(default = "default_true")]
     pub show_grid: bool,
     #[serde(default = "default_true")]
@@ -529,6 +531,7 @@ impl Default for Scene3dSettings {
             tile_cache_limit_bytes: default_tile_cache_limit_bytes(),
             far_clip_m: default_scene_far_clip_m(),
             max_camera_distance_m: default_scene_max_camera_distance_m(),
+            show_sky: true,
             show_grid: true,
             show_axes: true,
             grid_cell_auto: true,
@@ -568,14 +571,22 @@ impl Scene3dSettings {
         finite_or(self.grid_cell_m, default_scene_grid_cell_m()).clamp(0.01, 100_000.0)
     }
 
-    /// Returns (cell size, whether the shader should cross-fade LOD levels). In
-    /// auto mode the cell is a continuous function of camera height so it never
-    /// snaps between sizes or shimmers when orbiting tightly around an airborne
-    /// vehicle; the `true` flag drives the shader's LOD cross-fade.
+    /// Returns (grid level or cell size, whether the shader draws multiple
+    /// levels). In auto mode the value is a continuous *level*: the camera
+    /// height is located in the power-of-ten step table and interpolated
+    /// linearly inside its decade, so level 2.5 sits at 550 m rather than the
+    /// 316 m a logarithmic mapping would give. The shader turns `floor(level)`
+    /// into three simultaneous cell sizes and uses the fraction to hand
+    /// emphasis from one decade to the next. In fixed mode the value is the
+    /// cell size in metres and only that single level is drawn.
     pub fn resolved_grid(self, eye_height_m: f32) -> (f32, bool) {
         if self.grid_cell_auto {
             let height = finite_or(eye_height_m, 100.0).abs().max(1e-3);
-            (height / 10.0, true)
+            let decade = height.log10().floor();
+            let lo = 10f32.powf(decade);
+            let hi = lo * 10.0;
+            let level = decade + (height - lo) / (hi - lo);
+            (level.clamp(-3.0, 8.0), true)
         } else {
             (self.resolved_grid_cell_m(), false)
         }
@@ -1094,6 +1105,11 @@ fn scene3d_tab(
             );
             ui.end_row();
 
+            ui.label("Sky")
+                .on_hover_text("Draw a procedural sky and horizon haze behind the scene.");
+            ui.checkbox(&mut s.show_sky, "");
+            ui.end_row();
+
             ui.label("Grid");
             ui.checkbox(&mut s.show_grid, "");
             ui.end_row();
@@ -1546,6 +1562,7 @@ mod tests {
                 tile_cache_limit_bytes: 2 * 1024 * 1024 * 1024,
                 far_clip_m: 25_000.0,
                 max_camera_distance_m: 12_000.0,
+                show_sky: false,
                 show_grid: false,
                 show_axes: false,
                 grid_cell_auto: false,
@@ -1620,23 +1637,46 @@ mod tests {
     }
 
     #[test]
-    fn auto_grid_uses_continuous_cell_and_lod_blend() {
+    fn auto_grid_level_interpolates_linearly_inside_the_decade() {
         let s = Scene3dSettings {
             grid_cell_auto: true,
             ..Scene3dSettings::default()
         };
-        let (cell, lod) = s.resolved_grid(100.0);
-        assert!(lod);
-        assert!((cell - 10.0).abs() < 1e-3);
-        assert!(s.resolved_grid(50.0).0 < s.resolved_grid(5_000.0).0);
+        for (height, expected) in [
+            (1.0f32, 0.0f32),
+            (10.0, 1.0),
+            (100.0, 2.0),
+            (1_000.0, 3.0),
+            (550.0, 2.5),
+            (100_000.0, 5.0),
+        ] {
+            let (level, lod) = s.resolved_grid(height);
+            assert!(lod, "auto mode drives the multi-level path");
+            assert!(
+                (level - expected).abs() < 1e-3,
+                "height {height} -> level {level}, want {expected}"
+            );
+        }
     }
 
     #[test]
-    fn auto_grid_cell_follows_height_not_orbit_radius() {
+    fn auto_grid_level_is_continuous_across_a_decade_boundary() {
         let s = Scene3dSettings::default();
-        let (cell, lod) = s.resolved_grid(101.5);
-        assert!(lod);
-        assert!((cell - 10.15).abs() < 1e-2);
+        let below = s.resolved_grid(999.9).0;
+        let above = s.resolved_grid(1_000.1).0;
+        assert!(below < 3.0 && above > 3.0, "boundary straddles level 3");
+        assert!(
+            (above - below).abs() < 1e-2,
+            "level jumped from {below} to {above} across the boundary"
+        );
+    }
+
+    #[test]
+    fn auto_grid_level_rises_with_height_and_ignores_garbage() {
+        let s = Scene3dSettings::default();
+        assert!(s.resolved_grid(50.0).0 < s.resolved_grid(5_000.0).0);
+        assert_eq!(s.resolved_grid(f32::NAN).0, s.resolved_grid(100.0).0);
+        assert_eq!(s.resolved_grid(-250.0).0, s.resolved_grid(250.0).0);
     }
 
     #[test]
@@ -1743,5 +1783,18 @@ mod scripting_settings_tests {
         assert_eq!(json, "\"on_output\"");
         let back: AutoOpenScriptingConsole = serde_json::from_str(&json).unwrap();
         assert_eq!(back, AutoOpenScriptingConsole::OnOutput);
+    }
+
+    #[test]
+    fn sky_defaults_on_without_a_map_provider() {
+        let s = Scene3dSettings::default();
+        assert_eq!(s.map_provider, MapProviderId::None);
+        assert!(s.show_sky);
+    }
+
+    #[test]
+    fn old_scene3d_config_without_show_sky_defaults_it_on() {
+        let s: AppSettings = serde_json::from_str(r#"{"scene3d":{"far_clip_m":25000.0}}"#).unwrap();
+        assert!(s.scene3d.show_sky);
     }
 }
