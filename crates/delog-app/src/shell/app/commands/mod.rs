@@ -58,6 +58,7 @@ pub enum CommandId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppCommand {
     Static(CommandId),
+    ShowAbout,
     ToggleShellEmphasis,
     FitAll,
     SetCursorSampling(SampleMode),
@@ -93,6 +94,7 @@ impl AppCommand {
     pub const fn classic_menu_owner(&self) -> ClassicMenuOwner {
         match self {
             Self::Static(id) => id.classic_menu_owner(),
+            Self::ShowAbout => ClassicMenuOwner::Tools,
             Self::ToggleShellEmphasis | Self::DisconnectLink(_) => ClassicMenuOwner::File,
             Self::OpenWithBuiltInParser(_) => ClassicMenuOwner::File,
             Self::OpenWithParser(_) => ClassicMenuOwner::Tools,
