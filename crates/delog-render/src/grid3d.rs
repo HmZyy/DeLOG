@@ -49,7 +49,12 @@ impl GridUniform {
                 cam_pos[2],
                 if lod { 1.0 } else { 0.0 },
             ],
-            params: [level_or_cell, fade_start, fade_end, if fog { 1.0 } else { 0.0 }],
+            params: [
+                level_or_cell,
+                fade_start,
+                fade_end,
+                if fog { 1.0 } else { 0.0 },
+            ],
         }
     }
 }
@@ -425,9 +430,8 @@ mod tests {
                         continue;
                     }
                     let p = img.pixel(x as u32, y as u32);
-                    let l = 0.299 * f64::from(p[0])
-                        + 0.587 * f64::from(p[1])
-                        + 0.114 * f64::from(p[2]);
+                    let l =
+                        0.299 * f64::from(p[0]) + 0.587 * f64::from(p[1]) + 0.114 * f64::from(p[2]);
                     peak = peak.max(l);
                 }
             }
@@ -493,7 +497,13 @@ mod tests {
         for y in 0..h {
             let n = (0..w).filter(|&x| tinted(img.pixel(x, y))).count() as u32;
             if n > best.0 {
-                best = (n, y, (0..h).filter(|&yy| (0..w).any(|x| tinted(img.pixel(x, yy)))).count() as u32);
+                best = (
+                    n,
+                    y,
+                    (0..h)
+                        .filter(|&yy| (0..w).any(|x| tinted(img.pixel(x, yy))))
+                        .count() as u32,
+                );
             }
         }
         best
@@ -509,8 +519,16 @@ mod tests {
         // perpendicular axis is out of frame and the receding one may only ever
         // cover a few pixels per row.
         let cases = [
-            ("east", Vec3::new(2_000.0, 40.0, 0.0), Vec3::new(3_000.0, 20.0, 0.0)),
-            ("south", Vec3::new(0.0, 40.0, 2_000.0), Vec3::new(0.0, 20.0, 3_000.0)),
+            (
+                "east",
+                Vec3::new(2_000.0, 40.0, 0.0),
+                Vec3::new(3_000.0, 20.0, 0.0),
+            ),
+            (
+                "south",
+                Vec3::new(0.0, 40.0, 2_000.0),
+                Vec3::new(0.0, 20.0, 3_000.0),
+            ),
         ];
         for (name, eye, look) in cases {
             let (widest, row, rows) = widest_axis_run(&ctx, eye, look, 1.333);

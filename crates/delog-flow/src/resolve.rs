@@ -111,7 +111,10 @@ pub fn candidate_source_labels(snapshot: &StoreSnapshot, selector: &FieldSelecto
             let Some(topic) = snapshot.topic(topic_id) else {
                 return false;
             };
-            if topic.entry.removed || topic.store.is_none() || !topic_matches(&topic.entry.name, selector) {
+            if topic.entry.removed
+                || topic.store.is_none()
+                || !topic_matches(&topic.entry.name, selector)
+            {
                 return false;
             }
             snapshot.fields.iter().any(|field| {
@@ -194,7 +197,10 @@ mod tests {
             instance: None,
             field: "A".into(),
         };
-        assert_eq!(candidate_source_labels(&snap, &sel), vec!["flight".to_owned()]);
+        assert_eq!(
+            candidate_source_labels(&snap, &sel),
+            vec!["flight".to_owned()]
+        );
     }
 
     #[test]

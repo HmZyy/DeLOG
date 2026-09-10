@@ -1,5 +1,5 @@
 use super::*;
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender, unbounded};
 use std::{
     io::Cursor,
     sync::atomic::{AtomicUsize, Ordering},
@@ -36,20 +36,15 @@ fn server(body: Vec<u8>, content_type: &'static str, hits: Arc<AtomicUsize>) -> 
     thread::spawn(move || {
         for req in server.incoming_requests() {
             hits.fetch_add(1, Ordering::SeqCst);
-            let response = tiny_http::Response::from_data(body.clone()).with_header(
-                tiny_http::Header::from_bytes("Content-Type", content_type).unwrap(),
-            );
+            let response = tiny_http::Response::from_data(body.clone())
+                .with_header(tiny_http::Header::from_bytes("Content-Type", content_type).unwrap());
             let _ = req.respond(response);
         }
     });
     address
 }
 
-fn concurrency_server(
-    body: Vec<u8>,
-    active: Arc<AtomicUsize>,
-    peak: Arc<AtomicUsize>,
-) -> String {
+fn concurrency_server(body: Vec<u8>, active: Arc<AtomicUsize>, peak: Arc<AtomicUsize>) -> String {
     let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
     let address = format!("http://{}", server.server_addr());
     thread::spawn(move || {
@@ -148,7 +143,10 @@ fn request_at_scope_42() -> TileRequest {
     }
 }
 
-fn test_server_with_hits(body: Vec<u8>, hits: Arc<AtomicUsize>) -> (String, Receiver<()>, Sender<()>) {
+fn test_server_with_hits(
+    body: Vec<u8>,
+    hits: Arc<AtomicUsize>,
+) -> (String, Receiver<()>, Sender<()>) {
     let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
     let url = format!("http://{}/tile.jpeg", server.server_addr());
     let (observed_tx, observed_rx) = unbounded();
@@ -1143,7 +1141,8 @@ fn cache_write_failure_still_delivers_decoded_tile() {
 
     std::fs::remove_file(&cache_path).unwrap();
     std::fs::create_dir(&cache_path).unwrap();
-    let (url, observed, release) = test_server_with_hits(synthetic_tile(), Arc::new(AtomicUsize::new(0)));
+    let (url, observed, release) =
+        test_server_with_hits(synthetic_tile(), Arc::new(AtomicUsize::new(0)));
     let mut next = request_at_scope_42();
     next.id.x += 1;
     manager.request_with_url(next, Some(url));

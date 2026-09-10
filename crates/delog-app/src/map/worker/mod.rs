@@ -712,9 +712,9 @@ fn controller_loop(
                     || !controller_desired
                         .get(&work.request.scope)
                         .is_none_or(|snapshot| snapshot.accepts(&key, work.sequence))
-                    || !states
+                    || states
                         .get(&key)
-                        .is_some_and(|(_, token)| *token == work.sequence)
+                        .is_none_or(|(_, token)| *token != work.sequence)
                 {
                     idle.push(std::cmp::Reverse(worker));
                     continue;

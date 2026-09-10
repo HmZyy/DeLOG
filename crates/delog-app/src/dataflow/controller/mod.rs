@@ -53,7 +53,11 @@ impl RunningStats {
             min: s.min,
             max: s.max,
             mean: if s.count == 0 { 0.0 } else { s.mean },
-            m2: if s.count == 0 { 0.0 } else { s.stddev * s.stddev * s.count as f64 },
+            m2: if s.count == 0 {
+                0.0
+            } else {
+                s.stddev * s.stddev * s.count as f64
+            },
             t0_us: s.t0_us,
             t1_us: s.t1_us,
         }
@@ -248,7 +252,8 @@ impl DataFlowController {
     /// the graph currently contains a script node.
     #[cfg(feature = "scripting")]
     pub fn set_script_host(&mut self, host: Option<delog_script::flow::EngineFlowHost>) {
-        self.script_host = host.map(|host| Arc::new(host) as Arc<dyn delog_flow::script::ScriptNodeHost + Sync>);
+        self.script_host =
+            host.map(|host| Arc::new(host) as Arc<dyn delog_flow::script::ScriptNodeHost + Sync>);
     }
 
     pub fn apply(&mut self, command: GraphCommand) -> Result<(), String> {
@@ -511,9 +516,17 @@ impl DataFlowController {
         self.latest_generation
             .store(self.generation, Ordering::Relaxed);
         self.needs_eval = false;
-        let preview_from_t = if live { self.pending_preview_from } else { None };
+        let preview_from_t = if live {
+            self.pending_preview_from
+        } else {
+            None
+        };
         self.pending_preview_from = None;
-        let snapshot_max_t = if live { self.pending_snapshot_max } else { None };
+        let snapshot_max_t = if live {
+            self.pending_snapshot_max
+        } else {
+            None
+        };
         self.pending_snapshot_max = None;
         let request = PendingRequest {
             generation: self.generation,
@@ -589,10 +602,10 @@ impl DataFlowController {
             let mut preview_end_t = HashMap::new();
             for (&node, values) in &report.values {
                 for (port, value) in values.iter().enumerate() {
-                    if let Value::Signal(signal) = value {
-                        if let Some(&last) = signal.t.last() {
-                            preview_end_t.insert((node, port), last);
-                        }
+                    if let Value::Signal(signal) = value
+                        && let Some(&last) = signal.t.last()
+                    {
+                        preview_end_t.insert((node, port), last);
                     }
                 }
             }

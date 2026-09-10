@@ -1,8 +1,8 @@
+#[cfg(feature = "scripting")]
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
-#[cfg(feature = "scripting")]
-use std::collections::VecDeque;
 
 use arrow::array::{ArrayRef, Float64Array, Int64Array};
 use arrow::datatypes::DataType;
@@ -100,7 +100,10 @@ fn gps_source(
         )
         .unwrap(),
     );
-    (topic, Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap()))
+    (
+        topic,
+        Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap()),
+    )
 }
 
 fn snapshot_two_sources() -> Arc<StoreSnapshot> {
@@ -216,8 +219,7 @@ fn copy_paste_duplicates_nodes_and_internal_edges_in_one_undo_step() {
     assert!(!controller.selection.contains(&b));
     // A pasted DataField sits at the original offset by +30,+30.
     assert!(controller.graph.nodes.iter().any(|node| {
-        controller.selection.contains(&node.id)
-            && node.pos == [a_pos[0] + 30.0, a_pos[1] + 30.0]
+        controller.selection.contains(&node.id) && node.pos == [a_pos[0] + 30.0, a_pos[1] + 30.0]
     }));
 
     controller.undo();
@@ -758,14 +760,22 @@ fn live_preview_accumulates_across_ticks() {
     let (sender, _receiver) = ingest_channel();
 
     // Seed tick: full history [100,200,300] -> [1,2,3].
-    controller.request_live(snapshot_alt(vec![100, 200, 300], vec![1.0, 2.0, 3.0], 1), 3.0, false);
+    controller.request_live(
+        snapshot_alt(vec![100, 200, 300], vec![1.0, 2.0, 3.0], 1),
+        3.0,
+        false,
+    );
     wait_for(&mut controller, &sender);
     assert_eq!(controller.preview_for(field, 0).unwrap().count, 3);
 
     // Append tick: new samples 400,500 -> [4,5]; overlap re-reads 300 but the
     // tail merge only adds t > watermark, so count becomes 5, not 6.
     controller.request_live(
-        snapshot_alt(vec![100, 200, 300, 400, 500], vec![1.0, 2.0, 3.0, 4.0, 5.0], 2),
+        snapshot_alt(
+            vec![100, 200, 300, 400, 500],
+            vec![1.0, 2.0, 3.0, 4.0, 5.0],
+            2,
+        ),
         3.0,
         false,
     );
@@ -784,10 +794,18 @@ fn live_preview_survives_coalesced_generation() {
     let (sender, _receiver) = ingest_channel();
 
     // First live tick (seed) launches and stays in_flight (we do NOT poll).
-    controller.request_live(snapshot_alt(vec![100, 200, 300], vec![1.0, 2.0, 3.0], 1), 3.0, false);
+    controller.request_live(
+        snapshot_alt(vec![100, 200, 300], vec![1.0, 2.0, 3.0], 1),
+        3.0,
+        false,
+    );
     // Second tick arrives before the first is polled -> coalesces, cancelling gen 1.
     controller.request_live(
-        snapshot_alt(vec![100, 200, 300, 400, 500], vec![1.0, 2.0, 3.0, 4.0, 5.0], 2),
+        snapshot_alt(
+            vec![100, 200, 300, 400, 500],
+            vec![1.0, 2.0, 3.0, 4.0, 5.0],
+            2,
+        ),
         3.0,
         false,
     );
@@ -842,7 +860,11 @@ fn live_append_seeds_then_appends_only_new_tail() {
     });
 
     // Seed.
-    controller.request_live(snapshot_alt(vec![100, 200, 300], vec![1.0, 2.0, 3.0], 1), 3.0, true);
+    controller.request_live(
+        snapshot_alt(vec![100, 200, 300], vec![1.0, 2.0, 3.0], 1),
+        3.0,
+        true,
+    );
     wait_for(&mut controller, &sender);
     assert!(controller.is_live_published());
     assert_eq!(
@@ -858,7 +880,11 @@ fn live_append_seeds_then_appends_only_new_tail() {
 
     // Append: new samples 400,500; must NOT re-open, must NOT close, one more batch.
     controller.request_live(
-        snapshot_alt(vec![100, 200, 300, 400, 500], vec![1.0, 2.0, 3.0, 4.0, 5.0], 2),
+        snapshot_alt(
+            vec![100, 200, 300, 400, 500],
+            vec![1.0, 2.0, 3.0, 4.0, 5.0],
+            2,
+        ),
         3.0,
         true,
     );
@@ -867,7 +893,10 @@ fn live_append_seeds_then_appends_only_new_tail() {
         observed_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
         Observed::Batch
     );
-    assert!(observed_rx.try_recv().is_err(), "no second open, no close on append");
+    assert!(
+        observed_rx.try_recv().is_err(),
+        "no second open, no close on append"
+    );
 
     drop(sender);
     ingest_thread.join().unwrap();
@@ -922,7 +951,11 @@ fn live_seed_after_preview_covers_full_history() {
 
     // 1. Preview tick (append=false): advances the watermark to 30_000_000, no publish.
     controller.request_live(
-        snapshot_alt(vec![10_000_000, 20_000_000, 30_000_000], vec![1.0, 2.0, 3.0], 1),
+        snapshot_alt(
+            vec![10_000_000, 20_000_000, 30_000_000],
+            vec![1.0, 2.0, 3.0],
+            1,
+        ),
         3.0,
         false,
     );
@@ -944,7 +977,10 @@ fn live_seed_after_preview_covers_full_history() {
     wait_for(&mut controller, &sender);
 
     // The seed spans all 5 rows (full history), not a windowed tail.
-    assert_eq!(rec_rx.recv_timeout(Duration::from_secs(1)).unwrap(), Rec::Open);
+    assert_eq!(
+        rec_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        Rec::Open
+    );
     assert_eq!(
         rec_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
         Rec::Batch(5)

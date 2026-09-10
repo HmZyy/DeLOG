@@ -51,7 +51,11 @@ pub struct ScriptOutput {
 /// Implemented outside `delog-flow` (by the scripting engine). Kept dependency-free here so
 /// the evaluator is testable with a fake host and never links Python.
 pub trait ScriptNodeHost: Send {
-    fn eval(&self, request: ScriptRequest, cancel: &AtomicBool) -> Result<Vec<ScriptOutput>, String>;
+    fn eval(
+        &self,
+        request: ScriptRequest,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<ScriptOutput>, String>;
 }
 
 pub const HOST_UNAVAILABLE: &str = "Python scripting is not available in this build.";
@@ -113,7 +117,11 @@ pub fn request_for(node_label: &str, spec: &ScriptSpec, inputs: &[Value]) -> Scr
         node_label: node_label.to_owned(),
         code: spec.code.clone(),
         inputs,
-        outputs: spec.outputs.iter().map(|output| output.name.clone()).collect(),
+        outputs: spec
+            .outputs
+            .iter()
+            .map(|output| output.name.clone())
+            .collect(),
     }
 }
 
@@ -188,7 +196,10 @@ pub fn bind_outputs(
             }
             Some(times) => {
                 // Rule 2: explicit times matching a wired input reuse its timeline.
-                if let Some(signal) = signal_inputs.iter().find(|signal| signal.t.as_ref() == times) {
+                if let Some(signal) = signal_inputs
+                    .iter()
+                    .find(|signal| signal.t.as_ref() == times)
+                {
                     (signal.meta.timeline, Arc::clone(&signal.t))
                 // Rule 3: explicit times matching an earlier output of this node share its id.
                 } else if let Some((timeline, t)) = bound.iter().find_map(|value| match value {
@@ -252,7 +263,11 @@ mod script_tests {
     }
 
     impl ScriptNodeHost for FakeHost {
-        fn eval(&self, request: ScriptRequest, _cancel: &AtomicBool) -> Result<Vec<ScriptOutput>, String> {
+        fn eval(
+            &self,
+            request: ScriptRequest,
+            _cancel: &AtomicBool,
+        ) -> Result<Vec<ScriptOutput>, String> {
             self.requests.lock().unwrap().push(request);
             self.responses
                 .lock()
@@ -281,7 +296,12 @@ mod script_tests {
         })
     }
 
-    fn script(name: &str, inputs: &[&str], outputs: &[(&str, Option<&str>)], code: &str) -> NodeKind {
+    fn script(
+        name: &str,
+        inputs: &[&str],
+        outputs: &[(&str, Option<&str>)],
+        code: &str,
+    ) -> NodeKind {
         NodeKind::Script(ScriptSpec {
             name: name.to_owned(),
             inputs: inputs
@@ -314,7 +334,10 @@ mod script_tests {
         let mut graph = Graph::new("g");
         let x = add_node(&mut graph, field("IMU", "AccX"));
         let y = add_node(&mut graph, field("IMU", "AccY"));
-        let node = add_node(&mut graph, script("Sum", &["a", "b"], &[("out", None)], "code"));
+        let node = add_node(
+            &mut graph,
+            script("Sum", &["a", "b"], &[("out", None)], "code"),
+        );
         graph.connect(x, 0, node, 0).unwrap();
         graph.connect(y, 0, node, 1).unwrap();
 
@@ -349,7 +372,10 @@ mod script_tests {
         let mut graph = Graph::new("g");
         let gps = add_node(&mut graph, field("GPS", "Alt"));
         let baro = add_node(&mut graph, field("BARO", "Alt"));
-        let node = add_node(&mut graph, script("Mix", &["a", "b"], &[("out", None)], "code"));
+        let node = add_node(
+            &mut graph,
+            script("Mix", &["a", "b"], &[("out", None)], "code"),
+        );
         graph.connect(gps, 0, node, 0).unwrap();
         graph.connect(baro, 0, node, 1).unwrap();
 
@@ -407,7 +433,10 @@ mod script_tests {
     fn matching_times_across_two_outputs_share_one_timeline() {
         let snapshot = StoreSnapshot::empty();
         let mut graph = Graph::new("g");
-        let node = add_node(&mut graph, script("Solo", &[], &[("a", None), ("b", None)], "code"));
+        let node = add_node(
+            &mut graph,
+            script("Solo", &[], &[("a", None), ("b", None)], "code"),
+        );
 
         let host = FakeHost::new(vec![Ok(vec![
             ScriptOutput {
@@ -543,7 +572,10 @@ mod script_tests {
         let snapshot = snapshot_gps_baro();
         let mut graph = Graph::new("g");
         let gps = add_node(&mut graph, field("GPS", "Alt"));
-        let node = add_node(&mut graph, script("Solo", &["a"], &[("out", None)], "code v1"));
+        let node = add_node(
+            &mut graph,
+            script("Solo", &["a"], &[("out", None)], "code v1"),
+        );
         graph.connect(gps, 0, node, 0).unwrap();
 
         let host = FakeHost::new(vec![
@@ -576,7 +608,11 @@ mod script_tests {
             &mut cache,
             Some(&host),
         );
-        assert_eq!(host.call_count(), 1, "unchanged code should hit the node's cache");
+        assert_eq!(
+            host.call_count(),
+            1,
+            "unchanged code should hit the node's cache"
+        );
 
         let gps_before = match &first.values[&gps][0] {
             Value::Signal(signal) => Arc::clone(&signal.v),
@@ -600,7 +636,11 @@ mod script_tests {
             &mut cache,
             Some(&host),
         );
-        assert_eq!(host.call_count(), 2, "edited code should invalidate this node");
+        assert_eq!(
+            host.call_count(),
+            2,
+            "edited code should invalidate this node"
+        );
 
         let gps_after = match &third.values[&gps][0] {
             Value::Signal(signal) => Arc::clone(&signal.v),
@@ -639,7 +679,12 @@ mod script_tests {
                 Some(&host),
             );
             assert!(!report.values.contains_key(&node));
-            assert!(report.diagnostics.iter().any(|diagnostic| diagnostic.node == node));
+            assert!(
+                report
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.node == node)
+            );
         }
     }
 
@@ -688,7 +733,12 @@ mod script_tests {
                 Some(&host),
             );
             assert!(!report.values.contains_key(&node));
-            assert!(report.diagnostics.iter().any(|diagnostic| diagnostic.node == node));
+            assert!(
+                report
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.node == node)
+            );
             assert_eq!(host.call_count(), 0, "invalid spec must not reach the host");
         }
     }

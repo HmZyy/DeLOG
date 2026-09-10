@@ -122,7 +122,11 @@ pub fn generate_markers_window(
             let color_w = 48.0;
             let spacing = ui.spacing().item_spacing.x;
             ui.set_min_width(
-                include_w + value_w + name_min_w + color_w + spacing * 5.0
+                include_w
+                    + value_w
+                    + name_min_w
+                    + color_w
+                    + spacing * 5.0
                     + ui.spacing().scroll.bar_width,
             );
 
@@ -339,7 +343,6 @@ mod tests {
             "each row should render its editable name"
         );
     }
-
 
     #[test]
     fn value_color_is_stable_per_label() {

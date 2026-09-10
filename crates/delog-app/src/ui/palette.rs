@@ -93,7 +93,8 @@ impl PickerState {
         }
         self.selected = self.selected.min(ranked.len() - 1);
         self.scroll_to_selected |= self.selected != selected_before_key;
-        if ctx.input(|input| input.key_pressed(egui::Key::Enter)) && ranked[self.selected].is_enabled()
+        if ctx.input(|input| input.key_pressed(egui::Key::Enter))
+            && ranked[self.selected].is_enabled()
         {
             self.open = false;
             return Some(ranked[self.selected].key.clone());

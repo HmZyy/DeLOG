@@ -183,8 +183,7 @@ fn vehicle_layout_helpers_round_trip_static_ned_vehicle() {
     };
 
     let layout = vehicle_config_to_layout(&cfg, &snapshot).expect("vehicle should serialize");
-    let resolved =
-        vehicle_config_from_layout(&layout, &snapshot).expect("vehicle should resolve");
+    let resolved = vehicle_config_from_layout(&layout, &snapshot).expect("vehicle should resolve");
 
     assert_eq!(resolved, cfg);
 
@@ -380,7 +379,10 @@ fn scene_layouts_decode_each_trail_mode() {
         scene_layout(r#","trail_mode":"visible_window""#),
         TrailModeLayout::VisibleWindow
     );
-    assert_eq!(scene_layout(r#","trail_mode":"full""#), TrailModeLayout::Full);
+    assert_eq!(
+        scene_layout(r#","trail_mode":"full""#),
+        TrailModeLayout::Full
+    );
 }
 
 #[test]

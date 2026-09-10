@@ -331,9 +331,7 @@ impl CommandId {
             }
             OpenScriptEditor | OpenScriptVariables | OpenParserEditor | RunScript | SaveLayout
             | LoadLayout | ManageLayouts | ClearLayout | ImportLayout | ExportLayout
-            | OpenSettings => {
-                ClassicMenuOwner::Tools
-            }
+            | OpenSettings => ClassicMenuOwner::Tools,
         }
     }
 

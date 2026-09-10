@@ -8,13 +8,13 @@ use std::sync::Arc;
 
 use crate::plotting::axes;
 use crate::plotting::compare::CompareMode;
-use crate::ui::fuzzy::fuzzy_match_score;
 use crate::plotting::gpu::{self, GpuBridge, PreparedYRange, SyncTrace};
 use crate::plotting::plot::{ViewX, draw_zoom_drag_overlay};
 use crate::sync::sync_alignment::{
     AlignmentError, AnchorKind, SampleNeighborhood, SyncSample, anchor, sample_neighborhood,
     target_offset_us,
 };
+use crate::ui::fuzzy::fuzzy_match_score;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OffsetParseError {
@@ -62,7 +62,7 @@ pub fn parse_offset_us(text: &str) -> Result<i64, OffsetParseError> {
     // i64::MAX rounds up to 2^63 as f64, so the positive bound is exclusive.
     const I64_MIN_F64: f64 = -9_223_372_036_854_775_808.0;
     const I64_MAX_EXCLUSIVE_F64: f64 = 9_223_372_036_854_775_808.0;
-    if scaled < I64_MIN_F64 || scaled >= I64_MAX_EXCLUSIVE_F64 {
+    if !(I64_MIN_F64..I64_MAX_EXCLUSIVE_F64).contains(&scaled) {
         return Err(OffsetParseError::Overflow);
     }
     Ok(scaled as i64)
@@ -85,8 +85,8 @@ pub fn drag_delta_us(delta_px: f32, plot_width_px: f32, span_us: i64) -> Option<
     let delta = f64::from(delta_px) / f64::from(plot_width_px) * span_us as f64;
     const I64_MIN_F64: f64 = -9_223_372_036_854_775_808.0;
     const I64_MAX_EXCLUSIVE_F64: f64 = 9_223_372_036_854_775_808.0;
-    (delta.is_finite() && delta >= I64_MIN_F64 && delta < I64_MAX_EXCLUSIVE_F64)
-        .then(|| delta as i64)
+    (delta.is_finite() && (I64_MIN_F64..I64_MAX_EXCLUSIVE_F64).contains(&delta))
+        .then_some(delta as i64)
 }
 
 const SYNC_PLOT_MAX_HEIGHT: f32 = 360.0;
@@ -583,10 +583,9 @@ impl SyncWindow {
             .sources
             .iter()
             .any(|item| item.source == self.reference && item.included)
+            && let Some(next) = self.sources.iter().find(|item| item.included)
         {
-            if let Some(next) = self.sources.iter().find(|item| item.included) {
-                self.reference = next.source;
-            }
+            self.reference = next.source;
         }
         if self.active.is_some_and(|id| !self.is_movable(id)) {
             self.active = self.first_movable();
@@ -1166,10 +1165,9 @@ impl SyncWindow {
                         ),
                     )
                     .clicked()
+                    && let Some(batch) = self.align_and_begin_apply(snapshot, method)
                 {
-                    if let Some(batch) = self.align_and_begin_apply(snapshot, method) {
-                        response.apply = Some(batch);
-                    }
+                    response.apply = Some(batch);
                 }
             }
             if self.picker.is_some() {
@@ -1373,21 +1371,21 @@ impl SyncWindow {
                 ));
                 ui.add_enabled_ui(movable, |ui| {
                     let edit = ui.add(egui::TextEdit::singleline(&mut input).desired_width(110.0));
-                    if edit.changed() {
-                        if let Some(item) = self.source_mut(id) {
-                            item.input.text = input.clone();
-                            match parse_offset_us(input.trim()).or_else(|_| {
-                                input
-                                    .trim()
-                                    .parse::<i64>()
-                                    .map_err(|_| OffsetParseError::Number)
-                            }) {
-                                Ok(value) => {
-                                    item.input.valid = true;
-                                    item.draft_offset_us = value;
-                                }
-                                Err(_) => item.input.valid = false,
+                    if edit.changed()
+                        && let Some(item) = self.source_mut(id)
+                    {
+                        item.input.text = input.clone();
+                        match parse_offset_us(input.trim()).or_else(|_| {
+                            input
+                                .trim()
+                                .parse::<i64>()
+                                .map_err(|_| OffsetParseError::Number)
+                        }) {
+                            Ok(value) => {
+                                item.input.valid = true;
+                                item.draft_offset_us = value;
                             }
+                            Err(_) => item.input.valid = false,
                         }
                     }
                     if ui.button("Reset").clicked() {

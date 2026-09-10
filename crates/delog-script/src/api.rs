@@ -21,7 +21,7 @@ use pyo3::types::{PyMapping, PyMappingMethods};
 
 use crate::live::LiveTransformSpec;
 use crate::operations::{
-    SplitBySpec, MergeSpec, OperationBuffer, OperationMode, OperationSpec, TopicSelector,
+    MergeSpec, OperationBuffer, OperationMode, OperationSpec, SplitBySpec, TopicSelector,
     TransformSpec, merged_field_names, validate_split_template, validate_transform,
 };
 use crate::params::{ParamKind, ParamSpec, ParamValue, SharedParams};
@@ -167,15 +167,16 @@ pub(crate) fn topic_matches(
     requested_topic: Option<&str>,
     requested_instance: Option<u32>,
 ) -> bool {
-    if let Some(topic) = requested_topic {
-        if topic_name != topic && base_name != topic {
-            return false;
-        }
+    if let Some(topic) = requested_topic
+        && topic_name != topic
+        && base_name != topic
+    {
+        return false;
     }
-    if let Some(instance) = requested_instance {
-        if parsed_instance != Some(instance) {
-            return false;
-        }
+    if let Some(instance) = requested_instance
+        && parsed_instance != Some(instance)
+    {
+        return false;
     }
     true
 }
@@ -191,10 +192,10 @@ pub(crate) fn find_topics(
         if src.entry.removed {
             continue;
         }
-        if let Some(source) = source {
-            if src.entry.label != source {
-                continue;
-            }
+        if let Some(source) = source
+            && src.entry.label != source
+        {
+            continue;
         }
         for &topic_id in src.topics.iter() {
             let Some(topic_snapshot) = snapshot.topic(topic_id) else {
@@ -244,10 +245,10 @@ fn find_fields(
             if fe.removed || fe.topic != topic_match.topic_id {
                 continue;
             }
-            if let Some(field) = field {
-                if fe.name != field {
-                    continue;
-                }
+            if let Some(field) = field
+                && fe.name != field
+            {
+                continue;
             }
             out.push(FieldMatch {
                 source_id: topic_match.source_id,
@@ -279,7 +280,7 @@ pub(crate) fn find_fields_in_topic(
     let Some(src) = snapshot
         .sources
         .iter()
-        .find(|src| !src.entry.removed && src.topics.iter().any(|&id| id == topic_id))
+        .find(|src| !src.entry.removed && src.topics.contains(&topic_id))
     else {
         return Vec::new();
     };
@@ -289,10 +290,10 @@ pub(crate) fn find_fields_in_topic(
         if fe.removed || fe.topic != topic_id {
             continue;
         }
-        if let Some(field) = field {
-            if fe.name != field {
-                continue;
-            }
+        if let Some(field) = field
+            && fe.name != field
+        {
+            continue;
         }
         out.push(FieldMatch {
             source_id: src.entry.id,
@@ -788,8 +789,7 @@ impl Delog {
         }
         let output_topic = output_topic.unwrap_or_else(|| topic.clone());
         let mode = Some(mode);
-        let mode = OperationMode::parse(mode.as_deref())
-            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        let mode = OperationMode::parse(mode).map_err(pyo3::exceptions::PyValueError::new_err)?;
         self.operations
             .borrow_mut()
             .push(OperationSpec::Transform(TransformSpec {
@@ -863,8 +863,7 @@ impl Delog {
             .map(|(_, fields)| names.by_ref().take(fields.len()).collect::<Vec<_>>())
             .collect();
         let mode = Some(mode);
-        let mode = OperationMode::parse(mode.as_deref())
-            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        let mode = OperationMode::parse(mode).map_err(pyo3::exceptions::PyValueError::new_err)?;
         self.operations
             .borrow_mut()
             .push(OperationSpec::Merge(MergeSpec {
@@ -899,8 +898,7 @@ impl Delog {
         validate_split_template(&output_template)
             .map_err(pyo3::exceptions::PyValueError::new_err)?;
         let mode = Some(mode);
-        let mode = OperationMode::parse(mode.as_deref())
-            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        let mode = OperationMode::parse(mode).map_err(pyo3::exceptions::PyValueError::new_err)?;
         self.operations
             .borrow_mut()
             .push(OperationSpec::SplitBy(SplitBySpec {

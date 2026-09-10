@@ -107,7 +107,8 @@ impl FieldStatsController {
         self.fields = fields;
         self.current.clear();
         self.pending = None;
-        self.displayed.retain(|field, _| self.fields.contains(field));
+        self.displayed
+            .retain(|field, _| self.fields.contains(field));
         self.errors.retain(|field, _| self.fields.contains(field));
     }
 
@@ -326,7 +327,10 @@ mod tests {
         assert!(!controller.fields().is_empty());
 
         controller.close();
-        assert!(controller.fields().is_empty(), "closing should empty the view");
+        assert!(
+            controller.fields().is_empty(),
+            "closing should empty the view"
+        );
 
         controller.sync_plotted(vec![FieldId(1), FieldId(2)]);
         assert!(

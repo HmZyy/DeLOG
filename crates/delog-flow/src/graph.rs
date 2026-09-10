@@ -383,7 +383,11 @@ impl Graph {
         let Some(input) = inputs.get(to_port as usize) else {
             return Err(ConnectError::BadPort);
         };
-        if !output.accepts.iter().any(|kind| input.accepts.contains(kind)) {
+        if !output
+            .accepts
+            .iter()
+            .any(|kind| input.accepts.contains(kind))
+        {
             return Err(ConnectError::TypeMismatch);
         }
         if self.incoming(to, to_port).is_some() {
@@ -523,10 +527,7 @@ mod tests {
         let konst = add_node(&mut g, NodeKind::Constant { value: 2.0 });
         let add = add_node(&mut g, NodeKind::Add);
         let mul = add_node(&mut g, NodeKind::Multiply);
-        assert_eq!(
-            g.connect(konst, 0, add, 0),
-            Err(ConnectError::TypeMismatch)
-        );
+        assert_eq!(g.connect(konst, 0, add, 0), Err(ConnectError::TypeMismatch));
         assert_eq!(g.connect(konst, 0, mul, 1), Ok(()));
         assert_eq!(g.connect(konst, 0, mul, 7), Err(ConnectError::BadPort));
     }

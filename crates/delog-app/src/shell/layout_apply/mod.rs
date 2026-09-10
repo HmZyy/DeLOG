@@ -4,9 +4,9 @@ use delog_core::diagnostics::Diag;
 use delog_core::identity::SourceId;
 use delog_core::snapshot::StoreSnapshot;
 
+use crate::plotting::plot::{GhostTrace, PlotPane, TraceMode, TraceRef};
 use crate::scene3d::camera::OrbitCamera;
 use crate::scene3d::trail::TrailMode;
-use crate::plotting::plot::{GhostTrace, PlotPane, TraceMode, TraceRef};
 use crate::scene3d::vehicle::VehicleConfig;
 use crate::shell::workspace::{Pane, Scene3dPane, Workspace};
 

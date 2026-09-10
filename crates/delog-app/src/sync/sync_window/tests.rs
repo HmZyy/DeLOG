@@ -257,11 +257,7 @@ fn change_fixture() -> StoreSnapshot {
     ])
 }
 
-fn snapshot_with_offset(
-    snapshot: &StoreSnapshot,
-    source: SourceId,
-    offset: i64,
-) -> StoreSnapshot {
+fn snapshot_with_offset(snapshot: &StoreSnapshot, source: SourceId, offset: i64) -> StoreSnapshot {
     let mut changed = snapshot.clone();
     let mut sources = changed.sources.to_vec();
     sources[source.index()].entry.offset_us = offset;
@@ -543,8 +539,7 @@ fn automatic_alignment_respects_the_reference_draft_offset() {
 fn changed_reference_remains_dirty_and_is_applied_with_dependent_target() {
     let snapshot = alignment_fixture();
     let mut sync = SyncWindow::open(&snapshot).unwrap();
-    let [original_reference, changed_reference, target] =
-        sync.included_ids().try_into().unwrap();
+    let [original_reference, changed_reference, target] = sync.included_ids().try_into().unwrap();
 
     sync.set_draft_offset(changed_reference, 50).unwrap();
     sync.set_reference(changed_reference).unwrap();
@@ -599,9 +594,7 @@ fn rendered_and_legend_trace_colors_equal_the_standard_palette() {
         assert_eq!(rendered.trace.color, expected.to_srgb_f32());
         assert_eq!(
             egui_trace_color(index),
-            egui::Color32::from_rgba_unmultiplied(
-                expected.r, expected.g, expected.b, expected.a
-            )
+            egui::Color32::from_rgba_unmultiplied(expected.r, expected.g, expected.b, expected.a)
         );
     }
 }
@@ -697,7 +690,7 @@ fn reconcile_removes_sources_clears_missing_fields_and_excludes_new_sources() {
     sync.reconcile(&changed);
     assert!(sync.source(a).is_none());
     assert_eq!(sync.source(b).unwrap().field, None);
-    assert_eq!(sync.source(new_id).unwrap().included, false);
+    assert!(!sync.source(new_id).unwrap().included);
 }
 
 #[test]
@@ -842,12 +835,9 @@ fn removed_field_does_not_shift_schema_alignment() {
         )
         .unwrap(),
     );
-    let mut snapshot = StoreSnapshot::from_registry(
-        &identity,
-        [(topic, Arc::new(TopicStore::new(schema)))],
-        0,
-    )
-    .unwrap();
+    let mut snapshot =
+        StoreSnapshot::from_registry(&identity, [(topic, Arc::new(TopicStore::new(schema)))], 0)
+            .unwrap();
     let mut fields = snapshot.fields.to_vec();
     fields[removed.index()].removed = true;
     snapshot.fields = Arc::from(fields);

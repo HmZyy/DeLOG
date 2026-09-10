@@ -13,7 +13,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config::settings::AppSettings;
-use crate::scene3d::vehicle::{GeoRef, ModelKind, NedReference, OriMapping, PosMapping, VehicleConfig};
+use crate::scene3d::vehicle::{
+    GeoRef, ModelKind, NedReference, OriMapping, PosMapping, VehicleConfig,
+};
 
 const APP_ID: &str = "DeLOG";
 pub(crate) const LAYOUT_VERSION: u32 = 1;
@@ -474,7 +476,10 @@ fn named_layout_path(name: &str) -> Result<PathBuf, LayoutError> {
     Ok(layout_dir()?.join(format!("{}.json", sanitize_name(name))))
 }
 
-pub(crate) fn vehicle_to_layout(v: &VehicleConfig, snapshot: &StoreSnapshot) -> Option<VehicleLayout> {
+pub(crate) fn vehicle_to_layout(
+    v: &VehicleConfig,
+    snapshot: &StoreSnapshot,
+) -> Option<VehicleLayout> {
     Some(VehicleLayout {
         label: v.label.clone(),
         show: v.show,
@@ -762,7 +767,10 @@ impl Resolver<'_> {
     }
 }
 
-pub(crate) fn vehicle_from_layout(v: &VehicleLayout, resolver: &mut Resolver<'_>) -> Option<VehicleConfig> {
+pub(crate) fn vehicle_from_layout(
+    v: &VehicleLayout,
+    resolver: &mut Resolver<'_>,
+) -> Option<VehicleConfig> {
     let source = first_resolved_source(v, resolver)?;
     Some(VehicleConfig {
         source,

@@ -11,15 +11,17 @@ use delog_cache::CacheManager;
 use delog_core::identity::FieldId;
 use delog_core::snapshot::StoreSnapshot;
 
-use crate::plotting::axes;
-use crate::scene3d::camera::OrbitCamera;
-use crate::plotting::gpu::{self, GpuBridge, PaneView, VehicleDraw};
-use crate::plotting::hover::{self, HoverTarget};
-use crate::plotting::legend;
 use crate::map::mercator;
 use crate::map::provider::{MapProviderId, provider};
 use crate::map::worker::{MapScopeId, TileFailureClass, TileManager, TileRequest};
-use crate::plotting::plot::{GhostTrace, PlotPane, TraceMode, TraceRef, ViewX, draw_zoom_drag_overlay};
+use crate::plotting::axes;
+use crate::plotting::gpu::{self, GpuBridge, PaneView, VehicleDraw};
+use crate::plotting::hover::{self, HoverTarget};
+use crate::plotting::legend;
+use crate::plotting::plot::{
+    GhostTrace, PlotPane, TraceMode, TraceRef, ViewX, draw_zoom_drag_overlay,
+};
+use crate::scene3d::camera::OrbitCamera;
 use crate::scene3d::frame::SceneFrame;
 use crate::scene3d::trail::{self, TrailMode};
 use crate::scene3d::vehicle;
@@ -995,58 +997,57 @@ impl Behavior<'_> {
 
         let scene_reference = pane.scene_frame.reference;
         let provider_id = self.services.scene3d.map_provider;
-        let ready_tiles =
-            if let (Some(manager), Some(anchor), Some(map_provider)) = (
-                self.services.tile_manager.as_deref_mut(),
-                scene_reference,
-                provider(provider_id),
-            ) {
-                let selection = (provider_id, anchor.map(f64::to_bits));
-                pane.update_map_selection(Some(selection));
-                let ppp = ui.ctx().pixels_per_point();
-                let viewport = [
-                    (rect.width() * ppp).round().max(1.0) as u32,
-                    (rect.height() * ppp).round().max(1.0) as u32,
-                ];
-                let aspect = viewport[0] as f32 / viewport[1] as f32;
-                let (_, inverse_relative) = pane
-                    .camera
-                    .view_proj_and_inverse(aspect, self.services.scene3d.resolved_far_clip_m());
-                let inverse = glam::DMat4::from_translation(pane.camera.eye().as_dvec3())
-                    * inverse_relative.as_dmat4();
-                let visible = mercator::visible_tiles(
-                    inverse,
-                    viewport,
-                    [anchor[0], anchor[1]],
-                    map_provider.zoom_range(),
-                    delog_render::MAP_TILE_CAPACITY,
+        let ready_tiles = if let (Some(manager), Some(anchor), Some(map_provider)) = (
+            self.services.tile_manager.as_deref_mut(),
+            scene_reference,
+            provider(provider_id),
+        ) {
+            let selection = (provider_id, anchor.map(f64::to_bits));
+            pane.update_map_selection(Some(selection));
+            let ppp = ui.ctx().pixels_per_point();
+            let viewport = [
+                (rect.width() * ppp).round().max(1.0) as u32,
+                (rect.height() * ppp).round().max(1.0) as u32,
+            ];
+            let aspect = viewport[0] as f32 / viewport[1] as f32;
+            let (_, inverse_relative) = pane
+                .camera
+                .view_proj_and_inverse(aspect, self.services.scene3d.resolved_far_clip_m());
+            let inverse = glam::DMat4::from_translation(pane.camera.eye().as_dvec3())
+                * inverse_relative.as_dmat4();
+            let visible = mercator::visible_tiles(
+                inverse,
+                viewport,
+                [anchor[0], anchor[1]],
+                map_provider.zoom_range(),
+                delog_render::MAP_TILE_CAPACITY,
+            );
+            pane.update_visible_map_tiles(visible.tiles);
+            let desired: HashSet<_> = pane.map_tiles.iter().map(|(id, _)| *id).collect();
+            manager.set_desired(pane.map_scope, provider_id, pane.map_generation, desired);
+            for (id, priority) in pane.map_tiles.iter().copied() {
+                manager.request(TileRequest {
+                    scope: pane.map_scope,
+                    provider: provider_id,
+                    id,
+                    corners: mercator::tile_corners_render(id, anchor),
+                    priority,
+                    generation: pane.map_generation,
+                });
+            }
+            manager.poll(pane.map_scope)
+        } else {
+            if let Some(manager) = self.services.tile_manager.as_deref_mut() {
+                manager.set_desired(
+                    pane.map_scope,
+                    provider_id,
+                    pane.map_generation,
+                    std::iter::empty(),
                 );
-                pane.update_visible_map_tiles(visible.tiles);
-                let desired: HashSet<_> = pane.map_tiles.iter().map(|(id, _)| *id).collect();
-                manager.set_desired(pane.map_scope, provider_id, pane.map_generation, desired);
-                for (id, priority) in pane.map_tiles.iter().copied() {
-                    manager.request(TileRequest {
-                        scope: pane.map_scope,
-                        provider: provider_id,
-                        id,
-                        corners: mercator::tile_corners_render(id, anchor),
-                        priority,
-                        generation: pane.map_generation,
-                    });
-                }
-                manager.poll(pane.map_scope)
-            } else {
-                if let Some(manager) = self.services.tile_manager.as_deref_mut() {
-                    manager.set_desired(
-                        pane.map_scope,
-                        provider_id,
-                        pane.map_generation,
-                        std::iter::empty(),
-                    );
-                }
-                pane.update_map_selection(None);
-                Vec::new()
-            };
+            }
+            pane.update_map_selection(None);
+            Vec::new()
+        };
 
         let draws: Vec<VehicleDraw> = self
             .services
@@ -1672,143 +1673,151 @@ impl Behavior<'_> {
                 ui.close();
             }
 
-            ui.menu_image_text_button(menu_icon(ui, crate::ui::icons::ban()), "Remove trace", |ui| {
-                crate::ui::components::dense_rows(ui);
-                let entries: Vec<_> = pane
-                    .traces
-                    .iter()
-                    .map(|t| {
-                        (
-                            t.field,
-                            legend::trace_label(self.services.snapshot.as_ref(), t.field),
-                            t.color32(),
-                        )
-                    })
-                    .collect();
-                let ghosts: Vec<(usize, String, egui::Color32)> = pane
-                    .ghosts
-                    .iter()
-                    .enumerate()
-                    .map(|(index, g)| {
-                        (
-                            index,
-                            format!("{}.{} (missing)", g.topic, g.field),
-                            g.display_color32(),
-                        )
-                    })
-                    .collect();
-                if entries.is_empty() && ghosts.is_empty() {
-                    ui.add_enabled(false, egui::Button::new("No traces"));
-                }
-                for (field, label, color) in entries {
-                    let clicked = ui
-                        .horizontal(|ui| {
-                            color_swatch(ui, color);
-                            ui.button(label).clicked()
+            ui.menu_image_text_button(
+                menu_icon(ui, crate::ui::icons::ban()),
+                "Remove trace",
+                |ui| {
+                    crate::ui::components::dense_rows(ui);
+                    let entries: Vec<_> = pane
+                        .traces
+                        .iter()
+                        .map(|t| {
+                            (
+                                t.field,
+                                legend::trace_label(self.services.snapshot.as_ref(), t.field),
+                                t.color32(),
+                            )
                         })
-                        .inner;
-                    if clicked {
-                        pane.remove_trace(field);
-                        self.services.caches.unpin(field);
-                        self.actions.remove_trace.push(field);
-                        ui.close();
-                    }
-                }
-                for (index, label, color) in ghosts {
-                    let clicked = ui
-                        .horizontal(|ui| {
-                            color_swatch(ui, color);
-                            ui.button(label).clicked()
+                        .collect();
+                    let ghosts: Vec<(usize, String, egui::Color32)> = pane
+                        .ghosts
+                        .iter()
+                        .enumerate()
+                        .map(|(index, g)| {
+                            (
+                                index,
+                                format!("{}.{} (missing)", g.topic, g.field),
+                                g.display_color32(),
+                            )
                         })
-                        .inner;
-                    if clicked {
-                        pane.remove_ghost(index);
-                        ui.close();
+                        .collect();
+                    if entries.is_empty() && ghosts.is_empty() {
+                        ui.add_enabled(false, egui::Button::new("No traces"));
                     }
-                }
-            });
+                    for (field, label, color) in entries {
+                        let clicked = ui
+                            .horizontal(|ui| {
+                                color_swatch(ui, color);
+                                ui.button(label).clicked()
+                            })
+                            .inner;
+                        if clicked {
+                            pane.remove_trace(field);
+                            self.services.caches.unpin(field);
+                            self.actions.remove_trace.push(field);
+                            ui.close();
+                        }
+                    }
+                    for (index, label, color) in ghosts {
+                        let clicked = ui
+                            .horizontal(|ui| {
+                                color_swatch(ui, color);
+                                ui.button(label).clicked()
+                            })
+                            .inner;
+                        if clicked {
+                            pane.remove_ghost(index);
+                            ui.close();
+                        }
+                    }
+                },
+            );
 
-            ui.menu_image_text_button(menu_icon(ui, crate::ui::icons::pencil()), "Edit trace", |ui| {
-                crate::ui::components::dense_rows(ui);
-                let entries: Vec<_> = pane
-                    .traces
-                    .iter()
-                    .map(|t| {
-                        (
-                            t.field,
-                            legend::trace_label(self.services.snapshot.as_ref(), t.field),
-                            t.color32(),
-                        )
-                    })
-                    .collect();
-                let ghost_labels: Vec<(usize, String)> = pane
-                    .ghosts
-                    .iter()
-                    .enumerate()
-                    .map(|(index, g)| (index, format!("{}.{} (missing)", g.topic, g.field)))
-                    .collect();
-                if entries.is_empty() && ghost_labels.is_empty() {
-                    ui.add_enabled(false, egui::Button::new("No traces"));
-                }
-                for (field, label, color) in entries {
-                    let Some(trace) = pane.trace_mut(field) else {
-                        continue;
-                    };
-                    ui.menu_button(label, |ui| {
-                        crate::ui::components::dense_rows(ui);
-                        ui.horizontal(|ui| {
-                            let mut color = color;
-                            if egui::color_picker::color_edit_button_srgba(
-                                ui,
-                                &mut color,
-                                egui::color_picker::Alpha::Opaque,
+            ui.menu_image_text_button(
+                menu_icon(ui, crate::ui::icons::pencil()),
+                "Edit trace",
+                |ui| {
+                    crate::ui::components::dense_rows(ui);
+                    let entries: Vec<_> = pane
+                        .traces
+                        .iter()
+                        .map(|t| {
+                            (
+                                t.field,
+                                legend::trace_label(self.services.snapshot.as_ref(), t.field),
+                                t.color32(),
                             )
-                            .changed()
-                            {
-                                trace.color = legend::color32_to_srgb(color);
+                        })
+                        .collect();
+                    let ghost_labels: Vec<(usize, String)> = pane
+                        .ghosts
+                        .iter()
+                        .enumerate()
+                        .map(|(index, g)| (index, format!("{}.{} (missing)", g.topic, g.field)))
+                        .collect();
+                    if entries.is_empty() && ghost_labels.is_empty() {
+                        ui.add_enabled(false, egui::Button::new("No traces"));
+                    }
+                    for (field, label, color) in entries {
+                        let Some(trace) = pane.trace_mut(field) else {
+                            continue;
+                        };
+                        ui.menu_button(label, |ui| {
+                            crate::ui::components::dense_rows(ui);
+                            ui.horizontal(|ui| {
+                                let mut color = color;
+                                if egui::color_picker::color_edit_button_srgba(
+                                    ui,
+                                    &mut color,
+                                    egui::color_picker::Alpha::Opaque,
+                                )
+                                .changed()
+                                {
+                                    trace.color = legend::color32_to_srgb(color);
+                                }
+                                ui.weak("Color / mode");
+                            });
+                            for mode in TraceMode::ALL {
+                                ui.radio_value(&mut trace.mode, mode, mode.label());
                             }
-                            ui.weak("Color / mode");
+                            ui.add(
+                                egui::Slider::new(&mut trace.width_px, 1.0..=12.0)
+                                    .text("Width")
+                                    .suffix(" px"),
+                            );
                         });
-                        for mode in TraceMode::ALL {
-                            ui.radio_value(&mut trace.mode, mode, mode.label());
-                        }
-                        ui.add(
-                            egui::Slider::new(&mut trace.width_px, 1.0..=12.0)
-                                .text("Width")
-                                .suffix(" px"),
-                        );
-                    });
-                }
-                for (index, label) in ghost_labels {
-                    let Some(ghost) = pane.ghosts.get_mut(index) else {
-                        continue;
-                    };
-                    ui.menu_button(label, |ui| {
-                        crate::ui::components::dense_rows(ui);
-                        ui.horizontal(|ui| {
-                            let mut color = ghost.color32();
-                            if egui::color_picker::color_edit_button_srgba(
-                                ui,
-                                &mut color,
-                                egui::color_picker::Alpha::Opaque,
-                            )
-                            .changed()
-                            {
-                                ghost.color = legend::color32_to_srgb(color);
+                    }
+                    for (index, label) in ghost_labels {
+                        let Some(ghost) = pane.ghosts.get_mut(index) else {
+                            continue;
+                        };
+                        ui.menu_button(label, |ui| {
+                            crate::ui::components::dense_rows(ui);
+                            ui.horizontal(|ui| {
+                                let mut color = ghost.color32();
+                                if egui::color_picker::color_edit_button_srgba(
+                                    ui,
+                                    &mut color,
+                                    egui::color_picker::Alpha::Opaque,
+                                )
+                                .changed()
+                                {
+                                    ghost.color = legend::color32_to_srgb(color);
+                                }
+                                ui.weak("Color / mode");
+                            });
+                            for mode in TraceMode::ALL {
+                                ui.radio_value(&mut ghost.mode, mode, mode.label());
                             }
-                            ui.weak("Color / mode");
+                            ui.add(
+                                egui::Slider::new(&mut ghost.width_px, 1.0..=12.0)
+                                    .text("Width")
+                                    .suffix(" px"),
+                            );
                         });
-                        for mode in TraceMode::ALL {
-                            ui.radio_value(&mut ghost.mode, mode, mode.label());
-                        }
-                        ui.add(
-                            egui::Slider::new(&mut ghost.width_px, 1.0..=12.0)
-                                .text("Width")
-                                .suffix(" px"),
-                        );
-                    });
-                }
-            });
+                    }
+                },
+            );
 
             ui.separator();
 

@@ -22,6 +22,9 @@ pub const METRIC_DROPPED_BATCHES: &str = "ingest_dropped_batches";
 /// saturated link reports without flooding the channel it is already starving.
 const DROP_DIAG_INTERVAL: u64 = 256;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IngestDisconnected;
+
 /// A parsed slice of one topic: sorted i64 µs timestamps plus original-dtype
 /// Arrow columns.
 #[derive(Debug, Clone)]
@@ -141,11 +144,14 @@ impl IngestSender {
             .send(IngestMsg::SetSourceOffset { source, offset_us });
     }
 
-    pub fn set_source_offsets(&self, offsets: Vec<(SourceId, i64)>) -> Result<(), ()> {
+    pub fn set_source_offsets(
+        &self,
+        offsets: Vec<(SourceId, i64)>,
+    ) -> Result<(), IngestDisconnected> {
         if !offsets.is_empty() {
             self.tx
                 .send(IngestMsg::SetSourceOffsets { offsets })
-                .map_err(|_| ())?;
+                .map_err(|_| IngestDisconnected)?;
         }
         Ok(())
     }

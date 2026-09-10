@@ -1545,7 +1545,7 @@ fn ensure_delog_present(
 fn complete_line(globals: &Py<PyDict>, text: &str) -> Vec<String> {
     Python::attach(|py| {
         let g = globals.bind(py);
-        let completer = match build_completer(py, &g) {
+        let completer = match build_completer(py, g) {
             Ok(c) => c,
             Err(_) => return Vec::new(),
         };
@@ -1554,10 +1554,10 @@ fn complete_line(globals: &Py<PyDict>, text: &str) -> Vec<String> {
         loop {
             match completer.call_method1("complete", (text, state)) {
                 Ok(obj) if !obj.is_none() => {
-                    if let Ok(s) = obj.extract::<String>() {
-                        if !matches.contains(&s) {
-                            matches.push(s);
-                        }
+                    if let Ok(s) = obj.extract::<String>()
+                        && !matches.contains(&s)
+                    {
+                        matches.push(s);
                     }
                     state += 1;
                 }

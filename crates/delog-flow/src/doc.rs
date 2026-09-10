@@ -264,7 +264,8 @@ fn node_from_json(value: &Value) -> Result<Node, DocError> {
                 .and_then(Value::as_str)
                 .ok_or_else(|| invalid("conversion must be a string"))?;
             NodeKind::Convert {
-                kind: crate::graph::ConversionKind::parse(conversion).map_err(|message| invalid(&message))?,
+                kind: crate::graph::ConversionKind::parse(conversion)
+                    .map_err(|message| invalid(&message))?,
             }
         }
         "align" => {

@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
-use crate::ui::logging::{LogLevel, PendingLog, log};
 use crate::config::settings::AutoOpenVariables;
+use crate::ui::logging::{LogLevel, PendingLog, log};
 use delog_core::ingest::IngestSender;
 use delog_core::metrics::MetricsRegistry;
 use delog_core::snapshot::DataStore;
@@ -88,7 +88,9 @@ fn should_open_scripting_console(
 ) -> bool {
     match mode {
         crate::config::settings::AutoOpenScriptingConsole::OnOutput => true,
-        crate::config::settings::AutoOpenScriptingConsole::OnErrors => event == ConsoleEventKind::Error,
+        crate::config::settings::AutoOpenScriptingConsole::OnErrors => {
+            event == ConsoleEventKind::Error
+        }
         crate::config::settings::AutoOpenScriptingConsole::Never => false,
     }
 }
@@ -163,9 +165,10 @@ impl ScriptsPanel {
     }
 
     fn save_params(&self) {
-        if let Err(e) =
-            crate::scripting::script_params_io::save(&self.params_file, &self.params.lock().unwrap())
-        {
+        if let Err(e) = crate::scripting::script_params_io::save(
+            &self.params_file,
+            &self.params.lock().unwrap(),
+        ) {
             eprintln!("failed to save script params: {e}");
         }
     }
@@ -878,21 +881,18 @@ impl ScriptsPanel {
                                                     view.has_snapshot,
                                                 ));
                                             }
-                                            let reset =
-                                                ui
-                                                    .add(
-                                                        egui::Button::image(
-                                                            egui::Image::new(
-                                                                crate::ui::icons::rotate_ccw(),
-                                                            )
-                                                            .fit_to_exact_size(egui::vec2(
-                                                                14.0, 14.0,
-                                                            ))
-                                                            .tint(ui.visuals().text_color()),
+                                            let reset = ui
+                                                .add(
+                                                    egui::Button::image(
+                                                        egui::Image::new(
+                                                            crate::ui::icons::rotate_ccw(),
                                                         )
-                                                        .frame(false),
+                                                        .fit_to_exact_size(egui::vec2(14.0, 14.0))
+                                                        .tint(ui.visuals().text_color()),
                                                     )
-                                                    .on_hover_text("Reset to default");
+                                                    .frame(false),
+                                                )
+                                                .on_hover_text("Reset to default");
                                             if reset.clicked() {
                                                 resets.push((
                                                     view.name.clone(),
@@ -925,13 +925,19 @@ impl ScriptsPanel {
             let mut s = self.params.lock().unwrap();
             for (script, name, value, has_snapshot) in &commits {
                 s.set_value(script, name, value.clone());
-                if crate::scripting::script_params_io::should_rerun(*has_snapshot, named.contains(script)) {
+                if crate::scripting::script_params_io::should_rerun(
+                    *has_snapshot,
+                    named.contains(script),
+                ) {
                     to_rerun.insert(script.clone());
                 }
             }
             for (script, name, has_snapshot) in &resets {
                 s.reset_value(script, name);
-                if crate::scripting::script_params_io::should_rerun(*has_snapshot, named.contains(script)) {
+                if crate::scripting::script_params_io::should_rerun(
+                    *has_snapshot,
+                    named.contains(script),
+                ) {
                     to_rerun.insert(script.clone());
                 }
             }
@@ -1019,10 +1025,10 @@ impl ScriptsPanel {
                 {
                     match self.library.save(&self.current_name, &self.editor_text) {
                         Ok(()) => {
-                            if let Some(original) = self.editing_original_name.take() {
-                                if original != self.current_name {
-                                    let _ = self.library.delete(&original);
-                                }
+                            if let Some(original) = self.editing_original_name.take()
+                                && original != self.current_name
+                            {
+                                let _ = self.library.delete(&original);
                             }
                             self.editing_original_name = Some(self.current_name.clone());
                             self.status = format!("saved {}", self.current_name);
@@ -1655,7 +1661,10 @@ mod tests {
             temp.path().join("empty-parsers"),
             temp.path().join("empty-params.json"),
         );
-        assert_eq!(empty_panel.try_script_names().unwrap(), Vec::<String>::new());
+        assert_eq!(
+            empty_panel.try_script_names().unwrap(),
+            Vec::<String>::new()
+        );
 
         let not_a_directory = temp.path().join("not-a-directory");
         std::fs::write(&not_a_directory, "file where a directory is required").unwrap();

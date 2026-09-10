@@ -294,8 +294,8 @@ fn code_lines(source: &str) -> Vec<String> {
                 index += 1;
             }
             Scan::RawStr(hashes) => {
-                let closes = ch == '"'
-                    && (1..=hashes).all(|offset| chars.get(index + offset) == Some(&'#'));
+                let closes =
+                    ch == '"' && (1..=hashes).all(|offset| chars.get(index + offset) == Some(&'#'));
                 if closes {
                     mode = Scan::Code;
                     index += 1 + hashes;

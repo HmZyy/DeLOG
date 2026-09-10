@@ -5,8 +5,8 @@
 //! throttled so a multi-GB parse emits ~100 events, not millions.
 
 use std::cell::Cell;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::identity::SourceId;
 use crate::ingest::IngestSink;

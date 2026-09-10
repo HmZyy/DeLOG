@@ -10,10 +10,10 @@ use delog_core::ingest::ParsedBatch;
 use crate::api::{PendingColumn, PendingTopic, parse_topic_instance, topic_matches};
 use crate::emit::prepare_topics;
 use crate::operations::snapshot::{
-    MergeSeed, SeedField, StreamKey, split_key, pending_topic, slice_column,
+    MergeSeed, SeedField, StreamKey, pending_topic, slice_column, split_key,
 };
 use crate::operations::{
-    SplitBySpec, MergeSpec, OperationSpec, TopicRegistry, TopicSelector, TransformSpec,
+    MergeSpec, OperationSpec, SplitBySpec, TopicRegistry, TopicSelector, TransformSpec,
 };
 
 type EmittedSchema = Vec<(String, DataType, Option<String>)>;
@@ -913,7 +913,7 @@ mod tests {
     use crate::api::{PendingColumn, PendingField, PendingTopic};
     use crate::operations::snapshot::{MergeSeed, SeedField, StreamKey};
     use crate::operations::{
-        SplitBySpec, MergeSpec, OperationMode, OperationSpec, TopicRegistry, TopicSelector,
+        MergeSpec, OperationMode, OperationSpec, SplitBySpec, TopicRegistry, TopicSelector,
         TransformSpec,
     };
 

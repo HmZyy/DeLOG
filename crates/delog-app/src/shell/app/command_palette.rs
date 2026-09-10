@@ -343,11 +343,8 @@ mod tests {
     #[test]
     fn rendered_palette_click_dispatches_enabled_entry_but_not_disabled_fit_all() {
         let ctx = egui::Context::default();
-        let enabled = PaletteEntry::enabled(
-            AppCommand::Static(CommandId::Open),
-            "Open test log",
-            "file",
-        );
+        let enabled =
+            PaletteEntry::enabled(AppCommand::Static(CommandId::Open), "Open test log", "file");
         let disabled = PaletteEntry {
             command: AppCommand::FitAll,
             label: "Fit all plots".to_owned(),
@@ -490,9 +487,7 @@ mod tests {
         );
         assert!(entries.iter().any(|entry| {
             entry.command
-                == AppCommand::SetCursorSampling(
-                    delog_core::field_view::SampleMode::Linear,
-                )
+                == AppCommand::SetCursorSampling(delog_core::field_view::SampleMode::Linear)
                 && entry.selected == Some(true)
         }));
     }
@@ -545,11 +540,7 @@ mod tests {
         let (output, _) = palette_frame(&ctx, &mut palette, &entries, vec![]);
 
         assert!(output.shapes.iter().any(|shape| {
-            find_text_rect(
-                &shape.shape,
-                "shared\nTools › Scripts › Run Scripts",
-            )
-            .is_some()
+            find_text_rect(&shape.shape, "shared\nTools › Scripts › Run Scripts").is_some()
         }));
     }
 }

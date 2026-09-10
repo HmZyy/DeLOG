@@ -1,7 +1,9 @@
 use delog_core::field_view::SampleMode;
 
 use crate::config::settings::LegendPosition;
-use crate::shell::app::commands::{AppCommand, CommandAvailability, CommandId, CommandPresentation};
+use crate::shell::app::commands::{
+    AppCommand, CommandAvailability, CommandId, CommandPresentation,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GlobalPlotControl {
@@ -34,7 +36,9 @@ pub const fn command_for_control(control: GlobalPlotControl) -> AppCommand {
         GlobalPlotControl::ToggleMeasuringMarker => {
             AppCommand::Static(CommandId::AddMeasuringMarker)
         }
-        GlobalPlotControl::CycleLegendPosition => AppCommand::Static(CommandId::CycleLegendPosition),
+        GlobalPlotControl::CycleLegendPosition => {
+            AppCommand::Static(CommandId::CycleLegendPosition)
+        }
         GlobalPlotControl::ToggleLegends => AppCommand::Static(CommandId::ToggleLegends),
         GlobalPlotControl::OpenFieldStats => AppCommand::Static(CommandId::OpenFieldStats),
         GlobalPlotControl::ToggleAnnotationToolbar => {
@@ -77,9 +81,7 @@ pub fn show(
                         .selectable_label(model.cursor_sampling == mode, sample_mode_label(mode))
                         .clicked()
                     {
-                        commands.push(command_for_control(GlobalPlotControl::CursorSampling(
-                            mode,
-                        )));
+                        commands.push(command_for_control(GlobalPlotControl::CursorSampling(mode)));
                         ui.close();
                     }
                 }
@@ -117,14 +119,13 @@ pub fn show(
                     )
                 })
                 .inner;
-            let marker_response = match marker_presentation
-                .map(|presentation| &presentation.availability)
-            {
-                Some(CommandAvailability::Disabled(reason)) => {
-                    marker_response.on_disabled_hover_text(*reason)
-                }
-                _ => marker_response,
-            };
+            let marker_response =
+                match marker_presentation.map(|presentation| &presentation.availability) {
+                    Some(CommandAvailability::Disabled(reason)) => {
+                        marker_response.on_disabled_hover_text(*reason)
+                    }
+                    _ => marker_response,
+                };
             if marker_response.clicked() {
                 commands.push(marker);
             }
@@ -159,14 +160,13 @@ pub fn show(
                     )
                 })
                 .inner;
-            let stats_response = match stats_presentation
-                .map(|presentation| &presentation.availability)
-            {
-                Some(CommandAvailability::Disabled(reason)) => {
-                    stats_response.on_disabled_hover_text(*reason)
-                }
-                _ => stats_response,
-            };
+            let stats_response =
+                match stats_presentation.map(|presentation| &presentation.availability) {
+                    Some(CommandAvailability::Disabled(reason)) => {
+                        stats_response.on_disabled_hover_text(*reason)
+                    }
+                    _ => stats_response,
+                };
             if stats_response.clicked() {
                 commands.push(stats);
             }
@@ -192,14 +192,13 @@ pub fn show(
                     )
                 })
                 .inner;
-            let annotations_response = match annotations_presentation
-                .map(|presentation| &presentation.availability)
-            {
-                Some(CommandAvailability::Disabled(reason)) => {
-                    annotations_response.on_disabled_hover_text(*reason)
-                }
-                _ => annotations_response,
-            };
+            let annotations_response =
+                match annotations_presentation.map(|presentation| &presentation.availability) {
+                    Some(CommandAvailability::Disabled(reason)) => {
+                        annotations_response.on_disabled_hover_text(*reason)
+                    }
+                    _ => annotations_response,
+                };
             if annotations_response.clicked() {
                 commands.push(annotations);
             }
@@ -330,7 +329,10 @@ mod tests {
             text.contains("stroke=\"#ffffff\""),
             "icons must use a white stroke so the runtime tint colors them"
         );
-        assert!(text.contains("<path"), "the sigma icon should have geometry");
+        assert!(
+            text.contains("<path"),
+            "the sigma icon should have geometry"
+        );
     }
 
     #[test]
@@ -445,10 +447,7 @@ mod tests {
         let mut reported = None;
         let _ = ctx.run_ui(input(secondary(false)), |ui| {
             let response = legend_button(ui);
-            reported = legend_button_control(
-                response.clicked(),
-                response.secondary_clicked(),
-            );
+            reported = legend_button_control(response.clicked(), response.secondary_clicked());
         });
 
         assert_eq!(reported, Some(GlobalPlotControl::ToggleLegends));
@@ -540,12 +539,7 @@ mod tests {
             .find_map(|shape| find_text_rect(&shape.shape, "Cursor: Previous"))
             .expect("cursor toolbar menu should be painted");
         let cursor_pos = cursor_rect.center();
-        let _ = toolbar_frame(
-            &ctx,
-            &model,
-            &presentations,
-            click_events(cursor_pos, true),
-        );
+        let _ = toolbar_frame(&ctx, &model, &presentations, click_events(cursor_pos, true));
         let _ = toolbar_frame(
             &ctx,
             &model,
@@ -559,12 +553,7 @@ mod tests {
             .find_map(|shape| find_text_rect(&shape.shape, "Linear"))
             .expect("sampling menu choice should be painted");
         let linear_pos = linear_rect.center();
-        let _ = toolbar_frame(
-            &ctx,
-            &model,
-            &presentations,
-            click_events(linear_pos, true),
-        );
+        let _ = toolbar_frame(&ctx, &model, &presentations, click_events(linear_pos, true));
         let (_, commands) = toolbar_frame(
             &ctx,
             &model,
@@ -572,6 +561,9 @@ mod tests {
             click_events(linear_pos, false),
         );
 
-        assert_eq!(commands, [AppCommand::SetCursorSampling(SampleMode::Linear)]);
+        assert_eq!(
+            commands,
+            [AppCommand::SetCursorSampling(SampleMode::Linear)]
+        );
     }
 }

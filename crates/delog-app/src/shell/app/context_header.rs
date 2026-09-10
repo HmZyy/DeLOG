@@ -83,15 +83,10 @@ const TOOLS_LAYOUTS_MENU: &[CommandId] = &[
     CommandId::ExportLayout,
     CommandId::ClearLayout,
 ];
-const ANALYZE_MENU: &[CommandId] = &[
-    CommandId::SyncSources,
-    CommandId::OpenDataFlow,
-];
+const ANALYZE_MENU: &[CommandId] = &[CommandId::SyncSources, CommandId::OpenDataFlow];
 const TOOLS_MENU: &[CommandId] = &[CommandId::OpenSettings];
-const TOOLS_SCRIPTS_MENU: &[CommandId] = &[
-    CommandId::OpenScriptEditor,
-    CommandId::OpenScriptVariables,
-];
+const TOOLS_SCRIPTS_MENU: &[CommandId] =
+    &[CommandId::OpenScriptEditor, CommandId::OpenScriptVariables];
 const TOOLS_PARSERS_MENU: &[CommandId] = &[CommandId::OpenParserEditor];
 
 fn header_bottom_margin(style: &egui::Style) -> f32 {
@@ -198,14 +193,14 @@ pub fn show(
                     state,
                 };
                 components::status_chip(ui, &chip, model.theme).on_hover_text(format!(
-                        "{} received frames{}",
-                        status.rx_frames,
-                        status
-                            .recording
-                            .as_deref()
-                            .map(|value| format!(" · {value}"))
-                            .unwrap_or_default()
-                    ));
+                    "{} received frames{}",
+                    status.rx_frames,
+                    status
+                        .recording
+                        .as_deref()
+                        .map(|value| format!(" · {value}"))
+                        .unwrap_or_default()
+                ));
                 if components::icon_button(
                     ui,
                     crate::ui::icons::unplug(),
@@ -387,8 +382,7 @@ fn menu_items(
     selected: &mut Vec<AppCommand>,
 ) {
     debug_assert!(
-        ids.iter()
-            .all(|id| id.spec().classic_menu_owner == owner),
+        ids.iter().all(|id| id.spec().classic_menu_owner == owner),
         "classic menu section contains a command owned by another menu"
     );
     for id in ids {
@@ -458,10 +452,7 @@ fn presentation_row(
     let response = if checked {
         let mut is_selected = presentation.selected.unwrap_or(false);
         let text = checked_row_text(presentation);
-        let response = ui.add_enabled(
-            enabled,
-            egui::Checkbox::new(&mut is_selected, text),
-        );
+        let response = ui.add_enabled(enabled, egui::Checkbox::new(&mut is_selected, text));
         match reason {
             Some(reason) => response.on_disabled_hover_text(reason),
             None => response,
@@ -606,9 +597,7 @@ mod tests {
         }
         let bar = bars
             .iter()
-            .find(|rect| {
-                rect.contains(percent.1.center()) && rect.width() > 100.0
-            })
+            .find(|rect| rect.contains(percent.1.center()) && rect.width() > 100.0)
             .unwrap_or_else(|| panic!("the progress bar should enclose its percentage"));
 
         assert!(
@@ -635,9 +624,7 @@ mod tests {
         );
     }
 
-    fn header_with_toolbar_probe(
-        ctx: &egui::Context,
-    ) -> (egui::FullOutput, HeaderOutput) {
+    fn header_with_toolbar_probe(ctx: &egui::Context) -> (egui::FullOutput, HeaderOutput) {
         let model = HeaderModel {
             emphasis: ShellEmphasis::Offline,
             live_statuses: Vec::new(),
@@ -825,10 +812,7 @@ mod tests {
         let toolbar = bounds("Toolbar probe");
 
         assert!(toolbar.x0 > tools.x1);
-        assert_eq!(
-            (toolbar.y0 + toolbar.y1) * 0.5,
-            (tools.y0 + tools.y1) * 0.5,
-        );
+        assert_eq!((toolbar.y0 + toolbar.y1) * 0.5, (tools.y0 + tools.y1) * 0.5,);
     }
 
     #[test]
@@ -1031,10 +1015,7 @@ mod tests {
             ],
         );
 
-        assert_eq!(
-            selected,
-            [AppCommand::Static(CommandId::ToggleDataBrowser)]
-        );
+        assert_eq!(selected, [AppCommand::Static(CommandId::ToggleDataBrowser)]);
     }
 
     #[test]
@@ -1084,23 +1065,16 @@ mod tests {
                 "{id:?}"
             );
             assert!(
-                id.spec().routes.contains(&crate::shell::app::commands::AccessRoute::ClassicMenu),
+                id.spec()
+                    .routes
+                    .contains(&crate::shell::app::commands::AccessRoute::ClassicMenu),
                 "rendered command lacks a classic-menu route: {id:?}"
             );
         }
         for (owner, sections) in [
-            (
-                ClassicMenuOwner::File,
-                &[FILE_MENU, FILE_EXPORT_MENU][..],
-            ),
-            (
-                ClassicMenuOwner::View,
-                &[VIEW_MENU, VIEW_PANELS_MENU][..],
-            ),
-            (
-                ClassicMenuOwner::Analyze,
-                &[ANALYZE_MENU][..],
-            ),
+            (ClassicMenuOwner::File, &[FILE_MENU, FILE_EXPORT_MENU][..]),
+            (ClassicMenuOwner::View, &[VIEW_MENU, VIEW_PANELS_MENU][..]),
+            (ClassicMenuOwner::Analyze, &[ANALYZE_MENU][..]),
             (
                 ClassicMenuOwner::Tools,
                 &[
@@ -1123,7 +1097,10 @@ mod tests {
             CommandId::TogglePlayheadSnap,
             CommandId::DisconnectLive,
         ] {
-            assert!(!ids.contains(&omitted), "toolbar/shortcut command leaked into menu");
+            assert!(
+                !ids.contains(&omitted),
+                "toolbar/shortcut command leaked into menu"
+            );
         }
         assert!(
             !CommandId::DisconnectLive
