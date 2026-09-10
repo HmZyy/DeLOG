@@ -128,7 +128,17 @@ pub fn show(
     let mut refresh_dynamic_catalog = false;
     ui.vertical(|ui| {
         ui.horizontal(|ui| {
-            ui.strong("DeLOG");
+            if ui
+                .add(
+                    egui::Label::new(egui::RichText::new("DeLOG").strong())
+                        .sense(egui::Sense::click()),
+                )
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text("About DeLOG")
+                .clicked()
+            {
+                commands.push(AppCommand::ShowAbout);
+            }
             ui.separator();
             let offline = ui
                 .selectable_label(model.emphasis == ShellEmphasis::Offline, "Offline")
@@ -657,6 +667,89 @@ mod tests {
             },
         );
         (output, header_output.expect("header should render"))
+    }
+
+    fn offline_header(
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+    ) -> (egui::FullOutput, HeaderOutput) {
+        let model = HeaderModel {
+            emphasis: ShellEmphasis::Offline,
+            live_statuses: Vec::new(),
+            load: LoadStatusView::Idle,
+            fps: None,
+            theme: crate::ui::theme::ThemeChoice::CatppuccinMocha,
+        };
+        let presentations = crate::shell::app::commands::present_commands(
+            &crate::shell::app::commands::CommandContext::default(),
+            &crate::shell::app::commands::PresentationState::default(),
+            [],
+        );
+        let mut header_output = None;
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1_200.0, 300.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                header_output = Some(show(ui, &model, &presentations, |_| Vec::new()));
+            },
+        );
+        (output, header_output.expect("header should render"))
+    }
+
+    #[test]
+    fn clicking_the_brand_asks_for_the_about_dialog() {
+        let ctx = egui::Context::default();
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+
+        let (output, first) = offline_header(&ctx, Vec::new());
+        assert!(
+            first.commands.is_empty(),
+            "the brand should stay quiet until it is clicked"
+        );
+        let brand = output
+            .shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::epaint::Shape::Text(text) if text.galley.job.text == "DeLOG" => {
+                    Some(egui::Rect::from_min_size(text.pos, text.galley.size()))
+                }
+                _ => None,
+            })
+            .expect("the header should paint the brand");
+        let pos = brand.center();
+
+        let _ = offline_header(
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        let (_, output) = offline_header(
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+
+        assert_eq!(output.commands, [AppCommand::ShowAbout]);
     }
 
     fn header_with_live_link(

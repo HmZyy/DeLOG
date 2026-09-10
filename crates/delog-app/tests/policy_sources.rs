@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+pub const ABOUT: &str = include_str!("../src/ui/about.rs");
 pub const APP: &str = include_str!("../src/shell/app/mod.rs");
 pub const APP_COMMANDS: &str = include_str!("../src/shell/app/commands/specs.rs");
 pub const BROWSER: &str = include_str!("../src/plotting/browser.rs");
@@ -20,6 +21,8 @@ pub const PERFORMANCE: &str = include_str!("../src/ui/performance.rs");
 pub const SCRIPTS: &str = include_str!("../src/scripting/scripts.rs");
 pub const SETTINGS: &str = include_str!("../src/config/settings.rs");
 pub const SYNC_WINDOW: &str = include_str!("../src/sync/sync_window/mod.rs");
+pub const UPDATE: &str = include_str!("../src/update/mod.rs");
+pub const UPDATE_POPUP: &str = include_str!("../src/update/popup.rs");
 pub const VEHICLE_DIALOG: &str = concat!(
     include_str!("../src/session/vehicle_dialog/mod.rs"),
     include_str!("../src/session/vehicle_dialog/draft.rs"),
