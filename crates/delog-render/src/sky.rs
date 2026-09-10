@@ -350,7 +350,7 @@ mod tests {
             let mut pass = target.begin_pass(&mut enc, MAGENTA);
             sky.draw(&mut pass);
             if line {
-                traj.draw(&mut pass, &bind, pts.len() as u32);
+                traj.draw(&mut pass, &bind, 0..pts.len() as u32);
             }
         }
         ctx.queue().submit([enc.finish()]);
