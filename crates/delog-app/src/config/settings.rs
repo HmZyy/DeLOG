@@ -372,9 +372,10 @@ impl RenderMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AutoOpenVariables {
+    #[default]
     NewlyAdded,
     EveryRun,
     Never,
@@ -392,16 +393,11 @@ impl AutoOpenVariables {
     }
 }
 
-impl Default for AutoOpenVariables {
-    fn default() -> Self {
-        Self::NewlyAdded
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AutoOpenScriptingConsole {
     OnOutput,
+    #[default]
     OnErrors,
     Never,
 }
@@ -415,12 +411,6 @@ impl AutoOpenScriptingConsole {
             Self::OnErrors => "On errors",
             Self::Never => "Never",
         }
-    }
-}
-
-impl Default for AutoOpenScriptingConsole {
-    fn default() -> Self {
-        Self::OnErrors
     }
 }
 

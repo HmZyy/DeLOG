@@ -90,12 +90,11 @@ impl VehicleProfileLibrary {
             if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
                 continue;
             }
-            if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
-                if let Ok(name) = sanitize_name(stem)
-                    && name == stem
-                {
-                    profiles.push(name);
-                }
+            if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
+                && let Ok(name) = sanitize_name(stem)
+                && name == stem
+            {
+                profiles.push(name);
             }
         }
         profiles.sort();

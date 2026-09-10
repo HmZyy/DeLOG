@@ -65,12 +65,7 @@ pub fn icon_button_sized(
     let response = ui.add_sized(button_size, egui::Button::image(image).selected(selected));
     let enabled = response.enabled();
     response.widget_info(|| {
-        egui::WidgetInfo::selected(
-            egui::WidgetType::Button,
-            enabled,
-            selected,
-            tooltip,
-        )
+        egui::WidgetInfo::selected(egui::WidgetType::Button, enabled, selected, tooltip)
     });
     response.on_hover_text(tooltip)
 }
@@ -193,45 +188,33 @@ pub fn library_tree(
         .allow_drag_and_drop(false)
         .show_state(ui, &mut state, |builder| {
             for (index, name) in names.iter().enumerate() {
-                builder.node(
-                    egui_ltreeview::NodeBuilder::leaf(index).label_ui(|ui| {
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                if !menu_actions.is_empty() {
-                                    let menu = ui.menu_button("...", |ui| {
-                                        dense_rows(ui);
-                                        for action in menu_actions {
-                                            if ui.button(action.label()).clicked() {
-                                                menu_event = Some(LibraryEvent {
-                                                    name: name.clone(),
-                                                    action: *action,
-                                                });
-                                                ui.close();
-                                            }
-                                        }
-                                    });
-                                    if menu.response.clicked() || menu.inner.is_some() {
-                                        menu_consumed_click = true;
+                builder.node(egui_ltreeview::NodeBuilder::leaf(index).label_ui(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if !menu_actions.is_empty() {
+                            let menu = ui.menu_button("...", |ui| {
+                                dense_rows(ui);
+                                for action in menu_actions {
+                                    if ui.button(action.label()).clicked() {
+                                        menu_event = Some(LibraryEvent {
+                                            name: name.clone(),
+                                            action: *action,
+                                        });
+                                        ui.close();
                                     }
                                 }
-                                ui.with_layout(
-                                    egui::Layout::left_to_right(egui::Align::Center),
-                                    |ui| {
-                                        ui.add(
-                                            egui::Label::new(name)
-                                                .selectable(false)
-                                                .truncate(),
-                                        )
-                                        .on_hover_text(hover);
-                                    },
-                                );
-                            },
-                        );
-                    }),
-                );
+                            });
+                            if menu.response.clicked() || menu.inner.is_some() {
+                                menu_consumed_click = true;
+                            }
+                        }
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            ui.add(egui::Label::new(name).selectable(false).truncate())
+                                .on_hover_text(hover);
+                        });
+                    });
+                }));
             }
-            });
+        });
 
     state.set_selected(Vec::new());
     state.store(ui, id);
@@ -361,9 +344,7 @@ mod tests {
             out: &mut Option<f32>,
         ) {
             match shape {
-                egui::epaint::Shape::Rect(rect)
-                    if rect.fill == fills.0 || rect.fill == fills.1 =>
-                {
+                egui::epaint::Shape::Rect(rect) if rect.fill == fills.0 || rect.fill == fills.1 => {
                     *out = Some(rect.rect.center().y);
                 }
                 egui::epaint::Shape::Vec(shapes) => {
@@ -402,7 +383,12 @@ mod tests {
         );
     }
 
-    fn menu_rect_at_width(ctx: &egui::Context, id: egui::Id, names: &[String], w: f32) -> Option<egui::Rect> {
+    fn menu_rect_at_width(
+        ctx: &egui::Context,
+        id: egui::Id,
+        names: &[String],
+        w: f32,
+    ) -> Option<egui::Rect> {
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -606,10 +592,8 @@ mod tests {
         let ctx = egui::Context::default();
         ctx.enable_accesskit();
         let output = ctx.run_ui(egui::RawInput::default(), |ui| {
-            let texture = egui::load::SizedTexture::new(
-                egui::TextureId::default(),
-                egui::Vec2::splat(1.0),
-            );
+            let texture =
+                egui::load::SizedTexture::new(egui::TextureId::default(), egui::Vec2::splat(1.0));
             icon_button(ui, texture.into(), "Pin plot", true);
             icon_button(ui, texture.into(), "Unpinned plot", false);
         });

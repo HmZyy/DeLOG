@@ -15,10 +15,10 @@ use delog_parsers::{LogParser, ParseError, ReadSeek, Sniff};
 use parquet::arrow::ArrowWriter;
 
 use super::*;
-use crate::plotting::browser::BrowserModel;
 use crate::export::data_export::{
     ExportCtl, ExportField, ExportFormat, available_fields, write_export_file,
 };
+use crate::plotting::browser::BrowserModel;
 use delog_core::export::ResampleMode;
 
 #[cfg(feature = "scripting")]
@@ -146,7 +146,11 @@ fn write_unsorted_generic_parquet(path: &Path) {
 fn write_all_invalid_parquet(path: &Path) {
     let rows = delog_parsers::parquet::PARQUET_BATCH_ROWS * 32;
     let schema = Arc::new(Schema::new(vec![
-        Field::new("time", DataType::Timestamp(TimeUnit::Millisecond, None), true),
+        Field::new(
+            "time",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            true,
+        ),
         Field::new("value", DataType::Float32, true),
     ]));
     let batch = RecordBatch::try_new(
@@ -243,8 +247,7 @@ fn structured_export_fixture() -> (StoreSnapshot, Vec<ExportField>) {
         )
         .unwrap(),
     );
-    let status_store =
-        Arc::new(TopicStore::from_chunks(status_schema, [status_chunk]).unwrap());
+    let status_store = Arc::new(TopicStore::from_chunks(status_schema, [status_chunk]).unwrap());
 
     let att_b_schema = Arc::new(
         TopicSchema::new(
@@ -262,8 +265,7 @@ fn structured_export_fixture() -> (StoreSnapshot, Vec<ExportField>) {
         Chunk::try_new(
             Int64Array::from(vec![1_500, 2_500, 3_500]),
             vec![
-                Arc::new(Float32Array::from(vec![Some(-2.0), Some(-1.0), Some(0.0)]))
-                    as ArrayRef,
+                Arc::new(Float32Array::from(vec![Some(-2.0), Some(-1.0), Some(0.0)])) as ArrayRef,
                 Arc::new(Float64Array::from(vec![0.5, 0.75, 1.0])) as ArrayRef,
             ],
             &att_b_schema,
@@ -781,9 +783,11 @@ fn pre_submit_cancellation_after_progress_does_not_contaminate_the_next_load() {
         None,
         "removed-source progress must not contaminate later imports"
     );
-    assert!(session.diagnostic_records().iter().all(|record| {
-        record.diag.code != "parse-setup" && record.diag.code != "parse-ended"
-    }));
+    assert!(
+        session.diagnostic_records().iter().all(|record| {
+            record.diag.code != "parse-setup" && record.diag.code != "parse-ended"
+        })
+    );
 
     let _ = std::fs::remove_file(&invalid_path);
     let _ = std::fs::remove_file(&next_path);

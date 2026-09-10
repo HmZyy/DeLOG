@@ -11,7 +11,8 @@ use std::thread::JoinHandle;
 use delog_core::diagnostics::{Diag, DiagRecord, DiagnosticHub, Severity};
 use delog_core::identity::SourceId;
 use delog_core::ingest::{
-    ChannelSink, IngestSender, IngestSink, ParseSummary, SourceKind, ingest_channel,
+    ChannelSink, IngestDisconnected, IngestSender, IngestSink, ParseSummary, SourceKind,
+    ingest_channel,
 };
 use delog_core::ingestor::{IngestObserver, Ingestor};
 use delog_core::metrics::MetricsRegistry;
@@ -317,7 +318,10 @@ impl Session {
         self.sender.set_source_offset(source, offset_us);
     }
 
-    pub fn set_source_offsets(&self, offsets: Vec<(SourceId, i64)>) -> Result<(), ()> {
+    pub fn set_source_offsets(
+        &self,
+        offsets: Vec<(SourceId, i64)>,
+    ) -> Result<(), IngestDisconnected> {
         self.sender.set_source_offsets(offsets)
     }
 

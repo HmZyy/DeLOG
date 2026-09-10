@@ -420,7 +420,11 @@ mod tests {
         use delog_core::derived::{PendingColumn, PendingField, PendingTopic};
         let mut topic = PendingTopic::new("derived".into(), vec![10, 20, 30]);
         topic
-            .add_field(PendingField::numeric("v", vec![1.0, 2.0, 3.0], Some("m".into())))
+            .add_field(PendingField::numeric(
+                "v",
+                vec![1.0, 2.0, 3.0],
+                Some("m".into()),
+            ))
             .unwrap();
 
         let all = super::slice_topic_after(&topic, i64::MIN);

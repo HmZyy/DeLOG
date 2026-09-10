@@ -826,7 +826,8 @@ fn stale_resident_tiles_fall_back_while_replacements_load() {
     assert!(resources.map_tiles.contains(stale_key));
 
     let replacement = transition_tile(&moved, id(2));
-    let replaced = resources.prepare_map_tiles(identity, &moved, &[replacement.clone()]);
+    let replaced =
+        resources.prepare_map_tiles(identity, &moved, std::slice::from_ref(&replacement));
     assert_eq!(replaced.current, vec![map_tile_key(&replacement)]);
     assert_eq!(replaced.fallback, vec![stale_key]);
 }
@@ -858,7 +859,7 @@ fn stale_fallback_prefers_recent_and_skips_overlapping_older_tiles() {
     resources.prepare_map_tiles(identity, &first, &[transition_tile(&first, parent)]);
     let second = transition_selection(vec![(child, 0)]);
     let child_tile = transition_tile(&second, child);
-    resources.prepare_map_tiles(identity, &second, &[child_tile.clone()]);
+    resources.prepare_map_tiles(identity, &second, std::slice::from_ref(&child_tile));
 
     let third = transition_selection(vec![(far, 0)]);
     let draw = resources.prepare_map_tiles(identity, &third, &[]);
@@ -1000,7 +1001,7 @@ fn partial_child_uses_spare_slot_over_retained_parent() {
     let identity = test_tile_view();
     resources.prepare_map_tiles(identity, &selection, &previous);
     let child = transition_tile(&selection, child_ids[0]);
-    let draw = resources.prepare_map_tiles(identity, &selection, &[child.clone()]);
+    let draw = resources.prepare_map_tiles(identity, &selection, std::slice::from_ref(&child));
     assert_eq!(draw.fallback.len(), 127);
     assert!(draw.current.contains(&map_tile_key(&child)));
     assert!(
@@ -1087,7 +1088,7 @@ fn zoom_out_parent_draws_over_retained_fallback_children() {
         x: 3,
         y: 5,
     };
-    let children = vec![
+    let children = [
         TileId {
             zoom: 8,
             x: 6,
@@ -1118,7 +1119,7 @@ fn zoom_out_parent_draws_over_retained_fallback_children() {
     let identity = test_tile_view();
     resources.prepare_map_tiles(identity, &selection, &fallback);
     let current = transition_tile(&selection, parent);
-    let draw = resources.prepare_map_tiles(identity, &selection, &[current.clone()]);
+    let draw = resources.prepare_map_tiles(identity, &selection, std::slice::from_ref(&current));
     assert_eq!(draw.current, vec![map_tile_key(&current)]);
     assert_eq!(draw.fallback.len(), 4);
 }
