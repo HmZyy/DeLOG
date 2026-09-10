@@ -21,6 +21,7 @@ use crate::map::provider::{MapProviderId, provider};
 use crate::map::worker::{MapScopeId, TileFailureClass, TileManager, TileRequest};
 use crate::plotting::plot::{GhostTrace, PlotPane, TraceMode, TraceRef, ViewX, draw_zoom_drag_overlay};
 use crate::scene3d::frame::SceneFrame;
+use crate::scene3d::trail::{self, TrailMode};
 use crate::scene3d::vehicle;
 use crate::ui::components;
 
@@ -46,9 +47,7 @@ pub struct Scene3dPane {
     pub camera: OrbitCamera,
     pub tracked_vehicle: Option<usize>,
     pub(crate) scene_frame: SceneFrame,
-    /// When true, each vehicle's path is clipped to the playhead time; when
-    /// false, the full flight path is drawn.
-    pub trail_to_playhead: bool,
+    pub trail_mode: TrailMode,
     pub(crate) map_selection: Option<(MapProviderId, [u64; 3])>,
     pub(crate) map_generation: u64,
     pub(crate) map_tiles: Vec<(crate::map::provider::TileId, i32)>,
@@ -83,7 +82,7 @@ impl Default for Scene3dPane {
             camera: OrbitCamera::default(),
             tracked_vehicle: None,
             scene_frame: SceneFrame::default(),
-            trail_to_playhead: true,
+            trail_mode: TrailMode::default(),
             map_selection: None,
             map_generation: 0,
             map_tiles: Vec::new(),
@@ -928,7 +927,12 @@ impl Behavior<'_> {
 
         let snapshot = self.services.snapshot;
         let playhead = self.services.playhead_us;
-        let trail_to_playhead = pane.trail_to_playhead;
+        let trail_mode = pane.trail_mode;
+        let trail_window = self
+            .services
+            .view
+            .as_ref()
+            .map(|view| (view.min_us, view.max_us));
         let position_references: Vec<_> = {
             let _t = self.services.metrics.scope("scene_gpsref");
             self.services
@@ -1053,15 +1057,13 @@ impl Behavior<'_> {
                 let pose = poses[i]?;
                 let traj = self.services.trajectories.get(i);
                 let points: &[[f32; 3]] = traj.map_or(&[], |t| t.points.as_slice());
-                // Clip to the prefix of points at or before the playhead. The
-                // full path stays resident on the GPU, so toggling never
+                // The full path stays resident on the GPU, so toggling never
                 // re-uploads.
-                let visible_count = match (traj, playhead) {
-                    _ if !v.show_path => 0,
-                    (Some(t), Some(ph)) if trail_to_playhead => {
-                        t.times_us.partition_point(|&ts| ts <= ph) as u32
+                let visible = match traj {
+                    Some(t) if v.show_path => {
+                        trail::trail_range(&t.times_us, trail_mode, playhead, trail_window)
                     }
-                    _ => points.len() as u32,
+                    _ => 0..0,
                 };
                 Some(VehicleDraw {
                     key: i as u32,
@@ -1075,7 +1077,7 @@ impl Behavior<'_> {
                         .scene_frame
                         .transform(traj.and_then(|t| t.reference)),
                     traj_generation: self.services.traj_generation,
-                    visible_count,
+                    visible,
                 })
             })
             .collect();
@@ -1145,12 +1147,12 @@ impl Behavior<'_> {
             scene_map_status(ui, rect, message.as_deref());
         }
 
-        let overlay = scene_overlay_buttons(ui, rect, pane.trail_to_playhead);
+        let overlay = scene_overlay_buttons(ui, rect, pane.trail_mode);
         if overlay.vehicle_config {
             self.actions.open_vehicle_config = true;
         }
         if overlay.toggle_trail {
-            pane.trail_to_playhead = !pane.trail_to_playhead;
+            pane.trail_mode = pane.trail_mode.next();
         }
         if overlay.export_kml {
             self.actions.export_kml = true;
@@ -2432,10 +2434,21 @@ struct SceneOverlayClicks {
     export_kml: bool,
 }
 
+fn trail_mode_button(mode: TrailMode) -> (egui::ImageSource<'static>, &'static str) {
+    match mode {
+        TrailMode::ToPlayhead => (
+            crate::ui::icons::route_to_playhead(),
+            "Trails: up to playhead",
+        ),
+        TrailMode::VisibleWindow => (crate::ui::icons::route_window(), "Trails: visible window"),
+        TrailMode::Full => (crate::ui::icons::route(), "Trails: full path"),
+    }
+}
+
 fn scene_overlay_buttons(
     ui: &mut egui::Ui,
     scene_rect: egui::Rect,
-    trail_to_playhead: bool,
+    trail_mode: TrailMode,
 ) -> SceneOverlayClicks {
     let id = ui.make_persistent_id("scene-overlay-buttons");
     let mut clicks = SceneOverlayClicks::default();
@@ -2453,13 +2466,9 @@ fn scene_overlay_buttons(
                         false,
                     )
                     .clicked();
-                    clicks.toggle_trail = components::icon_button(
-                        ui,
-                        crate::ui::icons::route(),
-                        "Clip trails to playhead",
-                        trail_to_playhead,
-                    )
-                    .clicked();
+                    let (trail_icon, trail_tooltip) = trail_mode_button(trail_mode);
+                    clicks.toggle_trail =
+                        components::icon_button(ui, trail_icon, trail_tooltip, false).clicked();
                     clicks.export_kml = components::icon_button(
                         ui,
                         crate::ui::icons::earth(),

@@ -5,6 +5,7 @@ use delog_core::identity::SourceId;
 use delog_core::snapshot::StoreSnapshot;
 
 use crate::scene3d::camera::OrbitCamera;
+use crate::scene3d::trail::TrailMode;
 use crate::plotting::plot::{GhostTrace, PlotPane, TraceMode, TraceRef};
 use crate::scene3d::vehicle::VehicleConfig;
 use crate::shell::workspace::{Pane, Scene3dPane, Workspace};
@@ -12,7 +13,8 @@ use crate::shell::workspace::{Pane, Scene3dPane, Workspace};
 use crate::config::layout::doc::{
     AmbiguousField, CameraLayout, FieldRef, LAYOUT_VERSION, LayoutDoc, LayoutError, LayoutNode,
     PlaybackLayout, Resolver, SceneLayout, SplitLayout, TraceLayout, TraceModeLayout,
-    WorkspaceLayout, collect_field_refs, field_ref, vehicle_from_layout, vehicle_to_layout,
+    TrailModeLayout, WorkspaceLayout, collect_field_refs, field_ref, vehicle_from_layout,
+    vehicle_to_layout,
 };
 
 pub struct LayoutApply {
@@ -34,6 +36,22 @@ pub struct PendingLayout {
 pub enum LoadOutcome {
     Applied(LayoutApply),
     NeedsMapping(PendingLayout),
+}
+
+fn trail_mode_to_layout(mode: TrailMode) -> TrailModeLayout {
+    match mode {
+        TrailMode::ToPlayhead => TrailModeLayout::ToPlayhead,
+        TrailMode::VisibleWindow => TrailModeLayout::VisibleWindow,
+        TrailMode::Full => TrailModeLayout::Full,
+    }
+}
+
+fn trail_mode_from_layout(mode: TrailModeLayout) -> TrailMode {
+    match mode {
+        TrailModeLayout::ToPlayhead => TrailMode::ToPlayhead,
+        TrailModeLayout::VisibleWindow => TrailMode::VisibleWindow,
+        TrailModeLayout::Full => TrailMode::Full,
+    }
 }
 
 pub struct CurrentLayout<'a> {
@@ -139,7 +157,7 @@ fn node_to_layout(
                 distance: scene.camera.distance,
             },
             tracked_vehicle: scene.tracked_vehicle,
-            trail_to_playhead: scene.trail_to_playhead,
+            trail_mode: trail_mode_to_layout(scene.trail_mode),
         })),
         egui_tiles::Tile::Container(container) => {
             let children = container
@@ -262,7 +280,7 @@ fn insert_node(
                 distance: scene.camera.distance,
             },
             tracked_vehicle: scene.tracked_vehicle,
-            trail_to_playhead: scene.trail_to_playhead,
+            trail_mode: trail_mode_from_layout(scene.trail_mode),
             ..Scene3dPane::default()
         }))),
         LayoutNode::Split { split, children } => {

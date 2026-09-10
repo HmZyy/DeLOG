@@ -1517,7 +1517,7 @@ fn scene_overlay_probe(with_window: bool) -> (egui::Context, egui::Rect) {
                     });
             }
             tracked_vehicle_picker(ui, scene_rect, &mut pane, &vehicles);
-            scene_overlay_buttons(ui, scene_rect, false);
+            scene_overlay_buttons(ui, scene_rect, TrailMode::default());
         });
     }
     (ctx, scene_rect)
@@ -1562,4 +1562,32 @@ fn scene_overlays_still_sit_above_the_scene_itself() {
             "{what} fell behind the scene; with no window over it, it must still be clickable"
         );
     }
+}
+
+#[test]
+fn each_trail_mode_gets_its_own_overlay_icon_and_tooltip() {
+    let uri = |icon: egui::ImageSource<'static>| match icon {
+        egui::ImageSource::Bytes { uri, .. } => uri.to_string(),
+        _ => panic!("bundled icons are embedded bytes"),
+    };
+    let buttons: Vec<(String, &str)> = [
+        TrailMode::ToPlayhead,
+        TrailMode::VisibleWindow,
+        TrailMode::Full,
+    ]
+    .into_iter()
+    .map(|mode| {
+        let (icon, tooltip) = trail_mode_button(mode);
+        (uri(icon), tooltip)
+    })
+    .collect();
+
+    let icons: HashSet<&String> = buttons.iter().map(|(icon, _)| icon).collect();
+    let tooltips: HashSet<&str> = buttons.iter().map(|(_, tooltip)| *tooltip).collect();
+    assert_eq!(icons.len(), 3, "each mode needs its own icon, got {icons:?}");
+    assert_eq!(
+        tooltips.len(),
+        3,
+        "each mode needs its own tooltip, got {tooltips:?}"
+    );
 }
