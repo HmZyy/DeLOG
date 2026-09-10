@@ -20,7 +20,15 @@ pub const PERFORMANCE: &str = include_str!("../src/ui/performance.rs");
 pub const SCRIPTS: &str = include_str!("../src/scripting/scripts.rs");
 pub const SETTINGS: &str = include_str!("../src/config/settings.rs");
 pub const SYNC_WINDOW: &str = include_str!("../src/sync/sync_window/mod.rs");
-pub const VEHICLE_DIALOG: &str = include_str!("../src/session/vehicle_dialog.rs");
+pub const VEHICLE_DIALOG: &str = concat!(
+    include_str!("../src/session/vehicle_dialog/mod.rs"),
+    include_str!("../src/session/vehicle_dialog/draft.rs"),
+    include_str!("../src/session/vehicle_dialog/profile_draft.rs"),
+    include_str!("../src/session/vehicle_dialog/profiles.rs"),
+    include_str!("../src/session/vehicle_dialog/profiles_tab.rs"),
+    include_str!("../src/session/vehicle_dialog/vehicles_tab.rs"),
+    include_str!("../src/session/vehicle_dialog/widgets.rs"),
+);
 pub const WORKSPACE: &str = include_str!("../src/shell/workspace/mod.rs");
 pub const APP_MANIFEST: &str = include_str!("../Cargo.toml");
 pub const CORE_INGEST: &str = include_str!("../../delog-core/src/ingest.rs");

@@ -189,6 +189,14 @@ impl CommandId {
                 Shortcut,
                 Palette
             ),
+            RunScript => spec!(
+                "Run script…",
+                Workspace,
+                Some("Ctrl+K"),
+                "script execute run",
+                Shortcut,
+                Palette
+            ),
             ManageLayouts => {
                 spec!(
                     "Manage layouts…",

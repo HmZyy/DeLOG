@@ -127,8 +127,8 @@ impl CommandPaletteState {
     }
 }
 
-pub fn should_toggle_palette(ctrl_k: bool, wants_keyboard_input: bool) -> bool {
-    ctrl_k && !wants_keyboard_input
+pub fn should_toggle_palette(shortcut_pressed: bool, wants_keyboard_input: bool) -> bool {
+    shortcut_pressed && !wants_keyboard_input
 }
 
 #[cfg(test)]

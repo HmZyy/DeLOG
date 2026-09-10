@@ -454,20 +454,27 @@ fn scene_map_overlay_only_reports_actionable_states() {
 }
 
 #[test]
-fn scene_map_tracked_vehicle_switch_changes_generation() {
+fn scene_map_tracking_switch_preserves_frame_and_generation() {
     let mut pane = Scene3dPane::default();
-    let first = pane.update_map_selection(Some((0, MapProviderId::BingSatellite, [0; 3])));
-    assert_eq!(
-        pane.update_map_selection(Some((0, MapProviderId::BingSatellite, [0; 3]))),
-        first
-    );
-    assert!(pane.update_map_selection(Some((1, MapProviderId::BingSatellite, [0; 3]))) > first);
+    let references = [Some([0.5, 0.2, 100.0]), Some([0.6, 0.3, 200.0])];
+    pane.scene_frame.update(&references);
+    let anchor = pane.scene_frame.reference.unwrap();
+    let selection = Some((MapProviderId::BingSatellite, anchor.map(f64::to_bits)));
+    let generation = pane.update_map_selection(selection);
+    let transform = pane.scene_frame.transform(references[1]);
+    for tracked in [Some(0), Some(1), Some(0)] {
+        pane.tracked_vehicle = tracked;
+        pane.scene_frame.update(&references);
+        assert_eq!(pane.scene_frame.reference, Some(anchor));
+        assert_eq!(pane.scene_frame.transform(references[1]), transform);
+        assert_eq!(pane.update_map_selection(selection), generation);
+    }
 }
 
 #[test]
 fn scene_map_selection_change_clears_current_tiles() {
     let tile = |zoom, x| crate::map::provider::TileId { zoom, x, y: 4 };
-    let selection = Some((0, MapProviderId::BingSatellite, [0; 3]));
+    let selection = Some((MapProviderId::BingSatellite, [0; 3]));
     let mut pane = Scene3dPane::default();
     let generation = pane.update_map_selection(selection);
     pane.update_visible_map_tiles(vec![tile(8, 1)]);
@@ -476,9 +483,7 @@ fn scene_map_selection_change_clears_current_tiles() {
     assert_eq!(pane.update_map_selection(selection), generation);
     assert_eq!(pane.map_tiles, vec![(tile(9, 2), 0)]);
 
-    assert!(
-        pane.update_map_selection(Some((1, MapProviderId::BingSatellite, [1; 3]))) > generation
-    );
+    assert!(pane.update_map_selection(Some((MapProviderId::BingSatellite, [1; 3]))) > generation);
     assert!(pane.map_tiles.is_empty());
 }
 
@@ -1466,4 +1471,95 @@ fn remove_all_clears_every_plot() {
         assert_eq!(annotation_count(&workspace, *tile), 0);
     }
     assert!(workspace.annotation_rows().is_empty());
+}
+
+fn scene_overlay_probe(with_window: bool) -> (egui::Context, egui::Rect) {
+    let scene_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 400.0));
+    let vehicles = vec![vehicle::VehicleConfig {
+        source: delog_core::identity::SourceId(0),
+        label: "Vehicle #1".into(),
+        show: true,
+        show_path: true,
+        pos: vehicle::PosMapping::Ned {
+            north: delog_core::identity::FieldId(0),
+            east: delog_core::identity::FieldId(1),
+            down: delog_core::identity::FieldId(2),
+            reference: None,
+        },
+        ori: vehicle::OriMapping::Static,
+        model: vehicle::ModelKind::Cone,
+        color: egui::Color32::WHITE,
+        path_color: egui::Color32::WHITE,
+        scale: 1.0,
+    }];
+    let mut pane = Scene3dPane::default();
+    let ctx = egui::Context::default();
+
+    for _ in 0..3 {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input, |ui| {
+            egui::CentralPanel::default().show_inside(ui, |ui| {
+                ui.allocate_space(ui.available_size());
+            });
+            if with_window {
+                egui::Window::new("Vehicles")
+                    .fixed_pos(egui::Pos2::ZERO)
+                    .title_bar(false)
+                    .resizable(false)
+                    .show(ui.ctx(), |ui| {
+                        ui.allocate_space(egui::vec2(620.0, 400.0));
+                    });
+            }
+            tracked_vehicle_picker(ui, scene_rect, &mut pane, &vehicles);
+            scene_overlay_buttons(ui, scene_rect, false);
+        });
+    }
+    (ctx, scene_rect)
+}
+
+const OVERLAY_PROBES: [(f32, f32, &str); 2] = [
+    (20.0, 20.0, "the tracked-vehicle picker"),
+    (580.0, 20.0, "the scene overlay buttons"),
+];
+
+#[test]
+fn scene_overlays_sit_under_floating_windows() {
+    let (ctx, _) = scene_overlay_probe(true);
+
+    let window_layer = ctx
+        .layer_id_at(egui::pos2(300.0, 200.0))
+        .expect("the window should own the middle of the scene");
+    assert_eq!(window_layer.order, egui::Order::Middle);
+
+    for (x, y, what) in OVERLAY_PROBES {
+        let hit = ctx
+            .layer_id_at(egui::pos2(x, y))
+            .expect("something should be laid out at this corner");
+        assert_eq!(
+            hit, window_layer,
+            "{what} covers a window that overlaps it; scene overlays belong under floating windows"
+        );
+    }
+}
+
+#[test]
+fn scene_overlays_still_sit_above_the_scene_itself() {
+    let (ctx, _) = scene_overlay_probe(false);
+
+    for (x, y, what) in OVERLAY_PROBES {
+        let hit = ctx
+            .layer_id_at(egui::pos2(x, y))
+            .expect("something should be laid out at this corner");
+        assert_ne!(
+            hit,
+            egui::LayerId::background(),
+            "{what} fell behind the scene; with no window over it, it must still be clickable"
+        );
+    }
 }
