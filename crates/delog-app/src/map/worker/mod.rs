@@ -607,6 +607,7 @@ fn network_load(
     Ok((bytes, rgba))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn controller_loop(
     controls: Arc<Mutex<PendingControls>>,
     wake_rx: Receiver<()>,
@@ -772,6 +773,7 @@ fn controller_loop(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_desired_snapshots(
     desired: &Mutex<HashMap<MapScopeId, DesiredSnapshot>>,
     ingress: &Mutex<Vec<IngressRequest>>,
@@ -989,6 +991,7 @@ fn finish_cache_action(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn process_completion(
     completion: Completion,
     idle: &mut BinaryHeap<std::cmp::Reverse<usize>>,

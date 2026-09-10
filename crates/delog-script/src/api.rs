@@ -434,6 +434,7 @@ pub struct Delog {
 }
 
 impl Delog {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         snapshot: Arc<StoreSnapshot>,
         emit: EmitBuffer,
