@@ -10,6 +10,7 @@ pub(crate) mod session;
 pub(crate) mod shell;
 pub(crate) mod sync;
 pub(crate) mod ui;
+pub(crate) mod update;
 
 pub use shell::app::DelogApp;
 
