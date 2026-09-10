@@ -52,6 +52,15 @@ use delog_core::store::TopicStore;
 
 use super::*;
 
+fn test_tile_view() -> delog_render::MapTileUniform {
+    delog_render::MapTileUniform::new(
+        glam::Mat4::IDENTITY.to_cols_array_2d(),
+        [0.0; 3],
+        [0.0; 3],
+        None,
+    )
+}
+
 #[test]
 fn shared_frame_moves_resident_trajectories_without_reuploading() {
     let Some(ctx) = RenderContext::headless() else {
@@ -201,8 +210,7 @@ fn visible_y_range_merges_distinct_trace_origins_as_absolute_values() {
         .unwrap(),
     );
     let store = Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap());
-    let snapshot =
-        Arc::new(StoreSnapshot::from_registry(&identity, [(topic, store)], 0).unwrap());
+    let snapshot = Arc::new(StoreSnapshot::from_registry(&identity, [(topic, store)], 0).unwrap());
     let mut caches = CacheManager::new();
     caches.request(low, &snapshot);
     caches.request(high, &snapshot);
@@ -245,8 +253,7 @@ fn visible_y_range_threads_tuning_and_trace_mode_to_cache_geometry() {
         .unwrap(),
     );
     let store = Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap());
-    let snapshot =
-        Arc::new(StoreSnapshot::from_registry(&identity, [(topic, store)], 0).unwrap());
+    let snapshot = Arc::new(StoreSnapshot::from_registry(&identity, [(topic, store)], 0).unwrap());
     let mut caches = CacheManager::new();
     caches.request(field, &snapshot);
     for _ in 0..2_000 {
@@ -303,8 +310,7 @@ fn visible_y_range_line_connect_singleton_uses_empty_fallback() {
         .unwrap(),
     );
     let store = Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap());
-    let snapshot =
-        Arc::new(StoreSnapshot::from_registry(&identity, [(topic, store)], 0).unwrap());
+    let snapshot = Arc::new(StoreSnapshot::from_registry(&identity, [(topic, store)], 0).unwrap());
     let mut caches = CacheManager::new();
     caches.request(field, &snapshot);
     for _ in 0..2_000 {
@@ -560,7 +566,7 @@ fn prepare_map_tiles_exposes_sorted_fallback_then_current_draw_groups() {
     let mut expected_current = vec![map_tile_key(&tiles[0]), map_tile_key(&tiles[2])];
     expected_fallback.sort_unstable();
     expected_current.sort_unstable();
-    let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+    let identity = test_tile_view();
 
     let first = resources.prepare_map_tiles(identity, &selection, &tiles);
     let reversed = resources.prepare_map_tiles(
@@ -615,7 +621,7 @@ fn cache_epoch_change_purges_cpu_and_gpu_tiles_on_empty_poll() {
         rgba: [40, 80, 120, 255].repeat(256 * 256),
         corners: [[0.0, 0.0, 0.0]; 4],
     };
-    let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+    let identity = test_tile_view();
     resources.prepare_map_tiles(identity, &selection, &[tile]);
     assert_eq!(resources.map_tile_cache[&selection.scope].len(), 1);
     assert_eq!(resources.map_tiles.resident_tile_count(), 1);
@@ -656,7 +662,7 @@ fn map_tile_prepare_only_uploads_and_allocates_changed_residency() {
         rgba: color.repeat(256 * 256),
         corners: [[x as f32, 0.0, 0.0]; 4],
     };
-    let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+    let identity = test_tile_view();
     resources.prepare_map_tiles(identity, &selection, &[tile(4, 1, [1, 2, 3, 255])]);
     assert_eq!(resources.map_tiles.upload_count(), 1);
     assert_eq!(resources.map_tiles.allocation_count(), 1);
@@ -722,7 +728,7 @@ fn alternating_map_scopes_keep_union_resident_without_cross_pane_draws() {
         rgba: color.repeat(256 * 256),
         corners: [[x as f32, 0.0, 0.0]; 4],
     };
-    let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+    let identity = test_tile_view();
     let tile_a = tile(10, 1, [10, 20, 30, 255]);
     let tile_b = tile(20, 2, [40, 50, 60, 255]);
     let key_a = map_tile_key(&tile_a);
@@ -810,7 +816,7 @@ fn stale_resident_tiles_fall_back_while_replacements_load() {
     let shown = transition_selection(vec![(id(1), 0)]);
     let tile = transition_tile(&shown, id(1));
     let stale_key = map_tile_key(&tile);
-    let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+    let identity = test_tile_view();
     resources.prepare_map_tiles(identity, &shown, &[tile]);
 
     let moved = transition_selection(vec![(id(2), 0)]);
@@ -846,7 +852,7 @@ fn stale_fallback_prefers_recent_and_skips_overlapping_older_tiles() {
         x: 40,
         y: 4,
     };
-    let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+    let identity = test_tile_view();
 
     let first = transition_selection(vec![(parent, 0)]);
     resources.prepare_map_tiles(identity, &first, &[transition_tile(&first, parent)]);
@@ -870,7 +876,7 @@ fn stale_cache_is_bounded_per_scope() {
         return;
     };
     let mut resources = SceneResources::new(ctx);
-    let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+    let identity = test_tile_view();
     for round in 0..3_u32 {
         let ids: Vec<_> = (0..128)
             .map(|x| TileId {
@@ -937,7 +943,7 @@ fn ready_current_tile_preempts_saturated_fallback() {
         .copied()
         .map(|id| transition_tile(&selection, id))
         .collect();
-    let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+    let identity = test_tile_view();
     let first = resources.prepare_map_tiles(identity, &selection, &fallback);
     assert_eq!(first.fallback.len(), 128);
 
@@ -991,7 +997,7 @@ fn partial_child_uses_spare_slot_over_retained_parent() {
         .copied()
         .map(|id| transition_tile(&selection, id))
         .collect();
-    let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+    let identity = test_tile_view();
     resources.prepare_map_tiles(identity, &selection, &previous);
     let child = transition_tile(&selection, child_ids[0]);
     let draw = resources.prepare_map_tiles(identity, &selection, &[child.clone()]);
@@ -1049,7 +1055,7 @@ fn ready_children_and_fallback_share_quota_deterministically() {
         .iter()
         .map(|id| transition_tile(&selection, *id))
         .collect();
-    let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+    let identity = test_tile_view();
     resources.prepare_map_tiles(identity, &selection, &fallback);
     let draw = resources.prepare_map_tiles(identity, &selection, &ready_children);
     assert_eq!(draw.current.len(), 4);
@@ -1109,7 +1115,7 @@ fn zoom_out_parent_draws_over_retained_fallback_children() {
         .copied()
         .map(|id| transition_tile(&selection, id))
         .collect();
-    let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+    let identity = test_tile_view();
     resources.prepare_map_tiles(identity, &selection, &fallback);
     let current = transition_tile(&selection, parent);
     let draw = resources.prepare_map_tiles(identity, &selection, &[current.clone()]);
@@ -1141,13 +1147,8 @@ fn saturated_scope_draws_only_deterministic_first_128_candidates() {
         corners: [[x as f32, 0.0, 0.0]; 4],
     };
     let tiles: Vec<_> = (0..140).rev().map(tile).collect();
-    let expected: std::collections::HashSet<_> =
-        (0..128).map(|x| map_tile_key(&tile(x))).collect();
-    let draw = resources.prepare_map_tiles(
-        glam::Mat4::IDENTITY.to_cols_array_2d(),
-        &selection,
-        &tiles,
-    );
+    let expected: std::collections::HashSet<_> = (0..128).map(|x| map_tile_key(&tile(x))).collect();
+    let draw = resources.prepare_map_tiles(test_tile_view(), &selection, &tiles);
     assert_eq!(draw.current.len(), 128);
     assert_eq!(
         draw.current
@@ -1194,7 +1195,7 @@ fn saturated_same_zoom_pan_prefers_current_and_keeps_bounded_stale() {
     let old: Vec<_> = (0..128).map(tile).collect();
     let new: Vec<_> = (128..256).map(tile).collect();
     let expected: std::collections::HashSet<_> = new.iter().map(map_tile_key).collect();
-    let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+    let identity = test_tile_view();
     selection.current_tiles = old
         .iter()
         .map(|tile| (tile.id, (tile.id.x % 128) as i32))
@@ -1251,7 +1252,7 @@ fn same_zoom_one_tile_pan_retains_old_nonoverlap_with_exact_current_group() {
     };
     let old = vec![tile(1), tile(2)];
     let old_key = map_tile_key(&old[0]);
-    let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+    let identity = test_tile_view();
     resources.prepare_map_tiles(identity, &selection, &old);
 
     selection.current_tiles = vec![(id(2), 0), (id(3), 1)];
@@ -1300,7 +1301,7 @@ fn three_saturated_scopes_have_stable_sorted_quotas_and_uploads() {
             })
             .collect::<Vec<_>>()
     };
-    let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+    let identity = test_tile_view();
     for scope in [30, 10, 20] {
         resources.prepare_map_tiles(identity, &selection(scope), &tiles(scope));
     }
@@ -1346,7 +1347,7 @@ fn saturated_other_scope_cannot_starve_active_scope() {
     let a: Vec<_> = (0..128).map(|x| tile(41, x)).collect();
     let b = tile(42, 0);
     let b_key = map_tile_key(&b);
-    let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+    let identity = test_tile_view();
     resources.prepare_map_tiles(identity, &selection(41), &a);
     let draw_b = resources.prepare_map_tiles(identity, &selection(42), &[b]);
     assert_eq!(draw_b.current, vec![b_key]);
@@ -1391,7 +1392,7 @@ fn retaining_live_map_scopes_reclaims_closed_scope_quota_and_cache() {
         rgba: [scope as u8, x as u8, 0, 255].repeat(256 * 256),
         corners: [[x as f32, 0.0, 0.0]; 4],
     };
-    let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+    let identity = test_tile_view();
     let a: Vec<_> = (0..128).map(|x| tile(51, x)).collect();
     let b: Vec<_> = (0..128).map(|x| tile(52, x)).collect();
     resources.prepare_map_tiles(identity, &selection(51), &a);
@@ -1438,14 +1439,32 @@ fn retaining_live_map_scopes_reclaims_closed_scope_quota_and_cache() {
 }
 
 #[test]
-fn scene_pass_encodes_tiles_before_grid_before_vehicle_overlays() {
+fn scene_pass_encodes_sky_before_tiles_before_grid_before_vehicle_overlays() {
     let source = include_str!("mod.rs");
     let pass = source
         .split("let mut pass = res.target.begin_pass")
         .nth(1)
         .expect("scene pass");
+    let sky = pass.find("res.sky.draw").expect("sky draw");
     let tiles = pass.find("res.map_tiles.draw").expect("tile draw");
     let grid = pass.find("res.grid.draw").expect("grid draw");
     let vehicles = pass.find("res.draw_vehicles").expect("vehicle draw");
-    assert!(tiles < grid && grid < vehicles);
+    assert!(sky < tiles && tiles < grid && grid < vehicles);
+}
+
+#[test]
+fn sky_draws_from_its_own_toggle_and_not_the_map_provider() {
+    let source = include_str!("mod.rs");
+    let gate = source
+        .split("let sky_on = ")
+        .nth(1)
+        .and_then(|rest| rest.split(';').next())
+        .expect("sky gate");
+    assert_eq!(gate, "scene3d.show_sky");
+}
+
+#[test]
+fn tile_fog_tracks_whichever_backdrop_the_scene_is_drawing() {
+    assert_eq!(super::tile_fog_rgb(true), delog_render::HORIZON_RGB);
+    assert_eq!(super::tile_fog_rgb(false), super::SCENE_CLEAR_RGB);
 }
