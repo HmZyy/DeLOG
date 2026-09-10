@@ -307,6 +307,7 @@ impl CommandId {
                     Workspace,
                     None,
                     "plot key visibility",
+                    GlobalToolbar,
                     Palette
                 )
             }
