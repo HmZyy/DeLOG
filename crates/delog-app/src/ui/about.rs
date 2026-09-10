@@ -15,18 +15,12 @@ pub fn show(ctx: &egui::Context) -> bool {
         .pivot(egui::Align2::CENTER_CENTER)
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.add(
-                    egui::Image::new(crate::ui::icons::info())
-                        .tint(ui.visuals().text_color())
-                        .fit_to_exact_size(egui::vec2(20.0, 20.0)),
-                );
-                ui.strong(NAME);
-                ui.label(format!("v{VERSION}"));
+                ui.strong(format!("{NAME} v{VERSION}"));
+                ui.label("-");
+                ui.hyperlink_to("GitHub", REPOSITORY_URL);
             });
             ui.add_space(ui.spacing().item_spacing.y);
             ui.label(DESCRIPTION);
-            ui.add_space(ui.spacing().item_spacing.y);
-            ui.hyperlink_to("GitHub", REPOSITORY_URL);
             ui.separator();
             ui.vertical_centered(|ui| {
                 if ui.button("Close").clicked() {
@@ -66,9 +60,19 @@ mod tests {
     }
 
     fn painted_text(output: &egui::FullOutput) -> Vec<String> {
-        fn walk(shape: &egui::epaint::Shape, out: &mut Vec<String>) {
+        painted_rows(output)
+            .into_iter()
+            .map(|(text, _)| text)
+            .collect()
+    }
+
+    fn painted_rows(output: &egui::FullOutput) -> Vec<(String, egui::Rect)> {
+        fn walk(shape: &egui::epaint::Shape, out: &mut Vec<(String, egui::Rect)>) {
             match shape {
-                egui::epaint::Shape::Text(text) => out.push(text.galley.job.text.clone()),
+                egui::epaint::Shape::Text(text) => out.push((
+                    text.galley.job.text.clone(),
+                    egui::Rect::from_min_size(text.pos, text.galley.size()),
+                )),
                 egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
                 _ => {}
             }
@@ -80,31 +84,59 @@ mod tests {
         out
     }
 
+    fn rect_of(output: &egui::FullOutput, wanted: &str) -> egui::Rect {
+        painted_rows(output)
+            .into_iter()
+            .find(|(text, _)| text == wanted)
+            .unwrap_or_else(|| {
+                panic!(
+                    "the dialog should paint {wanted:?}, painted {:?}",
+                    painted_text(output)
+                )
+            })
+            .1
+    }
+
     #[test]
-    fn about_dialog_paints_the_name_and_current_version() {
+    fn about_dialog_heads_with_the_name_version_and_github_link_on_one_line() {
         let ctx = egui::Context::default();
         let (output, _) = run_frame(&ctx, frame_input());
-        let texts = painted_text(&output);
 
+        let heading = rect_of(&output, &format!("{NAME} v{VERSION}"));
+        let separator = rect_of(&output, "-");
+        let link = rect_of(&output, "GitHub");
+
+        for (label, rect) in [("separator", separator), ("link", link)] {
+            assert!(
+                (rect.center().y - heading.center().y).abs() < 2.0,
+                "the {label} should share the heading's line, heading at {} vs {label} at {}",
+                heading.center().y,
+                rect.center().y
+            );
+        }
         assert!(
-            texts.iter().any(|text| text == NAME),
-            "the dialog should name the application, painted {texts:?}"
-        );
-        assert!(
-            texts.iter().any(|text| text.contains(VERSION)),
-            "the dialog should paint version {VERSION}, painted {texts:?}"
+            heading.right() <= separator.left() && separator.right() <= link.left(),
+            "the line should read name, separator, link; got {heading:?} {separator:?} {link:?}"
         );
     }
 
     #[test]
-    fn about_dialog_paints_the_description() {
+    fn about_dialog_paints_the_description_below_the_heading() {
         let ctx = egui::Context::default();
         let (output, _) = run_frame(&ctx, frame_input());
-        let texts = painted_text(&output);
+
+        let heading = rect_of(&output, &format!("{NAME} v{VERSION}"));
+        let description = rect_of(&output, DESCRIPTION);
 
         assert!(
-            texts.iter().any(|text| text == DESCRIPTION),
-            "the dialog should paint the package description, painted {texts:?}"
+            description.top() > heading.bottom(),
+            "the description should sit below the heading, heading {heading:?} description {description:?}"
+        );
+        assert!(
+            description.left() <= heading.left() + 2.0,
+            "the description should start at the heading's margin, heading {} description {}",
+            heading.left(),
+            description.left()
         );
     }
 
