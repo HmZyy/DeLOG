@@ -53,6 +53,58 @@ use delog_core::store::TopicStore;
 use super::*;
 
 #[test]
+fn shared_frame_moves_resident_trajectories_without_reuploading() {
+    let Some(ctx) = RenderContext::headless() else {
+        eprintln!("no wgpu adapter - skipping shared frame trajectory test");
+        return;
+    };
+    let mut resources = SceneResources::new(ctx);
+    resources.target.resize(96, 96);
+    let points = [[-0.5, 0.0, 0.5], [0.5, 0.0, 0.5]];
+    let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+    let mut vehicle = VehicleDraw {
+        key: 0,
+        model: None,
+        model_matrix: identity,
+        normal_matrix: identity,
+        color: [1.0; 4],
+        path_color: [1.0; 4],
+        trajectory: &points,
+        trajectory_transform: glam::DMat4::IDENTITY,
+        traj_generation: 1,
+        visible_count: 2,
+    };
+    for offset in [0.0, 0.5, -0.5] {
+        vehicle.trajectory_transform =
+            glam::DMat4::from_translation(glam::DVec3::new(0.0, offset, 0.0));
+        resources.prepare_vehicles(identity, [0.0; 3], std::slice::from_ref(&vehicle));
+        let mut encoder = resources
+            .ctx
+            .device()
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = resources
+                .target
+                .begin_pass(&mut encoder, wgpu::Color::BLACK);
+            resources.draw_vehicles(&mut pass, std::slice::from_ref(&vehicle));
+        }
+        resources.ctx.queue().submit([encoder.finish()]);
+        let image = resources.target.read_rgba();
+        let mut rows = Vec::new();
+        for y in 0..96 {
+            for x in 0..96 {
+                if image.pixel(x, y)[0] > 30 {
+                    rows.push(y as f64 + 0.5);
+                }
+            }
+        }
+        assert!(rows.len() > 30);
+        let center = rows.iter().sum::<f64>() / rows.len() as f64;
+        assert!((center - (1.0 - offset) * 48.0).abs() < 1.0, "{center}");
+    }
+}
+
+#[test]
 fn sync_stacked_lanes_are_equal_and_cover_the_plot() {
     let rect = egui::Rect::from_min_max(egui::pos2(10.0, 20.0), egui::pos2(110.0, 80.0));
     let traces: Vec<_> = sync_lane_fractions(3, CompareMode::Stacked)

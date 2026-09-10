@@ -43,6 +43,7 @@ pub struct VehicleDraw<'a> {
     pub path_color: [f32; 4],
     /// Render-space `[x,y,z]` trajectory points; NaN = gap. Full resident path.
     pub trajectory: &'a [[f32; 3]],
+    pub trajectory_transform: glam::DMat4,
     /// Build-time config generation; a mismatch forces a full re-upload, a match
     /// lets a grown path upload only its appended tail.
     pub traj_generation: u64,
@@ -1274,7 +1275,12 @@ impl SceneResources {
             self.ctx.queue().write_buffer(
                 &vg.traj_uniform,
                 0,
-                bytemuck::bytes_of(&Traj3dUniform::new(vp_cols, v.path_color)),
+                bytemuck::bytes_of(&Traj3dUniform::new(
+                    (glam::Mat4::from_cols_array_2d(&vp_cols).as_dmat4() * v.trajectory_transform)
+                        .as_mat4()
+                        .to_cols_array_2d(),
+                    v.path_color,
+                )),
             );
             self.ctx.queue().write_buffer(
                 &vg.mesh_uniform,
