@@ -3,4 +3,5 @@ pub(crate) mod frame;
 pub mod geo;
 pub mod models;
 pub(crate) mod reference;
+pub mod trail;
 pub mod vehicle;
