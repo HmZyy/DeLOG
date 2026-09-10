@@ -2436,8 +2436,11 @@ struct SceneOverlayClicks {
 
 fn trail_mode_button(mode: TrailMode) -> (egui::ImageSource<'static>, &'static str) {
     match mode {
-        TrailMode::ToPlayhead => (crate::ui::icons::clock(), "Trails: up to playhead"),
-        TrailMode::VisibleWindow => (crate::ui::icons::columns(), "Trails: visible window"),
+        TrailMode::ToPlayhead => (
+            crate::ui::icons::route_to_playhead(),
+            "Trails: up to playhead",
+        ),
+        TrailMode::VisibleWindow => (crate::ui::icons::route_window(), "Trails: visible window"),
         TrailMode::Full => (crate::ui::icons::route(), "Trails: full path"),
     }
 }
