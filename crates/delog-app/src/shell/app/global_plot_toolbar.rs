@@ -9,17 +9,19 @@ pub enum GlobalPlotControl {
     TogglePlayheadSnap,
     ToggleMeasuringMarker,
     CycleLegendPosition,
+    ToggleLegends,
     OpenFieldStats,
     ToggleAnnotationToolbar,
 }
 
 #[cfg(test)]
 impl GlobalPlotControl {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::CursorSampling(SampleMode::Prev),
         Self::TogglePlayheadSnap,
         Self::ToggleMeasuringMarker,
         Self::CycleLegendPosition,
+        Self::ToggleLegends,
         Self::OpenFieldStats,
         Self::ToggleAnnotationToolbar,
     ];
@@ -33,6 +35,7 @@ pub const fn command_for_control(control: GlobalPlotControl) -> AppCommand {
             AppCommand::Static(CommandId::AddMeasuringMarker)
         }
         GlobalPlotControl::CycleLegendPosition => AppCommand::Static(CommandId::CycleLegendPosition),
+        GlobalPlotControl::ToggleLegends => AppCommand::Static(CommandId::ToggleLegends),
         GlobalPlotControl::OpenFieldStats => AppCommand::Static(CommandId::OpenFieldStats),
         GlobalPlotControl::ToggleAnnotationToolbar => {
             AppCommand::Static(CommandId::ToggleAnnotationToolbar)
@@ -45,6 +48,7 @@ pub struct GlobalPlotToolbarModel {
     pub playhead_snap: bool,
     pub measuring_marker: bool,
     pub legend_position: LegendPosition,
+    pub legends_visible: bool,
     pub annotation_toolbar_open: bool,
 }
 
@@ -125,15 +129,17 @@ pub fn show(
                 commands.push(marker);
             }
 
-            if crate::ui::components::icon_button(
+            let legend_response = crate::ui::components::icon_button(
                 ui,
                 legend_position_icon(model.legend_position),
-                "Cycle legend position on all plots",
+                legend_tooltip(model.legends_visible),
                 false,
-            )
-            .clicked()
-            {
-                commands.push(command_for_control(GlobalPlotControl::CycleLegendPosition));
+            );
+            if let Some(control) = legend_button_control(
+                legend_response.clicked(),
+                legend_response.secondary_clicked(),
+            ) {
+                commands.push(command_for_control(control));
             }
 
             let stats = command_for_control(GlobalPlotControl::OpenFieldStats);
@@ -210,6 +216,24 @@ fn sample_mode_label(mode: SampleMode) -> &'static str {
     }
 }
 
+fn legend_tooltip(legends_visible: bool) -> &'static str {
+    if legends_visible {
+        "Cycle legend position on all plots. Right-click to hide every legend"
+    } else {
+        "Cycle legend position on all plots. Right-click to show every legend"
+    }
+}
+
+fn legend_button_control(clicked: bool, secondary_clicked: bool) -> Option<GlobalPlotControl> {
+    if secondary_clicked {
+        Some(GlobalPlotControl::ToggleLegends)
+    } else if clicked {
+        Some(GlobalPlotControl::CycleLegendPosition)
+    } else {
+        None
+    }
+}
+
 fn legend_position_icon(position: LegendPosition) -> egui::ImageSource<'static> {
     match position {
         LegendPosition::TopLeft => crate::ui::icons::dice_top_left(),
@@ -278,6 +302,7 @@ mod tests {
             playhead_snap: false,
             measuring_marker: false,
             legend_position: LegendPosition::TopRight,
+            legends_visible: true,
             annotation_toolbar_open: false,
         };
         let input = || egui::RawInput {
@@ -310,7 +335,7 @@ mod tests {
 
     #[test]
     fn toolbar_actions_are_all_global() {
-        assert_eq!(GlobalPlotControl::ALL.len(), 6);
+        assert_eq!(GlobalPlotControl::ALL.len(), 7);
         assert!(!format!("{:?}", GlobalPlotControl::ALL).contains("Split"));
         assert!(!format!("{:?}", GlobalPlotControl::ALL).contains("FitAll"));
         assert!(!format!("{:?}", GlobalPlotControl::ALL).contains("ToggleAllLegends"));
@@ -318,6 +343,7 @@ mod tests {
         assert!(GlobalPlotControl::ALL.contains(&GlobalPlotControl::ToggleMeasuringMarker));
         assert!(GlobalPlotControl::ALL.contains(&GlobalPlotControl::OpenFieldStats));
         assert!(GlobalPlotControl::ALL.contains(&GlobalPlotControl::ToggleAnnotationToolbar));
+        assert!(GlobalPlotControl::ALL.contains(&GlobalPlotControl::ToggleLegends));
     }
 
     #[test]
@@ -343,11 +369,97 @@ mod tests {
 
     #[test]
     fn removed_toolbar_controls_keep_palette_commands() {
-        for id in [CommandId::ToggleLegends, CommandId::EqualizePlots] {
-            let routes = id.spec().routes;
-            assert!(routes.contains(&crate::shell::app::commands::AccessRoute::Palette));
-            assert!(!routes.contains(&crate::shell::app::commands::AccessRoute::GlobalToolbar));
-        }
+        let routes = CommandId::EqualizePlots.spec().routes;
+        assert!(routes.contains(&crate::shell::app::commands::AccessRoute::Palette));
+        assert!(!routes.contains(&crate::shell::app::commands::AccessRoute::GlobalToolbar));
+    }
+
+    #[test]
+    fn toggling_legends_is_routed_to_both_the_toolbar_and_the_palette() {
+        let routes = CommandId::ToggleLegends.spec().routes;
+        assert!(routes.contains(&crate::shell::app::commands::AccessRoute::Palette));
+        assert!(routes.contains(&crate::shell::app::commands::AccessRoute::GlobalToolbar));
+    }
+
+    #[test]
+    fn right_clicking_the_legend_button_toggles_legends_while_left_click_cycles() {
+        assert_eq!(
+            legend_button_control(false, true),
+            Some(GlobalPlotControl::ToggleLegends)
+        );
+        assert_eq!(
+            legend_button_control(true, false),
+            Some(GlobalPlotControl::CycleLegendPosition)
+        );
+        assert_eq!(legend_button_control(false, false), None);
+        assert_eq!(
+            legend_button_control(true, true),
+            Some(GlobalPlotControl::ToggleLegends)
+        );
+        assert_eq!(
+            command_for_control(GlobalPlotControl::ToggleLegends),
+            AppCommand::Static(CommandId::ToggleLegends)
+        );
+    }
+
+    #[test]
+    fn the_legend_icon_button_reports_a_secondary_click() {
+        let ctx = egui::Context::default();
+        let input = |events: Vec<egui::Event>| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(200.0, 60.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let legend_button = |ui: &mut egui::Ui| {
+            crate::ui::components::icon_button(
+                ui,
+                crate::ui::icons::dice_top_left(),
+                legend_tooltip(true),
+                false,
+            )
+        };
+
+        let mut rect = egui::Rect::NOTHING;
+        let _ = ctx.run_ui(input(vec![]), |ui| {
+            rect = legend_button(ui).rect;
+        });
+        let pos = rect.center();
+        let secondary = |pressed: bool| {
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Secondary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]
+        };
+
+        let _ = ctx.run_ui(input(secondary(true)), |ui| {
+            let _ = legend_button(ui);
+        });
+        let mut reported = None;
+        let _ = ctx.run_ui(input(secondary(false)), |ui| {
+            let response = legend_button(ui);
+            reported = legend_button_control(
+                response.clicked(),
+                response.secondary_clicked(),
+            );
+        });
+
+        assert_eq!(reported, Some(GlobalPlotControl::ToggleLegends));
+    }
+
+    #[test]
+    fn the_legend_button_tooltip_announces_the_right_click_toggle() {
+        assert!(legend_tooltip(true).contains("Right-click to hide"));
+        assert!(legend_tooltip(false).contains("Right-click to show"));
+        assert!(legend_tooltip(true).starts_with("Cycle legend position on all plots"));
+        assert!(legend_tooltip(false).starts_with("Cycle legend position on all plots"));
     }
 
     #[test]
@@ -411,6 +523,7 @@ mod tests {
             playhead_snap: false,
             measuring_marker: false,
             legend_position: LegendPosition::TopLeft,
+            legends_visible: true,
             annotation_toolbar_open: false,
         };
         let presentations = crate::shell::app::commands::present_commands(
