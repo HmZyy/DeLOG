@@ -374,6 +374,8 @@ pub struct DelogApp {
     inspector: inspector::InspectorState,
     shell_emphasis: context_header::ShellEmphasis,
     show_about: bool,
+    update_checks: mpsc::Receiver<Result<crate::update::Release, String>>,
+    update_prompt: Option<crate::update::Release>,
     command_palette: command_palette::CommandPaletteState,
     dynamic_command_catalog: commands::DynamicCommandCatalog,
     docks: AppDockController,
@@ -437,6 +439,11 @@ impl DelogApp {
         settings.theme.apply(&cc.egui_ctx);
         settings.font.apply(&cc.egui_ctx);
         let connection_dialog = ConnectionDialog::from_settings(&settings.live_connection);
+        let (update_checks_tx, update_checks) = mpsc::channel();
+        if settings.updates.check_for_updates {
+            let repaint = cc.egui_ctx.clone();
+            crate::update::spawn_check(update_checks_tx, move || repaint.request_repaint());
+        }
         let (tile_manager, tile_manager_error) =
             match directories::ProjectDirs::from("org", "hmzyy", "DeLOG") {
                 Some(dirs) => {
@@ -525,6 +532,8 @@ impl DelogApp {
             inspector: inspector::InspectorState::default(),
             shell_emphasis: context_header::ShellEmphasis::default(),
             show_about: false,
+            update_checks,
+            update_prompt: None,
             command_palette: command_palette::CommandPaletteState::default(),
             dynamic_command_catalog: commands::DynamicCommandCatalog::default(),
             docks: AppDockController::new_empty(),
@@ -1852,6 +1861,53 @@ impl DelogApp {
         entries
     }
 
+    fn poll_update_checks(&mut self) {
+        while let Ok(result) = self.update_checks.try_recv() {
+            match result {
+                Ok(release) => {
+                    if crate::update::should_notify(
+                        &release,
+                        crate::update::CURRENT_VERSION,
+                        self.settings.updates.skipped_version.as_deref(),
+                    ) {
+                        self.update_prompt = Some(release);
+                    }
+                }
+                Err(error) => self.push_log(PendingLog::with_target(
+                    LogLevel::Info,
+                    "update-check",
+                    format!("Update check skipped: {error}"),
+                )),
+            }
+        }
+    }
+
+    fn show_update_prompt(&mut self, ctx: &egui::Context) {
+        let Some(release) = self.update_prompt.clone() else {
+            return;
+        };
+        let Some(action) = crate::update::popup::show(ctx, &release) else {
+            return;
+        };
+        self.update_prompt = None;
+        let before = self.settings.updates.clone();
+        crate::update::apply_action(
+            action,
+            &release,
+            &mut self.settings.updates.check_for_updates,
+            &mut self.settings.updates.skipped_version,
+        );
+        if self.settings.updates != before
+            && let Err(error) = crate::config::layout::doc::save_app_settings(&self.settings)
+        {
+            self.push_log(PendingLog::with_target(
+                LogLevel::Error,
+                "update-check",
+                format!("Could not save the update preference: {error}"),
+            ));
+        }
+    }
+
     fn dispatch_command(
         &mut self,
         command: commands::AppCommand,
@@ -3158,6 +3214,8 @@ impl eframe::App for DelogApp {
         let _ui_windows_timer = self.session.metrics().scope("ui_windows");
         crate::export::data_export::progress_ui(ui.ctx(), &self.data_exports);
         self.show_layout_windows(ui.ctx());
+        self.poll_update_checks();
+        self.show_update_prompt(ui.ctx());
         if self.show_about {
             self.show_about = crate::ui::about::show(ui.ctx());
         }

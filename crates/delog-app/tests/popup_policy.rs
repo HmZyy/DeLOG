@@ -5,7 +5,8 @@ use policy_sources::{
     ABOUT as ABOUT_SOURCE, APP as APP_SOURCE, BROWSER, DATA_EXPORT as DATA_EXPORT_SOURCE,
     DIAGNOSTICS, DOCKS as DOCKS_SOURCE, GENERATE_MARKERS, LIVE, LOGGING, MARKERS, MESSAGE_POPUP,
     PARSERS, PERFORMANCE, SCRIPTS as SCRIPTS_SOURCE, SETTINGS as SETTINGS_SOURCE,
-    SYNC_WINDOW as SYNC_WINDOW_SOURCE, VEHICLE_DIALOG, WORKSPACE as WORKSPACE_SOURCE,
+    SYNC_WINDOW as SYNC_WINDOW_SOURCE, UPDATE as UPDATE_SOURCE,
+    UPDATE_POPUP as UPDATE_POPUP_SOURCE, VEHICLE_DIALOG, WORKSPACE as WORKSPACE_SOURCE,
 };
 
 const CONTEXT_HEADER_SOURCE: &str = include_str!("../src/shell/app/context_header.rs");
@@ -17,6 +18,7 @@ const GLOBAL_TOOLBAR_SOURCE: &str = include_str!("../src/shell/app/global_plot_t
 
 const POPUP_SOURCES: &[&str] = &[
     ABOUT_SOURCE,
+    UPDATE_POPUP_SOURCE,
     APP_SOURCE,
     BROWSER,
     GENERATE_MARKERS,
@@ -983,4 +985,36 @@ fn the_brand_opens_the_about_dialog_and_nothing_else_does() {
         !COMMANDS_SOURCE.contains("CommandId::ShowAbout"),
         "About should not be a static command with a menu row or palette entry"
     );
+}
+
+#[test]
+fn the_update_check_runs_off_the_ui_thread_and_only_when_enabled() {
+    assert!(UPDATE_SOURCE.contains("thread::Builder::new()"));
+    assert!(
+        !UPDATE_SOURCE.contains("block_on"),
+        "the release check must never block the UI thread"
+    );
+    assert!(APP_SOURCE.contains("update::spawn_check("));
+    assert!(
+        APP_SOURCE.contains("settings.updates.check_for_updates"),
+        "the check should be gated on the setting"
+    );
+}
+
+#[test]
+fn the_update_prompt_is_gated_and_its_choice_is_persisted() {
+    assert!(APP_SOURCE.contains("crate::update::should_notify("));
+    assert!(APP_SOURCE.contains("crate::update::popup::show("));
+    assert!(APP_SOURCE.contains("crate::update::apply_action("));
+    assert!(
+        APP_SOURCE.contains("save_app_settings"),
+        "a skipped version or a disabled check must survive a restart"
+    );
+}
+
+#[test]
+fn the_update_popup_offers_both_ways_to_ignore_an_update() {
+    assert!(UPDATE_POPUP_SOURCE.contains("\"Skip this version\""));
+    assert!(UPDATE_POPUP_SOURCE.contains("\"Stop checking for updates\""));
+    assert!(UPDATE_POPUP_SOURCE.contains("UpdateAction::RemindLater"));
 }
