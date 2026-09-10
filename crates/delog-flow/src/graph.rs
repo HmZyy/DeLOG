@@ -35,14 +35,24 @@ pub struct OutputSpec {
 #[derive(Debug, Clone, PartialEq)]
 pub enum NodeKind {
     DataField(FieldSelector),
-    Constant { value: f64 },
+    Constant {
+        value: f64,
+    },
     Add,
     Subtract,
     Multiply,
     Divide,
-    ScaleOffset { multiplier: f64, offset: f64 },
-    Convert { kind: ConversionKind },
-    Align { mode: AlignMode },
+    ScaleOffset {
+        multiplier: f64,
+        offset: f64,
+    },
+    Convert {
+        kind: ConversionKind,
+    },
+    Filter(crate::filter::FilterSpec),
+    Align {
+        mode: AlignMode,
+    },
     Output(OutputSpec),
     #[cfg(feature = "scripting")]
     Script(crate::script::ScriptSpec),
@@ -166,7 +176,7 @@ impl NodeKind {
                 port("A", vec![PortType::Signal]),
                 port("B", vec![PortType::Signal, PortType::Scalar]),
             ],
-            Self::ScaleOffset { .. } | Self::Convert { .. } => {
+            Self::ScaleOffset { .. } | Self::Convert { .. } | Self::Filter(_) => {
                 vec![port("In", vec![PortType::Signal])]
             }
             Self::Align { .. } => vec![
@@ -204,6 +214,7 @@ impl NodeKind {
             | Self::Divide
             | Self::ScaleOffset { .. }
             | Self::Convert { .. }
+            | Self::Filter(_)
             | Self::Align { .. } => single(vec![PortType::Signal]),
             #[cfg(feature = "scripting")]
             Self::Script(spec) => spec
@@ -228,6 +239,7 @@ impl NodeKind {
             Self::Divide => "Divide".to_owned(),
             Self::ScaleOffset { .. } => "Scale / Offset".to_owned(),
             Self::Convert { kind } => kind.label().to_owned(),
+            Self::Filter(spec) => spec.filter.label().to_owned(),
             Self::Align { .. } => "Align to Timeline".to_owned(),
             Self::Output(spec) => format!("Output: {}", spec.topic),
             #[cfg(feature = "scripting")]
@@ -439,6 +451,31 @@ impl Graph {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_filter_accepts_one_signal_and_rejects_scalars() {
+        use crate::filter::{FilterKind, FilterSpec};
+        for filter in FilterKind::ALL {
+            let mut graph = Graph::new("filters");
+            let scalar = add_node(&mut graph, NodeKind::Constant { value: 0.0 });
+            let source = add_node(&mut graph, NodeKind::Add);
+            let kind = NodeKind::Filter(FilterSpec::new(filter));
+            assert_eq!(kind.label(), filter.label());
+            assert_eq!(kind.inputs().len(), 1);
+            assert_eq!(kind.outputs().len(), 1);
+            assert_eq!(kind.outputs()[0].accepts, vec![PortType::Signal]);
+            let node = add_node(&mut graph, kind);
+            assert_eq!(
+                graph.connect(scalar, 0, node, 0),
+                Err(ConnectError::TypeMismatch)
+            );
+            assert_eq!(
+                graph.connect(source, 0, node, 1),
+                Err(ConnectError::BadPort)
+            );
+            graph.connect(source, 0, node, 0).unwrap();
+        }
+    }
 
     #[test]
     fn conversion_math_units_and_string_round_trip() {
