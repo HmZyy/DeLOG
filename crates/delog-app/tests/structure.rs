@@ -5,6 +5,7 @@ const LAYER_RANKS: &[(&str, u32)] = &[
     ("ui", 0),
     ("scene3d", 0),
     ("map", 1),
+    ("update", 1),
     ("config", 2),
     ("plotting", 3),
     ("export", 4),

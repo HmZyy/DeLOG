@@ -79,6 +79,25 @@ pub struct AppSettings {
     pub scripting: ScriptingSettings,
     #[serde(default)]
     pub dataflow: DataFlowSettings,
+    #[serde(default)]
+    pub updates: UpdateSettings,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UpdateSettings {
+    #[serde(default = "default_true")]
+    pub check_for_updates: bool,
+    #[serde(default)]
+    pub skipped_version: Option<String>,
+}
+
+impl Default for UpdateSettings {
+    fn default() -> Self {
+        Self {
+            check_for_updates: true,
+            skipped_version: None,
+        }
+    }
 }
 
 impl Default for AppSettings {
@@ -95,6 +114,7 @@ impl Default for AppSettings {
             font: FontOverride::default(),
             auto_open_diagnostics: false,
             scripting: ScriptingSettings::default(),
+            updates: UpdateSettings::default(),
             dataflow: DataFlowSettings::default(),
         }
     }
@@ -813,6 +833,10 @@ fn general_tab(ui: &mut egui::Ui, settings: &mut AppSettings) -> SettingsChange 
             ui.checkbox(&mut settings.show_fps, "");
             ui.end_row();
 
+            ui.label("Check for updates");
+            ui.checkbox(&mut settings.updates.check_for_updates, "");
+            ui.end_row();
+
             ui.label("Auto-open diagnostics")
                 .on_hover_text("Open the Diagnostics dock automatically when a new diagnostic is reported.");
             ui.checkbox(&mut settings.auto_open_diagnostics, "");
@@ -1371,6 +1395,58 @@ mod tests {
             .map(SettingsTab::label)
             .collect();
         assert!(labels.contains(&"Data Flow"));
+    }
+
+    #[test]
+    fn update_checks_are_on_by_default() {
+        assert!(AppSettings::default().updates.check_for_updates);
+        assert_eq!(AppSettings::default().updates.skipped_version, None);
+    }
+
+    #[test]
+    fn settings_saved_before_the_update_section_existed_still_check() {
+        let back: AppSettings =
+            serde_json::from_str("{}").expect("an empty settings document should load");
+        assert!(
+            back.updates.check_for_updates,
+            "an older settings file must not silently disable update checks"
+        );
+    }
+
+    #[test]
+    fn update_settings_round_trip() {
+        let mut settings = AppSettings::default();
+        settings.updates.check_for_updates = false;
+        settings.updates.skipped_version = Some("0.4.0".to_owned());
+        let json = serde_json::to_string(&settings).expect("settings should serialize");
+        let back: AppSettings = serde_json::from_str(&json).expect("settings should load");
+        assert!(!back.updates.check_for_updates);
+        assert_eq!(back.updates.skipped_version.as_deref(), Some("0.4.0"));
+    }
+
+    #[test]
+    fn the_general_tab_offers_an_update_check_toggle() {
+        let ctx = egui::Context::default();
+        let mut settings = AppSettings::default();
+        let mut texts = Vec::new();
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            general_tab(ui, &mut settings);
+        });
+        fn walk(shape: &egui::epaint::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::epaint::Shape::Text(text) => out.push(text.galley.job.text.clone()),
+                egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut texts);
+        }
+
+        assert!(
+            texts.iter().any(|text| text == "Check for updates"),
+            "the General tab should expose the update-check toggle, painted {texts:?}"
+        );
     }
 
     #[test]
