@@ -13,6 +13,7 @@ use egui::Color32;
 use glam::{Mat3, Mat4, Quat, Vec3};
 
 use crate::scene3d::geo;
+use crate::scene3d::reference::{first_valid_fix_by_time, first_valid_gps_fix};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ModelKind {
@@ -118,7 +119,7 @@ pub enum PosMapping {
 impl PosMapping {
     /// Extra GPS unit scales `(lat_lon, alt)` on top of the schema multiplier:
     /// `1e-7` for degE7 lat/lon, `1e-3` for mm alt.
-    fn gps_unit_scales(lat_lon_dege7: bool, alt_mm: bool) -> (f64, f64) {
+    pub(super) fn gps_unit_scales(lat_lon_dege7: bool, alt_mm: bool) -> (f64, f64) {
         (
             if lat_lon_dege7 { 1e-7 } else { 1.0 },
             if alt_mm { 1e-3 } else { 1.0 },
@@ -168,6 +169,13 @@ pub struct Pose {
 }
 
 impl Pose {
+    pub fn transformed(self, transform: glam::DMat4) -> Self {
+        Self {
+            pos: transform.transform_point3(self.pos.as_dvec3()).as_vec3(),
+            rot: glam::DMat3::from_mat4(transform).as_mat3() * self.rot,
+        }
+    }
+
     pub fn model_matrix(&self, scale: f32) -> Mat4 {
         Mat4::from_translation(self.pos)
             * Mat4::from_mat3(self.rot)
@@ -186,19 +194,22 @@ fn field_multiplier(snapshot: &StoreSnapshot, field: FieldId) -> f64 {
         .unwrap_or(1.0)
 }
 
-fn read_eng(view: &FieldView<'_>, mult: f64, t_us: i64) -> Option<f64> {
+pub(super) fn read_eng(view: &FieldView<'_>, mult: f64, t_us: i64) -> Option<f64> {
     view.sample_at(t_us, SampleMode::Prev)?
         .value
         .as_f64()
         .map(|v| v * mult)
 }
 
-fn open<'a>(snapshot: &'a StoreSnapshot, field: FieldId) -> Option<(FieldView<'a>, f64)> {
+pub(super) fn open<'a>(
+    snapshot: &'a StoreSnapshot,
+    field: FieldId,
+) -> Option<(FieldView<'a>, f64)> {
     let view = FieldView::new(snapshot, field).ok()?;
     Some((view, field_multiplier(snapshot, field)))
 }
 
-fn field_topic_range(snapshot: &StoreSnapshot, field: FieldId) -> Option<(i64, i64)> {
+pub(super) fn field_topic_range(snapshot: &StoreSnapshot, field: FieldId) -> Option<(i64, i64)> {
     let topic_id = snapshot.fields.get(field.index())?.topic;
     let store = snapshot.topic_store(topic_id)?;
     let source_id = snapshot.topic(topic_id)?.entry.source;
@@ -216,43 +227,6 @@ fn position_topic_range(snapshot: &StoreSnapshot, pos: &PosMapping) -> Option<(i
         PosMapping::Gps { lat, .. } => *lat,
     };
     field_topic_range(snapshot, anchor)
-}
-
-/// Resolve the GPS reference origin (first valid fix) to `(lat_rad, lon_rad, alt_m)`.
-fn resolve_gps_ref(
-    snapshot: &StoreSnapshot,
-    lat: FieldId,
-    lon: FieldId,
-    alt: FieldId,
-    ll_scale: f64,
-    alt_scale: f64,
-    range: (i64, i64),
-) -> Option<(f64, f64, f64)> {
-    let (lat_v, lm) = open(snapshot, lat)?;
-    let (lon_v, om) = open(snapshot, lon)?;
-    let (alt_v, am) = open(snapshot, alt)?;
-    // Skip null/zero fixes to find the first real one.
-    let mut t = range.0;
-    while t <= range.1 {
-        if let (Some(la), Some(lo), Some(al)) = (
-            lat_v
-                .sample_at(t, SampleMode::Next)
-                .and_then(|s| s.value.as_f64()),
-            lon_v
-                .sample_at(t, SampleMode::Next)
-                .and_then(|s| s.value.as_f64()),
-            alt_v
-                .sample_at(t, SampleMode::Next)
-                .and_then(|s| s.value.as_f64()),
-        ) {
-            let (la, lo, al) = (la * lm * ll_scale, lo * om * ll_scale, al * am * alt_scale);
-            if la != 0.0 || lo != 0.0 {
-                return Some((la.to_radians(), lo.to_radians(), al));
-            }
-        }
-        t += 1_000_000; // 1 s step
-    }
-    None
 }
 
 fn position_at(
@@ -348,6 +322,47 @@ pub fn pose_at(snapshot: &StoreSnapshot, config: &VehicleConfig, t_us: i64) -> O
     pose_at_with_ref(snapshot, config, gps_ref, t_us)
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PositionReference {
+    pub origin: Option<[f64; 3]>,
+    pub start_us: Option<i64>,
+}
+
+pub(crate) fn position_reference(
+    snapshot: &StoreSnapshot,
+    config: &VehicleConfig,
+    alt_step_m: Option<f64>,
+) -> PositionReference {
+    if alt_step_m.is_some() && matches!(config.pos, PosMapping::Gps { .. }) {
+        let fix = first_valid_gps_fix(snapshot, &config.pos, alt_step_m);
+        return PositionReference {
+            origin: fix.map(|(_, (lat, lon, alt))| [lat, lon, alt]),
+            start_us: fix.map(|(t_us, _)| t_us),
+        };
+    }
+    PositionReference {
+        origin: geodetic_reference(snapshot, config),
+        start_us: None,
+    }
+}
+
+pub(crate) fn pose_at_with_position_reference(
+    snapshot: &StoreSnapshot,
+    config: &VehicleConfig,
+    reference: PositionReference,
+    t_us: i64,
+) -> Option<Pose> {
+    if reference.start_us.is_some_and(|start| t_us < start) {
+        return None;
+    }
+    pose_at_with_ref(
+        snapshot,
+        config,
+        reference.origin.map(|[lat, lon, alt]| (lat, lon, alt)),
+        t_us,
+    )
+}
+
 /// GPS reference is supplied by the caller so it can be resolved once and
 /// reused across frames instead of re-scanning for the first fix per call.
 /// Ignored for NED-mapped vehicles.
@@ -366,33 +381,19 @@ pub(crate) fn gps_reference(
     snapshot: &StoreSnapshot,
     config: &VehicleConfig,
 ) -> Option<(f64, f64, f64)> {
-    if let PosMapping::Gps {
-        lat,
-        lon,
-        alt,
-        lat_lon_dege7,
-        alt_mm,
-        alt_offset_m: _,
-    } = &config.pos
-    {
-        let (ll_scale, alt_scale) = PosMapping::gps_unit_scales(*lat_lon_dege7, *alt_mm);
-        let range = position_topic_range(snapshot, &config.pos)?;
-        resolve_gps_ref(snapshot, *lat, *lon, *alt, ll_scale, alt_scale, range)
-    } else {
-        None
-    }
+    first_valid_gps_fix(snapshot, &config.pos, None).map(|(_, fix)| fix)
 }
 
 const MAX_TRAJECTORY_POINTS: usize = 4000;
 
-struct PositionRows<'a> {
-    store: &'a TopicStore,
+pub(super) struct PositionRows<'a> {
+    pub(super) store: &'a TopicStore,
     col_indices: [usize; 3],
     multipliers: [f64; 3],
-    offset_us: i64,
+    pub(super) offset_us: i64,
 }
 
-fn position_row_source<'a>(
+pub(super) fn position_row_source<'a>(
     snapshot: &'a StoreSnapshot,
     pos: &PosMapping,
 ) -> Option<PositionRows<'a>> {
@@ -430,7 +431,7 @@ fn position_row_source<'a>(
     })
 }
 
-fn row_value(
+pub(super) fn row_value(
     rows: &PositionRows<'_>,
     chunk: &delog_core::chunk::Chunk,
     col: usize,
@@ -477,6 +478,7 @@ fn position_from_row(
 fn build_trajectory_from_rows(
     snapshot: &StoreSnapshot,
     config: &VehicleConfig,
+    reference: PositionReference,
 ) -> Option<VehicleTrajectory> {
     let rows = position_row_source(snapshot, &config.pos)?;
     let total_rows = usize::try_from(rows.store.rows).ok()?;
@@ -484,7 +486,7 @@ fn build_trajectory_from_rows(
         return Some(VehicleTrajectory::default());
     }
 
-    let gps_ref = gps_reference(snapshot, config);
+    let gps_ref = reference.origin.map(|[lat, lon, alt]| (lat, lon, alt));
     // Full-resolution path in stored (append) order: no decimation, so vertices
     // never move between rebuilds (fixes the old jiggle) and the GPU upload only
     // writes the new tail. Canonical µs time rides alongside (`chunk.t`, not the
@@ -503,7 +505,12 @@ fn build_trajectory_from_rows(
             {
                 continue;
             }
-            times_us.push(chunk.t.value(row).checked_add(rows.offset_us)?);
+            let t = chunk.t.value(row).checked_add(rows.offset_us)?;
+            times_us.push(t);
+            if reference.start_us.is_some_and(|start| t < start) {
+                points.push([f32::NAN; 3]);
+                continue;
+            }
             match position_from_row(&config.pos, &rows, gps_ref, chunk, row) {
                 Some(p) => points.push([p.x, p.y, p.z]),
                 None => points.push([f32::NAN, f32::NAN, f32::NAN]),
@@ -511,14 +518,22 @@ fn build_trajectory_from_rows(
         }
     }
 
-    Some(VehicleTrajectory { points, times_us })
+    Some(VehicleTrajectory {
+        points,
+        times_us,
+        reference: reference.origin,
+    })
 }
 
-fn build_trajectory_by_time(snapshot: &StoreSnapshot, config: &VehicleConfig) -> VehicleTrajectory {
+fn build_trajectory_by_time(
+    snapshot: &StoreSnapshot,
+    config: &VehicleConfig,
+    reference: PositionReference,
+) -> VehicleTrajectory {
     let Some((t0, t1)) = position_topic_range(snapshot, &config.pos) else {
         return VehicleTrajectory::default();
     };
-    let gps_ref = gps_reference(snapshot, config);
+    let gps_ref = reference.origin.map(|[lat, lon, alt]| (lat, lon, alt));
     let span = (t1 - t0).max(1);
     let steps = (span / 50_000).clamp(2, MAX_TRAJECTORY_POINTS as i64) as usize; // ~20 Hz cap
     let mut points = Vec::with_capacity(steps);
@@ -526,25 +541,39 @@ fn build_trajectory_by_time(snapshot: &StoreSnapshot, config: &VehicleConfig) ->
     for i in 0..steps {
         let t = t0 + span * i as i64 / (steps as i64 - 1);
         times_us.push(t);
+        if reference.start_us.is_some_and(|start| t < start) {
+            points.push([f32::NAN; 3]);
+            continue;
+        }
         match position_at(snapshot, &config.pos, gps_ref, t) {
             Some(p) => points.push([p.x, p.y, p.z]),
             None => points.push([f32::NAN, f32::NAN, f32::NAN]),
         }
     }
-    VehicleTrajectory { points, times_us }
+    VehicleTrajectory {
+        points,
+        times_us,
+        reference: reference.origin,
+    }
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct VehicleTrajectory {
+    pub reference: Option<[f64; 3]>,
     /// NaN = gap, so the line shader breaks there.
     pub points: Vec<[f32; 3]>,
     /// Canonical µs timestamp, 1:1 with `points`.
     pub times_us: Vec<i64>,
 }
 
-pub fn build_trajectory(snapshot: &StoreSnapshot, config: &VehicleConfig) -> VehicleTrajectory {
-    build_trajectory_from_rows(snapshot, config)
-        .unwrap_or_else(|| build_trajectory_by_time(snapshot, config))
+pub fn build_trajectory(
+    snapshot: &StoreSnapshot,
+    config: &VehicleConfig,
+    alt_step_m: Option<f64>,
+) -> VehicleTrajectory {
+    let reference = position_reference(snapshot, config, alt_step_m);
+    build_trajectory_from_rows(snapshot, config, reference)
+        .unwrap_or_else(|| build_trajectory_by_time(snapshot, config, reference))
 }
 
 /// Raw geodetic sample: canonical µs time + WGS84 degrees/metres.
@@ -610,8 +639,7 @@ pub(crate) fn ned_reference_origin(
             geo_ref.alt_m,
         )),
         NedReference::Fields { lat, lon, alt } => {
-            let range = field_topic_range(snapshot, *lat)?;
-            resolve_gps_ref(snapshot, *lat, *lon, *alt, 1.0, 1.0, range)
+            first_valid_fix_by_time(snapshot, *lat, *lon, *alt, 1.0, 1.0, None).map(|(_, fix)| fix)
         }
     }
 }
@@ -745,7 +773,8 @@ mod tests {
             vec![408_000.0],     // 408 m, stored as mm
         );
         let (ll, am) = PosMapping::gps_unit_scales(true, true);
-        let (rlat, rlon, ralt) = resolve_gps_ref(&snap, lat, lon, alt, ll, am, (0, 0)).unwrap();
+        let (_, (rlat, rlon, ralt)) =
+            first_valid_fix_by_time(&snap, lat, lon, alt, ll, am, None).unwrap();
         assert!(
             (rlat.to_degrees() - 47.397_741_8).abs() < 1e-6,
             "{}",
@@ -764,7 +793,8 @@ mod tests {
         let (snap, [lat, lon, alt]) =
             gps_snapshot(vec![0], vec![47.397_741_8], vec![8.550_358_0], vec![408.0]);
         let (ll, am) = PosMapping::gps_unit_scales(false, false);
-        let (rlat, _, ralt) = resolve_gps_ref(&snap, lat, lon, alt, ll, am, (0, 0)).unwrap();
+        let (_, (rlat, _, ralt)) =
+            first_valid_fix_by_time(&snap, lat, lon, alt, ll, am, None).unwrap();
         assert!((rlat.to_degrees() - 47.397_741_8).abs() < 1e-6);
         assert!((ralt - 408.0).abs() < 1e-3);
     }
@@ -834,6 +864,272 @@ mod tests {
             "up offset, got {:?}",
             pose.pos
         );
+    }
+
+    #[test]
+    fn initial_zero_gps_filter_stops_at_the_first_valid_fix() {
+        let (snap, f) = gps_snapshot(
+            vec![0, 100_000, 200_000, 300_000, 400_000],
+            vec![0.0, 47.0, 47.0, 0.0, 0.0],
+            vec![8.0, 0.0, 8.0, 8.0, 0.0],
+            vec![400.0; 5],
+        );
+        let config = gps_config(f, 0.0);
+        let reference = position_reference(&snap, &config, Some(50.0));
+        assert_eq!(reference.start_us, Some(200_000));
+        for t in [400_000, 100_000, 300_000, 0, 200_000] {
+            assert_eq!(
+                pose_at_with_position_reference(&snap, &config, reference, t).is_some(),
+                t >= 200_000,
+            );
+        }
+        let trajectory = build_trajectory(&snap, &config, Some(50.0));
+        assert_eq!(
+            trajectory.times_us,
+            vec![0, 100_000, 200_000, 300_000, 400_000]
+        );
+        assert!(trajectory.points[..2].iter().all(|p| p[0].is_nan()));
+        assert!(
+            trajectory.points[2..]
+                .iter()
+                .flatten()
+                .all(|v| v.is_finite())
+        );
+        assert!(Vec3::from_array(trajectory.points[2]).length() < 0.001);
+    }
+
+    #[test]
+    fn initial_zero_gps_filter_skips_nonfinite_samples_before_the_first_fix() {
+        let (snap, f) = gps_snapshot(
+            vec![0, 100_000, 200_000, 300_000],
+            vec![0.0, f64::NAN, 47.0, 47.0],
+            vec![8.0, 8.0, 8.0, 8.0],
+            vec![400.0, 400.0, f64::NAN, 410.0],
+        );
+        let config = gps_config(f, 0.0);
+        let reference = position_reference(&snap, &config, Some(50.0));
+        assert_eq!(reference.start_us, Some(300_000));
+        assert_eq!(reference.origin.map(|o| o[2]), Some(410.0));
+        assert!(reference.origin.unwrap().iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn altitude_step_before_the_estimator_settles_moves_the_origin_past_it() {
+        let times: Vec<i64> = (0..25).map(|i| 7_693_965 + i * 40_000).collect();
+        let alt: Vec<f64> = (0..25)
+            .map(|i| {
+                if i < 19 {
+                    -0.36 - i as f64 * 0.04
+                } else {
+                    500.85
+                }
+            })
+            .collect();
+        let (snap, f) = gps_snapshot(
+            times.clone(),
+            vec![43.827_188_1; 25],
+            vec![2.738_144_2; 25],
+            alt,
+        );
+        let config = gps_config(f, 0.0);
+
+        let settled = position_reference(&snap, &config, Some(50.0));
+        assert_eq!(settled.start_us, Some(times[19]));
+        assert_eq!(settled.origin.map(|o| o[2]), Some(500.85));
+
+        let trajectory = build_trajectory(&snap, &config, Some(50.0));
+        assert!(trajectory.points[..19].iter().all(|p| p[1].is_nan()));
+        assert!(
+            trajectory.points[19..]
+                .iter()
+                .all(|p| p[1].abs() < 0.001 && p[1].is_finite())
+        );
+
+        let raw = position_reference(&snap, &config, None);
+        assert_eq!(raw.start_us, None);
+        assert_eq!(raw.origin.map(|o| o[2]), Some(-0.36));
+        let raw_trajectory = build_trajectory(&snap, &config, None);
+        assert!((raw_trajectory.points[24][1] - 501.21).abs() < 0.01);
+    }
+
+    #[test]
+    fn altitude_step_after_the_vehicle_leaves_the_pad_keeps_the_original_origin() {
+        let times: Vec<i64> = (0..40).map(|i| i * 100_000).collect();
+        let lat: Vec<f64> = (0..40).map(|i| 43.0 + i as f64 * 0.000_1).collect();
+        let alt: Vec<f64> = (0..40)
+            .map(|i| if i < 30 { 100.0 } else { 900.0 })
+            .collect();
+        let (snap, f) = gps_snapshot(times, lat, vec![2.0; 40], alt);
+        let config = gps_config(f, 0.0);
+        let reference = position_reference(&snap, &config, Some(50.0));
+        assert_eq!(reference.start_us, Some(0));
+        assert_eq!(reference.origin.map(|o| o[2]), Some(100.0));
+    }
+
+    #[test]
+    fn altitude_jump_threshold_decides_whether_the_step_moves_the_origin() {
+        let times: Vec<i64> = (0..25).map(|i| 7_693_965 + i * 40_000).collect();
+        let alt: Vec<f64> = (0..25)
+            .map(|i| if i < 19 { -0.36 } else { 500.85 })
+            .collect();
+        let (snap, f) = gps_snapshot(
+            times.clone(),
+            vec![43.827_188_1; 25],
+            vec![2.738_144_2; 25],
+            alt,
+        );
+        let config = gps_config(f, 0.0);
+        for (threshold, expected_start, expected_alt) in [
+            (50.0, Some(times[19]), 500.85),
+            (400.0, Some(times[19]), 500.85),
+            (600.0, Some(times[0]), -0.36),
+        ] {
+            let reference = position_reference(&snap, &config, Some(threshold));
+            assert_eq!(reference.start_us, expected_start, "at {threshold} m");
+            assert_eq!(
+                reference.origin.map(|o| o[2]),
+                Some(expected_alt),
+                "at {threshold} m",
+            );
+        }
+    }
+
+    #[test]
+    fn initial_zero_gps_filter_can_be_disabled() {
+        let (snap, f) = gps_snapshot(
+            vec![0, 100_000],
+            vec![0.0, 47.0],
+            vec![8.0, 8.0],
+            vec![400.0; 2],
+        );
+        let config = gps_config(f, 0.0);
+        let reference = position_reference(&snap, &config, None);
+        assert!(pose_at_with_position_reference(&snap, &config, reference, 0).is_some());
+        let trajectory = build_trajectory(&snap, &config, None);
+        assert!(trajectory.points.iter().flatten().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn initial_zero_gps_filter_waits_when_no_valid_fix_exists() {
+        let (snap, f) = gps_snapshot(
+            vec![0, 100_000],
+            vec![0.0, 47.0],
+            vec![8.0, 0.0],
+            vec![400.0; 2],
+        );
+        let config = gps_config(f, 0.0);
+        let reference = position_reference(&snap, &config, Some(50.0));
+        assert_eq!(reference.origin, None);
+        assert!(pose_at_with_position_reference(&snap, &config, reference, 100_000).is_none());
+        let trajectory = build_trajectory(&snap, &config, Some(50.0));
+        assert!(trajectory.points.iter().all(|p| p[0].is_nan()));
+    }
+
+    #[test]
+    fn initial_zero_gps_filter_leaves_ned_positions_unchanged() {
+        let (snap, f) = ned_snapshot(
+            vec![0, 100_000, 200_000],
+            vec![0.0, 10.0, 0.0],
+            vec![0.0; 3],
+            vec![0.0; 3],
+        );
+        let config = ned_config(f);
+        let reference = position_reference(&snap, &config, Some(50.0));
+        assert!(pose_at_with_position_reference(&snap, &config, reference, 0).is_some());
+        let trajectory = build_trajectory(&snap, &config, Some(50.0));
+        assert_eq!(
+            trajectory.points,
+            vec![[0.0, 0.0, 0.0], [0.0, 0.0, -10.0], [0.0, 0.0, 0.0]]
+        );
+    }
+
+    #[test]
+    fn shared_frame_aligns_gps_vehicles_with_different_first_fixes() {
+        let (first, f) = gps_snapshot(
+            vec![0, 1_000_000],
+            vec![47.0, 47.01],
+            vec![8.0, 8.01],
+            vec![300.0, 450.0],
+        );
+        let (second, g) = gps_snapshot(vec![0], vec![47.01], vec![8.01], vec![450.0]);
+        let a = gps_config(f, 0.0);
+        let b = gps_config(g, 0.0);
+        let frame = crate::scene3d::frame::SceneFrame {
+            reference: geodetic_reference(&first, &a),
+        };
+        let a_pose = pose_at(&first, &a, 1_000_000).unwrap();
+        let b_pose = pose_at(&second, &b, 0)
+            .unwrap()
+            .transformed(frame.transform(geodetic_reference(&second, &b)));
+        assert!((a_pose.pos - b_pose.pos).length() < 0.01);
+    }
+
+    #[test]
+    fn shared_frame_aligns_referenced_ned_with_gps() {
+        let (gps, f) = gps_snapshot(
+            vec![0, 1_000_000],
+            vec![47.0, 47.0],
+            vec![8.0, 8.0],
+            vec![300.0, 450.0],
+        );
+        let (ned, g) = ned_snapshot(vec![0], vec![0.0], vec![0.0], vec![-50.0]);
+        let a = gps_config(f, 0.0);
+        let mut b = ned_config(g);
+        if let PosMapping::Ned { reference, .. } = &mut b.pos {
+            *reference = Some(NedReference::Manual(GeoRef {
+                lat_deg: 47.0,
+                lon_deg: 8.0,
+                alt_m: 400.0,
+            }));
+        }
+        let frame = crate::scene3d::frame::SceneFrame {
+            reference: geodetic_reference(&gps, &a),
+        };
+        let a_pose = pose_at(&gps, &a, 1_000_000).unwrap();
+        let b_pose = pose_at(&ned, &b, 0)
+            .unwrap()
+            .transformed(frame.transform(geodetic_reference(&ned, &b)));
+        assert!((a_pose.pos - b_pose.pos).length() < 0.001);
+        assert!((b_pose.pos.y - 150.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn shared_frame_rotates_vehicle_attitude() {
+        let frame = crate::scene3d::frame::SceneFrame {
+            reference: Some([0.0, 0.0, 0.0]),
+        };
+        let pose = Pose {
+            pos: Vec3::ZERO,
+            rot: Mat3::IDENTITY,
+        }
+        .transformed(frame.transform(Some([0.0, std::f64::consts::FRAC_PI_2, 0.0])));
+        assert!((pose.rot * Vec3::Y - Vec3::X).length() < 1e-6);
+    }
+
+    #[test]
+    fn shared_frame_keeps_trajectory_aligned_when_the_scene_origin_changes() {
+        let (snap, f) = gps_snapshot(
+            vec![0, 1_000_000],
+            vec![47.0, 47.0],
+            vec![8.0, 8.0],
+            vec![400.0, 450.0],
+        );
+        let config = gps_config(f, 20.0);
+        let trajectory = build_trajectory(&snap, &config, None);
+        for altitude in [300.0, 350.0] {
+            let frame = crate::scene3d::frame::SceneFrame {
+                reference: Some([47.0_f64.to_radians(), 8.0_f64.to_radians(), altitude]),
+            };
+            let transform = frame.transform(trajectory.reference);
+            let point = transform
+                .transform_point3(Vec3::from_array(trajectory.points[1]).as_dvec3())
+                .as_vec3();
+            assert!((point.y - (470.0 - altitude) as f32).abs() < 0.001);
+            let pose = pose_at(&snap, &config, 1_000_000)
+                .unwrap()
+                .transformed(frame.transform(geodetic_reference(&snap, &config)));
+            assert!((point - pose.pos).length() < 0.001);
+        }
     }
 
     fn ned_config(fields: [FieldId; 3]) -> VehicleConfig {
@@ -952,7 +1248,7 @@ mod tests {
             vec![0.0, 0.0, 0.0],
             vec![0.0, 0.0, 0.0],
         );
-        let traj = build_trajectory(&snap, &ned_config(f)).points;
+        let traj = build_trajectory(&snap, &ned_config(f), None).points;
         assert!(traj.len() >= 2);
         // North maps to render −Z, so z should sweep 0 → −100.
         let first = traj.first().unwrap();
@@ -972,7 +1268,7 @@ mod tests {
             vec![0.0, 0.0, 0.0],
             vec![0.0, 0.0, 0.0],
         );
-        let traj = build_trajectory(&snap, &ned_config(f));
+        let traj = build_trajectory(&snap, &ned_config(f), None);
         assert_eq!(
             traj.points.len(),
             traj.times_us.len(),
@@ -997,7 +1293,7 @@ mod tests {
         sources[0].entry.offset_us = -1_784_120_623_158_000;
         snap.sources = Arc::from(sources);
 
-        let traj = build_trajectory(&snap, &ned_config(f));
+        let traj = build_trajectory(&snap, &ned_config(f), None);
 
         assert_eq!(traj.times_us, vec![76_842_000, 176_842_000]);
     }
@@ -1010,7 +1306,7 @@ mod tests {
             vec![0.0, 0.0, 0.0],
             vec![0.0, 0.0, 0.0],
         );
-        let traj = build_trajectory(&snap, &ned_config(f));
+        let traj = build_trajectory(&snap, &ned_config(f), None);
         // Playhead exactly on the middle sample includes the first two points.
         let visible = traj.times_us.partition_point(|&t| t <= 1_000_000);
         assert_eq!(visible, 2);
@@ -1032,7 +1328,7 @@ mod tests {
             vec![None, Some(8.0), Some(f64::NAN), Some(8.0), None],
             vec![None, Some(400.0), Some(f64::NAN), Some(400.0), None],
         );
-        let traj = build_trajectory(&snap, &gps_config(fields, 0.0));
+        let traj = build_trajectory(&snap, &gps_config(fields, 0.0), None);
         assert_eq!(traj.times_us, vec![1_000_000, 3_000_000]);
         assert_eq!(traj.points.len(), 2);
         assert!(traj.points.iter().flatten().all(|v| v.is_finite()));
@@ -1061,7 +1357,7 @@ mod tests {
                 Some(400.0),
             ],
         );
-        let traj = build_trajectory(&snap, &gps_config(fields, 0.0));
+        let traj = build_trajectory(&snap, &gps_config(fields, 0.0), None);
         assert_eq!(
             traj.times_us,
             vec![0, 1_000_000, 2_000_000, 3_000_000, 4_000_000]
@@ -1083,7 +1379,7 @@ mod tests {
             vec![0.0, 0.0, 0.0],
             vec![0.0, 0.0, 0.0],
         );
-        let traj = build_trajectory(&snap, &ned_config(f)).points;
+        let traj = build_trajectory(&snap, &ned_config(f), None).points;
         assert_eq!(traj.len(), 3);
         assert!((traj[0][2] - 0.0).abs() < 1e-4, "{traj:?}");
         assert!((traj[1][2] + 10.0).abs() < 1e-4, "{traj:?}");

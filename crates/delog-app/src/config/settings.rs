@@ -465,6 +465,9 @@ impl Default for LiveConnectionSettings {
     }
 }
 
+fn default_reference_alt_step_m() -> f64 {
+    50.0
+}
 fn default_scene_far_clip_m() -> f32 {
     20_000.0
 }
@@ -488,6 +491,10 @@ fn finite_or(value: f32, fallback: f32) -> f32 {
 /// Distances are render-space metres.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Scene3dSettings {
+    #[serde(default = "default_true", alias = "ignore_initial_zero_gps")]
+    pub ignore_initial_invalid_position: bool,
+    #[serde(default = "default_reference_alt_step_m")]
+    pub reference_alt_step_m: f64,
     #[serde(default)]
     pub map_provider: MapProviderId,
     #[serde(default = "default_tile_cache_limit_bytes")]
@@ -516,6 +523,8 @@ pub struct Scene3dSettings {
 impl Default for Scene3dSettings {
     fn default() -> Self {
         Self {
+            ignore_initial_invalid_position: true,
+            reference_alt_step_m: default_reference_alt_step_m(),
             map_provider: MapProviderId::None,
             tile_cache_limit_bytes: default_tile_cache_limit_bytes(),
             far_clip_m: default_scene_far_clip_m(),
@@ -532,6 +541,17 @@ impl Default for Scene3dSettings {
 }
 
 impl Scene3dSettings {
+    pub fn resolved_reference_alt_step_m(self) -> Option<f64> {
+        self.ignore_initial_invalid_position.then(|| {
+            let step = self.reference_alt_step_m;
+            if step.is_finite() {
+                step.clamp(1.0, 10_000.0)
+            } else {
+                default_reference_alt_step_m()
+            }
+        })
+    }
+
     pub fn resolved_far_clip_m(self) -> f32 {
         finite_or(self.far_clip_m, default_scene_far_clip_m()).clamp(10.0, 1_000_000.0)
     }
@@ -723,6 +743,7 @@ impl egui_dock::TabViewer for SettingsTabViewer<'_> {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct SettingsChange {
+    pub position_filter_changed: bool,
     pub theme_changed: bool,
     pub map_provider_changed: bool,
     pub tile_cache_limit_changed: bool,
@@ -731,6 +752,7 @@ pub struct SettingsChange {
 
 impl std::ops::BitOrAssign for SettingsChange {
     fn bitor_assign(&mut self, rhs: Self) {
+        self.position_filter_changed |= rhs.position_filter_changed;
         self.theme_changed |= rhs.theme_changed;
         self.map_provider_changed |= rhs.map_provider_changed;
         self.tile_cache_limit_changed |= rhs.tile_cache_limit_changed;
@@ -1003,6 +1025,10 @@ fn scene3d_tab(
     settings: &mut AppSettings,
     tile_cache: TileCacheUiState,
 ) -> SettingsChange {
+    let before_position_filter = (
+        settings.scene3d.ignore_initial_invalid_position,
+        settings.scene3d.reference_alt_step_m,
+    );
     let before_provider = settings.scene3d.map_provider;
     let before_limit = settings.scene3d.tile_cache_limit_bytes;
     let mut clear_tile_cache = false;
@@ -1111,12 +1137,35 @@ fn scene3d_tab(
                     .suffix(" m"),
             );
             ui.end_row();
+
+            ui.label("Ignore initial invalid positions").on_hover_text(
+                "Ignore leading samples with zero latitude or longitude, and leading altitudes \
+                 that jump before the estimator settles. NED positions are unaffected.",
+            );
+            ui.checkbox(&mut s.ignore_initial_invalid_position, "");
+            ui.end_row();
+
+            ui.label("Altitude jump threshold").on_hover_text(
+                "A step larger than this between consecutive altitude samples is treated as the \
+                 estimator fixing its origin, not as flight, so the scene origin restarts there.",
+            );
+            ui.add_enabled(
+                s.ignore_initial_invalid_position,
+                egui::Slider::new(&mut s.reference_alt_step_m, 1.0..=10_000.0)
+                    .logarithmic(true)
+                    .suffix(" m"),
+            );
+            ui.end_row();
         });
 
     if reset_to_defaults_button(ui) {
         settings.scene3d = Scene3dSettings::default();
     }
     SettingsChange {
+        position_filter_changed: (
+            settings.scene3d.ignore_initial_invalid_position,
+            settings.scene3d.reference_alt_step_m,
+        ) != before_position_filter,
         map_provider_changed: settings.scene3d.map_provider != before_provider,
         tile_cache_limit_changed: settings.scene3d.tile_cache_limit_bytes != before_limit,
         clear_tile_cache,
@@ -1491,6 +1540,8 @@ mod tests {
     fn app_settings_persist_scene3d_settings() {
         let settings = AppSettings {
             scene3d: Scene3dSettings {
+                ignore_initial_invalid_position: false,
+                reference_alt_step_m: 125.0,
                 map_provider: MapProviderId::BingSatellite,
                 tile_cache_limit_bytes: 2 * 1024 * 1024 * 1024,
                 far_clip_m: 25_000.0,
@@ -1510,6 +1561,55 @@ mod tests {
         assert!(json.contains("scene3d"));
         let decoded: AppSettings = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.scene3d, settings.scene3d);
+    }
+
+    #[test]
+    fn initial_invalid_position_setting_defaults_on_and_persists_both_values() {
+        let old: AppSettings = serde_json::from_str(r#"{"scene3d":{}}"#).unwrap();
+        assert_eq!(
+            serde_json::to_value(old).unwrap()["scene3d"]["ignore_initial_invalid_position"],
+            true,
+        );
+        for enabled in [false, true] {
+            for key in ["ignore_initial_invalid_position", "ignore_initial_zero_gps"] {
+                let json = serde_json::json!({"scene3d": {key: enabled}});
+                let settings: AppSettings = serde_json::from_value(json).unwrap();
+                assert_eq!(
+                    serde_json::to_value(settings).unwrap()["scene3d"]["ignore_initial_invalid_position"],
+                    enabled,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn reference_alt_step_defaults_to_50_m_and_is_gated_by_the_filter() {
+        let mut s = Scene3dSettings::default();
+        assert_eq!(s.resolved_reference_alt_step_m(), Some(50.0));
+        s.reference_alt_step_m = 250.0;
+        assert_eq!(s.resolved_reference_alt_step_m(), Some(250.0));
+        s.reference_alt_step_m = f64::NAN;
+        assert_eq!(s.resolved_reference_alt_step_m(), Some(50.0));
+        s.reference_alt_step_m = 0.0;
+        assert_eq!(s.resolved_reference_alt_step_m(), Some(1.0));
+        s.ignore_initial_invalid_position = false;
+        assert_eq!(s.resolved_reference_alt_step_m(), None);
+    }
+
+    #[test]
+    fn reference_alt_step_persists_and_defaults_for_old_configs() {
+        let old: AppSettings = serde_json::from_str(r#"{"scene3d":{}}"#).unwrap();
+        assert_eq!(
+            serde_json::to_value(old).unwrap()["scene3d"]["reference_alt_step_m"],
+            50.0,
+        );
+        let json = serde_json::json!({"scene3d": {"reference_alt_step_m": 320.0}});
+        let settings: AppSettings = serde_json::from_value(json).unwrap();
+        assert_eq!(settings.scene3d.reference_alt_step_m, 320.0);
+        assert_eq!(
+            serde_json::to_value(settings).unwrap()["scene3d"]["reference_alt_step_m"],
+            320.0,
+        );
     }
 
     #[test]

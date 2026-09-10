@@ -195,7 +195,6 @@ const ALLOWED_OVER_BUDGET: &[&str] = &[
     "delog-app/src/plotting/browser.rs",
     "delog-app/src/plotting/gpu/mod.rs",
     "delog-app/src/scripting/scripts.rs",
-    "delog-app/src/session/vehicle_dialog.rs",
     "delog-app/src/shell/app/mod.rs",
     "delog-app/src/shell/workspace/mod.rs",
     "delog-app/src/sync/sync_window/mod.rs",
