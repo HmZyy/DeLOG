@@ -725,6 +725,20 @@ impl DataFlowUi {
                     ui.add(egui::DragValue::new(offset));
                 });
             }
+            NodeKind::Filter(spec) => {
+                egui::ComboBox::from_id_salt(("dataflow-filter-condition", id.0))
+                    .selected_text(spec.filter.label())
+                    .show_ui(ui, |ui| {
+                        for option in delog_flow::filter::FilterKind::ALL {
+                            ui.selectable_value(&mut spec.filter, option, option.label());
+                        }
+                    });
+                super::filter_controls::filter_controls(ui, spec);
+                ui.label("Matching values are kept; rejected values become gaps.");
+                if spec.filter.is_range() {
+                    ui.label("Between includes both bounds. Outside Range keeps values strictly outside them.");
+                }
+            }
             NodeKind::Convert { kind } => {
                 egui::ComboBox::from_label("Conversion")
                     .selected_text(kind.label())
@@ -1333,7 +1347,6 @@ mod tests {
     }
 
     fn node_kinds_that_must_not_expand_the_window() -> Vec<NodeKind> {
-        #[allow(unused_mut)]
         let mut kinds = vec![
             NodeKind::DataField(FieldSelector {
                 source: Some("source-with-a-deliberately-long-display-name".to_owned()),
@@ -1362,6 +1375,11 @@ mod tests {
             }),
             NodeKind::Unknown(serde_json::json!({"type": "future_node"})),
         ];
+        kinds.extend(
+            delog_flow::filter::FilterKind::ALL
+                .into_iter()
+                .map(|kind| NodeKind::Filter(delog_flow::filter::FilterSpec::new(kind))),
+        );
         #[cfg(feature = "scripting")]
         kinds.push(NodeKind::Script(delog_flow::script::ScriptSpec {
             name: "script_with_a_deliberately_long_display_name".to_owned(),
