@@ -1,6 +1,6 @@
 [package]
 name = "delog-app"
-description = "DeLOG - drone flight log & live telemetry analyzer"
+description = "drone flight log & live telemetry analyzer"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
