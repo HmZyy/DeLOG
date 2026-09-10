@@ -147,14 +147,14 @@ impl Traj3dPipeline {
         &self,
         pass: &mut wgpu::RenderPass<'_>,
         bind_group: &wgpu::BindGroup,
-        point_count: u32,
+        points: std::ops::Range<u32>,
     ) {
-        if point_count < 2 {
+        if points.len() < 2 {
             return;
         }
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, bind_group, &[]);
-        pass.draw(0..(point_count - 1) * 2, 0..1);
+        pass.draw(points.start * 2..(points.end - 1) * 2, 0..1);
     }
 }
 
@@ -195,6 +195,16 @@ mod tests {
     }
 
     fn render(ctx: &RenderContext, w: u32, h: u32, pts: &[[f32; 3]]) -> crate::target::RgbaImage {
+        render_range(ctx, w, h, pts, 0..pts.len() as u32)
+    }
+
+    fn render_range(
+        ctx: &RenderContext,
+        w: u32,
+        h: u32,
+        pts: &[[f32; 3]],
+        range: std::ops::Range<u32>,
+    ) -> crate::target::RgbaImage {
         let target = Scene3dTarget::new(ctx.clone(), w, h);
         let pipe = Traj3dPipeline::new(
             ctx,
@@ -214,7 +224,7 @@ mod tests {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         {
             let mut pass = target.begin_pass(&mut enc, wgpu::Color::BLACK);
-            pipe.draw(&mut pass, &bind, pts.len() as u32);
+            pipe.draw(&mut pass, &bind, range);
         }
         ctx.queue().submit([enc.finish()]);
         ctx.device()
@@ -242,6 +252,40 @@ mod tests {
             "trajectory line should be visible, got {lit} lit px"
         );
         assert!(lit < (w * h) as usize / 8, "line should be thin, got {lit}");
+    }
+
+    #[test]
+    fn a_start_offset_skips_the_leading_segment() {
+        let Some(ctx) = RenderContext::headless() else {
+            eprintln!("no wgpu adapter - skipping traj3d test");
+            return;
+        };
+        let (w, h) = (96u32, 96u32);
+        let pts = [[-6.0, 0.0, 0.0], [0.0, 0.0, 0.0], [6.0, 0.0, 0.0]];
+        let img = render_range(&ctx, w, h, &pts, 1..3);
+
+        let full = render_range(&ctx, w, h, &pts, 0..3);
+
+        let yellow = |p: [u8; 4]| p[0] > 30 && p[1] > 30 && p[2] < 80;
+        let halves = |img: &crate::target::RgbaImage| {
+            let lit = |xs: std::ops::Range<u32>| {
+                xs.flat_map(|x| (0..h).map(move |y| (x, y)))
+                    .filter(|&(x, y)| yellow(img.pixel(x, y)))
+                    .count()
+            };
+            (lit(0..w / 2 - 4), lit(w / 2 + 4..w))
+        };
+        let (full_left, full_right) = halves(&full);
+        let (left, right) = halves(&img);
+
+        assert!(
+            full_left > 4 && full_right > 4,
+            "the whole polyline should span both halves, got {full_left}/{full_right}"
+        );
+        assert!(
+            (left == 0) != (right == 0),
+            "skipping the leading segment should leave exactly one half lit, got {left}/{right}"
+        );
     }
 
     #[test]
