@@ -47,8 +47,8 @@ pub struct VehicleDraw<'a> {
     /// Build-time config generation; a mismatch forces a full re-upload, a match
     /// lets a grown path upload only its appended tail.
     pub traj_generation: u64,
-    /// Points to draw this frame (≤ trajectory len); the rest stays resident.
-    pub visible_count: u32,
+    /// Points to draw this frame (within trajectory len); the rest stays resident.
+    pub visible: std::ops::Range<u32>,
 }
 
 /// Plot rect + data window shared by the GPU and the egui axes so labels line
@@ -679,7 +679,7 @@ impl GpuBridge {
                 }
                 if scene3d.show_axes {
                     res.traj
-                        .draw(&mut pass, &res.axis_gizmo.bind, res.axis_gizmo.count);
+                        .draw(&mut pass, &res.axis_gizmo.bind, 0..res.axis_gizmo.count);
                 }
                 res.draw_vehicles(&mut pass, vehicles);
             }
@@ -1305,8 +1305,11 @@ impl SceneResources {
             let Some(vg) = self.vehicles.get(&v.key) else {
                 continue;
             };
-            self.traj
-                .draw(pass, &vg.traj_bind, v.visible_count.min(vg.traj_count));
+            self.traj.draw(
+                pass,
+                &vg.traj_bind,
+                v.visible.start.min(vg.traj_count)..v.visible.end.min(vg.traj_count),
+            );
             if let Some(mesh) = v.model.and_then(|model| self.model_cache.get(model)) {
                 self.mesh.draw(pass, &vg.mesh_bind, mesh);
             }

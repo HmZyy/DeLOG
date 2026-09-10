@@ -95,14 +95,42 @@ pub enum TraceModeLayout {
 pub struct SceneLayout {
     pub camera: CameraLayout,
     pub tracked_vehicle: Option<usize>,
-    /// Defaults true so layouts saved before this field decode to the
-    /// up-to-playhead behavior.
-    #[serde(default = "default_trail_to_playhead")]
-    pub trail_to_playhead: bool,
+    #[serde(
+        default = "default_trail_mode",
+        alias = "trail_to_playhead",
+        deserialize_with = "trail_mode_compat"
+    )]
+    pub trail_mode: TrailModeLayout,
 }
 
-fn default_trail_to_playhead() -> bool {
-    true
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrailModeLayout {
+    ToPlayhead,
+    VisibleWindow,
+    Full,
+}
+
+fn default_trail_mode() -> TrailModeLayout {
+    TrailModeLayout::ToPlayhead
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum TrailModeCompat {
+    Named(TrailModeLayout),
+    Legacy(bool),
+}
+
+fn trail_mode_compat<'de, D>(deserializer: D) -> Result<TrailModeLayout, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match TrailModeCompat::deserialize(deserializer)? {
+        TrailModeCompat::Named(mode) => mode,
+        TrailModeCompat::Legacy(true) => TrailModeLayout::ToPlayhead,
+        TrailModeCompat::Legacy(false) => TrailModeLayout::Full,
+    })
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
