@@ -16,6 +16,35 @@ pub struct MapTileUpload<'a> {
     pub corners: [[f32; 3]; 4],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct MapTileUniform {
+    pub view_proj: [[f32; 4]; 4],
+    pub cam_pos: [f32; 4],
+    pub fog_color: [f32; 4],
+    pub fog_params: [f32; 4],
+}
+
+impl MapTileUniform {
+    pub fn new(
+        view_proj: [[f32; 4]; 4],
+        cam_pos: [f32; 3],
+        fog_color: [f32; 3],
+        fog: Option<(f32, f32)>,
+    ) -> Self {
+        let (start, end, enabled) = match fog {
+            Some((start, end)) => (start, end, 1.0),
+            None => (0.0, 1.0, 0.0),
+        };
+        Self {
+            view_proj,
+            cam_pos: [cam_pos[0], cam_pos[1], cam_pos[2], 0.0],
+            fog_color: [fog_color[0], fog_color[1], fog_color[2], 1.0],
+            fog_params: [start, end, enabled, 0.0],
+        }
+    }
+}
+
 /// Visible tiles in painter order. Fallback imagery is drawn first so
 /// coplanar current imagery deterministically replaces it where ready.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -103,8 +132,8 @@ impl MapTilePipeline {
             ..Default::default()
         });
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("delog-map-tiles-view-proj"),
-            size: 64,
+            label: Some("delog-map-tiles-view"),
+            size: std::mem::size_of::<MapTileUniform>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -113,11 +142,13 @@ impl MapTilePipeline {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
-                        min_binding_size: wgpu::BufferSize::new(64),
+                        min_binding_size: wgpu::BufferSize::new(
+                            std::mem::size_of::<MapTileUniform>() as u64,
+                        ),
                     },
                     count: None,
                 },
@@ -216,9 +247,16 @@ impl MapTilePipeline {
             create_pipeline("delog-map-tiles-fallback-pipeline", FALLBACK_DEPTH_BIAS);
         let current_pipeline =
             create_pipeline("delog-map-tiles-current-pipeline", CURRENT_DEPTH_BIAS);
-        let identity = glam_identity();
-        ctx.queue()
-            .write_buffer(&uniform, 0, bytemuck::cast_slice(&identity));
+        ctx.queue().write_buffer(
+            &uniform,
+            0,
+            bytemuck::bytes_of(&MapTileUniform::new(
+                glam_identity(),
+                [0.0; 3],
+                [0.0; 3],
+                None,
+            )),
+        );
         Self {
             ctx: ctx.clone(),
             fallback_pipeline,
@@ -342,10 +380,10 @@ impl MapTilePipeline {
         });
     }
 
-    pub fn set_view_proj(&self, view_proj: [[f32; 4]; 4]) {
+    pub fn set_uniform(&self, uniform: &MapTileUniform) {
         self.ctx
             .queue()
-            .write_buffer(&self.uniform, 0, bytemuck::cast_slice(&view_proj));
+            .write_buffer(&self.uniform, 0, bytemuck::bytes_of(uniform));
     }
 
     pub fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, keys: &[u64]) {
@@ -392,7 +430,7 @@ fn glam_identity() -> [[f32; 4]; 4] {
 
 #[cfg(test)]
 mod tests {
-    use super::{MapTileDrawGroups, MapTilePipeline, MapTileUpload};
+    use super::{MapTileDrawGroups, MapTilePipeline, MapTileUniform, MapTileUpload};
     use crate::{Grid3dPipeline, GridUniform, RenderContext, Scene3dTarget};
 
     struct NearTrianglePipeline(wgpu::RenderPipeline);
@@ -503,6 +541,16 @@ fn fs() -> @location(0) vec4<f32> {
     }
 
     fn render(tiles: &[MapTileUpload<'_>], view_proj: glam::Mat4) -> crate::RgbaImage {
+        fog_render(tiles, view_proj, [0.0; 3], [0.0; 3], None)
+    }
+
+    fn fog_render(
+        tiles: &[MapTileUpload<'_>],
+        view_proj: glam::Mat4,
+        cam_pos: [f32; 3],
+        fog_color: [f32; 3],
+        fog: Option<(f32, f32)>,
+    ) -> crate::RgbaImage {
         let ctx = RenderContext::headless().expect("headless adapter");
         let target = Scene3dTarget::new(ctx.clone(), 64, 64);
         let mut pipeline = MapTilePipeline::new(
@@ -514,7 +562,12 @@ fn fs() -> @location(0) vec4<f32> {
         for tile in tiles {
             pipeline.upload(*tile).unwrap();
         }
-        pipeline.set_view_proj(view_proj.to_cols_array_2d());
+        pipeline.set_uniform(&MapTileUniform::new(
+            view_proj.to_cols_array_2d(),
+            cam_pos,
+            fog_color,
+            fog,
+        ));
         let mut encoder = ctx.device().create_command_encoder(&Default::default());
         {
             let mut pass = target.begin_pass(&mut encoder, wgpu::Color::BLACK);
@@ -676,7 +729,12 @@ fn fs() -> @location(0) vec4<f32> {
             for index in insertion_order {
                 tiles.upload(uploads[index]).unwrap();
             }
-            tiles.set_view_proj(glam::Mat4::IDENTITY.to_cols_array_2d());
+            tiles.set_uniform(&MapTileUniform::new(
+                glam::Mat4::IDENTITY.to_cols_array_2d(),
+                [0.0; 3],
+                [0.0; 3],
+                None,
+            ));
             let triangle = NearTrianglePipeline::new(&ctx);
             let mut encoder = ctx.device().create_command_encoder(&Default::default());
             {
@@ -736,7 +794,12 @@ fn fs() -> @location(0) vec4<f32> {
             for index in order {
                 tiles.upload(uploads[index]).unwrap();
             }
-            tiles.set_view_proj(glam::Mat4::IDENTITY.to_cols_array_2d());
+            tiles.set_uniform(&MapTileUniform::new(
+                glam::Mat4::IDENTITY.to_cols_array_2d(),
+                [0.0; 3],
+                [0.0; 3],
+                None,
+            ));
             let visible = MapTileDrawGroups {
                 fallback: vec![90],
                 current: vec![10],
@@ -785,7 +848,12 @@ fn fs() -> @location(0) vec4<f32> {
                 ],
             })
             .unwrap();
-        tiles.set_view_proj(view_proj.to_cols_array_2d());
+        tiles.set_uniform(&MapTileUniform::new(
+            view_proj.to_cols_array_2d(),
+            [0.0; 3],
+            [0.0; 3],
+            None,
+        ));
         let grid = Grid3dPipeline::new(
             &ctx,
             target.color_format(),
@@ -892,7 +960,12 @@ fn fs() -> @location(0) vec4<f32> {
             let eye = glam::Vec3::new(dx, 3.0, 3.0);
             let vp = glam::Mat4::perspective_rh(0.9, 1.0, 0.1, 20.0)
                 * glam::Mat4::look_at_rh(eye, glam::Vec3::ZERO, glam::Vec3::Y);
-            tiles.set_view_proj(vp.to_cols_array_2d());
+            tiles.set_uniform(&MapTileUniform::new(
+                vp.to_cols_array_2d(),
+                [0.0; 3],
+                [0.0; 3],
+                None,
+            ));
             grid.set_uniform(
                 &ctx,
                 &GridUniform::new(
@@ -1038,23 +1111,28 @@ fn fs() -> @location(0) vec4<f32> {
             current: vec![1],
         };
 
-        for (eye, cell) in [
-            (glam::Vec3::new(0.0, 30.0, 30.0), 3.0f32),
-            (glam::Vec3::new(0.0, 300.0, 300.0), 30.0),
-            (glam::Vec3::new(0.0, 3000.0, 3000.0), 300.0),
+        for (eye, level) in [
+            (glam::Vec3::new(0.0, 30.0, 30.0), 1.222f32),
+            (glam::Vec3::new(0.0, 300.0, 300.0), 2.222),
+            (glam::Vec3::new(0.0, 3000.0, 3000.0), 3.222),
         ] {
             let proj = glam::Mat4::perspective_rh(0.95, w as f32 / h as f32, 0.05, 20_000.0);
             let view = glam::Mat4::look_at_rh(eye, glam::Vec3::ZERO, glam::Vec3::Y);
             let mut view_rot = view;
             view_rot.w_axis = glam::Vec4::new(0.0, 0.0, 0.0, 1.0);
-            tiles.set_view_proj((proj * view).to_cols_array_2d());
+            tiles.set_uniform(&MapTileUniform::new(
+                (proj * view).to_cols_array_2d(),
+                [0.0; 3],
+                [0.0; 3],
+                None,
+            ));
             grid.set_uniform(
                 &ctx,
                 &GridUniform::new(
                     (proj * view).to_cols_array_2d(),
                     (proj * view_rot).inverse().to_cols_array_2d(),
                     eye.to_array(),
-                    cell,
+                    level,
                     1_000.0,
                     20_000.0,
                     false,
@@ -1101,5 +1179,129 @@ fn fs() -> @location(0) vec4<f32> {
                  coplanar map tiles - they are z-fighting"
             );
         }
+    }
+
+    const FOG_MAGENTA: [f32; 3] = [1.0, 0.0, 1.0];
+
+    fn ground_quad_view() -> (glam::Mat4, [f32; 3]) {
+        let cam = glam::Vec3::new(0.0, 4.0, 4.0);
+        let view_proj = glam::Mat4::perspective_rh(60f32.to_radians(), 1.0, 0.1, 100.0)
+            * glam::Mat4::look_at_rh(cam, glam::Vec3::ZERO, glam::Vec3::Y);
+        (view_proj, cam.to_array())
+    }
+
+    fn centered_ground_tile(rgba: &[u8]) -> MapTileUpload<'_> {
+        MapTileUpload {
+            key: 1,
+            rgba,
+            corners: [
+                [-2.0, 0.0, -2.0],
+                [2.0, 0.0, -2.0],
+                [2.0, 0.0, 2.0],
+                [-2.0, 0.0, 2.0],
+            ],
+        }
+    }
+
+    #[test]
+    fn tiles_beyond_fog_end_render_as_the_fog_color() {
+        let red = solid([255, 0, 0, 255]);
+        let (view_proj, cam) = ground_quad_view();
+        let img = fog_render(
+            &[centered_ground_tile(&red)],
+            view_proj,
+            cam,
+            FOG_MAGENTA,
+            Some((1.0, 2.0)),
+        );
+
+        let (x, y) = screen_point(view_proj, glam::Vec3::ZERO);
+        assert!(
+            img.matches(x, y, [255, 0, 255, 255], 6),
+            "a tile past the fog end should be the fog color, got {:?}",
+            img.pixel(x, y)
+        );
+    }
+
+    #[test]
+    fn tiles_inside_fog_start_keep_their_texture() {
+        let red = solid([255, 0, 0, 255]);
+        let (view_proj, cam) = ground_quad_view();
+        let img = fog_render(
+            &[centered_ground_tile(&red)],
+            view_proj,
+            cam,
+            FOG_MAGENTA,
+            Some((100.0, 200.0)),
+        );
+
+        let (x, y) = screen_point(view_proj, glam::Vec3::ZERO);
+        assert!(
+            img.matches(x, y, [255, 0, 0, 255], 6),
+            "a tile nearer than the fog start should be unfogged, got {:?}",
+            img.pixel(x, y)
+        );
+    }
+
+    #[test]
+    fn fog_disabled_leaves_tiles_unfogged() {
+        let red = solid([255, 0, 0, 255]);
+        let (view_proj, cam) = ground_quad_view();
+        let img = fog_render(
+            &[centered_ground_tile(&red)],
+            view_proj,
+            cam,
+            FOG_MAGENTA,
+            None,
+        );
+
+        let (x, y) = screen_point(view_proj, glam::Vec3::ZERO);
+        assert!(
+            img.matches(x, y, [255, 0, 0, 255], 6),
+            "disabled fog must not tint tiles whatever the range is, got {:?}",
+            img.pixel(x, y)
+        );
+    }
+
+    #[test]
+    fn tiles_fade_gradually_across_their_own_distance_range() {
+        let white = solid([255, 255, 255, 255]);
+        let cam = glam::Vec3::new(0.0, 1.2, 8.0);
+        let view_proj = glam::Mat4::perspective_rh(60f32.to_radians(), 1.0, 0.1, 200.0)
+            * glam::Mat4::look_at_rh(cam, glam::Vec3::new(0.0, 0.0, -30.0), glam::Vec3::Y);
+        let strip = MapTileUpload {
+            key: 1,
+            rgba: &white,
+            corners: [
+                [-6.0, 0.0, 8.0],
+                [6.0, 0.0, 8.0],
+                [6.0, 0.0, -30.0],
+                [-6.0, 0.0, -30.0],
+            ],
+        };
+        let img = fog_render(
+            &[strip],
+            view_proj,
+            cam.to_array(),
+            [0.0, 0.0, 0.6],
+            Some((5.0, 60.0)),
+        );
+
+        let (nx, ny) = screen_point(view_proj, glam::Vec3::new(0.0, 0.0, -5.0));
+        let (fx, fy) = screen_point(view_proj, glam::Vec3::new(0.0, 0.0, -25.0));
+        let near = img.pixel(nx, ny);
+        let far = img.pixel(fx, fy);
+        assert!(
+            near[0] > 150,
+            "the near end of the strip should be barely fogged, got {near:?}"
+        );
+        assert!(
+            far[0] > 20,
+            "the far sample should still land on the strip, got {far:?}"
+        );
+        assert!(
+            u32::from(far[0]) + 40 < u32::from(near[0]),
+            "fog must build up with per-fragment distance, got near {near:?} far {far:?}"
+        );
     }
 }
