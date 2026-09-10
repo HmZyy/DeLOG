@@ -250,6 +250,14 @@ fn evaluate_inner(
                     });
                     continue;
                 }
+                // Validate before cache lookup: JSON fingerprints represent nonfinite
+                // numbers as null, so invalid settings must never restore a cached value.
+                if let NodeKind::Filter(spec) = kind
+                    && let Err(message) = spec.validate()
+                {
+                    report.diagnostics.push(Diagnostic { node: id, message });
+                    continue;
+                }
                 let fingerprint = fingerprint(kind, &input_fingerprints, None, None);
                 if restore_cached(id, fingerprint, cache, &mut report) {
                     fingerprints.insert(id, fingerprint);
@@ -361,6 +369,23 @@ fn evaluate_kernel(kind: &NodeKind, inputs: &[Value]) -> Result<(Vec<Value>, Vec
                 .v
                 .iter()
                 .map(|value| value * multiplier + offset)
+                .collect();
+            (
+                Value::Signal(Signal {
+                    t: Arc::clone(&input.t),
+                    v: Arc::new(values),
+                    meta: input.meta.clone(),
+                }),
+                Vec::new(),
+            )
+        }
+        NodeKind::Filter(spec) => {
+            spec.validate()?;
+            let input = require_signal(inputs.first())?;
+            let values = input
+                .v
+                .iter()
+                .map(|&value| if spec.matches(value) { value } else { f64::NAN })
                 .collect();
             (
                 Value::Signal(Signal {
@@ -658,6 +683,320 @@ mod tests {
         match report.values.get(&id).and_then(|v| v.get(port)).unwrap() {
             Value::Signal(signal) => signal,
             Value::Scalar(_) => panic!("expected signal"),
+        }
+    }
+
+    fn assert_samples(actual: &[f64], expected: &[f64]) {
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert!(
+                actual == expected || (actual.is_nan() && expected.is_nan()),
+                "{actual} != {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn filter_masks_nonfinite_values_and_chains_without_changing_metadata() {
+        use crate::filter::{FilterKind, FilterSpec};
+        for values in [
+            vec![],
+            vec![
+                -2.0,
+                -1.0,
+                0.0,
+                1.0,
+                2.0,
+                f64::NAN,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+            ],
+        ] {
+            let input = Signal {
+                t: Arc::new((0..values.len() as i64).collect()),
+                v: Arc::new(values),
+                meta: SignalMeta {
+                    timeline: TimelineId::Node(NodeId(10)),
+                    unit: Some("m".into()),
+                },
+            };
+            for filter in FilterKind::ALL {
+                let kind = NodeKind::Filter(FilterSpec::new(filter));
+                let (result, diagnostics) =
+                    evaluate_kernel(&kind, &[Value::Signal(input.clone())]).unwrap();
+                assert!(diagnostics.is_empty());
+                let Value::Signal(output) = &result[0] else {
+                    panic!("signal expected")
+                };
+                assert!(Arc::ptr_eq(&input.t, &output.t));
+                assert_eq!(input.meta, output.meta);
+                assert_eq!(input.v.len(), output.v.len());
+                for (before, after) in input.v.iter().zip(output.v.iter()) {
+                    assert!(after.is_nan() || before.to_bits() == after.to_bits());
+                    assert!(!after.is_infinite());
+                }
+                let (again, _) = evaluate_kernel(&kind, &result).unwrap();
+                let Value::Signal(again) = &again[0] else {
+                    panic!("signal expected")
+                };
+                assert_samples(&again.v, &output.v);
+            }
+        }
+    }
+
+    #[test]
+    fn filter_runs_on_normalized_values_and_publishes_beside_original() {
+        use crate::filter::{FilterKind, FilterSpec};
+        use crate::graph::{OutputFieldSpec, OutputSpec};
+        use delog_core::derived::PendingColumn;
+        let snapshot = snapshot_scaled_i16();
+        let mut graph = Graph::new("filters");
+        let data = add_node(&mut graph, field("SCALED", "A"));
+        let filter = add_node(
+            &mut graph,
+            NodeKind::Filter(FilterSpec {
+                value: 1.0,
+                ..FilterSpec::new(FilterKind::Equal)
+            }),
+        );
+        let add = add_node(&mut graph, NodeKind::Add);
+        let output = add_node(
+            &mut graph,
+            NodeKind::Output(OutputSpec {
+                topic: "filtered".into(),
+                fields: ["original", "filtered", "sum"]
+                    .into_iter()
+                    .map(|name| OutputFieldSpec {
+                        name: name.into(),
+                        unit: None,
+                    })
+                    .collect(),
+            }),
+        );
+        graph.connect(data, 0, filter, 0).unwrap();
+        graph.connect(data, 0, add, 0).unwrap();
+        graph.connect(filter, 0, add, 1).unwrap();
+        graph.connect(data, 0, output, 0).unwrap();
+        graph.connect(filter, 0, output, 1).unwrap();
+        graph.connect(add, 0, output, 2).unwrap();
+        let report = eval_single(&graph, &snapshot, output);
+        assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+        assert_samples(&signal(&report, filter).v, &[1.0, f64::NAN]);
+        assert_samples(&signal(&report, add).v, &[2.0, f64::NAN]);
+        assert!(Arc::ptr_eq(
+            &signal(&report, data).t,
+            &signal(&report, filter).t
+        ));
+        assert_eq!(signal(&report, data).meta, signal(&report, filter).meta);
+        let topics = crate::publish::build_outputs(&graph, &report).unwrap();
+        assert_eq!(topics[0].times, vec![100, 200]);
+        for (field, expected) in
+            topics[0]
+                .fields
+                .iter()
+                .zip([[1.0, 2.0], [1.0, f64::NAN], [2.0, f64::NAN]])
+        {
+            assert_eq!(field.unit.as_deref(), Some("m"));
+            let PendingColumn::F64(values) = &field.values else {
+                panic!("numeric expected")
+            };
+            assert_samples(values, &expected);
+        }
+    }
+
+    #[test]
+    fn filter_set_kind_invalidates_downstream_and_undo_restores_boundary() {
+        use crate::filter::{FilterKind, FilterSpec};
+        let snapshot = snapshot_gps_baro();
+        let mut graph = Graph::new("filters");
+        let data = add_node(&mut graph, field("GPS", "Alt"));
+        let initial = FilterSpec::new(FilterKind::GreaterThan);
+        let filter = add_node(&mut graph, NodeKind::Filter(initial.clone()));
+        let downstream = add_node(
+            &mut graph,
+            NodeKind::ScaleOffset {
+                multiplier: 2.0,
+                offset: 0.0,
+            },
+        );
+        graph.connect(data, 0, filter, 0).unwrap();
+        graph.connect(filter, 0, downstream, 0).unwrap();
+        let edges = graph.edges.clone();
+        let mut cache = EvalCache::default();
+        let mut run = |graph: &Graph| {
+            eval_no_host(
+                graph,
+                &snapshot,
+                &[downstream],
+                &AtomicBool::new(false),
+                &mut cache,
+            )
+        };
+        let first = run(&graph);
+        assert_samples(&signal(&first, downstream).v, &[2.0, f64::NAN, f64::NAN]);
+        for (spec, expected) in [
+            (
+                FilterSpec {
+                    inclusive: true,
+                    ..initial.clone()
+                },
+                [2.0, f64::NAN, 0.0],
+            ),
+            (
+                FilterSpec {
+                    value: -2.0,
+                    ..initial.clone()
+                },
+                [2.0, -2.0, 0.0],
+            ),
+            (FilterSpec::new(FilterKind::Between), [2.0, f64::NAN, 0.0]),
+            (
+                FilterSpec {
+                    upper: 0.0,
+                    ..FilterSpec::new(FilterKind::Between)
+                },
+                [f64::NAN, f64::NAN, 0.0],
+            ),
+            (
+                FilterSpec {
+                    value: 9.0,
+                    ..initial.clone()
+                },
+                [f64::NAN; 3],
+            ),
+        ] {
+            let inverse = apply(
+                &mut graph,
+                GraphCommand::SetKind {
+                    id: filter,
+                    kind: NodeKind::Filter(spec),
+                },
+            )
+            .unwrap();
+            let next = run(&graph);
+            assert_samples(&signal(&next, downstream).v, &expected);
+            assert!(Arc::ptr_eq(&signal(&first, data).v, &signal(&next, data).v));
+            assert!(!Arc::ptr_eq(
+                &signal(&first, filter).v,
+                &signal(&next, filter).v
+            ));
+            assert_eq!(graph.edges, edges);
+            apply(&mut graph, inverse).unwrap();
+            let restored = run(&graph);
+            assert_samples(
+                &signal(&restored, downstream).v,
+                &signal(&first, downstream).v,
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_filter_limits_cannot_restore_a_colliding_cache_entry() {
+        use crate::filter::{FilterKind, FilterSpec};
+        let snapshot = snapshot_gps_baro();
+        let mut graph = Graph::new("filters");
+        let data = add_node(&mut graph, field("GPS", "Alt"));
+        let filter = add_node(
+            &mut graph,
+            NodeKind::Filter(FilterSpec::new(FilterKind::Between)),
+        );
+        graph.connect(data, 0, filter, 0).unwrap();
+        let mut cache = EvalCache::default();
+        let valid = eval_no_host(
+            &graph,
+            &snapshot,
+            &[filter],
+            &AtomicBool::new(false),
+            &mut cache,
+        );
+        let source_fingerprint = cache.entries[&data].fingerprint;
+        for spec in [
+            FilterSpec {
+                value: f64::NAN,
+                ..FilterSpec::new(FilterKind::Equal)
+            },
+            FilterSpec {
+                value: f64::INFINITY,
+                ..FilterSpec::new(FilterKind::LessThan)
+            },
+            FilterSpec {
+                upper: f64::NEG_INFINITY,
+                ..FilterSpec::new(FilterKind::Between)
+            },
+            FilterSpec {
+                value: 2.0,
+                ..FilterSpec::new(FilterKind::OutsideRange)
+            },
+        ] {
+            let kind = NodeKind::Filter(spec);
+            // Force a matching stale fingerprint to test validation ordering independently of hashing.
+            cache.entries.get_mut(&filter).unwrap().fingerprint =
+                fingerprint(&kind, &[source_fingerprint], None, None);
+            graph.node_mut(filter).unwrap().kind = kind;
+            let report = eval_no_host(
+                &graph,
+                &snapshot,
+                &[filter],
+                &AtomicBool::new(false),
+                &mut cache,
+            );
+            assert!(!report.values.contains_key(&filter));
+            assert!(report.diagnostics.iter().any(|d| d.node == filter));
+            assert!(Arc::ptr_eq(
+                &signal(&valid, data).v,
+                &signal(&report, data).v
+            ));
+        }
+    }
+
+    #[test]
+    fn windowed_filter_keeps_window_timestamps_and_gaps() {
+        use crate::filter::{FilterKind, FilterSpec};
+        let snapshot = snapshot_gps_baro();
+        let mut graph = Graph::new("filters");
+        let data = add_node(&mut graph, field("GPS", "Alt"));
+        let filter = add_node(
+            &mut graph,
+            NodeKind::Filter(FilterSpec::new(FilterKind::Equal)),
+        );
+        graph.connect(data, 0, filter, 0).unwrap();
+        let mut cache = EvalCache::default();
+        for (window, times, values) in [
+            (
+                Some(TimeRange {
+                    min_us: 200,
+                    max_us: 300,
+                }),
+                vec![200, 300],
+                vec![f64::NAN, 0.0],
+            ),
+            (None, vec![100, 200, 300], vec![f64::NAN, f64::NAN, 0.0]),
+            (
+                Some(TimeRange {
+                    min_us: 400,
+                    max_us: 500,
+                }),
+                vec![],
+                vec![],
+            ),
+        ] {
+            let report = evaluate_windowed(
+                &graph,
+                &snapshot,
+                &[filter],
+                &AtomicBool::new(false),
+                &mut cache,
+                window,
+                #[cfg(feature = "scripting")]
+                None,
+            );
+            assert!(report.diagnostics.is_empty());
+            assert_eq!(*signal(&report, filter).t, times);
+            assert_samples(&signal(&report, filter).v, &values);
+            assert!(Arc::ptr_eq(
+                &signal(&report, data).t,
+                &signal(&report, filter).t
+            ));
         }
     }
 

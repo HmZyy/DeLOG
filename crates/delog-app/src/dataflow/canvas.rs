@@ -316,6 +316,7 @@ fn show_node_contents(
 
     result.changed = match edited {
         NodeKind::Constant { value } => ui.add(egui::DragValue::new(value)).changed(),
+        NodeKind::Filter(spec) => super::filter_controls::filter_controls(ui, spec),
         NodeKind::ScaleOffset { multiplier, offset } => {
             let multiplier_changed = ui
                 .add(egui::DragValue::new(multiplier).prefix("x "))

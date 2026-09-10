@@ -184,6 +184,7 @@ pub(crate) fn node_kind_json(kind: &NodeKind) -> Value {
             Map::from_iter([("conversion".to_owned(), json!(kind.as_str()))])
         }
         NodeKind::Align { mode } => Map::from_iter([("mode".to_owned(), json!(mode.as_str()))]),
+        NodeKind::Filter(spec) => serialized_object(spec),
         NodeKind::Output(spec) => serialized_object(spec),
         #[cfg(feature = "scripting")]
         NodeKind::Script(spec) => serialized_object(spec),
@@ -198,6 +199,7 @@ pub(crate) fn node_kind_json(kind: &NodeKind) -> Value {
         NodeKind::ScaleOffset { .. } => "scale_offset",
         NodeKind::Convert { .. } => "convert",
         NodeKind::Align { .. } => "align",
+        NodeKind::Filter(_) => "filter",
         NodeKind::Output(_) => "output",
         #[cfg(feature = "scripting")]
         NodeKind::Script(_) => "script",
@@ -275,6 +277,7 @@ fn node_from_json(value: &Value) -> Result<Node, DocError> {
                     .map_err(|message| invalid(&message))?,
             }
         }
+        "filter" => NodeKind::Filter(decode_value(value)?),
         "output" => NodeKind::Output(decode_value::<OutputSpec>(value)?),
         #[cfg(feature = "scripting")]
         "script" => NodeKind::Script(decode_value::<crate::script::ScriptSpec>(value)?),
@@ -334,6 +337,48 @@ mod tests {
             kind,
         });
         id
+    }
+
+    #[test]
+    fn filters_round_trip_flat_settings_and_default_missing_inclusive() {
+        use crate::filter::{FilterKind, FilterSpec};
+        for filter in FilterKind::ALL {
+            for inclusive in [false, true] {
+                let spec = FilterSpec {
+                    filter,
+                    value: -2.0,
+                    upper: 4.0,
+                    inclusive,
+                };
+                let mut graph = Graph::new("filters");
+                add(&mut graph, NodeKind::Filter(spec.clone()));
+                let mut json = to_json(&graph);
+                assert_eq!(json["nodes"][0]["type"], "filter");
+                assert_eq!(json["nodes"][0]["inclusive"], inclusive);
+                assert_eq!(json["nodes"][0]["value"], -2.0);
+                assert_eq!(from_json(&json).unwrap(), graph);
+                json["nodes"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("inclusive");
+                let NodeKind::Filter(decoded) = &from_json(&json).unwrap().nodes[0].kind else {
+                    panic!("filter expected")
+                };
+                assert!(!decoded.inclusive);
+                for (field, invalid) in [
+                    ("inclusive", json!(1)),
+                    ("inclusive", json!("true")),
+                    ("inclusive", Value::Null),
+                    ("value", json!("0")),
+                    ("upper", Value::Null),
+                    ("filter", json!("bogus")),
+                ] {
+                    let mut bad = json.clone();
+                    bad["nodes"][0][field] = invalid;
+                    assert!(from_json(&bad).is_err(), "{field}: {bad}");
+                }
+            }
+        }
     }
 
     #[test]
