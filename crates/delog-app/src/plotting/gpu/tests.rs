@@ -72,7 +72,7 @@ fn shared_frame_moves_resident_trajectories_without_reuploading() {
         trajectory: &points,
         trajectory_transform: glam::DMat4::IDENTITY,
         traj_generation: 1,
-        visible_count: 2,
+        visible: 0..2,
     };
     for offset in [0.0, 0.5, -0.5] {
         vehicle.trajectory_transform =

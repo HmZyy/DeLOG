@@ -85,6 +85,14 @@ pub fn arrow_left_right() -> ImageSource<'static> {
     egui::include_image!("../../assets/icons/arrow-left-right.svg")
 }
 
+pub fn route_to_playhead() -> ImageSource<'static> {
+    egui::include_image!("../../assets/icons/route-to-playhead.svg")
+}
+
+pub fn route_window() -> ImageSource<'static> {
+    egui::include_image!("../../assets/icons/route-window.svg")
+}
+
 #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
 pub fn square() -> ImageSource<'static> {
     egui::include_image!("../../assets/icons/square.svg")

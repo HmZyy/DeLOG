@@ -362,3 +362,54 @@ fn empty_doc(name: &str) -> LayoutDoc {
         vehicles: Vec::new(),
     }
 }
+
+fn scene_layout(tail: &str) -> TrailModeLayout {
+    let camera = r#""camera":{"yaw":0.0,"pitch":0.0,"distance":1.0},"tracked_vehicle":null"#;
+    serde_json::from_str::<SceneLayout>(&format!("{{{camera}{tail}}}"))
+        .expect("scene layout should decode")
+        .trail_mode
+}
+
+#[test]
+fn scene_layouts_decode_each_trail_mode() {
+    assert_eq!(
+        scene_layout(r#","trail_mode":"to_playhead""#),
+        TrailModeLayout::ToPlayhead
+    );
+    assert_eq!(
+        scene_layout(r#","trail_mode":"visible_window""#),
+        TrailModeLayout::VisibleWindow
+    );
+    assert_eq!(scene_layout(r#","trail_mode":"full""#), TrailModeLayout::Full);
+}
+
+#[test]
+fn scene_layouts_saved_with_the_old_boolean_keep_their_trail_choice() {
+    assert_eq!(
+        scene_layout(r#","trail_to_playhead":true"#),
+        TrailModeLayout::ToPlayhead
+    );
+    assert_eq!(
+        scene_layout(r#","trail_to_playhead":false"#),
+        TrailModeLayout::Full
+    );
+    assert_eq!(scene_layout(""), TrailModeLayout::ToPlayhead);
+}
+
+#[test]
+fn scene_layouts_re_encode_the_trail_mode_by_name() {
+    let scene = SceneLayout {
+        camera: CameraLayout {
+            yaw: 0.0,
+            pitch: 0.0,
+            distance: 1.0,
+        },
+        tracked_vehicle: None,
+        trail_mode: TrailModeLayout::VisibleWindow,
+    };
+    let json = serde_json::to_string(&scene).expect("scene layout should encode");
+    assert!(
+        json.contains(r#""trail_mode":"visible_window""#),
+        "expected a named trail mode, got {json}"
+    );
+}
