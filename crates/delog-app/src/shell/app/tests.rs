@@ -85,7 +85,7 @@ fn timeline_range_uses_empty_session_placeholder_without_data() {
 
 #[test]
 fn fit_to_view_defaults_on_for_new_sessions() {
-    assert!(DEFAULT_FIT_VIEW_ALL);
+    const { assert!(DEFAULT_FIT_VIEW_ALL) };
 }
 
 #[test]

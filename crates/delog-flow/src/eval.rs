@@ -1318,7 +1318,13 @@ mod tests {
         let mut graph = Graph::new("g");
         let gps = add_node(&mut graph, field("GPS", "Alt"));
         let mut cache = EvalCache::default();
-        let full = eval_no_host(&graph, &snapshot, &[gps], &AtomicBool::new(false), &mut cache);
+        let full = eval_no_host(
+            &graph,
+            &snapshot,
+            &[gps],
+            &AtomicBool::new(false),
+            &mut cache,
+        );
         assert_eq!(signal(&full, gps).t.len(), 3);
         let windowed = evaluate_windowed(
             &graph,

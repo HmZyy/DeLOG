@@ -30,13 +30,12 @@ fn unique_fields_dedupes_traces_shared_between_plots() {
         .tree
         .tiles
         .iter()
-        .filter(|(id, tile)| {
-            **id != first && matches!(tile, egui_tiles::Tile::Pane(Pane::Plot(_)))
-        })
+        .filter(|(id, tile)| **id != first && matches!(tile, egui_tiles::Tile::Pane(Pane::Plot(_))))
         .map(|(id, _)| *id)
         .next()
         .expect("the split should have produced a second plot");
-    let Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) = workspace.tree.tiles.get_mut(second) else {
+    let Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) = workspace.tree.tiles.get_mut(second)
+    else {
         panic!("expected a plot pane");
     };
     pane.add_trace(FieldId(3));
@@ -319,8 +318,7 @@ fn closing_the_focused_plot_reassigns_focus_to_the_surviving_plot() {
         .tiles
         .iter()
         .find_map(|(id, tile)| {
-            (*id != closing && matches!(tile, egui_tiles::Tile::Pane(Pane::Plot(_))))
-                .then_some(*id)
+            (*id != closing && matches!(tile, egui_tiles::Tile::Pane(Pane::Plot(_)))).then_some(*id)
         })
         .expect("split should create a surviving plot");
     workspace.focused = Some(closing);
@@ -341,8 +339,7 @@ fn focus_repair_chooses_the_lowest_surviving_plot_id() {
         .tiles
         .iter()
         .filter_map(|(id, tile)| {
-            (*id != closing && matches!(tile, egui_tiles::Tile::Pane(Pane::Plot(_))))
-                .then_some(*id)
+            (*id != closing && matches!(tile, egui_tiles::Tile::Pane(Pane::Plot(_)))).then_some(*id)
         })
         .min_by_key(|id| id.0)
         .expect("two plots should survive");
@@ -400,8 +397,7 @@ fn scene_splits_at_root_not_inside_the_focused_pane() {
         Some(root),
         "scene must sit directly under the root, beside the whole layout",
     );
-    let Some(egui_tiles::Tile::Container(root_container)) = workspace.tree.tiles.get(root)
-    else {
+    let Some(egui_tiles::Tile::Container(root_container)) = workspace.tree.tiles.get(root) else {
         panic!("root should be a container wrapping the layout and the scene");
     };
     assert_eq!(root_container.num_children(), 2);
@@ -438,8 +434,7 @@ fn scene_map_overlay_only_reports_actionable_states() {
         Some("Map cache error")
     );
     assert_eq!(
-        scene_map_overlay(true, None, Some(TileFailureClass::NetworkTransient), true)
-            .as_deref(),
+        scene_map_overlay(true, None, Some(TileFailureClass::NetworkTransient), true).as_deref(),
         Some("Map tiles offline - showing cached imagery")
     );
     assert_eq!(scene_map_overlay(true, None, None, true), None);
@@ -515,8 +510,7 @@ fn scene_map_none_provider_or_reference_produces_no_selection() {
 fn ghost_trace_resolves_when_matching_field_loads() {
     let mut workspace = Workspace::new();
     let root = workspace.tree.root().unwrap();
-    let Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) = workspace.tree.tiles.get_mut(root)
-    else {
+    let Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) = workspace.tree.tiles.get_mut(root) else {
         panic!("root should be a plot");
     };
     pane.add_ghost(crate::plotting::plot::GhostTrace {
@@ -553,8 +547,7 @@ fn ghost_trace_resolves_when_matching_field_loads() {
 fn ghost_trace_stays_missing_when_field_is_ambiguous() {
     let mut workspace = Workspace::new();
     let root = workspace.tree.root().unwrap();
-    let Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) = workspace.tree.tiles.get_mut(root)
-    else {
+    let Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) = workspace.tree.tiles.get_mut(root) else {
         panic!("root should be a plot");
     };
     pane.add_ghost(crate::plotting::plot::GhostTrace {
@@ -650,8 +643,7 @@ fn cross_direction_split_keeps_the_wrapped_pane_in_its_slot() {
         _ => panic!("root should still be a vertical container"),
     };
     assert_eq!(children.len(), 2);
-    let Some(egui_tiles::Tile::Container(wrapper)) = workspace.tree.tiles.get(children[0])
-    else {
+    let Some(egui_tiles::Tile::Container(wrapper)) = workspace.tree.tiles.get(children[0]) else {
         panic!("the top slot should hold the new horizontal wrapper");
     };
     assert_eq!(wrapper.kind(), egui_tiles::ContainerKind::Horizontal);
@@ -664,8 +656,7 @@ fn edge_drop_splits_root_and_adds_all_dropped_traces_to_new_pane() {
     let mut workspace = Workspace::new();
     let root = workspace.tree.root().unwrap();
 
-    let added =
-        workspace.split_plot_with_traces(root, DropEdge::Left, &[FieldId(7), FieldId(9)]);
+    let added = workspace.split_plot_with_traces(root, DropEdge::Left, &[FieldId(7), FieldId(9)]);
     assert_eq!(added, vec![FieldId(7), FieldId(9)]);
 
     let root = workspace.tree.root().unwrap();
@@ -675,8 +666,7 @@ fn edge_drop_splits_root_and_adds_all_dropped_traces_to_new_pane() {
     assert_eq!(container.kind(), egui_tiles::ContainerKind::Horizontal);
     let children = container.children_vec();
     let new_pane = children[0];
-    let Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) = workspace.tree.tiles.get(new_pane)
-    else {
+    let Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) = workspace.tree.tiles.get(new_pane) else {
         panic!("left child should be the new plot pane");
     };
     assert_eq!(
@@ -908,8 +898,7 @@ fn drop_edge_prefers_the_nearest_edge_inside_the_threshold() {
 fn close_plot_removes_its_fields_and_keeps_a_workspace_alive() {
     let mut workspace = Workspace::new();
     let root = workspace.tree.root().unwrap();
-    let Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) = workspace.tree.tiles.get_mut(root)
-    else {
+    let Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) = workspace.tree.tiles.get_mut(root) else {
         panic!("root should start as a pane");
     };
     pane.add_trace(FieldId(42));
@@ -1210,9 +1199,7 @@ fn opening_an_annotation_editor_closes_the_others() {
         .tree
         .tiles
         .iter()
-        .filter(|(id, tile)| {
-            **id != first && matches!(tile, egui_tiles::Tile::Pane(Pane::Plot(_)))
-        })
+        .filter(|(id, tile)| **id != first && matches!(tile, egui_tiles::Tile::Pane(Pane::Plot(_))))
         .map(|(id, _)| *id)
         .next()
         .expect("the split should have produced a second plot");
@@ -1283,7 +1270,11 @@ fn opening_annotation_editors_without_a_focused_pane_keeps_the_lowest_tile_id() 
             matches!(tile, egui_tiles::Tile::Pane(Pane::Plot(_))).then_some(*id)
         })
         .collect();
-    assert_eq!(plots.len(), 3, "two splits from one root should produce three plots");
+    assert_eq!(
+        plots.len(),
+        3,
+        "two splits from one root should produce three plots"
+    );
     let expected = *plots.iter().min_by_key(|id| id.0).unwrap();
 
     let open_editor = |workspace: &mut Workspace, tile| {
@@ -1380,7 +1371,9 @@ fn annotation_rows_are_labelled_in_tile_id_order() {
         "rows must follow tile-id order, not the tile map's hash order"
     );
     assert_eq!(
-        rows.iter().map(|r| r.plot_label.as_str()).collect::<Vec<_>>(),
+        rows.iter()
+            .map(|r| r.plot_label.as_str())
+            .collect::<Vec<_>>(),
         vec!["Plot 1", "Plot 2", "Plot 3"]
     );
 }
@@ -1584,7 +1577,11 @@ fn each_trail_mode_gets_its_own_overlay_icon_and_tooltip() {
 
     let icons: HashSet<&String> = buttons.iter().map(|(icon, _)| icon).collect();
     let tooltips: HashSet<&str> = buttons.iter().map(|(_, tooltip)| *tooltip).collect();
-    assert_eq!(icons.len(), 3, "each mode needs its own icon, got {icons:?}");
+    assert_eq!(
+        icons.len(),
+        3,
+        "each mode needs its own icon, got {icons:?}"
+    );
     assert_eq!(
         tooltips.len(),
         3,

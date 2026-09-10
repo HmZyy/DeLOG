@@ -432,7 +432,7 @@ fn field_stats_is_a_global_toolbar_action_not_a_per_plot_one() {
         "the global field stats button should use the sigma icon"
     );
     assert!(
-        APP_SOURCE.contains("self.field_stats.open_plotted(self.workspace.unique_fields())"),
+        APP_SOURCE.contains(".open_plotted(self.workspace.unique_fields())"),
         "the global action should open stats for every plotted trace"
     );
 }
@@ -662,10 +662,7 @@ fn view_and_analyze_menus_keep_display_and_analysis_actions_separate() {
     );
     assert_commands_in_order(
         analyze,
-        &[
-            "CommandId::SyncSources",
-            "CommandId::OpenDataFlow",
-        ],
+        &["CommandId::SyncSources", "CommandId::OpenDataFlow"],
     );
     assert!(!analyze.contains("CommandId::AddMarker"));
     assert!(!analyze.contains("CommandId::OpenMarkers"));

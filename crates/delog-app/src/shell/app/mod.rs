@@ -1,8 +1,8 @@
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
-pub mod commands;
 pub mod command_palette;
+pub mod commands;
 pub mod context_header;
 mod dynamic_commands;
 pub mod global_plot_toolbar;
@@ -14,23 +14,23 @@ use delog_core::time::TimeRange;
 use egui_extras::{Column, TableBuilder};
 use serde::Serialize;
 
+use crate::config::layout::doc::{LayoutDoc, LayoutError};
+use crate::config::settings::{AppSettings, RenderMode, SettingsDialog, TileCacheUiState};
+use crate::ingest::live::ConnectionDialog;
+use crate::map::worker::{CacheActionKind, CacheActionStatus, TileManager};
 use crate::plotting::browser::{self, BrowserFilterCache, BrowserModel};
-use crate::ui::diagnostics::DiagnosticsDock;
-use crate::ui::docks::{AppDockController, AppDockTab};
 use crate::plotting::field_stats::{FieldStatsController, StatsTab};
 use crate::plotting::gpu::GpuBridge;
-use crate::config::layout::doc::{LayoutDoc, LayoutError};
-use crate::shell::layout_apply::{LayoutApply, LoadOutcome, PendingLayout};
-use crate::ingest::live::ConnectionDialog;
-use crate::ui::logging::{LogLevel, LogRecord, LoggingDock, PendingLog};
-use crate::map::worker::{CacheActionKind, CacheActionStatus, TileManager};
-use crate::ui::performance::{PerformanceDock, PerformanceSnapshot, ResourceSummary, TraceSummary};
 use crate::plotting::plot::ViewX;
 #[cfg(feature = "scripting")]
 use crate::scripting::scripts;
 use crate::session::session::Session;
-use crate::config::settings::{AppSettings, RenderMode, SettingsDialog, TileCacheUiState};
+use crate::shell::layout_apply::{LayoutApply, LoadOutcome, PendingLayout};
 use crate::sync::sync_window::SyncWindow;
+use crate::ui::diagnostics::DiagnosticsDock;
+use crate::ui::docks::{AppDockController, AppDockTab};
+use crate::ui::logging::{LogLevel, LogRecord, LoggingDock, PendingLog};
+use crate::ui::performance::{PerformanceDock, PerformanceSnapshot, ResourceSummary, TraceSummary};
 
 fn data_browser_panel(preferred_width: f32) -> egui::Panel {
     egui::Panel::left("data_browser_expanded")
@@ -479,8 +479,8 @@ impl DelogApp {
             session,
             #[cfg(feature = "scripting")]
             scripts: {
-                let config_dir =
-                    crate::config::layout::doc::config_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+                let config_dir = crate::config::layout::doc::config_dir()
+                    .unwrap_or_else(|| std::path::PathBuf::from("."));
                 scripts::ScriptsPanel::new(
                     config_dir.join("scripts"),
                     config_dir.join("parsers"),
@@ -666,10 +666,7 @@ impl DelogApp {
                         .set_title("Open flight logs"),
                 };
                 if let Some(paths) = dialog.pick_files() {
-                    let _ = tx.send(PickedFiles {
-                        paths,
-                        parser,
-                    });
+                    let _ = tx.send(PickedFiles { paths, parser });
                     ctx.request_repaint();
                 }
             })
@@ -705,7 +702,9 @@ impl DelogApp {
                     .set_title("Export PNG")
                     .save_file();
                 if let Some(path) = picked {
-                    let _ = tx.send(crate::export::image_export::PngWriteRequest::new(path, png_bytes));
+                    let _ = tx.send(crate::export::image_export::PngWriteRequest::new(
+                        path, png_bytes,
+                    ));
                     ctx.request_repaint();
                 }
             })
@@ -1354,10 +1353,11 @@ impl DelogApp {
         match crate::config::layout::doc::save_named(&name, &doc) {
             Ok(()) => {
                 self.dynamic_command_catalog.invalidate();
-                self.session.push_diagnostic(delog_core::diagnostics::Diag::info(
-                    "layout-save",
-                    format!("saved layout `{name}`"),
-                ));
+                self.session
+                    .push_diagnostic(delog_core::diagnostics::Diag::info(
+                        "layout-save",
+                        format!("saved layout `{name}`"),
+                    ));
             }
             Err(err) => self
                 .session
@@ -1458,8 +1458,11 @@ impl DelogApp {
         ctx: &egui::Context,
         snapshot: &delog_core::snapshot::StoreSnapshot,
     ) {
-        let export =
-            crate::export::kml_export::build_kml(snapshot, &self.vehicles, &self.vehicle_trajectories);
+        let export = crate::export::kml_export::build_kml(
+            snapshot,
+            &self.vehicles,
+            &self.vehicle_trajectories,
+        );
         if export.exported == 0 {
             let _ = self
                 .exported_kml_tx
@@ -1555,17 +1558,18 @@ impl DelogApp {
     ) {
         let id = self.next_data_export_id;
         self.next_data_export_id += 1;
-        let chosen = match crate::export::data_export::resolve_export_fields(&request.fields, all_fields) {
-            Ok(chosen) => chosen,
-            Err(error) => {
-                let _ = self.data_export_tx.send(DataExportEvent::Failed {
-                    id,
-                    error: error.to_string(),
-                });
-                ctx.request_repaint();
-                return;
-            }
-        };
+        let chosen =
+            match crate::export::data_export::resolve_export_fields(&request.fields, all_fields) {
+                Ok(chosen) => chosen,
+                Err(error) => {
+                    let _ = self.data_export_tx.send(DataExportEvent::Failed {
+                        id,
+                        error: error.to_string(),
+                    });
+                    ctx.request_repaint();
+                    return;
+                }
+            };
         let origin_us = snapshot
             .global_time_range()
             .map(|range| range.min_us)
@@ -1653,8 +1657,7 @@ impl DelogApp {
             .sources
             .iter()
             .filter(|source| {
-                !source.entry.removed
-                    && source.entry.kind == delog_core::identity::SourceKind::File
+                !source.entry.removed && source.entry.kind == delog_core::identity::SourceKind::File
             })
             .count();
         commands::CommandContext::for_frame(
@@ -1717,9 +1720,7 @@ impl DelogApp {
         &self,
         context: commands::CommandContext,
     ) -> Vec<commands::CommandPresentation> {
-        use commands::{
-            AppCommand, CommandAvailability, CommandPresentation,
-        };
+        use commands::{AppCommand, CommandAvailability, CommandPresentation};
         debug_assert_eq!(commands::dynamic_command_families().len(), 4);
         debug_assert!(
             self.session
@@ -1789,8 +1790,7 @@ impl DelogApp {
         commands::present_commands(
             &context,
             &commands::PresentationState {
-                shell_emphasis_live: self.shell_emphasis
-                    == context_header::ShellEmphasis::Live,
+                shell_emphasis_live: self.shell_emphasis == context_header::ShellEmphasis::Live,
                 cursor_sampling: self.hover_mode,
                 data_browser_open: !self.browser_collapsed,
                 inspector_open: self.inspector.open,
@@ -1985,8 +1985,7 @@ impl DelogApp {
                 CommandId::OpenLogging => self.toggle_dock(AppDockTab::Logging),
                 CommandId::SaveLayout => self.save_layout_dialog.open = true,
                 CommandId::LoadLayout => {
-                    self.load_layout_dialog.layouts =
-                        crate::config::layout::doc::list_layouts();
+                    self.load_layout_dialog.layouts = crate::config::layout::doc::list_layouts();
                     self.load_layout_dialog.picker.open();
                 }
                 CommandId::RunScript => {
@@ -2032,7 +2031,8 @@ impl DelogApp {
                     self.workspace.set_all_plot_legends(visible);
                 }
                 CommandId::OpenFieldStats => {
-                    self.field_stats.open_plotted(self.workspace.unique_fields());
+                    self.field_stats
+                        .open_plotted(self.workspace.unique_fields());
                 }
                 CommandId::ToggleAnnotationToolbar => {
                     self.annotation_toolbar_open = !self.annotation_toolbar_open;
@@ -2139,23 +2139,25 @@ impl DelogApp {
                         )),
                 }
             }
-            LayoutManagerAction::Delete(name) => match crate::config::layout::doc::delete_named(&name) {
-                Ok(()) => {
-                    self.dynamic_command_catalog.invalidate();
-                    self.refresh_layout_manager(None);
-                    self.session
-                        .push_diagnostic(delog_core::diagnostics::Diag::info(
+            LayoutManagerAction::Delete(name) => {
+                match crate::config::layout::doc::delete_named(&name) {
+                    Ok(()) => {
+                        self.dynamic_command_catalog.invalidate();
+                        self.refresh_layout_manager(None);
+                        self.session
+                            .push_diagnostic(delog_core::diagnostics::Diag::info(
+                                "layout-manager",
+                                format!("deleted layout `{name}`"),
+                            ));
+                    }
+                    Err(err) => self
+                        .session
+                        .push_diagnostic(delog_core::diagnostics::Diag::error(
                             "layout-manager",
-                            format!("deleted layout `{name}`"),
-                        ));
+                            err.to_string(),
+                        )),
                 }
-                Err(err) => self
-                    .session
-                    .push_diagnostic(delog_core::diagnostics::Diag::error(
-                        "layout-manager",
-                        err.to_string(),
-                    )),
-            },
+            }
         }
     }
 
@@ -2239,9 +2241,7 @@ impl DelogApp {
                 .run_script_dialog
                 .scripts
                 .iter()
-                .map(|name| {
-                    crate::ui::palette::PickerItem::new(name.clone(), name.clone())
-                })
+                .map(|name| crate::ui::palette::PickerItem::new(name.clone(), name.clone()))
                 .collect();
             if let Some(name) = self.run_script_dialog.picker.show(
                 ctx,
@@ -2643,9 +2643,7 @@ impl eframe::App for DelogApp {
 
         let wants_keyboard = ui.ctx().egui_wants_keyboard_input();
         let palette_shortcut = ui.ctx().input(|input| {
-            input.modifiers.command
-                && input.modifiers.shift
-                && input.key_pressed(egui::Key::P)
+            input.modifiers.command && input.modifiers.shift && input.key_pressed(egui::Key::P)
         });
         if command_palette::should_toggle_palette(palette_shortcut, wants_keyboard) {
             if self.command_palette.is_open() {
@@ -2860,7 +2858,7 @@ impl eframe::App for DelogApp {
                                 crate::ui::icons::panel_left_open(),
                                 "Show data browser",
                             )
-                                .clicked()
+                            .clicked()
                             {
                                 self.browser_collapsed = false;
                                 self.browser_focus_filter = true;
@@ -2939,7 +2937,8 @@ impl eframe::App for DelogApp {
         }
         show_field_metadata_window(ui.ctx(), &snapshot, &mut self.field_metadata_dialog);
         if self.field_stats.is_tracking_plots() {
-            self.field_stats.sync_plotted(self.workspace.unique_fields());
+            self.field_stats
+                .sync_plotted(self.workspace.unique_fields());
         }
         show_field_stats_window(
             ui.ctx(),
@@ -4356,10 +4355,7 @@ fn dock_for_command(command: commands::CommandId) -> Option<AppDockTab> {
     }
 }
 
-fn command_for_shortcut(
-    key: egui::Key,
-    command_modifier: bool,
-) -> Option<commands::CommandId> {
+fn command_for_shortcut(key: egui::Key, command_modifier: bool) -> Option<commands::CommandId> {
     use commands::CommandId;
     match (key, command_modifier) {
         (egui::Key::S, true) => Some(CommandId::SaveLayout),
@@ -4539,10 +4535,18 @@ fn next_legend_position(
     position: crate::config::settings::LegendPosition,
 ) -> crate::config::settings::LegendPosition {
     match position {
-        crate::config::settings::LegendPosition::TopLeft => crate::config::settings::LegendPosition::TopRight,
-        crate::config::settings::LegendPosition::TopRight => crate::config::settings::LegendPosition::BottomLeft,
-        crate::config::settings::LegendPosition::BottomLeft => crate::config::settings::LegendPosition::BottomRight,
-        crate::config::settings::LegendPosition::BottomRight => crate::config::settings::LegendPosition::TopLeft,
+        crate::config::settings::LegendPosition::TopLeft => {
+            crate::config::settings::LegendPosition::TopRight
+        }
+        crate::config::settings::LegendPosition::TopRight => {
+            crate::config::settings::LegendPosition::BottomLeft
+        }
+        crate::config::settings::LegendPosition::BottomLeft => {
+            crate::config::settings::LegendPosition::BottomRight
+        }
+        crate::config::settings::LegendPosition::BottomRight => {
+            crate::config::settings::LegendPosition::TopLeft
+        }
     }
 }
 

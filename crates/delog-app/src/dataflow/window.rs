@@ -306,15 +306,17 @@ impl DataFlowUi {
                 ctx.copy_text(CLIPBOARD_SENTINEL.to_owned());
             }
         }
-        if paste && !self.clipboard.is_empty() {
-            if let Err(error) = self.controller.paste(&self.clipboard, [30.0, 30.0]) {
-                logs.push((LogLevel::Error, format!("Paste failed: {error}")));
-            }
+        if paste
+            && !self.clipboard.is_empty()
+            && let Err(error) = self.controller.paste(&self.clipboard, [30.0, 30.0])
+        {
+            logs.push((LogLevel::Error, format!("Paste failed: {error}")));
         }
-        if delete && !self.controller.selection.is_empty() {
-            if let Err(error) = self.controller.delete_selection() {
-                logs.push((LogLevel::Error, format!("Delete failed: {error}")));
-            }
+        if delete
+            && !self.controller.selection.is_empty()
+            && let Err(error) = self.controller.delete_selection()
+        {
+            logs.push((LogLevel::Error, format!("Delete failed: {error}")));
         }
     }
 
@@ -368,8 +370,11 @@ impl DataFlowUi {
                 }
                 let append = self.controller.is_live_published() || self.pending_live_publish;
                 self.pending_live_publish = false;
-                self.controller
-                    .request_live(Arc::clone(snapshot), settings.live_overlap_secs, append);
+                self.controller.request_live(
+                    Arc::clone(snapshot),
+                    settings.live_overlap_secs,
+                    append,
+                );
                 self.last_live_request_s = now_s;
                 self.last_live_epoch = epoch;
             }
@@ -402,34 +407,59 @@ impl DataFlowUi {
                 self.controller.graph.name.clone_from(&self.name_edit);
                 self.controller.dirty = true;
             }
-            if icon_btn_enabled(ui, !self.name_edit.is_empty(), crate::ui::icons::save(), "Save")
-                .clicked()
+            if icon_btn_enabled(
+                ui,
+                !self.name_edit.is_empty(),
+                crate::ui::icons::save(),
+                "Save",
+            )
+            .clicked()
             {
                 self.save(logs);
             }
             ui.separator();
-            if icon_btn_enabled(ui, self.controller.can_undo(), crate::ui::icons::rotate_ccw(), "Undo")
-                .clicked()
+            if icon_btn_enabled(
+                ui,
+                self.controller.can_undo(),
+                crate::ui::icons::rotate_ccw(),
+                "Undo",
+            )
+            .clicked()
             {
                 self.controller.undo();
             }
-            if icon_btn_enabled(ui, self.controller.can_redo(), crate::ui::icons::rotate_cw(), "Redo")
-                .clicked()
+            if icon_btn_enabled(
+                ui,
+                self.controller.can_redo(),
+                crate::ui::icons::rotate_cw(),
+                "Redo",
+            )
+            .clicked()
             {
                 self.controller.redo();
             }
             ui.separator();
             let has_selection = !self.controller.selection.is_empty();
-            if icon_btn_enabled(ui, has_selection, crate::ui::icons::copy(), "Duplicate selected")
-                .clicked()
+            if icon_btn_enabled(
+                ui,
+                has_selection,
+                crate::ui::icons::copy(),
+                "Duplicate selected",
+            )
+            .clicked()
             {
                 let clipboard = self.controller.copy_selection();
                 if let Err(error) = self.controller.paste(&clipboard, [30.0, 30.0]) {
                     logs.push((LogLevel::Error, format!("Duplicate failed: {error}")));
                 }
             }
-            if icon_btn_enabled(ui, has_selection, crate::ui::icons::trash(), "Delete selected")
-                .clicked()
+            if icon_btn_enabled(
+                ui,
+                has_selection,
+                crate::ui::icons::trash(),
+                "Delete selected",
+            )
+            .clicked()
                 && let Err(error) = self.controller.delete_selection()
             {
                 logs.push((LogLevel::Error, format!("Delete failed: {error}")));
@@ -439,7 +469,11 @@ impl DataFlowUi {
                 ui.add(egui::Spinner::new().size(16.0))
                     .on_hover_text("Running");
             } else {
-                let tooltip = if live_connected { "Run (publish live output)" } else { "Run" };
+                let tooltip = if live_connected {
+                    "Run (publish live output)"
+                } else {
+                    "Run"
+                };
                 if icon_btn_enabled(ui, true, crate::ui::icons::play(), tooltip).clicked() {
                     if live_connected {
                         self.pending_live_publish = true;
@@ -623,7 +657,9 @@ impl DataFlowUi {
             .resizable(false)
             .open(&mut keep_open)
             .show(ctx, |ui| {
-                ui.label(format!("Delete \u{201c}{name}\u{201d}? This cannot be undone."));
+                ui.label(format!(
+                    "Delete \u{201c}{name}\u{201d}? This cannot be undone."
+                ));
                 ui.horizontal(|ui| {
                     if ui.button("Delete").clicked() {
                         decision = Some(true);
@@ -914,9 +950,7 @@ impl DataFlowUi {
             self.apply(GraphCommand::SetKind { id, kind: edited }, logs);
         }
 
-        if !has_own_preview_section
-            && let Some(preview) = self.controller.preview_for(id, 0)
-        {
+        if !has_own_preview_section && let Some(preview) = self.controller.preview_for(id, 0) {
             ui.separator();
             ui.strong("Preview");
             egui::Grid::new(("dataflow-preview", id.0))
@@ -1030,7 +1064,13 @@ impl DataFlowUi {
     }
 }
 
-fn should_tick_live(now_s: f64, last_s: f64, throttle_ms: u32, epoch: u64, last_epoch: u64) -> bool {
+fn should_tick_live(
+    now_s: f64,
+    last_s: f64,
+    throttle_ms: u32,
+    epoch: u64,
+    last_epoch: u64,
+) -> bool {
     epoch != last_epoch && (now_s - last_s) * 1000.0 >= throttle_ms as f64
 }
 
@@ -1671,7 +1711,9 @@ mod tests {
         };
         let _ = render_data_flow_frame(&ctx, &mut flow, &snapshot, &sender, vec![enter]);
 
-        let menu = flow.add_menu.expect("add menu stays open after choosing Add Data");
+        let menu = flow
+            .add_menu
+            .expect("add menu stays open after choosing Add Data");
         assert_eq!(menu.mode, AddMenuMode::Data);
         assert_eq!(menu.query, "altitude");
     }

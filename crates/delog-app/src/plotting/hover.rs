@@ -35,9 +35,7 @@ pub fn draw(
     show_time: bool,
     opacity: f32,
 ) -> Option<i64> {
-    let Some(pos) = response.hover_pos() else {
-        return None;
-    };
+    let pos = response.hover_pos()?;
     let view = target.view;
     let rect = view.rect;
     if !rect.contains(pos) {

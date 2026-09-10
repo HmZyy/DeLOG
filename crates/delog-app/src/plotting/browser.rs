@@ -707,7 +707,8 @@ pub fn ui(
                                                 range.max_us as f64 / 1e6
                                             ));
                                         }
-                                        if let Some(change) = offset_widget(ui, source, offset_dialog)
+                                        if let Some(change) =
+                                            offset_widget(ui, source, offset_dialog)
                                         {
                                             offset_change = Some(change);
                                         }
@@ -721,9 +722,7 @@ pub fn ui(
                                 egui_ltreeview::NodeBuilder::dir(BrowserNode::Topic(topic.id.0))
                                     .default_open(false)
                                     .label_ui(|ui| {
-                                        ui.add(
-                                            egui::Label::new(&topic.name).selectable(false),
-                                        );
+                                        ui.add(egui::Label::new(&topic.name).selectable(false));
                                         ui.with_layout(
                                             egui::Layout::right_to_left(egui::Align::Center),
                                             |ui| {
@@ -800,7 +799,6 @@ pub fn ui(
                 data.insert_temp(width_id, available_width);
             });
         });
-
 
     if let Some(change) = offset_dialog_window(ui, model, offset_dialog) {
         offset_change = Some(change);
@@ -1146,7 +1144,6 @@ mod tests {
             _ => None,
         }
     }
-
 
     fn synth_model(sources: usize, topics: usize, fields: usize) -> BrowserModel {
         let mut model = BrowserModel::default();
@@ -1629,10 +1626,10 @@ mod tests {
         let mut offset_dialog = None;
 
         let measure = |panel_width: f32,
-                           query: &mut String,
-                           filter_cache: &mut BrowserFilterCache,
-                           selection: &mut Selection,
-                           offset_dialog: &mut Option<(SourceId, i64)>| {
+                       query: &mut String,
+                       filter_cache: &mut BrowserFilterCache,
+                       selection: &mut Selection,
+                       offset_dialog: &mut Option<(SourceId, i64)>| {
             let input = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -1646,15 +1643,7 @@ mod tests {
                     .resizable(false)
                     .exact_size(panel_width)
                     .show_inside(ui, |ui| {
-                        super::ui(
-                            ui,
-                            0,
-                            &model,
-                            query,
-                            filter_cache,
-                            selection,
-                            offset_dialog,
-                        );
+                        super::ui(ui, 0, &model, query, filter_cache, selection, offset_dialog);
                         used = ui.min_rect().width();
                     });
             });
@@ -1702,10 +1691,10 @@ mod tests {
         let mut offset_dialog = None;
 
         let render = |panel_width: f32,
-                          query: &mut String,
-                          filter_cache: &mut BrowserFilterCache,
-                          selection: &mut Selection,
-                          offset_dialog: &mut Option<(SourceId, i64)>| {
+                      query: &mut String,
+                      filter_cache: &mut BrowserFilterCache,
+                      selection: &mut Selection,
+                      offset_dialog: &mut Option<(SourceId, i64)>| {
             let input = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -1718,15 +1707,7 @@ mod tests {
                     .resizable(false)
                     .exact_size(panel_width)
                     .show_inside(ui, |ui| {
-                        super::ui(
-                            ui,
-                            0,
-                            &model,
-                            query,
-                            filter_cache,
-                            selection,
-                            offset_dialog,
-                        );
+                        super::ui(ui, 0, &model, query, filter_cache, selection, offset_dialog);
                     });
             })
         };
@@ -1793,15 +1774,7 @@ mod tests {
                 egui::Panel::left("browser-scroll")
                     .exact_size(420.0)
                     .show_inside(ui, |ui| {
-                        super::ui(
-                            ui,
-                            0,
-                            &model,
-                            query,
-                            filter_cache,
-                            selection,
-                            offset_dialog,
-                        );
+                        super::ui(ui, 0, &model, query, filter_cache, selection, offset_dialog);
                     });
             });
             let mut texts = Vec::new();
@@ -1851,10 +1824,7 @@ mod tests {
             "rows should still be painted after scrolling down, got {after:?}"
         );
         assert_ne!(
-            before
-                .iter()
-                .filter(|t| t.starts_with("field_"))
-                .count(),
+            before.iter().filter(|t| t.starts_with("field_")).count(),
             0,
             "sanity"
         );
@@ -1895,15 +1865,7 @@ mod tests {
                 egui::Panel::left("browser-scroll-click")
                     .exact_size(420.0)
                     .show_inside(ui, |ui| {
-                        super::ui(
-                            ui,
-                            0,
-                            &model,
-                            query,
-                            filter_cache,
-                            selection,
-                            offset_dialog,
-                        );
+                        super::ui(ui, 0, &model, query, filter_cache, selection, offset_dialog);
                     });
             });
             let mut texts = Vec::new();
@@ -1974,11 +1936,9 @@ mod tests {
             let same = next
                 .iter()
                 .map(|(text, rect)| (text.clone(), rect.top().round() as i32))
-                .eq(scrolled
-                    .iter()
-                    .map(|(text, rect): &(String, egui::Rect)| {
-                        (text.clone(), rect.top().round() as i32)
-                    }));
+                .eq(scrolled.iter().map(|(text, rect): &(String, egui::Rect)| {
+                    (text.clone(), rect.top().round() as i32)
+                }));
             scrolled = next;
             if same {
                 break;
@@ -1989,7 +1949,9 @@ mod tests {
             .iter()
             .find(|(text, rect)| text.starts_with("TOPIC") && rect.top() > 80.0)
             .cloned()
-            .unwrap_or_else(|| panic!("a topic row should be visible after scrolling: {scrolled:?}"));
+            .unwrap_or_else(|| {
+                panic!("a topic row should be visible after scrolling: {scrolled:?}")
+            });
         let target = rect.center();
 
         for pressed in [true, false] {
