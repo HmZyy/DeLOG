@@ -602,6 +602,7 @@ impl GpuBridge {
 
     /// The offscreen pass is submitted on our own queue during `update()`, so
     /// the texture is ready before eframe paints this frame.
+    #[allow(clippy::too_many_arguments)]
     pub fn render_scene(
         &self,
         frame: &eframe::Frame,

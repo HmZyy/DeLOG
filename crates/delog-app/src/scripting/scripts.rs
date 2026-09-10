@@ -617,6 +617,7 @@ impl ScriptsPanel {
         self.parsers.has_pending_work()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn ui(
         &mut self,
         ctx: &egui::Context,
