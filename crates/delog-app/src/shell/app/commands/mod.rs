@@ -13,6 +13,7 @@ pub enum CommandId {
     Open,
     ConnectLive,
     SyncSources,
+    CloseAllSources,
     DisconnectLive,
     CancelTasks,
     ExportData,
@@ -156,6 +157,7 @@ pub struct CommandSpec {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CommandContext {
     pub has_data: bool,
+    pub source_count: usize,
     pub offline_source_count: usize,
     pub live_link_count: usize,
     pub has_active_tasks: bool,
@@ -164,8 +166,10 @@ pub struct CommandContext {
 }
 
 impl CommandContext {
+    #[allow(clippy::too_many_arguments)]
     pub const fn for_frame(
         has_data: bool,
+        source_count: usize,
         offline_source_count: usize,
         live_link_count: usize,
         native_tasks_active: bool,
@@ -175,6 +179,7 @@ impl CommandContext {
     ) -> Self {
         Self {
             has_data,
+            source_count,
             offline_source_count,
             live_link_count,
             has_active_tasks: native_tasks_active || parser_task_active,
@@ -265,6 +270,7 @@ impl CommandId {
         Self::Open,
         Self::ConnectLive,
         Self::SyncSources,
+        Self::CloseAllSources,
         Self::DisconnectLive,
         Self::CancelTasks,
         Self::ExportData,
@@ -310,8 +316,10 @@ impl CommandId {
     pub const fn classic_menu_owner(self) -> ClassicMenuOwner {
         use CommandId::*;
         match self {
-            Open | ConnectLive | DisconnectLive | CancelTasks | ExportData | ExportDiagnostics
-            | ExportProfiling | ExportWorkspacePng | Exit => ClassicMenuOwner::File,
+            Open | ConnectLive | CloseAllSources | DisconnectLive | CancelTasks | ExportData
+            | ExportDiagnostics | ExportProfiling | ExportWorkspacePng | Exit => {
+                ClassicMenuOwner::File
+            }
             ToggleDataBrowser
             | ToggleInspector
             | ToggleScene3d
@@ -339,6 +347,9 @@ impl CommandId {
         match self {
             Self::SyncSources if context.offline_source_count < 2 => {
                 CommandAvailability::Disabled("Open at least two offline sources to synchronize")
+            }
+            Self::CloseAllSources if context.source_count == 0 => {
+                CommandAvailability::Disabled("No source is open")
             }
             Self::DisconnectLive if context.live_link_count == 0 => {
                 CommandAvailability::Disabled("No live connection is active")
@@ -674,7 +685,7 @@ mod tests {
 
     #[test]
     fn parser_only_work_enables_the_shared_cancel_presentation() {
-        let context = CommandContext::for_frame(false, 0, 0, false, true, true, false);
+        let context = CommandContext::for_frame(false, 0, 0, 0, false, true, true, false);
         assert!(context.has_active_tasks);
         assert_eq!(
             CommandId::CancelTasks.availability(&context),
@@ -772,5 +783,49 @@ mod tests {
             presentation(CommandId::AddMeasuringMarker).availability,
             CommandAvailability::Disabled("Open a log or connect a live source first")
         );
+    }
+
+    #[test]
+    fn close_all_sources_is_reachable_only_from_the_command_palette() {
+        assert_eq!(
+            CommandId::CloseAllSources.spec().routes,
+            &[AccessRoute::Palette]
+        );
+    }
+
+    #[test]
+    fn close_all_sources_needs_at_least_one_open_source() {
+        let empty = CommandContext::default();
+        assert!(matches!(
+            CommandId::CloseAllSources.availability(&empty),
+            CommandAvailability::Disabled(_)
+        ));
+        assert_eq!(
+            CommandId::CloseAllSources.availability(&CommandContext {
+                source_count: 1,
+                ..empty
+            }),
+            CommandAvailability::Enabled
+        );
+    }
+
+    #[test]
+    fn close_all_sources_is_presented_with_the_other_source_commands() {
+        let presentations = present_commands(
+            &CommandContext {
+                source_count: 2,
+                ..CommandContext::default()
+            },
+            &PresentationState::default(),
+            [],
+        );
+        let presentation = presentations
+            .iter()
+            .find(|item| item.command == AppCommand::Static(CommandId::CloseAllSources))
+            .expect("close all sources must be in the canonical catalog");
+
+        assert_eq!(presentation.label, "Close all sources");
+        assert_eq!(presentation.availability, CommandAvailability::Enabled);
+        assert_eq!(presentation.selected, None);
     }
 }

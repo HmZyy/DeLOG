@@ -44,6 +44,13 @@ impl CommandId {
                 ClassicMenu,
                 Palette
             ),
+            CloseAllSources => spec!(
+                "Close all sources",
+                Source,
+                None,
+                "remove clear unload discard logs",
+                Palette
+            ),
             DisconnectLive => {
                 spec!(
                     "Disconnect all live links",
