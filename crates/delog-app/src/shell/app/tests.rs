@@ -815,3 +815,18 @@ fn dock_commands_share_one_mapping_for_toggle_and_open_only_routes() {
     );
     assert_eq!(dock_for_command(CommandId::OpenDataFlow), None);
 }
+
+#[test]
+fn open_source_ids_lists_every_kind_of_source_and_skips_removed_ones() {
+    use delog_core::identity::SourceKind;
+
+    let mut identity = IdentityRegistry::new();
+    let file = identity.add_source("flight.ulg");
+    let live = identity.add_source_with_kind("udp:14550", SourceKind::Live);
+    let derived = identity.add_source_with_kind("script:calc", SourceKind::Derived);
+    let dropped = identity.add_source("stale.bin");
+    identity.remove_source(dropped);
+    let snapshot = StoreSnapshot::from_registry(&identity, [], 1).unwrap();
+
+    assert_eq!(open_source_ids(&snapshot), vec![file, live, derived]);
+}

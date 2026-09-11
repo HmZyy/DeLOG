@@ -1096,6 +1096,7 @@ mod tests {
             CommandId::EqualizePlots,
             CommandId::TogglePlayheadSnap,
             CommandId::DisconnectLive,
+            CommandId::CloseAllSources,
         ] {
             assert!(
                 !ids.contains(&omitted),
