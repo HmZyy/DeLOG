@@ -1653,6 +1653,7 @@ impl DelogApp {
         snapshot: &delog_core::snapshot::StoreSnapshot,
         parser_task_active: bool,
     ) -> commands::CommandContext {
+        let source_count = open_source_ids(snapshot).len();
         let offline_source_count = snapshot
             .sources
             .iter()
@@ -1662,6 +1663,7 @@ impl DelogApp {
             .count();
         commands::CommandContext::for_frame(
             snapshot.global_time_range().is_some(),
+            source_count,
             offline_source_count,
             self.session.live_statuses().len(),
             self.session.has_active_loads(),
@@ -1945,6 +1947,11 @@ impl DelogApp {
                 CommandId::Open => self.spawn_open_dialog(ctx, None),
                 CommandId::ConnectLive => self.show_connection_dialog = true,
                 CommandId::SyncSources => self.sync_window = SyncWindow::open(snapshot),
+                CommandId::CloseAllSources => {
+                    for source in open_source_ids(snapshot) {
+                        self.session.remove_source(source);
+                    }
+                }
                 CommandId::DisconnectLive => {
                     self.session.stop_all_live();
                 }
@@ -4548,6 +4555,17 @@ fn next_legend_position(
             crate::config::settings::LegendPosition::TopLeft
         }
     }
+}
+
+fn open_source_ids(
+    snapshot: &delog_core::snapshot::StoreSnapshot,
+) -> Vec<delog_core::identity::SourceId> {
+    snapshot
+        .sources
+        .iter()
+        .filter(|source| !source.entry.removed)
+        .map(|source| source.entry.id)
+        .collect()
 }
 
 #[cfg(test)]
