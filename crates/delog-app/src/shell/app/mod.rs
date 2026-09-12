@@ -2822,11 +2822,6 @@ impl eframe::App for DelogApp {
             if let Some(t_us) = action.marker_jump {
                 self.playback.scrub(t_us, range);
             }
-            if let Some((id, t_us)) = action.marker_move
-                && let Some(m) = self.markers.get_mut(id)
-            {
-                m.t_us = t_us.clamp(range.min_us, range.max_us);
-            }
             if let Some(id) = action.marker_delete {
                 self.markers.remove(id);
             }
