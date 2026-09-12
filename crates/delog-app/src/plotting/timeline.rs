@@ -196,7 +196,6 @@ pub struct TimelineAction {
     /// fit-all/live).
     pub view_changed: bool,
     pub marker_jump: Option<i64>,
-    pub marker_move: Option<(u64, i64)>,
     pub marker_delete: Option<u64>,
     pub marker_edit: Option<(u64, MarkerEdit)>,
 }
@@ -366,9 +365,9 @@ pub fn ui(
     action
 }
 
-/// Full-range bar with draggable playhead and marker flags. A drag beginning on
-/// a flag moves it, a click jumps to it, right-click edits/deletes; drags/clicks
-/// elsewhere scrub. Marker interactions are reported via `action`.
+/// Full-range bar with draggable playhead and marker flags. A click on a flag
+/// jumps to it, right-click edits/deletes; drags and clicks elsewhere scrub.
+/// Marker interactions are reported via `action`.
 fn scrubber(
     ui: &mut egui::Ui,
     playback: &mut Playback,
@@ -397,28 +396,8 @@ fn scrubber(
             .map(|(id, _)| id)
     };
 
-    // Marker being dragged, persisted across frames via egui memory.
-    let drag_key = ui.id().with("marker_drag");
-    let mut dragging: Option<u64> = ui
-        .memory_mut(|m| m.data.get_temp::<Option<u64>>(drag_key))
-        .flatten();
-    if response.drag_started() {
-        dragging = response
-            .interact_pointer_pos()
-            .and_then(|p| nearest_flag(p.x));
-        ui.memory_mut(|m| m.data.insert_temp(drag_key, dragging));
-    }
-
     let mut scrubbed = false;
-    if let Some(id) = dragging {
-        // Move the grabbed marker; the playhead stays put.
-        if let Some(p) = response.interact_pointer_pos() {
-            action.marker_move = Some((id, bar_time_at(p.x, rect, range)));
-        }
-        if response.drag_stopped() {
-            ui.memory_mut(|m| m.data.insert_temp::<Option<u64>>(drag_key, None));
-        }
-    } else if response.clicked() {
+    if response.clicked() {
         if let Some(p) = response.interact_pointer_pos() {
             match nearest_flag(p.x) {
                 Some(id) => {
