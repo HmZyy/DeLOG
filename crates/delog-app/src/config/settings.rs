@@ -29,6 +29,9 @@ fn default_opacity() -> f32 {
 fn default_marker_line_width() -> f32 {
     1.5
 }
+fn default_marker_label_font_size() -> f32 {
+    11.0
+}
 fn default_marker_shade_opacity() -> f32 {
     0.12
 }
@@ -218,6 +221,25 @@ impl MarkerDeltaReadout {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MarkerLabelOrientation {
+    Horizontal,
+    #[default]
+    Vertical,
+}
+
+impl MarkerLabelOrientation {
+    pub const ALL: [Self; 2] = [Self::Horizontal, Self::Vertical];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Horizontal => "Horizontal",
+            Self::Vertical => "Vertical",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PlotDisplay {
     #[serde(default)]
@@ -238,6 +260,12 @@ pub struct PlotDisplay {
     pub marker_line_width: f32,
     #[serde(default = "default_true")]
     pub marker_show_label: bool,
+    #[serde(default)]
+    pub marker_label_orientation: MarkerLabelOrientation,
+    #[serde(default = "default_marker_label_font_size")]
+    pub marker_label_font_size: f32,
+    #[serde(default = "default_true")]
+    pub marker_label_avoid_overlap: bool,
     #[serde(default)]
     pub marker_shade_regions: bool,
     #[serde(default = "default_marker_shade_opacity")]
@@ -266,6 +294,9 @@ impl Default for PlotDisplay {
             marker_line_opacity: default_opacity(),
             marker_line_width: default_marker_line_width(),
             marker_show_label: true,
+            marker_label_orientation: MarkerLabelOrientation::default(),
+            marker_label_font_size: default_marker_label_font_size(),
+            marker_label_avoid_overlap: true,
             marker_shade_regions: true,
             marker_shade_opacity: default_marker_shade_opacity(),
             text_label_cap: default_text_label_cap(),
@@ -945,6 +976,39 @@ fn plots_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
             ui.checkbox(&mut p.marker_show_label, "");
             ui.end_row();
 
+            ui.label("Marker label orientation")
+                .on_hover_text("Draw marker names horizontally or vertically down their lines.");
+            ui.add_enabled_ui(p.marker_show_label, |ui| {
+                egui::ComboBox::from_id_salt("settings-marker-label-orientation")
+                    .selected_text(p.marker_label_orientation.label())
+                    .show_ui(ui, |ui| {
+                        for orientation in MarkerLabelOrientation::ALL {
+                            ui.selectable_value(
+                                &mut p.marker_label_orientation,
+                                orientation,
+                                orientation.label(),
+                            );
+                        }
+                    });
+            });
+            ui.end_row();
+
+            ui.label("Marker label font size");
+            ui.add_enabled(
+                p.marker_show_label,
+                egui::DragValue::new(&mut p.marker_label_font_size)
+                    .range(4.0..=40.0)
+                    .speed(0.25),
+            );
+            ui.end_row();
+
+            ui.label("Avoid marker label overlap");
+            ui.add_enabled(
+                p.marker_show_label,
+                egui::Checkbox::new(&mut p.marker_label_avoid_overlap, ""),
+            );
+            ui.end_row();
+
             ui.label("Shade between markers")
                 .on_hover_text("Fill each plot region from one marker to the next (or the end) with that marker's colour.");
             ui.checkbox(&mut p.marker_shade_regions, "");
@@ -1509,6 +1573,47 @@ mod tests {
     }
 
     #[test]
+    fn marker_label_settings_round_trip() {
+        for orientation in ["horizontal", "vertical"] {
+            let json = serde_json::json!({
+                "plot": {
+                    "marker_label_orientation": orientation,
+                    "marker_label_font_size": 18.0
+                }
+            });
+            let settings: AppSettings = serde_json::from_value(json).unwrap();
+            let saved = serde_json::to_value(&settings).unwrap();
+            assert_eq!(saved["plot"]["marker_label_orientation"], orientation);
+            assert_eq!(saved["plot"]["marker_label_font_size"], 18.0);
+        }
+    }
+
+    #[test]
+    fn old_settings_default_marker_labels_to_vertical_at_size_11() {
+        for json in [r#"{}"#, r#"{"plot":{"marker_show_label":true}}"#] {
+            let settings: AppSettings = serde_json::from_str(json).unwrap();
+            let saved = serde_json::to_value(&settings).unwrap();
+            assert_eq!(saved["plot"]["marker_label_orientation"], "vertical");
+            assert_eq!(saved["plot"]["marker_label_font_size"], 11.0);
+        }
+    }
+
+    #[test]
+    fn marker_label_overlap_setting_defaults_on_and_persists_disabled() {
+        for json in [r#"{}"#, r#"{"plot":{"marker_show_label":true}}"#] {
+            let settings: AppSettings = serde_json::from_str(json).unwrap();
+            let saved = serde_json::to_value(&settings).unwrap();
+            assert_eq!(saved["plot"]["marker_label_avoid_overlap"], true);
+        }
+        let settings: AppSettings = serde_json::from_value(serde_json::json!({
+            "plot": {"marker_label_avoid_overlap": false}
+        }))
+        .unwrap();
+        let saved = serde_json::to_value(&settings).unwrap();
+        assert_eq!(saved["plot"]["marker_label_avoid_overlap"], false);
+    }
+
+    #[test]
     fn app_settings_persist_plot_display() {
         let settings = AppSettings {
             plot: PlotDisplay {
@@ -1521,6 +1626,9 @@ mod tests {
                 marker_line_opacity: 0.5,
                 marker_line_width: 2.0,
                 marker_show_label: false,
+                marker_label_orientation: MarkerLabelOrientation::Horizontal,
+                marker_label_font_size: 18.0,
+                marker_label_avoid_overlap: false,
                 marker_shade_regions: true,
                 marker_shade_opacity: 0.2,
                 text_label_cap: 1024,

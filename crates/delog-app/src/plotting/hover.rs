@@ -14,6 +14,7 @@ const READOUT_ORDER: egui::Order = egui::Order::Background;
 
 pub const PLAYHEAD_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 59, 59);
 const PLAYHEAD_CASING: egui::Color32 = egui::Color32::from_black_alpha(110);
+const MARKER_LABEL_GAP: f32 = 6.0;
 
 pub struct HoverTarget {
     pub id: egui::Id,
@@ -430,9 +431,7 @@ pub fn draw_session_markers(
     view: PaneView,
     origin_us: i64,
     markers: &[crate::plotting::markers::Marker],
-    opacity: f32,
-    width: f32,
-    show_label: bool,
+    display: &crate::config::settings::PlotDisplay,
 ) {
     let rect = view.rect;
     let (x0, x1) = view.x_range;
@@ -440,7 +439,10 @@ pub fn draw_session_markers(
         return;
     }
     let painter = ui.painter();
-    for m in markers {
+    let mut sorted: Vec<_> = markers.iter().collect();
+    sorted.sort_by_key(|m| (m.t_us, m.id));
+    let mut placed_labels: Vec<egui::Rect> = Vec::new();
+    for m in sorted {
         let t_sec = ((m.t_us - origin_us) as f64 * 1e-6) as f32;
         let frac = (t_sec - x0) / (x1 - x0);
         if !(0.0..=1.0).contains(&frac) {
@@ -451,18 +453,51 @@ pub fn draw_session_markers(
         painter.vline(
             x,
             rect.y_range(),
-            egui::Stroke::new(width, color.gamma_multiply(opacity.clamp(0.0, 1.0))),
+            egui::Stroke::new(
+                display.marker_line_width,
+                color.gamma_multiply(display.marker_line_opacity.clamp(0.0, 1.0)),
+            ),
         );
-        if !show_label {
+        if !display.marker_show_label {
             continue;
         }
-        painter.text(
-            egui::pos2(x + 3.0, rect.top() + 2.0),
-            egui::Align2::LEFT_TOP,
-            &m.label,
-            egui::FontId::proportional(11.0),
+        let galley = painter.layout_no_wrap(
+            m.label.clone(),
+            egui::FontId::proportional(display.marker_label_font_size.clamp(4.0, 40.0)),
             color,
         );
+        let mut label =
+            egui::epaint::TextShape::new(egui::pos2(x + 3.0, rect.top() + 2.0), galley, color);
+        if display.marker_label_orientation
+            == crate::config::settings::MarkerLabelOrientation::Vertical
+        {
+            // Keep the rotated label right of the line at any font size.
+            label.pos.x += label.galley.size().y;
+            label = label.with_angle(std::f32::consts::FRAC_PI_2);
+        }
+        if display.marker_label_avoid_overlap {
+            let mut bounds = label.visual_bounding_rect();
+            if bounds.is_positive() {
+                let original_top = bounds.top();
+                // Scan occupied space from top to bottom, reusing gaps just as
+                // string labels reuse rows. Rotated names can have different heights.
+                for previous in &placed_labels {
+                    if bounds
+                        .intersect(previous.expand(MARKER_LABEL_GAP))
+                        .is_positive()
+                    {
+                        bounds = bounds.translate(egui::vec2(
+                            0.0,
+                            previous.bottom() + MARKER_LABEL_GAP - bounds.top(),
+                        ));
+                    }
+                }
+                label.pos.y += bounds.top() - original_top;
+                let slot = placed_labels.partition_point(|r| r.top() <= bounds.top());
+                placed_labels.insert(slot, bounds);
+            }
+        }
+        painter.with_clip_rect(rect).add(label);
     }
 }
 
@@ -512,6 +547,174 @@ fn format_value(v: f64) -> String {
 mod tests {
     use super::{Row, format_delta, plot_to_screen, show_tooltip};
     use std::collections::HashMap;
+
+    fn marker_label_bounds(
+        markers: &crate::plotting::markers::Markers,
+        orientation: &str,
+        avoid_overlap: bool,
+        font_size: f32,
+    ) -> HashMap<String, egui::Rect> {
+        let display = serde_json::from_value(serde_json::json!({
+            "marker_label_orientation": orientation,
+            "marker_label_font_size": font_size,
+            "marker_label_avoid_overlap": avoid_overlap,
+        }))
+        .unwrap();
+        let ctx = egui::Context::default();
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            super::draw_session_markers(
+                ui,
+                super::PaneView {
+                    rect: egui::Rect::from_min_size(
+                        egui::pos2(50.0, 50.0),
+                        egui::vec2(400.0, 400.0),
+                    ),
+                    x_range: (0.0, 1.0),
+                    y_range: (0.0, 1.0),
+                },
+                0,
+                markers.as_slice(),
+                &display,
+            );
+        });
+        output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) => {
+                    Some((text.galley.job.text.clone(), text.visual_bounding_rect()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn marker_label_stacking_preserves_time_order_and_first_position() {
+        let mut markers = crate::plotting::markers::Markers::new();
+        // Insert out of time order, including an offscreen predecessor.
+        markers.add_at(201_000);
+        markers.add_at(200_000);
+        markers.add_at(-10_000);
+        markers.add_at(202_000);
+        markers.add_at(900_000);
+        for orientation in ["horizontal", "vertical"] {
+            for font_size in [11.0, 24.0] {
+                let original = marker_label_bounds(&markers, orientation, false, font_size);
+                let stacked = marker_label_bounds(&markers, orientation, true, font_size);
+                assert_eq!(stacked.len(), 4);
+                assert_eq!(stacked["Marker 2"], original["Marker 2"]);
+                assert_eq!(stacked["Marker 5"], original["Marker 5"]);
+                assert!(original["Marker 2"].intersects(original["Marker 1"]));
+                assert!(stacked["Marker 1"].top() > stacked["Marker 2"].bottom());
+                assert!(stacked["Marker 4"].top() > stacked["Marker 1"].bottom());
+                for name in ["Marker 1", "Marker 2", "Marker 4", "Marker 5"] {
+                    assert_eq!(stacked[name].left(), original[name].left());
+                    assert_eq!(stacked[name].right(), original[name].right());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn marker_label_stacking_keeps_creation_order_for_equal_timestamps() {
+        let mut markers = crate::plotting::markers::Markers::new();
+        for _ in 0..3 {
+            markers.add_at(500_000);
+        }
+        for orientation in ["horizontal", "vertical"] {
+            let original = marker_label_bounds(&markers, orientation, false, 11.0);
+            let stacked = marker_label_bounds(&markers, orientation, true, 11.0);
+            assert_eq!(stacked["Marker 1"], original["Marker 1"]);
+            assert!(stacked["Marker 2"].top() > stacked["Marker 1"].bottom());
+            assert!(stacked["Marker 3"].top() > stacked["Marker 2"].bottom());
+        }
+    }
+
+    #[test]
+    fn marker_label_stacking_reuses_space_above_a_shifted_label() {
+        let mut markers = crate::plotting::markers::Markers::new();
+        markers.push_loaded(100_000, "First".into(), [1.0; 4], String::new());
+        markers.push_loaded(
+            101_000,
+            "A much longer second marker name".into(),
+            [1.0; 4],
+            String::new(),
+        );
+        markers.push_loaded(300_000, "Third".into(), [1.0; 4], String::new());
+        markers.push_loaded(301_000, "Fourth".into(), [1.0; 4], String::new());
+        let original = marker_label_bounds(&markers, "horizontal", false, 11.0);
+        let stacked = marker_label_bounds(&markers, "horizontal", true, 11.0);
+        assert_eq!(stacked["Third"], original["Third"]);
+        let second = stacked["A much longer second marker name"];
+        assert!(stacked["Fourth"].top() > second.bottom());
+        let bounds: Vec<_> = stacked.values().collect();
+        for (index, label) in bounds.iter().enumerate() {
+            for other in &bounds[index + 1..] {
+                assert!(!label.intersects(**other));
+            }
+        }
+    }
+
+    #[test]
+    fn marker_labels_render_with_saved_orientation_and_font_size() {
+        let rect = egui::Rect::from_min_size(egui::pos2(50.0, 50.0), egui::vec2(400.0, 400.0));
+        let mut markers = crate::plotting::markers::Markers::new();
+        markers.add_at(500_000);
+        for (orientation, font_size, visible) in [
+            ("horizontal", 11.0, true),
+            ("horizontal", 24.0, true),
+            ("vertical", 11.0, true),
+            ("vertical", 24.0, true),
+            ("vertical", 24.0, false),
+        ] {
+            let display = serde_json::from_value(serde_json::json!({
+                "marker_label_orientation": orientation,
+                "marker_label_font_size": font_size,
+                "marker_show_label": visible,
+            }))
+            .unwrap();
+            let ctx = egui::Context::default();
+            let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                super::draw_session_markers(
+                    ui,
+                    super::PaneView {
+                        rect,
+                        x_range: (0.0, 1.0),
+                        y_range: (0.0, 1.0),
+                    },
+                    0,
+                    markers.as_slice(),
+                    &display,
+                );
+            });
+            let labels: Vec<_> = output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text) if text.galley.job.text == "Marker 1" => {
+                        Some((clipped.clip_rect, text))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(labels.len(), usize::from(visible));
+            if !visible {
+                continue;
+            }
+            let (clip_rect, label) = labels[0];
+            let bounds = label.visual_bounding_rect();
+            assert_eq!(
+                bounds.height() > bounds.width(),
+                orientation == "vertical",
+                "marker label should render {orientation}, got {bounds:?}"
+            );
+            assert_eq!(label.galley.job.sections[0].format.font_id.size, font_size);
+            assert!(bounds.left() >= 253.0, "label must stay right of its line");
+            assert!(bounds.top() >= 52.0, "label must stay below the plot top");
+            assert_eq!(clip_rect, rect);
+        }
+    }
 
     fn tooltip_row(field: u32, label: &str, value: f64) -> Row {
         Row {
