@@ -1487,9 +1487,7 @@ impl Behavior<'_> {
             pview,
             self.services.origin_us,
             self.services.markers,
-            self.services.plot_display.marker_line_opacity,
-            self.services.plot_display.marker_line_width,
-            self.services.plot_display.marker_show_label,
+            &self.services.plot_display,
         );
 
         // String fields drawn as labels at each sample's timestamp.
