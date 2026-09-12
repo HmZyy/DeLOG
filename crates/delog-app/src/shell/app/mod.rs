@@ -2660,16 +2660,16 @@ impl eframe::App for DelogApp {
             }
         }
 
-        // Existing shortcuts and palette selections share dispatch. Commands
-        // stay dormant while an editor or the palette owns keyboard input.
-        if !wants_keyboard && !self.command_palette.is_open() {
+        if !self.command_palette.is_open() {
             use commands::AppCommand;
             let shortcuts = ui.ctx().input(|input| {
                 SHORTCUT_KEYS
                     .iter()
                     .copied()
                     .filter(|key| input.key_pressed(*key))
-                    .filter_map(|key| command_for_shortcut(key, input.modifiers.command))
+                    .filter_map(|key| shortcut_for_key(key, input.modifiers.command))
+                    .filter(|(_, scope)| scope.allows(wants_keyboard))
+                    .map(|(command, _)| command)
                     .collect::<Vec<_>>()
             });
             for command in shortcuts {
@@ -4362,26 +4362,42 @@ fn dock_for_command(command: commands::CommandId) -> Option<AppDockTab> {
     }
 }
 
-fn command_for_shortcut(key: egui::Key, command_modifier: bool) -> Option<commands::CommandId> {
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ShortcutScope {
+    Anywhere,
+    WhenKeyboardIsFree,
+}
+
+impl ShortcutScope {
+    fn allows(self, wants_keyboard: bool) -> bool {
+        matches!(self, Self::Anywhere) || !wants_keyboard
+    }
+}
+
+fn shortcut_for_key(
+    key: egui::Key,
+    command_modifier: bool,
+) -> Option<(commands::CommandId, ShortcutScope)> {
+    use ShortcutScope::{Anywhere, WhenKeyboardIsFree};
     use commands::CommandId;
     match (key, command_modifier) {
-        (egui::Key::S, true) => Some(CommandId::SaveLayout),
-        (egui::Key::L, true) => Some(CommandId::LoadLayout),
-        (egui::Key::K, true) => Some(CommandId::RunScript),
-        (egui::Key::E, true) => Some(CommandId::ToggleDataBrowser),
-        (egui::Key::O, true) => Some(CommandId::Open),
-        (egui::Key::F1, _) => Some(CommandId::OpenDiagnostics),
-        (egui::Key::F2, _) => Some(CommandId::OpenPerformance),
-        (egui::Key::F3, _) => Some(CommandId::OpenMarkers),
-        (egui::Key::F9, _) => Some(CommandId::OpenScripting),
-        (egui::Key::F12, _) => Some(CommandId::OpenLogging),
-        (egui::Key::Space, _) => Some(CommandId::TogglePlayback),
-        (egui::Key::Home, _) => Some(CommandId::JumpStart),
-        (egui::Key::End, _) => Some(CommandId::JumpEnd),
-        (egui::Key::ArrowLeft, _) => Some(CommandId::StepLeft),
-        (egui::Key::ArrowRight, _) => Some(CommandId::StepRight),
-        (egui::Key::M, _) => Some(CommandId::AddMarker),
-        (egui::Key::Equals, _) => Some(CommandId::EqualizePlots),
+        (egui::Key::S, true) => Some((CommandId::SaveLayout, Anywhere)),
+        (egui::Key::L, true) => Some((CommandId::LoadLayout, Anywhere)),
+        (egui::Key::K, true) => Some((CommandId::RunScript, Anywhere)),
+        (egui::Key::E, true) => Some((CommandId::ToggleDataBrowser, Anywhere)),
+        (egui::Key::O, true) => Some((CommandId::Open, Anywhere)),
+        (egui::Key::F1, _) => Some((CommandId::OpenDiagnostics, Anywhere)),
+        (egui::Key::F2, _) => Some((CommandId::OpenPerformance, Anywhere)),
+        (egui::Key::F3, _) => Some((CommandId::OpenMarkers, Anywhere)),
+        (egui::Key::F9, _) => Some((CommandId::OpenScripting, Anywhere)),
+        (egui::Key::F12, _) => Some((CommandId::OpenLogging, Anywhere)),
+        (egui::Key::Space, _) => Some((CommandId::TogglePlayback, WhenKeyboardIsFree)),
+        (egui::Key::Home, _) => Some((CommandId::JumpStart, WhenKeyboardIsFree)),
+        (egui::Key::End, _) => Some((CommandId::JumpEnd, WhenKeyboardIsFree)),
+        (egui::Key::ArrowLeft, _) => Some((CommandId::StepLeft, WhenKeyboardIsFree)),
+        (egui::Key::ArrowRight, _) => Some((CommandId::StepRight, WhenKeyboardIsFree)),
+        (egui::Key::M, _) => Some((CommandId::AddMarker, WhenKeyboardIsFree)),
+        (egui::Key::Equals, _) => Some((CommandId::EqualizePlots, WhenKeyboardIsFree)),
         _ => None,
     }
 }

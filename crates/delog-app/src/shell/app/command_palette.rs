@@ -4,6 +4,8 @@ use crate::shell::app::commands::{
 
 use crate::ui::palette::{PickerItem, PickerState};
 
+use super::ShortcutScope;
+
 #[derive(Default)]
 pub struct CommandPaletteState {
     pub(crate) picker: PickerState,
@@ -128,7 +130,7 @@ impl CommandPaletteState {
 }
 
 pub fn should_toggle_palette(shortcut_pressed: bool, wants_keyboard_input: bool) -> bool {
-    shortcut_pressed && !wants_keyboard_input
+    shortcut_pressed && ShortcutScope::Anywhere.allows(wants_keyboard_input)
 }
 
 #[cfg(test)]
@@ -243,9 +245,10 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_k_is_ignored_when_an_editor_owns_text_input() {
-        assert!(!should_toggle_palette(true, true));
+    fn the_palette_shortcut_fires_even_when_an_editor_owns_text_input() {
+        assert!(should_toggle_palette(true, true));
         assert!(should_toggle_palette(true, false));
+        assert!(!should_toggle_palette(false, true));
     }
 
     #[test]
