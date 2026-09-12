@@ -650,7 +650,8 @@ impl GpuBridge {
                     fade_end,
                     scene3d.fog_enabled,
                     lod,
-                ),
+                )
+                .with_opacity(scene3d.resolved_grid_opacity()),
             );
             res.ctx.queue().write_buffer(
                 &res.axis_gizmo.uniform,

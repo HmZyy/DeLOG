@@ -521,6 +521,9 @@ fn default_scene_max_camera_distance_m() -> f32 {
 fn default_scene_grid_cell_m() -> f32 {
     1.0
 }
+fn default_scene_grid_opacity() -> f32 {
+    0.3
+}
 fn default_scene_fog_start_m() -> f32 {
     1_000.0
 }
@@ -558,6 +561,8 @@ pub struct Scene3dSettings {
     pub grid_cell_auto: bool,
     #[serde(default = "default_scene_grid_cell_m")]
     pub grid_cell_m: f32,
+    #[serde(default = "default_scene_grid_opacity")]
+    pub grid_opacity: f32,
     #[serde(default = "default_true")]
     pub fog_enabled: bool,
     #[serde(default = "default_scene_fog_start_m")]
@@ -580,6 +585,7 @@ impl Default for Scene3dSettings {
             show_axes: true,
             grid_cell_auto: true,
             grid_cell_m: default_scene_grid_cell_m(),
+            grid_opacity: default_scene_grid_opacity(),
             fog_enabled: true,
             fog_start_m: default_scene_fog_start_m(),
             fog_end_m: default_scene_fog_end_m(),
@@ -613,6 +619,10 @@ impl Scene3dSettings {
 
     pub fn resolved_grid_cell_m(self) -> f32 {
         finite_or(self.grid_cell_m, default_scene_grid_cell_m()).clamp(0.01, 100_000.0)
+    }
+
+    pub fn resolved_grid_opacity(self) -> f32 {
+        finite_or(self.grid_opacity, default_scene_grid_opacity()).clamp(0.0, 1.0)
     }
 
     /// Returns (grid level or cell size, whether the shader draws multiple
@@ -1214,6 +1224,14 @@ fn scene3d_tab(
             );
             ui.end_row();
 
+            ui.label("Grid opacity")
+                .on_hover_text("Blend the ground grid and its world axes against the scene. At 0 the grid is hidden.");
+            ui.add_enabled(
+                s.show_grid,
+                egui::Slider::new(&mut s.grid_opacity, 0.0..=1.0),
+            );
+            ui.end_row();
+
             ui.label("Fog")
                 .on_hover_text("Fade the grid out with distance. Disable to draw the grid crisp all the way to the render distance.");
             ui.checkbox(&mut s.fog_enabled, "");
@@ -1754,6 +1772,7 @@ mod tests {
                 show_axes: false,
                 grid_cell_auto: false,
                 grid_cell_m: 5.0,
+                grid_opacity: 0.4,
                 fog_enabled: false,
                 fog_start_m: 1500.0,
                 fog_end_m: 20_000.0,
@@ -1821,6 +1840,29 @@ mod tests {
         let s = Scene3dSettings::default();
         assert!(s.fog_enabled);
         assert!(s.grid_cell_auto);
+    }
+
+    #[test]
+    fn grid_opacity_defaults_to_a_faint_grid_and_clamps_garbage() {
+        let mut s = Scene3dSettings::default();
+        assert_eq!(s.grid_opacity, 0.3);
+        assert_eq!(s.resolved_grid_opacity(), 0.3);
+        s.grid_opacity = 0.35;
+        assert_eq!(s.resolved_grid_opacity(), 0.35);
+        s.grid_opacity = -2.0;
+        assert_eq!(s.resolved_grid_opacity(), 0.0);
+        s.grid_opacity = 4.0;
+        assert_eq!(s.resolved_grid_opacity(), 1.0);
+        s.grid_opacity = f32::NAN;
+        assert_eq!(s.resolved_grid_opacity(), 0.3);
+    }
+
+    #[test]
+    fn old_scene3d_config_without_grid_opacity_gets_the_default() {
+        let s: AppSettings = serde_json::from_str(r#"{"scene3d":{"far_clip_m":25000.0}}"#).unwrap();
+        assert_eq!(s.scene3d.grid_opacity, 0.3);
+        let s: AppSettings = serde_json::from_str(r#"{"scene3d":{"grid_opacity":0.25}}"#).unwrap();
+        assert_eq!(s.scene3d.resolved_grid_opacity(), 0.25);
     }
 
     #[test]
