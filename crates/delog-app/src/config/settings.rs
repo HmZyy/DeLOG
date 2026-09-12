@@ -75,6 +75,8 @@ pub struct AppSettings {
     #[serde(default)]
     pub plot: PlotDisplay,
     #[serde(default)]
+    pub marker_value_colors: crate::config::marker_colors::MarkerValueColors,
+    #[serde(default)]
     pub font: FontOverride,
     #[serde(default)]
     pub auto_open_diagnostics: bool,
@@ -114,6 +116,7 @@ impl Default for AppSettings {
             live_connection: LiveConnectionSettings::default(),
             scene3d: Scene3dSettings::default(),
             plot: PlotDisplay::default(),
+            marker_value_colors: crate::config::marker_colors::MarkerValueColors::default(),
             font: FontOverride::default(),
             auto_open_diagnostics: false,
             scripting: ScriptingSettings::default(),
@@ -1570,6 +1573,16 @@ mod tests {
         assert_eq!(p.legend_opacity, 1.0);
         assert_eq!(p.hover_opacity, 1.0);
         assert!(p.marker_shade_regions);
+    }
+
+    #[test]
+    fn generated_marker_color_assignments_survive_settings_reload() {
+        let json = serde_json::json!({
+            "marker_value_colors": {"10": [59, 130, 246], "18": [249, 115, 22]}
+        });
+        let settings: AppSettings = serde_json::from_value(json.clone()).unwrap();
+        let saved = serde_json::to_value(&settings).unwrap();
+        assert_eq!(saved["marker_value_colors"], json["marker_value_colors"]);
     }
 
     #[test]
