@@ -26,6 +26,7 @@ pub struct GridUniform {
     /// `y` = fade start, `z` = fade end,
     /// `w` = fog enabled (1.0 = fade with distance, 0.0 = crisp to far plane).
     pub params: [f32; 4],
+    pub opacity: [f32; 4],
 }
 
 impl GridUniform {
@@ -55,7 +56,14 @@ impl GridUniform {
                 fade_end,
                 if fog { 1.0 } else { 0.0 },
             ],
+            opacity: [1.0, 0.0, 0.0, 0.0],
         }
+    }
+
+    #[must_use]
+    pub fn with_opacity(mut self, opacity: f32) -> Self {
+        self.opacity[0] = opacity;
+        self
     }
 }
 
@@ -266,6 +274,90 @@ mod tests {
             (0..w).all(|x| img.matches(x, 0, [10, 12, 16, 255], 6)),
             "top row should be background (above horizon)"
         );
+    }
+
+    #[test]
+    fn opacity_scales_the_grid_and_hides_it_at_zero() {
+        let Some(ctx) = RenderContext::headless() else {
+            eprintln!("no wgpu adapter - skipping grid3d test");
+            return;
+        };
+        let clear = [10u8, 12, 16, 255];
+        let ink = |opacity: f32| -> u64 {
+            let img = grid_over_clear(&ctx, opacity);
+            (0..img.width)
+                .flat_map(|x| (0..img.height).map(move |y| (x, y)))
+                .map(|(x, y)| {
+                    let p = img.pixel(x, y);
+                    (0..3)
+                        .map(|c| u64::from(p[c].abs_diff(clear[c])))
+                        .sum::<u64>()
+                })
+                .sum()
+        };
+
+        let opaque = ink(1.0);
+        let faint = ink(0.3);
+        assert!(opaque > 0, "the grid should draw something at full opacity");
+        assert!(
+            faint * 2 < opaque,
+            "opacity 0.3 should be much fainter than 1.0, got {faint} vs {opaque}"
+        );
+        assert_eq!(
+            ink(0.0),
+            0,
+            "opacity 0 should leave the background untouched"
+        );
+    }
+
+    fn grid_over_clear(ctx: &RenderContext, opacity: f32) -> crate::target::RgbaImage {
+        let (w, h) = (128u32, 128u32);
+        let target = Scene3dTarget::new(ctx.clone(), w, h);
+        let grid = Grid3dPipeline::new(
+            ctx,
+            target.color_format(),
+            target.depth_format(),
+            target.sample_count(),
+        );
+        let eye = Vec3::new(3.0, 5.0, 8.0);
+        let proj = Mat4::perspective_rh(60f32.to_radians(), w as f32 / h as f32, 0.1, 200.0);
+        let view = Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::Y);
+        let mut view_rot = view;
+        view_rot.w_axis = glam::Vec4::new(0.0, 0.0, 0.0, 1.0);
+        grid.set_uniform(
+            ctx,
+            &GridUniform::new(
+                (proj * view).to_cols_array_2d(),
+                (proj * view_rot).inverse().to_cols_array_2d(),
+                eye.to_array(),
+                1.0,
+                12.0,
+                60.0,
+                true,
+                false,
+            )
+            .with_opacity(opacity),
+        );
+        let mut enc = ctx
+            .device()
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = target.begin_pass(
+                &mut enc,
+                wgpu::Color {
+                    r: 10.0 / 255.0,
+                    g: 12.0 / 255.0,
+                    b: 16.0 / 255.0,
+                    a: 1.0,
+                },
+            );
+            grid.draw(&mut pass);
+        }
+        ctx.queue().submit([enc.finish()]);
+        ctx.device()
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
+        target.read_rgba()
     }
 
     fn ground_coverage(ctx: &RenderContext, level_or_cell: f32, lod: bool) -> (f64, f64) {

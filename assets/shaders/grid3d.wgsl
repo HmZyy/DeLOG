@@ -16,6 +16,7 @@ struct Grid {
     inv_vp_rel: mat4x4<f32>,
     cam_pos: vec4<f32>,  // xyz world, w = multi-level on
     params: vec4<f32>,   // x = grid level (or cell size), y = fade start, z = fade end, w = fog on
+    opacity: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> g: Grid;
@@ -173,7 +174,7 @@ fn fs_main(in: VsOut) -> FsOut {
         color = vec3<f32>(0.20, 0.35, 0.95); // South → blue
     }
 
-    let alpha = max(grid_alpha, max(on_east, on_south)) * fade;
+    let alpha = max(grid_alpha, max(on_east, on_south)) * fade * g.opacity.x;
     if (alpha < 0.02) {
         // Empty ground between lines: leave the background untouched and do
         // not write depth.
