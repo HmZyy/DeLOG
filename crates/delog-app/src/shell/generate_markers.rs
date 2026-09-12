@@ -4,6 +4,8 @@ use delog_core::analysis::{TransitionsError, field_value_transitions};
 use delog_core::identity::FieldId;
 use delog_core::snapshot::StoreSnapshot;
 
+use crate::config::marker_colors::MarkerValueColors;
+
 /// Above this cap a field is treated as continuous and refused.
 const MAX_DISTINCT: usize = 64;
 
@@ -26,14 +28,19 @@ pub struct GenerateMarkersDialog {
 }
 
 impl GenerateMarkersDialog {
-    pub fn open(snapshot: &StoreSnapshot, field: FieldId, title: String) -> Self {
+    pub fn open(
+        snapshot: &StoreSnapshot,
+        field: FieldId,
+        title: String,
+        colors: &mut MarkerValueColors,
+    ) -> Self {
         match field_value_transitions(snapshot, field, MAX_DISTINCT) {
             Ok(groups) => {
                 let rows = groups
                     .into_iter()
                     .map(|g| ValueRow {
                         name: format!("Value {}", g.value_label),
-                        color: value_color(&g.value_label),
+                        color: colors.color_for(&g.value_label),
                         include: true,
                         label: g.value_label,
                         transitions: g.transitions,
@@ -62,17 +69,6 @@ impl GenerateMarkersDialog {
             },
         }
     }
-}
-
-/// Hash the label into the palette so the same value keeps its colour across
-/// regenerations and logs.
-fn value_color(label: &str) -> [f32; 4] {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in label.as_bytes() {
-        h ^= u64::from(*b);
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    delog_render::palette::trace_color(h as usize).to_srgb_f32()
 }
 
 fn color32_of(c: [f32; 4]) -> egui::Color32 {
@@ -212,7 +208,7 @@ pub fn generate_markers_window(
 
 #[cfg(test)]
 mod tests {
-    use super::{GenerateMarkersDialog, ValueRow, generate_markers_window, value_color};
+    use super::{GenerateMarkersDialog, MarkerValueColors, ValueRow, generate_markers_window};
 
     fn dialog_with_rows() -> GenerateMarkersDialog {
         GenerateMarkersDialog {
@@ -345,11 +341,48 @@ mod tests {
     }
 
     #[test]
-    fn value_color_is_stable_per_label() {
-        assert_eq!(value_color("4"), value_color("4"));
-        assert_eq!(value_color("AUTO"), value_color("AUTO"));
-        for c in value_color("4") {
-            assert!((0.0..=1.0).contains(&c));
-        }
+    fn generated_marker_colors_are_unique_for_all_supported_values() {
+        use std::sync::Arc;
+
+        use arrow::array::{ArrayRef, Int64Array};
+        use arrow::datatypes::DataType;
+        use delog_core::chunk::Chunk;
+        use delog_core::identity::IdentityRegistry;
+        use delog_core::schema::{FieldSchema, TopicSchema};
+        use delog_core::snapshot::StoreSnapshot;
+        use delog_core::store::TopicStore;
+
+        let mut identity = IdentityRegistry::new();
+        let source = identity.add_source("flight");
+        let topic = identity.add_topic(source, "MODE").unwrap();
+        let field = identity.add_field(topic, "mode").unwrap();
+        let schema = Arc::new(
+            TopicSchema::new(
+                "MODE",
+                [FieldSchema::new("mode", DataType::Int64, None::<String>, 1.0).unwrap()],
+            )
+            .unwrap(),
+        );
+        let values: Vec<i64> = (0..64).collect();
+        let chunk = Arc::new(
+            Chunk::try_new(
+                Int64Array::from(values.clone()),
+                vec![Arc::new(Int64Array::from(values)) as ArrayRef],
+                &schema,
+            )
+            .unwrap(),
+        );
+        let store = Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap());
+        let snapshot = StoreSnapshot::from_registry(&identity, [(topic, store)], 0).unwrap();
+        let mut colors = MarkerValueColors::default();
+        let dialog = GenerateMarkersDialog::open(&snapshot, field, "MODE.mode".into(), &mut colors);
+        assert!(dialog.error.is_none());
+        assert_eq!(dialog.rows.len(), 64);
+        let colors: std::collections::HashSet<_> = dialog
+            .rows
+            .iter()
+            .map(|row| super::color32_of(row.color))
+            .collect();
+        assert_eq!(colors.len(), 64, "different values must not reuse a color");
     }
 }
