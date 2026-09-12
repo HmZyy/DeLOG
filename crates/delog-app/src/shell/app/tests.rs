@@ -742,6 +742,13 @@ fn tile_cache_repaints_on_clear_submission_and_while_action_is_pending() {
     assert!(!tile_cache_needs_repaint(false, false));
 }
 
+fn command_for_shortcut(
+    key: egui::Key,
+    command_modifier: bool,
+) -> Option<crate::shell::app::commands::CommandId> {
+    shortcut_for_key(key, command_modifier).map(|(command, _)| command)
+}
+
 #[test]
 fn keyboard_shortcuts_produce_registry_commands() {
     use crate::shell::app::commands::CommandId;
@@ -829,4 +836,165 @@ fn open_source_ids_lists_every_kind_of_source_and_skips_removed_ones() {
     let snapshot = StoreSnapshot::from_registry(&identity, [], 1).unwrap();
 
     assert_eq!(open_source_ids(&snapshot), vec![file, live, derived]);
+}
+
+#[test]
+fn modifier_and_function_shortcuts_fire_while_a_widget_owns_the_keyboard() {
+    for (key, command_modifier) in [
+        (egui::Key::S, true),
+        (egui::Key::L, true),
+        (egui::Key::K, true),
+        (egui::Key::E, true),
+        (egui::Key::O, true),
+        (egui::Key::F1, false),
+        (egui::Key::F2, false),
+        (egui::Key::F3, false),
+        (egui::Key::F9, false),
+        (egui::Key::F12, false),
+    ] {
+        let (_, scope) = shortcut_for_key(key, command_modifier)
+            .unwrap_or_else(|| panic!("{key:?} should map to a command"));
+        assert!(
+            scope.allows(true),
+            "{key:?} cannot be typed, so a focused text field must not swallow it"
+        );
+    }
+}
+
+#[test]
+fn typed_shortcuts_stay_dormant_while_a_widget_owns_the_keyboard() {
+    for key in [
+        egui::Key::Space,
+        egui::Key::M,
+        egui::Key::Equals,
+        egui::Key::Home,
+        egui::Key::End,
+        egui::Key::ArrowLeft,
+        egui::Key::ArrowRight,
+    ] {
+        let (_, scope) = shortcut_for_key(key, false)
+            .unwrap_or_else(|| panic!("{key:?} should map to a command"));
+        assert!(
+            !scope.allows(true),
+            "{key:?} is text or caret input while a field is focused"
+        );
+        assert!(
+            scope.allows(false),
+            "{key:?} should fire when nothing is focused"
+        );
+    }
+}
+
+#[test]
+fn shortcut_dispatch_gates_on_scope_rather_than_on_focus_alone() {
+    const APP: &str = include_str!("mod.rs");
+
+    assert!(
+        !APP.contains("if !wants_keyboard && !self.command_palette.is_open()"),
+        "a focused widget must not disable every shortcut"
+    );
+    assert!(APP.contains("scope.allows(wants_keyboard)"));
+}
+
+#[test]
+fn a_focused_filter_field_types_text_yet_still_lets_modifier_shortcuts_through() {
+    fn frame(
+        ctx: &egui::Context,
+        text: &mut String,
+        focus: bool,
+        events: Vec<egui::Event>,
+    ) -> (Vec<commands::CommandId>, bool) {
+        let modifiers = events
+            .iter()
+            .find_map(|event| match event {
+                egui::Event::Key { modifiers, .. } => Some(*modifiers),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let mut dispatched = Vec::new();
+        let mut owned_keyboard = false;
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(900.0, 700.0),
+                )),
+                modifiers,
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                let wants_keyboard = ui.ctx().egui_wants_keyboard_input();
+                owned_keyboard = wants_keyboard;
+                dispatched = ui.ctx().input(|input| {
+                    SHORTCUT_KEYS
+                        .iter()
+                        .copied()
+                        .filter(|key| input.key_pressed(*key))
+                        .filter_map(|key| shortcut_for_key(key, input.modifiers.command))
+                        .filter(|(_, scope)| scope.allows(wants_keyboard))
+                        .map(|(command, _)| command)
+                        .collect()
+                });
+                let response = ui.add(egui::TextEdit::singleline(text));
+                if focus {
+                    response.request_focus();
+                }
+            },
+        );
+        (dispatched, owned_keyboard)
+    }
+
+    fn key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    let ctx = egui::Context::default();
+    let mut text = String::new();
+    frame(&ctx, &mut text, true, Vec::new());
+    assert!(
+        ctx.egui_wants_keyboard_input(),
+        "the field should own the keyboard once focused"
+    );
+
+    let (typed, typing_owned_keyboard) = frame(
+        &ctx,
+        &mut text,
+        false,
+        vec![
+            key(egui::Key::Space, egui::Modifiers::NONE),
+            egui::Event::Text(" ".to_owned()),
+        ],
+    );
+    assert!(typing_owned_keyboard, "the field still owns the keyboard");
+    assert_eq!(text, " ", "space belongs to the focused field");
+    assert!(
+        typed.is_empty(),
+        "space must not toggle playback while typing"
+    );
+
+    let (opened, open_owned_keyboard) = frame(
+        &ctx,
+        &mut text,
+        false,
+        vec![key(egui::Key::O, egui::Modifiers::COMMAND)],
+    );
+    assert!(open_owned_keyboard, "the field still owns the keyboard");
+    assert_eq!(text, " ", "Ctrl+O types nothing");
+    assert_eq!(opened, vec![commands::CommandId::Open]);
+
+    let (logging, logging_owned_keyboard) = frame(
+        &ctx,
+        &mut text,
+        false,
+        vec![key(egui::Key::F12, egui::Modifiers::NONE)],
+    );
+    assert!(logging_owned_keyboard, "the field still owns the keyboard");
+    assert_eq!(logging, vec![commands::CommandId::OpenLogging]);
 }
