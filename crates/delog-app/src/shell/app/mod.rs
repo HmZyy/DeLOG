@@ -2927,10 +2927,24 @@ impl eframe::App for DelogApp {
                 }
                 if let Some(field) = browser_response.generate_markers {
                     let title = crate::plotting::legend::trace_label(&snapshot, field);
+                    let colors_before = self.settings.marker_value_colors.clone();
                     self.generate_markers_dialog =
                         Some(crate::shell::generate_markers::GenerateMarkersDialog::open(
-                            &snapshot, field, title,
+                            &snapshot,
+                            field,
+                            title,
+                            &mut self.settings.marker_value_colors,
                         ));
+                    if self.settings.marker_value_colors != colors_before
+                        && let Err(error) =
+                            crate::config::layout::doc::save_app_settings(&self.settings)
+                    {
+                        self.session
+                            .push_diagnostic(delog_core::diagnostics::Diag::error(
+                                "settings-save",
+                                error.to_string(),
+                            ));
+                    }
                 }
             });
             self.browser_model = Some((epoch, model));
