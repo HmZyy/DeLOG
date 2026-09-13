@@ -1,7 +1,7 @@
 #[path = "policy_sources.rs"]
 mod policy_sources;
 
-use policy_sources::{APP_MANIFEST, DATA_FLOW_DOCS, DATAFLOW_CANVAS, DATAFLOW_WINDOW};
+use policy_sources::{APP_MANIFEST, DATAFLOW_CANVAS, DATAFLOW_DOCS, DATAFLOW_WINDOW};
 
 #[test]
 fn dataflow_canvas_uses_egui_graph_without_custom_edge_renderer() {
@@ -27,7 +27,7 @@ fn dataflow_canvas_uses_egui_graph_without_custom_edge_renderer() {
             "custom renderer leaked: {forbidden}"
         );
     }
-    assert!(DATA_FLOW_DOCS.contains("thin adapter over `egui_graph`"));
+    assert!(DATAFLOW_DOCS.contains("thin adapter over `egui_graph`"));
 }
 
 #[test]

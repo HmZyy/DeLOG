@@ -693,7 +693,7 @@ impl SettingsTab {
             Self::Rendering => "Rendering",
             Self::Scene3d => "3D View",
             Self::Scripting => "Scripting",
-            Self::DataFlow => "Data Flow",
+            Self::DataFlow => "Dataflow",
         }
     }
 }
@@ -1458,7 +1458,7 @@ mod tests {
                 "Rendering",
                 "3D View",
                 "Scripting",
-                "Data Flow"
+                "Dataflow"
             ]
         );
     }
@@ -1469,7 +1469,7 @@ mod tests {
             .into_iter()
             .map(SettingsTab::label)
             .collect();
-        assert!(labels.contains(&"Data Flow"));
+        assert!(labels.contains(&"Dataflow"));
     }
 
     #[test]

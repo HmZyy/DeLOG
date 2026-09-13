@@ -168,20 +168,6 @@ pub fn templates() -> &'static [NodeTemplate] {
                 mode: AlignMode::Prev,
             },
         },
-        NodeTemplate {
-            name: "Derived Topic Output",
-            category: "Output",
-            aliases: &["output", "publish", "emit"],
-            make: || {
-                NodeKind::Output(OutputSpec {
-                    topic: "derived".to_owned(),
-                    fields: vec![OutputFieldSpec {
-                        name: "out".to_owned(),
-                        unit: None,
-                    }],
-                })
-            },
-        },
         #[cfg(feature = "scripting")]
         NodeTemplate {
             name: "Python Script",
@@ -198,6 +184,20 @@ pub fn templates() -> &'static [NodeTemplate] {
                         unit: None,
                     }],
                     code: "def flow(inputs):\n    return {\"out\": inputs.a.v}\n".to_owned(),
+                })
+            },
+        },
+        NodeTemplate {
+            name: "Output",
+            category: "Output",
+            aliases: &["output", "publish", "emit"],
+            make: || {
+                NodeKind::Output(OutputSpec {
+                    topic: "derived".to_owned(),
+                    fields: vec![OutputFieldSpec {
+                        name: "field_1".to_owned(),
+                        unit: None,
+                    }],
                 })
             },
         },
