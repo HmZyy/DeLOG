@@ -761,6 +761,7 @@ pub struct WorkspaceActions {
     /// Manual X-view change (pan/zoom/reset); unlocks live-tail mode.
     pub view_changed: bool,
     pub open_vehicle_config: bool,
+    pub open_scene_settings: bool,
     pub export_kml: bool,
     /// Widest Y gutter any pane needed; fed into `Workspace::shared_y_gutter`.
     pub max_y_gutter: f32,
@@ -1151,6 +1152,9 @@ impl Behavior<'_> {
         let overlay = scene_overlay_buttons(ui, rect, pane.trail_mode);
         if overlay.vehicle_config {
             self.actions.open_vehicle_config = true;
+        }
+        if overlay.scene_settings {
+            self.actions.open_scene_settings = true;
         }
         if overlay.toggle_trail {
             pane.trail_mode = pane.trail_mode.next();
@@ -2437,9 +2441,12 @@ fn tracked_vehicle_picker(
 #[derive(Default)]
 struct SceneOverlayClicks {
     vehicle_config: bool,
+    scene_settings: bool,
     toggle_trail: bool,
     export_kml: bool,
 }
+
+const GEAR_TOOLTIP: &str = "Configure vehicles. Right-click for 3D view settings";
 
 fn trail_mode_button(mode: TrailMode) -> (egui::ImageSource<'static>, &'static str) {
     match mode {
@@ -2466,13 +2473,10 @@ fn scene_overlay_buttons(
         .show(ui.ctx(), |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    clicks.vehicle_config = components::icon_button(
-                        ui,
-                        crate::ui::icons::gear(),
-                        "Configure vehicles",
-                        false,
-                    )
-                    .clicked();
+                    let gear =
+                        components::icon_button(ui, crate::ui::icons::gear(), GEAR_TOOLTIP, false);
+                    clicks.vehicle_config = gear.clicked();
+                    clicks.scene_settings = gear.secondary_clicked();
                     let (trail_icon, trail_tooltip) = trail_mode_button(trail_mode);
                     clicks.toggle_trail =
                         components::icon_button(ui, trail_icon, trail_tooltip, false).clicked();
