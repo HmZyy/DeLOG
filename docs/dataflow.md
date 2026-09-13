@@ -1,6 +1,6 @@
-# DéLOG Data Flow Editor
+# DéLOG Dataflow Editor
 
-The Data Flow editor builds derived numeric signals as a visual graph. A graph
+The Dataflow editor builds derived numeric signals as a visual graph. A graph
 reads fields from the current data snapshot, applies operations, and publishes
 its outputs as a derived source named **`dataflow:<name>`**. It uses DéLOG's
 native evaluation engine, so it works without Python and is available in
@@ -28,7 +28,7 @@ one-shot snapshot: publish again after loading or receiving more data.
 
 ## Opening the editor
 
-Choose **File > Data Flow**. The floating window remains available when no log
+Choose **File > Dataflow**. The floating window remains available when no log
 is loaded, so you can build or edit a graph skeleton before opening data.
 
 The window has three resizable columns: **Dataflows**, the tabbed editor, and
@@ -179,17 +179,17 @@ Clicking **Run** while live seeds the derived source from all data already in
 the store, then keeps appending new samples as they arrive. The resulting
 `dataflow:<name>` topic behaves like any other live topic: it plots normally,
 its extent keeps growing as new samples publish, and it keeps updating even
-after the Data Flow editor window is closed.
+after the Dataflow editor window is closed.
 
 Without a live link connected, nothing changes: the preview still updates on
 edit, and **Run** still publishes a one-shot snapshot.
 
-Open flows keep updating when you switch editor tabs or close the Data Flow
+Open flows keep updating when you switch editor tabs or close the Dataflow
 window. Closing an individual editor tab stops its live updates; its published
 data remains available in the store. Reopening a saved flow and running it
 again replaces that flow's previous published source.
 
-**Settings > Data Flow** exposes two parameters for the live recompute:
+**Settings > Dataflow** exposes two parameters for the live recompute:
 
 | Setting | Meaning |
 | --- | --- |
@@ -199,9 +199,12 @@ again replaces that flow's previous published source.
 ## Saving graphs
 
 The name field is both the graph name and its library filename. **Save** writes
-a versioned JSON document. Select a graph in **Dataflows** to open it without
-replacing another tab's unsaved work. A name already used by another open tab
-must be changed before saving or running. Saved data flows form a global library:
+a versioned JSON document. Renaming a saved graph and saving again moves its
+file instead of leaving a copy under the old name, and is refused when the new
+name already belongs to another saved graph. Select a graph in **Dataflows** to
+open it without replacing another tab's unsaved work. A name already used by
+another open tab must be changed before saving or running. Saved dataflows form
+a global library:
 
 | Platform | Location |
 | --- | --- |
@@ -369,7 +372,7 @@ dependency when off. In a `--no-default-features` build:
 
 ## Limitations
 
-- Data flows process snapshots only. Publish again after loading or receiving
+- Dataflows process snapshots only. Publish again after loading or receiving
   more data.
 - Data selection and arithmetic are numeric-only.
 - Arithmetic nodes are binary; chain nodes for three or more inputs.
@@ -484,7 +487,7 @@ retains ownership of the persisted graph, typed-port validation, commands, undo
 history, evaluation, and publication; the crate supplies node interaction,
 sockets, edges, selection, pan, and zoom. Shared alignment, topic-instance
 parsing, and derived-topic preparation live in `delog-core`, so scripting and
-data flows use one implementation.
+dataflows use one implementation.
 
 ### Adding a node kind
 

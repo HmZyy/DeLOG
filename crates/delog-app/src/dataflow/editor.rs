@@ -388,14 +388,28 @@ impl DataFlowEditor {
             }
         }
         self.controller.graph.name.clone_from(&self.name_edit);
+        let name = self.controller.graph.name.clone();
+        let renamed_from = self
+            .loaded_name
+            .clone()
+            .filter(|previous| *previous != name);
+        if renamed_from.is_some() && store.list().contains(&name) {
+            logs.push((
+                LogLevel::Error,
+                format!("Dataflow '{name}' already exists. Choose a different name."),
+            ));
+            return false;
+        }
         match store.save(&self.controller.graph) {
             Ok(()) => {
+                if let Some(previous) = renamed_from
+                    && let Err(error) = store.delete(&previous)
+                {
+                    logs.push((LogLevel::Error, error));
+                }
                 self.controller.dirty = false;
-                self.loaded_name = Some(self.controller.graph.name.clone());
-                logs.push((
-                    LogLevel::Info,
-                    format!("Saved data flow '{}'", self.controller.graph.name),
-                ));
+                self.loaded_name = Some(name.clone());
+                logs.push((LogLevel::Info, format!("Saved dataflow '{name}'")));
                 true
             }
             Err(error) => {
