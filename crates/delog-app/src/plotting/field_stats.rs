@@ -96,6 +96,10 @@ impl FieldStatsController {
         self.tracking_plots = true;
     }
 
+    pub fn is_open(&self) -> bool {
+        !self.fields.is_empty()
+    }
+
     pub fn is_tracking_plots(&self) -> bool {
         self.tracking_plots
     }
@@ -346,6 +350,21 @@ mod tests {
             "the toolbar button should still reopen the window after a close"
         );
         assert!(controller.is_tracking_plots());
+    }
+
+    #[test]
+    fn the_window_is_open_exactly_while_it_holds_fields() {
+        let mut controller = FieldStatsController::default();
+        assert!(!controller.is_open());
+
+        controller.open_plotted(vec![FieldId(1), FieldId(2)]);
+        assert!(controller.is_open());
+
+        controller.close();
+        assert!(!controller.is_open());
+
+        controller.open(FieldId(3));
+        assert!(controller.is_open());
     }
 
     #[test]

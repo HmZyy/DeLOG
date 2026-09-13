@@ -13,7 +13,7 @@ pub enum GlobalPlotControl {
     ToggleMeasuringMarker,
     CycleLegendPosition,
     ToggleLegends,
-    OpenFieldStats,
+    ToggleFieldStats,
     ToggleAnnotationToolbar,
 }
 
@@ -26,7 +26,7 @@ impl GlobalPlotControl {
         Self::ToggleMeasuringMarker,
         Self::CycleLegendPosition,
         Self::ToggleLegends,
-        Self::OpenFieldStats,
+        Self::ToggleFieldStats,
         Self::ToggleAnnotationToolbar,
     ];
 }
@@ -43,7 +43,7 @@ pub const fn command_for_control(control: GlobalPlotControl) -> AppCommand {
             AppCommand::Static(CommandId::CycleLegendPosition)
         }
         GlobalPlotControl::ToggleLegends => AppCommand::Static(CommandId::ToggleLegends),
-        GlobalPlotControl::OpenFieldStats => AppCommand::Static(CommandId::OpenFieldStats),
+        GlobalPlotControl::ToggleFieldStats => AppCommand::Static(CommandId::ToggleFieldStats),
         GlobalPlotControl::ToggleAnnotationToolbar => {
             AppCommand::Static(CommandId::ToggleAnnotationToolbar)
         }
@@ -55,6 +55,7 @@ pub struct GlobalPlotToolbarModel {
     pub playhead_snap: bool,
     pub readout_lock: bool,
     pub measuring_marker: bool,
+    pub field_stats_open: bool,
     pub legend_position: LegendPosition,
     pub legends_visible: bool,
     pub annotation_toolbar_open: bool,
@@ -158,7 +159,7 @@ pub fn show(
                 commands.push(command_for_control(control));
             }
 
-            let stats = command_for_control(GlobalPlotControl::OpenFieldStats);
+            let stats = command_for_control(GlobalPlotControl::ToggleFieldStats);
             let stats_presentation = presentations
                 .iter()
                 .find(|presentation| presentation.command == stats);
@@ -171,7 +172,9 @@ pub fn show(
                         ui,
                         crate::ui::icons::sigma(),
                         "Field stats for every plotted trace",
-                        false,
+                        stats_presentation
+                            .and_then(|presentation| presentation.selected)
+                            .unwrap_or(model.field_stats_open),
                     )
                 })
                 .inner;
@@ -324,6 +327,7 @@ mod tests {
             playhead_snap: false,
             readout_lock: false,
             measuring_marker: false,
+            field_stats_open: false,
             legend_position: LegendPosition::TopRight,
             legends_visible: true,
             annotation_toolbar_open: false,
@@ -367,7 +371,7 @@ mod tests {
         assert!(!format!("{:?}", GlobalPlotControl::ALL).contains("ToggleAllLegends"));
         assert!(!format!("{:?}", GlobalPlotControl::ALL).contains("EqualizePlotHeights"));
         assert!(GlobalPlotControl::ALL.contains(&GlobalPlotControl::ToggleMeasuringMarker));
-        assert!(GlobalPlotControl::ALL.contains(&GlobalPlotControl::OpenFieldStats));
+        assert!(GlobalPlotControl::ALL.contains(&GlobalPlotControl::ToggleFieldStats));
         assert!(GlobalPlotControl::ALL.contains(&GlobalPlotControl::ToggleAnnotationToolbar));
         assert!(GlobalPlotControl::ALL.contains(&GlobalPlotControl::ToggleLegends));
     }
@@ -403,6 +407,7 @@ mod tests {
             playhead_snap: false,
             readout_lock,
             measuring_marker: false,
+            field_stats_open: false,
             legend_position: LegendPosition::TopRight,
             legends_visible: true,
             annotation_toolbar_open: false,
@@ -453,6 +458,45 @@ mod tests {
         );
         assert!(readout_lock_tooltip(false).contains("Lock readouts"));
         assert_ne!(readout_lock_tooltip(true), readout_lock_tooltip(false));
+    }
+
+    #[test]
+    fn the_field_stats_button_lights_up_while_its_window_is_open() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        egui_extras::install_image_loaders(&ctx);
+        let model = |field_stats_open| GlobalPlotToolbarModel {
+            cursor_sampling: SampleMode::Prev,
+            playhead_snap: false,
+            readout_lock: false,
+            measuring_marker: false,
+            field_stats_open,
+            legend_position: LegendPosition::TopRight,
+            legends_visible: true,
+            annotation_toolbar_open: false,
+        };
+        let toggled = |open| {
+            let mut state = None;
+            for _ in 0..3 {
+                let (output, _) = toolbar_frame(&ctx, &model(open), &[], Vec::new());
+                state = output
+                    .platform_output
+                    .accesskit_update
+                    .as_ref()
+                    .expect("accesskit is enabled")
+                    .nodes
+                    .iter()
+                    .find(|(_, node)| {
+                        node.role() == egui::accesskit::Role::Button
+                            && node.label() == Some("Field stats for every plotted trace")
+                    })
+                    .and_then(|(_, node)| node.toggled());
+            }
+            state
+        };
+
+        assert_eq!(toggled(true), Some(egui::accesskit::Toggled::True));
+        assert_eq!(toggled(false), Some(egui::accesskit::Toggled::False));
     }
 
     #[test]
@@ -630,6 +674,7 @@ mod tests {
             playhead_snap: false,
             readout_lock: false,
             measuring_marker: false,
+            field_stats_open: false,
             legend_position: LegendPosition::TopLeft,
             legends_visible: true,
             annotation_toolbar_open: false,

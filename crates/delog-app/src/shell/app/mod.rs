@@ -1672,6 +1672,7 @@ impl DelogApp {
             parser_task_active,
             cfg!(feature = "scripting"),
             self.workspace.fields().next().is_some(),
+            self.field_stats.is_open(),
         )
     }
 
@@ -1816,6 +1817,7 @@ impl DelogApp {
                 playhead_snap: self.snap_playhead,
                 readout_lock: self.lock_readouts,
                 measuring_marker: self.marker_us.is_some(),
+                field_stats_open: self.field_stats.is_open(),
                 legends_visible: self.workspace.all_plot_legends_visible(),
                 annotation_toolbar_open: self.annotation_toolbar_open,
             },
@@ -2041,9 +2043,13 @@ impl DelogApp {
                     let visible = !self.workspace.all_plot_legends_visible();
                     self.workspace.set_all_plot_legends(visible);
                 }
-                CommandId::OpenFieldStats => {
-                    self.field_stats
-                        .open_plotted(self.workspace.unique_fields());
+                CommandId::ToggleFieldStats => {
+                    if self.field_stats.is_open() {
+                        self.field_stats.close();
+                    } else {
+                        self.field_stats
+                            .open_plotted(self.workspace.unique_fields());
+                    }
                 }
                 CommandId::ToggleAnnotationToolbar => {
                     self.annotation_toolbar_open = !self.annotation_toolbar_open;
@@ -2634,6 +2640,7 @@ impl eframe::App for DelogApp {
             playhead_snap: self.snap_playhead,
             readout_lock: self.lock_readouts,
             measuring_marker: self.marker_us.is_some(),
+            field_stats_open: self.field_stats.is_open(),
             legend_position: self.settings.plot.legend_position,
             legends_visible: self.workspace.all_plot_legends_visible(),
             annotation_toolbar_open: self.annotation_toolbar_open,
