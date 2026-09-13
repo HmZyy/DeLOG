@@ -1558,6 +1558,26 @@ fn scene_overlays_still_sit_above_the_scene_itself() {
 }
 
 #[test]
+fn the_measuring_marker_follows_ctrl_hover_and_never_a_plain_drag() {
+    const WORKSPACE: &str = include_str!("mod.rs");
+
+    assert!(
+        !WORKSPACE.contains("marker_drag"),
+        "a primary drag over the marker must pan the plot, not grab the marker"
+    );
+
+    let scrub = WORKSPACE
+        .split("if self.marker_us(pane).is_some()")
+        .nth(1)
+        .expect("ctrl+hover marker scrubbing should still be wired");
+    let scrub = &scrub[..scrub
+        .find("set_marker_us")
+        .expect("the ctrl+hover branch should move the marker")];
+    assert!(scrub.contains("i.modifiers.ctrl"));
+    assert!(scrub.contains("response.hover_pos()"));
+}
+
+#[test]
 fn locking_readouts_pins_them_to_the_playhead_like_playback_does() {
     assert!(!playhead_readout(false, false, false, true));
     assert!(!playhead_readout(false, false, false, false));
