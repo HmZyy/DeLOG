@@ -5,6 +5,9 @@ use std::hash::Hash;
 const LABEL_RATIO: f32 = 0.4;
 const LABEL_MIN: f32 = 52.0;
 const LABEL_MAX: f32 = 104.0;
+const UNIT_RATIO: f32 = 0.28;
+const UNIT_MIN: f32 = 36.0;
+const UNIT_MAX: f32 = 72.0;
 const ACTION_WIDTH: f32 = 26.0;
 const MIN_CELL: f32 = 24.0;
 const SECTION_GAP: f32 = 12.0;
@@ -353,9 +356,9 @@ fn port_widths(ui: &egui::Ui, with_units: bool) -> (f32, Option<f32>) {
     if !with_units {
         return ((content_width(ui, 2) - ACTION_WIDTH).max(MIN_CELL), None);
     }
-    let name = label_width(ui);
-    let unit = (content_width(ui, 3) - ACTION_WIDTH - name).max(MIN_CELL);
-    (name, Some(unit))
+    let total = (content_width(ui, 3) - ACTION_WIDTH).max(MIN_CELL * 2.0);
+    let unit = (total * UNIT_RATIO).clamp(UNIT_MIN.min(total * 0.5), UNIT_MAX);
+    ((total - unit).max(MIN_CELL), Some(unit))
 }
 
 fn content_width(ui: &egui::Ui, columns: usize) -> f32 {
