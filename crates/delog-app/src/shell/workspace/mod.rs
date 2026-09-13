@@ -1341,14 +1341,11 @@ impl Behavior<'_> {
                 pane.annotations.selected = pane.context_target;
             }
         }
-        let marker_active =
-            !annot_active && self.handle_marker_drag(&response, plot_rect, x_range, pane);
-        if !annot_active && !marker_active {
+        if !annot_active {
             self.handle_plot_interaction(&response, plot_rect);
         }
         self.handle_zoom_drag(&response, plot_rect, pane);
-        // Ctrl+hover scrubs an existing marker to the cursor, with no precise
-        // grab on the line needed.
+        // Ctrl+hover scrubs an existing marker to the cursor.
         if self.marker_us(pane).is_some()
             && ui.input(|i| i.modifiers.ctrl)
             && let Some(pos) = response.hover_pos()
@@ -2046,54 +2043,6 @@ impl Behavior<'_> {
     /// Set or clear the shared measurement marker.
     fn set_marker_us(&mut self, _pane: &mut PlotPane, value: Option<i64>) {
         *self.services.marker_us = value;
-    }
-
-    /// Drag the measurement marker line along X. A primary drag that starts
-    /// within a few pixels of the marker grabs it. Returns whether the drag was
-    /// consumed, so the caller skips panning.
-    fn handle_marker_drag(
-        &mut self,
-        response: &egui::Response,
-        rect: egui::Rect,
-        x_range: (f32, f32),
-        pane: &mut PlotPane,
-    ) -> bool {
-        let Some(marker_us) = self.marker_us(pane) else {
-            return false;
-        };
-        let (x0, x1) = x_range;
-        if x1 <= x0 || rect.width() <= 0.0 {
-            return false;
-        }
-        let origin = self.services.origin_us;
-        let marker_sec = ((marker_us - origin) as f64 * 1e-6) as f32;
-        let marker_x = rect.left() + (marker_sec - x0) / (x1 - x0) * rect.width();
-
-        if response.drag_started_by(egui::PointerButton::Primary) {
-            pane.marker_drag = response
-                .interact_pointer_pos()
-                .is_some_and(|p| rect.contains(p) && (p.x - marker_x).abs() <= 6.0);
-        }
-        if response.drag_stopped() {
-            let was = pane.marker_drag;
-            pane.marker_drag = false;
-            if was {
-                return true; // consume the release frame so it never pans
-            }
-        }
-        if pane.marker_drag {
-            if let Some(p) = response.interact_pointer_pos() {
-                let frac = ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-                let t_sec = x0 as f64 + frac as f64 * (x1 - x0) as f64;
-                let mut t_us = origin + (t_sec * 1e6).round() as i64;
-                if let Some(range) = self.services.snapshot.global_time_range() {
-                    t_us = t_us.clamp(range.min_us, range.max_us);
-                }
-                self.set_marker_us(pane, Some(t_us));
-            }
-            return true;
-        }
-        false
     }
 
     /// Right-button drag zooms the shared X view to the dragged window. The
