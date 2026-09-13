@@ -20,6 +20,7 @@ use super::{
 };
 
 const WORKERS: usize = 4;
+
 const QUEUE_CAPACITY: usize = 256;
 const READY_CAPACITY: usize = 256;
 const FAILURE_CAPACITY: usize = 256;
@@ -657,6 +658,7 @@ fn controller_loop(
     let mut ready_order = VecDeque::with_capacity(READY_CAPACITY);
     let mut failed_order = VecDeque::with_capacity(FAILURE_CAPACITY);
     let mut epoch = 0_u64;
+    let mut last_flush = Instant::now();
     let mut shutdown = false;
     while !shutdown {
         select! {
@@ -695,12 +697,8 @@ fn controller_loop(
             epoch,
         );
         if !shutdown {
-            loop {
-                if pending.is_empty() || idle.is_empty() {
-                    break;
-                }
-                let Pending(work) = pending.pop().unwrap();
-                let std::cmp::Reverse(worker) = idle.pop().unwrap();
+            let mut starved = Vec::new();
+            while let Some(Pending(work)) = pending.pop() {
                 let key = (
                     work.request.scope,
                     work.request.provider,
@@ -717,53 +715,56 @@ fn controller_loop(
                         .get(&key)
                         .is_none_or(|(_, token)| *token != work.sequence)
                 {
-                    idle.push(std::cmp::Reverse(worker));
                     continue;
                 }
-                match cache.read(work.request.provider, work.request.id) {
-                    Ok(Some(bytes)) => match decode_tile(&bytes) {
-                        Ok(rgba) => {
-                            retain_ready(&mut states, &mut ready_order, key, work.sequence);
-                            send_ready(
-                                &ready_tx,
-                                &ready_evict_rx,
-                                ReadyEnvelope {
-                                    epoch: work.epoch,
-                                    sequence: work.sequence,
-                                    tile: ReadyTile {
-                                        scope: work.request.scope,
-                                        epoch: work.epoch,
-                                        provider: work.request.provider,
-                                        id: work.request.id,
-                                        generation: work.request.generation,
-                                        rgba,
-                                        corners: work.request.corners,
-                                    },
-                                },
-                            );
-                            idle.push(std::cmp::Reverse(worker));
-                            repaint();
-                        }
-                        Err(_) => {
-                            states.insert(key, (RequestState::InFlight, work.sequence));
-                            let _ = worker_txs[worker].send(work);
-                        }
-                    },
+                let cached = match cache.read(work.request.provider, work.request.id) {
+                    Ok(Some(bytes)) => decode_tile(&bytes).ok(),
+                    Ok(None) => None,
                     Err(error) => {
                         status_snapshot.lock().unwrap().failure = Some(TileFailure {
                             class: TileFailureClass::Cache,
                             retryable: false,
                             message: error.to_string(),
                         });
-                        states.insert(key, (RequestState::InFlight, work.sequence));
-                        let _ = worker_txs[worker].send(work);
+                        None
                     }
-                    Ok(None) => {
-                        states.insert(key, (RequestState::InFlight, work.sequence));
-                        let _ = worker_txs[worker].send(work);
-                    }
+                };
+                if let Some(rgba) = cached {
+                    retain_ready(&mut states, &mut ready_order, key, work.sequence);
+                    send_ready(
+                        &ready_tx,
+                        &ready_evict_rx,
+                        ReadyEnvelope {
+                            epoch: work.epoch,
+                            sequence: work.sequence,
+                            tile: ReadyTile {
+                                scope: work.request.scope,
+                                epoch: work.epoch,
+                                provider: work.request.provider,
+                                id: work.request.id,
+                                generation: work.request.generation,
+                                rgba,
+                                corners: work.request.corners,
+                            },
+                        },
+                    );
+                    repaint();
+                    continue;
                 }
+                let Some(std::cmp::Reverse(worker)) = idle.pop() else {
+                    starved.push(Pending(work));
+                    continue;
+                };
+                states.insert(key, (RequestState::InFlight, work.sequence));
+                let _ = worker_txs[worker].send(work);
             }
+            pending.extend(starved);
+        }
+        if last_flush.elapsed() >= Duration::from_secs(5) {
+            if let Err(error) = cache.flush() {
+                tracing::warn!(%error, "map tile index flush failed");
+            }
+            last_flush = Instant::now();
         }
         publish_status(&status_snapshot, &states, cache.usage_bytes());
     }

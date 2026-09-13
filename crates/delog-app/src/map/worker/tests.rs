@@ -1155,3 +1155,67 @@ fn cache_write_failure_still_delivers_decoded_tile() {
         "recovered cache error clears"
     );
 }
+
+fn tile_request(x: u32, priority: i32) -> TileRequest {
+    TileRequest {
+        scope: MapScopeId(1),
+        provider: MapProviderId::BingSatellite,
+        id: TileId { zoom: 5, x, y: 1 },
+        corners: [[0.0; 3]; 4],
+        priority,
+        generation: 1,
+    }
+}
+
+#[test]
+fn disk_cached_tiles_are_served_while_every_worker_is_busy_downloading() {
+    let dir = tempfile::tempdir().unwrap();
+    let hits = Arc::new(AtomicUsize::new(0));
+    let warm_url = server(jpeg(), "image/jpeg", Arc::clone(&hits));
+
+    {
+        let mut manager = TileManager::new(dir.path().to_owned(), u64::MAX, || {}).unwrap();
+        manager.request_with_url(tile_request(1, 0), Some(warm_url));
+        let ready = await_poll(&mut manager);
+        assert_eq!(ready.len(), 1, "warm-up tile must be delivered");
+    }
+
+    let mut manager = TileManager::new(dir.path().to_owned(), u64::MAX, || {}).unwrap();
+    let (gated_url, observed, release) = gated_server(jpeg());
+
+    for i in 0..WORKERS {
+        manager.request_with_url(
+            tile_request(100 + i as u32, 0),
+            Some(format!("{gated_url}/block{i}")),
+        );
+    }
+    for _ in 0..WORKERS {
+        observed
+            .recv_timeout(Duration::from_secs(5))
+            .expect("all workers should pick up a download");
+    }
+
+    manager.request_with_url(
+        tile_request(1, -1),
+        Some("http://127.0.0.1:1/unused".into()),
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut served = false;
+    while Instant::now() < deadline {
+        if manager
+            .poll(MapScopeId(1))
+            .iter()
+            .any(|tile| tile.id.x == 1)
+        {
+            served = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let _ = release;
+    assert!(
+        served,
+        "a tile already on disk was never delivered while {WORKERS} network downloads were in flight"
+    );
+}
