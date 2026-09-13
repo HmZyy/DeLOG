@@ -384,3 +384,26 @@ fn tables_are_framed_cards_with_row_dividers_instead_of_zebra_stripes() {
         assert!(*y > card.top() && *y < card.bottom(), "{y} in {card:?}");
     }
 }
+
+#[test]
+fn output_field_names_get_more_room_than_their_units() {
+    let ctx = context();
+    let mut editor = editor(output_kind());
+    render(&ctx, &mut editor, 291.0, vec![]);
+    let nodes = render(&ctx, &mut editor, 291.0, vec![]);
+    let width = |value: &str| {
+        nodes
+            .iter()
+            .find(|node| node.role() == Role::TextInput && node.value() == Some(value))
+            .unwrap_or_else(|| panic!("missing input {value}"))
+            .bounds()
+            .unwrap()
+            .width()
+    };
+    assert!(
+        width("altitude") > width("m") * 2.0,
+        "name {} vs unit {}",
+        width("altitude"),
+        width("m")
+    );
+}
