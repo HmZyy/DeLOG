@@ -4352,6 +4352,7 @@ const SHORTCUT_KEYS: &[egui::Key] = &[
     egui::Key::K,
     egui::Key::M,
     egui::Key::E,
+    egui::Key::T,
     egui::Key::O,
     egui::Key::Equals,
 ];
@@ -4394,6 +4395,7 @@ fn shortcut_for_key(
         (egui::Key::L, true) => Some((CommandId::LoadLayout, Anywhere)),
         (egui::Key::K, true) => Some((CommandId::RunScript, Anywhere)),
         (egui::Key::E, true) => Some((CommandId::ToggleDataBrowser, Anywhere)),
+        (egui::Key::T, true) => Some((CommandId::ToggleScene3d, Anywhere)),
         (egui::Key::O, true) => Some((CommandId::Open, Anywhere)),
         (egui::Key::F1, _) => Some((CommandId::OpenDiagnostics, Anywhere)),
         (egui::Key::F2, _) => Some((CommandId::OpenPerformance, Anywhere)),
