@@ -55,7 +55,7 @@ pub fn build_outputs(
     if outputs.is_empty() {
         return Err(vec![Diagnostic {
             node: NodeId(0),
-            message: "Connect a Derived Topic Output node to publish.".to_owned(),
+            message: "Connect an Output node to publish.".to_owned(),
         }]);
     }
 
@@ -156,7 +156,7 @@ pub fn build_outputs(
     if total_fields == 0 {
         errors.push(Diagnostic {
             node: outputs[0].0,
-            message: "Connect a Derived Topic Output node to publish.".to_owned(),
+            message: "Connect an Output node to publish.".to_owned(),
         });
     }
     if errors.is_empty() {

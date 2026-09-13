@@ -1,6 +1,5 @@
 use delog_flow::filter::FilterSpec;
 
-/// Shared by the node body and inspector so comparison edits behave identically.
 pub(super) fn filter_controls(ui: &mut egui::Ui, spec: &mut FilterSpec) -> bool {
     let mut changed = false;
     if spec.filter.supports_inclusive() {

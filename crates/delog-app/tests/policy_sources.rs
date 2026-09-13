@@ -5,7 +5,10 @@ pub const APP: &str = include_str!("../src/shell/app/mod.rs");
 pub const APP_COMMANDS: &str = include_str!("../src/shell/app/commands/specs.rs");
 pub const BROWSER: &str = include_str!("../src/plotting/browser.rs");
 pub const DATAFLOW_CANVAS: &str = include_str!("../src/dataflow/canvas.rs");
-pub const DATAFLOW_WINDOW: &str = include_str!("../src/dataflow/window.rs");
+pub const DATAFLOW_WINDOW: &str = concat!(
+    include_str!("../src/dataflow/window.rs"),
+    include_str!("../src/dataflow/editor.rs"),
+);
 pub const DATA_EXPORT: &str = include_str!("../src/export/data_export/mod.rs");
 pub const DIAGNOSTICS: &str = include_str!("../src/ui/diagnostics.rs");
 pub const DOCKS: &str = include_str!("../src/ui/docks.rs");
@@ -35,4 +38,4 @@ pub const VEHICLE_DIALOG: &str = concat!(
 pub const WORKSPACE: &str = include_str!("../src/shell/workspace/mod.rs");
 pub const APP_MANIFEST: &str = include_str!("../Cargo.toml");
 pub const CORE_INGEST: &str = include_str!("../../delog-core/src/ingest.rs");
-pub const DATA_FLOW_DOCS: &str = include_str!("../../../docs/data_flow.md");
+pub const DATAFLOW_DOCS: &str = include_str!("../../../docs/dataflow.md");

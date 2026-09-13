@@ -1,7 +1,11 @@
+mod add_menu;
 pub mod canvas;
 mod canvas_state;
 pub mod controller;
+mod editor;
 mod filter_controls;
+mod inspector;
+mod inspector_tables;
 pub mod picker;
 pub mod registry;
 pub mod store;
