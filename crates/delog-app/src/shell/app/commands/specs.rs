@@ -248,7 +248,7 @@ impl CommandId {
             ),
             OpenDataFlow => {
                 spec!(
-                    "Data flow",
+                    "Dataflow",
                     Analysis,
                     None,
                     "pipeline graph",

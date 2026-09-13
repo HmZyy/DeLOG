@@ -3193,15 +3193,6 @@ impl eframe::App for DelogApp {
         }
 
         {
-            #[cfg(feature = "scripting")]
-            if self.dataflow.open && self.dataflow.has_script_node() {
-                let host = self.scripts.engine_flow_host(
-                    self.session.store(),
-                    self.session.ingest_sender(),
-                    Arc::clone(self.session.metrics()),
-                );
-                self.dataflow.set_script_host(Some(host));
-            }
             let sender = self.session.ingest_sender();
             let live_connected = self.session.has_connected_live();
             let dataflow_settings = self.settings.dataflow;
@@ -3211,6 +3202,15 @@ impl eframe::App for DelogApp {
                     self.dataflow
                         .show(ui.ctx(), &snapshot, &sender, live_connected),
                 );
+            }
+            #[cfg(feature = "scripting")]
+            if self.dataflow.open && self.dataflow.has_script_node() {
+                let host = self.scripts.engine_flow_host(
+                    self.session.store(),
+                    self.session.ingest_sender(),
+                    Arc::clone(self.session.metrics()),
+                );
+                self.dataflow.set_script_host(Some(host));
             }
             logs.extend(self.dataflow.drive(
                 ui.ctx(),
