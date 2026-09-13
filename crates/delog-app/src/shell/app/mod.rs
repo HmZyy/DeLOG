@@ -3128,6 +3128,9 @@ impl eframe::App for DelogApp {
                     if actions.open_vehicle_config {
                         self.vehicle_dialog.open = true;
                     }
+                    if actions.open_scene_settings {
+                        self.settings_dialog.open_scene3d();
+                    }
                     if actions.export_kml {
                         self.spawn_export_kml_dialog(ui.ctx(), &snapshot);
                     }
