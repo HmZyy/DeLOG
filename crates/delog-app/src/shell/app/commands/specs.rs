@@ -327,7 +327,7 @@ impl CommandId {
                     Palette
                 )
             }
-            OpenFieldStats => {
+            ToggleFieldStats => {
                 spec!(
                     "Field stats",
                     Workspace,
