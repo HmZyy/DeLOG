@@ -109,6 +109,10 @@ pub fn show_canvas(
                                 frame.stroke.color = context.style().visuals.error_fg_color;
                                 frame.stroke.width = frame.stroke.width.max(1.5);
                             }
+                            let chrome = NodeChrome {
+                                margin: frame.inner_margin,
+                                corner_radius: frame.corner_radius,
+                            };
                             context.framed_with(frame, |ui, sockets| {
                                 show_node_contents(
                                     ui,
@@ -117,6 +121,7 @@ pub fn show_canvas(
                                     &inputs,
                                     &outputs,
                                     &mut edited,
+                                    chrome,
                                 )
                             })
                         });
@@ -271,6 +276,18 @@ fn port_type_label(port_type: PortType) -> &'static str {
     }
 }
 
+#[derive(Clone, Copy)]
+struct NodeChrome {
+    margin: egui::Margin,
+    corner_radius: egui::CornerRadius,
+}
+
+fn header_fill(visuals: &egui::Visuals) -> egui::Color32 {
+    visuals
+        .window_fill()
+        .lerp_to_gamma(visuals.text_color(), 0.1)
+}
+
 fn show_node_contents(
     ui: &mut egui::Ui,
     sockets: &mut egui_graph::SocketLayout,
@@ -278,9 +295,11 @@ fn show_node_contents(
     inputs: &[delog_flow::graph::PortSpec],
     outputs: &[delog_flow::graph::PortSpec],
     edited: &mut NodeKind,
+    chrome: NodeChrome,
 ) -> NodeContentResponse {
     let mut result = NodeContentResponse::default();
-    ui.horizontal(|ui| {
+    let header_bg = ui.painter().add(egui::Shape::Noop);
+    let header = ui.horizontal(|ui| {
         ui.strong(node_title(&node.kind));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let icon_size = egui::Vec2::splat(ui.spacing().icon_width);
@@ -293,7 +312,9 @@ fn show_node_contents(
                 .clicked();
         });
     });
-    ui.separator();
+    let header_bottom = header.response.rect.bottom() + chrome.margin.bottom as f32;
+    let fill = header_fill(ui.visuals());
+    ui.add_space(chrome.margin.bottom as f32);
 
     for index in 0..inputs.len().max(outputs.len()) {
         let input = inputs.get(index);
@@ -334,6 +355,24 @@ fn show_node_contents(
         }
         _ => false,
     };
+
+    let content = ui.min_rect();
+    ui.painter().set(
+        header_bg,
+        egui::epaint::RectShape::filled(
+            egui::Rect::from_min_max(
+                content.min - egui::vec2(chrome.margin.left as f32, chrome.margin.top as f32),
+                egui::pos2(content.right() + chrome.margin.right as f32, header_bottom),
+            ),
+            egui::CornerRadius {
+                nw: chrome.corner_radius.nw,
+                ne: chrome.corner_radius.ne,
+                sw: 0,
+                se: 0,
+            },
+            fill,
+        ),
+    );
     result
 }
 
@@ -1129,5 +1168,86 @@ mod tests {
                 to_port: 0,
             })
         ));
+    }
+
+    fn painted_rects(
+        ctx: &egui::Context,
+        graph: &Graph,
+        state: &mut CanvasState,
+        size: egui::Vec2,
+    ) -> Vec<egui::epaint::RectShape> {
+        let mut rects = Vec::new();
+        for _ in 0..4 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| {
+                ui.set_min_size(size);
+                ui.set_max_size(size);
+                let _ = show_canvas(ui, graph, &HashSet::new(), &HashSet::new(), state);
+            });
+            rects.clear();
+            for shape in output.shapes {
+                collect_rects(shape.shape, &mut rects);
+            }
+        }
+        rects
+    }
+
+    fn collect_rects(shape: egui::epaint::Shape, out: &mut Vec<egui::epaint::RectShape>) {
+        match shape {
+            egui::epaint::Shape::Rect(rect) => out.push(rect),
+            egui::epaint::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    collect_rects(shape, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn node_titles_sit_on_a_full_width_header_band() {
+        let ctx = egui::Context::default();
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let mut graph = Graph::new("g");
+        graph.insert_node(Node {
+            id: NodeId(1),
+            pos: [40.0, 40.0],
+            kind: NodeKind::Multiply,
+        });
+        let mut state = CanvasState::default();
+        let rects = painted_rects(&ctx, &graph, &mut state, egui::vec2(400.0, 300.0));
+
+        let visuals = &ctx.global_style().visuals;
+        let body = rects
+            .iter()
+            .find(|rect| rect.fill == visuals.window_fill() && rect.stroke.width > 0.0)
+            .expect("node frame");
+        let header = rects
+            .iter()
+            .find(|rect| rect.fill == header_fill(visuals))
+            .expect("node header band");
+
+        assert_ne!(header.fill, body.fill);
+        let inset = body.stroke.width.max(1.0) + 0.5;
+        assert!(body.rect.contains_rect(header.rect), "{header:?} {body:?}");
+        assert!(header.rect.left() - body.rect.left() <= inset, "{header:?}");
+        assert!(
+            body.rect.right() - header.rect.right() <= inset,
+            "{header:?}"
+        );
+        assert!(header.rect.top() - body.rect.top() <= inset, "{header:?}");
+        assert!(
+            header.rect.height() < body.rect.height() * 0.5,
+            "{:?} in {:?}",
+            header.rect,
+            body.rect
+        );
+        assert_eq!(header.corner_radius.nw, body.corner_radius.nw);
+        assert_eq!(header.corner_radius.ne, body.corner_radius.ne);
+        assert_eq!(header.corner_radius.sw, 0);
+        assert_eq!(header.corner_radius.se, 0);
     }
 }
