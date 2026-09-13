@@ -9,6 +9,7 @@ use crate::shell::app::commands::{
 pub enum GlobalPlotControl {
     CursorSampling(SampleMode),
     TogglePlayheadSnap,
+    ToggleReadoutLock,
     ToggleMeasuringMarker,
     CycleLegendPosition,
     ToggleLegends,
@@ -18,9 +19,10 @@ pub enum GlobalPlotControl {
 
 #[cfg(test)]
 impl GlobalPlotControl {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::CursorSampling(SampleMode::Prev),
         Self::TogglePlayheadSnap,
+        Self::ToggleReadoutLock,
         Self::ToggleMeasuringMarker,
         Self::CycleLegendPosition,
         Self::ToggleLegends,
@@ -33,6 +35,7 @@ pub const fn command_for_control(control: GlobalPlotControl) -> AppCommand {
     match control {
         GlobalPlotControl::CursorSampling(mode) => AppCommand::SetCursorSampling(mode),
         GlobalPlotControl::TogglePlayheadSnap => AppCommand::Static(CommandId::TogglePlayheadSnap),
+        GlobalPlotControl::ToggleReadoutLock => AppCommand::Static(CommandId::ToggleReadoutLock),
         GlobalPlotControl::ToggleMeasuringMarker => {
             AppCommand::Static(CommandId::AddMeasuringMarker)
         }
@@ -50,6 +53,7 @@ pub const fn command_for_control(control: GlobalPlotControl) -> AppCommand {
 pub struct GlobalPlotToolbarModel {
     pub cursor_sampling: SampleMode,
     pub playhead_snap: bool,
+    pub readout_lock: bool,
     pub measuring_marker: bool,
     pub legend_position: LegendPosition,
     pub legends_visible: bool,
@@ -96,6 +100,17 @@ pub fn show(
             .clicked()
             {
                 commands.push(command_for_control(GlobalPlotControl::TogglePlayheadSnap));
+            }
+
+            if crate::ui::components::icon_button(
+                ui,
+                crate::ui::icons::message_square(),
+                readout_lock_tooltip(model.readout_lock),
+                model.readout_lock,
+            )
+            .clicked()
+            {
+                commands.push(command_for_control(GlobalPlotControl::ToggleReadoutLock));
             }
 
             let marker = command_for_control(GlobalPlotControl::ToggleMeasuringMarker);
@@ -215,6 +230,14 @@ fn sample_mode_label(mode: SampleMode) -> &'static str {
     }
 }
 
+fn readout_lock_tooltip(locked: bool) -> &'static str {
+    if locked {
+        "Readouts locked to the playhead. Click to follow the hovered cursor again"
+    } else {
+        "Lock readouts to the playhead on all plots"
+    }
+}
+
 fn legend_tooltip(legends_visible: bool) -> &'static str {
     if legends_visible {
         "Cycle legend position on all plots. Right-click to hide every legend"
@@ -299,6 +322,7 @@ mod tests {
         let model = GlobalPlotToolbarModel {
             cursor_sampling: SampleMode::Prev,
             playhead_snap: false,
+            readout_lock: false,
             measuring_marker: false,
             legend_position: LegendPosition::TopRight,
             legends_visible: true,
@@ -337,7 +361,7 @@ mod tests {
 
     #[test]
     fn toolbar_actions_are_all_global() {
-        assert_eq!(GlobalPlotControl::ALL.len(), 7);
+        assert_eq!(GlobalPlotControl::ALL.len(), 8);
         assert!(!format!("{:?}", GlobalPlotControl::ALL).contains("Split"));
         assert!(!format!("{:?}", GlobalPlotControl::ALL).contains("FitAll"));
         assert!(!format!("{:?}", GlobalPlotControl::ALL).contains("ToggleAllLegends"));
@@ -366,6 +390,90 @@ mod tests {
         assert!(
             missing.is_empty(),
             "commands routed to the global toolbar but never rendered there: {missing:?}"
+        );
+    }
+
+    #[test]
+    fn the_readout_lock_button_emits_its_command_and_shows_its_state() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        egui_extras::install_image_loaders(&ctx);
+        let model = |readout_lock| GlobalPlotToolbarModel {
+            cursor_sampling: SampleMode::Prev,
+            playhead_snap: false,
+            readout_lock,
+            measuring_marker: false,
+            legend_position: LegendPosition::TopRight,
+            legends_visible: true,
+            annotation_toolbar_open: false,
+        };
+        let button_node = |output: &egui::FullOutput, label: &str| {
+            output
+                .platform_output
+                .accesskit_update
+                .as_ref()
+                .expect("accesskit is enabled")
+                .nodes
+                .iter()
+                .find(|(_, node)| {
+                    node.role() == egui::accesskit::Role::Button && node.label() == Some(label)
+                })
+                .map(|(_, node)| node.clone())
+        };
+
+        let mut unlocked = None;
+        for _ in 0..3 {
+            let (output, _) = toolbar_frame(&ctx, &model(false), &[], Vec::new());
+            unlocked = button_node(&output, readout_lock_tooltip(false));
+        }
+        let bounds = unlocked
+            .expect("the readout lock button belongs to the toolbar")
+            .bounds()
+            .expect("a laid-out button has bounds");
+        let pos = egui::pos2(
+            ((bounds.x0 + bounds.x1) * 0.5) as f32,
+            ((bounds.y0 + bounds.y1) * 0.5) as f32,
+        );
+
+        let _ = toolbar_frame(&ctx, &model(false), &[], click_events(pos, true));
+        let (_, clicked) = toolbar_frame(&ctx, &model(false), &[], click_events(pos, false));
+        assert!(
+            clicked.contains(&AppCommand::Static(CommandId::ToggleReadoutLock)),
+            "clicking the readout lock should emit its command, got {clicked:?}"
+        );
+
+        let mut locked = None;
+        for _ in 0..3 {
+            let (output, _) = toolbar_frame(&ctx, &model(true), &[], Vec::new());
+            locked = button_node(&output, readout_lock_tooltip(true));
+        }
+        assert!(
+            locked.is_some_and(|node| node.toggled() == Some(egui::accesskit::Toggled::True)),
+            "a locked toolbar must show the button as pressed"
+        );
+        assert!(readout_lock_tooltip(false).contains("Lock readouts"));
+        assert_ne!(readout_lock_tooltip(true), readout_lock_tooltip(false));
+    }
+
+    #[test]
+    fn the_readout_lock_icon_follows_the_tint_convention() {
+        let text = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/icons/message-square.svg"
+        ))
+        .expect("the readout lock icon should be bundled");
+        assert!(text.contains("stroke=\"#ffffff\""));
+        assert!(text.contains("<path"));
+    }
+
+    #[test]
+    fn the_readout_lock_is_routed_to_both_the_toolbar_and_the_palette() {
+        let routes = CommandId::ToggleReadoutLock.spec().routes;
+        assert!(routes.contains(&crate::shell::app::commands::AccessRoute::Palette));
+        assert!(routes.contains(&crate::shell::app::commands::AccessRoute::GlobalToolbar));
+        assert_eq!(
+            command_for_control(GlobalPlotControl::ToggleReadoutLock),
+            AppCommand::Static(CommandId::ToggleReadoutLock)
         );
     }
 
@@ -520,6 +628,7 @@ mod tests {
         let model = GlobalPlotToolbarModel {
             cursor_sampling: SampleMode::Prev,
             playhead_snap: false,
+            readout_lock: false,
             measuring_marker: false,
             legend_position: LegendPosition::TopLeft,
             legends_visible: true,

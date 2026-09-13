@@ -140,6 +140,10 @@ pub fn sigma() -> ImageSource<'static> {
     egui::include_image!("../../assets/icons/sigma.svg")
 }
 
+pub fn message_square() -> ImageSource<'static> {
+    egui::include_image!("../../assets/icons/message-square.svg")
+}
+
 pub fn ruler() -> ImageSource<'static> {
     egui::include_image!("../../assets/icons/ruler.svg")
 }
