@@ -51,13 +51,16 @@ pub fn show_canvas(
     issues: &HashSet<NodeId>,
     state: &mut CanvasState,
 ) -> Vec<CanvasEvent> {
+    let graph_id = state
+        .graph_id
+        .unwrap_or_else(|| egui_graph::id("dataflow-canvas"));
     let canvas_size = ui.available_size();
     state.prepare(graph, canvas_size);
     if state.fit_requested() {
         let node_bounds = if graph.nodes.is_empty() {
             None
         } else {
-            measured_node_bounds(ui.ctx(), graph, &state.view.layout)
+            measured_node_bounds(ui.ctx(), graph_id, graph, &state.view.layout)
         };
         let fitted = node_bounds.and_then(|bounds| fitted_scene_rect(bounds, canvas_size));
         state.apply_fit_request(graph, canvas_size, fitted);
@@ -76,7 +79,7 @@ pub fn show_canvas(
     let mut socket_secondary_clicked = false;
     let secondary_clicked =
         ui.input(|input| input.pointer.button_clicked(egui::PointerButton::Secondary));
-    let response = egui_graph::Graph::new("dataflow-canvas")
+    let response = egui_graph::Graph::from_id(graph_id)
         .dot_grid(true)
         .zoom_range(MIN_CANVAS_ZOOM..=MAX_CANVAS_ZOOM)
         .snap(None)
@@ -480,10 +483,11 @@ fn fitted_scene_rect(node_bounds: egui::Rect, canvas_size: egui::Vec2) -> Option
 
 fn measured_node_bounds(
     ctx: &egui::Context,
+    graph_id: egui::Id,
     graph: &Graph,
     layout: &egui_graph::Layout,
 ) -> Option<egui::Rect> {
-    egui_graph::with_graph_memory(ctx, egui_graph::id("dataflow-canvas"), |memory| {
+    egui_graph::with_graph_memory(ctx, graph_id, |memory| {
         graph
             .nodes
             .iter()
