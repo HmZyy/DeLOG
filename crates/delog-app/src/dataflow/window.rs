@@ -124,8 +124,9 @@ impl DataFlowUi {
         let mut actions = Vec::new();
         let window_layer = self.reassert_canvas_sublayers(ctx);
         let mut dock = std::mem::replace(&mut self.dock, DockState::new(Vec::new()));
-        egui::Window::new("Data Flow")
+        egui::Window::new("Dataflow")
             .open(&mut open)
+            .collapsible(false)
             .default_size([1180.0, 720.0])
             .min_size([800.0, 420.0])
             .show(ctx, |ui| {
@@ -182,7 +183,7 @@ impl DataFlowUi {
             self.active_editor_mut()
                 .show_add_menu(ctx, snapshot, &mut logs);
             let pointer_over_window = ctx
-                .memory(|memory| memory.area_rect(egui::Id::new("Data Flow")))
+                .memory(|memory| memory.area_rect(egui::Id::new("Dataflow")))
                 .zip(ctx.pointer_hover_pos())
                 .is_some_and(|(rect, pointer)| rect.contains(pointer));
             self.active_editor_mut()
@@ -299,7 +300,7 @@ impl DataFlowUi {
             logs.push((
                 LogLevel::Error,
                 format!(
-                    "Data flow '{name}' is already open in another tab. Choose a different name."
+                    "Dataflow '{name}' is already open in another tab. Choose a different name."
                 ),
             ));
             return false;
@@ -422,7 +423,7 @@ impl DataFlowUi {
                 match self.store.save(&graph) {
                     Ok(()) => logs.push((
                         LogLevel::Info,
-                        format!("Duplicated data flow '{name}' as '{copy}'"),
+                        format!("Duplicated dataflow '{name}' as '{copy}'"),
                     )),
                     Err(error) => logs.push((LogLevel::Error, error)),
                 }
@@ -437,7 +438,7 @@ impl DataFlowUi {
         };
         let mut decision = None;
         let response = egui::Modal::new(egui::Id::new("dataflow-delete-confirm")).show(ctx, |ui| {
-            ui.heading("Delete data flow?");
+            ui.heading("Delete dataflow?");
             ui.label(format!("Delete “{name}” from the library?"));
             ui.horizontal(|ui| {
                 if ui.button("Delete").clicked() {
@@ -461,7 +462,7 @@ impl DataFlowUi {
                                 editor.controller.dirty = true;
                             }
                         }
-                        logs.push((LogLevel::Info, format!("Deleted data flow '{name}'")));
+                        logs.push((LogLevel::Info, format!("Deleted dataflow '{name}'")));
                     }
                     Err(error) => logs.push((LogLevel::Error, error)),
                 }
@@ -480,7 +481,7 @@ impl DataFlowUi {
     }
 
     fn reassert_canvas_sublayers(&self, ctx: &egui::Context) -> egui::LayerId {
-        let window_layer = egui::LayerId::new(egui::Order::Middle, egui::Id::new("Data Flow"));
+        let window_layer = egui::LayerId::new(egui::Order::Middle, egui::Id::new("Dataflow"));
         for child in &self.canvas_layers {
             ctx.set_sublayer(window_layer, *child);
         }
@@ -541,7 +542,7 @@ impl TabViewer for WorkspaceViewer<'_> {
                                 &names,
                                 selected,
                                 &[LibraryAction::Duplicate, LibraryAction::Remove],
-                                "Open data flow",
+                                "Open dataflow",
                             )
                         })
                         .inner;
@@ -704,3 +705,7 @@ fn available_copy_name(existing: &[String], name: &str) -> String {
 #[cfg(test)]
 #[path = "window_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "window_store_tests.rs"]
+mod store_tests;

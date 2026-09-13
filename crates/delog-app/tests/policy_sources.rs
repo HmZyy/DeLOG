@@ -38,4 +38,4 @@ pub const VEHICLE_DIALOG: &str = concat!(
 pub const WORKSPACE: &str = include_str!("../src/shell/workspace/mod.rs");
 pub const APP_MANIFEST: &str = include_str!("../Cargo.toml");
 pub const CORE_INGEST: &str = include_str!("../../delog-core/src/ingest.rs");
-pub const DATA_FLOW_DOCS: &str = include_str!("../../../docs/data_flow.md");
+pub const DATAFLOW_DOCS: &str = include_str!("../../../docs/dataflow.md");

@@ -777,7 +777,7 @@ impl DataFlowController {
             match outcome.result {
                 Ok(Some(_)) => logs.push((
                     LogLevel::Info,
-                    format!("Published data flow '{}'.", outcome.name),
+                    format!("Published dataflow '{}'.", outcome.name),
                 )),
                 Ok(None) => {}
                 Err(message) => logs.push((LogLevel::Error, message)),
