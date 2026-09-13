@@ -784,6 +784,6 @@ fn clicking_editor_tabs_restores_the_canvas_and_inspector_selection() {
             .unwrap()
             .nodes
             .iter()
-            .any(|(_, node)| node.value() == Some("Topic: FIRST_TOPIC"))
+            .any(|(_, node)| node.value() == Some("FIRST_TOPIC"))
     );
 }

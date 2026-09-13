@@ -5,6 +5,7 @@ pub mod controller;
 mod editor;
 mod filter_controls;
 mod inspector;
+mod inspector_tables;
 pub mod picker;
 pub mod registry;
 pub mod store;
