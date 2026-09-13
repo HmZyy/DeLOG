@@ -20,6 +20,7 @@ pub struct EdgeStart {
 
 #[derive(Default)]
 pub struct GraphCanvasState {
+    pub graph_id: Option<egui::Id>,
     pub viewport: Viewport,
     pub view: View,
     pub edge_start: Option<EdgeStart>,

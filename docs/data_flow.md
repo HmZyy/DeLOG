@@ -7,7 +7,7 @@ native evaluation engine, so it works without Python and is available in
 `--no-default-features` builds.
 
 Evaluation processes a snapshot of the current data on request. When a live
-MAVLink link is connected, the currently loaded flow keeps recomputing as new
+MAVLink link is connected, the open flows keep recomputing as new
 samples arrive - see [Live data](#live-data). Otherwise evaluation is a
 one-shot snapshot: publish again after loading or receiving more data.
 
@@ -31,9 +31,17 @@ one-shot snapshot: publish again after loading or receiving more data.
 Choose **File > Data Flow**. The floating window remains available when no log
 is loaded, so you can build or edit a graph skeleton before opening data.
 
-The toolbar shows the graph name, persistence and undo controls, publication
-status, and a reminder that execution uses the current snapshot. The canvas is
-in the center and the selected node's inspector is on the right.
+The window has three resizable columns: **Dataflows**, the tabbed editor, and
+**Inspector**. Drag the dividers to change their widths. Dataflows and Inspector
+stay open; each editor tab has its own close button.
+
+Click a saved flow to open it, or focus its existing tab. **+ New** opens a blank
+graph. Each tab keeps its edits, undo history, selection, and canvas position.
+Closing the last editor tab creates an empty **Untitled** tab. A dot marks
+unsaved changes; closing an edited tab offers **Save**, **Discard**, and **Cancel**.
+
+The active editor's toolbar contains the graph name, Save, Undo/Redo, node
+controls, and Run. The inspector follows the selected node in the active tab.
 
 ## Building a graph
 
@@ -162,7 +170,7 @@ samples are never mutated.
 ## Live data
 
 Evaluation described above processes one snapshot per request. When a live
-MAVLink link is connected, the currently loaded flow instead re-evaluates
+MAVLink link is connected, each open flow instead re-evaluates
 automatically on a throttled cadence as new samples arrive - there is no
 toggle for this; it follows the link. Node preview statistics accumulate over
 the whole live session, not just the most recent recompute window.
@@ -176,10 +184,10 @@ after the Data Flow editor window is closed.
 Without a live link connected, nothing changes: the preview still updates on
 edit, and **Run** still publishes a one-shot snapshot.
 
-Only the currently loaded flow updates live. Loading a different flow does
-not carry the update forward - the previous flow's already-published
-`dataflow:<name>` data remains in the store, frozen at whatever it last
-computed.
+Open flows keep updating when you switch editor tabs or close the Data Flow
+window. Closing an individual editor tab stops its live updates; its published
+data remains available in the store. Reopening a saved flow and running it
+again replaces that flow's previous published source.
 
 **Settings > Data Flow** exposes two parameters for the live recompute:
 
@@ -191,9 +199,9 @@ computed.
 ## Saving graphs
 
 The name field is both the graph name and its library filename. **Save** writes
-a versioned JSON document. **Load** lists saved graphs; when the current graph
-has unsaved changes, the first click arms the load and the second confirms it.
-Saved data flows form a global library:
+a versioned JSON document. Select a graph in **Dataflows** to open it without
+replacing another tab's unsaved work. A name already used by another open tab
+must be changed before saving or running. Saved data flows form a global library:
 
 | Platform | Location |
 | --- | --- |
@@ -468,7 +476,10 @@ The native backend lives in `crates/delog-flow`:
 
 The application-side `dataflow` module owns the template registry, metadata
 picker, persistent graph store, background controller, canvas, inspector, and
-floating window. The editor canvas is a thin adapter over `egui_graph`. DeLOG
+floating window. The workspace uses `egui_dock` for the three panes and editor
+tabs. Each editor owns its controller and canvas state, while the workspace
+retains published-source ownership across tab closures. The editor canvas is a
+thin adapter over `egui_graph`. DeLOG
 retains ownership of the persisted graph, typed-port validation, commands, undo
 history, evaluation, and publication; the crate supplies node interaction,
 sockets, edges, selection, pan, and zoom. Shared alignment, topic-instance

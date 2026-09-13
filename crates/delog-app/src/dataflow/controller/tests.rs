@@ -557,7 +557,7 @@ fn publish_is_all_or_nothing_and_replaces_previous() {
 }
 
 #[test]
-fn graph_replacement_preserves_published_source_ownership() {
+fn replacement_controller_preserves_shared_published_source_ownership() {
     let mut graph = Graph::new("g");
     let input = add_node(&mut graph, data());
     let output = add_node(
@@ -600,7 +600,8 @@ fn graph_replacement_preserves_published_source_ownership() {
         observed_rx.recv_timeout(Duration::from_secs(1)).unwrap();
     }
 
-    controller.replace_graph(graph);
+    let published = Arc::clone(&controller.published);
+    controller = DataFlowController::new(graph).with_shared_publications(published);
     controller.request_publish(snapshot());
     wait_for(&mut controller, &sender);
 
@@ -995,7 +996,7 @@ fn live_seed_after_preview_covers_full_history() {
 }
 
 #[test]
-fn live_source_getter_exposes_open_source() {
+fn stopping_a_live_publication_releases_the_source() {
     let mut graph = Graph::new("g");
     let input = add_node(&mut graph, data());
     let out = add_node(
@@ -1021,17 +1022,17 @@ fn live_source_getter_exposes_open_source() {
         }
     });
 
-    assert!(controller.live_source().is_none());
+    assert!(controller.live_source.is_none());
     controller.request_live(
         snapshot_alt(vec![100, 200, 300], vec![1.0, 2.0, 3.0], 1),
         3.0,
         true,
     );
     wait_for(&mut controller, &sender);
-    assert!(controller.live_source().is_some());
+    assert!(controller.live_source.is_some());
 
-    controller.reset_live(&sender);
-    assert!(controller.live_source().is_none());
+    controller.stop(&sender);
+    assert!(controller.live_source.is_none());
 
     drop(sender);
     ingest_thread.join().unwrap();
