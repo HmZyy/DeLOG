@@ -467,6 +467,7 @@ mod tests {
         assert_eq!(CommandId::SaveLayout.spec().shortcut, Some("Ctrl+S"));
         assert_eq!(CommandId::LoadLayout.spec().shortcut, Some("Ctrl+L"));
         assert_eq!(CommandId::ToggleDataBrowser.spec().shortcut, Some("Ctrl+E"));
+        assert_eq!(CommandId::ToggleScene3d.spec().shortcut, Some("Ctrl+T"));
         assert_eq!(CommandId::Open.spec().shortcut, Some("Ctrl+O"));
         assert_eq!(CommandId::AddMarker.spec().shortcut, Some("M"));
         assert_eq!(CommandId::OpenDiagnostics.spec().shortcut, Some("F1"));

@@ -127,11 +127,12 @@ impl CommandId {
             ToggleScene3d => spec!(
                 "3D Scene",
                 Panels,
-                None,
+                Some("Ctrl+T"),
                 "vehicle map view",
                 Header,
                 ClassicMenu,
                 SceneToolbar,
+                Shortcut,
                 Palette
             ),
             OpenDiagnostics => spec!(

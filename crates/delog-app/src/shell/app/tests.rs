@@ -779,6 +779,12 @@ fn keyboard_shortcuts_produce_registry_commands() {
         Some(CommandId::RunScript)
     );
     assert!(SHORTCUT_KEYS.contains(&egui::Key::K));
+    assert_eq!(
+        command_for_shortcut(egui::Key::T, true),
+        Some(CommandId::ToggleScene3d)
+    );
+    assert_eq!(command_for_shortcut(egui::Key::T, false), None);
+    assert!(SHORTCUT_KEYS.contains(&egui::Key::T));
 }
 
 #[test]
@@ -845,6 +851,7 @@ fn modifier_and_function_shortcuts_fire_while_a_widget_owns_the_keyboard() {
         (egui::Key::L, true),
         (egui::Key::K, true),
         (egui::Key::E, true),
+        (egui::Key::T, true),
         (egui::Key::O, true),
         (egui::Key::F1, false),
         (egui::Key::F2, false),
