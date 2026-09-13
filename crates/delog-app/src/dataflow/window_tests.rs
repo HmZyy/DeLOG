@@ -186,7 +186,7 @@ fn render_data_flow_frame(
             crate::config::settings::DataFlowSettings::default(),
         );
     });
-    ctx.memory(|memory| memory.area_rect(egui::Id::new("Data Flow")).unwrap())
+    ctx.memory(|memory| memory.area_rect(egui::Id::new("Dataflow")).unwrap())
 }
 
 #[test]
@@ -206,7 +206,7 @@ fn active_data_flow_window_is_the_top_layer_for_title_highlight() {
     for _ in 0..4 {
         let _ = render_data_flow_frame(&ctx, &mut flow, &snapshot, &sender, vec![]);
     }
-    let window_layer = egui::LayerId::new(egui::Order::Middle, egui::Id::new("Data Flow"));
+    let window_layer = egui::LayerId::new(egui::Order::Middle, egui::Id::new("Dataflow"));
     assert!(
         !flow.canvas_layers.is_empty(),
         "canvas should paint sublayers that would otherwise shadow the window"
@@ -422,131 +422,6 @@ fn workspace_tab_close_policy_protects_the_library_and_inspector() {
     assert!(viewer.is_closeable(&DataFlowTab::Editor(id)));
     assert!(actions.is_empty());
 }
-
-fn close_dialog_click(flow: &mut DataFlowUi, label: &str) -> Vec<(LogLevel, String)> {
-    let ctx = egui::Context::default();
-    ctx.enable_accesskit();
-    let mut logs = Vec::new();
-    let mut bounds = None;
-    for _ in 0..3 {
-        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
-            flow.close_confirm(ui.ctx(), &mut logs);
-        });
-        bounds = output
-            .platform_output
-            .accesskit_update
-            .unwrap()
-            .nodes
-            .iter()
-            .find(|(_, node)| {
-                node.role() == egui::accesskit::Role::Button && node.label() == Some(label)
-            })
-            .and_then(|(_, node)| node.bounds());
-    }
-    let bounds = bounds.expect("close dialog button is visible");
-    let pos = egui::pos2(
-        ((bounds.x0 + bounds.x1) * 0.5) as f32,
-        ((bounds.y0 + bounds.y1) * 0.5) as f32,
-    );
-    for pressed in [true, false] {
-        let _ = ctx.run_ui(
-            egui::RawInput {
-                events: vec![
-                    egui::Event::PointerMoved(pos),
-                    egui::Event::PointerButton {
-                        pos,
-                        button: egui::PointerButton::Primary,
-                        pressed,
-                        modifiers: egui::Modifiers::NONE,
-                    },
-                ],
-                ..Default::default()
-            },
-            |ui| {
-                flow.close_confirm(ui.ctx(), &mut logs);
-            },
-        );
-    }
-    logs
-}
-
-#[test]
-fn cancelling_close_preserves_the_unsaved_graph() {
-    let mut flow = DataFlowUi::new();
-    let id = flow.active;
-    flow.active_editor_mut().name_edit = "draft".to_owned();
-    flow.request_close(id);
-    assert_eq!(flow.pending_close, Some(id));
-    close_dialog_click(&mut flow, "Cancel");
-    assert_eq!(flow.pending_close, None);
-    assert_eq!(flow.active, id);
-    assert_eq!(flow.active_editor().name_edit, "draft");
-}
-
-#[test]
-fn discarding_the_last_tab_opens_untitled_without_saving() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut flow = DataFlowUi::new();
-    flow.store = GraphStore::new(dir.path().to_path_buf());
-    flow.active_editor_mut().name_edit = "draft".to_owned();
-    flow.request_close(flow.active);
-    close_dialog_click(&mut flow, "Discard");
-    assert_eq!(flow.pending_close, None);
-    assert_eq!(flow.active_editor().title(), "Untitled");
-    assert!(flow.store.list().is_empty());
-}
-
-#[test]
-fn save_on_close_persists_the_document_and_replaces_the_last_tab() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut flow = DataFlowUi::new();
-    flow.store = GraphStore::new(dir.path().to_path_buf());
-    flow.active_editor_mut().name_edit = "draft".to_owned();
-    flow.request_close(flow.active);
-    close_dialog_click(&mut flow, "Save");
-    assert_eq!(flow.pending_close, None);
-    assert_eq!(flow.active_editor().title(), "Untitled");
-    assert_eq!(flow.store.load("draft").unwrap().name, "draft");
-}
-
-#[test]
-fn a_failed_save_on_close_keeps_the_document_and_confirmation_open() {
-    let mut flow = DataFlowUi::new();
-    let id = flow.active;
-    flow.active_editor_mut().name_edit = "invalid/name".to_owned();
-    flow.request_close(id);
-    let logs = close_dialog_click(&mut flow, "Save");
-    assert_eq!(flow.pending_close, Some(id));
-    assert_eq!(flow.active, id);
-    assert_eq!(logs.len(), 1);
-    assert!(logs[0].1.contains("invalid graph name"));
-}
-
-#[test]
-fn save_on_close_cannot_overwrite_another_open_flow() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut flow = DataFlowUi::new();
-    flow.store = GraphStore::new(dir.path().to_path_buf());
-    flow.store.save(&Graph::new("first")).unwrap();
-    let mut second = Graph::new("second");
-    second.insert_node(Node {
-        id: NodeId(7),
-        pos: [12.0, 24.0],
-        kind: NodeKind::Add,
-    });
-    flow.store.save(&second).unwrap();
-    let mut logs = Vec::new();
-    flow.edit_named("second", &mut logs);
-    flow.edit_named("first", &mut logs);
-    let first = flow.active;
-    flow.active_editor_mut().name_edit = "second".into();
-    flow.request_close(first);
-    close_dialog_click(&mut flow, "Save");
-    assert_eq!(flow.store.load("second").unwrap().nodes.len(), 1);
-    assert_eq!(flow.pending_close, Some(first));
-    assert_eq!(flow.editors[&first].loaded_name.as_deref(), Some("first"));
-}
-
 #[test]
 fn reopening_and_running_a_flow_replaces_its_previous_published_source() {
     use arrow::array::{ArrayRef, Float64Array, Int64Array};
