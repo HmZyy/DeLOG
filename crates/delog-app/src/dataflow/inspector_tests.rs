@@ -28,6 +28,22 @@ fn render(
     width: f32,
     events: Vec<egui::Event>,
 ) -> Vec<AccessibleNode> {
+    render_with(
+        ctx,
+        editor,
+        width,
+        &Arc::new(StoreSnapshot::empty()),
+        events,
+    )
+}
+
+fn render_with(
+    ctx: &egui::Context,
+    editor: &mut DataFlowEditor,
+    width: f32,
+    snapshot: &Arc<StoreSnapshot>,
+    events: Vec<egui::Event>,
+) -> Vec<AccessibleNode> {
     let output = ctx.run_ui(
         egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
@@ -42,7 +58,7 @@ fn render(
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     egui::Frame::new().inner_margin(12).show(ui, |ui| {
-                        editor.inspector(ui, &Arc::new(StoreSnapshot::empty()), &mut Vec::new());
+                        editor.inspector(ui, snapshot, &mut Vec::new());
                     });
                 });
         },
@@ -406,4 +422,70 @@ fn output_field_names_get_more_room_than_their_units() {
         width("altitude"),
         width("m")
     );
+}
+
+fn two_source_snapshot() -> Arc<StoreSnapshot> {
+    use arrow::array::{ArrayRef, Float64Array, Int64Array};
+    use arrow::datatypes::DataType;
+    use delog_core::chunk::Chunk;
+    use delog_core::identity::IdentityRegistry;
+    use delog_core::schema::{FieldSchema, TopicSchema};
+    use delog_core::store::TopicStore;
+
+    let mut identity = IdentityRegistry::new();
+    let mut stores = Vec::new();
+    for source_label in ["flight_01", "flight_02"] {
+        let source = identity.add_source(source_label);
+        for (name, field) in [("IMU[0]", "AccX"), ("IMU[1]", "AccX"), ("GPS", "Alt")] {
+            let topic = identity.add_topic(source, name).unwrap();
+            identity.add_field(topic, field).unwrap();
+            let schema = Arc::new(
+                TopicSchema::new(
+                    name,
+                    [FieldSchema::new(field, DataType::Float64, Some("m"), 1.0).unwrap()],
+                )
+                .unwrap(),
+            );
+            let chunk = Arc::new(
+                Chunk::try_new(
+                    Int64Array::from(vec![100, 200]),
+                    vec![Arc::new(Float64Array::from(vec![1.0, 2.0])) as ArrayRef],
+                    &schema,
+                )
+                .unwrap(),
+            );
+            stores.push((
+                topic,
+                Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap()),
+            ));
+        }
+    }
+    Arc::new(StoreSnapshot::from_registry(&identity, stores, 1).unwrap())
+}
+
+#[test]
+fn a_data_field_node_offers_source_topic_and_field_combos() {
+    let ctx = context();
+    let snapshot = two_source_snapshot();
+    let mut editor = editor(NodeKind::DataField(FieldSelector {
+        source: Some("flight_01".into()),
+        topic: "IMU".into(),
+        instance: Some(0),
+        field: "AccX".into(),
+    }));
+    render_with(&ctx, &mut editor, 320.0, &snapshot, vec![]);
+    let nodes = render_with(&ctx, &mut editor, 320.0, &snapshot, vec![]);
+
+    for label in ["Source", "Topic", "Field"] {
+        assert!(
+            nodes.iter().any(|node| node.value() == Some(label)),
+            "missing the {label} row"
+        );
+    }
+    let combos = nodes
+        .iter()
+        .filter(|node| node.role() == Role::ComboBox)
+        .count();
+    assert_eq!(combos, 3, "source, topic and field must all be selectable");
+    assert!(!editor.has_unsaved_changes());
 }
