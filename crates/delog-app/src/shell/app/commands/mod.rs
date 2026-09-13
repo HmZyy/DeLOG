@@ -41,6 +41,7 @@ pub enum CommandId {
     OpenScriptVariables,
     OpenParserEditor,
     TogglePlayheadSnap,
+    ToggleReadoutLock,
     AddMeasuringMarker,
     CycleLegendPosition,
     ToggleLegends,
@@ -219,6 +220,7 @@ pub struct PresentationState {
     pub scripting_console_open: bool,
     pub logging_open: bool,
     pub playhead_snap: bool,
+    pub readout_lock: bool,
     pub measuring_marker: bool,
     pub legends_visible: bool,
     pub annotation_toolbar_open: bool,
@@ -238,6 +240,7 @@ impl Default for PresentationState {
             scripting_console_open: false,
             logging_open: false,
             playhead_snap: false,
+            readout_lock: false,
             measuring_marker: false,
             legends_visible: true,
             annotation_toolbar_open: false,
@@ -257,6 +260,7 @@ impl PresentationState {
             CommandId::OpenScripting => Some(self.scripting_console_open),
             CommandId::OpenLogging => Some(self.logging_open),
             CommandId::TogglePlayheadSnap => Some(self.playhead_snap),
+            CommandId::ToggleReadoutLock => Some(self.readout_lock),
             CommandId::AddMeasuringMarker => Some(self.measuring_marker),
             CommandId::ToggleLegends => Some(self.legends_visible),
             CommandId::ToggleAnnotationToolbar => Some(self.annotation_toolbar_open),
@@ -298,6 +302,7 @@ impl CommandId {
         Self::OpenScriptVariables,
         Self::OpenParserEditor,
         Self::TogglePlayheadSnap,
+        Self::ToggleReadoutLock,
         Self::AddMeasuringMarker,
         Self::CycleLegendPosition,
         Self::ToggleLegends,
@@ -333,10 +338,9 @@ impl CommandId {
             | ToggleLegends
             | OpenFieldStats
             | ToggleAnnotationToolbar => ClassicMenuOwner::View,
-            SyncSources | OpenDataFlow | TogglePlayheadSnap | AddMeasuringMarker
-            | TogglePlayback | JumpStart | JumpEnd | StepLeft | StepRight | AddMarker => {
-                ClassicMenuOwner::Analyze
-            }
+            SyncSources | OpenDataFlow | TogglePlayheadSnap | ToggleReadoutLock
+            | AddMeasuringMarker | TogglePlayback | JumpStart | JumpEnd | StepLeft | StepRight
+            | AddMarker => ClassicMenuOwner::Analyze,
             OpenScriptEditor | OpenScriptVariables | OpenParserEditor | RunScript | SaveLayout
             | LoadLayout | ManageLayouts | ClearLayout | ImportLayout | ExportLayout
             | OpenSettings => ClassicMenuOwner::Tools,
