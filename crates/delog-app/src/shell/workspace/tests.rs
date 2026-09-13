@@ -1557,6 +1557,74 @@ fn scene_overlays_still_sit_above_the_scene_itself() {
     }
 }
 
+fn scene_gear_click(button: egui::PointerButton) -> SceneOverlayClicks {
+    let scene_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 400.0));
+    let ctx = egui::Context::default();
+    let mut clicks = SceneOverlayClicks::default();
+    let mut frame = |events: Vec<egui::Event>| {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 800.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input, |ui| {
+            clicks = scene_overlay_buttons(ui, scene_rect, TrailMode::default());
+        });
+    };
+
+    for _ in 0..3 {
+        frame(Vec::new());
+    }
+
+    let layer = ctx
+        .layer_id_at(egui::pos2(580.0, 20.0))
+        .expect("the overlay buttons should own the scene corner");
+    let area = ctx
+        .memory(|memory| memory.area_rect(layer.id))
+        .expect("the overlay area should have been laid out");
+    let gear = area.left_top() + egui::Vec2::splat(area.height() / 2.0);
+
+    frame(vec![
+        egui::Event::PointerMoved(gear),
+        egui::Event::PointerButton {
+            pos: gear,
+            button,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        },
+    ]);
+    frame(vec![egui::Event::PointerButton {
+        pos: gear,
+        button,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    }]);
+    clicks
+}
+
+#[test]
+fn left_clicking_the_scene_gear_opens_the_vehicle_config() {
+    let clicks = scene_gear_click(egui::PointerButton::Primary);
+    assert!(clicks.vehicle_config);
+    assert!(!clicks.scene_settings);
+}
+
+#[test]
+fn right_clicking_the_scene_gear_opens_the_3d_view_settings() {
+    let clicks = scene_gear_click(egui::PointerButton::Secondary);
+    assert!(clicks.scene_settings);
+    assert!(!clicks.vehicle_config);
+}
+
+#[test]
+fn the_scene_gear_tooltip_advertises_both_of_its_clicks() {
+    assert!(GEAR_TOOLTIP.contains("Configure vehicles"));
+    assert!(GEAR_TOOLTIP.contains("Right-click"));
+}
+
 #[test]
 fn each_trail_mode_gets_its_own_overlay_icon_and_tooltip() {
     let uri = |icon: egui::ImageSource<'static>| match icon {

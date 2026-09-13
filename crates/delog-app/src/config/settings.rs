@@ -722,6 +722,13 @@ impl SettingsDialog {
         self.open = true;
     }
 
+    pub fn open_scene3d(&mut self) {
+        self.open = true;
+        if let Some(path) = self.dock_state.find_tab(&SettingsTab::Scene3d) {
+            let _ = self.dock_state.set_active_tab(path);
+        }
+    }
+
     pub fn show(
         &mut self,
         ctx: &egui::Context,
@@ -1461,6 +1468,25 @@ mod tests {
                 "Dataflow"
             ]
         );
+    }
+
+    #[test]
+    fn opening_the_scene_settings_focuses_the_3d_view_tab() {
+        fn active(dialog: &SettingsDialog) -> SettingsTab {
+            let leaf = dialog.dock_state[egui_dock::SurfaceIndex::main()]
+                [egui_dock::NodeIndex::root()]
+            .get_leaf()
+            .expect("the settings tabs share one leaf");
+            leaf.tabs[leaf.active.0]
+        }
+
+        let mut dialog = SettingsDialog::default();
+        assert_eq!(active(&dialog), SettingsTab::General);
+
+        dialog.open_scene3d();
+
+        assert!(dialog.is_open());
+        assert_eq!(active(&dialog), SettingsTab::Scene3d);
     }
 
     #[test]
