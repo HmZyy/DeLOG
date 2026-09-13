@@ -312,7 +312,7 @@ impl DataFlowEditor {
 fn type_label(kind: &NodeKind) -> String {
     match kind {
         NodeKind::DataField(_) => "Data field".into(),
-        NodeKind::Output(_) => "Derived output".into(),
+        NodeKind::Output(_) => "Output".into(),
         #[cfg(feature = "scripting")]
         NodeKind::Script(_) => "Python script".into(),
         _ => kind.label(),
