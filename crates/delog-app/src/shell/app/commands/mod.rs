@@ -45,7 +45,7 @@ pub enum CommandId {
     AddMeasuringMarker,
     CycleLegendPosition,
     ToggleLegends,
-    OpenFieldStats,
+    ToggleFieldStats,
     ToggleAnnotationToolbar,
     OpenSettings,
     Exit,
@@ -164,6 +164,7 @@ pub struct CommandContext {
     pub has_active_tasks: bool,
     pub scripting_enabled: bool,
     pub has_plotted_traces: bool,
+    pub field_stats_open: bool,
 }
 
 impl CommandContext {
@@ -177,6 +178,7 @@ impl CommandContext {
         parser_task_active: bool,
         scripting_enabled: bool,
         has_plotted_traces: bool,
+        field_stats_open: bool,
     ) -> Self {
         Self {
             has_data,
@@ -186,6 +188,7 @@ impl CommandContext {
             has_active_tasks: native_tasks_active || parser_task_active,
             scripting_enabled,
             has_plotted_traces,
+            field_stats_open,
         }
     }
 }
@@ -222,6 +225,7 @@ pub struct PresentationState {
     pub playhead_snap: bool,
     pub readout_lock: bool,
     pub measuring_marker: bool,
+    pub field_stats_open: bool,
     pub legends_visible: bool,
     pub annotation_toolbar_open: bool,
 }
@@ -242,6 +246,7 @@ impl Default for PresentationState {
             playhead_snap: false,
             readout_lock: false,
             measuring_marker: false,
+            field_stats_open: false,
             legends_visible: true,
             annotation_toolbar_open: false,
         }
@@ -262,6 +267,7 @@ impl PresentationState {
             CommandId::TogglePlayheadSnap => Some(self.playhead_snap),
             CommandId::ToggleReadoutLock => Some(self.readout_lock),
             CommandId::AddMeasuringMarker => Some(self.measuring_marker),
+            CommandId::ToggleFieldStats => Some(self.field_stats_open),
             CommandId::ToggleLegends => Some(self.legends_visible),
             CommandId::ToggleAnnotationToolbar => Some(self.annotation_toolbar_open),
             _ => None,
@@ -306,7 +312,7 @@ impl CommandId {
         Self::AddMeasuringMarker,
         Self::CycleLegendPosition,
         Self::ToggleLegends,
-        Self::OpenFieldStats,
+        Self::ToggleFieldStats,
         Self::ToggleAnnotationToolbar,
         Self::OpenSettings,
         Self::Exit,
@@ -336,7 +342,7 @@ impl CommandId {
             | EqualizePlots
             | CycleLegendPosition
             | ToggleLegends
-            | OpenFieldStats
+            | ToggleFieldStats
             | ToggleAnnotationToolbar => ClassicMenuOwner::View,
             SyncSources | OpenDataFlow | TogglePlayheadSnap | ToggleReadoutLock
             | AddMeasuringMarker | TogglePlayback | JumpStart | JumpEnd | StepLeft | StepRight
@@ -370,7 +376,7 @@ impl CommandId {
             {
                 CommandAvailability::Disabled("Scripting support is not enabled in this build")
             }
-            Self::OpenFieldStats if !context.has_plotted_traces => {
+            Self::ToggleFieldStats if !context.has_plotted_traces && !context.field_stats_open => {
                 CommandAvailability::Disabled("Plot at least one trace first")
             }
             Self::ToggleAnnotationToolbar if !context.has_plotted_traces => {
@@ -690,7 +696,7 @@ mod tests {
 
     #[test]
     fn parser_only_work_enables_the_shared_cancel_presentation() {
-        let context = CommandContext::for_frame(false, 0, 0, 0, false, true, true, false);
+        let context = CommandContext::for_frame(false, 0, 0, 0, false, true, true, false, false);
         assert!(context.has_active_tasks);
         assert_eq!(
             CommandId::CancelTasks.availability(&context),
@@ -811,6 +817,42 @@ mod tests {
                 ..empty
             }),
             CommandAvailability::Enabled
+        );
+    }
+
+    #[test]
+    fn field_stats_reports_its_open_state_and_stays_closable_without_traces() {
+        assert_eq!(
+            PresentationState {
+                field_stats_open: true,
+                ..PresentationState::default()
+            }
+            .selected_for(CommandId::ToggleFieldStats),
+            Some(true)
+        );
+        assert_eq!(
+            PresentationState::default().selected_for(CommandId::ToggleFieldStats),
+            Some(false)
+        );
+
+        let closed = CommandContext::default();
+        assert!(matches!(
+            CommandId::ToggleFieldStats.availability(&closed),
+            CommandAvailability::Disabled(_)
+        ));
+        assert_eq!(
+            CommandId::ToggleFieldStats.availability(&CommandContext {
+                field_stats_open: true,
+                ..closed
+            }),
+            CommandAvailability::Enabled,
+        );
+        assert_eq!(
+            CommandId::ToggleFieldStats.availability(&CommandContext {
+                has_plotted_traces: true,
+                ..closed
+            }),
+            CommandAvailability::Enabled,
         );
     }
 
