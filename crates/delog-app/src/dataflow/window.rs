@@ -573,7 +573,7 @@ impl TabViewer for WorkspaceViewer<'_> {
             DataFlowTab::Inspector => {
                 let id = self.workspace.active;
                 ui.push_id(id, |ui| {
-                    egui::ScrollArea::both()
+                    egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
                             egui::Frame::new().inner_margin(12).show(ui, |ui| {
