@@ -247,6 +247,28 @@ impl ThemeChoice {
     }
 }
 
+const SELECTION_SATURATION_GAIN: f32 = 1.2;
+const SELECTION_SATURATION_FLOOR: f32 = 0.65;
+const SELECTION_LUMINANCE: f32 = 0.1;
+
+fn relative_luminance(color: egui::Rgba) -> f32 {
+    0.2126 * color.r() + 0.7152 * color.g() + 0.0722 * color.b()
+}
+
+fn selection_fill(accent: egui::Color32) -> egui::Color32 {
+    let mut hsv = egui::ecolor::HsvaGamma::from(accent);
+    hsv.s = (hsv.s * SELECTION_SATURATION_GAIN).clamp(SELECTION_SATURATION_FLOOR, 1.0);
+    let saturated = egui::Rgba::from(egui::Color32::from(hsv));
+    let brightest = saturated.r().max(saturated.g()).max(saturated.b());
+    let scale = (SELECTION_LUMINANCE / relative_luminance(saturated).max(f32::EPSILON))
+        .min(1.0 / brightest.max(f32::EPSILON));
+    egui::Color32::from(egui::Rgba::from_rgb(
+        saturated.r() * scale,
+        saturated.g() * scale,
+        saturated.b() * scale,
+    ))
+}
+
 fn set_theme(ctx: &egui::Context, palette: Palette) {
     let old = ctx.style_of(egui::Theme::Dark).visuals.clone();
     ctx.set_visuals(palette.visuals(old));
@@ -298,7 +320,7 @@ impl Palette {
                 open: make_widget_visual(old.widgets.open, self, self.surface0),
             },
             selection: egui::style::Selection {
-                bg_fill: self.accent.linear_multiply(0.2),
+                bg_fill: selection_fill(self.accent),
                 stroke: egui::Stroke {
                     color: self.text,
                     ..old.selection.stroke
@@ -321,6 +343,55 @@ impl Palette {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_palette_marks_a_pressed_toggle_with_a_saturated_fill() {
+        for choice in ThemeChoice::ALL {
+            let Some(palette) = choice.palette() else {
+                continue;
+            };
+            let fill = selection_fill(palette.accent);
+            let label = choice.label();
+
+            assert_eq!(fill.a(), 255, "{label}: a washed-out fill hides the toggle");
+            let saturation = egui::ecolor::HsvaGamma::from(fill).s;
+            assert!(
+                saturation >= 0.5,
+                "{label}: the fill reads as grey next to its neighbours ({saturation})"
+            );
+            assert!(
+                contrast_ratio(fill, palette.base) >= 1.7,
+                "{label}: the fill sinks into the panel ({})",
+                contrast_ratio(fill, palette.base)
+            );
+            assert!(
+                contrast_ratio(fill, palette.surface0) >= 1.4,
+                "{label}: the fill matches the unpressed buttons ({})",
+                contrast_ratio(fill, palette.surface0)
+            );
+            assert!(
+                contrast_ratio(palette.text, fill) >= 3.5,
+                "{label}: the icon is unreadable on the fill ({})",
+                contrast_ratio(palette.text, fill)
+            );
+        }
+    }
+
+    #[test]
+    fn selection_fills_sit_at_the_built_in_themes_weight() {
+        let reference = relative_luminance(egui::Visuals::dark().selection.bg_fill);
+        for choice in ThemeChoice::ALL {
+            let Some(palette) = choice.palette() else {
+                continue;
+            };
+            let luminance = relative_luminance(selection_fill(palette.accent));
+            assert!(
+                (luminance - reference).abs() < 0.05,
+                "{}: {luminance} is far from the built-in {reference}",
+                choice.label()
+            );
+        }
+    }
 
     #[test]
     fn theme_choices_have_stable_labels() {
