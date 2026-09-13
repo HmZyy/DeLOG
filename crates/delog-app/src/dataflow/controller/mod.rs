@@ -18,6 +18,8 @@ use crate::ui::logging::LogLevel;
 
 const UNDO_CAPACITY: usize = 64;
 
+pub(super) type PublishedSources = Arc<Mutex<HashMap<String, SourceId>>>;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PreviewStats {
     pub count: u64,
@@ -235,25 +237,20 @@ impl DataFlowController {
         }
     }
 
-    pub fn replace_graph(&mut self, graph: Graph) {
-        let published = Arc::clone(&self.published);
-        let latest_generation = Arc::clone(&self.latest_generation);
-        #[cfg(feature = "scripting")]
-        let script_host = self.script_host.clone();
-        *self = Self::with_publication_state(graph, published, latest_generation);
-        #[cfg(feature = "scripting")]
-        {
-            self.script_host = script_host;
-        }
+    pub(super) fn with_shared_publications(mut self, published: PublishedSources) -> Self {
+        self.published = published;
+        self
     }
 
     /// Sets (or clears) the host used to run `NodeKind::Script` nodes. The app
     /// layer refreshes this before each eval/publish request based on whether
     /// the graph currently contains a script node.
     #[cfg(feature = "scripting")]
-    pub fn set_script_host(&mut self, host: Option<delog_script::flow::EngineFlowHost>) {
-        self.script_host =
-            host.map(|host| Arc::new(host) as Arc<dyn delog_flow::script::ScriptNodeHost + Sync>);
+    pub fn set_script_host(
+        &mut self,
+        host: Option<Arc<dyn delog_flow::script::ScriptNodeHost + Sync>>,
+    ) {
+        self.script_host = host;
     }
 
     pub fn apply(&mut self, command: GraphCommand) -> Result<(), String> {
@@ -685,10 +682,6 @@ impl DataFlowController {
         self.live_source.is_some()
     }
 
-    pub fn live_source(&self) -> Option<SourceId> {
-        self.live_source
-    }
-
     pub fn invalidate_live(&mut self) {
         if self.live_source.is_some() {
             self.live_needs_reset = true;
@@ -697,6 +690,15 @@ impl DataFlowController {
 
     pub fn take_needs_live_reset(&mut self) -> bool {
         std::mem::take(&mut self.live_needs_reset)
+    }
+
+    pub fn stop(&mut self, sender: &IngestSender) {
+        if let Some(cancel) = &self.cancel {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        self.latest_generation.fetch_add(1, Ordering::Relaxed);
+        self.pending = None;
+        self.reset_live(sender);
     }
 
     pub fn reset_live(&mut self, sender: &IngestSender) {
