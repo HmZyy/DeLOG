@@ -4,6 +4,7 @@ use super::inspector_tables::wide_button;
 use super::inspector_tables::{
     PortEdit, combo, errors, number, ports, preview, properties, section, text_edit, text_value,
 };
+use super::picker;
 use crate::ui::logging::LogLevel;
 use delog_core::align::AlignMode;
 use delog_core::snapshot::StoreSnapshot;
@@ -66,37 +67,56 @@ impl DataFlowEditor {
             rows.property("Type", |ui| text_value(ui, type_label(&original)));
             match &mut edited {
                 NodeKind::DataField(selector) => {
+                    let options = picker::field_options(snapshot, selector);
                     rows.property("Source", |ui| {
-                        let candidates =
-                            delog_flow::resolve::candidate_source_labels(snapshot, selector);
-                        if candidates.len() > 1 {
-                            let mut chosen = selector.source.clone();
-                            let selected =
-                                chosen.clone().unwrap_or_else(|| "Choose source".to_owned());
-                            combo(ui, "source", &selected, |ui| {
-                                for label in candidates {
-                                    ui.selectable_value(&mut chosen, Some(label.clone()), label);
-                                }
-                            });
-                            if chosen != selector.source {
-                                source_choice = Some(chosen);
+                        let selected = selector.source.clone().unwrap_or_else(|| {
+                            delog_flow::resolve::candidate_source_labels(snapshot, selector)
+                                .first()
+                                .cloned()
+                                .unwrap_or_else(|| "Automatic".to_owned())
+                        });
+                        if options.sources.is_empty() {
+                            text_value(ui, selected);
+                            return;
+                        }
+                        let mut chosen = selector.source.clone();
+                        combo(ui, "source", &selected, |ui| {
+                            for label in &options.sources {
+                                ui.selectable_value(&mut chosen, Some(label.clone()), label);
                             }
-                        } else {
-                            text_value(
-                                ui,
-                                selector
-                                    .source
-                                    .as_deref()
-                                    .or_else(|| candidates.first().map(String::as_str))
-                                    .unwrap_or("Automatic"),
-                            );
+                        });
+                        if chosen != selector.source {
+                            source_choice = Some(chosen);
                         }
                     });
-                    rows.property("Topic", |ui| text_value(ui, &selector.topic));
-                    if let Some(instance) = selector.instance {
-                        rows.property("Instance", |ui| text_value(ui, instance.to_string()));
-                    }
-                    rows.property("Field", |ui| text_value(ui, &selector.field));
+                    rows.property("Topic", |ui| {
+                        let selected = picker::topic_display(selector);
+                        if options.topics.is_empty() {
+                            text_value(ui, selected);
+                            return;
+                        }
+                        let mut chosen = selected.clone();
+                        combo(ui, "topic", &selected, |ui| {
+                            for name in &options.topics {
+                                ui.selectable_value(&mut chosen, name.clone(), name);
+                            }
+                        });
+                        if chosen != selected {
+                            picker::retarget_topic(snapshot, selector, &chosen);
+                        }
+                    });
+                    rows.property("Field", |ui| {
+                        if options.fields.is_empty() {
+                            text_value(ui, &selector.field);
+                            return;
+                        }
+                        let selected = selector.field.clone();
+                        combo(ui, "field", &selected, |ui| {
+                            for name in &options.fields {
+                                ui.selectable_value(&mut selector.field, name.clone(), name);
+                            }
+                        });
+                    });
                 }
                 NodeKind::Constant { value } => {
                     rows.property("Value", |ui| number(ui, value));
