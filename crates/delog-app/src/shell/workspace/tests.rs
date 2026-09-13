@@ -1557,6 +1557,30 @@ fn scene_overlays_still_sit_above_the_scene_itself() {
     }
 }
 
+#[test]
+fn locking_readouts_pins_them_to_the_playhead_like_playback_does() {
+    assert!(!playhead_readout(false, false, false, true));
+    assert!(!playhead_readout(false, false, false, false));
+    assert!(playhead_readout(true, false, false, true));
+
+    assert!(playhead_readout(false, true, false, true));
+    assert!(playhead_readout(false, true, false, false));
+}
+
+#[test]
+fn locking_readouts_stops_hover_from_opening_its_own() {
+    assert!(hover_tooltip_shown(false, false));
+    assert!(!hover_tooltip_shown(true, false));
+    assert!(!hover_tooltip_shown(false, true));
+    assert!(!hover_tooltip_shown(true, true));
+}
+
+#[test]
+fn alt_scrubbing_still_reads_out_on_the_unhovered_panes_only() {
+    assert!(playhead_readout(false, false, true, false));
+    assert!(!playhead_readout(false, false, true, true));
+}
+
 fn scene_gear_click(button: egui::PointerButton) -> SceneOverlayClicks {
     let scene_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 400.0));
     let ctx = egui::Context::default();

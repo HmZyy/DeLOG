@@ -293,6 +293,14 @@ impl CommandId {
                 GlobalToolbar,
                 Palette
             ),
+            ToggleReadoutLock => spec!(
+                "Toggle readout lock",
+                Analysis,
+                None,
+                "pin value tooltip playhead hover",
+                GlobalToolbar,
+                Palette
+            ),
             AddMeasuringMarker => spec!(
                 "Toggle measuring marker",
                 Analysis,

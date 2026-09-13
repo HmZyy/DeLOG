@@ -337,6 +337,7 @@ pub struct DelogApp {
     marker_us: Option<i64>,
     markers: crate::plotting::markers::Markers,
     snap_playhead: bool,
+    lock_readouts: bool,
     frame: u64,
     last_epoch: u64,
     origin_us: i64,
@@ -498,6 +499,7 @@ impl DelogApp {
             marker_us: None,
             markers: crate::plotting::markers::Markers::new(),
             snap_playhead: false,
+            lock_readouts: false,
             frame: 0,
             last_epoch: u64::MAX,
             origin_us: 0,
@@ -1812,6 +1814,7 @@ impl DelogApp {
                 },
                 logging_open: self.docks.is_open(AppDockTab::Logging),
                 playhead_snap: self.snap_playhead,
+                readout_lock: self.lock_readouts,
                 measuring_marker: self.marker_us.is_some(),
                 legends_visible: self.workspace.all_plot_legends_visible(),
                 annotation_toolbar_open: self.annotation_toolbar_open,
@@ -2026,6 +2029,7 @@ impl DelogApp {
                     self.scripts.open_parser_editor();
                 }
                 CommandId::TogglePlayheadSnap => self.snap_playhead = !self.snap_playhead,
+                CommandId::ToggleReadoutLock => self.lock_readouts = !self.lock_readouts,
                 CommandId::AddMeasuringMarker => {
                     self.marker_us = self.marker_us.is_none().then_some(self.playback.t_us)
                 }
@@ -2628,6 +2632,7 @@ impl eframe::App for DelogApp {
         let toolbar_model = global_plot_toolbar::GlobalPlotToolbarModel {
             cursor_sampling: self.hover_mode,
             playhead_snap: self.snap_playhead,
+            readout_lock: self.lock_readouts,
             measuring_marker: self.marker_us.is_some(),
             legend_position: self.settings.plot.legend_position,
             legends_visible: self.workspace.all_plot_legends_visible(),
@@ -3063,6 +3068,7 @@ impl eframe::App for DelogApp {
                         scene3d: self.settings.scene3d,
                         playhead_us: snapshot.global_time_range().map(|_| self.playback.t_us),
                         playing: self.playback.playing,
+                        lock_readouts: self.lock_readouts,
                         vehicles: &self.vehicles,
                         trajectories: &self.vehicle_trajectories,
                         traj_generation: self.traj_vehicle_revision,

@@ -788,6 +788,7 @@ pub struct PlotServices<'a> {
     /// Playhead cursor time; `None` before any data loads.
     pub playhead_us: Option<i64>,
     pub playing: bool,
+    pub lock_readouts: bool,
     pub vehicles: &'a [crate::scene3d::vehicle::VehicleConfig],
     /// Render-space trajectories (points + per-point timestamps), parallel to
     /// `vehicles`.
@@ -1522,8 +1523,13 @@ impl Behavior<'_> {
                 .hover_pos()
                 .is_some_and(|pos| plot_rect.contains(pos));
             let alt = ui.input(|i| i.modifiers.alt);
-            let readout =
-                (self.services.playing || (alt && !hovered)).then_some(*self.services.hover_mode);
+            let readout = playhead_readout(
+                self.services.playing,
+                self.services.lock_readouts,
+                alt,
+                hovered,
+            )
+            .then_some(*self.services.hover_mode);
             hover::draw_playhead(
                 ui,
                 HoverTarget {
@@ -1573,7 +1579,7 @@ impl Behavior<'_> {
                 pane,
                 self.services.origin_us,
                 *self.services.hover_mode,
-                !self.services.playing,
+                hover_tooltip_shown(self.services.playing, self.services.lock_readouts),
                 readout_deltas,
                 self.services.plot_display.hover_show_field_name,
                 self.services.plot_display.hover_show_time,
@@ -2178,6 +2184,14 @@ fn rebind_text_state(pane: &mut PlotPane, old_field: FieldId, new_field: FieldId
         pane.text_offsets.remove(&(old_field, time_us));
         pane.text_offsets.insert((new_field, time_us), offset);
     }
+}
+
+const fn playhead_readout(playing: bool, locked: bool, alt: bool, hovered: bool) -> bool {
+    playing || locked || (alt && !hovered)
+}
+
+const fn hover_tooltip_shown(playing: bool, locked: bool) -> bool {
+    !playing && !locked
 }
 
 fn zoom_drag_anchor_x(view: ViewX, rect: egui::Rect, anchor_us: i64) -> f32 {
