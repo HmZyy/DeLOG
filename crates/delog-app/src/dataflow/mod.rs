@@ -4,6 +4,7 @@ mod canvas_state;
 pub mod controller;
 mod editor;
 mod filter_controls;
+pub mod headless;
 mod inspector;
 mod inspector_tables;
 pub mod picker;
