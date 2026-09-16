@@ -85,6 +85,7 @@ const TOOLS_LAYOUTS_MENU: &[CommandId] = &[
 ];
 const ANALYZE_MENU: &[CommandId] = &[CommandId::SyncSources, CommandId::OpenDataFlow];
 const TOOLS_MENU: &[CommandId] = &[CommandId::OpenSettings];
+const TOOLS_SEQUENCES_MENU: &[CommandId] = &[CommandId::ManageSequences];
 const TOOLS_SCRIPTS_MENU: &[CommandId] =
     &[CommandId::OpenScriptEditor, CommandId::OpenScriptVariables];
 const TOOLS_PARSERS_MENU: &[CommandId] = &[CommandId::OpenParserEditor];
@@ -102,6 +103,7 @@ pub(crate) fn classic_menu_command_ids() -> Vec<CommandId> {
         VIEW_PANELS_MENU,
         ANALYZE_MENU,
         TOOLS_MENU,
+        TOOLS_SEQUENCES_MENU,
         TOOLS_SCRIPTS_MENU,
         TOOLS_PARSERS_MENU,
         TOOLS_LAYOUTS_MENU,
@@ -353,6 +355,24 @@ pub fn show(
                         presentations,
                         &mut commands,
                     );
+                });
+                ui.menu_button("Sequences", |ui| {
+                    menu_items(
+                        ui,
+                        ClassicMenuOwner::Tools,
+                        TOOLS_SEQUENCES_MENU,
+                        presentations,
+                        &mut commands,
+                    );
+                    ui.menu_button("Run", |ui| {
+                        dynamic_rows(
+                            ui,
+                            ClassicMenuOwner::Tools,
+                            presentations,
+                            &mut commands,
+                            |command| matches!(command, AppCommand::RunSequence(_)),
+                        );
+                    });
                 });
                 menu_items(
                     ui,
@@ -1040,6 +1060,7 @@ mod tests {
             CommandId::OpenLogging,
             CommandId::SaveLayout,
             CommandId::ManageLayouts,
+            CommandId::ManageSequences,
             CommandId::ImportLayout,
             CommandId::ExportLayout,
             CommandId::ClearLayout,
@@ -1079,6 +1100,7 @@ mod tests {
                 ClassicMenuOwner::Tools,
                 &[
                     TOOLS_MENU,
+                    TOOLS_SEQUENCES_MENU,
                     TOOLS_SCRIPTS_MENU,
                     TOOLS_PARSERS_MENU,
                     TOOLS_LAYOUTS_MENU,
