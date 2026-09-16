@@ -7,6 +7,9 @@ pub mod context_header;
 mod dynamic_commands;
 pub mod global_plot_toolbar;
 pub mod inspector;
+#[cfg(all(test, feature = "scripting"))]
+mod sequence_tests;
+mod sequences;
 
 use delog_cache::CacheManager;
 use delog_core::diagnostics::{DiagRecord, Severity};
@@ -145,6 +148,10 @@ fn dynamic_palette_metadata(command: &commands::AppCommand) -> (&'static str, St
         AppCommand::RunScript(name) => (
             "Tools › Scripts › Run Scripts",
             format!("script run execute {name}"),
+        ),
+        AppCommand::RunSequence(name) => (
+            "Tools › Sequences › Run",
+            format!("sequence run execute {name}"),
         ),
         AppCommand::LoadNamedLayout(name) => (
             "Tools › Layouts › Load Layout",
@@ -404,6 +411,7 @@ pub struct DelogApp {
     armed_tool: Option<crate::plotting::annotations::place::ArmedTool>,
     sync_window: Option<SyncWindow>,
     dataflow: crate::dataflow::window::DataFlowUi,
+    sequences: crate::sequences::runtime::SequenceRuntime,
     generate_markers_dialog: Option<crate::shell::generate_markers::GenerateMarkersDialog>,
     save_layout_dialog: SaveLayoutDialog,
     load_layout_dialog: LoadLayoutDialog,
@@ -561,6 +569,7 @@ impl DelogApp {
             armed_tool: None,
             sync_window: None,
             dataflow: crate::dataflow::window::DataFlowUi::new(),
+            sequences: crate::sequences::runtime::SequenceRuntime::default(),
             generate_markers_dialog: None,
             save_layout_dialog: SaveLayoutDialog {
                 open: false,
@@ -1064,6 +1073,7 @@ impl DelogApp {
         snapshot: &delog_core::snapshot::StoreSnapshot,
         code: &'static str,
     ) {
+        self.sequences.interrupt_layout();
         let should_defer = !Self::snapshot_has_fields(snapshot);
         match crate::shell::layout_apply::load_doc(doc.clone(), snapshot) {
             Ok(LoadOutcome::Applied(layout)) => {
@@ -1146,6 +1156,7 @@ impl DelogApp {
     }
 
     fn clear_current_layout(&mut self) {
+        self.sequences.interrupt_layout();
         Self::clear_current_layout_state(
             &mut self.workspace,
             &mut self.playback,
@@ -1681,7 +1692,9 @@ impl DelogApp {
         {
             let scripts = &mut self.scripts;
             let previous = self.dynamic_command_catalog.names().clone();
+            let manager = &mut self.sequences.manager;
             self.dynamic_command_catalog.ensure_with(|| {
+                manager.refresh();
                 Ok::<_, ()>(commands::merge_fallible_dynamic_command_refresh(
                     &previous,
                     crate::config::layout::doc::try_list_layouts(),
@@ -1693,7 +1706,9 @@ impl DelogApp {
         #[cfg(not(feature = "scripting"))]
         {
             let previous = self.dynamic_command_catalog.names().clone();
+            let manager = &mut self.sequences.manager;
             self.dynamic_command_catalog.ensure_with(|| {
+                manager.refresh();
                 Ok::<_, ()>(commands::merge_fallible_dynamic_command_refresh(
                     &previous,
                     crate::config::layout::doc::try_list_layouts(),
@@ -1726,7 +1741,7 @@ impl DelogApp {
         context: commands::CommandContext,
     ) -> Vec<commands::CommandPresentation> {
         use commands::{AppCommand, CommandAvailability, CommandPresentation};
-        debug_assert_eq!(commands::dynamic_command_families().len(), 4);
+        debug_assert_eq!(commands::dynamic_command_families().len(), 5);
         debug_assert!(
             self.session
                 .parser_names()
@@ -1738,6 +1753,15 @@ impl DelogApp {
             dynamic.push(CommandPresentation {
                 command: AppCommand::OpenWithBuiltInParser(name.to_owned()),
                 label: label.to_owned(),
+                shortcut: None,
+                availability: CommandAvailability::Enabled,
+                selected: None,
+            });
+        }
+        for name in self.sequences.manager.names() {
+            dynamic.push(CommandPresentation {
+                command: AppCommand::RunSequence(name.clone()),
+                label: name.clone(),
                 shortcut: None,
                 availability: CommandAvailability::Enabled,
                 selected: None,
@@ -1946,6 +1970,7 @@ impl DelogApp {
                 let _ = name;
             }
             AppCommand::RunScript(name) => self.run_named_script(&name),
+            AppCommand::RunSequence(name) => self.run_named_sequence(&name),
             AppCommand::LoadNamedLayout(name) => self.load_layout(&name, snapshot),
             AppCommand::DisconnectLink(index) => self.session.stop_live(index),
             AppCommand::Static(id) => match id {
@@ -1961,6 +1986,7 @@ impl DelogApp {
                     self.session.stop_all_live();
                 }
                 CommandId::CancelTasks => {
+                    self.cancel_sequences();
                     self.session.cancel_all();
                     #[cfg(feature = "scripting")]
                     self.scripts.cancel_parsers();
@@ -2014,6 +2040,10 @@ impl DelogApp {
                 CommandId::ExportLayout => self.spawn_export_layout_dialog(ctx, snapshot),
                 CommandId::EqualizePlots => self.workspace.equalize_plot_heights(),
                 CommandId::OpenDataFlow => self.dataflow.open = true,
+                CommandId::ManageSequences => {
+                    self.sequences.manager.open = true;
+                    self.sequences.manager.refresh();
+                }
                 CommandId::OpenScriptEditor => {
                     #[cfg(feature = "scripting")]
                     {
@@ -2420,11 +2450,17 @@ impl DelogApp {
                 let snapshot = self.session.snapshot();
                 let layout = pending.apply(&snapshot);
                 self.apply_layout(layout);
+                self.sequences
+                    .layout_result
+                    .get_or_insert(crate::sequences::runner::StepOutcome::Succeeded);
             }
             if skip && let Some(pending) = self.pending_layout.take() {
                 let snapshot = self.session.snapshot();
                 let layout = pending.apply_skipping(&snapshot);
                 self.apply_layout(layout);
+                self.sequences
+                    .layout_result
+                    .get_or_insert(crate::sequences::runner::StepOutcome::Succeeded);
             }
         }
     }
@@ -3245,6 +3281,7 @@ impl eframe::App for DelogApp {
         let _ui_windows_timer = self.session.metrics().scope("ui_windows");
         crate::export::data_export::progress_ui(ui.ctx(), &self.data_exports);
         self.show_layout_windows(ui.ctx());
+        self.drive_sequences(ui.ctx());
         self.poll_update_checks();
         self.show_update_prompt(ui.ctx());
         if self.show_about {

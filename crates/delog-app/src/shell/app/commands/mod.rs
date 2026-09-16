@@ -32,6 +32,7 @@ pub enum CommandId {
     LoadLayout,
     RunScript,
     ManageLayouts,
+    ManageSequences,
     ClearLayout,
     ImportLayout,
     ExportLayout,
@@ -69,6 +70,7 @@ pub enum AppCommand {
     OpenWithParser(String),
     #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
     RunScript(String),
+    RunSequence(String),
     LoadNamedLayout(String),
     DisconnectLink(usize),
 }
@@ -102,7 +104,7 @@ impl AppCommand {
             Self::OpenWithParser(_) => ClassicMenuOwner::Tools,
             Self::FitAll => ClassicMenuOwner::View,
             Self::SetCursorSampling(_) => ClassicMenuOwner::Analyze,
-            Self::RunScript(_) => ClassicMenuOwner::Tools,
+            Self::RunScript(_) | Self::RunSequence(_) => ClassicMenuOwner::Tools,
             Self::LoadNamedLayout(_) => ClassicMenuOwner::Tools,
         }
     }
@@ -299,6 +301,7 @@ impl CommandId {
         Self::LoadLayout,
         Self::RunScript,
         Self::ManageLayouts,
+        Self::ManageSequences,
         Self::ClearLayout,
         Self::ImportLayout,
         Self::ExportLayout,
@@ -348,8 +351,8 @@ impl CommandId {
             | AddMeasuringMarker | TogglePlayback | JumpStart | JumpEnd | StepLeft | StepRight
             | AddMarker => ClassicMenuOwner::Analyze,
             OpenScriptEditor | OpenScriptVariables | OpenParserEditor | RunScript | SaveLayout
-            | LoadLayout | ManageLayouts | ClearLayout | ImportLayout | ExportLayout
-            | OpenSettings => ClassicMenuOwner::Tools,
+            | LoadLayout | ManageLayouts | ManageSequences | ClearLayout | ImportLayout
+            | ExportLayout | OpenSettings => ClassicMenuOwner::Tools,
         }
     }
 
@@ -527,6 +530,7 @@ mod tests {
             &[
                 DynamicFamily::Parser,
                 DynamicFamily::Script,
+                DynamicFamily::Sequence,
                 DynamicFamily::Layout,
                 DynamicFamily::LiveLink
             ],
@@ -538,6 +542,7 @@ mod tests {
         assert!(CommandId::ALL.iter().all(|id| !id.spec().routes.is_empty()));
         assert!(dynamic_command_families().contains(&DynamicFamily::Parser));
         assert!(dynamic_command_families().contains(&DynamicFamily::Script));
+        assert!(dynamic_command_families().contains(&DynamicFamily::Sequence));
         assert!(dynamic_command_families().contains(&DynamicFamily::Layout));
         assert!(dynamic_command_families().contains(&DynamicFamily::LiveLink));
     }
@@ -569,6 +574,10 @@ mod tests {
         );
         assert_eq!(
             AppCommand::OpenWithParser("csv".into()).classic_menu_owner(),
+            ClassicMenuOwner::Tools
+        );
+        assert_eq!(
+            AppCommand::RunSequence("startup".into()).classic_menu_owner(),
             ClassicMenuOwner::Tools
         );
         assert_eq!(

@@ -205,6 +205,14 @@ impl CommandId {
                 Shortcut,
                 Palette
             ),
+            ManageSequences => spec!(
+                "Manage sequences…",
+                Workspace,
+                None,
+                "sequence automation ordered run",
+                ClassicMenu,
+                Palette
+            ),
             ManageLayouts => {
                 spec!(
                     "Manage layouts…",
