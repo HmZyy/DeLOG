@@ -129,6 +129,8 @@ struct PublicationOutcome {
     generation: u64,
     name: String,
     result: Result<Option<SourceId>, String>,
+    live_times: Option<HashMap<String, i64>>,
+    watermark: Option<i64>,
 }
 
 /// Copied nodes and the edges between them, for in-editor duplication.
@@ -175,6 +177,8 @@ pub struct DataFlowController {
     publication_tx: mpsc::Sender<PublicationOutcome>,
     publication_rx: mpsc::Receiver<PublicationOutcome>,
     publications_in_flight: usize,
+    publication_key: Option<String>,
+    publication_results: std::collections::VecDeque<Result<(), String>>,
     cache: Arc<Mutex<EvalCache>>,
     live_watermark_t: Option<i64>,
     running_preview: HashMap<(NodeId, usize), RunningStats>,
@@ -223,6 +227,8 @@ impl DataFlowController {
             publication_tx,
             publication_rx,
             publications_in_flight: 0,
+            publication_key: None,
+            publication_results: std::collections::VecDeque::new(),
             cache: Arc::new(Mutex::new(EvalCache::default())),
             live_watermark_t: None,
             running_preview: HashMap::new(),
@@ -235,6 +241,42 @@ impl DataFlowController {
             #[cfg(feature = "scripting")]
             script_host: None,
         }
+    }
+
+    pub fn set_publication_key(&mut self, key: String) {
+        self.publication_key = Some(key);
+    }
+
+    pub fn take_publication_result(&mut self) -> Option<Result<(), String>> {
+        self.publication_results.pop_front()
+    }
+
+    pub fn stop_owned(&mut self, sender: &IngestSender) -> mpsc::Receiver<Result<(), String>> {
+        if let Some(cancel) = &self.cancel {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        self.generation = self
+            .latest_generation
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1);
+        self.pending = None;
+        let published = Arc::clone(&self.published);
+        let key = self
+            .publication_key
+            .clone()
+            .unwrap_or_else(|| self.graph.name.clone());
+        let sender = sender.clone();
+        let (reply, receipt) = mpsc::channel();
+        std::thread::spawn(move || {
+            if let Some(source) = published.lock().unwrap().remove(&key) {
+                sender.remove_source(source);
+            }
+            let result = sender
+                .publication_barrier()
+                .and_then(|rx| rx.recv().map_err(|e| e.to_string())?);
+            let _ = reply.send(result);
+        });
+        receipt
     }
 
     pub(super) fn with_shared_publications(mut self, published: PublishedSources) -> Self {
@@ -428,7 +470,9 @@ impl DataFlowController {
                 if outcome.live {
                     self.merge_live_previews(&outcome);
                     self.append_publish(&mut outcome, sender, &mut logs);
-                    if let Some(max) = outcome.snapshot_max_t {
+                    if self.publication_key.is_none()
+                        && let Some(max) = outcome.snapshot_max_t
+                    {
                         self.live_watermark_t = Some(max);
                     }
                 } else {
@@ -634,6 +678,13 @@ impl DataFlowController {
         let topics = match result {
             Ok(topics) => topics,
             Err(diagnostics) => {
+                if self.publication_key.is_some() {
+                    self.publication_results.push_back(Err(diagnostics
+                        .iter()
+                        .map(|d| d.message.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" ")));
+                }
                 logs.push((
                     LogLevel::Error,
                     diagnostics
@@ -651,6 +702,8 @@ impl DataFlowController {
         let published = Arc::clone(&self.published);
         let latest_generation = Arc::clone(&self.latest_generation);
         let publication_tx = self.publication_tx.clone();
+        let owned = self.publication_key.is_some();
+        let key = self.publication_key.clone().unwrap_or_else(|| name.clone());
         self.publications_in_flight += 1;
         std::thread::spawn(move || {
             let result = prepare_topics(&topics).map(|prepared| {
@@ -664,16 +717,27 @@ impl DataFlowController {
                     sender.remove_source(source);
                     return None;
                 }
-                if let Some(previous) = published.insert(name.clone(), source) {
+                if let Some(previous) = published.insert(key.clone(), source) {
                     sender.remove_source(previous);
                     sender.relabel_source(source, source_key(&name));
                 }
                 Some(source)
             });
+            let result = result.and_then(|source| {
+                if owned && source.is_some() {
+                    sender
+                        .publication_barrier()?
+                        .recv()
+                        .map_err(|e| e.to_string())??;
+                }
+                Ok(source)
+            });
             let _ = publication_tx.send(PublicationOutcome {
                 generation,
                 name,
                 result,
+                live_times: None,
+                watermark: None,
             });
         });
     }
@@ -718,6 +782,10 @@ impl DataFlowController {
         sender: &IngestSender,
         logs: &mut Vec<(LogLevel, String)>,
     ) {
+        if self.publication_key.is_some() {
+            self.append_owned(outcome, sender, logs);
+            return;
+        }
         let Some(result) = outcome.publish.take() else {
             return;
         };
@@ -768,11 +836,106 @@ impl DataFlowController {
         }
     }
 
+    fn append_owned(
+        &mut self,
+        outcome: &mut EvalOutcome,
+        sender: &IngestSender,
+        logs: &mut Vec<(LogLevel, String)>,
+    ) {
+        let Some(result) = outcome.publish.take() else {
+            return;
+        };
+        let topics = match result {
+            Ok(topics) => topics,
+            Err(diagnostics) => {
+                let error = diagnostics
+                    .iter()
+                    .map(|d| d.message.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                logs.push((LogLevel::Error, error.clone()));
+                self.publication_results.push_back(Err(error));
+                self.live_watermark_t = None;
+                return;
+            }
+        };
+        let mut times = self.last_published_t.clone();
+        let tails: Vec<_> = topics
+            .iter()
+            .filter_map(|topic| {
+                let tail =
+                    slice_topic_after(topic, times.get(&topic.name).copied().unwrap_or(i64::MIN));
+                if let Some(&last) = tail.times.last() {
+                    times.insert(topic.name.clone(), last);
+                    Some(tail)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let generation = outcome.generation;
+        let watermark = outcome.snapshot_max_t;
+        let name = outcome.graph_name.clone();
+        let key = self.publication_key.clone().unwrap();
+        let sender = sender.clone();
+        let published = Arc::clone(&self.published);
+        let latest_generation = Arc::clone(&self.latest_generation);
+        let publication_tx = self.publication_tx.clone();
+        self.publications_in_flight += 1;
+        std::thread::spawn(move || {
+            let result = prepare_topics(&tails).and_then(|prepared| {
+                let mut published = published.lock().unwrap();
+                if latest_generation.load(Ordering::Relaxed) != generation {
+                    return Ok(None);
+                }
+                let mut sink = sender.file_sink();
+                let source = *published.entry(key.clone()).or_insert_with(|| {
+                    open_derived_source(&mut sink, &source_key(&name), SourceKind::LiveDerived)
+                });
+                submit_prepared_topics(&mut sink, source, prepared);
+                if latest_generation.load(Ordering::Relaxed) != generation {
+                    sender.remove_source(source);
+                    published.remove(&key);
+                    return Ok(None);
+                }
+                drop(published);
+                sender
+                    .publication_barrier()?
+                    .recv()
+                    .map_err(|e| e.to_string())??;
+                Ok(Some(source))
+            });
+            let _ = publication_tx.send(PublicationOutcome {
+                generation,
+                name,
+                result,
+                live_times: Some(times),
+                watermark,
+            });
+        });
+    }
+
     fn collect_publications(&mut self, logs: &mut Vec<(LogLevel, String)>) {
         while let Ok(outcome) = self.publication_rx.try_recv() {
             self.publications_in_flight = self.publications_in_flight.saturating_sub(1);
             if outcome.generation != self.generation {
                 continue;
+            }
+            if let Some(times) = outcome.live_times {
+                if let Ok(Some(source)) = &outcome.result {
+                    self.live_source = Some(*source);
+                    self.last_published_t = times;
+                    self.live_watermark_t = outcome.watermark;
+                } else {
+                    self.live_watermark_t = None;
+                }
+            }
+            if self.publication_key.is_some() {
+                match &outcome.result {
+                    Ok(Some(_)) => self.publication_results.push_back(Ok(())),
+                    Err(error) => self.publication_results.push_back(Err(error.clone())),
+                    Ok(None) => {}
+                }
             }
             match outcome.result {
                 Ok(Some(_)) => logs.push((
