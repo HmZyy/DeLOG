@@ -4,7 +4,7 @@ mod policy_sources;
 use policy_sources::{
     ABOUT as ABOUT_SOURCE, APP as APP_SOURCE, BROWSER, DATA_EXPORT as DATA_EXPORT_SOURCE,
     DIAGNOSTICS, DOCKS as DOCKS_SOURCE, GENERATE_MARKERS, LIVE, LOGGING, MARKERS, MESSAGE_POPUP,
-    PARSERS, PERFORMANCE, SCRIPTS as SCRIPTS_SOURCE, SETTINGS as SETTINGS_SOURCE,
+    PALETTE, PARSERS, PERFORMANCE, SCRIPTS as SCRIPTS_SOURCE, SETTINGS as SETTINGS_SOURCE,
     SYNC_WINDOW as SYNC_WINDOW_SOURCE, UPDATE as UPDATE_SOURCE,
     UPDATE_POPUP as UPDATE_POPUP_SOURCE, VEHICLE_DIALOG, WORKSPACE as WORKSPACE_SOURCE,
 };
@@ -63,6 +63,12 @@ fn sync_toolbar_uses_icons_instead_of_unsupported_arrow_glyphs() {
     assert!(!SYNC_WINDOW_SOURCE.contains('↔'));
     assert!(SYNC_WINDOW_SOURCE.contains("crate::ui::icons::arrow_right()"));
     assert!(SYNC_WINDOW_SOURCE.contains("crate::ui::icons::arrow_left_right()"));
+}
+
+#[test]
+fn the_palette_marks_a_checked_row_with_an_icon_instead_of_a_glyph() {
+    assert!(!PALETTE.contains('\u{2713}'));
+    assert!(PALETTE.contains("crate::ui::icons::check()"));
 }
 
 #[test]

@@ -171,18 +171,19 @@ impl PickerState {
                         if item.separator_before && index > 0 {
                             ui.separator();
                         }
-                        let mut label = item.label.clone();
-                        if item.checked {
-                            label.insert_str(0, "✓  ");
-                        }
                         let subtitle = item.subtitle.as_deref();
-                        let text = picker_row_text(ui, &label, subtitle);
-                        let mut button = egui::Button::new(text)
-                            .selected(index == self.selected)
-                            .min_size(egui::vec2(
-                                ui.available_width(),
-                                if subtitle.is_some() { 42.0 } else { 30.0 },
-                            ));
+                        let text =
+                            egui::WidgetText::from(picker_row_text(ui, &item.label, subtitle));
+                        let mut button = if item.checked {
+                            egui::Button::image_and_text(check_mark(ui), text)
+                        } else {
+                            egui::Button::new(text)
+                        }
+                        .selected(index == self.selected)
+                        .min_size(egui::vec2(
+                            ui.available_width(),
+                            if subtitle.is_some() { 42.0 } else { 30.0 },
+                        ));
                         if let Some(shortcut) = item.shortcut.as_deref() {
                             button = button.shortcut_text(shortcut);
                         }
@@ -206,6 +207,14 @@ impl PickerState {
             });
         picked
     }
+}
+
+fn check_mark(ui: &egui::Ui) -> egui::Image<'static> {
+    let tokens = crate::ui::design_tokens::DesignTokens::from_style(ui.style());
+    egui::Image::new(crate::ui::icons::check())
+        .fit_to_exact_size(egui::Vec2::splat(tokens.icon_size))
+        .tint(ui.visuals().text_color())
+        .alt_text("Active")
 }
 
 fn picker_row_text(ui: &egui::Ui, label: &str, subtitle: Option<&str>) -> egui::text::LayoutJob {
@@ -451,6 +460,53 @@ mod tests {
         assert!(
             with > without,
             "a separator should occupy space above its row ({without} -> {with})"
+        );
+    }
+
+    #[test]
+    fn a_checked_row_marks_itself_with_an_icon_and_not_a_glyph() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        let mut items = layouts();
+        items[0].checked = true;
+        let mut state = PickerState::default();
+        state.open();
+        let render = |state: &mut PickerState, items: &[PickerItem<String>]| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1_000.0, 700.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    state.show(ui.ctx(), "checked-row", "hint", "empty", items);
+                },
+            )
+        };
+        let _ = render(&mut state, &items);
+        let output = render(&mut state, &items);
+
+        fn walk(shape: &egui::epaint::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::epaint::Shape::Text(text) => out.push(text.galley.job.text.clone()),
+                egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut texts = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut texts);
+        }
+
+        assert!(
+            texts.iter().all(|text| !text.contains('\u{2713}')),
+            "a checked row must not paint a check glyph, got {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|text| text == "alpha"),
+            "the checked row keeps its plain label, got {texts:?}"
         );
     }
 

@@ -23,6 +23,7 @@ pub const LIVE: &str = include_str!("../src/ingest/live.rs");
 pub const LOGGING: &str = include_str!("../src/ui/logging.rs");
 pub const MARKERS: &str = include_str!("../src/plotting/markers.rs");
 pub const MESSAGE_POPUP: &str = include_str!("../src/ui/message_popup.rs");
+pub const PALETTE: &str = include_str!("../src/ui/palette.rs");
 pub const PARSERS: &str = include_str!("../src/ingest/parsers.rs");
 pub const PERFORMANCE: &str = include_str!("../src/ui/performance.rs");
 pub const SCRIPTS: &str = include_str!("../src/scripting/scripts.rs");
