@@ -178,3 +178,53 @@ fn renaming_onto_an_existing_saved_flow_is_refused() {
     assert_eq!(flow.editors[&id].loaded_name.as_deref(), Some("first"));
     assert!(logs.iter().any(|(_, text)| text.contains("already exists")));
 }
+
+#[test]
+fn opening_a_named_flow_reveals_the_window_with_that_graph_loaded() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut flow = DataFlowUi::new();
+    flow.store = GraphStore::new(dir.path().to_path_buf());
+    let mut saved = Graph::new("fusion");
+    saved.insert_node(Node {
+        id: NodeId(3),
+        pos: [4.0, 5.0],
+        kind: NodeKind::Add,
+    });
+    flow.store.save(&saved).unwrap();
+    assert!(!flow.open);
+
+    let logs = flow.open_named("fusion");
+
+    assert!(
+        logs.is_empty(),
+        "opening a saved graph should not log: {logs:?}"
+    );
+    assert!(flow.open, "a failed headless run should reveal the window");
+    assert_eq!(
+        flow.active_editor().loaded_name.as_deref(),
+        Some("fusion"),
+        "the named graph should be the focused editor"
+    );
+    assert_eq!(flow.active_editor().controller.graph.nodes.len(), 1);
+
+    let reopened = flow.open_named("fusion");
+    assert!(reopened.is_empty());
+    assert_eq!(
+        flow.editors.len(),
+        1,
+        "reopening the same graph should focus its tab, not duplicate it"
+    );
+}
+
+#[test]
+fn opening_a_missing_flow_reports_the_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut flow = DataFlowUi::new();
+    flow.store = GraphStore::new(dir.path().to_path_buf());
+
+    let logs = flow.open_named("absent");
+
+    assert!(flow.open);
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0].0, LogLevel::Error);
+}
