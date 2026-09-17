@@ -142,19 +142,19 @@ fn dynamic_palette_metadata(command: &commands::AppCommand) -> (&'static str, St
             format!("built-in native parser open with {name}"),
         ),
         AppCommand::OpenWithParser(name) => (
-            "Tools › Parsers › Run Parser",
+            "Tools › Parsers › Run parser",
             format!("custom parser run parse file {name}"),
         ),
         AppCommand::RunScript(name) => (
-            "Tools › Scripts › Run Scripts",
+            "Tools › Scripts › Run script",
             format!("script run execute {name}"),
         ),
         AppCommand::RunSequence(name) => (
-            "Tools › Sequences › Run",
+            "Tools › Sequences › Run sequence",
             format!("sequence run execute {name}"),
         ),
         AppCommand::LoadNamedLayout(name) => (
-            "Tools › Layouts › Load Layout",
+            "Tools › Layouts › Load layout",
             format!("layout load workspace {name}"),
         ),
         AppCommand::DisconnectLink(_) => (
