@@ -247,7 +247,7 @@ pub fn draw_playhead(
 
     let painter = ui.painter();
     let color = PLAYHEAD_COLOR;
-    painter.vline(x, rect.y_range(), egui::Stroke::new(4.0, PLAYHEAD_CASING));
+    painter.vline(x, rect.y_range(), egui::Stroke::new(3.0, PLAYHEAD_CASING));
     painter.vline(x, rect.y_range(), egui::Stroke::new(2.0, color));
 
     let Some(mode) = readout else {
