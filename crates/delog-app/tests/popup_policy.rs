@@ -15,6 +15,7 @@ const COMMANDS_SOURCE: &str = concat!(
     include_str!("../src/shell/app/commands/specs.rs"),
 );
 const GLOBAL_TOOLBAR_SOURCE: &str = include_str!("../src/shell/app/global_plot_toolbar.rs");
+const APP_MAIN: &str = include_str!("../src/shell/app/mod.rs");
 
 const POPUP_SOURCES: &[&str] = &[
     ABOUT_SOURCE,
@@ -441,9 +442,15 @@ fn field_stats_is_a_global_toolbar_action_not_a_per_plot_one() {
         GLOBAL_TOOLBAR_SOURCE.contains("crate::ui::icons::sigma()"),
         "the global field stats button should use the sigma icon"
     );
+    let toggle_arm = between(
+        APP_SOURCE,
+        "CommandId::ToggleFieldStats => {",
+        "CommandId::ToggleAnnotationToolbar",
+    );
     assert!(
-        APP_SOURCE.contains(".open_plotted(self.workspace.unique_fields())"),
-        "the global action should open stats for every plotted trace"
+        toggle_arm.contains("let fields = self.plotted_fields();")
+            && toggle_arm.contains("self.field_stats.open_plotted(fields)"),
+        "the global action should open stats for every plotted trace, in every window"
     );
 }
 
@@ -471,7 +478,7 @@ fn browser_topic_tables_keep_field_drag_source() {
         "each visible field should become a tree leaf directly in the loop"
     );
     let table_row_call = browser[leaf_node..]
-        .find("field_table_row(ui, field, selection, &visible)")
+        .find("field_table_row(\n                                            ui, salt, origin, field, selection, &visible,")
         .map(|offset| leaf_node + offset)
         .expect("field leaves should render field table rows");
     assert!(
@@ -483,7 +490,7 @@ fn browser_topic_tables_keep_field_drag_source() {
         .find("fn field_table_row(")
         .expect("field_table_row helper should exist");
     let field_row_delegate = browser[table_row..]
-        .find("field_row(ui, field, selection, visible")
+        .find("field_row(\n        ui,\n        salt,\n        origin,\n        field,\n        selection,\n        visible,")
         .map(|offset| table_row + offset)
         .expect("field_table_row should delegate to field_row");
     assert!(
@@ -519,7 +526,7 @@ fn browser_topic_tables_keep_field_drag_source() {
     }
 
     let table_cell_calls = browser[table_row..field_row]
-        .matches("field_table_cell(\n                ui,")
+        .matches("field_table_cell(\n                    ui,")
         .count();
     assert_eq!(
         table_cell_calls, 5,
@@ -582,11 +589,11 @@ fn tools_layouts_menu_exposes_clear_current_layout() {
 #[test]
 fn removed_workspace_fields_are_pruned_before_cache_requests() {
     let prune = APP_SOURCE
-        .find("self.workspace.prune_removed_fields(&snapshot)")
-        .expect("workspace should prune removed fields on epoch changes");
+        .find("workspace.prune_removed_fields(&snapshot)")
+        .expect("every workspace should prune removed fields on epoch changes");
     let request = APP_SOURCE
         .find("self.caches.request(field, &snapshot);")
-        .expect("workspace fields should request render caches");
+        .expect("plotted fields should request render caches");
 
     assert!(prune < request);
 }
@@ -869,11 +876,9 @@ fn export_footer_keeps_cancel_left_and_export_right() {
 #[test]
 fn global_toolbar_is_rendered_once_through_the_context_header() {
     assert_eq!(APP_SOURCE.matches("global_plot_toolbar::show").count(), 1);
-    let header_call = APP_SOURCE.find("context_header::show").unwrap();
-    let toolbar_call = APP_SOURCE.find("global_plot_toolbar::show").unwrap();
-    let workspace = APP_SOURCE
-        .find("central_workspace_frame(ui.style()).show")
-        .unwrap();
+    let header_call = APP_MAIN.find("context_header::show").unwrap();
+    let toolbar_call = APP_MAIN.find("global_plot_toolbar::show").unwrap();
+    let workspace = APP_MAIN.find("render_workspace_window(").unwrap();
 
     assert!(header_call < toolbar_call && toolbar_call < workspace);
 }

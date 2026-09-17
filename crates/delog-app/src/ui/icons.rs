@@ -180,6 +180,10 @@ pub fn close() -> ImageSource<'static> {
     egui::include_image!("../../assets/icons/x.svg")
 }
 
+pub fn app_window() -> ImageSource<'static> {
+    egui::include_image!("../../assets/icons/app-window.svg")
+}
+
 pub fn panel_left_close() -> ImageSource<'static> {
     egui::include_image!("../../assets/icons/panel-left-close.svg")
 }

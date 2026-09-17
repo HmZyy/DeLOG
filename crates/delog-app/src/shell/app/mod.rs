@@ -10,6 +10,7 @@ pub mod inspector;
 #[cfg(all(test, feature = "scripting"))]
 mod sequence_tests;
 mod sequences;
+mod window_render;
 
 use delog_cache::CacheManager;
 use delog_core::diagnostics::{DiagRecord, Severity};
@@ -47,7 +48,7 @@ fn collapsed_data_browser_width(style: &egui::Style) -> f32 {
     tokens.space_sm + tokens.control_height + tokens.space_sm
 }
 
-fn central_workspace_frame(style: &egui::Style) -> egui::Frame {
+pub(crate) fn central_workspace_frame(style: &egui::Style) -> egui::Frame {
     let mut frame = egui::Frame::central_panel(style);
     frame.inner_margin.left = 0;
     frame
@@ -63,7 +64,7 @@ fn keep_active_loads_repainting(ctx: &egui::Context, has_active_loads: bool) {
     }
 }
 use crate::plotting::timeline::Playback;
-use crate::shell::workspace::{PlotServices, Workspace};
+use crate::shell::workspace::Workspace;
 
 struct TrajectoryBuildResult {
     epoch: u64,
@@ -421,6 +422,7 @@ pub struct DelogApp {
     markers: crate::plotting::markers::Markers,
     snap_playhead: bool,
     lock_readouts: bool,
+    alt_held: bool,
     frame: u64,
     last_epoch: u64,
     origin_us: i64,
@@ -486,6 +488,8 @@ pub struct DelogApp {
     annotation_toolbar_open: bool,
     armed_tool: Option<crate::plotting::annotations::place::ArmedTool>,
     sync_window: Option<SyncWindow>,
+    windows: Vec<crate::shell::windows::ExtendedWindow>,
+    next_window_id: u64,
     dataflow: crate::dataflow::window::DataFlowUi,
     sequences: crate::sequences::runtime::SequenceRuntime,
     generate_markers_dialog: Option<crate::shell::generate_markers::GenerateMarkersDialog>,
@@ -586,6 +590,7 @@ impl DelogApp {
             markers: crate::plotting::markers::Markers::new(),
             snap_playhead: false,
             lock_readouts: false,
+            alt_held: false,
             frame: 0,
             last_epoch: u64::MAX,
             origin_us: 0,
@@ -646,6 +651,8 @@ impl DelogApp {
             annotation_toolbar_open: false,
             armed_tool: None,
             sync_window: None,
+            windows: Vec::new(),
+            next_window_id: 1,
             dataflow: crate::dataflow::window::DataFlowUi::new(),
             sequences: crate::sequences::runtime::SequenceRuntime::default(),
             generate_markers_dialog: None,
@@ -1239,6 +1246,7 @@ impl DelogApp {
         self.sequences.interrupt_layout();
         Self::clear_current_layout_state(
             &mut self.workspace,
+            &mut self.windows,
             &mut self.playback,
             &mut self.view,
             &mut self.view_fitted,
@@ -1259,6 +1267,7 @@ impl DelogApp {
     #[allow(clippy::too_many_arguments)]
     fn clear_current_layout_state(
         workspace: &mut Workspace,
+        windows: &mut Vec<crate::shell::windows::ExtendedWindow>,
         playback: &mut Playback,
         view: &mut Option<ViewX>,
         view_fitted: &mut bool,
@@ -1271,6 +1280,7 @@ impl DelogApp {
         traj_dirty: &mut bool,
     ) {
         *workspace = Workspace::new();
+        windows.clear();
         playback.speed = 1.0;
         playback.follow_live = false;
         *view = None;
@@ -1429,6 +1439,7 @@ impl DelogApp {
         crate::shell::layout_apply::current_doc(crate::shell::layout_apply::CurrentLayout {
             name,
             workspace: &self.workspace,
+            windows: &self.windows,
             snapshot,
             speed: self.playback.speed as f64,
             follow_live: self.playback.follow_live,
@@ -1762,7 +1773,11 @@ impl DelogApp {
             self.session.has_active_loads(),
             parser_task_active,
             cfg!(feature = "scripting"),
-            self.workspace.fields().next().is_some(),
+            self.workspace.fields().next().is_some()
+                || self
+                    .windows
+                    .iter()
+                    .any(|window| window.workspace.fields().next().is_some()),
             self.field_stats.is_open(),
         )
     }
@@ -2094,6 +2109,7 @@ impl DelogApp {
                 }
                 CommandId::ToggleInspector => self.inspector.open = !self.inspector.open,
                 CommandId::ToggleScene3d => self.workspace.toggle_scene_pane(),
+                CommandId::NewPlotWindow => self.open_extended_window(),
                 CommandId::OpenDiagnostics => self.toggle_dock(AppDockTab::Diagnostics),
                 CommandId::OpenPerformance => self.toggle_dock(AppDockTab::Performance),
                 CommandId::OpenMarkers => self.toggle_dock(AppDockTab::Markers),
@@ -2159,8 +2175,8 @@ impl DelogApp {
                     if self.field_stats.is_open() {
                         self.field_stats.close();
                     } else {
-                        self.field_stats
-                            .open_plotted(self.workspace.unique_fields());
+                        let fields = self.plotted_fields();
+                        self.field_stats.open_plotted(fields);
                     }
                 }
                 CommandId::ToggleAnnotationToolbar => {
@@ -2292,6 +2308,8 @@ impl DelogApp {
 
     fn apply_layout(&mut self, layout: LayoutApply) {
         self.workspace = layout.workspace;
+        self.windows = layout.windows;
+        self.next_window_id = crate::shell::windows::next_window_id(&self.windows);
         self.view = None;
         self.view_fitted = false;
         self.fit_view_all = layout.fit_all;
@@ -2715,6 +2733,66 @@ impl DelogApp {
             }
         }
     }
+
+    fn open_extended_window(&mut self) {
+        let id = crate::shell::windows::WindowId(self.next_window_id);
+        self.next_window_id += 1;
+        self.windows
+            .push(crate::shell::windows::ExtendedWindow::new(id));
+    }
+
+    fn apply_browser_response(
+        &mut self,
+        response: browser::BrowserResponse,
+        snapshot: &delog_core::snapshot::StoreSnapshot,
+    ) {
+        if let Some((source, offset_us)) = response.offset_change {
+            self.session.set_source_offset(source, offset_us);
+        }
+        if let Some(source) = response.remove_source {
+            self.session.remove_source(source);
+        }
+        if let Some(source) = response.inspect_source {
+            self.source_metadata_dialog = Some(source);
+        }
+        if let Some(field) = response.inspect_field_metadata {
+            self.field_metadata_dialog = Some(field);
+        }
+        if let Some(field) = response.inspect_field_stats {
+            self.field_stats.open(field);
+        }
+        if let Some(field) = response.generate_markers {
+            let title = crate::plotting::legend::trace_label(snapshot, field);
+            let colors_before = self.settings.marker_value_colors.clone();
+            self.generate_markers_dialog =
+                Some(crate::shell::generate_markers::GenerateMarkersDialog::open(
+                    snapshot,
+                    field,
+                    title,
+                    &mut self.settings.marker_value_colors,
+                ));
+            if self.settings.marker_value_colors != colors_before
+                && let Err(error) = crate::config::layout::doc::save_app_settings(&self.settings)
+            {
+                self.session
+                    .push_diagnostic(delog_core::diagnostics::Diag::error(
+                        "settings-save",
+                        error.to_string(),
+                    ));
+            }
+        }
+    }
+
+    fn plotted_fields(&self) -> Vec<delog_core::identity::FieldId> {
+        crate::shell::windows::union_fields(&self.workspace, &self.windows)
+    }
+
+    fn each_workspace_mut(
+        &mut self,
+    ) -> impl Iterator<Item = &mut crate::shell::workspace::Workspace> {
+        std::iter::once(&mut self.workspace)
+            .chain(self.windows.iter_mut().map(|w| &mut w.workspace))
+    }
 }
 
 impl eframe::App for DelogApp {
@@ -2814,6 +2892,7 @@ impl eframe::App for DelogApp {
             ui.ctx().request_repaint();
         }
         self.caches.begin_frame(self.frame);
+        self.gpu.begin_plot_frame(frame);
         for field in self.caches.poll_builds() {
             let label = snapshot
                 .fields
@@ -2835,10 +2914,15 @@ impl eframe::App for DelogApp {
         if snapshot.epoch != self.last_epoch {
             self.caches.on_epoch(&snapshot);
             self.try_apply_deferred_layout(&snapshot);
-            for field in self.workspace.prune_removed_fields(&snapshot) {
+            let mut pruned = Vec::new();
+            let mut resolved = 0;
+            for workspace in self.each_workspace_mut() {
+                pruned.extend(workspace.prune_removed_fields(&snapshot));
+                resolved += workspace.resolve_ghosts(&snapshot);
+            }
+            for field in pruned {
                 self.caches.unpin(field);
             }
-            let resolved = self.workspace.resolve_ghosts(&snapshot);
             if resolved > 0 {
                 self.session
                     .push_diagnostic(delog_core::diagnostics::Diag::info(
@@ -2848,9 +2932,13 @@ impl eframe::App for DelogApp {
             }
             self.last_epoch = snapshot.epoch;
         }
+        if !matches!(self.browser_model.as_ref(), Some((epoch, _)) if *epoch == snapshot.epoch) {
+            self.browser_filter.reset();
+            self.browser_model = Some((snapshot.epoch, BrowserModel::from_snapshot(&snapshot)));
+        }
         self.ensure_trajectory_build(ui.ctx(), &snapshot);
         self.maybe_autosave_session(&snapshot);
-        for field in self.workspace.fields().collect::<Vec<_>>() {
+        for field in self.plotted_fields() {
             self.caches.request(field, &snapshot);
         }
         self.caches.evict_over_budget();
@@ -3167,18 +3255,10 @@ impl eframe::App for DelogApp {
                         });
                     });
                 });
-        } else {
-            // Reuse the cached tree while the epoch is unchanged. Take it out of
-            // `self` so the render closure can mutably borrow other `self` fields
-            // without aliasing the model, then put it back after the panel.
-            let epoch = snapshot.epoch;
-            let model = match self.browser_model.take() {
-                Some((cached_epoch, model)) if cached_epoch == epoch => model,
-                _ => {
-                    self.browser_filter.reset();
-                    BrowserModel::from_snapshot(&snapshot)
-                }
-            };
+        } else if let Some((epoch, model)) = self.browser_model.take() {
+            // Take the model out of `self` so the render closure can mutably
+            // borrow other `self` fields without aliasing it, then put it back
+            // after the panel.
             let preferred_width = if model.is_empty() {
                 ui.spacing().text_edit_width
             } else {
@@ -3186,14 +3266,19 @@ impl eframe::App for DelogApp {
             };
             let browser_panel = data_browser_panel(preferred_width);
             if std::mem::take(&mut self.browser_focus_filter) {
-                ui.ctx()
-                    .memory_mut(|memory| memory.request_focus(browser::filter_id()));
+                ui.ctx().memory_mut(|memory| {
+                    memory.request_focus(browser::filter_id(
+                        crate::shell::windows::WindowId::MAIN.id_salt(),
+                    ))
+                });
             }
             browser_panel.show_inside(ui, |ui| {
                 // Offset edits go through the ingest thread (the single
                 // registry writer) and come back as a new epoch.
                 let browser_response = browser::ui(
                     ui,
+                    crate::shell::windows::WindowId::MAIN.id_salt(),
+                    crate::shell::windows::WindowId::MAIN.0,
                     epoch,
                     &model,
                     &mut self.browser_query,
@@ -3204,42 +3289,7 @@ impl eframe::App for DelogApp {
                 if browser_response.collapse_requested {
                     self.browser_collapsed = true;
                 }
-                if let Some((source, offset_us)) = browser_response.offset_change {
-                    self.session.set_source_offset(source, offset_us);
-                }
-                if let Some(source) = browser_response.remove_source {
-                    self.session.remove_source(source);
-                }
-                if let Some(source) = browser_response.inspect_source {
-                    self.source_metadata_dialog = Some(source);
-                }
-                if let Some(field) = browser_response.inspect_field_metadata {
-                    self.field_metadata_dialog = Some(field);
-                }
-                if let Some(field) = browser_response.inspect_field_stats {
-                    self.field_stats.open(field);
-                }
-                if let Some(field) = browser_response.generate_markers {
-                    let title = crate::plotting::legend::trace_label(&snapshot, field);
-                    let colors_before = self.settings.marker_value_colors.clone();
-                    self.generate_markers_dialog =
-                        Some(crate::shell::generate_markers::GenerateMarkersDialog::open(
-                            &snapshot,
-                            field,
-                            title,
-                            &mut self.settings.marker_value_colors,
-                        ));
-                    if self.settings.marker_value_colors != colors_before
-                        && let Err(error) =
-                            crate::config::layout::doc::save_app_settings(&self.settings)
-                    {
-                        self.session
-                            .push_diagnostic(delog_core::diagnostics::Diag::error(
-                                "settings-save",
-                                error.to_string(),
-                            ));
-                    }
-                }
+                self.apply_browser_response(browser_response, &snapshot);
             });
             self.browser_model = Some((epoch, model));
         }
@@ -3252,8 +3302,8 @@ impl eframe::App for DelogApp {
         }
         show_field_metadata_window(ui.ctx(), &snapshot, &mut self.field_metadata_dialog);
         if self.field_stats.is_tracking_plots() {
-            self.field_stats
-                .sync_plotted(self.workspace.unique_fields());
+            let fields = self.plotted_fields();
+            self.field_stats.sync_plotted(fields);
         }
         show_field_stats_window(
             ui.ctx(),
@@ -3262,14 +3312,19 @@ impl eframe::App for DelogApp {
             &mut self.caches,
             &mut self.field_stats,
         );
-        let annotation_rows = self.workspace.annotation_rows();
+        let annotation_rows =
+            crate::shell::windows::annotation_rows(&self.workspace, &self.windows);
         if let Some(action) = crate::plotting::annotations::toolbar::show(
             ui.ctx(),
             &mut self.annotation_toolbar_open,
             &mut self.armed_tool,
             &annotation_rows,
         ) {
-            self.workspace.apply_annotation_action(action);
+            crate::shell::windows::apply_annotation_action(
+                &mut self.workspace,
+                &mut self.windows,
+                action,
+            );
         }
         if self.inspector.open {
             let traces = self.workspace.inspector_traces(&snapshot);
@@ -3322,157 +3377,27 @@ impl eframe::App for DelogApp {
             }
         }
 
+        let windows_ctx = ui.ctx().clone();
+        self.alt_held = crate::shell::windows::alt_held(&windows_ctx, &self.windows);
+        self.render_extended_windows(&windows_ctx, frame, &snapshot);
+
         let ui_workspace_timer = self.session.metrics().scope("ui_workspace");
-        central_workspace_frame(ui.style()).show(ui, |ui| {
-            // The workspace renders even before any log loads, so plots can be
-            // arranged and the 3D view opened on an empty session.
-
-            let workspace_rect = ui.available_rect_before_wrap();
-
-            // The central panel is a fallback drop zone: dropping a field onto
-            // empty workspace space plots it in the first pane.
-            let frame_style = egui::Frame::default();
-            let mut handled_workspace_drop = false;
-            let (_, dropped) =
-                ui.dnd_drop_zone::<Vec<delog_core::identity::FieldId>, ()>(frame_style, |ui| {
-                    // Owned metrics handle: `behavior` borrows `self` mutably
-                    // below, so we can't reach `self.session` while it lives.
-                    let tree_metrics = self.session.metrics().clone();
-                    let live_map_scopes = self.workspace.map_scopes();
-                    self.gpu.retain_map_scopes(frame, &live_map_scopes);
-                    if let Some(manager) = self.tile_manager.as_mut() {
-                        manager.retain_scopes(&live_map_scopes);
-                    }
-                    self.gpu.begin_plot_frame(frame);
-                    let services = PlotServices {
-                        frame,
-                        snapshot: &snapshot,
-                        metrics: self.session.metrics(),
-                        gpu: &mut self.gpu,
-                        tile_manager: self.tile_manager.as_mut(),
-                        tile_manager_error: self.tile_manager_error.as_deref(),
-                        caches: &mut self.caches,
-                        view: &mut self.view,
-                        origin_us: self.origin_us,
-                        hover_mode: &mut self.hover_mode,
-                        snap_playhead: &mut self.snap_playhead,
-                        marker_us: &mut self.marker_us,
-                        armed_tool: &mut self.armed_tool,
-                        render_tuning: self.settings.render,
-                        scene3d: self.settings.scene3d,
-                        playhead_us: snapshot.global_time_range().map(|_| self.playback.t_us),
-                        playing: self.playback.playing,
-                        lock_readouts: self.lock_readouts,
-                        vehicles: &self.vehicles,
-                        trajectories: &self.vehicle_trajectories,
-                        traj_generation: self.traj_vehicle_revision,
-                        shared_y_gutter: self.workspace.shared_y_gutter,
-                        plot_display: self.settings.plot,
-                        markers: self.markers.as_slice(),
-                    };
-                    let mut behavior = crate::shell::workspace::Behavior::new(services);
-                    // `workspace_tree`: the egui_tiles layout + pane rendering.
-                    // Profiling (2026-06-28) showed egui_tiles' own machinery is
-                    // negligible (~0.02 ms); the cost is the per-pane `pane_ui`
-                    // render. `ui_workspace − workspace_tree` is begin/retain +
-                    // action handling.
-                    let tree_timer = tree_metrics.scope("workspace_tree");
-                    self.workspace.tree.ui(&mut behavior, ui);
-                    drop(tree_timer);
-                    let actions = behavior.into_actions();
-                    self.workspace.repair_focus();
-                    self.workspace.enforce_single_annotation_editor();
-                    // Share the widest pane gutter so stacked plots align next
-                    // frame. Converges in one frame; until then each
-                    // pane never drops below its own gutter, so labels never
-                    // clip.
-                    self.workspace.shared_y_gutter = actions.max_y_gutter;
-                    if let Some((tile_id, direction)) = actions.split {
-                        self.workspace.split_plot(tile_id, direction);
-                    }
-                    if let Some((tile_id, edge, fields)) = actions.edge_drop {
-                        let added = self
-                            .workspace
-                            .split_plot_with_traces(tile_id, edge, &fields);
-                        if !added.is_empty() {
-                            handled_workspace_drop = true;
-                            for field in added {
-                                self.caches.request(field, &snapshot);
-                            }
-                        }
-                    }
-                    if let Some(mv) = actions.legend_move {
-                        let field = self.workspace.apply_legend_move(mv);
-                        self.caches.request(field, &snapshot);
-                        handled_workspace_drop = true;
-                    }
-                    if let Some(tile_id) = actions.close {
-                        for field in self.workspace.close_plot(tile_id) {
-                            self.caches.unpin(field);
-                        }
-                    }
-                    if let Some(tile_id) = actions.focus {
-                        self.workspace.focused = Some(tile_id);
-                    }
-                    if let Some(t_us) = actions.scrub_to
-                        && let Some(range) = snapshot.global_time_range()
-                    {
-                        self.playback.scrub(t_us, range);
-                    }
-                    if actions.view_changed {
-                        self.playback.unlock_live();
-                        // Manual pan/zoom drops out of fit-all (like a scrub
-                        // disengages live-follow).
-                        self.fit_view_all = false;
-                    }
-                    if actions.open_vehicle_config {
-                        self.vehicle_dialog.open = true;
-                    }
-                    if actions.open_scene_settings {
-                        self.settings_dialog.open_scene3d();
-                    }
-                    if actions.export_kml {
-                        self.spawn_export_kml_dialog(ui.ctx(), &snapshot);
-                    }
-                    if let Some(action) = actions.image {
-                        match action {
-                            crate::shell::workspace::WorkspaceImageAction::CopyPlot { rect } => {
-                                self.queue_image_capture(
-                                    ui.ctx(),
-                                    crate::export::image_export::ImageCaptureIntent::plot(
-                                        crate::export::image_export::ImageCaptureAction::Copy,
-                                        rect,
-                                        self.frame,
-                                    ),
-                                );
-                            }
-                            crate::shell::workspace::WorkspaceImageAction::ExportPlot { rect } => {
-                                self.queue_image_capture(
-                                    ui.ctx(),
-                                    crate::export::image_export::ImageCaptureIntent::plot(
-                                        crate::export::image_export::ImageCaptureAction::Export,
-                                        rect,
-                                        self.frame,
-                                    ),
-                                );
-                            }
-                        }
-                    }
-                });
-            if let Some(fields) = dropped
-                && !handled_workspace_drop
-            {
-                for &field in fields.iter() {
-                    if self.workspace.add_trace_to_first_plot(field) {
-                        self.caches.request(field, &snapshot);
-                    }
-                }
-            }
-            let plotted: Vec<_> = self.workspace.fields().collect();
-            self.gpu.retain_plotted_buffers(frame, &plotted);
-            self.start_queued_image_capture(ui.ctx(), Some(workspace_rect));
-        });
+        let mut main_workspace = std::mem::replace(
+            &mut self.workspace,
+            crate::shell::workspace::Workspace::placeholder(),
+        );
+        self.render_workspace_window(
+            ui,
+            frame,
+            &snapshot,
+            crate::shell::windows::WindowId::MAIN,
+            &mut main_workspace,
+        );
+        self.workspace = main_workspace;
         drop(ui_workspace_timer);
+
+        let plotted = self.plotted_fields();
+        self.gpu.retain_plotted_buffers(frame, &plotted);
 
         // Render synchronization previews after the workspace has reset the
         // per-frame uniform allocator and retained its own GPU buffers. The

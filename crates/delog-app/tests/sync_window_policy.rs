@@ -49,16 +49,31 @@ fn sync_window_is_modeless_private_and_atomically_applied() {
 
 #[test]
 fn sync_window_renders_after_workspace_gpu_setup_and_repaints_cache_builds() {
+    assert_eq!(
+        APP.matches("self.gpu.begin_plot_frame(frame)").count(),
+        1,
+        "the per-frame uniform allocator must be reset exactly once per frame"
+    );
+    assert_eq!(
+        APP.matches("self.gpu.retain_plotted_buffers(frame, &plotted)")
+            .count(),
+        1,
+        "plotted buffers must be retained exactly once per frame across every window"
+    );
     let begin = APP
         .find("self.gpu.begin_plot_frame(frame)")
-        .expect("workspace should initialize the plot frame");
+        .expect("the frame should initialize the plot frame");
     let retain = APP
         .find("self.gpu.retain_plotted_buffers(frame, &plotted)")
-        .expect("workspace should retain its plotted buffers");
+        .expect("the frame should retain plotted buffers");
     let sync = APP
         .find("sync_window.show(")
         .expect("synchronization window should be rendered");
 
+    assert!(
+        begin < retain,
+        "buffers are retained after the frame is initialized"
+    );
     assert!(
         sync > begin,
         "sync uniforms must be allocated after frame reset"

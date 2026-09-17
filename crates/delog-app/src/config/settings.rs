@@ -66,8 +66,8 @@ pub struct AppSettings {
     pub show_fps: bool,
     #[serde(default)]
     pub render_mode: RenderMode,
-    #[serde(default = "default_true")]
-    pub vsync: bool,
+    #[serde(default)]
+    pub present_mode: VsyncMode,
     #[serde(default)]
     pub live_connection: LiveConnectionSettings,
     #[serde(default)]
@@ -112,7 +112,7 @@ impl Default for AppSettings {
             render: RenderTuning::default(),
             show_fps: false,
             render_mode: RenderMode::default(),
-            vsync: true,
+            present_mode: VsyncMode::On,
             live_connection: LiveConnectionSettings::default(),
             scene3d: Scene3dSettings::default(),
             plot: PlotDisplay::default(),
@@ -402,6 +402,35 @@ impl RenderMode {
         match self {
             Self::Reactive => "Reactive",
             Self::Continuous => "Continuous",
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VsyncMode {
+    #[default]
+    On,
+    Adaptive,
+    Fast,
+}
+
+impl VsyncMode {
+    pub const ALL: [Self; 3] = [Self::On, Self::Adaptive, Self::Fast];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::On => "On",
+            Self::Adaptive => "Adaptive",
+            Self::Fast => "Fast",
+        }
+    }
+
+    pub const fn present_mode(self) -> eframe::wgpu::PresentMode {
+        match self {
+            Self::On => eframe::wgpu::PresentMode::Fifo,
+            Self::Adaptive => eframe::wgpu::PresentMode::AutoVsync,
+            Self::Fast => eframe::wgpu::PresentMode::AutoNoVsync,
         }
     }
 }
@@ -897,10 +926,18 @@ fn general_tab(ui: &mut egui::Ui, settings: &mut AppSettings) -> SettingsChange 
             ui.end_row();
 
             ui.label("VSync").on_hover_text(
-                "Synchronize frames to the monitor's refresh rate to avoid tearing. \
-                     Disable to uncap the frame rate. Takes effect after restarting DeLOG.",
+                "On: tear-free everywhere, but can stall a window that is hidden on some \
+                     drivers. Adaptive: relaxes vsync where the driver supports it. Fast: \
+                     avoids the stall and is tear-free on Wayland, but may tear on X11 and \
+                     Windows. Takes effect after restarting DeLOG.",
             );
-            ui.checkbox(&mut settings.vsync, "");
+            egui::ComboBox::from_id_salt("settings-vsync")
+                .selected_text(settings.present_mode.label())
+                .show_ui(ui, |ui| {
+                    for mode in VsyncMode::ALL {
+                        ui.selectable_value(&mut settings.present_mode, mode, mode.label());
+                    }
+                });
             ui.end_row();
 
             let f = &mut settings.font;
@@ -1740,7 +1777,7 @@ mod tests {
         let s = AppSettings::default();
         assert!(!s.show_fps);
         assert_eq!(s.render_mode, RenderMode::Continuous);
-        assert!(s.vsync);
+        assert_eq!(s.present_mode, VsyncMode::On);
         assert!(!s.auto_open_diagnostics);
     }
 
@@ -1750,10 +1787,54 @@ mod tests {
         let s: AppSettings = serde_json::from_str(json).unwrap();
         assert!(!s.show_fps);
         assert_eq!(s.render_mode, RenderMode::Continuous);
-        assert!(s.vsync);
+        assert_eq!(s.present_mode, VsyncMode::On);
         assert!(!s.auto_open_diagnostics);
         assert!(!s.live_connection.recording_enabled);
         assert!(s.live_connection.recording_dir.is_empty());
+    }
+
+    #[test]
+    fn stale_legacy_vsync_key_still_loads_and_defaults_present_mode() {
+        let json = r#"{"vsync":true}"#;
+        let s: AppSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(s.present_mode, VsyncMode::On);
+    }
+
+    #[test]
+    fn vsync_mode_strings_round_trip() {
+        for mode in VsyncMode::ALL {
+            let json = serde_json::to_string(&mode).unwrap();
+            let decoded: VsyncMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded, mode);
+        }
+    }
+
+    #[test]
+    fn settings_without_a_present_mode_key_default_to_on() {
+        let json = r#"{"theme":"catppuccin_mocha"}"#;
+        let s: AppSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(s.present_mode, VsyncMode::On);
+    }
+
+    #[test]
+    fn vsync_mode_default_is_on() {
+        assert_eq!(VsyncMode::default(), VsyncMode::On);
+    }
+
+    #[test]
+    fn vsync_mode_maps_to_the_documented_present_modes() {
+        assert_eq!(
+            VsyncMode::On.present_mode(),
+            eframe::wgpu::PresentMode::Fifo
+        );
+        assert_eq!(
+            VsyncMode::Adaptive.present_mode(),
+            eframe::wgpu::PresentMode::AutoVsync
+        );
+        assert_eq!(
+            VsyncMode::Fast.present_mode(),
+            eframe::wgpu::PresentMode::AutoNoVsync
+        );
     }
 
     #[test]
@@ -1958,6 +2039,12 @@ mod tests {
     fn render_mode_labels_are_stable() {
         let labels: Vec<_> = RenderMode::ALL.into_iter().map(RenderMode::label).collect();
         assert_eq!(labels, ["Reactive", "Continuous"]);
+    }
+
+    #[test]
+    fn vsync_mode_labels_are_stable() {
+        let labels: Vec<_> = VsyncMode::ALL.into_iter().map(VsyncMode::label).collect();
+        assert_eq!(labels, ["On", "Adaptive", "Fast"]);
     }
 
     #[test]

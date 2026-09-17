@@ -48,25 +48,43 @@ pub fn run() -> eframe::Result {
 fn app_native_options() -> eframe::NativeOptions {
     // VSync is configured once at surface creation, so it must be read from the
     // persisted settings here rather than at app construction.
-    let vsync = crate::config::layout::doc::load_app_settings().vsync;
+    let present_mode = crate::config::layout::doc::load_app_settings().present_mode;
 
     let mut options = eframe::NativeOptions {
         viewport: app_viewport(),
         renderer: eframe::Renderer::Wgpu,
         // `NativeOptions.vsync` only affects the glow backend; the wgpu backend
         // ignores it and reads `wgpu_options.present_mode`. Set both so the
-        // setting works regardless of renderer. `Fifo` is the canonical, always-
-        // supported vsync mode (hard-caps to the monitor refresh rate).
-        vsync,
+        // setting works regardless of renderer.
+        vsync: !matches!(present_mode, crate::config::settings::VsyncMode::Fast),
         ..Default::default()
     };
-    options.wgpu_options.present_mode = if vsync {
-        eframe::wgpu::PresentMode::Fifo
-    } else {
-        eframe::wgpu::PresentMode::AutoNoVsync
-    };
+    options.wgpu_options.present_mode = present_mode.present_mode();
+    options.wgpu_options.on_surface_status = std::sync::Arc::new(surface_status_action);
 
     options
+}
+
+fn surface_status_action(
+    status: &eframe::wgpu::CurrentSurfaceTexture,
+) -> eframe::egui_wgpu::SurfaceErrorAction {
+    use eframe::egui_wgpu::SurfaceErrorAction;
+    use eframe::wgpu::CurrentSurfaceTexture;
+
+    match status {
+        CurrentSurfaceTexture::Outdated | CurrentSurfaceTexture::Lost => {
+            tracing::trace!(?status, "recreating the surface");
+            SurfaceErrorAction::RecreateSurface
+        }
+        CurrentSurfaceTexture::Timeout | CurrentSurfaceTexture::Occluded => {
+            tracing::trace!(?status, "skipped a frame for a window that cannot present");
+            SurfaceErrorAction::SkipFrame
+        }
+        other => {
+            tracing::warn!(?other, "dropped frame");
+            SurfaceErrorAction::SkipFrame
+        }
+    }
 }
 
 #[cfg(feature = "scripting")]
@@ -123,5 +141,39 @@ pub fn app_icon() -> egui::IconData {
         rgba: RGBA.to_vec(),
         width: 256,
         height: 256,
+    }
+}
+
+#[cfg(test)]
+mod surface_status_tests {
+    use super::surface_status_action;
+    use eframe::egui_wgpu::SurfaceErrorAction;
+    use eframe::wgpu::CurrentSurfaceTexture;
+
+    fn skips_quietly(status: &CurrentSurfaceTexture) -> bool {
+        matches!(surface_status_action(status), SurfaceErrorAction::SkipFrame)
+    }
+
+    #[test]
+    fn a_timed_out_acquire_is_skipped_like_an_occluded_one() {
+        assert!(skips_quietly(&CurrentSurfaceTexture::Timeout));
+        assert!(skips_quietly(&CurrentSurfaceTexture::Occluded));
+    }
+
+    #[test]
+    fn a_changed_or_lost_surface_is_still_recreated() {
+        assert!(matches!(
+            surface_status_action(&CurrentSurfaceTexture::Outdated),
+            SurfaceErrorAction::RecreateSurface
+        ));
+        assert!(matches!(
+            surface_status_action(&CurrentSurfaceTexture::Lost),
+            SurfaceErrorAction::RecreateSurface
+        ));
+    }
+
+    #[test]
+    fn a_validation_failure_is_still_skipped() {
+        assert!(skips_quietly(&CurrentSurfaceTexture::Validation));
     }
 }

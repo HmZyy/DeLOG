@@ -168,10 +168,23 @@ pub struct Workspace {
 
 impl Workspace {
     pub fn new() -> Self {
+        Self::new_for(crate::shell::windows::WindowId::MAIN)
+    }
+
+    pub fn new_for(window: crate::shell::windows::WindowId) -> Self {
         let mut tiles = egui_tiles::Tiles::default();
         let root = tiles.insert_pane(Pane::Plot(PlotPane::default()));
         Self {
-            tree: egui_tiles::Tree::new("plot_workspace", root, tiles),
+            tree: egui_tiles::Tree::new(egui::Id::new(("plot_workspace", window.0)), root, tiles),
+            focused: None,
+            shared_y_gutter: 0.0,
+            default_show_legend: true,
+        }
+    }
+
+    pub fn placeholder() -> Self {
+        Self {
+            tree: egui_tiles::Tree::empty("plot_workspace_placeholder"),
             focused: None,
             shared_y_gutter: 0.0,
             default_show_legend: true,
@@ -263,11 +276,6 @@ impl Workspace {
 
     pub fn fields(&self) -> impl Iterator<Item = FieldId> + '_ {
         self.plot_panes().flat_map(PlotPane::fields)
-    }
-
-    pub fn unique_fields(&self) -> Vec<FieldId> {
-        let mut seen = std::collections::HashSet::new();
-        self.fields().filter(|field| seen.insert(*field)).collect()
     }
 
     pub fn map_scopes(&self) -> Vec<MapScopeId> {
@@ -630,6 +638,7 @@ impl Workspace {
             let plot_label = format!("Plot {}", index + 1);
             rows.extend(pane.annotations.items().iter().map(|annot| {
                 crate::plotting::annotations::toolbar::AnnotationRow {
+                    window: 0,
                     pane: tile.0,
                     plot_label: plot_label.clone(),
                     id: annot.id,
@@ -647,7 +656,7 @@ impl Workspace {
     ) {
         use crate::plotting::annotations::toolbar::ToolbarAction;
         match action {
-            ToolbarAction::Edit { pane, id } => {
+            ToolbarAction::Edit { pane, id, .. } => {
                 let tile = egui_tiles::TileId(pane);
                 let Some(egui_tiles::Tile::Pane(Pane::Plot(plot))) = self.tree.tiles.get_mut(tile)
                 else {
@@ -665,7 +674,7 @@ impl Workspace {
                 self.tree.make_active(|candidate, _| candidate == tile);
                 self.enforce_single_annotation_editor();
             }
-            ToolbarAction::Remove { pane, id } => {
+            ToolbarAction::Remove { pane, id, .. } => {
                 for tile in self.plot_tiles_in_order() {
                     if tile.0 != pane {
                         continue;
@@ -715,6 +724,12 @@ impl Workspace {
             if let Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) = self.tree.tiles.get_mut(id) {
                 crate::plotting::annotations::edit::close_editor(&mut pane.annotations);
             }
+        }
+    }
+
+    pub fn close_all_annotation_editors(&mut self) {
+        for pane in self.plot_panes_mut() {
+            crate::plotting::annotations::edit::close_editor(&mut pane.annotations);
         }
     }
 }
@@ -789,6 +804,7 @@ pub struct PlotServices<'a> {
     pub playhead_us: Option<i64>,
     pub playing: bool,
     pub lock_readouts: bool,
+    pub alt_held: bool,
     pub vehicles: &'a [crate::scene3d::vehicle::VehicleConfig],
     /// Render-space trajectories (points + per-point timestamps), parallel to
     /// `vehicles`.
@@ -799,6 +815,8 @@ pub struct PlotServices<'a> {
     pub shared_y_gutter: f32,
     pub plot_display: crate::config::settings::PlotDisplay,
     pub markers: &'a [crate::plotting::markers::Marker],
+    pub window: crate::shell::windows::WindowId,
+    pub allow_image_export: bool,
 }
 
 pub struct Behavior<'a> {
@@ -1180,9 +1198,9 @@ impl Behavior<'_> {
         let frame_style = egui::Frame::default();
         let mut tile_response = egui_tiles::UiResponse::None;
 
-        // A legend middle-drag is in flight: bypass the `Vec<FieldId>` drop zone.
+        // A legend middle-drag is in flight: bypass the `FieldDrag` drop zone.
         // egui's `take_payload` removes the payload before downcasting, so a
-        // `dnd_drop_zone::<Vec<FieldId>>` over the pointer would consume (and
+        // `dnd_drop_zone::<FieldDrag>` over the pointer would consume (and
         // discard) our `LegendTraceDrag` on release before we could read it.
         if egui::DragAndDrop::has_payload_of_type::<legend::LegendTraceDrag>(ui.ctx()) {
             let response = ui
@@ -1205,16 +1223,19 @@ impl Behavior<'_> {
             return tile_response;
         }
 
-        let (response, dropped) = ui.dnd_drop_zone::<Vec<FieldId>, ()>(frame_style, |ui| {
-            tile_response = self.plot_body(ui, tile_id, pane);
-        });
+        let (response, dropped) =
+            ui.dnd_drop_zone::<crate::plotting::browser::FieldDrag, ()>(frame_style, |ui| {
+                tile_response = self.plot_body(ui, tile_id, pane);
+            });
+        let dropped =
+            dropped.and_then(|drag| drag.accepted_by(self.services.window.0).map(<[_]>::to_vec));
 
         if let Some(fields) = dropped {
             let pointer = response.response.ctx.input(|i| i.pointer.interact_pos());
             if let Some(edge) =
                 pointer.and_then(|pos| DropEdge::from_pos(response.response.rect, pos))
             {
-                self.actions.edge_drop = Some((tile_id, edge, (*fields).clone()));
+                self.actions.edge_drop = Some((tile_id, edge, fields.clone()));
             } else {
                 for &field in fields.iter() {
                     if pane.add_trace(field) {
@@ -1248,7 +1269,7 @@ impl Behavior<'_> {
         // modal that can clear it, even for a pane with no traces or view.
         crate::plotting::annotations::edit::editor(
             ui.ctx(),
-            egui::Id::new(("plot_annotation", tile_id)),
+            egui::Id::new(("plot_annotation", self.services.window.0, tile_id)),
             &mut pane.annotations,
             self.services.origin_us,
         );
@@ -1519,7 +1540,7 @@ impl Behavior<'_> {
             let hovered = response
                 .hover_pos()
                 .is_some_and(|pos| plot_rect.contains(pos));
-            let alt = ui.input(|i| i.modifiers.alt);
+            let alt = self.services.alt_held;
             let readout = playhead_readout(
                 self.services.playing,
                 self.services.lock_readouts,
@@ -1530,7 +1551,7 @@ impl Behavior<'_> {
             hover::draw_playhead(
                 ui,
                 HoverTarget {
-                    id: egui::Id::new(("playhead", tile_id)),
+                    id: egui::Id::new(("playhead", self.services.window.0, tile_id)),
                     view: pview,
                 },
                 self.services.snapshot.as_ref(),
@@ -1549,7 +1570,7 @@ impl Behavior<'_> {
             // Alt+hover drags the playhead along with the cursor. With
             // snap enabled it lands on the nearest data point instead, so the
             // playhead holds a sample until the cursor crosses to the next one.
-            if ui.input(|i| i.modifiers.alt)
+            if self.services.alt_held
                 && let Some(pos) = response.hover_pos()
                 && plot_rect.contains(pos)
             {
@@ -1568,7 +1589,7 @@ impl Behavior<'_> {
             let _ = hover::draw(
                 ui,
                 HoverTarget {
-                    id: egui::Id::new(("plot_hover", tile_id)),
+                    id: egui::Id::new(("plot_hover", self.services.window.0, tile_id)),
                     view: pview,
                 },
                 &response,
@@ -1597,7 +1618,7 @@ impl Behavior<'_> {
                 .collect();
             let outcome = legend::ui(
                 ui,
-                egui::Id::new(("plot_legend", tile_id)),
+                egui::Id::new(("plot_legend", self.services.window.0, tile_id)),
                 plot_rect,
                 self.services.plot_display.legend_position,
                 self.services.plot_display.legend_opacity,
@@ -1625,7 +1646,7 @@ impl Behavior<'_> {
             }
         }
 
-        plot_rename_dialog(ui.ctx(), tile_id, pane);
+        plot_rename_dialog(ui.ctx(), self.services.window, tile_id, pane);
 
         self.plot_info_window(ui, tile_id, pane, Some(debug));
         drop(pane_overlay_timer);
@@ -1826,32 +1847,34 @@ impl Behavior<'_> {
 
             ui.separator();
 
-            if ui
-                .add(egui::Button::image_and_text(
-                    menu_icon(ui, crate::ui::icons::copy()),
-                    "Copy Image",
-                ))
-                .clicked()
-            {
-                self.actions.image = Some(WorkspaceImageAction::CopyPlot {
-                    rect: response.rect,
-                });
-                ui.close();
-            }
-            if ui
-                .add(egui::Button::image_and_text(
-                    menu_icon(ui, crate::ui::icons::export()),
-                    "Export PNG...",
-                ))
-                .clicked()
-            {
-                self.actions.image = Some(WorkspaceImageAction::ExportPlot {
-                    rect: response.rect,
-                });
-                ui.close();
-            }
+            if self.services.allow_image_export {
+                if ui
+                    .add(egui::Button::image_and_text(
+                        menu_icon(ui, crate::ui::icons::copy()),
+                        "Copy Image",
+                    ))
+                    .clicked()
+                {
+                    self.actions.image = Some(WorkspaceImageAction::CopyPlot {
+                        rect: response.rect,
+                    });
+                    ui.close();
+                }
+                if ui
+                    .add(egui::Button::image_and_text(
+                        menu_icon(ui, crate::ui::icons::export()),
+                        "Export PNG...",
+                    ))
+                    .clicked()
+                {
+                    self.actions.image = Some(WorkspaceImageAction::ExportPlot {
+                        rect: response.rect,
+                    });
+                    ui.close();
+                }
 
-            ui.separator();
+                ui.separator();
+            }
 
             if ui
                 .add(egui::Button::image_and_text(
@@ -1918,7 +1941,11 @@ impl Behavior<'_> {
         }
         let mut open = pane.show_info;
         egui::Window::new("Plot Info")
-            .id(egui::Id::new(("plot-info", tile_id)))
+            .id(egui::Id::new((
+                "plot-info",
+                self.services.window.0,
+                tile_id,
+            )))
             .open(&mut open)
             .collapsible(false)
             .default_pos(ui.ctx().content_rect().center())
@@ -2148,32 +2175,38 @@ fn zoom_drag_anchor_x(view: ViewX, rect: egui::Rect, anchor_us: i64) -> f32 {
     rect.left() + frac as f32 * rect.width()
 }
 
-fn plot_rename_dialog(ctx: &egui::Context, tile_id: egui_tiles::TileId, pane: &mut PlotPane) {
+fn plot_rename_dialog(
+    ctx: &egui::Context,
+    window: crate::shell::windows::WindowId,
+    tile_id: egui_tiles::TileId,
+    pane: &mut PlotPane,
+) {
     if pane.rename.is_none() {
         return;
     }
     let mut apply = false;
     let mut cancel = false;
-    let modal = egui::Modal::new(egui::Id::new(("rename_trace", tile_id))).show(ctx, |ui| {
-        ui.set_width(240.0);
-        ui.label("Rename trace");
-        let Some(dialog) = pane.rename.as_mut() else {
-            return;
-        };
-        let edit = ui.add(egui::TextEdit::singleline(&mut dialog.text));
-        edit.request_focus();
-        if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-            apply = true;
-        }
-        ui.horizontal(|ui| {
-            if ui.button("OK").clicked() {
+    let modal =
+        egui::Modal::new(egui::Id::new(("rename_trace", window.0, tile_id))).show(ctx, |ui| {
+            ui.set_width(240.0);
+            ui.label("Rename trace");
+            let Some(dialog) = pane.rename.as_mut() else {
+                return;
+            };
+            let edit = ui.add(egui::TextEdit::singleline(&mut dialog.text));
+            edit.request_focus();
+            if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 apply = true;
             }
-            if ui.button("Cancel").clicked() {
-                cancel = true;
-            }
+            ui.horizontal(|ui| {
+                if ui.button("OK").clicked() {
+                    apply = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+            });
         });
-    });
     if modal.should_close() {
         cancel = true;
     }
