@@ -1939,6 +1939,7 @@ impl DelogApp {
                     presentation.command,
                     commands::AppCommand::LoadNamedLayout(_)
                         | commands::AppCommand::RunScript(_)
+                        | commands::AppCommand::RunSequence(_)
                         | commands::AppCommand::OpenWithParser(_)
                         | commands::AppCommand::OpenWithBuiltInParser(_)
                 )
@@ -4653,7 +4654,6 @@ const SHORTCUT_KEYS: &[egui::Key] = &[
     egui::Key::ArrowRight,
     egui::Key::S,
     egui::Key::L,
-    egui::Key::K,
     egui::Key::R,
     egui::Key::M,
     egui::Key::E,
@@ -4698,7 +4698,6 @@ fn shortcut_for_key(
     match (key, command_modifier) {
         (egui::Key::S, true) => Some((CommandId::SaveLayout, Anywhere)),
         (egui::Key::L, true) => Some((CommandId::LoadLayout, Anywhere)),
-        (egui::Key::K, true) => Some((CommandId::RunScript, Anywhere)),
         (egui::Key::R, true) => Some((CommandId::RunPalette, Anywhere)),
         (egui::Key::E, true) => Some((CommandId::ToggleDataBrowser, Anywhere)),
         (egui::Key::T, true) => Some((CommandId::ToggleScene3d, Anywhere)),

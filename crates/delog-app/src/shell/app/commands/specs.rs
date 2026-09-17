@@ -200,9 +200,8 @@ impl CommandId {
             RunScript => spec!(
                 "Run script…",
                 Workspace,
-                Some("Ctrl+K"),
+                None,
                 "script execute run",
-                Shortcut,
                 Palette
             ),
             RunPalette => spec!(

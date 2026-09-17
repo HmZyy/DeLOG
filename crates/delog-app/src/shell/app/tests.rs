@@ -270,6 +270,7 @@ fn non_static_palette_entries_have_variant_specific_search_metadata() {
         enabled_presentation(AppCommand::OpenWithBuiltInParser("ulog".into()), "PX4"),
         enabled_presentation(AppCommand::OpenWithParser("shared".into()), "shared"),
         enabled_presentation(AppCommand::RunScript("shared".into()), "shared"),
+        enabled_presentation(AppCommand::RunSequence("shared".into()), "shared"),
         enabled_presentation(AppCommand::LoadNamedLayout("shared".into()), "shared"),
         enabled_presentation(AppCommand::DisconnectLink(0), "udp://127.0.0.1:14550"),
         enabled_presentation(AppCommand::ToggleShellEmphasis, "Emphasize live workflows"),
@@ -316,6 +317,7 @@ fn non_static_palette_entries_have_variant_specific_search_metadata() {
 
     for excluded in [
         AppCommand::RunScript("shared".into()),
+        AppCommand::RunSequence("shared".into()),
         AppCommand::LoadNamedLayout("shared".into()),
         AppCommand::OpenWithParser("shared".into()),
         AppCommand::OpenWithBuiltInParser("ulog".into()),
@@ -348,6 +350,7 @@ fn name_backed_dynamic_commands_stay_out_of_the_palette() {
         enabled_presentation(AppCommand::OpenWithBuiltInParser("shared".into()), "shared"),
         enabled_presentation(AppCommand::OpenWithParser("shared".into()), "shared"),
         enabled_presentation(AppCommand::RunScript("shared".into()), "shared"),
+        enabled_presentation(AppCommand::RunSequence("shared".into()), "shared"),
         enabled_presentation(AppCommand::LoadNamedLayout("shared".into()), "shared"),
         enabled_presentation(AppCommand::DisconnectLink(0), "shared"),
     ]);
@@ -775,10 +778,13 @@ fn keyboard_shortcuts_produce_registry_commands() {
     );
     assert!(SHORTCUT_KEYS.contains(&egui::Key::Equals));
     assert_eq!(
-        command_for_shortcut(egui::Key::K, true),
-        Some(CommandId::RunScript)
+        command_for_shortcut(egui::Key::K, false),
+        None,
+        "Ctrl+K was retired in favour of the Ctrl+R run palette"
     );
-    assert!(SHORTCUT_KEYS.contains(&egui::Key::K));
+    assert_eq!(command_for_shortcut(egui::Key::K, true), None);
+    assert!(!SHORTCUT_KEYS.contains(&egui::Key::K));
+    assert_eq!(CommandId::RunScript.spec().shortcut, None);
     assert_eq!(
         command_for_shortcut(egui::Key::T, true),
         Some(CommandId::ToggleScene3d)
@@ -958,7 +964,7 @@ fn the_command_palette_opens_on_ctrl_shift_p_not_ctrl_k() {
     assert!(shortcut.contains("egui::Key::P"));
     assert!(
         !shortcut.contains("egui::Key::K"),
-        "Ctrl+K now runs a script; the palette moved to Ctrl+Shift+P"
+        "the palette lives on Ctrl+Shift+P, not Ctrl+K"
     );
 }
 
@@ -1003,7 +1009,7 @@ fn modifier_and_function_shortcuts_fire_while_a_widget_owns_the_keyboard() {
     for (key, command_modifier) in [
         (egui::Key::S, true),
         (egui::Key::L, true),
-        (egui::Key::K, true),
+        (egui::Key::R, true),
         (egui::Key::E, true),
         (egui::Key::T, true),
         (egui::Key::O, true),
