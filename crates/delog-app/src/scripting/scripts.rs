@@ -358,6 +358,42 @@ impl ScriptsPanel {
         }
     }
 
+    pub fn run_sequence_step(
+        &mut self,
+        name: &str,
+        parser_path: Option<std::path::PathBuf>,
+        store: Arc<DataStore>,
+        sender: IngestSender,
+        metrics: Arc<MetricsRegistry>,
+    ) -> Result<std::sync::mpsc::Receiver<Result<(), String>>, String> {
+        if !self.ordinary_dispatch_enabled() || self.parsers.has_pending_work() {
+            return Err("scripting runtime is busy".into());
+        }
+        let command = if let Some(path) = parser_path {
+            let source = self.parsers.load_source(name)?;
+            ScriptCommand::ParseFile {
+                parser_name: name.into(),
+                source,
+                path,
+            }
+        } else {
+            let source = self.library.load(name).map_err(|e| e.to_string())?;
+            ScriptCommand::RunScript {
+                name: name.into(),
+                source,
+            }
+        };
+        let (reply, receipt) = std::sync::mpsc::channel();
+        self.engine(store, sender, metrics)
+            .send(ScriptCommand::Tracked {
+                command: Box::new(command),
+                reply,
+            })?;
+        self.running = true;
+        self.status = format!("sequence: {name}");
+        Ok(receipt)
+    }
+
     fn dispatch_run(
         &mut self,
         name: String,

@@ -43,6 +43,7 @@ pub struct PickerState {
     pub selected: usize,
     focus_search: bool,
     scroll_to_selected: bool,
+    suppress_enter: bool,
     hover: HoverGate,
 }
 
@@ -53,6 +54,7 @@ impl PickerState {
         self.selected = 0;
         self.focus_search = true;
         self.scroll_to_selected = true;
+        self.suppress_enter = true;
         self.hover = HoverGate::JustOpened;
     }
 
@@ -65,6 +67,7 @@ impl PickerState {
         ctx: &egui::Context,
         items: &[PickerItem<T>],
     ) -> Option<T> {
+        let enter_armed = !std::mem::take(&mut self.suppress_enter);
         if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
             self.open = false;
             return None;
@@ -93,7 +96,8 @@ impl PickerState {
         }
         self.selected = self.selected.min(ranked.len() - 1);
         self.scroll_to_selected |= self.selected != selected_before_key;
-        if ctx.input(|input| input.key_pressed(egui::Key::Enter))
+        if enter_armed
+            && ctx.input(|input| input.key_pressed(egui::Key::Enter))
             && ranked[self.selected].is_enabled()
         {
             self.open = false;
@@ -366,10 +370,30 @@ mod tests {
         let mut state = PickerState::default();
         state.open();
 
+        press(&ctx, &mut state, &items, egui::Key::Tab, false);
         let picked = press(&ctx, &mut state, &items, egui::Key::Enter, false);
 
         assert!(picked.is_none());
         assert!(state.open, "a disabled item should not close the picker");
+    }
+
+    #[test]
+    fn a_freshly_opened_picker_ignores_the_keystroke_that_opened_it() {
+        let ctx = egui::Context::default();
+        let items = layouts();
+        let mut state = PickerState::default();
+        state.open();
+
+        assert_eq!(
+            press(&ctx, &mut state, &items, egui::Key::Enter, false),
+            None,
+            "the key that opened the picker must not also choose from it"
+        );
+        assert!(state.open, "the picker stays open for a real choice");
+        assert_eq!(
+            press(&ctx, &mut state, &items, egui::Key::Enter, false).as_deref(),
+            Some("alpha")
+        );
     }
 
     fn second_row_top(ctx: &egui::Context, separator: bool) -> f32 {

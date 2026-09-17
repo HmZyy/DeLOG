@@ -6,6 +6,7 @@ pub(crate) mod map;
 pub(crate) mod plotting;
 pub(crate) mod scene3d;
 pub(crate) mod scripting;
+pub(crate) mod sequences;
 pub(crate) mod session;
 pub(crate) mod shell;
 pub(crate) mod sync;

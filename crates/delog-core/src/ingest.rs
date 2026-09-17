@@ -70,6 +70,9 @@ pub struct ParseSummary {
 
 #[derive(Debug)]
 pub enum IngestMsg {
+    PublicationBarrier {
+        reply: SyncSender<Result<(), String>>,
+    },
     /// The single-writer ingest thread assigns the dense `SourceId`, returned on `reply`.
     OpenSource {
         key: String,
@@ -130,6 +133,14 @@ pub fn ingest_channel() -> (IngestSender, IngestReceiver) {
 }
 
 impl IngestSender {
+    pub fn publication_barrier(&self) -> Result<Receiver<Result<(), String>>, String> {
+        let (reply, receipt) = sync_channel(1);
+        self.tx
+            .send(IngestMsg::PublicationBarrier { reply })
+            .map_err(|e| e.to_string())?;
+        Ok(receipt)
+    }
+
     /// Blocking: a full channel parks the caller until the ingest thread drains.
     pub fn file_sink(&self) -> ChannelSink {
         ChannelSink {

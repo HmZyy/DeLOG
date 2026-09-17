@@ -200,9 +200,24 @@ impl CommandId {
             RunScript => spec!(
                 "Run script…",
                 Workspace,
-                Some("Ctrl+K"),
+                None,
                 "script execute run",
+                Palette
+            ),
+            RunPalette => spec!(
+                "Run…",
+                Workspace,
+                Some("Ctrl+R"),
+                "run script parser layout sequence saved",
                 Shortcut,
+                Palette
+            ),
+            ManageSequences => spec!(
+                "Manage sequences…",
+                Workspace,
+                None,
+                "sequence automation ordered run",
+                ClassicMenu,
                 Palette
             ),
             ManageLayouts => {

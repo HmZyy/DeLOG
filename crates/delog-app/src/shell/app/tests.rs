@@ -270,6 +270,7 @@ fn non_static_palette_entries_have_variant_specific_search_metadata() {
         enabled_presentation(AppCommand::OpenWithBuiltInParser("ulog".into()), "PX4"),
         enabled_presentation(AppCommand::OpenWithParser("shared".into()), "shared"),
         enabled_presentation(AppCommand::RunScript("shared".into()), "shared"),
+        enabled_presentation(AppCommand::RunSequence("shared".into()), "shared"),
         enabled_presentation(AppCommand::LoadNamedLayout("shared".into()), "shared"),
         enabled_presentation(AppCommand::DisconnectLink(0), "udp://127.0.0.1:14550"),
         enabled_presentation(AppCommand::ToggleShellEmphasis, "Emphasize live workflows"),
@@ -316,6 +317,7 @@ fn non_static_palette_entries_have_variant_specific_search_metadata() {
 
     for excluded in [
         AppCommand::RunScript("shared".into()),
+        AppCommand::RunSequence("shared".into()),
         AppCommand::LoadNamedLayout("shared".into()),
         AppCommand::OpenWithParser("shared".into()),
         AppCommand::OpenWithBuiltInParser("ulog".into()),
@@ -348,6 +350,7 @@ fn name_backed_dynamic_commands_stay_out_of_the_palette() {
         enabled_presentation(AppCommand::OpenWithBuiltInParser("shared".into()), "shared"),
         enabled_presentation(AppCommand::OpenWithParser("shared".into()), "shared"),
         enabled_presentation(AppCommand::RunScript("shared".into()), "shared"),
+        enabled_presentation(AppCommand::RunSequence("shared".into()), "shared"),
         enabled_presentation(AppCommand::LoadNamedLayout("shared".into()), "shared"),
         enabled_presentation(AppCommand::DisconnectLink(0), "shared"),
     ]);
@@ -775,16 +778,173 @@ fn keyboard_shortcuts_produce_registry_commands() {
     );
     assert!(SHORTCUT_KEYS.contains(&egui::Key::Equals));
     assert_eq!(
-        command_for_shortcut(egui::Key::K, true),
-        Some(CommandId::RunScript)
+        command_for_shortcut(egui::Key::K, false),
+        None,
+        "Ctrl+K was retired in favour of the Ctrl+R run palette"
     );
-    assert!(SHORTCUT_KEYS.contains(&egui::Key::K));
+    assert_eq!(command_for_shortcut(egui::Key::K, true), None);
+    assert!(!SHORTCUT_KEYS.contains(&egui::Key::K));
+    assert_eq!(CommandId::RunScript.spec().shortcut, None);
     assert_eq!(
         command_for_shortcut(egui::Key::T, true),
         Some(CommandId::ToggleScene3d)
     );
     assert_eq!(command_for_shortcut(egui::Key::T, false), None);
     assert!(SHORTCUT_KEYS.contains(&egui::Key::T));
+    assert_eq!(
+        command_for_shortcut(egui::Key::R, true),
+        Some(CommandId::RunPalette)
+    );
+    assert_eq!(command_for_shortcut(egui::Key::R, false), None);
+    assert!(SHORTCUT_KEYS.contains(&egui::Key::R));
+    assert_eq!(CommandId::RunPalette.spec().shortcut, Some("Ctrl+R"));
+}
+
+fn press(key: egui::Key) -> Vec<egui::Event> {
+    vec![
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        },
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: false,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        },
+    ]
+}
+
+#[test]
+fn the_run_palette_offers_every_runnable_kind_before_any_item() {
+    let labels: Vec<_> = RunPaletteDialog::kind_items()
+        .into_iter()
+        .map(|item| item.label)
+        .collect();
+    assert_eq!(labels, ["Script", "Parser", "Dataflow", "Sequence"]);
+
+    let mut dialog = RunPaletteDialog::default();
+    dialog.open();
+    assert!(dialog.kinds.open, "the kind picker opens first");
+    assert!(!dialog.items.open, "no item picker before a kind is chosen");
+    assert_eq!(dialog.kind, None);
+
+    let ctx = egui::Context::default();
+    let items = RunPaletteDialog::kind_items();
+    let mut pick = |events| {
+        let mut picked = None;
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                events,
+                ..Default::default()
+            },
+            |ui| picked = dialog.kinds.handle_key(ui.ctx(), &items),
+        );
+        picked
+    };
+    assert_eq!(pick(press(egui::Key::ArrowDown)), None);
+    assert_eq!(pick(press(egui::Key::Enter)), Some(RunKind::Parser));
+}
+
+#[test]
+fn choosing_a_kind_opens_a_second_palette_holding_only_that_kinds_items() {
+    let mut dialog = RunPaletteDialog::default();
+    dialog.open();
+    dialog.choose(
+        RunKind::Sequence,
+        vec!["startup".to_owned(), "teardown".to_owned()],
+    );
+    assert_eq!(dialog.kind, Some(RunKind::Sequence));
+    assert!(dialog.items.open);
+    let labels: Vec<_> = dialog
+        .name_items()
+        .into_iter()
+        .map(|item| item.label)
+        .collect();
+    assert_eq!(labels, ["startup", "teardown"]);
+    assert_eq!(
+        dialog.kind.map(RunKind::search_hint),
+        Some("Search sequences…")
+    );
+    assert_eq!(
+        dialog.kind.map(RunKind::empty_hint),
+        Some("No saved sequences.")
+    );
+
+    let ctx = egui::Context::default();
+    let items = dialog.name_items();
+    let mut picked = None;
+    let mut frame = |dialog: &mut RunPaletteDialog, events| {
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                events,
+                ..Default::default()
+            },
+            |ui| picked = dialog.items.handle_key(ui.ctx(), &items),
+        );
+    };
+    frame(&mut dialog, Vec::new());
+    frame(&mut dialog, press(egui::Key::Enter));
+    assert_eq!(picked.as_deref(), Some("startup"));
+}
+
+#[test]
+fn the_keystroke_that_picks_a_kind_never_also_picks_its_first_item() {
+    let ctx = egui::Context::default();
+    let mut dialog = RunPaletteDialog::default();
+    dialog.open();
+    let kinds = RunPaletteDialog::kind_items();
+
+    let frame = |dialog: &mut RunPaletteDialog, events: Vec<egui::Event>| {
+        let mut ran = None;
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                if dialog.kinds.open
+                    && let Some(kind) = dialog.kinds.handle_key(ui.ctx(), &kinds)
+                {
+                    dialog.choose(kind, vec!["first".to_owned(), "second".to_owned()]);
+                }
+                if dialog.items.open {
+                    let names = dialog.name_items();
+                    ran = dialog.items.handle_key(ui.ctx(), &names);
+                }
+            },
+        );
+        ran
+    };
+
+    assert_eq!(frame(&mut dialog, Vec::new()), None);
+    assert_eq!(
+        frame(&mut dialog, press(egui::Key::Enter)),
+        None,
+        "the Enter that chose the kind must not fall through to the item list"
+    );
+    assert_eq!(dialog.kind, Some(RunKind::Script));
+    assert!(dialog.items.open, "the item palette should be waiting");
+    assert_eq!(
+        frame(&mut dialog, press(egui::Key::Enter)),
+        Some("first".to_owned())
+    );
+}
+
+#[test]
+fn reopening_the_run_palette_returns_to_the_kind_picker() {
+    let mut dialog = RunPaletteDialog::default();
+    dialog.open();
+    dialog.choose(RunKind::Dataflow, vec!["fusion".to_owned()]);
+    dialog.open();
+    assert!(dialog.kinds.open);
+    assert!(!dialog.items.open, "the item picker must not stay open");
+    assert_eq!(dialog.kind, None);
+    assert!(dialog.names.is_empty());
 }
 
 #[test]
@@ -804,7 +964,7 @@ fn the_command_palette_opens_on_ctrl_shift_p_not_ctrl_k() {
     assert!(shortcut.contains("egui::Key::P"));
     assert!(
         !shortcut.contains("egui::Key::K"),
-        "Ctrl+K now runs a script; the palette moved to Ctrl+Shift+P"
+        "the palette lives on Ctrl+Shift+P, not Ctrl+K"
     );
 }
 
@@ -849,7 +1009,7 @@ fn modifier_and_function_shortcuts_fire_while_a_widget_owns_the_keyboard() {
     for (key, command_modifier) in [
         (egui::Key::S, true),
         (egui::Key::L, true),
-        (egui::Key::K, true),
+        (egui::Key::R, true),
         (egui::Key::E, true),
         (egui::Key::T, true),
         (egui::Key::O, true),

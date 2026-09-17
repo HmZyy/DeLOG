@@ -126,6 +126,11 @@ impl<O: IngestObserver> Ingestor<O> {
     /// Public for step-driven testing.
     pub fn process(&mut self, msg: IngestMsg) {
         match msg {
+            IngestMsg::PublicationBarrier { reply } => {
+                self.flush_all();
+                let _ = reply.send(self.try_publish());
+            }
+
             IngestMsg::OpenSource { key, kind, reply } => {
                 let id = self.open_source(&key, kind);
                 let _ = reply.send(id);
@@ -470,20 +475,21 @@ impl<O: IngestObserver> Ingestor<O> {
     }
 
     fn publish(&self) {
+        if let Err(err) = self.try_publish() {
+            debug_assert!(false, "snapshot rebuild failed: {err}");
+        }
+    }
+
+    fn try_publish(&self) -> Result<(), String> {
         let _swap_timer = self.metrics.scope("snapshot_swap");
         let topic_stores = self
             .stores
             .iter()
             .map(|(&id, store)| (id, Arc::clone(store)));
-        match StoreSnapshot::from_registry(&self.identity, topic_stores, 0) {
-            Ok(snapshot) => {
-                let _ = self.store.publish(snapshot);
-            }
-            Err(err) => {
-                // A build failure is a writer-side bug, not bad input.
-                debug_assert!(false, "snapshot rebuild failed: {err}");
-            }
-        }
+        let snapshot = StoreSnapshot::from_registry(&self.identity, topic_stores, 0)
+            .map_err(|e| e.to_string())?;
+        self.store.publish(snapshot).map_err(|e| e.to_string())?;
+        Ok(())
     }
 }
 
@@ -616,6 +622,24 @@ mod tests {
 
     fn open(ing: &mut Ingestor<NullObserver>, key: &str, kind: SourceKind) -> SourceId {
         open_with(ing, key, kind)
+    }
+
+    #[test]
+    fn publication_barrier_flushes_before_acknowledging() {
+        let mut ing = Ingestor::new(NullObserver);
+        let source = open(&mut ing, "sequence-input", SourceKind::File);
+        ing.process(IngestMsg::Batch(batch(source, "GPS", &[1, 2])));
+        assert_eq!(ing.chunks_sealed(), 0);
+        let (sender, receiver) = crate::ingest::ingest_channel();
+        let receipt = sender.publication_barrier().unwrap();
+        assert!(matches!(
+            receipt.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        ing.process(receiver.try_recv().unwrap());
+        assert_eq!(receipt.try_recv().unwrap(), Ok(()));
+        assert_eq!(ing.chunks_sealed(), 1);
+        assert_eq!(ing.rows_ingested(), 2);
     }
 
     #[test]
