@@ -433,13 +433,16 @@ mod tests {
         let library = ParserLibrary::new(&temp.0);
 
         assert_eq!(library.dir(), temp.0.as_path());
-        assert_eq!(library.save(None, "dt46", "first").unwrap(), "dt46.py");
-        assert_eq!(library.list().unwrap(), vec!["dt46.py"]);
-        assert_eq!(library.load("dt46").unwrap(), "first");
+        assert_eq!(
+            library.save(None, "telemetry", "first").unwrap(),
+            "telemetry.py"
+        );
+        assert_eq!(library.list().unwrap(), vec!["telemetry.py"]);
+        assert_eq!(library.load("telemetry").unwrap(), "first");
 
         assert_eq!(
             library
-                .save(Some("dt46.py"), "flight.py", "second")
+                .save(Some("telemetry.py"), "flight.py", "second")
                 .unwrap(),
             "flight.py"
         );
@@ -847,8 +850,11 @@ mod tests {
         let temp = TestDir::new();
         let library = ParserLibrary::new(&temp.0);
 
-        assert_eq!(library.normalize_name("dt46").unwrap(), "dt46.py");
-        assert_eq!(library.normalize_name("dt46.py").unwrap(), "dt46.py");
+        assert_eq!(library.normalize_name("telemetry").unwrap(), "telemetry.py");
+        assert_eq!(
+            library.normalize_name("telemetry.py").unwrap(),
+            "telemetry.py"
+        );
     }
 
     #[test]
