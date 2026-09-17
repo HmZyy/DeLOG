@@ -118,16 +118,22 @@ pub fn build_outputs(
                 valid = false;
                 continue;
             };
-            if timeline.is_some_and(|timeline| timeline != signal.meta.timeline) {
-                errors.push(Diagnostic {
-                    node: node_id,
-                    message: "All fields of one output topic must share the same timeline. Align the inputs first."
-                        .to_owned(),
-                });
-                valid = false;
-            } else if timeline.is_none() {
-                timeline = Some(signal.meta.timeline);
-                times = Some((*signal.t).clone());
+            match (timeline, times.as_deref()) {
+                (Some(first), Some(first_times))
+                    if first != signal.meta.timeline && first_times != signal.t.as_slice() =>
+                {
+                    errors.push(Diagnostic {
+                        node: node_id,
+                        message: "All fields of one output topic must share the same timeline. Align the inputs first."
+                            .to_owned(),
+                    });
+                    valid = false;
+                }
+                (None, _) => {
+                    timeline = Some(signal.meta.timeline);
+                    times = Some((*signal.t).clone());
+                }
+                _ => {}
             }
             pending_fields.push(PendingField::numeric(
                 field.name.clone(),
@@ -307,6 +313,40 @@ mod tests {
         ));
         let batches = prepare_topics(&topics).unwrap().into_batches(SourceId(42));
         assert_eq!(batches[0].schema.field(0).unwrap().multiplier, 1.0);
+    }
+
+    #[test]
+    fn output_fields_that_already_share_timestamps_publish_without_an_align() {
+        let snapshot = snapshot_gps_baro();
+        let mut graph = Graph::new("g");
+        let gps = add_node(&mut graph, data("GPS"));
+        let imu = add_node(
+            &mut graph,
+            NodeKind::DataField(FieldSelector {
+                source: Some("flight".into()),
+                topic: "IMU".into(),
+                instance: Some(0),
+                field: "AccY".into(),
+            }),
+        );
+        let out = add_node(
+            &mut graph,
+            output("paired", &[("alt", None), ("acc", None)]),
+        );
+        graph.connect(gps, 0, out, 0).unwrap();
+        graph.connect(imu, 0, out, 1).unwrap();
+        let report = eval_no_host(
+            &graph,
+            &snapshot,
+            &[out],
+            &AtomicBool::new(false),
+            &mut EvalCache::default(),
+        );
+
+        let topics = build_outputs(&graph, &report)
+            .unwrap_or_else(|errors| panic!("equal timestamps need no align, got {errors:?}"));
+
+        assert_eq!(topics.len(), 1);
     }
 
     #[test]
