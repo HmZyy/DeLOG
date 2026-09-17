@@ -199,9 +199,13 @@ fn clear_current_layout_resets_layout_and_vehicle_state() {
     vehicle_dialog.open = true;
     let mut vehicle_revision = 7;
     let mut traj_dirty = false;
+    let mut windows = vec![crate::shell::windows::ExtendedWindow::new(
+        crate::shell::windows::WindowId(1),
+    )];
 
     DelogApp::clear_current_layout_state(
         &mut workspace,
+        &mut windows,
         &mut playback,
         &mut view,
         &mut view_fitted,
@@ -215,6 +219,10 @@ fn clear_current_layout_resets_layout_and_vehicle_state() {
     );
 
     assert!(workspace.focused_first_field().is_none());
+    assert!(
+        windows.is_empty(),
+        "clearing the layout closes every extended window"
+    );
     assert_eq!(playback.speed, 1.0);
     assert!(!playback.follow_live);
     assert_eq!(view, None);

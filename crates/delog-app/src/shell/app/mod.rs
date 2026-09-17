@@ -1244,6 +1244,7 @@ impl DelogApp {
         self.sequences.interrupt_layout();
         Self::clear_current_layout_state(
             &mut self.workspace,
+            &mut self.windows,
             &mut self.playback,
             &mut self.view,
             &mut self.view_fitted,
@@ -1264,6 +1265,7 @@ impl DelogApp {
     #[allow(clippy::too_many_arguments)]
     fn clear_current_layout_state(
         workspace: &mut Workspace,
+        windows: &mut Vec<crate::shell::windows::ExtendedWindow>,
         playback: &mut Playback,
         view: &mut Option<ViewX>,
         view_fitted: &mut bool,
@@ -1276,6 +1278,7 @@ impl DelogApp {
         traj_dirty: &mut bool,
     ) {
         *workspace = Workspace::new();
+        windows.clear();
         playback.speed = 1.0;
         playback.follow_live = false;
         *view = None;
