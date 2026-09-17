@@ -114,6 +114,8 @@ fn data_browser_panel_stays_at_its_opening_width_across_idle_frames() {
                 .show_inside(ui, |ui| {
                     browser::ui(
                         ui,
+                        crate::shell::windows::WindowId::MAIN.id_salt(),
+                        crate::shell::windows::WindowId::MAIN.0,
                         0,
                         &model,
                         &mut query,
