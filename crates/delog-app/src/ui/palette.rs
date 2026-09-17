@@ -97,7 +97,10 @@ impl PickerState {
             self.selected = self.selected.saturating_sub(1);
         }
         self.selected = self.selected.min(ranked.len() - 1);
-        self.scroll_to_selected |= self.selected != selected_before_key;
+        if self.selected != selected_before_key {
+            self.scroll_to_selected = true;
+            self.hover = HoverGate::Waiting(ctx.pointer_latest_pos());
+        }
         if enter_armed
             && ctx.input(|input| input.key_pressed(egui::Key::Enter))
             && ranked[self.selected].is_enabled()
@@ -503,6 +506,97 @@ mod tests {
         assert!(
             texts.iter().any(|text| text == "alpha"),
             "the checked row keeps its plain label, got {texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_key_press_overrides_the_hovered_row_until_the_pointer_moves_again() {
+        let ctx = egui::Context::default();
+        let items = layouts();
+        let mut state = PickerState::default();
+        state.open();
+        let render = |state: &mut PickerState, events: Vec<egui::Event>, time: f64| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1_000.0, 700.0),
+                    )),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    state.show(ui.ctx(), "override-test", "hint", "empty", &items);
+                },
+            )
+        };
+        fn walk(shape: &egui::epaint::Shape, out: &mut Vec<(String, egui::Rect)>) {
+            match shape {
+                egui::epaint::Shape::Text(text) => {
+                    out.push((text.galley.job.text.clone(), text.visual_bounding_rect()));
+                }
+                egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let row_center = |output: &egui::FullOutput, label: &str| {
+            let mut texts = Vec::new();
+            for clipped in &output.shapes {
+                walk(&clipped.shape, &mut texts);
+            }
+            texts
+                .into_iter()
+                .find(|(text, _)| text == label)
+                .unwrap_or_else(|| panic!("{label} should be painted"))
+                .1
+                .center()
+        };
+        let down = || {
+            vec![egui::Event::Key {
+                key: egui::Key::ArrowDown,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }]
+        };
+
+        let _ = render(
+            &mut state,
+            vec![egui::Event::PointerMoved(egui::pos2(1.0, 1.0))],
+            0.0,
+        );
+        let _ = render(&mut state, Vec::new(), 0.1);
+        let output = render(&mut state, Vec::new(), 0.2);
+        let beta = row_center(&output, "beta");
+
+        let _ = render(&mut state, vec![egui::Event::PointerMoved(beta)], 0.3);
+        assert_eq!(state.selected, 1, "hovering a row should select it");
+
+        let _ = render(&mut state, down(), 0.4);
+        assert_eq!(
+            state.selected, 2,
+            "a key press must move the selection off the hovered row"
+        );
+
+        let _ = render(&mut state, Vec::new(), 0.5);
+        assert_eq!(
+            state.selected, 2,
+            "the selection must not snap back while the pointer sits still"
+        );
+
+        let _ = render(&mut state, vec![egui::Event::PointerMoved(beta)], 0.6);
+        assert_eq!(
+            state.selected, 2,
+            "a pointer event without real movement must not steal the selection"
+        );
+
+        let alpha = row_center(&render(&mut state, Vec::new(), 0.7), "alpha");
+        let _ = render(&mut state, vec![egui::Event::PointerMoved(alpha)], 0.8);
+        assert_eq!(
+            state.selected, 0,
+            "moving the pointer again hands hover back its say"
         );
     }
 
