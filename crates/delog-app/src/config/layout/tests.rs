@@ -360,6 +360,7 @@ fn empty_doc(name: &str) -> LayoutDoc {
                 show_tooltip: true,
             },
         },
+        windows: Vec::new(),
         vehicles: Vec::new(),
     }
 }
@@ -416,4 +417,90 @@ fn scene_layouts_re_encode_the_trail_mode_by_name() {
         json.contains(r#""trail_mode":"visible_window""#),
         "expected a named trail mode, got {json}"
     );
+}
+
+#[test]
+fn a_v1_document_migrates_to_v2_with_no_extended_windows() {
+    let v1 = r#"{
+        "delog_layout": 1,
+        "name": "test",
+        "playback": { "speed": 1.0, "follow_live": false },
+        "workspace": { "root": { "plot": { "traces": [] } } },
+        "vehicles": []
+    }"#;
+
+    let doc = decode_doc(v1).expect("a v1 document should migrate");
+
+    assert_eq!(doc.delog_layout, 2);
+    assert!(doc.windows.is_empty());
+}
+
+#[test]
+fn a_v2_window_saved_without_an_id_still_decodes() {
+    let json = r#"{
+        "delog_layout": 2,
+        "name": "old-v2",
+        "playback": { "speed": 1.0, "follow_live": false },
+        "workspace": { "root": { "plot": { "traces": [] } } },
+        "windows": [
+            {
+                "title": "DeLOG \u00b7 Window 1",
+                "size": [800.0, 600.0],
+                "root": { "plot": { "traces": [] } }
+            }
+        ],
+        "vehicles": []
+    }"#;
+
+    let doc = decode_doc(json).expect("a v2 document without window ids should decode");
+
+    assert_eq!(doc.windows.len(), 1);
+    assert_eq!(doc.windows[0].id, None);
+}
+
+#[test]
+fn extended_windows_round_trip_through_the_document() {
+    let doc = LayoutDoc {
+        delog_layout: LAYOUT_VERSION,
+        name: "test".to_owned(),
+        playback: PlaybackLayout {
+            speed: 1.0,
+            follow_live: false,
+        },
+        workspace: WorkspaceLayout {
+            root: LayoutNode::Plot {
+                traces: Vec::new(),
+                show_legend: true,
+                show_tooltip: true,
+            },
+        },
+        windows: vec![WindowLayout {
+            id: None,
+            title: "DeLOG · Window 1".to_owned(),
+            size: [1600.0, 900.0],
+            root: LayoutNode::Plot {
+                traces: Vec::new(),
+                show_legend: true,
+                show_tooltip: true,
+            },
+        }],
+        vehicles: Vec::new(),
+    };
+
+    let json = doc_json(&doc).expect("a document should encode");
+    let decoded = decode_doc(&json).expect("a v2 document should decode");
+
+    assert_eq!(decoded.windows.len(), 1);
+    assert_eq!(decoded.windows[0].title, "DeLOG · Window 1");
+    assert_eq!(decoded.windows[0].size, [1600.0, 900.0]);
+}
+
+#[test]
+fn an_unknown_version_is_still_rejected() {
+    let v99 = r#"{ "delog_layout": 99, "name": "x" }"#;
+
+    assert!(matches!(
+        decode_doc(v99),
+        Err(LayoutError::UnsupportedVersion(99))
+    ));
 }

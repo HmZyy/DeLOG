@@ -364,6 +364,18 @@ impl Selection {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FieldDrag {
+    pub origin: u64,
+    pub fields: Vec<FieldId>,
+}
+
+impl FieldDrag {
+    pub fn accepted_by(&self, window: u64) -> Option<&[FieldId]> {
+        (self.origin == window).then_some(self.fields.as_slice())
+    }
+}
+
 /// Digit runs compare numerically, text runs case-insensitively
 /// (`GPS[2]` before `GPS[10]`).
 fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
@@ -532,12 +544,14 @@ pub fn data_browser_toggle_button(
     .inner
 }
 
-pub fn filter_id() -> egui::Id {
-    egui::Id::new("data_browser_filter")
+pub fn filter_id(salt: egui::Id) -> egui::Id {
+    salt.with("data_browser_filter")
 }
 
 pub fn ui(
     ui: &mut egui::Ui,
+    salt: egui::Id,
+    origin: u64,
     model_epoch: u64,
     model: &BrowserModel,
     query: &mut String,
@@ -556,7 +570,7 @@ pub fn ui(
         ui.add_sized(
             egui::vec2(filter_width, filter_height),
             egui::TextEdit::singleline(query)
-                .id(filter_id())
+                .id(filter_id(salt))
                 .hint_text("Filter...")
                 .desired_width(filter_width),
         );
@@ -612,9 +626,9 @@ pub fn ui(
     let mut inspect_field_stats = None;
     let mut generate_markers = None;
     let tree_id = if filtering {
-        egui::Id::new("browser_tree_filtered")
+        salt.with("browser_tree_filtered")
     } else {
-        egui::Id::new("browser_tree")
+        salt.with("browser_tree")
     };
     egui::ScrollArea::vertical()
         .auto_shrink([false, true])
@@ -760,7 +774,9 @@ pub fn ui(
                                         field.id.0,
                                     ))
                                     .label_ui(|ui| {
-                                        match field_table_row(ui, field, selection, &visible) {
+                                        match field_table_row(
+                                            ui, salt, origin, field, selection, &visible,
+                                        ) {
                                             Some(FieldRowAction::InspectMetadata(f)) => {
                                                 inspect_field_metadata = Some(f);
                                             }
@@ -800,7 +816,7 @@ pub fn ui(
             });
         });
 
-    if let Some(change) = offset_dialog_window(ui, model, offset_dialog) {
+    if let Some(change) = offset_dialog_window(ui, salt, model, offset_dialog) {
         offset_change = Some(change);
     }
     response.offset_change = offset_change;
@@ -844,6 +860,7 @@ fn offset_widget(
 
 fn offset_dialog_window(
     ui: &egui::Ui,
+    salt: egui::Id,
     model: &BrowserModel,
     offset_dialog: &mut Option<(SourceId, i64)>,
 ) -> Option<(SourceId, i64)> {
@@ -857,7 +874,7 @@ fn offset_dialog_window(
     let mut change = None;
     let mut open = true;
     egui::Window::new(format!("Time offset - {label}"))
-        .id(egui::Id::new(("source_offset", source_id.0)))
+        .id(salt.with(("source_offset", source_id.0)))
         .open(&mut open)
         .collapsible(false)
         .default_pos(ui.ctx().content_rect().center())
@@ -905,53 +922,63 @@ fn field_table_header(ui: &mut egui::Ui) {
 
 fn field_table_row(
     ui: &mut egui::Ui,
+    salt: egui::Id,
+    origin: u64,
     field: &FieldNode,
     selection: &mut Selection,
     visible: &[FieldId],
 ) -> Option<FieldRowAction> {
-    field_row(ui, field, selection, visible, |ui, field, selected| {
-        let width = (ui.available_width() - ui.spacing().item_spacing.x * 4.0).max(0.0);
-        let name_color = if selected {
-            ui.visuals().selection.stroke.color
-        } else {
-            ui.visuals().text_color()
-        };
-        let first = display_endpoint(field.first_raw.as_deref());
-        let last = display_endpoint(field.last_raw.as_deref());
-        let unit = field.unit.as_deref().unwrap_or("-");
-        ui.horizontal(|ui| {
-            field_table_cell(
-                ui,
-                width * FIELD_COL,
-                egui::RichText::new(&field.name).color(name_color),
-                cell_hover_text(&field.name),
-            );
-            field_table_cell(
-                ui,
-                width * FIRST_COL,
-                egui::RichText::new(first).weak(),
-                cell_hover_text(first),
-            );
-            field_table_cell(
-                ui,
-                width * LAST_COL,
-                egui::RichText::new(last).weak(),
-                cell_hover_text(last),
-            );
-            field_table_cell(
-                ui,
-                width * UNIT_COL,
-                egui::RichText::new(unit).weak(),
-                cell_hover_text(unit),
-            );
-            field_table_cell(
-                ui,
-                width * TYPE_COL,
-                egui::RichText::new(field.dtype).weak(),
-                cell_hover_text(field.dtype),
-            );
-        });
-    })
+    field_row(
+        ui,
+        salt,
+        origin,
+        field,
+        selection,
+        visible,
+        |ui, field, selected| {
+            let width = (ui.available_width() - ui.spacing().item_spacing.x * 4.0).max(0.0);
+            let name_color = if selected {
+                ui.visuals().selection.stroke.color
+            } else {
+                ui.visuals().text_color()
+            };
+            let first = display_endpoint(field.first_raw.as_deref());
+            let last = display_endpoint(field.last_raw.as_deref());
+            let unit = field.unit.as_deref().unwrap_or("-");
+            ui.horizontal(|ui| {
+                field_table_cell(
+                    ui,
+                    width * FIELD_COL,
+                    egui::RichText::new(&field.name).color(name_color),
+                    cell_hover_text(&field.name),
+                );
+                field_table_cell(
+                    ui,
+                    width * FIRST_COL,
+                    egui::RichText::new(first).weak(),
+                    cell_hover_text(first),
+                );
+                field_table_cell(
+                    ui,
+                    width * LAST_COL,
+                    egui::RichText::new(last).weak(),
+                    cell_hover_text(last),
+                );
+                field_table_cell(
+                    ui,
+                    width * UNIT_COL,
+                    egui::RichText::new(unit).weak(),
+                    cell_hover_text(unit),
+                );
+                field_table_cell(
+                    ui,
+                    width * TYPE_COL,
+                    egui::RichText::new(field.dtype).weak(),
+                    cell_hover_text(field.dtype),
+                );
+            });
+        },
+    )
 }
 
 fn field_table_cell(
@@ -981,23 +1008,26 @@ fn cell_hover_text(value: &str) -> Option<&str> {
 
 fn field_row(
     ui: &mut egui::Ui,
+    salt: egui::Id,
+    origin: u64,
     field: &FieldNode,
     selection: &mut Selection,
     visible: &[FieldId],
     add_contents: impl FnOnce(&mut egui::Ui, &FieldNode, bool),
 ) -> Option<FieldRowAction> {
     let mut action = None;
-    let id = egui::Id::new(("field", field.id.0));
+    let id = salt.with(("field", field.id.0));
     let dragging_this_field = ui.ctx().is_being_dragged(id);
     if dragging_this_field {
         selection.start_drag(field.id, current_select_modifier(ui), visible);
     }
-    let payload = selection.drag_payload(field.id, visible);
-    let drag_label = if payload.len() > 1 {
-        format!("{} fields", payload.len())
+    let fields = selection.drag_payload(field.id, visible);
+    let drag_label = if fields.len() > 1 {
+        format!("{} fields", fields.len())
     } else {
         field.name.clone()
     };
+    let payload = FieldDrag { origin, fields };
     let selected = selection.contains(field.id);
 
     let response = drag_source_with_click(ui, id, payload, &drag_label, |ui| {
@@ -1209,6 +1239,8 @@ mod tests {
                     .show_inside(ui, |ui| {
                         super::ui(
                             ui,
+                            egui::Id::new("test"),
+                            0,
                             0,
                             model,
                             &mut query,
@@ -1247,14 +1279,17 @@ mod tests {
                 },
                 |ui| {
                     if request_focus {
-                        ui.ctx()
-                            .memory_mut(|memory| memory.request_focus(super::filter_id()));
+                        ui.ctx().memory_mut(|memory| {
+                            memory.request_focus(super::filter_id(egui::Id::new("test")))
+                        });
                     }
                     egui::Panel::left("filter-focus-test")
                         .default_size(320.0)
                         .show_inside(ui, |ui| {
                             super::ui(
                                 ui,
+                                egui::Id::new("test"),
+                                0,
                                 0,
                                 &model,
                                 &mut query,
@@ -1268,10 +1303,10 @@ mod tests {
         };
 
         frame(vec![], false);
-        assert!(!ctx.memory(|memory| memory.has_focus(super::filter_id())));
+        assert!(!ctx.memory(|memory| memory.has_focus(super::filter_id(egui::Id::new("test")))));
 
         frame(vec![], true);
-        assert!(ctx.memory(|memory| memory.has_focus(super::filter_id())));
+        assert!(ctx.memory(|memory| memory.has_focus(super::filter_id(egui::Id::new("test")))));
 
         frame(vec![egui::Event::Text("gy".to_owned())], false);
         assert_eq!(query, "gy");
@@ -1315,6 +1350,8 @@ mod tests {
                     .show_inside(ui, |ui| {
                         super::ui(
                             ui,
+                            egui::Id::new("test"),
+                            0,
                             0,
                             &model,
                             &mut query,
@@ -1325,12 +1362,12 @@ mod tests {
                     });
                 egui::Frame::central_panel(ui.style()).show(ui, |ui| {
                     let (inner, payload) =
-                        ui.dnd_drop_zone::<Vec<FieldId>, ()>(egui::Frame::default(), |ui| {
+                        ui.dnd_drop_zone::<FieldDrag, ()>(egui::Frame::default(), |ui| {
                             ui.allocate_space(ui.available_size());
                         });
                     *zone_rect = inner.response.rect;
                     if let Some(payload) = payload {
-                        *dropped = Some((*payload).clone());
+                        *dropped = Some(payload.fields.clone());
                     }
                 });
             });
@@ -1438,6 +1475,8 @@ mod tests {
                     .show_inside(ui, |ui| {
                         super::ui(
                             ui,
+                            egui::Id::new("test"),
+                            0,
                             0,
                             &model,
                             &mut query,
@@ -1561,6 +1600,8 @@ mod tests {
                     .show_inside(ui, |ui| {
                         super::ui(
                             ui,
+                            egui::Id::new("test"),
+                            0,
                             0,
                             &model,
                             &mut query,
@@ -1643,7 +1684,17 @@ mod tests {
                     .resizable(false)
                     .exact_size(panel_width)
                     .show_inside(ui, |ui| {
-                        super::ui(ui, 0, &model, query, filter_cache, selection, offset_dialog);
+                        super::ui(
+                            ui,
+                            egui::Id::new("test"),
+                            0,
+                            0,
+                            &model,
+                            query,
+                            filter_cache,
+                            selection,
+                            offset_dialog,
+                        );
                         used = ui.min_rect().width();
                     });
             });
@@ -1707,7 +1758,17 @@ mod tests {
                     .resizable(false)
                     .exact_size(panel_width)
                     .show_inside(ui, |ui| {
-                        super::ui(ui, 0, &model, query, filter_cache, selection, offset_dialog);
+                        super::ui(
+                            ui,
+                            egui::Id::new("test"),
+                            0,
+                            0,
+                            &model,
+                            query,
+                            filter_cache,
+                            selection,
+                            offset_dialog,
+                        );
                     });
             })
         };
@@ -1774,7 +1835,17 @@ mod tests {
                 egui::Panel::left("browser-scroll")
                     .exact_size(420.0)
                     .show_inside(ui, |ui| {
-                        super::ui(ui, 0, &model, query, filter_cache, selection, offset_dialog);
+                        super::ui(
+                            ui,
+                            egui::Id::new("test"),
+                            0,
+                            0,
+                            &model,
+                            query,
+                            filter_cache,
+                            selection,
+                            offset_dialog,
+                        );
                     });
             });
             let mut texts = Vec::new();
@@ -1865,7 +1936,17 @@ mod tests {
                 egui::Panel::left("browser-scroll-click")
                     .exact_size(420.0)
                     .show_inside(ui, |ui| {
-                        super::ui(ui, 0, &model, query, filter_cache, selection, offset_dialog);
+                        super::ui(
+                            ui,
+                            egui::Id::new("test"),
+                            0,
+                            0,
+                            &model,
+                            query,
+                            filter_cache,
+                            selection,
+                            offset_dialog,
+                        );
                     });
             });
             let mut texts = Vec::new();
@@ -2021,6 +2102,8 @@ mod tests {
                 .show_inside(ui, |ui| {
                     super::ui(
                         ui,
+                        egui::Id::new("test"),
+                        0,
                         0,
                         &BrowserModel::default(),
                         &mut query,
@@ -2121,6 +2204,8 @@ mod tests {
         let output = ctx.run_ui(egui::RawInput::default(), |ui| {
             super::ui(
                 ui,
+                egui::Id::new("test"),
+                0,
                 0,
                 &BrowserModel::default(),
                 &mut query,
@@ -2192,6 +2277,8 @@ mod tests {
             |ui| {
                 super::ui(
                     ui,
+                    egui::Id::new("test"),
+                    0,
                     0,
                     &model,
                     &mut query,
@@ -2600,5 +2687,17 @@ mod tests {
 
         let blank_again = cache.view(2, &changed, "");
         assert_eq!(blank_again.sources[0].topics[0].fields.len(), 1);
+    }
+
+    #[test]
+    fn a_drag_is_only_accepted_by_the_window_it_started_in() {
+        let drag = FieldDrag {
+            origin: 2,
+            fields: vec![FieldId(1), FieldId(2)],
+        };
+
+        assert_eq!(drag.accepted_by(2), Some(&[FieldId(1), FieldId(2)][..]));
+        assert_eq!(drag.accepted_by(0), None);
+        assert_eq!(drag.accepted_by(3), None);
     }
 }
