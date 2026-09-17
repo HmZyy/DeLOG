@@ -264,6 +264,13 @@ impl DataFlowUi {
         self.add_editor(Graph::new(&name), None);
     }
 
+    pub fn open_named(&mut self, name: &str) -> Vec<(LogLevel, String)> {
+        let mut logs = Vec::new();
+        self.open = true;
+        self.edit_named(name, &mut logs);
+        logs
+    }
+
     fn edit_named(&mut self, name: &str, logs: &mut Vec<(LogLevel, String)>) {
         if let Some((&id, _)) = self
             .editors

@@ -31,6 +31,7 @@ pub enum CommandId {
     SaveLayout,
     LoadLayout,
     RunScript,
+    RunPalette,
     ManageLayouts,
     ManageSequences,
     ClearLayout,
@@ -300,6 +301,7 @@ impl CommandId {
         Self::SaveLayout,
         Self::LoadLayout,
         Self::RunScript,
+        Self::RunPalette,
         Self::ManageLayouts,
         Self::ManageSequences,
         Self::ClearLayout,
@@ -350,9 +352,9 @@ impl CommandId {
             SyncSources | OpenDataFlow | TogglePlayheadSnap | ToggleReadoutLock
             | AddMeasuringMarker | TogglePlayback | JumpStart | JumpEnd | StepLeft | StepRight
             | AddMarker => ClassicMenuOwner::Analyze,
-            OpenScriptEditor | OpenScriptVariables | OpenParserEditor | RunScript | SaveLayout
-            | LoadLayout | ManageLayouts | ManageSequences | ClearLayout | ImportLayout
-            | ExportLayout | OpenSettings => ClassicMenuOwner::Tools,
+            OpenScriptEditor | OpenScriptVariables | OpenParserEditor | RunScript | RunPalette
+            | SaveLayout | LoadLayout | ManageLayouts | ManageSequences | ClearLayout
+            | ImportLayout | ExportLayout | OpenSettings => ClassicMenuOwner::Tools,
         }
     }
 

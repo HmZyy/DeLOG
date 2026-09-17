@@ -205,6 +205,14 @@ impl CommandId {
                 Shortcut,
                 Palette
             ),
+            RunPalette => spec!(
+                "Run…",
+                Workspace,
+                Some("Ctrl+R"),
+                "run script parser layout sequence saved",
+                Shortcut,
+                Palette
+            ),
             ManageSequences => spec!(
                 "Manage sequences…",
                 Workspace,
