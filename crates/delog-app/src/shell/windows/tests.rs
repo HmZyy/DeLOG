@@ -334,3 +334,40 @@ fn a_restored_window_opens_with_its_data_browser_collapsed() {
     assert_eq!(window.id, WindowId(1));
     assert_eq!(window.title, WindowId(1).title());
 }
+
+fn set_input(ctx: &egui::Context, viewport: egui::ViewportId, focused: bool, alt: bool) {
+    ctx.input_mut_for(viewport, |input| {
+        input.focused = focused;
+        input.modifiers.alt = alt;
+    });
+}
+
+#[test]
+fn alt_held_in_the_main_window_reaches_the_extended_ones() {
+    let ctx = egui::Context::default();
+    let windows = [window_with(1, &[1])];
+    set_input(&ctx, egui::ViewportId::ROOT, true, true);
+    set_input(&ctx, WindowId(1).viewport_id(), false, false);
+
+    assert!(alt_held(&ctx, &windows));
+}
+
+#[test]
+fn alt_held_in_an_extended_window_reaches_the_main_one() {
+    let ctx = egui::Context::default();
+    let windows = [window_with(1, &[1])];
+    set_input(&ctx, egui::ViewportId::ROOT, false, false);
+    set_input(&ctx, WindowId(1).viewport_id(), true, true);
+
+    assert!(alt_held(&ctx, &windows));
+}
+
+#[test]
+fn alt_left_over_in_an_unfocused_window_is_ignored() {
+    let ctx = egui::Context::default();
+    let windows = [window_with(1, &[1])];
+    set_input(&ctx, egui::ViewportId::ROOT, true, false);
+    set_input(&ctx, WindowId(1).viewport_id(), false, true);
+
+    assert!(!alt_held(&ctx, &windows));
+}

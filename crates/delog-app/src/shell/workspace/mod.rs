@@ -804,6 +804,7 @@ pub struct PlotServices<'a> {
     pub playhead_us: Option<i64>,
     pub playing: bool,
     pub lock_readouts: bool,
+    pub alt_held: bool,
     pub vehicles: &'a [crate::scene3d::vehicle::VehicleConfig],
     /// Render-space trajectories (points + per-point timestamps), parallel to
     /// `vehicles`.
@@ -1539,7 +1540,7 @@ impl Behavior<'_> {
             let hovered = response
                 .hover_pos()
                 .is_some_and(|pos| plot_rect.contains(pos));
-            let alt = ui.input(|i| i.modifiers.alt);
+            let alt = self.services.alt_held;
             let readout = playhead_readout(
                 self.services.playing,
                 self.services.lock_readouts,
@@ -1569,7 +1570,7 @@ impl Behavior<'_> {
             // Alt+hover drags the playhead along with the cursor. With
             // snap enabled it lands on the nearest data point instead, so the
             // playhead holds a sample until the cursor crosses to the next one.
-            if ui.input(|i| i.modifiers.alt)
+            if self.services.alt_held
                 && let Some(pos) = response.hover_pos()
                 && plot_rect.contains(pos)
             {
