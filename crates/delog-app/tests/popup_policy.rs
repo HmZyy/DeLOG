@@ -66,6 +66,26 @@ fn sync_toolbar_uses_icons_instead_of_unsupported_arrow_glyphs() {
 }
 
 #[test]
+fn only_string_fields_offer_a_text_viewer_and_it_comes_first() {
+    let menu = between(BROWSER, "response.context_menu(|ui| {", "    action\n}");
+    let viewer = menu
+        .find("FieldRowAction::OpenTextViewer")
+        .expect("a string field should offer its text viewer");
+    let metadata = menu
+        .find("FieldRowAction::InspectMetadata")
+        .expect("the field metadata entry should exist");
+
+    assert!(
+        viewer < metadata,
+        "the text viewer entry belongs at the top of the field menu"
+    );
+    assert!(
+        menu.contains("field.dtype == \"str\""),
+        "only string fields carry text, so the entry must be gated on the dtype"
+    );
+}
+
+#[test]
 fn the_run_palette_opens_parsers_through_the_host_that_lists_them() {
     let names = between(
         APP_MAIN,

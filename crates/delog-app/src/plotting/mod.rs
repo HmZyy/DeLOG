@@ -9,4 +9,5 @@ pub mod legend;
 pub mod markers;
 pub mod plot;
 pub mod text_overlay;
+pub mod text_viewer;
 pub mod timeline;

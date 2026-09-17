@@ -485,6 +485,7 @@ pub struct DelogApp {
     source_metadata_dialog: Option<delog_core::identity::SourceId>,
     field_metadata_dialog: Option<delog_core::identity::FieldId>,
     field_stats: FieldStatsController,
+    text_viewers: crate::plotting::text_viewer::TextViewers,
     annotation_toolbar_open: bool,
     armed_tool: Option<crate::plotting::annotations::place::ArmedTool>,
     sync_window: Option<SyncWindow>,
@@ -648,6 +649,7 @@ impl DelogApp {
             source_metadata_dialog: None,
             field_metadata_dialog: None,
             field_stats: FieldStatsController::default(),
+            text_viewers: crate::plotting::text_viewer::TextViewers::default(),
             annotation_toolbar_open: false,
             armed_tool: None,
             sync_window: None,
@@ -2766,6 +2768,9 @@ impl DelogApp {
         if let Some(field) = response.inspect_field_stats {
             self.field_stats.open(field);
         }
+        if let Some(field) = response.open_text_viewer {
+            self.text_viewers.open(snapshot, field);
+        }
         if let Some(field) = response.generate_markers {
             let title = crate::plotting::legend::trace_label(snapshot, field);
             let colors_before = self.settings.marker_value_colors.clone();
@@ -3317,6 +3322,16 @@ impl eframe::App for DelogApp {
             &mut self.caches,
             &mut self.field_stats,
         );
+        if let Some(t_us) = self.text_viewers.show(
+            ui.ctx(),
+            &snapshot,
+            self.origin_us,
+            snapshot.global_time_range().map(|_| self.playback.t_us),
+            self.hover_mode,
+        ) && let Some(range) = snapshot.global_time_range()
+        {
+            self.playback.scrub(t_us, range);
+        }
         let annotation_rows =
             crate::shell::windows::annotation_rows(&self.workspace, &self.windows);
         if let Some(action) = crate::plotting::annotations::toolbar::show(
