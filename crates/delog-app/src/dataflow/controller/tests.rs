@@ -1037,3 +1037,155 @@ fn stopping_a_live_publication_releases_the_source() {
     drop(sender);
     ingest_thread.join().unwrap();
 }
+
+#[test]
+fn owned_publication_waits_for_ingestion_and_cleanup_removes_only_its_source() {
+    let ingestor = delog_core::ingestor::Ingestor::new(delog_core::ingestor::NullObserver);
+    let store = ingestor.store();
+    let (sender, receiver) = ingest_channel();
+    let thread = std::thread::spawn(move || ingestor.run(receiver));
+    let (mut graph, output) = scale_graph(2.0);
+    let out = add_node(
+        &mut graph,
+        NodeKind::Output(OutputSpec {
+            topic: "DERIVED".into(),
+            fields: vec![OutputFieldSpec {
+                name: "value".into(),
+                unit: None,
+            }],
+        }),
+    );
+    graph.connect(output, 0, out, 0).unwrap();
+    let mut first = DataFlowController::new(graph.clone());
+    let mut second = DataFlowController::new(graph);
+    first.set_publication_key("one".into());
+    second.set_publication_key("two".into());
+    for controller in [&mut first, &mut second] {
+        controller.request_publish(snapshot());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            controller.poll(&sender);
+            if let Some(result) = controller.take_publication_result() {
+                result.unwrap();
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+    assert_eq!(
+        store
+            .load()
+            .sources
+            .iter()
+            .filter(|s| !s.entry.removed)
+            .count(),
+        2
+    );
+    first
+        .stop_owned(&sender)
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        store
+            .load()
+            .sources
+            .iter()
+            .filter(|s| !s.entry.removed)
+            .count(),
+        1
+    );
+    second
+        .stop_owned(&sender)
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
+    drop(first);
+    drop(second);
+    drop(sender);
+    thread.join().unwrap();
+}
+
+#[test]
+fn headless_flow_reacts_to_inputs_not_its_own_publication() {
+    let ingestor = delog_core::ingestor::Ingestor::new(delog_core::ingestor::NullObserver);
+    let store = ingestor.store();
+    let (sender, receiver) = ingest_channel();
+    let thread = std::thread::spawn(move || ingestor.run(receiver));
+    let (mut graph, scaled) = scale_graph(2.0);
+    let out = add_node(
+        &mut graph,
+        NodeKind::Output(OutputSpec {
+            topic: "DERIVED".into(),
+            fields: vec![OutputFieldSpec {
+                name: "value".into(),
+                unit: None,
+            }],
+        }),
+    );
+    graph.connect(scaled, 0, out, 0).unwrap();
+    let input = snapshot();
+    let mut flow = crate::dataflow::headless::HeadlessFlow::new(graph, "sequence-step".into());
+    let mut time = 0.0;
+    loop {
+        let (_, result) = flow.drive(&input, &sender, true, time, 0, 2.0);
+        if let Some(result) = result {
+            result.unwrap();
+            break;
+        }
+        time += 0.01;
+        assert!(time < 10.0);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let mut republished = (*input).clone();
+    republished.epoch = 999;
+    let (_, result) = flow.drive(&Arc::new(republished), &sender, true, 20.0, 0, 2.0);
+    assert!(result.is_none());
+    assert!(!flow.controller.is_evaluating());
+    assert_eq!(
+        store
+            .load()
+            .sources
+            .iter()
+            .filter(|s| !s.entry.removed)
+            .count(),
+        1
+    );
+    let original_source = store
+        .load()
+        .sources
+        .iter()
+        .find(|source| !source.entry.removed)
+        .unwrap()
+        .entry
+        .id;
+    let updated = snapshot_alt(vec![100, 200, 300, 400], vec![1.0, 2.0, 3.0, 4.0], 1000);
+    let mut time = 21.0;
+    loop {
+        let (_, result) = flow.drive(&updated, &sender, true, time, 0, 2.0);
+        if let Some(result) = result {
+            result.unwrap();
+            break;
+        }
+        time += 0.01;
+        assert!(time < 30.0);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let published = store.load();
+    let current = published
+        .sources
+        .iter()
+        .find(|source| !source.entry.removed)
+        .unwrap();
+    assert_eq!(current.entry.id, original_source);
+    assert_eq!(published.topic_store(current.topics[0]).unwrap().rows, 4);
+    flow.controller
+        .stop_owned(&sender)
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
+    drop(flow);
+    drop(sender);
+    thread.join().unwrap();
+}

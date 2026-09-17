@@ -211,3 +211,7 @@ pub fn minus() -> ImageSource<'static> {
 pub fn slash() -> ImageSource<'static> {
     egui::include_image!("../../assets/icons/slash.svg")
 }
+
+pub fn grip_vertical() -> ImageSource<'static> {
+    egui::include_image!("../../assets/icons/grip-vertical.svg")
+}

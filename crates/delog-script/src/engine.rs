@@ -65,6 +65,10 @@ pub(crate) fn format_pyerr(py: Python<'_>, err: &PyErr) -> String {
 }
 
 pub enum ScriptCommand {
+    Tracked {
+        command: Box<ScriptCommand>,
+        reply: Sender<Result<(), String>>,
+    },
     Eval(String),
     /// Request completions for `text` (a token to complete). The reply is a
     /// `ScriptEvent::Completions` carrying the same `seq`.
@@ -978,6 +982,66 @@ fn handle_command(
 ) -> bool {
     {
         match cmd {
+            ScriptCommand::Tracked { command, reply } => {
+                if !matches!(
+                    *command,
+                    ScriptCommand::RunScript { .. } | ScriptCommand::ParseFile { .. }
+                ) {
+                    let _ = reply.send(Err("unsupported tracked command".into()));
+                    return false;
+                }
+                let (tracked_tx, tracked_rx) = channel();
+                let forward = evt_tx.clone();
+                let collector = std::thread::spawn(move || {
+                    let mut result = Ok(());
+                    for event in tracked_rx {
+                        match &event {
+                            ScriptEvent::Error(error) => result = Err(error.clone()),
+                            ScriptEvent::Parser(ParserEvent::Failed { message, .. }) => {
+                                result = Err(message.clone())
+                            }
+                            ScriptEvent::Parser(ParserEvent::Cancelled { .. }) => {
+                                result = Err("parser cancelled".into())
+                            }
+                            _ => {}
+                        }
+                        if !matches!(event, ScriptEvent::Done) {
+                            let _ = forward.send(event);
+                        }
+                    }
+                    result
+                });
+                handle_command(
+                    *command,
+                    store,
+                    sender,
+                    metrics,
+                    globals,
+                    &tracked_tx,
+                    active_live,
+                    active_declarative,
+                    prev_sources,
+                    live_sources,
+                    active_transforms,
+                    declarative_sources,
+                    active_operations,
+                    run_counter,
+                    parser_cancellation,
+                    params,
+                );
+                drop(tracked_tx);
+                let result = collector
+                    .join()
+                    .unwrap_or_else(|_| Err("tracked event collector stopped".into()));
+                let result = result.and_then(|()| {
+                    sender
+                        .publication_barrier()?
+                        .recv()
+                        .map_err(|e| e.to_string())?
+                });
+                let _ = evt_tx.send(ScriptEvent::Done);
+                let _ = reply.send(result);
+            }
             ScriptCommand::Shutdown => return true,
             ScriptCommand::RunScript { name, source } => {
                 // A NUL byte can't go through CString; fail before running so a
@@ -1629,6 +1693,93 @@ mod tests {
         let store = Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap());
         let snap = StoreSnapshot::from_registry(&id, [(topic, store)], 0).unwrap();
         Arc::new(DataStore::from_snapshot(snap))
+    }
+
+    #[test]
+    fn tracked_commands_report_failure_and_published_success() {
+        let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (sender, receiver) = delog_core::ingest::ingest_channel();
+        let ingestor = delog_core::ingestor::Ingestor::new(delog_core::ingestor::NullObserver);
+        let store = ingestor.store();
+        let ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
+        let engine =
+            ScriptEngine::spawn(store, sender, test_metrics(), crate::params::shared_empty());
+        for (source, succeeds) in [
+            ("raise ValueError('sequence failed')", false),
+            ("pass", true),
+        ] {
+            let (reply, receipt) = std::sync::mpsc::channel();
+            engine
+                .send(ScriptCommand::Tracked {
+                    command: Box::new(ScriptCommand::RunScript {
+                        name: "sequence-test".into(),
+                        source: source.into(),
+                    }),
+                    reply,
+                })
+                .unwrap();
+            assert_eq!(
+                receipt
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .unwrap()
+                    .is_ok(),
+                succeeds
+            );
+        }
+        drop(engine);
+        ingest_thread.join().unwrap();
+    }
+
+    #[test]
+    fn tracked_parser_results_are_visible_to_the_next_script() {
+        let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let path =
+            std::env::temp_dir().join(format!("delog-sequence-parser-{}.bin", std::process::id()));
+        std::fs::write(&path, [2_f32.to_ne_bytes(), 4_f32.to_ne_bytes()].concat()).unwrap();
+        let (sender, receiver) = delog_core::ingest::ingest_channel();
+        let ingestor = delog_core::ingestor::Ingestor::new(delog_core::ingestor::NullObserver);
+        let store = ingestor.store();
+        let ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
+        let engine = ScriptEngine::spawn(
+            Arc::clone(&store),
+            sender,
+            test_metrics(),
+            crate::params::shared_empty(),
+        );
+        let commands = [
+            ScriptCommand::ParseFile {
+                parser_name: "sequence.py".into(),
+                source: "import numpy as np\ndef Parse(raw):\n    return [('DATA.rtc', np.arange(raw.size), ''), ('DATA.value', raw, '')]".into(),
+                path: path.clone(),
+            },
+            ScriptCommand::RunScript {
+                name: "after-parser".into(),
+                source: "values = delog.topic('DATA').read('value')\nassert list(values.value) == [2.0, 4.0]\ndelog.emit('CHECKED', values.t, {'doubled': values.value * 2})".into(),
+            },
+        ];
+        for command in commands {
+            let (reply, receipt) = std::sync::mpsc::channel();
+            engine
+                .send(ScriptCommand::Tracked {
+                    command: Box::new(command),
+                    reply,
+                })
+                .unwrap();
+            receipt
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap()
+                .unwrap();
+        }
+        let snapshot = store.load();
+        let topic = snapshot
+            .topics
+            .iter()
+            .find(|topic| topic.entry.name == "CHECKED")
+            .unwrap();
+        assert_eq!(topic.store.as_ref().unwrap().rows, 2);
+        drop(engine);
+        ingest_thread.join().unwrap();
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
