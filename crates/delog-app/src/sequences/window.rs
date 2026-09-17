@@ -35,7 +35,9 @@ pub struct SequenceManager {
     saved_name: Option<String>,
     names: Vec<String>,
     error: Option<String>,
+    step_kind: StepKind,
     step_search: String,
+    step_reference: Option<String>,
     delete_pending: Option<String>,
 }
 
@@ -54,7 +56,9 @@ impl Default for SequenceManager {
             saved_name: None,
             names: Vec::new(),
             error: None,
+            step_kind: StepKind::Script,
             step_search: String::new(),
+            step_reference: None,
             delete_pending: None,
         }
     }
@@ -476,18 +480,49 @@ impl SequenceManager {
                                         let _ = doc.move_step(from, to);
                                     }
                                     ui.add_space(12.0);
-                                    ui.menu_button("+ Add step", |ui| {
-                                        ui.set_min_width(260.0);
-                                        ui.add(
-                                            egui::TextEdit::singleline(&mut self.step_search)
-                                                .hint_text("Search saved items"),
-                                        );
-                                        let query = self.step_search.to_lowercase();
-                                        egui::ScrollArea::vertical().max_height(280.0).show(
-                                            ui,
-                                            |ui| {
-                                                let mut found = false;
+                                    ui.horizontal(|ui| {
+                                        egui::ComboBox::from_id_salt("sequence-step-kind")
+                                            .width(120.0)
+                                            .selected_text(self.step_kind.label())
+                                            .show_ui(ui, |ui| {
                                                 for kind in StepKind::ALL {
+                                                    if ui
+                                                        .selectable_value(
+                                                            &mut self.step_kind,
+                                                            kind,
+                                                            kind.label(),
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        self.step_search.clear();
+                                                        self.step_reference = None;
+                                                    }
+                                                }
+                                            });
+                                        let kind = self.step_kind;
+                                        let search_id = egui::Id::new("sequence-step-search");
+                                        let picker =
+                                            egui::ComboBox::from_id_salt("sequence-step-reference")
+                                                .width(220.0)
+                                                .close_behavior(
+                                                    egui::PopupCloseBehavior::CloseOnClickOutside,
+                                                )
+                                                .selected_text(match &self.step_reference {
+                                                    Some(reference) => reference.clone(),
+                                                    None => format!(
+                                                        "Select a {}",
+                                                        kind.label().to_lowercase()
+                                                    ),
+                                                })
+                                                .show_ui(ui, |ui| {
+                                                    ui.add(
+                                                        egui::TextEdit::singleline(
+                                                            &mut self.step_search,
+                                                        )
+                                                        .id(search_id)
+                                                        .hint_text("Search saved items"),
+                                                    );
+                                                    let query = self.step_search.to_lowercase();
                                                     let items: Vec<_> = catalog
                                                         .items(kind)
                                                         .iter()
@@ -495,22 +530,49 @@ impl SequenceManager {
                                                             name.to_lowercase().contains(&query)
                                                         })
                                                         .collect();
-                                                    if items.is_empty() {
-                                                        continue;
+                                                    if catalog.items(kind).is_empty() {
+                                                        ui.weak(format!(
+                                                            "No saved {}s",
+                                                            kind.label().to_lowercase()
+                                                        ));
+                                                    } else if items.is_empty() {
+                                                        ui.weak("No matching saved items");
                                                     }
-                                                    found = true;
-                                                    ui.add_space(8.0);
-                                                    ui.weak(kind.label());
-                                                    for name in items {
-                                                        if ui.button(name).clicked() {
-                                                            doc.push(kind, name);
-                                                            self.step_search.clear();
-                                                            ui.close();
-                                                        }
-                                                    }
-                                                }
-                                                if !found {
-                                                    ui.weak("No matching saved items");
+                                                    egui::ScrollArea::vertical()
+                                                        .max_height(280.0)
+                                                        .show(ui, |ui| {
+                                                            for name in items {
+                                                                if ui.button(name).clicked() {
+                                                                    self.step_reference =
+                                                                        Some(name.clone());
+                                                                    self.step_search.clear();
+                                                                    ui.close();
+                                                                }
+                                                            }
+                                                        });
+                                                });
+                                        if picker.response.clicked() {
+                                            ui.ctx().memory_mut(|memory| {
+                                                memory.request_focus(search_id)
+                                            });
+                                        }
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                let ready = self.step_reference.is_some();
+                                                if ui
+                                                    .add_enabled(
+                                                        ready,
+                                                        egui::Button::new("Add step"),
+                                                    )
+                                                    .on_disabled_hover_text(
+                                                        "Select a saved item first",
+                                                    )
+                                                    .clicked()
+                                                    && let Some(reference) =
+                                                        self.step_reference.take()
+                                                {
+                                                    doc.push(kind, &reference);
                                                 }
                                             },
                                         );
@@ -550,6 +612,15 @@ mod tests {
         manager: &mut SequenceManager,
         events: Vec<egui::Event>,
     ) -> egui::FullOutput {
+        frame_with(ctx, manager, &Catalog::default(), events)
+    }
+
+    fn frame_with(
+        ctx: &egui::Context,
+        manager: &mut SequenceManager,
+        catalog: &Catalog,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
         ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
@@ -560,14 +631,229 @@ mod tests {
                 ..Default::default()
             },
             |ui| {
-                manager.show(
-                    ui.ctx(),
-                    &Catalog::default(),
-                    &BTreeMap::new(),
-                    &BTreeSet::new(),
-                );
+                manager.show(ui.ctx(), catalog, &BTreeMap::new(), &BTreeSet::new());
             },
         )
+    }
+
+    fn painted(output: &egui::FullOutput) -> Vec<String> {
+        fn walk(shape: &egui::epaint::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::epaint::Shape::Text(text) => out.push(text.galley.text().to_owned()),
+                egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut out);
+        }
+        out
+    }
+
+    fn text_pos(output: &egui::FullOutput, wanted: &str) -> Option<egui::Pos2> {
+        fn walk(shape: &egui::epaint::Shape, wanted: &str, out: &mut Option<egui::Pos2>) {
+            match shape {
+                egui::epaint::Shape::Text(text) if text.galley.text() == wanted => {
+                    *out = Some(text.visual_bounding_rect().center());
+                }
+                egui::epaint::Shape::Vec(shapes) => {
+                    shapes.iter().for_each(|s| walk(s, wanted, out));
+                }
+                _ => {}
+            }
+        }
+        let mut found = None;
+        for clipped in &output.shapes {
+            walk(&clipped.shape, wanted, &mut found);
+        }
+        found
+    }
+
+    fn click(pos: egui::Pos2) -> Vec<egui::Event> {
+        vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]
+    }
+
+    fn step_catalog() -> Catalog {
+        Catalog {
+            parsers: vec!["csv-parser".to_owned()],
+            scripts: vec!["derive-speed".to_owned(), "derive-wind".to_owned()],
+            dataflows: vec!["fusion".to_owned()],
+            layouts: vec!["overview".to_owned(), "overview-wide".to_owned()],
+        }
+    }
+
+    fn button_disabled(output: &egui::FullOutput, label: &str) -> Option<bool> {
+        output
+            .platform_output
+            .accesskit_update
+            .as_ref()?
+            .nodes
+            .iter()
+            .find(|(_, node)| {
+                node.role() == egui::accesskit::Role::Button && node.label() == Some(label)
+            })
+            .map(|(_, node)| node.is_disabled())
+    }
+
+    fn open_step_manager(ctx: &egui::Context) -> SequenceManager {
+        egui_extras::install_image_loaders(ctx);
+        ctx.enable_accesskit();
+        SequenceManager {
+            open: true,
+            draft: Some(SequenceDoc::new("steps")),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_reference_dropdown_lists_only_the_items_of_the_kind_chosen_in_the_first_dropdown() {
+        let ctx = egui::Context::default();
+        let mut manager = open_step_manager(&ctx);
+        let catalog = step_catalog();
+        let render =
+            |manager: &mut SequenceManager, events| frame_with(&ctx, manager, &catalog, events);
+
+        render(&mut manager, vec![]);
+        let output = render(&mut manager, vec![]);
+        assert_eq!(manager.step_kind, StepKind::Script);
+        let kind_combo = text_pos(&output, "Script").expect("the kind dropdown should be shown");
+        render(&mut manager, click(kind_combo));
+        let output = render(&mut manager, vec![]);
+        for kind in StepKind::ALL {
+            assert!(
+                painted(&output).contains(&kind.label().to_owned()),
+                "the kind dropdown should offer {}, painted {:?}",
+                kind.label(),
+                painted(&output)
+            );
+        }
+
+        let layout = text_pos(&output, "Layout").expect("Layout should be offered");
+        render(&mut manager, click(layout));
+        let output = render(&mut manager, vec![]);
+        assert_eq!(manager.step_kind, StepKind::Layout);
+
+        let picker = text_pos(&output, "Select a layout").expect("the reference dropdown");
+        render(&mut manager, click(picker));
+        let output = render(&mut manager, vec![]);
+        let listed = painted(&output);
+        assert!(listed.contains(&"overview".to_owned()));
+        assert!(listed.contains(&"overview-wide".to_owned()));
+        for other in ["csv-parser", "derive-speed", "derive-wind", "fusion"] {
+            assert!(
+                !listed.contains(&other.to_owned()),
+                "{other} belongs to another kind and must not be offered, painted {listed:?}"
+            );
+        }
+
+        let item = text_pos(&output, "overview-wide").expect("the layout should be listed");
+        render(&mut manager, click(item));
+        let output = render(&mut manager, vec![]);
+        assert!(
+            manager.draft.as_ref().unwrap().steps.is_empty(),
+            "picking a reference only arms the button, it must not append a step"
+        );
+        assert_eq!(button_disabled(&output, "Add step"), Some(false));
+        assert!(painted(&output).contains(&"overview-wide".to_owned()));
+
+        let add = text_pos(&output, "Add step").expect("the add button should be shown");
+        render(&mut manager, click(add));
+        let steps = &manager.draft.as_ref().unwrap().steps;
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].kind, StepKind::Layout);
+        assert_eq!(steps[0].reference, "overview-wide");
+    }
+
+    #[test]
+    fn the_add_step_button_stays_disabled_until_a_reference_is_picked() {
+        let ctx = egui::Context::default();
+        let mut manager = open_step_manager(&ctx);
+        let catalog = step_catalog();
+        let render =
+            |manager: &mut SequenceManager, events| frame_with(&ctx, manager, &catalog, events);
+
+        render(&mut manager, vec![]);
+        let output = render(&mut manager, vec![]);
+        assert_eq!(button_disabled(&output, "Add step"), Some(true));
+
+        let picker = text_pos(&output, "Select a script").expect("the reference dropdown");
+        render(&mut manager, click(picker));
+        let output = render(&mut manager, vec![]);
+        let item = text_pos(&output, "derive-speed").expect("the script should be listed");
+        render(&mut manager, click(item));
+        let output = render(&mut manager, vec![]);
+        assert_eq!(button_disabled(&output, "Add step"), Some(false));
+
+        let add = text_pos(&output, "Add step").expect("the add button should be shown");
+        render(&mut manager, click(add));
+        let output = render(&mut manager, vec![]);
+        assert_eq!(
+            manager.draft.as_ref().unwrap().steps[0].reference,
+            "derive-speed"
+        );
+        assert_eq!(
+            button_disabled(&output, "Add step"),
+            Some(true),
+            "adding the step should clear the pending reference again"
+        );
+    }
+
+    #[test]
+    fn changing_the_kind_drops_a_reference_picked_for_the_previous_kind() {
+        let ctx = egui::Context::default();
+        let mut manager = open_step_manager(&ctx);
+        manager.step_reference = Some("derive-speed".to_owned());
+        let catalog = step_catalog();
+        let render =
+            |manager: &mut SequenceManager, events| frame_with(&ctx, manager, &catalog, events);
+
+        render(&mut manager, vec![]);
+        let output = render(&mut manager, vec![]);
+        let kind_combo = text_pos(&output, "Script").expect("the kind dropdown should be shown");
+        render(&mut manager, click(kind_combo));
+        let output = render(&mut manager, vec![]);
+        let layout = text_pos(&output, "Layout").expect("Layout should be offered");
+        render(&mut manager, click(layout));
+        let output = render(&mut manager, vec![]);
+        assert_eq!(manager.step_reference, None);
+        assert_eq!(button_disabled(&output, "Add step"), Some(true));
+        assert!(painted(&output).contains(&"Select a layout".to_owned()));
+    }
+
+    #[test]
+    fn the_reference_dropdown_reports_a_kind_with_nothing_saved() {
+        let ctx = egui::Context::default();
+        let mut manager = open_step_manager(&ctx);
+        manager.step_kind = StepKind::Dataflow;
+        let catalog = Catalog {
+            scripts: vec!["derive-speed".to_owned()],
+            ..Catalog::default()
+        };
+        let render =
+            |manager: &mut SequenceManager, events| frame_with(&ctx, manager, &catalog, events);
+
+        render(&mut manager, vec![]);
+        let output = render(&mut manager, vec![]);
+        let picker = text_pos(&output, "Select a dataflow").expect("the reference dropdown");
+        render(&mut manager, click(picker));
+        let output = render(&mut manager, vec![]);
+        assert!(painted(&output).contains(&"No saved dataflows".to_owned()));
+        assert!(!painted(&output).contains(&"derive-speed".to_owned()));
     }
 
     #[test]
