@@ -533,7 +533,7 @@ mod tests {
         let entries = [PaletteEntry {
             command: AppCommand::RunScript("shared".into()),
             label: "shared".to_owned(),
-            subtitle: Some("Tools › Scripts › Run Scripts".to_owned()),
+            subtitle: Some("Tools › Scripts › Run script".to_owned()),
             search_text: "shared script run execute".to_owned(),
             availability: CommandAvailability::Enabled,
             selected: None,
@@ -543,7 +543,7 @@ mod tests {
         let (output, _) = palette_frame(&ctx, &mut palette, &entries, vec![]);
 
         assert!(output.shapes.iter().any(|shape| {
-            find_text_rect(&shape.shape, "shared\nTools › Scripts › Run Scripts").is_some()
+            find_text_rect(&shape.shape, "shared\nTools › Scripts › Run script").is_some()
         }));
     }
 }

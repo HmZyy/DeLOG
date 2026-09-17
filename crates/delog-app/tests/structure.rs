@@ -14,7 +14,8 @@ const LAYER_RANKS: &[(&str, u32)] = &[
     ("session", 5),
     ("scripting", 5),
     ("dataflow", 5),
-    ("shell", 6),
+    ("sequences", 6),
+    ("shell", 7),
 ];
 
 fn src_dir() -> PathBuf {
