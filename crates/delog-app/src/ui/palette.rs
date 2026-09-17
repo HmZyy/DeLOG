@@ -188,10 +188,6 @@ impl PickerState {
                             button = button.shortcut_text(shortcut);
                         }
                         let response = ui.add_enabled(item.is_enabled(), button);
-                        let response = match item.disabled_reason {
-                            Some(reason) if hover_armed => response.on_disabled_hover_text(reason),
-                            _ => response,
-                        };
                         if scroll_to_selected && index == self.selected {
                             response.scroll_to_me(None);
                         }
@@ -507,6 +503,72 @@ mod tests {
         assert!(
             texts.iter().any(|text| text == "alpha"),
             "the checked row keeps its plain label, got {texts:?}"
+        );
+    }
+
+    #[test]
+    fn hovering_a_row_never_opens_a_tooltip() {
+        let ctx = egui::Context::default();
+        let reason = "not right now";
+        let mut items = layouts();
+        items[0].disabled_reason = Some(reason);
+        let mut state = PickerState::default();
+        state.open();
+        let render = |state: &mut PickerState,
+                      items: &[PickerItem<String>],
+                      pointer: Option<egui::Pos2>,
+                      time: f64| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1_000.0, 700.0),
+                    )),
+                    time: Some(time),
+                    events: pointer.map(egui::Event::PointerMoved).into_iter().collect(),
+                    ..Default::default()
+                },
+                |ui| {
+                    state.show(ui.ctx(), "tooltip-test", "hint", "empty", items);
+                },
+            )
+        };
+        fn walk(shape: &egui::epaint::Shape, out: &mut Vec<(String, egui::Rect)>) {
+            match shape {
+                egui::epaint::Shape::Text(text) => {
+                    out.push((text.galley.job.text.clone(), text.visual_bounding_rect()));
+                }
+                egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let texts = |output: &egui::FullOutput| {
+            let mut out = Vec::new();
+            for clipped in &output.shapes {
+                walk(&clipped.shape, &mut out);
+            }
+            out
+        };
+
+        let _ = render(&mut state, &items, Some(egui::pos2(1.0, 1.0)), 0.0);
+        let _ = render(&mut state, &items, None, 0.1);
+        let output = render(&mut state, &items, None, 0.2);
+        let row = texts(&output)
+            .into_iter()
+            .find(|(text, _)| text == "alpha")
+            .expect("the disabled row should be painted")
+            .1
+            .center();
+
+        let mut output = render(&mut state, &items, Some(row), 0.3);
+        for step in 1..12 {
+            output = render(&mut state, &items, None, 0.3 + f64::from(step));
+        }
+
+        let painted = texts(&output);
+        assert!(
+            painted.iter().all(|(text, _)| text != reason),
+            "a palette row must never open a tooltip, got {painted:?}"
         );
     }
 
