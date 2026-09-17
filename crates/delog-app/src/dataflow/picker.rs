@@ -131,7 +131,7 @@ pub fn search_fields(snapshot: &StoreSnapshot, query: &str, limit: usize) -> Vec
                     continue;
                 }
                 let candidate = format!(
-                    "{} {} {} {}",
+                    "{}/{}.{} {}",
                     source.entry.label,
                     topic.entry.name,
                     field.name,
@@ -261,6 +261,23 @@ mod tests {
             gps_topic(&mut identity, flight_02),
         ];
         StoreSnapshot::from_registry(&identity, stores, 5).unwrap()
+    }
+
+    #[test]
+    fn a_dotted_query_scopes_the_search_to_a_topics_fields() {
+        let snapshot = snapshot_two_sources();
+
+        let hits = search_fields(&snapshot, "gps.alt", 10);
+
+        assert!(
+            !hits.is_empty(),
+            "topic.field should match like the browser"
+        );
+        assert!(
+            hits.iter()
+                .all(|hit| hit.selector.topic == "GPS" && hit.selector.field == "Alt"),
+            "the part after the dot must scope to fields, got {hits:?}"
+        );
     }
 
     #[test]
