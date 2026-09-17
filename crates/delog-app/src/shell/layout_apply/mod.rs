@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use delog_core::diagnostics::Diag;
 use delog_core::identity::SourceId;
@@ -8,17 +8,19 @@ use crate::plotting::plot::{GhostTrace, PlotPane, TraceMode, TraceRef};
 use crate::scene3d::camera::OrbitCamera;
 use crate::scene3d::trail::TrailMode;
 use crate::scene3d::vehicle::VehicleConfig;
+use crate::shell::windows::{ExtendedWindow, MIN_WINDOW_SIZE, WindowId};
 use crate::shell::workspace::{Pane, Scene3dPane, Workspace};
 
 use crate::config::layout::doc::{
     AmbiguousField, CameraLayout, FieldRef, LAYOUT_VERSION, LayoutDoc, LayoutError, LayoutNode,
     PlaybackLayout, Resolver, SceneLayout, SplitLayout, TraceLayout, TraceModeLayout,
-    TrailModeLayout, WorkspaceLayout, collect_field_refs, field_ref, vehicle_from_layout,
-    vehicle_to_layout,
+    TrailModeLayout, WindowLayout, WorkspaceLayout, collect_field_refs, field_ref,
+    vehicle_from_layout, vehicle_to_layout,
 };
 
 pub struct LayoutApply {
     pub workspace: Workspace,
+    pub windows: Vec<ExtendedWindow>,
     pub fit_all: bool,
     pub speed: f64,
     pub follow_live: bool,
@@ -57,6 +59,7 @@ fn trail_mode_from_layout(mode: TrailModeLayout) -> TrailMode {
 pub struct CurrentLayout<'a> {
     pub name: String,
     pub workspace: &'a Workspace,
+    pub windows: &'a [ExtendedWindow],
     pub snapshot: &'a StoreSnapshot,
     pub speed: f64,
     pub follow_live: bool,
@@ -113,6 +116,16 @@ pub fn current_doc(input: CurrentLayout<'_>) -> LayoutDoc {
             follow_live: input.follow_live,
         },
         workspace: workspace_doc(input.workspace, input.snapshot),
+        windows: input
+            .windows
+            .iter()
+            .map(|window| WindowLayout {
+                id: Some(window.id.0),
+                title: window.title.clone(),
+                size: window.size,
+                root: workspace_doc(&window.workspace, input.snapshot).root,
+            })
+            .collect(),
         vehicles: input
             .vehicles
             .iter()
@@ -200,6 +213,23 @@ fn ghost_to_layout(ghost: &GhostTrace) -> TraceLayout {
     }
 }
 
+fn window_ids(layouts: &[WindowLayout]) -> Vec<WindowId> {
+    let mut used: HashSet<u64> = HashSet::new();
+    let mut ids = Vec::with_capacity(layouts.len());
+    for (index, layout) in layouts.iter().enumerate() {
+        let wanted = layout.id.unwrap_or(index as u64 + 1).max(1);
+        let id = if used.insert(wanted) {
+            wanted
+        } else {
+            let free = used.iter().copied().max().unwrap_or(0) + 1;
+            used.insert(free);
+            free
+        };
+        ids.push(WindowId(id));
+    }
+    ids
+}
+
 fn apply_doc(
     doc: LayoutDoc,
     snapshot: &StoreSnapshot,
@@ -219,7 +249,29 @@ fn apply_doc(
             return Err(resolver.ambiguities.into_values().collect());
         }
     }
-    let workspace = workspace_from_layout(&doc.workspace, &mut resolver);
+    let workspace = workspace_from_layout(&doc.workspace, &mut resolver, WindowId::MAIN);
+    let ids = window_ids(&doc.windows);
+    let windows = doc
+        .windows
+        .iter()
+        .zip(ids)
+        .map(|(layout, id)| {
+            let mut window = ExtendedWindow::new(id);
+            window.title = layout.title.clone();
+            window.size = [
+                layout.size[0].max(MIN_WINDOW_SIZE[0]),
+                layout.size[1].max(MIN_WINDOW_SIZE[1]),
+            ];
+            window.workspace = workspace_from_layout(
+                &WorkspaceLayout {
+                    root: plots_only(&layout.root),
+                },
+                &mut resolver,
+                id,
+            );
+            window
+        })
+        .collect::<Vec<_>>();
     let vehicles = doc
         .vehicles
         .iter()
@@ -228,6 +280,7 @@ fn apply_doc(
 
     Ok(LayoutApply {
         workspace,
+        windows,
         fit_all: true,
         speed: doc.playback.speed,
         follow_live: doc.playback.follow_live,
@@ -236,12 +289,31 @@ fn apply_doc(
     })
 }
 
-fn workspace_from_layout(doc: &WorkspaceLayout, resolver: &mut Resolver<'_>) -> Workspace {
+fn plots_only(node: &LayoutNode) -> LayoutNode {
+    match node {
+        LayoutNode::Scene3d(_) => LayoutNode::Plot {
+            traces: Vec::new(),
+            show_legend: true,
+            show_tooltip: true,
+        },
+        LayoutNode::Split { split, children } => LayoutNode::Split {
+            split: *split,
+            children: children.iter().map(plots_only).collect(),
+        },
+        LayoutNode::Plot { .. } => node.clone(),
+    }
+}
+
+fn workspace_from_layout(
+    doc: &WorkspaceLayout,
+    resolver: &mut Resolver<'_>,
+    window: WindowId,
+) -> Workspace {
     let mut tiles = egui_tiles::Tiles::default();
     let root = insert_node(&mut tiles, &doc.root, resolver)
         .unwrap_or_else(|| tiles.insert_pane(Pane::Plot(PlotPane::default())));
     Workspace {
-        tree: egui_tiles::Tree::new("plot_workspace", root, tiles),
+        tree: egui_tiles::Tree::new(egui::Id::new(("plot_workspace", window.0)), root, tiles),
         focused: Some(root),
         shared_y_gutter: 0.0,
         default_show_legend: true,
