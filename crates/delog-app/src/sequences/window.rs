@@ -4,6 +4,8 @@ use super::store::SequenceStore;
 use crate::ui::{components, icons};
 use std::collections::{BTreeMap, BTreeSet};
 
+const STEP_STATUS_WIDTH: f32 = 72.0;
+
 #[derive(Default)]
 pub struct Catalog {
     pub parsers: Vec<String>,
@@ -415,19 +417,18 @@ impl SequenceManager {
                                                             ui.strong(&step.reference);
                                                             ui.weak(step.kind.label());
                                                         });
-                                                        if let Some(run) = run {
-                                                            if let Some(position) = run
-                                                                .doc
+                                                        let status = run.and_then(|run| {
+                                                            run.doc
                                                                 .steps
                                                                 .iter()
                                                                 .position(|s| s.id == step.id)
-                                                            {
-                                                                ui.weak(format!(
-                                                                    "{:?}",
-                                                                    run.states[position]
-                                                                ));
-                                                            }
-                                                        }
+                                                                .map(|position| {
+                                                                    format!(
+                                                                        "{:?}",
+                                                                        run.states[position]
+                                                                    )
+                                                                })
+                                                        });
                                                         ui.with_layout(
                                                             egui::Layout::right_to_left(
                                                                 egui::Align::Center,
@@ -443,6 +444,23 @@ impl SequenceManager {
                                                                 {
                                                                     remove = Some(index);
                                                                 }
+                                                                ui.allocate_ui_with_layout(
+                                                                    egui::vec2(
+                                                                        STEP_STATUS_WIDTH,
+                                                                        ui.spacing()
+                                                                            .interact_size
+                                                                            .y,
+                                                                    ),
+                                                                    egui::Layout::left_to_right(
+                                                                        egui::Align::Center,
+                                                                    ),
+                                                                    |ui| {
+                                                                        if let Some(status) = status
+                                                                        {
+                                                                            ui.weak(status);
+                                                                        }
+                                                                    },
+                                                                );
                                                             },
                                                         );
                                                     })
@@ -606,6 +624,7 @@ impl SequenceManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sequences::runner::StepStatus;
 
     fn frame(
         ctx: &egui::Context,
@@ -634,6 +653,44 @@ mod tests {
                 manager.show(ui.ctx(), catalog, &BTreeMap::new(), &BTreeSet::new());
             },
         )
+    }
+
+    fn frame_with_runs(
+        ctx: &egui::Context,
+        manager: &mut SequenceManager,
+        runs: &BTreeMap<String, SequenceRunner>,
+    ) -> egui::FullOutput {
+        ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1200.0, 800.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                manager.show(ui.ctx(), &Catalog::default(), runs, &BTreeSet::new());
+            },
+        )
+    }
+
+    fn text_rect(output: &egui::FullOutput, wanted: &str) -> Option<egui::Rect> {
+        fn walk(shape: &egui::epaint::Shape, wanted: &str, out: &mut Option<egui::Rect>) {
+            match shape {
+                egui::epaint::Shape::Text(text) if text.galley.text() == wanted => {
+                    *out = Some(egui::Rect::from_min_size(text.pos, text.galley.size()));
+                }
+                egui::epaint::Shape::Vec(shapes) => {
+                    shapes.iter().for_each(|s| walk(s, wanted, out));
+                }
+                _ => {}
+            }
+        }
+        let mut found = None;
+        for clipped in &output.shapes {
+            walk(&clipped.shape, wanted, &mut found);
+        }
+        found
     }
 
     fn painted(output: &egui::FullOutput) -> Vec<String> {
@@ -998,5 +1055,45 @@ mod tests {
         frame(&ctx, &mut manager, vec![button(handles[0], false)]);
         assert_eq!(manager.draft.as_ref().unwrap().steps[0].reference, "second");
         assert_eq!(manager.draft.as_ref().unwrap().steps[1].reference, "first");
+    }
+
+    #[test]
+    fn step_status_indicators_line_up_whatever_the_step_reference_is() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        let mut manager = SequenceManager::default();
+        manager.open = true;
+        let mut doc = SequenceDoc::new("status-column");
+        doc.push(StepKind::Script, "a");
+        doc.push(StepKind::Layout, "a-much-longer-step-reference");
+        doc.push(StepKind::Parser, "mid");
+        let mut runner = SequenceRunner::start(doc.clone(), 1);
+        runner.states[0] = StepStatus::Failed;
+        runner.states[1] = StepStatus::Pending;
+        runner.states[2] = StepStatus::Succeeded;
+        let mut runs = BTreeMap::new();
+        runs.insert(doc.id.clone(), runner);
+        manager.draft = Some(doc);
+
+        frame_with_runs(&ctx, &mut manager, &runs);
+        frame_with_runs(&ctx, &mut manager, &runs);
+        let output = frame_with_runs(&ctx, &mut manager, &runs);
+
+        let failed = text_rect(&output, "Failed").expect("the failed step should read out");
+        let pending = text_rect(&output, "Pending").expect("the pending step should read out");
+        let succeeded =
+            text_rect(&output, "Succeeded").expect("the succeeded step should read out");
+
+        assert_eq!(
+            (failed.left(), failed.left()),
+            (pending.left(), succeeded.left()),
+            "status indicators must share one column"
+        );
+        assert!(
+            succeeded.width() <= STEP_STATUS_WIDTH && succeeded.height() == failed.height(),
+            "the widest status must fit its column on one line, got {} x {}",
+            succeeded.width(),
+            succeeded.height()
+        );
     }
 }
