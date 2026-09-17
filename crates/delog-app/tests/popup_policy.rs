@@ -66,6 +66,29 @@ fn sync_toolbar_uses_icons_instead_of_unsupported_arrow_glyphs() {
 }
 
 #[test]
+fn the_run_palette_opens_parsers_through_the_host_that_lists_them() {
+    let names = between(
+        APP_MAIN,
+        "fn run_palette_names",
+        "fn open_run_palette_items",
+    );
+    let pick = between(APP_MAIN, "fn run_palette_pick", "fn show_layout_windows");
+
+    assert!(
+        names.contains("self.scripts.parser_names()"),
+        "the parser rows come from the script parser library"
+    );
+    assert!(
+        pick.contains("self.scripts.request_open(ctx, name)"),
+        "so they must open through the same host; the built-in registry has never heard of them"
+    );
+    assert!(
+        !pick.contains("spawn_open_dialog"),
+        "spawn_open_dialog forces a built-in parser by name and fails for a saved parser"
+    );
+}
+
+#[test]
 fn the_palette_marks_a_checked_row_with_an_icon_instead_of_a_glyph() {
     assert!(!PALETTE.contains('\u{2713}'));
     assert!(PALETTE.contains("crate::ui::icons::check()"));
