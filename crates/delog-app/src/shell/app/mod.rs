@@ -422,6 +422,7 @@ pub struct DelogApp {
     markers: crate::plotting::markers::Markers,
     snap_playhead: bool,
     lock_readouts: bool,
+    alt_held: bool,
     frame: u64,
     last_epoch: u64,
     origin_us: i64,
@@ -589,6 +590,7 @@ impl DelogApp {
             markers: crate::plotting::markers::Markers::new(),
             snap_playhead: false,
             lock_readouts: false,
+            alt_held: false,
             frame: 0,
             last_epoch: u64::MAX,
             origin_us: 0,
@@ -3376,6 +3378,7 @@ impl eframe::App for DelogApp {
         }
 
         let windows_ctx = ui.ctx().clone();
+        self.alt_held = crate::shell::windows::alt_held(&windows_ctx, &self.windows);
         self.render_extended_windows(&windows_ctx, frame, &snapshot);
 
         let ui_workspace_timer = self.session.metrics().scope("ui_workspace");

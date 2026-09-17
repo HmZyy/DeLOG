@@ -197,3 +197,14 @@ pub fn apply_annotation_action(
         }
     }
 }
+
+fn alt_in(ctx: &egui::Context, viewport: egui::ViewportId) -> bool {
+    ctx.input_for(viewport, |input| input.focused && input.modifiers.alt)
+}
+
+pub fn alt_held(ctx: &egui::Context, windows: &[ExtendedWindow]) -> bool {
+    alt_in(ctx, egui::ViewportId::ROOT)
+        || windows
+            .iter()
+            .any(|window| alt_in(ctx, window.id.viewport_id()))
+}
