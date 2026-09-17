@@ -174,6 +174,9 @@ pub fn search_fields(snapshot: &StoreSnapshot, query: &str, limit: usize) -> Vec
 }
 
 #[cfg(test)]
+pub(crate) use tests::snapshot_two_sources;
+
+#[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
@@ -246,7 +249,7 @@ mod tests {
         )
     }
 
-    fn snapshot_two_sources() -> StoreSnapshot {
+    pub(crate) fn snapshot_two_sources() -> StoreSnapshot {
         let mut identity = IdentityRegistry::new();
         let flight_01 = identity.add_source("flight_01");
         let flight_02 = identity.add_source("flight_02");
