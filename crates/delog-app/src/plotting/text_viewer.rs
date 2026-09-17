@@ -26,6 +26,9 @@ pub struct TextViewer {
     title: String,
     times: Vec<i64>,
     texts: Vec<String>,
+    query: String,
+    matched: Vec<usize>,
+    matched_for: Option<String>,
     epoch: u64,
     last_current: Option<usize>,
     open: bool,
@@ -38,6 +41,9 @@ impl TextViewer {
             title: crate::plotting::legend::trace_label(snapshot, field),
             times: Vec::new(),
             texts: Vec::new(),
+            query: String::new(),
+            matched: Vec::new(),
+            matched_for: None,
             epoch: u64::MAX,
             last_current: None,
             open: true,
@@ -48,6 +54,7 @@ impl TextViewer {
 
     fn reload(&mut self, snapshot: &StoreSnapshot) {
         self.epoch = snapshot.epoch;
+        self.matched_for = None;
         self.times.clear();
         self.texts.clear();
         let Some(range) = snapshot.global_time_range() else {
@@ -64,6 +71,28 @@ impl TextViewer {
             self.times.push(t_us);
             self.texts.push(text);
         }
+    }
+}
+
+impl TextViewer {
+    fn refresh_matches(&mut self) {
+        if self.matched_for.as_deref() == Some(self.query.as_str()) {
+            return;
+        }
+        let needle = self.query.trim().to_lowercase();
+        self.matched.clear();
+        if needle.is_empty() {
+            self.matched.extend(0..self.texts.len());
+        } else {
+            self.matched.extend(
+                self.texts
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, text)| text.to_lowercase().contains(needle.as_str()))
+                    .map(|(index, _)| index),
+            );
+        }
+        self.matched_for = Some(self.query.clone());
     }
 }
 
@@ -127,9 +156,19 @@ fn show_viewer(
                 ui.weak("No text logged for this field.");
                 return;
             }
+            ui.add(
+                egui::TextEdit::singleline(&mut window.query)
+                    .hint_text("Search text")
+                    .desired_width(f32::INFINITY),
+            );
+            ui.separator();
+            window.refresh_matches();
+            if window.matched.is_empty() {
+                ui.weak("No text matches the search.");
+                return;
+            }
             let row_height = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
             let past = ui.visuals().text_color();
-            let now = ui.visuals().strong_text_color();
             let later = past.gamma_multiply(0.45);
             let mut table = TableBuilder::new(ui)
                 .id_salt(("field_text_viewer_table", window.field.0))
@@ -140,8 +179,11 @@ fn show_viewer(
                 .auto_shrink([false, false])
                 .column(Column::auto().at_least(88.0))
                 .column(Column::remainder().clip(true));
-            if let Some(current) = current.filter(|_| follow) {
-                table = table.scroll_to_row(current, Some(egui::Align::Center));
+            let current_row = current
+                .filter(|_| follow)
+                .and_then(|current| window.matched.iter().position(|&index| index == current));
+            if let Some(row) = current_row {
+                table = table.scroll_to_row(row, Some(egui::Align::Center));
             }
             table
                 .header(row_height, |mut header| {
@@ -153,14 +195,14 @@ fn show_viewer(
                     });
                 })
                 .body(|body| {
-                    body.rows(row_height, window.times.len(), |mut row| {
-                        let index = row.index();
+                    body.rows(row_height, window.matched.len(), |mut row| {
+                        let index = window.matched[row.index()];
                         let is_current = Some(index) == current;
                         row.set_selected(is_current);
-                        let color = match current {
-                            Some(current) if index > current => later,
-                            _ if is_current => now,
-                            _ => past,
+                        let color = if current.is_some_and(|current| index > current) {
+                            later
+                        } else {
+                            past
                         };
                         let t_us = window.times[index];
                         row.col(|ui| {
@@ -487,6 +529,124 @@ mod tests {
         visible(310).expect("stepping forward must keep the highlighted row in view");
         visible(60).expect("jumping backward must bring the highlighted row into view");
         visible(59).expect("stepping backward must keep the highlighted row in view");
+    }
+
+    fn render_filtered(
+        ctx: &egui::Context,
+        windows: &mut TextViewers,
+        snapshot: &StoreSnapshot,
+        query: &str,
+    ) -> egui::FullOutput {
+        windows.windows[0].query = query.to_owned();
+        let mut output = render(ctx, windows, snapshot, Some(250), Vec::new()).0;
+        for _ in 0..24 {
+            output = render(ctx, windows, snapshot, Some(250), Vec::new()).0;
+        }
+        output
+    }
+
+    #[test]
+    fn a_search_hides_the_rows_that_do_not_match_it() {
+        let (snapshot, field) = snapshot_with_text();
+        let mut windows = TextViewers::default();
+        windows.open(&snapshot, field);
+        let ctx = egui::Context::default();
+
+        let output = render_filtered(&ctx, &mut windows, &snapshot, "arm");
+        let texts: Vec<String> = painted(&output).iter().map(|(t, _)| t.clone()).collect();
+
+        assert!(texts.iter().any(|text| text == "ARMED"));
+        assert!(texts.iter().any(|text| text == "DISARMED"));
+        assert!(
+            !texts
+                .iter()
+                .any(|text| text == "TAKEOFF" || text == "LANDING"),
+            "rows that do not match must be hidden, got {texts:?}"
+        );
+    }
+
+    fn selection_bands(output: &egui::FullOutput, fill: egui::Color32) -> usize {
+        fn close(a: egui::Color32, b: egui::Color32) -> bool {
+            a.to_array()
+                .iter()
+                .zip(b.to_array())
+                .all(|(a, b)| a.abs_diff(b) <= 8)
+        }
+        fn walk(shape: &egui::epaint::Shape, fill: egui::Color32, out: &mut usize) {
+            match shape {
+                egui::epaint::Shape::Rect(rect) if close(rect.fill, fill) => *out += 1,
+                egui::epaint::Shape::Vec(shapes) => {
+                    shapes.iter().for_each(|s| walk(s, fill, out));
+                }
+                _ => {}
+            }
+        }
+        let mut out = 0;
+        for clipped in &output.shapes {
+            walk(&clipped.shape, fill, &mut out);
+        }
+        out
+    }
+
+    #[test]
+    fn a_search_that_keeps_the_current_row_keeps_it_highlighted() {
+        let (snapshot, field) = snapshot_with_text();
+        let mut windows = TextViewers::default();
+        windows.open(&snapshot, field);
+        let ctx = egui::Context::default();
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let fill = ctx.style().visuals.selection.bg_fill;
+
+        let unfiltered = selection_bands(&render_filtered(&ctx, &mut windows, &snapshot, ""), fill);
+        let output = render_filtered(&ctx, &mut windows, &snapshot, "take");
+        let texts: Vec<String> = painted(&output).iter().map(|(t, _)| t.clone()).collect();
+
+        assert_eq!(windows.windows[0].last_current, Some(1));
+        assert!(unfiltered > 0, "an unfiltered current row is highlighted");
+        assert!(texts.iter().any(|text| text == "TAKEOFF"));
+        assert_eq!(
+            selection_bands(&output, fill),
+            unfiltered,
+            "the surviving current row keeps its highlight band"
+        );
+    }
+
+    #[test]
+    fn a_search_that_hides_the_current_row_highlights_nothing() {
+        let (snapshot, field) = snapshot_with_text();
+        let mut windows = TextViewers::default();
+        windows.open(&snapshot, field);
+        let ctx = egui::Context::default();
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let fill = ctx.style().visuals.selection.bg_fill;
+
+        let unfiltered = selection_bands(&render_filtered(&ctx, &mut windows, &snapshot, ""), fill);
+        let output = render_filtered(&ctx, &mut windows, &snapshot, "arm");
+        let colors = painted_colors(&output);
+        let color_of = |wanted: &str| {
+            colors
+                .iter()
+                .find(|(text, _)| text == wanted)
+                .unwrap_or_else(|| panic!("{wanted} should paint, got {colors:?}"))
+                .1
+        };
+
+        assert_eq!(
+            windows.windows[0].last_current,
+            Some(1),
+            "the viewer keeps tracking the real current message"
+        );
+        assert!(unfiltered > 0, "an unfiltered current row is highlighted");
+        assert_eq!(
+            selection_bands(&output, fill),
+            0,
+            "no surviving row may stand in for a current row the search hid"
+        );
+        assert_ne!(
+            color_of("DISARMED"),
+            color_of("ARMED"),
+            "rows on either side of the real current message keep their own shade"
+        );
     }
 
     #[test]
