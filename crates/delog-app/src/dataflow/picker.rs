@@ -174,7 +174,7 @@ pub fn search_fields(snapshot: &StoreSnapshot, query: &str, limit: usize) -> Vec
 }
 
 #[cfg(test)]
-pub(crate) use tests::snapshot_two_sources;
+pub(crate) use tests::{snapshot_long_names, snapshot_two_sources};
 
 #[cfg(test)]
 mod tests {
@@ -247,6 +247,16 @@ mod tests {
             topic,
             Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap()),
         )
+    }
+
+    pub(crate) fn snapshot_long_names() -> StoreSnapshot {
+        let mut identity = IdentityRegistry::new();
+        let source = identity.add_source("vehicle_01_long_source_label_for_layout_tests_07");
+        let stores = [
+            imu_topic(&mut identity, source, "landing_detector_status"),
+            gps_topic(&mut identity, source),
+        ];
+        StoreSnapshot::from_registry(&identity, stores, 5).unwrap()
     }
 
     pub(crate) fn snapshot_two_sources() -> StoreSnapshot {
