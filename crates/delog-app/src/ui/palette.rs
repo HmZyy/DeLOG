@@ -2,6 +2,7 @@
 pub struct PickerItem<T> {
     pub key: T,
     pub label: String,
+    pub shortcut: Option<String>,
     pub subtitle: Option<String>,
     pub search_text: String,
     pub disabled_reason: Option<&'static str>,
@@ -16,6 +17,7 @@ impl<T> PickerItem<T> {
             key,
             search_text: label.clone(),
             label,
+            shortcut: None,
             subtitle: None,
             disabled_reason: None,
             checked: false,
@@ -175,15 +177,16 @@ impl PickerState {
                         }
                         let subtitle = item.subtitle.as_deref();
                         let text = picker_row_text(ui, &label, subtitle);
-                        let response = ui.add_enabled(
-                            item.is_enabled(),
-                            egui::Button::new(text)
-                                .selected(index == self.selected)
-                                .min_size(egui::vec2(
-                                    ui.available_width(),
-                                    if subtitle.is_some() { 42.0 } else { 30.0 },
-                                )),
-                        );
+                        let mut button = egui::Button::new(text)
+                            .selected(index == self.selected)
+                            .min_size(egui::vec2(
+                                ui.available_width(),
+                                if subtitle.is_some() { 42.0 } else { 30.0 },
+                            ));
+                        if let Some(shortcut) = item.shortcut.as_deref() {
+                            button = button.shortcut_text(shortcut);
+                        }
+                        let response = ui.add_enabled(item.is_enabled(), button);
                         let response = match item.disabled_reason {
                             Some(reason) if hover_armed => response.on_disabled_hover_text(reason),
                             _ => response,
@@ -448,6 +451,62 @@ mod tests {
         assert!(
             with > without,
             "a separator should occupy space above its row ({without} -> {with})"
+        );
+    }
+
+    #[test]
+    fn palette_shortcuts_share_one_right_aligned_column() {
+        let ctx = egui::Context::default();
+        let mut items = layouts();
+        items[0].label = "Open".to_owned();
+        items[0].shortcut = Some("Ctrl+O".to_owned());
+        items[1].label = "Export workspace image".to_owned();
+        items[1].shortcut = Some("Ctrl+Shift+E".to_owned());
+        let mut state = PickerState::default();
+        state.open();
+        let render = |state: &mut PickerState, items: &[PickerItem<String>]| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1_000.0, 700.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    state.show(ui.ctx(), "shortcut-column", "hint", "empty", items);
+                },
+            )
+        };
+        let _ = render(&mut state, &items);
+        let output = render(&mut state, &items);
+
+        fn walk(shape: &egui::epaint::Shape, out: &mut Vec<(String, egui::Rect)>) {
+            match shape {
+                egui::epaint::Shape::Text(text) => out.push((
+                    text.galley.job.text.clone(),
+                    egui::Rect::from_min_size(text.pos, text.galley.size()),
+                )),
+                egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut texts = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut texts);
+        }
+        let find = |wanted: &str| {
+            texts
+                .iter()
+                .find(|(text, _)| text == wanted)
+                .unwrap_or_else(|| panic!("{wanted} should be painted, got {texts:?}"))
+                .1
+        };
+
+        assert_eq!(
+            find("Ctrl+O").right(),
+            find("Ctrl+Shift+E").right(),
+            "palette shortcuts must share one right-aligned column"
         );
     }
 

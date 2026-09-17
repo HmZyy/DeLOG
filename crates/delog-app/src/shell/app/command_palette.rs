@@ -24,19 +24,14 @@ impl CommandPaletteState {
         entries
             .iter()
             .map(|entry| {
-                let mut label = entry.label.clone();
-                let subtitle = match &entry.command {
-                    AppCommand::Static(_) => {
-                        if let Some(shortcut) = &entry.subtitle {
-                            label.push_str(&format!("    {shortcut}"));
-                        }
-                        None
-                    }
-                    _ => entry.subtitle.clone(),
+                let (shortcut, subtitle) = match &entry.command {
+                    AppCommand::Static(_) => (entry.subtitle.clone(), None),
+                    _ => (None, entry.subtitle.clone()),
                 };
                 PickerItem {
                     key: entry.command.clone(),
-                    label,
+                    label: entry.label.clone(),
+                    shortcut,
                     subtitle,
                     search_text: entry.search_text.clone(),
                     disabled_reason: match &entry.availability {
@@ -141,6 +136,7 @@ pub fn ranked_entries<'a>(query: &str, entries: &'a [PaletteEntry]) -> Vec<&'a P
         .map(|(index, entry)| PickerItem {
             key: index,
             label: entry.label.clone(),
+            shortcut: None,
             subtitle: None,
             search_text: entry.search_text.clone(),
             disabled_reason: None,

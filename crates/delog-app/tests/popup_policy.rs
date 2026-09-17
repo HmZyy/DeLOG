@@ -212,8 +212,12 @@ fn view_and_panel_rows_render_from_canonical_checked_state() {
         "ui.menu_button(\"Analyze\"",
     );
     assert_eq!(view.matches("checked_menu_items(").count(), 2);
-    assert!(CONTEXT_HEADER_SOURCE.contains("egui::Checkbox::new(&mut is_selected, text)"));
+    assert!(CONTEXT_HEADER_SOURCE.contains("egui::Checkbox::new(&mut is_selected, label)"));
     assert!(CONTEXT_HEADER_SOURCE.contains("presentation.selected.unwrap_or(false)"));
+    assert!(
+        CONTEXT_HEADER_SOURCE.contains("egui::Atom::grow()"),
+        "a checked row must push its shortcut to the right edge instead of inlining it"
+    );
 }
 
 #[test]

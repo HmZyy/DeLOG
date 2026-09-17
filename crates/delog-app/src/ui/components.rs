@@ -114,11 +114,11 @@ pub fn menu_row(
     enabled: bool,
     disabled_reason: Option<&str>,
 ) -> egui::Response {
-    let text = shortcut.map_or_else(|| label.to_owned(), |key| format!("{label}\t{key}"));
-    let response = ui.add_enabled(
-        enabled,
-        egui::Button::new(text).wrap_mode(egui::TextWrapMode::Extend),
-    );
+    let mut button = egui::Button::new(label).wrap_mode(egui::TextWrapMode::Extend);
+    if let Some(key) = shortcut {
+        button = button.shortcut_text(key);
+    }
+    let response = ui.add_enabled(enabled, button);
     match disabled_reason {
         Some(reason) if !enabled => response.on_disabled_hover_text(reason),
         _ => response,
@@ -372,6 +372,91 @@ mod tests {
             (*width - natural).abs() < 1.0,
             "a menu row must lay out at its natural width even when the popup was first sized for \
              shorter rows, got {width} instead of {natural}"
+        );
+    }
+
+    fn text_layout_rects(output: &egui::FullOutput) -> Vec<(String, egui::Rect)> {
+        fn walk(shape: &egui::epaint::Shape, out: &mut Vec<(String, egui::Rect)>) {
+            match shape {
+                egui::epaint::Shape::Text(text) => out.push((
+                    text.galley.job.text.clone(),
+                    egui::Rect::from_min_size(text.pos, text.galley.size()),
+                )),
+                egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut out);
+        }
+        out
+    }
+
+    #[test]
+    fn menu_row_shortcuts_share_one_right_aligned_column() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 600.0));
+        let frame = |events: Vec<egui::Event>| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    ui.horizontal(|ui| {
+                        ui.menu_button("File", |ui| {
+                            menu_row(ui, "Open", Some("Ctrl+O"), true, None);
+                            menu_row(
+                                ui,
+                                "Export workspace image",
+                                Some("Ctrl+Shift+E"),
+                                true,
+                                None,
+                            );
+                        });
+                    });
+                },
+            )
+        };
+        let output = frame(Vec::new());
+        let menu = text_layout_rects(&output)
+            .into_iter()
+            .find(|(text, _)| text == "File")
+            .expect("the File menu button should be painted")
+            .1;
+        let pos = menu.center();
+        let _ = frame(vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]);
+        let output = frame(Vec::new());
+        let rects = text_layout_rects(&output);
+        let find = |wanted: &str| {
+            rects
+                .iter()
+                .find(|(text, _)| text == wanted)
+                .unwrap_or_else(|| panic!("{wanted} should be painted, got {rects:?}"))
+                .1
+        };
+
+        assert_eq!(
+            find("Ctrl+O").right(),
+            find("Ctrl+Shift+E").right(),
+            "menu shortcuts must share one right-aligned column"
         );
     }
 
