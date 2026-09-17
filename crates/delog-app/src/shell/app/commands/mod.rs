@@ -23,6 +23,7 @@ pub enum CommandId {
     ToggleDataBrowser,
     ToggleInspector,
     ToggleScene3d,
+    NewPlotWindow,
     OpenDiagnostics,
     OpenPerformance,
     OpenMarkers,
@@ -293,6 +294,7 @@ impl CommandId {
         Self::ToggleDataBrowser,
         Self::ToggleInspector,
         Self::ToggleScene3d,
+        Self::NewPlotWindow,
         Self::OpenDiagnostics,
         Self::OpenPerformance,
         Self::OpenMarkers,
@@ -339,6 +341,7 @@ impl CommandId {
             ToggleDataBrowser
             | ToggleInspector
             | ToggleScene3d
+            | NewPlotWindow
             | OpenDiagnostics
             | OpenPerformance
             | OpenMarkers
@@ -864,6 +867,32 @@ mod tests {
                 ..closed
             }),
             CommandAvailability::Enabled,
+        );
+    }
+
+    #[test]
+    fn the_annotation_toolbar_tracks_every_window_it_actually_edits() {
+        let window_only = CommandContext {
+            has_plotted_traces: true,
+            ..CommandContext::default()
+        };
+
+        assert_eq!(
+            CommandId::ToggleFieldStats.availability(&window_only),
+            CommandAvailability::Enabled,
+            "field stats opens the union of every window, so it spans them"
+        );
+        assert_eq!(
+            CommandId::ToggleAnnotationToolbar.availability(&window_only),
+            CommandAvailability::Enabled,
+            "the toolbar now lists annotations from every window, so a trace plotted only in an extended window must still enable it"
+        );
+        assert!(
+            matches!(
+                CommandId::ToggleAnnotationToolbar.availability(&CommandContext::default()),
+                CommandAvailability::Disabled(_)
+            ),
+            "with nothing plotted anywhere, the toolbar stays disabled"
         );
     }
 
