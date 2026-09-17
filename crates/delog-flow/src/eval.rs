@@ -525,7 +525,7 @@ fn require_signal(value: Option<&Value>) -> Result<&Signal, String> {
 }
 
 fn require_same_timeline(a: &Signal, b: &Signal) -> Result<(), String> {
-    if a.meta.timeline != b.meta.timeline {
+    if a.meta.timeline != b.meta.timeline && a.t != b.t {
         return Err(TIMELINE_MISMATCH.to_owned());
     }
     if a.t.len() != b.t.len() || a.v.len() != b.v.len() {
@@ -1119,6 +1119,29 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.message.contains("Add an Align node"))
         );
+    }
+
+    #[test]
+    fn topics_with_identical_timestamps_do_not_need_an_align_node() {
+        let snapshot = snapshot_gps_baro();
+        let mut graph = Graph::new("g");
+        let acc = add_node(&mut graph, field("IMU", "AccY"));
+        let gps = add_node(&mut graph, field("GPS", "Alt"));
+        let add = add_node(&mut graph, NodeKind::Add);
+        graph.connect(acc, 0, add, 0).unwrap();
+        graph.connect(gps, 0, add, 1).unwrap();
+
+        let report = eval_single(&graph, &snapshot, add);
+
+        assert!(
+            !report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("Add an Align node")),
+            "topics that already share timestamps need no align, got {:?}",
+            report.diagnostics
+        );
+        assert_samples(&signal(&report, add).v, &[11.0, 19.0, 30.0]);
     }
 
     #[test]
