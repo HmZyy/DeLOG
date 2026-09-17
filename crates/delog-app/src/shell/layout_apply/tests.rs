@@ -161,6 +161,36 @@ fn extended_windows_survive_a_save_and_load_round_trip() {
 }
 
 #[test]
+fn a_window_restored_from_a_layout_opens_with_its_data_browser_collapsed() {
+    let snapshot = test_snapshot();
+    let mut window = ExtendedWindow::new(WindowId(1));
+    window
+        .workspace
+        .add_trace_to_first_plot(first_field(&snapshot));
+    assert!(
+        !window.browser.collapsed,
+        "a window opened by the user starts with its browser showing"
+    );
+
+    let doc = current_doc(CurrentLayout {
+        name: "collapsed".to_owned(),
+        workspace: &Workspace::new(),
+        windows: &[window],
+        snapshot: &snapshot,
+        speed: 1.0,
+        follow_live: false,
+        vehicles: &[],
+    });
+
+    let LoadOutcome::Applied(applied) = load_doc(doc, &snapshot).expect("the document should load")
+    else {
+        panic!("a document with no ambiguity should apply directly");
+    };
+
+    assert!(applied.windows[0].browser.collapsed);
+}
+
+#[test]
 fn a_saved_window_keeps_its_id_so_a_later_window_cannot_reuse_its_title() {
     let snapshot = test_snapshot();
     let mut window = ExtendedWindow::new(WindowId(2));

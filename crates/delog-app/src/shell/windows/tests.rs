@@ -318,3 +318,19 @@ fn opening_an_editor_in_one_window_closes_an_editor_open_in_another() {
         Some(extended_id)
     );
 }
+
+#[test]
+fn a_new_window_opens_with_its_data_browser_showing() {
+    let window = ExtendedWindow::new(WindowId(1));
+
+    assert!(!window.browser.collapsed);
+}
+
+#[test]
+fn a_restored_window_opens_with_its_data_browser_collapsed() {
+    let window = ExtendedWindow::restored(WindowId(1));
+
+    assert!(window.browser.collapsed);
+    assert_eq!(window.id, WindowId(1));
+    assert_eq!(window.title, WindowId(1).title());
+}

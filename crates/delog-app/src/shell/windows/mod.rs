@@ -59,6 +59,12 @@ impl ExtendedWindow {
         }
     }
 
+    pub fn restored(id: WindowId) -> Self {
+        let mut window = Self::new(id);
+        window.browser.collapsed = true;
+        window
+    }
+
     pub fn placeholder(id: WindowId) -> Self {
         Self {
             id,
