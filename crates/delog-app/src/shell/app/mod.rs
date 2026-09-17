@@ -2459,7 +2459,12 @@ impl DelogApp {
                 #[cfg(feature = "scripting")]
                 self.run_named_script(name);
             }
-            RunKind::Parser => self.spawn_open_dialog(ctx, Some(name)),
+            RunKind::Parser => {
+                #[cfg(feature = "scripting")]
+                let _ = self.scripts.request_open(ctx, name);
+                #[cfg(not(feature = "scripting"))]
+                let _ = ctx;
+            }
             RunKind::Dataflow => self.start_headless_dataflow(name),
             RunKind::Sequence => self.run_named_sequence(name),
         }
