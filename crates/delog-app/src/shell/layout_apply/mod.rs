@@ -256,7 +256,7 @@ fn apply_doc(
         .iter()
         .zip(ids)
         .map(|(layout, id)| {
-            let mut window = ExtendedWindow::new(id);
+            let mut window = ExtendedWindow::restored(id);
             window.title = layout.title.clone();
             window.size = [
                 layout.size[0].max(MIN_WINDOW_SIZE[0]),
