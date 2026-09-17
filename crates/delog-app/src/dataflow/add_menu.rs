@@ -1,6 +1,9 @@
-use super::picker::{DataHit, search_fields};
+use super::picker::{DataHit, search_fields, topic_display};
 use super::registry::{ADD_DATA_INDEX, search_templates, templates};
 use delog_core::snapshot::StoreSnapshot;
+
+const MENU_WIDTH: f32 = 520.0;
+const ROW_HEIGHT: f32 = 24.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AddMenuMode {
@@ -73,7 +76,7 @@ pub(super) fn show_add_menu(
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.set_min_width(320.0);
+                    ui.set_width(MENU_WIDTH);
                     let search = ui.add(
                         egui::TextEdit::singleline(&mut state.query)
                             .desired_width(f32::INFINITY)
@@ -113,14 +116,9 @@ pub(super) fn show_add_menu(
                                 if data_hits.is_empty() {
                                     ui.weak("No matching numeric fields");
                                 }
+                                let columns = data_columns(ui, &data_hits);
                                 for (row, hit) in data_hits.iter().enumerate() {
-                                    let label = match &hit.unit {
-                                        Some(unit) => {
-                                            format!("{}  {}  {} rows", hit.label, unit, hit.rows)
-                                        }
-                                        None => format!("{}  {} rows", hit.label, hit.rows),
-                                    };
-                                    if menu_row(ui, state.highlighted == row, &label) {
+                                    if data_row(ui, state.highlighted == row, hit, &columns) {
                                         action = Some(AddAction::Data(hit.clone()));
                                     }
                                 }
@@ -147,10 +145,82 @@ fn should_close_add_menu(was_dismiss_armed: bool, clicked_outside: bool) -> bool
     was_dismiss_armed && clicked_outside
 }
 
+const SEPARATOR: &str = "\u{203a}";
+
+struct DataColumns {
+    widths: [f32; 4],
+    separator: f32,
+    height: f32,
+}
+
+fn data_cells(hit: &DataHit) -> [String; 4] {
+    [
+        hit.selector.source.clone().unwrap_or_default(),
+        topic_display(&hit.selector),
+        hit.selector.field.clone(),
+        hit.unit.clone().unwrap_or_default(),
+    ]
+}
+
+fn data_columns(ui: &egui::Ui, hits: &[DataHit]) -> DataColumns {
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let measure = |text: &str| {
+        ui.ctx().fonts_mut(|fonts| {
+            fonts
+                .layout_no_wrap(text.to_owned(), font.clone(), egui::Color32::WHITE)
+                .size()
+        })
+    };
+    let mut columns = DataColumns {
+        widths: [0.0; 4],
+        separator: measure(SEPARATOR).x,
+        height: measure("Ag").y,
+    };
+    for hit in hits {
+        for (width, cell) in columns.widths.iter_mut().zip(data_cells(hit)) {
+            *width = width.max(measure(&cell).x);
+        }
+    }
+    columns
+}
+
+fn data_row(ui: &mut egui::Ui, highlighted: bool, hit: &DataHit, columns: &DataColumns) -> bool {
+    use egui::AtomExt as _;
+    let cell = |text: egui::RichText, width: f32| {
+        text.atom_size(egui::vec2(width, columns.height))
+            .atom_align(egui::Align2::LEFT_CENTER)
+    };
+    let mut atoms: Vec<egui::Atom<'static>> = Vec::new();
+    for (column, (text, width)) in data_cells(hit).into_iter().zip(columns.widths).enumerate() {
+        if column == 1 || column == 2 {
+            atoms.push(cell(
+                egui::RichText::new(SEPARATOR).weak(),
+                columns.separator,
+            ));
+        }
+        let text = egui::RichText::new(text);
+        let text = if column == 3 { text.weak() } else { text };
+        atoms.push(cell(text, width));
+    }
+    atoms.push(egui::Atom::grow());
+    atoms.push(
+        egui::RichText::new(format!("{} rows", hit.rows))
+            .weak()
+            .into(),
+    );
+    ui.add(
+        egui::Button::new(egui::Atoms::from(atoms))
+            .selected(highlighted)
+            .min_size(egui::vec2(ui.available_width(), ROW_HEIGHT)),
+    )
+    .clicked()
+}
+
 fn menu_row(ui: &mut egui::Ui, highlighted: bool, label: &str) -> bool {
-    ui.add_sized(
-        [ui.available_width(), 24.0],
-        egui::Button::new(label).selected(highlighted),
+    ui.add(
+        egui::Button::new(label)
+            .selected(highlighted)
+            .min_size(egui::vec2(ui.available_width(), ROW_HEIGHT)),
     )
     .clicked()
 }
@@ -223,6 +293,174 @@ mod tests {
                 .area_rect(egui::Id::new("dataflow-add-menu"))
                 .expect("Add menu area should exist")
         })
+    }
+
+    fn text_layout_rects(output: &egui::FullOutput) -> Vec<(String, egui::Rect)> {
+        fn walk(shape: &egui::epaint::Shape, out: &mut Vec<(String, egui::Rect)>) {
+            match shape {
+                egui::epaint::Shape::Text(text) => out.push((
+                    text.galley.job.text.clone(),
+                    egui::Rect::from_min_size(text.pos, text.galley.size()),
+                )),
+                egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut out);
+        }
+        out
+    }
+
+    fn painted(ctx: &egui::Context, menu: &mut AddMenuState) -> Vec<(String, egui::Rect)> {
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1_600.0, 900.0),
+            )),
+            ..Default::default()
+        };
+        let snapshot = crate::dataflow::picker::snapshot_two_sources();
+        let _ = ctx.run_ui(input(), |_ui| {
+            let _ = show_add_menu(ctx, menu, &snapshot);
+        });
+        let output = ctx.run_ui(input(), |_ui| {
+            let _ = show_add_menu(ctx, menu, &snapshot);
+        });
+        text_layout_rects(&output)
+    }
+
+    #[test]
+    fn node_rows_share_one_left_aligned_column() {
+        let ctx = egui::Context::default();
+        let mut menu = AddMenuState::new(egui::pos2(20.0, 30.0), [4.0, 5.0]);
+
+        let rects = painted(&ctx, &mut menu);
+        let names: Vec<_> = templates().iter().map(|t| t.name).collect();
+        let lefts: Vec<_> = rects
+            .iter()
+            .filter(|(text, _)| text == "Add Data..." || names.contains(&text.as_str()))
+            .map(|(text, rect)| (text.clone(), rect.left()))
+            .collect();
+
+        assert!(lefts.len() > 2, "the menu should paint its node rows");
+        let first = lefts[0].1;
+        assert!(
+            lefts.iter().all(|(_, left)| *left == first),
+            "every node row must start at the same x, got {lefts:?}"
+        );
+    }
+
+    #[test]
+    fn add_data_rows_lay_out_as_columns_with_the_row_count_last() {
+        let ctx = egui::Context::default();
+        let mut menu = AddMenuState::new(egui::pos2(20.0, 30.0), [4.0, 5.0]);
+        menu.mode = AddMenuMode::Data;
+
+        let rects = painted(&ctx, &mut menu);
+        let column = |members: &[&str]| -> Vec<(String, egui::Rect)> {
+            rects
+                .iter()
+                .filter(|(text, _)| members.contains(&text.as_str()))
+                .cloned()
+                .collect()
+        };
+        let one_left = |cells: &[(String, egui::Rect)], what: &str| {
+            assert!(cells.len() > 1, "{what} should paint on several rows");
+            let first = cells[0].1.left();
+            assert!(
+                cells.iter().all(|(_, rect)| rect.left() == first),
+                "every {what} must start at the same x, got {cells:?}"
+            );
+            first
+        };
+
+        let sources = column(&["flight_01", "flight_02"]);
+        let topics = column(&["IMU[0]", "IMU[1]", "GPS"]);
+        let fields = column(&["AccX", "Alt"]);
+        let source_left = one_left(&sources, "source");
+        let topic_left = one_left(&topics, "topic");
+        let field_left = one_left(&fields, "field");
+
+        assert!(
+            source_left < topic_left && topic_left < field_left,
+            "the columns must run source, topic, field"
+        );
+
+        let separators: Vec<_> = rects
+            .iter()
+            .filter(|(text, _)| text == "\u{203a}")
+            .cloned()
+            .collect();
+        assert_eq!(
+            separators.len(),
+            sources.len() * 2,
+            "each row keeps a separator between source, topic and field"
+        );
+        let after_source: Vec<_> = separators
+            .iter()
+            .filter(|(_, rect)| rect.left() < topic_left)
+            .collect();
+        assert_eq!(after_source.len(), sources.len());
+        let first = after_source[0].1.left();
+        assert!(
+            after_source.iter().all(|(_, rect)| rect.left() == first),
+            "the separators must line up too, got {after_source:?}"
+        );
+
+        let counts: Vec<_> = rects
+            .iter()
+            .filter(|(text, _)| text.ends_with(" rows"))
+            .cloned()
+            .collect();
+        assert!(counts.len() > 1, "each row should carry its row count");
+        let right = counts[0].1.right();
+        assert!(
+            counts.iter().all(|(_, rect)| rect.right() == right),
+            "row counts must share one right edge, got {counts:?}"
+        );
+        let widest = rects
+            .iter()
+            .map(|(_, rect)| rect.right())
+            .fold(f32::MIN, f32::max);
+        assert_eq!(
+            right, widest,
+            "the row count must sit at the very right of its row"
+        );
+    }
+
+    #[test]
+    fn the_menu_keeps_its_own_width_whatever_the_screen_is() {
+        let width = |screen: f32, mode: AddMenuMode| {
+            let ctx = egui::Context::default();
+            let mut menu = AddMenuState::new(egui::pos2(20.0, 30.0), [4.0, 5.0]);
+            menu.mode = mode;
+            let input = || egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(screen, 900.0),
+                )),
+                ..Default::default()
+            };
+            let snapshot = crate::dataflow::picker::snapshot_two_sources();
+            for _ in 0..2 {
+                let _ = ctx.run_ui(input(), |_ui| {
+                    let _ = show_add_menu(&ctx, &mut menu, &snapshot);
+                });
+            }
+            ctx.memory(|memory| memory.area_rect(egui::Id::new("dataflow-add-menu")))
+                .expect("Add menu area should exist")
+                .width()
+        };
+
+        let narrow = width(900.0, AddMenuMode::Templates);
+        assert_eq!(narrow, width(2_400.0, AddMenuMode::Templates));
+        assert_eq!(narrow, width(1_600.0, AddMenuMode::Data));
+        assert!(
+            (MENU_WIDTH..MENU_WIDTH + 32.0).contains(&narrow),
+            "the menu should size itself from MENU_WIDTH, got {narrow}"
+        );
     }
 
     #[test]
