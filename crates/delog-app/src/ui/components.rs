@@ -115,7 +115,10 @@ pub fn menu_row(
     disabled_reason: Option<&str>,
 ) -> egui::Response {
     let text = shortcut.map_or_else(|| label.to_owned(), |key| format!("{label}\t{key}"));
-    let response = ui.add_enabled(enabled, egui::Button::new(text));
+    let response = ui.add_enabled(
+        enabled,
+        egui::Button::new(text).wrap_mode(egui::TextWrapMode::Extend),
+    );
     match disabled_reason {
         Some(reason) if !enabled => response.on_disabled_hover_text(reason),
         _ => response,
@@ -250,6 +253,127 @@ pub fn library_tree(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_menu_row_keeps_its_full_width_after_the_popup_was_sized_for_shorter_rows() {
+        fn accesskit_rect(output: &egui::FullOutput, prefix: &str) -> Option<egui::Rect> {
+            let update = output.platform_output.accesskit_update.as_ref()?;
+            update
+                .nodes
+                .iter()
+                .find(|(_, node)| node.label().is_some_and(|label| label.starts_with(prefix)))
+                .and_then(|(_, node)| node.bounds())
+                .map(|bounds| {
+                    egui::Rect::from_min_max(
+                        egui::pos2(bounds.x0 as f32, bounds.y0 as f32),
+                        egui::pos2(bounds.x1 as f32, bounds.y1 as f32),
+                    )
+                })
+        }
+
+        fn painted_widths(output: &egui::FullOutput) -> Vec<(String, f32)> {
+            fn walk(shape: &egui::epaint::Shape, out: &mut Vec<(String, f32)>) {
+                match shape {
+                    egui::epaint::Shape::Text(text) => {
+                        out.push((text.galley.job.text.clone(), text.galley.rect.width()));
+                    }
+                    egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                    _ => {}
+                }
+            }
+            let mut out = Vec::new();
+            for clipped in &output.shapes {
+                walk(&clipped.shape, &mut out);
+            }
+            out
+        }
+
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let rows = std::cell::RefCell::new(vec!["a".to_owned()]);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 600.0));
+        let frame = |events: Vec<egui::Event>| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    ui.horizontal(|ui| {
+                        ui.menu_button("Tools", |ui| {
+                            ui.menu_button("Run script", |ui| {
+                                for row in rows.borrow().iter() {
+                                    menu_row(ui, row, None, true, None);
+                                }
+                            });
+                        });
+                    });
+                },
+            )
+        };
+        let click = |pos: egui::Pos2| {
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]
+        };
+        let open_submenu = || {
+            let output = frame(Vec::new());
+            let tools =
+                accesskit_rect(&output, "Tools").expect("the Tools menu button should exist");
+            let output = frame(click(tools.center()));
+            let submenu =
+                accesskit_rect(&output, "Run script").expect("the submenu button should exist");
+            let hover = vec![egui::Event::PointerMoved(submenu.center())];
+            let _sizing_pass = frame(hover.clone());
+            frame(hover)
+        };
+
+        let short = open_submenu();
+        assert!(
+            painted_widths(&short).iter().any(|(text, _)| text == "a"),
+            "the short row should open the submenu and size its popup"
+        );
+        let _ = frame(vec![egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]);
+
+        let long = "a-very-long-saved-script-name";
+        rows.replace(vec![long.to_owned()]);
+        let reopened = open_submenu();
+        let painted = painted_widths(&reopened);
+        let (_, width) = painted
+            .iter()
+            .find(|(text, _)| text == long)
+            .unwrap_or_else(|| panic!("the long row should be painted, got {painted:?}"));
+
+        let font = egui::TextStyle::Button.resolve(&ctx.global_style());
+        let natural = ctx
+            .fonts_mut(|fonts| fonts.layout_no_wrap(long.to_owned(), font, egui::Color32::WHITE))
+            .rect
+            .width();
+        assert!(
+            (*width - natural).abs() < 1.0,
+            "a menu row must lay out at its natural width even when the popup was first sized for \
+             shorter rows, got {width} instead of {natural}"
+        );
+    }
 
     fn library_names() -> Vec<String> {
         vec!["alpha".to_owned(), "beta".to_owned(), "gamma".to_owned()]

@@ -76,9 +76,8 @@ const VIEW_PANELS_MENU: &[CommandId] = &[
     CommandId::OpenScripting,
     CommandId::OpenLogging,
 ];
-const TOOLS_LAYOUTS_MENU: &[CommandId] = &[
-    CommandId::SaveLayout,
-    CommandId::ManageLayouts,
+const TOOLS_LAYOUTS_MENU: &[CommandId] = &[CommandId::SaveLayout, CommandId::ManageLayouts];
+const TOOLS_LAYOUTS_FILE_MENU: &[CommandId] = &[
     CommandId::ImportLayout,
     CommandId::ExportLayout,
     CommandId::ClearLayout,
@@ -107,6 +106,7 @@ pub(crate) fn classic_menu_command_ids() -> Vec<CommandId> {
         TOOLS_SCRIPTS_MENU,
         TOOLS_PARSERS_MENU,
         TOOLS_LAYOUTS_MENU,
+        TOOLS_LAYOUTS_FILE_MENU,
     ]
     .into_iter()
     .flatten()
@@ -258,6 +258,7 @@ pub fn show(
                         ClassicMenuOwner::File,
                         presentations,
                         &mut commands,
+                        "No built-in parsers",
                         |command| matches!(command, AppCommand::OpenWithBuiltInParser(_)),
                     );
                 });
@@ -302,12 +303,13 @@ pub fn show(
             });
             let tools_menu = ui.menu_button("Tools", |ui| {
                 ui.menu_button("Scripts", |ui| {
-                    ui.menu_button("Run Scripts", |ui| {
+                    ui.menu_button("Run script", |ui| {
                         dynamic_rows(
                             ui,
                             ClassicMenuOwner::Tools,
                             presentations,
                             &mut commands,
+                            "No saved scripts",
                             |command| matches!(command, AppCommand::RunScript(_)),
                         );
                     });
@@ -320,6 +322,16 @@ pub fn show(
                     );
                 });
                 ui.menu_button("Parsers", |ui| {
+                    ui.menu_button("Run parser", |ui| {
+                        dynamic_rows(
+                            ui,
+                            ClassicMenuOwner::Tools,
+                            presentations,
+                            &mut commands,
+                            "No saved parsers",
+                            |command| matches!(command, AppCommand::OpenWithParser(_)),
+                        );
+                    });
                     menu_items(
                         ui,
                         ClassicMenuOwner::Tools,
@@ -327,36 +339,45 @@ pub fn show(
                         presentations,
                         &mut commands,
                     );
-                    ui.menu_button("Run Parser", |ui| {
-                        dynamic_rows(
-                            ui,
-                            ClassicMenuOwner::Tools,
-                            presentations,
-                            &mut commands,
-                            |command| matches!(command, AppCommand::OpenWithParser(_)),
-                        );
-                    });
                 });
                 ui.menu_button("Layouts", |ui| {
-                    menu_item(ui, CommandId::SaveLayout, presentations, &mut commands);
-                    ui.menu_button("Load Layout", |ui| {
+                    ui.menu_button("Load layout", |ui| {
                         dynamic_rows(
                             ui,
                             ClassicMenuOwner::Tools,
                             presentations,
                             &mut commands,
+                            "No saved layouts",
                             |command| matches!(command, AppCommand::LoadNamedLayout(_)),
                         );
                     });
                     menu_items(
                         ui,
                         ClassicMenuOwner::Tools,
-                        &TOOLS_LAYOUTS_MENU[1..],
+                        TOOLS_LAYOUTS_MENU,
+                        presentations,
+                        &mut commands,
+                    );
+                    ui.separator();
+                    menu_items(
+                        ui,
+                        ClassicMenuOwner::Tools,
+                        TOOLS_LAYOUTS_FILE_MENU,
                         presentations,
                         &mut commands,
                     );
                 });
                 ui.menu_button("Sequences", |ui| {
+                    ui.menu_button("Run sequence", |ui| {
+                        dynamic_rows(
+                            ui,
+                            ClassicMenuOwner::Tools,
+                            presentations,
+                            &mut commands,
+                            "No saved sequences",
+                            |command| matches!(command, AppCommand::RunSequence(_)),
+                        );
+                    });
                     menu_items(
                         ui,
                         ClassicMenuOwner::Tools,
@@ -364,15 +385,6 @@ pub fn show(
                         presentations,
                         &mut commands,
                     );
-                    ui.menu_button("Run", |ui| {
-                        dynamic_rows(
-                            ui,
-                            ClassicMenuOwner::Tools,
-                            presentations,
-                            &mut commands,
-                            |command| matches!(command, AppCommand::RunSequence(_)),
-                        );
-                    });
                 });
                 menu_items(
                     ui,
@@ -430,14 +442,20 @@ fn dynamic_rows(
     owner: ClassicMenuOwner,
     presentations: &[CommandPresentation],
     selected: &mut Vec<AppCommand>,
+    empty_label: &str,
     matches_command: impl Fn(&AppCommand) -> bool,
 ) {
     let matching = presentations
         .iter()
         .filter(|presentation| matches_command(&presentation.command));
+    let mut rows = 0;
     for presentation in matching {
         debug_assert_eq!(presentation.command.classic_menu_owner(), owner);
         presentation_row(ui, presentation, false, selected);
+        rows += 1;
+    }
+    if rows == 0 {
+        components::menu_row(ui, empty_label, None, false, None);
     }
 }
 
@@ -535,6 +553,59 @@ mod tests {
             |ui| presentation_row(ui, presentation, true, &mut selected),
         );
         (output, selected)
+    }
+
+    #[test]
+    fn an_empty_dynamic_family_offers_one_disabled_placeholder_row() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let rows = |presentations: &[CommandPresentation]| {
+            let mut selected = Vec::new();
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(300.0, 200.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    dynamic_rows(
+                        ui,
+                        ClassicMenuOwner::Tools,
+                        presentations,
+                        &mut selected,
+                        "No saved scripts",
+                        |command| matches!(command, AppCommand::RunScript(_)),
+                    );
+                },
+            );
+            output
+                .platform_output
+                .accesskit_update
+                .expect("accesskit should report the menu rows")
+                .nodes
+                .into_iter()
+                .filter(|(_, node)| node.role() == egui::accesskit::Role::Button)
+                .map(|(_, node)| {
+                    (
+                        node.label().unwrap_or_default().to_owned(),
+                        node.is_disabled(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(rows(&[]), [("No saved scripts".to_owned(), true)]);
+
+        let saved = [CommandPresentation {
+            command: AppCommand::RunScript("derive".to_owned()),
+            label: "derive".to_owned(),
+            shortcut: None,
+            availability: CommandAvailability::Enabled,
+            selected: None,
+        }];
+        assert_eq!(rows(&saved), [("derive".to_owned(), false)]);
     }
 
     #[test]
@@ -1104,6 +1175,7 @@ mod tests {
                     TOOLS_SCRIPTS_MENU,
                     TOOLS_PARSERS_MENU,
                     TOOLS_LAYOUTS_MENU,
+                    TOOLS_LAYOUTS_FILE_MENU,
                 ][..],
             ),
         ] {

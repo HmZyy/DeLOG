@@ -94,9 +94,9 @@ fn menus_expose_scripts_parsers_and_scripting_console_dock() {
         .find("ui.menu_button(\"Tools\"")
         .expect("Tools menu should exist")..];
     assert!(tools.contains("ui.menu_button(\"Scripts\""));
-    assert!(tools.contains("ui.menu_button(\"Run Scripts\""));
+    assert!(tools.contains("ui.menu_button(\"Run script\""));
     assert!(tools.contains("ui.menu_button(\"Parsers\""));
-    assert!(tools.contains("ui.menu_button(\"Run Parser\""));
+    assert!(tools.contains("ui.menu_button(\"Run parser\""));
     assert!(tools.contains("ui.menu_button(\"Layouts\""));
     assert_commands_in_order(
         tools,
@@ -139,7 +139,7 @@ fn dynamic_commands_live_under_the_user_authoritative_nested_menus() {
     );
     let run_script = between(
         scripts,
-        "ui.menu_button(\"Run Scripts\"",
+        "ui.menu_button(\"Run script\"",
         "TOOLS_SCRIPTS_MENU",
     );
     assert!(run_script.contains("AppCommand::RunScript"));
@@ -149,13 +149,13 @@ fn dynamic_commands_live_under_the_user_authoritative_nested_menus() {
         "ui.menu_button(\"Parsers\"",
         "ui.menu_button(\"Layouts\"",
     );
+    let run_parser = parsers
+        .find("ui.menu_button(\"Run parser\"")
+        .expect("Run parser submenu should exist");
     let parser_editor = parsers
         .find("TOOLS_PARSERS_MENU")
         .expect("Parser Editor should be rendered");
-    let run_parser = parsers
-        .find("ui.menu_button(\"Run Parser\"")
-        .expect("Run Parser submenu should exist");
-    assert!(parser_editor < run_parser);
+    assert!(run_parser < parser_editor);
     assert!(parsers[run_parser..].contains("AppCommand::OpenWithParser"));
 
     let layouts = &tools[tools
@@ -163,11 +163,21 @@ fn dynamic_commands_live_under_the_user_authoritative_nested_menus() {
         .expect("Layouts submenu should exist")..];
     let load_layout = between(
         layouts,
-        "ui.menu_button(\"Load Layout\"",
-        "&TOOLS_LAYOUTS_MENU[",
+        "ui.menu_button(\"Load layout\"",
+        "TOOLS_LAYOUTS_MENU",
     );
     assert!(load_layout.contains("AppCommand::LoadNamedLayout"));
     assert!(!load_layout.contains("CommandId::LoadLayout"));
+
+    let sequences = &tools[tools
+        .find("ui.menu_button(\"Sequences\"")
+        .expect("Sequences submenu should exist")..];
+    let run_sequence = between(
+        sequences,
+        "ui.menu_button(\"Run sequence\"",
+        "TOOLS_SEQUENCES_MENU",
+    );
+    assert!(run_sequence.contains("AppCommand::RunSequence"));
 
     assert!(APP_SOURCE.contains("self.spawn_open_dialog(ctx, Some(&name))"));
     assert!(APP_SOURCE.contains("self.scripts.request_open(ctx, &name)"));
@@ -553,6 +563,20 @@ fn tools_layouts_menu_exposes_clear_current_layout() {
     );
     assert!(COMMANDS_SOURCE.contains("\"Clear current layout\""));
     assert!(APP_SOURCE.contains("CommandId::ClearLayout => self.clear_current_layout()"));
+
+    let rendered = between(
+        CONTEXT_HEADER_SOURCE,
+        "ui.menu_button(\"Layouts\"",
+        "ui.menu_button(\"Sequences\"",
+    );
+    assert_commands_in_order(
+        rendered,
+        &[
+            "TOOLS_LAYOUTS_MENU",
+            "ui.separator();",
+            "TOOLS_LAYOUTS_FILE_MENU",
+        ],
+    );
 }
 
 #[test]
