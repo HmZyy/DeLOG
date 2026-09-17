@@ -449,6 +449,7 @@ pub struct BrowserResponse {
     pub offset_change: Option<(SourceId, i64)>,
     pub remove_source: Option<SourceId>,
     pub inspect_source: Option<SourceId>,
+    pub open_text_viewer: Option<FieldId>,
     pub inspect_field_metadata: Option<FieldId>,
     pub inspect_field_stats: Option<FieldId>,
     pub generate_markers: Option<FieldId>,
@@ -456,6 +457,7 @@ pub struct BrowserResponse {
 }
 
 enum FieldRowAction {
+    OpenTextViewer(FieldId),
     InspectMetadata(FieldId),
     InspectStats(FieldId),
     GenerateMarkers(FieldId),
@@ -622,6 +624,7 @@ pub fn ui(
     let mut offset_change = None;
     let mut remove_source = None;
     let mut inspect_source = None;
+    let mut open_text_viewer = None;
     let mut inspect_field_metadata = None;
     let mut inspect_field_stats = None;
     let mut generate_markers = None;
@@ -777,6 +780,9 @@ pub fn ui(
                                         match field_table_row(
                                             ui, salt, origin, field, selection, &visible,
                                         ) {
+                                            Some(FieldRowAction::OpenTextViewer(f)) => {
+                                                open_text_viewer = Some(f);
+                                            }
                                             Some(FieldRowAction::InspectMetadata(f)) => {
                                                 inspect_field_metadata = Some(f);
                                             }
@@ -822,6 +828,7 @@ pub fn ui(
     response.offset_change = offset_change;
     response.remove_source = remove_source;
     response.inspect_source = inspect_source;
+    response.open_text_viewer = open_text_viewer;
     response.inspect_field_metadata = inspect_field_metadata;
     response.inspect_field_stats = inspect_field_stats;
     response.generate_markers = generate_markers;
@@ -1058,6 +1065,19 @@ fn field_row(
     }
     response.context_menu(|ui| {
         crate::ui::components::dense_rows(ui);
+        if field.dtype == "str" {
+            let viewer = egui::Image::new(crate::ui::icons::message_square())
+                .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
+                .tint(ui.visuals().text_color());
+            if ui
+                .add(egui::Button::image_and_text(viewer, "Text viewer"))
+                .on_hover_text("Open this field's text in its own window")
+                .clicked()
+            {
+                action = Some(FieldRowAction::OpenTextViewer(field.id));
+                ui.close();
+            }
+        }
         let metadata_info = egui::Image::new(crate::ui::icons::info())
             .fit_to_exact_size(egui::Vec2::splat(ui.spacing().icon_width))
             .tint(ui.visuals().text_color());
