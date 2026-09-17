@@ -62,6 +62,7 @@ pub(super) fn show_add_menu(
         AddMenuMode::Data => data_hits.len(),
     };
     state.highlighted = state.highlighted.min(row_count.saturating_sub(1));
+    let highlighted_before = state.highlighted;
     match handle_menu_keys(ctx, &mut state.highlighted, row_count) {
         Some(MenuKey::Close) => return Some(AddAction::Close),
         Some(MenuKey::Accept) => {
@@ -69,6 +70,7 @@ pub(super) fn show_add_menu(
         }
         None => {}
     }
+    let follow = state.highlighted != highlighted_before;
     {
         let mut action = None;
         let area = egui::Area::new(egui::Id::new("dataflow-add-menu"))
@@ -95,7 +97,7 @@ pub(super) fn show_add_menu(
                         .max_height(360.0)
                         .show(ui, |ui| match state.mode {
                             AddMenuMode::Templates => {
-                                if menu_row(ui, state.highlighted == 0, "Add Data...") {
+                                if menu_row(ui, state.highlighted == 0, follow, "Add Data...") {
                                     action = Some(AddAction::Template(ADD_DATA_INDEX));
                                 }
                                 let mut category = "";
@@ -107,7 +109,12 @@ pub(super) fn show_add_menu(
                                         category = template.category;
                                         ui.weak(category);
                                     }
-                                    if menu_row(ui, state.highlighted == row + 1, template.name) {
+                                    if menu_row(
+                                        ui,
+                                        state.highlighted == row + 1,
+                                        follow,
+                                        template.name,
+                                    ) {
                                         action = Some(AddAction::Template(hit.index));
                                     }
                                 }
@@ -118,7 +125,8 @@ pub(super) fn show_add_menu(
                                 }
                                 let columns = data_columns(ui, &data_hits);
                                 for (row, hit) in data_hits.iter().enumerate() {
-                                    if data_row(ui, state.highlighted == row, hit, &columns) {
+                                    if data_row(ui, state.highlighted == row, follow, hit, &columns)
+                                    {
                                         action = Some(AddAction::Data(hit.clone()));
                                     }
                                 }
@@ -184,7 +192,13 @@ fn data_columns(ui: &egui::Ui, hits: &[DataHit]) -> DataColumns {
     columns
 }
 
-fn data_row(ui: &mut egui::Ui, highlighted: bool, hit: &DataHit, columns: &DataColumns) -> bool {
+fn data_row(
+    ui: &mut egui::Ui,
+    highlighted: bool,
+    follow: bool,
+    hit: &DataHit,
+    columns: &DataColumns,
+) -> bool {
     use egui::AtomExt as _;
     let cell = |text: egui::RichText, width: f32| {
         text.atom_size(egui::vec2(width, columns.height))
@@ -208,21 +222,29 @@ fn data_row(ui: &mut egui::Ui, highlighted: bool, hit: &DataHit, columns: &DataC
             .weak()
             .into(),
     );
-    ui.add(
+    let response = ui.add(
         egui::Button::new(egui::Atoms::from(atoms))
             .selected(highlighted)
             .min_size(egui::vec2(ui.available_width(), ROW_HEIGHT)),
-    )
-    .clicked()
+    );
+    follow_highlight(&response, highlighted, follow);
+    response.clicked()
 }
 
-fn menu_row(ui: &mut egui::Ui, highlighted: bool, label: &str) -> bool {
-    ui.add(
+fn menu_row(ui: &mut egui::Ui, highlighted: bool, follow: bool, label: &str) -> bool {
+    let response = ui.add(
         egui::Button::new(label)
             .selected(highlighted)
             .min_size(egui::vec2(ui.available_width(), ROW_HEIGHT)),
-    )
-    .clicked()
+    );
+    follow_highlight(&response, highlighted, follow);
+    response.clicked()
+}
+
+fn follow_highlight(response: &egui::Response, highlighted: bool, follow: bool) {
+    if highlighted && follow {
+        response.scroll_to_me(None);
+    }
 }
 
 enum MenuKey {
@@ -234,10 +256,16 @@ fn handle_menu_keys(ctx: &egui::Context, highlighted: &mut usize, len: usize) ->
     if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
         return Some(MenuKey::Close);
     }
-    if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)) {
+    if ctx.input_mut(|input| {
+        input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)
+            || input.consume_key(egui::Modifiers::CTRL, egui::Key::N)
+    }) {
         *highlighted = move_highlight(*highlighted, len, 1);
     }
-    if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)) {
+    if ctx.input_mut(|input| {
+        input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)
+            || (!input.modifiers.shift && input.consume_key(egui::Modifiers::CTRL, egui::Key::P))
+    }) {
         *highlighted = move_highlight(*highlighted, len, -1);
     }
     if len > 0 && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
@@ -313,22 +341,53 @@ mod tests {
         out
     }
 
-    fn painted(ctx: &egui::Context, menu: &mut AddMenuState) -> Vec<(String, egui::Rect)> {
-        let input = || egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(1_600.0, 900.0),
-            )),
-            ..Default::default()
-        };
+    fn frame(
+        ctx: &egui::Context,
+        menu: &mut AddMenuState,
+        events: Vec<egui::Event>,
+    ) -> Vec<(String, egui::Rect)> {
         let snapshot = crate::dataflow::picker::snapshot_two_sources();
-        let _ = ctx.run_ui(input(), |_ui| {
-            let _ = show_add_menu(ctx, menu, &snapshot);
-        });
-        let output = ctx.run_ui(input(), |_ui| {
-            let _ = show_add_menu(ctx, menu, &snapshot);
-        });
+        let modifiers = events
+            .iter()
+            .find_map(|event| match event {
+                egui::Event::Key { modifiers, .. } => Some(*modifiers),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1_600.0, 900.0),
+                )),
+                modifiers,
+                events,
+                ..Default::default()
+            },
+            |_ui| {
+                let _ = show_add_menu(ctx, menu, &snapshot);
+            },
+        );
         text_layout_rects(&output)
+    }
+
+    fn key(key: egui::Key, modifiers: egui::Modifiers) -> Vec<egui::Event> {
+        vec![egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }]
+    }
+
+    fn painted(ctx: &egui::Context, menu: &mut AddMenuState) -> Vec<(String, egui::Rect)> {
+        let _ = frame(ctx, menu, Vec::new());
+        frame(ctx, menu, Vec::new())
+    }
+
+    fn row_name(row: usize) -> &'static str {
+        templates()[search_templates("")[row - 1].index].name
     }
 
     #[test]
@@ -461,6 +520,59 @@ mod tests {
             (MENU_WIDTH..MENU_WIDTH + 32.0).contains(&narrow),
             "the menu should size itself from MENU_WIDTH, got {narrow}"
         );
+    }
+
+    #[test]
+    fn ctrl_n_and_ctrl_p_walk_the_menu_like_the_palette() {
+        let ctx = egui::Context::default();
+        let mut menu = AddMenuState::new(egui::pos2(20.0, 30.0), [4.0, 5.0]);
+        let _ = painted(&ctx, &mut menu);
+
+        for _ in 0..3 {
+            let _ = frame(&ctx, &mut menu, key(egui::Key::N, egui::Modifiers::CTRL));
+        }
+        assert_eq!(menu.highlighted, 3, "ctrl+n should walk down");
+
+        let _ = frame(&ctx, &mut menu, key(egui::Key::P, egui::Modifiers::CTRL));
+        assert_eq!(menu.highlighted, 2, "ctrl+p should walk back up");
+
+        let _ = frame(
+            &ctx,
+            &mut menu,
+            key(egui::Key::P, egui::Modifiers::CTRL | egui::Modifiers::SHIFT),
+        );
+        assert_eq!(
+            menu.highlighted, 2,
+            "ctrl+shift+p belongs to the command palette and must not move the menu"
+        );
+    }
+
+    #[test]
+    fn the_scroll_area_follows_the_highlighted_row() {
+        let target = 20;
+        for navigate in [
+            key(egui::Key::ArrowDown, egui::Modifiers::NONE),
+            key(egui::Key::N, egui::Modifiers::CTRL),
+        ] {
+            let ctx = egui::Context::default();
+            let mut menu = AddMenuState::new(egui::pos2(20.0, 30.0), [4.0, 5.0]);
+            let rects = painted(&ctx, &mut menu);
+            assert!(
+                !rects.iter().any(|(text, _)| text == row_name(target)),
+                "row {target} should start out of view"
+            );
+
+            let mut rects = Vec::new();
+            for _ in 0..target {
+                rects = frame(&ctx, &mut menu, navigate.clone());
+            }
+
+            assert_eq!(menu.highlighted, target);
+            assert!(
+                rects.iter().any(|(text, _)| text == row_name(target)),
+                "the view must follow the highlight, got {rects:?}"
+            );
+        }
     }
 
     #[test]
