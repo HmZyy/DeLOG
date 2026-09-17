@@ -153,6 +153,7 @@ impl DelogApp {
                         playhead_us: snapshot.global_time_range().map(|_| self.playback.t_us),
                         playing: self.playback.playing,
                         lock_readouts: self.lock_readouts,
+                        alt_held: self.alt_held,
                         vehicles: &self.vehicles,
                         trajectories: &self.vehicle_trajectories,
                         traj_generation: self.traj_vehicle_revision,
