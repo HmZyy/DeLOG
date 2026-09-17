@@ -190,3 +190,28 @@ fn command_availability_checks_plotted_fields_in_every_window() {
         "has_plotted_traces must span extended windows too, or ToggleFieldStats/ToggleAnnotationToolbar stay disabled for fields plotted only there"
     );
 }
+
+#[test]
+fn the_header_offers_a_right_aligned_new_window_button() {
+    use policy_sources::CONTEXT_HEADER;
+
+    let toolbar = CONTEXT_HEADER
+        .find("commands.extend(show_toolbar(ui));")
+        .expect("the header should render the global plot toolbar");
+    let button = CONTEXT_HEADER
+        .find("crate::ui::icons::app_window()")
+        .expect("the header should offer a new-window button");
+    let aligned = CONTEXT_HEADER
+        .find("egui::Layout::right_to_left(egui::Align::Center)")
+        .expect("the new-window button should be right-aligned");
+
+    assert!(
+        button > toolbar,
+        "the button belongs at the end of the toolbar row, after the toolbar itself"
+    );
+    assert!(
+        aligned < button,
+        "the button must sit inside a right-to-left layout so it hugs the right edge"
+    );
+    assert!(CONTEXT_HEADER.contains("CommandId::NewPlotWindow"));
+}

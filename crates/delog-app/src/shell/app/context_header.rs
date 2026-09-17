@@ -397,6 +397,18 @@ pub fn show(
             refresh_dynamic_catalog |= tools_menu.response.clicked();
             ui.separator();
             commands.extend(show_toolbar(ui));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if crate::ui::components::icon_button(
+                    ui,
+                    crate::ui::icons::app_window(),
+                    CommandId::NewPlotWindow.spec().label,
+                    false,
+                )
+                .clicked()
+                {
+                    commands.push(AppCommand::Static(CommandId::NewPlotWindow));
+                }
+            });
         });
         ui.add_space(header_bottom_margin(ui.style()));
     });
