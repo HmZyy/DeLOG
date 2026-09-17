@@ -192,18 +192,18 @@ fn command_availability_checks_plotted_fields_in_every_window() {
 }
 
 #[test]
-fn the_header_offers_a_right_aligned_new_window_button() {
+fn the_header_offers_a_right_aligned_scene_button() {
     use policy_sources::CONTEXT_HEADER;
 
     let toolbar = CONTEXT_HEADER
         .find("commands.extend(show_toolbar(ui));")
         .expect("the header should render the global plot toolbar");
     let button = CONTEXT_HEADER
-        .find("crate::ui::icons::app_window()")
-        .expect("the header should offer a new-window button");
+        .find("crate::ui::icons::cube()")
+        .expect("the header should offer a 3D scene button");
     let aligned = CONTEXT_HEADER
         .find("egui::Layout::right_to_left(egui::Align::Center)")
-        .expect("the new-window button should be right-aligned");
+        .expect("the 3D scene button should be right-aligned");
 
     assert!(
         button > toolbar,
@@ -212,6 +212,24 @@ fn the_header_offers_a_right_aligned_new_window_button() {
     assert!(
         aligned < button,
         "the button must sit inside a right-to-left layout so it hugs the right edge"
+    );
+    assert!(CONTEXT_HEADER.contains("CommandId::ToggleScene3d"));
+}
+
+#[test]
+fn the_new_window_button_sits_in_the_left_group_beside_open() {
+    use policy_sources::CONTEXT_HEADER;
+
+    let toolbar = CONTEXT_HEADER
+        .find("commands.extend(show_toolbar(ui));")
+        .expect("the header should render the global plot toolbar");
+    let button = CONTEXT_HEADER
+        .find("crate::ui::icons::app_window()")
+        .expect("the header should offer a new-window button");
+
+    assert!(
+        button < toolbar,
+        "the new-window button belongs in the left group, before the toolbar"
     );
     assert!(CONTEXT_HEADER.contains("CommandId::NewPlotWindow"));
 }
