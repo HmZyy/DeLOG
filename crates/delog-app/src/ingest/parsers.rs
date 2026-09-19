@@ -511,7 +511,7 @@ impl ParsersPanel {
         ui.separator();
         let names = self.list().unwrap_or_default();
         if names.is_empty() {
-            ui.weak("No saved parsers.");
+            ui.weak(crate::ui::empty::no_saved("parsers"));
             return;
         }
         let selected = self.saved_original_name.clone();

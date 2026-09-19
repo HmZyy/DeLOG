@@ -117,6 +117,7 @@ impl PickerState {
         id: &'static str,
         hint: &str,
         empty_text: &str,
+        no_match_text: &str,
         items: &[PickerItem<T>],
     ) -> Option<T> {
         if !self.open {
@@ -168,7 +169,11 @@ impl PickerState {
 
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     if ranked.is_empty() {
-                        ui.weak(empty_text);
+                        ui.weak(if items.is_empty() {
+                            empty_text
+                        } else {
+                            no_match_text
+                        });
                     }
                     for (index, item) in ranked.iter().enumerate() {
                         if item.separator_before && index > 0 {
@@ -350,13 +355,53 @@ mod tests {
             }],
             ..Default::default()
         });
-        state.show(&ctx, "probe", "search", "empty", &items);
+        state.show(&ctx, "probe", "search", "empty", "no match", &items);
         let _ = ctx.end_pass();
 
         assert_eq!(
             state.selected, 2,
             "the palette shortcut must not double as a move-up while a picker is open"
         );
+    }
+
+    #[test]
+    fn a_query_that_matches_nothing_does_not_claim_nothing_is_saved() {
+        let ctx = egui::Context::default();
+        let items = layouts();
+        let mut state = PickerState::default();
+        state.open();
+        state.query = "zzzz".to_owned();
+
+        let mut shown = Vec::new();
+        for _ in 0..3 {
+            ctx.begin_pass(egui::RawInput::default());
+            state.show(&ctx, "no-match", "search", "empty", "no match", &items);
+            shown = painted(&ctx.end_pass());
+        }
+
+        assert!(
+            shown.contains(&"no match".to_owned()),
+            "a filtered-out palette must say the query matched nothing, painted: {shown:?}"
+        );
+        assert!(
+            !shown.contains(&"empty".to_owned()),
+            "a filtered-out palette must not claim the library is empty, painted: {shown:?}"
+        );
+    }
+
+    fn painted(output: &egui::FullOutput) -> Vec<String> {
+        fn walk(shape: &egui::epaint::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::epaint::Shape::Text(text) => out.push(text.galley.text().to_owned()),
+                egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut out);
+        }
+        out
     }
 
     #[test]
@@ -421,7 +466,7 @@ mod tests {
         };
         let render = |state: &mut PickerState, items: &[PickerItem<String>]| {
             ctx.run_ui(input(), |ui| {
-                state.show(ui.ctx(), "sep-test", "hint", "empty", items);
+                state.show(ui.ctx(), "sep-test", "hint", "empty", "no match", items);
             })
         };
         let _ = render(&mut state, &items);
@@ -480,7 +525,7 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    state.show(ui.ctx(), "checked-row", "hint", "empty", items);
+                    state.show(ui.ctx(), "checked-row", "hint", "empty", "no match", items);
                 },
             )
         };
@@ -527,7 +572,14 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    state.show(ui.ctx(), "override-test", "hint", "empty", &items);
+                    state.show(
+                        ui.ctx(),
+                        "override-test",
+                        "hint",
+                        "empty",
+                        "no match",
+                        &items,
+                    );
                 },
             )
         };
@@ -623,7 +675,7 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    state.show(ui.ctx(), "tooltip-test", "hint", "empty", items);
+                    state.show(ui.ctx(), "tooltip-test", "hint", "empty", "no match", items);
                 },
             )
         };
@@ -686,7 +738,14 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    state.show(ui.ctx(), "shortcut-column", "hint", "empty", items);
+                    state.show(
+                        ui.ctx(),
+                        "shortcut-column",
+                        "hint",
+                        "empty",
+                        "no match",
+                        items,
+                    );
                 },
             )
         };

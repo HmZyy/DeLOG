@@ -2419,6 +2419,9 @@ fn tracked_vehicle_picker(
                     egui::ComboBox::from_id_salt("scene-tracked-vehicle-combo")
                         .selected_text(selected)
                         .show_ui(ui, |ui| {
+                            if vehicles.is_empty() {
+                                ui.weak(crate::ui::empty::no_items("vehicles"));
+                            }
                             for (i, vehicle) in vehicles.iter().enumerate() {
                                 let label = if vehicle.show {
                                     vehicle.label.clone()

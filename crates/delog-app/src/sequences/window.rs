@@ -304,7 +304,7 @@ impl SequenceManager {
                                             self.library_action(event);
                                         }
                                         if names.is_empty() {
-                                            ui.weak("No saved sequences");
+                                            ui.weak(crate::ui::empty::no_saved("sequences"));
                                         }
                                     },
                                 );
@@ -548,13 +548,16 @@ impl SequenceManager {
                                                             name.to_lowercase().contains(&query)
                                                         })
                                                         .collect();
+                                                    let plural =
+                                                        format!("{}s", kind.label().to_lowercase());
                                                     if catalog.items(kind).is_empty() {
-                                                        ui.weak(format!(
-                                                            "No saved {}s",
-                                                            kind.label().to_lowercase()
+                                                        ui.weak(crate::ui::empty::no_saved(
+                                                            &plural,
                                                         ));
                                                     } else if items.is_empty() {
-                                                        ui.weak("No matching saved items");
+                                                        ui.weak(crate::ui::empty::no_matching(
+                                                            &plural,
+                                                        ));
                                                     }
                                                     egui::ScrollArea::vertical()
                                                         .max_height(280.0)
@@ -909,7 +912,7 @@ mod tests {
         let picker = text_pos(&output, "Select a dataflow").expect("the reference dropdown");
         render(&mut manager, click(picker));
         let output = render(&mut manager, vec![]);
-        assert!(painted(&output).contains(&"No saved dataflows".to_owned()));
+        assert!(painted(&output).contains(&crate::ui::empty::no_saved("dataflows")));
         assert!(!painted(&output).contains(&"derive-speed".to_owned()));
     }
 

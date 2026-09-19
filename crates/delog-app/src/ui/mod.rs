@@ -3,6 +3,7 @@ pub mod components;
 pub mod design_tokens;
 pub mod diagnostics;
 pub mod docks;
+pub mod empty;
 pub mod fuzzy;
 pub mod icons;
 pub mod logging;
