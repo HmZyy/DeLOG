@@ -1273,7 +1273,7 @@ impl SyncWindow {
                                 })
                             };
                             if results.is_empty() {
-                                ui.weak("No matching fields");
+                                ui.weak(crate::ui::empty::no_matching("fields"));
                                 return;
                             }
                             highlighted = highlighted.min(results.len() - 1);
@@ -1328,7 +1328,11 @@ impl SyncWindow {
                             |topic| topic_label(snapshot, topic),
                         ))
                         .show_ui(ui, |ui| {
-                            for candidate in available_topics(snapshot, id) {
+                            let candidates = available_topics(snapshot, id);
+                            if candidates.is_empty() {
+                                ui.weak(crate::ui::empty::no_items("topics"));
+                            }
+                            for candidate in candidates {
                                 ui.selectable_value(
                                     &mut topic,
                                     Some(candidate),
@@ -1348,14 +1352,18 @@ impl SyncWindow {
                             |f| field_label(snapshot, f),
                         ))
                         .show_ui(ui, |ui| {
-                            if let Some(topic) = topic {
-                                for candidate in plottable_fields(snapshot, id, topic) {
-                                    ui.selectable_value(
-                                        &mut field,
-                                        Some(candidate),
-                                        field_label(snapshot, candidate),
-                                    );
-                                }
+                            let candidates = topic
+                                .map(|topic| plottable_fields(snapshot, id, topic))
+                                .unwrap_or_default();
+                            if candidates.is_empty() {
+                                ui.weak(crate::ui::empty::no_items("fields"));
+                            }
+                            for candidate in candidates {
+                                ui.selectable_value(
+                                    &mut field,
+                                    Some(candidate),
+                                    field_label(snapshot, candidate),
+                                );
                             }
                         });
                 });

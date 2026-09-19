@@ -118,7 +118,8 @@ impl CommandPaletteState {
             ctx,
             "command-palette",
             "Search commands…",
-            "No matching commands",
+            &crate::ui::empty::no_items("commands"),
+            &crate::ui::empty::no_matching("commands"),
             &Self::picker_items(entries),
         )
     }

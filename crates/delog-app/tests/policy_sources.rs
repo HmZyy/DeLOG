@@ -44,3 +44,10 @@ pub const WORKSPACE: &str = include_str!("../src/shell/workspace/mod.rs");
 pub const APP_MANIFEST: &str = include_str!("../Cargo.toml");
 pub const CORE_INGEST: &str = include_str!("../../delog-core/src/ingest.rs");
 pub const DATAFLOW_DOCS: &str = include_str!("../../../docs/dataflow.md");
+pub const DATAFLOW_INSPECTOR: &str = concat!(
+    include_str!("../src/dataflow/inspector.rs"),
+    include_str!("../src/dataflow/inspector_tables.rs"),
+);
+pub const SEQUENCES_WINDOW: &str = include_str!("../src/sequences/window.rs");
+pub const UI_EMPTY: &str = include_str!("../src/ui/empty.rs");
+pub const COMMAND_PALETTE: &str = include_str!("../src/shell/app/command_palette.rs");

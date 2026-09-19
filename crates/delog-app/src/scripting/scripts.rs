@@ -1157,7 +1157,7 @@ impl ScriptsPanel {
         ui.separator();
         let names = self.script_names();
         if names.is_empty() {
-            ui.weak("No saved scripts.");
+            ui.weak(crate::ui::empty::no_saved("scripts"));
             return;
         }
         let selected = self.editing_original_name.clone();

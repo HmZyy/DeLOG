@@ -882,7 +882,7 @@ fn choosing_a_kind_opens_a_second_palette_holding_only_that_kinds_items() {
     );
     assert_eq!(
         dialog.kind.map(RunKind::empty_hint),
-        Some("No saved sequences.")
+        Some(crate::ui::empty::no_saved("sequences"))
     );
 
     let ctx = egui::Context::default();

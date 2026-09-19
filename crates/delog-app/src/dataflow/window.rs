@@ -536,7 +536,7 @@ impl TabViewer for WorkspaceViewer<'_> {
                     ui.add_space(8.0);
                     let names = self.workspace.store.list();
                     if names.is_empty() {
-                        ui.weak("No saved dataflows");
+                        ui.weak(crate::ui::empty::no_saved("dataflows"));
                         return;
                     }
                     let selected = self.workspace.active_editor().loaded_name.as_deref();
