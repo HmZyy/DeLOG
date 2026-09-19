@@ -337,13 +337,21 @@ impl RunKind {
         }
     }
 
-    const fn empty_hint(self) -> &'static str {
+    const fn plural(self) -> &'static str {
         match self {
-            Self::Script => "No saved scripts.",
-            Self::Parser => "No saved parsers.",
-            Self::Dataflow => "No saved dataflows.",
-            Self::Sequence => "No saved sequences.",
+            Self::Script => "scripts",
+            Self::Parser => "parsers",
+            Self::Dataflow => "dataflows",
+            Self::Sequence => "sequences",
         }
+    }
+
+    fn no_match_hint(self) -> String {
+        crate::ui::empty::no_matching(self.plural())
+    }
+
+    fn empty_hint(self) -> String {
+        crate::ui::empty::no_saved(self.plural())
     }
 }
 
@@ -2519,7 +2527,8 @@ impl DelogApp {
                 ctx,
                 "load-layout-picker",
                 "Search layouts…",
-                "No saved layouts.",
+                &crate::ui::empty::no_saved("layouts"),
+                &crate::ui::empty::no_matching("layouts"),
                 &items,
             ) {
                 Some(LayoutPick::Clear) => self.clear_current_layout(),
@@ -2538,6 +2547,7 @@ impl DelogApp {
                 "run-palette-kinds",
                 "Search what to run…",
                 "Nothing to run",
+                &crate::ui::empty::no_matching("actions"),
                 &items,
             ) {
                 self.open_run_palette_items(kind);
@@ -2552,7 +2562,8 @@ impl DelogApp {
                 ctx,
                 "run-palette-items",
                 kind.search_hint(),
-                kind.empty_hint(),
+                &kind.empty_hint(),
+                &kind.no_match_hint(),
                 &items,
             ) {
                 self.run_palette_pick(ctx, kind, &name);
@@ -2570,7 +2581,8 @@ impl DelogApp {
                 ctx,
                 "run-script-picker",
                 "Search scripts…",
-                "No saved scripts.",
+                &crate::ui::empty::no_saved("scripts"),
+                &crate::ui::empty::no_matching("scripts"),
                 &items,
             ) {
                 self.run_named_script(&name);
@@ -2591,7 +2603,7 @@ impl DelogApp {
                         ui.vertical(|ui| {
                             ui.set_min_width(180.0);
                             if self.layout_manager_dialog.layouts.is_empty() {
-                                ui.weak("No saved layouts.");
+                                ui.weak(crate::ui::empty::no_saved("layouts"));
                             } else {
                                 for (i, name) in
                                     self.layout_manager_dialog.layouts.iter().enumerate()

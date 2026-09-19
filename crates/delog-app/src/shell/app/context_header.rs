@@ -309,7 +309,7 @@ pub fn show(
                             ClassicMenuOwner::Tools,
                             presentations,
                             &mut commands,
-                            "No saved scripts",
+                            &crate::ui::empty::no_saved("scripts"),
                             |command| matches!(command, AppCommand::RunScript(_)),
                         );
                     });
@@ -328,7 +328,7 @@ pub fn show(
                             ClassicMenuOwner::Tools,
                             presentations,
                             &mut commands,
-                            "No saved parsers",
+                            &crate::ui::empty::no_saved("parsers"),
                             |command| matches!(command, AppCommand::OpenWithParser(_)),
                         );
                     });
@@ -347,7 +347,7 @@ pub fn show(
                             ClassicMenuOwner::Tools,
                             presentations,
                             &mut commands,
-                            "No saved layouts",
+                            &crate::ui::empty::no_saved("layouts"),
                             |command| matches!(command, AppCommand::LoadNamedLayout(_)),
                         );
                     });
@@ -374,7 +374,7 @@ pub fn show(
                             ClassicMenuOwner::Tools,
                             presentations,
                             &mut commands,
-                            "No saved sequences",
+                            &crate::ui::empty::no_saved("sequences"),
                             |command| matches!(command, AppCommand::RunSequence(_)),
                         );
                     });
@@ -682,7 +682,7 @@ mod tests {
                         ClassicMenuOwner::Tools,
                         presentations,
                         &mut selected,
-                        "No saved scripts",
+                        &crate::ui::empty::no_saved("scripts"),
                         |command| matches!(command, AppCommand::RunScript(_)),
                     );
                 },
@@ -703,7 +703,7 @@ mod tests {
                 .collect::<Vec<_>>()
         };
 
-        assert_eq!(rows(&[]), [("No saved scripts".to_owned(), true)]);
+        assert_eq!(rows(&[]), [(crate::ui::empty::no_saved("scripts"), true)]);
 
         let saved = [CommandPresentation {
             command: AppCommand::RunScript("derive".to_owned()),
