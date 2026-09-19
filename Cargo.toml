@@ -14,7 +14,7 @@ members = [
 exclude = ["third_party/egui_graph"]
 
 [workspace.package]
-version = "0.3.3"
+version = "0.3.4"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/HmZyy/DeLOG"
