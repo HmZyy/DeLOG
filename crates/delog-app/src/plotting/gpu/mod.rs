@@ -678,6 +678,7 @@ impl GpuBridge {
             }
             if res.metrics.is_none() {
                 res.metrics = Some(Arc::clone(metrics));
+                res.map_tiles.set_metrics(Arc::clone(metrics));
             }
             let uploads_before = res.map_tiles.upload_count();
             let allocs_before = res.map_tiles.allocation_count();
