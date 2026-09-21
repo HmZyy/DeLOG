@@ -613,6 +613,7 @@ impl GpuBridge {
         map_selection: MapTileSelection,
         ready_tiles: &[ReadyTile],
         vehicles: &[VehicleDraw],
+        metrics: &Arc<MetricsRegistry>,
     ) -> Option<egui::TextureId> {
         if !self.available {
             return None;
@@ -622,15 +623,22 @@ impl GpuBridge {
         let px_w = (rect.width() * ppp).round().max(1.0) as u32;
         let px_h = (rect.height() * ppp).round().max(1.0) as u32;
         let device = render_state.device.clone();
-        let mut renderer = render_state.renderer.write();
+        let mut renderer = {
+            let _t = metrics.scope("scene_lock");
+            render_state.renderer.write()
+        };
 
         // Clone the resolved view to end the resource borrow, so the
         // texture-registration below can borrow the renderer mutably.
         let (view, resized, existing) = {
             let res = renderer.callback_resources.get_mut::<SceneResources>()?;
             let resized = res.target.width() != px_w || res.target.height() != px_h;
-            res.target.resize(px_w, px_h);
+            if resized {
+                let _t = metrics.scope("scene_resize");
+                res.target.resize(px_w, px_h);
+            }
 
+            let uniform_timer = metrics.scope("scene_uniforms");
             // f64 inverse: f32 is ill-conditioned far from the origin and crawls the grid.
             let (vp, inv) = camera
                 .view_proj_and_inverse(px_w as f32 / px_h as f32, scene3d.resolved_far_clip_m());
@@ -663,7 +671,14 @@ impl GpuBridge {
                 res.sky
                     .set_uniform(&res.ctx, &SkyUniform::new(inv.to_cols_array_2d()));
             }
-            res.prepare_vehicles(vp_cols, camera.eye().to_array(), vehicles);
+            drop(uniform_timer);
+            {
+                let _t = metrics.scope("scene_veh_prep");
+                res.prepare_vehicles(vp_cols, camera.eye().to_array(), vehicles);
+            }
+            let uploads_before = res.map_tiles.upload_count();
+            let allocs_before = res.map_tiles.allocation_count();
+            let map_timer = metrics.scope("scene_map_prep");
             let visible_map_tiles = res.prepare_map_tiles(
                 MapTileUniform::new(
                     vp_cols,
@@ -674,7 +689,21 @@ impl GpuBridge {
                 &map_selection,
                 ready_tiles,
             );
+            drop(map_timer);
+            metrics.record(
+                "map_tile_uploads",
+                (res.map_tiles.upload_count() - uploads_before) as f32,
+            );
+            metrics.record(
+                "map_tile_allocs",
+                (res.map_tiles.allocation_count() - allocs_before) as f32,
+            );
+            metrics.record(
+                "map_tiles_resident",
+                res.map_tiles.resident_tile_count() as f32,
+            );
 
+            let encode_timer = metrics.scope("scene_encode");
             let clear = wgpu::Color {
                 r: f64::from(SCENE_CLEAR_RGB[0]),
                 g: f64::from(SCENE_CLEAR_RGB[1]),
@@ -702,10 +731,15 @@ impl GpuBridge {
                 }
                 res.draw_vehicles(&mut pass, vehicles);
             }
-            res.ctx.queue().submit([enc.finish()]);
+            drop(encode_timer);
+            {
+                let _t = metrics.scope("scene_submit");
+                res.ctx.queue().submit([enc.finish()]);
+            }
             (res.target.resolve_view().clone(), resized, res.texture_id)
         };
 
+        let texture_timer = metrics.scope("scene_texture");
         let id = match existing {
             Some(id) => {
                 if resized {
@@ -726,6 +760,7 @@ impl GpuBridge {
                 .get_mut::<SceneResources>()?
                 .texture_id = Some(id);
         }
+        drop(texture_timer);
         Some(id)
     }
 }

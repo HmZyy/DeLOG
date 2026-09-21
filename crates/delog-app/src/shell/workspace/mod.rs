@@ -918,6 +918,7 @@ impl Behavior<'_> {
         tile_id: egui_tiles::TileId,
         pane: &mut Scene3dPane,
     ) -> egui_tiles::UiResponse {
+        let _scene_pane = self.services.metrics.scope("scene_pane");
         let rect = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
         if response.clicked() || response.drag_started() || response.secondary_clicked() {
@@ -1017,6 +1018,7 @@ impl Behavior<'_> {
 
         let scene_reference = pane.scene_frame.reference;
         let provider_id = self.services.scene3d.map_provider;
+        let tiles_timer = self.services.metrics.scope("scene_tiles");
         let ready_tiles = if let (Some(manager), Some(anchor), Some(map_provider)) = (
             self.services.tile_manager.as_deref_mut(),
             scene_reference,
@@ -1068,6 +1070,7 @@ impl Behavior<'_> {
             pane.update_map_selection(None);
             Vec::new()
         };
+        drop(tiles_timer);
 
         let draws: Vec<VehicleDraw> = self
             .services
@@ -1126,6 +1129,7 @@ impl Behavior<'_> {
                 map_tile_selection.clone(),
                 &ready_tiles,
                 &draws,
+                self.services.metrics,
             )
         };
         if let Some(tex) = rendered {
