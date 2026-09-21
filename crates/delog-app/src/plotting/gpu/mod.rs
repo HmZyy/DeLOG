@@ -676,6 +676,9 @@ impl GpuBridge {
                 let _t = metrics.scope("scene_veh_prep");
                 res.prepare_vehicles(vp_cols, camera.eye().to_array(), vehicles);
             }
+            if res.metrics.is_none() {
+                res.metrics = Some(Arc::clone(metrics));
+            }
             let uploads_before = res.map_tiles.upload_count();
             let allocs_before = res.map_tiles.allocation_count();
             let map_timer = metrics.scope("scene_map_prep");
@@ -1168,6 +1171,7 @@ struct SceneResources {
     /// Vertical world Y-axis line (the up axis the ground grid can't draw).
     axis_gizmo: SceneTraj,
     texture_id: Option<egui::TextureId>,
+    metrics: Option<Arc<MetricsRegistry>>,
 }
 
 impl SceneResources {
@@ -1227,6 +1231,7 @@ impl SceneResources {
             vehicles: HashMap::new(),
             axis_gizmo,
             texture_id: None,
+            metrics: None,
         }
     }
 
@@ -1394,6 +1399,10 @@ impl SceneResources {
         selection: &MapTileSelection,
         ready: &[ReadyTile],
     ) -> MapTileDrawGroups {
+        let metrics = self.metrics.clone();
+        if let Some(metrics) = metrics.as_ref() {
+            metrics.record("map_ready_len", ready.len() as f32);
+        }
         self.map_tiles.set_uniform(&view);
         if self.map_tile_epoch != selection.epoch {
             self.map_tile_epoch = selection.epoch;
@@ -1423,6 +1432,7 @@ impl SceneResources {
         }
         self.map_tile_clock += 1;
         let clock = self.map_tile_clock;
+        let scan_timer = metrics.as_ref().map(|m| m.scope("map_scan"));
         let changed = {
             let cache = self.map_tile_cache.entry(selection.scope).or_default();
             let mut changed = std::collections::HashSet::new();
@@ -1457,7 +1467,9 @@ impl SceneResources {
             }
             changed
         };
+        drop(scan_timer);
         self.admit_map_tiles(&changed, Some(selection.scope));
+        let visible_timer = metrics.as_ref().map(|m| m.scope("map_visible"));
         let cache = &self.map_tile_cache[&selection.scope];
         let mut visible = MapTileDrawGroups::default();
         for (key, tile) in cache {
@@ -1472,6 +1484,7 @@ impl SceneResources {
         }
         visible.fallback.sort_unstable();
         visible.current.sort_unstable();
+        drop(visible_timer);
         visible
     }
 
@@ -1480,6 +1493,8 @@ impl SceneResources {
         changed: &std::collections::HashSet<u64>,
         active_scope: Option<MapScopeId>,
     ) {
+        let metrics = self.metrics.clone();
+        let order_timer = metrics.as_ref().map(|m| m.scope("map_order"));
         let mut scopes: Vec<_> = self.map_tile_selections.keys().copied().collect();
         scopes.sort_by_key(|scope| scope.0);
         // Above capacity, not every scope can own a slot. Keep the pane being
@@ -1506,10 +1521,18 @@ impl SceneResources {
         let caches = &self.map_tile_cache;
         self.map_tile_last_seen
             .retain(|key, _| caches.values().any(|cache| cache.contains_key(key)));
+        drop(order_timer);
 
+        let evict_timer = metrics.as_ref().map(|m| m.scope("map_evict"));
         self.map_tiles.retain(order.iter().copied());
         self.map_tile_resident_signatures
             .retain(|key, _| admitted.contains(key));
+        drop(evict_timer);
+
+        if let Some(metrics) = metrics.as_ref() {
+            metrics.record("map_order_len", order.len() as f32);
+        }
+        let upload_timer = metrics.as_ref().map(|m| m.scope("map_upload"));
         for key in order {
             let tile = self
                 .map_tile_cache
@@ -1530,6 +1553,7 @@ impl SceneResources {
                     .insert(key, map_tile_signature(tile));
             }
         }
+        drop(upload_timer);
     }
 }
 
