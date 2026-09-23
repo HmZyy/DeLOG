@@ -113,6 +113,8 @@ pub struct TraceRef {
     pub visible: bool,
     /// Session-only, per-plot rename. `None` = derived `topic.field` label.
     pub label_override: Option<String>,
+    #[cfg(feature = "scripting")]
+    pub owner: Option<delog_script::ScriptOwner>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -241,6 +243,8 @@ impl PlotPane {
             mode: TraceMode::Line,
             visible: true,
             label_override: None,
+            #[cfg(feature = "scripting")]
+            owner: None,
         });
         true
     }
@@ -502,6 +506,8 @@ mod tests {
             mode: TraceMode::Step,
             visible: false,
             label_override: Some("v".to_string()),
+            #[cfg(feature = "scripting")]
+            owner: None,
         };
         assert!(pane.add_trace_ref(t.clone()));
         assert_eq!(pane.traces.len(), 1);

@@ -245,6 +245,49 @@ fn removing_an_annotation_clears_a_grab_on_it() {
 }
 
 #[test]
+#[cfg(feature = "scripting")]
+fn retaining_clears_selection_editor_and_grab_only_for_the_dropped_annotation() {
+    let mut layer = AnnotationLayer::default();
+    let at = DataPos { t_us: 0, y: 0.0 };
+    let dropped = layer.add(Kind::Rect, at, 1_000_000, 10.0);
+    let kept = layer.add(Kind::Rect, at, 1_000_000, 10.0);
+    layer.selected = Some(dropped);
+    layer.editing = Some(dropped);
+    layer.grab = Some(Grab::Handle {
+        id: dropped,
+        index: 0,
+    });
+
+    layer.retain(|a| a.id != dropped);
+
+    assert_eq!(
+        layer.items().iter().map(|a| a.id).collect::<Vec<_>>(),
+        vec![kept]
+    );
+    assert_eq!(layer.selected, None);
+    assert_eq!(layer.editing, None);
+    assert_eq!(layer.grab, None);
+}
+
+#[test]
+#[cfg(feature = "scripting")]
+fn retaining_leaves_bookkeeping_referencing_the_surviving_annotation_untouched() {
+    let mut layer = AnnotationLayer::default();
+    let at = DataPos { t_us: 0, y: 0.0 };
+    let dropped = layer.add(Kind::Rect, at, 1_000_000, 10.0);
+    let kept = layer.add(Kind::Rect, at, 1_000_000, 10.0);
+    layer.selected = Some(kept);
+    layer.editing = Some(kept);
+    layer.grab = Some(Grab::Handle { id: kept, index: 0 });
+
+    layer.retain(|a| a.id != dropped);
+
+    assert_eq!(layer.selected, Some(kept));
+    assert_eq!(layer.editing, Some(kept));
+    assert_eq!(layer.grab, Some(Grab::Handle { id: kept, index: 0 }));
+}
+
+#[test]
 fn added_annotations_take_distinct_palette_colors() {
     let mut layer = AnnotationLayer::default();
     let at = DataPos { t_us: 0, y: 0.0 };

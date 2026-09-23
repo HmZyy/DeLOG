@@ -19,7 +19,9 @@ struct PlotsHost;
 impl ControlHost for PlotsHost {
     fn call(&self, request: ControlRequest) -> Result<ControlResponse, String> {
         match request {
-            ControlRequest::Plots(PlotRequest::List) => Ok(ControlResponse::Plots(Vec::new())),
+            ControlRequest::Plots(PlotRequest::List { .. }) => {
+                Ok(ControlResponse::Plots(Vec::new()))
+            }
             other => Err(format!("unexpected request: {other:?}")),
         }
     }

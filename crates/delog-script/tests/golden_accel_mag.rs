@@ -13,7 +13,8 @@ use delog_core::schema::{FieldSchema, TopicSchema};
 use delog_core::snapshot::{DataStore, StoreSnapshot};
 use delog_core::store::TopicStore;
 use delog_script::{
-    ControlRequest, MarkerRequest, PendingMarker, ScriptCommand, ScriptEngine, ScriptEvent,
+    ControlRequest, GenerationRequest, MarkerRequest, PendingMarker, ScriptCommand, ScriptEngine,
+    ScriptEvent,
 };
 
 static SCRIPT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -206,16 +207,22 @@ fn marker_command_is_exported_and_delivered_before_done() {
                 ScriptEvent::Done => {
                     assert_eq!(
                         commands,
-                        vec![ControlRequest::Markers(MarkerRequest::Replace {
-                            owner: "analysis".into(),
-                            generation: 0,
-                            markers: vec![PendingMarker {
-                                time_us: 123,
-                                label: "golden".into(),
-                                color: None,
-                                note: String::new(),
-                            }],
-                        })]
+                        vec![
+                            ControlRequest::Markers(MarkerRequest::Replace {
+                                owner: "analysis".into(),
+                                generation: 0,
+                                markers: vec![PendingMarker {
+                                    time_us: 123,
+                                    label: "golden".into(),
+                                    color: None,
+                                    note: String::new(),
+                                }],
+                            }),
+                            ControlRequest::Generation(GenerationRequest::Commit {
+                                owner: "analysis".into(),
+                                generation: 0,
+                            }),
+                        ]
                     );
                     drop(engine);
                     drop(sender);

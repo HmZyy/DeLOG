@@ -387,6 +387,8 @@ fn trace_from_layout(trace: &TraceLayout, resolver: &mut Resolver<'_>) -> Option
         mode: trace.mode.into(),
         visible: trace.visible,
         label_override: None,
+        #[cfg(feature = "scripting")]
+        owner: None,
     })
 }
 
