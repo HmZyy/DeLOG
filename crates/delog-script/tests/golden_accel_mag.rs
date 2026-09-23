@@ -207,8 +207,8 @@ fn marker_command_is_exported_and_delivered_before_done() {
                 ScriptEvent::Done => {
                     assert_eq!(
                         commands,
-                        vec![
-                            ControlRequest::Markers(MarkerRequest::Replace {
+                        vec![ControlRequest::Batch(vec![
+                            ControlRequest::Markers(MarkerRequest::Append {
                                 owner: "analysis".into(),
                                 generation: 1,
                                 markers: vec![PendingMarker {
@@ -222,7 +222,7 @@ fn marker_command_is_exported_and_delivered_before_done() {
                                 owner: "analysis".into(),
                                 generation: 1,
                             }),
-                        ]
+                        ])]
                     );
                     drop(engine);
                     drop(sender);

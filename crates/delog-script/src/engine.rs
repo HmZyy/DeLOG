@@ -1057,6 +1057,7 @@ fn handle_command(
                 let live: crate::api::LiveTransformBuffer = std::rc::Rc::default();
                 let operations: crate::operations::OperationBuffer = std::rc::Rc::default();
                 let markers: crate::api::MarkerBuffer = std::rc::Rc::default();
+                let batches: crate::control::DeferredControlBuffer = std::rc::Rc::default();
                 let generation = *run_counter;
                 *run_counter += 1;
                 let run_result: Result<(), String> = Python::attach(|py| {
@@ -1069,6 +1070,7 @@ fn handle_command(
                             std::rc::Rc::clone(&live),
                             std::rc::Rc::clone(&operations),
                             std::rc::Rc::clone(&markers),
+                            std::rc::Rc::clone(&batches),
                             name.clone(),
                             generation,
                             Arc::clone(params),
@@ -1183,17 +1185,25 @@ fn handle_command(
                                 }
 
                                 let published_markers = std::mem::take(&mut *markers.borrow_mut());
-                                let _ = evt_tx.send(ScriptEvent::Control(vec![
-                                    ControlRequest::Markers(MarkerRequest::Replace {
+                                let mut requests = std::mem::take(&mut *batches.borrow_mut())
+                                    .into_iter()
+                                    .flatten()
+                                    .collect::<Vec<_>>();
+                                requests.push(ControlRequest::Markers(MarkerRequest::Append {
+                                    owner: name.clone(),
+                                    generation,
+                                    markers: published_markers,
+                                }));
+                                requests.push(ControlRequest::Generation(
+                                    GenerationRequest::Commit {
                                         owner: name.clone(),
                                         generation,
-                                        markers: published_markers,
-                                    }),
-                                    ControlRequest::Generation(GenerationRequest::Commit {
-                                        owner: name.clone(),
-                                        generation,
-                                    }),
-                                ]));
+                                    },
+                                ));
+                                let _ =
+                                    evt_tx.send(ScriptEvent::Control(vec![ControlRequest::Batch(
+                                        requests,
+                                    )]));
                                 params.lock().unwrap().finalize(
                                     &name,
                                     generation,
@@ -1203,6 +1213,7 @@ fn handle_command(
                             }
                             Err(error) => {
                                 markers.borrow_mut().clear();
+                                batches.borrow_mut().clear();
                                 // Preparation is deliberately before teardown/open so a bad
                                 // rerun leaves the prior generation intact.
                                 let _ = evt_tx.send(ScriptEvent::Control(vec![
@@ -1218,6 +1229,7 @@ fn handle_command(
                     Err(msg) => {
                         // No partial source on failure.
                         markers.borrow_mut().clear();
+                        batches.borrow_mut().clear();
                         let _ =
                             evt_tx.send(ScriptEvent::Control(vec![ControlRequest::Generation(
                                 GenerationRequest::Rollback {
@@ -1284,7 +1296,7 @@ fn handle_command(
                     sender.remove_source(previous);
                 }
                 let _ = evt_tx.send(ScriptEvent::Control(vec![ControlRequest::Markers(
-                    MarkerRequest::Remove {
+                    MarkerRequest::RemoveOwned {
                         owner: name.clone(),
                     },
                 )]));
@@ -1300,6 +1312,7 @@ fn handle_command(
                 let live: crate::api::LiveTransformBuffer = std::rc::Rc::default();
                 let operations: crate::operations::OperationBuffer = std::rc::Rc::default();
                 let markers: crate::api::MarkerBuffer = std::rc::Rc::default();
+                let batches: crate::control::DeferredControlBuffer = std::rc::Rc::default();
                 let generation = *run_counter;
                 *run_counter += 1;
                 Python::attach(|py| {
@@ -1312,6 +1325,7 @@ fn handle_command(
                             std::rc::Rc::clone(&live),
                             std::rc::Rc::clone(&operations),
                             std::rc::Rc::clone(&markers),
+                            std::rc::Rc::clone(&batches),
                             String::new(),
                             generation,
                             Arc::clone(params),
@@ -1349,15 +1363,20 @@ fn handle_command(
                 };
                 if installation_succeeded {
                     let published_markers = std::mem::take(&mut *markers.borrow_mut());
-                    let _ = evt_tx.send(ScriptEvent::Control(vec![ControlRequest::Markers(
-                        MarkerRequest::Append {
-                            owner: CONSOLE_SCRIPT_NAME.into(),
-                            generation,
-                            markers: published_markers,
-                        },
-                    )]));
+                    let mut requests = std::mem::take(&mut *batches.borrow_mut())
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<_>>();
+                    requests.push(ControlRequest::Markers(MarkerRequest::Append {
+                        owner: CONSOLE_SCRIPT_NAME.into(),
+                        generation,
+                        markers: published_markers,
+                    }));
+                    let _ =
+                        evt_tx.send(ScriptEvent::Control(vec![ControlRequest::Batch(requests)]));
                 } else {
                     markers.borrow_mut().clear();
+                    batches.borrow_mut().clear();
                 }
                 let _ = evt_tx.send(ScriptEvent::Done);
             }
@@ -1619,6 +1638,7 @@ fn ensure_delog_present(
                 std::rc::Rc::clone(&live),
                 std::rc::Rc::clone(&operations),
                 std::rc::Rc::clone(&markers),
+                std::rc::Rc::default(),
                 String::new(),
                 *run_counter,
                 Arc::clone(params),
@@ -1901,6 +1921,24 @@ mod tests {
         }
     }
 
+    fn expected_named_batch(
+        owner: &str,
+        generation: u64,
+        markers: Vec<crate::api::PendingMarker>,
+    ) -> ControlRequest {
+        ControlRequest::Batch(vec![
+            ControlRequest::Markers(MarkerRequest::Append {
+                owner: owner.into(),
+                generation,
+                markers,
+            }),
+            ControlRequest::Generation(GenerationRequest::Commit {
+                owner: owner.into(),
+                generation,
+            }),
+        ])
+    }
+
     #[test]
     fn marker_named_runs_replace_only_after_complete_success_and_unregister_removes() {
         let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -1919,17 +1957,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             control_requests_until_done(&engine),
-            vec![
-                ControlRequest::Markers(MarkerRequest::Replace {
-                    owner: "analysis".into(),
-                    generation: 1,
-                    markers: vec![expected_marker(42, "launch")],
-                }),
-                ControlRequest::Generation(GenerationRequest::Commit {
-                    owner: "analysis".into(),
-                    generation: 1,
-                }),
-            ]
+            vec![expected_named_batch(
+                "analysis",
+                1,
+                vec![expected_marker(42, "launch")],
+            )]
         );
 
         engine
@@ -1954,17 +1986,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             control_requests_until_done(&engine),
-            vec![
-                ControlRequest::Markers(MarkerRequest::Replace {
-                    owner: "analysis".into(),
-                    generation: 3,
-                    markers: vec![],
-                }),
-                ControlRequest::Generation(GenerationRequest::Commit {
-                    owner: "analysis".into(),
-                    generation: 3,
-                }),
-            ]
+            vec![expected_named_batch("analysis", 3, vec![])]
         );
 
         engine
@@ -1977,7 +1999,7 @@ mod tests {
                 ScriptEvent::Control(batch) => {
                     assert_eq!(
                         batch,
-                        vec![ControlRequest::Markers(MarkerRequest::Remove {
+                        vec![ControlRequest::Markers(MarkerRequest::RemoveOwned {
                             owner: "analysis".into()
                         })]
                     );
@@ -2052,17 +2074,7 @@ mark = delog.live_transform(topic="A", fields=["v"], output_topic="B")(MarkerCal
             .unwrap();
         assert_eq!(
             control_requests_until_done(&engine),
-            vec![
-                ControlRequest::Markers(MarkerRequest::Replace {
-                    owner: "analysis".into(),
-                    generation: 1,
-                    markers: vec![],
-                }),
-                ControlRequest::Generation(GenerationRequest::Commit {
-                    owner: "analysis".into(),
-                    generation: 1,
-                }),
-            ]
+            vec![expected_named_batch("analysis", 1, vec![])]
         );
 
         let schema = Arc::new(
@@ -2147,19 +2159,23 @@ mark = delog.live_transform(topic="A", fields=["v"], output_topic="B")(MarkerCal
         for (source, expected) in [
             (
                 "delog.add_marker(10, 'console marker')",
-                vec![ControlRequest::Markers(MarkerRequest::Append {
-                    owner: CONSOLE_SCRIPT_NAME.into(),
-                    generation: 1,
-                    markers: vec![expected_marker(10, "console marker")],
-                })],
+                vec![ControlRequest::Batch(vec![ControlRequest::Markers(
+                    MarkerRequest::Append {
+                        owner: CONSOLE_SCRIPT_NAME.into(),
+                        generation: 1,
+                        markers: vec![expected_marker(10, "console marker")],
+                    },
+                )])],
             ),
             (
                 "unrelated = 1",
-                vec![ControlRequest::Markers(MarkerRequest::Append {
-                    owner: CONSOLE_SCRIPT_NAME.into(),
-                    generation: 2,
-                    markers: vec![],
-                })],
+                vec![ControlRequest::Batch(vec![ControlRequest::Markers(
+                    MarkerRequest::Append {
+                        owner: CONSOLE_SCRIPT_NAME.into(),
+                        generation: 2,
+                        markers: vec![],
+                    },
+                )])],
             ),
             (
                 "delog.add_marker(20, 'discarded'); raise RuntimeError('boom')",
@@ -2209,17 +2225,7 @@ def mark(batch):
             .unwrap();
         assert_eq!(
             control_requests_until_done(&engine),
-            vec![
-                ControlRequest::Markers(MarkerRequest::Replace {
-                    owner: "live_markers".into(),
-                    generation: 1,
-                    markers: vec![],
-                }),
-                ControlRequest::Generation(GenerationRequest::Commit {
-                    owner: "live_markers".into(),
-                    generation: 1,
-                }),
-            ]
+            vec![expected_named_batch("live_markers", 1, vec![])]
         );
 
         let schema = Arc::new(
@@ -2282,13 +2288,13 @@ def mark(batch):
                 source: "delog.add_marker(42, 'launch')".into(),
             })
             .unwrap();
-        assert!(
-            control_requests_until_done(&engine).contains(&ControlRequest::Generation(
-                GenerationRequest::Commit {
-                    owner: "analysis".into(),
-                    generation: 1,
-                }
-            ))
+        assert_eq!(
+            control_requests_until_done(&engine),
+            vec![expected_named_batch(
+                "analysis",
+                1,
+                vec![expected_marker(42, "launch")],
+            )]
         );
 
         engine

@@ -1,7 +1,7 @@
 //! Layouts store fields as `topic.field`, never as runtime IDs or source
 //! labels, so the same plot/vehicle setup can be reused across logs.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -552,7 +552,8 @@ pub fn vehicle_config_from_layout(
         choices: &choices,
         diagnostics: Vec::new(),
         ambiguities: BTreeMap::new(),
-        collect_ambiguities: false,
+        unresolved: BTreeSet::new(),
+        warnings: Vec::new(),
     };
     vehicle_from_layout(v, &mut resolver)
 }
@@ -570,7 +571,8 @@ pub fn vehicle_config_from_layout_for_source(
         choices: &choices,
         diagnostics: Vec::new(),
         ambiguities: BTreeMap::new(),
-        collect_ambiguities: false,
+        unresolved: BTreeSet::new(),
+        warnings: Vec::new(),
     };
     vehicle_from_layout(v, &mut resolver)
 }
@@ -724,13 +726,15 @@ pub(crate) struct Resolver<'a> {
     pub(crate) choices: &'a HashMap<FieldRef, SourceId>,
     pub(crate) diagnostics: Vec<Diag>,
     pub(crate) ambiguities: BTreeMap<FieldRef, AmbiguousField>,
-    pub(crate) collect_ambiguities: bool,
+    pub(crate) unresolved: BTreeSet<FieldRef>,
+    pub(crate) warnings: Vec<String>,
 }
 
 impl Resolver<'_> {
     pub(crate) fn resolve(&mut self, key: &FieldRef) -> Option<FieldId> {
         if let Some(&source) = self.choices.get(key) {
             return self.resolve_in_source(source, key).or_else(|| {
+                self.unresolved.insert(key.clone());
                 self.diagnostics.push(layout_warning(format!(
                     "{}.{} no longer exists in selected source",
                     key.topic, key.field
@@ -749,6 +753,7 @@ impl Resolver<'_> {
             let source = live_sources[0].entry.id;
             let got = self.resolve_in_source(source, key);
             if got.is_none() {
+                self.unresolved.insert(key.clone());
                 self.diagnostics.push(layout_warning(format!(
                     "{}.{} not found in loaded source",
                     key.topic, key.field
@@ -767,13 +772,14 @@ impl Resolver<'_> {
         match matches.as_slice() {
             [(_, _, field)] => Some(*field),
             [] => {
+                self.unresolved.insert(key.clone());
                 self.diagnostics.push(layout_warning(format!(
                     "{}.{} not found in loaded sources",
                     key.topic, key.field
                 )));
                 None
             }
-            _ if self.collect_ambiguities => {
+            _ => {
                 self.ambiguities
                     .entry(key.clone())
                     .or_insert_with(|| AmbiguousField {
@@ -789,7 +795,6 @@ impl Resolver<'_> {
                     });
                 None
             }
-            _ => None,
         }
     }
 

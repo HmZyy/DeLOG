@@ -27,6 +27,16 @@ pub struct LayoutApply {
     pub follow_live: bool,
     pub vehicles: Vec<VehicleConfig>,
     pub diagnostics: Vec<Diag>,
+    #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
+    pub report: LayoutReport,
+}
+
+#[cfg_attr(not(feature = "scripting"), allow(dead_code))]
+#[derive(Clone, Debug, Default)]
+pub struct LayoutReport {
+    pub ambiguous: Vec<AmbiguousField>,
+    pub unresolved: Vec<FieldRef>,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -74,6 +84,11 @@ impl PendingLayout {
 
     pub fn ambiguity_count(&self) -> usize {
         self.ambiguities.len()
+    }
+
+    #[allow(dead_code)]
+    pub fn ambiguities(&self) -> &[AmbiguousField] {
+        &self.ambiguities
     }
 
     pub fn apply(self, snapshot: &StoreSnapshot) -> LayoutApply {
@@ -296,7 +311,8 @@ fn apply_doc(
         choices,
         diagnostics: Vec::new(),
         ambiguities: BTreeMap::new(),
-        collect_ambiguities,
+        unresolved: std::collections::BTreeSet::new(),
+        warnings: Vec::new(),
     };
     if collect_ambiguities {
         collect_field_refs(&doc, &mut resolver);
@@ -333,6 +349,12 @@ fn apply_doc(
         .filter_map(|v| vehicle_from_layout(v, &mut resolver))
         .collect::<Vec<_>>();
 
+    let report = LayoutReport {
+        ambiguous: resolver.ambiguities.into_values().collect(),
+        unresolved: resolver.unresolved.into_iter().collect(),
+        warnings: resolver.warnings,
+    };
+
     Ok(LayoutApply {
         workspace,
         windows,
@@ -341,6 +363,7 @@ fn apply_doc(
         follow_live: doc.playback.follow_live,
         vehicles,
         diagnostics: resolver.diagnostics,
+        report,
     })
 }
 
@@ -441,15 +464,16 @@ fn insert_node(
 
 fn restore_annotation(pane: &mut PlotPane, layout: &AnnotationLayout, resolver: &mut Resolver<'_>) {
     let Some(geom) = geometry_from_layout(layout) else {
-        resolver.diagnostics.push(Diag::warning(
-            "layout",
-            format!(
-                "annotation \"{}\" has {} point(s), which doesn't match kind \"{}\"; skipped",
-                layout.label,
-                layout.points.len(),
-                layout.kind
-            ),
-        ));
+        let warning = format!(
+            "annotation \"{}\" has {} point(s), which doesn't match kind \"{}\"; skipped",
+            layout.label,
+            layout.points.len(),
+            layout.kind
+        );
+        resolver
+            .diagnostics
+            .push(Diag::warning("layout", warning.clone()));
+        resolver.warnings.push(warning);
         return;
     };
     let id = pane.annotations.add_geometry(geom);

@@ -4,7 +4,7 @@ use pyo3::prelude::*;
 use crate::control::{
     ControlRequest, ControlResponse, PlotContext, ProfileFieldRef, ProfileNedReference,
     ProfileOrientation, ProfilePosition, VehicleProfileInfo, VehicleProfileRequest,
-    call_immediate_detached,
+    call_immediate_detached, control_call_error,
 };
 
 use super::{VehiclePy, format_color, model_name, resolve_source, vehicle_from_info};
@@ -396,7 +396,7 @@ impl ProfileNedReferencePy {
 
 fn request_profile(py: Python<'_>, request: VehicleProfileRequest) -> PyResult<ControlResponse> {
     call_immediate_detached(py, ControlRequest::VehicleProfiles(request))
-        .map_err(PyRuntimeError::new_err)
+        .map_err(control_call_error)
 }
 
 fn request_profile_unit(py: Python<'_>, request: VehicleProfileRequest) -> PyResult<()> {

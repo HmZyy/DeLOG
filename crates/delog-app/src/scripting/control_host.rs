@@ -103,7 +103,7 @@ mod tests {
     fn a_request_is_answered_by_whoever_drains_the_queue() {
         let (host, queue) = ScriptControlHost::new(egui::Context::default());
         let worker = std::thread::spawn(move || {
-            host.call(ControlRequest::Markers(MarkerRequest::Remove {
+            host.call(ControlRequest::Markers(MarkerRequest::RemoveOwned {
                 owner: "flight.py".into(),
             }))
         });
@@ -122,7 +122,7 @@ mod tests {
         let (host, _queue) = ScriptControlHost::new(egui::Context::default());
         let error = host
             .call_with_timeout(
-                ControlRequest::Markers(MarkerRequest::Remove {
+                ControlRequest::Markers(MarkerRequest::RemoveOwned {
                     owner: "flight.py".into(),
                 }),
                 std::time::Duration::from_millis(50),
@@ -136,7 +136,7 @@ mod tests {
         let (host, queue) = ScriptControlHost::new(egui::Context::default());
         let error = host
             .call_with_timeout(
-                ControlRequest::Markers(MarkerRequest::Remove {
+                ControlRequest::Markers(MarkerRequest::RemoveOwned {
                     owner: "flight.py".into(),
                 }),
                 std::time::Duration::from_millis(50),
@@ -162,7 +162,7 @@ mod tests {
 
         let worker = std::thread::spawn(move || {
             host.call_with_timeout(
-                ControlRequest::Markers(MarkerRequest::Remove {
+                ControlRequest::Markers(MarkerRequest::RemoveOwned {
                     owner: "flight.py".into(),
                 }),
                 std::time::Duration::from_millis(200),

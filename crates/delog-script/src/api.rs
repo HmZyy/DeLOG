@@ -101,7 +101,7 @@ impl Drop for MarkerBufferOverride {
     }
 }
 
-fn active_marker_buffer() -> Option<MarkerBuffer> {
+pub(crate) fn active_marker_buffer() -> Option<MarkerBuffer> {
     MARKER_BUFFER_OVERRIDE.with(|current| current.borrow().clone())
 }
 
@@ -131,6 +131,25 @@ pub(crate) fn parse_marker_color(color: &str) -> PyResult<[f32; 4]> {
             1.0
         },
     ])
+}
+
+pub(crate) fn pending_marker(
+    time_us: i64,
+    label: String,
+    color: Option<String>,
+    note: Option<String>,
+) -> PyResult<PendingMarker> {
+    if label.is_empty() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "marker label must not be empty",
+        ));
+    }
+    Ok(PendingMarker {
+        time_us,
+        label,
+        color: color.as_deref().map(parse_marker_color).transpose()?,
+        note: note.unwrap_or_default(),
+    })
 }
 
 /// `(times_us, values, strings)`; `strings` is `Some` only for Utf8/LargeUtf8
@@ -428,6 +447,7 @@ pub struct Delog {
     live: LiveTransformBuffer,
     operations: OperationBuffer,
     markers: MarkerBuffer,
+    batches: crate::control::DeferredControlBuffer,
     script_name: String,
     generation: u64,
     params: SharedParams,
@@ -441,6 +461,7 @@ impl Delog {
         live: LiveTransformBuffer,
         operations: OperationBuffer,
         markers: MarkerBuffer,
+        batches: crate::control::DeferredControlBuffer,
         script_name: String,
         generation: u64,
         params: SharedParams,
@@ -451,6 +472,7 @@ impl Delog {
             live,
             operations,
             markers,
+            batches,
             script_name,
             generation,
             params,
@@ -478,6 +500,14 @@ impl Delog {
             name: self.script_name.clone(),
             generation: self.generation,
         })
+    }
+
+    fn marker_owner(&self) -> String {
+        if self.script_name.is_empty() {
+            "console".into()
+        } else {
+            self.script_name.clone()
+        }
     }
 
     fn plot_context(&self) -> crate::control::PlotContext {
@@ -772,17 +802,18 @@ impl Delog {
         color: Option<String>,
         note: Option<String>,
     ) -> PyResult<()> {
-        if label.is_empty() {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "marker label must not be empty",
-            ));
+        let marker = pending_marker(time_us, label, color, note)?;
+        let request =
+            crate::control::ControlRequest::Markers(crate::control::MarkerRequest::Append {
+                owner: self.marker_owner(),
+                generation: self.generation,
+                markers: vec![marker.clone()],
+            });
+        if crate::control::stage_batch_request(&request)
+            .map_err(crate::control::control_call_error)?
+        {
+            return Ok(());
         }
-        let marker = PendingMarker {
-            time_us,
-            label,
-            color: color.as_deref().map(parse_marker_color).transpose()?,
-            note: note.unwrap_or_default(),
-        };
         let markers = active_marker_buffer().unwrap_or_else(|| Rc::clone(&self.markers));
         markers.borrow_mut().push(marker);
         Ok(())
@@ -1051,6 +1082,24 @@ impl Delog {
     #[getter]
     fn annotations(&self) -> crate::control::annotations::GlobalAnnotationsPy {
         crate::control::annotations::GlobalAnnotationsPy
+    }
+
+    #[getter]
+    fn markers(&self) -> crate::control::markers::MarkerCollectionPy {
+        crate::control::markers::MarkerCollectionPy::new(
+            Rc::clone(&self.markers),
+            self.marker_owner(),
+            self.generation,
+        )
+    }
+
+    #[getter]
+    fn layouts(&self) -> crate::control::layouts::LayoutsPy {
+        crate::control::layouts::LayoutsPy
+    }
+
+    fn batch(&self) -> crate::control::BatchPy {
+        crate::control::BatchPy::new(Rc::clone(&self.batches))
     }
 
     #[getter]
@@ -1490,6 +1539,7 @@ mod tests {
             LiveTransformBuffer::default(),
             OperationBuffer::default(),
             markers,
+            crate::control::DeferredControlBuffer::default(),
             String::new(),
             0,
             crate::params::shared_empty(),
@@ -1587,7 +1637,7 @@ delog.add_marker(44, "rgba", color="#11223344")
     }
 
     #[test]
-    fn add_marker_has_no_aliases_and_live_transforms_capture_its_buffer() {
+    fn marker_collection_is_not_a_legacy_method_alias_and_live_transforms_capture_its_buffer() {
         Python::attach(|py| {
             let markers = MarkerBuffer::default();
             let live = LiveTransformBuffer::default();
@@ -1599,15 +1649,17 @@ delog.add_marker(44, "rgba", color="#11223344")
                     Rc::clone(&live),
                     OperationBuffer::default(),
                     Rc::clone(&markers),
+                    crate::control::DeferredControlBuffer::default(),
                     String::new(),
                     0,
                     crate::params::shared_empty(),
                 ),
             )
             .unwrap();
-            for alias in ["add_markers", "marker", "markers"] {
+            for alias in ["add_markers", "marker"] {
                 assert!(!delog.hasattr(alias).unwrap(), "unexpected alias: {alias}");
             }
+            assert!(delog.hasattr("markers").unwrap());
             let locals = PyDict::new(py);
             locals.set_item("delog", delog).unwrap();
             let code = std::ffi::CString::new(
@@ -1636,6 +1688,7 @@ def callback(batch):
                     LiveTransformBuffer::default(),
                     OperationBuffer::default(),
                     MarkerBuffer::default(),
+                    crate::control::DeferredControlBuffer::default(),
                     String::new(),
                     0,
                     crate::params::shared_empty(),
@@ -1672,6 +1725,7 @@ def callback(batch):
                     LiveTransformBuffer::default(),
                     OperationBuffer::default(),
                     MarkerBuffer::default(),
+                    crate::control::DeferredControlBuffer::default(),
                     String::new(),
                     0,
                     crate::params::shared_empty(),
@@ -1703,6 +1757,7 @@ def callback(batch):
                     LiveTransformBuffer::default(),
                     Rc::clone(&operations),
                     MarkerBuffer::default(),
+                    crate::control::DeferredControlBuffer::default(),
                     String::new(),
                     0,
                     crate::params::shared_empty(),
@@ -1765,6 +1820,7 @@ delog.split_by("PARAM_VALUE", "param_id")
                     LiveTransformBuffer::default(),
                     Rc::clone(&operations),
                     MarkerBuffer::default(),
+                    crate::control::DeferredControlBuffer::default(),
                     String::new(),
                     0,
                     crate::params::shared_empty(),
@@ -1809,6 +1865,7 @@ delog.split_by("PARAM_VALUE", "param_id")
                     LiveTransformBuffer::default(),
                     Rc::clone(&operations),
                     MarkerBuffer::default(),
+                    crate::control::DeferredControlBuffer::default(),
                     String::new(),
                     0,
                     crate::params::shared_empty(),

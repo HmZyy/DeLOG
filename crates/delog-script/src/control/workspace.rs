@@ -3,7 +3,7 @@ use pyo3::prelude::*;
 use super::plots::{PlotPy, plot_from_info};
 use super::{
     ControlRequest, ControlResponse, PlaybackRequest, PlotContext, SplitDirection,
-    WorkspaceRequest, call_immediate_detached,
+    WorkspaceRequest, call_immediate_detached, control_call_error,
 };
 
 #[pyclass(unsendable, name = "Workspace", skip_from_py_object)]
@@ -60,7 +60,7 @@ impl WorkspacePy {
 impl WorkspacePy {
     fn request_plot(&self, py: Python<'_>, request: WorkspaceRequest) -> PyResult<PlotPy> {
         let response = call_immediate_detached(py, ControlRequest::Workspace(request))
-            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+            .map_err(control_call_error)?;
         match response {
             ControlResponse::Plots(infos) => match infos.into_iter().next() {
                 Some(info) => Ok(plot_from_info(info, self.context.clone())),
@@ -77,7 +77,7 @@ impl WorkspacePy {
     fn request_unit(&self, py: Python<'_>, request: WorkspaceRequest) -> PyResult<()> {
         call_immediate_detached(py, ControlRequest::Workspace(request))
             .map(|_| ())
-            .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+            .map_err(control_call_error)
     }
 }
 
@@ -93,7 +93,7 @@ impl WindowsPy {
             py,
             ControlRequest::Workspace(WorkspaceRequest::OpenWindow { title }),
         )
-        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        .map_err(control_call_error)?;
         match response {
             ControlResponse::Window(id) => Ok(WindowPy { id }),
             _ => Err(pyo3::exceptions::PyRuntimeError::new_err(
@@ -155,7 +155,7 @@ impl PlaybackPy {
     fn request(&self, py: Python<'_>, request: PlaybackRequest) -> PyResult<()> {
         call_immediate_detached(py, ControlRequest::Playback(request))
             .map(|_| ())
-            .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+            .map_err(control_call_error)
     }
 }
 

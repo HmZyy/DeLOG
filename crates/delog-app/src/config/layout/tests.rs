@@ -318,7 +318,8 @@ fn one_loaded_source_resolves_topic_field_without_source() {
         choices: &HashMap::new(),
         diagnostics: Vec::new(),
         ambiguities: BTreeMap::new(),
-        collect_ambiguities: true,
+        unresolved: BTreeSet::new(),
+        warnings: Vec::new(),
     };
 
     let got = resolver.resolve(&FieldRef {
@@ -339,7 +340,8 @@ fn duplicate_topic_field_across_sources_is_ambiguous() {
         choices: &HashMap::new(),
         diagnostics: Vec::new(),
         ambiguities: BTreeMap::new(),
-        collect_ambiguities: true,
+        unresolved: BTreeSet::new(),
+        warnings: Vec::new(),
     };
 
     let got = resolver.resolve(&FieldRef {

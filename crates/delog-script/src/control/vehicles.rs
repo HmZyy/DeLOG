@@ -8,7 +8,7 @@ use crate::api::parse_marker_color;
 use super::{
     ControlRequest, ControlResponse, PlotContext, ResolvedVehicleField, VehicleFilter, VehicleInfo,
     VehicleModel, VehicleNedReference, VehicleOrientation, VehiclePatch, VehiclePosition,
-    VehicleRequest, VehicleSpec, call_immediate_detached,
+    VehicleRequest, VehicleSpec, call_immediate_detached, control_call_error, stage_batch_request,
 };
 
 pub(crate) mod profiles;
@@ -220,18 +220,52 @@ impl VehiclePy {
 
 impl VehiclePy {
     fn submit_patch(&mut self, py: Python<'_>, patch: VehiclePatch) -> PyResult<()> {
-        let mut infos = request_vehicles(
-            py,
-            VehicleRequest::Set {
-                id: self.info.id,
-                patch,
-            },
-        )?;
+        let request = VehicleRequest::Set {
+            id: self.info.id,
+            patch: patch.clone(),
+        };
+        if stage_batch_request(&ControlRequest::Vehicles(request.clone()))
+            .map_err(control_call_error)?
+        {
+            apply_patch_to_spec(&mut self.info.spec, patch);
+            return Ok(());
+        }
+        let mut infos = request_vehicles(py, request)?;
         if infos.len() != 1 || infos[0].id != self.info.id {
             return Err(wrong_response());
         }
         self.info = infos.remove(0);
         Ok(())
+    }
+}
+
+fn apply_patch_to_spec(spec: &mut VehicleSpec, patch: VehiclePatch) {
+    if let Some(value) = patch.label {
+        spec.label = value;
+    }
+    if let Some(value) = patch.show {
+        spec.show = value;
+    }
+    if let Some(value) = patch.show_path {
+        spec.show_path = value;
+    }
+    if let Some(value) = patch.position {
+        spec.position = value;
+    }
+    if let Some(value) = patch.orientation {
+        spec.orientation = value;
+    }
+    if let Some(value) = patch.model {
+        spec.model = value;
+    }
+    if let Some(value) = patch.color {
+        spec.color = value;
+    }
+    if let Some(value) = patch.path_color {
+        spec.path_color = value;
+    }
+    if let Some(value) = patch.scale {
+        spec.scale = value;
     }
 }
 
@@ -492,7 +526,7 @@ pub(crate) fn static_orientation() -> VehicleOrientationPy {
 
 fn request_vehicles(py: Python<'_>, request: VehicleRequest) -> PyResult<Vec<VehicleInfo>> {
     let response = call_immediate_detached(py, ControlRequest::Vehicles(request))
-        .map_err(PyRuntimeError::new_err)?;
+        .map_err(control_call_error)?;
     match response {
         ControlResponse::Vehicles(infos) => Ok(infos),
         _ => Err(wrong_response()),
@@ -501,7 +535,7 @@ fn request_vehicles(py: Python<'_>, request: VehicleRequest) -> PyResult<Vec<Veh
 
 fn request_unit(py: Python<'_>, request: VehicleRequest) -> PyResult<()> {
     let response = call_immediate_detached(py, ControlRequest::Vehicles(request))
-        .map_err(PyRuntimeError::new_err)?;
+        .map_err(control_call_error)?;
     match response {
         ControlResponse::Unit => Ok(()),
         _ => Err(wrong_response()),

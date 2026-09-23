@@ -36,14 +36,14 @@ pub struct InspectorTrace {
     pub color: egui::Color32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
 pub enum Pane {
     Plot(PlotPane),
     Scene3D(Scene3dPane),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Scene3dPane {
     pub(crate) map_scope: MapScopeId,
     pub camera: OrbitCamera,
@@ -154,6 +154,7 @@ impl DropEdge {
     }
 }
 
+#[derive(Clone)]
 pub struct Workspace {
     pub tree: TileTree,
     pub focused: Option<egui_tiles::TileId>,
@@ -608,7 +609,7 @@ impl Workspace {
             .collect()
     }
 
-    fn plot_panes(&self) -> impl Iterator<Item = &PlotPane> + '_ {
+    pub(crate) fn plot_panes(&self) -> impl Iterator<Item = &PlotPane> + '_ {
         self.tree.tiles.tiles().filter_map(|tile| match tile {
             egui_tiles::Tile::Pane(Pane::Plot(pane)) => Some(pane),
             egui_tiles::Tile::Pane(Pane::Scene3D(_)) | egui_tiles::Tile::Container(_) => None,

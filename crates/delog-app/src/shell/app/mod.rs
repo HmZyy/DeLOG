@@ -1281,6 +1281,30 @@ impl DelogApp {
         self.vehicle_trajectories.clear();
     }
 
+    #[cfg(feature = "scripting")]
+    fn apply_layout_control_effects(&mut self, effects: control_service::LayoutControlEffects) {
+        if effects.interrupt_layout {
+            self.sequences.interrupt_layout();
+        }
+        if effects.reset_view {
+            self.view = None;
+            self.view_fitted = false;
+            self.fit_view_all = true;
+        }
+        if effects.clear_transients {
+            self.fit_view_all = DEFAULT_FIT_VIEW_ALL;
+            self.marker_us = None;
+            self.vehicle_dialog = crate::session::vehicle_dialog::VehicleDialog::default();
+            self.pending_layout = None;
+            self.deferred_layout_doc = None;
+            self.traj_building = None;
+            self.vehicle_trajectories.clear();
+        }
+        if effects.invalidate_catalog {
+            self.dynamic_command_catalog.invalidate();
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn clear_current_layout_state(
         workspace: &mut Workspace,
@@ -3628,6 +3652,7 @@ impl eframe::App for DelogApp {
             );
             let vehicle_profiles =
                 crate::session::vehicle_profiles::VehicleProfileLibrary::from_config_dir();
+            let mut layout_effects = control_service::LayoutControlEffects::default();
             if let Some(queue) = self.scripts.control_queue() {
                 let mut control = control_service::AppControl {
                     markers: &mut self.markers,
@@ -3643,30 +3668,44 @@ impl eframe::App for DelogApp {
                     traj_dirty: &mut self.traj_dirty,
                     vehicle_profiles: vehicle_profiles.as_ref(),
                 };
-                queue.drain_with(|request| control_service::apply(&mut control, request));
+                queue.drain_with(|request| {
+                    let effects = control_service::LayoutControlEffects::for_success(&request);
+                    let result = control_service::apply(&mut control, request);
+                    if result.is_ok() {
+                        layout_effects.merge(effects);
+                    }
+                    result
+                });
             }
+            self.apply_layout_control_effects(layout_effects);
             for batch in self.scripts.take_control_batches() {
                 for request in batch {
-                    let mut control = control_service::AppControl {
-                        markers: &mut self.markers,
-                        workspace: &mut self.workspace,
-                        windows: &mut self.windows,
-                        playback: &mut self.playback,
-                        next_window_id: &mut self.next_window_id,
-                        caches: &mut self.caches,
-                        snapshot: &snapshot,
-                        vehicles: &mut self.vehicles,
-                        next_vehicle_id: &mut self.next_vehicle_id,
-                        vehicle_revision: &mut self.vehicle_revision,
-                        traj_dirty: &mut self.traj_dirty,
-                        vehicle_profiles: vehicle_profiles.as_ref(),
+                    let effects = control_service::LayoutControlEffects::for_success(&request);
+                    let result = {
+                        let mut control = control_service::AppControl {
+                            markers: &mut self.markers,
+                            workspace: &mut self.workspace,
+                            windows: &mut self.windows,
+                            playback: &mut self.playback,
+                            next_window_id: &mut self.next_window_id,
+                            caches: &mut self.caches,
+                            snapshot: &snapshot,
+                            vehicles: &mut self.vehicles,
+                            next_vehicle_id: &mut self.next_vehicle_id,
+                            vehicle_revision: &mut self.vehicle_revision,
+                            traj_dirty: &mut self.traj_dirty,
+                            vehicle_profiles: vehicle_profiles.as_ref(),
+                        };
+                        control_service::apply(&mut control, request)
                     };
-                    if let Err(error) = control_service::apply(&mut control, request) {
+                    if let Err(error) = result {
                         self.push_log(PendingLog::with_target(
                             LogLevel::Error,
                             "python-control",
                             error,
                         ));
+                    } else {
+                        self.apply_layout_control_effects(effects);
                     }
                 }
             }

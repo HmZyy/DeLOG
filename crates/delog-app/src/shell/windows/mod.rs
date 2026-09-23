@@ -32,7 +32,7 @@ impl WindowId {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct WindowBrowser {
     pub query: String,
     pub filter: BrowserFilterCache,
@@ -40,6 +40,7 @@ pub struct WindowBrowser {
     pub collapsed: bool,
 }
 
+#[derive(Clone)]
 pub struct ExtendedWindow {
     pub id: WindowId,
     pub title: String,
