@@ -769,11 +769,12 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use delog_api::markers::PendingMarker;
     use delog_script::{
-        GenerationRequest, LayoutRequest, MarkerPatch, MarkerRequest, PendingMarker,
-        ProfilePosition, ResolvedVehicleField, ScriptOwner, VehicleFilter, VehicleInfo,
-        VehicleModel, VehicleOrientation, VehiclePatch, VehiclePosition, VehicleProfileRequest,
-        VehicleRequest, VehicleSpec,
+        GenerationRequest, LayoutRequest, MarkerPatch, MarkerRequest, ProfilePosition,
+        ResolvedVehicleField, ScriptOwner, VehicleFilter, VehicleInfo, VehicleModel,
+        VehicleOrientation, VehiclePatch, VehiclePosition, VehicleProfileRequest, VehicleRequest,
+        VehicleSpec,
     };
 
     fn marker(time_us: i64, label: &str) -> PendingMarker {

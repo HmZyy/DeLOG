@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 
+use delog_api::catalog::{
+    TopicMatch, candidate_topic_paths, find_fields_in_topic, find_topics, materialize_field,
+};
+use delog_core::derived::{PendingColumn, PendingField, PendingTopic};
 use delog_core::identity::SourceId;
 use delog_core::snapshot::StoreSnapshot;
 
-use crate::api::{
-    PendingColumn, PendingField, PendingTopic, TopicMatch, find_fields_in_topic, find_topics,
-    materialize_field,
-};
 use crate::operations::{
     MergeSpec, OperationMode, OperationSpec, SplitBySpec, TopicRegistry, TopicSelector,
     TransformSpec,
@@ -93,14 +93,6 @@ struct MaterializedTopic {
     key: StreamKey,
     times: Vec<i64>,
     fields: Vec<(String, PendingColumn, Option<String>)>,
-}
-
-fn candidate_topic_paths(matches: &[TopicMatch]) -> String {
-    matches
-        .iter()
-        .map(|candidate| format!("{}/{}", candidate.source_label, candidate.topic_name))
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 fn missing_topic_error(snapshot: &StoreSnapshot, selector: &TopicSelector) -> String {
@@ -241,7 +233,15 @@ fn materialize_topic(
     let mut times = None;
     let mut fields = Vec::with_capacity(selected.len());
     for (field, schema_field) in selected {
-        let (field_times, values, strings) = materialize_field(snapshot, field.field_id)?;
+        let materialized = materialize_field(
+            snapshot,
+            field.field_id,
+            crate::context::current_timestamp_mode(),
+        )
+        .map_err(|error| error.into_message())?;
+        let field_times = materialized.times_us;
+        let values = materialized.values;
+        let strings = materialized.strings;
         match &times {
             Some(existing) if existing != &field_times => {
                 return Err(format!(
@@ -668,10 +668,10 @@ mod tests {
     use delog_core::snapshot::StoreSnapshot;
     use delog_core::store::TopicStore;
 
-    use crate::api::{PendingColumn, PendingTopic};
     use crate::operations::{
         MergeSpec, OperationMode, OperationSpec, SplitBySpec, TopicSelector, TransformSpec,
     };
+    use delog_core::derived::{PendingColumn, PendingTopic};
 
     use super::{StreamKey, prepare_snapshot};
 
@@ -1327,7 +1327,7 @@ mod tests {
         let snap =
             StoreSnapshot::from_registry(&ids, [(empty, Arc::new(TopicStore::new(schema)))], 0)
                 .unwrap();
-        let topic_match = crate::api::find_topics(&snap, Some("EMPTY"), None, None)
+        let topic_match = delog_api::catalog::find_topics(&snap, Some("EMPTY"), None, None)
             .into_iter()
             .next()
             .unwrap();
@@ -1432,7 +1432,7 @@ mod tests {
         let snap =
             StoreSnapshot::from_registry(&ids, [(topic, Arc::new(TopicStore::new(schema)))], 0)
                 .unwrap();
-        let topic_match = crate::api::find_topics(&snap, Some("MISMATCH"), None, None)
+        let topic_match = delog_api::catalog::find_topics(&snap, Some("MISMATCH"), None, None)
             .into_iter()
             .next()
             .unwrap();
@@ -1465,7 +1465,7 @@ mod tests {
         let snap =
             StoreSnapshot::from_registry(&ids, [(topic, Arc::new(TopicStore::new(schema)))], 0)
                 .unwrap();
-        let topic_match = crate::api::find_topics(&snap, Some("MISMATCH"), None, None)
+        let topic_match = delog_api::catalog::find_topics(&snap, Some("MISMATCH"), None, None)
             .into_iter()
             .next()
             .unwrap();

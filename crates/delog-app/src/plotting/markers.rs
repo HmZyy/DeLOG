@@ -3,9 +3,11 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 
 #[cfg(feature = "scripting")]
+use delog_api::markers::PendingMarker;
+#[cfg(feature = "scripting")]
 use delog_script::{
     ControlResponse, MarkerFilter, MarkerInfo, MarkerOrigin as ScriptMarkerOrigin, MarkerPatch,
-    MarkerRequest, PendingMarker,
+    MarkerRequest,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

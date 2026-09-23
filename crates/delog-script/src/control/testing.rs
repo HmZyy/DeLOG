@@ -34,7 +34,7 @@ fn globals_with_delog_named_and_markers(
     snapshot: Arc<StoreSnapshot>,
     script_name: String,
     generation: u64,
-    markers: crate::api::MarkerBuffer,
+    markers: crate::staging::MarkerBuffer,
 ) -> Result<Bound<'_, PyDict>, String> {
     let globals = PyDict::new(py);
     let delog = crate::api::Delog::new(
@@ -87,10 +87,10 @@ pub fn eval_with_host_and_staged_batches(
 pub fn eval_with_host_and_staged_markers(
     host: Arc<dyn ControlHost>,
     statement: &str,
-) -> Result<Vec<crate::api::PendingMarker>, String> {
+) -> Result<Vec<delog_api::markers::PendingMarker>, String> {
     let _guard = install_host(Some(host));
     Python::attach(|py| {
-        let markers: crate::api::MarkerBuffer = std::rc::Rc::default();
+        let markers: crate::staging::MarkerBuffer = std::rc::Rc::default();
         let globals = globals_with_delog_named_and_markers(
             py,
             Arc::new(StoreSnapshot::empty()),

@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray};
 use arrow::datatypes::DataType;
+use delog_core::derived::{PendingColumn, PendingField};
 use delog_core::field_view::{array_row_as_f64, array_row_as_str};
 use delog_core::identity::SourceId;
 use delog_core::ingest::ParsedBatch;
@@ -11,8 +12,6 @@ use delog_core::schema::{FieldSchema, TopicSchema};
 use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 use pyo3::exceptions::{PyAttributeError, PyValueError};
 use pyo3::prelude::*;
-
-use crate::api::{PendingColumn, PendingField};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveTransformSpec {

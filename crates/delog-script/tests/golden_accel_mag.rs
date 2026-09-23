@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use arrow::array::{ArrayRef, Float64Array, Int64Array};
 use arrow::datatypes::DataType;
+use delog_api::markers::PendingMarker;
 use delog_core::chunk::Chunk;
 use delog_core::identity::IdentityRegistry;
 use delog_core::ingest::ingest_channel;
@@ -13,8 +14,7 @@ use delog_core::schema::{FieldSchema, TopicSchema};
 use delog_core::snapshot::{DataStore, StoreSnapshot};
 use delog_core::store::TopicStore;
 use delog_script::{
-    ControlRequest, GenerationRequest, MarkerRequest, PendingMarker, ScriptCommand, ScriptEngine,
-    ScriptEvent,
+    ControlRequest, GenerationRequest, MarkerRequest, ScriptCommand, ScriptEngine, ScriptEvent,
 };
 
 static SCRIPT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -90,6 +90,44 @@ fn read_store_with_baro_gps() -> Arc<DataStore> {
     let snap =
         StoreSnapshot::from_registry(&id, [(baro, baro_store), (gps, gps_store)], 0).unwrap();
     Arc::new(DataStore::from_snapshot(snap))
+}
+
+fn read_store_with_empty_topic() -> Arc<DataStore> {
+    let mut id = IdentityRegistry::new();
+    let src = id.add_source("flight");
+    let populated = id.add_topic(src, "BARO").unwrap();
+    let empty = id.add_topic(src, "STATUS").unwrap();
+    id.add_field(populated, "Alt").unwrap();
+    id.add_field(empty, "Mode").unwrap();
+
+    let populated_schema = Arc::new(
+        TopicSchema::new(
+            "BARO",
+            [FieldSchema::new("Alt", DataType::Float64, Some("m"), 1.0).unwrap()],
+        )
+        .unwrap(),
+    );
+    let empty_schema = Arc::new(
+        TopicSchema::new(
+            "STATUS",
+            [FieldSchema::new("Mode", DataType::Utf8, None::<String>, 1.0).unwrap()],
+        )
+        .unwrap(),
+    );
+    let chunk = Arc::new(
+        Chunk::try_new(
+            Int64Array::from(vec![10]),
+            vec![Arc::new(Float64Array::from(vec![100.0])) as ArrayRef],
+            &populated_schema,
+        )
+        .unwrap(),
+    );
+    let populated_store = Arc::new(TopicStore::from_chunks(populated_schema, [chunk]).unwrap());
+    let empty_store = Arc::new(TopicStore::new(empty_schema));
+    let snapshot =
+        StoreSnapshot::from_registry(&id, [(populated, populated_store), (empty, empty_store)], 0)
+            .unwrap();
+    Arc::new(DataStore::from_snapshot(snapshot))
 }
 
 #[test]
@@ -356,6 +394,42 @@ print(float(accx.v[0]))
     assert_eq!(
         lines,
         ["['AccX', 'AccY', 'AccZ']", "3.0", "4.0", "0", "3.0"]
+    );
+
+    drop(engine);
+    drop(sender);
+    let _ = ingest_thread.join();
+}
+
+#[test]
+fn python_reads_schema_backed_empty_topics_as_empty_arrays() {
+    let _guard = SCRIPT_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let ingestor = Ingestor::new(NullObserver);
+    let (sender, receiver) = ingest_channel();
+    let ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
+
+    let engine = ScriptEngine::spawn(
+        read_store_with_empty_topic(),
+        sender.clone(),
+        Arc::new(MetricsRegistry::new()),
+        delog_api::params::shared_empty(),
+    );
+    let output = run_script_capture_output(
+        &engine,
+        "empty_topic_read",
+        r#"
+field = delog.topic("STATUS").field("Mode").read()
+table = delog.topic("STATUS").read()
+print(len(field.t), len(field.v), len(field.s))
+print(list(table.fields()), len(table.t), len(table.Mode))
+"#,
+    );
+
+    assert_eq!(
+        output.lines().collect::<Vec<_>>(),
+        ["0 0 0", "['Mode'] 0 0"]
     );
 
     drop(engine);

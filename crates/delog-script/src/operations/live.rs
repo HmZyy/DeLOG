@@ -3,11 +3,12 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use arrow::datatypes::DataType;
+use delog_api::catalog::topic_matches;
+use delog_core::derived::{PendingColumn, PendingTopic};
 use delog_core::field_view::{array_row_as_f64, array_row_as_str};
-use delog_core::identity::SourceId;
+use delog_core::identity::{SourceId, parse_topic_instance};
 use delog_core::ingest::ParsedBatch;
 
-use crate::api::{PendingColumn, PendingTopic, parse_topic_instance, topic_matches};
 use crate::emit::prepare_topics;
 use crate::operations::snapshot::{
     MergeSeed, SeedField, StreamKey, pending_topic, slice_column, split_key,
@@ -910,12 +911,12 @@ mod tests {
     use delog_core::ingest::ParsedBatch;
     use delog_core::schema::{FieldSchema, TopicSchema};
 
-    use crate::api::{PendingColumn, PendingField, PendingTopic};
     use crate::operations::snapshot::{MergeSeed, SeedField, StreamKey};
     use crate::operations::{
         MergeSpec, OperationMode, OperationSpec, SplitBySpec, TopicRegistry, TopicSelector,
         TransformSpec,
     };
+    use delog_core::derived::{PendingColumn, PendingField, PendingTopic};
 
     use super::{ActiveOperation, ColumnHistory};
 
