@@ -15,6 +15,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use crate::api::{Delog, PendingMarker};
+use crate::control::{ControlRequest, MarkerRequest};
 use crate::custom_parser::{
     ParserOutput, emit_parser_output, parse_python_result, read_float32_file,
 };
@@ -303,30 +304,13 @@ pub enum ParserEvent {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum MarkerCommand {
-    Replace {
-        owner: String,
-        generation: u64,
-        markers: Vec<PendingMarker>,
-    },
-    Append {
-        owner: String,
-        generation: u64,
-        markers: Vec<PendingMarker>,
-    },
-    Remove {
-        owner: String,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq)]
 pub enum ScriptEvent {
     Output(String),
     Result(String),
     Error(String),
     Done,
-    /// Publishes marker state without carrying command-completion semantics.
-    Markers(MarkerCommand),
+    /// Publishes control requests without carrying command-completion semantics.
+    Control(Vec<ControlRequest>),
     /// Carries no command-completion semantics; the UI ignores it.
     LiveBatchProcessed,
     /// Completion candidates for a prior `ScriptCommand::Complete`.
@@ -351,6 +335,7 @@ pub struct ScriptEngine {
     parser_cancellation: Arc<Mutex<ParserCancellationState>>,
     params: SharedParams,
     use_original_timestamps: Arc<AtomicBool>,
+    control_host: Arc<Mutex<Option<Arc<dyn crate::control::ControlHost>>>>,
 }
 
 impl ScriptEngine {
@@ -375,6 +360,9 @@ impl ScriptEngine {
         let params_worker = Arc::clone(&params);
         let use_original_timestamps = Arc::new(AtomicBool::new(false));
         let use_original_timestamps_worker = Arc::clone(&use_original_timestamps);
+        let control_host: Arc<Mutex<Option<Arc<dyn crate::control::ControlHost>>>> =
+            Arc::new(Mutex::new(None));
+        let control_host_worker = Arc::clone(&control_host);
         let handle = std::thread::Builder::new()
             .name("delog-script".into())
             .spawn(move || {
@@ -390,6 +378,7 @@ impl ScriptEngine {
                     parser_cancellation_worker,
                     params_worker,
                     use_original_timestamps_worker,
+                    control_host_worker,
                 )
             })
             .expect("spawn script thread");
@@ -403,12 +392,17 @@ impl ScriptEngine {
             parser_cancellation,
             params,
             use_original_timestamps,
+            control_host,
         }
     }
 
     pub fn set_use_original_timestamps(&self, use_original: bool) {
         self.use_original_timestamps
             .store(use_original, Ordering::Relaxed);
+    }
+
+    pub fn set_control_host(&self, host: Arc<dyn crate::control::ControlHost>) {
+        *self.control_host.lock().unwrap() = Some(host);
     }
 
     pub fn send(&self, cmd: ScriptCommand) -> Result<(), String> {
@@ -580,6 +574,7 @@ fn worker_loop(
     parser_cancellation: Arc<Mutex<ParserCancellationState>>,
     params: SharedParams,
     use_original_timestamps: Arc<AtomicBool>,
+    control_host: Arc<Mutex<Option<Arc<dyn crate::control::ControlHost>>>>,
 ) {
     let globals: Py<PyDict> = Python::attach(|py| PyDict::new(py).unbind());
     // Per-script-name snapshot-emit source from the previous run, for
@@ -640,6 +635,7 @@ fn worker_loop(
                         &mut run_counter,
                         &parser_cancellation,
                         &params,
+                        &control_host,
                     )
                 });
                 if shutdown {
@@ -697,11 +693,13 @@ fn run_live_transforms(
                     }
                     drop(sink);
                     if !markers.is_empty() {
-                        let _ = evt_tx.send(ScriptEvent::Markers(MarkerCommand::Append {
-                            owner: transform.spec.script_name.clone(),
-                            generation: transform.generation,
-                            markers,
-                        }));
+                        let _ = evt_tx.send(ScriptEvent::Control(vec![ControlRequest::Markers(
+                            MarkerRequest::Append {
+                                owner: transform.spec.script_name.clone(),
+                                generation: transform.generation,
+                                markers,
+                            },
+                        )]));
                     }
                 }
                 Err(msg) => {
@@ -979,6 +977,7 @@ fn handle_command(
     run_counter: &mut u64,
     parser_cancellation: &Arc<Mutex<ParserCancellationState>>,
     params: &SharedParams,
+    control_host: &Arc<Mutex<Option<Arc<dyn crate::control::ControlHost>>>>,
 ) -> bool {
     {
         match cmd {
@@ -1028,6 +1027,7 @@ fn handle_command(
                     run_counter,
                     parser_cancellation,
                     params,
+                    control_host,
                 );
                 drop(tracked_tx);
                 let result = collector
@@ -1044,6 +1044,7 @@ fn handle_command(
             }
             ScriptCommand::Shutdown => return true,
             ScriptCommand::RunScript { name, source } => {
+                let _control = crate::control::install_host(control_host.lock().unwrap().clone());
                 // A NUL byte can't go through CString; fail before running so a
                 // bad buffer never emits a (partial or empty) source.
                 if source.contains('\0') {
@@ -1182,11 +1183,13 @@ fn handle_command(
                                 }
 
                                 let published_markers = std::mem::take(&mut *markers.borrow_mut());
-                                let _ = evt_tx.send(ScriptEvent::Markers(MarkerCommand::Replace {
-                                    owner: name.clone(),
-                                    generation,
-                                    markers: published_markers,
-                                }));
+                                let _ = evt_tx.send(ScriptEvent::Control(vec![
+                                    ControlRequest::Markers(MarkerRequest::Replace {
+                                        owner: name.clone(),
+                                        generation,
+                                        markers: published_markers,
+                                    }),
+                                ]));
                                 params.lock().unwrap().finalize(
                                     &name,
                                     generation,
@@ -1263,15 +1266,18 @@ fn handle_command(
                 if let Some(previous) = declarative_sources.remove(&name) {
                     sender.remove_source(previous);
                 }
-                let _ = evt_tx.send(ScriptEvent::Markers(MarkerCommand::Remove {
-                    owner: name.clone(),
-                }));
+                let _ = evt_tx.send(ScriptEvent::Control(vec![ControlRequest::Markers(
+                    MarkerRequest::Remove {
+                        owner: name.clone(),
+                    },
+                )]));
                 // Console confirmation; carries no command-completion semantics.
                 let _ = evt_tx.send(ScriptEvent::Output(format!(
                     "# unregistered live transform '{name}'\n"
                 )));
             }
             ScriptCommand::Eval(src) => {
+                let _control = crate::control::install_host(control_host.lock().unwrap().clone());
                 let snapshot = store.load();
                 let emit: crate::api::EmitBuffer = std::rc::Rc::default();
                 let live: crate::api::LiveTransformBuffer = std::rc::Rc::default();
@@ -1326,11 +1332,13 @@ fn handle_command(
                 };
                 if installation_succeeded {
                     let published_markers = std::mem::take(&mut *markers.borrow_mut());
-                    let _ = evt_tx.send(ScriptEvent::Markers(MarkerCommand::Append {
-                        owner: CONSOLE_SCRIPT_NAME.into(),
-                        generation,
-                        markers: published_markers,
-                    }));
+                    let _ = evt_tx.send(ScriptEvent::Control(vec![ControlRequest::Markers(
+                        MarkerRequest::Append {
+                            owner: CONSOLE_SCRIPT_NAME.into(),
+                            generation,
+                            markers: published_markers,
+                        },
+                    )]));
                 } else {
                     markers.borrow_mut().clear();
                 }
@@ -1799,7 +1807,7 @@ mod tests {
                 ScriptEvent::Done => break,
                 ScriptEvent::Error(e) => panic!("{e}"),
                 ScriptEvent::Result(_)
-                | ScriptEvent::Markers(_)
+                | ScriptEvent::Control(_)
                 | ScriptEvent::LiveBatchProcessed
                 | ScriptEvent::Completions { .. }
                 | ScriptEvent::Parser(_) => {}
@@ -1825,7 +1833,7 @@ mod tests {
                 ScriptEvent::Done => break,
                 ScriptEvent::Error(e) => panic!("unexpected error: {e}"),
                 ScriptEvent::Output(_)
-                | ScriptEvent::Markers(_)
+                | ScriptEvent::Control(_)
                 | ScriptEvent::LiveBatchProcessed
                 | ScriptEvent::Completions { .. }
                 | ScriptEvent::Parser(_) => {}
@@ -1844,24 +1852,24 @@ mod tests {
         }
     }
 
-    fn marker_commands_until_done(engine: &ScriptEngine) -> Vec<MarkerCommand> {
-        let mut commands = Vec::new();
+    fn control_requests_until_done(engine: &ScriptEngine) -> Vec<ControlRequest> {
+        let mut requests = Vec::new();
         loop {
             match engine.recv_blocking() {
-                ScriptEvent::Markers(command) => commands.push(command),
-                ScriptEvent::Done => return commands,
+                ScriptEvent::Control(batch) => requests.extend(batch),
+                ScriptEvent::Done => return requests,
                 ScriptEvent::Error(_) => {}
                 _ => {}
             }
         }
     }
 
-    fn marker_commands_until_live_processed(engine: &ScriptEngine) -> Vec<MarkerCommand> {
-        let mut commands = Vec::new();
+    fn control_requests_until_live_processed(engine: &ScriptEngine) -> Vec<ControlRequest> {
+        let mut requests = Vec::new();
         loop {
             match engine.recv_blocking() {
-                ScriptEvent::Markers(command) => commands.push(command),
-                ScriptEvent::LiveBatchProcessed => return commands,
+                ScriptEvent::Control(batch) => requests.extend(batch),
+                ScriptEvent::LiveBatchProcessed => return requests,
                 _ => {}
             }
         }
@@ -1893,12 +1901,12 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            marker_commands_until_done(&engine),
-            vec![MarkerCommand::Replace {
+            control_requests_until_done(&engine),
+            vec![ControlRequest::Markers(MarkerRequest::Replace {
                 owner: "analysis".into(),
                 generation: 0,
                 markers: vec![expected_marker(42, "launch")],
-            }]
+            })]
         );
 
         engine
@@ -1907,7 +1915,7 @@ mod tests {
                 source: "delog.add_marker(43, 'discarded')\nraise RuntimeError('boom')".into(),
             })
             .unwrap();
-        assert!(marker_commands_until_done(&engine).is_empty());
+        assert!(control_requests_until_done(&engine).is_empty());
 
         engine
             .send(ScriptCommand::RunScript {
@@ -1916,12 +1924,12 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            marker_commands_until_done(&engine),
-            vec![MarkerCommand::Replace {
+            control_requests_until_done(&engine),
+            vec![ControlRequest::Markers(MarkerRequest::Replace {
                 owner: "analysis".into(),
                 generation: 2,
                 markers: vec![],
-            }]
+            })]
         );
 
         engine
@@ -1931,12 +1939,12 @@ mod tests {
             .unwrap();
         loop {
             match engine.recv_blocking() {
-                ScriptEvent::Markers(command) => {
+                ScriptEvent::Control(batch) => {
                     assert_eq!(
-                        command,
-                        MarkerCommand::Remove {
+                        batch,
+                        vec![ControlRequest::Markers(MarkerRequest::Remove {
                             owner: "analysis".into()
-                        }
+                        })]
                     );
                     break;
                 }
@@ -1969,7 +1977,7 @@ delog.transform("MISSING", mode="snapshot")
                 .into(),
             })
             .unwrap();
-        assert!(marker_commands_until_done(&engine).is_empty());
+        assert!(control_requests_until_done(&engine).is_empty());
         assert!(!engine.has_live_transform("analysis"));
     }
 
@@ -2002,12 +2010,12 @@ mark = delog.live_transform(topic="A", fields=["v"], output_topic="B")(MarkerCal
             })
             .unwrap();
         assert_eq!(
-            marker_commands_until_done(&engine),
-            vec![MarkerCommand::Replace {
+            control_requests_until_done(&engine),
+            vec![ControlRequest::Markers(MarkerRequest::Replace {
                 owner: "analysis".into(),
                 generation: 0,
                 markers: vec![],
-            }]
+            })]
         );
 
         let schema = Arc::new(
@@ -2040,7 +2048,7 @@ mark = delog.live_transform(topic="A", fields=["v"], output_topic="B")(MarkerCal
                     source: failed_source.into(),
                 })
                 .unwrap();
-            assert!(marker_commands_until_done(&engine).is_empty());
+            assert!(control_requests_until_done(&engine).is_empty());
 
             let mut commands = Vec::new();
             let mut errors = Vec::new();
@@ -2048,7 +2056,7 @@ mark = delog.live_transform(topic="A", fields=["v"], output_topic="B")(MarkerCal
                 engine.try_send_live_batch("live", make_batch()).unwrap();
                 loop {
                     match engine.recv_blocking() {
-                        ScriptEvent::Markers(command) => commands.push(command),
+                        ScriptEvent::Control(batch) => commands.extend(batch),
                         ScriptEvent::Error(error) => errors.push(error),
                         ScriptEvent::LiveBatchProcessed => break,
                         _ => {}
@@ -2059,11 +2067,11 @@ mark = delog.live_transform(topic="A", fields=["v"], output_topic="B")(MarkerCal
             assert_eq!(
                 commands,
                 vec![
-                    MarkerCommand::Append {
+                    ControlRequest::Markers(MarkerRequest::Append {
                         owner: "analysis".into(),
                         generation: 0,
                         markers: vec![expected_marker(42, "still active")],
-                    };
+                    });
                     usize::from(LIVE_TRANSFORM_ERROR_LIMIT)
                 ]
             );
@@ -2083,19 +2091,19 @@ mark = delog.live_transform(topic="A", fields=["v"], output_topic="B")(MarkerCal
         for (source, expected) in [
             (
                 "delog.add_marker(10, 'console marker')",
-                vec![MarkerCommand::Append {
+                vec![ControlRequest::Markers(MarkerRequest::Append {
                     owner: CONSOLE_SCRIPT_NAME.into(),
                     generation: 0,
                     markers: vec![expected_marker(10, "console marker")],
-                }],
+                })],
             ),
             (
                 "unrelated = 1",
-                vec![MarkerCommand::Append {
+                vec![ControlRequest::Markers(MarkerRequest::Append {
                     owner: CONSOLE_SCRIPT_NAME.into(),
                     generation: 1,
                     markers: vec![],
-                }],
+                })],
             ),
             (
                 "delog.add_marker(20, 'discarded'); raise RuntimeError('boom')",
@@ -2107,7 +2115,7 @@ mark = delog.live_transform(topic="A", fields=["v"], output_topic="B")(MarkerCal
             ),
         ] {
             engine.send(ScriptCommand::Eval(source.into())).unwrap();
-            assert_eq!(marker_commands_until_done(&engine), expected);
+            assert_eq!(control_requests_until_done(&engine), expected);
         }
     }
 
@@ -2144,12 +2152,12 @@ def mark(batch):
             })
             .unwrap();
         assert_eq!(
-            marker_commands_until_done(&engine),
-            vec![MarkerCommand::Replace {
+            control_requests_until_done(&engine),
+            vec![ControlRequest::Markers(MarkerRequest::Replace {
                 owner: "live_markers".into(),
                 generation: 0,
                 markers: vec![],
-            }]
+            })]
         );
 
         let schema = Arc::new(
@@ -2179,16 +2187,16 @@ def mark(batch):
             (Some(400), true),
         ] {
             engine.try_send_live_batch("live", make_batch()).unwrap();
-            let commands = marker_commands_until_live_processed(&engine);
+            let commands = control_requests_until_live_processed(&engine);
             if expected {
                 let time_us = expected_time.unwrap();
                 assert_eq!(
                     commands,
-                    vec![MarkerCommand::Append {
+                    vec![ControlRequest::Markers(MarkerRequest::Append {
                         owner: "live_markers".into(),
                         generation: 0,
                         markers: vec![expected_marker(time_us, &format!("call {}", time_us / 100))],
-                    }]
+                    })]
                 );
             } else {
                 assert!(commands.is_empty());
@@ -2316,7 +2324,7 @@ def mark(batch):
                 ScriptEvent::Done => break,
                 ScriptEvent::Error(e) => panic!("{e}"),
                 ScriptEvent::Output(_)
-                | ScriptEvent::Markers(_)
+                | ScriptEvent::Control(_)
                 | ScriptEvent::LiveBatchProcessed
                 | ScriptEvent::Completions { .. }
                 | ScriptEvent::Parser(_) => {}
@@ -3245,6 +3253,7 @@ def f(batch):
             parser_cancellation: Arc::clone(&cancellation),
             params: crate::params::shared_empty(),
             use_original_timestamps: Arc::new(AtomicBool::new(false)),
+            control_host: Arc::new(Mutex::new(None)),
         };
 
         let failed_interrupt = std::sync::Mutex::new(None);
@@ -3326,6 +3335,7 @@ def f(batch):
             parser_cancellation: Arc::clone(&cancellation),
             params: crate::params::shared_empty(),
             use_original_timestamps: Arc::new(AtomicBool::new(false)),
+            control_host: Arc::new(Mutex::new(None)),
         };
 
         engine
@@ -3379,6 +3389,7 @@ def f(batch):
                 parser_cancellation: Arc::clone(&cancellation),
                 params: crate::params::shared_empty(),
                 use_original_timestamps: Arc::new(AtomicBool::new(false)),
+                control_host: Arc::new(Mutex::new(None)),
             };
             let (boundary_tx, boundary_rx) = channel();
             let (cancelled_tx, cancelled_rx) = channel();
@@ -3467,6 +3478,7 @@ def f(batch):
             parser_cancellation: Arc::new(Mutex::new(ParserCancellationState::default())),
             params: crate::params::shared_empty(),
             use_original_timestamps: Arc::new(AtomicBool::new(false)),
+            control_host: Arc::new(Mutex::new(None)),
         };
 
         assert!(engine.send(ScriptCommand::Eval("1".into())).is_err());

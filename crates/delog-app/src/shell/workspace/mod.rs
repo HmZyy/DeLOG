@@ -629,6 +629,20 @@ impl Workspace {
         plots
     }
 
+    #[cfg(feature = "scripting")]
+    pub fn plot_infos(&self) -> Vec<delog_script::PlotInfo> {
+        self.plot_tiles_in_order()
+            .into_iter()
+            .enumerate()
+            .map(|(index, tile)| delog_script::PlotInfo {
+                window: 0,
+                tile: tile.0,
+                index,
+                label: format!("Plot {}", index + 1),
+            })
+            .collect()
+    }
+
     pub fn annotation_rows(&self) -> Vec<crate::plotting::annotations::toolbar::AnnotationRow> {
         let mut rows = Vec::new();
         for (index, tile) in self.plot_tiles_in_order().into_iter().enumerate() {
