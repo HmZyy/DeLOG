@@ -3,7 +3,10 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 
 #[cfg(feature = "scripting")]
-use delog_script::{MarkerRequest, PendingMarker};
+use delog_script::{
+    ControlResponse, MarkerFilter, MarkerInfo, MarkerOrigin as ScriptMarkerOrigin, MarkerPatch,
+    MarkerRequest, PendingMarker,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum MarkerOrigin {
@@ -16,7 +19,7 @@ enum MarkerOrigin {
 }
 
 #[cfg(feature = "scripting")]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ScriptMarkerState {
     generation: u64,
     next_palette_index: usize,
@@ -49,7 +52,7 @@ impl Marker {
 
 /// Monotonic `next_id` never reuses numbers, so labels and ids stay stable
 /// across deletions.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Markers {
     items: Vec<Marker>,
     next_id: u64,
@@ -91,32 +94,26 @@ impl Markers {
     }
 
     #[cfg(feature = "scripting")]
-    pub fn apply_control_request(&mut self, request: MarkerRequest) {
+    pub fn apply_control_request(
+        &mut self,
+        request: MarkerRequest,
+    ) -> Result<ControlResponse, String> {
         match request {
-            MarkerRequest::Replace {
-                owner,
-                generation,
-                markers,
-            } => {
-                self.remove_script_markers(&owner);
-                let mut state = ScriptMarkerState {
-                    generation,
-                    next_palette_index: 0,
-                };
-                self.insert_script_markers(&owner, generation, markers, &mut state);
-                self.script_states.insert(owner, state);
-            }
             MarkerRequest::Append {
                 owner,
                 generation,
                 markers,
             } => {
+                validate_pending_markers(&markers)?;
                 let mut state = match self.script_states.get(&owner).copied() {
-                    Some(state) if generation < state.generation => return,
-                    Some(mut state) => {
-                        state.generation = generation;
-                        state
+                    Some(state) if generation < state.generation => {
+                        return Ok(ControlResponse::Unit);
                     }
+                    Some(state) if generation == state.generation => state,
+                    Some(_) => ScriptMarkerState {
+                        generation,
+                        next_palette_index: 0,
+                    },
                     None => ScriptMarkerState {
                         generation,
                         next_palette_index: 0,
@@ -124,12 +121,164 @@ impl Markers {
                 };
                 self.insert_script_markers(&owner, generation, markers, &mut state);
                 self.script_states.insert(owner, state);
+                Ok(ControlResponse::Unit)
             }
-            MarkerRequest::Remove { owner } => {
-                self.script_states.remove(&owner);
+            MarkerRequest::RemoveOwned { owner } => {
                 self.remove_script_markers(&owner);
+                self.rebuild_script_states();
+                Ok(ControlResponse::Unit)
+            }
+            MarkerRequest::List => Ok(ControlResponse::Markers(self.marker_infos())),
+            MarkerRequest::Set { id, patch } => {
+                validate_marker_patch(&patch)?;
+                let marker = self
+                    .items
+                    .iter_mut()
+                    .find(|marker| marker.id == id)
+                    .ok_or_else(|| format!("marker {id} is gone"))?;
+                apply_marker_patch(marker, patch);
+                Ok(ControlResponse::Unit)
+            }
+            MarkerRequest::Remove(filter) => {
+                self.remove_filtered(filter)?;
+                self.rebuild_script_states();
+                Ok(ControlResponse::Unit)
             }
         }
+    }
+
+    #[cfg(feature = "scripting")]
+    fn marker_infos(&self) -> Vec<MarkerInfo> {
+        self.by_time()
+            .into_iter()
+            .enumerate()
+            .map(|(index, marker)| {
+                let (origin, owner) = match &marker.origin {
+                    MarkerOrigin::Manual => (ScriptMarkerOrigin::Manual, None),
+                    MarkerOrigin::Script { owner, .. } => {
+                        (ScriptMarkerOrigin::Script, Some(owner.clone()))
+                    }
+                };
+                MarkerInfo {
+                    id: marker.id,
+                    index,
+                    t_us: marker.t_us,
+                    label: marker.label.clone(),
+                    color: marker.color,
+                    note: marker.note.clone(),
+                    origin,
+                    owner,
+                }
+            })
+            .collect()
+    }
+
+    #[cfg(feature = "scripting")]
+    fn remove_filtered(&mut self, filter: MarkerFilter) -> Result<(), String> {
+        match filter {
+            MarkerFilter::Id(id) => {
+                let index = self
+                    .items
+                    .iter()
+                    .position(|marker| marker.id == id)
+                    .ok_or_else(|| format!("marker {id} is gone"))?;
+                self.items.remove(index);
+            }
+            MarkerFilter::Index(index) => {
+                let id = self
+                    .by_time()
+                    .get(index)
+                    .map(|marker| marker.id)
+                    .ok_or_else(|| format!("marker index {index} is gone"))?;
+                self.items.retain(|marker| marker.id != id);
+            }
+            MarkerFilter::Owner(owner) => self.items.retain(|marker| {
+                !matches!(
+                    &marker.origin,
+                    MarkerOrigin::Script {
+                        owner: marker_owner,
+                        ..
+                    } if marker_owner == &owner
+                )
+            }),
+            MarkerFilter::Origin(origin) => self.items.retain(|marker| {
+                let matches = match origin {
+                    ScriptMarkerOrigin::Manual => matches!(marker.origin, MarkerOrigin::Manual),
+                    ScriptMarkerOrigin::Script => {
+                        matches!(marker.origin, MarkerOrigin::Script { .. })
+                    }
+                };
+                !matches
+            }),
+            MarkerFilter::ScriptLabel(label) => self.items.retain(|marker| {
+                !matches!(marker.origin, MarkerOrigin::Script { .. }) || marker.label != label
+            }),
+            MarkerFilter::ScriptTimeRange { after, before } => {
+                self.items.retain(|marker| {
+                    let in_range = after.is_none_or(|after| marker.t_us >= after)
+                        && before.is_none_or(|before| marker.t_us <= before);
+                    !matches!(marker.origin, MarkerOrigin::Script { .. }) || !in_range
+                });
+            }
+            MarkerFilter::ScriptAll => self
+                .items
+                .retain(|marker| !matches!(marker.origin, MarkerOrigin::Script { .. })),
+            MarkerFilter::All => self.items.clear(),
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "scripting")]
+    fn rebuild_script_states(&mut self) {
+        let mut states = HashMap::<String, ScriptMarkerState>::new();
+        for marker in &self.items {
+            let MarkerOrigin::Script { owner, generation } = &marker.origin else {
+                continue;
+            };
+            match states.get_mut(owner) {
+                Some(state) if *generation < state.generation => {}
+                Some(state) if *generation == state.generation => {
+                    state.next_palette_index += 1;
+                }
+                Some(state) => {
+                    *state = ScriptMarkerState {
+                        generation: *generation,
+                        next_palette_index: 1,
+                    };
+                }
+                None => {
+                    states.insert(
+                        owner.clone(),
+                        ScriptMarkerState {
+                            generation: *generation,
+                            next_palette_index: 1,
+                        },
+                    );
+                }
+            }
+        }
+        self.script_states = states;
+    }
+
+    #[cfg(feature = "scripting")]
+    pub(crate) fn sweep_generation(&mut self, owner: &str, generation: u64, commit: bool) {
+        self.items.retain(|marker| {
+            let MarkerOrigin::Script {
+                owner: marker_owner,
+                generation: marker_generation,
+            } = &marker.origin
+            else {
+                return true;
+            };
+            let remove = marker_owner == owner
+                && if commit {
+                    *marker_generation < generation
+                } else {
+                    *marker_generation == generation
+                };
+            !remove
+        });
+        self.rebuild_script_states();
     }
 
     #[cfg(feature = "scripting")]
@@ -178,12 +327,72 @@ impl Markers {
 
     pub fn by_time(&self) -> Vec<&Marker> {
         let mut v: Vec<&Marker> = self.items.iter().collect();
-        v.sort_by_key(|m| m.t_us);
+        v.sort_by_key(|m| (m.t_us, m.id));
         v
     }
 
     pub fn as_slice(&self) -> &[Marker] {
         &self.items
+    }
+
+    /// Clears the current layout's markers without recycling stable IDs.
+    #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
+    pub(crate) fn clear_preserving_ids(&mut self) {
+        self.items.clear();
+        #[cfg(feature = "scripting")]
+        self.script_states.clear();
+    }
+}
+
+#[cfg(feature = "scripting")]
+fn validate_pending_markers(markers: &[PendingMarker]) -> Result<(), String> {
+    for marker in markers {
+        if marker.label.is_empty() {
+            return Err("marker label must not be empty".into());
+        }
+        if let Some(color) = marker.color {
+            validate_marker_color(color)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "scripting")]
+fn validate_marker_patch(patch: &MarkerPatch) -> Result<(), String> {
+    if patch.label.as_deref() == Some("") {
+        return Err("marker label must not be empty".into());
+    }
+    if let Some(color) = patch.color {
+        validate_marker_color(color)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "scripting")]
+fn validate_marker_color(color: [f32; 4]) -> Result<(), String> {
+    if color
+        .iter()
+        .all(|component| component.is_finite() && (0.0..=1.0).contains(component))
+    {
+        Ok(())
+    } else {
+        Err("marker color components must be finite and between 0 and 1".into())
+    }
+}
+
+#[cfg(feature = "scripting")]
+fn apply_marker_patch(marker: &mut Marker, patch: MarkerPatch) {
+    if let Some(t_us) = patch.t_us {
+        marker.t_us = t_us;
+    }
+    if let Some(label) = patch.label {
+        marker.label = label;
+    }
+    if let Some(color) = patch.color {
+        marker.color = color;
+    }
+    if let Some(note) = patch.note {
+        marker.note = note;
     }
 }
 
@@ -403,25 +612,24 @@ mod tests {
 
     #[test]
     #[cfg(feature = "scripting")]
-    fn script_replace_preserves_manual_and_replaces_only_owner_generation() {
+    fn script_commit_preserves_manual_and_replaces_only_older_owner_generations() {
         let mut markers = Markers::new();
         markers.add_at(5);
         markers.push_loaded(6, "generated".into(), [0.1, 0.2, 0.3, 1.0], String::new());
-        markers.apply_control_request(MarkerRequest::Replace {
-            owner: "flight.py".into(),
-            generation: 1,
-            markers: vec![pending(10, "old", None)],
-        });
-        markers.apply_control_request(MarkerRequest::Replace {
-            owner: "other.py".into(),
-            generation: 1,
-            markers: vec![pending(15, "other", None)],
-        });
-        markers.apply_control_request(MarkerRequest::Replace {
-            owner: "flight.py".into(),
-            generation: 2,
-            markers: vec![pending(20, "new", None)],
-        });
+        for (owner, generation, marker) in [
+            ("flight.py", 1, pending(10, "old", None)),
+            ("other.py", 1, pending(15, "other", None)),
+            ("flight.py", 2, pending(20, "new", None)),
+        ] {
+            markers
+                .apply_control_request(MarkerRequest::Append {
+                    owner: owner.into(),
+                    generation,
+                    markers: vec![marker],
+                })
+                .unwrap();
+        }
+        markers.sweep_generation("flight.py", 2, true);
 
         assert_eq!(labels(&markers), ["Marker 1", "generated", "other", "new"]);
         assert_eq!(markers.as_slice()[0].origin, MarkerOrigin::Manual);
@@ -439,16 +647,18 @@ mod tests {
     #[cfg(feature = "scripting")]
     fn script_append_rejects_lower_generation() {
         let mut markers = Markers::new();
-        markers.apply_control_request(MarkerRequest::Append {
-            owner: "console".into(),
-            generation: 2,
-            markers: vec![pending(10, "current", None)],
-        });
-        markers.apply_control_request(MarkerRequest::Append {
-            owner: "console".into(),
-            generation: 1,
-            markers: vec![pending(20, "stale", None)],
-        });
+        for (generation, marker) in [
+            (2, pending(10, "current", None)),
+            (1, pending(20, "stale", None)),
+        ] {
+            markers
+                .apply_control_request(MarkerRequest::Append {
+                    owner: "console".into(),
+                    generation,
+                    markers: vec![marker],
+                })
+                .unwrap();
+        }
 
         assert_eq!(labels(&markers), ["current"]);
     }
@@ -458,11 +668,13 @@ mod tests {
     fn script_append_accumulates_at_equal_generation() {
         let mut markers = Markers::new();
         for label in ["first", "second"] {
-            markers.apply_control_request(MarkerRequest::Append {
-                owner: "console".into(),
-                generation: 3,
-                markers: vec![pending(10, label, None)],
-            });
+            markers
+                .apply_control_request(MarkerRequest::Append {
+                    owner: "console".into(),
+                    generation: 3,
+                    markers: vec![pending(10, label, None)],
+                })
+                .unwrap();
         }
 
         assert_eq!(labels(&markers), ["first", "second"]);
@@ -472,16 +684,18 @@ mod tests {
     #[cfg(feature = "scripting")]
     fn script_append_advances_generation_without_clearing_history() {
         let mut markers = Markers::new();
-        markers.apply_control_request(MarkerRequest::Append {
-            owner: "console".into(),
-            generation: 1,
-            markers: vec![pending(10, "history", None)],
-        });
-        markers.apply_control_request(MarkerRequest::Append {
-            owner: "console".into(),
-            generation: 2,
-            markers: vec![pending(20, "latest", None)],
-        });
+        for (generation, marker) in [
+            (1, pending(10, "history", None)),
+            (2, pending(20, "latest", None)),
+        ] {
+            markers
+                .apply_control_request(MarkerRequest::Append {
+                    owner: "console".into(),
+                    generation,
+                    markers: vec![marker],
+                })
+                .unwrap();
+        }
 
         assert_eq!(labels(&markers), ["history", "latest"]);
         assert_eq!(
@@ -506,15 +720,19 @@ mod tests {
         let mut markers = Markers::new();
         markers.add_at(1);
         for owner in ["one", "two"] {
-            markers.apply_control_request(MarkerRequest::Replace {
-                owner: owner.into(),
-                generation: 1,
-                markers: vec![pending(10, owner, None)],
-            });
+            markers
+                .apply_control_request(MarkerRequest::Append {
+                    owner: owner.into(),
+                    generation: 1,
+                    markers: vec![pending(10, owner, None)],
+                })
+                .unwrap();
         }
-        markers.apply_control_request(MarkerRequest::Remove {
-            owner: "one".into(),
-        });
+        markers
+            .apply_control_request(MarkerRequest::RemoveOwned {
+                owner: "one".into(),
+            })
+            .unwrap();
 
         assert_eq!(labels(&markers), ["Marker 1", "two"]);
     }
@@ -524,11 +742,13 @@ mod tests {
     fn script_markers_keep_duplicate_timestamps_and_explicit_colors() {
         let explicit = [0.1, 0.2, 0.3, 0.4];
         let mut markers = Markers::new();
-        markers.apply_control_request(MarkerRequest::Replace {
-            owner: "flight.py".into(),
-            generation: 1,
-            markers: vec![pending(42, "a", Some(explicit)), pending(42, "b", None)],
-        });
+        markers
+            .apply_control_request(MarkerRequest::Append {
+                owner: "flight.py".into(),
+                generation: 1,
+                markers: vec![pending(42, "a", Some(explicit)), pending(42, "b", None)],
+            })
+            .unwrap();
 
         assert_eq!(markers.as_slice().len(), 2);
         assert_eq!(markers.as_slice()[0].t_us, 42);
@@ -542,31 +762,179 @@ mod tests {
 
     #[test]
     #[cfg(feature = "scripting")]
-    fn script_replace_resets_automatic_palette_ordinal() {
+    fn a_new_script_generation_resets_automatic_palette_ordinal() {
         let explicit = [0.9, 0.8, 0.7, 0.6];
         let mut markers = Markers::new();
-        markers.apply_control_request(MarkerRequest::Replace {
-            owner: "flight.py".into(),
-            generation: 1,
-            markers: vec![
-                pending(1, "colored", Some(explicit)),
-                pending(2, "auto", None),
-            ],
-        });
+        markers
+            .apply_control_request(MarkerRequest::Append {
+                owner: "flight.py".into(),
+                generation: 1,
+                markers: vec![
+                    pending(1, "colored", Some(explicit)),
+                    pending(2, "auto", None),
+                ],
+            })
+            .unwrap();
         assert_eq!(markers.as_slice()[0].color, explicit);
         assert_eq!(
             markers.as_slice()[1].color,
             delog_render::palette::trace_color(1).to_srgb_f32()
         );
 
-        markers.apply_control_request(MarkerRequest::Replace {
-            owner: "flight.py".into(),
-            generation: 2,
-            markers: vec![pending(3, "reset", None)],
-        });
+        markers
+            .apply_control_request(MarkerRequest::Append {
+                owner: "flight.py".into(),
+                generation: 2,
+                markers: vec![pending(3, "reset", None)],
+            })
+            .unwrap();
+        markers.sweep_generation("flight.py", 2, true);
         assert_eq!(
             markers.as_slice()[0].color,
             delog_render::palette::trace_color(0).to_srgb_f32()
         );
+    }
+
+    #[test]
+    #[cfg(feature = "scripting")]
+    fn control_list_uses_time_then_id_order_and_reports_origins() {
+        let mut markers = Markers::new();
+        let manual = markers.add_at(20);
+        markers.get_mut(manual).unwrap().label = "manual".into();
+        markers
+            .apply_control_request(MarkerRequest::Append {
+                owner: "flight.py".into(),
+                generation: 3,
+                markers: vec![pending(10, "first", None), pending(10, "second", None)],
+            })
+            .unwrap();
+
+        let delog_script::ControlResponse::Markers(infos) =
+            markers.apply_control_request(MarkerRequest::List).unwrap()
+        else {
+            panic!("wrong response kind");
+        };
+        assert_eq!(
+            infos
+                .iter()
+                .map(|info| info.label.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "second", "manual"]
+        );
+        assert_eq!(
+            infos.iter().map(|info| info.index).collect::<Vec<_>>(),
+            [0, 1, 2]
+        );
+        assert_eq!(infos[0].origin, delog_script::MarkerOrigin::Script);
+        assert_eq!(infos[0].owner.as_deref(), Some("flight.py"));
+        assert_eq!(infos[2].origin, delog_script::MarkerOrigin::Manual);
+        assert_eq!(infos[2].owner, None);
+    }
+
+    #[test]
+    #[cfg(feature = "scripting")]
+    fn control_set_keeps_stable_identity_when_time_reorders() {
+        let mut markers = Markers::new();
+        markers
+            .apply_control_request(MarkerRequest::Append {
+                owner: "flight.py".into(),
+                generation: 1,
+                markers: vec![pending(10, "early", None), pending(20, "late", None)],
+            })
+            .unwrap();
+        let id = markers.as_slice()[1].id;
+
+        markers
+            .apply_control_request(MarkerRequest::Set {
+                id,
+                patch: delog_script::MarkerPatch {
+                    t_us: Some(5),
+                    label: Some("moved".into()),
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+
+        assert_eq!(markers.by_time()[0].id, id);
+        assert_eq!(markers.by_time()[0].label, "moved");
+        let before = markers.clone();
+        let error = markers
+            .apply_control_request(MarkerRequest::Set {
+                id: u64::MAX,
+                patch: delog_script::MarkerPatch {
+                    label: Some("wrong target".into()),
+                    ..Default::default()
+                },
+            })
+            .unwrap_err();
+        assert!(error.contains("gone"), "{error}");
+        assert_eq!(markers, before);
+    }
+
+    #[test]
+    #[cfg(feature = "scripting")]
+    fn broad_filters_protect_manual_markers_until_explicitly_requested() {
+        let mut markers = Markers::new();
+        let manual = markers.add_at(10);
+        markers.get_mut(manual).unwrap().label = "same".into();
+        markers
+            .apply_control_request(MarkerRequest::Append {
+                owner: "flight.py".into(),
+                generation: 1,
+                markers: vec![pending(10, "same", None), pending(20, "other", None)],
+            })
+            .unwrap();
+
+        for filter in [
+            delog_script::MarkerFilter::ScriptLabel("same".into()),
+            delog_script::MarkerFilter::ScriptTimeRange {
+                after: Some(0),
+                before: Some(30),
+            },
+            delog_script::MarkerFilter::ScriptAll,
+        ] {
+            markers
+                .apply_control_request(MarkerRequest::Remove(filter))
+                .unwrap();
+        }
+        assert_eq!(labels(&markers), ["same"]);
+
+        markers
+            .apply_control_request(MarkerRequest::Remove(delog_script::MarkerFilter::Origin(
+                delog_script::MarkerOrigin::Manual,
+            )))
+            .unwrap();
+        assert!(markers.as_slice().is_empty());
+    }
+
+    #[test]
+    #[cfg(feature = "scripting")]
+    fn rolling_back_a_new_generation_reactivates_older_live_appends() {
+        let mut markers = Markers::new();
+        markers
+            .apply_control_request(MarkerRequest::Append {
+                owner: "flight.py".into(),
+                generation: 1,
+                markers: vec![pending(10, "old", None)],
+            })
+            .unwrap();
+        markers
+            .apply_control_request(MarkerRequest::Append {
+                owner: "flight.py".into(),
+                generation: 2,
+                markers: vec![pending(20, "failed", None)],
+            })
+            .unwrap();
+
+        markers.sweep_generation("flight.py", 2, false);
+        markers
+            .apply_control_request(MarkerRequest::Append {
+                owner: "flight.py".into(),
+                generation: 1,
+                markers: vec![pending(30, "still live", None)],
+            })
+            .unwrap();
+
+        assert_eq!(labels(&markers), ["old", "still live"]);
     }
 }

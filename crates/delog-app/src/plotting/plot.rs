@@ -193,7 +193,7 @@ pub fn rename_value(text: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PlotPane {
     pub traces: Vec<TraceRef>,
     pub ghosts: Vec<GhostTrace>,

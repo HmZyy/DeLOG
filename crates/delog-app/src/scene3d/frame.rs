@@ -2,7 +2,7 @@ use glam::{DMat3, DMat4, DVec3};
 
 use super::geo;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct SceneFrame {
     pub reference: Option<[f64; 3]>,
 }

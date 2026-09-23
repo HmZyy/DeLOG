@@ -4,6 +4,7 @@ use super::annotations::AnnotationCollectionPy;
 use super::traces::TraceCollectionPy;
 use super::{
     ControlRequest, ControlResponse, PlotContext, PlotInfo, PlotRequest, call_immediate_detached,
+    control_call_error,
 };
 
 #[pyclass(unsendable, name = "Plot", skip_from_py_object)]
@@ -56,8 +57,8 @@ pub fn focused_plot(py: Python<'_>, context: PlotContext) -> PyResult<Option<Plo
 }
 
 fn request_plots(py: Python<'_>, request: PlotRequest) -> PyResult<Vec<PlotInfo>> {
-    let response = call_immediate_detached(py, ControlRequest::Plots(request))
-        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    let response =
+        call_immediate_detached(py, ControlRequest::Plots(request)).map_err(control_call_error)?;
     match response {
         ControlResponse::Plots(infos) => Ok(infos),
         _ => Err(pyo3::exceptions::PyRuntimeError::new_err(
