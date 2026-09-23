@@ -32,6 +32,7 @@ bundled-python = ["scripting"]
 arboard = { workspace = true }
 arrow = { workspace = true }
 parquet = { workspace = true }
+delog-api = { workspace = true }
 delog-core = { workspace = true }
 delog-parquet-format = { workspace = true }
 delog-flow = { workspace = true }
