@@ -1,6 +1,4 @@
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
 
 use arrow::datatypes::DataType;
 
@@ -79,8 +77,6 @@ pub enum OperationSpec {
     Merge(MergeSpec),
     SplitBy(SplitBySpec),
 }
-
-pub type OperationBuffer = Rc<RefCell<Vec<OperationSpec>>>;
 
 pub(crate) type OutputSchema = Vec<(String, DataType, Option<String>)>;
 

@@ -1001,6 +1001,7 @@ version = "0.3.3"
 dependencies = [
  "arrow",
  "delog-core",
+ "proptest",
  "serde",
  "thiserror 2.0.18",
 ]

@@ -1,10 +1,12 @@
 use std::rc::Rc;
 
+use delog_api::color::{format_hex_color, parse_hex_color};
+use delog_api::markers::PendingMarker;
 use pyo3::exceptions::{PyIndexError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyIterator, PyList};
 
-use crate::api::{MarkerBuffer, active_marker_buffer, pending_marker};
+use crate::staging::{MarkerBuffer, active_marker_buffer};
 
 use super::{
     ControlRequest, ControlResponse, MarkerFilter, MarkerInfo, MarkerOrigin, MarkerPatch,
@@ -28,7 +30,7 @@ impl MarkerCollectionPy {
         }
     }
 
-    fn append(&self, pending: Vec<crate::api::PendingMarker>) -> PyResult<()> {
+    fn append(&self, pending: Vec<PendingMarker>) -> PyResult<()> {
         let request = ControlRequest::Markers(MarkerRequest::Append {
             owner: self.owner.clone(),
             generation: self.generation,
@@ -53,15 +55,17 @@ impl MarkerCollectionPy {
         color: Option<String>,
         note: Option<String>,
     ) -> PyResult<()> {
-        let marker = pending_marker(t_us, label, color, note)?;
+        let marker = PendingMarker::new(t_us, label, color.as_deref(), note)
+            .map_err(crate::errors::value)?;
         self.append(vec![marker])
     }
 
     fn extend(&self, items: Vec<(i64, String)>) -> PyResult<()> {
         let pending = items
             .into_iter()
-            .map(|(t_us, label)| pending_marker(t_us, label, None, None))
-            .collect::<PyResult<Vec<_>>>()?;
+            .map(|(t_us, label)| PendingMarker::new(t_us, label, None, None))
+            .collect::<delog_api::Result<Vec<_>>>()
+            .map_err(crate::errors::value)?;
         self.append(pending)
     }
 
@@ -234,12 +238,12 @@ impl MarkerPy {
 
     #[getter]
     fn color(&self) -> String {
-        format_color(self.info.color)
+        format_hex_color(self.info.color)
     }
 
     #[setter]
     fn set_color(&mut self, py: Python<'_>, color: &str) -> PyResult<()> {
-        let color = crate::api::parse_marker_color(color)?;
+        let color = parse_hex_color(color).map_err(crate::errors::value)?;
         self.submit_patch(
             py,
             MarkerPatch {
@@ -323,15 +327,4 @@ fn origin_name(origin: MarkerOrigin) -> &'static str {
         MarkerOrigin::Manual => "manual",
         MarkerOrigin::Script => "script",
     }
-}
-
-fn format_color(color: [f32; 4]) -> String {
-    let byte = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
-    format!(
-        "#{:02X}{:02X}{:02X}{:02X}",
-        byte(color[0]),
-        byte(color[1]),
-        byte(color[2]),
-        byte(color[3])
-    )
 }

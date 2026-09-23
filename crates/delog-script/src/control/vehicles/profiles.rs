@@ -1,3 +1,4 @@
+use delog_api::color::format_hex_color;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
@@ -7,7 +8,7 @@ use crate::control::{
     call_immediate_detached, control_call_error,
 };
 
-use super::{VehiclePy, format_color, model_name, resolve_source, vehicle_from_info};
+use super::{VehiclePy, model_name, resolve_source, vehicle_from_info};
 
 #[pyclass(unsendable, name = "VehicleProfiles", skip_from_py_object)]
 #[derive(Clone)]
@@ -141,12 +142,12 @@ impl VehicleProfilePy {
 
     #[getter]
     fn color(&self) -> String {
-        format_color(self.info.color)
+        format_hex_color(self.info.color)
     }
 
     #[getter]
     fn path_color(&self) -> String {
-        format_color(self.info.path_color)
+        format_hex_color(self.info.path_color)
     }
 
     #[getter]

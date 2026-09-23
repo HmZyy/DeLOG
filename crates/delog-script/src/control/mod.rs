@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
+use delog_api::markers::PendingMarker;
 use delog_core::identity::{FieldId, SourceId};
 use delog_core::snapshot::StoreSnapshot;
-
-use crate::api::PendingMarker;
 
 pub mod annotations;
 pub mod layouts;

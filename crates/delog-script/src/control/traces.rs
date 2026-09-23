@@ -1,9 +1,9 @@
+use delog_api::catalog::resolve_field_path;
+use delog_api::color::{format_hex_color, parse_hex_color};
 use delog_core::identity::FieldId;
 use delog_core::snapshot::StoreSnapshot;
 use pyo3::prelude::*;
 use pyo3::types::{PyIterator, PyList};
-
-use crate::api::parse_marker_color;
 
 use super::{
     ControlRequest, ControlResponse, PlotContext, TraceInfo, TraceMode, TraceRequest,
@@ -41,7 +41,11 @@ impl TraceCollectionPy {
     ) -> PyResult<()> {
         let (field_id, field) = resolve_field(&self.context.snapshot, &field)?;
         let mode = parse_trace_mode(mode)?;
-        let color = color.as_deref().map(parse_marker_color).transpose()?;
+        let color = color
+            .as_deref()
+            .map(parse_hex_color)
+            .transpose()
+            .map_err(crate::errors::value)?;
         let request = TraceRequest::Add {
             window: self.window,
             tile: self.tile,
@@ -157,12 +161,12 @@ impl TracePy {
 
     #[getter]
     fn color(&self) -> String {
-        format_color(self.color)
+        format_hex_color(self.color)
     }
 
     #[setter]
     fn set_color(&mut self, py: Python<'_>, color: String) -> PyResult<()> {
-        let parsed = parse_marker_color(&color)?;
+        let parsed = parse_hex_color(&color).map_err(crate::errors::value)?;
         self.set_trace(py, Some(parsed), None, None, None)?;
         self.color = parsed;
         Ok(())
@@ -264,25 +268,11 @@ fn resolve_field(
             "trace field must be a string like 'topic.field' or a FieldRef",
         )
     })?;
-    let Some((topic, name)) = path.split_once('.') else {
-        return Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "field '{path}' must be 'topic.field'"
-        )));
-    };
-    let matches = crate::api::find_fields(snapshot, Some(topic), Some(name), None, None);
-    match matches.len() {
-        1 => {
-            let m = matches.into_iter().next().unwrap();
-            Ok((m.field_id, format!("{}.{}", m.topic_name, m.field_name)))
-        }
-        0 => Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "field '{path}' not found"
-        ))),
-        _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "field '{path}' is ambiguous; candidates: {}",
-            crate::api::candidate_field_paths(&matches)
-        ))),
-    }
+    let field = resolve_field_path(snapshot, &path).map_err(crate::errors::value)?;
+    Ok((
+        field.field_id,
+        format!("{}.{}", field.topic_name, field.field_name),
+    ))
 }
 
 fn parse_trace_mode(name: &str) -> PyResult<TraceMode> {
@@ -299,15 +289,4 @@ fn trace_mode_name(mode: TraceMode) -> &'static str {
         TraceMode::Scatter => "scatter",
         TraceMode::Step => "step",
     }
-}
-
-fn format_color(color: [f32; 4]) -> String {
-    let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-    format!(
-        "#{:02X}{:02X}{:02X}{:02X}",
-        byte(color[0]),
-        byte(color[1]),
-        byte(color[2]),
-        byte(color[3])
-    )
 }
