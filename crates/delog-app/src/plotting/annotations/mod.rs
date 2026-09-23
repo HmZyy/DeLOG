@@ -225,6 +225,8 @@ pub struct Annotation {
     pub geom: Geometry,
     pub label: String,
     pub style: Style,
+    #[cfg(feature = "scripting")]
+    pub owner: Option<delog_script::ScriptOwner>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -287,6 +289,8 @@ impl AnnotationLayer {
             geom,
             label: String::new(),
             style: default_style(id),
+            #[cfg(feature = "scripting")]
+            owner: None,
         });
         id
     }
@@ -301,6 +305,19 @@ impl AnnotationLayer {
         }
         if self.grab.map(Grab::id) == Some(id) {
             self.grab = None;
+        }
+    }
+
+    #[cfg(feature = "scripting")]
+    pub fn retain(&mut self, keep: impl Fn(&Annotation) -> bool) {
+        let doomed: Vec<u64> = self
+            .items
+            .iter()
+            .filter(|a| !keep(a))
+            .map(|a| a.id)
+            .collect();
+        for id in doomed {
+            self.remove(id);
         }
     }
 
