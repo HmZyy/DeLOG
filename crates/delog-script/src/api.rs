@@ -922,6 +922,15 @@ impl Delog {
         }
     }
 
+    #[pyo3(signature = (*, window=None))]
+    fn plots(
+        &self,
+        py: Python<'_>,
+        window: Option<u64>,
+    ) -> PyResult<Vec<crate::control::plots::PlotPy>> {
+        crate::control::plots::list_plots(py, window)
+    }
+
     #[pyo3(signature = (name, *, source=None, instance=None))]
     fn topic(
         &self,
