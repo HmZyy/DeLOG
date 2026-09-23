@@ -26,18 +26,20 @@ impl VehicleProfileDoc {
         config: &VehicleConfig,
         snapshot: &StoreSnapshot,
     ) -> Option<Self> {
-        Some(Self {
+        let doc = Self {
             delog_vehicle_profile: VEHICLE_PROFILE_VERSION,
             name: name.trim().to_owned(),
             vehicle: layout::vehicle_config_to_layout(config, snapshot)?,
-        })
+        };
+        doc.validate().ok()?;
+        Some(doc)
     }
 
     pub fn to_config(&self, snapshot: &StoreSnapshot) -> Option<VehicleConfig> {
-        if self.delog_vehicle_profile != VEHICLE_PROFILE_VERSION {
-            return None;
-        }
-        layout::vehicle_config_from_layout(&self.vehicle, snapshot)
+        self.validate().ok()?;
+        let mut config = layout::vehicle_config_from_layout(&self.vehicle, snapshot)?;
+        config.scale = self.vehicle.scale;
+        Some(config)
     }
 
     pub fn to_config_for_source(
@@ -45,11 +47,169 @@ impl VehicleProfileDoc {
         snapshot: &StoreSnapshot,
         source: SourceId,
     ) -> Option<VehicleConfig> {
-        if self.delog_vehicle_profile != VEHICLE_PROFILE_VERSION {
-            return None;
-        }
-        layout::vehicle_config_from_layout_for_source(&self.vehicle, snapshot, source)
+        self.validate().ok()?;
+        let mut config =
+            layout::vehicle_config_from_layout_for_source(&self.vehicle, snapshot, source)?;
+        config.scale = self.vehicle.scale;
+        Some(config)
     }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.delog_vehicle_profile != VEHICLE_PROFILE_VERSION {
+            return Err(format!(
+                "unsupported vehicle profile version {}",
+                self.delog_vehicle_profile
+            ));
+        }
+        if !self.vehicle.scale.is_finite() || self.vehicle.scale <= 0.0 {
+            return Err("vehicle scale must be finite and > 0".to_owned());
+        }
+        match &self.vehicle.position {
+            layout::PosLayout::Gps { alt_offset_m, .. } => {
+                if !alt_offset_m.is_finite() {
+                    return Err("vehicle GPS alt_offset_m must be finite".to_owned());
+                }
+            }
+            layout::PosLayout::Ned {
+                reference:
+                    Some(layout::NedRefLayout::Manual {
+                        lat_deg,
+                        lon_deg,
+                        alt_m,
+                    }),
+                ..
+            } => {
+                if !lat_deg.is_finite()
+                    || !lon_deg.is_finite()
+                    || !alt_m.is_finite()
+                    || !(-90.0..=90.0).contains(lat_deg)
+                    || !(-180.0..=180.0).contains(lon_deg)
+                {
+                    return Err("vehicle NED georeference is invalid".to_owned());
+                }
+            }
+            layout::PosLayout::Ned { .. } => {}
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "scripting")]
+    pub fn to_script_info(&self) -> delog_script::VehicleProfileInfo {
+        delog_script::VehicleProfileInfo {
+            name: self.name.clone(),
+            label: self.vehicle.label.clone(),
+            show: self.vehicle.show,
+            show_path: self.vehicle.show_path,
+            position: script_position(&self.vehicle.position),
+            orientation: script_orientation(&self.vehicle.orientation),
+            model: script_model(&self.vehicle.model),
+            color: script_color(self.vehicle.color),
+            path_color: script_color(self.vehicle.path_color),
+            scale: self.vehicle.scale,
+        }
+    }
+}
+
+#[cfg(feature = "scripting")]
+fn script_field(field: &layout::FieldRef) -> delog_script::ProfileFieldRef {
+    delog_script::ProfileFieldRef {
+        topic: field.topic.clone(),
+        field: field.field.clone(),
+    }
+}
+
+#[cfg(feature = "scripting")]
+fn script_position(position: &layout::PosLayout) -> delog_script::ProfilePosition {
+    match position {
+        layout::PosLayout::Ned {
+            north,
+            east,
+            down,
+            reference,
+        } => delog_script::ProfilePosition::Ned {
+            north: script_field(north),
+            east: script_field(east),
+            down: script_field(down),
+            reference: reference.as_ref().map(|reference| match reference {
+                layout::NedRefLayout::Manual {
+                    lat_deg,
+                    lon_deg,
+                    alt_m,
+                } => delog_script::ProfileNedReference::Manual {
+                    lat_deg: *lat_deg,
+                    lon_deg: *lon_deg,
+                    alt_m: *alt_m,
+                },
+                layout::NedRefLayout::Fields { lat, lon, alt } => {
+                    delog_script::ProfileNedReference::Fields {
+                        lat: script_field(lat),
+                        lon: script_field(lon),
+                        alt: script_field(alt),
+                    }
+                }
+            }),
+        },
+        layout::PosLayout::Gps {
+            lat,
+            lon,
+            alt,
+            lat_lon_dege7,
+            alt_mm,
+            alt_offset_m,
+        } => delog_script::ProfilePosition::Gps {
+            lat: script_field(lat),
+            lon: script_field(lon),
+            alt: script_field(alt),
+            lat_lon_dege7: *lat_lon_dege7,
+            alt_mm: *alt_mm,
+            alt_offset_m: *alt_offset_m,
+        },
+    }
+}
+
+#[cfg(feature = "scripting")]
+fn script_orientation(orientation: &layout::OriLayout) -> delog_script::ProfileOrientation {
+    match orientation {
+        layout::OriLayout::Static => delog_script::ProfileOrientation::Static,
+        layout::OriLayout::Euler {
+            roll,
+            pitch,
+            yaw,
+            degrees,
+        } => delog_script::ProfileOrientation::Euler {
+            roll: script_field(roll),
+            pitch: script_field(pitch),
+            yaw: script_field(yaw),
+            degrees: *degrees,
+        },
+        layout::OriLayout::Quat { w, x, y, z } => delog_script::ProfileOrientation::Quat {
+            w: script_field(w),
+            x: script_field(x),
+            y: script_field(y),
+            z: script_field(z),
+        },
+    }
+}
+
+#[cfg(feature = "scripting")]
+fn script_model(model: &layout::ModelLayout) -> delog_script::VehicleModel {
+    match model {
+        layout::ModelLayout::None => delog_script::VehicleModel::None,
+        layout::ModelLayout::Quad => delog_script::VehicleModel::Quad,
+        layout::ModelLayout::FixedWing => delog_script::VehicleModel::FixedWing,
+        layout::ModelLayout::DeltaWing => delog_script::VehicleModel::DeltaWing,
+        layout::ModelLayout::Cone => delog_script::VehicleModel::Cone,
+        layout::ModelLayout::Sphere => delog_script::VehicleModel::Sphere,
+        layout::ModelLayout::Cube => delog_script::VehicleModel::Cube,
+        layout::ModelLayout::CustomGlb { path } => {
+            delog_script::VehicleModel::CustomGlb(path.clone())
+        }
+    }
+}
+
+#[cfg(feature = "scripting")]
+fn script_color(color: [u8; 4]) -> [f32; 4] {
+    color.map(|component| component as f32 / 255.0)
 }
 
 impl PartialEq for VehicleProfileDoc {
@@ -115,11 +275,15 @@ impl VehicleProfileLibrary {
                 ),
             ));
         }
+        doc.validate()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         Ok(doc)
     }
 
     pub fn save(&self, name: &str, doc: &VehicleProfileDoc) -> io::Result<()> {
         let path = self.profile_path(name)?;
+        doc.validate()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         fs::create_dir_all(&self.dir)?;
         let json = serde_json::to_string_pretty(doc)
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
@@ -263,6 +427,7 @@ mod tests {
             delog_vehicle_profile: VEHICLE_PROFILE_VERSION,
             name: "mavlink_local_position".to_owned(),
             vehicle: VehicleLayout {
+                owner: None,
                 label: "Vehicle".to_owned(),
                 show: true,
                 show_path: true,
@@ -300,6 +465,32 @@ mod tests {
         fs::remove_dir_all(tmp).unwrap();
     }
 
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn profile_doc_converts_to_source_independent_script_payload() {
+        let info = sample_doc().to_script_info();
+
+        assert_eq!(info.name, "mavlink_local_position");
+        assert_eq!(info.label, "Vehicle");
+        assert_eq!(info.model, delog_script::VehicleModel::FixedWing);
+        assert_eq!(info.color, [90.0 / 255.0, 170.0 / 255.0, 1.0, 1.0]);
+        assert!(matches!(
+            info.position,
+            delog_script::ProfilePosition::Ned {
+                north: delog_script::ProfileFieldRef { ref topic, ref field },
+                ..
+            } if topic == "LOCAL_POSITION_NED" && field == "x"
+        ));
+        assert!(matches!(
+            info.orientation,
+            delog_script::ProfileOrientation::Euler {
+                yaw: delog_script::ProfileFieldRef { ref topic, ref field },
+                degrees: false,
+                ..
+            } if topic == "ATTITUDE" && field == "yaw"
+        ));
+    }
+
     #[test]
     fn profile_doc_from_vehicle_config_uses_layout_conversion() {
         let snapshot = snapshot_with_local_position_and_attitude();
@@ -310,6 +501,7 @@ mod tests {
             .map(|source| source.entry.id)
             .expect("source should exist");
         let cfg = VehicleConfig {
+            runtime: crate::scene3d::vehicle::VehicleRuntime::unassigned(),
             source,
             label: "Rover".to_owned(),
             show: true,
@@ -346,6 +538,7 @@ mod tests {
             delog_vehicle_profile: VEHICLE_PROFILE_VERSION,
             name: "Local".to_owned(),
             vehicle: VehicleLayout {
+                owner: None,
                 label: "Rover".to_owned(),
                 show: true,
                 show_path: true,

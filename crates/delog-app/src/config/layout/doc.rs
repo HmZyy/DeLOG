@@ -14,7 +14,8 @@ use serde_json::Value;
 
 use crate::config::settings::AppSettings;
 use crate::scene3d::vehicle::{
-    GeoRef, ModelKind, NedReference, OriMapping, PosMapping, VehicleConfig,
+    GeoRef, ModelKind, NedReference, OriMapping, PosMapping, VehicleConfig, VehicleOwner,
+    VehicleRuntime,
 };
 
 const APP_ID: &str = "DeLOG";
@@ -173,6 +174,8 @@ pub struct CameraLayout {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VehicleLayout {
     pub label: String,
+    #[serde(default)]
+    pub owner: Option<String>,
     pub show: bool,
     #[serde(default = "default_true")]
     pub show_path: bool,
@@ -518,6 +521,7 @@ pub(crate) fn vehicle_to_layout(
 ) -> Option<VehicleLayout> {
     Some(VehicleLayout {
         label: v.label.clone(),
+        owner: v.runtime.owner.as_ref().map(|owner| owner.name.clone()),
         show: v.show,
         show_path: v.show_path,
         model: model_to_layout(&v.model),
@@ -812,6 +816,13 @@ pub(crate) fn vehicle_from_layout(
 ) -> Option<VehicleConfig> {
     let source = first_resolved_source(v, resolver)?;
     Some(VehicleConfig {
+        runtime: VehicleRuntime {
+            id: 0,
+            owner: v.owner.clone().map(|name| VehicleOwner {
+                name,
+                generation: 0,
+            }),
+        },
         source,
         label: v.label.clone(),
         show: v.show,
@@ -1004,7 +1015,7 @@ fn model_from_layout(model: &ModelLayout) -> ModelKind {
 }
 
 fn color_to_rgba(c: Color32) -> [u8; 4] {
-    [c.r(), c.g(), c.b(), c.a()]
+    c.to_srgba_unmultiplied()
 }
 
 fn rgba_to_color(c: [u8; 4]) -> Color32 {

@@ -243,6 +243,7 @@ impl ProfileDraft {
             delog_vehicle_profile: VEHICLE_PROFILE_VERSION,
             name: name.trim().to_owned(),
             vehicle: VehicleLayout {
+                owner: None,
                 label: self.label.clone(),
                 show: self.show,
                 show_path: self.show_path,
