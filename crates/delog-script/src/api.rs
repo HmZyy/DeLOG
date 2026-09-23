@@ -970,6 +970,11 @@ impl Delog {
     }
 
     #[getter]
+    fn annotations(&self) -> crate::control::annotations::GlobalAnnotationsPy {
+        crate::control::annotations::GlobalAnnotationsPy
+    }
+
+    #[getter]
     fn playback(&self) -> crate::control::workspace::PlaybackPy {
         crate::control::workspace::PlaybackPy
     }

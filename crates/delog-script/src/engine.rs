@@ -592,7 +592,7 @@ fn worker_loop(
     let mut active_transforms: HashMap<String, Vec<ActiveTransform>> = HashMap::new();
     let mut declarative_sources: HashMap<String, SourceId> = HashMap::new();
     let mut active_operations: HashMap<String, Vec<ActiveOperation>> = HashMap::new();
-    let mut run_counter: u64 = 0;
+    let mut run_counter: u64 = 1;
 
     Python::attach(|py| {
         let sys = py.import("sys").expect("import sys");
@@ -1922,12 +1922,12 @@ mod tests {
             vec![
                 ControlRequest::Markers(MarkerRequest::Replace {
                     owner: "analysis".into(),
-                    generation: 0,
+                    generation: 1,
                     markers: vec![expected_marker(42, "launch")],
                 }),
                 ControlRequest::Generation(GenerationRequest::Commit {
                     owner: "analysis".into(),
-                    generation: 0,
+                    generation: 1,
                 }),
             ]
         );
@@ -1942,7 +1942,7 @@ mod tests {
             control_requests_until_done(&engine),
             vec![ControlRequest::Generation(GenerationRequest::Rollback {
                 owner: "analysis".into(),
-                generation: 1,
+                generation: 2,
             })]
         );
 
@@ -1957,12 +1957,12 @@ mod tests {
             vec![
                 ControlRequest::Markers(MarkerRequest::Replace {
                     owner: "analysis".into(),
-                    generation: 2,
+                    generation: 3,
                     markers: vec![],
                 }),
                 ControlRequest::Generation(GenerationRequest::Commit {
                     owner: "analysis".into(),
-                    generation: 2,
+                    generation: 3,
                 }),
             ]
         );
@@ -2016,7 +2016,7 @@ delog.transform("MISSING", mode="snapshot")
             control_requests_until_done(&engine),
             vec![ControlRequest::Generation(GenerationRequest::Rollback {
                 owner: "analysis".into(),
-                generation: 0,
+                generation: 1,
             })]
         );
         assert!(!engine.has_live_transform("analysis"));
@@ -2055,12 +2055,12 @@ mark = delog.live_transform(topic="A", fields=["v"], output_topic="B")(MarkerCal
             vec![
                 ControlRequest::Markers(MarkerRequest::Replace {
                     owner: "analysis".into(),
-                    generation: 0,
+                    generation: 1,
                     markers: vec![],
                 }),
                 ControlRequest::Generation(GenerationRequest::Commit {
                     owner: "analysis".into(),
-                    generation: 0,
+                    generation: 1,
                 }),
             ]
         );
@@ -2102,7 +2102,7 @@ mark = delog.live_transform(topic="A", fields=["v"], output_topic="B")(MarkerCal
                 control_requests_until_done(&engine),
                 vec![ControlRequest::Generation(GenerationRequest::Rollback {
                     owner: "analysis".into(),
-                    generation: index as u64 + 1,
+                    generation: index as u64 + 2,
                 })]
             );
 
@@ -2125,7 +2125,7 @@ mark = delog.live_transform(topic="A", fields=["v"], output_topic="B")(MarkerCal
                 vec![
                     ControlRequest::Markers(MarkerRequest::Append {
                         owner: "analysis".into(),
-                        generation: 0,
+                        generation: 1,
                         markers: vec![expected_marker(42, "still active")],
                     });
                     usize::from(LIVE_TRANSFORM_ERROR_LIMIT)
@@ -2149,7 +2149,7 @@ mark = delog.live_transform(topic="A", fields=["v"], output_topic="B")(MarkerCal
                 "delog.add_marker(10, 'console marker')",
                 vec![ControlRequest::Markers(MarkerRequest::Append {
                     owner: CONSOLE_SCRIPT_NAME.into(),
-                    generation: 0,
+                    generation: 1,
                     markers: vec![expected_marker(10, "console marker")],
                 })],
             ),
@@ -2157,7 +2157,7 @@ mark = delog.live_transform(topic="A", fields=["v"], output_topic="B")(MarkerCal
                 "unrelated = 1",
                 vec![ControlRequest::Markers(MarkerRequest::Append {
                     owner: CONSOLE_SCRIPT_NAME.into(),
-                    generation: 1,
+                    generation: 2,
                     markers: vec![],
                 })],
             ),
@@ -2212,12 +2212,12 @@ def mark(batch):
             vec![
                 ControlRequest::Markers(MarkerRequest::Replace {
                     owner: "live_markers".into(),
-                    generation: 0,
+                    generation: 1,
                     markers: vec![],
                 }),
                 ControlRequest::Generation(GenerationRequest::Commit {
                     owner: "live_markers".into(),
-                    generation: 0,
+                    generation: 1,
                 }),
             ]
         );
@@ -2256,7 +2256,7 @@ def mark(batch):
                     commands,
                     vec![ControlRequest::Markers(MarkerRequest::Append {
                         owner: "live_markers".into(),
-                        generation: 0,
+                        generation: 1,
                         markers: vec![expected_marker(time_us, &format!("call {}", time_us / 100))],
                     })]
                 );
@@ -2286,7 +2286,7 @@ def mark(batch):
             control_requests_until_done(&engine).contains(&ControlRequest::Generation(
                 GenerationRequest::Commit {
                     owner: "analysis".into(),
-                    generation: 0,
+                    generation: 1,
                 }
             ))
         );
@@ -2301,7 +2301,7 @@ def mark(batch):
             control_requests_until_done(&engine).contains(&ControlRequest::Generation(
                 GenerationRequest::Rollback {
                     owner: "analysis".into(),
-                    generation: 1,
+                    generation: 2,
                 }
             ))
         );

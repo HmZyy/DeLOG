@@ -210,7 +210,7 @@ fn marker_command_is_exported_and_delivered_before_done() {
                         vec![
                             ControlRequest::Markers(MarkerRequest::Replace {
                                 owner: "analysis".into(),
-                                generation: 0,
+                                generation: 1,
                                 markers: vec![PendingMarker {
                                     time_us: 123,
                                     label: "golden".into(),
@@ -220,7 +220,7 @@ fn marker_command_is_exported_and_delivered_before_done() {
                             }),
                             ControlRequest::Generation(GenerationRequest::Commit {
                                 owner: "analysis".into(),
-                                generation: 0,
+                                generation: 1,
                             }),
                         ]
                     );

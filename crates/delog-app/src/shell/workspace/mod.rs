@@ -657,6 +657,17 @@ impl Workspace {
             .collect()
     }
 
+    #[cfg(feature = "scripting")]
+    pub fn annotation_infos(&self, window: u64) -> Vec<delog_script::AnnotationInfo> {
+        let mut infos = Vec::new();
+        for tile in self.plot_tiles_in_order() {
+            if let Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) = self.tree.tiles.get(tile) {
+                infos.extend(annotation_infos_for_pane(window, tile.0, pane));
+            }
+        }
+        infos
+    }
+
     pub fn annotation_rows(&self) -> Vec<crate::plotting::annotations::toolbar::AnnotationRow> {
         let mut rows = Vec::new();
         for (index, tile) in self.plot_tiles_in_order().into_iter().enumerate() {
@@ -766,6 +777,30 @@ impl Default for Workspace {
     fn default() -> Self {
         Self::new()
     }
+}
+
+#[cfg(feature = "scripting")]
+pub(crate) fn annotation_infos_for_pane(
+    window: u64,
+    tile: u64,
+    pane: &PlotPane,
+) -> Vec<delog_script::AnnotationInfo> {
+    pane.annotations
+        .items()
+        .iter()
+        .enumerate()
+        .map(|(index, annotation)| delog_script::AnnotationInfo {
+            window,
+            tile,
+            id: annotation.id,
+            index,
+            kind: annotation.geom.kind().to_script(),
+            geometry: annotation.geom.to_script(),
+            label: annotation.label.clone(),
+            color: annotation.style.color,
+            owner: annotation.owner.as_ref().map(|owner| owner.name.clone()),
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

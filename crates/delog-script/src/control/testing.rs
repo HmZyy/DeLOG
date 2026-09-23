@@ -11,6 +11,15 @@ fn globals_with_delog(
     py: Python<'_>,
     snapshot: Arc<StoreSnapshot>,
 ) -> Result<Bound<'_, PyDict>, String> {
+    globals_with_delog_named(py, snapshot, String::new(), 0)
+}
+
+fn globals_with_delog_named(
+    py: Python<'_>,
+    snapshot: Arc<StoreSnapshot>,
+    script_name: String,
+    generation: u64,
+) -> Result<Bound<'_, PyDict>, String> {
     let globals = PyDict::new(py);
     let delog = crate::api::Delog::new(
         snapshot,
@@ -18,8 +27,8 @@ fn globals_with_delog(
         std::rc::Rc::default(),
         std::rc::Rc::default(),
         std::rc::Rc::default(),
-        String::new(),
-        0,
+        script_name,
+        generation,
         crate::params::shared_empty(),
     );
     globals
@@ -63,6 +72,26 @@ pub fn eval_with_host_and_snapshot(
     let _guard = install_host(Some(host));
     Python::attach(|py| {
         let globals = globals_with_delog(py, snapshot)?;
+        let code = std::ffi::CString::new(statement).map_err(|e| e.to_string())?;
+        py.run(&code, Some(&globals), None)
+            .map_err(|e| e.to_string())
+    })
+}
+
+pub fn eval_named_with_host(
+    host: Arc<dyn ControlHost>,
+    script_name: &str,
+    generation: u64,
+    statement: &str,
+) -> Result<(), String> {
+    let _guard = install_host(Some(host));
+    Python::attach(|py| {
+        let globals = globals_with_delog_named(
+            py,
+            Arc::new(StoreSnapshot::empty()),
+            script_name.to_string(),
+            generation,
+        )?;
         let code = std::ffi::CString::new(statement).map_err(|e| e.to_string())?;
         py.run(&code, Some(&globals), None)
             .map_err(|e| e.to_string())
