@@ -16,6 +16,12 @@ pub mod api;
 mod context;
 
 #[cfg(feature = "python")]
+mod errors;
+
+#[cfg(feature = "python")]
+mod staging;
+
+#[cfg(feature = "python")]
 pub mod emit;
 
 #[cfg(feature = "python")]
@@ -32,9 +38,6 @@ pub mod operations;
 
 #[cfg(feature = "python")]
 pub mod control;
-
-#[cfg(feature = "python")]
-pub use api::PendingMarker;
 
 #[cfg(feature = "python")]
 pub use control::{

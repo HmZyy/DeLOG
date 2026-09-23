@@ -1,9 +1,9 @@
+use delog_api::catalog::resolve_field_path;
+use delog_api::color::{format_hex_color, parse_hex_color};
 use delog_core::snapshot::StoreSnapshot;
 use pyo3::exceptions::{PyIndexError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyIterator, PyList};
-
-use crate::api::parse_marker_color;
 
 use super::{
     ControlRequest, ControlResponse, PlotContext, ResolvedVehicleField, VehicleFilter, VehicleInfo,
@@ -171,7 +171,7 @@ impl VehiclePy {
 
     #[getter]
     fn color(&self) -> String {
-        format_color(self.info.spec.color)
+        format_hex_color(self.info.spec.color)
     }
 
     #[setter]
@@ -179,7 +179,7 @@ impl VehiclePy {
         self.submit_patch(
             py,
             VehiclePatch {
-                color: Some(parse_marker_color(color)?),
+                color: Some(parse_hex_color(color).map_err(crate::errors::value)?),
                 ..VehiclePatch::default()
             },
         )
@@ -187,7 +187,7 @@ impl VehiclePy {
 
     #[getter]
     fn path_color(&self) -> String {
-        format_color(self.info.spec.path_color)
+        format_hex_color(self.info.spec.path_color)
     }
 
     #[setter]
@@ -195,7 +195,7 @@ impl VehiclePy {
         self.submit_patch(
             py,
             VehiclePatch {
-                path_color: Some(parse_marker_color(path_color)?),
+                path_color: Some(parse_hex_color(path_color).map_err(crate::errors::value)?),
                 ..VehiclePatch::default()
             },
         )
@@ -326,8 +326,8 @@ impl VehicleCollectionPy {
                 .map(|orientation| orientation.0.clone())
                 .unwrap_or(VehicleOrientation::Static),
             model: parse_model(model)?,
-            color: parse_marker_color(color)?,
-            path_color: parse_marker_color(path_color)?,
+            color: parse_hex_color(color).map_err(crate::errors::value)?,
+            path_color: parse_hex_color(path_color).map_err(crate::errors::value)?,
             scale: positive_scale(scale)?,
             owner: self.context.owner.clone(),
         };
@@ -396,24 +396,14 @@ fn resolve_field(
     let path = value.extract::<String>().map_err(|_| {
         PyValueError::new_err("vehicle fields must be a string like 'topic.field' or a FieldRef")
     })?;
-    let (topic, name) = path
-        .split_once('.')
-        .ok_or_else(|| PyValueError::new_err(format!("field '{path}' must be 'topic.field'")))?;
-    let matches = crate::api::find_fields(snapshot, Some(topic), Some(name), None, None);
-    match matches.as_slice() {
-        [field] => Ok(ResolvedVehicleField {
-            id: field.field_id,
-            path: format!(
-                "{}/{}/{}",
-                field.source_label, field.topic_name, field.field_name
-            ),
-        }),
-        [] => Err(PyValueError::new_err(format!("field '{path}' not found"))),
-        _ => Err(PyValueError::new_err(format!(
-            "field '{path}' is ambiguous; candidates: {}",
-            crate::api::candidate_field_paths(&matches)
-        ))),
-    }
+    let field = resolve_field_path(snapshot, &path).map_err(crate::errors::value)?;
+    Ok(ResolvedVehicleField {
+        id: field.field_id,
+        path: format!(
+            "{}/{}/{}",
+            field.source_label, field.topic_name, field.field_name
+        ),
+    })
 }
 
 fn finite(name: &str, value: f64) -> PyResult<f64> {
@@ -612,15 +602,4 @@ fn positive_scale(scale: f32) -> PyResult<f32> {
             "vehicle scale must be finite and > 0",
         ))
     }
-}
-
-fn format_color(color: [f32; 4]) -> String {
-    let byte = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
-    format!(
-        "#{:02X}{:02X}{:02X}{:02X}",
-        byte(color[0]),
-        byte(color[1]),
-        byte(color[2]),
-        byte(color[3])
-    )
 }

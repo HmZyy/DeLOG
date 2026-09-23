@@ -1,7 +1,6 @@
+use delog_api::color::{format_hex_color, parse_hex_color};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyIterator, PyList};
-
-use crate::api::parse_marker_color;
 
 use super::{
     AnnotationFilter, AnnotationGeometry, AnnotationInfo, AnnotationKind, AnnotationRequest,
@@ -450,7 +449,11 @@ fn build_style_patch(
     font_px: Option<f32>,
     arrow: Option<bool>,
 ) -> PyResult<AnnotationStylePatch> {
-    let color = color.as_deref().map(parse_marker_color).transpose()?;
+    let color = color
+        .as_deref()
+        .map(parse_hex_color)
+        .transpose()
+        .map_err(crate::errors::value)?;
     reject_non_finite(stroke_px, "stroke_px")?;
     reject_non_finite(fill_opacity, "fill_opacity")?;
     reject_non_finite(font_px, "font_px")?;
@@ -575,17 +578,6 @@ fn moved_to(geometry: AnnotationGeometry, point: (i64, f64)) -> AnnotationGeomet
     }
 }
 
-fn format_color(color: [f32; 4]) -> String {
-    let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-    format!(
-        "#{:02X}{:02X}{:02X}{:02X}",
-        byte(color[0]),
-        byte(color[1]),
-        byte(color[2]),
-        byte(color[3])
-    )
-}
-
 #[pyclass(unsendable, name = "Annotation", skip_from_py_object)]
 #[derive(Clone)]
 pub struct AnnotationPy {
@@ -637,12 +629,12 @@ impl AnnotationPy {
 
     #[getter]
     fn color(&self) -> String {
-        format_color(self.color)
+        format_hex_color(self.color)
     }
 
     #[setter]
     fn set_color(&mut self, py: Python<'_>, color: String) -> PyResult<()> {
-        let parsed = parse_marker_color(&color)?;
+        let parsed = parse_hex_color(&color).map_err(crate::errors::value)?;
         let style = AnnotationStylePatch {
             color: Some(parsed),
             ..Default::default()

@@ -2,10 +2,9 @@
 
 use std::sync::Arc;
 
+use delog_api::markers::PendingMarker;
 use delog_script::control::RecordingHost;
-use delog_script::{
-    ControlRequest, MarkerRequest, PendingMarker, PlaybackRequest, TraceMode, TraceRequest,
-};
+use delog_script::{ControlRequest, MarkerRequest, PlaybackRequest, TraceMode, TraceRequest};
 
 #[test]
 fn a_successful_batch_stages_supported_requests_in_issue_order() {

@@ -5,7 +5,9 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
+use delog_api::markers::PendingMarker;
 use delog_api::params::SharedParams;
+use delog_api::timestamps::TimestampMode;
 use delog_core::identity::SourceId;
 use delog_core::ingest::{IngestSender, IngestSink, ParseSummary, ParsedBatch, SourceKind};
 use delog_core::metrics::MetricsRegistry;
@@ -15,7 +17,7 @@ use pyo3::exceptions::{PyKeyboardInterrupt, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use crate::api::{Delog, PendingMarker};
+use crate::api::Delog;
 use crate::control::{ControlRequest, GenerationRequest, MarkerRequest};
 use crate::custom_parser::{
     ParserOutput, emit_parser_output, parse_python_result, read_float32_file,
@@ -47,7 +49,7 @@ struct ActiveTransform {
     spec: LiveTransformSpec,
     callable: Py<PyAny>,
     source: SourceId,
-    markers: crate::api::MarkerBuffer,
+    markers: crate::staging::MarkerBuffer,
     generation: u64,
     consecutive_errors: u8,
     disabled: bool,
@@ -613,11 +615,11 @@ fn worker_loop(
             }
             Ok(EngineCommand::Script(cmd)) => {
                 let timestamp_mode = if use_original_timestamps.load(Ordering::Relaxed) {
-                    crate::api::ScriptTimestampMode::Original
+                    TimestampMode::Original
                 } else {
-                    crate::api::ScriptTimestampMode::Effective
+                    TimestampMode::Effective
                 };
-                let shutdown = crate::api::with_timestamp_mode(timestamp_mode, || {
+                let shutdown = crate::context::with_timestamp_mode(timestamp_mode, || {
                     handle_command(
                         cmd,
                         &store,
@@ -894,7 +896,7 @@ fn run_one_transform(
 ) -> Result<(Vec<ParsedBatch>, Vec<PendingMarker>), String> {
     transform.markers.borrow_mut().clear();
     let _marker_override =
-        crate::api::override_marker_buffer(std::rc::Rc::clone(&transform.markers));
+        crate::staging::override_marker_buffer(std::rc::Rc::clone(&transform.markers));
     let result = (|| {
         let materialized = LiveTransformBatch::from_parsed(&transform.spec, batch)?;
         let input_times = materialized.times.clone();
@@ -1053,10 +1055,10 @@ fn handle_command(
                     return false;
                 }
                 let snapshot = store.load();
-                let emit: crate::api::EmitBuffer = std::rc::Rc::default();
-                let live: crate::api::LiveTransformBuffer = std::rc::Rc::default();
-                let operations: crate::operations::OperationBuffer = std::rc::Rc::default();
-                let markers: crate::api::MarkerBuffer = std::rc::Rc::default();
+                let emit: crate::staging::EmitBuffer = std::rc::Rc::default();
+                let live: crate::staging::LiveTransformBuffer = std::rc::Rc::default();
+                let operations: crate::staging::OperationBuffer = std::rc::Rc::default();
+                let markers: crate::staging::MarkerBuffer = std::rc::Rc::default();
                 let batches: crate::control::DeferredControlBuffer = std::rc::Rc::default();
                 let generation = *run_counter;
                 *run_counter += 1;
@@ -1308,10 +1310,10 @@ fn handle_command(
             ScriptCommand::Eval(src) => {
                 let _control = crate::control::install_host(control_host.lock().unwrap().clone());
                 let snapshot = store.load();
-                let emit: crate::api::EmitBuffer = std::rc::Rc::default();
-                let live: crate::api::LiveTransformBuffer = std::rc::Rc::default();
-                let operations: crate::operations::OperationBuffer = std::rc::Rc::default();
-                let markers: crate::api::MarkerBuffer = std::rc::Rc::default();
+                let emit: crate::staging::EmitBuffer = std::rc::Rc::default();
+                let live: crate::staging::LiveTransformBuffer = std::rc::Rc::default();
+                let operations: crate::staging::OperationBuffer = std::rc::Rc::default();
+                let markers: crate::staging::MarkerBuffer = std::rc::Rc::default();
                 let batches: crate::control::DeferredControlBuffer = std::rc::Rc::default();
                 let generation = *run_counter;
                 *run_counter += 1;
@@ -1626,10 +1628,10 @@ fn ensure_delog_present(
             return;
         }
         let snapshot = store.load();
-        let emit: crate::api::EmitBuffer = std::rc::Rc::default();
-        let live: crate::api::LiveTransformBuffer = std::rc::Rc::default();
-        let operations: crate::operations::OperationBuffer = std::rc::Rc::default();
-        let markers: crate::api::MarkerBuffer = std::rc::Rc::default();
+        let emit: crate::staging::EmitBuffer = std::rc::Rc::default();
+        let live: crate::staging::LiveTransformBuffer = std::rc::Rc::default();
+        let operations: crate::staging::OperationBuffer = std::rc::Rc::default();
+        let markers: crate::staging::MarkerBuffer = std::rc::Rc::default();
         if let Ok(delog) = Bound::new(
             py,
             Delog::new(
@@ -1916,8 +1918,8 @@ mod tests {
         }
     }
 
-    fn expected_marker(time_us: i64, label: &str) -> crate::api::PendingMarker {
-        crate::api::PendingMarker {
+    fn expected_marker(time_us: i64, label: &str) -> delog_api::markers::PendingMarker {
+        delog_api::markers::PendingMarker {
             time_us,
             label: label.into(),
             color: None,
@@ -1928,7 +1930,7 @@ mod tests {
     fn expected_named_batch(
         owner: &str,
         generation: u64,
-        markers: Vec<crate::api::PendingMarker>,
+        markers: Vec<delog_api::markers::PendingMarker>,
     ) -> ControlRequest {
         ControlRequest::Batch(vec![
             ControlRequest::Markers(MarkerRequest::Append {
