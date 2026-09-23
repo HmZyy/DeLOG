@@ -4,6 +4,8 @@ use std::time::{Duration, Instant};
 pub mod command_palette;
 pub mod commands;
 pub mod context_header;
+#[cfg(feature = "scripting")]
+mod control_service;
 mod dynamic_commands;
 pub mod global_plot_toolbar;
 pub mod inspector;
@@ -585,6 +587,7 @@ impl DelogApp {
                     config_dir.join("scripts"),
                     config_dir.join("parsers"),
                     config_dir.join("script_params.json"),
+                    cc.egui_ctx.clone(),
                 )
             },
             gpu: GpuBridge::from_creation_context(cc),
@@ -3612,8 +3615,27 @@ impl eframe::App for DelogApp {
                 self.settings.scripting.auto_open_console,
                 self.settings.scripting.use_original_timestamps,
             );
-            for command in self.scripts.take_marker_commands() {
-                self.markers.apply_script_command(command);
+            if let Some(queue) = self.scripts.control_queue() {
+                let mut control = control_service::AppControl {
+                    markers: &mut self.markers,
+                    workspace: &mut self.workspace,
+                };
+                queue.drain_with(|request| control_service::apply(&mut control, request));
+            }
+            for batch in self.scripts.take_control_batches() {
+                for request in batch {
+                    let mut control = control_service::AppControl {
+                        markers: &mut self.markers,
+                        workspace: &mut self.workspace,
+                    };
+                    if let Err(error) = control_service::apply(&mut control, request) {
+                        self.push_log(PendingLog::with_target(
+                            LogLevel::Error,
+                            "python-control",
+                            error,
+                        ));
+                    }
+                }
             }
             for message in self.scripts.take_parser_diagnostics() {
                 self.push_log(PendingLog::with_target(

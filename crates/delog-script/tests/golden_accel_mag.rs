@@ -12,7 +12,9 @@ use delog_core::metrics::MetricsRegistry;
 use delog_core::schema::{FieldSchema, TopicSchema};
 use delog_core::snapshot::{DataStore, StoreSnapshot};
 use delog_core::store::TopicStore;
-use delog_script::{MarkerCommand, PendingMarker, ScriptCommand, ScriptEngine, ScriptEvent};
+use delog_script::{
+    ControlRequest, MarkerRequest, PendingMarker, ScriptCommand, ScriptEngine, ScriptEvent,
+};
 
 static SCRIPT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -200,11 +202,11 @@ fn marker_command_is_exported_and_delivered_before_done() {
     loop {
         for event in engine.drain_events() {
             match event {
-                ScriptEvent::Markers(command) => commands.push(command),
+                ScriptEvent::Control(batch) => commands.extend(batch),
                 ScriptEvent::Done => {
                     assert_eq!(
                         commands,
-                        vec![MarkerCommand::Replace {
+                        vec![ControlRequest::Markers(MarkerRequest::Replace {
                             owner: "analysis".into(),
                             generation: 0,
                             markers: vec![PendingMarker {
@@ -213,7 +215,7 @@ fn marker_command_is_exported_and_delivered_before_done() {
                                 color: None,
                                 note: String::new(),
                             }],
-                        }]
+                        })]
                     );
                     drop(engine);
                     drop(sender);

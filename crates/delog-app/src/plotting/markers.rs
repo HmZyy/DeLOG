@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 
 #[cfg(feature = "scripting")]
-use delog_script::{MarkerCommand, PendingMarker};
+use delog_script::{MarkerRequest, PendingMarker};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum MarkerOrigin {
@@ -91,9 +91,9 @@ impl Markers {
     }
 
     #[cfg(feature = "scripting")]
-    pub fn apply_script_command(&mut self, command: MarkerCommand) {
-        match command {
-            MarkerCommand::Replace {
+    pub fn apply_control_request(&mut self, request: MarkerRequest) {
+        match request {
+            MarkerRequest::Replace {
                 owner,
                 generation,
                 markers,
@@ -106,7 +106,7 @@ impl Markers {
                 self.insert_script_markers(&owner, generation, markers, &mut state);
                 self.script_states.insert(owner, state);
             }
-            MarkerCommand::Append {
+            MarkerRequest::Append {
                 owner,
                 generation,
                 markers,
@@ -125,7 +125,7 @@ impl Markers {
                 self.insert_script_markers(&owner, generation, markers, &mut state);
                 self.script_states.insert(owner, state);
             }
-            MarkerCommand::Remove { owner } => {
+            MarkerRequest::Remove { owner } => {
                 self.script_states.remove(&owner);
                 self.remove_script_markers(&owner);
             }
@@ -407,17 +407,17 @@ mod tests {
         let mut markers = Markers::new();
         markers.add_at(5);
         markers.push_loaded(6, "generated".into(), [0.1, 0.2, 0.3, 1.0], String::new());
-        markers.apply_script_command(MarkerCommand::Replace {
+        markers.apply_control_request(MarkerRequest::Replace {
             owner: "flight.py".into(),
             generation: 1,
             markers: vec![pending(10, "old", None)],
         });
-        markers.apply_script_command(MarkerCommand::Replace {
+        markers.apply_control_request(MarkerRequest::Replace {
             owner: "other.py".into(),
             generation: 1,
             markers: vec![pending(15, "other", None)],
         });
-        markers.apply_script_command(MarkerCommand::Replace {
+        markers.apply_control_request(MarkerRequest::Replace {
             owner: "flight.py".into(),
             generation: 2,
             markers: vec![pending(20, "new", None)],
@@ -439,12 +439,12 @@ mod tests {
     #[cfg(feature = "scripting")]
     fn script_append_rejects_lower_generation() {
         let mut markers = Markers::new();
-        markers.apply_script_command(MarkerCommand::Append {
+        markers.apply_control_request(MarkerRequest::Append {
             owner: "console".into(),
             generation: 2,
             markers: vec![pending(10, "current", None)],
         });
-        markers.apply_script_command(MarkerCommand::Append {
+        markers.apply_control_request(MarkerRequest::Append {
             owner: "console".into(),
             generation: 1,
             markers: vec![pending(20, "stale", None)],
@@ -458,7 +458,7 @@ mod tests {
     fn script_append_accumulates_at_equal_generation() {
         let mut markers = Markers::new();
         for label in ["first", "second"] {
-            markers.apply_script_command(MarkerCommand::Append {
+            markers.apply_control_request(MarkerRequest::Append {
                 owner: "console".into(),
                 generation: 3,
                 markers: vec![pending(10, label, None)],
@@ -472,12 +472,12 @@ mod tests {
     #[cfg(feature = "scripting")]
     fn script_append_advances_generation_without_clearing_history() {
         let mut markers = Markers::new();
-        markers.apply_script_command(MarkerCommand::Append {
+        markers.apply_control_request(MarkerRequest::Append {
             owner: "console".into(),
             generation: 1,
             markers: vec![pending(10, "history", None)],
         });
-        markers.apply_script_command(MarkerCommand::Append {
+        markers.apply_control_request(MarkerRequest::Append {
             owner: "console".into(),
             generation: 2,
             markers: vec![pending(20, "latest", None)],
@@ -506,13 +506,13 @@ mod tests {
         let mut markers = Markers::new();
         markers.add_at(1);
         for owner in ["one", "two"] {
-            markers.apply_script_command(MarkerCommand::Replace {
+            markers.apply_control_request(MarkerRequest::Replace {
                 owner: owner.into(),
                 generation: 1,
                 markers: vec![pending(10, owner, None)],
             });
         }
-        markers.apply_script_command(MarkerCommand::Remove {
+        markers.apply_control_request(MarkerRequest::Remove {
             owner: "one".into(),
         });
 
@@ -524,7 +524,7 @@ mod tests {
     fn script_markers_keep_duplicate_timestamps_and_explicit_colors() {
         let explicit = [0.1, 0.2, 0.3, 0.4];
         let mut markers = Markers::new();
-        markers.apply_script_command(MarkerCommand::Replace {
+        markers.apply_control_request(MarkerRequest::Replace {
             owner: "flight.py".into(),
             generation: 1,
             markers: vec![pending(42, "a", Some(explicit)), pending(42, "b", None)],
@@ -545,7 +545,7 @@ mod tests {
     fn script_replace_resets_automatic_palette_ordinal() {
         let explicit = [0.9, 0.8, 0.7, 0.6];
         let mut markers = Markers::new();
-        markers.apply_script_command(MarkerCommand::Replace {
+        markers.apply_control_request(MarkerRequest::Replace {
             owner: "flight.py".into(),
             generation: 1,
             markers: vec![
@@ -559,7 +559,7 @@ mod tests {
             delog_render::palette::trace_color(1).to_srgb_f32()
         );
 
-        markers.apply_script_command(MarkerCommand::Replace {
+        markers.apply_control_request(MarkerRequest::Replace {
             owner: "flight.py".into(),
             generation: 2,
             markers: vec![pending(3, "reset", None)],
