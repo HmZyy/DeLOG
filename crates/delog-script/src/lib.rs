@@ -38,9 +38,10 @@ pub use api::PendingMarker;
 
 #[cfg(feature = "python")]
 pub use control::{
-    ControlHost, ControlRequest, ControlResponse, GenerationRequest, MarkerRequest,
-    PlaybackRequest, PlotInfo, PlotRequest, ScriptOwner, SplitDirection, TraceInfo, TraceMode,
-    TraceRequest, WorkspaceRequest,
+    AnnotationFilter, AnnotationGeometry, AnnotationInfo, AnnotationKind, AnnotationRequest,
+    AnnotationStylePatch, ControlHost, ControlRequest, ControlResponse, GenerationRequest,
+    MarkerRequest, PlaybackRequest, PlotInfo, PlotRequest, ScriptOwner, SplitDirection, TraceInfo,
+    TraceMode, TraceRequest, WorkspaceRequest,
 };
 
 #[cfg(feature = "python")]

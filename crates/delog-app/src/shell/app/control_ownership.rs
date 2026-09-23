@@ -2,6 +2,7 @@ use delog_core::identity::FieldId;
 use delog_script::{GenerationRequest, ScriptOwner};
 
 use super::control_service::AppControl;
+use crate::plotting::annotations::AnnotationOwner;
 use crate::plotting::plot::PlotPane;
 
 #[derive(Debug)]
@@ -26,15 +27,26 @@ impl Sweep {
         let Some(owner) = owner else {
             return false;
         };
+        self.removes_owner(&owner.name, owner.generation)
+    }
+
+    fn removes_annotation(&self, owner: Option<&AnnotationOwner>) -> bool {
+        let Some(owner) = owner else {
+            return false;
+        };
+        self.removes_owner(&owner.name, owner.generation)
+    }
+
+    fn removes_owner(&self, owner: &str, owner_generation: u64) -> bool {
         match self {
             Self::Commit {
                 owner: name,
                 generation,
-            } => owner.name == *name && owner.generation < *generation,
+            } => owner == name && owner_generation < *generation,
             Self::Rollback {
                 owner: name,
                 generation,
-            } => owner.name == *name && owner.generation == *generation,
+            } => owner == name && owner_generation == *generation,
         }
     }
 }
@@ -56,7 +68,7 @@ fn sweep_pane(pane: &mut PlotPane, sweep: &Sweep) -> Vec<FieldId> {
         .collect();
     sweep_vec(&mut pane.traces, |trace| trace.owner.as_ref(), sweep);
     pane.annotations
-        .retain(|annotation| !sweep.removes(annotation.owner.as_ref()));
+        .retain(|annotation| !sweep.removes_annotation(annotation.owner.as_ref()));
     removed
 }
 
@@ -124,6 +136,50 @@ mod tests {
         );
         let kept: Vec<&str> = items.iter().map(|item| item.1).collect();
         assert_eq!(kept, ["previous", "hand drawn"]);
+    }
+
+    #[test]
+    fn a_restored_owner_stamped_annotation_survives_its_owners_first_rollback() {
+        use crate::plotting::annotations::{DataPos, Geometry};
+        use crate::plotting::plot::PlotPane;
+
+        let mut pane = PlotPane::default();
+        let id = pane.annotations.add_geometry(Geometry::Text {
+            at: DataPos { t_us: 0, y: 0.0 },
+        });
+        pane.annotations.get_mut(id).unwrap().owner = owner("flight.py", 0).map(Into::into);
+
+        sweep_pane(
+            &mut pane,
+            &Sweep::Rollback {
+                owner: "flight.py".into(),
+                generation: 1,
+            },
+        );
+
+        assert_eq!(pane.annotations.items().len(), 1);
+    }
+
+    #[test]
+    fn a_restored_owner_stamped_annotation_is_removed_by_its_owners_first_commit() {
+        use crate::plotting::annotations::{DataPos, Geometry};
+        use crate::plotting::plot::PlotPane;
+
+        let mut pane = PlotPane::default();
+        let id = pane.annotations.add_geometry(Geometry::Text {
+            at: DataPos { t_us: 0, y: 0.0 },
+        });
+        pane.annotations.get_mut(id).unwrap().owner = owner("flight.py", 0).map(Into::into);
+
+        sweep_pane(
+            &mut pane,
+            &Sweep::Commit {
+                owner: "flight.py".into(),
+                generation: 1,
+            },
+        );
+
+        assert!(pane.annotations.is_empty());
     }
 
     #[test]
@@ -222,7 +278,7 @@ mod tests {
             let id = pane.annotations.add_geometry(Geometry::Text {
                 at: DataPos { t_us: 0, y: 0.0 },
             });
-            pane.annotations.get_mut(id).unwrap().owner = owned.clone();
+            pane.annotations.get_mut(id).unwrap().owner = owned.clone().map(Into::into);
         }
 
         let snapshot = delog_core::snapshot::StoreSnapshot::empty();

@@ -373,6 +373,7 @@ fn alt_left_over_in_an_unfocused_window_is_ignored() {
 }
 
 #[test]
+#[cfg(feature = "scripting")]
 fn plot_infos_span_every_window_and_carry_their_real_ids() {
     let main = Workspace::new();
     let mut extra = ExtendedWindow::new(WindowId(3));

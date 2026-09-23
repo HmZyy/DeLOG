@@ -163,6 +163,18 @@ pub fn plot_infos(main: &Workspace, windows: &[ExtendedWindow]) -> Vec<delog_scr
     infos
 }
 
+#[cfg(feature = "scripting")]
+pub fn annotation_infos(
+    main: &Workspace,
+    windows: &[ExtendedWindow],
+) -> Vec<delog_script::AnnotationInfo> {
+    let mut infos = main.annotation_infos(0);
+    for window in windows {
+        infos.extend(window.workspace.annotation_infos(window.id.0));
+    }
+    infos
+}
+
 pub fn annotation_rows(
     main: &Workspace,
     windows: &[ExtendedWindow],
