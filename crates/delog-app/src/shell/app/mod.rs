@@ -5,6 +5,8 @@ pub mod command_palette;
 pub mod commands;
 pub mod context_header;
 #[cfg(feature = "scripting")]
+mod control_ownership;
+#[cfg(feature = "scripting")]
 mod control_service;
 mod dynamic_commands;
 pub mod global_plot_toolbar;
@@ -2757,10 +2759,7 @@ impl DelogApp {
     }
 
     fn open_extended_window(&mut self) {
-        let id = crate::shell::windows::WindowId(self.next_window_id);
-        self.next_window_id += 1;
-        self.windows
-            .push(crate::shell::windows::ExtendedWindow::new(id));
+        crate::shell::windows::open_window(&mut self.windows, &mut self.next_window_id, None);
     }
 
     fn apply_browser_response(
@@ -3619,6 +3618,11 @@ impl eframe::App for DelogApp {
                 let mut control = control_service::AppControl {
                     markers: &mut self.markers,
                     workspace: &mut self.workspace,
+                    windows: &mut self.windows,
+                    playback: &mut self.playback,
+                    next_window_id: &mut self.next_window_id,
+                    caches: &mut self.caches,
+                    snapshot: &snapshot,
                 };
                 queue.drain_with(|request| control_service::apply(&mut control, request));
             }
@@ -3627,6 +3631,11 @@ impl eframe::App for DelogApp {
                     let mut control = control_service::AppControl {
                         markers: &mut self.markers,
                         workspace: &mut self.workspace,
+                        windows: &mut self.windows,
+                        playback: &mut self.playback,
+                        next_window_id: &mut self.next_window_id,
+                        caches: &mut self.caches,
+                        snapshot: &snapshot,
                     };
                     if let Err(error) = control_service::apply(&mut control, request) {
                         self.push_log(PendingLog::with_target(

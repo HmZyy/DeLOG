@@ -101,6 +101,21 @@ pub fn next_window_id(windows: &[ExtendedWindow]) -> u64 {
     windows.iter().map(|window| window.id.0).max().unwrap_or(0) + 1
 }
 
+pub fn open_window(
+    windows: &mut Vec<ExtendedWindow>,
+    next_window_id: &mut u64,
+    title: Option<String>,
+) -> WindowId {
+    let id = WindowId(*next_window_id);
+    *next_window_id += 1;
+    let mut window = ExtendedWindow::new(id);
+    if let Some(title) = title {
+        window.title = title;
+    }
+    windows.push(window);
+    id
+}
+
 pub fn union_fields(main: &Workspace, windows: &[ExtendedWindow]) -> Vec<FieldId> {
     let mut seen = std::collections::HashSet::new();
     let mut union = Vec::new();
@@ -137,6 +152,15 @@ pub fn fields_only_in(
         }
     }
     released
+}
+
+#[cfg(feature = "scripting")]
+pub fn plot_infos(main: &Workspace, windows: &[ExtendedWindow]) -> Vec<delog_script::PlotInfo> {
+    let mut infos = main.plot_infos(0);
+    for window in windows {
+        infos.extend(window.workspace.plot_infos(window.id.0));
+    }
+    infos
 }
 
 pub fn annotation_rows(
