@@ -205,6 +205,7 @@ mod tests {
 
     fn gps_vehicle(fields: [FieldId; 3]) -> VehicleConfig {
         VehicleConfig {
+            runtime: crate::scene3d::vehicle::VehicleRuntime::unassigned(),
             source: SourceId(0),
             label: "Drone <1>".into(),
             show: true,

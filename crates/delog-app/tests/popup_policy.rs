@@ -488,7 +488,7 @@ fn field_stats_is_a_global_toolbar_action_not_a_per_plot_one() {
     assert!(!BROWSER.contains("focus the Inspector"));
 
     assert!(
-        GLOBAL_TOOLBAR_SOURCE.contains("GlobalPlotControl::OpenFieldStats"),
+        GLOBAL_TOOLBAR_SOURCE.contains("GlobalPlotControl::ToggleFieldStats"),
         "the global toolbar should offer field stats"
     );
     assert!(

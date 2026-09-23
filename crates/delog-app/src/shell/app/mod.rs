@@ -524,6 +524,7 @@ pub struct DelogApp {
     show_connection_dialog: bool,
     connection_dialog: ConnectionDialog,
     vehicles: Vec<crate::scene3d::vehicle::VehicleConfig>,
+    next_vehicle_id: u64,
     vehicle_dialog: crate::session::vehicle_dialog::VehicleDialog,
     /// Parallel to `vehicles`, rebuilt on a worker when the data epoch or
     /// vehicle set changes.
@@ -692,6 +693,7 @@ impl DelogApp {
             show_connection_dialog: false,
             connection_dialog,
             vehicles: Vec::new(),
+            next_vehicle_id: 1,
             vehicle_dialog: crate::session::vehicle_dialog::VehicleDialog::default(),
             vehicle_trajectories: Vec::new(),
             traj_epoch: u64::MAX,
@@ -2332,6 +2334,16 @@ impl DelogApp {
         self.playback.follow_live = layout.follow_live;
         // Legend/tooltip visibility is restored per-pane via the workspace.
         self.vehicles = layout.vehicles;
+        if let Err(error) = crate::scene3d::vehicle::assign_runtime_ids(
+            &mut self.vehicles,
+            &mut self.next_vehicle_id,
+        ) {
+            self.session
+                .push_diagnostic(delog_core::diagnostics::Diag::error(
+                    "layout-vehicles",
+                    error,
+                ));
+        }
         self.vehicle_revision = self.vehicle_revision.wrapping_add(1);
         self.traj_dirty = true;
         for diag in layout.diagnostics {
@@ -3614,6 +3626,8 @@ impl eframe::App for DelogApp {
                 self.settings.scripting.auto_open_console,
                 self.settings.scripting.use_original_timestamps,
             );
+            let vehicle_profiles =
+                crate::session::vehicle_profiles::VehicleProfileLibrary::from_config_dir();
             if let Some(queue) = self.scripts.control_queue() {
                 let mut control = control_service::AppControl {
                     markers: &mut self.markers,
@@ -3623,6 +3637,11 @@ impl eframe::App for DelogApp {
                     next_window_id: &mut self.next_window_id,
                     caches: &mut self.caches,
                     snapshot: &snapshot,
+                    vehicles: &mut self.vehicles,
+                    next_vehicle_id: &mut self.next_vehicle_id,
+                    vehicle_revision: &mut self.vehicle_revision,
+                    traj_dirty: &mut self.traj_dirty,
+                    vehicle_profiles: vehicle_profiles.as_ref(),
                 };
                 queue.drain_with(|request| control_service::apply(&mut control, request));
             }
@@ -3636,6 +3655,11 @@ impl eframe::App for DelogApp {
                         next_window_id: &mut self.next_window_id,
                         caches: &mut self.caches,
                         snapshot: &snapshot,
+                        vehicles: &mut self.vehicles,
+                        next_vehicle_id: &mut self.next_vehicle_id,
+                        vehicle_revision: &mut self.vehicle_revision,
+                        traj_dirty: &mut self.traj_dirty,
+                        vehicle_profiles: vehicle_profiles.as_ref(),
                     };
                     if let Err(error) = control_service::apply(&mut control, request) {
                         self.push_log(PendingLog::with_target(

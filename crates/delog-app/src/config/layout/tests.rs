@@ -167,6 +167,7 @@ fn vehicle_layout_helpers_round_trip_static_ned_vehicle() {
     let down = fields.remove("z").unwrap();
 
     let cfg = VehicleConfig {
+        runtime: crate::scene3d::vehicle::VehicleRuntime::unassigned(),
         source,
         label: "Vehicle".to_owned(),
         show: true,
@@ -215,6 +216,42 @@ fn vehicle_layout_helpers_round_trip_static_ned_vehicle() {
 }
 
 #[test]
+fn a_vehicle_owner_round_trips_by_name_and_restores_generation_zero() {
+    let snapshot = snapshot_with_topics(&[("log", "LOCAL_POSITION_NED", &["x", "y", "z"])]);
+    let source = snapshot.sources[0].entry.id;
+    let mut fields = snapshot.fields.iter().map(|field| field.id);
+    let mut config = VehicleConfig {
+        runtime: crate::scene3d::vehicle::VehicleRuntime::unassigned(),
+        source,
+        label: "Vehicle".to_owned(),
+        show: true,
+        show_path: true,
+        pos: PosMapping::Ned {
+            north: fields.next().unwrap(),
+            east: fields.next().unwrap(),
+            down: fields.next().unwrap(),
+            reference: None,
+        },
+        ori: OriMapping::Static,
+        model: ModelKind::Cone,
+        color: Color32::WHITE,
+        path_color: Color32::WHITE,
+        scale: 1.0,
+    };
+    config.runtime.owner = Some(crate::scene3d::vehicle::VehicleOwner {
+        name: "flight.py".to_owned(),
+        generation: 7,
+    });
+
+    let layout = vehicle_config_to_layout(&config, &snapshot).unwrap();
+    assert_eq!(layout.owner.as_deref(), Some("flight.py"));
+    let restored = vehicle_config_from_layout(&layout, &snapshot).unwrap();
+
+    assert_eq!(restored.runtime.id, 0);
+    assert_eq!(restored.runtime.owner.unwrap().generation, 0);
+}
+
+#[test]
 fn vehicle_config_from_layout_for_source_resolves_duplicate_topic_fields() {
     let snapshot = snapshot_with_topics(&[
         ("flight_a", "LOCAL_POSITION_NED", &["x", "y", "z"]),
@@ -227,6 +264,7 @@ fn vehicle_config_from_layout_for_source_resolves_duplicate_topic_fields() {
         .map(|source| source.entry.id)
         .expect("second source should exist");
     let layout = VehicleLayout {
+        owner: None,
         label: "Rover".to_owned(),
         show: true,
         show_path: true,

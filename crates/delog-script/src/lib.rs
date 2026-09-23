@@ -40,8 +40,11 @@ pub use api::PendingMarker;
 pub use control::{
     AnnotationFilter, AnnotationGeometry, AnnotationInfo, AnnotationKind, AnnotationRequest,
     AnnotationStylePatch, ControlHost, ControlRequest, ControlResponse, GenerationRequest,
-    MarkerRequest, PlaybackRequest, PlotInfo, PlotRequest, ScriptOwner, SplitDirection, TraceInfo,
-    TraceMode, TraceRequest, WorkspaceRequest,
+    MarkerRequest, PlaybackRequest, PlotInfo, PlotRequest, ProfileFieldRef, ProfileNedReference,
+    ProfileOrientation, ProfilePosition, ResolvedVehicleField, ScriptOwner, SplitDirection,
+    TraceInfo, TraceMode, TraceRequest, VehicleFilter, VehicleInfo, VehicleModel,
+    VehicleNedReference, VehicleOrientation, VehiclePatch, VehiclePosition, VehicleProfileInfo,
+    VehicleProfileRequest, VehicleRequest, VehicleSpec, WorkspaceRequest,
 };
 
 #[cfg(feature = "python")]

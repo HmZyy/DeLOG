@@ -4,8 +4,16 @@ use delog_core::snapshot::StoreSnapshot;
 use delog_script::{
     AnnotationFilter, AnnotationRequest, ControlRequest, ControlResponse, PlaybackRequest,
     PlotRequest, SplitDirection as ScriptSplitDirection, TraceInfo, TraceMode as ScriptTraceMode,
-    TraceRequest, WorkspaceRequest,
+    TraceRequest, VehicleFilter, VehicleInfo, VehicleNedReference as ScriptNedReference,
+    VehicleOrientation as ScriptVehicleOrientation, VehiclePatch, VehiclePosition, VehicleRequest,
+    VehicleSpec, WorkspaceRequest,
 };
+
+mod profiles;
+mod vehicle_mapping;
+
+use profiles::apply_vehicle_profile_request;
+use vehicle_mapping::*;
 
 use crate::plotting::legend::trace_label;
 use crate::plotting::markers::Markers;
@@ -22,6 +30,11 @@ pub struct AppControl<'a> {
     pub next_window_id: &'a mut u64,
     pub caches: &'a mut CacheManager,
     pub snapshot: &'a StoreSnapshot,
+    pub vehicles: &'a mut Vec<crate::scene3d::vehicle::VehicleConfig>,
+    pub next_vehicle_id: &'a mut u64,
+    pub vehicle_revision: &'a mut u64,
+    pub traj_dirty: &'a mut bool,
+    pub vehicle_profiles: Option<&'a crate::session::vehicle_profiles::VehicleProfileLibrary>,
 }
 
 pub fn apply(
@@ -59,7 +72,260 @@ pub fn apply(
         }
         ControlRequest::Workspace(request) => apply_workspace_request(control, request),
         ControlRequest::Playback(request) => apply_playback_request(control, request),
+        ControlRequest::Vehicles(request) => apply_vehicle_request(control, request),
+        ControlRequest::VehicleProfiles(request) => apply_vehicle_profile_request(control, request),
     }
+}
+
+pub(crate) fn apply_vehicle_request(
+    control: &mut AppControl<'_>,
+    request: VehicleRequest,
+) -> Result<ControlResponse, String> {
+    crate::scene3d::vehicle::assign_runtime_ids(control.vehicles, control.next_vehicle_id)?;
+    match request {
+        VehicleRequest::List => Ok(ControlResponse::Vehicles(vehicle_infos(
+            control.vehicles,
+            control.snapshot,
+        )?)),
+        VehicleRequest::Add(spec) => {
+            let mut vehicle = vehicle_from_spec(control.snapshot, spec)?;
+            crate::scene3d::vehicle::assign_runtime_id(&mut vehicle, control.next_vehicle_id)?;
+            control.vehicles.push(vehicle);
+            mark_vehicles_changed(control);
+            let index = control.vehicles.len() - 1;
+            Ok(ControlResponse::Vehicles(vec![vehicle_info(
+                &control.vehicles[index],
+                index,
+                control.snapshot,
+            )?]))
+        }
+        VehicleRequest::Set { id, patch } => {
+            let index = control
+                .vehicles
+                .iter()
+                .position(|vehicle| vehicle.runtime.id == id)
+                .ok_or_else(|| format!("vehicle {id} is gone"))?;
+            let mut updated = control.vehicles[index].clone();
+            apply_vehicle_patch(control.snapshot, &mut updated, patch)?;
+            let info = vehicle_info(&updated, index, control.snapshot)?;
+            control.vehicles[index] = updated;
+            mark_vehicles_changed(control);
+            Ok(ControlResponse::Vehicles(vec![info]))
+        }
+        VehicleRequest::Remove(filter) => {
+            let before = control.vehicles.len();
+            match filter {
+                VehicleFilter::Index(index) => {
+                    if index >= control.vehicles.len() {
+                        return Err(format!("vehicle index {index} is gone"));
+                    }
+                    control.vehicles.remove(index);
+                }
+                VehicleFilter::Id(id) => {
+                    let index = control
+                        .vehicles
+                        .iter()
+                        .position(|vehicle| vehicle.runtime.id == id)
+                        .ok_or_else(|| format!("vehicle {id} is gone"))?;
+                    control.vehicles.remove(index);
+                }
+                VehicleFilter::Label(label) => {
+                    control.vehicles.retain(|vehicle| vehicle.label != label);
+                }
+                VehicleFilter::Source(source) => {
+                    control.vehicles.retain(|vehicle| vehicle.source != source);
+                }
+                VehicleFilter::All => control.vehicles.clear(),
+            }
+            if control.vehicles.len() != before {
+                mark_vehicles_changed(control);
+            }
+            Ok(ControlResponse::Unit)
+        }
+    }
+}
+
+pub(crate) fn mark_vehicles_changed(control: &mut AppControl<'_>) {
+    *control.vehicle_revision = control.vehicle_revision.wrapping_add(1);
+    *control.traj_dirty = true;
+}
+
+fn vehicle_infos(
+    vehicles: &[crate::scene3d::vehicle::VehicleConfig],
+    snapshot: &StoreSnapshot,
+) -> Result<Vec<VehicleInfo>, String> {
+    vehicles
+        .iter()
+        .enumerate()
+        .map(|(index, vehicle)| vehicle_info(vehicle, index, snapshot))
+        .collect()
+}
+
+fn vehicle_info(
+    vehicle: &crate::scene3d::vehicle::VehicleConfig,
+    index: usize,
+    snapshot: &StoreSnapshot,
+) -> Result<VehicleInfo, String> {
+    use crate::scene3d::vehicle::{NedReference, OriMapping, PosMapping};
+
+    let position = match &vehicle.pos {
+        PosMapping::Ned {
+            north,
+            east,
+            down,
+            reference,
+        } => VehiclePosition::Ned {
+            north: resolved_field(snapshot, *north)?,
+            east: resolved_field(snapshot, *east)?,
+            down: resolved_field(snapshot, *down)?,
+            reference: reference
+                .as_ref()
+                .map(|reference| -> Result<ScriptNedReference, String> {
+                    match reference {
+                        NedReference::Manual(reference) => Ok(ScriptNedReference::Manual {
+                            lat_deg: reference.lat_deg,
+                            lon_deg: reference.lon_deg,
+                            alt_m: reference.alt_m,
+                        }),
+                        NedReference::Fields { lat, lon, alt } => Ok(ScriptNedReference::Fields {
+                            lat: resolved_field(snapshot, *lat)?,
+                            lon: resolved_field(snapshot, *lon)?,
+                            alt: resolved_field(snapshot, *alt)?,
+                        }),
+                    }
+                })
+                .transpose()?,
+        },
+        PosMapping::Gps {
+            lat,
+            lon,
+            alt,
+            lat_lon_dege7,
+            alt_mm,
+            alt_offset_m,
+        } => VehiclePosition::Gps {
+            lat: resolved_field(snapshot, *lat)?,
+            lon: resolved_field(snapshot, *lon)?,
+            alt: resolved_field(snapshot, *alt)?,
+            lat_lon_dege7: *lat_lon_dege7,
+            alt_mm: *alt_mm,
+            alt_offset_m: *alt_offset_m,
+        },
+    };
+    let orientation = match &vehicle.ori {
+        OriMapping::Static => ScriptVehicleOrientation::Static,
+        OriMapping::Euler {
+            roll,
+            pitch,
+            yaw,
+            degrees,
+        } => ScriptVehicleOrientation::Euler {
+            roll: resolved_field(snapshot, *roll)?,
+            pitch: resolved_field(snapshot, *pitch)?,
+            yaw: resolved_field(snapshot, *yaw)?,
+            degrees: *degrees,
+        },
+        OriMapping::Quat { w, x, y, z } => ScriptVehicleOrientation::Quat {
+            w: resolved_field(snapshot, *w)?,
+            x: resolved_field(snapshot, *x)?,
+            y: resolved_field(snapshot, *y)?,
+            z: resolved_field(snapshot, *z)?,
+        },
+    };
+    let source = snapshot
+        .source(vehicle.source)
+        .filter(|source| !source.entry.removed)
+        .ok_or_else(|| format!("vehicle source {} is gone", vehicle.source.0))?;
+    Ok(VehicleInfo {
+        id: vehicle.runtime.id,
+        index,
+        spec: VehicleSpec {
+            source_id: vehicle.source,
+            source: source.entry.label.clone(),
+            label: vehicle.label.clone(),
+            show: vehicle.show,
+            show_path: vehicle.show_path,
+            position,
+            orientation,
+            model: script_model(&vehicle.model),
+            color: color_to_script(vehicle.color),
+            path_color: color_to_script(vehicle.path_color),
+            scale: vehicle.scale,
+            owner: vehicle
+                .runtime
+                .owner
+                .as_ref()
+                .map(|owner| delog_script::ScriptOwner {
+                    name: owner.name.clone(),
+                    generation: owner.generation,
+                }),
+        },
+    })
+}
+
+fn vehicle_from_spec(
+    snapshot: &StoreSnapshot,
+    spec: VehicleSpec,
+) -> Result<crate::scene3d::vehicle::VehicleConfig, String> {
+    validate_source(snapshot, spec.source_id, &spec.source)?;
+    validate_scale(spec.scale)?;
+    Ok(crate::scene3d::vehicle::VehicleConfig {
+        runtime: crate::scene3d::vehicle::VehicleRuntime {
+            id: 0,
+            owner: spec
+                .owner
+                .map(|owner| crate::scene3d::vehicle::VehicleOwner {
+                    name: owner.name,
+                    generation: owner.generation,
+                }),
+        },
+        source: spec.source_id,
+        label: spec.label,
+        show: spec.show,
+        show_path: spec.show_path,
+        pos: app_position(snapshot, spec.source_id, spec.position)?,
+        ori: app_orientation(snapshot, spec.source_id, spec.orientation)?,
+        model: app_model(spec.model),
+        color: app_color(spec.color, "vehicle color")?,
+        path_color: app_color(spec.path_color, "vehicle path color")?,
+        scale: spec.scale,
+    })
+}
+
+fn apply_vehicle_patch(
+    snapshot: &StoreSnapshot,
+    vehicle: &mut crate::scene3d::vehicle::VehicleConfig,
+    patch: VehiclePatch,
+) -> Result<(), String> {
+    if let Some(label) = patch.label {
+        vehicle.label = label;
+    }
+    if let Some(show) = patch.show {
+        vehicle.show = show;
+    }
+    if let Some(show_path) = patch.show_path {
+        vehicle.show_path = show_path;
+    }
+    if let Some(position) = patch.position {
+        vehicle.pos = app_position(snapshot, vehicle.source, position)?;
+    }
+    if let Some(orientation) = patch.orientation {
+        vehicle.ori = app_orientation(snapshot, vehicle.source, orientation)?;
+    }
+    if let Some(model) = patch.model {
+        vehicle.model = app_model(model);
+    }
+    if let Some(color) = patch.color {
+        vehicle.color = app_color(color, "vehicle color")?;
+    }
+    if let Some(path_color) = patch.path_color {
+        vehicle.path_color = app_color(path_color, "vehicle path color")?;
+    }
+    if let Some(scale) = patch.scale {
+        validate_scale(scale)?;
+        vehicle.scale = scale;
+    }
+    Ok(())
 }
 
 fn workspace_for<'a>(
@@ -489,7 +755,11 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use delog_script::{MarkerRequest, PendingMarker};
+    use delog_script::{
+        MarkerRequest, PendingMarker, ProfilePosition, ResolvedVehicleField, ScriptOwner,
+        VehicleFilter, VehicleInfo, VehicleModel, VehicleOrientation, VehiclePatch,
+        VehiclePosition, VehicleProfileRequest, VehicleRequest, VehicleSpec,
+    };
 
     fn marker(time_us: i64, label: &str) -> PendingMarker {
         PendingMarker {
@@ -498,6 +768,22 @@ mod tests {
             color: None,
             note: String::new(),
         }
+    }
+
+    type TestVehicleState = (
+        &'static mut Vec<crate::scene3d::vehicle::VehicleConfig>,
+        &'static mut u64,
+        &'static mut u64,
+        &'static mut bool,
+    );
+
+    fn test_vehicle_state() -> TestVehicleState {
+        (
+            Box::leak(Box::new(Vec::new())),
+            Box::leak(Box::new(1)),
+            Box::leak(Box::new(0)),
+            Box::leak(Box::new(false)),
+        )
     }
 
     #[test]
@@ -509,6 +795,7 @@ mod tests {
         let mut next_window_id = 1u64;
         let mut caches = CacheManager::new();
         let snapshot = StoreSnapshot::empty();
+        let (vehicles, next_vehicle_id, vehicle_revision, traj_dirty) = test_vehicle_state();
         let mut control = AppControl {
             markers: &mut markers,
             workspace: &mut workspace,
@@ -517,6 +804,11 @@ mod tests {
             next_window_id: &mut next_window_id,
             caches: &mut caches,
             snapshot: &snapshot,
+            vehicles,
+            next_vehicle_id,
+            vehicle_revision,
+            traj_dirty,
+            vehicle_profiles: None,
         };
         let response = apply(
             &mut control,
@@ -541,6 +833,7 @@ mod tests {
         let mut next_window_id = 1u64;
         let mut caches = CacheManager::new();
         let snapshot = StoreSnapshot::empty();
+        let (vehicles, next_vehicle_id, vehicle_revision, traj_dirty) = test_vehicle_state();
         let mut control = AppControl {
             markers: &mut markers,
             workspace: &mut workspace,
@@ -549,6 +842,11 @@ mod tests {
             next_window_id: &mut next_window_id,
             caches: &mut caches,
             snapshot: &snapshot,
+            vehicles,
+            next_vehicle_id,
+            vehicle_revision,
+            traj_dirty,
+            vehicle_profiles: None,
         };
         for owner in ["flight.py", "other.py"] {
             apply(
@@ -607,6 +905,542 @@ mod tests {
         )
     }
 
+    struct VehicleHarness<'a> {
+        markers: Markers,
+        workspace: crate::shell::workspace::Workspace,
+        windows: Vec<crate::shell::windows::ExtendedWindow>,
+        playback: Playback,
+        next_window_id: u64,
+        caches: CacheManager,
+        snapshot: StoreSnapshot,
+        vehicles: Vec<crate::scene3d::vehicle::VehicleConfig>,
+        next_vehicle_id: u64,
+        vehicle_revision: u64,
+        traj_dirty: bool,
+        vehicle_profiles: Option<&'a crate::session::vehicle_profiles::VehicleProfileLibrary>,
+    }
+
+    impl VehicleHarness<'_> {
+        fn new(snapshot: StoreSnapshot) -> Self {
+            Self {
+                markers: Markers::new(),
+                workspace: crate::shell::workspace::Workspace::new(),
+                windows: Vec::new(),
+                playback: Playback::default(),
+                next_window_id: 1,
+                caches: CacheManager::new(),
+                snapshot,
+                vehicles: Vec::new(),
+                next_vehicle_id: 1,
+                vehicle_revision: 0,
+                traj_dirty: false,
+                vehicle_profiles: None,
+            }
+        }
+
+        fn with_profiles<'a>(
+            snapshot: StoreSnapshot,
+            profiles: &'a crate::session::vehicle_profiles::VehicleProfileLibrary,
+        ) -> VehicleHarness<'a> {
+            VehicleHarness {
+                markers: Markers::new(),
+                workspace: crate::shell::workspace::Workspace::new(),
+                windows: Vec::new(),
+                playback: Playback::default(),
+                next_window_id: 1,
+                caches: CacheManager::new(),
+                snapshot,
+                vehicles: Vec::new(),
+                next_vehicle_id: 1,
+                vehicle_revision: 0,
+                traj_dirty: false,
+                vehicle_profiles: Some(profiles),
+            }
+        }
+
+        fn apply(&mut self, request: VehicleRequest) -> Result<ControlResponse, String> {
+            let mut control = AppControl {
+                markers: &mut self.markers,
+                workspace: &mut self.workspace,
+                windows: &mut self.windows,
+                playback: &mut self.playback,
+                next_window_id: &mut self.next_window_id,
+                caches: &mut self.caches,
+                snapshot: &self.snapshot,
+                vehicles: &mut self.vehicles,
+                next_vehicle_id: &mut self.next_vehicle_id,
+                vehicle_revision: &mut self.vehicle_revision,
+                traj_dirty: &mut self.traj_dirty,
+                vehicle_profiles: self.vehicle_profiles,
+            };
+            super::apply(&mut control, ControlRequest::Vehicles(request))
+        }
+
+        fn apply_profile(
+            &mut self,
+            request: VehicleProfileRequest,
+        ) -> Result<ControlResponse, String> {
+            let mut control = AppControl {
+                markers: &mut self.markers,
+                workspace: &mut self.workspace,
+                windows: &mut self.windows,
+                playback: &mut self.playback,
+                next_window_id: &mut self.next_window_id,
+                caches: &mut self.caches,
+                snapshot: &self.snapshot,
+                vehicles: &mut self.vehicles,
+                next_vehicle_id: &mut self.next_vehicle_id,
+                vehicle_revision: &mut self.vehicle_revision,
+                traj_dirty: &mut self.traj_dirty,
+                vehicle_profiles: self.vehicle_profiles,
+            };
+            super::apply(&mut control, ControlRequest::VehicleProfiles(request))
+        }
+
+        fn add(&mut self, spec: VehicleSpec) -> Result<VehicleInfo, String> {
+            match self.apply(VehicleRequest::Add(spec))? {
+                ControlResponse::Vehicles(mut infos) if infos.len() == 1 => Ok(infos.remove(0)),
+                response => Err(format!("unexpected response: {response:?}")),
+            }
+        }
+
+        fn source(&self, label: &str) -> delog_core::identity::SourceId {
+            self.snapshot
+                .sources
+                .iter()
+                .find(|source| !source.entry.removed && source.entry.label == label)
+                .unwrap()
+                .entry
+                .id
+        }
+
+        fn field(&self, source: &str, topic: &str, field: &str) -> FieldId {
+            let source = self
+                .snapshot
+                .sources
+                .iter()
+                .find(|candidate| !candidate.entry.removed && candidate.entry.label == source)
+                .unwrap();
+            let topic = source
+                .topics
+                .iter()
+                .filter_map(|id| self.snapshot.topic(*id))
+                .find(|candidate| !candidate.entry.removed && candidate.entry.name == topic)
+                .unwrap();
+            self.snapshot
+                .fields
+                .iter()
+                .find(|candidate| {
+                    !candidate.removed
+                        && candidate.topic == topic.entry.id
+                        && candidate.name == field
+                })
+                .unwrap()
+                .id
+        }
+
+        fn gps_spec(&self, source: &str, label: &str) -> VehicleSpec {
+            let resolved = |field: &str| ResolvedVehicleField {
+                id: self.field(source, "GPS", field),
+                path: format!("{source}/GPS/{field}"),
+            };
+            VehicleSpec {
+                source_id: self.source(source),
+                source: source.into(),
+                label: label.into(),
+                show: true,
+                show_path: true,
+                position: VehiclePosition::Gps {
+                    lat: resolved("lat"),
+                    lon: resolved("lon"),
+                    alt: resolved("alt"),
+                    lat_lon_dege7: false,
+                    alt_mm: false,
+                    alt_offset_m: 0.0,
+                },
+                orientation: VehicleOrientation::Static,
+                model: VehicleModel::Quad,
+                color: [0.3, 0.6, 1.0, 1.0],
+                path_color: [1.0, 0.6, 0.2, 1.0],
+                scale: 1.0,
+                owner: None,
+            }
+        }
+    }
+
+    fn vehicle_snapshot_for(sources: &[&str]) -> StoreSnapshot {
+        let mut ids = delog_core::identity::IdentityRegistry::new();
+        for source_name in sources {
+            let source = ids.add_source(*source_name);
+            let gps = ids.add_topic(source, "GPS").unwrap();
+            for field in ["lat", "lon", "alt"] {
+                ids.add_field(gps, field).unwrap();
+            }
+        }
+        StoreSnapshot::from_registry(&ids, [], 0).expect("identity snapshot")
+    }
+
+    fn profile_doc_with_gps_field(
+        topic: &str,
+        field: &str,
+    ) -> crate::session::vehicle_profiles::VehicleProfileDoc {
+        use crate::config::layout::doc::{
+            FieldRef, ModelLayout, OriLayout, PosLayout, VehicleLayout,
+        };
+        use crate::session::vehicle_profiles::{VEHICLE_PROFILE_VERSION, VehicleProfileDoc};
+
+        let field = || FieldRef {
+            topic: topic.to_owned(),
+            field: field.to_owned(),
+        };
+        VehicleProfileDoc {
+            delog_vehicle_profile: VEHICLE_PROFILE_VERSION,
+            name: "missing".to_owned(),
+            vehicle: VehicleLayout {
+                label: "UAV".to_owned(),
+                owner: None,
+                show: true,
+                show_path: true,
+                model: ModelLayout::Quad,
+                color: [76, 153, 255, 255],
+                path_color: [255, 153, 51, 255],
+                scale: 1.0,
+                position: PosLayout::Gps {
+                    lat: field(),
+                    lon: field(),
+                    alt: field(),
+                    lat_lon_dege7: false,
+                    alt_mm: false,
+                    alt_offset_m: 0.0,
+                },
+                orientation: OriLayout::Static,
+            },
+        }
+    }
+
+    #[test]
+    fn profile_requests_save_load_apply_and_delete_through_the_real_library() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let library = crate::session::vehicle_profiles::VehicleProfileLibrary::new(temp.path());
+        let mut harness =
+            VehicleHarness::with_profiles(vehicle_snapshot_for(&["flight"]), &library);
+        let mut spec = harness.gps_spec("flight", "UAV");
+        spec.scale = 0.001;
+        spec.color = [1.0, 0.0, 0.0, 128.0 / 255.0];
+        spec.path_color = [0.0, 1.0, 0.0, 64.0 / 255.0];
+        let original = harness.add(spec).unwrap();
+
+        harness
+            .apply_profile(VehicleProfileRequest::Save {
+                name: "quad-gps".into(),
+                vehicle_id: original.id,
+            })
+            .unwrap();
+        assert_eq!(
+            harness.apply_profile(VehicleProfileRequest::List).unwrap(),
+            ControlResponse::Names(vec!["quad-gps".into()])
+        );
+        let loaded = harness
+            .apply_profile(VehicleProfileRequest::Load {
+                name: "quad-gps".into(),
+            })
+            .unwrap();
+        let ControlResponse::VehicleProfile(loaded) = loaded else {
+            panic!("expected vehicle profile")
+        };
+        assert_eq!(loaded.name, "quad-gps");
+        assert!(matches!(loaded.position, ProfilePosition::Gps { .. }));
+        assert_eq!(loaded.scale, 0.001);
+        assert_eq!(loaded.color, [1.0, 0.0, 0.0, 128.0 / 255.0]);
+        assert_eq!(loaded.path_color, [0.0, 1.0, 0.0, 64.0 / 255.0]);
+
+        let source = harness.source("flight");
+        let applied = harness
+            .apply_profile(VehicleProfileRequest::Apply {
+                name: "quad-gps".into(),
+                source_id: source,
+                source: "flight".into(),
+                owner: Some(ScriptOwner {
+                    name: "flight.py".into(),
+                    generation: 2,
+                }),
+            })
+            .unwrap();
+        let ControlResponse::Vehicles(applied) = applied else {
+            panic!("expected vehicle")
+        };
+        assert_eq!(applied.len(), 1);
+        assert_ne!(applied[0].id, original.id);
+        assert_eq!(applied[0].spec.owner.as_ref().unwrap().generation, 2);
+        assert_eq!(applied[0].spec.scale, 0.001);
+        assert_eq!(applied[0].spec.color, [1.0, 0.0, 0.0, 128.0 / 255.0]);
+        assert_eq!(applied[0].spec.path_color, [0.0, 1.0, 0.0, 64.0 / 255.0]);
+
+        harness
+            .apply_profile(VehicleProfileRequest::Delete {
+                name: "quad-gps".into(),
+            })
+            .unwrap();
+        assert_eq!(
+            harness.apply_profile(VehicleProfileRequest::List).unwrap(),
+            ControlResponse::Names(Vec::new())
+        );
+    }
+
+    #[test]
+    fn applying_a_profile_with_unresolved_fields_adds_no_vehicle() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let library = crate::session::vehicle_profiles::VehicleProfileLibrary::new(temp.path());
+        library
+            .save("missing", &profile_doc_with_gps_field("GPS", "missing"))
+            .unwrap();
+        let mut harness =
+            VehicleHarness::with_profiles(vehicle_snapshot_for(&["flight"]), &library);
+        let before = harness.vehicles.len();
+        let source = harness.source("flight");
+        let error = harness
+            .apply_profile(VehicleProfileRequest::Apply {
+                name: "missing".into(),
+                source_id: source,
+                source: "flight".into(),
+                owner: None,
+            })
+            .unwrap_err();
+        assert!(
+            error.contains("missing") && error.contains("flight"),
+            "{error}"
+        );
+        assert_eq!(harness.vehicles.len(), before);
+        assert_eq!(harness.vehicle_revision, 0);
+    }
+
+    #[test]
+    fn profiles_with_invalid_scale_or_manual_georeference_are_rejected_atomically() {
+        use crate::config::layout::doc::{NedRefLayout, PosLayout};
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let library = crate::session::vehicle_profiles::VehicleProfileLibrary::new(temp.path());
+
+        let mut invalid_scale = profile_doc_with_gps_field("GPS", "lat");
+        invalid_scale.name = "invalid-scale".into();
+        invalid_scale.vehicle.scale = -1.0;
+        std::fs::write(
+            temp.path().join("invalid-scale.json"),
+            serde_json::to_string_pretty(&invalid_scale).unwrap(),
+        )
+        .unwrap();
+
+        let mut invalid_georef = profile_doc_with_gps_field("GPS", "lat");
+        invalid_georef.name = "invalid-georef".into();
+        invalid_georef.vehicle.position = PosLayout::Ned {
+            north: crate::config::layout::doc::FieldRef {
+                topic: "GPS".into(),
+                field: "lat".into(),
+            },
+            east: crate::config::layout::doc::FieldRef {
+                topic: "GPS".into(),
+                field: "lon".into(),
+            },
+            down: crate::config::layout::doc::FieldRef {
+                topic: "GPS".into(),
+                field: "alt".into(),
+            },
+            reference: Some(NedRefLayout::Manual {
+                lat_deg: 91.0,
+                lon_deg: 0.0,
+                alt_m: 0.0,
+            }),
+        };
+        std::fs::write(
+            temp.path().join("invalid-georef.json"),
+            serde_json::to_string_pretty(&invalid_georef).unwrap(),
+        )
+        .unwrap();
+
+        let mut harness =
+            VehicleHarness::with_profiles(vehicle_snapshot_for(&["flight"]), &library);
+        let source = harness.source("flight");
+        for name in ["invalid-scale", "invalid-georef"] {
+            let error = harness
+                .apply_profile(VehicleProfileRequest::Apply {
+                    name: name.into(),
+                    source_id: source,
+                    source: "flight".into(),
+                    owner: None,
+                })
+                .unwrap_err();
+            assert!(error.contains("invalid"), "{error}");
+            assert!(harness.vehicles.is_empty());
+            assert_eq!(harness.vehicle_revision, 0);
+            assert!(!harness.traj_dirty);
+        }
+    }
+
+    #[test]
+    fn missing_and_corrupt_profiles_return_readable_errors_without_mutation() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let library = crate::session::vehicle_profiles::VehicleProfileLibrary::new(temp.path());
+        std::fs::write(temp.path().join("broken.json"), "{ not json").unwrap();
+        let mut harness =
+            VehicleHarness::with_profiles(vehicle_snapshot_for(&["flight"]), &library);
+
+        let missing = harness
+            .apply_profile(VehicleProfileRequest::Load {
+                name: "missing".into(),
+            })
+            .unwrap_err();
+        assert!(missing.contains("missing"), "{missing}");
+
+        let corrupt = harness
+            .apply_profile(VehicleProfileRequest::Load {
+                name: "broken".into(),
+            })
+            .unwrap_err();
+        assert!(
+            corrupt.contains("broken") && corrupt.contains("invalid"),
+            "{corrupt}"
+        );
+        assert!(harness.vehicles.is_empty());
+        assert_eq!(harness.vehicle_revision, 0);
+    }
+
+    #[test]
+    fn adding_and_setting_a_vehicle_assigns_a_stable_id_and_invalidates_trajectories() {
+        let mut harness = VehicleHarness::new(vehicle_snapshot_for(&["flight"]));
+        let spec = harness.gps_spec("flight", "Vehicle");
+        let added = harness.add(spec).unwrap();
+        assert_ne!(added.id, 0);
+        assert_eq!(harness.vehicle_revision, 1);
+        assert!(harness.traj_dirty);
+
+        harness.traj_dirty = false;
+        harness
+            .apply(VehicleRequest::Set {
+                id: added.id,
+                patch: VehiclePatch {
+                    label: Some("renamed".into()),
+                    ..VehiclePatch::default()
+                },
+            })
+            .unwrap();
+        assert_eq!(harness.vehicles[0].label, "renamed");
+        assert_eq!(harness.vehicles[0].runtime.id, added.id);
+        assert_eq!(harness.vehicle_revision, 2);
+        assert!(harness.traj_dirty);
+    }
+
+    #[test]
+    fn a_set_that_cannot_build_its_response_leaves_vehicle_state_unchanged() {
+        let mut ids = delog_core::identity::IdentityRegistry::new();
+        let source = ids.add_source("flight");
+        let gps = ids.add_topic(source, "GPS").unwrap();
+        for field in ["lat", "lon", "alt"] {
+            ids.add_field(gps, field).unwrap();
+        }
+        let snapshot = StoreSnapshot::from_registry(&ids, [], 0).expect("identity snapshot");
+        let mut harness = VehicleHarness::new(snapshot);
+        let spec = harness.gps_spec("flight", "Vehicle");
+        let added = harness.add(spec).unwrap();
+
+        ids.remove_source(source);
+        harness.snapshot =
+            StoreSnapshot::from_registry(&ids, [], 1).expect("removed-source snapshot");
+        harness.traj_dirty = false;
+        let vehicles_before = harness.vehicles.clone();
+        let revision_before = harness.vehicle_revision;
+
+        let error = harness
+            .apply(VehicleRequest::Set {
+                id: added.id,
+                patch: VehiclePatch {
+                    label: Some("must not commit".into()),
+                    ..VehiclePatch::default()
+                },
+            })
+            .unwrap_err();
+
+        assert!(error.contains("gone"), "{error}");
+        assert_eq!(harness.vehicles, vehicles_before);
+        assert_eq!(harness.vehicle_revision, revision_before);
+        assert!(!harness.traj_dirty);
+    }
+
+    #[test]
+    fn a_stale_vehicle_handle_never_retargets_a_new_vector_entry() {
+        let mut harness = VehicleHarness::new(vehicle_snapshot_for(&["flight"]));
+        let spec = harness.gps_spec("flight", "old");
+        let old = harness.add(spec).unwrap();
+        harness
+            .apply(VehicleRequest::Remove(VehicleFilter::Id(old.id)))
+            .unwrap();
+        let spec = harness.gps_spec("flight", "replacement");
+        let replacement = harness.add(spec).unwrap();
+        assert_ne!(old.id, replacement.id);
+
+        let error = harness
+            .apply(VehicleRequest::Set {
+                id: old.id,
+                patch: VehiclePatch {
+                    label: Some("wrong target".into()),
+                    ..VehiclePatch::default()
+                },
+            })
+            .unwrap_err();
+        assert!(error.contains(&old.id.to_string()), "{error}");
+        assert_ne!(harness.vehicles[0].label, "wrong target");
+    }
+
+    #[test]
+    fn a_mapping_field_from_another_source_is_rejected_atomically() {
+        let mut harness = VehicleHarness::new(vehicle_snapshot_for(&["flight_a", "flight_b"]));
+        let mut spec = harness.gps_spec("flight_a", "Vehicle");
+        let foreign = harness.field("flight_b", "GPS", "alt");
+        match &mut spec.position {
+            VehiclePosition::Gps { alt, .. } => {
+                *alt = ResolvedVehicleField {
+                    id: foreign,
+                    path: "flight_b/GPS/alt".into(),
+                };
+            }
+            VehiclePosition::Ned { .. } => panic!("GPS fixture returned NED"),
+        }
+        let error = harness.apply(VehicleRequest::Add(spec)).unwrap_err();
+        assert!(error.contains("flight_b/GPS/alt"), "{error}");
+        assert!(harness.vehicles.is_empty());
+        assert_eq!(harness.vehicle_revision, 0);
+    }
+
+    #[test]
+    fn remove_by_label_and_source_remove_every_match_but_not_other_vehicles() {
+        let mut harness = VehicleHarness::new(vehicle_snapshot_for(&["flight_a", "flight_b"]));
+        for (source, label) in [
+            ("flight_a", "group"),
+            ("flight_a", "group"),
+            ("flight_a", "keep"),
+            ("flight_b", "keep"),
+        ] {
+            let spec = harness.gps_spec(source, label);
+            harness.add(spec).unwrap();
+        }
+        harness
+            .apply(VehicleRequest::Remove(VehicleFilter::Label("group".into())))
+            .unwrap();
+        assert_eq!(
+            harness
+                .vehicles
+                .iter()
+                .map(|vehicle| vehicle.label.as_str())
+                .collect::<Vec<_>>(),
+            ["keep", "keep"]
+        );
+        let source_a = harness.source("flight_a");
+        harness
+            .apply(VehicleRequest::Remove(VehicleFilter::Source(source_a)))
+            .unwrap();
+        assert_eq!(harness.vehicles.len(), 1);
+        assert_eq!(harness.vehicles[0].source, harness.source("flight_b"));
+    }
+
     fn root_tile(workspace: &crate::shell::workspace::Workspace) -> u64 {
         workspace.plot_infos(0)[0].tile
     }
@@ -620,6 +1454,7 @@ mod tests {
         caches: &'a mut CacheManager,
         snapshot: &'a StoreSnapshot,
     ) -> AppControl<'a> {
+        let (vehicles, next_vehicle_id, vehicle_revision, traj_dirty) = test_vehicle_state();
         AppControl {
             markers,
             workspace,
@@ -628,6 +1463,11 @@ mod tests {
             next_window_id,
             caches,
             snapshot,
+            vehicles,
+            next_vehicle_id,
+            vehicle_revision,
+            traj_dirty,
+            vehicle_profiles: None,
         }
     }
 
@@ -1001,6 +1841,7 @@ mod tests {
         let mut playback = Playback::default();
         let mut next_window_id = 1u64;
         let mut caches = CacheManager::new();
+        let (vehicles, next_vehicle_id, vehicle_revision, traj_dirty) = test_vehicle_state();
         let mut control = AppControl {
             markers: &mut markers,
             workspace: &mut workspace,
@@ -1009,6 +1850,11 @@ mod tests {
             next_window_id: &mut next_window_id,
             caches: &mut caches,
             snapshot: &snapshot,
+            vehicles,
+            next_vehicle_id,
+            vehicle_revision,
+            traj_dirty,
+            vehicle_profiles: None,
         };
         let error = apply(
             &mut control,
@@ -1219,6 +2065,7 @@ mod tests {
         let mut playback = Playback::default();
         let mut next_window_id = 1u64;
         let mut caches = CacheManager::new();
+        let (vehicles, next_vehicle_id, vehicle_revision, traj_dirty) = test_vehicle_state();
         let mut control = AppControl {
             markers: &mut markers,
             workspace: &mut workspace,
@@ -1227,6 +2074,11 @@ mod tests {
             next_window_id: &mut next_window_id,
             caches: &mut caches,
             snapshot: &snapshot,
+            vehicles,
+            next_vehicle_id,
+            vehicle_revision,
+            traj_dirty,
+            vehicle_profiles: None,
         };
         let response = apply(
             &mut control,
@@ -1251,6 +2103,7 @@ mod tests {
         let mut playback = Playback::default();
         let mut next_window_id = 1u64;
         let mut caches = CacheManager::new();
+        let (vehicles, next_vehicle_id, vehicle_revision, traj_dirty) = test_vehicle_state();
         let mut control = AppControl {
             markers: &mut markers,
             workspace: &mut workspace,
@@ -1259,6 +2112,11 @@ mod tests {
             next_window_id: &mut next_window_id,
             caches: &mut caches,
             snapshot: &snapshot,
+            vehicles,
+            next_vehicle_id,
+            vehicle_revision,
+            traj_dirty,
+            vehicle_profiles: None,
         };
         apply(
             &mut control,
