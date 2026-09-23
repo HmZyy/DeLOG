@@ -15,7 +15,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use crate::api::{Delog, PendingMarker};
-use crate::control::{ControlRequest, MarkerRequest};
+use crate::control::{ControlRequest, GenerationRequest, MarkerRequest};
 use crate::custom_parser::{
     ParserOutput, emit_parser_output, parse_python_result, read_float32_file,
 };
@@ -1189,6 +1189,10 @@ fn handle_command(
                                         generation,
                                         markers: published_markers,
                                     }),
+                                    ControlRequest::Generation(GenerationRequest::Commit {
+                                        owner: name.clone(),
+                                        generation,
+                                    }),
                                 ]));
                                 params.lock().unwrap().finalize(
                                     &name,
@@ -1201,6 +1205,12 @@ fn handle_command(
                                 markers.borrow_mut().clear();
                                 // Preparation is deliberately before teardown/open so a bad
                                 // rerun leaves the prior generation intact.
+                                let _ = evt_tx.send(ScriptEvent::Control(vec![
+                                    ControlRequest::Generation(GenerationRequest::Rollback {
+                                        owner: name.clone(),
+                                        generation,
+                                    }),
+                                ]));
                                 let _ = evt_tx.send(ScriptEvent::Error(error));
                             }
                         }
@@ -1208,6 +1218,13 @@ fn handle_command(
                     Err(msg) => {
                         // No partial source on failure.
                         markers.borrow_mut().clear();
+                        let _ =
+                            evt_tx.send(ScriptEvent::Control(vec![ControlRequest::Generation(
+                                GenerationRequest::Rollback {
+                                    owner: name.clone(),
+                                    generation,
+                                },
+                            )]));
                         let _ = evt_tx.send(ScriptEvent::Error(msg));
                     }
                 }
@@ -1902,11 +1919,17 @@ mod tests {
             .unwrap();
         assert_eq!(
             control_requests_until_done(&engine),
-            vec![ControlRequest::Markers(MarkerRequest::Replace {
-                owner: "analysis".into(),
-                generation: 0,
-                markers: vec![expected_marker(42, "launch")],
-            })]
+            vec![
+                ControlRequest::Markers(MarkerRequest::Replace {
+                    owner: "analysis".into(),
+                    generation: 0,
+                    markers: vec![expected_marker(42, "launch")],
+                }),
+                ControlRequest::Generation(GenerationRequest::Commit {
+                    owner: "analysis".into(),
+                    generation: 0,
+                }),
+            ]
         );
 
         engine
@@ -1915,7 +1938,13 @@ mod tests {
                 source: "delog.add_marker(43, 'discarded')\nraise RuntimeError('boom')".into(),
             })
             .unwrap();
-        assert!(control_requests_until_done(&engine).is_empty());
+        assert_eq!(
+            control_requests_until_done(&engine),
+            vec![ControlRequest::Generation(GenerationRequest::Rollback {
+                owner: "analysis".into(),
+                generation: 1,
+            })]
+        );
 
         engine
             .send(ScriptCommand::RunScript {
@@ -1925,11 +1954,17 @@ mod tests {
             .unwrap();
         assert_eq!(
             control_requests_until_done(&engine),
-            vec![ControlRequest::Markers(MarkerRequest::Replace {
-                owner: "analysis".into(),
-                generation: 2,
-                markers: vec![],
-            })]
+            vec![
+                ControlRequest::Markers(MarkerRequest::Replace {
+                    owner: "analysis".into(),
+                    generation: 2,
+                    markers: vec![],
+                }),
+                ControlRequest::Generation(GenerationRequest::Commit {
+                    owner: "analysis".into(),
+                    generation: 2,
+                }),
+            ]
         );
 
         engine
@@ -1977,7 +2012,13 @@ delog.transform("MISSING", mode="snapshot")
                 .into(),
             })
             .unwrap();
-        assert!(control_requests_until_done(&engine).is_empty());
+        assert_eq!(
+            control_requests_until_done(&engine),
+            vec![ControlRequest::Generation(GenerationRequest::Rollback {
+                owner: "analysis".into(),
+                generation: 0,
+            })]
+        );
         assert!(!engine.has_live_transform("analysis"));
     }
 
@@ -2011,11 +2052,17 @@ mark = delog.live_transform(topic="A", fields=["v"], output_topic="B")(MarkerCal
             .unwrap();
         assert_eq!(
             control_requests_until_done(&engine),
-            vec![ControlRequest::Markers(MarkerRequest::Replace {
-                owner: "analysis".into(),
-                generation: 0,
-                markers: vec![],
-            })]
+            vec![
+                ControlRequest::Markers(MarkerRequest::Replace {
+                    owner: "analysis".into(),
+                    generation: 0,
+                    markers: vec![],
+                }),
+                ControlRequest::Generation(GenerationRequest::Commit {
+                    owner: "analysis".into(),
+                    generation: 0,
+                }),
+            ]
         );
 
         let schema = Arc::new(
@@ -2038,17 +2085,26 @@ mark = delog.live_transform(topic="A", fields=["v"], output_topic="B")(MarkerCal
             )
         };
 
-        for failed_source in [
+        for (index, failed_source) in [
             "raise RuntimeError('rerun failed')",
             "delog.transform('MISSING', mode='snapshot')",
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             engine
                 .send(ScriptCommand::RunScript {
                     name: "analysis".into(),
                     source: failed_source.into(),
                 })
                 .unwrap();
-            assert!(control_requests_until_done(&engine).is_empty());
+            assert_eq!(
+                control_requests_until_done(&engine),
+                vec![ControlRequest::Generation(GenerationRequest::Rollback {
+                    owner: "analysis".into(),
+                    generation: index as u64 + 1,
+                })]
+            );
 
             let mut commands = Vec::new();
             let mut errors = Vec::new();
@@ -2153,11 +2209,17 @@ def mark(batch):
             .unwrap();
         assert_eq!(
             control_requests_until_done(&engine),
-            vec![ControlRequest::Markers(MarkerRequest::Replace {
-                owner: "live_markers".into(),
-                generation: 0,
-                markers: vec![],
-            })]
+            vec![
+                ControlRequest::Markers(MarkerRequest::Replace {
+                    owner: "live_markers".into(),
+                    generation: 0,
+                    markers: vec![],
+                }),
+                ControlRequest::Generation(GenerationRequest::Commit {
+                    owner: "live_markers".into(),
+                    generation: 0,
+                }),
+            ]
         );
 
         let schema = Arc::new(
@@ -2202,6 +2264,47 @@ def mark(batch):
                 assert!(commands.is_empty());
             }
         }
+    }
+
+    #[test]
+    fn a_named_run_commits_its_generation_and_a_failing_one_rolls_back() {
+        let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let engine = ScriptEngine::spawn(
+            Arc::new(DataStore::new()),
+            dummy_sender(),
+            test_metrics(),
+            crate::params::shared_empty(),
+        );
+
+        engine
+            .send(ScriptCommand::RunScript {
+                name: "analysis".into(),
+                source: "delog.add_marker(42, 'launch')".into(),
+            })
+            .unwrap();
+        assert!(
+            control_requests_until_done(&engine).contains(&ControlRequest::Generation(
+                GenerationRequest::Commit {
+                    owner: "analysis".into(),
+                    generation: 0,
+                }
+            ))
+        );
+
+        engine
+            .send(ScriptCommand::RunScript {
+                name: "analysis".into(),
+                source: "raise RuntimeError('boom')".into(),
+            })
+            .unwrap();
+        assert!(
+            control_requests_until_done(&engine).contains(&ControlRequest::Generation(
+                GenerationRequest::Rollback {
+                    owner: "analysis".into(),
+                    generation: 1,
+                }
+            ))
+        );
     }
 
     fn completions_for(engine: &ScriptEngine, seq: u64, text: &str) -> Vec<String> {

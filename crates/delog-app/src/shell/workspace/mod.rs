@@ -303,6 +303,8 @@ impl Workspace {
                             mode: ghost.mode,
                             visible: ghost.visible,
                             label_override: None,
+                            #[cfg(feature = "scripting")]
+                            owner: None,
                         });
                         apply_ghost_text_state(pane, &ghost, field);
                         resolved += 1;
@@ -391,8 +393,12 @@ impl Workspace {
         }
     }
 
-    pub fn split_plot(&mut self, tile_id: egui_tiles::TileId, direction: SplitDirection) {
-        self.split_plot_at(tile_id, direction, false);
+    pub fn split_plot(
+        &mut self,
+        tile_id: egui_tiles::TileId,
+        direction: SplitDirection,
+    ) -> Option<egui_tiles::TileId> {
+        self.split_plot_at(tile_id, direction, false)
     }
 
     pub fn split_plot_with_traces(
@@ -609,11 +615,19 @@ impl Workspace {
         })
     }
 
-    fn plot_panes_mut(&mut self) -> impl Iterator<Item = &mut PlotPane> + '_ {
+    pub(crate) fn plot_panes_mut(&mut self) -> impl Iterator<Item = &mut PlotPane> + '_ {
         self.tree.tiles.tiles_mut().filter_map(|tile| match tile {
             egui_tiles::Tile::Pane(Pane::Plot(pane)) => Some(pane),
             egui_tiles::Tile::Pane(Pane::Scene3D(_)) | egui_tiles::Tile::Container(_) => None,
         })
+    }
+
+    #[cfg(feature = "scripting")]
+    pub(crate) fn plot_pane_mut(&mut self, tile: egui_tiles::TileId) -> Option<&mut PlotPane> {
+        match self.tree.tiles.get_mut(tile)? {
+            egui_tiles::Tile::Pane(Pane::Plot(pane)) => Some(pane),
+            egui_tiles::Tile::Pane(Pane::Scene3D(_)) | egui_tiles::Tile::Container(_) => None,
+        }
     }
 
     fn plot_tiles_in_order(&self) -> Vec<egui_tiles::TileId> {
@@ -630,12 +644,12 @@ impl Workspace {
     }
 
     #[cfg(feature = "scripting")]
-    pub fn plot_infos(&self) -> Vec<delog_script::PlotInfo> {
+    pub fn plot_infos(&self, window: u64) -> Vec<delog_script::PlotInfo> {
         self.plot_tiles_in_order()
             .into_iter()
             .enumerate()
             .map(|(index, tile)| delog_script::PlotInfo {
-                window: 0,
+                window,
                 tile: tile.0,
                 index,
                 label: format!("Plot {}", index + 1),

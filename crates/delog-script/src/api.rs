@@ -105,7 +105,7 @@ fn active_marker_buffer() -> Option<MarkerBuffer> {
     MARKER_BUFFER_OVERRIDE.with(|current| current.borrow().clone())
 }
 
-fn parse_marker_color(color: &str) -> PyResult<[f32; 4]> {
+pub(crate) fn parse_marker_color(color: &str) -> PyResult<[f32; 4]> {
     let invalid =
         || pyo3::exceptions::PyValueError::new_err("marker color must be #RRGGBB or #RRGGBBAA");
     let digits = color.as_bytes().strip_prefix(b"#").ok_or_else(invalid)?;
@@ -232,7 +232,7 @@ fn field_unit(snapshot: &StoreSnapshot, topic: TopicId, field_name: &str) -> Opt
     store.schema.field_by_name(field_name)?.unit.clone()
 }
 
-fn find_fields(
+pub(crate) fn find_fields(
     snapshot: &StoreSnapshot,
     topic: Option<&str>,
     field: Option<&str>,
@@ -472,6 +472,20 @@ impl Delog {
     pub fn marker_buffer(&self) -> MarkerBuffer {
         Rc::clone(&self.markers)
     }
+
+    fn owner(&self) -> Option<crate::control::ScriptOwner> {
+        (!self.script_name.is_empty()).then(|| crate::control::ScriptOwner {
+            name: self.script_name.clone(),
+            generation: self.generation,
+        })
+    }
+
+    fn plot_context(&self) -> crate::control::PlotContext {
+        crate::control::PlotContext {
+            owner: self.owner(),
+            snapshot: Arc::clone(&self.snapshot),
+        }
+    }
 }
 
 #[pyclass(unsendable, name = "SourceRef", skip_from_py_object)]
@@ -501,7 +515,7 @@ struct TopicRefPy {
 #[allow(dead_code)]
 #[pyclass(unsendable, name = "FieldRef", skip_from_py_object)]
 #[derive(Clone)]
-struct FieldRefPy {
+pub(crate) struct FieldRefPy {
     snapshot: Arc<StoreSnapshot>,
     field_id: FieldId,
     topic_id: TopicId,
@@ -554,7 +568,7 @@ fn candidate_topic_paths(matches: &[TopicMatch]) -> String {
         .join(", ")
 }
 
-fn candidate_field_paths(matches: &[FieldMatch]) -> String {
+pub(crate) fn candidate_field_paths(matches: &[FieldMatch]) -> String {
     matches
         .iter()
         .map(|m| format!("{}/{}/{}", m.source_label, m.topic_name, m.field_name))
@@ -698,6 +712,16 @@ impl FieldRefPy {
             v: v.into_pyarray(py).unbind(),
             s,
         })
+    }
+}
+
+impl FieldRefPy {
+    pub(crate) fn field_id(&self) -> FieldId {
+        self.field_id
+    }
+
+    pub(crate) fn label(&self) -> String {
+        format!("{}.{}", self.topic, self.name)
     }
 }
 
@@ -928,7 +952,26 @@ impl Delog {
         py: Python<'_>,
         window: Option<u64>,
     ) -> PyResult<Vec<crate::control::plots::PlotPy>> {
-        crate::control::plots::list_plots(py, window)
+        crate::control::plots::list_plots(py, window, self.plot_context())
+    }
+
+    fn focused_plot(&self, py: Python<'_>) -> PyResult<Option<crate::control::plots::PlotPy>> {
+        crate::control::plots::focused_plot(py, self.plot_context())
+    }
+
+    #[getter]
+    fn workspace(&self) -> crate::control::workspace::WorkspacePy {
+        crate::control::workspace::WorkspacePy::new(self.plot_context())
+    }
+
+    #[getter]
+    fn windows(&self) -> crate::control::workspace::WindowsPy {
+        crate::control::workspace::WindowsPy
+    }
+
+    #[getter]
+    fn playback(&self) -> crate::control::workspace::PlaybackPy {
+        crate::control::workspace::PlaybackPy
     }
 
     #[pyo3(signature = (name, *, source=None, instance=None))]

@@ -1,0 +1,257 @@
+use delog_core::identity::FieldId;
+use delog_script::{GenerationRequest, ScriptOwner};
+
+use super::control_service::AppControl;
+use crate::plotting::plot::PlotPane;
+
+#[derive(Debug)]
+pub enum Sweep {
+    Commit { owner: String, generation: u64 },
+    Rollback { owner: String, generation: u64 },
+}
+
+impl From<GenerationRequest> for Sweep {
+    fn from(request: GenerationRequest) -> Self {
+        match request {
+            GenerationRequest::Commit { owner, generation } => Self::Commit { owner, generation },
+            GenerationRequest::Rollback { owner, generation } => {
+                Self::Rollback { owner, generation }
+            }
+        }
+    }
+}
+
+impl Sweep {
+    pub fn removes(&self, owner: Option<&ScriptOwner>) -> bool {
+        let Some(owner) = owner else {
+            return false;
+        };
+        match self {
+            Self::Commit {
+                owner: name,
+                generation,
+            } => owner.name == *name && owner.generation < *generation,
+            Self::Rollback {
+                owner: name,
+                generation,
+            } => owner.name == *name && owner.generation == *generation,
+        }
+    }
+}
+
+pub fn sweep_vec<T>(
+    items: &mut Vec<T>,
+    owner_of: impl Fn(&T) -> Option<&ScriptOwner>,
+    sweep: &Sweep,
+) {
+    items.retain(|item| !sweep.removes(owner_of(item)));
+}
+
+fn sweep_pane(pane: &mut PlotPane, sweep: &Sweep) -> Vec<FieldId> {
+    let removed: Vec<FieldId> = pane
+        .traces
+        .iter()
+        .filter(|trace| sweep.removes(trace.owner.as_ref()))
+        .map(|trace| trace.field)
+        .collect();
+    sweep_vec(&mut pane.traces, |trace| trace.owner.as_ref(), sweep);
+    pane.annotations
+        .retain(|annotation| !sweep.removes(annotation.owner.as_ref()));
+    removed
+}
+
+pub fn apply_sweep(control: &mut AppControl<'_>, sweep: &Sweep) {
+    let mut removed_fields = Vec::new();
+    for pane in control.workspace.plot_panes_mut() {
+        removed_fields.extend(sweep_pane(pane, sweep));
+    }
+    for window in control.windows.iter_mut() {
+        for pane in window.workspace.plot_panes_mut() {
+            removed_fields.extend(sweep_pane(pane, sweep));
+        }
+    }
+    for field in removed_fields {
+        control.caches.unpin(field);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use delog_script::ScriptOwner;
+
+    fn owner(name: &str, generation: u64) -> Option<ScriptOwner> {
+        Some(ScriptOwner {
+            name: name.into(),
+            generation,
+        })
+    }
+
+    #[test]
+    fn commit_removes_only_older_generations_of_the_same_owner() {
+        let mut items = vec![
+            (owner("flight.py", 1), "old"),
+            (owner("flight.py", 2), "new"),
+            (owner("other.py", 1), "other"),
+            (None, "hand drawn"),
+        ];
+        sweep_vec(
+            &mut items,
+            |item| item.0.as_ref(),
+            &Sweep::Commit {
+                owner: "flight.py".into(),
+                generation: 2,
+            },
+        );
+        let kept: Vec<&str> = items.iter().map(|item| item.1).collect();
+        assert_eq!(kept, ["new", "other", "hand drawn"]);
+    }
+
+    #[test]
+    fn rollback_removes_exactly_the_failed_generation() {
+        let mut items = vec![
+            (owner("flight.py", 1), "previous"),
+            (owner("flight.py", 2), "failed run"),
+            (None, "hand drawn"),
+        ];
+        sweep_vec(
+            &mut items,
+            |item| item.0.as_ref(),
+            &Sweep::Rollback {
+                owner: "flight.py".into(),
+                generation: 2,
+            },
+        );
+        let kept: Vec<&str> = items.iter().map(|item| item.1).collect();
+        assert_eq!(kept, ["previous", "hand drawn"]);
+    }
+
+    #[test]
+    fn unowned_objects_are_never_swept() {
+        let mut items = vec![(None, "hand drawn"), (None, "console")];
+        sweep_vec(
+            &mut items,
+            |item| item.0.as_ref(),
+            &Sweep::Commit {
+                owner: "flight.py".into(),
+                generation: 9,
+            },
+        );
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn a_commit_sweep_unpins_the_fields_of_the_traces_it_removes() {
+        use crate::plotting::plot::{TraceMode, TraceRef};
+        use crate::shell::workspace::Workspace;
+        use delog_core::identity::FieldId;
+        use std::sync::Arc;
+
+        let owned = owner("flight.py", 1);
+        let field = FieldId(1);
+
+        let mut markers = crate::plotting::markers::Markers::new();
+        let mut main = Workspace::new();
+        let mut windows: Vec<crate::shell::windows::ExtendedWindow> = Vec::new();
+        {
+            let pane = main.plot_panes_mut().next().unwrap();
+            pane.traces.push(TraceRef {
+                field,
+                color: [0.0, 0.0, 0.0, 1.0],
+                width_px: 1.0,
+                mode: TraceMode::Line,
+                visible: true,
+                label_override: None,
+                owner: owned.clone(),
+            });
+        }
+
+        let snapshot = delog_core::snapshot::StoreSnapshot::empty();
+        let mut playback = crate::plotting::timeline::Playback::default();
+        let mut next_window_id = 1u64;
+        let mut caches = delog_cache::CacheManager::new();
+        caches.request(
+            field,
+            &Arc::new(delog_core::snapshot::StoreSnapshot::empty()),
+        );
+        assert!(caches.is_pinned(field));
+        let mut control = AppControl {
+            markers: &mut markers,
+            workspace: &mut main,
+            windows: &mut windows,
+            playback: &mut playback,
+            next_window_id: &mut next_window_id,
+            caches: &mut caches,
+            snapshot: &snapshot,
+        };
+        apply_sweep(
+            &mut control,
+            &Sweep::Commit {
+                owner: "flight.py".into(),
+                generation: 2,
+            },
+        );
+
+        assert!(!caches.is_pinned(field));
+    }
+
+    #[test]
+    fn apply_sweep_reaches_panes_in_extended_windows_too() {
+        use crate::plotting::annotations::{DataPos, Geometry};
+        use crate::plotting::plot::{TraceMode, TraceRef};
+        use crate::shell::windows::{ExtendedWindow, WindowId};
+        use crate::shell::workspace::Workspace;
+        use delog_core::identity::FieldId;
+
+        let owned = owner("flight.py", 1);
+
+        let mut markers = crate::plotting::markers::Markers::new();
+        let mut main = Workspace::new();
+        let mut windows = vec![ExtendedWindow::new(WindowId(1))];
+        {
+            let pane = windows[0].workspace.plot_panes_mut().next().unwrap();
+            pane.traces.push(TraceRef {
+                field: FieldId(1),
+                color: [0.0, 0.0, 0.0, 1.0],
+                width_px: 1.0,
+                mode: TraceMode::Line,
+                visible: true,
+                label_override: None,
+                owner: owned.clone(),
+            });
+            let id = pane.annotations.add_geometry(Geometry::Text {
+                at: DataPos { t_us: 0, y: 0.0 },
+            });
+            pane.annotations.get_mut(id).unwrap().owner = owned.clone();
+        }
+
+        let snapshot = delog_core::snapshot::StoreSnapshot::empty();
+        let mut playback = crate::plotting::timeline::Playback::default();
+        let mut next_window_id = 2u64;
+        let mut caches = delog_cache::CacheManager::new();
+        let mut control = AppControl {
+            markers: &mut markers,
+            workspace: &mut main,
+            windows: &mut windows,
+            playback: &mut playback,
+            next_window_id: &mut next_window_id,
+            caches: &mut caches,
+            snapshot: &snapshot,
+        };
+        apply_sweep(
+            &mut control,
+            &Sweep::Commit {
+                owner: "flight.py".into(),
+                generation: 2,
+            },
+        );
+
+        let pane = control.windows[0]
+            .workspace
+            .plot_panes_mut()
+            .next()
+            .unwrap();
+        assert!(pane.traces.is_empty());
+        assert!(pane.annotations.is_empty());
+    }
+}

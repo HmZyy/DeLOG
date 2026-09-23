@@ -3,10 +3,15 @@ use std::sync::{Arc, Mutex};
 
 use pyo3::Python;
 
+use delog_core::identity::FieldId;
+use delog_core::snapshot::StoreSnapshot;
+
 use crate::api::PendingMarker;
 
 pub mod plots;
 pub mod testing;
+pub mod traces;
+pub mod workspace;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlotInfo {
@@ -14,6 +19,74 @@ pub struct PlotInfo {
     pub tile: u64,
     pub index: usize,
     pub label: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceMode {
+    Line,
+    Scatter,
+    Step,
+}
+
+impl TraceMode {
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "line" => Some(Self::Line),
+            "scatter" => Some(Self::Scatter),
+            "step" => Some(Self::Step),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraceInfo {
+    pub index: usize,
+    pub field_id: FieldId,
+    pub field: String,
+    pub color: [f32; 4],
+    pub width_px: f32,
+    pub mode: TraceMode,
+    pub visible: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TraceRequest {
+    List {
+        window: u64,
+        tile: u64,
+    },
+    Add {
+        window: u64,
+        tile: u64,
+        field_id: FieldId,
+        field: String,
+        color: Option<[f32; 4]>,
+        width_px: Option<f32>,
+        mode: TraceMode,
+        owner: Option<ScriptOwner>,
+    },
+    Remove {
+        window: u64,
+        tile: u64,
+        index: Option<usize>,
+        field_id: Option<FieldId>,
+        field: Option<String>,
+    },
+    Clear {
+        window: u64,
+        tile: u64,
+    },
+    Set {
+        window: u64,
+        tile: u64,
+        index: usize,
+        field_id: FieldId,
+        color: Option<[f32; 4]>,
+        width_px: Option<f32>,
+        mode: Option<TraceMode>,
+        visible: Option<bool>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -35,19 +108,91 @@ pub enum MarkerRequest {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlotRequest {
-    List,
+    List { window: Option<u64> },
+    Focused,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitDirection {
+    Horizontal,
+    Vertical,
+}
+
+impl SplitDirection {
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "horizontal" => Some(Self::Horizontal),
+            "vertical" => Some(Self::Vertical),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum WorkspaceRequest {
+    AddPlot {
+        direction: SplitDirection,
+    },
+    Split {
+        window: u64,
+        tile: u64,
+        direction: SplitDirection,
+    },
+    Close {
+        window: u64,
+        tile: u64,
+    },
+    Equalize,
+    ShowScene {
+        visible: bool,
+    },
+    OpenWindow {
+        title: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PlaybackRequest {
+    Set {
+        speed: Option<f64>,
+        follow_live: Option<bool>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptOwner {
+    pub name: String,
+    pub generation: u64,
+}
+
+#[derive(Clone)]
+pub struct PlotContext {
+    pub owner: Option<ScriptOwner>,
+    pub snapshot: Arc<StoreSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum GenerationRequest {
+    Commit { owner: String, generation: u64 },
+    Rollback { owner: String, generation: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ControlRequest {
     Markers(MarkerRequest),
     Plots(PlotRequest),
+    Traces(TraceRequest),
+    Generation(GenerationRequest),
+    Workspace(WorkspaceRequest),
+    Playback(PlaybackRequest),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ControlResponse {
     Unit,
     Plots(Vec<PlotInfo>),
+    Traces(Vec<TraceInfo>),
+    Window(u64),
 }
 
 pub trait ControlHost: Send + Sync {
@@ -214,7 +359,7 @@ mod tests {
         });
         let waiter = std::thread::spawn(move || {
             let _guard = install_host(Some(host as Arc<dyn ControlHost>));
-            call(ControlRequest::Plots(PlotRequest::List))
+            call(ControlRequest::Plots(PlotRequest::List { window: None }))
         });
         entered_rx.recv().unwrap();
 
