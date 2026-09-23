@@ -3,11 +3,11 @@ use std::sync::Arc;
 
 use crate::config::settings::AutoOpenVariables;
 use crate::ui::logging::{LogLevel, PendingLog, log};
+use delog_api::params::{ParamSpec, ParamValue, SharedParams, shared_empty};
 use delog_core::ingest::IngestSender;
 use delog_core::metrics::MetricsRegistry;
 use delog_core::snapshot::DataStore;
 use delog_script::library::ScriptLibrary;
-use delog_script::params::{ParamSpec, ParamValue};
 use delog_script::{ControlRequest, ScriptCommand, ScriptEngine, ScriptEvent};
 use egui_code_editor::{CodeEditor, ColorTheme, Syntax};
 
@@ -111,7 +111,7 @@ pub struct ScriptsPanel {
     running: bool,
     parsers: ParsersPanel,
     deferred_parser_actions: VecDeque<ParserUiAction>,
-    params: delog_script::params::SharedParams,
+    params: SharedParams,
     params_file: std::path::PathBuf,
     pub variables_open: bool,
     pending_auto_open: Option<PendingAutoOpen>,
@@ -133,7 +133,7 @@ impl ScriptsPanel {
         ctx: egui::Context,
     ) -> Self {
         let library = ScriptLibrary::new(scripts_dir);
-        let params = delog_script::params::shared_empty();
+        let params = shared_empty();
         {
             let loaded = crate::scripting::script_params_io::load(&params_file);
             crate::scripting::script_params_io::apply_loaded(&mut params.lock().unwrap(), loaded);
@@ -1247,7 +1247,7 @@ fn render_param_widget(
     spec: &ParamSpec,
     value: ParamValue,
 ) -> Option<ParamValue> {
-    use delog_script::params::ParamKind;
+    use delog_api::params::ParamKind;
     match (&spec.kind, value) {
         (
             ParamKind::Slider {

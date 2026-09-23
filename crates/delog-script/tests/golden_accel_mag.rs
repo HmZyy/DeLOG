@@ -104,7 +104,7 @@ fn accel_magnitude_script_emits_expected_values() {
         read_store(),
         sender,
         Arc::new(MetricsRegistry::new()),
-        delog_script::params::shared_empty(),
+        delog_api::params::shared_empty(),
     );
     let script = r#"
 import numpy as np
@@ -188,7 +188,7 @@ fn marker_command_is_exported_and_delivered_before_done() {
         read_store(),
         sender.clone(),
         Arc::new(MetricsRegistry::new()),
-        delog_script::params::shared_empty(),
+        delog_api::params::shared_empty(),
     );
 
     engine
@@ -293,7 +293,7 @@ fn discovery_refs_expose_paths_and_metadata() {
         read_store(),
         sender.clone(),
         Arc::new(MetricsRegistry::new()),
-        delog_script::params::shared_empty(),
+        delog_api::params::shared_empty(),
     );
     let output = run_script_capture_output(
         &engine,
@@ -335,7 +335,7 @@ fn topic_ref_reads_table_columns() {
         read_store(),
         sender.clone(),
         Arc::new(MetricsRegistry::new()),
-        delog_script::params::shared_empty(),
+        delog_api::params::shared_empty(),
     );
     let output = run_script_capture_output(
         &engine,
@@ -374,7 +374,7 @@ fn field_align_supports_modes_base_forms_and_validation() {
         read_store_with_baro_gps(),
         sender.clone(),
         Arc::new(MetricsRegistry::new()),
-        delog_script::params::shared_empty(),
+        delog_api::params::shared_empty(),
     );
     let output = run_script_capture_output(
         &engine,
@@ -439,7 +439,7 @@ fn emit_helper_publishes_derived_topic() {
         read_store(),
         sender.clone(),
         Arc::new(MetricsRegistry::new()),
-        delog_script::params::shared_empty(),
+        delog_api::params::shared_empty(),
     );
     engine
         .send(ScriptCommand::RunScript {
@@ -495,7 +495,7 @@ fn discovery_missing_lookup_errors_include_candidates() {
         read_store(),
         sender.clone(),
         Arc::new(MetricsRegistry::new()),
-        delog_script::params::shared_empty(),
+        delog_api::params::shared_empty(),
     );
 
     let missing_topic = run_script_capture_error(

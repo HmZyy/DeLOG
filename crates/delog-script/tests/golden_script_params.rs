@@ -2,10 +2,10 @@
 
 use std::sync::{Arc, Mutex};
 
+use delog_api::params::{self, ParamKind, ParamValue};
 use delog_core::ingestor::{Ingestor, NullObserver};
 use delog_core::metrics::MetricsRegistry;
 use delog_core::snapshot::{DataStore, StoreSnapshot};
-use delog_script::params::{self, ParamKind, ParamValue};
 use delog_script::{ScriptCommand, ScriptEngine, ScriptEvent};
 
 /// Serializes the tests in this file: each spawns a `ScriptEngine`, and all

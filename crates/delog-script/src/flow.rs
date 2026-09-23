@@ -297,7 +297,7 @@ mod tests {
             Arc::new(DataStore::new()),
             dummy_sender(),
             Arc::new(MetricsRegistry::new()),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         )
     }
 
