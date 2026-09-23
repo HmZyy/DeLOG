@@ -6,6 +6,7 @@ use crate::api::parse_marker_color;
 use super::{
     AnnotationFilter, AnnotationGeometry, AnnotationInfo, AnnotationKind, AnnotationRequest,
     AnnotationStylePatch, ControlRequest, ControlResponse, PlotContext, call_immediate_detached,
+    control_call_error,
 };
 
 #[pyclass(unsendable, name = "AnnotationCollection", skip_from_py_object)]
@@ -47,7 +48,7 @@ impl AnnotationCollectionPy {
             owner: self.context.owner.clone(),
         };
         let response = call_immediate_detached(py, ControlRequest::Annotations(request))
-            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+            .map_err(control_call_error)?;
         match response {
             ControlResponse::Annotations(mut infos) if infos.len() == 1 => {
                 Ok(annotation_from_info(infos.remove(0)))
@@ -339,7 +340,7 @@ impl AnnotationCollectionPy {
         };
         call_immediate_detached(py, ControlRequest::Annotations(request))
             .map(|_| ())
-            .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+            .map_err(control_call_error)
     }
 }
 
@@ -511,7 +512,7 @@ fn request_annotations(
         py,
         ControlRequest::Annotations(AnnotationRequest::List { target }),
     )
-    .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    .map_err(control_call_error)?;
     match response {
         ControlResponse::Annotations(infos) => Ok(infos),
         _ => Err(pyo3::exceptions::PyRuntimeError::new_err(
@@ -722,7 +723,7 @@ impl AnnotationPy {
         };
         call_immediate_detached(py, ControlRequest::Annotations(request))
             .map(|_| ())
-            .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+            .map_err(control_call_error)
     }
 }
 
@@ -780,5 +781,5 @@ fn submit_global_remove(
     let request = AnnotationRequest::Remove { target, filter };
     call_immediate_detached(py, ControlRequest::Annotations(request))
         .map(|_| ())
-        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+        .map_err(control_call_error)
 }

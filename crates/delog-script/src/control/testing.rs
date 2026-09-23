@@ -20,12 +20,29 @@ fn globals_with_delog_named(
     script_name: String,
     generation: u64,
 ) -> Result<Bound<'_, PyDict>, String> {
+    globals_with_delog_named_and_markers(
+        py,
+        snapshot,
+        script_name,
+        generation,
+        std::rc::Rc::default(),
+    )
+}
+
+fn globals_with_delog_named_and_markers(
+    py: Python<'_>,
+    snapshot: Arc<StoreSnapshot>,
+    script_name: String,
+    generation: u64,
+    markers: crate::api::MarkerBuffer,
+) -> Result<Bound<'_, PyDict>, String> {
     let globals = PyDict::new(py);
     let delog = crate::api::Delog::new(
         snapshot,
         std::rc::Rc::default(),
         std::rc::Rc::default(),
         std::rc::Rc::default(),
+        markers,
         std::rc::Rc::default(),
         script_name,
         generation,
@@ -35,6 +52,58 @@ fn globals_with_delog_named(
         .set_item("delog", Bound::new(py, delog).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
     Ok(globals)
+}
+
+pub fn eval_with_host_and_staged_batches(
+    host: Arc<dyn ControlHost>,
+    statement: &str,
+) -> Result<Vec<Vec<super::ControlRequest>>, String> {
+    let _guard = install_host(Some(host));
+    Python::attach(|py| {
+        let batches: super::DeferredControlBuffer = std::rc::Rc::default();
+        let globals = PyDict::new(py);
+        let delog = crate::api::Delog::new(
+            Arc::new(StoreSnapshot::empty()),
+            std::rc::Rc::default(),
+            std::rc::Rc::default(),
+            std::rc::Rc::default(),
+            std::rc::Rc::default(),
+            std::rc::Rc::clone(&batches),
+            "flight.py".into(),
+            1,
+            crate::params::shared_empty(),
+        );
+        globals
+            .set_item("delog", Bound::new(py, delog).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+        let code = std::ffi::CString::new(statement).map_err(|e| e.to_string())?;
+        py.run(&code, Some(&globals), None)
+            .map_err(|e| e.to_string())?;
+        let staged = batches.borrow().clone();
+        Ok(staged)
+    })
+}
+
+pub fn eval_with_host_and_staged_markers(
+    host: Arc<dyn ControlHost>,
+    statement: &str,
+) -> Result<Vec<crate::api::PendingMarker>, String> {
+    let _guard = install_host(Some(host));
+    Python::attach(|py| {
+        let markers: crate::api::MarkerBuffer = std::rc::Rc::default();
+        let globals = globals_with_delog_named_and_markers(
+            py,
+            Arc::new(StoreSnapshot::empty()),
+            "flight.py".into(),
+            1,
+            std::rc::Rc::clone(&markers),
+        )?;
+        let code = std::ffi::CString::new(statement).map_err(|e| e.to_string())?;
+        py.run(&code, Some(&globals), None)
+            .map_err(|e| e.to_string())?;
+        let staged = markers.borrow().clone();
+        Ok(staged)
+    })
 }
 
 fn eval(host: Option<Arc<dyn ControlHost>>, expression: &str) -> Result<Vec<String>, String> {

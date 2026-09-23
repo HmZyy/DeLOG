@@ -1,7 +1,4 @@
-use std::cell::RefCell;
-use std::sync::{Arc, Mutex};
-
-use pyo3::Python;
+use std::sync::Arc;
 
 use delog_core::identity::{FieldId, SourceId};
 use delog_core::snapshot::StoreSnapshot;
@@ -9,11 +6,19 @@ use delog_core::snapshot::StoreSnapshot;
 use crate::api::PendingMarker;
 
 pub mod annotations;
+pub mod layouts;
+pub mod markers;
 pub mod plots;
+mod runtime;
 pub mod testing;
 pub mod traces;
 pub mod vehicles;
 pub mod workspace;
+
+pub use runtime::{
+    BatchPy, DeferredControlBuffer, HostGuard, RecordingHost, call_immediate_detached,
+    control_call_error, current_host, install_host, request_is_batchable, stage_batch_request,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlotInfo {
@@ -193,21 +198,63 @@ pub enum AnnotationRequest {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkerOrigin {
+    Manual,
+    Script,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MarkerInfo {
+    pub id: u64,
+    pub index: usize,
+    pub t_us: i64,
+    pub label: String,
+    pub color: [f32; 4],
+    pub note: String,
+    pub origin: MarkerOrigin,
+    pub owner: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MarkerPatch {
+    pub t_us: Option<i64>,
+    pub label: Option<String>,
+    pub color: Option<[f32; 4]>,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum MarkerFilter {
+    Id(u64),
+    Index(usize),
+    Owner(String),
+    Origin(MarkerOrigin),
+    ScriptLabel(String),
+    ScriptTimeRange {
+        after: Option<i64>,
+        before: Option<i64>,
+    },
+    ScriptAll,
+    All,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum MarkerRequest {
-    Replace {
-        owner: String,
-        generation: u64,
-        markers: Vec<PendingMarker>,
-    },
     Append {
         owner: String,
         generation: u64,
         markers: Vec<PendingMarker>,
     },
-    Remove {
+    RemoveOwned {
         owner: String,
     },
+    List,
+    Set {
+        id: u64,
+        patch: MarkerPatch,
+    },
+    Remove(MarkerFilter),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -491,6 +538,34 @@ pub enum VehicleProfileRequest {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayoutFieldIssue {
+    pub field: String,
+    pub candidates: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LoadReport {
+    pub ambiguous: Vec<LayoutFieldIssue>,
+    pub unresolved: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum LayoutRequest {
+    List,
+    Save { name: String },
+    Load { name: String },
+    Delete { name: String },
+    Rename { from: String, to: String },
+    Duplicate { from: String, to: String },
+    ImportFile { path: String },
+    ExportFile { name: String, path: String },
+    Clear,
+    Current,
+    Apply { json: String },
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ControlRequest {
     Markers(MarkerRequest),
@@ -502,6 +577,8 @@ pub enum ControlRequest {
     Playback(PlaybackRequest),
     Vehicles(VehicleRequest),
     VehicleProfiles(VehicleProfileRequest),
+    Layouts(LayoutRequest),
+    Batch(Vec<ControlRequest>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -514,87 +591,21 @@ pub enum ControlResponse {
     Vehicles(Vec<VehicleInfo>),
     VehicleProfile(VehicleProfileInfo),
     Names(Vec<String>),
+    Markers(Vec<MarkerInfo>),
+    Layout(String),
+    LoadReport(LoadReport),
 }
 
 pub trait ControlHost: Send + Sync {
     fn call(&self, request: ControlRequest) -> Result<ControlResponse, String>;
 }
 
-thread_local! {
-    static HOST: RefCell<Option<Arc<dyn ControlHost>>> = const { RefCell::new(None) };
-}
-
-pub struct HostGuard {
-    previous: Option<Arc<dyn ControlHost>>,
-}
-
-impl Drop for HostGuard {
-    fn drop(&mut self) {
-        HOST.with(|host| {
-            *host.borrow_mut() = self.previous.take();
-        });
-    }
-}
-
-pub fn install_host(host: Option<Arc<dyn ControlHost>>) -> HostGuard {
-    let previous = HOST.with(|current| std::mem::replace(&mut *current.borrow_mut(), host));
-    HostGuard { previous }
-}
-
-pub fn current_host() -> Option<Arc<dyn ControlHost>> {
-    HOST.with(|host| host.borrow().clone())
-}
-
-fn missing_host() -> String {
-    "the DeLOG control API is not available here; it works in the scripting console \
-     and in named script runs, not inside live transforms, parsers, or flow scripts"
-        .into()
-}
-
-/// Round-trips a request to the host with the interpreter detached, so other
-/// Python threads keep running and a pending interrupt can unblock the wait.
-pub fn call_immediate_detached(
-    py: Python<'_>,
-    request: ControlRequest,
-) -> Result<ControlResponse, String> {
-    let host = current_host().ok_or_else(missing_host)?;
-    py.detach(move || host.call(request))
-}
-
-#[derive(Default)]
-pub struct RecordingHost {
-    seen: Mutex<Vec<ControlRequest>>,
-    error: Option<String>,
-}
-
-impl RecordingHost {
-    pub fn failing(error: &str) -> Self {
-        Self {
-            seen: Mutex::new(Vec::new()),
-            error: Some(error.into()),
-        }
-    }
-
-    pub fn taken(&self) -> Vec<ControlRequest> {
-        std::mem::take(&mut *self.seen.lock().unwrap())
-    }
-}
-
-impl ControlHost for RecordingHost {
-    fn call(&self, request: ControlRequest) -> Result<ControlResponse, String> {
-        self.seen.lock().unwrap().push(request);
-        match &self.error {
-            Some(error) => Err(error.clone()),
-            None => Ok(ControlResponse::Unit),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use pyo3::Python;
     use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     fn call(request: ControlRequest) -> Result<ControlResponse, String> {
@@ -603,7 +614,7 @@ mod tests {
 
     #[test]
     fn immediate_calls_without_a_host_report_the_missing_context() {
-        let error = call(ControlRequest::Markers(MarkerRequest::Remove {
+        let error = call(ControlRequest::Markers(MarkerRequest::RemoveOwned {
             owner: "flight.py".into(),
         }))
         .unwrap_err();
@@ -615,7 +626,7 @@ mod tests {
         let host = Arc::new(RecordingHost::default());
         {
             let _guard = install_host(Some(host.clone()));
-            let response = call(ControlRequest::Markers(MarkerRequest::Remove {
+            let response = call(ControlRequest::Markers(MarkerRequest::RemoveOwned {
                 owner: "flight.py".into(),
             }))
             .unwrap();
@@ -623,12 +634,12 @@ mod tests {
         }
         assert_eq!(
             host.taken(),
-            vec![ControlRequest::Markers(MarkerRequest::Remove {
+            vec![ControlRequest::Markers(MarkerRequest::RemoveOwned {
                 owner: "flight.py".into()
             })]
         );
         assert!(
-            call(ControlRequest::Markers(MarkerRequest::Remove {
+            call(ControlRequest::Markers(MarkerRequest::RemoveOwned {
                 owner: "x".into()
             }))
             .is_err()
@@ -645,10 +656,29 @@ mod tests {
     }
 
     #[test]
+    fn recording_host_preserves_p4_requests() {
+        let host = Arc::new(RecordingHost::default());
+        let _guard = install_host(Some(host.clone()));
+        let marker = ControlRequest::Markers(MarkerRequest::List);
+        let layout = ControlRequest::Layouts(LayoutRequest::Current);
+        let batch = ControlRequest::Batch(vec![ControlRequest::Playback(PlaybackRequest::Set {
+            speed: Some(2.0),
+            follow_live: None,
+        })]);
+        let _report = ControlResponse::LoadReport(LoadReport::default());
+        Python::attach(|py| {
+            call_immediate_detached(py, marker.clone()).unwrap();
+            call_immediate_detached(py, layout.clone()).unwrap();
+            call_immediate_detached(py, batch.clone()).unwrap();
+        });
+        assert_eq!(host.taken(), vec![marker, layout, batch]);
+    }
+
+    #[test]
     fn a_host_error_surfaces_verbatim() {
         let host = Arc::new(RecordingHost::failing("pane closed"));
         let _guard = install_host(Some(host));
-        let error = call(ControlRequest::Markers(MarkerRequest::Remove {
+        let error = call(ControlRequest::Markers(MarkerRequest::RemoveOwned {
             owner: "x".into(),
         }))
         .unwrap_err();

@@ -338,7 +338,7 @@ impl Grab {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct AnnotationLayer {
     items: Vec<Annotation>,
     next_id: u64,
