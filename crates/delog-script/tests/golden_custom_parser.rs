@@ -55,7 +55,7 @@ fn representative_custom_parser_reaches_canonical_store_transactionally() {
         Arc::new(DataStore::new()),
         sender.clone(),
         Arc::clone(&metrics),
-        delog_script::params::shared_empty(),
+        delog_api::params::shared_empty(),
     );
 
     let _ = engine.send(ScriptCommand::ParseFile {

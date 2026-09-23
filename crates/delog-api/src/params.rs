@@ -3,6 +3,8 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
+use crate::{Error, Result};
+
 pub type SharedParams = Arc<Mutex<ParamStore>>;
 
 pub fn shared_empty() -> SharedParams {
@@ -74,33 +76,29 @@ impl ParamStore {
         script: &str,
         generation: u64,
         mut spec: ParamSpec,
-    ) -> Result<ParamValue, String> {
+    ) -> Result<ParamValue> {
         if spec.name.is_empty() {
-            return Err("param name must not be empty".into());
+            return Err(Error::invalid_input("param name must not be empty"));
         }
         let sp = self.scripts.entry(script.to_string()).or_default();
-        // First declaration of a new run clears the prior generation's specs
-        // (implicit pruning) while keeping persisted/current values.
         if sp.last_generation != Some(generation) {
             sp.last_generation = Some(generation);
             sp.specs.clear();
         }
         if sp.specs.iter().any(|s| s.name == spec.name) {
-            return Err(format!("param '{}' declared twice in one run", spec.name));
+            return Err(Error::invalid_input(format!(
+                "param '{}' declared twice in one run",
+                spec.name
+            )));
         }
-        // Keep an existing value if present and compatible with this kind.
         let keep = sp.values.get(&spec.name).and_then(|v| {
             if !v.compatible_with(&spec.kind) {
                 return None;
             }
             match (&spec.kind, v) {
-                // A persisted / prior-run value may fall outside a range that
-                // was since tightened; clamp it so an out-of-range value never
-                // reaches the script's computation.
                 (ParamKind::Slider { min, max, .. }, ParamValue::Float(f)) => {
                     Some(ParamValue::Float(f.clamp(*min, *max)))
                 }
-                // A combo value must still be one of the current options.
                 (ParamKind::Combo { options }, ParamValue::Text(s)) => {
                     options.contains(s).then(|| v.clone())
                 }
@@ -145,7 +143,6 @@ impl ParamStore {
 
     pub fn finalize(&mut self, script: &str, generation: u64, has_snapshot: bool, has_live: bool) {
         let sp = self.scripts.entry(script.to_string()).or_default();
-        // A run that declared no params clears the prior generation's specs.
         if sp.last_generation != Some(generation) {
             sp.last_generation = Some(generation);
             sp.specs.clear();
@@ -153,19 +150,6 @@ impl ParamStore {
         sp.has_snapshot = has_snapshot;
         sp.has_live = has_live;
     }
-}
-
-thread_local! {
-    static CURRENT_SCRIPT: std::cell::RefCell<Option<String>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-pub fn set_current_script(name: Option<String>) {
-    CURRENT_SCRIPT.with(|c| *c.borrow_mut() = name);
-}
-
-pub fn current_script() -> Option<String> {
-    CURRENT_SCRIPT.with(|c| c.borrow().clone())
 }
 
 #[cfg(test)]
@@ -203,7 +187,7 @@ mod tests {
         s.declare("foo", 1, slider("gain", 2.0, 0.0, 10.0)).unwrap();
         s.set_value("foo", "gain", ParamValue::Float(7.5));
         let v = s.declare("foo", 2, slider("gain", 2.0, 0.0, 10.0)).unwrap();
-        assert_eq!(v, ParamValue::Float(7.5)); // edit preserved, not reset to default
+        assert_eq!(v, ParamValue::Float(7.5));
     }
 
     #[test]
@@ -211,7 +195,6 @@ mod tests {
         let mut s = ParamStore::default();
         s.declare("foo", 1, slider("gain", 2.0, 0.0, 10.0)).unwrap();
         s.set_value("foo", "gain", ParamValue::Float(9.0));
-        // Re-declared with a tighter max: the kept 9.0 must be clamped to 5.0.
         let v = s.declare("foo", 2, slider("gain", 2.0, 0.0, 5.0)).unwrap();
         assert_eq!(v, ParamValue::Float(5.0));
         assert_eq!(s.value("foo", "gain"), Some(ParamValue::Float(5.0)));
@@ -220,7 +203,7 @@ mod tests {
     #[test]
     fn declare_falls_back_to_default_on_incompatible_kind() {
         let mut s = ParamStore::default();
-        s.set_value("foo", "x", ParamValue::Text("hello".into())); // stale value, wrong kind
+        s.set_value("foo", "x", ParamValue::Text("hello".into()));
         let v = s.declare("foo", 1, slider("x", 3.0, 0.0, 10.0)).unwrap();
         assert_eq!(v, ParamValue::Float(3.0));
     }
@@ -249,7 +232,6 @@ mod tests {
         s.declare("foo", 1, slider("a", 1.0, 0.0, 2.0)).unwrap();
         s.declare("foo", 1, slider("b", 1.0, 0.0, 2.0)).unwrap();
         assert_eq!(s.scripts["foo"].specs.len(), 2);
-        // Next run declares only "a": "b"'s spec is pruned.
         s.declare("foo", 2, slider("a", 1.0, 0.0, 2.0)).unwrap();
         s.finalize("foo", 2, true, false);
         let names: Vec<_> = s.scripts["foo"]
@@ -264,7 +246,7 @@ mod tests {
     fn finalize_clears_specs_when_run_declares_nothing() {
         let mut s = ParamStore::default();
         s.declare("foo", 1, slider("a", 1.0, 0.0, 2.0)).unwrap();
-        s.finalize("foo", 2, false, true); // run 2 declared nothing
+        s.finalize("foo", 2, false, true);
         assert!(s.scripts["foo"].specs.is_empty());
         assert!(s.scripts["foo"].has_live);
     }
@@ -289,14 +271,5 @@ mod tests {
         s.set_value("foo", "g", ParamValue::Float(9.0));
         assert_eq!(s.reset_value("foo", "g"), Some(ParamValue::Float(2.0)));
         assert_eq!(s.value("foo", "g"), Some(ParamValue::Float(2.0)));
-    }
-
-    #[test]
-    fn current_script_thread_local_roundtrips() {
-        assert_eq!(current_script(), None);
-        set_current_script(Some("s".into()));
-        assert_eq!(current_script(), Some("s".into()));
-        set_current_script(None);
-        assert_eq!(current_script(), None);
     }
 }

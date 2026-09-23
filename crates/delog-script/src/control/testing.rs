@@ -46,7 +46,7 @@ fn globals_with_delog_named_and_markers(
         std::rc::Rc::default(),
         script_name,
         generation,
-        crate::params::shared_empty(),
+        delog_api::params::shared_empty(),
     );
     globals
         .set_item("delog", Bound::new(py, delog).map_err(|e| e.to_string())?)
@@ -71,7 +71,7 @@ pub fn eval_with_host_and_staged_batches(
             std::rc::Rc::clone(&batches),
             "flight.py".into(),
             1,
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
         globals
             .set_item("delog", Bound::new(py, delog).map_err(|e| e.to_string())?)

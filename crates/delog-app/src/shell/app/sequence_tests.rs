@@ -13,7 +13,7 @@ fn sequence_script_dataflow_script_and_layout_share_published_results() {
         Arc::clone(&store),
         sender.clone(),
         Arc::new(delog_core::metrics::MetricsRegistry::new()),
-        delog_script::params::shared_empty(),
+        delog_api::params::shared_empty(),
     );
     let run_script = |name: &str, source: &str| {
         let (reply, receipt) = mpsc::channel();

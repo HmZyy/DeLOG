@@ -48,7 +48,7 @@ fn live_transform_appends_derived_batches() {
         read_store(),
         sender.clone(),
         Arc::new(MetricsRegistry::new()),
-        delog_script::params::shared_empty(),
+        delog_api::params::shared_empty(),
     );
     let _ = engine.send(ScriptCommand::RunScript {
         name: "nav_rad".into(),

@@ -48,7 +48,7 @@ fn first_unpublished_live_batch_keeps_its_source_label() {
         Arc::clone(&store),
         sender.clone(),
         Arc::new(MetricsRegistry::new()),
-        delog_script::params::shared_empty(),
+        delog_api::params::shared_empty(),
     );
     *scripts.lock().unwrap() = Some(engine.live_batch_sender());
     engine
@@ -102,7 +102,7 @@ fn both_mode_backfills_once_and_ignores_derived_feedback() {
         Arc::clone(&store),
         sender.clone(),
         Arc::new(MetricsRegistry::new()),
-        delog_script::params::shared_empty(),
+        delog_api::params::shared_empty(),
     );
     engine
         .send(ScriptCommand::RunScript {
@@ -166,7 +166,7 @@ fn registration_staging_is_lossless_beyond_the_former_queue_capacity() {
         Arc::clone(&store),
         sender.clone(),
         Arc::new(MetricsRegistry::new()),
-        delog_script::params::shared_empty(),
+        delog_api::params::shared_empty(),
     );
     engine
         .send(ScriptCommand::RunScript {
@@ -211,7 +211,7 @@ fn dynamic_cross_operation_collision_disables_only_the_losing_producer() {
         Arc::clone(&store),
         sender.clone(),
         Arc::new(MetricsRegistry::new()),
-        delog_script::params::shared_empty(),
+        delog_api::params::shared_empty(),
     );
     engine
         .send(ScriptCommand::RunScript {

@@ -5,6 +5,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
+use delog_api::params::SharedParams;
 use delog_core::identity::SourceId;
 use delog_core::ingest::{IngestSender, IngestSink, ParseSummary, ParsedBatch, SourceKind};
 use delog_core::metrics::MetricsRegistry;
@@ -23,7 +24,6 @@ use crate::live::{
     LiveBatchPy, LiveTransformBatch, LiveTransformSpec, parse_transform_result, result_to_batch,
 };
 use crate::operations::live::ActiveOperation;
-use crate::params::{self, SharedParams};
 
 const LIVE_TRANSFORM_ERROR_LIMIT: u8 = 3;
 const CONSOLE_SCRIPT_NAME: &str = "console";
@@ -898,7 +898,7 @@ fn run_one_transform(
     let result = (|| {
         let materialized = LiveTransformBatch::from_parsed(&transform.spec, batch)?;
         let input_times = materialized.times.clone();
-        crate::params::set_current_script(Some(transform.spec.script_name.clone()));
+        crate::context::set_current_script(Some(transform.spec.script_name.clone()));
         let results = Python::attach(
             |py| -> Result<Vec<crate::live::LiveTransformResult>, String> {
                 let py_batch = LiveBatchPy::from_materialized(py, materialized)
@@ -913,7 +913,7 @@ fn run_one_transform(
                     .map_err(|e| format_pyerr(py, &e))
             },
         );
-        crate::params::set_current_script(None);
+        crate::context::set_current_script(None);
         let results = results?;
 
         // A dynamic transform can pick a topic's field set per batch; a change
@@ -1079,11 +1079,11 @@ fn handle_command(
                     .unwrap();
                     g.set_item("delog", delog).unwrap();
                     let code = std::ffi::CString::new(source.as_str()).expect("NUL checked above");
-                    params::set_current_script(Some(name.clone()));
+                    crate::context::set_current_script(Some(name.clone()));
                     let r = py
                         .run(&code, Some(g), None)
                         .map_err(|e| format_pyerr(py, &e));
-                    params::set_current_script(None);
+                    crate::context::set_current_script(None);
                     r
                 });
                 match run_result {
@@ -1334,9 +1334,9 @@ fn handle_command(
                     .unwrap();
                     g.set_item("delog", delog).unwrap();
                 });
-                params::set_current_script(Some(String::new()));
+                crate::context::set_current_script(Some(String::new()));
                 let evaluation_succeeded = eval_line(globals, &src, evt_tx);
-                params::set_current_script(None);
+                crate::context::set_current_script(None);
                 let specs = operations.borrow().clone();
                 let installation_succeeded = if !evaluation_succeeded || specs.is_empty() {
                     evaluation_succeeded
@@ -1747,8 +1747,12 @@ mod tests {
         let ingestor = delog_core::ingestor::Ingestor::new(delog_core::ingestor::NullObserver);
         let store = ingestor.store();
         let ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
-        let engine =
-            ScriptEngine::spawn(store, sender, test_metrics(), crate::params::shared_empty());
+        let engine = ScriptEngine::spawn(
+            store,
+            sender,
+            test_metrics(),
+            delog_api::params::shared_empty(),
+        );
         for (source, succeeds) in [
             ("raise ValueError('sequence failed')", false),
             ("pass", true),
@@ -1789,7 +1793,7 @@ mod tests {
             Arc::clone(&store),
             sender,
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
         let commands = [
             ScriptCommand::ParseFile {
@@ -1834,7 +1838,7 @@ mod tests {
             Arc::new(DataStore::new()),
             dummy_sender(),
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
         let _ = engine.send(ScriptCommand::Eval("print('hello')".into()));
         let mut text = String::new();
@@ -1860,7 +1864,7 @@ mod tests {
             Arc::new(DataStore::new()),
             dummy_sender(),
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
         let _ = engine.send(ScriptCommand::Eval("1 + 1".into()));
         let mut got_result = None;
@@ -1946,7 +1950,7 @@ mod tests {
             Arc::new(DataStore::new()),
             dummy_sender(),
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
 
         engine
@@ -2018,8 +2022,12 @@ mod tests {
         let store = ingestor.store();
         let (sender, receiver) = delog_core::ingest::ingest_channel();
         let _ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
-        let engine =
-            ScriptEngine::spawn(store, sender, test_metrics(), crate::params::shared_empty());
+        let engine = ScriptEngine::spawn(
+            store,
+            sender,
+            test_metrics(),
+            delog_api::params::shared_empty(),
+        );
 
         engine
             .send(ScriptCommand::RunScript {
@@ -2055,7 +2063,7 @@ delog.transform("MISSING", mode="snapshot")
             store,
             sender.clone(),
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
 
         engine
@@ -2153,7 +2161,7 @@ mark = delog.live_transform(topic="A", fields=["v"], output_topic="B")(MarkerCal
             Arc::new(DataStore::new()),
             dummy_sender(),
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
 
         for (source, expected) in [
@@ -2202,7 +2210,7 @@ mark = delog.live_transform(topic="A", fields=["v"], output_topic="B")(MarkerCal
             store,
             sender.clone(),
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
 
         engine
@@ -2279,7 +2287,7 @@ def mark(batch):
             Arc::new(DataStore::new()),
             dummy_sender(),
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
 
         engine
@@ -2337,7 +2345,7 @@ def mark(batch):
             Arc::new(DataStore::new()),
             dummy_sender(),
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
         let _ = engine.send(ScriptCommand::Eval("xylophone = 1".into()));
         drain_until_done(&engine);
@@ -2352,7 +2360,7 @@ def mark(batch):
             Arc::new(DataStore::new()),
             dummy_sender(),
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
         let matches = completions_for(&engine, 1, "delog.fi");
         assert!(
@@ -2376,7 +2384,7 @@ def mark(batch):
             Arc::new(DataStore::new()),
             dummy_sender(),
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
         let matches = completions_for(&engine, 1, "delog.add_m");
         assert!(
@@ -2396,7 +2404,7 @@ def mark(batch):
             test_store_with_baro_alt(),
             dummy_sender(),
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
         let _ = engine.send(ScriptCommand::Eval(
             "field = delog.topic('BARO').field('Alt').read()".into(),
@@ -2421,7 +2429,7 @@ def mark(batch):
             store,
             dummy_sender(),
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
         let _ = engine.send(ScriptCommand::Eval(
             "float(delog.topic('BARO').field('Alt').read().v[0])".into(),
@@ -2449,7 +2457,7 @@ def mark(batch):
             test_store_with_baro_alt_offset(250),
             dummy_sender(),
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
 
         let read_time = |engine: &ScriptEngine| {
@@ -2491,7 +2499,7 @@ def mark(batch):
             Arc::new(DataStore::new()),
             sender,
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
         let script = r#"
 import numpy as np
@@ -2544,7 +2552,7 @@ delog.emit("Mag", t, {"v": (np.array([1.0, 2.0, 3.0]), "m")})
             Arc::new(DataStore::new()),
             sender,
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
         let script = r#"
 import numpy as np
@@ -2602,8 +2610,12 @@ delog.emit("Mag", t, {"v": (np.array([1.0, 2.0, 3.0]), "m")})
         let (sender, receiver) = ingest_channel();
         let _ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
 
-        let engine =
-            ScriptEngine::spawn(store, sender, test_metrics(), crate::params::shared_empty());
+        let engine = ScriptEngine::spawn(
+            store,
+            sender,
+            test_metrics(),
+            delog_api::params::shared_empty(),
+        );
 
         let script = r#"
 @delog.live_transform(
@@ -2645,8 +2657,12 @@ def convert(batch):
         let (sender, receiver) = ingest_channel();
         let _ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
 
-        let engine =
-            ScriptEngine::spawn(store, sender, test_metrics(), crate::params::shared_empty());
+        let engine = ScriptEngine::spawn(
+            store,
+            sender,
+            test_metrics(),
+            delog_api::params::shared_empty(),
+        );
 
         let script = r#"
 @delog.live_transform(topic="NAMED_VALUE_FLOAT", fields=["name", "value"])
@@ -2686,7 +2702,7 @@ def split(batch):
             store,
             sender.clone(),
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
 
         // First call emits topic "T" with fields {a, b}; every later call emits
@@ -2772,7 +2788,7 @@ def split(batch):
             Arc::new(DataStore::new()),
             sender.clone(),
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
 
         let script = r#"
@@ -2846,7 +2862,7 @@ def f(batch):
             Arc::new(DataStore::new()),
             dummy_sender(),
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
         let _ = engine.send(ScriptCommand::Eval("while True:\n    pass".into()));
         std::thread::sleep(std::time::Duration::from_millis(200));
@@ -2877,7 +2893,7 @@ def f(batch):
             Arc::new(DataStore::new()),
             sender.clone(),
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
 
         let script = r#"
@@ -2960,7 +2976,7 @@ def f(batch):
             Arc::new(DataStore::new()),
             sender,
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
         let script = "import numpy as np\ndelog.emit('X', np.array([0],dtype=np.int64), {'v': np.array([1.0])})\nraise ValueError('boom')\n";
         let _ = engine.send(ScriptCommand::RunScript {
@@ -2996,7 +3012,7 @@ def f(batch):
             Arc::new(DataStore::new()),
             dummy_sender(),
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
         let _ = engine.send(ScriptCommand::ValidateParser {
             name: "side_effect.py".into(),
@@ -3019,7 +3035,7 @@ def f(batch):
             Arc::new(DataStore::new()),
             dummy_sender(),
             Arc::clone(&metrics),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
         for source in ["def Parse(:\n    pass", "x = '\0'"] {
             let _ = engine.send(ScriptCommand::ValidateParser {
@@ -3050,7 +3066,7 @@ def f(batch):
             Arc::new(DataStore::new()),
             dummy_sender(),
             Arc::clone(&metrics),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
         let path = PathBuf::from("/definitely/missing/custom-parser.bin");
         let _ = engine.send(ScriptCommand::ParseFile {
@@ -3091,7 +3107,7 @@ def f(batch):
             Arc::new(DataStore::new()),
             dummy_sender(),
             Arc::clone(&metrics),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
         let _ = engine.send(ScriptCommand::ParseFile {
             parser_name: "cancel.py".into(),
@@ -3123,7 +3139,7 @@ def f(batch):
             Arc::new(DataStore::new()),
             dummy_sender(),
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
         engine
             .send(ScriptCommand::RunScript {
@@ -3176,7 +3192,7 @@ def f(batch):
             Arc::new(DataStore::new()),
             dummy_sender(),
             Arc::clone(&metrics),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
         engine
             .send(ScriptCommand::RunScript {
@@ -3240,7 +3256,7 @@ def f(batch):
             Arc::new(DataStore::new()),
             dummy_sender(),
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
         engine
             .send(ScriptCommand::RunScript {
@@ -3360,7 +3376,7 @@ def f(batch):
             active_live: Arc::new(Mutex::new(HashMap::new())),
             active_declarative: Arc::new(Mutex::new(HashSet::new())),
             parser_cancellation: Arc::clone(&cancellation),
-            params: crate::params::shared_empty(),
+            params: delog_api::params::shared_empty(),
             use_original_timestamps: Arc::new(AtomicBool::new(false)),
             control_host: Arc::new(Mutex::new(None)),
         };
@@ -3442,7 +3458,7 @@ def f(batch):
             active_live: Arc::new(Mutex::new(HashMap::new())),
             active_declarative: Arc::new(Mutex::new(HashSet::new())),
             parser_cancellation: Arc::clone(&cancellation),
-            params: crate::params::shared_empty(),
+            params: delog_api::params::shared_empty(),
             use_original_timestamps: Arc::new(AtomicBool::new(false)),
             control_host: Arc::new(Mutex::new(None)),
         };
@@ -3480,7 +3496,7 @@ def f(batch):
             Arc::new(DataStore::new()),
             dummy_sender(),
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
         for _ in 0..8 {
             let (event_tx, event_rx) = channel();
@@ -3496,7 +3512,7 @@ def f(batch):
                 active_live: Arc::new(Mutex::new(HashMap::new())),
                 active_declarative: Arc::new(Mutex::new(HashSet::new())),
                 parser_cancellation: Arc::clone(&cancellation),
-                params: crate::params::shared_empty(),
+                params: delog_api::params::shared_empty(),
                 use_original_timestamps: Arc::new(AtomicBool::new(false)),
                 control_host: Arc::new(Mutex::new(None)),
             };
@@ -3585,7 +3601,7 @@ def f(batch):
             active_live: Arc::new(Mutex::new(HashMap::new())),
             active_declarative: Arc::new(Mutex::new(HashSet::new())),
             parser_cancellation: Arc::new(Mutex::new(ParserCancellationState::default())),
-            params: crate::params::shared_empty(),
+            params: delog_api::params::shared_empty(),
             use_original_timestamps: Arc::new(AtomicBool::new(false)),
             control_host: Arc::new(Mutex::new(None)),
         };

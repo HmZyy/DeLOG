@@ -42,7 +42,7 @@ fn engine_with_host() -> (ScriptEngine, IngestSender, std::thread::JoinHandle<()
         Arc::new(DataStore::from_snapshot(StoreSnapshot::empty())),
         sender.clone(),
         Arc::new(MetricsRegistry::new()),
-        delog_script::params::shared_empty(),
+        delog_api::params::shared_empty(),
     );
     let host: Arc<dyn ControlHost> = Arc::new(PlotsHost);
     engine.set_control_host(host);
