@@ -1,5 +1,6 @@
 use pyo3::prelude::*;
 
+use super::annotations::AnnotationCollectionPy;
 use super::traces::TraceCollectionPy;
 use super::{
     ControlRequest, ControlResponse, PlotContext, PlotInfo, PlotRequest, call_immediate_detached,
@@ -27,6 +28,11 @@ impl PlotPy {
     #[getter]
     fn traces(&self) -> TraceCollectionPy {
         TraceCollectionPy::new(self.window, self.tile, self.context.clone())
+    }
+
+    #[getter]
+    fn annotations(&self) -> AnnotationCollectionPy {
+        AnnotationCollectionPy::new(self.window, self.tile, self.context.clone())
     }
 }
 

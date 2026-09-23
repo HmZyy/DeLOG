@@ -161,6 +161,220 @@ fn extended_windows_survive_a_save_and_load_round_trip() {
 }
 
 #[test]
+fn annotations_survive_a_save_and_load_round_trip_in_every_window() {
+    use crate::plotting::annotations::{DataPos, Geometry, Kind, Style};
+
+    let snapshot = test_snapshot();
+    let main_style = Style {
+        color: [0.25, 0.5, 0.75, 1.0],
+        stroke_px: 3.5,
+        fill_opacity: 0.4,
+        font_px: 14.0,
+        arrow: true,
+    };
+    let mut main = Workspace::new();
+    let main_geom;
+    {
+        let pane = main.plot_panes_mut().next().unwrap();
+        let id = pane.annotations.add(
+            Kind::Rect,
+            DataPos {
+                t_us: 1_000,
+                y: 2.0,
+            },
+            2_000_000,
+            4.0,
+        );
+        let annotation = pane.annotations.get_mut(id).unwrap();
+        annotation.label = "main burst".to_owned();
+        annotation.style = main_style;
+        #[cfg(feature = "scripting")]
+        {
+            annotation.owner = Some(crate::plotting::annotations::AnnotationOwner {
+                name: "flight.py".to_owned(),
+                generation: 5,
+            });
+        }
+        main_geom = annotation.geom;
+    }
+    let mut window = ExtendedWindow::new(WindowId(1));
+    {
+        let pane = window.workspace.plot_panes_mut().next().unwrap();
+        let id = pane
+            .annotations
+            .add(Kind::HLine, DataPos { t_us: 0, y: 3.5 }, 2_000_000, 4.0);
+        pane.annotations.get_mut(id).unwrap().label = "window limit".to_owned();
+    }
+    let windows = vec![window];
+
+    let doc = current_doc(CurrentLayout {
+        name: "annotated-round-trip".to_owned(),
+        workspace: &main,
+        windows: &windows,
+        snapshot: &snapshot,
+        speed: 1.0,
+        follow_live: false,
+        vehicles: &[],
+    });
+
+    let LoadOutcome::Applied(applied) = load_doc(doc, &snapshot).expect("the document should load")
+    else {
+        panic!("a document with no ambiguity should apply directly");
+    };
+
+    let main_pane = applied
+        .workspace
+        .tree
+        .tiles
+        .tiles()
+        .find_map(|tile| match tile {
+            egui_tiles::Tile::Pane(Pane::Plot(pane)) => Some(pane),
+            _ => None,
+        })
+        .expect("plot pane in the main workspace");
+    assert_eq!(main_pane.annotations.items().len(), 1);
+    let restored = &main_pane.annotations.items()[0];
+    assert_eq!(restored.label, "main burst");
+    match (restored.geom, main_geom) {
+        (
+            Geometry::Rect { a, b },
+            Geometry::Rect {
+                a: orig_a,
+                b: orig_b,
+            },
+        ) => {
+            assert_eq!(a.t_us, orig_a.t_us);
+            assert_eq!(a.y, orig_a.y);
+            assert_eq!(b.t_us, orig_b.t_us);
+            assert_eq!(b.y, orig_b.y);
+        }
+        other => panic!("expected a restored rect matching the original, got {other:?}"),
+    }
+    assert_eq!(restored.style, main_style);
+    #[cfg(feature = "scripting")]
+    {
+        assert_eq!(
+            restored.owner.as_ref().map(|owner| owner.name.as_str()),
+            Some("flight.py")
+        );
+    }
+
+    let window_pane = applied.windows[0]
+        .workspace
+        .tree
+        .tiles
+        .tiles()
+        .find_map(|tile| match tile {
+            egui_tiles::Tile::Pane(Pane::Plot(pane)) => Some(pane),
+            _ => None,
+        })
+        .expect("plot pane in the extended window");
+    assert_eq!(window_pane.annotations.items().len(), 1);
+    assert_eq!(window_pane.annotations.items()[0].label, "window limit");
+}
+
+#[cfg(not(feature = "scripting"))]
+#[test]
+fn annotation_owner_survives_a_layout_round_trip_without_scripting() {
+    let snapshot = test_snapshot();
+    let mut doc = empty_doc("owner-round-trip");
+    let LayoutNode::Plot { annotations, .. } = &mut doc.workspace.root else {
+        panic!("expected a plot root");
+    };
+    annotations.push(crate::config::layout::doc::AnnotationLayout {
+        kind: "hline".to_owned(),
+        points: Vec::new(),
+        y: Some(9.81),
+        label: "1g".to_owned(),
+        color: [1.0, 0.0, 0.0, 1.0],
+        stroke_px: 1.5,
+        fill_opacity: 0.0,
+        font_px: 11.0,
+        arrow: false,
+        owner: Some("flight.py".to_owned()),
+    });
+
+    let LoadOutcome::Applied(applied) = load_doc(doc, &snapshot).expect("the document should load")
+    else {
+        panic!("a document with no ambiguity should apply directly");
+    };
+    let saved = current_doc(CurrentLayout {
+        name: "owner-round-trip".to_owned(),
+        workspace: &applied.workspace,
+        windows: &applied.windows,
+        snapshot: &snapshot,
+        speed: applied.speed,
+        follow_live: applied.follow_live,
+        vehicles: &applied.vehicles,
+    });
+    let json = crate::config::layout::doc::doc_json(&saved).expect("the document should encode");
+    let decoded =
+        crate::config::layout::doc::decode_doc(&json).expect("the document should decode");
+    let LayoutNode::Plot { annotations, .. } = decoded.workspace.root else {
+        panic!("expected a plot root");
+    };
+
+    assert_eq!(annotations[0].owner.as_deref(), Some("flight.py"));
+}
+
+#[test]
+fn an_annotation_whose_points_do_not_match_its_kind_is_skipped_and_reported() {
+    let snapshot = test_snapshot();
+    let doc = LayoutDoc {
+        delog_layout: LAYOUT_VERSION,
+        name: "malformed-annotation".to_owned(),
+        playback: PlaybackLayout {
+            speed: 1.0,
+            follow_live: false,
+        },
+        workspace: WorkspaceLayout {
+            root: LayoutNode::Plot {
+                traces: Vec::new(),
+                show_legend: true,
+                show_tooltip: true,
+                annotations: vec![crate::config::layout::doc::AnnotationLayout {
+                    kind: "rect".to_owned(),
+                    points: vec![[0.0, 0.0]],
+                    y: None,
+                    label: "lopsided".to_owned(),
+                    color: [1.0, 0.0, 0.0, 1.0],
+                    stroke_px: 1.5,
+                    fill_opacity: 0.0,
+                    font_px: 11.0,
+                    arrow: false,
+                    owner: None,
+                }],
+            },
+        },
+        windows: Vec::new(),
+        vehicles: Vec::new(),
+    };
+
+    let LoadOutcome::Applied(applied) = load_doc(doc, &snapshot).expect("the document should load")
+    else {
+        panic!("no ambiguity is possible in this document");
+    };
+
+    let pane = applied
+        .workspace
+        .tree
+        .tiles
+        .tiles()
+        .find_map(|tile| match tile {
+            egui_tiles::Tile::Pane(Pane::Plot(pane)) => Some(pane),
+            _ => None,
+        })
+        .expect("plot pane");
+    assert!(pane.annotations.is_empty());
+    assert!(
+        applied
+            .diagnostics
+            .iter()
+            .any(|diag| diag.message.contains("lopsided"))
+    );
+}
+
+#[test]
 fn a_window_restored_from_a_layout_opens_with_its_data_browser_collapsed() {
     let snapshot = test_snapshot();
     let mut window = ExtendedWindow::new(WindowId(1));
@@ -238,6 +452,7 @@ fn window_ids_fall_back_to_position_and_never_collide() {
                 traces: Vec::new(),
                 show_legend: true,
                 show_tooltip: true,
+                annotations: Vec::new(),
             },
         }
     }
@@ -274,6 +489,7 @@ fn a_scene_node_in_an_extended_window_layout_becomes_a_plot() {
                 traces: Vec::new(),
                 show_legend: true,
                 show_tooltip: true,
+                annotations: Vec::new(),
             },
         },
         windows: vec![WindowLayout {
@@ -318,6 +534,7 @@ fn a_field_ambiguous_only_inside_an_extended_window_is_flagged_for_mapping() {
                 traces: Vec::new(),
                 show_legend: true,
                 show_tooltip: true,
+                annotations: Vec::new(),
             },
         },
         windows: vec![WindowLayout {
@@ -337,6 +554,7 @@ fn a_field_ambiguous_only_inside_an_extended_window_is_flagged_for_mapping() {
                 }],
                 show_legend: true,
                 show_tooltip: true,
+                annotations: Vec::new(),
             },
         }],
         vehicles: Vec::new(),
@@ -386,6 +604,7 @@ fn empty_doc(name: &str) -> LayoutDoc {
                 traces: Vec::new(),
                 show_legend: true,
                 show_tooltip: true,
+                annotations: Vec::new(),
             },
         },
         windows: Vec::new(),

@@ -219,14 +219,102 @@ pub fn default_geometry(kind: Kind, at: DataPos, span_us: i64, y_span: f64) -> G
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnnotationOwner {
+    pub name: String,
+    pub generation: u64,
+}
+
+#[cfg(feature = "scripting")]
+impl From<delog_script::ScriptOwner> for AnnotationOwner {
+    fn from(owner: delog_script::ScriptOwner) -> Self {
+        Self {
+            name: owner.name,
+            generation: owner.generation,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Annotation {
     pub id: u64,
     pub geom: Geometry,
     pub label: String,
     pub style: Style,
-    #[cfg(feature = "scripting")]
-    pub owner: Option<delog_script::ScriptOwner>,
+    pub owner: Option<AnnotationOwner>,
+}
+
+#[cfg(feature = "scripting")]
+impl Kind {
+    pub fn to_script(self) -> delog_script::AnnotationKind {
+        match self {
+            Self::Text => delog_script::AnnotationKind::Text,
+            Self::Segment => delog_script::AnnotationKind::Segment,
+            Self::Rect => delog_script::AnnotationKind::Rect,
+            Self::Ellipse => delog_script::AnnotationKind::Ellipse,
+            Self::HLine => delog_script::AnnotationKind::HLine,
+        }
+    }
+}
+
+#[cfg(feature = "scripting")]
+impl Geometry {
+    pub fn from_script(geometry: delog_script::AnnotationGeometry) -> Self {
+        let pos = |(t_us, y): (i64, f64)| DataPos { t_us, y };
+        match geometry {
+            delog_script::AnnotationGeometry::Text { at } => Self::Text { at: pos(at) },
+            delog_script::AnnotationGeometry::Segment { from, to } => Self::Segment {
+                from: pos(from),
+                to: pos(to),
+            },
+            delog_script::AnnotationGeometry::Rect { a, b } => Self::Rect {
+                a: pos(a),
+                b: pos(b),
+            },
+            delog_script::AnnotationGeometry::Ellipse { a, b } => Self::Ellipse {
+                a: pos(a),
+                b: pos(b),
+            },
+            delog_script::AnnotationGeometry::HLine { y } => Self::HLine { y },
+        }
+    }
+
+    pub fn to_script(self) -> delog_script::AnnotationGeometry {
+        let pt = |p: DataPos| (p.t_us, p.y);
+        match self {
+            Self::Text { at } => delog_script::AnnotationGeometry::Text { at: pt(at) },
+            Self::Segment { from, to } => delog_script::AnnotationGeometry::Segment {
+                from: pt(from),
+                to: pt(to),
+            },
+            Self::Rect { a, b } => delog_script::AnnotationGeometry::Rect { a: pt(a), b: pt(b) },
+            Self::Ellipse { a, b } => {
+                delog_script::AnnotationGeometry::Ellipse { a: pt(a), b: pt(b) }
+            }
+            Self::HLine { y } => delog_script::AnnotationGeometry::HLine { y },
+        }
+    }
+}
+
+#[cfg(feature = "scripting")]
+impl Annotation {
+    pub fn apply_style_patch(&mut self, patch: delog_script::AnnotationStylePatch) {
+        if let Some(color) = patch.color {
+            self.style.color = color;
+        }
+        if let Some(stroke_px) = patch.stroke_px {
+            self.style.stroke_px = stroke_px;
+        }
+        if let Some(fill_opacity) = patch.fill_opacity {
+            self.style.fill_opacity = fill_opacity;
+        }
+        if let Some(font_px) = patch.font_px {
+            self.style.font_px = font_px;
+        }
+        if let Some(arrow) = patch.arrow {
+            self.style.arrow = arrow;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -289,7 +377,6 @@ impl AnnotationLayer {
             geom,
             label: String::new(),
             style: default_style(id),
-            #[cfg(feature = "scripting")]
             owner: None,
         });
         id

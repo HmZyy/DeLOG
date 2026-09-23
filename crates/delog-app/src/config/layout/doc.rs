@@ -70,6 +70,8 @@ pub enum LayoutNode {
         show_legend: bool,
         #[serde(default = "default_true")]
         show_tooltip: bool,
+        #[serde(default)]
+        annotations: Vec<AnnotationLayout>,
     },
     Scene3d(SceneLayout),
     Split {
@@ -102,6 +104,21 @@ pub enum TraceModeLayout {
     Line,
     Scatter,
     Step,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AnnotationLayout {
+    pub kind: String,
+    pub points: Vec<[f64; 2]>,
+    pub y: Option<f64>,
+    pub label: String,
+    pub color: [f32; 4],
+    pub stroke_px: f32,
+    pub fill_opacity: f32,
+    pub font_px: f32,
+    pub arrow: bool,
+    #[serde(default)]
+    pub owner: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]

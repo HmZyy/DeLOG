@@ -59,7 +59,6 @@ pub fn draw(
             geom,
             label: String::new(),
             style: super::default_style(0),
-            #[cfg(feature = "scripting")]
             owner: None,
         };
         if is_visible(&ghost, &tf) {
