@@ -13,7 +13,7 @@ pub mod custom_parser;
 pub mod api;
 
 #[cfg(feature = "python")]
-pub mod params;
+mod context;
 
 #[cfg(feature = "python")]
 pub mod emit;

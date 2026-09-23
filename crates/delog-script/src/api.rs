@@ -2,6 +2,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
+use delog_api::params::{ParamKind, ParamSpec, ParamValue, SharedParams};
 use delog_core::align::{AlignMode, align_values};
 pub use delog_core::derived::{PendingColumn, PendingField, PendingTopic};
 use delog_core::field_view::FieldView;
@@ -24,7 +25,6 @@ use crate::operations::{
     MergeSpec, OperationBuffer, OperationMode, OperationSpec, SplitBySpec, TopicSelector,
     TransformSpec, merged_field_names, validate_split_template, validate_transform,
 };
-use crate::params::{ParamKind, ParamSpec, ParamValue, SharedParams};
 use pyo3::types::{PyBool, PyInt};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -1400,7 +1400,7 @@ impl Delog {
     }
 
     fn param(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
-        let script = crate::params::current_script().unwrap_or_else(|| self.script_name.clone());
+        let script = crate::context::current_script().unwrap_or_else(|| self.script_name.clone());
         let store = self.params.lock().unwrap();
         // Resolve against the declared spec (not a bare persisted value), so an
         // undeclared name raises and a slider's int typing is preserved.
@@ -1424,7 +1424,7 @@ impl Delog {
             .lock()
             .unwrap()
             .declare(&self.script_name, self.generation, spec)
-            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
         value_to_py(py, &value, Some(&kind))
     }
 }
@@ -1542,7 +1542,7 @@ mod tests {
             crate::control::DeferredControlBuffer::default(),
             String::new(),
             0,
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         )
     }
 
@@ -1652,7 +1652,7 @@ delog.add_marker(44, "rgba", color="#11223344")
                     crate::control::DeferredControlBuffer::default(),
                     String::new(),
                     0,
-                    crate::params::shared_empty(),
+                    delog_api::params::shared_empty(),
                 ),
             )
             .unwrap();
@@ -1691,7 +1691,7 @@ def callback(batch):
                     crate::control::DeferredControlBuffer::default(),
                     String::new(),
                     0,
-                    crate::params::shared_empty(),
+                    delog_api::params::shared_empty(),
                 ),
             )
             .unwrap();
@@ -1728,7 +1728,7 @@ def callback(batch):
                     crate::control::DeferredControlBuffer::default(),
                     String::new(),
                     0,
-                    crate::params::shared_empty(),
+                    delog_api::params::shared_empty(),
                 ),
             )
             .unwrap();
@@ -1760,7 +1760,7 @@ def callback(batch):
                     crate::control::DeferredControlBuffer::default(),
                     String::new(),
                     0,
-                    crate::params::shared_empty(),
+                    delog_api::params::shared_empty(),
                 ),
             )
             .unwrap();
@@ -1823,7 +1823,7 @@ delog.split_by("PARAM_VALUE", "param_id")
                     crate::control::DeferredControlBuffer::default(),
                     String::new(),
                     0,
-                    crate::params::shared_empty(),
+                    delog_api::params::shared_empty(),
                 ),
             )
             .unwrap();
@@ -1868,7 +1868,7 @@ delog.split_by("PARAM_VALUE", "param_id")
                     crate::control::DeferredControlBuffer::default(),
                     String::new(),
                     0,
-                    crate::params::shared_empty(),
+                    delog_api::params::shared_empty(),
                 ),
             )
             .unwrap();
