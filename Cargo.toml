@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+  "crates/delog-api",
   "crates/delog-core",
   "crates/delog-flow",
   "crates/delog-parsers",
@@ -25,6 +26,7 @@ rust-version = "1.92"
 [workspace.dependencies]
 tempfile = "3.27.0"
 # intra-workspace
+delog-api = { path = "crates/delog-api" }
 delog-core = { path = "crates/delog-core" }
 delog-flow = { path = "crates/delog-flow" }
 delog-parsers = { path = "crates/delog-parsers" }
