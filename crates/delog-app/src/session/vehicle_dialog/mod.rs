@@ -44,6 +44,7 @@ impl VehicleDialogTab {
 pub struct VehicleDialog {
     pub open: bool,
     drafts: Vec<Draft>,
+    live_baseline: Vec<VehicleConfig>,
     selected_vehicle: usize,
     was_open: bool,
     dock_state: egui_dock::DockState<VehicleDialogTab>,
@@ -60,6 +61,7 @@ impl Default for VehicleDialog {
         Self {
             open: false,
             drafts: Vec::new(),
+            live_baseline: Vec::new(),
             selected_vehicle: 0,
             was_open: false,
             dock_state: egui_dock::DockState::new(VehicleDialogTab::ALL.to_vec()),
@@ -82,6 +84,38 @@ impl VehicleDialog {
         self.selected_vehicle = self
             .selected_vehicle
             .min(self.drafts.len().saturating_sub(1));
+    }
+
+    fn sync_live_vehicles(&mut self, vehicles: &[VehicleConfig], snapshot: &StoreSnapshot) {
+        let incomplete = self
+            .drafts
+            .iter()
+            .filter(|draft| draft.is_incomplete())
+            .cloned()
+            .collect::<Vec<_>>();
+        let selected_profiles = self
+            .drafts
+            .iter()
+            .filter(|draft| draft.runtime.id != 0)
+            .filter_map(|draft| {
+                draft
+                    .selected_profile
+                    .clone()
+                    .map(|profile| (draft.runtime.id, profile))
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+
+        self.drafts = vehicles
+            .iter()
+            .map(|vehicle| {
+                let mut draft = Draft::from_config(vehicle, snapshot);
+                draft.selected_profile = selected_profiles.get(&vehicle.runtime.id).cloned();
+                draft
+            })
+            .chain(incomplete)
+            .collect();
+        self.live_baseline = vehicles.to_vec();
+        self.clamp_selection();
     }
 }
 
@@ -106,12 +140,11 @@ pub fn show(
     // Resync drafts on the open edge so external changes (e.g. a loaded layout)
     // are reflected when the dialog opens.
     if state.open && !state.was_open {
-        state.drafts = vehicles
-            .iter()
-            .map(|v| Draft::from_config(v, snapshot))
-            .collect();
-        state.clamp_selection();
+        state.drafts.clear();
+        state.sync_live_vehicles(vehicles, snapshot);
         refresh_profiles(state);
+    } else if state.open && state.live_baseline != *vehicles {
+        state.sync_live_vehicles(vehicles, snapshot);
     }
     state.was_open = state.open;
     if !state.open {
@@ -158,6 +191,7 @@ pub fn show(
     // position mapping moves.
     let rebuilt: Vec<VehicleConfig> = state.drafts.iter().filter_map(Draft::build).collect();
     if rebuilt == *vehicles {
+        state.live_baseline.clone_from(vehicles);
         return false;
     }
     let traj_changed = rebuilt
@@ -165,6 +199,7 @@ pub fn show(
         .map(|v| (v.source, &v.pos))
         .ne(vehicles.iter().map(|v| (v.source, &v.pos)));
     *vehicles = rebuilt;
+    state.live_baseline.clone_from(vehicles);
     traj_changed
 }
 

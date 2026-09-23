@@ -723,6 +723,10 @@ impl FieldRefPy {
     pub(crate) fn label(&self) -> String {
         format!("{}.{}", self.topic, self.name)
     }
+
+    pub(crate) fn qualified_path(&self) -> &str {
+        &self.path
+    }
 }
 
 #[pymethods]
@@ -782,6 +786,81 @@ impl Delog {
         let markers = active_marker_buffer().unwrap_or_else(|| Rc::clone(&self.markers));
         markers.borrow_mut().push(marker);
         Ok(())
+    }
+
+    #[pyo3(signature = (lat, lon, alt, *, dege7=false, alt_mm=false, alt_offset_m=0.0))]
+    fn gps(
+        &self,
+        lat: Bound<'_, PyAny>,
+        lon: Bound<'_, PyAny>,
+        alt: Bound<'_, PyAny>,
+        dege7: bool,
+        alt_mm: bool,
+        alt_offset_m: f64,
+    ) -> PyResult<crate::control::vehicles::VehiclePositionPy> {
+        crate::control::vehicles::gps(
+            &self.snapshot,
+            &lat,
+            &lon,
+            &alt,
+            dege7,
+            alt_mm,
+            alt_offset_m,
+        )
+    }
+
+    #[pyo3(signature = (north, east, down, *, reference=None))]
+    fn ned(
+        &self,
+        north: Bound<'_, PyAny>,
+        east: Bound<'_, PyAny>,
+        down: Bound<'_, PyAny>,
+        reference: Option<PyRef<'_, crate::control::vehicles::GeoReferencePy>>,
+    ) -> PyResult<crate::control::vehicles::VehiclePositionPy> {
+        crate::control::vehicles::ned(&self.snapshot, &north, &east, &down, reference.as_deref())
+    }
+
+    fn geo(
+        &self,
+        lat_deg: f64,
+        lon_deg: f64,
+        alt_m: f64,
+    ) -> PyResult<crate::control::vehicles::GeoReferencePy> {
+        crate::control::vehicles::geo(lat_deg, lon_deg, alt_m)
+    }
+
+    fn geo_fields(
+        &self,
+        lat: Bound<'_, PyAny>,
+        lon: Bound<'_, PyAny>,
+        alt: Bound<'_, PyAny>,
+    ) -> PyResult<crate::control::vehicles::GeoReferencePy> {
+        crate::control::vehicles::geo_fields(&self.snapshot, &lat, &lon, &alt)
+    }
+
+    #[pyo3(signature = (roll, pitch, yaw, *, degrees=false))]
+    fn euler(
+        &self,
+        roll: Bound<'_, PyAny>,
+        pitch: Bound<'_, PyAny>,
+        yaw: Bound<'_, PyAny>,
+        degrees: bool,
+    ) -> PyResult<crate::control::vehicles::VehicleOrientationPy> {
+        crate::control::vehicles::euler(&self.snapshot, &roll, &pitch, &yaw, degrees)
+    }
+
+    fn quat(
+        &self,
+        w: Bound<'_, PyAny>,
+        x: Bound<'_, PyAny>,
+        y: Bound<'_, PyAny>,
+        z: Bound<'_, PyAny>,
+    ) -> PyResult<crate::control::vehicles::VehicleOrientationPy> {
+        crate::control::vehicles::quat(&self.snapshot, &w, &x, &y, &z)
+    }
+
+    fn static_ori(&self) -> crate::control::vehicles::VehicleOrientationPy {
+        crate::control::vehicles::static_orientation()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -972,6 +1051,16 @@ impl Delog {
     #[getter]
     fn annotations(&self) -> crate::control::annotations::GlobalAnnotationsPy {
         crate::control::annotations::GlobalAnnotationsPy
+    }
+
+    #[getter]
+    fn vehicles(&self) -> crate::control::vehicles::VehicleCollectionPy {
+        crate::control::vehicles::VehicleCollectionPy::new(self.plot_context())
+    }
+
+    #[getter]
+    fn vehicle_profiles(&self) -> crate::control::vehicles::profiles::VehicleProfilesPy {
+        crate::control::vehicles::profiles::VehicleProfilesPy::new(self.plot_context())
     }
 
     #[getter]

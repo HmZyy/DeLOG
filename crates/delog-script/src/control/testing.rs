@@ -78,6 +78,37 @@ pub fn eval_with_host_and_snapshot(
     })
 }
 
+pub fn eval_vehicle_mappings_with_snapshot(
+    snapshot: Arc<StoreSnapshot>,
+    statement: &str,
+) -> Result<(super::VehiclePosition, super::VehicleOrientation), String> {
+    Python::attach(|py| {
+        let globals = globals_with_delog(py, snapshot)?;
+        let code = std::ffi::CString::new(statement).map_err(|e| e.to_string())?;
+        py.run(&code, Some(&globals), None)
+            .map_err(|e| e.to_string())?;
+        let position = globals
+            .get_item("pos")
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "test script did not define 'pos'".to_string())?;
+        let orientation = globals
+            .get_item("ori")
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "test script did not define 'ori'".to_string())?;
+        let position = position
+            .extract::<PyRef<'_, super::vehicles::VehiclePositionPy>>()
+            .map_err(|e| e.to_string())?
+            .0
+            .clone();
+        let orientation = orientation
+            .extract::<PyRef<'_, super::vehicles::VehicleOrientationPy>>()
+            .map_err(|e| e.to_string())?
+            .0
+            .clone();
+        Ok((position, orientation))
+    })
+}
+
 pub fn eval_named_with_host(
     host: Arc<dyn ControlHost>,
     script_name: &str,

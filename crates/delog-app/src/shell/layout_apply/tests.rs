@@ -275,6 +275,59 @@ fn annotations_survive_a_save_and_load_round_trip_in_every_window() {
 
 #[cfg(not(feature = "scripting"))]
 #[test]
+fn vehicle_owner_survives_a_layout_round_trip_without_scripting() {
+    let snapshot = test_snapshot();
+    let mut doc = empty_doc("vehicle-owner-round-trip");
+    doc.vehicles
+        .push(crate::config::layout::doc::VehicleLayout {
+            label: "Vehicle".to_owned(),
+            show: true,
+            show_path: true,
+            model: crate::config::layout::doc::ModelLayout::Cone,
+            color: [255, 255, 255, 255],
+            path_color: [255, 255, 255, 255],
+            scale: 1.0,
+            position: crate::config::layout::doc::PosLayout::Gps {
+                lat: crate::config::layout::doc::FieldRef {
+                    topic: "GLOBAL_POSITION_INT".to_owned(),
+                    field: "lat".to_owned(),
+                },
+                lon: crate::config::layout::doc::FieldRef {
+                    topic: "GLOBAL_POSITION_INT".to_owned(),
+                    field: "lon".to_owned(),
+                },
+                alt: crate::config::layout::doc::FieldRef {
+                    topic: "GLOBAL_POSITION_INT".to_owned(),
+                    field: "alt".to_owned(),
+                },
+                lat_lon_dege7: true,
+                alt_mm: true,
+                alt_offset_m: 0.0,
+            },
+            orientation: crate::config::layout::doc::OriLayout::Static,
+            owner: Some("flight.py".to_owned()),
+        });
+
+    let LoadOutcome::Applied(applied) = load_doc(doc, &snapshot).unwrap() else {
+        panic!("the document should apply");
+    };
+    let saved = current_doc(CurrentLayout {
+        name: "vehicle-owner-round-trip".to_owned(),
+        workspace: &applied.workspace,
+        windows: &applied.windows,
+        snapshot: &snapshot,
+        speed: applied.speed,
+        follow_live: applied.follow_live,
+        vehicles: &applied.vehicles,
+    });
+    let json = crate::config::layout::doc::doc_json(&saved).unwrap();
+    let decoded = crate::config::layout::doc::decode_doc(&json).unwrap();
+
+    assert_eq!(decoded.vehicles[0].owner.as_deref(), Some("flight.py"));
+}
+
+#[cfg(not(feature = "scripting"))]
+#[test]
 fn annotation_owner_survives_a_layout_round_trip_without_scripting() {
     let snapshot = test_snapshot();
     let mut doc = empty_doc("owner-round-trip");
