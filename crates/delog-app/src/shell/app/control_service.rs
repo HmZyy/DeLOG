@@ -2,9 +2,9 @@ use delog_cache::CacheManager;
 use delog_core::identity::FieldId;
 use delog_core::snapshot::StoreSnapshot;
 use delog_script::{
-    ControlRequest, ControlResponse, PlaybackRequest, PlotRequest,
-    SplitDirection as ScriptSplitDirection, TraceInfo, TraceMode as ScriptTraceMode, TraceRequest,
-    WorkspaceRequest,
+    AnnotationFilter, AnnotationRequest, ControlRequest, ControlResponse, PlaybackRequest,
+    PlotRequest, SplitDirection as ScriptSplitDirection, TraceInfo, TraceMode as ScriptTraceMode,
+    TraceRequest, WorkspaceRequest,
 };
 
 use crate::plotting::legend::trace_label;
@@ -51,6 +51,7 @@ pub fn apply(
             Ok(ControlResponse::Plots(focused.into_iter().collect()))
         }
         ControlRequest::Traces(request) => apply_trace_request(control, request),
+        ControlRequest::Annotations(request) => apply_annotation_request(control, request),
         ControlRequest::Generation(request) => {
             let sweep = control_ownership::Sweep::from(request);
             control_ownership::apply_sweep(control, &sweep);
@@ -297,6 +298,149 @@ fn apply_trace_request(
                 trace.visible = visible;
             }
             Ok(ControlResponse::Unit)
+        }
+    }
+}
+
+fn apply_annotation_request(
+    control: &mut AppControl<'_>,
+    request: AnnotationRequest,
+) -> Result<ControlResponse, String> {
+    match request {
+        AnnotationRequest::Add {
+            window,
+            tile,
+            geometry,
+            label,
+            style,
+            owner,
+        } => {
+            let pane = plot_pane(control, window, tile)?;
+            let id =
+                pane.annotations
+                    .add_geometry(crate::plotting::annotations::Geometry::from_script(
+                        geometry,
+                    ));
+            let index = pane.annotations.items().len() - 1;
+            let annotation = pane
+                .annotations
+                .get_mut(id)
+                .expect("the annotation was just inserted");
+            annotation.label = label;
+            annotation.apply_style_patch(style);
+            annotation.owner = owner.map(Into::into);
+            let info = delog_script::AnnotationInfo {
+                window,
+                tile,
+                id,
+                index,
+                kind: annotation.geom.kind().to_script(),
+                geometry: annotation.geom.to_script(),
+                label: annotation.label.clone(),
+                color: annotation.style.color,
+                owner: annotation.owner.as_ref().map(|owner| owner.name.clone()),
+            };
+            Ok(ControlResponse::Annotations(vec![info]))
+        }
+        AnnotationRequest::List { target } => {
+            let infos = match target {
+                Some((window, tile)) => {
+                    let pane = plot_pane(control, window, tile)?;
+                    crate::shell::workspace::annotation_infos_for_pane(window, tile, pane)
+                }
+                None => crate::shell::windows::annotation_infos(control.workspace, control.windows),
+            };
+            Ok(ControlResponse::Annotations(infos))
+        }
+        AnnotationRequest::Remove { target, filter } => {
+            match target {
+                Some((window, tile)) => {
+                    let pane = plot_pane(control, window, tile)?;
+                    remove_matching_annotations(pane, &filter)?;
+                }
+                None => {
+                    if matches!(filter, AnnotationFilter::Index(_) | AnnotationFilter::Id(_)) {
+                        return Err(
+                            "a global annotation removal cannot address a single annotation by index or id".into(),
+                        );
+                    }
+                    for pane in control.workspace.plot_panes_mut() {
+                        remove_matching_annotations(pane, &filter)?;
+                    }
+                    for window in control.windows.iter_mut() {
+                        for pane in window.workspace.plot_panes_mut() {
+                            remove_matching_annotations(pane, &filter)?;
+                        }
+                    }
+                }
+            }
+            Ok(ControlResponse::Unit)
+        }
+        AnnotationRequest::Set {
+            window,
+            tile,
+            id,
+            label,
+            geometry,
+            style,
+        } => {
+            let pane = plot_pane(control, window, tile)?;
+            let annotation = pane.annotations.get_mut(id).ok_or_else(|| {
+                format!("annotation {id} on plot {tile} in window {window} is gone")
+            })?;
+            if let Some(label) = label {
+                annotation.label = label;
+            }
+            if let Some(geometry) = geometry {
+                annotation.geom = crate::plotting::annotations::Geometry::from_script(geometry);
+            }
+            annotation.apply_style_patch(style);
+            Ok(ControlResponse::Unit)
+        }
+    }
+}
+
+fn remove_matching_annotations(
+    pane: &mut PlotPane,
+    filter: &AnnotationFilter,
+) -> Result<(), String> {
+    match filter {
+        AnnotationFilter::All => {
+            pane.annotations.clear();
+            Ok(())
+        }
+        AnnotationFilter::Index(index) => {
+            let id = pane
+                .annotations
+                .items()
+                .get(*index)
+                .map(|annotation| annotation.id)
+                .ok_or_else(|| format!("annotation {index} is gone"))?;
+            pane.annotations.remove(id);
+            Ok(())
+        }
+        AnnotationFilter::Id(id) => {
+            if pane.annotations.get(*id).is_none() {
+                return Err(format!("annotation {id} is gone"));
+            }
+            pane.annotations.remove(*id);
+            Ok(())
+        }
+        AnnotationFilter::Kind(kind) => {
+            pane.annotations
+                .retain(|annotation| annotation.geom.kind().to_script() != *kind);
+            Ok(())
+        }
+        AnnotationFilter::Label(label) => {
+            pane.annotations
+                .retain(|annotation| &annotation.label != label);
+            Ok(())
+        }
+        AnnotationFilter::Owner(owner) => {
+            pane.annotations.retain(|annotation| {
+                annotation.owner.as_ref().map(|owner| owner.name.as_str()) != Some(owner.as_str())
+            });
+            Ok(())
         }
     }
 }
@@ -1330,5 +1474,713 @@ mod tests {
         .unwrap();
         assert!(!control.caches.is_pinned(field_a));
         assert!(!control.caches.is_pinned(field_b));
+    }
+
+    fn hline_at(y: f64) -> delog_script::AnnotationGeometry {
+        delog_script::AnnotationGeometry::HLine { y }
+    }
+
+    #[test]
+    fn adding_an_annotation_with_no_style_args_matches_a_hand_drawn_default() {
+        let snapshot = StoreSnapshot::empty();
+        let mut markers = Markers::new();
+        let mut workspace = crate::shell::workspace::Workspace::new();
+        let mut windows: Vec<crate::shell::windows::ExtendedWindow> = Vec::new();
+        let mut playback = Playback::default();
+        let mut next_window_id = 1u64;
+        let mut caches = CacheManager::new();
+        let tile = root_tile(&workspace);
+        let mut control = control_with_one_plot(
+            &mut markers,
+            &mut workspace,
+            &mut windows,
+            &mut playback,
+            &mut next_window_id,
+            &mut caches,
+            &snapshot,
+        );
+        let response = apply(
+            &mut control,
+            ControlRequest::Annotations(delog_script::AnnotationRequest::Add {
+                window: 0,
+                tile,
+                geometry: hline_at(9.81),
+                label: "1g".into(),
+                style: delog_script::AnnotationStylePatch::default(),
+                owner: None,
+            }),
+        )
+        .unwrap();
+        let ControlResponse::Annotations(infos) = response else {
+            panic!("expected Annotations response");
+        };
+        let id = infos[0].id;
+        let pane = control
+            .workspace
+            .plot_pane_mut(egui_tiles::TileId(tile))
+            .unwrap();
+        let annotation = pane.annotations.get(id).unwrap();
+        assert_eq!(
+            annotation.geom,
+            crate::plotting::annotations::Geometry::HLine { y: 9.81 }
+        );
+        assert_eq!(annotation.label, "1g");
+        assert_eq!(
+            annotation.style,
+            crate::plotting::annotations::default_style(id)
+        );
+        assert_eq!(annotation.owner, None);
+    }
+
+    #[test]
+    fn a_style_patch_overrides_only_the_fields_it_sets() {
+        let snapshot = StoreSnapshot::empty();
+        let mut markers = Markers::new();
+        let mut workspace = crate::shell::workspace::Workspace::new();
+        let mut windows: Vec<crate::shell::windows::ExtendedWindow> = Vec::new();
+        let mut playback = Playback::default();
+        let mut next_window_id = 1u64;
+        let mut caches = CacheManager::new();
+        let tile = root_tile(&workspace);
+        let mut control = control_with_one_plot(
+            &mut markers,
+            &mut workspace,
+            &mut windows,
+            &mut playback,
+            &mut next_window_id,
+            &mut caches,
+            &snapshot,
+        );
+        let response = apply(
+            &mut control,
+            ControlRequest::Annotations(delog_script::AnnotationRequest::Add {
+                window: 0,
+                tile,
+                geometry: hline_at(9.81),
+                label: String::new(),
+                style: delog_script::AnnotationStylePatch {
+                    fill_opacity: Some(0.15),
+                    arrow: Some(true),
+                    ..Default::default()
+                },
+                owner: None,
+            }),
+        )
+        .unwrap();
+        let ControlResponse::Annotations(infos) = response else {
+            panic!("expected Annotations response");
+        };
+        let id = infos[0].id;
+        let pane = control
+            .workspace
+            .plot_pane_mut(egui_tiles::TileId(tile))
+            .unwrap();
+        let annotation = pane.annotations.get(id).unwrap();
+        let default = crate::plotting::annotations::default_style(id);
+        assert_eq!(annotation.style.fill_opacity, 0.15);
+        assert!(annotation.style.arrow);
+        assert_eq!(annotation.style.color, default.color);
+        assert_eq!(annotation.style.stroke_px, default.stroke_px);
+        assert_eq!(annotation.style.font_px, default.font_px);
+    }
+
+    #[test]
+    fn a_scripted_annotation_is_stamped_with_its_owner() {
+        let snapshot = StoreSnapshot::empty();
+        let mut markers = Markers::new();
+        let mut workspace = crate::shell::workspace::Workspace::new();
+        let mut windows: Vec<crate::shell::windows::ExtendedWindow> = Vec::new();
+        let mut playback = Playback::default();
+        let mut next_window_id = 1u64;
+        let mut caches = CacheManager::new();
+        let tile = root_tile(&workspace);
+        let mut control = control_with_one_plot(
+            &mut markers,
+            &mut workspace,
+            &mut windows,
+            &mut playback,
+            &mut next_window_id,
+            &mut caches,
+            &snapshot,
+        );
+        let owner = Some(delog_script::ScriptOwner {
+            name: "flight.py".into(),
+            generation: 4,
+        });
+        let response = apply(
+            &mut control,
+            ControlRequest::Annotations(delog_script::AnnotationRequest::Add {
+                window: 0,
+                tile,
+                geometry: hline_at(9.81),
+                label: String::new(),
+                style: delog_script::AnnotationStylePatch::default(),
+                owner: owner.clone(),
+            }),
+        )
+        .unwrap();
+        let ControlResponse::Annotations(infos) = response else {
+            panic!("expected Annotations response");
+        };
+        let id = infos[0].id;
+        let pane = control
+            .workspace
+            .plot_pane_mut(egui_tiles::TileId(tile))
+            .unwrap();
+        assert_eq!(
+            pane.annotations.get(id).unwrap().owner,
+            owner.map(Into::into)
+        );
+    }
+
+    #[test]
+    fn adding_an_annotation_to_a_missing_pane_is_rejected() {
+        let snapshot = StoreSnapshot::empty();
+        let mut markers = Markers::new();
+        let mut workspace = crate::shell::workspace::Workspace::new();
+        let mut windows: Vec<crate::shell::windows::ExtendedWindow> = Vec::new();
+        let mut playback = Playback::default();
+        let mut next_window_id = 1u64;
+        let mut caches = CacheManager::new();
+        let mut control = control_with_one_plot(
+            &mut markers,
+            &mut workspace,
+            &mut windows,
+            &mut playback,
+            &mut next_window_id,
+            &mut caches,
+            &snapshot,
+        );
+        let error = apply(
+            &mut control,
+            ControlRequest::Annotations(delog_script::AnnotationRequest::Add {
+                window: 0,
+                tile: 999,
+                geometry: hline_at(9.81),
+                label: String::new(),
+                style: delog_script::AnnotationStylePatch::default(),
+                owner: None,
+            }),
+        )
+        .unwrap_err();
+        assert!(error.contains("999"), "{error}");
+    }
+
+    fn add_annotation(
+        control: &mut AppControl<'_>,
+        window: u64,
+        tile: u64,
+        geometry: delog_script::AnnotationGeometry,
+        label: &str,
+        owner: Option<delog_script::ScriptOwner>,
+    ) -> u64 {
+        let response = apply(
+            control,
+            ControlRequest::Annotations(delog_script::AnnotationRequest::Add {
+                window,
+                tile,
+                geometry,
+                label: label.into(),
+                style: delog_script::AnnotationStylePatch::default(),
+                owner,
+            }),
+        )
+        .unwrap();
+        let ControlResponse::Annotations(infos) = response else {
+            panic!("expected Annotations response");
+        };
+        infos[0].id
+    }
+
+    #[test]
+    fn listing_annotations_reports_index_and_kind_in_creation_order() {
+        let snapshot = StoreSnapshot::empty();
+        let mut markers = Markers::new();
+        let mut workspace = crate::shell::workspace::Workspace::new();
+        let mut windows: Vec<crate::shell::windows::ExtendedWindow> = Vec::new();
+        let mut playback = Playback::default();
+        let mut next_window_id = 1u64;
+        let mut caches = CacheManager::new();
+        let tile = root_tile(&workspace);
+        let mut control = control_with_one_plot(
+            &mut markers,
+            &mut workspace,
+            &mut windows,
+            &mut playback,
+            &mut next_window_id,
+            &mut caches,
+            &snapshot,
+        );
+        let rect_id = add_annotation(
+            &mut control,
+            0,
+            tile,
+            delog_script::AnnotationGeometry::Rect {
+                a: (0, 0.0),
+                b: (1, 1.0),
+            },
+            "box",
+            None,
+        );
+        let hline_id = add_annotation(&mut control, 0, tile, hline_at(9.81), "1g", None);
+        let response = apply(
+            &mut control,
+            ControlRequest::Annotations(delog_script::AnnotationRequest::List {
+                target: Some((0, tile)),
+            }),
+        )
+        .unwrap();
+        let ControlResponse::Annotations(infos) = response else {
+            panic!("expected Annotations response");
+        };
+        assert_eq!(infos.len(), 2);
+        assert_eq!(infos[0].id, rect_id);
+        assert_eq!(infos[0].index, 0);
+        assert_eq!(infos[0].kind, delog_script::AnnotationKind::Rect);
+        assert_eq!(infos[1].id, hline_id);
+        assert_eq!(infos[1].index, 1);
+        assert_eq!(infos[1].kind, delog_script::AnnotationKind::HLine);
+    }
+
+    #[test]
+    fn listing_annotations_walks_every_window_when_no_target_is_given() {
+        let snapshot = StoreSnapshot::empty();
+        let mut markers = Markers::new();
+        let mut workspace = crate::shell::workspace::Workspace::new();
+        let mut windows = vec![crate::shell::windows::ExtendedWindow::new(
+            crate::shell::windows::WindowId(1),
+        )];
+        let mut playback = Playback::default();
+        let mut next_window_id = 2u64;
+        let mut caches = CacheManager::new();
+        let main_tile = root_tile(&workspace);
+        let other_tile = windows[0].workspace.plot_infos(1)[0].tile;
+        let mut control = control_with_one_plot(
+            &mut markers,
+            &mut workspace,
+            &mut windows,
+            &mut playback,
+            &mut next_window_id,
+            &mut caches,
+            &snapshot,
+        );
+        add_annotation(&mut control, 0, main_tile, hline_at(1.0), "main", None);
+        add_annotation(&mut control, 1, other_tile, hline_at(2.0), "other", None);
+        let response = apply(
+            &mut control,
+            ControlRequest::Annotations(delog_script::AnnotationRequest::List { target: None }),
+        )
+        .unwrap();
+        let ControlResponse::Annotations(infos) = response else {
+            panic!("expected Annotations response");
+        };
+        let windows_seen: Vec<u64> = infos.iter().map(|info| info.window).collect();
+        assert_eq!(windows_seen, vec![0, 1]);
+    }
+
+    #[test]
+    fn removing_by_index_removes_only_that_annotation() {
+        let snapshot = StoreSnapshot::empty();
+        let mut markers = Markers::new();
+        let mut workspace = crate::shell::workspace::Workspace::new();
+        let mut windows: Vec<crate::shell::windows::ExtendedWindow> = Vec::new();
+        let mut playback = Playback::default();
+        let mut next_window_id = 1u64;
+        let mut caches = CacheManager::new();
+        let tile = root_tile(&workspace);
+        let mut control = control_with_one_plot(
+            &mut markers,
+            &mut workspace,
+            &mut windows,
+            &mut playback,
+            &mut next_window_id,
+            &mut caches,
+            &snapshot,
+        );
+        add_annotation(&mut control, 0, tile, hline_at(1.0), "first", None);
+        let second = add_annotation(&mut control, 0, tile, hline_at(2.0), "second", None);
+        apply(
+            &mut control,
+            ControlRequest::Annotations(delog_script::AnnotationRequest::Remove {
+                target: Some((0, tile)),
+                filter: AnnotationFilter::Index(0),
+            }),
+        )
+        .unwrap();
+        let pane = control
+            .workspace
+            .plot_pane_mut(egui_tiles::TileId(tile))
+            .unwrap();
+        assert_eq!(pane.annotations.items().len(), 1);
+        assert_eq!(pane.annotations.items()[0].id, second);
+    }
+
+    #[test]
+    fn removing_an_out_of_range_index_is_rejected() {
+        let snapshot = StoreSnapshot::empty();
+        let mut markers = Markers::new();
+        let mut workspace = crate::shell::workspace::Workspace::new();
+        let mut windows: Vec<crate::shell::windows::ExtendedWindow> = Vec::new();
+        let mut playback = Playback::default();
+        let mut next_window_id = 1u64;
+        let mut caches = CacheManager::new();
+        let tile = root_tile(&workspace);
+        let mut control = control_with_one_plot(
+            &mut markers,
+            &mut workspace,
+            &mut windows,
+            &mut playback,
+            &mut next_window_id,
+            &mut caches,
+            &snapshot,
+        );
+        let error = apply(
+            &mut control,
+            ControlRequest::Annotations(delog_script::AnnotationRequest::Remove {
+                target: Some((0, tile)),
+                filter: AnnotationFilter::Index(0),
+            }),
+        )
+        .unwrap_err();
+        assert!(error.contains("is gone"), "{error}");
+    }
+
+    #[test]
+    fn removing_a_stale_id_is_rejected_and_never_touches_another_annotation() {
+        let snapshot = StoreSnapshot::empty();
+        let mut markers = Markers::new();
+        let mut workspace = crate::shell::workspace::Workspace::new();
+        let mut windows: Vec<crate::shell::windows::ExtendedWindow> = Vec::new();
+        let mut playback = Playback::default();
+        let mut next_window_id = 1u64;
+        let mut caches = CacheManager::new();
+        let tile = root_tile(&workspace);
+        let mut control = control_with_one_plot(
+            &mut markers,
+            &mut workspace,
+            &mut windows,
+            &mut playback,
+            &mut next_window_id,
+            &mut caches,
+            &snapshot,
+        );
+        let stale = add_annotation(&mut control, 0, tile, hline_at(1.0), "gone", None);
+        let survivor = add_annotation(&mut control, 0, tile, hline_at(2.0), "survivor", None);
+        apply(
+            &mut control,
+            ControlRequest::Annotations(delog_script::AnnotationRequest::Remove {
+                target: Some((0, tile)),
+                filter: AnnotationFilter::Id(stale),
+            }),
+        )
+        .unwrap();
+        let error = apply(
+            &mut control,
+            ControlRequest::Annotations(delog_script::AnnotationRequest::Remove {
+                target: Some((0, tile)),
+                filter: AnnotationFilter::Id(stale),
+            }),
+        )
+        .unwrap_err();
+        assert!(error.contains("is gone"), "{error}");
+        let pane = control
+            .workspace
+            .plot_pane_mut(egui_tiles::TileId(tile))
+            .unwrap();
+        assert_eq!(pane.annotations.items().len(), 1);
+        assert_eq!(pane.annotations.items()[0].id, survivor);
+    }
+
+    #[test]
+    fn removing_by_kind_only_matches_that_kind() {
+        let snapshot = StoreSnapshot::empty();
+        let mut markers = Markers::new();
+        let mut workspace = crate::shell::workspace::Workspace::new();
+        let mut windows: Vec<crate::shell::windows::ExtendedWindow> = Vec::new();
+        let mut playback = Playback::default();
+        let mut next_window_id = 1u64;
+        let mut caches = CacheManager::new();
+        let tile = root_tile(&workspace);
+        let mut control = control_with_one_plot(
+            &mut markers,
+            &mut workspace,
+            &mut windows,
+            &mut playback,
+            &mut next_window_id,
+            &mut caches,
+            &snapshot,
+        );
+        add_annotation(&mut control, 0, tile, hline_at(1.0), "hline", None);
+        let rect = add_annotation(
+            &mut control,
+            0,
+            tile,
+            delog_script::AnnotationGeometry::Rect {
+                a: (0, 0.0),
+                b: (1, 1.0),
+            },
+            "rect",
+            None,
+        );
+        apply(
+            &mut control,
+            ControlRequest::Annotations(delog_script::AnnotationRequest::Remove {
+                target: Some((0, tile)),
+                filter: AnnotationFilter::Kind(delog_script::AnnotationKind::HLine),
+            }),
+        )
+        .unwrap();
+        let pane = control
+            .workspace
+            .plot_pane_mut(egui_tiles::TileId(tile))
+            .unwrap();
+        assert_eq!(pane.annotations.items().len(), 1);
+        assert_eq!(pane.annotations.items()[0].id, rect);
+    }
+
+    #[test]
+    fn a_global_removal_by_owner_reaches_every_window() {
+        let snapshot = StoreSnapshot::empty();
+        let mut markers = Markers::new();
+        let mut workspace = crate::shell::workspace::Workspace::new();
+        let mut windows = vec![crate::shell::windows::ExtendedWindow::new(
+            crate::shell::windows::WindowId(1),
+        )];
+        let mut playback = Playback::default();
+        let mut next_window_id = 2u64;
+        let mut caches = CacheManager::new();
+        let main_tile = root_tile(&workspace);
+        let other_tile = windows[0].workspace.plot_infos(1)[0].tile;
+        let mut control = control_with_one_plot(
+            &mut markers,
+            &mut workspace,
+            &mut windows,
+            &mut playback,
+            &mut next_window_id,
+            &mut caches,
+            &snapshot,
+        );
+        let owner = Some(delog_script::ScriptOwner {
+            name: "flight.py".into(),
+            generation: 1,
+        });
+        add_annotation(
+            &mut control,
+            0,
+            main_tile,
+            hline_at(1.0),
+            "main",
+            owner.clone(),
+        );
+        add_annotation(
+            &mut control,
+            1,
+            other_tile,
+            hline_at(2.0),
+            "other",
+            owner.clone(),
+        );
+        apply(
+            &mut control,
+            ControlRequest::Annotations(delog_script::AnnotationRequest::Remove {
+                target: None,
+                filter: AnnotationFilter::Owner("flight.py".into()),
+            }),
+        )
+        .unwrap();
+        assert!(
+            control
+                .workspace
+                .plot_pane_mut(egui_tiles::TileId(main_tile))
+                .unwrap()
+                .annotations
+                .is_empty()
+        );
+        assert!(
+            control.windows[0]
+                .workspace
+                .plot_pane_mut(egui_tiles::TileId(other_tile))
+                .unwrap()
+                .annotations
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_global_removal_by_index_or_id_is_rejected_before_touching_any_pane() {
+        let snapshot = StoreSnapshot::empty();
+        let mut markers = Markers::new();
+        let mut workspace = crate::shell::workspace::Workspace::new();
+        let mut windows: Vec<crate::shell::windows::ExtendedWindow> = Vec::new();
+        let mut playback = Playback::default();
+        let mut next_window_id = 1u64;
+        let mut caches = CacheManager::new();
+        let tile = root_tile(&workspace);
+        let mut control = control_with_one_plot(
+            &mut markers,
+            &mut workspace,
+            &mut windows,
+            &mut playback,
+            &mut next_window_id,
+            &mut caches,
+            &snapshot,
+        );
+        add_annotation(&mut control, 0, tile, hline_at(1.0), "kept", None);
+        let index_error = apply(
+            &mut control,
+            ControlRequest::Annotations(delog_script::AnnotationRequest::Remove {
+                target: None,
+                filter: AnnotationFilter::Index(0),
+            }),
+        )
+        .unwrap_err();
+        assert!(index_error.contains("index or id"), "{index_error}");
+        let id_error = apply(
+            &mut control,
+            ControlRequest::Annotations(delog_script::AnnotationRequest::Remove {
+                target: None,
+                filter: AnnotationFilter::Id(0),
+            }),
+        )
+        .unwrap_err();
+        assert!(id_error.contains("index or id"), "{id_error}");
+        let pane = control
+            .workspace
+            .plot_pane_mut(egui_tiles::TileId(tile))
+            .unwrap();
+        assert_eq!(pane.annotations.items().len(), 1);
+    }
+
+    #[test]
+    fn removing_the_selected_annotation_clears_selection_state() {
+        let snapshot = StoreSnapshot::empty();
+        let mut markers = Markers::new();
+        let mut workspace = crate::shell::workspace::Workspace::new();
+        let mut windows: Vec<crate::shell::windows::ExtendedWindow> = Vec::new();
+        let mut playback = Playback::default();
+        let mut next_window_id = 1u64;
+        let mut caches = CacheManager::new();
+        let tile = root_tile(&workspace);
+        let mut control = control_with_one_plot(
+            &mut markers,
+            &mut workspace,
+            &mut windows,
+            &mut playback,
+            &mut next_window_id,
+            &mut caches,
+            &snapshot,
+        );
+        let id = add_annotation(&mut control, 0, tile, hline_at(1.0), "1g", None);
+        {
+            let pane = control
+                .workspace
+                .plot_pane_mut(egui_tiles::TileId(tile))
+                .unwrap();
+            pane.annotations.selected = Some(id);
+        }
+        apply(
+            &mut control,
+            ControlRequest::Annotations(delog_script::AnnotationRequest::Remove {
+                target: Some((0, tile)),
+                filter: AnnotationFilter::Kind(delog_script::AnnotationKind::HLine),
+            }),
+        )
+        .unwrap();
+        let pane = control
+            .workspace
+            .plot_pane_mut(egui_tiles::TileId(tile))
+            .unwrap();
+        assert_eq!(pane.annotations.selected, None);
+    }
+
+    #[test]
+    fn set_updates_label_geometry_and_style() {
+        let snapshot = StoreSnapshot::empty();
+        let mut markers = Markers::new();
+        let mut workspace = crate::shell::workspace::Workspace::new();
+        let mut windows: Vec<crate::shell::windows::ExtendedWindow> = Vec::new();
+        let mut playback = Playback::default();
+        let mut next_window_id = 1u64;
+        let mut caches = CacheManager::new();
+        let tile = root_tile(&workspace);
+        let mut control = control_with_one_plot(
+            &mut markers,
+            &mut workspace,
+            &mut windows,
+            &mut playback,
+            &mut next_window_id,
+            &mut caches,
+            &snapshot,
+        );
+        let id = add_annotation(&mut control, 0, tile, hline_at(1.0), "1g", None);
+        apply(
+            &mut control,
+            ControlRequest::Annotations(delog_script::AnnotationRequest::Set {
+                window: 0,
+                tile,
+                id,
+                label: Some("burst".into()),
+                geometry: Some(hline_at(9.81)),
+                style: delog_script::AnnotationStylePatch {
+                    arrow: Some(true),
+                    ..Default::default()
+                },
+            }),
+        )
+        .unwrap();
+        let pane = control
+            .workspace
+            .plot_pane_mut(egui_tiles::TileId(tile))
+            .unwrap();
+        let annotation = pane.annotations.get(id).unwrap();
+        assert_eq!(annotation.label, "burst");
+        assert_eq!(
+            annotation.geom,
+            crate::plotting::annotations::Geometry::HLine { y: 9.81 }
+        );
+        assert!(annotation.style.arrow);
+    }
+
+    #[test]
+    fn set_on_a_removed_annotation_is_rejected() {
+        let snapshot = StoreSnapshot::empty();
+        let mut markers = Markers::new();
+        let mut workspace = crate::shell::workspace::Workspace::new();
+        let mut windows: Vec<crate::shell::windows::ExtendedWindow> = Vec::new();
+        let mut playback = Playback::default();
+        let mut next_window_id = 1u64;
+        let mut caches = CacheManager::new();
+        let tile = root_tile(&workspace);
+        let mut control = control_with_one_plot(
+            &mut markers,
+            &mut workspace,
+            &mut windows,
+            &mut playback,
+            &mut next_window_id,
+            &mut caches,
+            &snapshot,
+        );
+        let id = add_annotation(&mut control, 0, tile, hline_at(1.0), "1g", None);
+        apply(
+            &mut control,
+            ControlRequest::Annotations(delog_script::AnnotationRequest::Remove {
+                target: Some((0, tile)),
+                filter: AnnotationFilter::Id(id),
+            }),
+        )
+        .unwrap();
+        let error = apply(
+            &mut control,
+            ControlRequest::Annotations(delog_script::AnnotationRequest::Set {
+                window: 0,
+                tile,
+                id,
+                label: Some("burst".into()),
+                geometry: None,
+                style: delog_script::AnnotationStylePatch::default(),
+            }),
+        )
+        .unwrap_err();
+        assert!(error.contains("is gone"), "{error}");
     }
 }

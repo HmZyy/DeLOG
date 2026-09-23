@@ -358,11 +358,63 @@ fn empty_doc(name: &str) -> LayoutDoc {
                 traces: Vec::new(),
                 show_legend: true,
                 show_tooltip: true,
+                annotations: Vec::new(),
             },
         },
         windows: Vec::new(),
         vehicles: Vec::new(),
     }
+}
+
+fn doc_with_annotation() -> LayoutDoc {
+    let mut doc = empty_doc("annotated");
+    doc.workspace.root = LayoutNode::Plot {
+        traces: Vec::new(),
+        show_legend: true,
+        show_tooltip: true,
+        annotations: vec![AnnotationLayout {
+            kind: "rect".into(),
+            points: vec![[0.0, -1.0], [1_000_000.0, 1.0]],
+            y: None,
+            label: "vibration burst".into(),
+            color: [1.0, 0.0, 0.0, 1.0],
+            stroke_px: 1.5,
+            fill_opacity: 0.2,
+            font_px: 11.0,
+            arrow: false,
+            owner: None,
+        }],
+    };
+    doc
+}
+
+#[test]
+fn annotations_survive_a_layout_round_trip() {
+    let doc = doc_with_annotation();
+    let json = doc_json(&doc).unwrap();
+    let back = decode_doc(&json).unwrap();
+    let LayoutNode::Plot { annotations, .. } = &back.workspace.root else {
+        panic!("expected a plot root");
+    };
+    assert_eq!(annotations.len(), 1);
+    assert_eq!(annotations[0].label, "vibration burst");
+    assert_eq!(annotations[0].kind, "rect");
+}
+
+#[test]
+fn a_layout_written_before_annotations_existed_still_decodes() {
+    let json = r#"{
+        "delog_layout": 2,
+        "name": "legacy",
+        "playback": { "speed": 1.0, "follow_live": false },
+        "workspace": { "root": { "plot": { "traces": [], "show_legend": true, "show_tooltip": true } } },
+        "vehicles": []
+    }"#;
+    let doc = decode_doc(json).expect("a v2 document without annotations must load");
+    let LayoutNode::Plot { annotations, .. } = &doc.workspace.root else {
+        panic!("expected a plot root");
+    };
+    assert!(annotations.is_empty());
 }
 
 fn scene_layout(tail: &str) -> TrailModeLayout {
@@ -472,6 +524,7 @@ fn extended_windows_round_trip_through_the_document() {
                 traces: Vec::new(),
                 show_legend: true,
                 show_tooltip: true,
+                annotations: Vec::new(),
             },
         },
         windows: vec![WindowLayout {
@@ -482,6 +535,7 @@ fn extended_windows_round_trip_through_the_document() {
                 traces: Vec::new(),
                 show_legend: true,
                 show_tooltip: true,
+                annotations: Vec::new(),
             },
         }],
         vehicles: Vec::new(),
