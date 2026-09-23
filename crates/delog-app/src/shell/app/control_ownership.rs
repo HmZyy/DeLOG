@@ -87,6 +87,14 @@ fn sweep_vehicles(vehicles: &mut Vec<VehicleConfig>, sweep: &Sweep) -> bool {
 }
 
 pub fn apply_sweep(control: &mut AppControl<'_>, sweep: &Sweep) {
+    match sweep {
+        Sweep::Commit { owner, generation } => {
+            control.markers.sweep_generation(owner, *generation, true);
+        }
+        Sweep::Rollback { owner, generation } => {
+            control.markers.sweep_generation(owner, *generation, false);
+        }
+    }
     let mut removed_fields = Vec::new();
     for pane in control.workspace.plot_panes_mut() {
         removed_fields.extend(sweep_pane(pane, sweep));

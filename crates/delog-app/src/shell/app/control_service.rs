@@ -9,9 +9,14 @@ use delog_script::{
     VehicleSpec, WorkspaceRequest,
 };
 
+mod batch;
+mod layouts;
 mod profiles;
 mod vehicle_mapping;
 
+use batch::{apply_batch, trace_counts, unpin_removed_traces};
+pub use layouts::LayoutControlEffects;
+use layouts::apply_layout_request;
 use profiles::apply_vehicle_profile_request;
 use vehicle_mapping::*;
 
@@ -41,11 +46,18 @@ pub fn apply(
     control: &mut AppControl<'_>,
     request: ControlRequest,
 ) -> Result<ControlResponse, String> {
+    if let ControlRequest::Batch(requests) = request {
+        return apply_batch(control, requests);
+    }
+    apply_one(control, request)
+}
+
+fn apply_one(
+    control: &mut AppControl<'_>,
+    request: ControlRequest,
+) -> Result<ControlResponse, String> {
     match request {
-        ControlRequest::Markers(request) => {
-            control.markers.apply_control_request(request);
-            Ok(ControlResponse::Unit)
-        }
+        ControlRequest::Markers(request) => control.markers.apply_control_request(request),
         ControlRequest::Plots(PlotRequest::List { window }) => {
             let all = crate::shell::windows::plot_infos(control.workspace, control.windows);
             Ok(ControlResponse::Plots(match window {
@@ -74,6 +86,8 @@ pub fn apply(
         ControlRequest::Playback(request) => apply_playback_request(control, request),
         ControlRequest::Vehicles(request) => apply_vehicle_request(control, request),
         ControlRequest::VehicleProfiles(request) => apply_vehicle_profile_request(control, request),
+        ControlRequest::Layouts(request) => apply_layout_request(control, request),
+        ControlRequest::Batch(_) => Err("nested control batches are not supported".into()),
     }
 }
 
@@ -756,9 +770,10 @@ mod tests {
 
     use super::*;
     use delog_script::{
-        MarkerRequest, PendingMarker, ProfilePosition, ResolvedVehicleField, ScriptOwner,
-        VehicleFilter, VehicleInfo, VehicleModel, VehicleOrientation, VehiclePatch,
-        VehiclePosition, VehicleProfileRequest, VehicleRequest, VehicleSpec,
+        GenerationRequest, LayoutRequest, MarkerPatch, MarkerRequest, PendingMarker,
+        ProfilePosition, ResolvedVehicleField, ScriptOwner, VehicleFilter, VehicleInfo,
+        VehicleModel, VehicleOrientation, VehiclePatch, VehiclePosition, VehicleProfileRequest,
+        VehicleRequest, VehicleSpec,
     };
 
     fn marker(time_us: i64, label: &str) -> PendingMarker {
@@ -787,7 +802,7 @@ mod tests {
     }
 
     #[test]
-    fn a_marker_replace_request_reaches_the_marker_store() {
+    fn a_marker_append_request_reaches_the_marker_store() {
         let mut markers = crate::plotting::markers::Markers::new();
         let mut workspace = crate::shell::workspace::Workspace::new();
         let mut windows: Vec<crate::shell::windows::ExtendedWindow> = Vec::new();
@@ -812,7 +827,7 @@ mod tests {
         };
         let response = apply(
             &mut control,
-            ControlRequest::Markers(MarkerRequest::Replace {
+            ControlRequest::Markers(MarkerRequest::Append {
                 owner: "flight.py".into(),
                 generation: 1,
                 markers: vec![marker(10, "armed")],
@@ -851,7 +866,7 @@ mod tests {
         for owner in ["flight.py", "other.py"] {
             apply(
                 &mut control,
-                ControlRequest::Markers(MarkerRequest::Replace {
+                ControlRequest::Markers(MarkerRequest::Append {
                     owner: owner.into(),
                     generation: 1,
                     markers: vec![marker(10, owner)],
@@ -861,10 +876,18 @@ mod tests {
         }
         apply(
             &mut control,
-            ControlRequest::Markers(MarkerRequest::Replace {
+            ControlRequest::Markers(MarkerRequest::Append {
                 owner: "flight.py".into(),
                 generation: 2,
                 markers: vec![marker(20, "new")],
+            }),
+        )
+        .unwrap();
+        apply(
+            &mut control,
+            ControlRequest::Generation(delog_script::GenerationRequest::Commit {
+                owner: "flight.py".into(),
+                generation: 2,
             }),
         )
         .unwrap();
@@ -976,6 +999,24 @@ mod tests {
             super::apply(&mut control, ControlRequest::Vehicles(request))
         }
 
+        fn apply_control(&mut self, request: ControlRequest) -> Result<ControlResponse, String> {
+            let mut control = AppControl {
+                markers: &mut self.markers,
+                workspace: &mut self.workspace,
+                windows: &mut self.windows,
+                playback: &mut self.playback,
+                next_window_id: &mut self.next_window_id,
+                caches: &mut self.caches,
+                snapshot: &self.snapshot,
+                vehicles: &mut self.vehicles,
+                next_vehicle_id: &mut self.next_vehicle_id,
+                vehicle_revision: &mut self.vehicle_revision,
+                traj_dirty: &mut self.traj_dirty,
+                vehicle_profiles: self.vehicle_profiles,
+            };
+            super::apply(&mut control, request)
+        }
+
         fn apply_profile(
             &mut self,
             request: VehicleProfileRequest,
@@ -1066,6 +1107,373 @@ mod tests {
                 owner: None,
             }
         }
+    }
+
+    #[test]
+    fn a_supported_batch_commits_all_mutations_together() {
+        let mut harness = VehicleHarness::new(StoreSnapshot::empty());
+        let response = harness
+            .apply_control(ControlRequest::Batch(vec![
+                ControlRequest::Playback(PlaybackRequest::Set {
+                    speed: Some(2.0),
+                    follow_live: Some(true),
+                }),
+                ControlRequest::Markers(MarkerRequest::Append {
+                    owner: "flight.py".into(),
+                    generation: 1,
+                    markers: vec![marker(10, "armed")],
+                }),
+            ]))
+            .unwrap();
+
+        assert_eq!(response, ControlResponse::Unit);
+        assert_eq!(harness.playback.speed, 2.0);
+        assert!(harness.playback.follow_live);
+        assert_eq!(harness.markers.as_slice()[0].label, "armed");
+    }
+
+    #[test]
+    fn a_failed_batch_leaves_earlier_mutations_unchanged() {
+        let mut harness = VehicleHarness::new(StoreSnapshot::empty());
+        let before = harness.playback;
+        let error = harness
+            .apply_control(ControlRequest::Batch(vec![
+                ControlRequest::Playback(PlaybackRequest::Set {
+                    speed: Some(4.0),
+                    follow_live: Some(true),
+                }),
+                ControlRequest::Markers(MarkerRequest::Set {
+                    id: u64::MAX,
+                    patch: MarkerPatch {
+                        label: Some("gone".into()),
+                        ..MarkerPatch::default()
+                    },
+                }),
+            ]))
+            .unwrap_err();
+
+        assert!(error.contains("batch request 1"), "{error}");
+        assert_eq!(harness.playback, before);
+        assert!(harness.markers.as_slice().is_empty());
+    }
+
+    #[test]
+    fn batch_validation_rejects_reads_before_any_mutation_runs() {
+        let mut harness = VehicleHarness::new(StoreSnapshot::empty());
+        let before = harness.playback;
+        let error = harness
+            .apply_control(ControlRequest::Batch(vec![
+                ControlRequest::Playback(PlaybackRequest::Set {
+                    speed: Some(4.0),
+                    follow_live: None,
+                }),
+                ControlRequest::Plots(PlotRequest::Focused),
+            ]))
+            .unwrap_err();
+
+        assert!(error.contains("batch request 1"), "{error}");
+        assert_eq!(harness.playback, before);
+    }
+
+    #[test]
+    fn named_batch_validation_failure_rolls_back_its_immediate_generation() {
+        let mut harness = VehicleHarness::new(StoreSnapshot::empty());
+        for (generation, label) in [(1, "previous"), (2, "failed run")] {
+            harness
+                .apply_control(ControlRequest::Markers(MarkerRequest::Append {
+                    owner: "flight.py".into(),
+                    generation,
+                    markers: vec![marker(generation as i64, label)],
+                }))
+                .unwrap();
+        }
+
+        let error = harness
+            .apply_control(ControlRequest::Batch(vec![
+                ControlRequest::Plots(PlotRequest::Focused),
+                ControlRequest::Generation(GenerationRequest::Commit {
+                    owner: "flight.py".into(),
+                    generation: 2,
+                }),
+            ]))
+            .unwrap_err();
+
+        assert!(error.contains("batch request 0"), "{error}");
+        assert_eq!(
+            harness
+                .markers
+                .as_slice()
+                .iter()
+                .map(|marker| marker.label.as_str())
+                .collect::<Vec<_>>(),
+            ["previous"]
+        );
+    }
+
+    #[test]
+    fn a_failed_named_publication_rolls_back_immediate_objects_from_that_generation() {
+        let mut harness = VehicleHarness::new(StoreSnapshot::empty());
+        for (generation, label) in [(1, "previous"), (2, "failed run")] {
+            harness
+                .apply_control(ControlRequest::Markers(MarkerRequest::Append {
+                    owner: "flight.py".into(),
+                    generation,
+                    markers: vec![marker(generation as i64, label)],
+                }))
+                .unwrap();
+        }
+        let before = harness.playback;
+
+        let error = harness
+            .apply_control(ControlRequest::Batch(vec![
+                ControlRequest::Playback(PlaybackRequest::Set {
+                    speed: Some(3.0),
+                    follow_live: None,
+                }),
+                ControlRequest::Markers(MarkerRequest::Set {
+                    id: u64::MAX,
+                    patch: MarkerPatch::default(),
+                }),
+                ControlRequest::Generation(GenerationRequest::Commit {
+                    owner: "flight.py".into(),
+                    generation: 2,
+                }),
+            ]))
+            .unwrap_err();
+
+        assert!(error.contains("batch request 1"), "{error}");
+        assert_eq!(harness.playback, before);
+        assert_eq!(
+            harness
+                .markers
+                .as_slice()
+                .iter()
+                .map(|marker| marker.label.as_str())
+                .collect::<Vec<_>>(),
+            ["previous"]
+        );
+    }
+
+    #[test]
+    fn layout_apply_skips_and_reports_ambiguous_and_unresolved_fields() {
+        let mut ids = delog_core::identity::IdentityRegistry::new();
+        for source_name in ["flight-b", "flight-a"] {
+            let source = ids.add_source(source_name);
+            let topic = ids.add_topic(source, "ATT").unwrap();
+            ids.add_field(topic, "roll").unwrap();
+        }
+        let snapshot = StoreSnapshot::from_registry(&ids, [], 0).unwrap();
+        let mut harness = VehicleHarness::new(snapshot);
+        let json = serde_json::json!({
+            "delog_layout": 2,
+            "name": "report",
+            "playback": {"speed": 2.0, "follow_live": true},
+            "workspace": {"root": {"plot": {
+                "traces": [
+                    {"field": {"topic": "ATT", "field": "roll"}, "color": [1.0, 1.0, 1.0, 1.0], "width_px": 1.5, "mode": "line", "visible": true},
+                    {"field": {"topic": "GPS", "field": "alt"}, "color": [1.0, 1.0, 1.0, 1.0], "width_px": 1.5, "mode": "line", "visible": true}
+                ],
+                "show_legend": true,
+                "show_tooltip": true,
+                "annotations": [{
+                    "kind": "segment", "points": [[1.0, 2.0]], "y": null,
+                    "label": "broken", "color": [1.0, 1.0, 1.0, 1.0],
+                    "stroke_px": 1.0, "fill_opacity": 0.0, "font_px": 12.0,
+                    "arrow": false
+                }]
+            }}},
+            "windows": [],
+            "vehicles": []
+        })
+        .to_string();
+
+        let response = harness
+            .apply_control(ControlRequest::Layouts(LayoutRequest::Apply { json }))
+            .unwrap();
+        let ControlResponse::LoadReport(report) = response else {
+            panic!("expected a layout load report")
+        };
+        assert_eq!(report.ambiguous.len(), 1);
+        assert_eq!(report.ambiguous[0].field, "ATT.roll");
+        assert_eq!(report.ambiguous[0].candidates, ["flight-a", "flight-b"]);
+        assert_eq!(report.unresolved, ["GPS.alt"]);
+        assert_eq!(report.warnings.len(), 1);
+        assert!(report.warnings[0].contains("broken"));
+        assert_eq!(harness.playback.speed, 2.0);
+        assert!(harness.playback.follow_live);
+        let pane = harness.workspace.plot_panes().next().unwrap();
+        assert_eq!(pane.traces.len(), 0);
+        assert_eq!(pane.ghosts.len(), 2);
+    }
+
+    #[test]
+    fn layout_current_returns_versioned_json_and_invalid_apply_is_atomic() {
+        let mut harness = VehicleHarness::new(StoreSnapshot::empty());
+        harness.playback.set_speed(3.0);
+        harness.playback.follow_live = true;
+        let response = harness
+            .apply_control(ControlRequest::Layouts(LayoutRequest::Current))
+            .unwrap();
+        let ControlResponse::Layout(json) = response else {
+            panic!("expected layout JSON")
+        };
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["delog_layout"], 2);
+        assert_eq!(value["playback"]["speed"], 3.0);
+
+        let before = harness.playback;
+        let error = harness
+            .apply_control(ControlRequest::Layouts(LayoutRequest::Apply {
+                json: r#"{"delog_layout":99}"#.into(),
+            }))
+            .unwrap_err();
+        assert!(error.contains("unsupported layout version") || error.contains("JSON"));
+        assert_eq!(harness.playback, before);
+    }
+
+    #[test]
+    fn layout_clear_resets_current_state_without_reusing_marker_or_vehicle_ids() {
+        let mut harness = VehicleHarness::new(StoreSnapshot::empty());
+        let old_marker = harness.markers.add_at(10);
+        harness
+            .windows
+            .push(crate::shell::windows::ExtendedWindow::new(
+                crate::shell::windows::WindowId(4),
+            ));
+        harness.next_window_id = 5;
+        harness.next_vehicle_id = 17;
+        harness.playback.set_speed(4.0);
+        harness.playback.follow_live = true;
+
+        assert_eq!(
+            harness
+                .apply_control(ControlRequest::Layouts(LayoutRequest::Clear))
+                .unwrap(),
+            ControlResponse::Unit
+        );
+        assert!(harness.windows.is_empty());
+        assert_eq!(harness.next_window_id, 1);
+        assert_eq!(harness.playback.speed, 1.0);
+        assert!(!harness.playback.follow_live);
+        assert!(harness.markers.as_slice().is_empty());
+        assert_eq!(harness.next_vehicle_id, 17);
+        let new_marker = harness.markers.add_at(20);
+        assert!(new_marker > old_marker);
+    }
+
+    #[test]
+    fn layout_named_library_operations_and_file_transfer_round_trip() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        struct XdgGuard(Option<std::ffi::OsString>);
+        impl Drop for XdgGuard {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => unsafe { std::env::set_var("XDG_DATA_HOME", value) },
+                    None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
+                }
+            }
+        }
+        let temp = tempfile::TempDir::new().unwrap();
+        let old = std::env::var_os("XDG_DATA_HOME");
+        unsafe { std::env::set_var("XDG_DATA_HOME", temp.path()) };
+        let _guard = XdgGuard(old);
+        let mut harness = VehicleHarness::new(StoreSnapshot::empty());
+
+        harness
+            .apply_control(ControlRequest::Layouts(LayoutRequest::Save {
+                name: "alpha".into(),
+            }))
+            .unwrap();
+        assert_eq!(
+            harness
+                .apply_control(ControlRequest::Layouts(LayoutRequest::List))
+                .unwrap(),
+            ControlResponse::Names(vec!["alpha".into()])
+        );
+        harness
+            .apply_control(ControlRequest::Layouts(LayoutRequest::Duplicate {
+                from: "alpha".into(),
+                to: "beta".into(),
+            }))
+            .unwrap();
+        harness
+            .apply_control(ControlRequest::Layouts(LayoutRequest::Rename {
+                from: "beta".into(),
+                to: "gamma".into(),
+            }))
+            .unwrap();
+        let exported = temp.path().join("exported.json");
+        harness
+            .apply_control(ControlRequest::Layouts(LayoutRequest::ExportFile {
+                name: "alpha".into(),
+                path: exported.display().to_string(),
+            }))
+            .unwrap();
+        assert!(exported.is_file());
+        assert!(matches!(
+            harness
+                .apply_control(ControlRequest::Layouts(LayoutRequest::ImportFile {
+                    path: exported.display().to_string(),
+                }))
+                .unwrap(),
+            ControlResponse::LoadReport(_)
+        ));
+        assert_eq!(
+            harness
+                .apply_control(ControlRequest::Layouts(LayoutRequest::List))
+                .unwrap(),
+            ControlResponse::Names(vec!["alpha".into(), "gamma".into()])
+        );
+        for name in ["alpha", "gamma"] {
+            harness
+                .apply_control(ControlRequest::Layouts(LayoutRequest::Delete {
+                    name: name.into(),
+                }))
+                .unwrap();
+        }
+        assert_eq!(
+            harness
+                .apply_control(ControlRequest::Layouts(LayoutRequest::List))
+                .unwrap(),
+            ControlResponse::Names(Vec::new())
+        );
+
+        let error = harness
+            .apply_control(ControlRequest::Layouts(LayoutRequest::Save {
+                name: "../unsafe".into(),
+            }))
+            .unwrap_err();
+        assert!(error.contains("layout names"), "{error}");
+    }
+
+    #[test]
+    fn layout_apply_assigns_fresh_vehicle_ids_and_invalidates_trajectories() {
+        let mut harness = VehicleHarness::new(vehicle_snapshot_for(&["flight"]));
+        let spec = harness.gps_spec("flight", "Saved UAV");
+        let original = harness.add(spec).unwrap();
+        let ControlResponse::Layout(json) = harness
+            .apply_control(ControlRequest::Layouts(LayoutRequest::Current))
+            .unwrap()
+        else {
+            panic!("expected layout JSON")
+        };
+        harness
+            .apply(VehicleRequest::Remove(VehicleFilter::All))
+            .unwrap();
+        harness.traj_dirty = false;
+        let revision_before = harness.vehicle_revision;
+
+        assert!(matches!(
+            harness
+                .apply_control(ControlRequest::Layouts(LayoutRequest::Apply { json }))
+                .unwrap(),
+            ControlResponse::LoadReport(_)
+        ));
+        assert_eq!(harness.vehicles.len(), 1);
+        assert_ne!(harness.vehicles[0].runtime.id, original.id);
+        assert_eq!(harness.vehicle_revision, revision_before + 1);
+        assert!(harness.traj_dirty);
     }
 
     fn vehicle_snapshot_for(sources: &[&str]) -> StoreSnapshot {

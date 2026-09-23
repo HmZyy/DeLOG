@@ -129,6 +129,77 @@ fn same_layout_populates_after_loading_before_log_schema() {
 }
 
 #[test]
+fn load_report_tracks_ambiguous_unresolved_and_non_resolution_warnings_structurally() {
+    let snapshot = snapshot_with_topics(&[
+        ("flight-b", "ATT", &["roll"]),
+        ("flight-a", "ATT", &["roll"]),
+    ]);
+    let mut doc = empty_doc("report");
+    doc.workspace.root = LayoutNode::Plot {
+        traces: vec![
+            TraceLayout {
+                field: FieldRef {
+                    topic: "ATT".into(),
+                    field: "roll".into(),
+                },
+                color: [1.0; 4],
+                width_px: 1.5,
+                mode: TraceModeLayout::Line,
+                visible: true,
+            },
+            TraceLayout {
+                field: FieldRef {
+                    topic: "GPS".into(),
+                    field: "alt".into(),
+                },
+                color: [1.0; 4],
+                width_px: 1.5,
+                mode: TraceModeLayout::Line,
+                visible: true,
+            },
+            TraceLayout {
+                field: FieldRef {
+                    topic: "GPS".into(),
+                    field: "alt".into(),
+                },
+                color: [1.0; 4],
+                width_px: 1.5,
+                mode: TraceModeLayout::Line,
+                visible: true,
+            },
+        ],
+        show_legend: true,
+        show_tooltip: true,
+        annotations: vec![AnnotationLayout {
+            kind: "segment".into(),
+            points: vec![[1.0, 2.0]],
+            y: None,
+            label: "broken".into(),
+            color: [1.0; 4],
+            stroke_px: 1.0,
+            fill_opacity: 0.0,
+            font_px: 12.0,
+            arrow: false,
+            owner: None,
+        }],
+    };
+
+    let LoadOutcome::NeedsMapping(pending) = load_doc(doc, &snapshot).unwrap() else {
+        panic!("duplicate fields should require source mapping")
+    };
+    assert_eq!(pending.ambiguities().len(), 1);
+    let applied = pending.apply_skipping(&snapshot);
+    assert_eq!(applied.report.ambiguous.len(), 1);
+    assert_eq!(applied.report.ambiguous[0].field.topic, "ATT");
+    assert_eq!(applied.report.ambiguous[0].field.field, "roll");
+    assert_eq!(applied.report.unresolved.len(), 1);
+    assert_eq!(applied.report.unresolved[0].topic, "GPS");
+    assert_eq!(applied.report.unresolved[0].field, "alt");
+    assert_eq!(applied.report.warnings.len(), 1);
+    assert!(applied.report.warnings[0].contains("broken"));
+}
+
+#[test]
 fn extended_windows_survive_a_save_and_load_round_trip() {
     let snapshot = test_snapshot();
     let mut window = ExtendedWindow::new(WindowId(1));

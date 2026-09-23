@@ -7,7 +7,7 @@ use crate::api::parse_marker_color;
 
 use super::{
     ControlRequest, ControlResponse, PlotContext, TraceInfo, TraceMode, TraceRequest,
-    call_immediate_detached,
+    call_immediate_detached, control_call_error,
 };
 
 #[pyclass(unsendable, name = "TraceCollection", skip_from_py_object)]
@@ -54,7 +54,7 @@ impl TraceCollectionPy {
         };
         call_immediate_detached(py, ControlRequest::Traces(request))
             .map(|_| ())
-            .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+            .map_err(control_call_error)
     }
 
     fn extend(&self, py: Python<'_>, fields: Vec<Bound<'_, PyAny>>) -> PyResult<()> {
@@ -93,7 +93,7 @@ impl TraceCollectionPy {
         };
         call_immediate_detached(py, ControlRequest::Traces(request))
             .map(|_| ())
-            .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+            .map_err(control_call_error)
     }
 
     fn clear(&self, py: Python<'_>) -> PyResult<()> {
@@ -103,7 +103,7 @@ impl TraceCollectionPy {
         };
         call_immediate_detached(py, ControlRequest::Traces(request))
             .map(|_| ())
-            .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+            .map_err(control_call_error)
     }
 
     fn list(&self, py: Python<'_>) -> PyResult<Vec<TracePy>> {
@@ -220,7 +220,7 @@ impl TracePy {
         };
         call_immediate_detached(py, ControlRequest::Traces(request))
             .map(|_| ())
-            .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+            .map_err(control_call_error)
     }
 }
 
@@ -229,7 +229,7 @@ fn request_traces(py: Python<'_>, window: u64, tile: u64) -> PyResult<Vec<TraceI
         py,
         ControlRequest::Traces(TraceRequest::List { window, tile }),
     )
-    .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    .map_err(control_call_error)?;
     match response {
         ControlResponse::Traces(infos) => Ok(infos),
         _ => Err(pyo3::exceptions::PyRuntimeError::new_err(
