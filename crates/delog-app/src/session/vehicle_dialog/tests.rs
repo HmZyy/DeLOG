@@ -397,10 +397,115 @@ fn headless_frame(ctx: &egui::Context, mut draw: impl FnMut(&mut egui::Ui)) {
     let _ = ctx.run_ui(input, &mut draw);
 }
 
+fn test_vehicle(
+    id: u64,
+    label: &str,
+    owner: Option<(&str, u64)>,
+) -> crate::scene3d::vehicle::VehicleConfig {
+    crate::scene3d::vehicle::VehicleConfig {
+        runtime: crate::scene3d::vehicle::VehicleRuntime {
+            id,
+            owner: owner.map(|(name, generation)| crate::scene3d::vehicle::VehicleOwner {
+                name: name.to_owned(),
+                generation,
+            }),
+        },
+        source: SourceId(0),
+        label: label.to_owned(),
+        show: true,
+        show_path: true,
+        pos: crate::scene3d::vehicle::PosMapping::Gps {
+            lat: FieldId(0),
+            lon: FieldId(1),
+            alt: FieldId(2),
+            lat_lon_dege7: true,
+            alt_mm: true,
+            alt_offset_m: 0.0,
+        },
+        ori: crate::scene3d::vehicle::OriMapping::Static,
+        model: ModelKind::Quad,
+        color: egui::Color32::WHITE,
+        path_color: egui::Color32::WHITE,
+        scale: 1.0,
+    }
+}
+
+#[test]
+fn an_open_dialog_preserves_vehicle_runtime_identity_and_owner() {
+    let snapshot = test_snapshot();
+    let mut vehicles = vec![test_vehicle(41, "owned", Some(("flight.py", 7)))];
+    let expected_runtime = vehicles[0].runtime.clone();
+    let ctx = egui::Context::default();
+    let mut dialog = VehicleDialog {
+        open: true,
+        ..VehicleDialog::default()
+    };
+
+    headless_frame(&ctx, |ui| {
+        show(ui.ctx(), &mut dialog, &mut vehicles, &snapshot);
+    });
+
+    assert_eq!(vehicles[0].runtime, expected_runtime);
+}
+
+#[test]
+fn an_open_dialog_reconciles_external_add_set_remove_and_sweep_changes() {
+    let snapshot = test_snapshot();
+    let mut vehicles = vec![
+        test_vehicle(1, "set-me", None),
+        test_vehicle(2, "remove-me", None),
+        test_vehicle(3, "sweep-me", Some(("flight.py", 1))),
+    ];
+    let ctx = egui::Context::default();
+    let mut dialog = VehicleDialog {
+        open: true,
+        ..VehicleDialog::default()
+    };
+    headless_frame(&ctx, |ui| {
+        show(ui.ctx(), &mut dialog, &mut vehicles, &snapshot);
+    });
+    dialog.drafts.push(Draft::default());
+
+    vehicles[0].label = "updated externally".to_owned();
+    vehicles.retain(|vehicle| vehicle.runtime.id != 2);
+    vehicles.retain(|vehicle| {
+        !matches!(
+            vehicle.runtime.owner.as_ref(),
+            Some(owner) if owner.name == "flight.py" && owner.generation < 2
+        )
+    });
+    vehicles.push(test_vehicle(4, "added externally", Some(("other.py", 2))));
+
+    headless_frame(&ctx, |ui| {
+        show(ui.ctx(), &mut dialog, &mut vehicles, &snapshot);
+    });
+
+    assert_eq!(
+        vehicles
+            .iter()
+            .map(|vehicle| (vehicle.runtime.id, vehicle.label.as_str()))
+            .collect::<Vec<_>>(),
+        [(1, "updated externally"), (4, "added externally")]
+    );
+    assert_eq!(
+        vehicles[1]
+            .runtime
+            .owner
+            .as_ref()
+            .map(|owner| owner.name.as_str()),
+        Some("other.py")
+    );
+    assert!(
+        dialog.drafts.iter().any(Draft::is_incomplete),
+        "external reconciliation must not discard a locally incomplete draft"
+    );
+}
+
 #[test]
 fn the_dialog_lays_out_headlessly_with_complete_and_incomplete_vehicles() {
     let snapshot = test_snapshot();
     let mut vehicles = vec![crate::scene3d::vehicle::VehicleConfig {
+        runtime: crate::scene3d::vehicle::VehicleRuntime::unassigned(),
         source: SourceId(0),
         label: "Quadcopter".into(),
         show: true,

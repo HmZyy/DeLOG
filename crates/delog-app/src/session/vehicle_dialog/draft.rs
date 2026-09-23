@@ -3,7 +3,7 @@ use delog_core::snapshot::StoreSnapshot;
 use egui::Color32;
 
 use crate::scene3d::vehicle::{
-    GeoRef, ModelKind, NedReference, OriMapping, PosMapping, VehicleConfig,
+    GeoRef, ModelKind, NedReference, OriMapping, PosMapping, VehicleConfig, VehicleRuntime,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -21,6 +21,7 @@ pub(super) enum OriMode {
 
 #[derive(Clone)]
 pub(super) struct Draft {
+    pub(super) runtime: VehicleRuntime,
     pub(super) label: String,
     pub(super) show: bool,
     pub(super) show_path: bool,
@@ -69,6 +70,7 @@ pub(super) struct Draft {
 impl Default for Draft {
     fn default() -> Self {
         Self {
+            runtime: VehicleRuntime::unassigned(),
             label: "Vehicle".into(),
             show: true,
             show_path: true,
@@ -116,6 +118,7 @@ impl Draft {
     pub(super) fn from_config(cfg: &VehicleConfig, snapshot: &StoreSnapshot) -> Self {
         let topic_of = |f: FieldId| field_topic(snapshot, f);
         let mut d = Draft {
+            runtime: cfg.runtime.clone(),
             label: cfg.label.clone(),
             show: cfg.show,
             show_path: cfg.show_path,
@@ -274,6 +277,7 @@ impl Draft {
             self.model.clone()
         };
         Some(VehicleConfig {
+            runtime: self.runtime.clone(),
             source,
             label: self.label.clone(),
             show: self.show,

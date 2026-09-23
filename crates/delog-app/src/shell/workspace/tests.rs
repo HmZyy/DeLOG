@@ -1455,6 +1455,7 @@ fn remove_all_clears_every_plot() {
 fn scene_overlay_probe(with_window: bool) -> (egui::Context, egui::Rect) {
     let scene_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 400.0));
     let vehicles = vec![vehicle::VehicleConfig {
+        runtime: vehicle::VehicleRuntime::unassigned(),
         source: delog_core::identity::SourceId(0),
         label: "Vehicle #1".into(),
         show: true,
