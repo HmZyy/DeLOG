@@ -22,7 +22,7 @@ pub use vehicles::{
     ProfileFieldRef, ProfileNedReference, ProfileOrientation, ProfilePosition,
     ResolvedVehicleField, VehicleFilter, VehicleInfo, VehicleModel, VehicleNedReference,
     VehicleOrientation, VehiclePatch, VehiclePosition, VehicleProfileInfo, VehicleProfileRequest,
-    VehicleRequest, VehicleSpec,
+    VehicleRequest, VehicleSpec, validate_profile_name,
 };
 pub use workspace::{PlaybackRequest, SplitDirection, WorkspaceRequest};
 
