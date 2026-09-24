@@ -4,6 +4,7 @@ use arrow::datatypes::DataType;
 
 use crate::{Error, Result};
 
+pub mod live;
 pub mod snapshot;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
