@@ -1,13 +1,13 @@
+use delog_api::control::{
+    AnnotationFilter, AnnotationInfo, AnnotationRequest, ControlRequest, ControlResponse,
+    PlaybackRequest, PlotInfo, PlotRequest, ScriptOwner, SplitDirection as ScriptSplitDirection,
+    TraceInfo, TraceMode as ScriptTraceMode, TraceRequest, VehicleFilter, VehicleInfo,
+    VehicleNedReference as ScriptNedReference, VehicleOrientation as ScriptVehicleOrientation,
+    VehiclePatch, VehiclePosition, VehicleRequest, VehicleSpec, WorkspaceRequest,
+};
 use delog_cache::CacheManager;
 use delog_core::identity::FieldId;
 use delog_core::snapshot::StoreSnapshot;
-use delog_script::{
-    AnnotationFilter, AnnotationRequest, ControlRequest, ControlResponse, PlaybackRequest,
-    PlotRequest, SplitDirection as ScriptSplitDirection, TraceInfo, TraceMode as ScriptTraceMode,
-    TraceRequest, VehicleFilter, VehicleInfo, VehicleNedReference as ScriptNedReference,
-    VehicleOrientation as ScriptVehicleOrientation, VehiclePatch, VehiclePosition, VehicleRequest,
-    VehicleSpec, WorkspaceRequest,
-};
 
 mod batch;
 mod layouts;
@@ -265,14 +265,10 @@ fn vehicle_info(
             color: color_to_script(vehicle.color),
             path_color: color_to_script(vehicle.path_color),
             scale: vehicle.scale,
-            owner: vehicle
-                .runtime
-                .owner
-                .as_ref()
-                .map(|owner| delog_script::ScriptOwner {
-                    name: owner.name.clone(),
-                    generation: owner.generation,
-                }),
+            owner: vehicle.runtime.owner.as_ref().map(|owner| ScriptOwner {
+                name: owner.name.clone(),
+                generation: owner.generation,
+            }),
         },
     })
 }
@@ -372,7 +368,7 @@ fn plot_info_for(
     workspace: &Workspace,
     window: u64,
     tile: egui_tiles::TileId,
-) -> Result<delog_script::PlotInfo, String> {
+) -> Result<PlotInfo, String> {
     workspace
         .plot_infos(window)
         .into_iter()
@@ -609,7 +605,7 @@ fn apply_annotation_request(
             annotation.label = label;
             annotation.apply_style_patch(style);
             annotation.owner = owner.map(Into::into);
-            let info = delog_script::AnnotationInfo {
+            let info = AnnotationInfo {
                 window,
                 tile,
                 id,
@@ -769,13 +765,13 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use delog_api::markers::PendingMarker;
-    use delog_script::{
-        GenerationRequest, LayoutRequest, MarkerPatch, MarkerRequest, ProfilePosition,
-        ResolvedVehicleField, ScriptOwner, VehicleFilter, VehicleInfo, VehicleModel,
-        VehicleOrientation, VehiclePatch, VehiclePosition, VehicleProfileRequest, VehicleRequest,
-        VehicleSpec,
+    use delog_api::control::{
+        AnnotationGeometry, AnnotationKind, AnnotationStylePatch, GenerationRequest, LayoutRequest,
+        MarkerPatch, MarkerRequest, ProfilePosition, ResolvedVehicleField, ScriptOwner,
+        VehicleFilter, VehicleInfo, VehicleModel, VehicleOrientation, VehiclePatch,
+        VehiclePosition, VehicleProfileRequest, VehicleRequest, VehicleSpec,
     };
+    use delog_api::markers::PendingMarker;
 
     fn marker(time_us: i64, label: &str) -> PendingMarker {
         PendingMarker {
@@ -886,7 +882,7 @@ mod tests {
         .unwrap();
         apply(
             &mut control,
-            ControlRequest::Generation(delog_script::GenerationRequest::Commit {
+            ControlRequest::Generation(GenerationRequest::Commit {
                 owner: "flight.py".into(),
                 generation: 2,
             }),
@@ -1884,7 +1880,7 @@ mod tests {
         tile: u64,
         field_id: FieldId,
         mode: ScriptTraceMode,
-        owner: Option<delog_script::ScriptOwner>,
+        owner: Option<ScriptOwner>,
     ) -> ControlRequest {
         ControlRequest::Traces(TraceRequest::Add {
             window: 0,
@@ -1917,7 +1913,7 @@ mod tests {
             &mut caches,
             &snapshot,
         );
-        let owner = Some(delog_script::ScriptOwner {
+        let owner = Some(ScriptOwner {
             name: "flight.py".into(),
             generation: 3,
         });
@@ -1962,7 +1958,7 @@ mod tests {
                     tile,
                     field,
                     ScriptTraceMode::Line,
-                    Some(delog_script::ScriptOwner {
+                    Some(ScriptOwner {
                         name: "flight.py".into(),
                         generation,
                     }),
@@ -2743,8 +2739,8 @@ mod tests {
         assert!(!control.caches.is_pinned(field_b));
     }
 
-    fn hline_at(y: f64) -> delog_script::AnnotationGeometry {
-        delog_script::AnnotationGeometry::HLine { y }
+    fn hline_at(y: f64) -> AnnotationGeometry {
+        AnnotationGeometry::HLine { y }
     }
 
     #[test]
@@ -2768,12 +2764,12 @@ mod tests {
         );
         let response = apply(
             &mut control,
-            ControlRequest::Annotations(delog_script::AnnotationRequest::Add {
+            ControlRequest::Annotations(AnnotationRequest::Add {
                 window: 0,
                 tile,
                 geometry: hline_at(9.81),
                 label: "1g".into(),
-                style: delog_script::AnnotationStylePatch::default(),
+                style: AnnotationStylePatch::default(),
                 owner: None,
             }),
         )
@@ -2820,12 +2816,12 @@ mod tests {
         );
         let response = apply(
             &mut control,
-            ControlRequest::Annotations(delog_script::AnnotationRequest::Add {
+            ControlRequest::Annotations(AnnotationRequest::Add {
                 window: 0,
                 tile,
                 geometry: hline_at(9.81),
                 label: String::new(),
-                style: delog_script::AnnotationStylePatch {
+                style: AnnotationStylePatch {
                     fill_opacity: Some(0.15),
                     arrow: Some(true),
                     ..Default::default()
@@ -2870,18 +2866,18 @@ mod tests {
             &mut caches,
             &snapshot,
         );
-        let owner = Some(delog_script::ScriptOwner {
+        let owner = Some(ScriptOwner {
             name: "flight.py".into(),
             generation: 4,
         });
         let response = apply(
             &mut control,
-            ControlRequest::Annotations(delog_script::AnnotationRequest::Add {
+            ControlRequest::Annotations(AnnotationRequest::Add {
                 window: 0,
                 tile,
                 geometry: hline_at(9.81),
                 label: String::new(),
-                style: delog_script::AnnotationStylePatch::default(),
+                style: AnnotationStylePatch::default(),
                 owner: owner.clone(),
             }),
         )
@@ -2920,12 +2916,12 @@ mod tests {
         );
         let error = apply(
             &mut control,
-            ControlRequest::Annotations(delog_script::AnnotationRequest::Add {
+            ControlRequest::Annotations(AnnotationRequest::Add {
                 window: 0,
                 tile: 999,
                 geometry: hline_at(9.81),
                 label: String::new(),
-                style: delog_script::AnnotationStylePatch::default(),
+                style: AnnotationStylePatch::default(),
                 owner: None,
             }),
         )
@@ -2937,18 +2933,18 @@ mod tests {
         control: &mut AppControl<'_>,
         window: u64,
         tile: u64,
-        geometry: delog_script::AnnotationGeometry,
+        geometry: AnnotationGeometry,
         label: &str,
-        owner: Option<delog_script::ScriptOwner>,
+        owner: Option<ScriptOwner>,
     ) -> u64 {
         let response = apply(
             control,
-            ControlRequest::Annotations(delog_script::AnnotationRequest::Add {
+            ControlRequest::Annotations(AnnotationRequest::Add {
                 window,
                 tile,
                 geometry,
                 label: label.into(),
-                style: delog_script::AnnotationStylePatch::default(),
+                style: AnnotationStylePatch::default(),
                 owner,
             }),
         )
@@ -2982,7 +2978,7 @@ mod tests {
             &mut control,
             0,
             tile,
-            delog_script::AnnotationGeometry::Rect {
+            AnnotationGeometry::Rect {
                 a: (0, 0.0),
                 b: (1, 1.0),
             },
@@ -2992,7 +2988,7 @@ mod tests {
         let hline_id = add_annotation(&mut control, 0, tile, hline_at(9.81), "1g", None);
         let response = apply(
             &mut control,
-            ControlRequest::Annotations(delog_script::AnnotationRequest::List {
+            ControlRequest::Annotations(AnnotationRequest::List {
                 target: Some((0, tile)),
             }),
         )
@@ -3003,10 +2999,10 @@ mod tests {
         assert_eq!(infos.len(), 2);
         assert_eq!(infos[0].id, rect_id);
         assert_eq!(infos[0].index, 0);
-        assert_eq!(infos[0].kind, delog_script::AnnotationKind::Rect);
+        assert_eq!(infos[0].kind, AnnotationKind::Rect);
         assert_eq!(infos[1].id, hline_id);
         assert_eq!(infos[1].index, 1);
-        assert_eq!(infos[1].kind, delog_script::AnnotationKind::HLine);
+        assert_eq!(infos[1].kind, AnnotationKind::HLine);
     }
 
     #[test]
@@ -3035,7 +3031,7 @@ mod tests {
         add_annotation(&mut control, 1, other_tile, hline_at(2.0), "other", None);
         let response = apply(
             &mut control,
-            ControlRequest::Annotations(delog_script::AnnotationRequest::List { target: None }),
+            ControlRequest::Annotations(AnnotationRequest::List { target: None }),
         )
         .unwrap();
         let ControlResponse::Annotations(infos) = response else {
@@ -3068,7 +3064,7 @@ mod tests {
         let second = add_annotation(&mut control, 0, tile, hline_at(2.0), "second", None);
         apply(
             &mut control,
-            ControlRequest::Annotations(delog_script::AnnotationRequest::Remove {
+            ControlRequest::Annotations(AnnotationRequest::Remove {
                 target: Some((0, tile)),
                 filter: AnnotationFilter::Index(0),
             }),
@@ -3103,7 +3099,7 @@ mod tests {
         );
         let error = apply(
             &mut control,
-            ControlRequest::Annotations(delog_script::AnnotationRequest::Remove {
+            ControlRequest::Annotations(AnnotationRequest::Remove {
                 target: Some((0, tile)),
                 filter: AnnotationFilter::Index(0),
             }),
@@ -3135,7 +3131,7 @@ mod tests {
         let survivor = add_annotation(&mut control, 0, tile, hline_at(2.0), "survivor", None);
         apply(
             &mut control,
-            ControlRequest::Annotations(delog_script::AnnotationRequest::Remove {
+            ControlRequest::Annotations(AnnotationRequest::Remove {
                 target: Some((0, tile)),
                 filter: AnnotationFilter::Id(stale),
             }),
@@ -3143,7 +3139,7 @@ mod tests {
         .unwrap();
         let error = apply(
             &mut control,
-            ControlRequest::Annotations(delog_script::AnnotationRequest::Remove {
+            ControlRequest::Annotations(AnnotationRequest::Remove {
                 target: Some((0, tile)),
                 filter: AnnotationFilter::Id(stale),
             }),
@@ -3182,7 +3178,7 @@ mod tests {
             &mut control,
             0,
             tile,
-            delog_script::AnnotationGeometry::Rect {
+            AnnotationGeometry::Rect {
                 a: (0, 0.0),
                 b: (1, 1.0),
             },
@@ -3191,9 +3187,9 @@ mod tests {
         );
         apply(
             &mut control,
-            ControlRequest::Annotations(delog_script::AnnotationRequest::Remove {
+            ControlRequest::Annotations(AnnotationRequest::Remove {
                 target: Some((0, tile)),
-                filter: AnnotationFilter::Kind(delog_script::AnnotationKind::HLine),
+                filter: AnnotationFilter::Kind(AnnotationKind::HLine),
             }),
         )
         .unwrap();
@@ -3227,7 +3223,7 @@ mod tests {
             &mut caches,
             &snapshot,
         );
-        let owner = Some(delog_script::ScriptOwner {
+        let owner = Some(ScriptOwner {
             name: "flight.py".into(),
             generation: 1,
         });
@@ -3249,7 +3245,7 @@ mod tests {
         );
         apply(
             &mut control,
-            ControlRequest::Annotations(delog_script::AnnotationRequest::Remove {
+            ControlRequest::Annotations(AnnotationRequest::Remove {
                 target: None,
                 filter: AnnotationFilter::Owner("flight.py".into()),
             }),
@@ -3295,7 +3291,7 @@ mod tests {
         add_annotation(&mut control, 0, tile, hline_at(1.0), "kept", None);
         let index_error = apply(
             &mut control,
-            ControlRequest::Annotations(delog_script::AnnotationRequest::Remove {
+            ControlRequest::Annotations(AnnotationRequest::Remove {
                 target: None,
                 filter: AnnotationFilter::Index(0),
             }),
@@ -3304,7 +3300,7 @@ mod tests {
         assert!(index_error.contains("index or id"), "{index_error}");
         let id_error = apply(
             &mut control,
-            ControlRequest::Annotations(delog_script::AnnotationRequest::Remove {
+            ControlRequest::Annotations(AnnotationRequest::Remove {
                 target: None,
                 filter: AnnotationFilter::Id(0),
             }),
@@ -3347,9 +3343,9 @@ mod tests {
         }
         apply(
             &mut control,
-            ControlRequest::Annotations(delog_script::AnnotationRequest::Remove {
+            ControlRequest::Annotations(AnnotationRequest::Remove {
                 target: Some((0, tile)),
-                filter: AnnotationFilter::Kind(delog_script::AnnotationKind::HLine),
+                filter: AnnotationFilter::Kind(AnnotationKind::HLine),
             }),
         )
         .unwrap();
@@ -3382,13 +3378,13 @@ mod tests {
         let id = add_annotation(&mut control, 0, tile, hline_at(1.0), "1g", None);
         apply(
             &mut control,
-            ControlRequest::Annotations(delog_script::AnnotationRequest::Set {
+            ControlRequest::Annotations(AnnotationRequest::Set {
                 window: 0,
                 tile,
                 id,
                 label: Some("burst".into()),
                 geometry: Some(hline_at(9.81)),
-                style: delog_script::AnnotationStylePatch {
+                style: AnnotationStylePatch {
                     arrow: Some(true),
                     ..Default::default()
                 },
@@ -3430,7 +3426,7 @@ mod tests {
         let id = add_annotation(&mut control, 0, tile, hline_at(1.0), "1g", None);
         apply(
             &mut control,
-            ControlRequest::Annotations(delog_script::AnnotationRequest::Remove {
+            ControlRequest::Annotations(AnnotationRequest::Remove {
                 target: Some((0, tile)),
                 filter: AnnotationFilter::Id(id),
             }),
@@ -3438,13 +3434,13 @@ mod tests {
         .unwrap();
         let error = apply(
             &mut control,
-            ControlRequest::Annotations(delog_script::AnnotationRequest::Set {
+            ControlRequest::Annotations(AnnotationRequest::Set {
                 window: 0,
                 tile,
                 id,
                 label: Some("burst".into()),
                 geometry: None,
-                style: delog_script::AnnotationStylePatch::default(),
+                style: AnnotationStylePatch::default(),
             }),
         )
         .unwrap_err();

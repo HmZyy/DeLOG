@@ -1,10 +1,10 @@
-use delog_core::identity::{FieldId, SourceId};
-use delog_core::snapshot::StoreSnapshot;
-use delog_script::{
+use delog_api::control::{
     ResolvedVehicleField, VehicleModel as ScriptVehicleModel,
     VehicleNedReference as ScriptNedReference, VehicleOrientation as ScriptVehicleOrientation,
     VehiclePosition,
 };
+use delog_core::identity::{FieldId, SourceId};
+use delog_core::snapshot::StoreSnapshot;
 
 pub(super) fn validate_source(
     snapshot: &StoreSnapshot,

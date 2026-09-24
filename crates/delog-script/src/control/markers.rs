@@ -2,15 +2,15 @@ use std::rc::Rc;
 
 use delog_api::color::{format_hex_color, parse_hex_color};
 use delog_api::markers::PendingMarker;
-use pyo3::exceptions::{PyIndexError, PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyIndexError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyIterator, PyList};
 
 use crate::staging::{MarkerBuffer, active_marker_buffer};
 
 use super::{
-    ControlRequest, ControlResponse, MarkerFilter, MarkerInfo, MarkerOrigin, MarkerPatch,
-    MarkerRequest, call_immediate_detached, control_call_error, stage_batch_request,
+    ControlRequest, MarkerFilter, MarkerInfo, MarkerOrigin, MarkerPatch, MarkerRequest,
+    call_immediate_detached, control_call_error, stage_batch_request,
 };
 
 #[pyclass(unsendable, name = "MarkerCollection", skip_from_py_object)]
@@ -289,27 +289,17 @@ impl MarkerPy {
 fn request_markers(py: Python<'_>) -> PyResult<Vec<MarkerInfo>> {
     let response = call_immediate_detached(py, ControlRequest::Markers(MarkerRequest::List))
         .map_err(control_call_error)?;
-    match response {
-        ControlResponse::Markers(infos) => Ok(infos),
-        _ => Err(wrong_response()),
-    }
+    response.into_markers().map_err(crate::errors::control)
 }
 
 fn request_unit(py: Python<'_>, request: MarkerRequest) -> PyResult<()> {
     let response = call_immediate_detached(py, ControlRequest::Markers(request))
         .map_err(control_call_error)?;
-    match response {
-        ControlResponse::Unit => Ok(()),
-        _ => Err(wrong_response()),
-    }
+    response.into_unit().map_err(crate::errors::control)
 }
 
 fn marker_from_info(info: MarkerInfo) -> MarkerPy {
     MarkerPy { info }
-}
-
-fn wrong_response() -> PyErr {
-    PyRuntimeError::new_err("the DeLOG window answered with the wrong kind of result")
 }
 
 fn parse_origin(origin: &str) -> PyResult<MarkerOrigin> {

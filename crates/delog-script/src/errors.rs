@@ -24,7 +24,6 @@ pub(crate) fn value(error: Error) -> PyErr {
     }
 }
 
-#[allow(dead_code)]
 pub(crate) fn control(error: Error) -> PyErr {
     match error.kind() {
         ErrorKind::InvalidInput | ErrorKind::Ambiguous => {

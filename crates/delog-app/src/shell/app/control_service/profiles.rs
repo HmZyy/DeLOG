@@ -1,4 +1,4 @@
-use delog_script::{ControlResponse, VehicleProfileRequest};
+use delog_api::control::{ControlResponse, VehicleProfileRequest};
 
 use super::{AppControl, mark_vehicles_changed, validate_source, vehicle_info};
 

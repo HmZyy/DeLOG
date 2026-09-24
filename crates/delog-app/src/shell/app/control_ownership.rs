@@ -1,5 +1,5 @@
+use delog_api::control::{GenerationRequest, ScriptOwner};
 use delog_core::identity::FieldId;
-use delog_script::{GenerationRequest, ScriptOwner};
 
 use super::control_service::AppControl;
 use crate::plotting::annotations::AnnotationOwner;
@@ -115,7 +115,6 @@ pub fn apply_sweep(control: &mut AppControl<'_>, sweep: &Sweep) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use delog_script::ScriptOwner;
 
     fn vehicle_with_owner(
         label: &str,

@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use arrow::array::{ArrayRef, Float64Array, Int64Array};
 use arrow::datatypes::DataType;
+use delog_api::control::{ControlRequest, GenerationRequest, MarkerRequest};
 use delog_api::markers::PendingMarker;
 use delog_core::chunk::Chunk;
 use delog_core::identity::IdentityRegistry;
@@ -13,9 +14,7 @@ use delog_core::metrics::MetricsRegistry;
 use delog_core::schema::{FieldSchema, TopicSchema};
 use delog_core::snapshot::{DataStore, StoreSnapshot};
 use delog_core::store::TopicStore;
-use delog_script::{
-    ControlRequest, GenerationRequest, MarkerRequest, ScriptCommand, ScriptEngine, ScriptEvent,
-};
+use delog_script::{ScriptCommand, ScriptEngine, ScriptEvent};
 
 static SCRIPT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 

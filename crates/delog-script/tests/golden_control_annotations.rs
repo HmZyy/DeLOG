@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use delog_script::{
+use delog_api::control::{
     AnnotationFilter, AnnotationGeometry, AnnotationInfo, AnnotationKind, AnnotationRequest,
     ControlHost, ControlRequest, ControlResponse, PlotInfo,
 };
@@ -16,7 +16,7 @@ struct Recorder {
 }
 
 impl ControlHost for Recorder {
-    fn call(&self, request: ControlRequest) -> Result<ControlResponse, String> {
+    fn call(&self, request: ControlRequest) -> delog_api::Result<ControlResponse> {
         self.seen.lock().unwrap().push(request.clone());
         match request {
             ControlRequest::Plots(_) => Ok(ControlResponse::Plots(vec![

@@ -6,8 +6,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyIterator, PyList};
 
 use super::{
-    ControlRequest, ControlResponse, PlotContext, TraceInfo, TraceMode, TraceRequest,
-    call_immediate_detached, control_call_error,
+    ControlRequest, PlotContext, TraceInfo, TraceMode, TraceRequest, call_immediate_detached,
+    control_call_error,
 };
 
 #[pyclass(unsendable, name = "TraceCollection", skip_from_py_object)]
@@ -57,8 +57,9 @@ impl TraceCollectionPy {
             owner: self.context.owner.clone(),
         };
         call_immediate_detached(py, ControlRequest::Traces(request))
-            .map(|_| ())
-            .map_err(control_call_error)
+            .map_err(control_call_error)?
+            .into_unit()
+            .map_err(crate::errors::control)
     }
 
     fn extend(&self, py: Python<'_>, fields: Vec<Bound<'_, PyAny>>) -> PyResult<()> {
@@ -96,8 +97,9 @@ impl TraceCollectionPy {
             field,
         };
         call_immediate_detached(py, ControlRequest::Traces(request))
-            .map(|_| ())
-            .map_err(control_call_error)
+            .map_err(control_call_error)?
+            .into_unit()
+            .map_err(crate::errors::control)
     }
 
     fn clear(&self, py: Python<'_>) -> PyResult<()> {
@@ -106,8 +108,9 @@ impl TraceCollectionPy {
             tile: self.tile,
         };
         call_immediate_detached(py, ControlRequest::Traces(request))
-            .map(|_| ())
-            .map_err(control_call_error)
+            .map_err(control_call_error)?
+            .into_unit()
+            .map_err(crate::errors::control)
     }
 
     fn list(&self, py: Python<'_>) -> PyResult<Vec<TracePy>> {
@@ -223,8 +226,9 @@ impl TracePy {
             visible,
         };
         call_immediate_detached(py, ControlRequest::Traces(request))
-            .map(|_| ())
-            .map_err(control_call_error)
+            .map_err(control_call_error)?
+            .into_unit()
+            .map_err(crate::errors::control)
     }
 }
 
@@ -234,12 +238,7 @@ fn request_traces(py: Python<'_>, window: u64, tile: u64) -> PyResult<Vec<TraceI
         ControlRequest::Traces(TraceRequest::List { window, tile }),
     )
     .map_err(control_call_error)?;
-    match response {
-        ControlResponse::Traces(infos) => Ok(infos),
-        _ => Err(pyo3::exceptions::PyRuntimeError::new_err(
-            "the DeLOG window answered with the wrong kind of result",
-        )),
-    }
+    response.into_traces().map_err(crate::errors::control)
 }
 
 fn trace_from_info(window: u64, tile: u64, info: TraceInfo) -> TracePy {

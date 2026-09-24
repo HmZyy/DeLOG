@@ -1,14 +1,14 @@
 use delog_api::catalog::resolve_field_path;
 use delog_api::color::{format_hex_color, parse_hex_color};
 use delog_core::snapshot::StoreSnapshot;
-use pyo3::exceptions::{PyIndexError, PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyIndexError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyIterator, PyList};
 
 use super::{
-    ControlRequest, ControlResponse, PlotContext, ResolvedVehicleField, VehicleFilter, VehicleInfo,
-    VehicleModel, VehicleNedReference, VehicleOrientation, VehiclePatch, VehiclePosition,
-    VehicleRequest, VehicleSpec, call_immediate_detached, control_call_error, stage_batch_request,
+    ControlRequest, PlotContext, ResolvedVehicleField, VehicleFilter, VehicleInfo, VehicleModel,
+    VehicleNedReference, VehicleOrientation, VehiclePatch, VehiclePosition, VehicleRequest,
+    VehicleSpec, call_immediate_detached, control_call_error, stage_batch_request,
 };
 
 pub(crate) mod profiles;
@@ -517,23 +517,19 @@ pub(crate) fn static_orientation() -> VehicleOrientationPy {
 fn request_vehicles(py: Python<'_>, request: VehicleRequest) -> PyResult<Vec<VehicleInfo>> {
     let response = call_immediate_detached(py, ControlRequest::Vehicles(request))
         .map_err(control_call_error)?;
-    match response {
-        ControlResponse::Vehicles(infos) => Ok(infos),
-        _ => Err(wrong_response()),
-    }
+    response.into_vehicles().map_err(crate::errors::control)
 }
 
 fn request_unit(py: Python<'_>, request: VehicleRequest) -> PyResult<()> {
     let response = call_immediate_detached(py, ControlRequest::Vehicles(request))
         .map_err(control_call_error)?;
-    match response {
-        ControlResponse::Unit => Ok(()),
-        _ => Err(wrong_response()),
-    }
+    response.into_unit().map_err(crate::errors::control)
 }
 
 fn wrong_response() -> PyErr {
-    PyRuntimeError::new_err("the DeLOG window answered with the wrong kind of result")
+    crate::errors::control(delog_api::Error::protocol(
+        "the DeLOG window answered with the wrong kind of result",
+    ))
 }
 
 fn vehicle_from_info(info: VehicleInfo) -> VehiclePy {

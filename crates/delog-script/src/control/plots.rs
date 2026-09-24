@@ -3,8 +3,7 @@ use pyo3::prelude::*;
 use super::annotations::AnnotationCollectionPy;
 use super::traces::TraceCollectionPy;
 use super::{
-    ControlRequest, ControlResponse, PlotContext, PlotInfo, PlotRequest, call_immediate_detached,
-    control_call_error,
+    ControlRequest, PlotContext, PlotInfo, PlotRequest, call_immediate_detached, control_call_error,
 };
 
 #[pyclass(unsendable, name = "Plot", skip_from_py_object)]
@@ -59,12 +58,7 @@ pub fn focused_plot(py: Python<'_>, context: PlotContext) -> PyResult<Option<Plo
 fn request_plots(py: Python<'_>, request: PlotRequest) -> PyResult<Vec<PlotInfo>> {
     let response =
         call_immediate_detached(py, ControlRequest::Plots(request)).map_err(control_call_error)?;
-    match response {
-        ControlResponse::Plots(infos) => Ok(infos),
-        _ => Err(pyo3::exceptions::PyRuntimeError::new_err(
-            "the DeLOG window answered with the wrong kind of result",
-        )),
-    }
+    response.into_plots().map_err(crate::errors::control)
 }
 
 pub(crate) fn plot_from_info(info: PlotInfo, context: PlotContext) -> PlotPy {

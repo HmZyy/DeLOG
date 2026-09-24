@@ -1,3 +1,5 @@
+#[cfg(feature = "scripting")]
+use delog_api::control::{AnnotationInfo, PlotInfo};
 use delog_core::identity::FieldId;
 
 use crate::plotting::browser::{self, BrowserFilterCache};
@@ -156,7 +158,7 @@ pub fn fields_only_in(
 }
 
 #[cfg(feature = "scripting")]
-pub fn plot_infos(main: &Workspace, windows: &[ExtendedWindow]) -> Vec<delog_script::PlotInfo> {
+pub fn plot_infos(main: &Workspace, windows: &[ExtendedWindow]) -> Vec<PlotInfo> {
     let mut infos = main.plot_infos(0);
     for window in windows {
         infos.extend(window.workspace.plot_infos(window.id.0));
@@ -165,10 +167,7 @@ pub fn plot_infos(main: &Workspace, windows: &[ExtendedWindow]) -> Vec<delog_scr
 }
 
 #[cfg(feature = "scripting")]
-pub fn annotation_infos(
-    main: &Workspace,
-    windows: &[ExtendedWindow],
-) -> Vec<delog_script::AnnotationInfo> {
+pub fn annotation_infos(main: &Workspace, windows: &[ExtendedWindow]) -> Vec<AnnotationInfo> {
     let mut infos = main.annotation_infos(0);
     for window in windows {
         infos.extend(window.workspace.annotation_infos(window.id.0));

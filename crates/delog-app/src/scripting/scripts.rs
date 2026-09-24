@@ -3,12 +3,13 @@ use std::sync::Arc;
 
 use crate::config::settings::AutoOpenVariables;
 use crate::ui::logging::{LogLevel, PendingLog, log};
+use delog_api::control::ControlRequest;
 use delog_api::params::{ParamSpec, ParamValue, SharedParams, shared_empty};
 use delog_core::ingest::IngestSender;
 use delog_core::metrics::MetricsRegistry;
 use delog_core::snapshot::DataStore;
 use delog_script::library::ScriptLibrary;
-use delog_script::{ControlRequest, ScriptCommand, ScriptEngine, ScriptEvent};
+use delog_script::{ScriptCommand, ScriptEngine, ScriptEvent};
 use egui_code_editor::{CodeEditor, ColorTheme, Syntax};
 
 use crate::ingest::parsers::{ParserUiAction, ParsersPanel};
@@ -1318,8 +1319,9 @@ mod tests {
     use std::collections::HashSet;
     use std::path::PathBuf;
 
+    use delog_api::control::MarkerRequest;
     use delog_core::ingest::ingest_channel;
-    use delog_script::{MarkerRequest, ParserEvent};
+    use delog_script::ParserEvent;
 
     use super::*;
 

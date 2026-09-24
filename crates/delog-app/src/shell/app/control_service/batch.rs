@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 
+use delog_api::control::{
+    ControlRequest, ControlResponse, GenerationRequest, request_is_batchable,
+};
 use delog_cache::CacheManager;
 use delog_core::identity::FieldId;
-use delog_script::{ControlRequest, ControlResponse, GenerationRequest};
 
 use super::{AppControl, apply_one};
 use crate::shell::app::control_ownership;
@@ -19,7 +21,7 @@ pub(super) fn apply_batch(
         _ => None,
     });
     for (index, request) in requests.iter().enumerate() {
-        if !delog_script::control::request_is_batchable(request) {
+        if !request_is_batchable(request) {
             rollback_terminal_commit(control, terminal_commit.as_ref());
             return Err(format!(
                 "batch request {index} is not an atomic mutation supported by delog.batch()"
