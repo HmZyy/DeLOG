@@ -178,10 +178,7 @@ impl ProfileFieldPy {
 impl ProfilePositionPy {
     #[getter]
     fn kind(&self) -> &'static str {
-        match self.0 {
-            ProfilePosition::Ned { .. } => "ned",
-            ProfilePosition::Gps { .. } => "gps",
-        }
+        self.0.kind()
     }
 
     #[getter]
@@ -269,11 +266,7 @@ impl ProfilePositionPy {
 impl ProfileOrientationPy {
     #[getter]
     fn kind(&self) -> &'static str {
-        match self.0 {
-            ProfileOrientation::Static => "static",
-            ProfileOrientation::Euler { .. } => "euler",
-            ProfileOrientation::Quat { .. } => "quat",
-        }
+        self.0.kind()
     }
 
     #[getter]
@@ -345,10 +338,7 @@ impl ProfileOrientationPy {
 impl ProfileNedReferencePy {
     #[getter]
     fn kind(&self) -> &'static str {
-        match self.0 {
-            ProfileNedReference::Manual { .. } => "manual",
-            ProfileNedReference::Fields { .. } => "fields",
-        }
+        self.0.kind()
     }
 
     #[getter]

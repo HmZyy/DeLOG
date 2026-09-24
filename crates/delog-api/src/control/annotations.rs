@@ -23,6 +23,16 @@ impl AnnotationKind {
             ))),
         }
     }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Segment => "segment",
+            Self::Rect => "rect",
+            Self::Ellipse => "ellipse",
+            Self::HLine => "hline",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
