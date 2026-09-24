@@ -4,6 +4,8 @@ use arrow::datatypes::DataType;
 
 use crate::{Error, Result};
 
+pub mod snapshot;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperationMode {
     Snapshot,
