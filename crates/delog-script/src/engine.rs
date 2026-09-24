@@ -8,6 +8,7 @@ use std::thread::JoinHandle;
 use delog_api::control::{ControlHost, ControlRequest, GenerationRequest, MarkerRequest};
 use delog_api::markers::PendingMarker;
 use delog_api::operations::OperationSpec;
+use delog_api::operations::live::ActiveOperation;
 use delog_api::operations::snapshot::prepare_snapshot_with_timestamp_mode;
 use delog_api::params::SharedParams;
 use delog_api::timestamps::TimestampMode;
@@ -28,7 +29,6 @@ use crate::custom_parser::{
 use crate::live::{
     LiveBatchPy, LiveTransformBatch, LiveTransformSpec, parse_transform_result, result_to_batch,
 };
-use crate::operations::live::ActiveOperation;
 
 const LIVE_TRANSFORM_ERROR_LIMIT: u8 = 3;
 const CONSOLE_SCRIPT_NAME: &str = "console";

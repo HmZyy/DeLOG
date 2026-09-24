@@ -29,8 +29,7 @@ impl StreamKey {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-#[doc(hidden)]
-pub enum SeedField {
+pub(crate) enum SeedField {
     F64 {
         unit: Option<String>,
         sample: Option<(i64, f64)>,
@@ -43,8 +42,7 @@ pub enum SeedField {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MergeSeed {
-    #[doc(hidden)]
-    pub fields: HashMap<(String, String), SeedField>,
+    pub(crate) fields: HashMap<(String, String), SeedField>,
 }
 
 impl MergeSeed {
@@ -288,8 +286,7 @@ fn record_watermark(out: &mut SnapshotOperationOutput, topic: &MaterializedTopic
     }
 }
 
-#[doc(hidden)]
-pub fn pending_topic(
+pub(crate) fn pending_topic(
     name: String,
     times: Vec<i64>,
     fields: impl IntoIterator<Item = (String, PendingColumn, Option<String>)>,
@@ -355,8 +352,7 @@ fn execute_transform(
     Ok(())
 }
 
-#[doc(hidden)]
-pub fn split_key(column: &PendingColumn, row: usize) -> Option<String> {
+pub(crate) fn split_key(column: &PendingColumn, row: usize) -> Option<String> {
     match column {
         PendingColumn::Utf8(values) => values.get(row).filter(|value| !value.is_empty()).cloned(),
         PendingColumn::F64(values) => {
@@ -372,8 +368,7 @@ pub fn split_key(column: &PendingColumn, row: usize) -> Option<String> {
     }
 }
 
-#[doc(hidden)]
-pub fn slice_column(column: &PendingColumn, rows: &[usize]) -> PendingColumn {
+pub(crate) fn slice_column(column: &PendingColumn, rows: &[usize]) -> PendingColumn {
     match column {
         PendingColumn::F64(values) => {
             PendingColumn::F64(rows.iter().map(|&row| values[row]).collect())

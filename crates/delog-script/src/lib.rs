@@ -34,9 +34,6 @@ pub mod flow;
 pub mod live;
 
 #[cfg(feature = "python")]
-pub mod operations;
-
-#[cfg(feature = "python")]
 pub mod control;
 
 #[cfg(feature = "python")]

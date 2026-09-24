@@ -2,20 +2,21 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use arrow::datatypes::DataType;
-use delog_api::catalog::topic_matches;
-use delog_api::operations::snapshot::{
+use crate::catalog::topic_matches;
+use crate::operations::snapshot::{
     MergeSeed, SeedField, StreamKey, pending_topic, slice_column, split_key,
 };
-use delog_api::operations::{
+use crate::operations::{
     MergeSpec, OperationSpec, SplitBySpec, TopicRegistry, TopicSelector, TransformSpec,
 };
+use crate::{Error, Result};
+use arrow::datatypes::DataType;
 use delog_core::derived::{PendingColumn, PendingTopic};
 use delog_core::field_view::{array_row_as_f64, array_row_as_str};
 use delog_core::identity::{SourceId, parse_topic_instance};
 use delog_core::ingest::ParsedBatch;
 
-use crate::emit::prepare_topics;
+use delog_core::derived::prepare_topics;
 
 type EmittedSchema = Vec<(String, DataType, Option<String>)>;
 
@@ -32,7 +33,7 @@ enum ColumnHistory {
 }
 
 impl ColumnHistory {
-    fn insert(&mut self, times: &[i64], values: &PendingColumn) -> Result<(), String> {
+    fn insert(&mut self, times: &[i64], values: &PendingColumn) -> Result<()> {
         match (self, values) {
             (
                 Self::F64 {
@@ -50,7 +51,7 @@ impl ColumnHistory {
             ) => insert_sorted(history_times, history_values, times, values),
             (Self::F64 { .. }, PendingColumn::Utf8(_))
             | (Self::Utf8 { .. }, PendingColumn::F64(_)) => {
-                return Err("merge field type changed between batches".to_owned());
+                return Err(Error::execution("merge field type changed between batches"));
             }
         }
         Ok(())
@@ -200,7 +201,8 @@ impl ActiveOperation {
         )
     }
 
-    pub(crate) fn with_registry(
+    #[doc(hidden)]
+    pub fn with_registry(
         operation_index: usize,
         spec: OperationSpec,
         derived_source: SourceId,
@@ -224,11 +226,7 @@ impl ActiveOperation {
         }
     }
 
-    pub fn process(
-        &mut self,
-        batch: &ParsedBatch,
-        source_label: &str,
-    ) -> Result<Vec<ParsedBatch>, String> {
+    pub fn process(&mut self, batch: &ParsedBatch, source_label: &str) -> Result<Vec<ParsedBatch>> {
         if self.disabled || !self.matches(batch, source_label) {
             return Ok(Vec::new());
         }
@@ -286,11 +284,7 @@ impl ActiveOperation {
         }
     }
 
-    fn process_raw(
-        &mut self,
-        batch: &ParsedBatch,
-        source_label: &str,
-    ) -> Result<Vec<ParsedBatch>, String> {
+    fn process_raw(&mut self, batch: &ParsedBatch, source_label: &str) -> Result<Vec<ParsedBatch>> {
         if let OperationSpec::Merge(spec) = &self.spec
             && spec.mode.wants_live()
         {
@@ -353,7 +347,7 @@ impl ActiveOperation {
             .collect()
     }
 
-    fn pin_and_build(&mut self, topics: Vec<PendingTopic>) -> Result<Vec<ParsedBatch>, String> {
+    fn pin_and_build(&mut self, topics: Vec<PendingTopic>) -> Result<Vec<ParsedBatch>> {
         let schemas = topics
             .iter()
             .map(|topic| {
@@ -372,15 +366,15 @@ impl ActiveOperation {
             })
             .collect::<Vec<_>>();
 
-        let prepared = prepare_topics(&topics)?;
+        let prepared = prepare_topics(&topics).map_err(Error::execution)?;
 
         for (topic, schema) in &schemas {
             if let Some(pinned) = self.emitted_schemas.get(topic)
                 && pinned != schema
             {
-                return Err(format!(
+                return Err(Error::execution(format!(
                     "output topic '{topic}' schema changed from {pinned:?} to {schema:?}"
-                ));
+                )));
             }
         }
         let claims = schemas
@@ -389,8 +383,7 @@ impl ActiveOperation {
             .collect::<Vec<_>>();
         self.registry
             .borrow_mut()
-            .claim_batch(self.operation_index, &claims)
-            .map_err(delog_api::Error::into_message)?;
+            .claim_batch(self.operation_index, &claims)?;
         for (topic, schema) in schemas {
             self.emitted_schemas.entry(topic).or_insert(schema);
         }
@@ -417,33 +410,33 @@ fn selector_matches(selector: &TopicSelector, topic: &str, source_label: &str) -
     )
 }
 
-fn validate_batch(batch: &ParsedBatch) -> Result<(), String> {
+fn validate_batch(batch: &ParsedBatch) -> Result<()> {
     if batch.columns.len() != batch.schema.len() {
-        return Err(format!(
+        return Err(Error::execution(format!(
             "topic '{}' schema has {} fields but batch has {} columns",
             batch.topic(),
             batch.schema.len(),
             batch.columns.len()
-        ));
+        )));
     }
     for (field, column) in batch.schema.fields().iter().zip(&batch.columns) {
         if column.len() != batch.rows() {
-            return Err(format!(
+            return Err(Error::execution(format!(
                 "topic '{}' field '{}' has {} rows but timestamps have {}",
                 batch.topic(),
                 field.name,
                 column.len(),
                 batch.rows()
-            ));
+            )));
         }
         if column.data_type() != &field.dtype {
-            return Err(format!(
+            return Err(Error::execution(format!(
                 "topic '{}' field '{}' schema type {:?} does not match column type {:?}",
                 batch.topic(),
                 field.name,
                 field.dtype,
                 column.data_type()
-            ));
+            )));
         }
     }
     Ok(())
@@ -452,7 +445,7 @@ fn validate_batch(batch: &ParsedBatch) -> Result<(), String> {
 fn materialize_columns(
     batch: &ParsedBatch,
     rows: &[usize],
-) -> Result<Vec<(String, PendingColumn, Option<String>)>, String> {
+) -> Result<Vec<(String, PendingColumn, Option<String>)>> {
     validate_batch(batch)?;
     batch
         .schema
@@ -477,29 +470,26 @@ fn materialize_columns(
                         .collect(),
                 )
             } else {
-                return Err(format!(
+                return Err(Error::execution(format!(
                     "topic '{}' field '{}' has unsupported live type {:?}",
                     batch.topic(),
                     field.name,
                     field.dtype
-                ));
+                )));
             };
             Ok((field.name.clone(), values, field.unit.clone()))
         })
         .collect()
 }
 
-fn validate_requested_fields(
-    batch: &ParsedBatch,
-    requested: Option<&[String]>,
-) -> Result<(), String> {
+fn validate_requested_fields(batch: &ParsedBatch, requested: Option<&[String]>) -> Result<()> {
     if let Some(requested) = requested {
         for name in requested {
             if batch.schema.field_by_name(name).is_none() {
-                return Err(format!(
+                return Err(Error::not_found(format!(
                     "field '{name}' not found in topic '{}'",
                     batch.topic()
-                ));
+                )));
             }
         }
     }
@@ -510,7 +500,7 @@ fn execute_transform(
     batch: &ParsedBatch,
     spec: &TransformSpec,
     rows: Vec<usize>,
-) -> Result<Vec<PendingTopic>, String> {
+) -> Result<Vec<PendingTopic>> {
     validate_requested_fields(batch, spec.fields.as_deref())?;
     let mut fields = materialize_columns(batch, &rows)?;
     if rows.is_empty() {
@@ -536,24 +526,25 @@ fn execute_transform(
         .iter()
         .map(|&row| batch.timestamps.value(row))
         .collect();
-    Ok(vec![
-        pending_topic(spec.output_topic.clone(), times, fields)
-            .map_err(delog_api::Error::into_message)?,
-    ])
+    Ok(vec![pending_topic(
+        spec.output_topic.clone(),
+        times,
+        fields,
+    )?])
 }
 
 fn execute_split(
     batch: &ParsedBatch,
     spec: &SplitBySpec,
     rows: Vec<usize>,
-) -> Result<Vec<PendingTopic>, String> {
+) -> Result<Vec<PendingTopic>> {
     validate_requested_fields(batch, spec.fields.as_deref())?;
     if batch.schema.field_by_name(&spec.field).is_none() {
-        return Err(format!(
+        return Err(Error::not_found(format!(
             "field '{}' not found in topic '{}'",
             spec.field,
             batch.topic()
-        ));
+        )));
     }
     let fields = materialize_columns(batch, &rows)?;
     let split_column = fields
@@ -614,8 +605,7 @@ fn execute_split(
             });
             pending_topic(topic, times, output_fields)
         })
-        .collect::<delog_api::Result<Vec<_>>>()
-        .map_err(delog_api::Error::into_message)
+        .collect::<Result<Vec<_>>>()
 }
 
 fn configured_topic_matches(configured: &str, actual: &str) -> bool {
@@ -627,7 +617,7 @@ fn selected_columns(
     batch: &ParsedBatch,
     names: &[String],
     rows: &[usize],
-) -> Result<Vec<(String, PendingColumn, Option<String>)>, String> {
+) -> Result<Vec<(String, PendingColumn, Option<String>)>> {
     validate_requested_fields(batch, Some(names))?;
     let columns = materialize_columns(batch, rows)?;
     Ok(names
@@ -648,7 +638,7 @@ fn execute_merge(
     spec: &MergeSpec,
     rows: Vec<usize>,
     state: &mut MergeState,
-) -> Result<MergeOutput, String> {
+) -> Result<MergeOutput> {
     let empty = || MergeOutput {
         topics: Vec::new(),
         consumed_pending: false,
@@ -668,17 +658,19 @@ fn execute_merge(
             .zip(&spec.topics)
             .any(|(output_names, (_, fields))| output_names.len() != fields.len())
     {
-        return Err("merge output field names do not match selected fields".to_owned());
+        return Err(Error::invalid_input(
+            "merge output field names do not match selected fields",
+        ));
     }
     let base_index = spec
         .topics
         .iter()
         .position(|(topic, _)| topic == &spec.base_topic)
         .ok_or_else(|| {
-            format!(
+            Error::invalid_input(format!(
                 "merge base_topic '{}' must be present in topics",
                 spec.base_topic
-            )
+            ))
         })?;
     let Some(input_index) = spec
         .topics
@@ -700,10 +692,10 @@ fn execute_merge(
             if let Some(existing_unit) = state.units.get(&key)
                 && existing_unit != unit
             {
-                return Err(format!(
+                return Err(Error::execution(format!(
                     "merge field '{}/{}' unit changed from {:?} to {:?}",
                     key.0, key.1, existing_unit, unit
-                ));
+                )));
             }
             if let Some(history) = state.histories.get(&key)
                 && !matches!(
@@ -712,10 +704,10 @@ fn execute_merge(
                         | (ColumnHistory::Utf8 { .. }, PendingColumn::Utf8(_))
                 )
             {
-                return Err(format!(
+                return Err(Error::execution(format!(
                     "merge field '{}/{}' type changed between batches",
                     key.0, key.1
-                ));
+                )));
             }
         }
         for (field, values, unit) in fields {
@@ -789,7 +781,7 @@ fn merge_secondary_schema_ready(spec: &MergeSpec, base_index: usize, state: &Mer
 fn validate_pending_base_schema(
     expected: Option<&PendingBaseBatch>,
     actual: &PendingBaseBatch,
-) -> Result<(), String> {
+) -> Result<()> {
     let Some(expected) = expected else {
         return Ok(());
     };
@@ -807,7 +799,9 @@ fn validate_pending_base_schema(
             .collect::<Vec<_>>()
     };
     if schema(expected) != schema(actual) {
-        return Err("merge base schema changed while waiting for secondary metadata".to_owned());
+        return Err(Error::execution(
+            "merge base schema changed while waiting for secondary metadata",
+        ));
     }
     Ok(())
 }
@@ -817,7 +811,7 @@ fn build_merged_base_topic(
     base_index: usize,
     bases: &[PendingBaseBatch],
     state: &MergeState,
-) -> Result<PendingTopic, String> {
+) -> Result<PendingTopic> {
     build_merged_base_topic_refs(spec, base_index, &bases.iter().collect::<Vec<_>>(), state)
 }
 
@@ -826,7 +820,7 @@ fn build_merged_base_topic_refs(
     base_index: usize,
     bases: &[&PendingBaseBatch],
     state: &MergeState,
-) -> Result<PendingTopic, String> {
+) -> Result<PendingTopic> {
     let mut rows = bases
         .iter()
         .enumerate()
@@ -897,7 +891,6 @@ fn build_merged_base_topic_refs(
         }
     }
     pending_topic(spec.output_topic.clone(), times, output_fields)
-        .map_err(delog_api::Error::into_message)
 }
 
 #[cfg(test)]
@@ -913,8 +906,8 @@ mod tests {
     use delog_core::ingest::ParsedBatch;
     use delog_core::schema::{FieldSchema, TopicSchema};
 
-    use delog_api::operations::snapshot::{MergeSeed, SeedField, StreamKey};
-    use delog_api::operations::{
+    use crate::operations::snapshot::{MergeSeed, SeedField, StreamKey};
+    use crate::operations::{
         MergeSpec, OperationMode, OperationSpec, SplitBySpec, TopicRegistry, TopicSelector,
         TransformSpec,
     };
@@ -1160,7 +1153,10 @@ mod tests {
                     "live",
                 )
                 .unwrap_err();
-            assert!(error.contains("owned by operation 0"), "{error}");
+            assert!(
+                error.to_string().contains("owned by operation 0"),
+                "{error}"
+            );
             assert_eq!(colliding.consecutive_errors(), failure);
         }
         let output = later
@@ -1454,7 +1450,7 @@ mod tests {
             ],
         );
         let error = op.process(&source_two_base, "live").unwrap_err();
-        assert!(error.contains("schema changed"), "{error}");
+        assert!(error.to_string().contains("schema changed"), "{error}");
 
         let state = &op.merge[&SourceId(2)];
         assert_eq!(state.last_base_time, None);
@@ -1593,7 +1589,7 @@ mod tests {
             ],
         );
         let error = op.process(&changed, "live").unwrap_err();
-        assert!(error.contains("schema changed"), "{error}");
+        assert!(error.to_string().contains("schema changed"), "{error}");
 
         let missing = batch(
             SourceId(2),
@@ -1604,7 +1600,10 @@ mod tests {
         );
         let mut fresh = transform_operation_with_watermark(i64::MIN);
         let error = fresh.process(&missing, "live").unwrap_err();
-        assert!(error.contains("field 'roll' not found"), "{error}");
+        assert!(
+            error.to_string().contains("field 'roll' not found"),
+            "{error}"
+        );
     }
 
     #[test]
