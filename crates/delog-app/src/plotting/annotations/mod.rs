@@ -5,6 +5,9 @@ pub mod interact;
 pub mod place;
 pub mod toolbar;
 
+#[cfg(feature = "scripting")]
+use delog_api::control::{AnnotationGeometry, AnnotationKind, AnnotationStylePatch, ScriptOwner};
+
 use crate::plotting::gpu::PaneView;
 
 const DEFAULT_SPAN_FRACTION: f64 = 0.12;
@@ -219,12 +222,100 @@ pub fn default_geometry(kind: Kind, at: DataPos, span_us: i64, y_span: f64) -> G
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnnotationOwner {
+    pub name: String,
+    pub generation: u64,
+}
+
+#[cfg(feature = "scripting")]
+impl From<ScriptOwner> for AnnotationOwner {
+    fn from(owner: ScriptOwner) -> Self {
+        Self {
+            name: owner.name,
+            generation: owner.generation,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Annotation {
     pub id: u64,
     pub geom: Geometry,
     pub label: String,
     pub style: Style,
+    pub owner: Option<AnnotationOwner>,
+}
+
+#[cfg(feature = "scripting")]
+impl Kind {
+    pub fn to_script(self) -> AnnotationKind {
+        match self {
+            Self::Text => AnnotationKind::Text,
+            Self::Segment => AnnotationKind::Segment,
+            Self::Rect => AnnotationKind::Rect,
+            Self::Ellipse => AnnotationKind::Ellipse,
+            Self::HLine => AnnotationKind::HLine,
+        }
+    }
+}
+
+#[cfg(feature = "scripting")]
+impl Geometry {
+    pub fn from_script(geometry: AnnotationGeometry) -> Self {
+        let pos = |(t_us, y): (i64, f64)| DataPos { t_us, y };
+        match geometry {
+            AnnotationGeometry::Text { at } => Self::Text { at: pos(at) },
+            AnnotationGeometry::Segment { from, to } => Self::Segment {
+                from: pos(from),
+                to: pos(to),
+            },
+            AnnotationGeometry::Rect { a, b } => Self::Rect {
+                a: pos(a),
+                b: pos(b),
+            },
+            AnnotationGeometry::Ellipse { a, b } => Self::Ellipse {
+                a: pos(a),
+                b: pos(b),
+            },
+            AnnotationGeometry::HLine { y } => Self::HLine { y },
+        }
+    }
+
+    pub fn to_script(self) -> AnnotationGeometry {
+        let pt = |p: DataPos| (p.t_us, p.y);
+        match self {
+            Self::Text { at } => AnnotationGeometry::Text { at: pt(at) },
+            Self::Segment { from, to } => AnnotationGeometry::Segment {
+                from: pt(from),
+                to: pt(to),
+            },
+            Self::Rect { a, b } => AnnotationGeometry::Rect { a: pt(a), b: pt(b) },
+            Self::Ellipse { a, b } => AnnotationGeometry::Ellipse { a: pt(a), b: pt(b) },
+            Self::HLine { y } => AnnotationGeometry::HLine { y },
+        }
+    }
+}
+
+#[cfg(feature = "scripting")]
+impl Annotation {
+    pub fn apply_style_patch(&mut self, patch: AnnotationStylePatch) {
+        if let Some(color) = patch.color {
+            self.style.color = color;
+        }
+        if let Some(stroke_px) = patch.stroke_px {
+            self.style.stroke_px = stroke_px;
+        }
+        if let Some(fill_opacity) = patch.fill_opacity {
+            self.style.fill_opacity = fill_opacity;
+        }
+        if let Some(font_px) = patch.font_px {
+            self.style.font_px = font_px;
+        }
+        if let Some(arrow) = patch.arrow {
+            self.style.arrow = arrow;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -248,7 +339,7 @@ impl Grab {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct AnnotationLayer {
     items: Vec<Annotation>,
     next_id: u64,
@@ -287,6 +378,7 @@ impl AnnotationLayer {
             geom,
             label: String::new(),
             style: default_style(id),
+            owner: None,
         });
         id
     }
@@ -301,6 +393,19 @@ impl AnnotationLayer {
         }
         if self.grab.map(Grab::id) == Some(id) {
             self.grab = None;
+        }
+    }
+
+    #[cfg(feature = "scripting")]
+    pub fn retain(&mut self, keep: impl Fn(&Annotation) -> bool) {
+        let doomed: Vec<u64> = self
+            .items
+            .iter()
+            .filter(|a| !keep(a))
+            .map(|a| a.id)
+            .collect();
+        for id in doomed {
+            self.remove(id);
         }
     }
 

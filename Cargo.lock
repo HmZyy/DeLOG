@@ -996,6 +996,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 
 [[package]]
+name = "delog-api"
+version = "0.4.0"
+dependencies = [
+ "arrow",
+ "delog-core",
+ "proptest",
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "delog-app"
 version = "0.4.0"
 dependencies = [
@@ -1003,6 +1014,7 @@ dependencies = [
  "arrow",
  "bytemuck",
  "crossbeam-channel",
+ "delog-api",
  "delog-cache",
  "delog-core",
  "delog-flow",
@@ -1113,6 +1125,7 @@ version = "0.4.0"
 dependencies = [
  "arrow",
  "criterion",
+ "delog-api",
  "delog-core",
  "delog-flow",
  "numpy",

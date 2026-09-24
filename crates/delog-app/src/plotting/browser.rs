@@ -85,7 +85,7 @@ pub struct VisibleTopic {
     pub fields: Vec<usize>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct BrowserFilterCache {
     epoch: u64,
     query: String,
@@ -295,7 +295,7 @@ pub enum SelectMod {
 
 /// `visible` is the tree's current field order so ranges and payloads follow
 /// what the user sees.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Selection {
     selected: std::collections::HashSet<FieldId>,
     anchor: Option<FieldId>,

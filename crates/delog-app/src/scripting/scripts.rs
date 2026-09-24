@@ -3,12 +3,13 @@ use std::sync::Arc;
 
 use crate::config::settings::AutoOpenVariables;
 use crate::ui::logging::{LogLevel, PendingLog, log};
+use delog_api::control::ControlRequest;
+use delog_api::params::{ParamSpec, ParamValue, SharedParams, shared_empty};
 use delog_core::ingest::IngestSender;
 use delog_core::metrics::MetricsRegistry;
 use delog_core::snapshot::DataStore;
 use delog_script::library::ScriptLibrary;
-use delog_script::params::{ParamSpec, ParamValue};
-use delog_script::{MarkerCommand, ScriptCommand, ScriptEngine, ScriptEvent};
+use delog_script::{ScriptCommand, ScriptEngine, ScriptEvent};
 use egui_code_editor::{CodeEditor, ColorTheme, Syntax};
 
 use crate::ingest::parsers::{ParserUiAction, ParsersPanel};
@@ -111,16 +112,18 @@ pub struct ScriptsPanel {
     running: bool,
     parsers: ParsersPanel,
     deferred_parser_actions: VecDeque<ParserUiAction>,
-    params: delog_script::params::SharedParams,
+    params: SharedParams,
     params_file: std::path::PathBuf,
     pub variables_open: bool,
     pending_auto_open: Option<PendingAutoOpen>,
     auto_open_mode: AutoOpenVariables,
     use_original_timestamps: bool,
     pending_logs: Vec<PendingLog>,
-    pending_marker_commands: Vec<MarkerCommand>,
+    pending_control_batches: Vec<Vec<ControlRequest>>,
     completion: ReplCompletion,
     history: ReplHistory,
+    ctx: egui::Context,
+    control_queue: Option<crate::scripting::control_host::ControlQueue>,
 }
 
 impl ScriptsPanel {
@@ -128,9 +131,10 @@ impl ScriptsPanel {
         scripts_dir: std::path::PathBuf,
         parsers_dir: std::path::PathBuf,
         params_file: std::path::PathBuf,
+        ctx: egui::Context,
     ) -> Self {
         let library = ScriptLibrary::new(scripts_dir);
-        let params = delog_script::params::shared_empty();
+        let params = shared_empty();
         {
             let loaded = crate::scripting::script_params_io::load(&params_file);
             crate::scripting::script_params_io::apply_loaded(&mut params.lock().unwrap(), loaded);
@@ -158,9 +162,11 @@ impl ScriptsPanel {
             auto_open_mode: AutoOpenVariables::default(),
             use_original_timestamps: false,
             pending_logs: Vec::new(),
-            pending_marker_commands: Vec::new(),
+            pending_control_batches: Vec::new(),
             completion: ReplCompletion::new(),
             history: ReplHistory::new(),
+            ctx,
+            control_queue: None,
         }
     }
 
@@ -225,8 +231,12 @@ impl ScriptsPanel {
         std::mem::take(&mut self.pending_logs)
     }
 
-    pub fn take_marker_commands(&mut self) -> Vec<MarkerCommand> {
-        std::mem::take(&mut self.pending_marker_commands)
+    pub fn take_control_batches(&mut self) -> Vec<Vec<ControlRequest>> {
+        std::mem::take(&mut self.pending_control_batches)
+    }
+
+    pub fn control_queue(&self) -> Option<&crate::scripting::control_host::ControlQueue> {
+        self.control_queue.as_ref()
     }
 
     pub fn request_interrupt(&self) {
@@ -474,9 +484,14 @@ impl ScriptsPanel {
     ) -> &ScriptEngine {
         let params = Arc::clone(&self.params);
         let use_original_timestamps = self.use_original_timestamps;
-        let engine = self
-            .engine
-            .get_or_insert_with(|| ScriptEngine::spawn(store, sender, metrics, params));
+        let ctx = self.ctx.clone();
+        let engine = self.engine.get_or_insert_with(|| {
+            let engine = ScriptEngine::spawn(store, sender, metrics, params);
+            let (host, queue) = crate::scripting::control_host::ScriptControlHost::new(ctx);
+            engine.set_control_host(host);
+            self.control_queue = Some(queue);
+            engine
+        });
         engine.set_use_original_timestamps(use_original_timestamps);
         engine
     }
@@ -571,7 +586,7 @@ impl ScriptsPanel {
                     }
                 }
             }
-            ScriptEvent::Markers(command) => self.pending_marker_commands.push(command),
+            ScriptEvent::Control(batch) => self.pending_control_batches.push(batch),
             ScriptEvent::LiveBatchProcessed => {}
             ScriptEvent::Parser(event) => self.parsers.handle_event(event),
             ScriptEvent::Completions { seq, matches } => {
@@ -1233,7 +1248,7 @@ fn render_param_widget(
     spec: &ParamSpec,
     value: ParamValue,
 ) -> Option<ParamValue> {
-    use delog_script::params::ParamKind;
+    use delog_api::params::ParamKind;
     match (&spec.kind, value) {
         (
             ParamKind::Slider {
@@ -1304,6 +1319,7 @@ mod tests {
     use std::collections::HashSet;
     use std::path::PathBuf;
 
+    use delog_api::control::MarkerRequest;
     use delog_core::ingest::ingest_channel;
     use delog_script::ParserEvent;
 
@@ -1319,6 +1335,7 @@ mod tests {
             root.join("scripts"),
             root.join("parsers"),
             root.join("params.json"),
+            egui::Context::default(),
         );
         panel.running = true;
         panel.status = "running console script".into();
@@ -1371,6 +1388,7 @@ mod tests {
             root.join("scripts"),
             root.join("parsers"),
             root.join("params.json"),
+            egui::Context::default(),
         );
 
         panel.handle_event(ScriptEvent::Error("python exploded".into()));
@@ -1390,6 +1408,7 @@ mod tests {
             root.join("scripts"),
             root.join("parsers"),
             root.join("params.json"),
+            egui::Context::default(),
         );
         panel.running = true;
         panel.status = "running console script".into();
@@ -1399,13 +1418,13 @@ mod tests {
         panel.refocus_repl_input = false;
         panel.repl_input = "ma".into();
         let completion_seq = panel.completion.begin_request(0, 2, "ma".into());
-        let command = delog_script::MarkerCommand::Append {
+        let request = ControlRequest::Markers(MarkerRequest::Append {
             owner: "console".into(),
             generation: 7,
             markers: vec![],
-        };
+        });
 
-        panel.handle_event(ScriptEvent::Markers(command.clone()));
+        panel.handle_event(ScriptEvent::Control(vec![request.clone()]));
 
         assert!(panel.running);
         assert_eq!(panel.status, "running console script");
@@ -1414,8 +1433,8 @@ mod tests {
         assert!(!panel.variables_open);
         assert!(!panel.refocus_repl_input);
         assert_eq!(panel.repl_input, "ma");
-        assert_eq!(panel.take_marker_commands(), vec![command]);
-        assert!(panel.take_marker_commands().is_empty());
+        assert_eq!(panel.take_control_batches(), vec![vec![request]]);
+        assert!(panel.take_control_batches().is_empty());
 
         panel.handle_event(ScriptEvent::Completions {
             seq: completion_seq,
@@ -1432,6 +1451,7 @@ mod tests {
             root.join("scripts"),
             root.join("parsers"),
             root.join("params.json"),
+            egui::Context::default(),
         );
         panel.current_name = "old".into();
         panel.editor_text = "print('old')".into();
@@ -1451,6 +1471,7 @@ mod tests {
             root.join("scripts"),
             root.join("parsers"),
             root.join("params.json"),
+            egui::Context::default(),
         );
         panel.library.save("demo", "print('demo')").unwrap();
         panel.library.save("demo_copy", "old copy").unwrap();
@@ -1474,6 +1495,7 @@ mod tests {
             root.join("scripts"),
             root.join("parsers"),
             root.join("params.json"),
+            egui::Context::default(),
         );
         panel.library.save("saved", "print('saved')").unwrap();
         panel
@@ -1514,6 +1536,7 @@ mod tests {
             root.join("scripts"),
             root.join("parsers"),
             root.join("params.json"),
+            egui::Context::default(),
         );
         let path = PathBuf::from("flight.raw");
         panel.running = true;
@@ -1555,6 +1578,7 @@ mod tests {
             root.join("scripts"),
             root.join("parsers"),
             root.join("params.json"),
+            egui::Context::default(),
         );
         panel.parsers.add_new();
         let action = panel.parsers.stage_save().unwrap();
@@ -1586,6 +1610,7 @@ mod tests {
             root.join("scripts"),
             root.join("parsers"),
             root.join("params.json"),
+            egui::Context::default(),
         );
         panel.running = false;
         panel.parsers.add_new();
@@ -1610,6 +1635,7 @@ mod tests {
             root.join("scripts"),
             root.join("parsers"),
             root.join("params.json"),
+            egui::Context::default(),
         );
 
         panel.request_repl_refocus();
@@ -1629,6 +1655,7 @@ mod tests {
             root.join("scripts"),
             root.join("parsers"),
             root.join("params.json"),
+            egui::Context::default(),
         );
 
         panel.set_console_open(true);
@@ -1648,6 +1675,7 @@ mod tests {
             root.join("scripts"),
             root.join("parsers"),
             root.join("params.json"),
+            egui::Context::default(),
         );
         let first = PathBuf::from("first.raw");
         let second = PathBuf::from("second.raw");
@@ -1680,8 +1708,12 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&root);
         std::fs::write(&root, "not a directory").unwrap();
-        let mut panel =
-            ScriptsPanel::new(root.join("scripts"), root.clone(), root.join("params.json"));
+        let mut panel = ScriptsPanel::new(
+            root.join("scripts"),
+            root.clone(),
+            root.join("params.json"),
+            egui::Context::default(),
+        );
 
         assert!(panel.parser_names().is_err());
         assert!(panel.parser_names().is_err());
@@ -1697,6 +1729,7 @@ mod tests {
             temp.path().join("empty-scripts"),
             temp.path().join("empty-parsers"),
             temp.path().join("empty-params.json"),
+            egui::Context::default(),
         );
         assert_eq!(
             empty_panel.try_script_names().unwrap(),
@@ -1709,6 +1742,7 @@ mod tests {
             not_a_directory,
             temp.path().join("parsers"),
             temp.path().join("params.json"),
+            egui::Context::default(),
         );
 
         assert!(panel.try_script_names().is_err());
@@ -1724,6 +1758,7 @@ mod tests {
             root.join("scripts"),
             root.join("parsers"),
             root.join("params.json"),
+            egui::Context::default(),
         );
         panel.parsers.add_new();
         panel.parsers.stage_save().unwrap();
@@ -1749,6 +1784,7 @@ mod tests {
             root.join("scripts"),
             root.join("parsers"),
             root.join("params.json"),
+            egui::Context::default(),
         );
         let path = PathBuf::from("flight.raw");
 
@@ -1773,6 +1809,7 @@ mod tests {
             root.join("scripts"),
             root.join("parsers"),
             root.join("params.json"),
+            egui::Context::default(),
         );
         panel
             .parsers

@@ -1,8 +1,8 @@
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
 
 use arrow::datatypes::DataType;
+
+use crate::{Error, Result};
 
 pub mod live;
 pub mod snapshot;
@@ -15,14 +15,14 @@ pub enum OperationMode {
 }
 
 impl OperationMode {
-    pub fn parse(value: Option<&str>) -> Result<Self, String> {
+    pub fn parse(value: Option<&str>) -> Result<Self> {
         match value.unwrap_or("both") {
             "snapshot" => Ok(Self::Snapshot),
             "live" => Ok(Self::Live),
             "both" => Ok(Self::Both),
-            value => Err(format!(
+            value => Err(Error::invalid_input(format!(
                 "mode must be 'snapshot', 'live', or 'both', got '{value}'"
-            )),
+            ))),
         }
     }
 
@@ -54,6 +54,41 @@ pub struct TransformSpec {
     pub mode: OperationMode,
 }
 
+impl TransformSpec {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        input: TopicSelector,
+        multiplier: f64,
+        offset: f64,
+        fields: Option<Vec<String>>,
+        unit: Option<String>,
+        units: HashMap<String, String>,
+        output_topic: Option<String>,
+        mode: OperationMode,
+    ) -> Result<Self> {
+        validate_transform(multiplier, offset, unit.as_deref(), &units)?;
+        if matches!(&fields, Some(fields) if fields.is_empty()) {
+            return Err(Error::invalid_input("transform fields must not be empty"));
+        }
+        if output_topic.as_deref() == Some("") {
+            return Err(Error::invalid_input(
+                "transform output_topic must not be empty",
+            ));
+        }
+        let output_topic = output_topic.unwrap_or_else(|| input.topic.clone());
+        Ok(Self {
+            input,
+            multiplier,
+            offset,
+            fields,
+            unit,
+            units,
+            output_topic,
+            mode,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MergeSpec {
     pub topics: Vec<(String, Vec<String>)>,
@@ -62,6 +97,55 @@ pub struct MergeSpec {
     pub source: Option<String>,
     pub output_names: Vec<Vec<String>>,
     pub mode: OperationMode,
+}
+
+impl MergeSpec {
+    pub fn new(
+        topics: Vec<(String, Vec<String>)>,
+        base_topic: String,
+        output_topic: String,
+        source: Option<String>,
+        mode: OperationMode,
+    ) -> Result<Self> {
+        if topics.is_empty() {
+            return Err(Error::invalid_input("merge topics must not be empty"));
+        }
+        for (topic, fields) in &topics {
+            if fields.is_empty() {
+                return Err(Error::invalid_input(format!(
+                    "merge topic '{topic}' fields must not be empty"
+                )));
+            }
+        }
+        if !topics.iter().any(|(topic, _)| topic == &base_topic) {
+            return Err(Error::invalid_input(format!(
+                "merge base_topic '{base_topic}' must be present in topics"
+            )));
+        }
+        let borrowed = topics
+            .iter()
+            .map(|(topic, fields)| {
+                (
+                    topic.as_str(),
+                    fields.iter().map(String::as_str).collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let flat_names = merged_field_names(&borrowed)?;
+        let mut names = flat_names.into_iter();
+        let output_names = topics
+            .iter()
+            .map(|(_, fields)| names.by_ref().take(fields.len()).collect::<Vec<_>>())
+            .collect();
+        Ok(Self {
+            topics,
+            base_topic,
+            output_topic,
+            source,
+            output_names,
+            mode,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,6 +157,29 @@ pub struct SplitBySpec {
     pub mode: OperationMode,
 }
 
+impl SplitBySpec {
+    pub fn new(
+        input: TopicSelector,
+        field: String,
+        fields: Option<Vec<String>>,
+        output_topic: Option<String>,
+        mode: OperationMode,
+    ) -> Result<Self> {
+        if matches!(&fields, Some(fields) if fields.is_empty()) {
+            return Err(Error::invalid_input("split_by fields must not be empty"));
+        }
+        let output_template = output_topic.unwrap_or_else(|| "{topic}/{value}".to_owned());
+        validate_split_template(&output_template)?;
+        Ok(Self {
+            input,
+            field,
+            fields,
+            output_template,
+            mode,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum OperationSpec {
     Transform(TransformSpec),
@@ -80,9 +187,7 @@ pub enum OperationSpec {
     SplitBy(SplitBySpec),
 }
 
-pub type OperationBuffer = Rc<RefCell<Vec<OperationSpec>>>;
-
-pub(crate) type OutputSchema = Vec<(String, DataType, Option<String>)>;
+pub type OutputSchema = Vec<(String, DataType, Option<String>)>;
 
 #[derive(Debug, Clone, PartialEq)]
 struct TopicClaim {
@@ -90,14 +195,13 @@ struct TopicClaim {
     schema: Option<OutputSchema>,
 }
 
-/// Generation-wide ownership and schema pins for the single declarative source.
 #[derive(Debug, Clone, Default)]
 pub struct TopicRegistry {
     claims: HashMap<String, TopicClaim>,
 }
 
 impl TopicRegistry {
-    pub(crate) fn preclaim_static(&mut self, specs: &[OperationSpec]) -> Result<(), String> {
+    pub fn preclaim_static(&mut self, specs: &[OperationSpec]) -> Result<()> {
         for (operation, spec) in specs.iter().enumerate() {
             let topic = match spec {
                 OperationSpec::Transform(spec) => Some(spec.output_topic.as_str()),
@@ -111,34 +215,33 @@ impl TopicRegistry {
         Ok(())
     }
 
-    /// Validate an entire output group first, then commit every claim together.
-    pub(crate) fn claim_batch(
+    pub fn claim_batch(
         &mut self,
         operation: usize,
         claims: &[(String, Option<OutputSchema>)],
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         let mut staged = HashMap::<&str, &Option<OutputSchema>>::new();
         for (topic, schema) in claims {
             if let Some(previous) = staged.insert(topic, schema)
                 && previous != schema
             {
-                return Err(format!(
+                return Err(Error::invalid_input(format!(
                     "output topic '{topic}' has conflicting schemas in operation {operation}"
-                ));
+                )));
             }
             if let Some(existing) = self.claims.get(topic) {
                 if existing.operation != operation {
-                    return Err(format!(
+                    return Err(Error::invalid_input(format!(
                         "output topic '{topic}' is owned by operation {}; operation {operation} cannot also produce it",
                         existing.operation
-                    ));
+                    )));
                 }
                 if let (Some(existing), Some(schema)) = (&existing.schema, schema)
                     && existing != schema
                 {
-                    return Err(format!(
+                    return Err(Error::invalid_input(format!(
                         "output topic '{topic}' schema changed from {existing:?} to {schema:?}"
-                    ));
+                    )));
                 }
             }
         }
@@ -156,32 +259,36 @@ impl TopicRegistry {
     }
 }
 
-pub(crate) fn validate_transform(
+fn validate_transform(
     multiplier: f64,
     offset: f64,
     unit: Option<&str>,
     units: &HashMap<String, String>,
-) -> Result<(), String> {
+) -> Result<()> {
     if !multiplier.is_finite() {
-        return Err("transform multiplier must be finite".to_owned());
+        return Err(Error::invalid_input("transform multiplier must be finite"));
     }
     if !offset.is_finite() {
-        return Err("transform offset must be finite".to_owned());
+        return Err(Error::invalid_input("transform offset must be finite"));
     }
     if unit.is_some() && !units.is_empty() {
-        return Err("transform unit and units are mutually exclusive".to_owned());
+        return Err(Error::invalid_input(
+            "transform unit and units are mutually exclusive",
+        ));
     }
     Ok(())
 }
 
-pub(crate) fn validate_split_template(template: &str) -> Result<(), String> {
+fn validate_split_template(template: &str) -> Result<()> {
     if !template.contains("{value}") {
-        return Err("split_by output_topic must contain '{value}'".to_owned());
+        return Err(Error::invalid_input(
+            "split_by output_topic must contain '{value}'",
+        ));
     }
     Ok(())
 }
 
-pub(crate) fn merged_field_names(topics: &[(&str, Vec<&str>)]) -> Result<Vec<String>, String> {
+pub fn merged_field_names(topics: &[(&str, Vec<&str>)]) -> Result<Vec<String>> {
     let mut counts = HashMap::new();
     for (_, fields) in topics {
         for field in fields {
@@ -199,7 +306,9 @@ pub(crate) fn merged_field_names(topics: &[(&str, Vec<&str>)]) -> Result<Vec<Str
                 (*field).to_owned()
             };
             if !unique.insert(name.clone()) {
-                return Err(format!("merge output field name '{name}' is duplicated"));
+                return Err(Error::invalid_input(format!(
+                    "merge output field name '{name}' is duplicated"
+                )));
             }
             names.push(name);
         }
@@ -210,7 +319,17 @@ pub(crate) fn merged_field_names(topics: &[(&str, Vec<&str>)]) -> Result<Vec<Str
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+
+    #[test]
+    fn operation_mode_defaults_and_preserves_unknown_mode_errors() {
+        assert_eq!(OperationMode::parse(None).unwrap(), OperationMode::Both);
+        assert_eq!(
+            OperationMode::parse(Some("stream"))
+                .unwrap_err()
+                .to_string(),
+            "mode must be 'snapshot', 'live', or 'both', got 'stream'"
+        );
+    }
 
     #[test]
     fn merge_prefixes_every_colliding_name() {
@@ -229,42 +348,64 @@ mod tests {
 
     #[test]
     fn split_template_requires_value() {
+        let input = TopicSelector {
+            topic: "ATT".into(),
+            source: None,
+            instance: None,
+        };
         assert_eq!(
-            validate_split_template("{topic}/fixed").unwrap_err(),
+            SplitBySpec::new(
+                input.clone(),
+                "instance".into(),
+                None,
+                Some("{topic}/fixed".into()),
+                OperationMode::Both,
+            )
+            .unwrap_err()
+            .to_string(),
             "split_by output_topic must contain '{value}'"
         );
-        assert!(validate_split_template("{topic}/{value}").is_ok());
+        assert_eq!(
+            SplitBySpec::new(input, "instance".into(), None, None, OperationMode::Both)
+                .unwrap()
+                .output_template,
+            "{topic}/{value}"
+        );
     }
 
     #[test]
-    fn mode_defaults_and_rejects_unknown_values() {
-        assert_eq!(OperationMode::parse(None).unwrap(), OperationMode::Both);
-        assert_eq!(
-            OperationMode::parse(Some("snapshot")).unwrap(),
-            OperationMode::Snapshot
+    fn transform_requires_finite_operands_and_exclusive_units() {
+        let input = TopicSelector {
+            topic: "ATT".into(),
+            source: None,
+            instance: None,
+        };
+        assert!(
+            TransformSpec::new(
+                input.clone(),
+                f64::NAN,
+                0.0,
+                None,
+                None,
+                HashMap::new(),
+                None,
+                OperationMode::Both,
+            )
+            .is_err()
         );
-        assert_eq!(
-            OperationMode::parse(Some("live")).unwrap(),
-            OperationMode::Live
+        assert!(
+            TransformSpec::new(
+                input,
+                1.0,
+                0.0,
+                None,
+                Some("deg".into()),
+                HashMap::from([("roll".into(), "deg".into())]),
+                None,
+                OperationMode::Both,
+            )
+            .is_err()
         );
-        assert_eq!(
-            OperationMode::parse(Some("both")).unwrap(),
-            OperationMode::Both
-        );
-        assert!(OperationMode::parse(Some("stream")).is_err());
-    }
-
-    #[test]
-    fn transform_requires_finite_operands() {
-        assert!(validate_transform(f64::NAN, 0.0, None, &HashMap::new()).is_err());
-        assert!(validate_transform(1.0, f64::INFINITY, None, &HashMap::new()).is_err());
-        assert!(validate_transform(1.0, 0.0, None, &HashMap::new()).is_ok());
-    }
-
-    #[test]
-    fn transform_unit_overrides_are_mutually_exclusive() {
-        let units = HashMap::from([("roll".to_owned(), "deg".to_owned())]);
-        assert!(validate_transform(1.0, 0.0, Some("deg"), &units).is_err());
     }
 
     fn schema(fields: &[(&str, DataType, Option<&str>)]) -> OutputSchema {
@@ -342,7 +483,10 @@ mod tests {
             let error = registry
                 .claim_batch(1, &[("OUT".into(), Some(variant))])
                 .unwrap_err();
-            assert!(error.contains("owned by operation 0"), "{error}");
+            assert!(
+                error.to_string().contains("owned by operation 0"),
+                "{error}"
+            );
         }
     }
 

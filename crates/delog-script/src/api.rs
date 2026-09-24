@@ -1,15 +1,20 @@
-use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use delog_core::align::{AlignMode, align_values};
-pub use delog_core::derived::{PendingColumn, PendingField, PendingTopic};
-use delog_core::field_view::FieldView;
-use delog_core::field_view::array_row_as_f64;
-use delog_core::field_view::array_row_as_str;
-use delog_core::identity::FieldId;
-pub(crate) use delog_core::identity::parse_topic_instance;
-use delog_core::identity::{SourceId, TopicId};
+use delog_api::catalog::{
+    FieldMatch, TopicMatch, find_fields, find_fields_in_topic, find_topics, materialize_field,
+    materialize_topic, resolve_field, resolve_field_in_topic, resolve_topic,
+};
+use delog_api::control::{ControlRequest, MarkerRequest, PlotContext, ScriptOwner};
+use delog_api::live::LiveTransformSpec;
+use delog_api::markers::PendingMarker;
+use delog_api::operations::{
+    MergeSpec, OperationMode, OperationSpec, SplitBySpec, TopicSelector, TransformSpec,
+};
+use delog_api::params::{ParamKind, ParamSpec, ParamValue, SharedParams};
+use delog_api::timestamps::{AlignmentMode, align_values};
+use delog_core::derived::{PendingField, PendingTopic};
+use delog_core::identity::{FieldId, TopicId};
 use delog_core::snapshot::StoreSnapshot;
 
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
@@ -19,336 +24,11 @@ use pyo3::types::PyList;
 use pyo3::types::PyTuple;
 use pyo3::types::{PyMapping, PyMappingMethods};
 
-use crate::live::LiveTransformSpec;
-use crate::operations::{
-    MergeSpec, OperationBuffer, OperationMode, OperationSpec, SplitBySpec, TopicSelector,
-    TransformSpec, merged_field_names, validate_split_template, validate_transform,
+use crate::staging::{
+    EmitBuffer, LiveTransformBuffer, MarkerBuffer, OperationBuffer, PendingLiveTransform,
+    active_marker_buffer,
 };
-use crate::params::{ParamKind, ParamSpec, ParamValue, SharedParams};
 use pyo3::types::{PyBool, PyInt};
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub enum ScriptTimestampMode {
-    #[default]
-    Effective,
-    Original,
-}
-
-thread_local! {
-    static SCRIPT_TIMESTAMP_MODE: Cell<ScriptTimestampMode> = const {
-        Cell::new(ScriptTimestampMode::Effective)
-    };
-}
-
-pub(crate) fn with_timestamp_mode<T>(mode: ScriptTimestampMode, f: impl FnOnce() -> T) -> T {
-    SCRIPT_TIMESTAMP_MODE.with(|current| {
-        struct Reset<'a> {
-            current: &'a Cell<ScriptTimestampMode>,
-            previous: ScriptTimestampMode,
-        }
-        impl Drop for Reset<'_> {
-            fn drop(&mut self) {
-                self.current.set(self.previous);
-            }
-        }
-
-        let reset = Reset {
-            current,
-            previous: current.replace(mode),
-        };
-        let result = f();
-        drop(reset);
-        result
-    })
-}
-
-pub struct PendingLiveTransform {
-    pub spec: LiveTransformSpec,
-    pub callable: Py<PyAny>,
-    pub markers: MarkerBuffer,
-}
-
-pub type LiveTransformBuffer = Rc<RefCell<Vec<PendingLiveTransform>>>;
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct PendingMarker {
-    pub time_us: i64,
-    pub label: String,
-    pub color: Option<[f32; 4]>,
-    pub note: String,
-}
-
-pub type MarkerBuffer = Rc<RefCell<Vec<PendingMarker>>>;
-
-thread_local! {
-    static MARKER_BUFFER_OVERRIDE: RefCell<Option<MarkerBuffer>> = const { RefCell::new(None) };
-}
-
-pub(crate) struct MarkerBufferOverride {
-    previous: Option<MarkerBuffer>,
-}
-
-pub(crate) fn override_marker_buffer(markers: MarkerBuffer) -> MarkerBufferOverride {
-    let previous = MARKER_BUFFER_OVERRIDE.with(|current| current.replace(Some(markers)));
-    MarkerBufferOverride { previous }
-}
-
-impl Drop for MarkerBufferOverride {
-    fn drop(&mut self) {
-        MARKER_BUFFER_OVERRIDE.with(|current| {
-            current.replace(self.previous.take());
-        });
-    }
-}
-
-fn active_marker_buffer() -> Option<MarkerBuffer> {
-    MARKER_BUFFER_OVERRIDE.with(|current| current.borrow().clone())
-}
-
-fn parse_marker_color(color: &str) -> PyResult<[f32; 4]> {
-    let invalid =
-        || pyo3::exceptions::PyValueError::new_err("marker color must be #RRGGBB or #RRGGBBAA");
-    let digits = color.as_bytes().strip_prefix(b"#").ok_or_else(invalid)?;
-    if !matches!(digits.len(), 6 | 8) || !digits.iter().all(u8::is_ascii_hexdigit) {
-        return Err(invalid());
-    }
-    let parse_byte = |start| {
-        let nibble = |digit| match digit {
-            b'0'..=b'9' => digit - b'0',
-            b'a'..=b'f' => digit - b'a' + 10,
-            b'A'..=b'F' => digit - b'A' + 10,
-            _ => unreachable!("hex digits validated above"),
-        };
-        nibble(digits[start]) * 16 + nibble(digits[start + 1])
-    };
-    Ok([
-        parse_byte(0) as f32 / 255.0,
-        parse_byte(2) as f32 / 255.0,
-        parse_byte(4) as f32 / 255.0,
-        if digits.len() == 8 {
-            parse_byte(6) as f32 / 255.0
-        } else {
-            1.0
-        },
-    ])
-}
-
-/// `(times_us, values, strings)`; `strings` is `Some` only for Utf8/LargeUtf8
-/// fields, with null cells materialized as `""`.
-pub type MaterializedField = (Vec<i64>, Vec<f64>, Option<Vec<String>>);
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TopicMatch {
-    pub(crate) source_id: SourceId,
-    pub(crate) source_label: String,
-    pub(crate) topic_id: TopicId,
-    pub(crate) topic_name: String,
-    pub(crate) base_name: String,
-    pub(crate) instance: Option<u32>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct FieldMatch {
-    pub(crate) source_id: SourceId,
-    pub(crate) source_label: String,
-    pub(crate) topic_id: TopicId,
-    pub(crate) topic_name: String,
-    pub(crate) base_name: String,
-    pub(crate) instance: Option<u32>,
-    pub(crate) field_id: FieldId,
-    pub(crate) field_name: String,
-    pub(crate) unit: Option<String>,
-}
-
-pub(crate) fn topic_matches(
-    topic_name: &str,
-    base_name: &str,
-    parsed_instance: Option<u32>,
-    requested_topic: Option<&str>,
-    requested_instance: Option<u32>,
-) -> bool {
-    if let Some(topic) = requested_topic
-        && topic_name != topic
-        && base_name != topic
-    {
-        return false;
-    }
-    if let Some(instance) = requested_instance
-        && parsed_instance != Some(instance)
-    {
-        return false;
-    }
-    true
-}
-
-pub(crate) fn find_topics(
-    snapshot: &StoreSnapshot,
-    topic: Option<&str>,
-    source: Option<&str>,
-    instance: Option<u32>,
-) -> Vec<TopicMatch> {
-    let mut out = Vec::new();
-    for src in snapshot.sources.iter() {
-        if src.entry.removed {
-            continue;
-        }
-        if let Some(source) = source
-            && src.entry.label != source
-        {
-            continue;
-        }
-        for &topic_id in src.topics.iter() {
-            let Some(topic_snapshot) = snapshot.topic(topic_id) else {
-                continue;
-            };
-            if topic_snapshot.entry.removed {
-                continue;
-            }
-            let (base_name, parsed_instance) = parse_topic_instance(&topic_snapshot.entry.name);
-            if !topic_matches(
-                &topic_snapshot.entry.name,
-                &base_name,
-                parsed_instance,
-                topic,
-                instance,
-            ) {
-                continue;
-            }
-            out.push(TopicMatch {
-                source_id: src.entry.id,
-                source_label: src.entry.label.clone(),
-                topic_id,
-                topic_name: topic_snapshot.entry.name.clone(),
-                base_name,
-                instance: parsed_instance,
-            });
-        }
-    }
-    out
-}
-
-fn field_unit(snapshot: &StoreSnapshot, topic: TopicId, field_name: &str) -> Option<String> {
-    let store = snapshot.topic_store(topic)?;
-    store.schema.field_by_name(field_name)?.unit.clone()
-}
-
-fn find_fields(
-    snapshot: &StoreSnapshot,
-    topic: Option<&str>,
-    field: Option<&str>,
-    source: Option<&str>,
-    instance: Option<u32>,
-) -> Vec<FieldMatch> {
-    let mut out = Vec::new();
-    for topic_match in find_topics(snapshot, topic, source, instance) {
-        for fe in snapshot.fields.iter() {
-            if fe.removed || fe.topic != topic_match.topic_id {
-                continue;
-            }
-            if let Some(field) = field
-                && fe.name != field
-            {
-                continue;
-            }
-            out.push(FieldMatch {
-                source_id: topic_match.source_id,
-                source_label: topic_match.source_label.clone(),
-                topic_id: topic_match.topic_id,
-                topic_name: topic_match.topic_name.clone(),
-                base_name: topic_match.base_name.clone(),
-                instance: topic_match.instance,
-                field_id: fe.id,
-                field_name: fe.name.clone(),
-                unit: field_unit(snapshot, topic_match.topic_id, &fe.name),
-            });
-        }
-    }
-    out
-}
-
-pub(crate) fn find_fields_in_topic(
-    snapshot: &StoreSnapshot,
-    topic_id: TopicId,
-    field: Option<&str>,
-) -> Vec<FieldMatch> {
-    let Some(topic_snapshot) = snapshot.topic(topic_id) else {
-        return Vec::new();
-    };
-    if topic_snapshot.entry.removed {
-        return Vec::new();
-    }
-    let Some(src) = snapshot
-        .sources
-        .iter()
-        .find(|src| !src.entry.removed && src.topics.contains(&topic_id))
-    else {
-        return Vec::new();
-    };
-    let (base_name, instance) = parse_topic_instance(&topic_snapshot.entry.name);
-    let mut out = Vec::new();
-    for fe in snapshot.fields.iter() {
-        if fe.removed || fe.topic != topic_id {
-            continue;
-        }
-        if let Some(field) = field
-            && fe.name != field
-        {
-            continue;
-        }
-        out.push(FieldMatch {
-            source_id: src.entry.id,
-            source_label: src.entry.label.clone(),
-            topic_id,
-            topic_name: topic_snapshot.entry.name.clone(),
-            base_name: base_name.clone(),
-            instance,
-            field_id: fe.id,
-            field_name: fe.name.clone(),
-            unit: field_unit(snapshot, topic_id, &fe.name),
-        });
-    }
-    out
-}
-
-/// Materialize a field as `(times_us, values, strings)` by walking its chunks
-/// in time order. Timestamps are effective (source offset applied) unless the
-/// current script command explicitly requests original source time.
-pub fn materialize_field(
-    snapshot: &StoreSnapshot,
-    field: FieldId,
-) -> Result<MaterializedField, String> {
-    let view = FieldView::new(snapshot, field).map_err(|e| e.to_string())?;
-    let col = view.col_index();
-    let range = snapshot
-        .global_time_range()
-        .ok_or_else(|| "field has no data".to_string())?;
-    let mut times = Vec::new();
-    let mut values = Vec::new();
-    let mut strings = view.schema_field().is_string().then(Vec::new);
-    let timestamp_mode = SCRIPT_TIMESTAMP_MODE.get();
-    let offset_us = view.offset_us_for_export();
-    for chunk in view.chunks_overlapping(range) {
-        for row in 0..chunk.len() {
-            let raw_time = chunk.t.value(row);
-            let time = match timestamp_mode {
-                ScriptTimestampMode::Effective => raw_time
-                    .checked_add(offset_us)
-                    .ok_or_else(|| "source offset overflows a script timestamp".to_owned())?,
-                ScriptTimestampMode::Original => raw_time,
-            };
-            times.push(time);
-            values.push(array_row_as_f64(chunk.cols[col].as_ref(), row));
-            if let Some(s) = &mut strings {
-                s.push(
-                    array_row_as_str(chunk.cols[col].as_ref(), row)
-                        .unwrap_or_default()
-                        .to_owned(),
-                );
-            }
-        }
-    }
-    Ok((times, values, strings))
-}
 
 /// A numpy unicode ('<U...') array from owned strings, so scripts get
 /// vectorized comparisons like `batch.name == "airspd"`.
@@ -418,8 +98,6 @@ fn parse_emit_field_entry(
     Ok((vals, None))
 }
 
-pub type EmitBuffer = Rc<RefCell<Vec<PendingTopic>>>;
-
 /// `unsendable`: lives only on the worker thread under the GIL.
 #[pyclass(unsendable, name = "Delog")]
 pub struct Delog {
@@ -428,6 +106,7 @@ pub struct Delog {
     live: LiveTransformBuffer,
     operations: OperationBuffer,
     markers: MarkerBuffer,
+    batches: crate::control::DeferredControlBuffer,
     script_name: String,
     generation: u64,
     params: SharedParams,
@@ -441,6 +120,7 @@ impl Delog {
         live: LiveTransformBuffer,
         operations: OperationBuffer,
         markers: MarkerBuffer,
+        batches: crate::control::DeferredControlBuffer,
         script_name: String,
         generation: u64,
         params: SharedParams,
@@ -451,6 +131,7 @@ impl Delog {
             live,
             operations,
             markers,
+            batches,
             script_name,
             generation,
             params,
@@ -471,6 +152,28 @@ impl Delog {
 
     pub fn marker_buffer(&self) -> MarkerBuffer {
         Rc::clone(&self.markers)
+    }
+
+    fn owner(&self) -> Option<ScriptOwner> {
+        (!self.script_name.is_empty()).then(|| ScriptOwner {
+            name: self.script_name.clone(),
+            generation: self.generation,
+        })
+    }
+
+    fn marker_owner(&self) -> String {
+        if self.script_name.is_empty() {
+            "console".into()
+        } else {
+            self.script_name.clone()
+        }
+    }
+
+    fn plot_context(&self) -> PlotContext {
+        PlotContext {
+            owner: self.owner(),
+            snapshot: Arc::clone(&self.snapshot),
+        }
     }
 }
 
@@ -501,7 +204,7 @@ struct TopicRefPy {
 #[allow(dead_code)]
 #[pyclass(unsendable, name = "FieldRef", skip_from_py_object)]
 #[derive(Clone)]
-struct FieldRefPy {
+pub(crate) struct FieldRefPy {
     snapshot: Arc<StoreSnapshot>,
     field_id: FieldId,
     topic_id: TopicId,
@@ -546,49 +249,14 @@ fn field_ref(snapshot: Arc<StoreSnapshot>, m: FieldMatch) -> FieldRefPy {
     }
 }
 
-fn candidate_topic_paths(matches: &[TopicMatch]) -> String {
-    matches
-        .iter()
-        .map(|m| format!("{}/{}", m.source_label, m.topic_name))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn candidate_field_paths(matches: &[FieldMatch]) -> String {
-    matches
-        .iter()
-        .map(|m| format!("{}/{}/{}", m.source_label, m.topic_name, m.field_name))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 fn unique_topic(
     snapshot: Arc<StoreSnapshot>,
     name: &str,
     source: Option<&str>,
     instance: Option<u32>,
 ) -> PyResult<TopicRefPy> {
-    let matches = find_topics(&snapshot, Some(name), source, instance);
-    match matches.len() {
-        1 => Ok(topic_ref(snapshot, matches.into_iter().next().unwrap())),
-        0 => {
-            let candidates = find_topics(&snapshot, None, source, instance);
-            if candidates.is_empty() {
-                Err(pyo3::exceptions::PyKeyError::new_err(format!(
-                    "topic '{name}' not found"
-                )))
-            } else {
-                Err(pyo3::exceptions::PyKeyError::new_err(format!(
-                    "topic '{name}' not found; candidates: {}",
-                    candidate_topic_paths(&candidates)
-                )))
-            }
-        }
-        _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "topic '{name}' is ambiguous; candidates: {}; pass source= or instance=",
-            candidate_topic_paths(&matches)
-        ))),
-    }
+    let topic = resolve_topic(&snapshot, name, source, instance).map_err(crate::errors::lookup)?;
+    Ok(topic_ref(snapshot, topic))
 }
 
 #[pymethods]
@@ -613,32 +281,9 @@ impl TopicRefPy {
     }
 
     fn field(&self, name: &str) -> PyResult<FieldRefPy> {
-        let matches = find_fields_in_topic(&self.snapshot, self.topic_id, Some(name));
-        match matches.len() {
-            1 => Ok(field_ref(
-                Arc::clone(&self.snapshot),
-                matches.into_iter().next().unwrap(),
-            )),
-            0 => {
-                let candidates = find_fields_in_topic(&self.snapshot, self.topic_id, None);
-                if candidates.is_empty() {
-                    Err(pyo3::exceptions::PyKeyError::new_err(format!(
-                        "field '{name}' not found in topic '{}'",
-                        self.name
-                    )))
-                } else {
-                    Err(pyo3::exceptions::PyKeyError::new_err(format!(
-                        "field '{name}' not found in topic '{}'; candidates: {}",
-                        self.name,
-                        candidate_field_paths(&candidates)
-                    )))
-                }
-            }
-            _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "field '{name}' in topic '{}' is ambiguous",
-                self.name
-            ))),
-        }
+        let field = resolve_field_in_topic(&self.snapshot, self.topic_id, name)
+            .map_err(crate::errors::lookup)?;
+        Ok(field_ref(Arc::clone(&self.snapshot), field))
     }
 
     #[pyo3(signature = (*fields))]
@@ -647,36 +292,24 @@ impl TopicRefPy {
             .iter()
             .map(|item| item.extract::<String>())
             .collect::<PyResult<Vec<_>>>()?;
-        let requested = if fields.is_empty() {
-            find_fields_in_topic(&self.snapshot, self.topic_id, None)
-                .into_iter()
-                .map(|m| m.field_name)
-                .collect::<Vec<_>>()
-        } else {
-            fields
-        };
-        let mut table_t: Option<Vec<i64>> = None;
-        let mut names = Vec::with_capacity(requested.len());
+        let table = materialize_topic(
+            &self.snapshot,
+            self.topic_id,
+            &fields,
+            crate::context::current_timestamp_mode(),
+        )
+        .map_err(crate::errors::lookup)?;
+        let mut names = Vec::with_capacity(table.columns.len());
         let mut columns = std::collections::HashMap::new();
-        for name in requested {
-            let field_ref = self.field(&name)?;
-            let (t, v, s) = materialize_field(&self.snapshot, field_ref.field_id)
-                .map_err(pyo3::exceptions::PyValueError::new_err)?;
-            match &table_t {
-                None => table_t = Some(t),
-                Some(existing) if *existing == t => {}
-                Some(_) => {
-                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                        "topic '{}' field '{name}' does not share the topic timeline",
-                        self.name
-                    )));
-                }
-            }
-            columns.insert(name.clone(), materialized_values_to_py(py, v, s)?);
-            names.push(name);
+        for column in table.columns {
+            columns.insert(
+                column.name.clone(),
+                materialized_values_to_py(py, column.values, column.strings)?,
+            );
+            names.push(column.name);
         }
         Ok(DelogTable {
-            t: table_t.unwrap_or_default().into_pyarray(py).unbind(),
+            t: table.times_us.into_pyarray(py).unbind(),
             fields: names,
             columns,
         })
@@ -690,14 +323,35 @@ impl FieldRefPy {
     }
 
     fn read(&self, py: Python<'_>) -> PyResult<DelogField> {
-        let (t, v, s) = materialize_field(&self.snapshot, self.field_id)
-            .map_err(pyo3::exceptions::PyValueError::new_err)?;
-        let s = s.map(|vals| numpy_str_array(py, vals)).transpose()?;
+        let field = materialize_field(
+            &self.snapshot,
+            self.field_id,
+            crate::context::current_timestamp_mode(),
+        )
+        .map_err(crate::errors::value)?;
+        let s = field
+            .strings
+            .map(|values| numpy_str_array(py, values))
+            .transpose()?;
         Ok(DelogField {
-            t: t.into_pyarray(py).unbind(),
-            v: v.into_pyarray(py).unbind(),
+            t: field.times_us.into_pyarray(py).unbind(),
+            v: field.values.into_pyarray(py).unbind(),
             s,
         })
+    }
+}
+
+impl FieldRefPy {
+    pub(crate) fn field_id(&self) -> FieldId {
+        self.field_id
+    }
+
+    pub(crate) fn label(&self) -> String {
+        format!("{}.{}", self.topic, self.name)
+    }
+
+    pub(crate) fn qualified_path(&self) -> &str {
+        &self.path
     }
 }
 
@@ -744,20 +398,96 @@ impl Delog {
         color: Option<String>,
         note: Option<String>,
     ) -> PyResult<()> {
-        if label.is_empty() {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "marker label must not be empty",
-            ));
+        let marker = PendingMarker::new(time_us, label, color.as_deref(), note)
+            .map_err(crate::errors::value)?;
+        let request = ControlRequest::Markers(MarkerRequest::Append {
+            owner: self.marker_owner(),
+            generation: self.generation,
+            markers: vec![marker.clone()],
+        });
+        if crate::control::stage_batch_request(&request)
+            .map_err(crate::control::control_call_error)?
+        {
+            return Ok(());
         }
-        let marker = PendingMarker {
-            time_us,
-            label,
-            color: color.as_deref().map(parse_marker_color).transpose()?,
-            note: note.unwrap_or_default(),
-        };
         let markers = active_marker_buffer().unwrap_or_else(|| Rc::clone(&self.markers));
         markers.borrow_mut().push(marker);
         Ok(())
+    }
+
+    #[pyo3(signature = (lat, lon, alt, *, dege7=false, alt_mm=false, alt_offset_m=0.0))]
+    fn gps(
+        &self,
+        lat: Bound<'_, PyAny>,
+        lon: Bound<'_, PyAny>,
+        alt: Bound<'_, PyAny>,
+        dege7: bool,
+        alt_mm: bool,
+        alt_offset_m: f64,
+    ) -> PyResult<crate::control::vehicles::VehiclePositionPy> {
+        crate::control::vehicles::gps(
+            &self.snapshot,
+            &lat,
+            &lon,
+            &alt,
+            dege7,
+            alt_mm,
+            alt_offset_m,
+        )
+    }
+
+    #[pyo3(signature = (north, east, down, *, reference=None))]
+    fn ned(
+        &self,
+        north: Bound<'_, PyAny>,
+        east: Bound<'_, PyAny>,
+        down: Bound<'_, PyAny>,
+        reference: Option<PyRef<'_, crate::control::vehicles::GeoReferencePy>>,
+    ) -> PyResult<crate::control::vehicles::VehiclePositionPy> {
+        crate::control::vehicles::ned(&self.snapshot, &north, &east, &down, reference.as_deref())
+    }
+
+    fn geo(
+        &self,
+        lat_deg: f64,
+        lon_deg: f64,
+        alt_m: f64,
+    ) -> PyResult<crate::control::vehicles::GeoReferencePy> {
+        crate::control::vehicles::geo(lat_deg, lon_deg, alt_m)
+    }
+
+    fn geo_fields(
+        &self,
+        lat: Bound<'_, PyAny>,
+        lon: Bound<'_, PyAny>,
+        alt: Bound<'_, PyAny>,
+    ) -> PyResult<crate::control::vehicles::GeoReferencePy> {
+        crate::control::vehicles::geo_fields(&self.snapshot, &lat, &lon, &alt)
+    }
+
+    #[pyo3(signature = (roll, pitch, yaw, *, degrees=false))]
+    fn euler(
+        &self,
+        roll: Bound<'_, PyAny>,
+        pitch: Bound<'_, PyAny>,
+        yaw: Bound<'_, PyAny>,
+        degrees: bool,
+    ) -> PyResult<crate::control::vehicles::VehicleOrientationPy> {
+        crate::control::vehicles::euler(&self.snapshot, &roll, &pitch, &yaw, degrees)
+    }
+
+    fn quat(
+        &self,
+        w: Bound<'_, PyAny>,
+        x: Bound<'_, PyAny>,
+        y: Bound<'_, PyAny>,
+        z: Bound<'_, PyAny>,
+    ) -> PyResult<crate::control::vehicles::VehicleOrientationPy> {
+        crate::control::vehicles::quat(&self.snapshot, &w, &x, &y, &z)
+    }
+
+    fn static_ori(&self) -> crate::control::vehicles::VehicleOrientationPy {
+        crate::control::vehicles::static_orientation()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -776,37 +506,25 @@ impl Delog {
         mode: &str,
     ) -> PyResult<()> {
         let units = units.unwrap_or_default();
-        validate_transform(multiplier, offset, unit.as_deref(), &units)
-            .map_err(pyo3::exceptions::PyValueError::new_err)?;
-        if matches!(&fields, Some(fields) if fields.is_empty()) {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "transform fields must not be empty",
-            ));
-        }
-        if output_topic.as_deref() == Some("") {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "transform output_topic must not be empty",
-            ));
-        }
-        let output_topic = output_topic.unwrap_or_else(|| topic.clone());
-        let mode = Some(mode);
-        let mode = OperationMode::parse(mode).map_err(pyo3::exceptions::PyValueError::new_err)?;
+        let mode = OperationMode::parse(Some(mode)).map_err(crate::errors::value)?;
+        let spec = TransformSpec::new(
+            TopicSelector {
+                topic,
+                source,
+                instance,
+            },
+            multiplier,
+            offset,
+            fields,
+            unit,
+            units,
+            output_topic,
+            mode,
+        )
+        .map_err(crate::errors::value)?;
         self.operations
             .borrow_mut()
-            .push(OperationSpec::Transform(TransformSpec {
-                input: TopicSelector {
-                    topic,
-                    source,
-                    instance,
-                },
-                multiplier,
-                offset,
-                fields,
-                unit,
-                units,
-                output_topic,
-                mode,
-            }));
+            .push(OperationSpec::Transform(spec));
         Ok(())
     }
 
@@ -819,11 +537,6 @@ impl Delog {
         source: Option<String>,
         mode: &str,
     ) -> PyResult<()> {
-        if topics.is_empty()? {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "merge topics must not be empty",
-            ));
-        }
         let mut ordered_topics = Vec::with_capacity(topics.len()?);
         for item in topics.items()?.iter() {
             let item = item.cast::<PyTuple>()?;
@@ -835,46 +548,14 @@ impl Delog {
                     "merge topic '{topic}' fields must be a list of strings"
                 ))
             })?;
-            if fields.is_empty() {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "merge topic '{topic}' fields must not be empty"
-                )));
-            }
             ordered_topics.push((topic, fields));
         }
-        if !ordered_topics.iter().any(|(topic, _)| topic == &base_topic) {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "merge base_topic '{base_topic}' must be present in topics"
-            )));
-        }
-        let borrowed = ordered_topics
-            .iter()
-            .map(|(topic, fields)| {
-                (
-                    topic.as_str(),
-                    fields.iter().map(String::as_str).collect::<Vec<_>>(),
-                )
-            })
-            .collect::<Vec<_>>();
-        let flat_names =
-            merged_field_names(&borrowed).map_err(pyo3::exceptions::PyValueError::new_err)?;
-        let mut names = flat_names.into_iter();
-        let output_names = ordered_topics
-            .iter()
-            .map(|(_, fields)| names.by_ref().take(fields.len()).collect::<Vec<_>>())
-            .collect();
-        let mode = Some(mode);
-        let mode = OperationMode::parse(mode).map_err(pyo3::exceptions::PyValueError::new_err)?;
+        let mode = OperationMode::parse(Some(mode)).map_err(crate::errors::value)?;
+        let spec = MergeSpec::new(ordered_topics, base_topic, output_topic, source, mode)
+            .map_err(crate::errors::value)?;
         self.operations
             .borrow_mut()
-            .push(OperationSpec::Merge(MergeSpec {
-                topics: ordered_topics,
-                base_topic,
-                output_topic,
-                source,
-                output_names,
-                mode,
-            }));
+            .push(OperationSpec::Merge(spec));
         Ok(())
     }
 
@@ -890,29 +571,22 @@ impl Delog {
         instance: Option<u32>,
         mode: &str,
     ) -> PyResult<()> {
-        if matches!(&fields, Some(fields) if fields.is_empty()) {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "split_by fields must not be empty",
-            ));
-        }
-        let output_template = output_topic.unwrap_or_else(|| "{topic}/{value}".to_owned());
-        validate_split_template(&output_template)
-            .map_err(pyo3::exceptions::PyValueError::new_err)?;
-        let mode = Some(mode);
-        let mode = OperationMode::parse(mode).map_err(pyo3::exceptions::PyValueError::new_err)?;
+        let mode = OperationMode::parse(Some(mode)).map_err(crate::errors::value)?;
+        let spec = SplitBySpec::new(
+            TopicSelector {
+                topic,
+                source,
+                instance,
+            },
+            field,
+            fields,
+            output_topic,
+            mode,
+        )
+        .map_err(crate::errors::value)?;
         self.operations
             .borrow_mut()
-            .push(OperationSpec::SplitBy(SplitBySpec {
-                input: TopicSelector {
-                    topic,
-                    source,
-                    instance,
-                },
-                field,
-                fields,
-                output_template,
-                mode,
-            }));
+            .push(OperationSpec::SplitBy(spec));
         Ok(())
     }
 
@@ -920,6 +594,67 @@ impl Delog {
         CatalogPy {
             snapshot: Arc::clone(&self.snapshot),
         }
+    }
+
+    #[pyo3(signature = (*, window=None))]
+    fn plots(
+        &self,
+        py: Python<'_>,
+        window: Option<u64>,
+    ) -> PyResult<Vec<crate::control::plots::PlotPy>> {
+        crate::control::plots::list_plots(py, window, self.plot_context())
+    }
+
+    fn focused_plot(&self, py: Python<'_>) -> PyResult<Option<crate::control::plots::PlotPy>> {
+        crate::control::plots::focused_plot(py, self.plot_context())
+    }
+
+    #[getter]
+    fn workspace(&self) -> crate::control::workspace::WorkspacePy {
+        crate::control::workspace::WorkspacePy::new(self.plot_context())
+    }
+
+    #[getter]
+    fn windows(&self) -> crate::control::workspace::WindowsPy {
+        crate::control::workspace::WindowsPy
+    }
+
+    #[getter]
+    fn annotations(&self) -> crate::control::annotations::GlobalAnnotationsPy {
+        crate::control::annotations::GlobalAnnotationsPy
+    }
+
+    #[getter]
+    fn markers(&self) -> crate::control::markers::MarkerCollectionPy {
+        crate::control::markers::MarkerCollectionPy::new(
+            Rc::clone(&self.markers),
+            self.marker_owner(),
+            self.generation,
+        )
+    }
+
+    #[getter]
+    fn layouts(&self) -> crate::control::layouts::LayoutsPy {
+        crate::control::layouts::LayoutsPy
+    }
+
+    fn batch(&self) -> crate::control::BatchPy {
+        crate::control::BatchPy::new(Rc::clone(&self.batches))
+    }
+
+    #[getter]
+    fn vehicles(&self) -> crate::control::vehicles::VehicleCollectionPy {
+        crate::control::vehicles::VehicleCollectionPy::new(self.plot_context())
+    }
+
+    #[getter]
+    fn vehicle_profiles(&self) -> crate::control::vehicles::profiles::VehicleProfilesPy {
+        crate::control::vehicles::profiles::VehicleProfilesPy::new(self.plot_context())
+    }
+
+    #[getter]
+    fn playback(&self) -> crate::control::workspace::PlaybackPy {
+        crate::control::workspace::PlaybackPy
     }
 
     #[pyo3(signature = (name, *, source=None, instance=None))]
@@ -942,42 +677,13 @@ impl Delog {
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
         if let Some(field_name) = field {
-            let matches = find_fields(
-                &self.snapshot,
-                Some(topic),
-                Some(field_name),
-                source,
-                instance,
+            let field = resolve_field(&self.snapshot, topic, field_name, source, instance)
+                .map_err(crate::errors::lookup)?;
+            return Ok(
+                Bound::new(py, field_ref(Arc::clone(&self.snapshot), field))?
+                    .into_any()
+                    .unbind(),
             );
-            return match matches.len() {
-                1 => Ok(Bound::new(
-                    py,
-                    field_ref(
-                        Arc::clone(&self.snapshot),
-                        matches.into_iter().next().unwrap(),
-                    ),
-                )?
-                .into_any()
-                .unbind()),
-                0 => {
-                    let candidates =
-                        find_fields(&self.snapshot, Some(topic), None, source, instance);
-                    if candidates.is_empty() {
-                        Err(pyo3::exceptions::PyKeyError::new_err(format!(
-                            "field '{field_name}' not found in topic '{topic}'"
-                        )))
-                    } else {
-                        Err(pyo3::exceptions::PyKeyError::new_err(format!(
-                            "field '{field_name}' not found in topic '{topic}'; candidates: {}",
-                            candidate_field_paths(&candidates)
-                        )))
-                    }
-                }
-                _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "field '{field_name}' in topic '{topic}' is ambiguous; candidates: {}; pass source= or instance=",
-                    candidate_field_paths(&matches)
-                ))),
-            };
         }
         Ok(Bound::new(
             py,
@@ -1052,7 +758,7 @@ impl Delog {
             fields,
             output_topic,
         )
-        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        .map_err(crate::errors::value)?;
 
         #[pyclass(unsendable)]
         struct Decorator {
@@ -1205,7 +911,7 @@ impl Delog {
     }
 
     fn param(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
-        let script = crate::params::current_script().unwrap_or_else(|| self.script_name.clone());
+        let script = crate::context::current_script().unwrap_or_else(|| self.script_name.clone());
         let store = self.params.lock().unwrap();
         // Resolve against the declared spec (not a bare persisted value), so an
         // undeclared name raises and a slider's int typing is preserved.
@@ -1229,7 +935,7 @@ impl Delog {
             .lock()
             .unwrap()
             .declare(&self.script_name, self.generation, spec)
-            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
         value_to_py(py, &value, Some(&kind))
     }
 }
@@ -1325,7 +1031,7 @@ impl DelogField {
             src_t.as_slice()?,
             src_v.as_slice()?,
             &base_times,
-            AlignMode::parse(mode).map_err(pyo3::exceptions::PyValueError::new_err)?,
+            AlignmentMode::parse(mode).map_err(crate::errors::value)?,
         );
         Ok(out.into_pyarray(py).unbind())
     }
@@ -1334,8 +1040,8 @@ impl DelogField {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::operations::{OperationBuffer, OperationMode, OperationSpec};
-    use arrow::array::{ArrayRef, Float64Array, Int64Array};
+    use crate::staging::OperationBuffer;
+    use delog_api::operations::{OperationMode, OperationSpec};
 
     fn test_delog_with_markers(markers: MarkerBuffer) -> Delog {
         Delog::new(
@@ -1344,9 +1050,10 @@ mod tests {
             LiveTransformBuffer::default(),
             OperationBuffer::default(),
             markers,
+            crate::control::DeferredControlBuffer::default(),
             String::new(),
             0,
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         )
     }
 
@@ -1441,7 +1148,7 @@ delog.add_marker(44, "rgba", color="#11223344")
     }
 
     #[test]
-    fn add_marker_has_no_aliases_and_live_transforms_capture_its_buffer() {
+    fn marker_collection_is_not_a_legacy_method_alias_and_live_transforms_capture_its_buffer() {
         Python::attach(|py| {
             let markers = MarkerBuffer::default();
             let live = LiveTransformBuffer::default();
@@ -1453,15 +1160,17 @@ delog.add_marker(44, "rgba", color="#11223344")
                     Rc::clone(&live),
                     OperationBuffer::default(),
                     Rc::clone(&markers),
+                    crate::control::DeferredControlBuffer::default(),
                     String::new(),
                     0,
-                    crate::params::shared_empty(),
+                    delog_api::params::shared_empty(),
                 ),
             )
             .unwrap();
-            for alias in ["add_markers", "marker", "markers"] {
+            for alias in ["add_markers", "marker"] {
                 assert!(!delog.hasattr(alias).unwrap(), "unexpected alias: {alias}");
             }
+            assert!(delog.hasattr("markers").unwrap());
             let locals = PyDict::new(py);
             locals.set_item("delog", delog).unwrap();
             let code = std::ffi::CString::new(
@@ -1490,9 +1199,10 @@ def callback(batch):
                     LiveTransformBuffer::default(),
                     OperationBuffer::default(),
                     MarkerBuffer::default(),
+                    crate::control::DeferredControlBuffer::default(),
                     String::new(),
                     0,
-                    crate::params::shared_empty(),
+                    delog_api::params::shared_empty(),
                 ),
             )
             .unwrap();
@@ -1526,9 +1236,10 @@ def callback(batch):
                     LiveTransformBuffer::default(),
                     OperationBuffer::default(),
                     MarkerBuffer::default(),
+                    crate::control::DeferredControlBuffer::default(),
                     String::new(),
                     0,
-                    crate::params::shared_empty(),
+                    delog_api::params::shared_empty(),
                 ),
             )
             .unwrap();
@@ -1557,9 +1268,10 @@ def callback(batch):
                     LiveTransformBuffer::default(),
                     Rc::clone(&operations),
                     MarkerBuffer::default(),
+                    crate::control::DeferredControlBuffer::default(),
                     String::new(),
                     0,
-                    crate::params::shared_empty(),
+                    delog_api::params::shared_empty(),
                 ),
             )
             .unwrap();
@@ -1608,7 +1320,7 @@ delog.split_by("PARAM_VALUE", "param_id")
     }
 
     #[test]
-    fn invalid_declarative_calls_do_not_register_partial_specs() {
+    fn invalid_declarative_methods_do_not_register_partial_specs() {
         Python::attach(|py| {
             let operations = OperationBuffer::default();
             let delog = Bound::new(
@@ -1619,9 +1331,10 @@ delog.split_by("PARAM_VALUE", "param_id")
                     LiveTransformBuffer::default(),
                     Rc::clone(&operations),
                     MarkerBuffer::default(),
+                    crate::control::DeferredControlBuffer::default(),
                     String::new(),
                     0,
-                    crate::params::shared_empty(),
+                    delog_api::params::shared_empty(),
                 ),
             )
             .unwrap();
@@ -1652,7 +1365,7 @@ delog.split_by("PARAM_VALUE", "param_id")
     }
 
     #[test]
-    fn transform_rejects_explicit_empty_output_topic_without_registering() {
+    fn declarative_methods_reject_explicit_empty_output_topic_without_registering() {
         Python::attach(|py| {
             let operations = OperationBuffer::default();
             let delog = Bound::new(
@@ -1663,9 +1376,10 @@ delog.split_by("PARAM_VALUE", "param_id")
                     LiveTransformBuffer::default(),
                     Rc::clone(&operations),
                     MarkerBuffer::default(),
+                    crate::control::DeferredControlBuffer::default(),
                     String::new(),
                     0,
-                    crate::params::shared_empty(),
+                    delog_api::params::shared_empty(),
                 ),
             )
             .unwrap();
@@ -1703,310 +1417,5 @@ delog.split_by("PARAM_VALUE", "param_id")
         );
         assert_eq!(topic.fields.len(), 2);
         assert_eq!(topic.times.len(), 3);
-    }
-
-    fn reference_align(src_t: &[i64], src_v: &[f64], base: &[i64], mode: AlignMode) -> Vec<f64> {
-        let mut canonical: Vec<(i64, f64)> = Vec::new();
-        for (&time, &value) in src_t.iter().zip(src_v) {
-            if canonical
-                .last()
-                .is_some_and(|(last_time, _)| *last_time == time)
-            {
-                canonical.last_mut().unwrap().1 = value;
-            } else {
-                canonical.push((time, value));
-            }
-        }
-
-        base.iter()
-            .map(|&bt| match mode {
-                AlignMode::Prev => canonical
-                    .iter()
-                    .rev()
-                    .find(|(time, _)| *time <= bt)
-                    .map_or(f64::NAN, |(_, value)| *value),
-                AlignMode::Nearest => canonical
-                    .iter()
-                    .enumerate()
-                    .min_by_key(|(index, (time, _))| {
-                        ((i128::from(*time) - i128::from(bt)).abs(), *index)
-                    })
-                    .map_or(f64::NAN, |(_, (_, value))| *value),
-                AlignMode::Linear => {
-                    if let Some((_, value)) = canonical.iter().find(|(time, _)| *time == bt) {
-                        *value
-                    } else {
-                        let lower = canonical.iter().rev().find(|(time, _)| *time < bt);
-                        let upper = canonical.iter().find(|(time, _)| *time > bt);
-                        match (lower, upper) {
-                            (Some((t0, v0)), Some((t1, v1))) => {
-                                let fraction = (i128::from(bt) - i128::from(*t0)) as f64
-                                    / (i128::from(*t1) - i128::from(*t0)) as f64;
-                                v0 + fraction * (v1 - v0)
-                            }
-                            _ => f64::NAN,
-                        }
-                    }
-                }
-            })
-            .collect()
-    }
-
-    fn prop_assert_float_vectors_eq(
-        got: &[f64],
-        expected: &[f64],
-    ) -> Result<(), proptest::test_runner::TestCaseError> {
-        proptest::prop_assert_eq!(got.len(), expected.len());
-        for (&actual, &reference) in got.iter().zip(expected) {
-            if reference.is_nan() {
-                proptest::prop_assert!(actual.is_nan());
-            } else {
-                proptest::prop_assert_eq!(actual, reference);
-            }
-        }
-        Ok(())
-    }
-
-    proptest::proptest! {
-        #[test]
-        fn align_modes_match_linear_scan_reference(
-            src in proptest::collection::vec((-50i64..50, -1e6f64..1e6), 0..50),
-            base in proptest::collection::vec(proptest::num::i64::ANY, 0..50),
-        ) {
-            let mut src = src;
-            src.sort_by_key(|(time, _)| *time);
-            let src_t: Vec<i64> = src.iter().map(|(time, _)| *time).collect();
-            let src_v: Vec<f64> = src.iter().map(|(_, value)| *value).collect();
-
-            for mode in [AlignMode::Prev, AlignMode::Nearest, AlignMode::Linear] {
-                let got = align_values(&src_t, &src_v, &base, mode);
-                let expected = reference_align(&src_t, &src_v, &base, mode);
-                prop_assert_float_vectors_eq(&got, &expected)?;
-            }
-        }
-    }
-    use arrow::datatypes::DataType;
-    use delog_core::chunk::Chunk;
-    use delog_core::identity::IdentityRegistry;
-    use delog_core::schema::{FieldSchema, TopicSchema};
-    use delog_core::store::TopicStore;
-
-    #[test]
-    fn snapshot_lookup_finds_topics_and_fields() {
-        let mut id = IdentityRegistry::new();
-        let src = id.add_source("flight");
-        let imu = id.add_topic_instance(src, "IMU", 0).unwrap();
-        let gps = id.add_topic(src, "GPS").unwrap();
-        let accx = id.add_field(imu, "AccX").unwrap();
-        let accy = id.add_field(imu, "AccY").unwrap();
-        let alt = id.add_field(gps, "Alt").unwrap();
-
-        let imu_schema = Arc::new(
-            TopicSchema::new(
-                "IMU[0]",
-                [
-                    FieldSchema::new("AccX", DataType::Float64, Some("m/s^2"), 1.0).unwrap(),
-                    FieldSchema::new("AccY", DataType::Float64, Some("m/s^2"), 1.0).unwrap(),
-                ],
-            )
-            .unwrap(),
-        );
-        let gps_schema = Arc::new(
-            TopicSchema::new(
-                "GPS",
-                [FieldSchema::new("Alt", DataType::Float64, Some("m"), 1.0).unwrap()],
-            )
-            .unwrap(),
-        );
-        let imu_chunk = Arc::new(
-            Chunk::try_new(
-                Int64Array::from(vec![10]),
-                vec![
-                    Arc::new(Float64Array::from(vec![1.0])) as ArrayRef,
-                    Arc::new(Float64Array::from(vec![2.0])) as ArrayRef,
-                ],
-                &imu_schema,
-            )
-            .unwrap(),
-        );
-        let gps_chunk = Arc::new(
-            Chunk::try_new(
-                Int64Array::from(vec![10]),
-                vec![Arc::new(Float64Array::from(vec![100.0])) as ArrayRef],
-                &gps_schema,
-            )
-            .unwrap(),
-        );
-        let imu_store = Arc::new(TopicStore::from_chunks(imu_schema, [imu_chunk]).unwrap());
-        let gps_store = Arc::new(TopicStore::from_chunks(gps_schema, [gps_chunk]).unwrap());
-        let snap =
-            StoreSnapshot::from_registry(&id, [(imu, imu_store), (gps, gps_store)], 0).unwrap();
-
-        let topics = super::find_topics(&snap, Some("IMU"), None, Some(0));
-        assert_eq!(topics.len(), 1);
-        assert_eq!(topics[0].topic_id, imu);
-        assert_eq!(topics[0].source_label, "flight");
-        assert_eq!(topics[0].topic_name, "IMU[0]");
-        assert_eq!(topics[0].base_name, "IMU");
-        assert_eq!(topics[0].instance, Some(0));
-
-        let fields = super::find_fields(&snap, Some("IMU"), Some("AccX"), None, Some(0));
-        assert_eq!(fields.len(), 1);
-        assert_eq!(fields[0].field_id, accx);
-        assert_eq!(fields[0].field_name, "AccX");
-        assert_eq!(fields[0].unit.as_deref(), Some("m/s^2"));
-
-        let all_fields = super::find_fields(&snap, Some("IMU"), None, None, Some(0));
-        let ids: Vec<_> = all_fields.iter().map(|m| m.field_id).collect();
-        assert_eq!(ids, vec![accx, accy]);
-
-        let gps_fields = super::find_fields(&snap, Some("GPS"), Some("Alt"), Some("flight"), None);
-        assert_eq!(gps_fields[0].field_id, alt);
-    }
-
-    #[test]
-    fn topic_ref_field_lookup_keeps_exact_topic_identity() {
-        let mut id = IdentityRegistry::new();
-        let src = id.add_source("flight");
-        let gps = id.add_topic(src, "GPS").unwrap();
-        let gps0 = id.add_topic_instance(src, "GPS", 0).unwrap();
-        let lat = id.add_field(gps, "Lat").unwrap();
-        let fix = id.add_field(gps0, "Fix").unwrap();
-
-        let gps_schema = Arc::new(
-            TopicSchema::new(
-                "GPS",
-                [FieldSchema::new("Lat", DataType::Float64, Some("deg"), 1.0).unwrap()],
-            )
-            .unwrap(),
-        );
-        let gps0_schema = Arc::new(
-            TopicSchema::new(
-                "GPS[0]",
-                [FieldSchema::new("Fix", DataType::Float64, None::<String>, 1.0).unwrap()],
-            )
-            .unwrap(),
-        );
-        let gps_chunk = Arc::new(
-            Chunk::try_new(
-                Int64Array::from(vec![10]),
-                vec![Arc::new(Float64Array::from(vec![1.0])) as ArrayRef],
-                &gps_schema,
-            )
-            .unwrap(),
-        );
-        let gps0_chunk = Arc::new(
-            Chunk::try_new(
-                Int64Array::from(vec![10]),
-                vec![Arc::new(Float64Array::from(vec![2.0])) as ArrayRef],
-                &gps0_schema,
-            )
-            .unwrap(),
-        );
-        let gps_store = Arc::new(TopicStore::from_chunks(gps_schema, [gps_chunk]).unwrap());
-        let gps0_store = Arc::new(TopicStore::from_chunks(gps0_schema, [gps0_chunk]).unwrap());
-        let snap = Arc::new(
-            StoreSnapshot::from_registry(&id, [(gps, gps_store), (gps0, gps0_store)], 0).unwrap(),
-        );
-
-        let gps_ref = TopicRefPy {
-            snapshot: Arc::clone(&snap),
-            topic_id: gps,
-            source: "flight".to_owned(),
-            name: "GPS".to_owned(),
-            instance: None,
-            path: "flight/GPS".to_owned(),
-        };
-
-        let lat_ref = gps_ref.field("Lat").unwrap();
-        assert_eq!(lat_ref.field_id, lat);
-        assert!(gps_ref.field("Fix").is_err());
-        assert_ne!(lat_ref.field_id, fix);
-    }
-
-    #[test]
-    fn materialize_field_concatenates_chunks_in_time_order() {
-        let mut id = IdentityRegistry::new();
-        let src = id.add_source("flight");
-        let topic = id.add_topic(src, "BARO").unwrap();
-        let alt = id.add_field(topic, "Alt").unwrap();
-        let schema = Arc::new(
-            TopicSchema::new(
-                "BARO",
-                [FieldSchema::new("Alt", DataType::Float64, Some("m"), 1.0).unwrap()],
-            )
-            .unwrap(),
-        );
-        let c1: Vec<ArrayRef> = vec![Arc::new(Float64Array::from(vec![1.0, 2.0]))];
-        let c2: Vec<ArrayRef> = vec![Arc::new(Float64Array::from(vec![3.0]))];
-        let chunk1 = Arc::new(Chunk::try_new(Int64Array::from(vec![10, 20]), c1, &schema).unwrap());
-        let chunk2 = Arc::new(Chunk::try_new(Int64Array::from(vec![30]), c2, &schema).unwrap());
-        let store = Arc::new(TopicStore::from_chunks(schema, [chunk1, chunk2]).unwrap());
-        let snap = StoreSnapshot::from_registry(&id, [(topic, store)], 0).unwrap();
-
-        let (t, v, s) = materialize_field(&snap, alt).unwrap();
-        assert_eq!(t, vec![10, 20, 30]);
-        assert_eq!(v, vec![1.0, 2.0, 3.0]);
-        assert_eq!(s, None);
-    }
-
-    #[test]
-    fn materialize_field_uses_effective_times_by_default_and_can_use_original_times() {
-        let mut id = IdentityRegistry::new();
-        let src = id.add_source("flight");
-        id.set_source_offset_us(src, -1_784_120_623_158_000)
-            .unwrap();
-        let topic = id.add_topic(src, "BARO").unwrap();
-        let alt = id.add_field(topic, "Alt").unwrap();
-        let schema = Arc::new(
-            TopicSchema::new(
-                "BARO",
-                [FieldSchema::new("Alt", DataType::Float64, Some("m"), 1.0).unwrap()],
-            )
-            .unwrap(),
-        );
-        let columns: Vec<ArrayRef> = vec![Arc::new(Float64Array::from(vec![1.0]))];
-        let chunk = Arc::new(
-            Chunk::try_new(
-                Int64Array::from(vec![1_784_120_700_000_000]),
-                columns,
-                &schema,
-            )
-            .unwrap(),
-        );
-        let store = Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap());
-        let snap = StoreSnapshot::from_registry(&id, [(topic, store)], 0).unwrap();
-
-        assert_eq!(materialize_field(&snap, alt).unwrap().0, vec![76_842_000]);
-        let original = with_timestamp_mode(ScriptTimestampMode::Original, || {
-            materialize_field(&snap, alt).unwrap().0
-        });
-        assert_eq!(original, vec![1_784_120_700_000_000]);
-    }
-
-    #[test]
-    fn materialize_field_extracts_strings_for_utf8_columns() {
-        use arrow::array::StringArray;
-        let mut id = IdentityRegistry::new();
-        let src = id.add_source("live");
-        let topic = id.add_topic(src, "NAMED_VALUE_FLOAT").unwrap();
-        let name = id.add_field(topic, "name").unwrap();
-        let schema = Arc::new(
-            TopicSchema::new(
-                "NAMED_VALUE_FLOAT",
-                [FieldSchema::new("name", DataType::Utf8, None::<String>, 1.0).unwrap()],
-            )
-            .unwrap(),
-        );
-        let cols: Vec<ArrayRef> = vec![Arc::new(StringArray::from(vec![Some("airspd"), None]))];
-        let chunk =
-            Arc::new(Chunk::try_new(Int64Array::from(vec![10, 20]), cols, &schema).unwrap());
-        let store = Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap());
-        let snap = StoreSnapshot::from_registry(&id, [(topic, store)], 0).unwrap();
-
-        let (t, v, s) = materialize_field(&snap, name).unwrap();
-        assert_eq!(t, vec![10, 20]);
-        assert!(v.iter().all(|x| x.is_nan()));
-        assert_eq!(s, Some(vec!["airspd".to_owned(), String::new()]));
     }
 }

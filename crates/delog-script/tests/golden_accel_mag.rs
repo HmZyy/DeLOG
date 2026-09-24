@@ -4,6 +4,8 @@ use std::sync::Arc;
 
 use arrow::array::{ArrayRef, Float64Array, Int64Array};
 use arrow::datatypes::DataType;
+use delog_api::control::{ControlRequest, GenerationRequest, MarkerRequest};
+use delog_api::markers::PendingMarker;
 use delog_core::chunk::Chunk;
 use delog_core::identity::IdentityRegistry;
 use delog_core::ingest::ingest_channel;
@@ -12,7 +14,7 @@ use delog_core::metrics::MetricsRegistry;
 use delog_core::schema::{FieldSchema, TopicSchema};
 use delog_core::snapshot::{DataStore, StoreSnapshot};
 use delog_core::store::TopicStore;
-use delog_script::{MarkerCommand, PendingMarker, ScriptCommand, ScriptEngine, ScriptEvent};
+use delog_script::{ScriptCommand, ScriptEngine, ScriptEvent};
 
 static SCRIPT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -89,6 +91,44 @@ fn read_store_with_baro_gps() -> Arc<DataStore> {
     Arc::new(DataStore::from_snapshot(snap))
 }
 
+fn read_store_with_empty_topic() -> Arc<DataStore> {
+    let mut id = IdentityRegistry::new();
+    let src = id.add_source("flight");
+    let populated = id.add_topic(src, "BARO").unwrap();
+    let empty = id.add_topic(src, "STATUS").unwrap();
+    id.add_field(populated, "Alt").unwrap();
+    id.add_field(empty, "Mode").unwrap();
+
+    let populated_schema = Arc::new(
+        TopicSchema::new(
+            "BARO",
+            [FieldSchema::new("Alt", DataType::Float64, Some("m"), 1.0).unwrap()],
+        )
+        .unwrap(),
+    );
+    let empty_schema = Arc::new(
+        TopicSchema::new(
+            "STATUS",
+            [FieldSchema::new("Mode", DataType::Utf8, None::<String>, 1.0).unwrap()],
+        )
+        .unwrap(),
+    );
+    let chunk = Arc::new(
+        Chunk::try_new(
+            Int64Array::from(vec![10]),
+            vec![Arc::new(Float64Array::from(vec![100.0])) as ArrayRef],
+            &populated_schema,
+        )
+        .unwrap(),
+    );
+    let populated_store = Arc::new(TopicStore::from_chunks(populated_schema, [chunk]).unwrap());
+    let empty_store = Arc::new(TopicStore::new(empty_schema));
+    let snapshot =
+        StoreSnapshot::from_registry(&id, [(populated, populated_store), (empty, empty_store)], 0)
+            .unwrap();
+    Arc::new(DataStore::from_snapshot(snapshot))
+}
+
 #[test]
 fn accel_magnitude_script_emits_expected_values() {
     let _guard = SCRIPT_TEST_LOCK.lock().unwrap();
@@ -101,7 +141,7 @@ fn accel_magnitude_script_emits_expected_values() {
         read_store(),
         sender,
         Arc::new(MetricsRegistry::new()),
-        delog_script::params::shared_empty(),
+        delog_api::params::shared_empty(),
     );
     let script = r#"
 import numpy as np
@@ -185,7 +225,7 @@ fn marker_command_is_exported_and_delivered_before_done() {
         read_store(),
         sender.clone(),
         Arc::new(MetricsRegistry::new()),
-        delog_script::params::shared_empty(),
+        delog_api::params::shared_empty(),
     );
 
     engine
@@ -200,20 +240,26 @@ fn marker_command_is_exported_and_delivered_before_done() {
     loop {
         for event in engine.drain_events() {
             match event {
-                ScriptEvent::Markers(command) => commands.push(command),
+                ScriptEvent::Control(batch) => commands.extend(batch),
                 ScriptEvent::Done => {
                     assert_eq!(
                         commands,
-                        vec![MarkerCommand::Replace {
-                            owner: "analysis".into(),
-                            generation: 0,
-                            markers: vec![PendingMarker {
-                                time_us: 123,
-                                label: "golden".into(),
-                                color: None,
-                                note: String::new(),
-                            }],
-                        }]
+                        vec![ControlRequest::Batch(vec![
+                            ControlRequest::Markers(MarkerRequest::Append {
+                                owner: "analysis".into(),
+                                generation: 1,
+                                markers: vec![PendingMarker {
+                                    time_us: 123,
+                                    label: "golden".into(),
+                                    color: None,
+                                    note: String::new(),
+                                }],
+                            }),
+                            ControlRequest::Generation(GenerationRequest::Commit {
+                                owner: "analysis".into(),
+                                generation: 1,
+                            }),
+                        ])]
                     );
                     drop(engine);
                     drop(sender);
@@ -284,7 +330,7 @@ fn discovery_refs_expose_paths_and_metadata() {
         read_store(),
         sender.clone(),
         Arc::new(MetricsRegistry::new()),
-        delog_script::params::shared_empty(),
+        delog_api::params::shared_empty(),
     );
     let output = run_script_capture_output(
         &engine,
@@ -326,7 +372,7 @@ fn topic_ref_reads_table_columns() {
         read_store(),
         sender.clone(),
         Arc::new(MetricsRegistry::new()),
-        delog_script::params::shared_empty(),
+        delog_api::params::shared_empty(),
     );
     let output = run_script_capture_output(
         &engine,
@@ -355,6 +401,42 @@ print(float(accx.v[0]))
 }
 
 #[test]
+fn python_reads_schema_backed_empty_topics_as_empty_arrays() {
+    let _guard = SCRIPT_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let ingestor = Ingestor::new(NullObserver);
+    let (sender, receiver) = ingest_channel();
+    let ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
+
+    let engine = ScriptEngine::spawn(
+        read_store_with_empty_topic(),
+        sender.clone(),
+        Arc::new(MetricsRegistry::new()),
+        delog_api::params::shared_empty(),
+    );
+    let output = run_script_capture_output(
+        &engine,
+        "empty_topic_read",
+        r#"
+field = delog.topic("STATUS").field("Mode").read()
+table = delog.topic("STATUS").read()
+print(len(field.t), len(field.v), len(field.s))
+print(list(table.fields()), len(table.t), len(table.Mode))
+"#,
+    );
+
+    assert_eq!(
+        output.lines().collect::<Vec<_>>(),
+        ["0 0 0", "['Mode'] 0 0"]
+    );
+
+    drop(engine);
+    drop(sender);
+    let _ = ingest_thread.join();
+}
+
+#[test]
 fn field_align_supports_modes_base_forms_and_validation() {
     let _guard = SCRIPT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let ingestor = Ingestor::new(NullObserver);
@@ -365,7 +447,7 @@ fn field_align_supports_modes_base_forms_and_validation() {
         read_store_with_baro_gps(),
         sender.clone(),
         Arc::new(MetricsRegistry::new()),
-        delog_script::params::shared_empty(),
+        delog_api::params::shared_empty(),
     );
     let output = run_script_capture_output(
         &engine,
@@ -430,7 +512,7 @@ fn emit_helper_publishes_derived_topic() {
         read_store(),
         sender.clone(),
         Arc::new(MetricsRegistry::new()),
-        delog_script::params::shared_empty(),
+        delog_api::params::shared_empty(),
     );
     engine
         .send(ScriptCommand::RunScript {
@@ -486,7 +568,7 @@ fn discovery_missing_lookup_errors_include_candidates() {
         read_store(),
         sender.clone(),
         Arc::new(MetricsRegistry::new()),
-        delog_script::params::shared_empty(),
+        delog_api::params::shared_empty(),
     );
 
     let missing_topic = run_script_capture_error(

@@ -1,16 +1,17 @@
 use std::collections::HashMap;
 
-use delog_core::identity::SourceId;
-use delog_core::snapshot::StoreSnapshot;
-
-use crate::api::{
-    PendingColumn, PendingField, PendingTopic, TopicMatch, find_fields_in_topic, find_topics,
-    materialize_field,
+use crate::catalog::{
+    TopicMatch, candidate_topic_paths, find_fields_in_topic, find_topics, materialize_field,
 };
 use crate::operations::{
     MergeSpec, OperationMode, OperationSpec, SplitBySpec, TopicRegistry, TopicSelector,
     TransformSpec,
 };
+use crate::timestamps::TimestampMode;
+use crate::{Error, Result};
+use delog_core::derived::{PendingColumn, PendingField, PendingTopic};
+use delog_core::identity::SourceId;
+use delog_core::snapshot::StoreSnapshot;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StreamKey {
@@ -95,15 +96,7 @@ struct MaterializedTopic {
     fields: Vec<(String, PendingColumn, Option<String>)>,
 }
 
-fn candidate_topic_paths(matches: &[TopicMatch]) -> String {
-    matches
-        .iter()
-        .map(|candidate| format!("{}/{}", candidate.source_label, candidate.topic_name))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn missing_topic_error(snapshot: &StoreSnapshot, selector: &TopicSelector) -> String {
+fn missing_topic_error(snapshot: &StoreSnapshot, selector: &TopicSelector) -> Error {
     let candidates = find_topics(
         snapshot,
         None,
@@ -111,13 +104,13 @@ fn missing_topic_error(snapshot: &StoreSnapshot, selector: &TopicSelector) -> St
         selector.instance,
     );
     if candidates.is_empty() {
-        format!("topic '{}' not found", selector.topic)
+        Error::not_found(format!("topic '{}' not found", selector.topic))
     } else {
-        format!(
+        Error::not_found(format!(
             "topic '{}' not found; candidates: {}",
             selector.topic,
             candidate_topic_paths(&candidates)
-        )
+        ))
     }
 }
 
@@ -126,7 +119,7 @@ fn require_usable_schema(
     topic: TopicMatch,
     selector: &TopicSelector,
     mode: OperationMode,
-) -> Result<Option<TopicMatch>, String> {
+) -> Result<Option<TopicMatch>> {
     if snapshot.topic_store(topic.topic_id).is_some() {
         Ok(Some(topic))
     } else if mode == OperationMode::Snapshot {
@@ -140,7 +133,7 @@ fn resolve_topic(
     snapshot: &StoreSnapshot,
     selector: &TopicSelector,
     mode: OperationMode,
-) -> Result<Option<TopicMatch>, String> {
+) -> Result<Option<TopicMatch>> {
     let matches = find_topics(
         snapshot,
         Some(&selector.topic),
@@ -151,11 +144,11 @@ fn resolve_topic(
         1 => Ok(matches.into_iter().next()),
         0 if mode == OperationMode::Snapshot => Err(missing_topic_error(snapshot, selector)),
         0 => Ok(None),
-        _ => Err(format!(
+        _ => Err(Error::ambiguous(format!(
             "topic '{}' is ambiguous; candidates: {}; pass source= or instance=",
             selector.topic,
             candidate_topic_paths(&matches)
-        )),
+        ))),
     }
 }
 
@@ -163,17 +156,18 @@ fn materialize_topic(
     snapshot: &StoreSnapshot,
     topic: TopicMatch,
     requested: Option<&[String]>,
-) -> Result<MaterializedTopic, String> {
-    let store = snapshot
-        .topic_store(topic.topic_id)
-        .ok_or_else(|| format!("topic '{}' has no usable schema", topic.topic_name))?;
+    timestamp_mode: TimestampMode,
+) -> Result<MaterializedTopic> {
+    let store = snapshot.topic_store(topic.topic_id).ok_or_else(|| {
+        Error::invalid_input(format!("topic '{}' has no usable schema", topic.topic_name))
+    })?;
     let available = find_fields_in_topic(snapshot, topic.topic_id, None);
     for field in &available {
         if store.schema.field_by_name(&field.field_name).is_none() {
-            return Err(format!(
+            return Err(Error::invalid_input(format!(
                 "topic '{}' live identity field '{}' is missing from schema",
                 topic.topic_name, field.field_name
-            ));
+            )));
         }
     }
     let resolved = store
@@ -185,22 +179,22 @@ fn materialize_topic(
                 .iter()
                 .find(|field| field.field_name == schema_field.name)
                 .ok_or_else(|| {
-                    format!(
+                    Error::invalid_input(format!(
                         "topic '{}' schema field '{}' has no live identity field",
                         topic.topic_name, schema_field.name
-                    )
+                    ))
                 })?;
             Ok((field.clone(), schema_field))
         })
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect::<Result<Vec<_>>>()?;
     let selected = match requested {
         Some(requested) => {
             for name in requested {
                 if store.schema.field_by_name(name).is_none() {
-                    return Err(format!(
+                    return Err(Error::not_found(format!(
                         "field '{name}' not found in topic '{}'",
                         topic.topic_name
-                    ));
+                    )));
                 }
             }
             requested
@@ -211,10 +205,13 @@ fn materialize_topic(
                         .find(|(_, schema_field)| schema_field.name == *name)
                         .cloned()
                         .ok_or_else(|| {
-                            format!("field '{name}' not found in topic '{}'", topic.topic_name)
+                            Error::not_found(format!(
+                                "field '{name}' not found in topic '{}'",
+                                topic.topic_name
+                            ))
                         })
                 })
-                .collect::<Result<Vec<_>, String>>()?
+                .collect::<Result<Vec<_>>>()?
         }
         None => resolved,
     };
@@ -241,13 +238,16 @@ fn materialize_topic(
     let mut times = None;
     let mut fields = Vec::with_capacity(selected.len());
     for (field, schema_field) in selected {
-        let (field_times, values, strings) = materialize_field(snapshot, field.field_id)?;
+        let materialized = materialize_field(snapshot, field.field_id, timestamp_mode)?;
+        let field_times = materialized.times_us;
+        let values = materialized.values;
+        let strings = materialized.strings;
         match &times {
             Some(existing) if existing != &field_times => {
-                return Err(format!(
+                return Err(Error::invalid_input(format!(
                     "topic '{}' field '{}' does not share the topic timeline",
                     topic.topic_name, field.field_name
-                ));
+                )));
             }
             None => times = Some(field_times),
             _ => {}
@@ -290,10 +290,12 @@ pub(crate) fn pending_topic(
     name: String,
     times: Vec<i64>,
     fields: impl IntoIterator<Item = (String, PendingColumn, Option<String>)>,
-) -> Result<PendingTopic, String> {
+) -> Result<PendingTopic> {
     let mut topic = PendingTopic::new(name, times);
     for (name, values, unit) in fields {
-        topic.add_field(PendingField { name, values, unit })?;
+        topic
+            .add_field(PendingField { name, values, unit })
+            .map_err(Error::invalid_input)?;
     }
     Ok(topic)
 }
@@ -302,7 +304,8 @@ fn execute_transform(
     snapshot: &StoreSnapshot,
     spec: &TransformSpec,
     out: &mut SnapshotOperationOutput,
-) -> Result<(), String> {
+    timestamp_mode: TimestampMode,
+) -> Result<()> {
     let Some(topic_match) = resolve_topic(snapshot, &spec.input, spec.mode)? else {
         return Ok(());
     };
@@ -311,14 +314,14 @@ fn execute_transform(
         return Ok(());
     };
     // Materialize all fields because unselected fields are pass-through columns.
-    let mut topic = materialize_topic(snapshot, topic_match, None)?;
+    let mut topic = materialize_topic(snapshot, topic_match, None, timestamp_mode)?;
     if let Some(requested) = &spec.fields {
         for name in requested {
             if !topic.fields.iter().any(|(field, _, _)| field == name) {
-                return Err(format!(
+                return Err(Error::not_found(format!(
                     "field '{name}' not found in topic '{}'",
                     spec.input.topic
-                ));
+                )));
             }
         }
     }
@@ -380,7 +383,8 @@ fn execute_split(
     snapshot: &StoreSnapshot,
     spec: &SplitBySpec,
     out: &mut SnapshotOperationOutput,
-) -> Result<(), String> {
+    timestamp_mode: TimestampMode,
+) -> Result<()> {
     let Some(topic_match) = resolve_topic(snapshot, &spec.input, spec.mode)? else {
         return Ok(());
     };
@@ -388,25 +392,25 @@ fn execute_split(
     else {
         return Ok(());
     };
-    let topic = materialize_topic(snapshot, topic_match, None)?;
+    let topic = materialize_topic(snapshot, topic_match, None, timestamp_mode)?;
     let split_column = topic
         .fields
         .iter()
         .find(|(name, _, _)| name == &spec.field)
         .ok_or_else(|| {
-            format!(
+            Error::not_found(format!(
                 "field '{}' not found in topic '{}'",
                 spec.field, spec.input.topic
-            )
+            ))
         })?;
     let selected: Vec<String> = match &spec.fields {
         Some(fields) => {
             for name in fields {
                 if !topic.fields.iter().any(|(field, _, _)| field == name) {
-                    return Err(format!(
+                    return Err(Error::not_found(format!(
                         "field '{name}' not found in topic '{}'",
                         spec.input.topic
-                    ));
+                    )));
                 }
             }
             fields
@@ -517,7 +521,8 @@ fn execute_merge(
     operation_index: usize,
     spec: &MergeSpec,
     out: &mut SnapshotOperationOutput,
-) -> Result<(), String> {
+    timestamp_mode: TimestampMode,
+) -> Result<()> {
     if spec.output_names.len() != spec.topics.len()
         || spec
             .output_names
@@ -525,7 +530,9 @@ fn execute_merge(
             .zip(&spec.topics)
             .any(|(names, (_, fields))| names.len() != fields.len())
     {
-        return Err("merge output field names do not match selected fields".to_owned());
+        return Err(Error::invalid_input(
+            "merge output field names do not match selected fields",
+        ));
     }
 
     let mut inputs = Vec::with_capacity(spec.topics.len());
@@ -547,7 +554,7 @@ fn execute_merge(
             inputs.push(None);
             continue;
         };
-        let topic = materialize_topic(snapshot, topic_match, Some(fields))?;
+        let topic = materialize_topic(snapshot, topic_match, Some(fields), timestamp_mode)?;
         record_watermark(out, &topic);
         inputs.push(Some(topic));
     }
@@ -557,10 +564,10 @@ fn execute_merge(
         .iter()
         .position(|(topic, _)| topic == &spec.base_topic)
         .ok_or_else(|| {
-            format!(
+            Error::invalid_input(format!(
                 "merge base_topic '{}' must be present in topics",
                 spec.base_topic
-            )
+            ))
         })?;
     if spec.mode.wants_live() {
         for (index, topic) in inputs.iter().enumerate() {
@@ -587,7 +594,9 @@ fn execute_merge(
         .collect::<Vec<_>>();
     let source = inputs[base_index].key.source;
     if inputs.iter().any(|topic| topic.key.source != source) {
-        return Err("merge inputs resolved to different sources".to_owned());
+        return Err(Error::invalid_input(
+            "merge inputs resolved to different sources",
+        ));
     }
     if !spec.mode.wants_snapshot() || inputs[base_index].times.is_empty() {
         return Ok(());
@@ -603,7 +612,7 @@ fn execute_merge(
                 .get(input_index)
                 .and_then(|names| names.get(field_index))
                 .ok_or_else(|| {
-                    "merge output field names do not match selected fields".to_owned()
+                    Error::invalid_input("merge output field names do not match selected fields")
                 })?;
             let values = match &indices {
                 Some(indices) => align_column(column, indices),
@@ -623,15 +632,29 @@ fn execute_merge(
 pub fn prepare_snapshot(
     snapshot: &StoreSnapshot,
     specs: &[OperationSpec],
-) -> Result<SnapshotOperationOutput, String> {
+) -> Result<SnapshotOperationOutput> {
+    prepare_snapshot_with_timestamp_mode(snapshot, specs, TimestampMode::Effective)
+}
+
+pub fn prepare_snapshot_with_timestamp_mode(
+    snapshot: &StoreSnapshot,
+    specs: &[OperationSpec],
+    timestamp_mode: TimestampMode,
+) -> Result<SnapshotOperationOutput> {
     let mut out = SnapshotOperationOutput::default();
     out.registry.preclaim_static(specs)?;
     for (index, spec) in specs.iter().enumerate() {
         let first_topic = out.topics.len();
         match spec {
-            OperationSpec::Transform(spec) => execute_transform(snapshot, spec, &mut out)?,
-            OperationSpec::SplitBy(spec) => execute_split(snapshot, spec, &mut out)?,
-            OperationSpec::Merge(spec) => execute_merge(snapshot, index, spec, &mut out)?,
+            OperationSpec::Transform(spec) => {
+                execute_transform(snapshot, spec, &mut out, timestamp_mode)?
+            }
+            OperationSpec::SplitBy(spec) => {
+                execute_split(snapshot, spec, &mut out, timestamp_mode)?
+            }
+            OperationSpec::Merge(spec) => {
+                execute_merge(snapshot, index, spec, &mut out, timestamp_mode)?
+            }
         }
         let claims = out.topics[first_topic..]
             .iter()
@@ -668,12 +691,13 @@ mod tests {
     use delog_core::snapshot::StoreSnapshot;
     use delog_core::store::TopicStore;
 
-    use crate::api::{PendingColumn, PendingTopic};
     use crate::operations::{
         MergeSpec, OperationMode, OperationSpec, SplitBySpec, TopicSelector, TransformSpec,
     };
+    use crate::timestamps::TimestampMode;
+    use delog_core::derived::{PendingColumn, PendingTopic};
 
-    use super::{StreamKey, prepare_snapshot};
+    use super::{StreamKey, prepare_snapshot, prepare_snapshot_with_timestamp_mode};
 
     fn topic_store(
         name: &str,
@@ -857,6 +881,49 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_timestamp_mode_preserves_original_and_effective_times() {
+        let mut ids = IdentityRegistry::new();
+        let source = ids.add_source("flight");
+        ids.set_source_offset_us(source, 250).unwrap();
+        let attitude = ids.add_topic(source, "ATTITUDE").unwrap();
+        ids.add_field(attitude, "roll").unwrap();
+        let store = topic_store(
+            "ATTITUDE",
+            vec![FieldSchema::new("roll", DataType::Float64, None::<String>, 1.0).unwrap()],
+            vec![100],
+            vec![Arc::new(Float64Array::from(vec![1.0]))],
+        );
+        let snapshot = StoreSnapshot::from_registry(&ids, [(attitude, store)], 0).unwrap();
+        let spec = OperationSpec::Transform(TransformSpec {
+            input: TopicSelector {
+                topic: "ATTITUDE".into(),
+                source: None,
+                instance: None,
+            },
+            multiplier: 1.0,
+            offset: 0.0,
+            fields: None,
+            unit: None,
+            units: HashMap::new(),
+            output_topic: "OUT".into(),
+            mode: OperationMode::Snapshot,
+        });
+
+        let effective = prepare_snapshot_with_timestamp_mode(
+            &snapshot,
+            std::slice::from_ref(&spec),
+            TimestampMode::Effective,
+        )
+        .unwrap();
+        let original =
+            prepare_snapshot_with_timestamp_mode(&snapshot, &[spec], TimestampMode::Original)
+                .unwrap();
+
+        assert_eq!(effective.topics[0].times, vec![350]);
+        assert_eq!(original.topics[0].times, vec![100]);
+    }
+
+    #[test]
     fn snapshot_rejects_two_operations_owning_one_output_topic() {
         let specs = vec![
             OperationSpec::Transform(TransformSpec {
@@ -887,9 +954,12 @@ mod tests {
             Ok(_) => panic!("duplicate ownership unexpectedly succeeded"),
             Err(error) => error,
         };
-        assert!(error.contains("output topic 'COLLISION'"), "{error}");
-        assert!(error.contains("operation 0"), "{error}");
-        assert!(error.contains("operation 1"), "{error}");
+        assert!(
+            error.to_string().contains("output topic 'COLLISION'"),
+            "{error}"
+        );
+        assert!(error.to_string().contains("operation 0"), "{error}");
+        assert!(error.to_string().contains("operation 1"), "{error}");
     }
 
     #[test]
@@ -926,7 +996,10 @@ mod tests {
             Ok(_) => panic!("partial dynamic ownership unexpectedly succeeded"),
             Err(error) => error,
         };
-        assert!(error.contains("PARAM_VALUE/MIN_SPEED"), "{error}");
+        assert!(
+            error.to_string().contains("PARAM_VALUE/MIN_SPEED"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1327,16 +1400,26 @@ mod tests {
         let snap =
             StoreSnapshot::from_registry(&ids, [(empty, Arc::new(TopicStore::new(schema)))], 0)
                 .unwrap();
-        let topic_match = crate::api::find_topics(&snap, Some("EMPTY"), None, None)
+        let topic_match = crate::catalog::find_topics(&snap, Some("EMPTY"), None, None)
             .into_iter()
             .next()
             .unwrap();
 
-        let topic = super::materialize_topic(&snap, topic_match.clone(), None).unwrap();
+        let topic =
+            super::materialize_topic(&snap, topic_match.clone(), None, TimestampMode::Effective)
+                .unwrap();
         assert!(topic.times.is_empty());
         assert!(matches!(&topic.fields[0].1, PendingColumn::F64(values) if values.is_empty()));
         assert!(matches!(&topic.fields[1].1, PendingColumn::Utf8(values) if values.is_empty()));
-        assert!(super::materialize_topic(&snap, topic_match, Some(&["missing".into()])).is_err());
+        assert!(
+            super::materialize_topic(
+                &snap,
+                topic_match,
+                Some(&["missing".into()]),
+                TimestampMode::Effective,
+            )
+            .is_err()
+        );
 
         let spec = OperationSpec::Transform(TransformSpec {
             input: TopicSelector {
@@ -1432,16 +1515,20 @@ mod tests {
         let snap =
             StoreSnapshot::from_registry(&ids, [(topic, Arc::new(TopicStore::new(schema)))], 0)
                 .unwrap();
-        let topic_match = crate::api::find_topics(&snap, Some("MISMATCH"), None, None)
+        let topic_match = crate::catalog::find_topics(&snap, Some("MISMATCH"), None, None)
             .into_iter()
             .next()
             .unwrap();
 
-        let result =
-            super::materialize_topic(&snap, topic_match, Some(&["schema_only".to_owned()]));
+        let result = super::materialize_topic(
+            &snap,
+            topic_match,
+            Some(&["schema_only".to_owned()]),
+            TimestampMode::Effective,
+        );
         match result {
             Err(error) => assert_eq!(
-                error,
+                error.to_string(),
                 "topic 'MISMATCH' schema field 'schema_only' has no live identity field"
             ),
             Ok(_) => panic!("schema/identity disagreement was silently accepted"),
@@ -1465,15 +1552,15 @@ mod tests {
         let snap =
             StoreSnapshot::from_registry(&ids, [(topic, Arc::new(TopicStore::new(schema)))], 0)
                 .unwrap();
-        let topic_match = crate::api::find_topics(&snap, Some("MISMATCH"), None, None)
+        let topic_match = crate::catalog::find_topics(&snap, Some("MISMATCH"), None, None)
             .into_iter()
             .next()
             .unwrap();
 
-        let result = super::materialize_topic(&snap, topic_match, None);
+        let result = super::materialize_topic(&snap, topic_match, None, TimestampMode::Effective);
         match result {
             Err(error) => assert_eq!(
-                error,
+                error.to_string(),
                 "topic 'MISMATCH' live identity field 'identity_only' is missing from schema"
             ),
             Ok(_) => panic!("schema/identity disagreement was silently accepted"),
@@ -1498,7 +1585,7 @@ mod tests {
 
         let error = super::resolve_topic(&snap, &selector, OperationMode::Snapshot).unwrap_err();
         assert_eq!(
-            error,
+            error.to_string(),
             "topic 'MISSING' not found; candidates: flight/REGISTRY_ONLY, flight/AVAILABLE"
         );
     }

@@ -164,6 +164,8 @@ fn prune_removed_fields_rebinds_script_traces_to_recreated_fields() {
             mode: TraceMode::Step,
             visible: false,
             label_override: None,
+            #[cfg(feature = "scripting")]
+            owner: None,
         }
     );
     assert_eq!(pane.text_filters.get(&new_field).unwrap(), "armed");
@@ -236,6 +238,8 @@ fn prune_removed_fields_keeps_script_trace_until_recreated_field_appears() {
             mode: TraceMode::Scatter,
             visible: false,
             label_override: None,
+            #[cfg(feature = "scripting")]
+            owner: None,
         }
     );
     assert_eq!(pane.text_filters.get(&new_field).unwrap(), "armed");
@@ -920,6 +924,8 @@ fn inspector_flattens_visible_trace_instances_in_layout_order() {
             mode: TraceMode::Line,
             visible: true,
             label_override: Some("Bank".to_owned()),
+            #[cfg(feature = "scripting")]
+            owner: None,
         },
     );
     seed_trace(
@@ -932,6 +938,8 @@ fn inspector_flattens_visible_trace_instances_in_layout_order() {
             mode: TraceMode::Line,
             visible: false,
             label_override: None,
+            #[cfg(feature = "scripting")]
+            owner: None,
         },
     );
     workspace.split_plot(first, SplitDirection::Horizontal);
@@ -949,6 +957,8 @@ fn inspector_flattens_visible_trace_instances_in_layout_order() {
             mode: TraceMode::Line,
             visible: true,
             label_override: None,
+            #[cfg(feature = "scripting")]
+            owner: None,
         },
     );
 
@@ -977,6 +987,8 @@ fn legend_move_edge_recolors_and_removes_emptied_source() {
             mode: TraceMode::Step,
             visible: false,
             label_override: Some("renamed".to_string()),
+            #[cfg(feature = "scripting")]
+            owner: None,
         },
     );
     let trace = trace_of(&ws, source, FieldId(3)).unwrap();
@@ -1022,6 +1034,8 @@ fn legend_move_center_recolors_to_target_palette_slot() {
             mode: TraceMode::Step,
             visible: true,
             label_override: Some("keep".to_string()),
+            #[cfg(feature = "scripting")]
+            owner: None,
         },
     );
     ws.split_plot(source, SplitDirection::Horizontal);
@@ -1040,6 +1054,8 @@ fn legend_move_center_recolors_to_target_palette_slot() {
                 mode: TraceMode::Line,
                 visible: true,
                 label_override: None,
+                #[cfg(feature = "scripting")]
+                owner: None,
             },
         );
     }
@@ -1078,6 +1094,8 @@ fn legend_move_keeps_source_when_traces_remain() {
                 mode: TraceMode::Line,
                 visible: true,
                 label_override: None,
+                #[cfg(feature = "scripting")]
+                owner: None,
             },
         );
     }
@@ -1116,6 +1134,8 @@ fn legend_move_center_into_pane_with_same_field_dedups_and_keeps_target() {
             mode: TraceMode::Line,
             visible: true,
             label_override: Some("A".to_string()),
+            #[cfg(feature = "scripting")]
+            owner: None,
         },
     );
     ws.split_plot(source, SplitDirection::Horizontal);
@@ -1133,6 +1153,8 @@ fn legend_move_center_into_pane_with_same_field_dedups_and_keeps_target() {
             mode: TraceMode::Scatter,
             visible: true,
             label_override: Some("B".to_string()),
+            #[cfg(feature = "scripting")]
+            owner: None,
         },
     );
     let moved = trace_of(&ws, source, FieldId(1)).unwrap();
@@ -1433,6 +1455,7 @@ fn remove_all_clears_every_plot() {
 fn scene_overlay_probe(with_window: bool) -> (egui::Context, egui::Rect) {
     let scene_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 400.0));
     let vehicles = vec![vehicle::VehicleConfig {
+        runtime: vehicle::VehicleRuntime::unassigned(),
         source: delog_core::identity::SourceId(0),
         label: "Vehicle #1".into(),
         show: true,

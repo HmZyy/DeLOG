@@ -1,8 +1,6 @@
-pub use delog_core::derived::{PreparedTopics, prepare_topics};
+use delog_core::derived::{PendingTopic, PreparedTopics};
 use delog_core::identity::SourceId;
 use delog_core::ingest::IngestSink;
-
-use crate::api::PendingTopic;
 
 pub fn emit_topics(
     sink: &mut dyn IngestSink,

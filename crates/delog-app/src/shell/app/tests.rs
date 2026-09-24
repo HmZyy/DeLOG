@@ -179,6 +179,7 @@ fn clear_current_layout_resets_layout_and_vehicle_state() {
     let mut markers = crate::plotting::markers::Markers::new();
     markers.add_at(42);
     let mut vehicles = vec![crate::scene3d::vehicle::VehicleConfig {
+        runtime: crate::scene3d::vehicle::VehicleRuntime::unassigned(),
         source: delog_core::identity::SourceId(0),
         label: "Vehicle".into(),
         show: true,

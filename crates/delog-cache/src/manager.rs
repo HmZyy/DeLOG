@@ -148,6 +148,10 @@ impl CacheManager {
         matches!(self.caches.get(&field), Some(Slot::Building))
     }
 
+    pub fn is_pinned(&self, field: FieldId) -> bool {
+        self.pinned.contains(&field)
+    }
+
     pub fn is_ready(&self, field: FieldId) -> bool {
         matches!(self.caches.get(&field), Some(Slot::Ready(_)))
     }

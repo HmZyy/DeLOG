@@ -25,6 +25,7 @@ fn annot(id: u64, geom: Geometry) -> Annotation {
         geom,
         label: String::new(),
         style: default_style(id),
+        owner: None,
     }
 }
 

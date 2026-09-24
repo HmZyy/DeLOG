@@ -146,8 +146,27 @@ pub enum OriMapping {
     },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VehicleOwner {
+    pub name: String,
+    pub generation: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VehicleRuntime {
+    pub id: u64,
+    pub owner: Option<VehicleOwner>,
+}
+
+impl VehicleRuntime {
+    pub fn unassigned() -> Self {
+        Self { id: 0, owner: None }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct VehicleConfig {
+    pub runtime: VehicleRuntime,
     pub source: SourceId,
     pub label: String,
     pub show: bool,
@@ -158,6 +177,26 @@ pub struct VehicleConfig {
     pub color: Color32,
     pub path_color: Color32,
     pub scale: f32,
+}
+
+pub fn assign_runtime_id(config: &mut VehicleConfig, next_id: &mut u64) -> Result<(), String> {
+    if config.runtime.id != 0 {
+        return Ok(());
+    }
+    let id = (*next_id).max(1);
+    let following = id
+        .checked_add(1)
+        .ok_or_else(|| "vehicle runtime ID space is exhausted".to_string())?;
+    config.runtime.id = id;
+    *next_id = following;
+    Ok(())
+}
+
+pub fn assign_runtime_ids(configs: &mut [VehicleConfig], next_id: &mut u64) -> Result<(), String> {
+    for config in configs {
+        assign_runtime_id(config, next_id)?;
+    }
+    Ok(())
 }
 
 /// Render-space pose. `rot` already includes the mesh→body correction, so it
@@ -672,6 +711,14 @@ mod tests {
 
     use arrow::array::Int64Array;
 
+    #[test]
+    fn vehicle_runtime_defaults_to_an_unassigned_unowned_entry() {
+        let runtime = VehicleRuntime::unassigned();
+
+        assert_eq!(runtime.id, 0);
+        assert_eq!(runtime.owner, None);
+    }
+
     fn ned_snapshot(
         times: Vec<i64>,
         n: Vec<f64>,
@@ -829,6 +876,7 @@ mod tests {
 
     fn gps_config(fields: [FieldId; 3], alt_offset_m: f64) -> VehicleConfig {
         VehicleConfig {
+            runtime: VehicleRuntime::unassigned(),
             source: SourceId(0),
             label: "v".into(),
             show: true,
@@ -1134,6 +1182,7 @@ mod tests {
 
     fn ned_config(fields: [FieldId; 3]) -> VehicleConfig {
         VehicleConfig {
+            runtime: VehicleRuntime::unassigned(),
             source: SourceId(0),
             label: "v".into(),
             show: true,

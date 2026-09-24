@@ -605,7 +605,7 @@ fn spawn_engine(store: Arc<DataStore>, sender: delog_core::ingest::IngestSender)
         store,
         sender,
         Arc::new(MetricsRegistry::new()),
-        delog_script::params::shared_empty(),
+        delog_api::params::shared_empty(),
     )
 }
 

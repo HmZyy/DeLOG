@@ -1,7 +1,7 @@
 //! Layouts store fields as `topic.field`, never as runtime IDs or source
 //! labels, so the same plot/vehicle setup can be reused across logs.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -14,7 +14,8 @@ use serde_json::Value;
 
 use crate::config::settings::AppSettings;
 use crate::scene3d::vehicle::{
-    GeoRef, ModelKind, NedReference, OriMapping, PosMapping, VehicleConfig,
+    GeoRef, ModelKind, NedReference, OriMapping, PosMapping, VehicleConfig, VehicleOwner,
+    VehicleRuntime,
 };
 
 const APP_ID: &str = "DeLOG";
@@ -70,6 +71,8 @@ pub enum LayoutNode {
         show_legend: bool,
         #[serde(default = "default_true")]
         show_tooltip: bool,
+        #[serde(default)]
+        annotations: Vec<AnnotationLayout>,
     },
     Scene3d(SceneLayout),
     Split {
@@ -102,6 +105,21 @@ pub enum TraceModeLayout {
     Line,
     Scatter,
     Step,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AnnotationLayout {
+    pub kind: String,
+    pub points: Vec<[f64; 2]>,
+    pub y: Option<f64>,
+    pub label: String,
+    pub color: [f32; 4],
+    pub stroke_px: f32,
+    pub fill_opacity: f32,
+    pub font_px: f32,
+    pub arrow: bool,
+    #[serde(default)]
+    pub owner: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -156,6 +174,8 @@ pub struct CameraLayout {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VehicleLayout {
     pub label: String,
+    #[serde(default)]
+    pub owner: Option<String>,
     pub show: bool,
     #[serde(default = "default_true")]
     pub show_path: bool,
@@ -501,6 +521,7 @@ pub(crate) fn vehicle_to_layout(
 ) -> Option<VehicleLayout> {
     Some(VehicleLayout {
         label: v.label.clone(),
+        owner: v.runtime.owner.as_ref().map(|owner| owner.name.clone()),
         show: v.show,
         show_path: v.show_path,
         model: model_to_layout(&v.model),
@@ -531,7 +552,8 @@ pub fn vehicle_config_from_layout(
         choices: &choices,
         diagnostics: Vec::new(),
         ambiguities: BTreeMap::new(),
-        collect_ambiguities: false,
+        unresolved: BTreeSet::new(),
+        warnings: Vec::new(),
     };
     vehicle_from_layout(v, &mut resolver)
 }
@@ -549,7 +571,8 @@ pub fn vehicle_config_from_layout_for_source(
         choices: &choices,
         diagnostics: Vec::new(),
         ambiguities: BTreeMap::new(),
-        collect_ambiguities: false,
+        unresolved: BTreeSet::new(),
+        warnings: Vec::new(),
     };
     vehicle_from_layout(v, &mut resolver)
 }
@@ -703,13 +726,15 @@ pub(crate) struct Resolver<'a> {
     pub(crate) choices: &'a HashMap<FieldRef, SourceId>,
     pub(crate) diagnostics: Vec<Diag>,
     pub(crate) ambiguities: BTreeMap<FieldRef, AmbiguousField>,
-    pub(crate) collect_ambiguities: bool,
+    pub(crate) unresolved: BTreeSet<FieldRef>,
+    pub(crate) warnings: Vec<String>,
 }
 
 impl Resolver<'_> {
     pub(crate) fn resolve(&mut self, key: &FieldRef) -> Option<FieldId> {
         if let Some(&source) = self.choices.get(key) {
             return self.resolve_in_source(source, key).or_else(|| {
+                self.unresolved.insert(key.clone());
                 self.diagnostics.push(layout_warning(format!(
                     "{}.{} no longer exists in selected source",
                     key.topic, key.field
@@ -728,6 +753,7 @@ impl Resolver<'_> {
             let source = live_sources[0].entry.id;
             let got = self.resolve_in_source(source, key);
             if got.is_none() {
+                self.unresolved.insert(key.clone());
                 self.diagnostics.push(layout_warning(format!(
                     "{}.{} not found in loaded source",
                     key.topic, key.field
@@ -746,13 +772,14 @@ impl Resolver<'_> {
         match matches.as_slice() {
             [(_, _, field)] => Some(*field),
             [] => {
+                self.unresolved.insert(key.clone());
                 self.diagnostics.push(layout_warning(format!(
                     "{}.{} not found in loaded sources",
                     key.topic, key.field
                 )));
                 None
             }
-            _ if self.collect_ambiguities => {
+            _ => {
                 self.ambiguities
                     .entry(key.clone())
                     .or_insert_with(|| AmbiguousField {
@@ -768,7 +795,6 @@ impl Resolver<'_> {
                     });
                 None
             }
-            _ => None,
         }
     }
 
@@ -795,6 +821,13 @@ pub(crate) fn vehicle_from_layout(
 ) -> Option<VehicleConfig> {
     let source = first_resolved_source(v, resolver)?;
     Some(VehicleConfig {
+        runtime: VehicleRuntime {
+            id: 0,
+            owner: v.owner.clone().map(|name| VehicleOwner {
+                name,
+                generation: 0,
+            }),
+        },
         source,
         label: v.label.clone(),
         show: v.show,
@@ -987,7 +1020,7 @@ fn model_from_layout(model: &ModelLayout) -> ModelKind {
 }
 
 fn color_to_rgba(c: Color32) -> [u8; 4] {
-    [c.r(), c.g(), c.b(), c.a()]
+    c.to_srgba_unmultiplied()
 }
 
 fn rgba_to_color(c: [u8; 4]) -> Color32 {
