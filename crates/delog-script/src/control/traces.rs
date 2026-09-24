@@ -168,7 +168,7 @@ impl TracePy {
 
     #[getter]
     fn mode(&self) -> String {
-        trace_mode_name(self.mode).to_string()
+        self.mode.as_str().to_owned()
     }
 
     #[setter]
@@ -262,12 +262,4 @@ fn resolve_field(
 
 fn parse_trace_mode(name: &str) -> PyResult<TraceMode> {
     TraceMode::parse(name).map_err(crate::errors::value)
-}
-
-fn trace_mode_name(mode: TraceMode) -> &'static str {
-    match mode {
-        TraceMode::Line => "line",
-        TraceMode::Scatter => "scatter",
-        TraceMode::Step => "step",
-    }
 }
