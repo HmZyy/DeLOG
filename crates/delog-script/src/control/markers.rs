@@ -130,24 +130,13 @@ impl MarkerCollectionPy {
                 ));
             }
         } else if let Some(owner) = owner {
-            if owner.is_empty() {
-                return Err(PyValueError::new_err("marker owner must not be empty"));
-            }
-            MarkerFilter::Owner(owner)
+            MarkerFilter::owner(owner).map_err(crate::errors::value)?
         } else if let Some(origin) = origin {
-            MarkerFilter::Origin(parse_origin(origin)?)
+            MarkerFilter::Origin(MarkerOrigin::parse(origin).map_err(crate::errors::value)?)
         } else if let Some(label) = label {
-            if label.is_empty() {
-                return Err(PyValueError::new_err("marker label must not be empty"));
-            }
-            MarkerFilter::ScriptLabel(label)
+            MarkerFilter::script_label(label).map_err(crate::errors::value)?
         } else {
-            if matches!((after, before), (Some(after), Some(before)) if after > before) {
-                return Err(PyValueError::new_err(
-                    "marker time range requires after <= before",
-                ));
-            }
-            MarkerFilter::ScriptTimeRange { after, before }
+            MarkerFilter::time_range(after, before).map_err(crate::errors::value)?
         };
         request_unit(py, MarkerRequest::Remove(filter))
     }
@@ -189,7 +178,7 @@ impl MarkerPy {
 
     #[getter]
     fn origin(&self) -> &'static str {
-        origin_name(self.info.origin)
+        self.info.origin.as_str()
     }
 
     #[getter]
@@ -222,9 +211,6 @@ impl MarkerPy {
 
     #[setter]
     fn set_label(&mut self, py: Python<'_>, label: String) -> PyResult<()> {
-        if label.is_empty() {
-            return Err(PyValueError::new_err("marker label must not be empty"));
-        }
         self.submit_patch(
             py,
             MarkerPatch {
@@ -276,6 +262,7 @@ impl MarkerPy {
 
 impl MarkerPy {
     fn submit_patch(&self, py: Python<'_>, patch: MarkerPatch) -> PyResult<()> {
+        patch.validate().map_err(crate::errors::value)?;
         request_unit(
             py,
             MarkerRequest::Set {
@@ -300,21 +287,4 @@ fn request_unit(py: Python<'_>, request: MarkerRequest) -> PyResult<()> {
 
 fn marker_from_info(info: MarkerInfo) -> MarkerPy {
     MarkerPy { info }
-}
-
-fn parse_origin(origin: &str) -> PyResult<MarkerOrigin> {
-    match origin {
-        "manual" => Ok(MarkerOrigin::Manual),
-        "script" => Ok(MarkerOrigin::Script),
-        _ => Err(PyValueError::new_err(format!(
-            "marker origin must be 'manual' or 'script', got {origin:?}"
-        ))),
-    }
-}
-
-fn origin_name(origin: MarkerOrigin) -> &'static str {
-    match origin {
-        MarkerOrigin::Manual => "manual",
-        MarkerOrigin::Script => "script",
-    }
 }
