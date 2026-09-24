@@ -1,4 +1,4 @@
-use delog_api::catalog::resolve_field_path;
+use delog_api::catalog::{resolve_field_path, resolve_source};
 use delog_api::color::{format_hex_color, parse_hex_color};
 use delog_core::snapshot::StoreSnapshot;
 use pyo3::exceptions::{PyIndexError, PyValueError};
@@ -155,7 +155,7 @@ impl VehiclePy {
 
     #[getter]
     fn model(&self) -> String {
-        model_name(&self.info.spec.model).to_owned()
+        self.info.spec.model.as_str().to_owned()
     }
 
     #[setter]
@@ -163,7 +163,7 @@ impl VehiclePy {
         self.submit_patch(
             py,
             VehiclePatch {
-                model: Some(parse_model(model)?),
+                model: Some(VehicleModel::parse(model).map_err(crate::errors::value)?),
                 ..VehiclePatch::default()
             },
         )
@@ -211,7 +211,7 @@ impl VehiclePy {
         self.submit_patch(
             py,
             VehiclePatch {
-                scale: Some(positive_scale(scale)?),
+                scale: Some(scale),
                 ..VehiclePatch::default()
             },
         )
@@ -220,6 +220,7 @@ impl VehiclePy {
 
 impl VehiclePy {
     fn submit_patch(&mut self, py: Python<'_>, patch: VehiclePatch) -> PyResult<()> {
+        patch.validate().map_err(crate::errors::value)?;
         let request = VehicleRequest::Set {
             id: self.info.id,
             patch: patch.clone(),
@@ -227,7 +228,10 @@ impl VehiclePy {
         if stage_batch_request(&ControlRequest::Vehicles(request.clone()))
             .map_err(control_call_error)?
         {
-            apply_patch_to_spec(&mut self.info.spec, patch);
+            self.info
+                .spec
+                .apply_patch(patch)
+                .map_err(crate::errors::value)?;
             return Ok(());
         }
         let mut infos = request_vehicles(py, request)?;
@@ -236,36 +240,6 @@ impl VehiclePy {
         }
         self.info = infos.remove(0);
         Ok(())
-    }
-}
-
-fn apply_patch_to_spec(spec: &mut VehicleSpec, patch: VehiclePatch) {
-    if let Some(value) = patch.label {
-        spec.label = value;
-    }
-    if let Some(value) = patch.show {
-        spec.show = value;
-    }
-    if let Some(value) = patch.show_path {
-        spec.show_path = value;
-    }
-    if let Some(value) = patch.position {
-        spec.position = value;
-    }
-    if let Some(value) = patch.orientation {
-        spec.orientation = value;
-    }
-    if let Some(value) = patch.model {
-        spec.model = value;
-    }
-    if let Some(value) = patch.color {
-        spec.color = value;
-    }
-    if let Some(value) = patch.path_color {
-        spec.path_color = value;
-    }
-    if let Some(value) = patch.scale {
-        spec.scale = value;
     }
 }
 
@@ -313,10 +287,11 @@ impl VehicleCollectionPy {
         show: bool,
         show_path: bool,
     ) -> PyResult<VehiclePy> {
-        let (source_id, source) = resolve_source(&self.context.snapshot, source)?;
+        let source =
+            resolve_source(&self.context.snapshot, source).map_err(crate::errors::value)?;
         let spec = VehicleSpec {
-            source_id,
-            source,
+            source_id: source.source_id,
+            source: source.source_label,
             label: label.to_owned(),
             show,
             show_path,
@@ -324,13 +299,14 @@ impl VehicleCollectionPy {
             orientation: ori
                 .as_deref()
                 .map(|orientation| orientation.0.clone())
-                .unwrap_or(VehicleOrientation::Static),
-            model: parse_model(model)?,
+                .unwrap_or_else(VehicleOrientation::static_orientation),
+            model: VehicleModel::parse(model).map_err(crate::errors::value)?,
             color: parse_hex_color(color).map_err(crate::errors::value)?,
             path_color: parse_hex_color(path_color).map_err(crate::errors::value)?,
-            scale: positive_scale(scale)?,
+            scale,
             owner: self.context.owner.clone(),
         };
+        spec.validate().map_err(crate::errors::value)?;
         let mut infos = request_vehicles(py, VehicleRequest::Add(spec))?;
         if infos.len() != 1 {
             return Err(wrong_response());
@@ -372,8 +348,9 @@ impl VehicleCollectionPy {
                     "remove() needs exactly one of a position/handle, label=, or source=",
                 )
             })?;
-            let (source_id, _) = resolve_source(&self.context.snapshot, source)?;
-            VehicleFilter::Source(source_id)
+            let source =
+                resolve_source(&self.context.snapshot, source).map_err(crate::errors::value)?;
+            VehicleFilter::Source(source.source_id)
         };
         request_unit(py, VehicleRequest::Remove(filter))
     }
@@ -397,21 +374,7 @@ fn resolve_field(
         PyValueError::new_err("vehicle fields must be a string like 'topic.field' or a FieldRef")
     })?;
     let field = resolve_field_path(snapshot, &path).map_err(crate::errors::value)?;
-    Ok(ResolvedVehicleField {
-        id: field.field_id,
-        path: format!(
-            "{}/{}/{}",
-            field.source_label, field.topic_name, field.field_name
-        ),
-    })
-}
-
-fn finite(name: &str, value: f64) -> PyResult<f64> {
-    if value.is_finite() {
-        Ok(value)
-    } else {
-        Err(PyValueError::new_err(format!("{name} must be finite")))
-    }
+    Ok(field.into())
 }
 
 pub(crate) fn gps(
@@ -423,14 +386,16 @@ pub(crate) fn gps(
     alt_mm: bool,
     alt_offset_m: f64,
 ) -> PyResult<VehiclePositionPy> {
-    Ok(VehiclePositionPy(VehiclePosition::Gps {
-        lat: resolve_field(snapshot, lat)?,
-        lon: resolve_field(snapshot, lon)?,
-        alt: resolve_field(snapshot, alt)?,
-        lat_lon_dege7: dege7,
+    VehiclePosition::gps(
+        resolve_field(snapshot, lat)?,
+        resolve_field(snapshot, lon)?,
+        resolve_field(snapshot, alt)?,
+        dege7,
         alt_mm,
-        alt_offset_m: finite("alt_offset_m", alt_offset_m)?,
-    }))
+        alt_offset_m,
+    )
+    .map(VehiclePositionPy)
+    .map_err(crate::errors::value)
 }
 
 pub(crate) fn ned(
@@ -440,31 +405,20 @@ pub(crate) fn ned(
     down: &Bound<'_, PyAny>,
     reference: Option<&GeoReferencePy>,
 ) -> PyResult<VehiclePositionPy> {
-    Ok(VehiclePositionPy(VehiclePosition::Ned {
-        north: resolve_field(snapshot, north)?,
-        east: resolve_field(snapshot, east)?,
-        down: resolve_field(snapshot, down)?,
-        reference: reference.map(|reference| reference.0.clone()),
-    }))
+    VehiclePosition::ned(
+        resolve_field(snapshot, north)?,
+        resolve_field(snapshot, east)?,
+        resolve_field(snapshot, down)?,
+        reference.map(|reference| reference.0.clone()),
+    )
+    .map(VehiclePositionPy)
+    .map_err(crate::errors::value)
 }
 
 pub(crate) fn geo(lat_deg: f64, lon_deg: f64, alt_m: f64) -> PyResult<GeoReferencePy> {
-    let lat_deg = finite("lat_deg", lat_deg)?;
-    let lon_deg = finite("lon_deg", lon_deg)?;
-    let alt_m = finite("alt_m", alt_m)?;
-    if !(-90.0..=90.0).contains(&lat_deg) {
-        return Err(PyValueError::new_err("lat_deg must be between -90 and 90"));
-    }
-    if !(-180.0..=180.0).contains(&lon_deg) {
-        return Err(PyValueError::new_err(
-            "lon_deg must be between -180 and 180",
-        ));
-    }
-    Ok(GeoReferencePy(VehicleNedReference::Manual {
-        lat_deg,
-        lon_deg,
-        alt_m,
-    }))
+    VehicleNedReference::manual(lat_deg, lon_deg, alt_m)
+        .map(GeoReferencePy)
+        .map_err(crate::errors::value)
 }
 
 pub(crate) fn geo_fields(
@@ -473,11 +427,11 @@ pub(crate) fn geo_fields(
     lon: &Bound<'_, PyAny>,
     alt: &Bound<'_, PyAny>,
 ) -> PyResult<GeoReferencePy> {
-    Ok(GeoReferencePy(VehicleNedReference::Fields {
-        lat: resolve_field(snapshot, lat)?,
-        lon: resolve_field(snapshot, lon)?,
-        alt: resolve_field(snapshot, alt)?,
-    }))
+    Ok(GeoReferencePy(VehicleNedReference::fields(
+        resolve_field(snapshot, lat)?,
+        resolve_field(snapshot, lon)?,
+        resolve_field(snapshot, alt)?,
+    )))
 }
 
 pub(crate) fn euler(
@@ -487,12 +441,12 @@ pub(crate) fn euler(
     yaw: &Bound<'_, PyAny>,
     degrees: bool,
 ) -> PyResult<VehicleOrientationPy> {
-    Ok(VehicleOrientationPy(VehicleOrientation::Euler {
-        roll: resolve_field(snapshot, roll)?,
-        pitch: resolve_field(snapshot, pitch)?,
-        yaw: resolve_field(snapshot, yaw)?,
+    Ok(VehicleOrientationPy(VehicleOrientation::euler(
+        resolve_field(snapshot, roll)?,
+        resolve_field(snapshot, pitch)?,
+        resolve_field(snapshot, yaw)?,
         degrees,
-    }))
+    )))
 }
 
 pub(crate) fn quat(
@@ -502,16 +456,16 @@ pub(crate) fn quat(
     y: &Bound<'_, PyAny>,
     z: &Bound<'_, PyAny>,
 ) -> PyResult<VehicleOrientationPy> {
-    Ok(VehicleOrientationPy(VehicleOrientation::Quat {
-        w: resolve_field(snapshot, w)?,
-        x: resolve_field(snapshot, x)?,
-        y: resolve_field(snapshot, y)?,
-        z: resolve_field(snapshot, z)?,
-    }))
+    Ok(VehicleOrientationPy(VehicleOrientation::quaternion(
+        resolve_field(snapshot, w)?,
+        resolve_field(snapshot, x)?,
+        resolve_field(snapshot, y)?,
+        resolve_field(snapshot, z)?,
+    )))
 }
 
 pub(crate) fn static_orientation() -> VehicleOrientationPy {
-    VehicleOrientationPy(VehicleOrientation::Static)
+    VehicleOrientationPy(VehicleOrientation::static_orientation())
 }
 
 fn request_vehicles(py: Python<'_>, request: VehicleRequest) -> PyResult<Vec<VehicleInfo>> {
@@ -534,68 +488,4 @@ fn wrong_response() -> PyErr {
 
 fn vehicle_from_info(info: VehicleInfo) -> VehiclePy {
     VehiclePy { info }
-}
-
-fn resolve_source(
-    snapshot: &StoreSnapshot,
-    requested: &str,
-) -> PyResult<(delog_core::identity::SourceId, String)> {
-    let matches: Vec<_> = snapshot
-        .sources
-        .iter()
-        .filter(|source| !source.entry.removed && source.entry.label == requested)
-        .collect();
-    match matches.as_slice() {
-        [source] => Ok((source.entry.id, source.entry.label.clone())),
-        [] => Err(PyValueError::new_err(format!(
-            "source '{requested}' not found"
-        ))),
-        _ => Err(PyValueError::new_err(format!(
-            "source '{requested}' is ambiguous; candidate IDs: {}",
-            matches
-                .iter()
-                .map(|source| source.entry.id.0.to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ))),
-    }
-}
-
-fn parse_model(name: &str) -> PyResult<VehicleModel> {
-    match name {
-        "none" => Ok(VehicleModel::None),
-        "quad" => Ok(VehicleModel::Quad),
-        "fixedwing" => Ok(VehicleModel::FixedWing),
-        "deltawing" => Ok(VehicleModel::DeltaWing),
-        "cone" => Ok(VehicleModel::Cone),
-        "sphere" => Ok(VehicleModel::Sphere),
-        "cube" => Ok(VehicleModel::Cube),
-        path if path.ends_with(".glb") => Ok(VehicleModel::CustomGlb(path.to_owned())),
-        _ => Err(PyValueError::new_err(format!(
-            "vehicle model must be 'none', 'quad', 'fixedwing', 'deltawing', 'cone', 'sphere', 'cube', or a .glb path, got {name:?}"
-        ))),
-    }
-}
-
-fn model_name(model: &VehicleModel) -> &str {
-    match model {
-        VehicleModel::None => "none",
-        VehicleModel::Quad => "quad",
-        VehicleModel::FixedWing => "fixedwing",
-        VehicleModel::DeltaWing => "deltawing",
-        VehicleModel::Cone => "cone",
-        VehicleModel::Sphere => "sphere",
-        VehicleModel::Cube => "cube",
-        VehicleModel::CustomGlb(path) => path,
-    }
-}
-
-fn positive_scale(scale: f32) -> PyResult<f32> {
-    if scale.is_finite() && scale > 0.0 {
-        Ok(scale)
-    } else {
-        Err(PyValueError::new_err(
-            "vehicle scale must be finite and > 0",
-        ))
-    }
 }

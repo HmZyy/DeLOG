@@ -18,6 +18,12 @@ pub struct TopicMatch {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceMatch {
+    pub source_id: SourceId,
+    pub source_label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldMatch {
     pub source_id: SourceId,
     pub source_label: String,
@@ -248,6 +254,29 @@ pub fn resolve_topic(
         _ => Err(Error::ambiguous(format!(
             "topic '{name}' is ambiguous; candidates: {}; pass source= or instance=",
             candidate_topic_paths(&matches)
+        ))),
+    }
+}
+
+pub fn resolve_source(snapshot: &StoreSnapshot, requested: &str) -> Result<SourceMatch> {
+    let matches: Vec<_> = snapshot
+        .sources
+        .iter()
+        .filter(|source| !source.entry.removed && source.entry.label == requested)
+        .collect();
+    match matches.as_slice() {
+        [source] => Ok(SourceMatch {
+            source_id: source.entry.id,
+            source_label: source.entry.label.clone(),
+        }),
+        [] => Err(Error::not_found(format!("source '{requested}' not found"))),
+        _ => Err(Error::ambiguous(format!(
+            "source '{requested}' is ambiguous; candidate IDs: {}",
+            matches
+                .iter()
+                .map(|source| source.entry.id.0.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
         ))),
     }
 }
