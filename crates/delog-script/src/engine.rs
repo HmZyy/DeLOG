@@ -8,8 +8,10 @@ use std::thread::JoinHandle;
 use delog_api::control::{ControlHost, ControlRequest, GenerationRequest, MarkerRequest};
 use delog_api::markers::PendingMarker;
 use delog_api::operations::OperationSpec;
+use delog_api::operations::snapshot::prepare_snapshot_with_timestamp_mode;
 use delog_api::params::SharedParams;
 use delog_api::timestamps::TimestampMode;
+use delog_core::derived::prepare_topics;
 use delog_core::identity::SourceId;
 use delog_core::ingest::{IngestSender, IngestSink, ParseSummary, ParsedBatch, SourceKind};
 use delog_core::metrics::MetricsRegistry;
@@ -816,9 +818,13 @@ fn install_declarative_generation(
     .flatten()
     .collect::<HashSet<_>>();
     let operation_snapshot = snapshot_without_sources(snapshot, &prior_generated_sources);
-    let snapshot_output =
-        crate::operations::snapshot::prepare_snapshot(&operation_snapshot, specs)?;
-    let prepared = crate::emit::prepare_topics(&snapshot_output.topics)?;
+    let snapshot_output = prepare_snapshot_with_timestamp_mode(
+        &operation_snapshot,
+        specs,
+        crate::context::current_timestamp_mode(),
+    )
+    .map_err(delog_api::Error::into_message)?;
+    let prepared = prepare_topics(&snapshot_output.topics)?;
     let topic_registry = std::rc::Rc::new(std::cell::RefCell::new(snapshot_output.registry));
     let mut operations = specs
         .iter()

@@ -4,6 +4,9 @@ use std::rc::Rc;
 
 use arrow::datatypes::DataType;
 use delog_api::catalog::topic_matches;
+use delog_api::operations::snapshot::{
+    MergeSeed, SeedField, StreamKey, pending_topic, slice_column, split_key,
+};
 use delog_api::operations::{
     MergeSpec, OperationSpec, SplitBySpec, TopicRegistry, TopicSelector, TransformSpec,
 };
@@ -13,9 +16,6 @@ use delog_core::identity::{SourceId, parse_topic_instance};
 use delog_core::ingest::ParsedBatch;
 
 use crate::emit::prepare_topics;
-use crate::operations::snapshot::{
-    MergeSeed, SeedField, StreamKey, pending_topic, slice_column, split_key,
-};
 
 type EmittedSchema = Vec<(String, DataType, Option<String>)>;
 
@@ -536,11 +536,10 @@ fn execute_transform(
         .iter()
         .map(|&row| batch.timestamps.value(row))
         .collect();
-    Ok(vec![pending_topic(
-        spec.output_topic.clone(),
-        times,
-        fields,
-    )?])
+    Ok(vec![
+        pending_topic(spec.output_topic.clone(), times, fields)
+            .map_err(delog_api::Error::into_message)?,
+    ])
 }
 
 fn execute_split(
@@ -615,7 +614,8 @@ fn execute_split(
             });
             pending_topic(topic, times, output_fields)
         })
-        .collect()
+        .collect::<delog_api::Result<Vec<_>>>()
+        .map_err(delog_api::Error::into_message)
 }
 
 fn configured_topic_matches(configured: &str, actual: &str) -> bool {
@@ -897,6 +897,7 @@ fn build_merged_base_topic_refs(
         }
     }
     pending_topic(spec.output_topic.clone(), times, output_fields)
+        .map_err(delog_api::Error::into_message)
 }
 
 #[cfg(test)]
@@ -912,7 +913,7 @@ mod tests {
     use delog_core::ingest::ParsedBatch;
     use delog_core::schema::{FieldSchema, TopicSchema};
 
-    use crate::operations::snapshot::{MergeSeed, SeedField, StreamKey};
+    use delog_api::operations::snapshot::{MergeSeed, SeedField, StreamKey};
     use delog_api::operations::{
         MergeSpec, OperationMode, OperationSpec, SplitBySpec, TopicRegistry, TopicSelector,
         TransformSpec,
