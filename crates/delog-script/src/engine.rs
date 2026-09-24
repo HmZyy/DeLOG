@@ -5,6 +5,17 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
+use delog_api::control::{ControlHost, ControlRequest, GenerationRequest, MarkerRequest};
+use delog_api::live::{
+    LiveTransformBatch, LiveTransformResult, LiveTransformSpec, result_to_batch,
+};
+use delog_api::markers::PendingMarker;
+use delog_api::operations::OperationSpec;
+use delog_api::operations::live::ActiveOperation;
+use delog_api::operations::snapshot::prepare_snapshot_with_timestamp_mode;
+use delog_api::params::SharedParams;
+use delog_api::timestamps::TimestampMode;
+use delog_core::derived::prepare_topics;
 use delog_core::identity::SourceId;
 use delog_core::ingest::{IngestSender, IngestSink, ParseSummary, ParsedBatch, SourceKind};
 use delog_core::metrics::MetricsRegistry;
@@ -14,15 +25,11 @@ use pyo3::exceptions::{PyKeyboardInterrupt, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use crate::api::{Delog, PendingMarker};
+use crate::api::Delog;
 use crate::custom_parser::{
     ParserOutput, emit_parser_output, parse_python_result, read_float32_file,
 };
-use crate::live::{
-    LiveBatchPy, LiveTransformBatch, LiveTransformSpec, parse_transform_result, result_to_batch,
-};
-use crate::operations::live::ActiveOperation;
-use crate::params::{self, SharedParams};
+use crate::live::{LiveBatchPy, parse_transform_result};
 
 const LIVE_TRANSFORM_ERROR_LIMIT: u8 = 3;
 const CONSOLE_SCRIPT_NAME: &str = "console";
@@ -46,7 +53,7 @@ struct ActiveTransform {
     spec: LiveTransformSpec,
     callable: Py<PyAny>,
     source: SourceId,
-    markers: crate::api::MarkerBuffer,
+    markers: crate::staging::MarkerBuffer,
     generation: u64,
     consecutive_errors: u8,
     disabled: bool,
@@ -303,30 +310,13 @@ pub enum ParserEvent {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum MarkerCommand {
-    Replace {
-        owner: String,
-        generation: u64,
-        markers: Vec<PendingMarker>,
-    },
-    Append {
-        owner: String,
-        generation: u64,
-        markers: Vec<PendingMarker>,
-    },
-    Remove {
-        owner: String,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq)]
 pub enum ScriptEvent {
     Output(String),
     Result(String),
     Error(String),
     Done,
-    /// Publishes marker state without carrying command-completion semantics.
-    Markers(MarkerCommand),
+    /// Publishes control requests without carrying command-completion semantics.
+    Control(Vec<ControlRequest>),
     /// Carries no command-completion semantics; the UI ignores it.
     LiveBatchProcessed,
     /// Completion candidates for a prior `ScriptCommand::Complete`.
@@ -351,6 +341,7 @@ pub struct ScriptEngine {
     parser_cancellation: Arc<Mutex<ParserCancellationState>>,
     params: SharedParams,
     use_original_timestamps: Arc<AtomicBool>,
+    control_host: Arc<Mutex<Option<Arc<dyn ControlHost>>>>,
 }
 
 impl ScriptEngine {
@@ -375,6 +366,8 @@ impl ScriptEngine {
         let params_worker = Arc::clone(&params);
         let use_original_timestamps = Arc::new(AtomicBool::new(false));
         let use_original_timestamps_worker = Arc::clone(&use_original_timestamps);
+        let control_host: Arc<Mutex<Option<Arc<dyn ControlHost>>>> = Arc::new(Mutex::new(None));
+        let control_host_worker = Arc::clone(&control_host);
         let handle = std::thread::Builder::new()
             .name("delog-script".into())
             .spawn(move || {
@@ -390,6 +383,7 @@ impl ScriptEngine {
                     parser_cancellation_worker,
                     params_worker,
                     use_original_timestamps_worker,
+                    control_host_worker,
                 )
             })
             .expect("spawn script thread");
@@ -403,12 +397,17 @@ impl ScriptEngine {
             parser_cancellation,
             params,
             use_original_timestamps,
+            control_host,
         }
     }
 
     pub fn set_use_original_timestamps(&self, use_original: bool) {
         self.use_original_timestamps
             .store(use_original, Ordering::Relaxed);
+    }
+
+    pub fn set_control_host(&self, host: Arc<dyn ControlHost>) {
+        *self.control_host.lock().unwrap() = Some(host);
     }
 
     pub fn send(&self, cmd: ScriptCommand) -> Result<(), String> {
@@ -509,7 +508,7 @@ impl ScriptEngine {
     }
 
     #[cfg(test)]
-    pub fn transform_specs(&self) -> Vec<crate::live::LiveTransformSpec> {
+    pub fn transform_specs(&self) -> Vec<LiveTransformSpec> {
         self.active_live
             .lock()
             .unwrap()
@@ -580,6 +579,7 @@ fn worker_loop(
     parser_cancellation: Arc<Mutex<ParserCancellationState>>,
     params: SharedParams,
     use_original_timestamps: Arc<AtomicBool>,
+    control_host: Arc<Mutex<Option<Arc<dyn ControlHost>>>>,
 ) {
     let globals: Py<PyDict> = Python::attach(|py| PyDict::new(py).unbind());
     // Per-script-name snapshot-emit source from the previous run, for
@@ -597,7 +597,7 @@ fn worker_loop(
     let mut active_transforms: HashMap<String, Vec<ActiveTransform>> = HashMap::new();
     let mut declarative_sources: HashMap<String, SourceId> = HashMap::new();
     let mut active_operations: HashMap<String, Vec<ActiveOperation>> = HashMap::new();
-    let mut run_counter: u64 = 0;
+    let mut run_counter: u64 = 1;
 
     Python::attach(|py| {
         let sys = py.import("sys").expect("import sys");
@@ -618,11 +618,11 @@ fn worker_loop(
             }
             Ok(EngineCommand::Script(cmd)) => {
                 let timestamp_mode = if use_original_timestamps.load(Ordering::Relaxed) {
-                    crate::api::ScriptTimestampMode::Original
+                    TimestampMode::Original
                 } else {
-                    crate::api::ScriptTimestampMode::Effective
+                    TimestampMode::Effective
                 };
-                let shutdown = crate::api::with_timestamp_mode(timestamp_mode, || {
+                let shutdown = crate::context::with_timestamp_mode(timestamp_mode, || {
                     handle_command(
                         cmd,
                         &store,
@@ -640,6 +640,7 @@ fn worker_loop(
                         &mut run_counter,
                         &parser_cancellation,
                         &params,
+                        &control_host,
                     )
                 });
                 if shutdown {
@@ -697,11 +698,13 @@ fn run_live_transforms(
                     }
                     drop(sink);
                     if !markers.is_empty() {
-                        let _ = evt_tx.send(ScriptEvent::Markers(MarkerCommand::Append {
-                            owner: transform.spec.script_name.clone(),
-                            generation: transform.generation,
-                            markers,
-                        }));
+                        let _ = evt_tx.send(ScriptEvent::Control(vec![ControlRequest::Markers(
+                            MarkerRequest::Append {
+                                owner: transform.spec.script_name.clone(),
+                                generation: transform.generation,
+                                markers,
+                            },
+                        )]));
                     }
                 }
                 Err(msg) => {
@@ -778,16 +781,16 @@ fn snapshot_without_sources(
     filtered
 }
 
-fn operation_modes(specs: &[crate::operations::OperationSpec]) -> (bool, bool) {
+fn operation_modes(specs: &[OperationSpec]) -> (bool, bool) {
     let wants_live = specs.iter().any(|spec| match spec {
-        crate::operations::OperationSpec::Transform(spec) => spec.mode.wants_live(),
-        crate::operations::OperationSpec::Merge(spec) => spec.mode.wants_live(),
-        crate::operations::OperationSpec::SplitBy(spec) => spec.mode.wants_live(),
+        OperationSpec::Transform(spec) => spec.mode.wants_live(),
+        OperationSpec::Merge(spec) => spec.mode.wants_live(),
+        OperationSpec::SplitBy(spec) => spec.mode.wants_live(),
     });
     let wants_snapshot = specs.iter().any(|spec| match spec {
-        crate::operations::OperationSpec::Transform(spec) => spec.mode.wants_snapshot(),
-        crate::operations::OperationSpec::Merge(spec) => spec.mode.wants_snapshot(),
-        crate::operations::OperationSpec::SplitBy(spec) => spec.mode.wants_snapshot(),
+        OperationSpec::Transform(spec) => spec.mode.wants_snapshot(),
+        OperationSpec::Merge(spec) => spec.mode.wants_snapshot(),
+        OperationSpec::SplitBy(spec) => spec.mode.wants_snapshot(),
     });
     (wants_live, wants_snapshot)
 }
@@ -796,7 +799,7 @@ fn operation_modes(specs: &[crate::operations::OperationSpec]) -> (bool, bool) {
 fn install_declarative_generation(
     name: &str,
     snapshot: &delog_core::snapshot::StoreSnapshot,
-    specs: &[crate::operations::OperationSpec],
+    specs: &[OperationSpec],
     sender: &IngestSender,
     active_live: &Arc<Mutex<HashMap<String, Vec<LiveTransformSpec>>>>,
     active_declarative: &Arc<Mutex<HashSet<String>>>,
@@ -816,9 +819,13 @@ fn install_declarative_generation(
     .flatten()
     .collect::<HashSet<_>>();
     let operation_snapshot = snapshot_without_sources(snapshot, &prior_generated_sources);
-    let snapshot_output =
-        crate::operations::snapshot::prepare_snapshot(&operation_snapshot, specs)?;
-    let prepared = crate::emit::prepare_topics(&snapshot_output.topics)?;
+    let snapshot_output = prepare_snapshot_with_timestamp_mode(
+        &operation_snapshot,
+        specs,
+        crate::context::current_timestamp_mode(),
+    )
+    .map_err(delog_api::Error::into_message)?;
+    let prepared = prepare_topics(&snapshot_output.topics)?;
     let topic_registry = std::rc::Rc::new(std::cell::RefCell::new(snapshot_output.registry));
     let mut operations = specs
         .iter()
@@ -896,26 +903,25 @@ fn run_one_transform(
 ) -> Result<(Vec<ParsedBatch>, Vec<PendingMarker>), String> {
     transform.markers.borrow_mut().clear();
     let _marker_override =
-        crate::api::override_marker_buffer(std::rc::Rc::clone(&transform.markers));
+        crate::staging::override_marker_buffer(std::rc::Rc::clone(&transform.markers));
     let result = (|| {
-        let materialized = LiveTransformBatch::from_parsed(&transform.spec, batch)?;
+        let materialized = LiveTransformBatch::from_parsed(&transform.spec, batch)
+            .map_err(delog_api::Error::into_message)?;
         let input_times = materialized.times.clone();
-        crate::params::set_current_script(Some(transform.spec.script_name.clone()));
-        let results = Python::attach(
-            |py| -> Result<Vec<crate::live::LiveTransformResult>, String> {
-                let py_batch = LiveBatchPy::from_materialized(py, materialized)
-                    .and_then(|b| Bound::new(py, b))
-                    .map_err(|e| format_pyerr(py, &e))?;
-                let ret = transform
-                    .callable
-                    .bind(py)
-                    .call1((py_batch,))
-                    .map_err(|e| format_pyerr(py, &e))?;
-                parse_transform_result(py, &transform.spec, &input_times, &ret)
-                    .map_err(|e| format_pyerr(py, &e))
-            },
-        );
-        crate::params::set_current_script(None);
+        crate::context::set_current_script(Some(transform.spec.script_name.clone()));
+        let results = Python::attach(|py| -> Result<Vec<LiveTransformResult>, String> {
+            let py_batch = LiveBatchPy::from_materialized(py, materialized)
+                .and_then(|b| Bound::new(py, b))
+                .map_err(|e| format_pyerr(py, &e))?;
+            let ret = transform
+                .callable
+                .bind(py)
+                .call1((py_batch,))
+                .map_err(|e| format_pyerr(py, &e))?;
+            parse_transform_result(py, &transform.spec, &input_times, &ret)
+                .map_err(|e| format_pyerr(py, &e))
+        });
+        crate::context::set_current_script(None);
         let results = results?;
 
         // A dynamic transform can pick a topic's field set per batch; a change
@@ -944,7 +950,8 @@ fn run_one_transform(
         let batches = results
             .into_iter()
             .map(|r| result_to_batch(transform.source, r))
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<delog_api::Result<Vec<_>>>()
+            .map_err(delog_api::Error::into_message)?;
 
         // Record only now that the whole batch validated: a failed batch must not
         // pin a topic's field set from a partial or since-rejected result.
@@ -979,6 +986,7 @@ fn handle_command(
     run_counter: &mut u64,
     parser_cancellation: &Arc<Mutex<ParserCancellationState>>,
     params: &SharedParams,
+    control_host: &Arc<Mutex<Option<Arc<dyn ControlHost>>>>,
 ) -> bool {
     {
         match cmd {
@@ -1028,6 +1036,7 @@ fn handle_command(
                     run_counter,
                     parser_cancellation,
                     params,
+                    control_host,
                 );
                 drop(tracked_tx);
                 let result = collector
@@ -1044,6 +1053,7 @@ fn handle_command(
             }
             ScriptCommand::Shutdown => return true,
             ScriptCommand::RunScript { name, source } => {
+                let _control = crate::control::install_host(control_host.lock().unwrap().clone());
                 // A NUL byte can't go through CString; fail before running so a
                 // bad buffer never emits a (partial or empty) source.
                 if source.contains('\0') {
@@ -1052,10 +1062,11 @@ fn handle_command(
                     return false;
                 }
                 let snapshot = store.load();
-                let emit: crate::api::EmitBuffer = std::rc::Rc::default();
-                let live: crate::api::LiveTransformBuffer = std::rc::Rc::default();
-                let operations: crate::operations::OperationBuffer = std::rc::Rc::default();
-                let markers: crate::api::MarkerBuffer = std::rc::Rc::default();
+                let emit: crate::staging::EmitBuffer = std::rc::Rc::default();
+                let live: crate::staging::LiveTransformBuffer = std::rc::Rc::default();
+                let operations: crate::staging::OperationBuffer = std::rc::Rc::default();
+                let markers: crate::staging::MarkerBuffer = std::rc::Rc::default();
+                let batches: crate::control::DeferredControlBuffer = std::rc::Rc::default();
                 let generation = *run_counter;
                 *run_counter += 1;
                 let run_result: Result<(), String> = Python::attach(|py| {
@@ -1068,6 +1079,7 @@ fn handle_command(
                             std::rc::Rc::clone(&live),
                             std::rc::Rc::clone(&operations),
                             std::rc::Rc::clone(&markers),
+                            std::rc::Rc::clone(&batches),
                             name.clone(),
                             generation,
                             Arc::clone(params),
@@ -1076,11 +1088,11 @@ fn handle_command(
                     .unwrap();
                     g.set_item("delog", delog).unwrap();
                     let code = std::ffi::CString::new(source.as_str()).expect("NUL checked above");
-                    params::set_current_script(Some(name.clone()));
+                    crate::context::set_current_script(Some(name.clone()));
                     let r = py
                         .run(&code, Some(g), None)
                         .map_err(|e| format_pyerr(py, &e));
-                    params::set_current_script(None);
+                    crate::context::set_current_script(None);
                     r
                 });
                 match run_result {
@@ -1092,7 +1104,7 @@ fn handle_command(
                         let declared_snapshot =
                             !emit.borrow().is_empty() || operation_wants_snapshot;
                         let has_topics = !emit.borrow().is_empty();
-                        let prepared_topics = crate::emit::prepare_topics(&emit.borrow());
+                        let prepared_topics = prepare_topics(&emit.borrow());
                         let installation = prepared_topics.and_then(|prepared_topics| {
                             install_declarative_generation(
                                 &name,
@@ -1182,11 +1194,25 @@ fn handle_command(
                                 }
 
                                 let published_markers = std::mem::take(&mut *markers.borrow_mut());
-                                let _ = evt_tx.send(ScriptEvent::Markers(MarkerCommand::Replace {
+                                let mut requests = std::mem::take(&mut *batches.borrow_mut())
+                                    .into_iter()
+                                    .flatten()
+                                    .collect::<Vec<_>>();
+                                requests.push(ControlRequest::Markers(MarkerRequest::Append {
                                     owner: name.clone(),
                                     generation,
                                     markers: published_markers,
                                 }));
+                                requests.push(ControlRequest::Generation(
+                                    GenerationRequest::Commit {
+                                        owner: name.clone(),
+                                        generation,
+                                    },
+                                ));
+                                let _ =
+                                    evt_tx.send(ScriptEvent::Control(vec![ControlRequest::Batch(
+                                        requests,
+                                    )]));
                                 params.lock().unwrap().finalize(
                                     &name,
                                     generation,
@@ -1196,8 +1222,15 @@ fn handle_command(
                             }
                             Err(error) => {
                                 markers.borrow_mut().clear();
+                                batches.borrow_mut().clear();
                                 // Preparation is deliberately before teardown/open so a bad
                                 // rerun leaves the prior generation intact.
+                                let _ = evt_tx.send(ScriptEvent::Control(vec![
+                                    ControlRequest::Generation(GenerationRequest::Rollback {
+                                        owner: name.clone(),
+                                        generation,
+                                    }),
+                                ]));
                                 let _ = evt_tx.send(ScriptEvent::Error(error));
                             }
                         }
@@ -1205,6 +1238,14 @@ fn handle_command(
                     Err(msg) => {
                         // No partial source on failure.
                         markers.borrow_mut().clear();
+                        batches.borrow_mut().clear();
+                        let _ =
+                            evt_tx.send(ScriptEvent::Control(vec![ControlRequest::Generation(
+                                GenerationRequest::Rollback {
+                                    owner: name.clone(),
+                                    generation,
+                                },
+                            )]));
                         let _ = evt_tx.send(ScriptEvent::Error(msg));
                     }
                 }
@@ -1263,20 +1304,24 @@ fn handle_command(
                 if let Some(previous) = declarative_sources.remove(&name) {
                     sender.remove_source(previous);
                 }
-                let _ = evt_tx.send(ScriptEvent::Markers(MarkerCommand::Remove {
-                    owner: name.clone(),
-                }));
+                let _ = evt_tx.send(ScriptEvent::Control(vec![ControlRequest::Markers(
+                    MarkerRequest::RemoveOwned {
+                        owner: name.clone(),
+                    },
+                )]));
                 // Console confirmation; carries no command-completion semantics.
                 let _ = evt_tx.send(ScriptEvent::Output(format!(
                     "# unregistered live transform '{name}'\n"
                 )));
             }
             ScriptCommand::Eval(src) => {
+                let _control = crate::control::install_host(control_host.lock().unwrap().clone());
                 let snapshot = store.load();
-                let emit: crate::api::EmitBuffer = std::rc::Rc::default();
-                let live: crate::api::LiveTransformBuffer = std::rc::Rc::default();
-                let operations: crate::operations::OperationBuffer = std::rc::Rc::default();
-                let markers: crate::api::MarkerBuffer = std::rc::Rc::default();
+                let emit: crate::staging::EmitBuffer = std::rc::Rc::default();
+                let live: crate::staging::LiveTransformBuffer = std::rc::Rc::default();
+                let operations: crate::staging::OperationBuffer = std::rc::Rc::default();
+                let markers: crate::staging::MarkerBuffer = std::rc::Rc::default();
+                let batches: crate::control::DeferredControlBuffer = std::rc::Rc::default();
                 let generation = *run_counter;
                 *run_counter += 1;
                 Python::attach(|py| {
@@ -1289,6 +1334,7 @@ fn handle_command(
                             std::rc::Rc::clone(&live),
                             std::rc::Rc::clone(&operations),
                             std::rc::Rc::clone(&markers),
+                            std::rc::Rc::clone(&batches),
                             String::new(),
                             generation,
                             Arc::clone(params),
@@ -1297,9 +1343,9 @@ fn handle_command(
                     .unwrap();
                     g.set_item("delog", delog).unwrap();
                 });
-                params::set_current_script(Some(String::new()));
+                crate::context::set_current_script(Some(String::new()));
                 let evaluation_succeeded = eval_line(globals, &src, evt_tx);
-                params::set_current_script(None);
+                crate::context::set_current_script(None);
                 let specs = operations.borrow().clone();
                 let installation_succeeded = if !evaluation_succeeded || specs.is_empty() {
                     evaluation_succeeded
@@ -1326,13 +1372,20 @@ fn handle_command(
                 };
                 if installation_succeeded {
                     let published_markers = std::mem::take(&mut *markers.borrow_mut());
-                    let _ = evt_tx.send(ScriptEvent::Markers(MarkerCommand::Append {
+                    let mut requests = std::mem::take(&mut *batches.borrow_mut())
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<_>>();
+                    requests.push(ControlRequest::Markers(MarkerRequest::Append {
                         owner: CONSOLE_SCRIPT_NAME.into(),
                         generation,
                         markers: published_markers,
                     }));
+                    let _ =
+                        evt_tx.send(ScriptEvent::Control(vec![ControlRequest::Batch(requests)]));
                 } else {
                     markers.borrow_mut().clear();
+                    batches.borrow_mut().clear();
                 }
                 let _ = evt_tx.send(ScriptEvent::Done);
             }
@@ -1582,10 +1635,10 @@ fn ensure_delog_present(
             return;
         }
         let snapshot = store.load();
-        let emit: crate::api::EmitBuffer = std::rc::Rc::default();
-        let live: crate::api::LiveTransformBuffer = std::rc::Rc::default();
-        let operations: crate::operations::OperationBuffer = std::rc::Rc::default();
-        let markers: crate::api::MarkerBuffer = std::rc::Rc::default();
+        let emit: crate::staging::EmitBuffer = std::rc::Rc::default();
+        let live: crate::staging::LiveTransformBuffer = std::rc::Rc::default();
+        let operations: crate::staging::OperationBuffer = std::rc::Rc::default();
+        let markers: crate::staging::MarkerBuffer = std::rc::Rc::default();
         if let Ok(delog) = Bound::new(
             py,
             Delog::new(
@@ -1594,6 +1647,7 @@ fn ensure_delog_present(
                 std::rc::Rc::clone(&live),
                 std::rc::Rc::clone(&operations),
                 std::rc::Rc::clone(&markers),
+                std::rc::Rc::default(),
                 String::new(),
                 *run_counter,
                 Arc::clone(params),
@@ -1702,8 +1756,12 @@ mod tests {
         let ingestor = delog_core::ingestor::Ingestor::new(delog_core::ingestor::NullObserver);
         let store = ingestor.store();
         let ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
-        let engine =
-            ScriptEngine::spawn(store, sender, test_metrics(), crate::params::shared_empty());
+        let engine = ScriptEngine::spawn(
+            store,
+            sender,
+            test_metrics(),
+            delog_api::params::shared_empty(),
+        );
         for (source, succeeds) in [
             ("raise ValueError('sequence failed')", false),
             ("pass", true),
@@ -1744,7 +1802,7 @@ mod tests {
             Arc::clone(&store),
             sender,
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
         let commands = [
             ScriptCommand::ParseFile {
@@ -1789,7 +1847,7 @@ mod tests {
             Arc::new(DataStore::new()),
             dummy_sender(),
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
         let _ = engine.send(ScriptCommand::Eval("print('hello')".into()));
         let mut text = String::new();
@@ -1799,7 +1857,7 @@ mod tests {
                 ScriptEvent::Done => break,
                 ScriptEvent::Error(e) => panic!("{e}"),
                 ScriptEvent::Result(_)
-                | ScriptEvent::Markers(_)
+                | ScriptEvent::Control(_)
                 | ScriptEvent::LiveBatchProcessed
                 | ScriptEvent::Completions { .. }
                 | ScriptEvent::Parser(_) => {}
@@ -1815,7 +1873,7 @@ mod tests {
             Arc::new(DataStore::new()),
             dummy_sender(),
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
         let _ = engine.send(ScriptCommand::Eval("1 + 1".into()));
         let mut got_result = None;
@@ -1825,7 +1883,7 @@ mod tests {
                 ScriptEvent::Done => break,
                 ScriptEvent::Error(e) => panic!("unexpected error: {e}"),
                 ScriptEvent::Output(_)
-                | ScriptEvent::Markers(_)
+                | ScriptEvent::Control(_)
                 | ScriptEvent::LiveBatchProcessed
                 | ScriptEvent::Completions { .. }
                 | ScriptEvent::Parser(_) => {}
@@ -1844,36 +1902,54 @@ mod tests {
         }
     }
 
-    fn marker_commands_until_done(engine: &ScriptEngine) -> Vec<MarkerCommand> {
-        let mut commands = Vec::new();
+    fn control_requests_until_done(engine: &ScriptEngine) -> Vec<ControlRequest> {
+        let mut requests = Vec::new();
         loop {
             match engine.recv_blocking() {
-                ScriptEvent::Markers(command) => commands.push(command),
-                ScriptEvent::Done => return commands,
+                ScriptEvent::Control(batch) => requests.extend(batch),
+                ScriptEvent::Done => return requests,
                 ScriptEvent::Error(_) => {}
                 _ => {}
             }
         }
     }
 
-    fn marker_commands_until_live_processed(engine: &ScriptEngine) -> Vec<MarkerCommand> {
-        let mut commands = Vec::new();
+    fn control_requests_until_live_processed(engine: &ScriptEngine) -> Vec<ControlRequest> {
+        let mut requests = Vec::new();
         loop {
             match engine.recv_blocking() {
-                ScriptEvent::Markers(command) => commands.push(command),
-                ScriptEvent::LiveBatchProcessed => return commands,
+                ScriptEvent::Control(batch) => requests.extend(batch),
+                ScriptEvent::LiveBatchProcessed => return requests,
                 _ => {}
             }
         }
     }
 
-    fn expected_marker(time_us: i64, label: &str) -> crate::api::PendingMarker {
-        crate::api::PendingMarker {
+    fn expected_marker(time_us: i64, label: &str) -> delog_api::markers::PendingMarker {
+        delog_api::markers::PendingMarker {
             time_us,
             label: label.into(),
             color: None,
             note: String::new(),
         }
+    }
+
+    fn expected_named_batch(
+        owner: &str,
+        generation: u64,
+        markers: Vec<delog_api::markers::PendingMarker>,
+    ) -> ControlRequest {
+        ControlRequest::Batch(vec![
+            ControlRequest::Markers(MarkerRequest::Append {
+                owner: owner.into(),
+                generation,
+                markers,
+            }),
+            ControlRequest::Generation(GenerationRequest::Commit {
+                owner: owner.into(),
+                generation,
+            }),
+        ])
     }
 
     #[test]
@@ -1883,7 +1959,7 @@ mod tests {
             Arc::new(DataStore::new()),
             dummy_sender(),
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
 
         engine
@@ -1893,12 +1969,12 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            marker_commands_until_done(&engine),
-            vec![MarkerCommand::Replace {
-                owner: "analysis".into(),
-                generation: 0,
-                markers: vec![expected_marker(42, "launch")],
-            }]
+            control_requests_until_done(&engine),
+            vec![expected_named_batch(
+                "analysis",
+                1,
+                vec![expected_marker(42, "launch")],
+            )]
         );
 
         engine
@@ -1907,7 +1983,13 @@ mod tests {
                 source: "delog.add_marker(43, 'discarded')\nraise RuntimeError('boom')".into(),
             })
             .unwrap();
-        assert!(marker_commands_until_done(&engine).is_empty());
+        assert_eq!(
+            control_requests_until_done(&engine),
+            vec![ControlRequest::Generation(GenerationRequest::Rollback {
+                owner: "analysis".into(),
+                generation: 2,
+            })]
+        );
 
         engine
             .send(ScriptCommand::RunScript {
@@ -1916,12 +1998,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            marker_commands_until_done(&engine),
-            vec![MarkerCommand::Replace {
-                owner: "analysis".into(),
-                generation: 2,
-                markers: vec![],
-            }]
+            control_requests_until_done(&engine),
+            vec![expected_named_batch("analysis", 3, vec![])]
         );
 
         engine
@@ -1931,12 +2009,12 @@ mod tests {
             .unwrap();
         loop {
             match engine.recv_blocking() {
-                ScriptEvent::Markers(command) => {
+                ScriptEvent::Control(batch) => {
                     assert_eq!(
-                        command,
-                        MarkerCommand::Remove {
+                        batch,
+                        vec![ControlRequest::Markers(MarkerRequest::RemoveOwned {
                             owner: "analysis".into()
-                        }
+                        })]
                     );
                     break;
                 }
@@ -1953,8 +2031,12 @@ mod tests {
         let store = ingestor.store();
         let (sender, receiver) = delog_core::ingest::ingest_channel();
         let _ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
-        let engine =
-            ScriptEngine::spawn(store, sender, test_metrics(), crate::params::shared_empty());
+        let engine = ScriptEngine::spawn(
+            store,
+            sender,
+            test_metrics(),
+            delog_api::params::shared_empty(),
+        );
 
         engine
             .send(ScriptCommand::RunScript {
@@ -1969,7 +2051,13 @@ delog.transform("MISSING", mode="snapshot")
                 .into(),
             })
             .unwrap();
-        assert!(marker_commands_until_done(&engine).is_empty());
+        assert_eq!(
+            control_requests_until_done(&engine),
+            vec![ControlRequest::Generation(GenerationRequest::Rollback {
+                owner: "analysis".into(),
+                generation: 1,
+            })]
+        );
         assert!(!engine.has_live_transform("analysis"));
     }
 
@@ -1984,7 +2072,7 @@ delog.transform("MISSING", mode="snapshot")
             store,
             sender.clone(),
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
 
         engine
@@ -2002,12 +2090,8 @@ mark = delog.live_transform(topic="A", fields=["v"], output_topic="B")(MarkerCal
             })
             .unwrap();
         assert_eq!(
-            marker_commands_until_done(&engine),
-            vec![MarkerCommand::Replace {
-                owner: "analysis".into(),
-                generation: 0,
-                markers: vec![],
-            }]
+            control_requests_until_done(&engine),
+            vec![expected_named_batch("analysis", 1, vec![])]
         );
 
         let schema = Arc::new(
@@ -2030,17 +2114,26 @@ mark = delog.live_transform(topic="A", fields=["v"], output_topic="B")(MarkerCal
             )
         };
 
-        for failed_source in [
+        for (index, failed_source) in [
             "raise RuntimeError('rerun failed')",
             "delog.transform('MISSING', mode='snapshot')",
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             engine
                 .send(ScriptCommand::RunScript {
                     name: "analysis".into(),
                     source: failed_source.into(),
                 })
                 .unwrap();
-            assert!(marker_commands_until_done(&engine).is_empty());
+            assert_eq!(
+                control_requests_until_done(&engine),
+                vec![ControlRequest::Generation(GenerationRequest::Rollback {
+                    owner: "analysis".into(),
+                    generation: index as u64 + 2,
+                })]
+            );
 
             let mut commands = Vec::new();
             let mut errors = Vec::new();
@@ -2048,7 +2141,7 @@ mark = delog.live_transform(topic="A", fields=["v"], output_topic="B")(MarkerCal
                 engine.try_send_live_batch("live", make_batch()).unwrap();
                 loop {
                     match engine.recv_blocking() {
-                        ScriptEvent::Markers(command) => commands.push(command),
+                        ScriptEvent::Control(batch) => commands.extend(batch),
                         ScriptEvent::Error(error) => errors.push(error),
                         ScriptEvent::LiveBatchProcessed => break,
                         _ => {}
@@ -2059,11 +2152,11 @@ mark = delog.live_transform(topic="A", fields=["v"], output_topic="B")(MarkerCal
             assert_eq!(
                 commands,
                 vec![
-                    MarkerCommand::Append {
+                    ControlRequest::Markers(MarkerRequest::Append {
                         owner: "analysis".into(),
-                        generation: 0,
+                        generation: 1,
                         markers: vec![expected_marker(42, "still active")],
-                    };
+                    });
                     usize::from(LIVE_TRANSFORM_ERROR_LIMIT)
                 ]
             );
@@ -2077,25 +2170,29 @@ mark = delog.live_transform(topic="A", fields=["v"], output_topic="B")(MarkerCal
             Arc::new(DataStore::new()),
             dummy_sender(),
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
 
         for (source, expected) in [
             (
                 "delog.add_marker(10, 'console marker')",
-                vec![MarkerCommand::Append {
-                    owner: CONSOLE_SCRIPT_NAME.into(),
-                    generation: 0,
-                    markers: vec![expected_marker(10, "console marker")],
-                }],
+                vec![ControlRequest::Batch(vec![ControlRequest::Markers(
+                    MarkerRequest::Append {
+                        owner: CONSOLE_SCRIPT_NAME.into(),
+                        generation: 1,
+                        markers: vec![expected_marker(10, "console marker")],
+                    },
+                )])],
             ),
             (
                 "unrelated = 1",
-                vec![MarkerCommand::Append {
-                    owner: CONSOLE_SCRIPT_NAME.into(),
-                    generation: 1,
-                    markers: vec![],
-                }],
+                vec![ControlRequest::Batch(vec![ControlRequest::Markers(
+                    MarkerRequest::Append {
+                        owner: CONSOLE_SCRIPT_NAME.into(),
+                        generation: 2,
+                        markers: vec![],
+                    },
+                )])],
             ),
             (
                 "delog.add_marker(20, 'discarded'); raise RuntimeError('boom')",
@@ -2107,7 +2204,7 @@ mark = delog.live_transform(topic="A", fields=["v"], output_topic="B")(MarkerCal
             ),
         ] {
             engine.send(ScriptCommand::Eval(source.into())).unwrap();
-            assert_eq!(marker_commands_until_done(&engine), expected);
+            assert_eq!(control_requests_until_done(&engine), expected);
         }
     }
 
@@ -2122,7 +2219,7 @@ mark = delog.live_transform(topic="A", fields=["v"], output_topic="B")(MarkerCal
             store,
             sender.clone(),
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
 
         engine
@@ -2144,12 +2241,8 @@ def mark(batch):
             })
             .unwrap();
         assert_eq!(
-            marker_commands_until_done(&engine),
-            vec![MarkerCommand::Replace {
-                owner: "live_markers".into(),
-                generation: 0,
-                markers: vec![],
-            }]
+            control_requests_until_done(&engine),
+            vec![expected_named_batch("live_markers", 1, vec![])]
         );
 
         let schema = Arc::new(
@@ -2179,21 +2272,62 @@ def mark(batch):
             (Some(400), true),
         ] {
             engine.try_send_live_batch("live", make_batch()).unwrap();
-            let commands = marker_commands_until_live_processed(&engine);
+            let commands = control_requests_until_live_processed(&engine);
             if expected {
                 let time_us = expected_time.unwrap();
                 assert_eq!(
                     commands,
-                    vec![MarkerCommand::Append {
+                    vec![ControlRequest::Markers(MarkerRequest::Append {
                         owner: "live_markers".into(),
-                        generation: 0,
+                        generation: 1,
                         markers: vec![expected_marker(time_us, &format!("call {}", time_us / 100))],
-                    }]
+                    })]
                 );
             } else {
                 assert!(commands.is_empty());
             }
         }
+    }
+
+    #[test]
+    fn a_named_run_commits_its_generation_and_a_failing_one_rolls_back() {
+        let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let engine = ScriptEngine::spawn(
+            Arc::new(DataStore::new()),
+            dummy_sender(),
+            test_metrics(),
+            delog_api::params::shared_empty(),
+        );
+
+        engine
+            .send(ScriptCommand::RunScript {
+                name: "analysis".into(),
+                source: "delog.add_marker(42, 'launch')".into(),
+            })
+            .unwrap();
+        assert_eq!(
+            control_requests_until_done(&engine),
+            vec![expected_named_batch(
+                "analysis",
+                1,
+                vec![expected_marker(42, "launch")],
+            )]
+        );
+
+        engine
+            .send(ScriptCommand::RunScript {
+                name: "analysis".into(),
+                source: "raise RuntimeError('boom')".into(),
+            })
+            .unwrap();
+        assert!(
+            control_requests_until_done(&engine).contains(&ControlRequest::Generation(
+                GenerationRequest::Rollback {
+                    owner: "analysis".into(),
+                    generation: 2,
+                }
+            ))
+        );
     }
 
     fn completions_for(engine: &ScriptEngine, seq: u64, text: &str) -> Vec<String> {
@@ -2220,7 +2354,7 @@ def mark(batch):
             Arc::new(DataStore::new()),
             dummy_sender(),
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
         let _ = engine.send(ScriptCommand::Eval("xylophone = 1".into()));
         drain_until_done(&engine);
@@ -2235,7 +2369,7 @@ def mark(batch):
             Arc::new(DataStore::new()),
             dummy_sender(),
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
         let matches = completions_for(&engine, 1, "delog.fi");
         assert!(
@@ -2259,7 +2393,7 @@ def mark(batch):
             Arc::new(DataStore::new()),
             dummy_sender(),
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
         let matches = completions_for(&engine, 1, "delog.add_m");
         assert!(
@@ -2279,7 +2413,7 @@ def mark(batch):
             test_store_with_baro_alt(),
             dummy_sender(),
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
         let _ = engine.send(ScriptCommand::Eval(
             "field = delog.topic('BARO').field('Alt').read()".into(),
@@ -2304,7 +2438,7 @@ def mark(batch):
             store,
             dummy_sender(),
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
         let _ = engine.send(ScriptCommand::Eval(
             "float(delog.topic('BARO').field('Alt').read().v[0])".into(),
@@ -2316,7 +2450,7 @@ def mark(batch):
                 ScriptEvent::Done => break,
                 ScriptEvent::Error(e) => panic!("{e}"),
                 ScriptEvent::Output(_)
-                | ScriptEvent::Markers(_)
+                | ScriptEvent::Control(_)
                 | ScriptEvent::LiveBatchProcessed
                 | ScriptEvent::Completions { .. }
                 | ScriptEvent::Parser(_) => {}
@@ -2332,7 +2466,7 @@ def mark(batch):
             test_store_with_baro_alt_offset(250),
             dummy_sender(),
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
 
         let read_time = |engine: &ScriptEngine| {
@@ -2374,7 +2508,7 @@ def mark(batch):
             Arc::new(DataStore::new()),
             sender,
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
         let script = r#"
 import numpy as np
@@ -2427,7 +2561,7 @@ delog.emit("Mag", t, {"v": (np.array([1.0, 2.0, 3.0]), "m")})
             Arc::new(DataStore::new()),
             sender,
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
         let script = r#"
 import numpy as np
@@ -2485,8 +2619,12 @@ delog.emit("Mag", t, {"v": (np.array([1.0, 2.0, 3.0]), "m")})
         let (sender, receiver) = ingest_channel();
         let _ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
 
-        let engine =
-            ScriptEngine::spawn(store, sender, test_metrics(), crate::params::shared_empty());
+        let engine = ScriptEngine::spawn(
+            store,
+            sender,
+            test_metrics(),
+            delog_api::params::shared_empty(),
+        );
 
         let script = r#"
 @delog.live_transform(
@@ -2528,8 +2666,12 @@ def convert(batch):
         let (sender, receiver) = ingest_channel();
         let _ingest_thread = std::thread::spawn(move || ingestor.run(receiver));
 
-        let engine =
-            ScriptEngine::spawn(store, sender, test_metrics(), crate::params::shared_empty());
+        let engine = ScriptEngine::spawn(
+            store,
+            sender,
+            test_metrics(),
+            delog_api::params::shared_empty(),
+        );
 
         let script = r#"
 @delog.live_transform(topic="NAMED_VALUE_FLOAT", fields=["name", "value"])
@@ -2569,7 +2711,7 @@ def split(batch):
             store,
             sender.clone(),
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
 
         // First call emits topic "T" with fields {a, b}; every later call emits
@@ -2655,7 +2797,7 @@ def split(batch):
             Arc::new(DataStore::new()),
             sender.clone(),
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
 
         let script = r#"
@@ -2729,7 +2871,7 @@ def f(batch):
             Arc::new(DataStore::new()),
             dummy_sender(),
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
         let _ = engine.send(ScriptCommand::Eval("while True:\n    pass".into()));
         std::thread::sleep(std::time::Duration::from_millis(200));
@@ -2760,7 +2902,7 @@ def f(batch):
             Arc::new(DataStore::new()),
             sender.clone(),
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
 
         let script = r#"
@@ -2843,7 +2985,7 @@ def f(batch):
             Arc::new(DataStore::new()),
             sender,
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
         let script = "import numpy as np\ndelog.emit('X', np.array([0],dtype=np.int64), {'v': np.array([1.0])})\nraise ValueError('boom')\n";
         let _ = engine.send(ScriptCommand::RunScript {
@@ -2879,7 +3021,7 @@ def f(batch):
             Arc::new(DataStore::new()),
             dummy_sender(),
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
         let _ = engine.send(ScriptCommand::ValidateParser {
             name: "side_effect.py".into(),
@@ -2902,7 +3044,7 @@ def f(batch):
             Arc::new(DataStore::new()),
             dummy_sender(),
             Arc::clone(&metrics),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
         for source in ["def Parse(:\n    pass", "x = '\0'"] {
             let _ = engine.send(ScriptCommand::ValidateParser {
@@ -2933,7 +3075,7 @@ def f(batch):
             Arc::new(DataStore::new()),
             dummy_sender(),
             Arc::clone(&metrics),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
         let path = PathBuf::from("/definitely/missing/custom-parser.bin");
         let _ = engine.send(ScriptCommand::ParseFile {
@@ -2974,7 +3116,7 @@ def f(batch):
             Arc::new(DataStore::new()),
             dummy_sender(),
             Arc::clone(&metrics),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
         let _ = engine.send(ScriptCommand::ParseFile {
             parser_name: "cancel.py".into(),
@@ -3006,7 +3148,7 @@ def f(batch):
             Arc::new(DataStore::new()),
             dummy_sender(),
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
         engine
             .send(ScriptCommand::RunScript {
@@ -3059,7 +3201,7 @@ def f(batch):
             Arc::new(DataStore::new()),
             dummy_sender(),
             Arc::clone(&metrics),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
         engine
             .send(ScriptCommand::RunScript {
@@ -3123,7 +3265,7 @@ def f(batch):
             Arc::new(DataStore::new()),
             dummy_sender(),
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
         engine
             .send(ScriptCommand::RunScript {
@@ -3243,8 +3385,9 @@ def f(batch):
             active_live: Arc::new(Mutex::new(HashMap::new())),
             active_declarative: Arc::new(Mutex::new(HashSet::new())),
             parser_cancellation: Arc::clone(&cancellation),
-            params: crate::params::shared_empty(),
+            params: delog_api::params::shared_empty(),
             use_original_timestamps: Arc::new(AtomicBool::new(false)),
+            control_host: Arc::new(Mutex::new(None)),
         };
 
         let failed_interrupt = std::sync::Mutex::new(None);
@@ -3324,8 +3467,9 @@ def f(batch):
             active_live: Arc::new(Mutex::new(HashMap::new())),
             active_declarative: Arc::new(Mutex::new(HashSet::new())),
             parser_cancellation: Arc::clone(&cancellation),
-            params: crate::params::shared_empty(),
+            params: delog_api::params::shared_empty(),
             use_original_timestamps: Arc::new(AtomicBool::new(false)),
+            control_host: Arc::new(Mutex::new(None)),
         };
 
         engine
@@ -3361,7 +3505,7 @@ def f(batch):
             Arc::new(DataStore::new()),
             dummy_sender(),
             test_metrics(),
-            crate::params::shared_empty(),
+            delog_api::params::shared_empty(),
         );
         for _ in 0..8 {
             let (event_tx, event_rx) = channel();
@@ -3377,8 +3521,9 @@ def f(batch):
                 active_live: Arc::new(Mutex::new(HashMap::new())),
                 active_declarative: Arc::new(Mutex::new(HashSet::new())),
                 parser_cancellation: Arc::clone(&cancellation),
-                params: crate::params::shared_empty(),
+                params: delog_api::params::shared_empty(),
                 use_original_timestamps: Arc::new(AtomicBool::new(false)),
+                control_host: Arc::new(Mutex::new(None)),
             };
             let (boundary_tx, boundary_rx) = channel();
             let (cancelled_tx, cancelled_rx) = channel();
@@ -3465,8 +3610,9 @@ def f(batch):
             active_live: Arc::new(Mutex::new(HashMap::new())),
             active_declarative: Arc::new(Mutex::new(HashSet::new())),
             parser_cancellation: Arc::new(Mutex::new(ParserCancellationState::default())),
-            params: crate::params::shared_empty(),
+            params: delog_api::params::shared_empty(),
             use_original_timestamps: Arc::new(AtomicBool::new(false)),
+            control_host: Arc::new(Mutex::new(None)),
         };
 
         assert!(engine.send(ScriptCommand::Eval("1".into())).is_err());

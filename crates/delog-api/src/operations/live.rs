@@ -2,169 +2,25 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use crate::catalog::topic_matches;
+use crate::operations::snapshot::{MergeSeed, StreamKey, pending_topic, slice_column, split_key};
+use crate::operations::{OperationSpec, SplitBySpec, TopicRegistry, TopicSelector, TransformSpec};
+use crate::{Error, Result};
 use arrow::datatypes::DataType;
+use delog_core::derived::{PendingColumn, PendingTopic};
 use delog_core::field_view::{array_row_as_f64, array_row_as_str};
-use delog_core::identity::SourceId;
+use delog_core::identity::{SourceId, parse_topic_instance};
 use delog_core::ingest::ParsedBatch;
 
-use crate::api::{PendingColumn, PendingTopic, parse_topic_instance, topic_matches};
-use crate::emit::prepare_topics;
-use crate::operations::snapshot::{
-    MergeSeed, SeedField, StreamKey, pending_topic, slice_column, split_key,
-};
-use crate::operations::{
-    MergeSpec, OperationSpec, SplitBySpec, TopicRegistry, TopicSelector, TransformSpec,
-};
+use delog_core::derived::prepare_topics;
 
 type EmittedSchema = Vec<(String, DataType, Option<String>)>;
 
-#[derive(Debug, Clone)]
-enum ColumnHistory {
-    F64 {
-        times: Vec<i64>,
-        values: Vec<f64>,
-    },
-    Utf8 {
-        times: Vec<i64>,
-        values: Vec<String>,
-    },
-}
+mod merge;
 
-impl ColumnHistory {
-    fn insert(&mut self, times: &[i64], values: &PendingColumn) -> Result<(), String> {
-        match (self, values) {
-            (
-                Self::F64 {
-                    times: history_times,
-                    values: history_values,
-                },
-                PendingColumn::F64(values),
-            ) => insert_sorted(history_times, history_values, times, values),
-            (
-                Self::Utf8 {
-                    times: history_times,
-                    values: history_values,
-                },
-                PendingColumn::Utf8(values),
-            ) => insert_sorted(history_times, history_values, times, values),
-            (Self::F64 { .. }, PendingColumn::Utf8(_))
-            | (Self::Utf8 { .. }, PendingColumn::F64(_)) => {
-                return Err("merge field type changed between batches".to_owned());
-            }
-        }
-        Ok(())
-    }
-
-    fn align(&self, base_times: &[i64]) -> PendingColumn {
-        match self {
-            Self::F64 { times, values } => PendingColumn::F64(
-                base_times
-                    .iter()
-                    .map(|time| {
-                        previous_index(times, *time).map_or(f64::NAN, |index| values[index])
-                    })
-                    .collect(),
-            ),
-            Self::Utf8 { times, values } => PendingColumn::Utf8(
-                base_times
-                    .iter()
-                    .map(|time| {
-                        previous_index(times, *time)
-                            .map_or_else(String::new, |index| values[index].clone())
-                    })
-                    .collect(),
-            ),
-        }
-    }
-
-    fn prune(&mut self, cutoff: i64) {
-        let times = match self {
-            Self::F64 { times, .. } | Self::Utf8 { times, .. } => times,
-        };
-        let remove = times
-            .partition_point(|time| *time <= cutoff)
-            .saturating_sub(1);
-        if remove == 0 {
-            return;
-        }
-        match self {
-            Self::F64 { times, values } => {
-                times.drain(..remove);
-                values.drain(..remove);
-            }
-            Self::Utf8 { times, values } => {
-                times.drain(..remove);
-                values.drain(..remove);
-            }
-        }
-    }
-}
-
-fn insert_sorted<T: Clone>(
-    history_times: &mut Vec<i64>,
-    history_values: &mut Vec<T>,
-    times: &[i64],
-    values: &[T],
-) {
-    for (&time, value) in times.iter().zip(values) {
-        let index = history_times.partition_point(|existing| *existing <= time);
-        history_times.insert(index, time);
-        history_values.insert(index, value.clone());
-    }
-}
-
-fn previous_index(times: &[i64], time: i64) -> Option<usize> {
-    times
-        .partition_point(|candidate| *candidate <= time)
-        .checked_sub(1)
-}
-
-#[derive(Debug, Default)]
-struct MergeState {
-    histories: HashMap<(String, String), ColumnHistory>,
-    units: HashMap<(String, String), Option<String>>,
-    last_base_time: Option<i64>,
-    pending_base: Vec<PendingBaseBatch>,
-}
-
-#[derive(Debug)]
-struct PendingBaseBatch {
-    times: Vec<i64>,
-    fields: Vec<(String, PendingColumn, Option<String>)>,
-}
-
-struct MergeOutput {
-    topics: Vec<PendingTopic>,
-    consumed_pending: bool,
-    cutoff: Option<i64>,
-}
-
-impl MergeState {
-    fn from_seed(seed: MergeSeed) -> Self {
-        let mut state = Self::default();
-        for (key, field) in seed.fields {
-            let (history, unit) = match field {
-                SeedField::F64 { unit, sample } => {
-                    let (times, values) = sample.map_or_else(
-                        || (Vec::new(), Vec::new()),
-                        |(time, value)| (vec![time], vec![value]),
-                    );
-                    (ColumnHistory::F64 { times, values }, unit)
-                }
-                SeedField::Utf8 { unit, sample } => {
-                    let (times, values) = sample.map_or_else(
-                        || (Vec::new(), Vec::new()),
-                        |(time, value)| (vec![time], vec![value]),
-                    );
-                    (ColumnHistory::Utf8 { times, values }, unit)
-                }
-            };
-            state.histories.insert(key.clone(), history);
-            state.units.insert(key, unit);
-        }
-        state
-    }
-}
+#[cfg(test)]
+use merge::ColumnHistory;
+use merge::{MergeState, execute_merge};
 
 pub struct ActiveOperation {
     operation_index: usize,
@@ -199,7 +55,8 @@ impl ActiveOperation {
         )
     }
 
-    pub(crate) fn with_registry(
+    #[doc(hidden)]
+    pub fn with_registry(
         operation_index: usize,
         spec: OperationSpec,
         derived_source: SourceId,
@@ -223,11 +80,7 @@ impl ActiveOperation {
         }
     }
 
-    pub fn process(
-        &mut self,
-        batch: &ParsedBatch,
-        source_label: &str,
-    ) -> Result<Vec<ParsedBatch>, String> {
+    pub fn process(&mut self, batch: &ParsedBatch, source_label: &str) -> Result<Vec<ParsedBatch>> {
         if self.disabled || !self.matches(batch, source_label) {
             return Ok(Vec::new());
         }
@@ -285,11 +138,7 @@ impl ActiveOperation {
         }
     }
 
-    fn process_raw(
-        &mut self,
-        batch: &ParsedBatch,
-        source_label: &str,
-    ) -> Result<Vec<ParsedBatch>, String> {
+    fn process_raw(&mut self, batch: &ParsedBatch, source_label: &str) -> Result<Vec<ParsedBatch>> {
         if let OperationSpec::Merge(spec) = &self.spec
             && spec.mode.wants_live()
         {
@@ -352,7 +201,7 @@ impl ActiveOperation {
             .collect()
     }
 
-    fn pin_and_build(&mut self, topics: Vec<PendingTopic>) -> Result<Vec<ParsedBatch>, String> {
+    fn pin_and_build(&mut self, topics: Vec<PendingTopic>) -> Result<Vec<ParsedBatch>> {
         let schemas = topics
             .iter()
             .map(|topic| {
@@ -371,15 +220,15 @@ impl ActiveOperation {
             })
             .collect::<Vec<_>>();
 
-        let prepared = prepare_topics(&topics)?;
+        let prepared = prepare_topics(&topics).map_err(Error::execution)?;
 
         for (topic, schema) in &schemas {
             if let Some(pinned) = self.emitted_schemas.get(topic)
                 && pinned != schema
             {
-                return Err(format!(
+                return Err(Error::execution(format!(
                     "output topic '{topic}' schema changed from {pinned:?} to {schema:?}"
-                ));
+                )));
             }
         }
         let claims = schemas
@@ -415,33 +264,33 @@ fn selector_matches(selector: &TopicSelector, topic: &str, source_label: &str) -
     )
 }
 
-fn validate_batch(batch: &ParsedBatch) -> Result<(), String> {
+fn validate_batch(batch: &ParsedBatch) -> Result<()> {
     if batch.columns.len() != batch.schema.len() {
-        return Err(format!(
+        return Err(Error::execution(format!(
             "topic '{}' schema has {} fields but batch has {} columns",
             batch.topic(),
             batch.schema.len(),
             batch.columns.len()
-        ));
+        )));
     }
     for (field, column) in batch.schema.fields().iter().zip(&batch.columns) {
         if column.len() != batch.rows() {
-            return Err(format!(
+            return Err(Error::execution(format!(
                 "topic '{}' field '{}' has {} rows but timestamps have {}",
                 batch.topic(),
                 field.name,
                 column.len(),
                 batch.rows()
-            ));
+            )));
         }
         if column.data_type() != &field.dtype {
-            return Err(format!(
+            return Err(Error::execution(format!(
                 "topic '{}' field '{}' schema type {:?} does not match column type {:?}",
                 batch.topic(),
                 field.name,
                 field.dtype,
                 column.data_type()
-            ));
+            )));
         }
     }
     Ok(())
@@ -450,7 +299,7 @@ fn validate_batch(batch: &ParsedBatch) -> Result<(), String> {
 fn materialize_columns(
     batch: &ParsedBatch,
     rows: &[usize],
-) -> Result<Vec<(String, PendingColumn, Option<String>)>, String> {
+) -> Result<Vec<(String, PendingColumn, Option<String>)>> {
     validate_batch(batch)?;
     batch
         .schema
@@ -475,29 +324,26 @@ fn materialize_columns(
                         .collect(),
                 )
             } else {
-                return Err(format!(
+                return Err(Error::execution(format!(
                     "topic '{}' field '{}' has unsupported live type {:?}",
                     batch.topic(),
                     field.name,
                     field.dtype
-                ));
+                )));
             };
             Ok((field.name.clone(), values, field.unit.clone()))
         })
         .collect()
 }
 
-fn validate_requested_fields(
-    batch: &ParsedBatch,
-    requested: Option<&[String]>,
-) -> Result<(), String> {
+fn validate_requested_fields(batch: &ParsedBatch, requested: Option<&[String]>) -> Result<()> {
     if let Some(requested) = requested {
         for name in requested {
             if batch.schema.field_by_name(name).is_none() {
-                return Err(format!(
+                return Err(Error::not_found(format!(
                     "field '{name}' not found in topic '{}'",
                     batch.topic()
-                ));
+                )));
             }
         }
     }
@@ -508,7 +354,7 @@ fn execute_transform(
     batch: &ParsedBatch,
     spec: &TransformSpec,
     rows: Vec<usize>,
-) -> Result<Vec<PendingTopic>, String> {
+) -> Result<Vec<PendingTopic>> {
     validate_requested_fields(batch, spec.fields.as_deref())?;
     let mut fields = materialize_columns(batch, &rows)?;
     if rows.is_empty() {
@@ -545,14 +391,14 @@ fn execute_split(
     batch: &ParsedBatch,
     spec: &SplitBySpec,
     rows: Vec<usize>,
-) -> Result<Vec<PendingTopic>, String> {
+) -> Result<Vec<PendingTopic>> {
     validate_requested_fields(batch, spec.fields.as_deref())?;
     if batch.schema.field_by_name(&spec.field).is_none() {
-        return Err(format!(
+        return Err(Error::not_found(format!(
             "field '{}' not found in topic '{}'",
             spec.field,
             batch.topic()
-        ));
+        )));
     }
     let fields = materialize_columns(batch, &rows)?;
     let split_column = fields
@@ -613,7 +459,7 @@ fn execute_split(
             });
             pending_topic(topic, times, output_fields)
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()
 }
 
 fn configured_topic_matches(configured: &str, actual: &str) -> bool {
@@ -625,7 +471,7 @@ fn selected_columns(
     batch: &ParsedBatch,
     names: &[String],
     rows: &[usize],
-) -> Result<Vec<(String, PendingColumn, Option<String>)>, String> {
+) -> Result<Vec<(String, PendingColumn, Option<String>)>> {
     validate_requested_fields(batch, Some(names))?;
     let columns = materialize_columns(batch, rows)?;
     Ok(names
@@ -638,263 +484,6 @@ fn selected_columns(
                 .clone()
         })
         .collect())
-}
-
-fn execute_merge(
-    batch: &ParsedBatch,
-    source_label: &str,
-    spec: &MergeSpec,
-    rows: Vec<usize>,
-    state: &mut MergeState,
-) -> Result<MergeOutput, String> {
-    let empty = || MergeOutput {
-        topics: Vec::new(),
-        consumed_pending: false,
-        cutoff: None,
-    };
-    if spec
-        .source
-        .as_deref()
-        .is_some_and(|source| source != source_label)
-    {
-        return Ok(empty());
-    }
-    if spec.output_names.len() != spec.topics.len()
-        || spec
-            .output_names
-            .iter()
-            .zip(&spec.topics)
-            .any(|(output_names, (_, fields))| output_names.len() != fields.len())
-    {
-        return Err("merge output field names do not match selected fields".to_owned());
-    }
-    let base_index = spec
-        .topics
-        .iter()
-        .position(|(topic, _)| topic == &spec.base_topic)
-        .ok_or_else(|| {
-            format!(
-                "merge base_topic '{}' must be present in topics",
-                spec.base_topic
-            )
-        })?;
-    let Some(input_index) = spec
-        .topics
-        .iter()
-        .position(|(topic, _)| configured_topic_matches(topic, batch.topic()))
-    else {
-        return Ok(empty());
-    };
-
-    let (input_topic, requested_fields) = &spec.topics[input_index];
-    let fields = selected_columns(batch, requested_fields, &rows)?;
-    let times = rows
-        .iter()
-        .map(|&row| batch.timestamps.value(row))
-        .collect::<Vec<_>>();
-    if input_index != base_index {
-        for (field, values, unit) in &fields {
-            let key = (input_topic.clone(), field.clone());
-            if let Some(existing_unit) = state.units.get(&key)
-                && existing_unit != unit
-            {
-                return Err(format!(
-                    "merge field '{}/{}' unit changed from {:?} to {:?}",
-                    key.0, key.1, existing_unit, unit
-                ));
-            }
-            if let Some(history) = state.histories.get(&key)
-                && !matches!(
-                    (history, values),
-                    (ColumnHistory::F64 { .. }, PendingColumn::F64(_))
-                        | (ColumnHistory::Utf8 { .. }, PendingColumn::Utf8(_))
-                )
-            {
-                return Err(format!(
-                    "merge field '{}/{}' type changed between batches",
-                    key.0, key.1
-                ));
-            }
-        }
-        for (field, values, unit) in fields {
-            let key = (input_topic.clone(), field);
-            match state.histories.entry(key.clone()) {
-                std::collections::hash_map::Entry::Occupied(mut entry) => {
-                    entry.get_mut().insert(&times, &values)?;
-                }
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    let history = match values {
-                        PendingColumn::F64(values) => ColumnHistory::F64 {
-                            times: times.clone(),
-                            values,
-                        },
-                        PendingColumn::Utf8(values) => ColumnHistory::Utf8 {
-                            times: times.clone(),
-                            values,
-                        },
-                    };
-                    entry.insert(history);
-                }
-            }
-            state.units.entry(key).or_insert(unit);
-        }
-        if merge_secondary_schema_ready(spec, base_index, state) && !state.pending_base.is_empty() {
-            let topic = build_merged_base_topic(spec, base_index, &state.pending_base, state)?;
-            let cutoff = topic.times.iter().copied().max();
-            return Ok(MergeOutput {
-                topics: vec![topic],
-                consumed_pending: true,
-                cutoff,
-            });
-        }
-        return Ok(empty());
-    }
-    if rows.is_empty() {
-        return Ok(empty());
-    }
-    let current = PendingBaseBatch { times, fields };
-    validate_pending_base_schema(state.pending_base.first(), &current)?;
-    if !merge_secondary_schema_ready(spec, base_index, state) {
-        state.pending_base.push(current);
-        return Ok(empty());
-    }
-
-    let mut bases = state.pending_base.iter().collect::<Vec<_>>();
-    bases.push(&current);
-    let topic = build_merged_base_topic_refs(spec, base_index, &bases, state)?;
-    let cutoff = topic.times.iter().copied().max();
-    Ok(MergeOutput {
-        topics: vec![topic],
-        consumed_pending: !state.pending_base.is_empty(),
-        cutoff,
-    })
-}
-
-fn merge_secondary_schema_ready(spec: &MergeSpec, base_index: usize, state: &MergeState) -> bool {
-    spec.topics
-        .iter()
-        .enumerate()
-        .all(|(topic_index, (topic, fields))| {
-            topic_index == base_index
-                || fields.iter().all(|field| {
-                    state
-                        .histories
-                        .contains_key(&(topic.clone(), field.clone()))
-                })
-        })
-}
-
-fn validate_pending_base_schema(
-    expected: Option<&PendingBaseBatch>,
-    actual: &PendingBaseBatch,
-) -> Result<(), String> {
-    let Some(expected) = expected else {
-        return Ok(());
-    };
-    let schema = |batch: &PendingBaseBatch| {
-        batch
-            .fields
-            .iter()
-            .map(|(name, values, unit)| {
-                (
-                    name.clone(),
-                    matches!(values, PendingColumn::Utf8(_)),
-                    unit.clone(),
-                )
-            })
-            .collect::<Vec<_>>()
-    };
-    if schema(expected) != schema(actual) {
-        return Err("merge base schema changed while waiting for secondary metadata".to_owned());
-    }
-    Ok(())
-}
-
-fn build_merged_base_topic(
-    spec: &MergeSpec,
-    base_index: usize,
-    bases: &[PendingBaseBatch],
-    state: &MergeState,
-) -> Result<PendingTopic, String> {
-    build_merged_base_topic_refs(spec, base_index, &bases.iter().collect::<Vec<_>>(), state)
-}
-
-fn build_merged_base_topic_refs(
-    spec: &MergeSpec,
-    base_index: usize,
-    bases: &[&PendingBaseBatch],
-    state: &MergeState,
-) -> Result<PendingTopic, String> {
-    let mut rows = bases
-        .iter()
-        .enumerate()
-        .flat_map(|(batch_index, batch)| {
-            batch
-                .times
-                .iter()
-                .copied()
-                .enumerate()
-                .map(move |(row, time)| (time, batch_index, row))
-        })
-        .collect::<Vec<_>>();
-    rows.sort_by_key(|&(time, batch_index, row)| (time, batch_index, row));
-    let times = rows.iter().map(|&(time, _, _)| time).collect::<Vec<_>>();
-
-    let first = bases
-        .first()
-        .expect("merged base output has at least one batch");
-    let mut output_fields = Vec::new();
-    for (topic_index, (topic, requested)) in spec.topics.iter().enumerate() {
-        if topic_index == base_index {
-            for (field_index, (_, first_values, unit)) in first.fields.iter().enumerate() {
-                let values = match first_values {
-                    PendingColumn::F64(_) => PendingColumn::F64(
-                        rows.iter()
-                            .map(
-                                |&(_, batch, row)| match &bases[batch].fields[field_index].1 {
-                                    PendingColumn::F64(values) => values[row],
-                                    PendingColumn::Utf8(_) => {
-                                        unreachable!("base schemas were validated")
-                                    }
-                                },
-                            )
-                            .collect(),
-                    ),
-                    PendingColumn::Utf8(_) => PendingColumn::Utf8(
-                        rows.iter()
-                            .map(
-                                |&(_, batch, row)| match &bases[batch].fields[field_index].1 {
-                                    PendingColumn::Utf8(values) => values[row].clone(),
-                                    PendingColumn::F64(_) => {
-                                        unreachable!("base schemas were validated")
-                                    }
-                                },
-                            )
-                            .collect(),
-                    ),
-                };
-                output_fields.push((
-                    spec.output_names[base_index][field_index].clone(),
-                    values,
-                    unit.clone(),
-                ));
-            }
-            continue;
-        }
-        for (field_index, field) in requested.iter().enumerate() {
-            let key = (topic.clone(), field.clone());
-            let history = state
-                .histories
-                .get(&key)
-                .expect("secondary metadata readiness was checked");
-            output_fields.push((
-                spec.output_names[topic_index][field_index].clone(),
-                history.align(&times),
-                state.units.get(&key).cloned().flatten(),
-            ));
-        }
-    }
-    pending_topic(spec.output_topic.clone(), times, output_fields)
 }
 
 #[cfg(test)]
@@ -910,12 +499,12 @@ mod tests {
     use delog_core::ingest::ParsedBatch;
     use delog_core::schema::{FieldSchema, TopicSchema};
 
-    use crate::api::{PendingColumn, PendingField, PendingTopic};
     use crate::operations::snapshot::{MergeSeed, SeedField, StreamKey};
     use crate::operations::{
         MergeSpec, OperationMode, OperationSpec, SplitBySpec, TopicRegistry, TopicSelector,
         TransformSpec,
     };
+    use delog_core::derived::{PendingColumn, PendingField, PendingTopic};
 
     use super::{ActiveOperation, ColumnHistory};
 
@@ -1157,7 +746,10 @@ mod tests {
                     "live",
                 )
                 .unwrap_err();
-            assert!(error.contains("owned by operation 0"), "{error}");
+            assert!(
+                error.to_string().contains("owned by operation 0"),
+                "{error}"
+            );
             assert_eq!(colliding.consecutive_errors(), failure);
         }
         let output = later
@@ -1451,7 +1043,7 @@ mod tests {
             ],
         );
         let error = op.process(&source_two_base, "live").unwrap_err();
-        assert!(error.contains("schema changed"), "{error}");
+        assert!(error.to_string().contains("schema changed"), "{error}");
 
         let state = &op.merge[&SourceId(2)];
         assert_eq!(state.last_base_time, None);
@@ -1590,7 +1182,7 @@ mod tests {
             ],
         );
         let error = op.process(&changed, "live").unwrap_err();
-        assert!(error.contains("schema changed"), "{error}");
+        assert!(error.to_string().contains("schema changed"), "{error}");
 
         let missing = batch(
             SourceId(2),
@@ -1601,7 +1193,10 @@ mod tests {
         );
         let mut fresh = transform_operation_with_watermark(i64::MIN);
         let error = fresh.process(&missing, "live").unwrap_err();
-        assert!(error.contains("field 'roll' not found"), "{error}");
+        assert!(
+            error.to_string().contains("field 'roll' not found"),
+            "{error}"
+        );
     }
 
     #[test]

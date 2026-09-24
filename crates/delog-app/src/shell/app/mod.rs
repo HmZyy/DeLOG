@@ -4,6 +4,10 @@ use std::time::{Duration, Instant};
 pub mod command_palette;
 pub mod commands;
 pub mod context_header;
+#[cfg(feature = "scripting")]
+mod control_ownership;
+#[cfg(feature = "scripting")]
+mod control_service;
 mod dynamic_commands;
 pub mod global_plot_toolbar;
 pub mod inspector;
@@ -520,6 +524,7 @@ pub struct DelogApp {
     show_connection_dialog: bool,
     connection_dialog: ConnectionDialog,
     vehicles: Vec<crate::scene3d::vehicle::VehicleConfig>,
+    next_vehicle_id: u64,
     vehicle_dialog: crate::session::vehicle_dialog::VehicleDialog,
     /// Parallel to `vehicles`, rebuilt on a worker when the data epoch or
     /// vehicle set changes.
@@ -585,6 +590,7 @@ impl DelogApp {
                     config_dir.join("scripts"),
                     config_dir.join("parsers"),
                     config_dir.join("script_params.json"),
+                    cc.egui_ctx.clone(),
                 )
             },
             gpu: GpuBridge::from_creation_context(cc),
@@ -687,6 +693,7 @@ impl DelogApp {
             show_connection_dialog: false,
             connection_dialog,
             vehicles: Vec::new(),
+            next_vehicle_id: 1,
             vehicle_dialog: crate::session::vehicle_dialog::VehicleDialog::default(),
             vehicle_trajectories: Vec::new(),
             traj_epoch: u64::MAX,
@@ -1272,6 +1279,30 @@ impl DelogApp {
         self.deferred_layout_doc = None;
         self.traj_building = None;
         self.vehicle_trajectories.clear();
+    }
+
+    #[cfg(feature = "scripting")]
+    fn apply_layout_control_effects(&mut self, effects: control_service::LayoutControlEffects) {
+        if effects.interrupt_layout {
+            self.sequences.interrupt_layout();
+        }
+        if effects.reset_view {
+            self.view = None;
+            self.view_fitted = false;
+            self.fit_view_all = true;
+        }
+        if effects.clear_transients {
+            self.fit_view_all = DEFAULT_FIT_VIEW_ALL;
+            self.marker_us = None;
+            self.vehicle_dialog = crate::session::vehicle_dialog::VehicleDialog::default();
+            self.pending_layout = None;
+            self.deferred_layout_doc = None;
+            self.traj_building = None;
+            self.vehicle_trajectories.clear();
+        }
+        if effects.invalidate_catalog {
+            self.dynamic_command_catalog.invalidate();
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2327,6 +2358,16 @@ impl DelogApp {
         self.playback.follow_live = layout.follow_live;
         // Legend/tooltip visibility is restored per-pane via the workspace.
         self.vehicles = layout.vehicles;
+        if let Err(error) = crate::scene3d::vehicle::assign_runtime_ids(
+            &mut self.vehicles,
+            &mut self.next_vehicle_id,
+        ) {
+            self.session
+                .push_diagnostic(delog_core::diagnostics::Diag::error(
+                    "layout-vehicles",
+                    error,
+                ));
+        }
         self.vehicle_revision = self.vehicle_revision.wrapping_add(1);
         self.traj_dirty = true;
         for diag in layout.diagnostics {
@@ -2754,10 +2795,7 @@ impl DelogApp {
     }
 
     fn open_extended_window(&mut self) {
-        let id = crate::shell::windows::WindowId(self.next_window_id);
-        self.next_window_id += 1;
-        self.windows
-            .push(crate::shell::windows::ExtendedWindow::new(id));
+        crate::shell::windows::open_window(&mut self.windows, &mut self.next_window_id, None);
     }
 
     fn apply_browser_response(
@@ -3612,8 +3650,64 @@ impl eframe::App for DelogApp {
                 self.settings.scripting.auto_open_console,
                 self.settings.scripting.use_original_timestamps,
             );
-            for command in self.scripts.take_marker_commands() {
-                self.markers.apply_script_command(command);
+            let vehicle_profiles =
+                crate::session::vehicle_profiles::VehicleProfileLibrary::from_config_dir();
+            let mut layout_effects = control_service::LayoutControlEffects::default();
+            if let Some(queue) = self.scripts.control_queue() {
+                let mut control = control_service::AppControl {
+                    markers: &mut self.markers,
+                    workspace: &mut self.workspace,
+                    windows: &mut self.windows,
+                    playback: &mut self.playback,
+                    next_window_id: &mut self.next_window_id,
+                    caches: &mut self.caches,
+                    snapshot: &snapshot,
+                    vehicles: &mut self.vehicles,
+                    next_vehicle_id: &mut self.next_vehicle_id,
+                    vehicle_revision: &mut self.vehicle_revision,
+                    traj_dirty: &mut self.traj_dirty,
+                    vehicle_profiles: vehicle_profiles.as_ref(),
+                };
+                queue.drain_with(|request| {
+                    let effects = control_service::LayoutControlEffects::for_success(&request);
+                    let result = control_service::apply(&mut control, request);
+                    if result.is_ok() {
+                        layout_effects.merge(effects);
+                    }
+                    result
+                });
+            }
+            self.apply_layout_control_effects(layout_effects);
+            for batch in self.scripts.take_control_batches() {
+                for request in batch {
+                    let effects = control_service::LayoutControlEffects::for_success(&request);
+                    let result = {
+                        let mut control = control_service::AppControl {
+                            markers: &mut self.markers,
+                            workspace: &mut self.workspace,
+                            windows: &mut self.windows,
+                            playback: &mut self.playback,
+                            next_window_id: &mut self.next_window_id,
+                            caches: &mut self.caches,
+                            snapshot: &snapshot,
+                            vehicles: &mut self.vehicles,
+                            next_vehicle_id: &mut self.next_vehicle_id,
+                            vehicle_revision: &mut self.vehicle_revision,
+                            traj_dirty: &mut self.traj_dirty,
+                            vehicle_profiles: vehicle_profiles.as_ref(),
+                        };
+                        control_service::apply(&mut control, request)
+                    };
+                    if let Err(error) = result {
+                        self.push_log(PendingLog::with_target(
+                            LogLevel::Error,
+                            "python-control",
+                            error,
+                        ));
+                    } else {
+                        self.apply_layout_control_effects(effects);
+                    }
+                }
             }
             for message in self.scripts.take_parser_diagnostics() {
                 self.push_log(PendingLog::with_target(

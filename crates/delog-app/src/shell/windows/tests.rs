@@ -371,3 +371,21 @@ fn alt_left_over_in_an_unfocused_window_is_ignored() {
 
     assert!(!alt_held(&ctx, &windows));
 }
+
+#[test]
+#[cfg(feature = "scripting")]
+fn plot_infos_span_every_window_and_carry_their_real_ids() {
+    let main = Workspace::new();
+    let mut extra = ExtendedWindow::new(WindowId(3));
+    let root = extra.workspace.tree.root().unwrap();
+    extra
+        .workspace
+        .split_plot(root, crate::shell::workspace::SplitDirection::Horizontal);
+
+    let infos = plot_infos(&main, std::slice::from_ref(&extra));
+
+    let windows: Vec<u64> = infos.iter().map(|i| i.window).collect();
+    assert_eq!(windows, [0, 3, 3]);
+    let indices: Vec<usize> = infos.iter().map(|i| i.index).collect();
+    assert_eq!(indices, [0, 0, 1], "index is per-window, not global");
+}

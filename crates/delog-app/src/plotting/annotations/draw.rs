@@ -59,6 +59,7 @@ pub fn draw(
             geom,
             label: String::new(),
             style: super::default_style(0),
+            owner: None,
         };
         if is_visible(&ghost, &tf) {
             paint_geometry(&painter, &ghost, &tf, false, true);

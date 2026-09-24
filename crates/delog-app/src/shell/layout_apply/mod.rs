@@ -12,11 +12,12 @@ use crate::shell::windows::{ExtendedWindow, MIN_WINDOW_SIZE, WindowId};
 use crate::shell::workspace::{Pane, Scene3dPane, Workspace};
 
 use crate::config::layout::doc::{
-    AmbiguousField, CameraLayout, FieldRef, LAYOUT_VERSION, LayoutDoc, LayoutError, LayoutNode,
-    PlaybackLayout, Resolver, SceneLayout, SplitLayout, TraceLayout, TraceModeLayout,
-    TrailModeLayout, WindowLayout, WorkspaceLayout, collect_field_refs, field_ref,
+    AmbiguousField, AnnotationLayout, CameraLayout, FieldRef, LAYOUT_VERSION, LayoutDoc,
+    LayoutError, LayoutNode, PlaybackLayout, Resolver, SceneLayout, SplitLayout, TraceLayout,
+    TraceModeLayout, TrailModeLayout, WindowLayout, WorkspaceLayout, collect_field_refs, field_ref,
     vehicle_from_layout, vehicle_to_layout,
 };
+use crate::plotting::annotations::{Annotation, AnnotationOwner, DataPos, Geometry, Style};
 
 pub struct LayoutApply {
     pub workspace: Workspace,
@@ -26,6 +27,16 @@ pub struct LayoutApply {
     pub follow_live: bool,
     pub vehicles: Vec<VehicleConfig>,
     pub diagnostics: Vec<Diag>,
+    #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
+    pub report: LayoutReport,
+}
+
+#[cfg_attr(not(feature = "scripting"), allow(dead_code))]
+#[derive(Clone, Debug, Default)]
+pub struct LayoutReport {
+    pub ambiguous: Vec<AmbiguousField>,
+    pub unresolved: Vec<FieldRef>,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -73,6 +84,11 @@ impl PendingLayout {
 
     pub fn ambiguity_count(&self) -> usize {
         self.ambiguities.len()
+    }
+
+    #[allow(dead_code)]
+    pub fn ambiguities(&self) -> &[AmbiguousField] {
+        &self.ambiguities
     }
 
     pub fn apply(self, snapshot: &StoreSnapshot) -> LayoutApply {
@@ -143,6 +159,7 @@ fn workspace_doc(workspace: &Workspace, snapshot: &StoreSnapshot) -> WorkspaceLa
             traces: Vec::new(),
             show_legend: true,
             show_tooltip: true,
+            annotations: Vec::new(),
         });
     WorkspaceLayout { root }
 }
@@ -162,6 +179,12 @@ fn node_to_layout(
                 .collect(),
             show_legend: pane.show_legend,
             show_tooltip: pane.show_tooltip,
+            annotations: pane
+                .annotations
+                .items()
+                .iter()
+                .map(annotation_to_layout)
+                .collect(),
         }),
         egui_tiles::Tile::Pane(Pane::Scene3D(scene)) => Some(LayoutNode::Scene3d(SceneLayout {
             camera: CameraLayout {
@@ -213,6 +236,53 @@ fn ghost_to_layout(ghost: &GhostTrace) -> TraceLayout {
     }
 }
 
+fn annotation_to_layout(annotation: &Annotation) -> AnnotationLayout {
+    let point = |p: DataPos| [p.t_us as f64, p.y];
+    let (kind, points, y) = match annotation.geom {
+        Geometry::Text { at } => ("text", vec![point(at)], None),
+        Geometry::Segment { from, to } => ("segment", vec![point(from), point(to)], None),
+        Geometry::Rect { a, b } => ("rect", vec![point(a), point(b)], None),
+        Geometry::Ellipse { a, b } => ("ellipse", vec![point(a), point(b)], None),
+        Geometry::HLine { y } => ("hline", Vec::new(), Some(y)),
+    };
+    AnnotationLayout {
+        kind: kind.to_owned(),
+        points,
+        y,
+        label: annotation.label.clone(),
+        color: annotation.style.color,
+        stroke_px: annotation.style.stroke_px,
+        fill_opacity: annotation.style.fill_opacity,
+        font_px: annotation.style.font_px,
+        arrow: annotation.style.arrow,
+        owner: annotation.owner.as_ref().map(|owner| owner.name.clone()),
+    }
+}
+
+fn geometry_from_layout(layout: &AnnotationLayout) -> Option<Geometry> {
+    let point = |p: &[f64; 2]| DataPos {
+        t_us: p[0] as i64,
+        y: p[1],
+    };
+    match (layout.kind.as_str(), layout.points.as_slice()) {
+        ("text", [a]) => Some(Geometry::Text { at: point(a) }),
+        ("segment", [a, b]) => Some(Geometry::Segment {
+            from: point(a),
+            to: point(b),
+        }),
+        ("rect", [a, b]) => Some(Geometry::Rect {
+            a: point(a),
+            b: point(b),
+        }),
+        ("ellipse", [a, b]) => Some(Geometry::Ellipse {
+            a: point(a),
+            b: point(b),
+        }),
+        ("hline", []) => layout.y.map(|y| Geometry::HLine { y }),
+        _ => None,
+    }
+}
+
 fn window_ids(layouts: &[WindowLayout]) -> Vec<WindowId> {
     let mut used: HashSet<u64> = HashSet::new();
     let mut ids = Vec::with_capacity(layouts.len());
@@ -241,7 +311,8 @@ fn apply_doc(
         choices,
         diagnostics: Vec::new(),
         ambiguities: BTreeMap::new(),
-        collect_ambiguities,
+        unresolved: std::collections::BTreeSet::new(),
+        warnings: Vec::new(),
     };
     if collect_ambiguities {
         collect_field_refs(&doc, &mut resolver);
@@ -278,6 +349,12 @@ fn apply_doc(
         .filter_map(|v| vehicle_from_layout(v, &mut resolver))
         .collect::<Vec<_>>();
 
+    let report = LayoutReport {
+        ambiguous: resolver.ambiguities.into_values().collect(),
+        unresolved: resolver.unresolved.into_iter().collect(),
+        warnings: resolver.warnings,
+    };
+
     Ok(LayoutApply {
         workspace,
         windows,
@@ -286,6 +363,7 @@ fn apply_doc(
         follow_live: doc.playback.follow_live,
         vehicles,
         diagnostics: resolver.diagnostics,
+        report,
     })
 }
 
@@ -295,6 +373,7 @@ fn plots_only(node: &LayoutNode) -> LayoutNode {
             traces: Vec::new(),
             show_legend: true,
             show_tooltip: true,
+            annotations: Vec::new(),
         },
         LayoutNode::Split { split, children } => LayoutNode::Split {
             split: *split,
@@ -330,6 +409,7 @@ fn insert_node(
             traces,
             show_legend,
             show_tooltip,
+            annotations,
         } => {
             let mut pane = PlotPane {
                 show_legend: *show_legend,
@@ -341,6 +421,9 @@ fn insert_node(
                     Some(resolved) => pane.traces.push(resolved),
                     None => pane.add_ghost(ghost_from_layout(trace)),
                 }
+            }
+            for annotation in annotations {
+                restore_annotation(&mut pane, annotation, resolver);
             }
             Some(tiles.insert_pane(Pane::Plot(pane)))
         }
@@ -379,6 +462,39 @@ fn insert_node(
     }
 }
 
+fn restore_annotation(pane: &mut PlotPane, layout: &AnnotationLayout, resolver: &mut Resolver<'_>) {
+    let Some(geom) = geometry_from_layout(layout) else {
+        let warning = format!(
+            "annotation \"{}\" has {} point(s), which doesn't match kind \"{}\"; skipped",
+            layout.label,
+            layout.points.len(),
+            layout.kind
+        );
+        resolver
+            .diagnostics
+            .push(Diag::warning("layout", warning.clone()));
+        resolver.warnings.push(warning);
+        return;
+    };
+    let id = pane.annotations.add_geometry(geom);
+    let restored = pane
+        .annotations
+        .get_mut(id)
+        .expect("the annotation was just inserted");
+    restored.label = layout.label.clone();
+    restored.style = Style {
+        color: layout.color,
+        stroke_px: layout.stroke_px,
+        fill_opacity: layout.fill_opacity,
+        font_px: layout.font_px,
+        arrow: layout.arrow,
+    };
+    restored.owner = layout.owner.clone().map(|name| AnnotationOwner {
+        name,
+        generation: 0,
+    });
+}
+
 fn trace_from_layout(trace: &TraceLayout, resolver: &mut Resolver<'_>) -> Option<TraceRef> {
     Some(TraceRef {
         field: resolver.resolve(&trace.field)?,
@@ -387,6 +503,8 @@ fn trace_from_layout(trace: &TraceLayout, resolver: &mut Resolver<'_>) -> Option
         mode: trace.mode.into(),
         visible: trace.visible,
         label_override: None,
+        #[cfg(feature = "scripting")]
+        owner: None,
     })
 }
 
