@@ -6,6 +6,7 @@ use delog_api::catalog::{
     materialize_topic, resolve_field, resolve_field_in_topic, resolve_topic,
 };
 use delog_api::control::{ControlRequest, MarkerRequest, PlotContext, ScriptOwner};
+use delog_api::live::LiveTransformSpec;
 use delog_api::markers::PendingMarker;
 use delog_api::operations::{
     MergeSpec, OperationMode, OperationSpec, SplitBySpec, TopicSelector, TransformSpec,
@@ -23,7 +24,6 @@ use pyo3::types::PyList;
 use pyo3::types::PyTuple;
 use pyo3::types::{PyMapping, PyMappingMethods};
 
-use crate::live::LiveTransformSpec;
 use crate::staging::{
     EmitBuffer, LiveTransformBuffer, MarkerBuffer, OperationBuffer, PendingLiveTransform,
     active_marker_buffer,
@@ -758,7 +758,7 @@ impl Delog {
             fields,
             output_topic,
         )
-        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        .map_err(crate::errors::value)?;
 
         #[pyclass(unsendable)]
         struct Decorator {
