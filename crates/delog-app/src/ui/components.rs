@@ -65,12 +65,7 @@ pub fn icon_button_sized(
     let response = ui.add_sized(button_size, egui::Button::image(image).selected(selected));
     let enabled = response.enabled();
     response.widget_info(|| {
-        egui::WidgetInfo::selected(
-            egui::WidgetType::Button,
-            enabled,
-            selected,
-            tooltip,
-        )
+        egui::WidgetInfo::selected(egui::WidgetType::Button, enabled, selected, tooltip)
     });
     response.on_hover_text(tooltip)
 }
@@ -119,8 +114,11 @@ pub fn menu_row(
     enabled: bool,
     disabled_reason: Option<&str>,
 ) -> egui::Response {
-    let text = shortcut.map_or_else(|| label.to_owned(), |key| format!("{label}\t{key}"));
-    let response = ui.add_enabled(enabled, egui::Button::new(text));
+    let mut button = egui::Button::new(label).wrap_mode(egui::TextWrapMode::Extend);
+    if let Some(key) = shortcut {
+        button = button.shortcut_text(key);
+    }
+    let response = ui.add_enabled(enabled, button);
     match disabled_reason {
         Some(reason) if !enabled => response.on_disabled_hover_text(reason),
         _ => response,
@@ -144,6 +142,15 @@ impl LibraryAction {
             Self::Remove => "Remove",
         }
     }
+
+    pub fn icon(self) -> egui::ImageSource<'static> {
+        match self {
+            Self::Load => crate::ui::icons::folder_open(),
+            Self::Edit => crate::ui::icons::pencil(),
+            Self::Duplicate => crate::ui::icons::copy(),
+            Self::Remove => crate::ui::icons::trash(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,6 +164,15 @@ pub fn dense_rows(ui: &mut egui::Ui) {
     ui.spacing_mut().interact_size.y = tokens.dense_row_height;
     ui.spacing_mut().item_spacing.y = tokens.dense_row_gap;
     ui.spacing_mut().button_padding.y = tokens.dense_row_gap;
+}
+
+const CONTEXT_MENU_WIDTH: f32 = 140.0;
+
+fn context_menu_item(ui: &mut egui::Ui, action: LibraryAction) -> egui::Response {
+    let icon = egui::Image::new(action.icon())
+        .fit_to_exact_size(egui::Vec2::splat(14.0))
+        .tint(ui.visuals().text_color());
+    ui.add(egui::Button::image_and_text(icon, action.label()))
 }
 
 pub fn library_tree(
@@ -187,51 +203,33 @@ pub fn library_tree(
     }
 
     let mut menu_event = None;
-    let mut menu_consumed_click = false;
     let (_, actions) = egui_ltreeview::TreeView::new(id)
         .allow_multi_selection(false)
         .allow_drag_and_drop(false)
         .show_state(ui, &mut state, |builder| {
             for (index, name) in names.iter().enumerate() {
-                builder.node(
-                    egui_ltreeview::NodeBuilder::leaf(index).label_ui(|ui| {
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                if !menu_actions.is_empty() {
-                                    let menu = ui.menu_button("...", |ui| {
-                                        dense_rows(ui);
-                                        for action in menu_actions {
-                                            if ui.button(action.label()).clicked() {
-                                                menu_event = Some(LibraryEvent {
-                                                    name: name.clone(),
-                                                    action: *action,
-                                                });
-                                                ui.close();
-                                            }
-                                        }
-                                    });
-                                    if menu.response.clicked() || menu.inner.is_some() {
-                                        menu_consumed_click = true;
-                                    }
-                                }
-                                ui.with_layout(
-                                    egui::Layout::left_to_right(egui::Align::Center),
-                                    |ui| {
-                                        ui.add(
-                                            egui::Label::new(name)
-                                                .selectable(false)
-                                                .truncate(),
-                                        )
-                                        .on_hover_text(hover);
-                                    },
-                                );
-                            },
-                        );
-                    }),
-                );
+                let mut node = egui_ltreeview::NodeBuilder::leaf(index).label_ui(|ui| {
+                    ui.add(egui::Label::new(name).selectable(false).truncate())
+                        .on_hover_text(hover);
+                });
+                if !menu_actions.is_empty() {
+                    node = node.context_menu(|ui| {
+                        dense_rows(ui);
+                        ui.set_min_width(CONTEXT_MENU_WIDTH);
+                        for action in menu_actions {
+                            if context_menu_item(ui, *action).clicked() {
+                                menu_event = Some(LibraryEvent {
+                                    name: name.clone(),
+                                    action: *action,
+                                });
+                                ui.close();
+                            }
+                        }
+                    });
+                }
+                builder.node(node);
             }
-            });
+        });
 
     state.set_selected(Vec::new());
     state.store(ui, id);
@@ -239,9 +237,6 @@ pub fn library_tree(
 
     if let Some(event) = menu_event {
         return Some(event);
-    }
-    if menu_consumed_click {
-        return None;
     }
     actions.into_iter().find_map(|action| match action {
         egui_ltreeview::Action::SetSelected(selected) => selected
@@ -258,6 +253,212 @@ pub fn library_tree(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_menu_row_keeps_its_full_width_after_the_popup_was_sized_for_shorter_rows() {
+        fn accesskit_rect(output: &egui::FullOutput, prefix: &str) -> Option<egui::Rect> {
+            let update = output.platform_output.accesskit_update.as_ref()?;
+            update
+                .nodes
+                .iter()
+                .find(|(_, node)| node.label().is_some_and(|label| label.starts_with(prefix)))
+                .and_then(|(_, node)| node.bounds())
+                .map(|bounds| {
+                    egui::Rect::from_min_max(
+                        egui::pos2(bounds.x0 as f32, bounds.y0 as f32),
+                        egui::pos2(bounds.x1 as f32, bounds.y1 as f32),
+                    )
+                })
+        }
+
+        fn painted_widths(output: &egui::FullOutput) -> Vec<(String, f32)> {
+            fn walk(shape: &egui::epaint::Shape, out: &mut Vec<(String, f32)>) {
+                match shape {
+                    egui::epaint::Shape::Text(text) => {
+                        out.push((text.galley.job.text.clone(), text.galley.rect.width()));
+                    }
+                    egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                    _ => {}
+                }
+            }
+            let mut out = Vec::new();
+            for clipped in &output.shapes {
+                walk(&clipped.shape, &mut out);
+            }
+            out
+        }
+
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let rows = std::cell::RefCell::new(vec!["a".to_owned()]);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 600.0));
+        let frame = |events: Vec<egui::Event>| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    ui.horizontal(|ui| {
+                        ui.menu_button("Tools", |ui| {
+                            ui.menu_button("Run script", |ui| {
+                                for row in rows.borrow().iter() {
+                                    menu_row(ui, row, None, true, None);
+                                }
+                            });
+                        });
+                    });
+                },
+            )
+        };
+        let click = |pos: egui::Pos2| {
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]
+        };
+        let open_submenu = || {
+            let output = frame(Vec::new());
+            let tools =
+                accesskit_rect(&output, "Tools").expect("the Tools menu button should exist");
+            let output = frame(click(tools.center()));
+            let submenu =
+                accesskit_rect(&output, "Run script").expect("the submenu button should exist");
+            let hover = vec![egui::Event::PointerMoved(submenu.center())];
+            let _sizing_pass = frame(hover.clone());
+            frame(hover)
+        };
+
+        let short = open_submenu();
+        assert!(
+            painted_widths(&short).iter().any(|(text, _)| text == "a"),
+            "the short row should open the submenu and size its popup"
+        );
+        let _ = frame(vec![egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]);
+
+        let long = "a-very-long-saved-script-name";
+        rows.replace(vec![long.to_owned()]);
+        let reopened = open_submenu();
+        let painted = painted_widths(&reopened);
+        let (_, width) = painted
+            .iter()
+            .find(|(text, _)| text == long)
+            .unwrap_or_else(|| panic!("the long row should be painted, got {painted:?}"));
+
+        let font = egui::TextStyle::Button.resolve(&ctx.global_style());
+        let natural = ctx
+            .fonts_mut(|fonts| fonts.layout_no_wrap(long.to_owned(), font, egui::Color32::WHITE))
+            .rect
+            .width();
+        assert!(
+            (*width - natural).abs() < 1.0,
+            "a menu row must lay out at its natural width even when the popup was first sized for \
+             shorter rows, got {width} instead of {natural}"
+        );
+    }
+
+    fn text_layout_rects(output: &egui::FullOutput) -> Vec<(String, egui::Rect)> {
+        fn walk(shape: &egui::epaint::Shape, out: &mut Vec<(String, egui::Rect)>) {
+            match shape {
+                egui::epaint::Shape::Text(text) => out.push((
+                    text.galley.job.text.clone(),
+                    egui::Rect::from_min_size(text.pos, text.galley.size()),
+                )),
+                egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut out);
+        }
+        out
+    }
+
+    #[test]
+    fn menu_row_shortcuts_share_one_right_aligned_column() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 600.0));
+        let frame = |events: Vec<egui::Event>| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    ui.horizontal(|ui| {
+                        ui.menu_button("File", |ui| {
+                            menu_row(ui, "Open", Some("Ctrl+O"), true, None);
+                            menu_row(
+                                ui,
+                                "Export workspace image",
+                                Some("Ctrl+Shift+E"),
+                                true,
+                                None,
+                            );
+                        });
+                    });
+                },
+            )
+        };
+        let output = frame(Vec::new());
+        let menu = text_layout_rects(&output)
+            .into_iter()
+            .find(|(text, _)| text == "File")
+            .expect("the File menu button should be painted")
+            .1;
+        let pos = menu.center();
+        let _ = frame(vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]);
+        let output = frame(Vec::new());
+        let rects = text_layout_rects(&output);
+        let find = |wanted: &str| {
+            rects
+                .iter()
+                .find(|(text, _)| text == wanted)
+                .unwrap_or_else(|| panic!("{wanted} should be painted, got {rects:?}"))
+                .1
+        };
+
+        assert_eq!(
+            find("Ctrl+O").right(),
+            find("Ctrl+Shift+E").right(),
+            "menu shortcuts must share one right-aligned column"
+        );
+    }
 
     fn library_names() -> Vec<String> {
         vec!["alpha".to_owned(), "beta".to_owned(), "gamma".to_owned()]
@@ -307,7 +508,7 @@ mod tests {
     }
 
     #[test]
-    fn library_tree_renders_every_entry_with_its_menu() {
+    fn library_tree_renders_every_entry_without_an_inline_menu() {
         let (event, output, names) = run_library_tree(Some("beta"));
         assert!(event.is_none());
         let painted = painted_text(&output);
@@ -317,10 +518,9 @@ mod tests {
                 "{name} should be painted as a row, got {painted:?}"
             );
         }
-        assert_eq!(
-            painted.iter().filter(|text| text.as_str() == "...").count(),
-            names.len(),
-            "every row should carry its overflow menu"
+        assert!(
+            !painted.iter().any(|text| text.as_str() == "..."),
+            "rows must not carry an inline overflow menu, got {painted:?}"
         );
     }
 
@@ -361,9 +561,7 @@ mod tests {
             out: &mut Option<f32>,
         ) {
             match shape {
-                egui::epaint::Shape::Rect(rect)
-                    if rect.fill == fills.0 || rect.fill == fills.1 =>
-                {
+                egui::epaint::Shape::Rect(rect) if rect.fill == fills.0 || rect.fill == fills.1 => {
                     *out = Some(rect.rect.center().y);
                 }
                 egui::epaint::Shape::Vec(shapes) => {
@@ -402,7 +600,13 @@ mod tests {
         );
     }
 
-    fn menu_rect_at_width(ctx: &egui::Context, id: egui::Id, names: &[String], w: f32) -> Option<egui::Rect> {
+    fn row_rect_at_width(
+        ctx: &egui::Context,
+        id: egui::Id,
+        names: &[String],
+        label: &str,
+        w: f32,
+    ) -> Option<egui::Rect> {
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -421,41 +625,42 @@ mod tests {
         output
             .shapes
             .iter()
-            .find_map(|clipped| find_label_rect(&clipped.shape, "..."))
+            .find_map(|clipped| find_label_rect(&clipped.shape, label))
     }
 
     #[test]
-    fn library_row_menu_stays_visible_after_shrinking_the_drawer() {
+    fn library_rows_stay_inside_the_drawer_after_shrinking_it() {
         let ctx = egui::Context::default();
         crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
         let names = vec!["alpha".to_owned()];
         let id = egui::Id::new("library-menu-visibility");
 
-        menu_rect_at_width(&ctx, id, &names, 400.0);
-        menu_rect_at_width(&ctx, id, &names, 400.0);
-        let narrow = menu_rect_at_width(&ctx, id, &names, 150.0)
-            .expect("the overflow menu should still be painted after shrinking");
+        row_rect_at_width(&ctx, id, &names, "alpha", 400.0);
+        row_rect_at_width(&ctx, id, &names, "alpha", 400.0);
+        let narrow = row_rect_at_width(&ctx, id, &names, "alpha", 150.0)
+            .expect("the entry should still be painted after shrinking");
 
         assert!(
             narrow.right() <= 150.0,
-            "the row menu is drawn at x={} which is outside a 150 point drawer",
+            "the row is drawn at x={} which is outside a 150 point drawer",
             narrow.right()
         );
     }
 
     #[test]
-    fn library_row_menu_survives_an_entry_name_wider_than_the_drawer() {
+    fn an_entry_name_wider_than_the_drawer_is_truncated_inside_it() {
         let ctx = egui::Context::default();
         crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
-        let names = vec!["a_long_saved_entry_name_that_overflows_the_drawer".to_owned()];
+        let name = "a_long_saved_entry_name_that_overflows_the_drawer".to_owned();
+        let names = vec![name.clone()];
         let id = egui::Id::new("library-menu-long-name");
 
-        let narrow = menu_rect_at_width(&ctx, id, &names, 150.0)
-            .expect("a long entry name must not push the overflow menu out of the drawer");
+        let narrow = row_rect_at_width(&ctx, id, &names, &name, 150.0)
+            .expect("a long entry name must still be painted");
 
         assert!(
             narrow.right() <= 150.0,
-            "the row menu is drawn at x={} which is outside a 150 point drawer",
+            "the row is drawn at x={} which is outside a 150 point drawer",
             narrow.right()
         );
     }
@@ -606,10 +811,8 @@ mod tests {
         let ctx = egui::Context::default();
         ctx.enable_accesskit();
         let output = ctx.run_ui(egui::RawInput::default(), |ui| {
-            let texture = egui::load::SizedTexture::new(
-                egui::TextureId::default(),
-                egui::Vec2::splat(1.0),
-            );
+            let texture =
+                egui::load::SizedTexture::new(egui::TextureId::default(), egui::Vec2::splat(1.0));
             icon_button(ui, texture.into(), "Pin plot", true);
             icon_button(ui, texture.into(), "Unpinned plot", false);
         });
@@ -632,6 +835,101 @@ mod tests {
         assert_eq!(
             find("Unpinned plot").toggled(),
             Some(egui::accesskit::Toggled::False)
+        );
+    }
+
+    #[test]
+    fn right_clicking_a_row_opens_a_context_menu_that_emits_its_action() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+        let names = library_names();
+        let id = egui::Id::new("library-context-menu");
+        let actions = [LibraryAction::Duplicate, LibraryAction::Remove];
+
+        let event = std::cell::RefCell::new(None);
+        let frame = |events: Vec<egui::Event>| -> Vec<egui::accesskit::Node> {
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(400.0, 600.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let found = library_tree(ui, id, &names, None, &actions, "Load entry");
+                    if found.is_some() {
+                        *event.borrow_mut() = found;
+                    }
+                },
+            );
+            output
+                .platform_output
+                .accesskit_update
+                .unwrap()
+                .nodes
+                .into_iter()
+                .map(|(_, node)| node)
+                .collect()
+        };
+
+        let nodes = frame(Vec::new());
+        assert!(
+            !nodes.iter().any(|node| node.label() == Some("Remove")),
+            "the context menu must stay closed until a right click"
+        );
+
+        let row = egui::pos2(60.0, 20.0);
+        for pressed in [true, false] {
+            frame(vec![
+                egui::Event::PointerMoved(row),
+                egui::Event::PointerButton {
+                    pos: row,
+                    button: egui::PointerButton::Secondary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]);
+        }
+        let nodes = frame(Vec::new());
+        let remove = nodes
+            .iter()
+            .find(|node| node.label() == Some("Remove"))
+            .expect("right clicking a row opens its context menu");
+        assert!(
+            nodes.iter().any(|node| node.label() == Some("Duplicate")),
+            "every configured action is offered"
+        );
+        assert!(
+            event.borrow().is_none(),
+            "opening the menu must not load the entry"
+        );
+
+        let bounds = remove.bounds().unwrap();
+        let click = egui::pos2(
+            ((bounds.x0 + bounds.x1) * 0.5) as f32,
+            ((bounds.y0 + bounds.y1) * 0.5) as f32,
+        );
+        for pressed in [true, false] {
+            frame(vec![
+                egui::Event::PointerMoved(click),
+                egui::Event::PointerButton {
+                    pos: click,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]);
+        }
+
+        assert_eq!(
+            event.into_inner(),
+            Some(LibraryEvent {
+                name: "alpha".to_owned(),
+                action: LibraryAction::Remove,
+            })
         );
     }
 }

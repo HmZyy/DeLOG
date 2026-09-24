@@ -6,6 +6,7 @@ const SWATCH_SIZE: f32 = 10.0;
 const SWATCH_ROUNDING: f32 = 2.0;
 
 pub struct AnnotationRow {
+    pub window: u64,
     pub pane: u64,
     pub plot_label: String,
     pub id: u64,
@@ -15,8 +16,8 @@ pub struct AnnotationRow {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolbarAction {
-    Edit { pane: u64, id: u64 },
-    Remove { pane: u64, id: u64 },
+    Edit { window: u64, pane: u64, id: u64 },
+    Remove { window: u64, pane: u64, id: u64 },
     RemoveAll,
 }
 
@@ -111,6 +112,7 @@ fn list(ui: &mut egui::Ui, rows: &[AnnotationRow]) -> Option<ToolbarAction> {
                             .clicked()
                             {
                                 action = Some(ToolbarAction::Edit {
+                                    window: row.window,
                                     pane: row.pane,
                                     id: row.id,
                                 });
@@ -124,6 +126,7 @@ fn list(ui: &mut egui::Ui, rows: &[AnnotationRow]) -> Option<ToolbarAction> {
                             .clicked()
                             {
                                 action = Some(ToolbarAction::Remove {
+                                    window: row.window,
                                     pane: row.pane,
                                     id: row.id,
                                 });
@@ -188,6 +191,7 @@ mod tests {
 
     fn row(pane: u64, id: u64, kind: Kind) -> AnnotationRow {
         AnnotationRow {
+            window: 0,
             pane,
             plot_label: format!("Plot {pane}"),
             id,

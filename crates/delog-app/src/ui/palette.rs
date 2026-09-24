@@ -2,6 +2,7 @@
 pub struct PickerItem<T> {
     pub key: T,
     pub label: String,
+    pub shortcut: Option<String>,
     pub subtitle: Option<String>,
     pub search_text: String,
     pub disabled_reason: Option<&'static str>,
@@ -16,6 +17,7 @@ impl<T> PickerItem<T> {
             key,
             search_text: label.clone(),
             label,
+            shortcut: None,
             subtitle: None,
             disabled_reason: None,
             checked: false,
@@ -43,6 +45,7 @@ pub struct PickerState {
     pub selected: usize,
     focus_search: bool,
     scroll_to_selected: bool,
+    suppress_enter: bool,
     hover: HoverGate,
 }
 
@@ -53,6 +56,7 @@ impl PickerState {
         self.selected = 0;
         self.focus_search = true;
         self.scroll_to_selected = true;
+        self.suppress_enter = true;
         self.hover = HoverGate::JustOpened;
     }
 
@@ -65,6 +69,7 @@ impl PickerState {
         ctx: &egui::Context,
         items: &[PickerItem<T>],
     ) -> Option<T> {
+        let enter_armed = !std::mem::take(&mut self.suppress_enter);
         if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
             self.open = false;
             return None;
@@ -92,8 +97,13 @@ impl PickerState {
             self.selected = self.selected.saturating_sub(1);
         }
         self.selected = self.selected.min(ranked.len() - 1);
-        self.scroll_to_selected |= self.selected != selected_before_key;
-        if ctx.input(|input| input.key_pressed(egui::Key::Enter)) && ranked[self.selected].is_enabled()
+        if self.selected != selected_before_key {
+            self.scroll_to_selected = true;
+            self.hover = HoverGate::Waiting(ctx.pointer_latest_pos());
+        }
+        if enter_armed
+            && ctx.input(|input| input.key_pressed(egui::Key::Enter))
+            && ranked[self.selected].is_enabled()
         {
             self.open = false;
             return Some(ranked[self.selected].key.clone());
@@ -107,6 +117,7 @@ impl PickerState {
         id: &'static str,
         hint: &str,
         empty_text: &str,
+        no_match_text: &str,
         items: &[PickerItem<T>],
     ) -> Option<T> {
         if !self.open {
@@ -158,31 +169,33 @@ impl PickerState {
 
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     if ranked.is_empty() {
-                        ui.weak(empty_text);
+                        ui.weak(if items.is_empty() {
+                            empty_text
+                        } else {
+                            no_match_text
+                        });
                     }
                     for (index, item) in ranked.iter().enumerate() {
                         if item.separator_before && index > 0 {
                             ui.separator();
                         }
-                        let mut label = item.label.clone();
-                        if item.checked {
-                            label.insert_str(0, "✓  ");
-                        }
                         let subtitle = item.subtitle.as_deref();
-                        let text = picker_row_text(ui, &label, subtitle);
-                        let response = ui.add_enabled(
-                            item.is_enabled(),
+                        let text =
+                            egui::WidgetText::from(picker_row_text(ui, &item.label, subtitle));
+                        let mut button = if item.checked {
+                            egui::Button::image_and_text(check_mark(ui), text)
+                        } else {
                             egui::Button::new(text)
-                                .selected(index == self.selected)
-                                .min_size(egui::vec2(
-                                    ui.available_width(),
-                                    if subtitle.is_some() { 42.0 } else { 30.0 },
-                                )),
-                        );
-                        let response = match item.disabled_reason {
-                            Some(reason) if hover_armed => response.on_disabled_hover_text(reason),
-                            _ => response,
-                        };
+                        }
+                        .selected(index == self.selected)
+                        .min_size(egui::vec2(
+                            ui.available_width(),
+                            if subtitle.is_some() { 42.0 } else { 30.0 },
+                        ));
+                        if let Some(shortcut) = item.shortcut.as_deref() {
+                            button = button.shortcut_text(shortcut);
+                        }
+                        let response = ui.add_enabled(item.is_enabled(), button);
                         if scroll_to_selected && index == self.selected {
                             response.scroll_to_me(None);
                         }
@@ -198,6 +211,14 @@ impl PickerState {
             });
         picked
     }
+}
+
+fn check_mark(ui: &egui::Ui) -> egui::Image<'static> {
+    let tokens = crate::ui::design_tokens::DesignTokens::from_style(ui.style());
+    egui::Image::new(crate::ui::icons::check())
+        .fit_to_exact_size(egui::Vec2::splat(tokens.icon_size))
+        .tint(ui.visuals().text_color())
+        .alt_text("Active")
 }
 
 fn picker_row_text(ui: &egui::Ui, label: &str, subtitle: Option<&str>) -> egui::text::LayoutJob {
@@ -334,13 +355,53 @@ mod tests {
             }],
             ..Default::default()
         });
-        state.show(&ctx, "probe", "search", "empty", &items);
+        state.show(&ctx, "probe", "search", "empty", "no match", &items);
         let _ = ctx.end_pass();
 
         assert_eq!(
             state.selected, 2,
             "the palette shortcut must not double as a move-up while a picker is open"
         );
+    }
+
+    #[test]
+    fn a_query_that_matches_nothing_does_not_claim_nothing_is_saved() {
+        let ctx = egui::Context::default();
+        let items = layouts();
+        let mut state = PickerState::default();
+        state.open();
+        state.query = "zzzz".to_owned();
+
+        let mut shown = Vec::new();
+        for _ in 0..3 {
+            ctx.begin_pass(egui::RawInput::default());
+            state.show(&ctx, "no-match", "search", "empty", "no match", &items);
+            shown = painted(&ctx.end_pass());
+        }
+
+        assert!(
+            shown.contains(&"no match".to_owned()),
+            "a filtered-out palette must say the query matched nothing, painted: {shown:?}"
+        );
+        assert!(
+            !shown.contains(&"empty".to_owned()),
+            "a filtered-out palette must not claim the library is empty, painted: {shown:?}"
+        );
+    }
+
+    fn painted(output: &egui::FullOutput) -> Vec<String> {
+        fn walk(shape: &egui::epaint::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::epaint::Shape::Text(text) => out.push(text.galley.text().to_owned()),
+                egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut out);
+        }
+        out
     }
 
     #[test]
@@ -365,10 +426,30 @@ mod tests {
         let mut state = PickerState::default();
         state.open();
 
+        press(&ctx, &mut state, &items, egui::Key::Tab, false);
         let picked = press(&ctx, &mut state, &items, egui::Key::Enter, false);
 
         assert!(picked.is_none());
         assert!(state.open, "a disabled item should not close the picker");
+    }
+
+    #[test]
+    fn a_freshly_opened_picker_ignores_the_keystroke_that_opened_it() {
+        let ctx = egui::Context::default();
+        let items = layouts();
+        let mut state = PickerState::default();
+        state.open();
+
+        assert_eq!(
+            press(&ctx, &mut state, &items, egui::Key::Enter, false),
+            None,
+            "the key that opened the picker must not also choose from it"
+        );
+        assert!(state.open, "the picker stays open for a real choice");
+        assert_eq!(
+            press(&ctx, &mut state, &items, egui::Key::Enter, false).as_deref(),
+            Some("alpha")
+        );
     }
 
     fn second_row_top(ctx: &egui::Context, separator: bool) -> f32 {
@@ -385,7 +466,7 @@ mod tests {
         };
         let render = |state: &mut PickerState, items: &[PickerItem<String>]| {
             ctx.run_ui(input(), |ui| {
-                state.show(ui.ctx(), "sep-test", "hint", "empty", items);
+                state.show(ui.ctx(), "sep-test", "hint", "empty", "no match", items);
             })
         };
         let _ = render(&mut state, &items);
@@ -423,6 +504,280 @@ mod tests {
         assert!(
             with > without,
             "a separator should occupy space above its row ({without} -> {with})"
+        );
+    }
+
+    #[test]
+    fn a_checked_row_marks_itself_with_an_icon_and_not_a_glyph() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        let mut items = layouts();
+        items[0].checked = true;
+        let mut state = PickerState::default();
+        state.open();
+        let render = |state: &mut PickerState, items: &[PickerItem<String>]| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1_000.0, 700.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    state.show(ui.ctx(), "checked-row", "hint", "empty", "no match", items);
+                },
+            )
+        };
+        let _ = render(&mut state, &items);
+        let output = render(&mut state, &items);
+
+        fn walk(shape: &egui::epaint::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::epaint::Shape::Text(text) => out.push(text.galley.job.text.clone()),
+                egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut texts = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut texts);
+        }
+
+        assert!(
+            texts.iter().all(|text| !text.contains('\u{2713}')),
+            "a checked row must not paint a check glyph, got {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|text| text == "alpha"),
+            "the checked row keeps its plain label, got {texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_key_press_overrides_the_hovered_row_until_the_pointer_moves_again() {
+        let ctx = egui::Context::default();
+        let items = layouts();
+        let mut state = PickerState::default();
+        state.open();
+        let render = |state: &mut PickerState, events: Vec<egui::Event>, time: f64| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1_000.0, 700.0),
+                    )),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    state.show(
+                        ui.ctx(),
+                        "override-test",
+                        "hint",
+                        "empty",
+                        "no match",
+                        &items,
+                    );
+                },
+            )
+        };
+        fn walk(shape: &egui::epaint::Shape, out: &mut Vec<(String, egui::Rect)>) {
+            match shape {
+                egui::epaint::Shape::Text(text) => {
+                    out.push((text.galley.job.text.clone(), text.visual_bounding_rect()));
+                }
+                egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let row_center = |output: &egui::FullOutput, label: &str| {
+            let mut texts = Vec::new();
+            for clipped in &output.shapes {
+                walk(&clipped.shape, &mut texts);
+            }
+            texts
+                .into_iter()
+                .find(|(text, _)| text == label)
+                .unwrap_or_else(|| panic!("{label} should be painted"))
+                .1
+                .center()
+        };
+        let down = || {
+            vec![egui::Event::Key {
+                key: egui::Key::ArrowDown,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }]
+        };
+
+        let _ = render(
+            &mut state,
+            vec![egui::Event::PointerMoved(egui::pos2(1.0, 1.0))],
+            0.0,
+        );
+        let _ = render(&mut state, Vec::new(), 0.1);
+        let output = render(&mut state, Vec::new(), 0.2);
+        let beta = row_center(&output, "beta");
+
+        let _ = render(&mut state, vec![egui::Event::PointerMoved(beta)], 0.3);
+        assert_eq!(state.selected, 1, "hovering a row should select it");
+
+        let _ = render(&mut state, down(), 0.4);
+        assert_eq!(
+            state.selected, 2,
+            "a key press must move the selection off the hovered row"
+        );
+
+        let _ = render(&mut state, Vec::new(), 0.5);
+        assert_eq!(
+            state.selected, 2,
+            "the selection must not snap back while the pointer sits still"
+        );
+
+        let _ = render(&mut state, vec![egui::Event::PointerMoved(beta)], 0.6);
+        assert_eq!(
+            state.selected, 2,
+            "a pointer event without real movement must not steal the selection"
+        );
+
+        let alpha = row_center(&render(&mut state, Vec::new(), 0.7), "alpha");
+        let _ = render(&mut state, vec![egui::Event::PointerMoved(alpha)], 0.8);
+        assert_eq!(
+            state.selected, 0,
+            "moving the pointer again hands hover back its say"
+        );
+    }
+
+    #[test]
+    fn hovering_a_row_never_opens_a_tooltip() {
+        let ctx = egui::Context::default();
+        let reason = "not right now";
+        let mut items = layouts();
+        items[0].disabled_reason = Some(reason);
+        let mut state = PickerState::default();
+        state.open();
+        let render = |state: &mut PickerState,
+                      items: &[PickerItem<String>],
+                      pointer: Option<egui::Pos2>,
+                      time: f64| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1_000.0, 700.0),
+                    )),
+                    time: Some(time),
+                    events: pointer.map(egui::Event::PointerMoved).into_iter().collect(),
+                    ..Default::default()
+                },
+                |ui| {
+                    state.show(ui.ctx(), "tooltip-test", "hint", "empty", "no match", items);
+                },
+            )
+        };
+        fn walk(shape: &egui::epaint::Shape, out: &mut Vec<(String, egui::Rect)>) {
+            match shape {
+                egui::epaint::Shape::Text(text) => {
+                    out.push((text.galley.job.text.clone(), text.visual_bounding_rect()));
+                }
+                egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let texts = |output: &egui::FullOutput| {
+            let mut out = Vec::new();
+            for clipped in &output.shapes {
+                walk(&clipped.shape, &mut out);
+            }
+            out
+        };
+
+        let _ = render(&mut state, &items, Some(egui::pos2(1.0, 1.0)), 0.0);
+        let _ = render(&mut state, &items, None, 0.1);
+        let output = render(&mut state, &items, None, 0.2);
+        let row = texts(&output)
+            .into_iter()
+            .find(|(text, _)| text == "alpha")
+            .expect("the disabled row should be painted")
+            .1
+            .center();
+
+        let mut output = render(&mut state, &items, Some(row), 0.3);
+        for step in 1..12 {
+            output = render(&mut state, &items, None, 0.3 + f64::from(step));
+        }
+
+        let painted = texts(&output);
+        assert!(
+            painted.iter().all(|(text, _)| text != reason),
+            "a palette row must never open a tooltip, got {painted:?}"
+        );
+    }
+
+    #[test]
+    fn palette_shortcuts_share_one_right_aligned_column() {
+        let ctx = egui::Context::default();
+        let mut items = layouts();
+        items[0].label = "Open".to_owned();
+        items[0].shortcut = Some("Ctrl+O".to_owned());
+        items[1].label = "Export workspace image".to_owned();
+        items[1].shortcut = Some("Ctrl+Shift+E".to_owned());
+        let mut state = PickerState::default();
+        state.open();
+        let render = |state: &mut PickerState, items: &[PickerItem<String>]| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1_000.0, 700.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    state.show(
+                        ui.ctx(),
+                        "shortcut-column",
+                        "hint",
+                        "empty",
+                        "no match",
+                        items,
+                    );
+                },
+            )
+        };
+        let _ = render(&mut state, &items);
+        let output = render(&mut state, &items);
+
+        fn walk(shape: &egui::epaint::Shape, out: &mut Vec<(String, egui::Rect)>) {
+            match shape {
+                egui::epaint::Shape::Text(text) => out.push((
+                    text.galley.job.text.clone(),
+                    egui::Rect::from_min_size(text.pos, text.galley.size()),
+                )),
+                egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut texts = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut texts);
+        }
+        let find = |wanted: &str| {
+            texts
+                .iter()
+                .find(|(text, _)| text == wanted)
+                .unwrap_or_else(|| panic!("{wanted} should be painted, got {texts:?}"))
+                .1
+        };
+
+        assert_eq!(
+            find("Ctrl+O").right(),
+            find("Ctrl+Shift+E").right(),
+            "palette shortcuts must share one right-aligned column"
         );
     }
 

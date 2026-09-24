@@ -1,8 +1,8 @@
+#[cfg(feature = "scripting")]
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
-#[cfg(feature = "scripting")]
-use std::collections::VecDeque;
 
 use arrow::array::{ArrayRef, Float64Array, Int64Array};
 use arrow::datatypes::DataType;
@@ -100,7 +100,10 @@ fn gps_source(
         )
         .unwrap(),
     );
-    (topic, Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap()))
+    (
+        topic,
+        Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap()),
+    )
 }
 
 fn snapshot_two_sources() -> Arc<StoreSnapshot> {
@@ -216,8 +219,7 @@ fn copy_paste_duplicates_nodes_and_internal_edges_in_one_undo_step() {
     assert!(!controller.selection.contains(&b));
     // A pasted DataField sits at the original offset by +30,+30.
     assert!(controller.graph.nodes.iter().any(|node| {
-        controller.selection.contains(&node.id)
-            && node.pos == [a_pos[0] + 30.0, a_pos[1] + 30.0]
+        controller.selection.contains(&node.id) && node.pos == [a_pos[0] + 30.0, a_pos[1] + 30.0]
     }));
 
     controller.undo();
@@ -555,7 +557,7 @@ fn publish_is_all_or_nothing_and_replaces_previous() {
 }
 
 #[test]
-fn graph_replacement_preserves_published_source_ownership() {
+fn replacement_controller_preserves_shared_published_source_ownership() {
     let mut graph = Graph::new("g");
     let input = add_node(&mut graph, data());
     let output = add_node(
@@ -598,7 +600,8 @@ fn graph_replacement_preserves_published_source_ownership() {
         observed_rx.recv_timeout(Duration::from_secs(1)).unwrap();
     }
 
-    controller.replace_graph(graph);
+    let published = Arc::clone(&controller.published);
+    controller = DataFlowController::new(graph).with_shared_publications(published);
     controller.request_publish(snapshot());
     wait_for(&mut controller, &sender);
 
@@ -758,14 +761,22 @@ fn live_preview_accumulates_across_ticks() {
     let (sender, _receiver) = ingest_channel();
 
     // Seed tick: full history [100,200,300] -> [1,2,3].
-    controller.request_live(snapshot_alt(vec![100, 200, 300], vec![1.0, 2.0, 3.0], 1), 3.0, false);
+    controller.request_live(
+        snapshot_alt(vec![100, 200, 300], vec![1.0, 2.0, 3.0], 1),
+        3.0,
+        false,
+    );
     wait_for(&mut controller, &sender);
     assert_eq!(controller.preview_for(field, 0).unwrap().count, 3);
 
     // Append tick: new samples 400,500 -> [4,5]; overlap re-reads 300 but the
     // tail merge only adds t > watermark, so count becomes 5, not 6.
     controller.request_live(
-        snapshot_alt(vec![100, 200, 300, 400, 500], vec![1.0, 2.0, 3.0, 4.0, 5.0], 2),
+        snapshot_alt(
+            vec![100, 200, 300, 400, 500],
+            vec![1.0, 2.0, 3.0, 4.0, 5.0],
+            2,
+        ),
         3.0,
         false,
     );
@@ -784,10 +795,18 @@ fn live_preview_survives_coalesced_generation() {
     let (sender, _receiver) = ingest_channel();
 
     // First live tick (seed) launches and stays in_flight (we do NOT poll).
-    controller.request_live(snapshot_alt(vec![100, 200, 300], vec![1.0, 2.0, 3.0], 1), 3.0, false);
+    controller.request_live(
+        snapshot_alt(vec![100, 200, 300], vec![1.0, 2.0, 3.0], 1),
+        3.0,
+        false,
+    );
     // Second tick arrives before the first is polled -> coalesces, cancelling gen 1.
     controller.request_live(
-        snapshot_alt(vec![100, 200, 300, 400, 500], vec![1.0, 2.0, 3.0, 4.0, 5.0], 2),
+        snapshot_alt(
+            vec![100, 200, 300, 400, 500],
+            vec![1.0, 2.0, 3.0, 4.0, 5.0],
+            2,
+        ),
         3.0,
         false,
     );
@@ -842,7 +861,11 @@ fn live_append_seeds_then_appends_only_new_tail() {
     });
 
     // Seed.
-    controller.request_live(snapshot_alt(vec![100, 200, 300], vec![1.0, 2.0, 3.0], 1), 3.0, true);
+    controller.request_live(
+        snapshot_alt(vec![100, 200, 300], vec![1.0, 2.0, 3.0], 1),
+        3.0,
+        true,
+    );
     wait_for(&mut controller, &sender);
     assert!(controller.is_live_published());
     assert_eq!(
@@ -858,7 +881,11 @@ fn live_append_seeds_then_appends_only_new_tail() {
 
     // Append: new samples 400,500; must NOT re-open, must NOT close, one more batch.
     controller.request_live(
-        snapshot_alt(vec![100, 200, 300, 400, 500], vec![1.0, 2.0, 3.0, 4.0, 5.0], 2),
+        snapshot_alt(
+            vec![100, 200, 300, 400, 500],
+            vec![1.0, 2.0, 3.0, 4.0, 5.0],
+            2,
+        ),
         3.0,
         true,
     );
@@ -867,7 +894,10 @@ fn live_append_seeds_then_appends_only_new_tail() {
         observed_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
         Observed::Batch
     );
-    assert!(observed_rx.try_recv().is_err(), "no second open, no close on append");
+    assert!(
+        observed_rx.try_recv().is_err(),
+        "no second open, no close on append"
+    );
 
     drop(sender);
     ingest_thread.join().unwrap();
@@ -922,7 +952,11 @@ fn live_seed_after_preview_covers_full_history() {
 
     // 1. Preview tick (append=false): advances the watermark to 30_000_000, no publish.
     controller.request_live(
-        snapshot_alt(vec![10_000_000, 20_000_000, 30_000_000], vec![1.0, 2.0, 3.0], 1),
+        snapshot_alt(
+            vec![10_000_000, 20_000_000, 30_000_000],
+            vec![1.0, 2.0, 3.0],
+            1,
+        ),
         3.0,
         false,
     );
@@ -944,7 +978,10 @@ fn live_seed_after_preview_covers_full_history() {
     wait_for(&mut controller, &sender);
 
     // The seed spans all 5 rows (full history), not a windowed tail.
-    assert_eq!(rec_rx.recv_timeout(Duration::from_secs(1)).unwrap(), Rec::Open);
+    assert_eq!(
+        rec_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        Rec::Open
+    );
     assert_eq!(
         rec_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
         Rec::Batch(5)
@@ -959,7 +996,7 @@ fn live_seed_after_preview_covers_full_history() {
 }
 
 #[test]
-fn live_source_getter_exposes_open_source() {
+fn stopping_a_live_publication_releases_the_source() {
     let mut graph = Graph::new("g");
     let input = add_node(&mut graph, data());
     let out = add_node(
@@ -985,18 +1022,170 @@ fn live_source_getter_exposes_open_source() {
         }
     });
 
-    assert!(controller.live_source().is_none());
+    assert!(controller.live_source.is_none());
     controller.request_live(
         snapshot_alt(vec![100, 200, 300], vec![1.0, 2.0, 3.0], 1),
         3.0,
         true,
     );
     wait_for(&mut controller, &sender);
-    assert!(controller.live_source().is_some());
+    assert!(controller.live_source.is_some());
 
-    controller.reset_live(&sender);
-    assert!(controller.live_source().is_none());
+    controller.stop(&sender);
+    assert!(controller.live_source.is_none());
 
     drop(sender);
     ingest_thread.join().unwrap();
+}
+
+#[test]
+fn owned_publication_waits_for_ingestion_and_cleanup_removes_only_its_source() {
+    let ingestor = delog_core::ingestor::Ingestor::new(delog_core::ingestor::NullObserver);
+    let store = ingestor.store();
+    let (sender, receiver) = ingest_channel();
+    let thread = std::thread::spawn(move || ingestor.run(receiver));
+    let (mut graph, output) = scale_graph(2.0);
+    let out = add_node(
+        &mut graph,
+        NodeKind::Output(OutputSpec {
+            topic: "DERIVED".into(),
+            fields: vec![OutputFieldSpec {
+                name: "value".into(),
+                unit: None,
+            }],
+        }),
+    );
+    graph.connect(output, 0, out, 0).unwrap();
+    let mut first = DataFlowController::new(graph.clone());
+    let mut second = DataFlowController::new(graph);
+    first.set_publication_key("one".into());
+    second.set_publication_key("two".into());
+    for controller in [&mut first, &mut second] {
+        controller.request_publish(snapshot());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            controller.poll(&sender);
+            if let Some(result) = controller.take_publication_result() {
+                result.unwrap();
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+    assert_eq!(
+        store
+            .load()
+            .sources
+            .iter()
+            .filter(|s| !s.entry.removed)
+            .count(),
+        2
+    );
+    first
+        .stop_owned(&sender)
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        store
+            .load()
+            .sources
+            .iter()
+            .filter(|s| !s.entry.removed)
+            .count(),
+        1
+    );
+    second
+        .stop_owned(&sender)
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
+    drop(first);
+    drop(second);
+    drop(sender);
+    thread.join().unwrap();
+}
+
+#[test]
+fn headless_flow_reacts_to_inputs_not_its_own_publication() {
+    let ingestor = delog_core::ingestor::Ingestor::new(delog_core::ingestor::NullObserver);
+    let store = ingestor.store();
+    let (sender, receiver) = ingest_channel();
+    let thread = std::thread::spawn(move || ingestor.run(receiver));
+    let (mut graph, scaled) = scale_graph(2.0);
+    let out = add_node(
+        &mut graph,
+        NodeKind::Output(OutputSpec {
+            topic: "DERIVED".into(),
+            fields: vec![OutputFieldSpec {
+                name: "value".into(),
+                unit: None,
+            }],
+        }),
+    );
+    graph.connect(scaled, 0, out, 0).unwrap();
+    let input = snapshot();
+    let mut flow = crate::dataflow::headless::HeadlessFlow::new(graph, "sequence-step".into());
+    let mut time = 0.0;
+    loop {
+        let (_, result) = flow.drive(&input, &sender, true, time, 0, 2.0);
+        if let Some(result) = result {
+            result.unwrap();
+            break;
+        }
+        time += 0.01;
+        assert!(time < 10.0);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let mut republished = (*input).clone();
+    republished.epoch = 999;
+    let (_, result) = flow.drive(&Arc::new(republished), &sender, true, 20.0, 0, 2.0);
+    assert!(result.is_none());
+    assert!(!flow.controller.is_evaluating());
+    assert_eq!(
+        store
+            .load()
+            .sources
+            .iter()
+            .filter(|s| !s.entry.removed)
+            .count(),
+        1
+    );
+    let original_source = store
+        .load()
+        .sources
+        .iter()
+        .find(|source| !source.entry.removed)
+        .unwrap()
+        .entry
+        .id;
+    let updated = snapshot_alt(vec![100, 200, 300, 400], vec![1.0, 2.0, 3.0, 4.0], 1000);
+    let mut time = 21.0;
+    loop {
+        let (_, result) = flow.drive(&updated, &sender, true, time, 0, 2.0);
+        if let Some(result) = result {
+            result.unwrap();
+            break;
+        }
+        time += 0.01;
+        assert!(time < 30.0);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let published = store.load();
+    let current = published
+        .sources
+        .iter()
+        .find(|source| !source.entry.removed)
+        .unwrap();
+    assert_eq!(current.entry.id, original_source);
+    assert_eq!(published.topic_store(current.topics[0]).unwrap().rows, 4);
+    flow.controller
+        .stop_owned(&sender)
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
+    drop(flow);
+    drop(sender);
+    thread.join().unwrap();
 }

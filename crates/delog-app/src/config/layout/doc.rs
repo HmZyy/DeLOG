@@ -13,10 +13,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config::settings::AppSettings;
-use crate::scene3d::vehicle::{GeoRef, ModelKind, NedReference, OriMapping, PosMapping, VehicleConfig};
+use crate::scene3d::vehicle::{
+    GeoRef, ModelKind, NedReference, OriMapping, PosMapping, VehicleConfig,
+};
 
 const APP_ID: &str = "DeLOG";
-pub(crate) const LAYOUT_VERSION: u32 = 1;
+pub(crate) const LAYOUT_VERSION: u32 = 2;
 
 fn default_true() -> bool {
     true
@@ -28,6 +30,8 @@ pub struct LayoutDoc {
     pub name: String,
     pub playback: PlaybackLayout,
     pub workspace: WorkspaceLayout,
+    #[serde(default)]
+    pub windows: Vec<WindowLayout>,
     pub vehicles: Vec<VehicleLayout>,
 }
 
@@ -45,6 +49,15 @@ pub struct PlaybackLayout {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkspaceLayout {
+    pub root: LayoutNode,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WindowLayout {
+    #[serde(default)]
+    pub id: Option<u64>,
+    pub title: String,
+    pub size: [f32; 2],
     pub root: LayoutNode,
 }
 
@@ -95,14 +108,42 @@ pub enum TraceModeLayout {
 pub struct SceneLayout {
     pub camera: CameraLayout,
     pub tracked_vehicle: Option<usize>,
-    /// Defaults true so layouts saved before this field decode to the
-    /// up-to-playhead behavior.
-    #[serde(default = "default_trail_to_playhead")]
-    pub trail_to_playhead: bool,
+    #[serde(
+        default = "default_trail_mode",
+        alias = "trail_to_playhead",
+        deserialize_with = "trail_mode_compat"
+    )]
+    pub trail_mode: TrailModeLayout,
 }
 
-fn default_trail_to_playhead() -> bool {
-    true
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrailModeLayout {
+    ToPlayhead,
+    VisibleWindow,
+    Full,
+}
+
+fn default_trail_mode() -> TrailModeLayout {
+    TrailModeLayout::ToPlayhead
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum TrailModeCompat {
+    Named(TrailModeLayout),
+    Legacy(bool),
+}
+
+fn trail_mode_compat<'de, D>(deserializer: D) -> Result<TrailModeLayout, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match TrailModeCompat::deserialize(deserializer)? {
+        TrailModeCompat::Named(mode) => mode,
+        TrailModeCompat::Legacy(true) => TrailModeLayout::ToPlayhead,
+        TrailModeCompat::Legacy(false) => TrailModeLayout::Full,
+    })
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -394,6 +435,14 @@ fn migrate_to_current(value: Value) -> Result<Value, LayoutError> {
         .ok_or(LayoutError::MissingVersion)? as u32;
     match version {
         LAYOUT_VERSION => Ok(value),
+        1 => {
+            let mut value = value;
+            if let Some(object) = value.as_object_mut() {
+                object.insert("delog_layout".to_owned(), Value::from(LAYOUT_VERSION));
+                object.insert("windows".to_owned(), Value::Array(Vec::new()));
+            }
+            Ok(value)
+        }
         other => Err(LayoutError::UnsupportedVersion(other)),
     }
 }
@@ -446,7 +495,10 @@ fn named_layout_path(name: &str) -> Result<PathBuf, LayoutError> {
     Ok(layout_dir()?.join(format!("{}.json", sanitize_name(name))))
 }
 
-pub(crate) fn vehicle_to_layout(v: &VehicleConfig, snapshot: &StoreSnapshot) -> Option<VehicleLayout> {
+pub(crate) fn vehicle_to_layout(
+    v: &VehicleConfig,
+    snapshot: &StoreSnapshot,
+) -> Option<VehicleLayout> {
     Some(VehicleLayout {
         label: v.label.clone(),
         show: v.show,
@@ -516,6 +568,9 @@ pub(crate) fn field_ref(snapshot: &StoreSnapshot, field: FieldId) -> Option<Fiel
 
 pub(crate) fn collect_field_refs(doc: &LayoutDoc, resolver: &mut Resolver<'_>) {
     collect_node_field_refs(&doc.workspace.root, resolver);
+    for window in &doc.windows {
+        collect_node_field_refs(&window.root, resolver);
+    }
     for vehicle in &doc.vehicles {
         collect_pos_field_refs(&vehicle.position, resolver);
         collect_ori_field_refs(&vehicle.orientation, resolver);
@@ -734,7 +789,10 @@ impl Resolver<'_> {
     }
 }
 
-pub(crate) fn vehicle_from_layout(v: &VehicleLayout, resolver: &mut Resolver<'_>) -> Option<VehicleConfig> {
+pub(crate) fn vehicle_from_layout(
+    v: &VehicleLayout,
+    resolver: &mut Resolver<'_>,
+) -> Option<VehicleConfig> {
     let source = first_resolved_source(v, resolver)?;
     Some(VehicleConfig {
         source,

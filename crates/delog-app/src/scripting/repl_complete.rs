@@ -78,10 +78,7 @@ fn match_highlight_job(
 /// immediately before the cursor. `None` when that run is empty.
 pub fn completable_token(line: &str, cursor: usize) -> Option<(usize, &str)> {
     let cursor = cursor.min(line.len());
-    let head = match line.get(..cursor) {
-        Some(head) => head,
-        None => return None,
-    };
+    let head = line.get(..cursor)?;
     let start = head
         .char_indices()
         .rev()
@@ -233,16 +230,14 @@ impl ReplCompletion {
 
     /// Replace the popup's range with the highlighted candidate and close.
     pub fn accept_selected(&mut self, buffer: &mut String) {
-        if let Some(popup) = self.popup.take() {
-            if let Some(choice) = popup.matches.get(popup.selected) {
-                if buffer.is_char_boundary(popup.start)
-                    && popup.end <= buffer.len()
-                    && buffer.is_char_boundary(popup.end)
-                {
-                    buffer.replace_range(popup.start..popup.end, choice);
-                    self.pending_cursor = Some(popup.start + choice.len());
-                }
-            }
+        if let Some(popup) = self.popup.take()
+            && let Some(choice) = popup.matches.get(popup.selected)
+            && buffer.is_char_boundary(popup.start)
+            && popup.end <= buffer.len()
+            && buffer.is_char_boundary(popup.end)
+        {
+            buffer.replace_range(popup.start..popup.end, choice);
+            self.pending_cursor = Some(popup.start + choice.len());
         }
     }
 

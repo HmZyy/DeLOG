@@ -13,6 +13,7 @@ pub enum CommandId {
     Open,
     ConnectLive,
     SyncSources,
+    CloseAllSources,
     DisconnectLive,
     CancelTasks,
     ExportData,
@@ -22,6 +23,7 @@ pub enum CommandId {
     ToggleDataBrowser,
     ToggleInspector,
     ToggleScene3d,
+    NewPlotWindow,
     OpenDiagnostics,
     OpenPerformance,
     OpenMarkers,
@@ -30,7 +32,9 @@ pub enum CommandId {
     SaveLayout,
     LoadLayout,
     RunScript,
+    RunPalette,
     ManageLayouts,
+    ManageSequences,
     ClearLayout,
     ImportLayout,
     ExportLayout,
@@ -40,10 +44,11 @@ pub enum CommandId {
     OpenScriptVariables,
     OpenParserEditor,
     TogglePlayheadSnap,
+    ToggleReadoutLock,
     AddMeasuringMarker,
     CycleLegendPosition,
     ToggleLegends,
-    OpenFieldStats,
+    ToggleFieldStats,
     ToggleAnnotationToolbar,
     OpenSettings,
     Exit,
@@ -58,6 +63,7 @@ pub enum CommandId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppCommand {
     Static(CommandId),
+    ShowAbout,
     ToggleShellEmphasis,
     FitAll,
     SetCursorSampling(SampleMode),
@@ -66,6 +72,7 @@ pub enum AppCommand {
     OpenWithParser(String),
     #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
     RunScript(String),
+    RunSequence(String),
     LoadNamedLayout(String),
     DisconnectLink(usize),
 }
@@ -93,12 +100,13 @@ impl AppCommand {
     pub const fn classic_menu_owner(&self) -> ClassicMenuOwner {
         match self {
             Self::Static(id) => id.classic_menu_owner(),
+            Self::ShowAbout => ClassicMenuOwner::Tools,
             Self::ToggleShellEmphasis | Self::DisconnectLink(_) => ClassicMenuOwner::File,
             Self::OpenWithBuiltInParser(_) => ClassicMenuOwner::File,
             Self::OpenWithParser(_) => ClassicMenuOwner::Tools,
             Self::FitAll => ClassicMenuOwner::View,
             Self::SetCursorSampling(_) => ClassicMenuOwner::Analyze,
-            Self::RunScript(_) => ClassicMenuOwner::Tools,
+            Self::RunScript(_) | Self::RunSequence(_) => ClassicMenuOwner::Tools,
             Self::LoadNamedLayout(_) => ClassicMenuOwner::Tools,
         }
     }
@@ -154,30 +162,37 @@ pub struct CommandSpec {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CommandContext {
     pub has_data: bool,
+    pub source_count: usize,
     pub offline_source_count: usize,
     pub live_link_count: usize,
     pub has_active_tasks: bool,
     pub scripting_enabled: bool,
     pub has_plotted_traces: bool,
+    pub field_stats_open: bool,
 }
 
 impl CommandContext {
+    #[allow(clippy::too_many_arguments)]
     pub const fn for_frame(
         has_data: bool,
+        source_count: usize,
         offline_source_count: usize,
         live_link_count: usize,
         native_tasks_active: bool,
         parser_task_active: bool,
         scripting_enabled: bool,
         has_plotted_traces: bool,
+        field_stats_open: bool,
     ) -> Self {
         Self {
             has_data,
+            source_count,
             offline_source_count,
             live_link_count,
             has_active_tasks: native_tasks_active || parser_task_active,
             scripting_enabled,
             has_plotted_traces,
+            field_stats_open,
         }
     }
 }
@@ -212,7 +227,9 @@ pub struct PresentationState {
     pub scripting_console_open: bool,
     pub logging_open: bool,
     pub playhead_snap: bool,
+    pub readout_lock: bool,
     pub measuring_marker: bool,
+    pub field_stats_open: bool,
     pub legends_visible: bool,
     pub annotation_toolbar_open: bool,
 }
@@ -231,7 +248,9 @@ impl Default for PresentationState {
             scripting_console_open: false,
             logging_open: false,
             playhead_snap: false,
+            readout_lock: false,
             measuring_marker: false,
+            field_stats_open: false,
             legends_visible: true,
             annotation_toolbar_open: false,
         }
@@ -250,7 +269,9 @@ impl PresentationState {
             CommandId::OpenScripting => Some(self.scripting_console_open),
             CommandId::OpenLogging => Some(self.logging_open),
             CommandId::TogglePlayheadSnap => Some(self.playhead_snap),
+            CommandId::ToggleReadoutLock => Some(self.readout_lock),
             CommandId::AddMeasuringMarker => Some(self.measuring_marker),
+            CommandId::ToggleFieldStats => Some(self.field_stats_open),
             CommandId::ToggleLegends => Some(self.legends_visible),
             CommandId::ToggleAnnotationToolbar => Some(self.annotation_toolbar_open),
             _ => None,
@@ -263,6 +284,7 @@ impl CommandId {
         Self::Open,
         Self::ConnectLive,
         Self::SyncSources,
+        Self::CloseAllSources,
         Self::DisconnectLive,
         Self::CancelTasks,
         Self::ExportData,
@@ -272,6 +294,7 @@ impl CommandId {
         Self::ToggleDataBrowser,
         Self::ToggleInspector,
         Self::ToggleScene3d,
+        Self::NewPlotWindow,
         Self::OpenDiagnostics,
         Self::OpenPerformance,
         Self::OpenMarkers,
@@ -280,7 +303,9 @@ impl CommandId {
         Self::SaveLayout,
         Self::LoadLayout,
         Self::RunScript,
+        Self::RunPalette,
         Self::ManageLayouts,
+        Self::ManageSequences,
         Self::ClearLayout,
         Self::ImportLayout,
         Self::ExportLayout,
@@ -290,10 +315,11 @@ impl CommandId {
         Self::OpenScriptVariables,
         Self::OpenParserEditor,
         Self::TogglePlayheadSnap,
+        Self::ToggleReadoutLock,
         Self::AddMeasuringMarker,
         Self::CycleLegendPosition,
         Self::ToggleLegends,
-        Self::OpenFieldStats,
+        Self::ToggleFieldStats,
         Self::ToggleAnnotationToolbar,
         Self::OpenSettings,
         Self::Exit,
@@ -308,11 +334,14 @@ impl CommandId {
     pub const fn classic_menu_owner(self) -> ClassicMenuOwner {
         use CommandId::*;
         match self {
-            Open | ConnectLive | DisconnectLive | CancelTasks | ExportData | ExportDiagnostics
-            | ExportProfiling | ExportWorkspacePng | Exit => ClassicMenuOwner::File,
+            Open | ConnectLive | CloseAllSources | DisconnectLive | CancelTasks | ExportData
+            | ExportDiagnostics | ExportProfiling | ExportWorkspacePng | Exit => {
+                ClassicMenuOwner::File
+            }
             ToggleDataBrowser
             | ToggleInspector
             | ToggleScene3d
+            | NewPlotWindow
             | OpenDiagnostics
             | OpenPerformance
             | OpenMarkers
@@ -321,17 +350,14 @@ impl CommandId {
             | EqualizePlots
             | CycleLegendPosition
             | ToggleLegends
-            | OpenFieldStats
+            | ToggleFieldStats
             | ToggleAnnotationToolbar => ClassicMenuOwner::View,
-            SyncSources | OpenDataFlow | TogglePlayheadSnap | AddMeasuringMarker
-            | TogglePlayback | JumpStart | JumpEnd | StepLeft | StepRight | AddMarker => {
-                ClassicMenuOwner::Analyze
-            }
-            OpenScriptEditor | OpenScriptVariables | OpenParserEditor | RunScript | SaveLayout
-            | LoadLayout | ManageLayouts | ClearLayout | ImportLayout | ExportLayout
-            | OpenSettings => {
-                ClassicMenuOwner::Tools
-            }
+            SyncSources | OpenDataFlow | TogglePlayheadSnap | ToggleReadoutLock
+            | AddMeasuringMarker | TogglePlayback | JumpStart | JumpEnd | StepLeft | StepRight
+            | AddMarker => ClassicMenuOwner::Analyze,
+            OpenScriptEditor | OpenScriptVariables | OpenParserEditor | RunScript | RunPalette
+            | SaveLayout | LoadLayout | ManageLayouts | ManageSequences | ClearLayout
+            | ImportLayout | ExportLayout | OpenSettings => ClassicMenuOwner::Tools,
         }
     }
 
@@ -339,6 +365,9 @@ impl CommandId {
         match self {
             Self::SyncSources if context.offline_source_count < 2 => {
                 CommandAvailability::Disabled("Open at least two offline sources to synchronize")
+            }
+            Self::CloseAllSources if context.source_count == 0 => {
+                CommandAvailability::Disabled("No source is open")
             }
             Self::DisconnectLive if context.live_link_count == 0 => {
                 CommandAvailability::Disabled("No live connection is active")
@@ -355,7 +384,7 @@ impl CommandId {
             {
                 CommandAvailability::Disabled("Scripting support is not enabled in this build")
             }
-            Self::OpenFieldStats if !context.has_plotted_traces => {
+            Self::ToggleFieldStats if !context.has_plotted_traces && !context.field_stats_open => {
                 CommandAvailability::Disabled("Plot at least one trace first")
             }
             Self::ToggleAnnotationToolbar if !context.has_plotted_traces => {
@@ -456,6 +485,7 @@ mod tests {
         assert_eq!(CommandId::SaveLayout.spec().shortcut, Some("Ctrl+S"));
         assert_eq!(CommandId::LoadLayout.spec().shortcut, Some("Ctrl+L"));
         assert_eq!(CommandId::ToggleDataBrowser.spec().shortcut, Some("Ctrl+E"));
+        assert_eq!(CommandId::ToggleScene3d.spec().shortcut, Some("Ctrl+T"));
         assert_eq!(CommandId::Open.spec().shortcut, Some("Ctrl+O"));
         assert_eq!(CommandId::AddMarker.spec().shortcut, Some("M"));
         assert_eq!(CommandId::OpenDiagnostics.spec().shortcut, Some("F1"));
@@ -505,6 +535,7 @@ mod tests {
             &[
                 DynamicFamily::Parser,
                 DynamicFamily::Script,
+                DynamicFamily::Sequence,
                 DynamicFamily::Layout,
                 DynamicFamily::LiveLink
             ],
@@ -516,6 +547,7 @@ mod tests {
         assert!(CommandId::ALL.iter().all(|id| !id.spec().routes.is_empty()));
         assert!(dynamic_command_families().contains(&DynamicFamily::Parser));
         assert!(dynamic_command_families().contains(&DynamicFamily::Script));
+        assert!(dynamic_command_families().contains(&DynamicFamily::Sequence));
         assert!(dynamic_command_families().contains(&DynamicFamily::Layout));
         assert!(dynamic_command_families().contains(&DynamicFamily::LiveLink));
     }
@@ -547,6 +579,10 @@ mod tests {
         );
         assert_eq!(
             AppCommand::OpenWithParser("csv".into()).classic_menu_owner(),
+            ClassicMenuOwner::Tools
+        );
+        assert_eq!(
+            AppCommand::RunSequence("startup".into()).classic_menu_owner(),
             ClassicMenuOwner::Tools
         );
         assert_eq!(
@@ -674,7 +710,7 @@ mod tests {
 
     #[test]
     fn parser_only_work_enables_the_shared_cancel_presentation() {
-        let context = CommandContext::for_frame(false, 0, 0, false, true, true, false);
+        let context = CommandContext::for_frame(false, 0, 0, 0, false, true, true, false, false);
         assert!(context.has_active_tasks);
         assert_eq!(
             CommandId::CancelTasks.availability(&context),
@@ -772,5 +808,111 @@ mod tests {
             presentation(CommandId::AddMeasuringMarker).availability,
             CommandAvailability::Disabled("Open a log or connect a live source first")
         );
+    }
+
+    #[test]
+    fn close_all_sources_is_reachable_only_from_the_command_palette() {
+        assert_eq!(
+            CommandId::CloseAllSources.spec().routes,
+            &[AccessRoute::Palette]
+        );
+    }
+
+    #[test]
+    fn close_all_sources_needs_at_least_one_open_source() {
+        let empty = CommandContext::default();
+        assert!(matches!(
+            CommandId::CloseAllSources.availability(&empty),
+            CommandAvailability::Disabled(_)
+        ));
+        assert_eq!(
+            CommandId::CloseAllSources.availability(&CommandContext {
+                source_count: 1,
+                ..empty
+            }),
+            CommandAvailability::Enabled
+        );
+    }
+
+    #[test]
+    fn field_stats_reports_its_open_state_and_stays_closable_without_traces() {
+        assert_eq!(
+            PresentationState {
+                field_stats_open: true,
+                ..PresentationState::default()
+            }
+            .selected_for(CommandId::ToggleFieldStats),
+            Some(true)
+        );
+        assert_eq!(
+            PresentationState::default().selected_for(CommandId::ToggleFieldStats),
+            Some(false)
+        );
+
+        let closed = CommandContext::default();
+        assert!(matches!(
+            CommandId::ToggleFieldStats.availability(&closed),
+            CommandAvailability::Disabled(_)
+        ));
+        assert_eq!(
+            CommandId::ToggleFieldStats.availability(&CommandContext {
+                field_stats_open: true,
+                ..closed
+            }),
+            CommandAvailability::Enabled,
+        );
+        assert_eq!(
+            CommandId::ToggleFieldStats.availability(&CommandContext {
+                has_plotted_traces: true,
+                ..closed
+            }),
+            CommandAvailability::Enabled,
+        );
+    }
+
+    #[test]
+    fn the_annotation_toolbar_tracks_every_window_it_actually_edits() {
+        let window_only = CommandContext {
+            has_plotted_traces: true,
+            ..CommandContext::default()
+        };
+
+        assert_eq!(
+            CommandId::ToggleFieldStats.availability(&window_only),
+            CommandAvailability::Enabled,
+            "field stats opens the union of every window, so it spans them"
+        );
+        assert_eq!(
+            CommandId::ToggleAnnotationToolbar.availability(&window_only),
+            CommandAvailability::Enabled,
+            "the toolbar now lists annotations from every window, so a trace plotted only in an extended window must still enable it"
+        );
+        assert!(
+            matches!(
+                CommandId::ToggleAnnotationToolbar.availability(&CommandContext::default()),
+                CommandAvailability::Disabled(_)
+            ),
+            "with nothing plotted anywhere, the toolbar stays disabled"
+        );
+    }
+
+    #[test]
+    fn close_all_sources_is_presented_with_the_other_source_commands() {
+        let presentations = present_commands(
+            &CommandContext {
+                source_count: 2,
+                ..CommandContext::default()
+            },
+            &PresentationState::default(),
+            [],
+        );
+        let presentation = presentations
+            .iter()
+            .find(|item| item.command == AppCommand::Static(CommandId::CloseAllSources))
+            .expect("close all sources must be in the canonical catalog");
+
+        assert_eq!(presentation.label, "Close all sources");
+        assert_eq!(presentation.availability, CommandAvailability::Enabled);
+        assert_eq!(presentation.selected, None);
     }
 }

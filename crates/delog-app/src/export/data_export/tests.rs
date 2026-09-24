@@ -269,12 +269,11 @@ fn shared_batches_preserve_rows_nulls_origin_and_multiplier() {
 #[test]
 fn shared_batches_use_nulls_for_missing_union_cells() {
     let (snapshot, fields) = snapshot_with_staggered_fields();
-    let batch =
-        ExportBatchReader::try_new(&snapshot, &fields, (10, 20), ResampleMode::None, 10)
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap();
+    let batch = ExportBatchReader::try_new(&snapshot, &fields, (10, 20), ResampleMode::None, 10)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap();
     let roll = batch
         .column(2)
         .as_any()
@@ -298,18 +297,16 @@ fn shared_batches_are_bounded_to_8192_rows() {
         .map(|value| Some(value as f64))
         .collect::<Vec<_>>();
     let (snapshot, field) = snapshot_with_values(timestamps, values);
-    let sizes =
-        ExportBatchReader::try_new(&snapshot, &[field], (0, 8_192), ResampleMode::None, 0)
-            .unwrap()
-            .map(|batch| batch.unwrap().num_rows())
-            .collect::<Vec<_>>();
+    let sizes = ExportBatchReader::try_new(&snapshot, &[field], (0, 8_192), ResampleMode::None, 0)
+        .unwrap()
+        .map(|batch| batch.unwrap().num_rows())
+        .collect::<Vec<_>>();
     assert_eq!(sizes, vec![8_192, 1]);
 }
 
 #[test]
 fn csv_writer_preserves_header_and_precision() {
-    let (snapshot, field) =
-        snapshot_with_values(vec![1_000, 2_000], vec![Some(1.25), Some(-3.0)]);
+    let (snapshot, field) = snapshot_with_values(vec![1_000, 2_000], vec![Some(1.25), Some(-3.0)]);
     let batches =
         ExportBatchReader::try_new(&snapshot, &[field], (1_000, 2_000), ResampleMode::None, 0)
             .unwrap();
@@ -327,8 +324,7 @@ fn csv_writer_quotes_headers_and_blanks_missing_union_cells() {
     let (snapshot, mut fields) = snapshot_with_staggered_fields();
     fields[0].label = "flight,one / ATT.Roll".into();
     let batches =
-        ExportBatchReader::try_new(&snapshot, &fields, (10, 20), ResampleMode::None, 10)
-            .unwrap();
+        ExportBatchReader::try_new(&snapshot, &fields, (10, 20), ResampleMode::None, 10).unwrap();
     let mut output = Vec::new();
     let rows = write_csv(&mut output, batches, (10, 20), &ExportCtl::default()).unwrap();
     assert_eq!(rows, 2);
@@ -1239,8 +1235,7 @@ fn exact_field_resolution_rejects_mixed_valid_and_stale_ids() {
     let fields = vec![export_field(1, "Roll"), export_field(2, "Pitch")];
     let stale = delog_core::identity::FieldId(99);
 
-    let error =
-        resolve_export_fields(&[fields[0].id, stale, fields[1].id], &fields).unwrap_err();
+    let error = resolve_export_fields(&[fields[0].id, stale, fields[1].id], &fields).unwrap_err();
 
     assert_eq!(error.id, stale);
 }

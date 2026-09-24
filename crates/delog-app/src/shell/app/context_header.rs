@@ -76,22 +76,17 @@ const VIEW_PANELS_MENU: &[CommandId] = &[
     CommandId::OpenScripting,
     CommandId::OpenLogging,
 ];
-const TOOLS_LAYOUTS_MENU: &[CommandId] = &[
-    CommandId::SaveLayout,
-    CommandId::ManageLayouts,
+const TOOLS_LAYOUTS_MENU: &[CommandId] = &[CommandId::SaveLayout, CommandId::ManageLayouts];
+const TOOLS_LAYOUTS_FILE_MENU: &[CommandId] = &[
     CommandId::ImportLayout,
     CommandId::ExportLayout,
     CommandId::ClearLayout,
 ];
-const ANALYZE_MENU: &[CommandId] = &[
-    CommandId::SyncSources,
-    CommandId::OpenDataFlow,
-];
+const ANALYZE_MENU: &[CommandId] = &[CommandId::SyncSources, CommandId::OpenDataFlow];
 const TOOLS_MENU: &[CommandId] = &[CommandId::OpenSettings];
-const TOOLS_SCRIPTS_MENU: &[CommandId] = &[
-    CommandId::OpenScriptEditor,
-    CommandId::OpenScriptVariables,
-];
+const TOOLS_SEQUENCES_MENU: &[CommandId] = &[CommandId::ManageSequences];
+const TOOLS_SCRIPTS_MENU: &[CommandId] =
+    &[CommandId::OpenScriptEditor, CommandId::OpenScriptVariables];
 const TOOLS_PARSERS_MENU: &[CommandId] = &[CommandId::OpenParserEditor];
 
 fn header_bottom_margin(style: &egui::Style) -> f32 {
@@ -107,9 +102,11 @@ pub(crate) fn classic_menu_command_ids() -> Vec<CommandId> {
         VIEW_PANELS_MENU,
         ANALYZE_MENU,
         TOOLS_MENU,
+        TOOLS_SEQUENCES_MENU,
         TOOLS_SCRIPTS_MENU,
         TOOLS_PARSERS_MENU,
         TOOLS_LAYOUTS_MENU,
+        TOOLS_LAYOUTS_FILE_MENU,
     ]
     .into_iter()
     .flatten()
@@ -128,7 +125,17 @@ pub fn show(
     let mut refresh_dynamic_catalog = false;
     ui.vertical(|ui| {
         ui.horizontal(|ui| {
-            ui.strong("DeLOG");
+            if ui
+                .add(
+                    egui::Label::new(egui::RichText::new("DeLOG").strong())
+                        .sense(egui::Sense::click()),
+                )
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text("About DeLOG")
+                .clicked()
+            {
+                commands.push(AppCommand::ShowAbout);
+            }
             ui.separator();
             let offline = ui
                 .selectable_label(model.emphasis == ShellEmphasis::Offline, "Offline")
@@ -162,13 +169,13 @@ pub fn show(
             }
             if crate::ui::components::icon_button(
                 ui,
-                crate::ui::icons::cube(),
-                "Show or hide the 3D scene",
+                crate::ui::icons::app_window(),
+                CommandId::NewPlotWindow.spec().label,
                 false,
             )
             .clicked()
             {
-                commands.push(AppCommand::Static(CommandId::ToggleScene3d));
+                commands.push(AppCommand::Static(CommandId::NewPlotWindow));
             }
             for status in &model.live_statuses {
                 let detail = format!("{} · {} rows", status.state, status.rows);
@@ -188,14 +195,14 @@ pub fn show(
                     state,
                 };
                 components::status_chip(ui, &chip, model.theme).on_hover_text(format!(
-                        "{} received frames{}",
-                        status.rx_frames,
-                        status
-                            .recording
-                            .as_deref()
-                            .map(|value| format!(" · {value}"))
-                            .unwrap_or_default()
-                    ));
+                    "{} received frames{}",
+                    status.rx_frames,
+                    status
+                        .recording
+                        .as_deref()
+                        .map(|value| format!(" · {value}"))
+                        .unwrap_or_default()
+                ));
                 if components::icon_button(
                     ui,
                     crate::ui::icons::unplug(),
@@ -251,6 +258,7 @@ pub fn show(
                         ClassicMenuOwner::File,
                         presentations,
                         &mut commands,
+                        "No built-in parsers",
                         |command| matches!(command, AppCommand::OpenWithBuiltInParser(_)),
                     );
                 });
@@ -295,12 +303,13 @@ pub fn show(
             });
             let tools_menu = ui.menu_button("Tools", |ui| {
                 ui.menu_button("Scripts", |ui| {
-                    ui.menu_button("Run Scripts", |ui| {
+                    ui.menu_button("Run script", |ui| {
                         dynamic_rows(
                             ui,
                             ClassicMenuOwner::Tools,
                             presentations,
                             &mut commands,
+                            &crate::ui::empty::no_saved("scripts"),
                             |command| matches!(command, AppCommand::RunScript(_)),
                         );
                     });
@@ -313,6 +322,16 @@ pub fn show(
                     );
                 });
                 ui.menu_button("Parsers", |ui| {
+                    ui.menu_button("Run parser", |ui| {
+                        dynamic_rows(
+                            ui,
+                            ClassicMenuOwner::Tools,
+                            presentations,
+                            &mut commands,
+                            &crate::ui::empty::no_saved("parsers"),
+                            |command| matches!(command, AppCommand::OpenWithParser(_)),
+                        );
+                    });
                     menu_items(
                         ui,
                         ClassicMenuOwner::Tools,
@@ -320,31 +339,49 @@ pub fn show(
                         presentations,
                         &mut commands,
                     );
-                    ui.menu_button("Run Parser", |ui| {
-                        dynamic_rows(
-                            ui,
-                            ClassicMenuOwner::Tools,
-                            presentations,
-                            &mut commands,
-                            |command| matches!(command, AppCommand::OpenWithParser(_)),
-                        );
-                    });
                 });
                 ui.menu_button("Layouts", |ui| {
-                    menu_item(ui, CommandId::SaveLayout, presentations, &mut commands);
-                    ui.menu_button("Load Layout", |ui| {
+                    ui.menu_button("Load layout", |ui| {
                         dynamic_rows(
                             ui,
                             ClassicMenuOwner::Tools,
                             presentations,
                             &mut commands,
+                            &crate::ui::empty::no_saved("layouts"),
                             |command| matches!(command, AppCommand::LoadNamedLayout(_)),
                         );
                     });
                     menu_items(
                         ui,
                         ClassicMenuOwner::Tools,
-                        &TOOLS_LAYOUTS_MENU[1..],
+                        TOOLS_LAYOUTS_MENU,
+                        presentations,
+                        &mut commands,
+                    );
+                    ui.separator();
+                    menu_items(
+                        ui,
+                        ClassicMenuOwner::Tools,
+                        TOOLS_LAYOUTS_FILE_MENU,
+                        presentations,
+                        &mut commands,
+                    );
+                });
+                ui.menu_button("Sequences", |ui| {
+                    ui.menu_button("Run sequence", |ui| {
+                        dynamic_rows(
+                            ui,
+                            ClassicMenuOwner::Tools,
+                            presentations,
+                            &mut commands,
+                            &crate::ui::empty::no_saved("sequences"),
+                            |command| matches!(command, AppCommand::RunSequence(_)),
+                        );
+                    });
+                    menu_items(
+                        ui,
+                        ClassicMenuOwner::Tools,
+                        TOOLS_SEQUENCES_MENU,
                         presentations,
                         &mut commands,
                     );
@@ -360,6 +397,18 @@ pub fn show(
             refresh_dynamic_catalog |= tools_menu.response.clicked();
             ui.separator();
             commands.extend(show_toolbar(ui));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if crate::ui::components::icon_button(
+                    ui,
+                    crate::ui::icons::cube(),
+                    "Show or hide the 3D scene",
+                    false,
+                )
+                .clicked()
+                {
+                    commands.push(AppCommand::Static(CommandId::ToggleScene3d));
+                }
+            });
         });
         ui.add_space(header_bottom_margin(ui.style()));
     });
@@ -377,8 +426,7 @@ fn menu_items(
     selected: &mut Vec<AppCommand>,
 ) {
     debug_assert!(
-        ids.iter()
-            .all(|id| id.spec().classic_menu_owner == owner),
+        ids.iter().all(|id| id.spec().classic_menu_owner == owner),
         "classic menu section contains a command owned by another menu"
     );
     for id in ids {
@@ -406,14 +454,20 @@ fn dynamic_rows(
     owner: ClassicMenuOwner,
     presentations: &[CommandPresentation],
     selected: &mut Vec<AppCommand>,
+    empty_label: &str,
     matches_command: impl Fn(&AppCommand) -> bool,
 ) {
     let matching = presentations
         .iter()
         .filter(|presentation| matches_command(&presentation.command));
+    let mut rows = 0;
     for presentation in matching {
         debug_assert_eq!(presentation.command.classic_menu_owner(), owner);
         presentation_row(ui, presentation, false, selected);
+        rows += 1;
+    }
+    if rows == 0 {
+        components::menu_row(ui, empty_label, None, false, None);
     }
 }
 
@@ -428,13 +482,6 @@ fn menu_item(
     }
 }
 
-fn checked_row_text(presentation: &CommandPresentation) -> String {
-    presentation.shortcut.map_or_else(
-        || presentation.label.clone(),
-        |shortcut| format!("{}\t{shortcut}", presentation.label),
-    )
-}
-
 fn presentation_row(
     ui: &mut egui::Ui,
     presentation: &CommandPresentation,
@@ -447,11 +494,21 @@ fn presentation_row(
     };
     let response = if checked {
         let mut is_selected = presentation.selected.unwrap_or(false);
-        let text = checked_row_text(presentation);
-        let response = ui.add_enabled(
-            enabled,
-            egui::Checkbox::new(&mut is_selected, text),
-        );
+        let label = presentation.label.as_str();
+        let response = match presentation.shortcut {
+            Some(shortcut) => ui.add_enabled(
+                enabled,
+                egui::Checkbox::new(
+                    &mut is_selected,
+                    (
+                        label,
+                        egui::Atom::grow(),
+                        egui::RichText::new(shortcut).weak(),
+                    ),
+                ),
+            ),
+            None => ui.add_enabled(enabled, egui::Checkbox::new(&mut is_selected, label)),
+        };
         match reason {
             Some(reason) => response.on_disabled_hover_text(reason),
             None => response,
@@ -484,6 +541,93 @@ fn static_presentation(
 mod tests {
     use super::*;
 
+    fn text_layout_rect(output: &egui::FullOutput, expected: &str) -> Option<egui::Rect> {
+        fn walk(shape: &egui::epaint::Shape, expected: &str) -> Option<egui::Rect> {
+            match shape {
+                egui::epaint::Shape::Text(text) if text.galley.job.text == expected => {
+                    Some(egui::Rect::from_min_size(text.pos, text.galley.size()))
+                }
+                egui::epaint::Shape::Vec(shapes) => {
+                    shapes.iter().find_map(|shape| walk(shape, expected))
+                }
+                _ => None,
+            }
+        }
+        output
+            .shapes
+            .iter()
+            .find_map(|clipped| walk(&clipped.shape, expected))
+    }
+
+    #[test]
+    fn checked_menu_rows_share_one_shortcut_column() {
+        let ctx = egui::Context::default();
+        let browser = CommandPresentation {
+            command: AppCommand::Static(CommandId::ToggleDataBrowser),
+            label: "Data Browser".to_owned(),
+            shortcut: Some("Ctrl+E"),
+            availability: CommandAvailability::Enabled,
+            selected: Some(true),
+        };
+        let scene = CommandPresentation {
+            command: AppCommand::Static(CommandId::ToggleScene3d),
+            label: "3D".to_owned(),
+            shortcut: Some("Ctrl+Shift+T"),
+            availability: CommandAvailability::Enabled,
+            selected: Some(false),
+        };
+        let frame = |events: Vec<egui::Event>| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(900.0, 600.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    ui.menu_button("View", |ui| {
+                        let mut selected = Vec::new();
+                        presentation_row(ui, &browser, true, &mut selected);
+                        presentation_row(ui, &scene, true, &mut selected);
+                    });
+                },
+            )
+        };
+        let output = frame(Vec::new());
+        let pos = text_layout_rect(&output, "View")
+            .expect("the View menu button should paint")
+            .center();
+        let _ = frame(vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]);
+        let output = frame(Vec::new());
+
+        let first =
+            text_layout_rect(&output, "Ctrl+E").expect("the first row shortcut should paint");
+        let second = text_layout_rect(&output, "Ctrl+Shift+T")
+            .expect("the second row shortcut should paint");
+
+        assert_eq!(
+            first.right(),
+            second.right(),
+            "checked menu rows must share one right-aligned shortcut column"
+        );
+    }
+
     fn find_text_rect(shape: &egui::epaint::Shape, expected: &str) -> Option<egui::Rect> {
         match shape {
             egui::epaint::Shape::Text(text) if text.galley.job.text == expected => {
@@ -511,9 +655,64 @@ mod tests {
                 events,
                 ..Default::default()
             },
-            |ui| presentation_row(ui, presentation, true, &mut selected),
+            |ui| {
+                presentation_row(ui, presentation, true, &mut selected);
+            },
         );
         (output, selected)
+    }
+
+    #[test]
+    fn an_empty_dynamic_family_offers_one_disabled_placeholder_row() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let rows = |presentations: &[CommandPresentation]| {
+            let mut selected = Vec::new();
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(300.0, 200.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    dynamic_rows(
+                        ui,
+                        ClassicMenuOwner::Tools,
+                        presentations,
+                        &mut selected,
+                        &crate::ui::empty::no_saved("scripts"),
+                        |command| matches!(command, AppCommand::RunScript(_)),
+                    );
+                },
+            );
+            output
+                .platform_output
+                .accesskit_update
+                .expect("accesskit should report the menu rows")
+                .nodes
+                .into_iter()
+                .filter(|(_, node)| node.role() == egui::accesskit::Role::Button)
+                .map(|(_, node)| {
+                    (
+                        node.label().unwrap_or_default().to_owned(),
+                        node.is_disabled(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(rows(&[]), [(crate::ui::empty::no_saved("scripts"), true)]);
+
+        let saved = [CommandPresentation {
+            command: AppCommand::RunScript("derive".to_owned()),
+            label: "derive".to_owned(),
+            shortcut: None,
+            availability: CommandAvailability::Enabled,
+            selected: None,
+        }];
+        assert_eq!(rows(&saved), [("derive".to_owned(), false)]);
     }
 
     #[test]
@@ -596,9 +795,7 @@ mod tests {
         }
         let bar = bars
             .iter()
-            .find(|rect| {
-                rect.contains(percent.1.center()) && rect.width() > 100.0
-            })
+            .find(|rect| rect.contains(percent.1.center()) && rect.width() > 100.0)
             .unwrap_or_else(|| panic!("the progress bar should enclose its percentage"));
 
         assert!(
@@ -625,9 +822,7 @@ mod tests {
         );
     }
 
-    fn header_with_toolbar_probe(
-        ctx: &egui::Context,
-    ) -> (egui::FullOutput, HeaderOutput) {
+    fn header_with_toolbar_probe(ctx: &egui::Context) -> (egui::FullOutput, HeaderOutput) {
         let model = HeaderModel {
             emphasis: ShellEmphasis::Offline,
             live_statuses: Vec::new(),
@@ -657,6 +852,89 @@ mod tests {
             },
         );
         (output, header_output.expect("header should render"))
+    }
+
+    fn offline_header(
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+    ) -> (egui::FullOutput, HeaderOutput) {
+        let model = HeaderModel {
+            emphasis: ShellEmphasis::Offline,
+            live_statuses: Vec::new(),
+            load: LoadStatusView::Idle,
+            fps: None,
+            theme: crate::ui::theme::ThemeChoice::CatppuccinMocha,
+        };
+        let presentations = crate::shell::app::commands::present_commands(
+            &crate::shell::app::commands::CommandContext::default(),
+            &crate::shell::app::commands::PresentationState::default(),
+            [],
+        );
+        let mut header_output = None;
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1_200.0, 300.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                header_output = Some(show(ui, &model, &presentations, |_| Vec::new()));
+            },
+        );
+        (output, header_output.expect("header should render"))
+    }
+
+    #[test]
+    fn clicking_the_brand_asks_for_the_about_dialog() {
+        let ctx = egui::Context::default();
+        crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+
+        let (output, first) = offline_header(&ctx, Vec::new());
+        assert!(
+            first.commands.is_empty(),
+            "the brand should stay quiet until it is clicked"
+        );
+        let brand = output
+            .shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::epaint::Shape::Text(text) if text.galley.job.text == "DeLOG" => {
+                    Some(egui::Rect::from_min_size(text.pos, text.galley.size()))
+                }
+                _ => None,
+            })
+            .expect("the header should paint the brand");
+        let pos = brand.center();
+
+        let _ = offline_header(
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        let (_, output) = offline_header(
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+
+        assert_eq!(output.commands, [AppCommand::ShowAbout]);
     }
 
     fn header_with_live_link(
@@ -732,10 +1010,7 @@ mod tests {
         let toolbar = bounds("Toolbar probe");
 
         assert!(toolbar.x0 > tools.x1);
-        assert_eq!(
-            (toolbar.y0 + toolbar.y1) * 0.5,
-            (tools.y0 + tools.y1) * 0.5,
-        );
+        assert_eq!((toolbar.y0 + toolbar.y1) * 0.5, (tools.y0 + tools.y1) * 0.5,);
     }
 
     #[test]
@@ -904,11 +1179,10 @@ mod tests {
         let ctx = egui::Context::default();
         let _ = checked_row_frame(&ctx, &presentation, vec![]);
         let (output, _) = checked_row_frame(&ctx, &presentation, vec![]);
-        let painted = checked_row_text(&presentation);
         let rect = output
             .shapes
             .iter()
-            .find_map(|shape| find_text_rect(&shape.shape, &painted))
+            .find_map(|shape| find_text_rect(&shape.shape, &presentation.label))
             .expect("checked menu label should be painted");
         let pos = rect.center();
         let _ = checked_row_frame(
@@ -938,10 +1212,7 @@ mod tests {
             ],
         );
 
-        assert_eq!(
-            selected,
-            [AppCommand::Static(CommandId::ToggleDataBrowser)]
-        );
+        assert_eq!(selected, [AppCommand::Static(CommandId::ToggleDataBrowser)]);
     }
 
     #[test]
@@ -966,6 +1237,7 @@ mod tests {
             CommandId::OpenLogging,
             CommandId::SaveLayout,
             CommandId::ManageLayouts,
+            CommandId::ManageSequences,
             CommandId::ImportLayout,
             CommandId::ExportLayout,
             CommandId::ClearLayout,
@@ -991,30 +1263,25 @@ mod tests {
                 "{id:?}"
             );
             assert!(
-                id.spec().routes.contains(&crate::shell::app::commands::AccessRoute::ClassicMenu),
+                id.spec()
+                    .routes
+                    .contains(&crate::shell::app::commands::AccessRoute::ClassicMenu),
                 "rendered command lacks a classic-menu route: {id:?}"
             );
         }
         for (owner, sections) in [
-            (
-                ClassicMenuOwner::File,
-                &[FILE_MENU, FILE_EXPORT_MENU][..],
-            ),
-            (
-                ClassicMenuOwner::View,
-                &[VIEW_MENU, VIEW_PANELS_MENU][..],
-            ),
-            (
-                ClassicMenuOwner::Analyze,
-                &[ANALYZE_MENU][..],
-            ),
+            (ClassicMenuOwner::File, &[FILE_MENU, FILE_EXPORT_MENU][..]),
+            (ClassicMenuOwner::View, &[VIEW_MENU, VIEW_PANELS_MENU][..]),
+            (ClassicMenuOwner::Analyze, &[ANALYZE_MENU][..]),
             (
                 ClassicMenuOwner::Tools,
                 &[
                     TOOLS_MENU,
+                    TOOLS_SEQUENCES_MENU,
                     TOOLS_SCRIPTS_MENU,
                     TOOLS_PARSERS_MENU,
                     TOOLS_LAYOUTS_MENU,
+                    TOOLS_LAYOUTS_FILE_MENU,
                 ][..],
             ),
         ] {
@@ -1029,8 +1296,12 @@ mod tests {
             CommandId::EqualizePlots,
             CommandId::TogglePlayheadSnap,
             CommandId::DisconnectLive,
+            CommandId::CloseAllSources,
         ] {
-            assert!(!ids.contains(&omitted), "toolbar/shortcut command leaked into menu");
+            assert!(
+                !ids.contains(&omitted),
+                "toolbar/shortcut command leaked into menu"
+            );
         }
         assert!(
             !CommandId::DisconnectLive

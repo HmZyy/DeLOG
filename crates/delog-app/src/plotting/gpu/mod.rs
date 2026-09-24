@@ -8,19 +8,19 @@ use delog_core::metrics::MetricsRegistry;
 use delog_render::{
     BufferManager, GAP_CONNECT, GAP_CUT, GAP_DOTTED, GAP_FORCE_DASH, GpuErrorHub, Grid3dPipeline,
     GridUniform, LinePipeline, MAP_TILE_CAPACITY, MapTileDrawGroups, MapTilePipeline,
-    MapTileUpload, MeshGpu, MeshPipeline, MeshUniform, MinMaxColPipeline, PlotUniform,
-    RenderContext, ScatterPipeline, Scene3dTarget, StepPipeline, Traj3dPipeline, Traj3dUniform,
-    UniformRing,
+    MapTileUniform, MapTileUpload, MeshGpu, MeshPipeline, MeshUniform, MinMaxColPipeline,
+    PlotUniform, RenderContext, ScatterPipeline, Scene3dTarget, SkyPipeline, SkyUniform,
+    StepPipeline, Traj3dPipeline, Traj3dUniform, UniformRing,
 };
 use eframe::{egui_wgpu, wgpu};
 
-use crate::scene3d::camera::OrbitCamera;
+use crate::config::settings::{GapMode, RenderTuning, Scene3dSettings};
 use crate::map::provider::{MapProviderId, TileId};
 use crate::map::worker::{MapScopeId, ReadyTile};
-use crate::scene3d::models;
-use crate::plotting::plot::{PlotPane, TraceMode, ViewX};
-use crate::config::settings::{GapMode, RenderTuning, Scene3dSettings};
 use crate::plotting::compare::CompareMode;
+use crate::plotting::plot::{PlotPane, TraceMode, ViewX};
+use crate::scene3d::camera::OrbitCamera;
+use crate::scene3d::models;
 use crate::scene3d::vehicle::ModelKind;
 
 #[derive(Clone, Debug)]
@@ -47,8 +47,8 @@ pub struct VehicleDraw<'a> {
     /// Build-time config generation; a mismatch forces a full re-upload, a match
     /// lets a grown path upload only its appended tail.
     pub traj_generation: u64,
-    /// Points to draw this frame (≤ trajectory len); the rest stays resident.
-    pub visible_count: u32,
+    /// Points to draw this frame (within trajectory len); the rest stays resident.
+    pub visible: std::ops::Range<u32>,
 }
 
 /// Plot rect + data window shared by the GPU and the egui axes so labels line
@@ -602,6 +602,7 @@ impl GpuBridge {
 
     /// The offscreen pass is submitted on our own queue during `update()`, so
     /// the texture is ready before eframe paints this frame.
+    #[allow(clippy::too_many_arguments)]
     pub fn render_scene(
         &self,
         frame: &eframe::Frame,
@@ -612,6 +613,7 @@ impl GpuBridge {
         map_selection: MapTileSelection,
         ready_tiles: &[ReadyTile],
         vehicles: &[VehicleDraw],
+        metrics: &Arc<MetricsRegistry>,
     ) -> Option<egui::TextureId> {
         if !self.available {
             return None;
@@ -621,48 +623,95 @@ impl GpuBridge {
         let px_w = (rect.width() * ppp).round().max(1.0) as u32;
         let px_h = (rect.height() * ppp).round().max(1.0) as u32;
         let device = render_state.device.clone();
-        let mut renderer = render_state.renderer.write();
+        let mut renderer = {
+            let _t = metrics.scope("scene_lock");
+            render_state.renderer.write()
+        };
 
         // Clone the resolved view to end the resource borrow, so the
         // texture-registration below can borrow the renderer mutably.
         let (view, resized, existing) = {
             let res = renderer.callback_resources.get_mut::<SceneResources>()?;
             let resized = res.target.width() != px_w || res.target.height() != px_h;
-            res.target.resize(px_w, px_h);
+            if resized {
+                let _t = metrics.scope("scene_resize");
+                res.target.resize(px_w, px_h);
+            }
 
+            let uniform_timer = metrics.scope("scene_uniforms");
             // f64 inverse: f32 is ill-conditioned far from the origin and crawls the grid.
             let (vp, inv) = camera
                 .view_proj_and_inverse(px_w as f32 / px_h as f32, scene3d.resolved_far_clip_m());
             let vp_cols = vp.to_cols_array_2d();
             let (fade_start, fade_end) = scene3d.resolved_fog_m();
-            // Cell tracks height above the y=0 ground so orbiting low doesn't shimmer
-            // into a fine mesh; lod lets the shader cross-fade levels to avoid popping.
-            let (cell, lod) = scene3d.resolved_grid(camera.eye().y);
+            // Level tracks height above the y=0 ground so orbiting low doesn't shimmer
+            // into a fine mesh; lod lets the shader draw three decades at once.
+            let (level, lod) = scene3d.resolved_grid(camera.eye().y);
             res.grid.set_uniform(
                 &res.ctx,
                 &GridUniform::new(
                     vp_cols,
                     inv.to_cols_array_2d(),
                     camera.eye().to_array(),
-                    cell,
+                    level,
                     fade_start,
                     fade_end,
                     scene3d.fog_enabled,
                     lod,
-                ),
+                )
+                .with_opacity(scene3d.resolved_grid_opacity()),
             );
             res.ctx.queue().write_buffer(
                 &res.axis_gizmo.uniform,
                 0,
                 bytemuck::bytes_of(&Traj3dUniform::new(vp_cols, res.axis_gizmo.color)),
             );
-            res.prepare_vehicles(vp_cols, camera.eye().to_array(), vehicles);
-            let visible_map_tiles = res.prepare_map_tiles(vp_cols, &map_selection, ready_tiles);
+            let sky_on = scene3d.show_sky;
+            if sky_on {
+                res.sky
+                    .set_uniform(&res.ctx, &SkyUniform::new(inv.to_cols_array_2d()));
+            }
+            drop(uniform_timer);
+            {
+                let _t = metrics.scope("scene_veh_prep");
+                res.prepare_vehicles(vp_cols, camera.eye().to_array(), vehicles);
+            }
+            if res.metrics.is_none() {
+                res.metrics = Some(Arc::clone(metrics));
+                res.map_tiles.set_metrics(Arc::clone(metrics));
+            }
+            let uploads_before = res.map_tiles.upload_count();
+            let allocs_before = res.map_tiles.allocation_count();
+            let map_timer = metrics.scope("scene_map_prep");
+            let visible_map_tiles = res.prepare_map_tiles(
+                MapTileUniform::new(
+                    vp_cols,
+                    camera.eye().to_array(),
+                    tile_fog_rgb(sky_on),
+                    scene3d.fog_enabled.then(|| scene3d.resolved_fog_m()),
+                ),
+                &map_selection,
+                ready_tiles,
+            );
+            drop(map_timer);
+            metrics.record(
+                "map_tile_uploads",
+                (res.map_tiles.upload_count() - uploads_before) as f32,
+            );
+            metrics.record(
+                "map_tile_allocs",
+                (res.map_tiles.allocation_count() - allocs_before) as f32,
+            );
+            metrics.record(
+                "map_tiles_resident",
+                res.map_tiles.resident_tile_count() as f32,
+            );
 
+            let encode_timer = metrics.scope("scene_encode");
             let clear = wgpu::Color {
-                r: 0.07,
-                g: 0.078,
-                b: 0.10,
+                r: f64::from(SCENE_CLEAR_RGB[0]),
+                g: f64::from(SCENE_CLEAR_RGB[1]),
+                b: f64::from(SCENE_CLEAR_RGB[2]),
                 a: 1.0,
             };
             let mut enc =
@@ -673,20 +722,28 @@ impl GpuBridge {
                     });
             {
                 let mut pass = res.target.begin_pass(&mut enc, clear);
+                if sky_on {
+                    res.sky.draw(&mut pass);
+                }
                 res.map_tiles.draw_visible(&mut pass, &visible_map_tiles);
                 if scene3d.show_grid {
                     res.grid.draw(&mut pass);
                 }
                 if scene3d.show_axes {
                     res.traj
-                        .draw(&mut pass, &res.axis_gizmo.bind, res.axis_gizmo.count);
+                        .draw(&mut pass, &res.axis_gizmo.bind, 0..res.axis_gizmo.count);
                 }
                 res.draw_vehicles(&mut pass, vehicles);
             }
-            res.ctx.queue().submit([enc.finish()]);
+            drop(encode_timer);
+            {
+                let _t = metrics.scope("scene_submit");
+                res.ctx.queue().submit([enc.finish()]);
+            }
             (res.target.resolve_view().clone(), resized, res.texture_id)
         };
 
+        let texture_timer = metrics.scope("scene_texture");
         let id = match existing {
             Some(id) => {
                 if resized {
@@ -707,6 +764,7 @@ impl GpuBridge {
                 .get_mut::<SceneResources>()?
                 .texture_id = Some(id);
         }
+        drop(texture_timer);
         Some(id)
     }
 }
@@ -1084,9 +1142,20 @@ struct VehicleGpu {
     traj_bind: wgpu::BindGroup,
 }
 
+pub const SCENE_CLEAR_RGB: [f32; 3] = [0.07, 0.078, 0.10];
+
+pub fn tile_fog_rgb(sky_enabled: bool) -> [f32; 3] {
+    if sky_enabled {
+        delog_render::HORIZON_RGB
+    } else {
+        SCENE_CLEAR_RGB
+    }
+}
+
 struct SceneResources {
     ctx: RenderContext,
     target: Scene3dTarget,
+    sky: SkyPipeline,
     grid: Grid3dPipeline,
     map_tiles: MapTilePipeline,
     map_tile_cache: HashMap<MapScopeId, HashMap<u64, ReadyTile>>,
@@ -1103,12 +1172,19 @@ struct SceneResources {
     /// Vertical world Y-axis line (the up axis the ground grid can't draw).
     axis_gizmo: SceneTraj,
     texture_id: Option<egui::TextureId>,
+    metrics: Option<Arc<MetricsRegistry>>,
 }
 
 impl SceneResources {
     fn new(ctx: RenderContext) -> Self {
         // Start at 1×1; the first `render_scene` resizes to the pane.
         let target = Scene3dTarget::new(ctx.clone(), 1, 1);
+        let sky = SkyPipeline::new(
+            &ctx,
+            target.color_format(),
+            target.depth_format(),
+            target.sample_count(),
+        );
         let grid = Grid3dPipeline::new(
             &ctx,
             target.color_format(),
@@ -1141,6 +1217,7 @@ impl SceneResources {
         Self {
             ctx,
             target,
+            sky,
             grid,
             map_tiles,
             map_tile_cache: HashMap::new(),
@@ -1155,6 +1232,7 @@ impl SceneResources {
             vehicles: HashMap::new(),
             axis_gizmo,
             texture_id: None,
+            metrics: None,
         }
     }
 
@@ -1305,8 +1383,11 @@ impl SceneResources {
             let Some(vg) = self.vehicles.get(&v.key) else {
                 continue;
             };
-            self.traj
-                .draw(pass, &vg.traj_bind, v.visible_count.min(vg.traj_count));
+            self.traj.draw(
+                pass,
+                &vg.traj_bind,
+                v.visible.start.min(vg.traj_count)..v.visible.end.min(vg.traj_count),
+            );
             if let Some(mesh) = v.model.and_then(|model| self.model_cache.get(model)) {
                 self.mesh.draw(pass, &vg.mesh_bind, mesh);
             }
@@ -1315,11 +1396,15 @@ impl SceneResources {
 
     fn prepare_map_tiles(
         &mut self,
-        vp: [[f32; 4]; 4],
+        view: MapTileUniform,
         selection: &MapTileSelection,
         ready: &[ReadyTile],
     ) -> MapTileDrawGroups {
-        self.map_tiles.set_view_proj(vp);
+        let metrics = self.metrics.clone();
+        if let Some(metrics) = metrics.as_ref() {
+            metrics.record("map_ready_len", ready.len() as f32);
+        }
+        self.map_tiles.set_uniform(&view);
         if self.map_tile_epoch != selection.epoch {
             self.map_tile_epoch = selection.epoch;
             self.map_tile_cache.clear();
@@ -1348,6 +1433,7 @@ impl SceneResources {
         }
         self.map_tile_clock += 1;
         let clock = self.map_tile_clock;
+        let scan_timer = metrics.as_ref().map(|m| m.scope("map_scan"));
         let changed = {
             let cache = self.map_tile_cache.entry(selection.scope).or_default();
             let mut changed = std::collections::HashSet::new();
@@ -1382,7 +1468,9 @@ impl SceneResources {
             }
             changed
         };
+        drop(scan_timer);
         self.admit_map_tiles(&changed, Some(selection.scope));
+        let visible_timer = metrics.as_ref().map(|m| m.scope("map_visible"));
         let cache = &self.map_tile_cache[&selection.scope];
         let mut visible = MapTileDrawGroups::default();
         for (key, tile) in cache {
@@ -1397,6 +1485,7 @@ impl SceneResources {
         }
         visible.fallback.sort_unstable();
         visible.current.sort_unstable();
+        drop(visible_timer);
         visible
     }
 
@@ -1405,6 +1494,8 @@ impl SceneResources {
         changed: &std::collections::HashSet<u64>,
         active_scope: Option<MapScopeId>,
     ) {
+        let metrics = self.metrics.clone();
+        let order_timer = metrics.as_ref().map(|m| m.scope("map_order"));
         let mut scopes: Vec<_> = self.map_tile_selections.keys().copied().collect();
         scopes.sort_by_key(|scope| scope.0);
         // Above capacity, not every scope can own a slot. Keep the pane being
@@ -1431,10 +1522,18 @@ impl SceneResources {
         let caches = &self.map_tile_cache;
         self.map_tile_last_seen
             .retain(|key, _| caches.values().any(|cache| cache.contains_key(key)));
+        drop(order_timer);
 
+        let evict_timer = metrics.as_ref().map(|m| m.scope("map_evict"));
         self.map_tiles.retain(order.iter().copied());
         self.map_tile_resident_signatures
             .retain(|key, _| admitted.contains(key));
+        drop(evict_timer);
+
+        if let Some(metrics) = metrics.as_ref() {
+            metrics.record("map_order_len", order.len() as f32);
+        }
+        let upload_timer = metrics.as_ref().map(|m| m.scope("map_upload"));
         for key in order {
             let tile = self
                 .map_tile_cache
@@ -1455,6 +1554,7 @@ impl SceneResources {
                     .insert(key, map_tile_signature(tile));
             }
         }
+        drop(upload_timer);
     }
 }
 

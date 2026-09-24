@@ -29,6 +29,9 @@ fn default_opacity() -> f32 {
 fn default_marker_line_width() -> f32 {
     1.5
 }
+fn default_marker_label_font_size() -> f32 {
+    11.0
+}
 fn default_marker_shade_opacity() -> f32 {
     0.12
 }
@@ -63,14 +66,16 @@ pub struct AppSettings {
     pub show_fps: bool,
     #[serde(default)]
     pub render_mode: RenderMode,
-    #[serde(default = "default_true")]
-    pub vsync: bool,
+    #[serde(default)]
+    pub present_mode: VsyncMode,
     #[serde(default)]
     pub live_connection: LiveConnectionSettings,
     #[serde(default)]
     pub scene3d: Scene3dSettings,
     #[serde(default)]
     pub plot: PlotDisplay,
+    #[serde(default)]
+    pub marker_value_colors: crate::config::marker_colors::MarkerValueColors,
     #[serde(default)]
     pub font: FontOverride,
     #[serde(default)]
@@ -79,6 +84,25 @@ pub struct AppSettings {
     pub scripting: ScriptingSettings,
     #[serde(default)]
     pub dataflow: DataFlowSettings,
+    #[serde(default)]
+    pub updates: UpdateSettings,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UpdateSettings {
+    #[serde(default = "default_true")]
+    pub check_for_updates: bool,
+    #[serde(default)]
+    pub skipped_version: Option<String>,
+}
+
+impl Default for UpdateSettings {
+    fn default() -> Self {
+        Self {
+            check_for_updates: true,
+            skipped_version: None,
+        }
+    }
 }
 
 impl Default for AppSettings {
@@ -88,13 +112,15 @@ impl Default for AppSettings {
             render: RenderTuning::default(),
             show_fps: false,
             render_mode: RenderMode::default(),
-            vsync: true,
+            present_mode: VsyncMode::On,
             live_connection: LiveConnectionSettings::default(),
             scene3d: Scene3dSettings::default(),
             plot: PlotDisplay::default(),
+            marker_value_colors: crate::config::marker_colors::MarkerValueColors::default(),
             font: FontOverride::default(),
             auto_open_diagnostics: false,
             scripting: ScriptingSettings::default(),
+            updates: UpdateSettings::default(),
             dataflow: DataFlowSettings::default(),
         }
     }
@@ -198,6 +224,25 @@ impl MarkerDeltaReadout {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MarkerLabelOrientation {
+    Horizontal,
+    #[default]
+    Vertical,
+}
+
+impl MarkerLabelOrientation {
+    pub const ALL: [Self; 2] = [Self::Horizontal, Self::Vertical];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Horizontal => "Horizontal",
+            Self::Vertical => "Vertical",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PlotDisplay {
     #[serde(default)]
@@ -218,6 +263,12 @@ pub struct PlotDisplay {
     pub marker_line_width: f32,
     #[serde(default = "default_true")]
     pub marker_show_label: bool,
+    #[serde(default)]
+    pub marker_label_orientation: MarkerLabelOrientation,
+    #[serde(default = "default_marker_label_font_size")]
+    pub marker_label_font_size: f32,
+    #[serde(default = "default_true")]
+    pub marker_label_avoid_overlap: bool,
     #[serde(default)]
     pub marker_shade_regions: bool,
     #[serde(default = "default_marker_shade_opacity")]
@@ -246,6 +297,9 @@ impl Default for PlotDisplay {
             marker_line_opacity: default_opacity(),
             marker_line_width: default_marker_line_width(),
             marker_show_label: true,
+            marker_label_orientation: MarkerLabelOrientation::default(),
+            marker_label_font_size: default_marker_label_font_size(),
+            marker_label_avoid_overlap: true,
             marker_shade_regions: true,
             marker_shade_opacity: default_marker_shade_opacity(),
             text_label_cap: default_text_label_cap(),
@@ -352,9 +406,39 @@ impl RenderMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VsyncMode {
+    #[default]
+    On,
+    Adaptive,
+    Fast,
+}
+
+impl VsyncMode {
+    pub const ALL: [Self; 3] = [Self::On, Self::Adaptive, Self::Fast];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::On => "On",
+            Self::Adaptive => "Adaptive",
+            Self::Fast => "Fast",
+        }
+    }
+
+    pub const fn present_mode(self) -> eframe::wgpu::PresentMode {
+        match self {
+            Self::On => eframe::wgpu::PresentMode::Fifo,
+            Self::Adaptive => eframe::wgpu::PresentMode::AutoVsync,
+            Self::Fast => eframe::wgpu::PresentMode::AutoNoVsync,
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AutoOpenVariables {
+    #[default]
     NewlyAdded,
     EveryRun,
     Never,
@@ -372,16 +456,11 @@ impl AutoOpenVariables {
     }
 }
 
-impl Default for AutoOpenVariables {
-    fn default() -> Self {
-        Self::NewlyAdded
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AutoOpenScriptingConsole {
     OnOutput,
+    #[default]
     OnErrors,
     Never,
 }
@@ -395,12 +474,6 @@ impl AutoOpenScriptingConsole {
             Self::OnErrors => "On errors",
             Self::Never => "Never",
         }
-    }
-}
-
-impl Default for AutoOpenScriptingConsole {
-    fn default() -> Self {
-        Self::OnErrors
     }
 }
 
@@ -469,19 +542,22 @@ fn default_reference_alt_step_m() -> f64 {
     50.0
 }
 fn default_scene_far_clip_m() -> f32 {
-    20_000.0
+    100_000.0
 }
 fn default_scene_max_camera_distance_m() -> f32 {
-    12_000.0
+    5_000.0
 }
 fn default_scene_grid_cell_m() -> f32 {
     1.0
+}
+fn default_scene_grid_opacity() -> f32 {
+    0.3
 }
 fn default_scene_fog_start_m() -> f32 {
     1_000.0
 }
 fn default_scene_fog_end_m() -> f32 {
-    20_000.0
+    100_000.0
 }
 
 fn finite_or(value: f32, fallback: f32) -> f32 {
@@ -504,6 +580,8 @@ pub struct Scene3dSettings {
     #[serde(default = "default_scene_max_camera_distance_m")]
     pub max_camera_distance_m: f32,
     #[serde(default = "default_true")]
+    pub show_sky: bool,
+    #[serde(default = "default_true")]
     pub show_grid: bool,
     #[serde(default = "default_true")]
     pub show_axes: bool,
@@ -512,6 +590,8 @@ pub struct Scene3dSettings {
     pub grid_cell_auto: bool,
     #[serde(default = "default_scene_grid_cell_m")]
     pub grid_cell_m: f32,
+    #[serde(default = "default_scene_grid_opacity")]
+    pub grid_opacity: f32,
     #[serde(default = "default_true")]
     pub fog_enabled: bool,
     #[serde(default = "default_scene_fog_start_m")]
@@ -529,10 +609,12 @@ impl Default for Scene3dSettings {
             tile_cache_limit_bytes: default_tile_cache_limit_bytes(),
             far_clip_m: default_scene_far_clip_m(),
             max_camera_distance_m: default_scene_max_camera_distance_m(),
+            show_sky: true,
             show_grid: true,
             show_axes: true,
             grid_cell_auto: true,
             grid_cell_m: default_scene_grid_cell_m(),
+            grid_opacity: default_scene_grid_opacity(),
             fog_enabled: true,
             fog_start_m: default_scene_fog_start_m(),
             fog_end_m: default_scene_fog_end_m(),
@@ -568,14 +650,26 @@ impl Scene3dSettings {
         finite_or(self.grid_cell_m, default_scene_grid_cell_m()).clamp(0.01, 100_000.0)
     }
 
-    /// Returns (cell size, whether the shader should cross-fade LOD levels). In
-    /// auto mode the cell is a continuous function of camera height so it never
-    /// snaps between sizes or shimmers when orbiting tightly around an airborne
-    /// vehicle; the `true` flag drives the shader's LOD cross-fade.
+    pub fn resolved_grid_opacity(self) -> f32 {
+        finite_or(self.grid_opacity, default_scene_grid_opacity()).clamp(0.0, 1.0)
+    }
+
+    /// Returns (grid level or cell size, whether the shader draws multiple
+    /// levels). In auto mode the value is a continuous *level*: the camera
+    /// height is located in the power-of-ten step table and interpolated
+    /// linearly inside its decade, so level 2.5 sits at 550 m rather than the
+    /// 316 m a logarithmic mapping would give. The shader turns `floor(level)`
+    /// into three simultaneous cell sizes and uses the fraction to hand
+    /// emphasis from one decade to the next. In fixed mode the value is the
+    /// cell size in metres and only that single level is drawn.
     pub fn resolved_grid(self, eye_height_m: f32) -> (f32, bool) {
         if self.grid_cell_auto {
             let height = finite_or(eye_height_m, 100.0).abs().max(1e-3);
-            (height / 10.0, true)
+            let decade = height.log10().floor();
+            let lo = 10f32.powf(decade);
+            let hi = lo * 10.0;
+            let level = decade + (height - lo) / (hi - lo);
+            (level.clamp(-3.0, 8.0), true)
         } else {
             (self.resolved_grid_cell_m(), false)
         }
@@ -628,7 +722,7 @@ impl SettingsTab {
             Self::Rendering => "Rendering",
             Self::Scene3d => "3D View",
             Self::Scripting => "Scripting",
-            Self::DataFlow => "Data Flow",
+            Self::DataFlow => "Dataflow",
         }
     }
 }
@@ -655,6 +749,13 @@ impl SettingsDialog {
 
     pub fn open(&mut self) {
         self.open = true;
+    }
+
+    pub fn open_scene3d(&mut self) {
+        self.open = true;
+        if let Some(path) = self.dock_state.find_tab(&SettingsTab::Scene3d) {
+            let _ = self.dock_state.set_active_tab(path);
+        }
     }
 
     pub fn show(
@@ -802,6 +903,10 @@ fn general_tab(ui: &mut egui::Ui, settings: &mut AppSettings) -> SettingsChange 
             ui.checkbox(&mut settings.show_fps, "");
             ui.end_row();
 
+            ui.label("Check for updates");
+            ui.checkbox(&mut settings.updates.check_for_updates, "");
+            ui.end_row();
+
             ui.label("Auto-open diagnostics")
                 .on_hover_text("Open the Diagnostics dock automatically when a new diagnostic is reported.");
             ui.checkbox(&mut settings.auto_open_diagnostics, "");
@@ -821,10 +926,18 @@ fn general_tab(ui: &mut egui::Ui, settings: &mut AppSettings) -> SettingsChange 
             ui.end_row();
 
             ui.label("VSync").on_hover_text(
-                "Synchronize frames to the monitor's refresh rate to avoid tearing. \
-                     Disable to uncap the frame rate. Takes effect after restarting DeLOG.",
+                "On: tear-free everywhere, but can stall a window that is hidden on some \
+                     drivers. Adaptive: relaxes vsync where the driver supports it. Fast: \
+                     avoids the stall and is tear-free on Wayland, but may tear on X11 and \
+                     Windows. Takes effect after restarting DeLOG.",
             );
-            ui.checkbox(&mut settings.vsync, "");
+            egui::ComboBox::from_id_salt("settings-vsync")
+                .selected_text(settings.present_mode.label())
+                .show_ui(ui, |ui| {
+                    for mode in VsyncMode::ALL {
+                        ui.selectable_value(&mut settings.present_mode, mode, mode.label());
+                    }
+                });
             ui.end_row();
 
             let f = &mut settings.font;
@@ -918,6 +1031,39 @@ fn plots_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
             ui.label("Marker labels")
                 .on_hover_text("Draw each manual session marker's label at the top of its line on plots.");
             ui.checkbox(&mut p.marker_show_label, "");
+            ui.end_row();
+
+            ui.label("Marker label orientation")
+                .on_hover_text("Draw marker names horizontally or vertically down their lines.");
+            ui.add_enabled_ui(p.marker_show_label, |ui| {
+                egui::ComboBox::from_id_salt("settings-marker-label-orientation")
+                    .selected_text(p.marker_label_orientation.label())
+                    .show_ui(ui, |ui| {
+                        for orientation in MarkerLabelOrientation::ALL {
+                            ui.selectable_value(
+                                &mut p.marker_label_orientation,
+                                orientation,
+                                orientation.label(),
+                            );
+                        }
+                    });
+            });
+            ui.end_row();
+
+            ui.label("Marker label font size");
+            ui.add_enabled(
+                p.marker_show_label,
+                egui::DragValue::new(&mut p.marker_label_font_size)
+                    .range(4.0..=40.0)
+                    .speed(0.25),
+            );
+            ui.end_row();
+
+            ui.label("Avoid marker label overlap");
+            ui.add_enabled(
+                p.marker_show_label,
+                egui::Checkbox::new(&mut p.marker_label_avoid_overlap, ""),
+            );
             ui.end_row();
 
             ui.label("Shade between markers")
@@ -1094,6 +1240,11 @@ fn scene3d_tab(
             );
             ui.end_row();
 
+            ui.label("Sky")
+                .on_hover_text("Draw a procedural sky and horizon haze behind the scene.");
+            ui.checkbox(&mut s.show_sky, "");
+            ui.end_row();
+
             ui.label("Grid");
             ui.checkbox(&mut s.show_grid, "");
             ui.end_row();
@@ -1114,6 +1265,14 @@ fn scene3d_tab(
                 egui::Slider::new(&mut s.grid_cell_m, 0.01..=100_000.0)
                     .logarithmic(true)
                     .suffix(" m"),
+            );
+            ui.end_row();
+
+            ui.label("Grid opacity")
+                .on_hover_text("Blend the ground grid and its world axes against the scene. At 0 the grid is hidden.");
+            ui.add_enabled(
+                s.show_grid,
+                egui::Slider::new(&mut s.grid_opacity, 0.0..=1.0),
             );
             ui.end_row();
 
@@ -1343,9 +1502,28 @@ mod tests {
                 "Rendering",
                 "3D View",
                 "Scripting",
-                "Data Flow"
+                "Dataflow"
             ]
         );
+    }
+
+    #[test]
+    fn opening_the_scene_settings_focuses_the_3d_view_tab() {
+        fn active(dialog: &SettingsDialog) -> SettingsTab {
+            let leaf = dialog.dock_state[egui_dock::SurfaceIndex::main()]
+                [egui_dock::NodeIndex::root()]
+            .get_leaf()
+            .expect("the settings tabs share one leaf");
+            leaf.tabs[leaf.active.0]
+        }
+
+        let mut dialog = SettingsDialog::default();
+        assert_eq!(active(&dialog), SettingsTab::General);
+
+        dialog.open_scene3d();
+
+        assert!(dialog.is_open());
+        assert_eq!(active(&dialog), SettingsTab::Scene3d);
     }
 
     #[test]
@@ -1354,7 +1532,59 @@ mod tests {
             .into_iter()
             .map(SettingsTab::label)
             .collect();
-        assert!(labels.contains(&"Data Flow"));
+        assert!(labels.contains(&"Dataflow"));
+    }
+
+    #[test]
+    fn update_checks_are_on_by_default() {
+        assert!(AppSettings::default().updates.check_for_updates);
+        assert_eq!(AppSettings::default().updates.skipped_version, None);
+    }
+
+    #[test]
+    fn settings_saved_before_the_update_section_existed_still_check() {
+        let back: AppSettings =
+            serde_json::from_str("{}").expect("an empty settings document should load");
+        assert!(
+            back.updates.check_for_updates,
+            "an older settings file must not silently disable update checks"
+        );
+    }
+
+    #[test]
+    fn update_settings_round_trip() {
+        let mut settings = AppSettings::default();
+        settings.updates.check_for_updates = false;
+        settings.updates.skipped_version = Some("0.4.0".to_owned());
+        let json = serde_json::to_string(&settings).expect("settings should serialize");
+        let back: AppSettings = serde_json::from_str(&json).expect("settings should load");
+        assert!(!back.updates.check_for_updates);
+        assert_eq!(back.updates.skipped_version.as_deref(), Some("0.4.0"));
+    }
+
+    #[test]
+    fn the_general_tab_offers_an_update_check_toggle() {
+        let ctx = egui::Context::default();
+        let mut settings = AppSettings::default();
+        let mut texts = Vec::new();
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            general_tab(ui, &mut settings);
+        });
+        fn walk(shape: &egui::epaint::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::epaint::Shape::Text(text) => out.push(text.galley.job.text.clone()),
+                egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut texts);
+        }
+
+        assert!(
+            texts.iter().any(|text| text == "Check for updates"),
+            "the General tab should expose the update-check toggle, painted {texts:?}"
+        );
     }
 
     #[test]
@@ -1427,6 +1657,57 @@ mod tests {
     }
 
     #[test]
+    fn generated_marker_color_assignments_survive_settings_reload() {
+        let json = serde_json::json!({
+            "marker_value_colors": {"10": [59, 130, 246], "18": [249, 115, 22]}
+        });
+        let settings: AppSettings = serde_json::from_value(json.clone()).unwrap();
+        let saved = serde_json::to_value(&settings).unwrap();
+        assert_eq!(saved["marker_value_colors"], json["marker_value_colors"]);
+    }
+
+    #[test]
+    fn marker_label_settings_round_trip() {
+        for orientation in ["horizontal", "vertical"] {
+            let json = serde_json::json!({
+                "plot": {
+                    "marker_label_orientation": orientation,
+                    "marker_label_font_size": 18.0
+                }
+            });
+            let settings: AppSettings = serde_json::from_value(json).unwrap();
+            let saved = serde_json::to_value(&settings).unwrap();
+            assert_eq!(saved["plot"]["marker_label_orientation"], orientation);
+            assert_eq!(saved["plot"]["marker_label_font_size"], 18.0);
+        }
+    }
+
+    #[test]
+    fn old_settings_default_marker_labels_to_vertical_at_size_11() {
+        for json in [r#"{}"#, r#"{"plot":{"marker_show_label":true}}"#] {
+            let settings: AppSettings = serde_json::from_str(json).unwrap();
+            let saved = serde_json::to_value(&settings).unwrap();
+            assert_eq!(saved["plot"]["marker_label_orientation"], "vertical");
+            assert_eq!(saved["plot"]["marker_label_font_size"], 11.0);
+        }
+    }
+
+    #[test]
+    fn marker_label_overlap_setting_defaults_on_and_persists_disabled() {
+        for json in [r#"{}"#, r#"{"plot":{"marker_show_label":true}}"#] {
+            let settings: AppSettings = serde_json::from_str(json).unwrap();
+            let saved = serde_json::to_value(&settings).unwrap();
+            assert_eq!(saved["plot"]["marker_label_avoid_overlap"], true);
+        }
+        let settings: AppSettings = serde_json::from_value(serde_json::json!({
+            "plot": {"marker_label_avoid_overlap": false}
+        }))
+        .unwrap();
+        let saved = serde_json::to_value(&settings).unwrap();
+        assert_eq!(saved["plot"]["marker_label_avoid_overlap"], false);
+    }
+
+    #[test]
     fn app_settings_persist_plot_display() {
         let settings = AppSettings {
             plot: PlotDisplay {
@@ -1439,6 +1720,9 @@ mod tests {
                 marker_line_opacity: 0.5,
                 marker_line_width: 2.0,
                 marker_show_label: false,
+                marker_label_orientation: MarkerLabelOrientation::Horizontal,
+                marker_label_font_size: 18.0,
+                marker_label_avoid_overlap: false,
                 marker_shade_regions: true,
                 marker_shade_opacity: 0.2,
                 text_label_cap: 1024,
@@ -1493,7 +1777,7 @@ mod tests {
         let s = AppSettings::default();
         assert!(!s.show_fps);
         assert_eq!(s.render_mode, RenderMode::Continuous);
-        assert!(s.vsync);
+        assert_eq!(s.present_mode, VsyncMode::On);
         assert!(!s.auto_open_diagnostics);
     }
 
@@ -1503,10 +1787,54 @@ mod tests {
         let s: AppSettings = serde_json::from_str(json).unwrap();
         assert!(!s.show_fps);
         assert_eq!(s.render_mode, RenderMode::Continuous);
-        assert!(s.vsync);
+        assert_eq!(s.present_mode, VsyncMode::On);
         assert!(!s.auto_open_diagnostics);
         assert!(!s.live_connection.recording_enabled);
         assert!(s.live_connection.recording_dir.is_empty());
+    }
+
+    #[test]
+    fn stale_legacy_vsync_key_still_loads_and_defaults_present_mode() {
+        let json = r#"{"vsync":true}"#;
+        let s: AppSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(s.present_mode, VsyncMode::On);
+    }
+
+    #[test]
+    fn vsync_mode_strings_round_trip() {
+        for mode in VsyncMode::ALL {
+            let json = serde_json::to_string(&mode).unwrap();
+            let decoded: VsyncMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded, mode);
+        }
+    }
+
+    #[test]
+    fn settings_without_a_present_mode_key_default_to_on() {
+        let json = r#"{"theme":"catppuccin_mocha"}"#;
+        let s: AppSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(s.present_mode, VsyncMode::On);
+    }
+
+    #[test]
+    fn vsync_mode_default_is_on() {
+        assert_eq!(VsyncMode::default(), VsyncMode::On);
+    }
+
+    #[test]
+    fn vsync_mode_maps_to_the_documented_present_modes() {
+        assert_eq!(
+            VsyncMode::On.present_mode(),
+            eframe::wgpu::PresentMode::Fifo
+        );
+        assert_eq!(
+            VsyncMode::Adaptive.present_mode(),
+            eframe::wgpu::PresentMode::AutoVsync
+        );
+        assert_eq!(
+            VsyncMode::Fast.present_mode(),
+            eframe::wgpu::PresentMode::AutoNoVsync
+        );
     }
 
     #[test]
@@ -1546,10 +1874,12 @@ mod tests {
                 tile_cache_limit_bytes: 2 * 1024 * 1024 * 1024,
                 far_clip_m: 25_000.0,
                 max_camera_distance_m: 12_000.0,
+                show_sky: false,
                 show_grid: false,
                 show_axes: false,
                 grid_cell_auto: false,
                 grid_cell_m: 5.0,
+                grid_opacity: 0.4,
                 fog_enabled: false,
                 fog_start_m: 1500.0,
                 fog_end_m: 20_000.0,
@@ -1620,23 +1950,69 @@ mod tests {
     }
 
     #[test]
-    fn auto_grid_uses_continuous_cell_and_lod_blend() {
+    fn grid_opacity_defaults_to_a_faint_grid_and_clamps_garbage() {
+        let mut s = Scene3dSettings::default();
+        assert_eq!(s.grid_opacity, 0.3);
+        assert_eq!(s.resolved_grid_opacity(), 0.3);
+        s.grid_opacity = 0.35;
+        assert_eq!(s.resolved_grid_opacity(), 0.35);
+        s.grid_opacity = -2.0;
+        assert_eq!(s.resolved_grid_opacity(), 0.0);
+        s.grid_opacity = 4.0;
+        assert_eq!(s.resolved_grid_opacity(), 1.0);
+        s.grid_opacity = f32::NAN;
+        assert_eq!(s.resolved_grid_opacity(), 0.3);
+    }
+
+    #[test]
+    fn old_scene3d_config_without_grid_opacity_gets_the_default() {
+        let s: AppSettings = serde_json::from_str(r#"{"scene3d":{"far_clip_m":25000.0}}"#).unwrap();
+        assert_eq!(s.scene3d.grid_opacity, 0.3);
+        let s: AppSettings = serde_json::from_str(r#"{"scene3d":{"grid_opacity":0.25}}"#).unwrap();
+        assert_eq!(s.scene3d.resolved_grid_opacity(), 0.25);
+    }
+
+    #[test]
+    fn auto_grid_level_interpolates_linearly_inside_the_decade() {
         let s = Scene3dSettings {
             grid_cell_auto: true,
             ..Scene3dSettings::default()
         };
-        let (cell, lod) = s.resolved_grid(100.0);
-        assert!(lod);
-        assert!((cell - 10.0).abs() < 1e-3);
-        assert!(s.resolved_grid(50.0).0 < s.resolved_grid(5_000.0).0);
+        for (height, expected) in [
+            (1.0f32, 0.0f32),
+            (10.0, 1.0),
+            (100.0, 2.0),
+            (1_000.0, 3.0),
+            (550.0, 2.5),
+            (100_000.0, 5.0),
+        ] {
+            let (level, lod) = s.resolved_grid(height);
+            assert!(lod, "auto mode drives the multi-level path");
+            assert!(
+                (level - expected).abs() < 1e-3,
+                "height {height} -> level {level}, want {expected}"
+            );
+        }
     }
 
     #[test]
-    fn auto_grid_cell_follows_height_not_orbit_radius() {
+    fn auto_grid_level_is_continuous_across_a_decade_boundary() {
         let s = Scene3dSettings::default();
-        let (cell, lod) = s.resolved_grid(101.5);
-        assert!(lod);
-        assert!((cell - 10.15).abs() < 1e-2);
+        let below = s.resolved_grid(999.9).0;
+        let above = s.resolved_grid(1_000.1).0;
+        assert!(below < 3.0 && above > 3.0, "boundary straddles level 3");
+        assert!(
+            (above - below).abs() < 1e-2,
+            "level jumped from {below} to {above} across the boundary"
+        );
+    }
+
+    #[test]
+    fn auto_grid_level_rises_with_height_and_ignores_garbage() {
+        let s = Scene3dSettings::default();
+        assert!(s.resolved_grid(50.0).0 < s.resolved_grid(5_000.0).0);
+        assert_eq!(s.resolved_grid(f32::NAN).0, s.resolved_grid(100.0).0);
+        assert_eq!(s.resolved_grid(-250.0).0, s.resolved_grid(250.0).0);
     }
 
     #[test]
@@ -1663,6 +2039,12 @@ mod tests {
     fn render_mode_labels_are_stable() {
         let labels: Vec<_> = RenderMode::ALL.into_iter().map(RenderMode::label).collect();
         assert_eq!(labels, ["Reactive", "Continuous"]);
+    }
+
+    #[test]
+    fn vsync_mode_labels_are_stable() {
+        let labels: Vec<_> = VsyncMode::ALL.into_iter().map(VsyncMode::label).collect();
+        assert_eq!(labels, ["On", "Adaptive", "Fast"]);
     }
 
     #[test]
@@ -1743,5 +2125,18 @@ mod scripting_settings_tests {
         assert_eq!(json, "\"on_output\"");
         let back: AutoOpenScriptingConsole = serde_json::from_str(&json).unwrap();
         assert_eq!(back, AutoOpenScriptingConsole::OnOutput);
+    }
+
+    #[test]
+    fn sky_defaults_on_without_a_map_provider() {
+        let s = Scene3dSettings::default();
+        assert_eq!(s.map_provider, MapProviderId::None);
+        assert!(s.show_sky);
+    }
+
+    #[test]
+    fn old_scene3d_config_without_show_sky_defaults_it_on() {
+        let s: AppSettings = serde_json::from_str(r#"{"scene3d":{"far_clip_m":25000.0}}"#).unwrap();
+        assert!(s.scene3d.show_sky);
     }
 }

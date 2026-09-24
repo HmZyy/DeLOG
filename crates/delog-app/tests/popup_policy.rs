@@ -2,10 +2,11 @@
 mod policy_sources;
 
 use policy_sources::{
-    APP as APP_SOURCE, BROWSER, DATA_EXPORT as DATA_EXPORT_SOURCE, DIAGNOSTICS,
-    DOCKS as DOCKS_SOURCE, GENERATE_MARKERS, LIVE, LOGGING, MARKERS, MESSAGE_POPUP, PARSERS,
-    PERFORMANCE, SCRIPTS as SCRIPTS_SOURCE, SETTINGS as SETTINGS_SOURCE,
-    SYNC_WINDOW as SYNC_WINDOW_SOURCE, VEHICLE_DIALOG, WORKSPACE as WORKSPACE_SOURCE,
+    ABOUT as ABOUT_SOURCE, APP as APP_SOURCE, BROWSER, DATA_EXPORT as DATA_EXPORT_SOURCE,
+    DIAGNOSTICS, DOCKS as DOCKS_SOURCE, GENERATE_MARKERS, LIVE, LOGGING, MARKERS, MESSAGE_POPUP,
+    PALETTE, PARSERS, PERFORMANCE, SCRIPTS as SCRIPTS_SOURCE, SETTINGS as SETTINGS_SOURCE,
+    SYNC_WINDOW as SYNC_WINDOW_SOURCE, UPDATE as UPDATE_SOURCE,
+    UPDATE_POPUP as UPDATE_POPUP_SOURCE, VEHICLE_DIALOG, WORKSPACE as WORKSPACE_SOURCE,
 };
 
 const CONTEXT_HEADER_SOURCE: &str = include_str!("../src/shell/app/context_header.rs");
@@ -14,8 +15,11 @@ const COMMANDS_SOURCE: &str = concat!(
     include_str!("../src/shell/app/commands/specs.rs"),
 );
 const GLOBAL_TOOLBAR_SOURCE: &str = include_str!("../src/shell/app/global_plot_toolbar.rs");
+const APP_MAIN: &str = include_str!("../src/shell/app/mod.rs");
 
 const POPUP_SOURCES: &[&str] = &[
+    ABOUT_SOURCE,
+    UPDATE_POPUP_SOURCE,
     APP_SOURCE,
     BROWSER,
     GENERATE_MARKERS,
@@ -62,6 +66,55 @@ fn sync_toolbar_uses_icons_instead_of_unsupported_arrow_glyphs() {
 }
 
 #[test]
+fn only_string_fields_offer_a_text_viewer_and_it_comes_first() {
+    let menu = between(BROWSER, "response.context_menu(|ui| {", "    action\n}");
+    let viewer = menu
+        .find("FieldRowAction::OpenTextViewer")
+        .expect("a string field should offer its text viewer");
+    let metadata = menu
+        .find("FieldRowAction::InspectMetadata")
+        .expect("the field metadata entry should exist");
+
+    assert!(
+        viewer < metadata,
+        "the text viewer entry belongs at the top of the field menu"
+    );
+    assert!(
+        menu.contains("field.dtype == \"str\""),
+        "only string fields carry text, so the entry must be gated on the dtype"
+    );
+}
+
+#[test]
+fn the_run_palette_opens_parsers_through_the_host_that_lists_them() {
+    let names = between(
+        APP_MAIN,
+        "fn run_palette_names",
+        "fn open_run_palette_items",
+    );
+    let pick = between(APP_MAIN, "fn run_palette_pick", "fn show_layout_windows");
+
+    assert!(
+        names.contains("self.scripts.parser_names()"),
+        "the parser rows come from the script parser library"
+    );
+    assert!(
+        pick.contains("self.scripts.request_open(ctx, name)"),
+        "so they must open through the same host; the built-in registry has never heard of them"
+    );
+    assert!(
+        !pick.contains("spawn_open_dialog"),
+        "spawn_open_dialog forces a built-in parser by name and fails for a saved parser"
+    );
+}
+
+#[test]
+fn the_palette_marks_a_checked_row_with_an_icon_instead_of_a_glyph() {
+    assert!(!PALETTE.contains('\u{2713}'));
+    assert!(PALETTE.contains("crate::ui::icons::check()"));
+}
+
+#[test]
 fn menus_expose_scripts_parsers_and_scripting_console_dock() {
     let tools_static = between(
         CONTEXT_HEADER_SOURCE,
@@ -91,9 +144,9 @@ fn menus_expose_scripts_parsers_and_scripting_console_dock() {
         .find("ui.menu_button(\"Tools\"")
         .expect("Tools menu should exist")..];
     assert!(tools.contains("ui.menu_button(\"Scripts\""));
-    assert!(tools.contains("ui.menu_button(\"Run Scripts\""));
+    assert!(tools.contains("ui.menu_button(\"Run script\""));
     assert!(tools.contains("ui.menu_button(\"Parsers\""));
-    assert!(tools.contains("ui.menu_button(\"Run Parser\""));
+    assert!(tools.contains("ui.menu_button(\"Run parser\""));
     assert!(tools.contains("ui.menu_button(\"Layouts\""));
     assert_commands_in_order(
         tools,
@@ -136,7 +189,7 @@ fn dynamic_commands_live_under_the_user_authoritative_nested_menus() {
     );
     let run_script = between(
         scripts,
-        "ui.menu_button(\"Run Scripts\"",
+        "ui.menu_button(\"Run script\"",
         "TOOLS_SCRIPTS_MENU",
     );
     assert!(run_script.contains("AppCommand::RunScript"));
@@ -146,13 +199,13 @@ fn dynamic_commands_live_under_the_user_authoritative_nested_menus() {
         "ui.menu_button(\"Parsers\"",
         "ui.menu_button(\"Layouts\"",
     );
+    let run_parser = parsers
+        .find("ui.menu_button(\"Run parser\"")
+        .expect("Run parser submenu should exist");
     let parser_editor = parsers
         .find("TOOLS_PARSERS_MENU")
         .expect("Parser Editor should be rendered");
-    let run_parser = parsers
-        .find("ui.menu_button(\"Run Parser\"")
-        .expect("Run Parser submenu should exist");
-    assert!(parser_editor < run_parser);
+    assert!(run_parser < parser_editor);
     assert!(parsers[run_parser..].contains("AppCommand::OpenWithParser"));
 
     let layouts = &tools[tools
@@ -160,11 +213,21 @@ fn dynamic_commands_live_under_the_user_authoritative_nested_menus() {
         .expect("Layouts submenu should exist")..];
     let load_layout = between(
         layouts,
-        "ui.menu_button(\"Load Layout\"",
-        "&TOOLS_LAYOUTS_MENU[",
+        "ui.menu_button(\"Load layout\"",
+        "TOOLS_LAYOUTS_MENU",
     );
     assert!(load_layout.contains("AppCommand::LoadNamedLayout"));
     assert!(!load_layout.contains("CommandId::LoadLayout"));
+
+    let sequences = &tools[tools
+        .find("ui.menu_button(\"Sequences\"")
+        .expect("Sequences submenu should exist")..];
+    let run_sequence = between(
+        sequences,
+        "ui.menu_button(\"Run sequence\"",
+        "TOOLS_SEQUENCES_MENU",
+    );
+    assert!(run_sequence.contains("AppCommand::RunSequence"));
 
     assert!(APP_SOURCE.contains("self.spawn_open_dialog(ctx, Some(&name))"));
     assert!(APP_SOURCE.contains("self.scripts.request_open(ctx, &name)"));
@@ -198,8 +261,12 @@ fn view_and_panel_rows_render_from_canonical_checked_state() {
         "ui.menu_button(\"Analyze\"",
     );
     assert_eq!(view.matches("checked_menu_items(").count(), 2);
-    assert!(CONTEXT_HEADER_SOURCE.contains("egui::Checkbox::new(&mut is_selected, text)"));
+    assert!(CONTEXT_HEADER_SOURCE.contains("egui::Checkbox::new(&mut is_selected, label)"));
     assert!(CONTEXT_HEADER_SOURCE.contains("presentation.selected.unwrap_or(false)"));
+    assert!(
+        CONTEXT_HEADER_SOURCE.contains("egui::Atom::grow()"),
+        "a checked row must push its shortcut to the right edge instead of inlining it"
+    );
 }
 
 #[test]
@@ -428,9 +495,15 @@ fn field_stats_is_a_global_toolbar_action_not_a_per_plot_one() {
         GLOBAL_TOOLBAR_SOURCE.contains("crate::ui::icons::sigma()"),
         "the global field stats button should use the sigma icon"
     );
+    let toggle_arm = between(
+        APP_SOURCE,
+        "CommandId::ToggleFieldStats => {",
+        "CommandId::ToggleAnnotationToolbar",
+    );
     assert!(
-        APP_SOURCE.contains("self.field_stats.open_plotted(self.workspace.unique_fields())"),
-        "the global action should open stats for every plotted trace"
+        toggle_arm.contains("let fields = self.plotted_fields();")
+            && toggle_arm.contains("self.field_stats.open_plotted(fields)"),
+        "the global action should open stats for every plotted trace, in every window"
     );
 }
 
@@ -458,7 +531,7 @@ fn browser_topic_tables_keep_field_drag_source() {
         "each visible field should become a tree leaf directly in the loop"
     );
     let table_row_call = browser[leaf_node..]
-        .find("field_table_row(ui, field, selection, &visible)")
+        .find("field_table_row(\n                                            ui, salt, origin, field, selection, &visible,")
         .map(|offset| leaf_node + offset)
         .expect("field leaves should render field table rows");
     assert!(
@@ -470,7 +543,7 @@ fn browser_topic_tables_keep_field_drag_source() {
         .find("fn field_table_row(")
         .expect("field_table_row helper should exist");
     let field_row_delegate = browser[table_row..]
-        .find("field_row(ui, field, selection, visible")
+        .find("field_row(\n        ui,\n        salt,\n        origin,\n        field,\n        selection,\n        visible,")
         .map(|offset| table_row + offset)
         .expect("field_table_row should delegate to field_row");
     assert!(
@@ -506,7 +579,7 @@ fn browser_topic_tables_keep_field_drag_source() {
     }
 
     let table_cell_calls = browser[table_row..field_row]
-        .matches("field_table_cell(\n                ui,")
+        .matches("field_table_cell(\n                    ui,")
         .count();
     assert_eq!(
         table_cell_calls, 5,
@@ -550,16 +623,30 @@ fn tools_layouts_menu_exposes_clear_current_layout() {
     );
     assert!(COMMANDS_SOURCE.contains("\"Clear current layout\""));
     assert!(APP_SOURCE.contains("CommandId::ClearLayout => self.clear_current_layout()"));
+
+    let rendered = between(
+        CONTEXT_HEADER_SOURCE,
+        "ui.menu_button(\"Layouts\"",
+        "ui.menu_button(\"Sequences\"",
+    );
+    assert_commands_in_order(
+        rendered,
+        &[
+            "TOOLS_LAYOUTS_MENU",
+            "ui.separator();",
+            "TOOLS_LAYOUTS_FILE_MENU",
+        ],
+    );
 }
 
 #[test]
 fn removed_workspace_fields_are_pruned_before_cache_requests() {
     let prune = APP_SOURCE
-        .find("self.workspace.prune_removed_fields(&snapshot)")
-        .expect("workspace should prune removed fields on epoch changes");
+        .find("workspace.prune_removed_fields(&snapshot)")
+        .expect("every workspace should prune removed fields on epoch changes");
     let request = APP_SOURCE
         .find("self.caches.request(field, &snapshot);")
-        .expect("workspace fields should request render caches");
+        .expect("plotted fields should request render caches");
 
     assert!(prune < request);
 }
@@ -659,10 +746,7 @@ fn view_and_analyze_menus_keep_display_and_analysis_actions_separate() {
     );
     assert_commands_in_order(
         analyze,
-        &[
-            "CommandId::SyncSources",
-            "CommandId::OpenDataFlow",
-        ],
+        &["CommandId::SyncSources", "CommandId::OpenDataFlow"],
     );
     assert!(!analyze.contains("CommandId::AddMarker"));
     assert!(!analyze.contains("CommandId::OpenMarkers"));
@@ -845,11 +929,9 @@ fn export_footer_keeps_cancel_left_and_export_right() {
 #[test]
 fn global_toolbar_is_rendered_once_through_the_context_header() {
     assert_eq!(APP_SOURCE.matches("global_plot_toolbar::show").count(), 1);
-    let header_call = APP_SOURCE.find("context_header::show").unwrap();
-    let toolbar_call = APP_SOURCE.find("global_plot_toolbar::show").unwrap();
-    let workspace = APP_SOURCE
-        .find("central_workspace_frame(ui.style()).show")
-        .unwrap();
+    let header_call = APP_MAIN.find("context_header::show").unwrap();
+    let toolbar_call = APP_MAIN.find("global_plot_toolbar::show").unwrap();
+    let workspace = APP_MAIN.find("render_workspace_window(").unwrap();
 
     assert!(header_call < toolbar_call && toolbar_call < workspace);
 }
@@ -959,4 +1041,59 @@ fn the_parquet_path_has_no_import_dialog() {
             file.display()
         );
     }
+}
+
+#[test]
+fn about_dialog_reads_its_version_description_and_link_from_cargo_metadata() {
+    assert!(ABOUT_SOURCE.contains("env!(\"CARGO_PKG_VERSION\")"));
+    assert!(ABOUT_SOURCE.contains("env!(\"CARGO_PKG_DESCRIPTION\")"));
+    assert!(ABOUT_SOURCE.contains("env!(\"CARGO_PKG_REPOSITORY\")"));
+    assert!(
+        !ABOUT_SOURCE.contains("hyperlink_to(\"GitHub\", \"https://"),
+        "the GitHub link should come from the manifest, not a literal URL"
+    );
+}
+
+#[test]
+fn the_brand_opens_the_about_dialog_and_nothing_else_does() {
+    let brand = between(CONTEXT_HEADER_SOURCE, "pub fn show(", "ui.separator();");
+    assert!(brand.contains("AppCommand::ShowAbout"));
+    assert!(APP_SOURCE.contains("AppCommand::ShowAbout => self.show_about = true"));
+    assert!(APP_SOURCE.contains("crate::ui::about::show("));
+    assert!(
+        !COMMANDS_SOURCE.contains("CommandId::ShowAbout"),
+        "About should not be a static command with a menu row or palette entry"
+    );
+}
+
+#[test]
+fn the_update_check_runs_off_the_ui_thread_and_only_when_enabled() {
+    assert!(UPDATE_SOURCE.contains("thread::Builder::new()"));
+    assert!(
+        !UPDATE_SOURCE.contains("block_on"),
+        "the release check must never block the UI thread"
+    );
+    assert!(APP_SOURCE.contains("update::spawn_check("));
+    assert!(
+        APP_SOURCE.contains("settings.updates.check_for_updates"),
+        "the check should be gated on the setting"
+    );
+}
+
+#[test]
+fn the_update_prompt_is_gated_and_its_choice_is_persisted() {
+    assert!(APP_SOURCE.contains("crate::update::should_notify("));
+    assert!(APP_SOURCE.contains("crate::update::popup::show("));
+    assert!(APP_SOURCE.contains("crate::update::apply_action("));
+    assert!(
+        APP_SOURCE.contains("save_app_settings"),
+        "a skipped version or a disabled check must survive a restart"
+    );
+}
+
+#[test]
+fn the_update_popup_offers_both_ways_to_ignore_an_update() {
+    assert!(UPDATE_POPUP_SOURCE.contains("\"Skip this version\""));
+    assert!(UPDATE_POPUP_SOURCE.contains("\"Stop checking for updates\""));
+    assert!(UPDATE_POPUP_SOURCE.contains("UpdateAction::RemindLater"));
 }
