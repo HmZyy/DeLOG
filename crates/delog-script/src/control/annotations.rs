@@ -505,16 +505,6 @@ fn annotation_from_info(info: AnnotationInfo) -> AnnotationPy {
     }
 }
 
-fn kind_name(kind: AnnotationKind) -> &'static str {
-    match kind {
-        AnnotationKind::Text => "text",
-        AnnotationKind::Segment => "segment",
-        AnnotationKind::Rect => "rect",
-        AnnotationKind::Ellipse => "ellipse",
-        AnnotationKind::HLine => "hline",
-    }
-}
-
 #[pyclass(unsendable, name = "Annotation", skip_from_py_object)]
 #[derive(Clone)]
 pub struct AnnotationPy {
@@ -537,14 +527,14 @@ impl AnnotationPy {
         format!(
             "<Annotation {} kind={} id={}>",
             self.label,
-            kind_name(self.kind),
+            self.kind.as_str(),
             self.id
         )
     }
 
     #[getter]
     fn kind(&self) -> &'static str {
-        kind_name(self.kind)
+        self.kind.as_str()
     }
 
     #[getter]

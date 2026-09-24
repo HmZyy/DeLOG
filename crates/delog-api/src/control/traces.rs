@@ -21,6 +21,14 @@ impl TraceMode {
             ))),
         }
     }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Line => "line",
+            Self::Scatter => "scatter",
+            Self::Step => "step",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

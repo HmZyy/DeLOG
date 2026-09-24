@@ -392,6 +392,15 @@ pub enum ProfileNedReference {
     },
 }
 
+impl ProfileNedReference {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Manual { .. } => "manual",
+            Self::Fields { .. } => "fields",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProfilePosition {
     Ned {
@@ -410,6 +419,15 @@ pub enum ProfilePosition {
     },
 }
 
+impl ProfilePosition {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Ned { .. } => "ned",
+            Self::Gps { .. } => "gps",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProfileOrientation {
     Static,
@@ -425,6 +443,16 @@ pub enum ProfileOrientation {
         y: ProfileFieldRef,
         z: ProfileFieldRef,
     },
+}
+
+impl ProfileOrientation {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Static => "static",
+            Self::Euler { .. } => "euler",
+            Self::Quat { .. } => "quat",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
