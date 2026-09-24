@@ -7,6 +7,7 @@ use std::thread::JoinHandle;
 
 use delog_api::control::{ControlHost, ControlRequest, GenerationRequest, MarkerRequest};
 use delog_api::markers::PendingMarker;
+use delog_api::operations::OperationSpec;
 use delog_api::params::SharedParams;
 use delog_api::timestamps::TimestampMode;
 use delog_core::identity::SourceId;
@@ -777,16 +778,16 @@ fn snapshot_without_sources(
     filtered
 }
 
-fn operation_modes(specs: &[crate::operations::OperationSpec]) -> (bool, bool) {
+fn operation_modes(specs: &[OperationSpec]) -> (bool, bool) {
     let wants_live = specs.iter().any(|spec| match spec {
-        crate::operations::OperationSpec::Transform(spec) => spec.mode.wants_live(),
-        crate::operations::OperationSpec::Merge(spec) => spec.mode.wants_live(),
-        crate::operations::OperationSpec::SplitBy(spec) => spec.mode.wants_live(),
+        OperationSpec::Transform(spec) => spec.mode.wants_live(),
+        OperationSpec::Merge(spec) => spec.mode.wants_live(),
+        OperationSpec::SplitBy(spec) => spec.mode.wants_live(),
     });
     let wants_snapshot = specs.iter().any(|spec| match spec {
-        crate::operations::OperationSpec::Transform(spec) => spec.mode.wants_snapshot(),
-        crate::operations::OperationSpec::Merge(spec) => spec.mode.wants_snapshot(),
-        crate::operations::OperationSpec::SplitBy(spec) => spec.mode.wants_snapshot(),
+        OperationSpec::Transform(spec) => spec.mode.wants_snapshot(),
+        OperationSpec::Merge(spec) => spec.mode.wants_snapshot(),
+        OperationSpec::SplitBy(spec) => spec.mode.wants_snapshot(),
     });
     (wants_live, wants_snapshot)
 }
@@ -795,7 +796,7 @@ fn operation_modes(specs: &[crate::operations::OperationSpec]) -> (bool, bool) {
 fn install_declarative_generation(
     name: &str,
     snapshot: &delog_core::snapshot::StoreSnapshot,
-    specs: &[crate::operations::OperationSpec],
+    specs: &[OperationSpec],
     sender: &IngestSender,
     active_live: &Arc<Mutex<HashMap<String, Vec<LiveTransformSpec>>>>,
     active_declarative: &Arc<Mutex<HashSet<String>>>,
