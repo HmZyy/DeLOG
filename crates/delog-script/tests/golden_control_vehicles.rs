@@ -2,12 +2,12 @@
 
 use std::sync::{Arc, Mutex};
 
-use delog_core::identity::IdentityRegistry;
-use delog_core::snapshot::StoreSnapshot;
-use delog_script::{
+use delog_api::control::{
     ControlHost, ControlRequest, ControlResponse, VehicleFilter, VehicleInfo, VehicleModel,
     VehicleNedReference, VehicleOrientation, VehiclePatch, VehiclePosition, VehicleRequest,
 };
+use delog_core::identity::IdentityRegistry;
+use delog_core::snapshot::StoreSnapshot;
 
 #[derive(Default)]
 struct Recorder {
@@ -27,7 +27,7 @@ impl Recorder {
 }
 
 impl ControlHost for Recorder {
-    fn call(&self, request: ControlRequest) -> Result<ControlResponse, String> {
+    fn call(&self, request: ControlRequest) -> delog_api::Result<ControlResponse> {
         self.seen.lock().unwrap().push(request.clone());
         match request {
             ControlRequest::Vehicles(VehicleRequest::List) => Ok(ControlResponse::Vehicles(
@@ -50,7 +50,7 @@ impl ControlHost for Recorder {
                 let info = vehicles
                     .iter_mut()
                     .find(|info| info.id == id)
-                    .ok_or_else(|| format!("vehicle {id} is gone"))?;
+                    .ok_or_else(|| delog_api::Error::execution(format!("vehicle {id} is gone")))?;
                 apply_patch(info, patch);
                 Ok(ControlResponse::Vehicles(vec![info.clone()]))
             }
@@ -60,7 +60,9 @@ impl ControlHost for Recorder {
                     VehicleFilter::Id(id) => vehicles.retain(|info| info.id != id),
                     VehicleFilter::Index(index) => {
                         if index >= vehicles.len() {
-                            return Err(format!("vehicle index {index} is gone"));
+                            return Err(delog_api::Error::execution(format!(
+                                "vehicle index {index} is gone"
+                            )));
                         }
                         vehicles.remove(index);
                     }

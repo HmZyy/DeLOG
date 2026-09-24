@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use delog_script::{
+use delog_api::control::{
     ControlHost, ControlRequest, ControlResponse, LayoutFieldIssue, LayoutRequest, LoadReport,
 };
 
@@ -18,7 +18,7 @@ impl LayoutHost {
 }
 
 impl ControlHost for LayoutHost {
-    fn call(&self, request: ControlRequest) -> Result<ControlResponse, String> {
+    fn call(&self, request: ControlRequest) -> delog_api::Result<ControlResponse> {
         self.seen.lock().unwrap().push(request.clone());
         match request {
             ControlRequest::Layouts(LayoutRequest::List) => Ok(ControlResponse::Names(vec![
@@ -41,7 +41,9 @@ impl ControlHost for LayoutHost {
                 warnings: vec!["annotation skipped".into()],
             })),
             ControlRequest::Layouts(_) => Ok(ControlResponse::Unit),
-            other => Err(format!("unexpected request: {other:?}")),
+            other => Err(delog_api::Error::execution(format!(
+                "unexpected request: {other:?}"
+            ))),
         }
     }
 }

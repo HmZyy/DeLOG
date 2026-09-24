@@ -2,8 +2,8 @@ use pyo3::prelude::*;
 
 use super::plots::{PlotPy, plot_from_info};
 use super::{
-    ControlRequest, ControlResponse, PlaybackRequest, PlotContext, SplitDirection,
-    WorkspaceRequest, call_immediate_detached, control_call_error,
+    ControlRequest, PlaybackRequest, PlotContext, SplitDirection, WorkspaceRequest,
+    call_immediate_detached, control_call_error,
 };
 
 #[pyclass(unsendable, name = "Workspace", skip_from_py_object)]
@@ -61,23 +61,24 @@ impl WorkspacePy {
     fn request_plot(&self, py: Python<'_>, request: WorkspaceRequest) -> PyResult<PlotPy> {
         let response = call_immediate_detached(py, ControlRequest::Workspace(request))
             .map_err(control_call_error)?;
-        match response {
-            ControlResponse::Plots(infos) => match infos.into_iter().next() {
-                Some(info) => Ok(plot_from_info(info, self.context.clone())),
-                None => Err(pyo3::exceptions::PyRuntimeError::new_err(
-                    "the DeLOG window did not report the new plot",
-                )),
-            },
-            _ => Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "the DeLOG window answered with the wrong kind of result",
+        match response
+            .into_plots()
+            .map_err(crate::errors::control)?
+            .into_iter()
+            .next()
+        {
+            Some(info) => Ok(plot_from_info(info, self.context.clone())),
+            None => Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "the DeLOG window did not report the new plot",
             )),
         }
     }
 
     fn request_unit(&self, py: Python<'_>, request: WorkspaceRequest) -> PyResult<()> {
         call_immediate_detached(py, ControlRequest::Workspace(request))
-            .map(|_| ())
-            .map_err(control_call_error)
+            .map_err(control_call_error)?
+            .into_unit()
+            .map_err(crate::errors::control)
     }
 }
 
@@ -94,12 +95,10 @@ impl WindowsPy {
             ControlRequest::Workspace(WorkspaceRequest::OpenWindow { title }),
         )
         .map_err(control_call_error)?;
-        match response {
-            ControlResponse::Window(id) => Ok(WindowPy { id }),
-            _ => Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "the DeLOG window answered with the wrong kind of result",
-            )),
-        }
+        response
+            .into_window()
+            .map(|id| WindowPy { id })
+            .map_err(crate::errors::control)
     }
 }
 
@@ -154,8 +153,9 @@ impl PlaybackPy {
 impl PlaybackPy {
     fn request(&self, py: Python<'_>, request: PlaybackRequest) -> PyResult<()> {
         call_immediate_detached(py, ControlRequest::Playback(request))
-            .map(|_| ())
-            .map_err(control_call_error)
+            .map_err(control_call_error)?
+            .into_unit()
+            .map_err(crate::errors::control)
     }
 }
 

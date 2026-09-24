@@ -3,12 +3,12 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 
 #[cfg(feature = "scripting")]
-use delog_api::markers::PendingMarker;
-#[cfg(feature = "scripting")]
-use delog_script::{
+use delog_api::control::{
     ControlResponse, MarkerFilter, MarkerInfo, MarkerOrigin as ScriptMarkerOrigin, MarkerPatch,
     MarkerRequest,
 };
+#[cfg(feature = "scripting")]
+use delog_api::markers::PendingMarker;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum MarkerOrigin {
@@ -811,7 +811,7 @@ mod tests {
             })
             .unwrap();
 
-        let delog_script::ControlResponse::Markers(infos) =
+        let ControlResponse::Markers(infos) =
             markers.apply_control_request(MarkerRequest::List).unwrap()
         else {
             panic!("wrong response kind");
@@ -827,9 +827,9 @@ mod tests {
             infos.iter().map(|info| info.index).collect::<Vec<_>>(),
             [0, 1, 2]
         );
-        assert_eq!(infos[0].origin, delog_script::MarkerOrigin::Script);
+        assert_eq!(infos[0].origin, ScriptMarkerOrigin::Script);
         assert_eq!(infos[0].owner.as_deref(), Some("flight.py"));
-        assert_eq!(infos[2].origin, delog_script::MarkerOrigin::Manual);
+        assert_eq!(infos[2].origin, ScriptMarkerOrigin::Manual);
         assert_eq!(infos[2].owner, None);
     }
 
@@ -849,7 +849,7 @@ mod tests {
         markers
             .apply_control_request(MarkerRequest::Set {
                 id,
-                patch: delog_script::MarkerPatch {
+                patch: MarkerPatch {
                     t_us: Some(5),
                     label: Some("moved".into()),
                     ..Default::default()
@@ -863,7 +863,7 @@ mod tests {
         let error = markers
             .apply_control_request(MarkerRequest::Set {
                 id: u64::MAX,
-                patch: delog_script::MarkerPatch {
+                patch: MarkerPatch {
                     label: Some("wrong target".into()),
                     ..Default::default()
                 },
@@ -888,12 +888,12 @@ mod tests {
             .unwrap();
 
         for filter in [
-            delog_script::MarkerFilter::ScriptLabel("same".into()),
-            delog_script::MarkerFilter::ScriptTimeRange {
+            MarkerFilter::ScriptLabel("same".into()),
+            MarkerFilter::ScriptTimeRange {
                 after: Some(0),
                 before: Some(30),
             },
-            delog_script::MarkerFilter::ScriptAll,
+            MarkerFilter::ScriptAll,
         ] {
             markers
                 .apply_control_request(MarkerRequest::Remove(filter))
@@ -902,8 +902,8 @@ mod tests {
         assert_eq!(labels(&markers), ["same"]);
 
         markers
-            .apply_control_request(MarkerRequest::Remove(delog_script::MarkerFilter::Origin(
-                delog_script::MarkerOrigin::Manual,
+            .apply_control_request(MarkerRequest::Remove(MarkerFilter::Origin(
+                ScriptMarkerOrigin::Manual,
             )))
             .unwrap();
         assert!(markers.as_slice().is_empty());

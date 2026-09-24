@@ -2,12 +2,12 @@
 
 use std::sync::Arc;
 
-use delog_script::{ControlHost, ControlRequest, ControlResponse, PlotInfo, PlotRequest};
+use delog_api::control::{ControlHost, ControlRequest, ControlResponse, PlotInfo, PlotRequest};
 
 struct TwoPlots;
 
 impl ControlHost for TwoPlots {
-    fn call(&self, request: ControlRequest) -> Result<ControlResponse, String> {
+    fn call(&self, request: ControlRequest) -> delog_api::Result<ControlResponse> {
         match request {
             ControlRequest::Plots(PlotRequest::List { window: None }) => {
                 Ok(ControlResponse::Plots(vec![
@@ -25,7 +25,9 @@ impl ControlHost for TwoPlots {
                     },
                 ]))
             }
-            other => Err(format!("unexpected request: {other:?}")),
+            other => Err(delog_api::Error::execution(format!(
+                "unexpected request: {other:?}"
+            ))),
         }
     }
 }
@@ -48,7 +50,7 @@ fn plots_raise_a_clear_error_when_no_window_is_attached() {
 struct TwoWindows;
 
 impl ControlHost for TwoWindows {
-    fn call(&self, request: ControlRequest) -> Result<ControlResponse, String> {
+    fn call(&self, request: ControlRequest) -> delog_api::Result<ControlResponse> {
         match request {
             ControlRequest::Plots(PlotRequest::List { window }) => {
                 assert_eq!(window, Some(3), "the window filter must reach the app");
@@ -59,7 +61,9 @@ impl ControlHost for TwoWindows {
                     label: "Plot 1".into(),
                 }]))
             }
-            other => Err(format!("unexpected request: {other:?}")),
+            other => Err(delog_api::Error::execution(format!(
+                "unexpected request: {other:?}"
+            ))),
         }
     }
 }

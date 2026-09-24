@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use delog_script::{
+use delog_api::control::{
     ControlHost, ControlRequest, ControlResponse, MarkerFilter, MarkerInfo, MarkerOrigin,
     MarkerRequest,
 };
@@ -49,7 +49,7 @@ impl MarkerHost {
 }
 
 impl ControlHost for MarkerHost {
-    fn call(&self, request: ControlRequest) -> Result<ControlResponse, String> {
+    fn call(&self, request: ControlRequest) -> delog_api::Result<ControlResponse> {
         self.seen.lock().unwrap().push(request.clone());
         match request {
             ControlRequest::Markers(MarkerRequest::List) => Ok(ControlResponse::Markers(
@@ -60,7 +60,7 @@ impl ControlHost for MarkerHost {
                 let marker = markers
                     .iter_mut()
                     .find(|marker| marker.id == id)
-                    .ok_or_else(|| format!("marker {id} is gone"))?;
+                    .ok_or_else(|| delog_api::Error::execution(format!("marker {id} is gone")))?;
                 if let Some(t_us) = patch.t_us {
                     marker.t_us = t_us;
                 }
@@ -76,7 +76,9 @@ impl ControlHost for MarkerHost {
                 Ok(ControlResponse::Unit)
             }
             ControlRequest::Markers(MarkerRequest::Remove(_)) => Ok(ControlResponse::Unit),
-            other => Err(format!("unexpected request: {other:?}")),
+            other => Err(delog_api::Error::execution(format!(
+                "unexpected request: {other:?}"
+            ))),
         }
     }
 }

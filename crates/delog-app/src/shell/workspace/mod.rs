@@ -7,6 +7,8 @@ use std::sync::{
 };
 use std::time::Instant;
 
+#[cfg(feature = "scripting")]
+use delog_api::control::{AnnotationInfo, PlotInfo};
 use delog_cache::CacheManager;
 use delog_core::identity::FieldId;
 use delog_core::snapshot::StoreSnapshot;
@@ -645,11 +647,11 @@ impl Workspace {
     }
 
     #[cfg(feature = "scripting")]
-    pub fn plot_infos(&self, window: u64) -> Vec<delog_script::PlotInfo> {
+    pub fn plot_infos(&self, window: u64) -> Vec<PlotInfo> {
         self.plot_tiles_in_order()
             .into_iter()
             .enumerate()
-            .map(|(index, tile)| delog_script::PlotInfo {
+            .map(|(index, tile)| PlotInfo {
                 window,
                 tile: tile.0,
                 index,
@@ -659,7 +661,7 @@ impl Workspace {
     }
 
     #[cfg(feature = "scripting")]
-    pub fn annotation_infos(&self, window: u64) -> Vec<delog_script::AnnotationInfo> {
+    pub fn annotation_infos(&self, window: u64) -> Vec<AnnotationInfo> {
         let mut infos = Vec::new();
         for tile in self.plot_tiles_in_order() {
             if let Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) = self.tree.tiles.get(tile) {
@@ -785,12 +787,12 @@ pub(crate) fn annotation_infos_for_pane(
     window: u64,
     tile: u64,
     pane: &PlotPane,
-) -> Vec<delog_script::AnnotationInfo> {
+) -> Vec<AnnotationInfo> {
     pane.annotations
         .items()
         .iter()
         .enumerate()
-        .map(|(index, annotation)| delog_script::AnnotationInfo {
+        .map(|(index, annotation)| AnnotationInfo {
             window,
             tile,
             id: annotation.id,

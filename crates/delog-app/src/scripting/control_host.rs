@@ -3,7 +3,8 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{Receiver, Sender, SyncSender, channel, sync_channel};
 use std::time::Duration;
 
-use delog_script::{ControlHost, ControlRequest, ControlResponse};
+use delog_api::control::{ControlHost, ControlRequest, ControlResponse};
+use delog_api::{Error, Result};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 const CLAIMED_GRACE: Duration = Duration::from_secs(5);
@@ -14,7 +15,7 @@ const ABANDONED: u8 = 2;
 
 struct Pending {
     request: ControlRequest,
-    reply: SyncSender<Result<ControlResponse, String>>,
+    reply: SyncSender<Result<ControlResponse>>,
     claim: Arc<AtomicU8>,
 }
 
@@ -37,8 +38,8 @@ impl ScriptControlHost {
         &self,
         request: ControlRequest,
         timeout: Duration,
-    ) -> Result<ControlResponse, String> {
-        let (reply_tx, reply_rx) = sync_channel::<Result<ControlResponse, String>>(1);
+    ) -> Result<ControlResponse> {
+        let (reply_tx, reply_rx) = sync_channel::<Result<ControlResponse>>(1);
         let claim = Arc::new(AtomicU8::new(UNCLAIMED));
         self.tx
             .send(Pending {
@@ -46,7 +47,7 @@ impl ScriptControlHost {
                 reply: reply_tx,
                 claim: Arc::clone(&claim),
             })
-            .map_err(|_| "the DeLOG window is gone".to_string())?;
+            .map_err(|_| Error::unavailable("the DeLOG window is gone"))?;
         self.ctx.request_repaint();
         match reply_rx.recv_timeout(timeout) {
             Ok(result) => result,
@@ -55,18 +56,18 @@ impl ScriptControlHost {
                     .compare_exchange(UNCLAIMED, ABANDONED, Ordering::SeqCst, Ordering::SeqCst)
                     .is_ok()
                 {
-                    return Err("the DeLOG window did not respond".to_string());
+                    return Err(Error::unavailable("the DeLOG window did not respond"));
                 }
                 reply_rx
                     .recv_timeout(CLAIMED_GRACE)
-                    .map_err(|_| "the DeLOG window did not respond".to_string())?
+                    .map_err(|_| Error::unavailable("the DeLOG window did not respond"))?
             }
         }
     }
 }
 
 impl ControlHost for ScriptControlHost {
-    fn call(&self, request: ControlRequest) -> Result<ControlResponse, String> {
+    fn call(&self, request: ControlRequest) -> Result<ControlResponse> {
         self.call_with_timeout(request, DEFAULT_TIMEOUT)
     }
 }
@@ -74,7 +75,7 @@ impl ControlHost for ScriptControlHost {
 impl ControlQueue {
     pub fn drain_with(
         &self,
-        mut apply: impl FnMut(ControlRequest) -> Result<ControlResponse, String>,
+        mut apply: impl FnMut(ControlRequest) -> std::result::Result<ControlResponse, String>,
     ) {
         while let Ok(pending) = self.rx.try_recv() {
             if pending
@@ -89,7 +90,9 @@ impl ControlQueue {
             {
                 continue;
             }
-            let _ = pending.reply.send(apply(pending.request));
+            let _ = pending
+                .reply
+                .send(apply(pending.request).map_err(Error::execution));
         }
     }
 }
@@ -97,7 +100,8 @@ impl ControlQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use delog_script::MarkerRequest;
+    use delog_api::ErrorKind;
+    use delog_api::control::MarkerRequest;
 
     #[test]
     fn a_request_is_answered_by_whoever_drains_the_queue() {
@@ -128,7 +132,8 @@ mod tests {
                 std::time::Duration::from_millis(50),
             )
             .unwrap_err();
-        assert!(error.contains("did not respond"), "{error}");
+        assert_eq!(error.kind(), ErrorKind::Unavailable);
+        assert!(error.to_string().contains("did not respond"), "{error}");
     }
 
     #[test]
@@ -142,7 +147,8 @@ mod tests {
                 std::time::Duration::from_millis(50),
             )
             .unwrap_err();
-        assert!(error.contains("did not respond"), "{error}");
+        assert_eq!(error.kind(), ErrorKind::Unavailable);
+        assert!(error.to_string().contains("did not respond"), "{error}");
 
         let mut applied = 0;
         queue.drain_with(|_request| {
@@ -196,5 +202,39 @@ mod tests {
             "a request the drain had already claimed must be waited for, not abandoned: {outcome:?}"
         );
         assert_eq!(applied.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn app_dispatch_errors_cross_the_queue_as_execution_errors() {
+        let (host, queue) = ScriptControlHost::new(egui::Context::default());
+        let worker = std::thread::spawn(move || {
+            host.call(ControlRequest::Markers(MarkerRequest::RemoveOwned {
+                owner: "flight.py".into(),
+            }))
+        });
+        let mut served = false;
+        while !served {
+            queue.drain_with(|_request| {
+                served = true;
+                Err("pane closed".to_string())
+            });
+            std::thread::yield_now();
+        }
+        let error = worker.join().unwrap().unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Execution);
+        assert_eq!(error.to_string(), "pane closed");
+    }
+
+    #[test]
+    fn a_disconnected_window_is_an_unavailable_error() {
+        let (host, queue) = ScriptControlHost::new(egui::Context::default());
+        drop(queue);
+        let error = host
+            .call(ControlRequest::Markers(MarkerRequest::RemoveOwned {
+                owner: "flight.py".into(),
+            }))
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unavailable);
+        assert_eq!(error.to_string(), "the DeLOG window is gone");
     }
 }

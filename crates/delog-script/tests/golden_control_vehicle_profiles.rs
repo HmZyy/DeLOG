@@ -2,14 +2,14 @@
 
 use std::sync::{Arc, Mutex};
 
-use delog_core::identity::{FieldId, IdentityRegistry, SourceId};
-use delog_core::snapshot::StoreSnapshot;
-use delog_script::{
+use delog_api::control::{
     ControlHost, ControlRequest, ControlResponse, ProfileFieldRef, ProfileNedReference,
     ProfileOrientation, ProfilePosition, ResolvedVehicleField, ScriptOwner, VehicleInfo,
     VehicleModel, VehicleOrientation, VehiclePosition, VehicleProfileInfo, VehicleProfileRequest,
     VehicleSpec,
 };
+use delog_core::identity::{FieldId, IdentityRegistry, SourceId};
+use delog_core::snapshot::StoreSnapshot;
 
 #[derive(Default)]
 struct ProfileHost {
@@ -43,7 +43,7 @@ impl ProfileHost {
 }
 
 impl ControlHost for ProfileHost {
-    fn call(&self, request: ControlRequest) -> Result<ControlResponse, String> {
+    fn call(&self, request: ControlRequest) -> delog_api::Result<ControlResponse> {
         self.seen.lock().unwrap().push(request.clone());
         match request {
             ControlRequest::VehicleProfiles(VehicleProfileRequest::List) => {
@@ -64,7 +64,9 @@ impl ControlHost for ProfileHost {
             | ControlRequest::VehicleProfiles(VehicleProfileRequest::Delete { .. }) => {
                 Ok(ControlResponse::Unit)
             }
-            other => Err(format!("unexpected request: {other:?}")),
+            other => Err(delog_api::Error::execution(format!(
+                "unexpected request: {other:?}"
+            ))),
         }
     }
 }

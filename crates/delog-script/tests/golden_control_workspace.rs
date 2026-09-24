@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use delog_script::{
+use delog_api::control::{
     ControlHost, ControlRequest, ControlResponse, PlaybackRequest, PlotInfo, SplitDirection,
     WorkspaceRequest,
 };
@@ -13,7 +13,7 @@ struct Recorder {
 }
 
 impl ControlHost for Recorder {
-    fn call(&self, request: ControlRequest) -> Result<ControlResponse, String> {
+    fn call(&self, request: ControlRequest) -> delog_api::Result<ControlResponse> {
         self.seen.lock().unwrap().push(request.clone());
         match request {
             ControlRequest::Plots(_) => Ok(ControlResponse::Plots(vec![plot_fixture()])),

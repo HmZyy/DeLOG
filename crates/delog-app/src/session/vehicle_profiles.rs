@@ -4,6 +4,11 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "scripting")]
+use delog_api::control::{
+    ProfileFieldRef, ProfileNedReference, ProfileOrientation, ProfilePosition, VehicleModel,
+    VehicleProfileInfo,
+};
 use delog_core::identity::SourceId;
 use delog_core::snapshot::StoreSnapshot;
 use serde::{Deserialize, Serialize};
@@ -94,8 +99,8 @@ impl VehicleProfileDoc {
     }
 
     #[cfg(feature = "scripting")]
-    pub fn to_script_info(&self) -> delog_script::VehicleProfileInfo {
-        delog_script::VehicleProfileInfo {
+    pub fn to_script_info(&self) -> VehicleProfileInfo {
+        VehicleProfileInfo {
             name: self.name.clone(),
             label: self.vehicle.label.clone(),
             show: self.vehicle.show,
@@ -111,22 +116,22 @@ impl VehicleProfileDoc {
 }
 
 #[cfg(feature = "scripting")]
-fn script_field(field: &layout::FieldRef) -> delog_script::ProfileFieldRef {
-    delog_script::ProfileFieldRef {
+fn script_field(field: &layout::FieldRef) -> ProfileFieldRef {
+    ProfileFieldRef {
         topic: field.topic.clone(),
         field: field.field.clone(),
     }
 }
 
 #[cfg(feature = "scripting")]
-fn script_position(position: &layout::PosLayout) -> delog_script::ProfilePosition {
+fn script_position(position: &layout::PosLayout) -> ProfilePosition {
     match position {
         layout::PosLayout::Ned {
             north,
             east,
             down,
             reference,
-        } => delog_script::ProfilePosition::Ned {
+        } => ProfilePosition::Ned {
             north: script_field(north),
             east: script_field(east),
             down: script_field(down),
@@ -135,18 +140,16 @@ fn script_position(position: &layout::PosLayout) -> delog_script::ProfilePositio
                     lat_deg,
                     lon_deg,
                     alt_m,
-                } => delog_script::ProfileNedReference::Manual {
+                } => ProfileNedReference::Manual {
                     lat_deg: *lat_deg,
                     lon_deg: *lon_deg,
                     alt_m: *alt_m,
                 },
-                layout::NedRefLayout::Fields { lat, lon, alt } => {
-                    delog_script::ProfileNedReference::Fields {
-                        lat: script_field(lat),
-                        lon: script_field(lon),
-                        alt: script_field(alt),
-                    }
-                }
+                layout::NedRefLayout::Fields { lat, lon, alt } => ProfileNedReference::Fields {
+                    lat: script_field(lat),
+                    lon: script_field(lon),
+                    alt: script_field(alt),
+                },
             }),
         },
         layout::PosLayout::Gps {
@@ -156,7 +159,7 @@ fn script_position(position: &layout::PosLayout) -> delog_script::ProfilePositio
             lat_lon_dege7,
             alt_mm,
             alt_offset_m,
-        } => delog_script::ProfilePosition::Gps {
+        } => ProfilePosition::Gps {
             lat: script_field(lat),
             lon: script_field(lon),
             alt: script_field(alt),
@@ -168,21 +171,21 @@ fn script_position(position: &layout::PosLayout) -> delog_script::ProfilePositio
 }
 
 #[cfg(feature = "scripting")]
-fn script_orientation(orientation: &layout::OriLayout) -> delog_script::ProfileOrientation {
+fn script_orientation(orientation: &layout::OriLayout) -> ProfileOrientation {
     match orientation {
-        layout::OriLayout::Static => delog_script::ProfileOrientation::Static,
+        layout::OriLayout::Static => ProfileOrientation::Static,
         layout::OriLayout::Euler {
             roll,
             pitch,
             yaw,
             degrees,
-        } => delog_script::ProfileOrientation::Euler {
+        } => ProfileOrientation::Euler {
             roll: script_field(roll),
             pitch: script_field(pitch),
             yaw: script_field(yaw),
             degrees: *degrees,
         },
-        layout::OriLayout::Quat { w, x, y, z } => delog_script::ProfileOrientation::Quat {
+        layout::OriLayout::Quat { w, x, y, z } => ProfileOrientation::Quat {
             w: script_field(w),
             x: script_field(x),
             y: script_field(y),
@@ -192,18 +195,16 @@ fn script_orientation(orientation: &layout::OriLayout) -> delog_script::ProfileO
 }
 
 #[cfg(feature = "scripting")]
-fn script_model(model: &layout::ModelLayout) -> delog_script::VehicleModel {
+fn script_model(model: &layout::ModelLayout) -> VehicleModel {
     match model {
-        layout::ModelLayout::None => delog_script::VehicleModel::None,
-        layout::ModelLayout::Quad => delog_script::VehicleModel::Quad,
-        layout::ModelLayout::FixedWing => delog_script::VehicleModel::FixedWing,
-        layout::ModelLayout::DeltaWing => delog_script::VehicleModel::DeltaWing,
-        layout::ModelLayout::Cone => delog_script::VehicleModel::Cone,
-        layout::ModelLayout::Sphere => delog_script::VehicleModel::Sphere,
-        layout::ModelLayout::Cube => delog_script::VehicleModel::Cube,
-        layout::ModelLayout::CustomGlb { path } => {
-            delog_script::VehicleModel::CustomGlb(path.clone())
-        }
+        layout::ModelLayout::None => VehicleModel::None,
+        layout::ModelLayout::Quad => VehicleModel::Quad,
+        layout::ModelLayout::FixedWing => VehicleModel::FixedWing,
+        layout::ModelLayout::DeltaWing => VehicleModel::DeltaWing,
+        layout::ModelLayout::Cone => VehicleModel::Cone,
+        layout::ModelLayout::Sphere => VehicleModel::Sphere,
+        layout::ModelLayout::Cube => VehicleModel::Cube,
+        layout::ModelLayout::CustomGlb { path } => VehicleModel::CustomGlb(path.clone()),
     }
 }
 
@@ -472,19 +473,19 @@ mod tests {
 
         assert_eq!(info.name, "mavlink_local_position");
         assert_eq!(info.label, "Vehicle");
-        assert_eq!(info.model, delog_script::VehicleModel::FixedWing);
+        assert_eq!(info.model, VehicleModel::FixedWing);
         assert_eq!(info.color, [90.0 / 255.0, 170.0 / 255.0, 1.0, 1.0]);
         assert!(matches!(
             info.position,
-            delog_script::ProfilePosition::Ned {
-                north: delog_script::ProfileFieldRef { ref topic, ref field },
+            ProfilePosition::Ned {
+                north: ProfileFieldRef { ref topic, ref field },
                 ..
             } if topic == "LOCAL_POSITION_NED" && field == "x"
         ));
         assert!(matches!(
             info.orientation,
-            delog_script::ProfileOrientation::Euler {
-                yaw: delog_script::ProfileFieldRef { ref topic, ref field },
+            ProfileOrientation::Euler {
+                yaw: ProfileFieldRef { ref topic, ref field },
                 degrees: false,
                 ..
             } if topic == "ATTITUDE" && field == "yaw"

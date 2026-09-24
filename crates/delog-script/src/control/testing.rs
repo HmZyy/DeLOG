@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
+use delog_api::control::{ControlHost, ControlRequest, VehicleOrientation, VehiclePosition};
+use delog_core::snapshot::StoreSnapshot;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use delog_core::snapshot::StoreSnapshot;
-
-use super::{ControlHost, install_host};
+use super::install_host;
 
 fn globals_with_delog(
     py: Python<'_>,
@@ -57,7 +57,7 @@ fn globals_with_delog_named_and_markers(
 pub fn eval_with_host_and_staged_batches(
     host: Arc<dyn ControlHost>,
     statement: &str,
-) -> Result<Vec<Vec<super::ControlRequest>>, String> {
+) -> Result<Vec<Vec<ControlRequest>>, String> {
     let _guard = install_host(Some(host));
     Python::attach(|py| {
         let batches: super::DeferredControlBuffer = std::rc::Rc::default();
@@ -150,7 +150,7 @@ pub fn eval_with_host_and_snapshot(
 pub fn eval_vehicle_mappings_with_snapshot(
     snapshot: Arc<StoreSnapshot>,
     statement: &str,
-) -> Result<(super::VehiclePosition, super::VehicleOrientation), String> {
+) -> Result<(VehiclePosition, VehicleOrientation), String> {
     Python::attach(|py| {
         let globals = globals_with_delog(py, snapshot)?;
         let code = std::ffi::CString::new(statement).map_err(|e| e.to_string())?;

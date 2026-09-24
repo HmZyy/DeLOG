@@ -2,17 +2,12 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use delog_api::control::{ControlHost, ControlRequest, ControlResponse, request_is_batchable};
+use delog_api::{Error, Result};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use super::{
-    AnnotationRequest, ControlHost, ControlRequest, ControlResponse, MarkerRequest, TraceRequest,
-    VehicleRequest, WorkspaceRequest,
-};
-
 pub type DeferredControlBuffer = Rc<RefCell<Vec<Vec<ControlRequest>>>>;
-
-const BATCH_ERROR_PREFIX: &str = "batch: ";
 
 thread_local! {
     static HOST: RefCell<Option<Arc<dyn ControlHost>>> = const { RefCell::new(None) };
@@ -40,62 +35,24 @@ pub fn current_host() -> Option<Arc<dyn ControlHost>> {
     HOST.with(|host| host.borrow().clone())
 }
 
-fn missing_host() -> String {
-    "the DeLOG control API is not available here; it works in the scripting console \
-     and in named script runs, not inside live transforms, parsers, or flow scripts"
-        .into()
-}
-
-/// Whether a request can be applied without needing a response payload or
-/// creating a handle that subsequent Python statements depend on.
-pub fn request_is_batchable(request: &ControlRequest) -> bool {
-    match request {
-        ControlRequest::Markers(request) => matches!(
-            request,
-            MarkerRequest::Append { .. }
-                | MarkerRequest::RemoveOwned { .. }
-                | MarkerRequest::Set { .. }
-                | MarkerRequest::Remove(_)
-        ),
-        ControlRequest::Plots(_) => false,
-        ControlRequest::Traces(request) => !matches!(request, TraceRequest::List { .. }),
-        ControlRequest::Annotations(request) => {
-            matches!(
-                request,
-                AnnotationRequest::Remove { .. } | AnnotationRequest::Set { .. }
-            )
-        }
-        ControlRequest::Generation(_) => true,
-        ControlRequest::Workspace(request) => matches!(
-            request,
-            WorkspaceRequest::Close { .. }
-                | WorkspaceRequest::Equalize
-                | WorkspaceRequest::ShowScene { .. }
-        ),
-        ControlRequest::Playback(_) => true,
-        ControlRequest::Vehicles(request) => {
-            matches!(
-                request,
-                VehicleRequest::Set { .. } | VehicleRequest::Remove(_)
-            )
-        }
-        ControlRequest::VehicleProfiles(_)
-        | ControlRequest::Layouts(_)
-        | ControlRequest::Batch(_) => false,
-    }
+fn missing_host() -> Error {
+    Error::unavailable(
+        "the DeLOG control API is not available here; it works in the scripting console \
+         and in named script runs, not inside live transforms, parsers, or flow scripts",
+    )
 }
 
 /// Stages a request when executing inside `with delog.batch():`.
 /// Returns `false` when there is no active batch.
-pub fn stage_batch_request(request: &ControlRequest) -> Result<bool, String> {
+pub fn stage_batch_request(request: &ControlRequest) -> Result<bool> {
     ACTIVE_BATCH.with(|active| {
         let mut active = active.borrow_mut();
         let Some(requests) = active.as_mut() else {
             return Ok(false);
         };
         if !request_is_batchable(request) {
-            return Err(format!(
-                "{BATCH_ERROR_PREFIX}this control operation cannot be used inside delog.batch()"
+            return Err(Error::invalid_input(
+                "this control operation cannot be used inside delog.batch()",
             ));
         }
         requests.push(request.clone());
@@ -103,12 +60,8 @@ pub fn stage_batch_request(request: &ControlRequest) -> Result<bool, String> {
     })
 }
 
-pub fn control_call_error(error: String) -> PyErr {
-    if let Some(message) = error.strip_prefix(BATCH_ERROR_PREFIX) {
-        PyValueError::new_err(message.to_owned())
-    } else {
-        PyRuntimeError::new_err(error)
-    }
+pub fn control_call_error(error: Error) -> PyErr {
+    crate::errors::control(error)
 }
 
 #[pyclass(unsendable, name = "Batch", skip_from_py_object)]
@@ -130,7 +83,7 @@ impl BatchPy {
 impl BatchPy {
     fn __enter__(&mut self) -> PyResult<()> {
         if current_host().is_none() {
-            return Err(PyRuntimeError::new_err(missing_host()));
+            return Err(crate::errors::control(missing_host()));
         }
         let nested = ACTIVE_BATCH.with(|active| {
             let mut active = active.borrow_mut();
@@ -180,10 +133,7 @@ impl Drop for BatchPy {
 
 /// Round-trips a request to the host with the interpreter detached, so other
 /// Python threads keep running and a pending interrupt can unblock the wait.
-pub fn call_immediate_detached(
-    py: Python<'_>,
-    request: ControlRequest,
-) -> Result<ControlResponse, String> {
+pub fn call_immediate_detached(py: Python<'_>, request: ControlRequest) -> Result<ControlResponse> {
     if stage_batch_request(&request)? {
         return Ok(ControlResponse::Unit);
     }
@@ -194,14 +144,14 @@ pub fn call_immediate_detached(
 #[derive(Default)]
 pub struct RecordingHost {
     seen: Mutex<Vec<ControlRequest>>,
-    error: Option<String>,
+    error: Option<Error>,
 }
 
 impl RecordingHost {
     pub fn failing(error: &str) -> Self {
         Self {
             seen: Mutex::new(Vec::new()),
-            error: Some(error.into()),
+            error: Some(Error::execution(error)),
         }
     }
 
@@ -211,7 +161,7 @@ impl RecordingHost {
 }
 
 impl ControlHost for RecordingHost {
-    fn call(&self, request: ControlRequest) -> Result<ControlResponse, String> {
+    fn call(&self, request: ControlRequest) -> Result<ControlResponse> {
         self.seen.lock().unwrap().push(request);
         match &self.error {
             Some(error) => Err(error.clone()),

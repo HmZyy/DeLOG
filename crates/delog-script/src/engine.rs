@@ -5,6 +5,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
+use delog_api::control::{ControlHost, ControlRequest, GenerationRequest, MarkerRequest};
 use delog_api::markers::PendingMarker;
 use delog_api::params::SharedParams;
 use delog_api::timestamps::TimestampMode;
@@ -18,7 +19,6 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use crate::api::Delog;
-use crate::control::{ControlRequest, GenerationRequest, MarkerRequest};
 use crate::custom_parser::{
     ParserOutput, emit_parser_output, parse_python_result, read_float32_file,
 };
@@ -337,7 +337,7 @@ pub struct ScriptEngine {
     parser_cancellation: Arc<Mutex<ParserCancellationState>>,
     params: SharedParams,
     use_original_timestamps: Arc<AtomicBool>,
-    control_host: Arc<Mutex<Option<Arc<dyn crate::control::ControlHost>>>>,
+    control_host: Arc<Mutex<Option<Arc<dyn ControlHost>>>>,
 }
 
 impl ScriptEngine {
@@ -362,8 +362,7 @@ impl ScriptEngine {
         let params_worker = Arc::clone(&params);
         let use_original_timestamps = Arc::new(AtomicBool::new(false));
         let use_original_timestamps_worker = Arc::clone(&use_original_timestamps);
-        let control_host: Arc<Mutex<Option<Arc<dyn crate::control::ControlHost>>>> =
-            Arc::new(Mutex::new(None));
+        let control_host: Arc<Mutex<Option<Arc<dyn ControlHost>>>> = Arc::new(Mutex::new(None));
         let control_host_worker = Arc::clone(&control_host);
         let handle = std::thread::Builder::new()
             .name("delog-script".into())
@@ -403,7 +402,7 @@ impl ScriptEngine {
             .store(use_original, Ordering::Relaxed);
     }
 
-    pub fn set_control_host(&self, host: Arc<dyn crate::control::ControlHost>) {
+    pub fn set_control_host(&self, host: Arc<dyn ControlHost>) {
         *self.control_host.lock().unwrap() = Some(host);
     }
 
@@ -576,7 +575,7 @@ fn worker_loop(
     parser_cancellation: Arc<Mutex<ParserCancellationState>>,
     params: SharedParams,
     use_original_timestamps: Arc<AtomicBool>,
-    control_host: Arc<Mutex<Option<Arc<dyn crate::control::ControlHost>>>>,
+    control_host: Arc<Mutex<Option<Arc<dyn ControlHost>>>>,
 ) {
     let globals: Py<PyDict> = Python::attach(|py| PyDict::new(py).unbind());
     // Per-script-name snapshot-emit source from the previous run, for
@@ -979,7 +978,7 @@ fn handle_command(
     run_counter: &mut u64,
     parser_cancellation: &Arc<Mutex<ParserCancellationState>>,
     params: &SharedParams,
-    control_host: &Arc<Mutex<Option<Arc<dyn crate::control::ControlHost>>>>,
+    control_host: &Arc<Mutex<Option<Arc<dyn ControlHost>>>>,
 ) -> bool {
     {
         match cmd {

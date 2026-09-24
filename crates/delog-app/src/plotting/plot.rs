@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+#[cfg(feature = "scripting")]
+use delog_api::control::ScriptOwner;
 use delog_core::identity::FieldId;
 use delog_core::time::TimeRange;
 use delog_render::palette;
@@ -114,7 +116,7 @@ pub struct TraceRef {
     /// Session-only, per-plot rename. `None` = derived `topic.field` label.
     pub label_override: Option<String>,
     #[cfg(feature = "scripting")]
-    pub owner: Option<delog_script::ScriptOwner>,
+    pub owner: Option<ScriptOwner>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

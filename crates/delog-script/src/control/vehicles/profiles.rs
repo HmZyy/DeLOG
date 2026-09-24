@@ -1,5 +1,5 @@
 use delog_api::color::format_hex_color;
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use crate::control::{
@@ -55,10 +55,9 @@ pub struct ProfileNedReferencePy(ProfileNedReference);
 #[pymethods]
 impl VehicleProfilesPy {
     fn list(&self, py: Python<'_>) -> PyResult<Vec<String>> {
-        match request_profile(py, VehicleProfileRequest::List)? {
-            ControlResponse::Names(names) => Ok(names),
-            other => Err(profile_response_error(other)),
-        }
+        request_profile(py, VehicleProfileRequest::List)?
+            .into_names()
+            .map_err(crate::errors::control)
     }
 
     fn save(&self, py: Python<'_>, name: &str, vehicle: PyRef<'_, VehiclePy>) -> PyResult<()> {
@@ -81,7 +80,7 @@ impl VehicleProfilesPy {
     fn apply(&self, py: Python<'_>, name: &str, source: &str) -> PyResult<VehiclePy> {
         let name = validate_profile_name(name)?;
         let (source_id, source) = resolve_source(&self.context.snapshot, source)?;
-        match request_profile(
+        let mut infos = request_profile(
             py,
             VehicleProfileRequest::Apply {
                 name,
@@ -89,11 +88,15 @@ impl VehicleProfilesPy {
                 source,
                 owner: self.context.owner.clone(),
             },
-        )? {
-            ControlResponse::Vehicles(mut infos) if infos.len() == 1 => {
-                Ok(vehicle_from_info(infos.remove(0)))
-            }
-            other => Err(profile_response_error(other)),
+        )?
+        .into_vehicles()
+        .map_err(crate::errors::control)?;
+        if infos.len() == 1 {
+            Ok(vehicle_from_info(infos.remove(0)))
+        } else {
+            Err(crate::errors::control(delog_api::Error::protocol(
+                "the DeLOG window answered with the wrong kind of result",
+            )))
         }
     }
 
@@ -401,21 +404,16 @@ fn request_profile(py: Python<'_>, request: VehicleProfileRequest) -> PyResult<C
 }
 
 fn request_profile_unit(py: Python<'_>, request: VehicleProfileRequest) -> PyResult<()> {
-    match request_profile(py, request)? {
-        ControlResponse::Unit => Ok(()),
-        other => Err(profile_response_error(other)),
-    }
+    request_profile(py, request)?
+        .into_unit()
+        .map_err(crate::errors::control)
 }
 
 fn profile_from_response(response: ControlResponse) -> PyResult<VehicleProfilePy> {
-    match response {
-        ControlResponse::VehicleProfile(info) => Ok(VehicleProfilePy { info }),
-        other => Err(profile_response_error(other)),
-    }
-}
-
-fn profile_response_error(response: ControlResponse) -> PyErr {
-    PyRuntimeError::new_err(format!("vehicle profile request returned {response:?}"))
+    response
+        .into_vehicle_profile()
+        .map(|info| VehicleProfilePy { info })
+        .map_err(crate::errors::control)
 }
 
 fn validate_profile_name(name: &str) -> PyResult<String> {

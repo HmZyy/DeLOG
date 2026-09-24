@@ -5,6 +5,7 @@ use delog_api::catalog::{
     FieldMatch, TopicMatch, find_fields, find_fields_in_topic, find_topics, materialize_field,
     materialize_topic, resolve_field, resolve_field_in_topic, resolve_topic,
 };
+use delog_api::control::{ControlRequest, MarkerRequest, PlotContext, ScriptOwner};
 use delog_api::markers::PendingMarker;
 use delog_api::params::{ParamKind, ParamSpec, ParamValue, SharedParams};
 use delog_api::timestamps::{AlignmentMode, align_values};
@@ -154,8 +155,8 @@ impl Delog {
         Rc::clone(&self.markers)
     }
 
-    fn owner(&self) -> Option<crate::control::ScriptOwner> {
-        (!self.script_name.is_empty()).then(|| crate::control::ScriptOwner {
+    fn owner(&self) -> Option<ScriptOwner> {
+        (!self.script_name.is_empty()).then(|| ScriptOwner {
             name: self.script_name.clone(),
             generation: self.generation,
         })
@@ -169,8 +170,8 @@ impl Delog {
         }
     }
 
-    fn plot_context(&self) -> crate::control::PlotContext {
-        crate::control::PlotContext {
+    fn plot_context(&self) -> PlotContext {
+        PlotContext {
             owner: self.owner(),
             snapshot: Arc::clone(&self.snapshot),
         }
@@ -400,12 +401,11 @@ impl Delog {
     ) -> PyResult<()> {
         let marker = PendingMarker::new(time_us, label, color.as_deref(), note)
             .map_err(crate::errors::value)?;
-        let request =
-            crate::control::ControlRequest::Markers(crate::control::MarkerRequest::Append {
-                owner: self.marker_owner(),
-                generation: self.generation,
-                markers: vec![marker.clone()],
-            });
+        let request = ControlRequest::Markers(MarkerRequest::Append {
+            owner: self.marker_owner(),
+            generation: self.generation,
+            markers: vec![marker.clone()],
+        });
         if crate::control::stage_batch_request(&request)
             .map_err(crate::control::control_call_error)?
         {

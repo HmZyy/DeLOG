@@ -40,18 +40,6 @@ pub mod operations;
 pub mod control;
 
 #[cfg(feature = "python")]
-pub use control::{
-    AnnotationFilter, AnnotationGeometry, AnnotationInfo, AnnotationKind, AnnotationRequest,
-    AnnotationStylePatch, ControlHost, ControlRequest, ControlResponse, GenerationRequest,
-    LayoutFieldIssue, LayoutRequest, LoadReport, MarkerFilter, MarkerInfo, MarkerOrigin,
-    MarkerPatch, MarkerRequest, PlaybackRequest, PlotInfo, PlotRequest, ProfileFieldRef,
-    ProfileNedReference, ProfileOrientation, ProfilePosition, ResolvedVehicleField, ScriptOwner,
-    SplitDirection, TraceInfo, TraceMode, TraceRequest, VehicleFilter, VehicleInfo, VehicleModel,
-    VehicleNedReference, VehicleOrientation, VehiclePatch, VehiclePosition, VehicleProfileInfo,
-    VehicleProfileRequest, VehicleRequest, VehicleSpec, WorkspaceRequest,
-};
-
-#[cfg(feature = "python")]
 pub use engine::{LiveBatchInput, ParserEvent, ScriptCommand, ScriptEngine, ScriptEvent};
 
 #[cfg(feature = "python")]
