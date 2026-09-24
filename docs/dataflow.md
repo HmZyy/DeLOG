@@ -1,18 +1,19 @@
-# DéLOG Data Flow Editor
+# DéLOG Dataflow Editor
 
-The Data Flow editor builds derived numeric signals as a visual graph. A graph
+The Dataflow editor builds derived numeric signals as a visual graph. A graph
 reads fields from the current data snapshot, applies operations, and publishes
 its outputs as a derived source named **`dataflow:<name>`**. It uses DéLOG's
 native evaluation engine, so it works without Python and is available in
 `--no-default-features` builds.
 
 Evaluation processes a snapshot of the current data on request. When a live
-MAVLink link is connected, the currently loaded flow keeps recomputing as new
+MAVLink link is connected, the open flows keep recomputing as new
 samples arrive - see [Live data](#live-data). Otherwise evaluation is a
 one-shot snapshot: publish again after loading or receiving more data.
 
 - [Opening the editor](#opening-the-editor)
 - [Building a graph](#building-a-graph)
+- [Filtering signals](#filtering-signals)
 - [Timelines and alignment](#timelines-and-alignment)
 - [Units and NaN gaps](#units-and-nan-gaps)
 - [Publishing](#publishing)
@@ -27,12 +28,20 @@ one-shot snapshot: publish again after loading or receiving more data.
 
 ## Opening the editor
 
-Choose **File > Data Flow**. The floating window remains available when no log
+Choose **File > Dataflow**. The floating window remains available when no log
 is loaded, so you can build or edit a graph skeleton before opening data.
 
-The toolbar shows the graph name, persistence and undo controls, publication
-status, and a reminder that execution uses the current snapshot. The canvas is
-in the center and the selected node's inspector is on the right.
+The window has three resizable columns: **Dataflows**, the tabbed editor, and
+**Inspector**. Drag the dividers to change their widths. Dataflows and Inspector
+stay open; each editor tab has its own close button.
+
+Click a saved flow to open it, or focus its existing tab. **+ New** opens a blank
+graph. Each tab keeps its edits, undo history, selection, and canvas position.
+Closing the last editor tab creates an empty **Untitled** tab. A dot marks
+unsaved changes; closing an edited tab offers **Save**, **Discard**, and **Cancel**.
+
+The active editor's toolbar contains the graph name, Save, Undo/Redo, node
+controls, and Run. The inspector follows the selected node in the active tab.
 
 ## Building a graph
 
@@ -52,11 +61,51 @@ and incompatible scalar/signal connections, and reports the reason in the
 Logging dock.
 
 Click a node to select it. Its inspector shows parameters, diagnostics, and the
-latest preview statistics. Constant values and Scale / Offset parameters may
-also be edited directly on the canvas. Drag a node by its body to move it.
+latest preview statistics. Constant values, Scale / Offset parameters, and
+filter limits and Inclusive checkboxes may also be edited directly on the
+canvas. Drag a node by its body to move it.
 Use **Undo** and **Redo** for graph edits; one drag is one undoable move. Press
 <kbd>Delete</kbd> or <kbd>Backspace</kbd> to remove the selected node.
 Select an edge and press <kbd>Delete</kbd> or <kbd>Backspace</kbd> to disconnect it.
+
+## Filtering signals
+
+Choose a node from the **Filters** category in the Add menu and connect a
+signal to its **In** port. A filter keeps values matching its condition and
+replaces rejected values with NaN gaps. Its output preserves the original
+timestamps, sample count, timeline, and unit, so it can still be combined with
+other fields from the same timeline.
+
+| Filter | Values kept |
+| --- | --- |
+| Equal | Equal to Value (`==`) |
+| Not Equal | Different from Value (`!=`) |
+| Less Than | Below Value (`<`), or at or below it (`<=`) with **Inclusive** checked |
+| Greater Than | Above Value (`>`), or at or above it (`>=`) with **Inclusive** checked |
+| Between | From Minimum to Maximum, including both limits |
+| Outside Range | Below Minimum or above Maximum, excluding both limits |
+
+Select a filter to change its condition in the inspector. Edit Value, or
+Minimum and Maximum, on the canvas or in the inspector. Less Than and Greater
+Than have an **Inclusive** checkbox in both places, unchecked by default. The
+symbol beside the threshold shows the active comparison. Changes support
+Undo/Redo and update downstream results.
+
+For example, **Not Equal**, Value `0`, changes `[2, 0, 5]` into `[2, gap, 5]`.
+**Less Than**, Value `5`, keeps the first value of `[2, 5, 8]`; checking
+**Inclusive** also keeps `5`. Chain filters to require several conditions,
+such as Greater Than `0` followed by Less Than `100`.
+
+Equality is exact, with no implicit tolerance. Comparisons use the values
+arriving at the node, including source multipliers and upstream conversions.
+Existing NaN gaps remain gaps, and positive or negative infinity becomes a gap
+for every filter. A filter that rejects every sample keeps the timestamps
+with a gap at each one.
+
+Limits must be finite. Minimum must be at most Maximum; equal limits are
+valid. Invalid limits produce a diagnostic instead of a filtered output.
+New single-value filters start at `0`; range filters start at `0` through `1`.
+These native filters work without Python.
 
 ## Timelines and alignment
 
@@ -92,6 +141,7 @@ Units are metadata. The evaluator does not perform dimensional conversion.
 | Multiply / Divide by a Constant | The signal input's unit |
 | Multiply / Divide two signals | Cleared |
 | Scale / Offset | The input unit |
+| Filters | The input unit |
 | Align to Timeline | The Data input unit |
 | Output field | The configured override, or the incoming signal unit when no override is set |
 
@@ -120,7 +170,7 @@ samples are never mutated.
 ## Live data
 
 Evaluation described above processes one snapshot per request. When a live
-MAVLink link is connected, the currently loaded flow instead re-evaluates
+MAVLink link is connected, each open flow instead re-evaluates
 automatically on a throttled cadence as new samples arrive - there is no
 toggle for this; it follows the link. Node preview statistics accumulate over
 the whole live session, not just the most recent recompute window.
@@ -129,17 +179,17 @@ Clicking **Run** while live seeds the derived source from all data already in
 the store, then keeps appending new samples as they arrive. The resulting
 `dataflow:<name>` topic behaves like any other live topic: it plots normally,
 its extent keeps growing as new samples publish, and it keeps updating even
-after the Data Flow editor window is closed.
+after the Dataflow editor window is closed.
 
 Without a live link connected, nothing changes: the preview still updates on
 edit, and **Run** still publishes a one-shot snapshot.
 
-Only the currently loaded flow updates live. Loading a different flow does
-not carry the update forward - the previous flow's already-published
-`dataflow:<name>` data remains in the store, frozen at whatever it last
-computed.
+Open flows keep updating when you switch editor tabs or close the Dataflow
+window. Closing an individual editor tab stops its live updates; its published
+data remains available in the store. Reopening a saved flow and running it
+again replaces that flow's previous published source.
 
-**Settings > Data Flow** exposes two parameters for the live recompute:
+**Settings > Dataflow** exposes two parameters for the live recompute:
 
 | Setting | Meaning |
 | --- | --- |
@@ -149,9 +199,12 @@ computed.
 ## Saving graphs
 
 The name field is both the graph name and its library filename. **Save** writes
-a versioned JSON document. **Load** lists saved graphs; when the current graph
-has unsaved changes, the first click arms the load and the second confirms it.
-Saved data flows form a global library:
+a versioned JSON document. Renaming a saved graph and saving again moves its
+file instead of leaving a copy under the old name, and is refused when the new
+name already belongs to another saved graph. Select a graph in **Dataflows** to
+open it without replacing another tab's unsaved work. A name already used by
+another open tab must be changed before saving or running. Saved dataflows form
+a global library:
 
 | Platform | Location |
 | --- | --- |
@@ -319,7 +372,7 @@ dependency when off. In a `--no-default-features` build:
 
 ## Limitations
 
-- Data flows process snapshots only. Publish again after loading or receiving
+- Dataflows process snapshots only. Publish again after loading or receiving
   more data.
 - Data selection and arithmetic are numeric-only.
 - Arithmetic nodes are binary; chain nodes for three or more inputs.
@@ -426,12 +479,15 @@ The native backend lives in `crates/delog-flow`:
 
 The application-side `dataflow` module owns the template registry, metadata
 picker, persistent graph store, background controller, canvas, inspector, and
-floating window. The editor canvas is a thin adapter over `egui_graph`. DeLOG
+floating window. The workspace uses `egui_dock` for the three panes and editor
+tabs. Each editor owns its controller and canvas state, while the workspace
+retains published-source ownership across tab closures. The editor canvas is a
+thin adapter over `egui_graph`. DeLOG
 retains ownership of the persisted graph, typed-port validation, commands, undo
 history, evaluation, and publication; the crate supplies node interaction,
 sockets, edges, selection, pan, and zoom. Shared alignment, topic-instance
 parsing, and derived-topic preparation live in `delog-core`, so scripting and
-data flows use one implementation.
+dataflows use one implementation.
 
 ### Adding a node kind
 

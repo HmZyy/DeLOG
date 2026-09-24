@@ -35,7 +35,11 @@ impl EngineFlowHost {
 }
 
 impl ScriptNodeHost for EngineFlowHost {
-    fn eval(&self, request: ScriptRequest, cancel: &AtomicBool) -> Result<Vec<ScriptOutput>, String> {
+    fn eval(
+        &self,
+        request: ScriptRequest,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<ScriptOutput>, String> {
         let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
         {
             let tx = self.tx.lock().unwrap_or_else(|e| e.into_inner());
@@ -81,7 +85,9 @@ fn value_to_py(py: Python<'_>, value: &Value) -> PyResult<Py<PyAny>> {
             let t = signal.t.as_ref().clone().into_pyarray(py).unbind();
             let v = signal.v.as_ref().clone().into_pyarray(py).unbind();
             let unit = signal.meta.unit.clone();
-            Ok(Bound::new(py, FlowSignal { t, v, unit })?.into_any().unbind())
+            Ok(Bound::new(py, FlowSignal { t, v, unit })?
+                .into_any()
+                .unbind())
         }
         Value::Scalar(x) => Ok(x.into_pyobject(py)?.into_any().unbind()),
     }
@@ -335,7 +341,9 @@ mod tests {
             vec![signal_input("a", vec![1, 2, 3], vec![1.0, 2.0, 3.0], None)],
             &["out"],
         );
-        let result = host.eval(req, &AtomicBool::new(false)).expect("eval succeeds");
+        let result = host
+            .eval(req, &AtomicBool::new(false))
+            .expect("eval succeeds");
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].values, vec![2.0, 4.0, 6.0]);
         assert!(result[0].times.is_none());
@@ -352,7 +360,9 @@ mod tests {
             vec![scalar_input("k", 4.0)],
             &["out"],
         );
-        let result = host.eval(req, &AtomicBool::new(false)).expect("eval succeeds");
+        let result = host
+            .eval(req, &AtomicBool::new(false))
+            .expect("eval succeeds");
         assert_eq!(result[0].values, vec![12.0]);
     }
 
@@ -370,7 +380,9 @@ mod tests {
             vec![],
             &["pair", "triple"],
         );
-        let result = host.eval(req, &AtomicBool::new(false)).expect("eval succeeds");
+        let result = host
+            .eval(req, &AtomicBool::new(false))
+            .expect("eval succeeds");
         assert_eq!(result[0].times, Some(vec![10, 20, 30]));
         assert_eq!(result[0].values, vec![1.0, 2.0, 3.0]);
         assert_eq!(result[0].unit, None);

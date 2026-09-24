@@ -47,6 +47,7 @@ pub struct TileDiskCache {
     generation: u64,
     sequence: u64,
     index: HashMap<CacheKey, CacheMeta>,
+    dirty: bool,
 }
 
 impl TileDiskCache {
@@ -68,6 +69,7 @@ impl TileDiskCache {
             generation: persisted.generation,
             sequence: persisted.sequence,
             index: persisted.entries.into_iter().collect(),
+            dirty: false,
         };
         cache.reconcile_tiles(index_available)?;
         cache.prune()?;
@@ -85,7 +87,7 @@ impl TileDiskCache {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 self.index.remove(&key);
-                self.persist_index()?;
+                self.dirty = true;
                 return Ok(None);
             }
             Err(error) => return Err(error),
@@ -93,12 +95,12 @@ impl TileDiskCache {
         if bytes.len() as u64 != expected.size || checksum(&bytes) != expected.checksum {
             remove_if_exists(&path)?;
             self.index.remove(&key);
-            self.persist_index()?;
+            self.dirty = true;
             return Ok(None);
         }
         let access = self.next_sequence();
         self.index.get_mut(&key).unwrap().last_access = access;
-        self.persist_index()?;
+        self.dirty = true;
         Ok(Some(bytes))
     }
 
@@ -131,13 +133,14 @@ impl TileDiskCache {
             },
         );
         self.prune()?;
-        self.persist_index()
+        self.dirty = true;
+        Ok(())
     }
 
     pub fn set_limit(&mut self, bytes: u64) -> io::Result<()> {
         self.limit = bytes.clamp(MIN_CACHE_BYTES, MAX_CACHE_BYTES);
         self.prune()?;
-        self.persist_index()
+        self.flush()
     }
 
     pub fn clear(&mut self) -> io::Result<CacheGeneration> {
@@ -145,8 +148,17 @@ impl TileDiskCache {
         fs::create_dir_all(&self.root)?;
         self.index.clear();
         self.generation = self.generation.wrapping_add(1);
-        self.persist_index()?;
+        self.dirty = true;
+        self.flush()?;
         Ok(CacheGeneration(self.generation))
+    }
+
+    pub fn flush(&mut self) -> io::Result<()> {
+        if self.dirty {
+            self.persist_index()?;
+            self.dirty = false;
+        }
+        Ok(())
     }
 
     pub fn usage_bytes(&self) -> u64 {
@@ -256,6 +268,12 @@ impl TileDiskCache {
             let _ = remove_if_exists(&part);
         }
         result
+    }
+}
+
+impl Drop for TileDiskCache {
+    fn drop(&mut self) {
+        let _ = self.flush();
     }
 }
 
@@ -409,6 +427,8 @@ mod tests {
                 .unwrap();
         }
 
+        cache.flush().unwrap();
+
         let persisted: PersistedIndex =
             serde_json::from_slice(&fs::read(root.join(INDEX_FILE)).unwrap()).unwrap();
         assert_eq!(persisted.entries.len(), 8);
@@ -467,6 +487,59 @@ mod tests {
         );
         assert_eq!(cache.usage_bytes(), 0);
         assert!(!part.exists());
+    }
+
+    #[test]
+    fn cache_hits_do_not_rewrite_the_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_owned();
+        let mut cache = TileDiskCache::open(root.clone(), u64::MAX).unwrap();
+        for x in 1..=8 {
+            cache
+                .write(MapProviderId::BingSatellite, tile(x), &[x as u8])
+                .unwrap();
+        }
+        cache.flush().unwrap();
+
+        let index = root.join(INDEX_FILE);
+        let before = fs::read(&index).unwrap();
+        for _ in 0..4 {
+            for x in 1..=8 {
+                assert!(
+                    cache
+                        .read(MapProviderId::BingSatellite, tile(x))
+                        .unwrap()
+                        .is_some()
+                );
+            }
+        }
+        assert_eq!(
+            fs::read(&index).unwrap(),
+            before,
+            "reading cached tiles must not rewrite the index"
+        );
+
+        cache.flush().unwrap();
+        assert_ne!(
+            fs::read(&index).unwrap(),
+            before,
+            "flush must persist the recorded access order"
+        );
+    }
+
+    #[test]
+    fn dropping_the_cache_persists_pending_index_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_owned();
+        let mut cache = TileDiskCache::open(root.clone(), u64::MAX).unwrap();
+        cache
+            .write(MapProviderId::BingSatellite, tile(1), b"trusted")
+            .unwrap();
+        drop(cache);
+
+        let persisted: PersistedIndex =
+            serde_json::from_slice(&fs::read(root.join(INDEX_FILE)).unwrap()).unwrap();
+        assert_eq!(persisted.entries.len(), 1);
     }
 
     #[test]

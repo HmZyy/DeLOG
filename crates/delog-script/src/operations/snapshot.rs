@@ -8,7 +8,7 @@ use crate::api::{
     materialize_field,
 };
 use crate::operations::{
-    SplitBySpec, MergeSpec, OperationMode, OperationSpec, TopicRegistry, TopicSelector,
+    MergeSpec, OperationMode, OperationSpec, SplitBySpec, TopicRegistry, TopicSelector,
     TransformSpec,
 };
 
@@ -81,22 +81,12 @@ impl MergeSeed {
     }
 }
 
+#[derive(Default)]
 pub struct SnapshotOperationOutput {
     pub topics: Vec<PendingTopic>,
     pub watermarks: HashMap<StreamKey, i64>,
     pub merge_seeds: HashMap<(usize, SourceId), MergeSeed>,
     pub registry: TopicRegistry,
-}
-
-impl Default for SnapshotOperationOutput {
-    fn default() -> Self {
-        Self {
-            topics: Vec::new(),
-            watermarks: HashMap::new(),
-            merge_seeds: HashMap::new(),
-            registry: TopicRegistry::default(),
-        }
-    }
 }
 
 struct MaterializedTopic {
@@ -680,7 +670,7 @@ mod tests {
 
     use crate::api::{PendingColumn, PendingTopic};
     use crate::operations::{
-        SplitBySpec, MergeSpec, OperationMode, OperationSpec, TopicSelector, TransformSpec,
+        MergeSpec, OperationMode, OperationSpec, SplitBySpec, TopicSelector, TransformSpec,
     };
 
     use super::{StreamKey, prepare_snapshot};

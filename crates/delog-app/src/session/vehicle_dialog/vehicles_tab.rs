@@ -120,7 +120,7 @@ fn show_rail(ui: &mut egui::Ui, selected: usize, rows: &[Row], pending: &mut Pen
 
     if rows.is_empty() {
         ui.add_space(tokens.space_md);
-        ui.label(egui::RichText::new("No vehicles yet").weak());
+        ui.label(egui::RichText::new(crate::ui::empty::no_items("vehicles")).weak());
         return;
     }
 
@@ -329,6 +329,9 @@ fn show_profile_picker(
                 .selected_text(draft.selected_profile.as_deref().unwrap_or("-"))
                 .width(control_width(ui))
                 .show_ui(ui, |ui| {
+                    if profiles.is_empty() {
+                        ui.weak(crate::ui::empty::no_saved("profiles"));
+                    }
                     for name in profiles {
                         ui.selectable_value(&mut draft.selected_profile, Some(name.clone()), name);
                     }
@@ -362,6 +365,9 @@ fn general_section(ui: &mut egui::Ui, draft: &mut Draft, snapshot: &StoreSnapsho
                 .selected_text(combo_label(&sources, &draft.source))
                 .width(control_width(ui))
                 .show_ui(ui, |ui| {
+                    if sources.is_empty() {
+                        ui.weak(crate::ui::empty::no_items("sources"));
+                    }
                     for (id, label) in &sources {
                         if ui
                             .selectable_value(&mut draft.source, Some(*id), label)
@@ -480,7 +486,7 @@ fn position_section(
             });
         });
         form_row(ui, "Topic", |ui| {
-            if searchable_combo(ui, "veh-pos-topic", &mut draft.pos_topic, topics) {
+            if searchable_combo(ui, "veh-pos-topic", &mut draft.pos_topic, topics, "topics") {
                 draft.north = None;
                 draft.east = None;
                 draft.down = None;
@@ -582,7 +588,7 @@ fn orientation_section(
             return;
         }
         form_row(ui, "Topic", |ui| {
-            if searchable_combo(ui, "veh-ori-topic", &mut draft.ori_topic, topics) {
+            if searchable_combo(ui, "veh-ori-topic", &mut draft.ori_topic, topics, "topics") {
                 draft.roll = None;
                 draft.pitch = None;
                 draft.yaw = None;

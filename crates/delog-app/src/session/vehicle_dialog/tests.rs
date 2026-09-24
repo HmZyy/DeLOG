@@ -479,7 +479,7 @@ fn combo_list_area_height(ctx: &egui::Context, items: &[(TopicId, String)], filt
         headless_frame(ctx, |ui| {
             egui::Area::new(area_id).show(ui.ctx(), |ui| {
                 ui.set_min_width(240.0);
-                super::widgets::combo_list(ui, filter_id, highlight_id, &mut sel, items);
+                super::widgets::combo_list(ui, filter_id, highlight_id, &mut sel, items, "topics");
             });
         });
     }
@@ -587,7 +587,7 @@ fn combo_list_frames(
         let _ = ctx.run_ui(input, |ui| {
             egui::Area::new(egui::Id::new("combo-list-probe")).show(ui.ctx(), |ui| {
                 ui.set_min_width(240.0);
-                super::widgets::combo_list(ui, filter_id, highlight_id, sel, items);
+                super::widgets::combo_list(ui, filter_id, highlight_id, sel, items, "topics");
             });
         });
     }
@@ -701,7 +701,13 @@ fn the_topic_button_left_aligns_its_text_like_every_other_dropdown() {
                 .show(ui.ctx(), |ui| {
                     ui.set_min_width(WIDTH);
                     ui.set_max_width(WIDTH);
-                    super::widgets::searchable_combo(ui, "align-topic", &mut topic, &topics);
+                    super::widgets::searchable_combo(
+                        ui,
+                        "align-topic",
+                        &mut topic,
+                        &topics,
+                        "topics",
+                    );
                 });
             egui::Area::new(egui::Id::new("field-area"))
                 .fixed_pos(egui::pos2(500.0, 0.0))
@@ -799,5 +805,87 @@ fn a_profile_the_source_cannot_satisfy_clears_the_previous_mappings() {
         draft.model,
         ModelKind::Quad,
         "settings that do not depend on the source still come from the new profile"
+    );
+}
+
+fn painted_text(output: &egui::FullOutput) -> Vec<String> {
+    fn walk(shape: &egui::epaint::Shape, out: &mut Vec<String>) {
+        match shape {
+            egui::epaint::Shape::Text(text) => out.push(text.galley.text().to_owned()),
+            egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for clipped in &output.shapes {
+        walk(&clipped.shape, &mut out);
+    }
+    out
+}
+
+fn painted_frame(ctx: &egui::Context, mut draw: impl FnMut(&mut egui::Ui)) -> Vec<String> {
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1280.0, 800.0),
+        )),
+        ..Default::default()
+    };
+    painted_text(&ctx.run_ui(input, &mut draw))
+}
+
+#[test]
+fn an_empty_searchable_list_names_the_type_it_has_none_of() {
+    let ctx = egui::Context::default();
+    let mut sel: Option<TopicId> = None;
+    let painted = painted_frame(&ctx, |ui| {
+        super::widgets::combo_list(
+            ui,
+            egui::Id::new("empty-filter"),
+            egui::Id::new("empty-highlight"),
+            &mut sel,
+            &[],
+            "topics",
+        );
+    });
+    assert!(
+        painted.contains(&"No topics".to_owned()),
+        "an empty searchable list must not render blank, painted: {painted:?}"
+    );
+}
+
+#[test]
+fn a_filter_that_matches_nothing_does_not_claim_the_list_is_empty() {
+    let ctx = egui::Context::default();
+    let items: Vec<(TopicId, String)> = vec![(TopicId(0), "ATTITUDE".to_owned())];
+    let mut sel: Option<TopicId> = None;
+    let filter_id = egui::Id::new("narrow-filter");
+    ctx.memory_mut(|m| m.data.insert_temp(filter_id, "zzz".to_owned()));
+    let painted = painted_frame(&ctx, |ui| {
+        super::widgets::combo_list(
+            ui,
+            filter_id,
+            egui::Id::new("narrow-highlight"),
+            &mut sel,
+            &items,
+            "topics",
+        );
+    });
+    assert!(
+        painted.contains(&"No matching topics".to_owned()),
+        "a filtered-out list must say so rather than claim no topics exist, painted: {painted:?}"
+    );
+}
+
+#[test]
+fn an_empty_field_list_names_the_type_it_has_none_of() {
+    let ctx = egui::Context::default();
+    let mut sel: Option<FieldId> = None;
+    let painted = painted_frame(&ctx, |ui| {
+        super::widgets::field_options(ui, &mut sel, &[]);
+    });
+    assert!(
+        painted.contains(&"No fields".to_owned()),
+        "an empty field list must not render blank, painted: {painted:?}"
     );
 }

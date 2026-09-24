@@ -55,7 +55,7 @@ pub fn build_outputs(
     if outputs.is_empty() {
         return Err(vec![Diagnostic {
             node: NodeId(0),
-            message: "Connect a Derived Topic Output node to publish.".to_owned(),
+            message: "Connect an Output node to publish.".to_owned(),
         }]);
     }
 
@@ -118,16 +118,22 @@ pub fn build_outputs(
                 valid = false;
                 continue;
             };
-            if timeline.is_some_and(|timeline| timeline != signal.meta.timeline) {
-                errors.push(Diagnostic {
-                    node: node_id,
-                    message: "All fields of one output topic must share the same timeline. Align the inputs first."
-                        .to_owned(),
-                });
-                valid = false;
-            } else if timeline.is_none() {
-                timeline = Some(signal.meta.timeline);
-                times = Some((*signal.t).clone());
+            match (timeline, times.as_deref()) {
+                (Some(first), Some(first_times))
+                    if first != signal.meta.timeline && first_times != signal.t.as_slice() =>
+                {
+                    errors.push(Diagnostic {
+                        node: node_id,
+                        message: "All fields of one output topic must share the same timeline. Align the inputs first."
+                            .to_owned(),
+                    });
+                    valid = false;
+                }
+                (None, _) => {
+                    timeline = Some(signal.meta.timeline);
+                    times = Some((*signal.t).clone());
+                }
+                _ => {}
             }
             pending_fields.push(PendingField::numeric(
                 field.name.clone(),
@@ -156,7 +162,7 @@ pub fn build_outputs(
     if total_fields == 0 {
         errors.push(Diagnostic {
             node: outputs[0].0,
-            message: "Connect a Derived Topic Output node to publish.".to_owned(),
+            message: "Connect an Output node to publish.".to_owned(),
         });
     }
     if errors.is_empty() {
@@ -310,6 +316,40 @@ mod tests {
     }
 
     #[test]
+    fn output_fields_that_already_share_timestamps_publish_without_an_align() {
+        let snapshot = snapshot_gps_baro();
+        let mut graph = Graph::new("g");
+        let gps = add_node(&mut graph, data("GPS"));
+        let imu = add_node(
+            &mut graph,
+            NodeKind::DataField(FieldSelector {
+                source: Some("flight".into()),
+                topic: "IMU".into(),
+                instance: Some(0),
+                field: "AccY".into(),
+            }),
+        );
+        let out = add_node(
+            &mut graph,
+            output("paired", &[("alt", None), ("acc", None)]),
+        );
+        graph.connect(gps, 0, out, 0).unwrap();
+        graph.connect(imu, 0, out, 1).unwrap();
+        let report = eval_no_host(
+            &graph,
+            &snapshot,
+            &[out],
+            &AtomicBool::new(false),
+            &mut EvalCache::default(),
+        );
+
+        let topics = build_outputs(&graph, &report)
+            .unwrap_or_else(|errors| panic!("equal timestamps need no align, got {errors:?}"));
+
+        assert_eq!(topics.len(), 1);
+    }
+
+    #[test]
     fn mixed_timelines_in_one_output_block_publication() {
         let snapshot = snapshot_gps_baro();
         let mut graph = Graph::new("g");
@@ -420,7 +460,11 @@ mod tests {
         use delog_core::derived::{PendingColumn, PendingField, PendingTopic};
         let mut topic = PendingTopic::new("derived".into(), vec![10, 20, 30]);
         topic
-            .add_field(PendingField::numeric("v", vec![1.0, 2.0, 3.0], Some("m".into())))
+            .add_field(PendingField::numeric(
+                "v",
+                vec![1.0, 2.0, 3.0],
+                Some("m".into()),
+            ))
             .unwrap();
 
         let all = super::slice_topic_after(&topic, i64::MIN);

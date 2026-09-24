@@ -11,16 +11,19 @@ use delog_cache::CacheManager;
 use delog_core::identity::FieldId;
 use delog_core::snapshot::StoreSnapshot;
 
-use crate::plotting::axes;
-use crate::scene3d::camera::OrbitCamera;
-use crate::plotting::gpu::{self, GpuBridge, PaneView, VehicleDraw};
-use crate::plotting::hover::{self, HoverTarget};
-use crate::plotting::legend;
 use crate::map::mercator;
 use crate::map::provider::{MapProviderId, provider};
 use crate::map::worker::{MapScopeId, TileFailureClass, TileManager, TileRequest};
-use crate::plotting::plot::{GhostTrace, PlotPane, TraceMode, TraceRef, ViewX, draw_zoom_drag_overlay};
+use crate::plotting::axes;
+use crate::plotting::gpu::{self, GpuBridge, PaneView, VehicleDraw};
+use crate::plotting::hover::{self, HoverTarget};
+use crate::plotting::legend;
+use crate::plotting::plot::{
+    GhostTrace, PlotPane, TraceMode, TraceRef, ViewX, draw_zoom_drag_overlay,
+};
+use crate::scene3d::camera::OrbitCamera;
 use crate::scene3d::frame::SceneFrame;
+use crate::scene3d::trail::{self, TrailMode};
 use crate::scene3d::vehicle;
 use crate::ui::components;
 
@@ -46,9 +49,7 @@ pub struct Scene3dPane {
     pub camera: OrbitCamera,
     pub tracked_vehicle: Option<usize>,
     pub(crate) scene_frame: SceneFrame,
-    /// When true, each vehicle's path is clipped to the playhead time; when
-    /// false, the full flight path is drawn.
-    pub trail_to_playhead: bool,
+    pub trail_mode: TrailMode,
     pub(crate) map_selection: Option<(MapProviderId, [u64; 3])>,
     pub(crate) map_generation: u64,
     pub(crate) map_tiles: Vec<(crate::map::provider::TileId, i32)>,
@@ -83,7 +84,7 @@ impl Default for Scene3dPane {
             camera: OrbitCamera::default(),
             tracked_vehicle: None,
             scene_frame: SceneFrame::default(),
-            trail_to_playhead: true,
+            trail_mode: TrailMode::default(),
             map_selection: None,
             map_generation: 0,
             map_tiles: Vec::new(),
@@ -167,10 +168,23 @@ pub struct Workspace {
 
 impl Workspace {
     pub fn new() -> Self {
+        Self::new_for(crate::shell::windows::WindowId::MAIN)
+    }
+
+    pub fn new_for(window: crate::shell::windows::WindowId) -> Self {
         let mut tiles = egui_tiles::Tiles::default();
         let root = tiles.insert_pane(Pane::Plot(PlotPane::default()));
         Self {
-            tree: egui_tiles::Tree::new("plot_workspace", root, tiles),
+            tree: egui_tiles::Tree::new(egui::Id::new(("plot_workspace", window.0)), root, tiles),
+            focused: None,
+            shared_y_gutter: 0.0,
+            default_show_legend: true,
+        }
+    }
+
+    pub fn placeholder() -> Self {
+        Self {
+            tree: egui_tiles::Tree::empty("plot_workspace_placeholder"),
             focused: None,
             shared_y_gutter: 0.0,
             default_show_legend: true,
@@ -262,11 +276,6 @@ impl Workspace {
 
     pub fn fields(&self) -> impl Iterator<Item = FieldId> + '_ {
         self.plot_panes().flat_map(PlotPane::fields)
-    }
-
-    pub fn unique_fields(&self) -> Vec<FieldId> {
-        let mut seen = std::collections::HashSet::new();
-        self.fields().filter(|field| seen.insert(*field)).collect()
     }
 
     pub fn map_scopes(&self) -> Vec<MapScopeId> {
@@ -629,6 +638,7 @@ impl Workspace {
             let plot_label = format!("Plot {}", index + 1);
             rows.extend(pane.annotations.items().iter().map(|annot| {
                 crate::plotting::annotations::toolbar::AnnotationRow {
+                    window: 0,
                     pane: tile.0,
                     plot_label: plot_label.clone(),
                     id: annot.id,
@@ -646,7 +656,7 @@ impl Workspace {
     ) {
         use crate::plotting::annotations::toolbar::ToolbarAction;
         match action {
-            ToolbarAction::Edit { pane, id } => {
+            ToolbarAction::Edit { pane, id, .. } => {
                 let tile = egui_tiles::TileId(pane);
                 let Some(egui_tiles::Tile::Pane(Pane::Plot(plot))) = self.tree.tiles.get_mut(tile)
                 else {
@@ -664,7 +674,7 @@ impl Workspace {
                 self.tree.make_active(|candidate, _| candidate == tile);
                 self.enforce_single_annotation_editor();
             }
-            ToolbarAction::Remove { pane, id } => {
+            ToolbarAction::Remove { pane, id, .. } => {
                 for tile in self.plot_tiles_in_order() {
                     if tile.0 != pane {
                         continue;
@@ -716,6 +726,12 @@ impl Workspace {
             }
         }
     }
+
+    pub fn close_all_annotation_editors(&mut self) {
+        for pane in self.plot_panes_mut() {
+            crate::plotting::annotations::edit::close_editor(&mut pane.annotations);
+        }
+    }
 }
 
 impl Default for Workspace {
@@ -760,6 +776,7 @@ pub struct WorkspaceActions {
     /// Manual X-view change (pan/zoom/reset); unlocks live-tail mode.
     pub view_changed: bool,
     pub open_vehicle_config: bool,
+    pub open_scene_settings: bool,
     pub export_kml: bool,
     /// Widest Y gutter any pane needed; fed into `Workspace::shared_y_gutter`.
     pub max_y_gutter: f32,
@@ -786,6 +803,8 @@ pub struct PlotServices<'a> {
     /// Playhead cursor time; `None` before any data loads.
     pub playhead_us: Option<i64>,
     pub playing: bool,
+    pub lock_readouts: bool,
+    pub alt_held: bool,
     pub vehicles: &'a [crate::scene3d::vehicle::VehicleConfig],
     /// Render-space trajectories (points + per-point timestamps), parallel to
     /// `vehicles`.
@@ -796,6 +815,8 @@ pub struct PlotServices<'a> {
     pub shared_y_gutter: f32,
     pub plot_display: crate::config::settings::PlotDisplay,
     pub markers: &'a [crate::plotting::markers::Marker],
+    pub window: crate::shell::windows::WindowId,
+    pub allow_image_export: bool,
 }
 
 pub struct Behavior<'a> {
@@ -897,6 +918,7 @@ impl Behavior<'_> {
         tile_id: egui_tiles::TileId,
         pane: &mut Scene3dPane,
     ) -> egui_tiles::UiResponse {
+        let _scene_pane = self.services.metrics.scope("scene_pane");
         let rect = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
         if response.clicked() || response.drag_started() || response.secondary_clicked() {
@@ -928,7 +950,12 @@ impl Behavior<'_> {
 
         let snapshot = self.services.snapshot;
         let playhead = self.services.playhead_us;
-        let trail_to_playhead = pane.trail_to_playhead;
+        let trail_mode = pane.trail_mode;
+        let trail_window = self
+            .services
+            .view
+            .as_ref()
+            .map(|view| (view.min_us, view.max_us));
         let position_references: Vec<_> = {
             let _t = self.services.metrics.scope("scene_gpsref");
             self.services
@@ -991,58 +1018,59 @@ impl Behavior<'_> {
 
         let scene_reference = pane.scene_frame.reference;
         let provider_id = self.services.scene3d.map_provider;
-        let ready_tiles =
-            if let (Some(manager), Some(anchor), Some(map_provider)) = (
-                self.services.tile_manager.as_deref_mut(),
-                scene_reference,
-                provider(provider_id),
-            ) {
-                let selection = (provider_id, anchor.map(f64::to_bits));
-                pane.update_map_selection(Some(selection));
-                let ppp = ui.ctx().pixels_per_point();
-                let viewport = [
-                    (rect.width() * ppp).round().max(1.0) as u32,
-                    (rect.height() * ppp).round().max(1.0) as u32,
-                ];
-                let aspect = viewport[0] as f32 / viewport[1] as f32;
-                let (_, inverse_relative) = pane
-                    .camera
-                    .view_proj_and_inverse(aspect, self.services.scene3d.resolved_far_clip_m());
-                let inverse = glam::DMat4::from_translation(pane.camera.eye().as_dvec3())
-                    * inverse_relative.as_dmat4();
-                let visible = mercator::visible_tiles(
-                    inverse,
-                    viewport,
-                    [anchor[0], anchor[1]],
-                    map_provider.zoom_range(),
-                    delog_render::MAP_TILE_CAPACITY,
+        let tiles_timer = self.services.metrics.scope("scene_tiles");
+        let ready_tiles = if let (Some(manager), Some(anchor), Some(map_provider)) = (
+            self.services.tile_manager.as_deref_mut(),
+            scene_reference,
+            provider(provider_id),
+        ) {
+            let selection = (provider_id, anchor.map(f64::to_bits));
+            pane.update_map_selection(Some(selection));
+            let ppp = ui.ctx().pixels_per_point();
+            let viewport = [
+                (rect.width() * ppp).round().max(1.0) as u32,
+                (rect.height() * ppp).round().max(1.0) as u32,
+            ];
+            let aspect = viewport[0] as f32 / viewport[1] as f32;
+            let (_, inverse_relative) = pane
+                .camera
+                .view_proj_and_inverse(aspect, self.services.scene3d.resolved_far_clip_m());
+            let inverse = glam::DMat4::from_translation(pane.camera.eye().as_dvec3())
+                * inverse_relative.as_dmat4();
+            let visible = mercator::visible_tiles(
+                inverse,
+                viewport,
+                [anchor[0], anchor[1]],
+                map_provider.zoom_range(),
+                delog_render::MAP_TILE_CAPACITY,
+            );
+            pane.update_visible_map_tiles(visible.tiles);
+            let desired: HashSet<_> = pane.map_tiles.iter().map(|(id, _)| *id).collect();
+            manager.set_desired(pane.map_scope, provider_id, pane.map_generation, desired);
+            for (id, priority) in pane.map_tiles.iter().copied() {
+                manager.request(TileRequest {
+                    scope: pane.map_scope,
+                    provider: provider_id,
+                    id,
+                    corners: mercator::tile_corners_render(id, anchor),
+                    priority,
+                    generation: pane.map_generation,
+                });
+            }
+            manager.poll(pane.map_scope)
+        } else {
+            if let Some(manager) = self.services.tile_manager.as_deref_mut() {
+                manager.set_desired(
+                    pane.map_scope,
+                    provider_id,
+                    pane.map_generation,
+                    std::iter::empty(),
                 );
-                pane.update_visible_map_tiles(visible.tiles);
-                let desired: HashSet<_> = pane.map_tiles.iter().map(|(id, _)| *id).collect();
-                manager.set_desired(pane.map_scope, provider_id, pane.map_generation, desired);
-                for (id, priority) in pane.map_tiles.iter().copied() {
-                    manager.request(TileRequest {
-                        scope: pane.map_scope,
-                        provider: provider_id,
-                        id,
-                        corners: mercator::tile_corners_render(id, anchor),
-                        priority,
-                        generation: pane.map_generation,
-                    });
-                }
-                manager.poll(pane.map_scope)
-            } else {
-                if let Some(manager) = self.services.tile_manager.as_deref_mut() {
-                    manager.set_desired(
-                        pane.map_scope,
-                        provider_id,
-                        pane.map_generation,
-                        std::iter::empty(),
-                    );
-                }
-                pane.update_map_selection(None);
-                Vec::new()
-            };
+            }
+            pane.update_map_selection(None);
+            Vec::new()
+        };
+        drop(tiles_timer);
 
         let draws: Vec<VehicleDraw> = self
             .services
@@ -1053,15 +1081,13 @@ impl Behavior<'_> {
                 let pose = poses[i]?;
                 let traj = self.services.trajectories.get(i);
                 let points: &[[f32; 3]] = traj.map_or(&[], |t| t.points.as_slice());
-                // Clip to the prefix of points at or before the playhead. The
-                // full path stays resident on the GPU, so toggling never
+                // The full path stays resident on the GPU, so toggling never
                 // re-uploads.
-                let visible_count = match (traj, playhead) {
-                    _ if !v.show_path => 0,
-                    (Some(t), Some(ph)) if trail_to_playhead => {
-                        t.times_us.partition_point(|&ts| ts <= ph) as u32
+                let visible = match traj {
+                    Some(t) if v.show_path => {
+                        trail::trail_range(&t.times_us, trail_mode, playhead, trail_window)
                     }
-                    _ => points.len() as u32,
+                    _ => 0..0,
                 };
                 Some(VehicleDraw {
                     key: i as u32,
@@ -1075,7 +1101,7 @@ impl Behavior<'_> {
                         .scene_frame
                         .transform(traj.and_then(|t| t.reference)),
                     traj_generation: self.services.traj_generation,
-                    visible_count,
+                    visible,
                 })
             })
             .collect();
@@ -1103,6 +1129,7 @@ impl Behavior<'_> {
                 map_tile_selection.clone(),
                 &ready_tiles,
                 &draws,
+                self.services.metrics,
             )
         };
         if let Some(tex) = rendered {
@@ -1145,12 +1172,15 @@ impl Behavior<'_> {
             scene_map_status(ui, rect, message.as_deref());
         }
 
-        let overlay = scene_overlay_buttons(ui, rect, pane.trail_to_playhead);
+        let overlay = scene_overlay_buttons(ui, rect, pane.trail_mode);
         if overlay.vehicle_config {
             self.actions.open_vehicle_config = true;
         }
+        if overlay.scene_settings {
+            self.actions.open_scene_settings = true;
+        }
         if overlay.toggle_trail {
-            pane.trail_to_playhead = !pane.trail_to_playhead;
+            pane.trail_mode = pane.trail_mode.next();
         }
         if overlay.export_kml {
             self.actions.export_kml = true;
@@ -1172,9 +1202,9 @@ impl Behavior<'_> {
         let frame_style = egui::Frame::default();
         let mut tile_response = egui_tiles::UiResponse::None;
 
-        // A legend middle-drag is in flight: bypass the `Vec<FieldId>` drop zone.
+        // A legend middle-drag is in flight: bypass the `FieldDrag` drop zone.
         // egui's `take_payload` removes the payload before downcasting, so a
-        // `dnd_drop_zone::<Vec<FieldId>>` over the pointer would consume (and
+        // `dnd_drop_zone::<FieldDrag>` over the pointer would consume (and
         // discard) our `LegendTraceDrag` on release before we could read it.
         if egui::DragAndDrop::has_payload_of_type::<legend::LegendTraceDrag>(ui.ctx()) {
             let response = ui
@@ -1197,16 +1227,19 @@ impl Behavior<'_> {
             return tile_response;
         }
 
-        let (response, dropped) = ui.dnd_drop_zone::<Vec<FieldId>, ()>(frame_style, |ui| {
-            tile_response = self.plot_body(ui, tile_id, pane);
-        });
+        let (response, dropped) =
+            ui.dnd_drop_zone::<crate::plotting::browser::FieldDrag, ()>(frame_style, |ui| {
+                tile_response = self.plot_body(ui, tile_id, pane);
+            });
+        let dropped =
+            dropped.and_then(|drag| drag.accepted_by(self.services.window.0).map(<[_]>::to_vec));
 
         if let Some(fields) = dropped {
             let pointer = response.response.ctx.input(|i| i.pointer.interact_pos());
             if let Some(edge) =
                 pointer.and_then(|pos| DropEdge::from_pos(response.response.rect, pos))
             {
-                self.actions.edge_drop = Some((tile_id, edge, (*fields).clone()));
+                self.actions.edge_drop = Some((tile_id, edge, fields.clone()));
             } else {
                 for &field in fields.iter() {
                     if pane.add_trace(field) {
@@ -1240,7 +1273,7 @@ impl Behavior<'_> {
         // modal that can clear it, even for a pane with no traces or view.
         crate::plotting::annotations::edit::editor(
             ui.ctx(),
-            egui::Id::new(("plot_annotation", tile_id)),
+            egui::Id::new(("plot_annotation", self.services.window.0, tile_id)),
             &mut pane.annotations,
             self.services.origin_us,
         );
@@ -1333,14 +1366,11 @@ impl Behavior<'_> {
                 pane.annotations.selected = pane.context_target;
             }
         }
-        let marker_active =
-            !annot_active && self.handle_marker_drag(&response, plot_rect, x_range, pane);
-        if !annot_active && !marker_active {
+        if !annot_active {
             self.handle_plot_interaction(&response, plot_rect);
         }
         self.handle_zoom_drag(&response, plot_rect, pane);
-        // Ctrl+hover scrubs an existing marker to the cursor, with no precise
-        // grab on the line needed.
+        // Ctrl+hover scrubs an existing marker to the cursor.
         if self.marker_us(pane).is_some()
             && ui.input(|i| i.modifiers.ctrl)
             && let Some(pos) = response.hover_pos()
@@ -1484,9 +1514,7 @@ impl Behavior<'_> {
             pview,
             self.services.origin_us,
             self.services.markers,
-            self.services.plot_display.marker_line_opacity,
-            self.services.plot_display.marker_line_width,
-            self.services.plot_display.marker_show_label,
+            &self.services.plot_display,
         );
 
         // String fields drawn as labels at each sample's timestamp.
@@ -1516,13 +1544,18 @@ impl Behavior<'_> {
             let hovered = response
                 .hover_pos()
                 .is_some_and(|pos| plot_rect.contains(pos));
-            let alt = ui.input(|i| i.modifiers.alt);
-            let readout =
-                (self.services.playing || (alt && !hovered)).then_some(*self.services.hover_mode);
+            let alt = self.services.alt_held;
+            let readout = playhead_readout(
+                self.services.playing,
+                self.services.lock_readouts,
+                alt,
+                hovered,
+            )
+            .then_some(*self.services.hover_mode);
             hover::draw_playhead(
                 ui,
                 HoverTarget {
-                    id: egui::Id::new(("playhead", tile_id)),
+                    id: egui::Id::new(("playhead", self.services.window.0, tile_id)),
                     view: pview,
                 },
                 self.services.snapshot.as_ref(),
@@ -1541,7 +1574,7 @@ impl Behavior<'_> {
             // Alt+hover drags the playhead along with the cursor. With
             // snap enabled it lands on the nearest data point instead, so the
             // playhead holds a sample until the cursor crosses to the next one.
-            if ui.input(|i| i.modifiers.alt)
+            if self.services.alt_held
                 && let Some(pos) = response.hover_pos()
                 && plot_rect.contains(pos)
             {
@@ -1560,7 +1593,7 @@ impl Behavior<'_> {
             let _ = hover::draw(
                 ui,
                 HoverTarget {
-                    id: egui::Id::new(("plot_hover", tile_id)),
+                    id: egui::Id::new(("plot_hover", self.services.window.0, tile_id)),
                     view: pview,
                 },
                 &response,
@@ -1568,7 +1601,7 @@ impl Behavior<'_> {
                 pane,
                 self.services.origin_us,
                 *self.services.hover_mode,
-                !self.services.playing,
+                hover_tooltip_shown(self.services.playing, self.services.lock_readouts),
                 readout_deltas,
                 self.services.plot_display.hover_show_field_name,
                 self.services.plot_display.hover_show_time,
@@ -1589,7 +1622,7 @@ impl Behavior<'_> {
                 .collect();
             let outcome = legend::ui(
                 ui,
-                egui::Id::new(("plot_legend", tile_id)),
+                egui::Id::new(("plot_legend", self.services.window.0, tile_id)),
                 plot_rect,
                 self.services.plot_display.legend_position,
                 self.services.plot_display.legend_opacity,
@@ -1617,7 +1650,7 @@ impl Behavior<'_> {
             }
         }
 
-        plot_rename_dialog(ui.ctx(), tile_id, pane);
+        plot_rename_dialog(ui.ctx(), self.services.window, tile_id, pane);
 
         self.plot_info_window(ui, tile_id, pane, Some(debug));
         drop(pane_overlay_timer);
@@ -1670,172 +1703,182 @@ impl Behavior<'_> {
                 ui.close();
             }
 
-            ui.menu_image_text_button(menu_icon(ui, crate::ui::icons::ban()), "Remove trace", |ui| {
-                crate::ui::components::dense_rows(ui);
-                let entries: Vec<_> = pane
-                    .traces
-                    .iter()
-                    .map(|t| {
-                        (
-                            t.field,
-                            legend::trace_label(self.services.snapshot.as_ref(), t.field),
-                            t.color32(),
-                        )
-                    })
-                    .collect();
-                let ghosts: Vec<(usize, String, egui::Color32)> = pane
-                    .ghosts
-                    .iter()
-                    .enumerate()
-                    .map(|(index, g)| {
-                        (
-                            index,
-                            format!("{}.{} (missing)", g.topic, g.field),
-                            g.display_color32(),
-                        )
-                    })
-                    .collect();
-                if entries.is_empty() && ghosts.is_empty() {
-                    ui.add_enabled(false, egui::Button::new("No traces"));
-                }
-                for (field, label, color) in entries {
-                    let clicked = ui
-                        .horizontal(|ui| {
-                            color_swatch(ui, color);
-                            ui.button(label).clicked()
+            ui.menu_image_text_button(
+                menu_icon(ui, crate::ui::icons::ban()),
+                "Remove trace",
+                |ui| {
+                    crate::ui::components::dense_rows(ui);
+                    let entries: Vec<_> = pane
+                        .traces
+                        .iter()
+                        .map(|t| {
+                            (
+                                t.field,
+                                legend::trace_label(self.services.snapshot.as_ref(), t.field),
+                                t.color32(),
+                            )
                         })
-                        .inner;
-                    if clicked {
-                        pane.remove_trace(field);
-                        self.services.caches.unpin(field);
-                        self.actions.remove_trace.push(field);
-                        ui.close();
-                    }
-                }
-                for (index, label, color) in ghosts {
-                    let clicked = ui
-                        .horizontal(|ui| {
-                            color_swatch(ui, color);
-                            ui.button(label).clicked()
+                        .collect();
+                    let ghosts: Vec<(usize, String, egui::Color32)> = pane
+                        .ghosts
+                        .iter()
+                        .enumerate()
+                        .map(|(index, g)| {
+                            (
+                                index,
+                                format!("{}.{} (missing)", g.topic, g.field),
+                                g.display_color32(),
+                            )
                         })
-                        .inner;
-                    if clicked {
-                        pane.remove_ghost(index);
-                        ui.close();
+                        .collect();
+                    if entries.is_empty() && ghosts.is_empty() {
+                        ui.add_enabled(false, egui::Button::new("No traces"));
                     }
-                }
-            });
+                    for (field, label, color) in entries {
+                        let clicked = ui
+                            .horizontal(|ui| {
+                                color_swatch(ui, color);
+                                ui.button(label).clicked()
+                            })
+                            .inner;
+                        if clicked {
+                            pane.remove_trace(field);
+                            self.services.caches.unpin(field);
+                            self.actions.remove_trace.push(field);
+                            ui.close();
+                        }
+                    }
+                    for (index, label, color) in ghosts {
+                        let clicked = ui
+                            .horizontal(|ui| {
+                                color_swatch(ui, color);
+                                ui.button(label).clicked()
+                            })
+                            .inner;
+                        if clicked {
+                            pane.remove_ghost(index);
+                            ui.close();
+                        }
+                    }
+                },
+            );
 
-            ui.menu_image_text_button(menu_icon(ui, crate::ui::icons::pencil()), "Edit trace", |ui| {
-                crate::ui::components::dense_rows(ui);
-                let entries: Vec<_> = pane
-                    .traces
-                    .iter()
-                    .map(|t| {
-                        (
-                            t.field,
-                            legend::trace_label(self.services.snapshot.as_ref(), t.field),
-                            t.color32(),
-                        )
-                    })
-                    .collect();
-                let ghost_labels: Vec<(usize, String)> = pane
-                    .ghosts
-                    .iter()
-                    .enumerate()
-                    .map(|(index, g)| (index, format!("{}.{} (missing)", g.topic, g.field)))
-                    .collect();
-                if entries.is_empty() && ghost_labels.is_empty() {
-                    ui.add_enabled(false, egui::Button::new("No traces"));
-                }
-                for (field, label, color) in entries {
-                    let Some(trace) = pane.trace_mut(field) else {
-                        continue;
-                    };
-                    ui.menu_button(label, |ui| {
-                        crate::ui::components::dense_rows(ui);
-                        ui.horizontal(|ui| {
-                            let mut color = color;
-                            if egui::color_picker::color_edit_button_srgba(
-                                ui,
-                                &mut color,
-                                egui::color_picker::Alpha::Opaque,
+            ui.menu_image_text_button(
+                menu_icon(ui, crate::ui::icons::pencil()),
+                "Edit trace",
+                |ui| {
+                    crate::ui::components::dense_rows(ui);
+                    let entries: Vec<_> = pane
+                        .traces
+                        .iter()
+                        .map(|t| {
+                            (
+                                t.field,
+                                legend::trace_label(self.services.snapshot.as_ref(), t.field),
+                                t.color32(),
                             )
-                            .changed()
-                            {
-                                trace.color = legend::color32_to_srgb(color);
+                        })
+                        .collect();
+                    let ghost_labels: Vec<(usize, String)> = pane
+                        .ghosts
+                        .iter()
+                        .enumerate()
+                        .map(|(index, g)| (index, format!("{}.{} (missing)", g.topic, g.field)))
+                        .collect();
+                    if entries.is_empty() && ghost_labels.is_empty() {
+                        ui.add_enabled(false, egui::Button::new("No traces"));
+                    }
+                    for (field, label, color) in entries {
+                        let Some(trace) = pane.trace_mut(field) else {
+                            continue;
+                        };
+                        ui.menu_button(label, |ui| {
+                            crate::ui::components::dense_rows(ui);
+                            ui.horizontal(|ui| {
+                                let mut color = color;
+                                if egui::color_picker::color_edit_button_srgba(
+                                    ui,
+                                    &mut color,
+                                    egui::color_picker::Alpha::Opaque,
+                                )
+                                .changed()
+                                {
+                                    trace.color = legend::color32_to_srgb(color);
+                                }
+                                ui.weak("Color / mode");
+                            });
+                            for mode in TraceMode::ALL {
+                                ui.radio_value(&mut trace.mode, mode, mode.label());
                             }
-                            ui.weak("Color / mode");
+                            ui.add(
+                                egui::Slider::new(&mut trace.width_px, 1.0..=12.0)
+                                    .text("Width")
+                                    .suffix(" px"),
+                            );
                         });
-                        for mode in TraceMode::ALL {
-                            ui.radio_value(&mut trace.mode, mode, mode.label());
-                        }
-                        ui.add(
-                            egui::Slider::new(&mut trace.width_px, 1.0..=12.0)
-                                .text("Width")
-                                .suffix(" px"),
-                        );
-                    });
-                }
-                for (index, label) in ghost_labels {
-                    let Some(ghost) = pane.ghosts.get_mut(index) else {
-                        continue;
-                    };
-                    ui.menu_button(label, |ui| {
-                        crate::ui::components::dense_rows(ui);
-                        ui.horizontal(|ui| {
-                            let mut color = ghost.color32();
-                            if egui::color_picker::color_edit_button_srgba(
-                                ui,
-                                &mut color,
-                                egui::color_picker::Alpha::Opaque,
-                            )
-                            .changed()
-                            {
-                                ghost.color = legend::color32_to_srgb(color);
+                    }
+                    for (index, label) in ghost_labels {
+                        let Some(ghost) = pane.ghosts.get_mut(index) else {
+                            continue;
+                        };
+                        ui.menu_button(label, |ui| {
+                            crate::ui::components::dense_rows(ui);
+                            ui.horizontal(|ui| {
+                                let mut color = ghost.color32();
+                                if egui::color_picker::color_edit_button_srgba(
+                                    ui,
+                                    &mut color,
+                                    egui::color_picker::Alpha::Opaque,
+                                )
+                                .changed()
+                                {
+                                    ghost.color = legend::color32_to_srgb(color);
+                                }
+                                ui.weak("Color / mode");
+                            });
+                            for mode in TraceMode::ALL {
+                                ui.radio_value(&mut ghost.mode, mode, mode.label());
                             }
-                            ui.weak("Color / mode");
+                            ui.add(
+                                egui::Slider::new(&mut ghost.width_px, 1.0..=12.0)
+                                    .text("Width")
+                                    .suffix(" px"),
+                            );
                         });
-                        for mode in TraceMode::ALL {
-                            ui.radio_value(&mut ghost.mode, mode, mode.label());
-                        }
-                        ui.add(
-                            egui::Slider::new(&mut ghost.width_px, 1.0..=12.0)
-                                .text("Width")
-                                .suffix(" px"),
-                        );
-                    });
-                }
-            });
+                    }
+                },
+            );
 
             ui.separator();
 
-            if ui
-                .add(egui::Button::image_and_text(
-                    menu_icon(ui, crate::ui::icons::copy()),
-                    "Copy Image",
-                ))
-                .clicked()
-            {
-                self.actions.image = Some(WorkspaceImageAction::CopyPlot {
-                    rect: response.rect,
-                });
-                ui.close();
-            }
-            if ui
-                .add(egui::Button::image_and_text(
-                    menu_icon(ui, crate::ui::icons::export()),
-                    "Export PNG...",
-                ))
-                .clicked()
-            {
-                self.actions.image = Some(WorkspaceImageAction::ExportPlot {
-                    rect: response.rect,
-                });
-                ui.close();
-            }
+            if self.services.allow_image_export {
+                if ui
+                    .add(egui::Button::image_and_text(
+                        menu_icon(ui, crate::ui::icons::copy()),
+                        "Copy Image",
+                    ))
+                    .clicked()
+                {
+                    self.actions.image = Some(WorkspaceImageAction::CopyPlot {
+                        rect: response.rect,
+                    });
+                    ui.close();
+                }
+                if ui
+                    .add(egui::Button::image_and_text(
+                        menu_icon(ui, crate::ui::icons::export()),
+                        "Export PNG...",
+                    ))
+                    .clicked()
+                {
+                    self.actions.image = Some(WorkspaceImageAction::ExportPlot {
+                        rect: response.rect,
+                    });
+                    ui.close();
+                }
 
-            ui.separator();
+                ui.separator();
+            }
 
             if ui
                 .add(egui::Button::image_and_text(
@@ -1902,7 +1945,11 @@ impl Behavior<'_> {
         }
         let mut open = pane.show_info;
         egui::Window::new("Plot Info")
-            .id(egui::Id::new(("plot-info", tile_id)))
+            .id(egui::Id::new((
+                "plot-info",
+                self.services.window.0,
+                tile_id,
+            )))
             .open(&mut open)
             .collapsible(false)
             .default_pos(ui.ctx().content_rect().center())
@@ -2029,54 +2076,6 @@ impl Behavior<'_> {
         *self.services.marker_us = value;
     }
 
-    /// Drag the measurement marker line along X. A primary drag that starts
-    /// within a few pixels of the marker grabs it. Returns whether the drag was
-    /// consumed, so the caller skips panning.
-    fn handle_marker_drag(
-        &mut self,
-        response: &egui::Response,
-        rect: egui::Rect,
-        x_range: (f32, f32),
-        pane: &mut PlotPane,
-    ) -> bool {
-        let Some(marker_us) = self.marker_us(pane) else {
-            return false;
-        };
-        let (x0, x1) = x_range;
-        if x1 <= x0 || rect.width() <= 0.0 {
-            return false;
-        }
-        let origin = self.services.origin_us;
-        let marker_sec = ((marker_us - origin) as f64 * 1e-6) as f32;
-        let marker_x = rect.left() + (marker_sec - x0) / (x1 - x0) * rect.width();
-
-        if response.drag_started_by(egui::PointerButton::Primary) {
-            pane.marker_drag = response
-                .interact_pointer_pos()
-                .is_some_and(|p| rect.contains(p) && (p.x - marker_x).abs() <= 6.0);
-        }
-        if response.drag_stopped() {
-            let was = pane.marker_drag;
-            pane.marker_drag = false;
-            if was {
-                return true; // consume the release frame so it never pans
-            }
-        }
-        if pane.marker_drag {
-            if let Some(p) = response.interact_pointer_pos() {
-                let frac = ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-                let t_sec = x0 as f64 + frac as f64 * (x1 - x0) as f64;
-                let mut t_us = origin + (t_sec * 1e6).round() as i64;
-                if let Some(range) = self.services.snapshot.global_time_range() {
-                    t_us = t_us.clamp(range.min_us, range.max_us);
-                }
-                self.set_marker_us(pane, Some(t_us));
-            }
-            return true;
-        }
-        false
-    }
-
     /// Right-button drag zooms the shared X view to the dragged window. The
     /// zoom applies on release; a plain right-click never sets the anchor and so
     /// still opens the context menu.
@@ -2167,37 +2166,51 @@ fn rebind_text_state(pane: &mut PlotPane, old_field: FieldId, new_field: FieldId
     }
 }
 
+const fn playhead_readout(playing: bool, locked: bool, alt: bool, hovered: bool) -> bool {
+    playing || locked || (alt && !hovered)
+}
+
+const fn hover_tooltip_shown(playing: bool, locked: bool) -> bool {
+    !playing && !locked
+}
+
 fn zoom_drag_anchor_x(view: ViewX, rect: egui::Rect, anchor_us: i64) -> f32 {
     let frac = (anchor_us - view.min_us) as f64 / view.span_us() as f64;
     rect.left() + frac as f32 * rect.width()
 }
 
-fn plot_rename_dialog(ctx: &egui::Context, tile_id: egui_tiles::TileId, pane: &mut PlotPane) {
+fn plot_rename_dialog(
+    ctx: &egui::Context,
+    window: crate::shell::windows::WindowId,
+    tile_id: egui_tiles::TileId,
+    pane: &mut PlotPane,
+) {
     if pane.rename.is_none() {
         return;
     }
     let mut apply = false;
     let mut cancel = false;
-    let modal = egui::Modal::new(egui::Id::new(("rename_trace", tile_id))).show(ctx, |ui| {
-        ui.set_width(240.0);
-        ui.label("Rename trace");
-        let Some(dialog) = pane.rename.as_mut() else {
-            return;
-        };
-        let edit = ui.add(egui::TextEdit::singleline(&mut dialog.text));
-        edit.request_focus();
-        if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-            apply = true;
-        }
-        ui.horizontal(|ui| {
-            if ui.button("OK").clicked() {
+    let modal =
+        egui::Modal::new(egui::Id::new(("rename_trace", window.0, tile_id))).show(ctx, |ui| {
+            ui.set_width(240.0);
+            ui.label("Rename trace");
+            let Some(dialog) = pane.rename.as_mut() else {
+                return;
+            };
+            let edit = ui.add(egui::TextEdit::singleline(&mut dialog.text));
+            edit.request_focus();
+            if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 apply = true;
             }
-            if ui.button("Cancel").clicked() {
-                cancel = true;
-            }
+            ui.horizontal(|ui| {
+                if ui.button("OK").clicked() {
+                    apply = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+            });
         });
-    });
     if modal.should_close() {
         cancel = true;
     }
@@ -2410,6 +2423,9 @@ fn tracked_vehicle_picker(
                     egui::ComboBox::from_id_salt("scene-tracked-vehicle-combo")
                         .selected_text(selected)
                         .show_ui(ui, |ui| {
+                            if vehicles.is_empty() {
+                                ui.weak(crate::ui::empty::no_items("vehicles"));
+                            }
                             for (i, vehicle) in vehicles.iter().enumerate() {
                                 let label = if vehicle.show {
                                     vehicle.label.clone()
@@ -2428,14 +2444,28 @@ fn tracked_vehicle_picker(
 #[derive(Default)]
 struct SceneOverlayClicks {
     vehicle_config: bool,
+    scene_settings: bool,
     toggle_trail: bool,
     export_kml: bool,
+}
+
+const GEAR_TOOLTIP: &str = "Configure vehicles. Right-click for 3D view settings";
+
+fn trail_mode_button(mode: TrailMode) -> (egui::ImageSource<'static>, &'static str) {
+    match mode {
+        TrailMode::ToPlayhead => (
+            crate::ui::icons::route_to_playhead(),
+            "Trails: up to playhead",
+        ),
+        TrailMode::VisibleWindow => (crate::ui::icons::route_window(), "Trails: visible window"),
+        TrailMode::Full => (crate::ui::icons::route(), "Trails: full path"),
+    }
 }
 
 fn scene_overlay_buttons(
     ui: &mut egui::Ui,
     scene_rect: egui::Rect,
-    trail_to_playhead: bool,
+    trail_mode: TrailMode,
 ) -> SceneOverlayClicks {
     let id = ui.make_persistent_id("scene-overlay-buttons");
     let mut clicks = SceneOverlayClicks::default();
@@ -2446,20 +2476,13 @@ fn scene_overlay_buttons(
         .show(ui.ctx(), |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    clicks.vehicle_config = components::icon_button(
-                        ui,
-                        crate::ui::icons::gear(),
-                        "Configure vehicles",
-                        false,
-                    )
-                    .clicked();
-                    clicks.toggle_trail = components::icon_button(
-                        ui,
-                        crate::ui::icons::route(),
-                        "Clip trails to playhead",
-                        trail_to_playhead,
-                    )
-                    .clicked();
+                    let gear =
+                        components::icon_button(ui, crate::ui::icons::gear(), GEAR_TOOLTIP, false);
+                    clicks.vehicle_config = gear.clicked();
+                    clicks.scene_settings = gear.secondary_clicked();
+                    let (trail_icon, trail_tooltip) = trail_mode_button(trail_mode);
+                    clicks.toggle_trail =
+                        components::icon_button(ui, trail_icon, trail_tooltip, false).clicked();
                     clicks.export_kml = components::icon_button(
                         ui,
                         crate::ui::icons::earth(),

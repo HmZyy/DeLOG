@@ -22,6 +22,7 @@ pub(super) fn searchable_combo<T: PartialEq + Copy>(
     salt: &str,
     sel: &mut Option<T>,
     items: &[(T, String)],
+    plural: &str,
 ) -> bool {
     let before = *sel;
     let filter_id = ui.make_persistent_id((salt, "filter"));
@@ -40,7 +41,7 @@ pub(super) fn searchable_combo<T: PartialEq + Copy>(
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
             ui.set_min_width(popup_width);
-            combo_list(ui, filter_id, highlight_id, sel, items);
+            combo_list(ui, filter_id, highlight_id, sel, items, plural);
         });
     *sel != before
 }
@@ -51,6 +52,7 @@ pub(super) fn combo_list<T: PartialEq + Copy>(
     highlight_id: egui::Id,
     sel: &mut Option<T>,
     items: &[(T, String)],
+    plural: &str,
 ) {
     let search_height = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
     ui.set_max_height(search_height + LIST_MAX_HEIGHT);
@@ -71,6 +73,11 @@ pub(super) fn combo_list<T: PartialEq + Copy>(
         .filter(|(_, name)| needle.is_empty() || name.to_ascii_lowercase().contains(&needle))
         .map(|(value, name)| (*value, name.as_str()))
         .collect::<Vec<_>>();
+    if items.is_empty() {
+        ui.weak(crate::ui::empty::no_items(plural));
+    } else if visible.is_empty() {
+        ui.weak(crate::ui::empty::no_matching(plural));
+    }
     let stored_highlight = ui.memory_mut(|m| m.data.get_temp::<usize>(highlight_id));
     let initialized_highlight = stored_highlight.is_none();
     let mut highlighted = stored_highlight.unwrap_or_else(|| {
@@ -134,6 +141,20 @@ pub(super) fn combo_list<T: PartialEq + Copy>(
     }
 }
 
+pub(super) fn field_options(
+    ui: &mut egui::Ui,
+    sel: &mut Option<FieldId>,
+    fields: &[(FieldId, String)],
+) {
+    if fields.is_empty() {
+        ui.weak(crate::ui::empty::no_items("fields"));
+        return;
+    }
+    for (id, name) in fields {
+        ui.selectable_value(sel, Some(*id), name);
+    }
+}
+
 pub(super) fn field_combo(
     ui: &mut egui::Ui,
     salt: &str,
@@ -143,11 +164,7 @@ pub(super) fn field_combo(
     egui::ComboBox::from_id_salt(salt)
         .selected_text(combo_label(fields, sel))
         .width(control_width(ui))
-        .show_ui(ui, |ui| {
-            for (id, name) in fields {
-                ui.selectable_value(sel, Some(*id), name);
-            }
-        });
+        .show_ui(ui, |ui| field_options(ui, sel, fields));
 }
 
 pub(super) fn choose_custom_glb_path(current_path: &str) -> Option<String> {

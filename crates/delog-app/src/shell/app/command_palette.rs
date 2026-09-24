@@ -4,6 +4,8 @@ use crate::shell::app::commands::{
 
 use crate::ui::palette::{PickerItem, PickerState};
 
+use super::ShortcutScope;
+
 #[derive(Default)]
 pub struct CommandPaletteState {
     pub(crate) picker: PickerState,
@@ -22,19 +24,14 @@ impl CommandPaletteState {
         entries
             .iter()
             .map(|entry| {
-                let mut label = entry.label.clone();
-                let subtitle = match &entry.command {
-                    AppCommand::Static(_) => {
-                        if let Some(shortcut) = &entry.subtitle {
-                            label.push_str(&format!("    {shortcut}"));
-                        }
-                        None
-                    }
-                    _ => entry.subtitle.clone(),
+                let (shortcut, subtitle) = match &entry.command {
+                    AppCommand::Static(_) => (entry.subtitle.clone(), None),
+                    _ => (None, entry.subtitle.clone()),
                 };
                 PickerItem {
                     key: entry.command.clone(),
-                    label,
+                    label: entry.label.clone(),
+                    shortcut,
                     subtitle,
                     search_text: entry.search_text.clone(),
                     disabled_reason: match &entry.availability {
@@ -121,14 +118,15 @@ impl CommandPaletteState {
             ctx,
             "command-palette",
             "Search commands…",
-            "No matching commands",
+            &crate::ui::empty::no_items("commands"),
+            &crate::ui::empty::no_matching("commands"),
             &Self::picker_items(entries),
         )
     }
 }
 
 pub fn should_toggle_palette(shortcut_pressed: bool, wants_keyboard_input: bool) -> bool {
-    shortcut_pressed && !wants_keyboard_input
+    shortcut_pressed && ShortcutScope::Anywhere.allows(wants_keyboard_input)
 }
 
 #[cfg(test)]
@@ -139,6 +137,7 @@ pub fn ranked_entries<'a>(query: &str, entries: &'a [PaletteEntry]) -> Vec<&'a P
         .map(|(index, entry)| PickerItem {
             key: index,
             label: entry.label.clone(),
+            shortcut: None,
             subtitle: None,
             search_text: entry.search_text.clone(),
             disabled_reason: None,
@@ -243,9 +242,10 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_k_is_ignored_when_an_editor_owns_text_input() {
-        assert!(!should_toggle_palette(true, true));
+    fn the_palette_shortcut_fires_even_when_an_editor_owns_text_input() {
+        assert!(should_toggle_palette(true, true));
         assert!(should_toggle_palette(true, false));
+        assert!(!should_toggle_palette(false, true));
     }
 
     #[test]
@@ -343,11 +343,8 @@ mod tests {
     #[test]
     fn rendered_palette_click_dispatches_enabled_entry_but_not_disabled_fit_all() {
         let ctx = egui::Context::default();
-        let enabled = PaletteEntry::enabled(
-            AppCommand::Static(CommandId::Open),
-            "Open test log",
-            "file",
-        );
+        let enabled =
+            PaletteEntry::enabled(AppCommand::Static(CommandId::Open), "Open test log", "file");
         let disabled = PaletteEntry {
             command: AppCommand::FitAll,
             label: "Fit all plots".to_owned(),
@@ -490,9 +487,7 @@ mod tests {
         );
         assert!(entries.iter().any(|entry| {
             entry.command
-                == AppCommand::SetCursorSampling(
-                    delog_core::field_view::SampleMode::Linear,
-                )
+                == AppCommand::SetCursorSampling(delog_core::field_view::SampleMode::Linear)
                 && entry.selected == Some(true)
         }));
     }
@@ -535,7 +530,7 @@ mod tests {
         let entries = [PaletteEntry {
             command: AppCommand::RunScript("shared".into()),
             label: "shared".to_owned(),
-            subtitle: Some("Tools › Scripts › Run Scripts".to_owned()),
+            subtitle: Some("Tools › Scripts › Run script".to_owned()),
             search_text: "shared script run execute".to_owned(),
             availability: CommandAvailability::Enabled,
             selected: None,
@@ -545,11 +540,7 @@ mod tests {
         let (output, _) = palette_frame(&ctx, &mut palette, &entries, vec![]);
 
         assert!(output.shapes.iter().any(|shape| {
-            find_text_rect(
-                &shape.shape,
-                "shared\nTools › Scripts › Run Scripts",
-            )
-            .is_some()
+            find_text_rect(&shape.shape, "shared\nTools › Scripts › Run script").is_some()
         }));
     }
 }
