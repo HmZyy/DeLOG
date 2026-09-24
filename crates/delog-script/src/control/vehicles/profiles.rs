@@ -1,5 +1,6 @@
+use delog_api::catalog::resolve_source;
 use delog_api::color::format_hex_color;
-use pyo3::exceptions::PyValueError;
+use delog_api::control::validate_profile_name;
 use pyo3::prelude::*;
 
 use crate::control::{
@@ -8,7 +9,7 @@ use crate::control::{
     call_immediate_detached, control_call_error,
 };
 
-use super::{VehiclePy, model_name, resolve_source, vehicle_from_info};
+use super::{VehiclePy, vehicle_from_info};
 
 #[pyclass(unsendable, name = "VehicleProfiles", skip_from_py_object)]
 #[derive(Clone)]
@@ -61,7 +62,7 @@ impl VehicleProfilesPy {
     }
 
     fn save(&self, py: Python<'_>, name: &str, vehicle: PyRef<'_, VehiclePy>) -> PyResult<()> {
-        let name = validate_profile_name(name)?;
+        let name = validate_profile_name(name).map_err(crate::errors::value)?;
         request_profile_unit(
             py,
             VehicleProfileRequest::Save {
@@ -72,20 +73,21 @@ impl VehicleProfilesPy {
     }
 
     fn load(&self, py: Python<'_>, name: &str) -> PyResult<VehicleProfilePy> {
-        let name = validate_profile_name(name)?;
+        let name = validate_profile_name(name).map_err(crate::errors::value)?;
         profile_from_response(request_profile(py, VehicleProfileRequest::Load { name })?)
     }
 
     #[pyo3(signature = (name, *, source))]
     fn apply(&self, py: Python<'_>, name: &str, source: &str) -> PyResult<VehiclePy> {
-        let name = validate_profile_name(name)?;
-        let (source_id, source) = resolve_source(&self.context.snapshot, source)?;
+        let name = validate_profile_name(name).map_err(crate::errors::value)?;
+        let source =
+            resolve_source(&self.context.snapshot, source).map_err(crate::errors::value)?;
         let mut infos = request_profile(
             py,
             VehicleProfileRequest::Apply {
                 name,
-                source_id,
-                source,
+                source_id: source.source_id,
+                source: source.source_label,
                 owner: self.context.owner.clone(),
             },
         )?
@@ -101,7 +103,7 @@ impl VehicleProfilesPy {
     }
 
     fn delete(&self, py: Python<'_>, name: &str) -> PyResult<()> {
-        let name = validate_profile_name(name)?;
+        let name = validate_profile_name(name).map_err(crate::errors::value)?;
         request_profile_unit(py, VehicleProfileRequest::Delete { name })
     }
 }
@@ -140,7 +142,7 @@ impl VehicleProfilePy {
 
     #[getter]
     fn model(&self) -> String {
-        model_name(&self.info.model).to_owned()
+        self.info.model.as_str().to_owned()
     }
 
     #[getter]
@@ -414,16 +416,6 @@ fn profile_from_response(response: ControlResponse) -> PyResult<VehicleProfilePy
         .into_vehicle_profile()
         .map(|info| VehicleProfilePy { info })
         .map_err(crate::errors::control)
-}
-
-fn validate_profile_name(name: &str) -> PyResult<String> {
-    let name = name.trim();
-    if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
-        return Err(PyValueError::new_err(
-            "vehicle profile name must not be empty or contain path separators/traversal",
-        ));
-    }
-    Ok(name.to_owned())
 }
 
 fn profile_field(field: &ProfileFieldRef) -> ProfileFieldPy {

@@ -2,9 +2,11 @@ use delog_api::ErrorKind;
 use delog_api::control::{
     AnnotationGeometry, AnnotationKind, AnnotationStylePatch, ControlRequest, ControlResponse,
     LayoutRequest, MarkerFilter, MarkerOrigin, MarkerPatch, MarkerRequest, PlaybackRequest,
-    PlotInfo, SplitDirection, TraceMode, TraceRequest, request_is_batchable, validate_layout_name,
-    validate_layout_path,
+    PlotInfo, ResolvedVehicleField, SplitDirection, TraceMode, TraceRequest, VehicleModel,
+    VehicleNedReference, VehiclePatch, VehiclePosition, request_is_batchable, validate_layout_name,
+    validate_layout_path, validate_profile_name,
 };
+use delog_core::identity::FieldId;
 
 #[test]
 fn mutations_and_response_returning_requests_keep_the_batch_policy() {
@@ -162,5 +164,63 @@ fn marker_origin_and_patch_validation_preserve_messages() {
         .unwrap_err()
         .to_string(),
         "marker color components must be finite and between 0 and 1"
+    );
+}
+
+#[test]
+fn manual_georeferences_validate_latitude_longitude_and_finiteness() {
+    assert_eq!(
+        VehicleNedReference::manual(91.0, 0.0, 0.0)
+            .unwrap_err()
+            .to_string(),
+        "lat_deg must be between -90 and 90"
+    );
+    assert_eq!(
+        VehicleNedReference::manual(0.0, f64::NAN, 0.0)
+            .unwrap_err()
+            .to_string(),
+        "lon_deg must be finite"
+    );
+}
+
+#[test]
+fn model_parser_preserves_supported_names() {
+    assert_eq!(
+        VehicleModel::parse("fixedwing").unwrap(),
+        VehicleModel::FixedWing
+    );
+    assert!(VehicleModel::parse("rocket").is_err());
+}
+
+#[test]
+fn vehicle_position_and_patch_validation_preserve_messages() {
+    let field = |id| ResolvedVehicleField {
+        id: FieldId(id),
+        path: format!("flight/GPS/{id}"),
+    };
+    assert_eq!(
+        VehiclePosition::gps(field(0), field(1), field(2), false, false, f64::INFINITY)
+            .unwrap_err()
+            .to_string(),
+        "alt_offset_m must be finite"
+    );
+    assert_eq!(
+        VehiclePatch {
+            scale: Some(0.0),
+            ..VehiclePatch::default()
+        }
+        .validate()
+        .unwrap_err()
+        .to_string(),
+        "vehicle scale must be finite and > 0"
+    );
+}
+
+#[test]
+fn vehicle_profile_names_are_normalized_and_portable() {
+    assert_eq!(validate_profile_name(" survey ").unwrap(), "survey");
+    assert_eq!(
+        validate_profile_name("../survey").unwrap_err().to_string(),
+        "vehicle profile name must not be empty or contain path separators/traversal"
     );
 }
