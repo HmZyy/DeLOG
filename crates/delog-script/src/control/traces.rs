@@ -80,22 +80,8 @@ impl TraceCollectionPy {
             .as_ref()
             .map(|field| resolve_field(&self.context.snapshot, field))
             .transpose()?;
-        if matches!((index, &resolved), (Some(_), Some(_)) | (None, None)) {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "remove() needs exactly one of a position or field=",
-            ));
-        }
-        let (field_id, field) = match resolved {
-            Some((id, path)) => (Some(id), Some(path)),
-            None => (None, None),
-        };
-        let request = TraceRequest::Remove {
-            window: self.window,
-            tile: self.tile,
-            index,
-            field_id,
-            field,
-        };
+        let request = TraceRequest::remove(self.window, self.tile, index, resolved)
+            .map_err(crate::errors::value)?;
         call_immediate_detached(py, ControlRequest::Traces(request))
             .map_err(control_call_error)?
             .into_unit()
@@ -275,11 +261,7 @@ fn resolve_field(
 }
 
 fn parse_trace_mode(name: &str) -> PyResult<TraceMode> {
-    TraceMode::parse(name).ok_or_else(|| {
-        pyo3::exceptions::PyValueError::new_err(format!(
-            "trace mode must be 'line', 'scatter', or 'step', got {name:?}"
-        ))
-    })
+    TraceMode::parse(name).map_err(crate::errors::value)
 }
 
 fn trace_mode_name(mode: TraceMode) -> &'static str {

@@ -1,3 +1,4 @@
+use delog_api::control::{validate_layout_name, validate_layout_path};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict};
@@ -23,7 +24,7 @@ impl LayoutsPy {
         request_unit(
             py,
             LayoutRequest::Save {
-                name: layout_name(name)?,
+                name: validate_layout_name(name).map_err(crate::errors::value)?,
             },
         )
     }
@@ -32,7 +33,7 @@ impl LayoutsPy {
         request_report(
             py,
             LayoutRequest::Load {
-                name: layout_name(name)?,
+                name: validate_layout_name(name).map_err(crate::errors::value)?,
             },
         )
     }
@@ -41,7 +42,7 @@ impl LayoutsPy {
         request_unit(
             py,
             LayoutRequest::Delete {
-                name: layout_name(name)?,
+                name: validate_layout_name(name).map_err(crate::errors::value)?,
             },
         )
     }
@@ -50,8 +51,8 @@ impl LayoutsPy {
         request_unit(
             py,
             LayoutRequest::Rename {
-                from: layout_name(old)?,
-                to: layout_name(new)?,
+                from: validate_layout_name(old).map_err(crate::errors::value)?,
+                to: validate_layout_name(new).map_err(crate::errors::value)?,
             },
         )
     }
@@ -60,8 +61,8 @@ impl LayoutsPy {
         request_unit(
             py,
             LayoutRequest::Duplicate {
-                from: layout_name(old)?,
-                to: layout_name(new)?,
+                from: validate_layout_name(old).map_err(crate::errors::value)?,
+                to: validate_layout_name(new).map_err(crate::errors::value)?,
             },
         )
     }
@@ -70,7 +71,7 @@ impl LayoutsPy {
         request_report(
             py,
             LayoutRequest::ImportFile {
-                path: layout_path(path)?,
+                path: validate_layout_path(path).map_err(crate::errors::value)?,
             },
         )
     }
@@ -79,8 +80,8 @@ impl LayoutsPy {
         request_unit(
             py,
             LayoutRequest::ExportFile {
-                name: layout_name(name)?,
-                path: layout_path(path)?,
+                name: validate_layout_name(name).map_err(crate::errors::value)?,
+                path: validate_layout_path(path).map_err(crate::errors::value)?,
             },
         )
     }
@@ -171,25 +172,4 @@ fn request_report(py: Python<'_>, request_value: LayoutRequest) -> PyResult<Load
         .into_load_report()
         .map(|report| LoadReportPy { report })
         .map_err(crate::errors::control)
-}
-
-fn layout_name(name: &str) -> PyResult<String> {
-    let name = name.trim();
-    if name.is_empty()
-        || !name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
-        return Err(PyValueError::new_err(
-            "layout names may contain only ASCII letters, digits, '-' and '_'",
-        ));
-    }
-    Ok(name.to_owned())
-}
-
-fn layout_path(path: &str) -> PyResult<String> {
-    if path.trim().is_empty() {
-        return Err(PyValueError::new_err("layout path must not be empty"));
-    }
-    Ok(path.to_owned())
 }

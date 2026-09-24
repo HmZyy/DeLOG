@@ -11,7 +11,9 @@ pub use annotations::{
     AnnotationFilter, AnnotationGeometry, AnnotationInfo, AnnotationKind, AnnotationRequest,
     AnnotationStylePatch,
 };
-pub use layouts::{LayoutFieldIssue, LayoutRequest, LoadReport};
+pub use layouts::{
+    LayoutFieldIssue, LayoutRequest, LoadReport, validate_layout_name, validate_layout_path,
+};
 pub use markers::{MarkerFilter, MarkerInfo, MarkerOrigin, MarkerPatch, MarkerRequest};
 pub use owner::{GenerationRequest, PlotContext, ScriptOwner};
 pub use plots::{PlotInfo, PlotRequest};

@@ -1,3 +1,5 @@
+use crate::{Error, Result};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayoutFieldIssue {
     pub field: String,
@@ -24,4 +26,25 @@ pub enum LayoutRequest {
     Clear,
     Current,
     Apply { json: String },
+}
+
+pub fn validate_layout_name(name: &str) -> Result<String> {
+    let name = name.trim();
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(Error::invalid_input(
+            "layout names may contain only ASCII letters, digits, '-' and '_'",
+        ));
+    }
+    Ok(name.to_owned())
+}
+
+pub fn validate_layout_path(path: &str) -> Result<String> {
+    if path.trim().is_empty() {
+        return Err(Error::invalid_input("layout path must not be empty"));
+    }
+    Ok(path.to_owned())
 }
