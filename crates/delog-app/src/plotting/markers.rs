@@ -361,13 +361,7 @@ fn validate_pending_markers(markers: &[PendingMarker]) -> Result<(), String> {
 
 #[cfg(feature = "scripting")]
 fn validate_marker_patch(patch: &MarkerPatch) -> Result<(), String> {
-    if patch.label.as_deref() == Some("") {
-        return Err("marker label must not be empty".into());
-    }
-    if let Some(color) = patch.color {
-        validate_marker_color(color)?;
-    }
-    Ok(())
+    patch.validate().map_err(delog_api::Error::into_message)
 }
 
 #[cfg(feature = "scripting")]
