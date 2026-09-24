@@ -5,6 +5,9 @@ pub mod interact;
 pub mod place;
 pub mod toolbar;
 
+#[cfg(feature = "scripting")]
+use delog_api::control::{AnnotationGeometry, AnnotationKind, AnnotationStylePatch, ScriptOwner};
+
 use crate::plotting::gpu::PaneView;
 
 const DEFAULT_SPAN_FRACTION: f64 = 0.12;
@@ -226,8 +229,8 @@ pub struct AnnotationOwner {
 }
 
 #[cfg(feature = "scripting")]
-impl From<delog_script::ScriptOwner> for AnnotationOwner {
-    fn from(owner: delog_script::ScriptOwner) -> Self {
+impl From<ScriptOwner> for AnnotationOwner {
+    fn from(owner: ScriptOwner) -> Self {
         Self {
             name: owner.name,
             generation: owner.generation,
@@ -246,59 +249,57 @@ pub struct Annotation {
 
 #[cfg(feature = "scripting")]
 impl Kind {
-    pub fn to_script(self) -> delog_script::AnnotationKind {
+    pub fn to_script(self) -> AnnotationKind {
         match self {
-            Self::Text => delog_script::AnnotationKind::Text,
-            Self::Segment => delog_script::AnnotationKind::Segment,
-            Self::Rect => delog_script::AnnotationKind::Rect,
-            Self::Ellipse => delog_script::AnnotationKind::Ellipse,
-            Self::HLine => delog_script::AnnotationKind::HLine,
+            Self::Text => AnnotationKind::Text,
+            Self::Segment => AnnotationKind::Segment,
+            Self::Rect => AnnotationKind::Rect,
+            Self::Ellipse => AnnotationKind::Ellipse,
+            Self::HLine => AnnotationKind::HLine,
         }
     }
 }
 
 #[cfg(feature = "scripting")]
 impl Geometry {
-    pub fn from_script(geometry: delog_script::AnnotationGeometry) -> Self {
+    pub fn from_script(geometry: AnnotationGeometry) -> Self {
         let pos = |(t_us, y): (i64, f64)| DataPos { t_us, y };
         match geometry {
-            delog_script::AnnotationGeometry::Text { at } => Self::Text { at: pos(at) },
-            delog_script::AnnotationGeometry::Segment { from, to } => Self::Segment {
+            AnnotationGeometry::Text { at } => Self::Text { at: pos(at) },
+            AnnotationGeometry::Segment { from, to } => Self::Segment {
                 from: pos(from),
                 to: pos(to),
             },
-            delog_script::AnnotationGeometry::Rect { a, b } => Self::Rect {
+            AnnotationGeometry::Rect { a, b } => Self::Rect {
                 a: pos(a),
                 b: pos(b),
             },
-            delog_script::AnnotationGeometry::Ellipse { a, b } => Self::Ellipse {
+            AnnotationGeometry::Ellipse { a, b } => Self::Ellipse {
                 a: pos(a),
                 b: pos(b),
             },
-            delog_script::AnnotationGeometry::HLine { y } => Self::HLine { y },
+            AnnotationGeometry::HLine { y } => Self::HLine { y },
         }
     }
 
-    pub fn to_script(self) -> delog_script::AnnotationGeometry {
+    pub fn to_script(self) -> AnnotationGeometry {
         let pt = |p: DataPos| (p.t_us, p.y);
         match self {
-            Self::Text { at } => delog_script::AnnotationGeometry::Text { at: pt(at) },
-            Self::Segment { from, to } => delog_script::AnnotationGeometry::Segment {
+            Self::Text { at } => AnnotationGeometry::Text { at: pt(at) },
+            Self::Segment { from, to } => AnnotationGeometry::Segment {
                 from: pt(from),
                 to: pt(to),
             },
-            Self::Rect { a, b } => delog_script::AnnotationGeometry::Rect { a: pt(a), b: pt(b) },
-            Self::Ellipse { a, b } => {
-                delog_script::AnnotationGeometry::Ellipse { a: pt(a), b: pt(b) }
-            }
-            Self::HLine { y } => delog_script::AnnotationGeometry::HLine { y },
+            Self::Rect { a, b } => AnnotationGeometry::Rect { a: pt(a), b: pt(b) },
+            Self::Ellipse { a, b } => AnnotationGeometry::Ellipse { a: pt(a), b: pt(b) },
+            Self::HLine { y } => AnnotationGeometry::HLine { y },
         }
     }
 }
 
 #[cfg(feature = "scripting")]
 impl Annotation {
-    pub fn apply_style_patch(&mut self, patch: delog_script::AnnotationStylePatch) {
+    pub fn apply_style_patch(&mut self, patch: AnnotationStylePatch) {
         if let Some(color) = patch.color {
             self.style.color = color;
         }

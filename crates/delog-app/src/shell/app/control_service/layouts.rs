@@ -1,6 +1,8 @@
 use std::path::Path;
 
-use delog_script::{ControlRequest, ControlResponse, LayoutFieldIssue, LayoutRequest, LoadReport};
+use delog_api::control::{
+    ControlRequest, ControlResponse, LayoutFieldIssue, LayoutRequest, LoadReport,
+};
 
 use super::{AppControl, trace_counts, unpin_removed_traces};
 use crate::config::layout::doc::{

@@ -4,25 +4,25 @@ use std::sync::Arc;
 
 use arrow::array::{ArrayRef, Float32Array, Int64Array};
 use arrow::datatypes::DataType;
+use delog_api::control::{ControlHost, ControlRequest, ControlResponse, PlotRequest};
 use delog_core::ingest::{IngestSender, IngestSink, ingest_channel};
 use delog_core::ingestor::{Ingestor, NullObserver};
 use delog_core::metrics::MetricsRegistry;
 use delog_core::schema::{FieldSchema, TopicSchema};
 use delog_core::snapshot::{DataStore, StoreSnapshot};
-use delog_script::{
-    ControlHost, ControlRequest, ControlResponse, PlotRequest, ScriptCommand, ScriptEngine,
-    ScriptEvent,
-};
+use delog_script::{ScriptCommand, ScriptEngine, ScriptEvent};
 
 struct PlotsHost;
 
 impl ControlHost for PlotsHost {
-    fn call(&self, request: ControlRequest) -> Result<ControlResponse, String> {
+    fn call(&self, request: ControlRequest) -> delog_api::Result<ControlResponse> {
         match request {
             ControlRequest::Plots(PlotRequest::List { .. }) => {
                 Ok(ControlResponse::Plots(Vec::new()))
             }
-            other => Err(format!("unexpected request: {other:?}")),
+            other => Err(delog_api::Error::execution(format!(
+                "unexpected request: {other:?}"
+            ))),
         }
     }
 }

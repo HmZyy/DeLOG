@@ -2,9 +2,11 @@
 
 use std::sync::Arc;
 
+use delog_api::control::{
+    ControlRequest, MarkerRequest, PlaybackRequest, TraceMode, TraceRequest, request_is_batchable,
+};
 use delog_api::markers::PendingMarker;
 use delog_script::control::RecordingHost;
-use delog_script::{ControlRequest, MarkerRequest, PlaybackRequest, TraceMode, TraceRequest};
 
 #[test]
 fn a_successful_batch_stages_supported_requests_in_issue_order() {
@@ -90,8 +92,8 @@ fn protocol_keeps_trace_mutations_batchable_without_matching_reads() {
         mode: TraceMode::Line,
         owner: None,
     });
-    assert!(delog_script::control::request_is_batchable(&add));
-    assert!(!delog_script::control::request_is_batchable(
-        &ControlRequest::Traces(TraceRequest::List { window: 0, tile: 1 })
-    ));
+    assert!(request_is_batchable(&add));
+    assert!(!request_is_batchable(&ControlRequest::Traces(
+        TraceRequest::List { window: 0, tile: 1 }
+    )));
 }

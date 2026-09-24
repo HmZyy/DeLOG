@@ -14,10 +14,9 @@ pub struct LayoutsPy;
 #[pymethods]
 impl LayoutsPy {
     fn list(&self, py: Python<'_>) -> PyResult<Vec<String>> {
-        match request(py, LayoutRequest::List)? {
-            ControlResponse::Names(names) => Ok(names),
-            _ => Err(wrong_response()),
-        }
+        request(py, LayoutRequest::List)?
+            .into_names()
+            .map_err(crate::errors::control)
     }
 
     fn save(&self, py: Python<'_>, name: &str) -> PyResult<()> {
@@ -91,9 +90,9 @@ impl LayoutsPy {
     }
 
     fn current(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
-        let ControlResponse::Layout(json) = request(py, LayoutRequest::Current)? else {
-            return Err(wrong_response());
-        };
+        let json = request(py, LayoutRequest::Current)?
+            .into_layout()
+            .map_err(crate::errors::control)?;
         let value = py
             .import("json")
             .and_then(|module| module.call_method1("loads", (json,)))
@@ -162,17 +161,16 @@ fn request(py: Python<'_>, request: LayoutRequest) -> PyResult<ControlResponse> 
 }
 
 fn request_unit(py: Python<'_>, request_value: LayoutRequest) -> PyResult<()> {
-    match request(py, request_value)? {
-        ControlResponse::Unit => Ok(()),
-        _ => Err(wrong_response()),
-    }
+    request(py, request_value)?
+        .into_unit()
+        .map_err(crate::errors::control)
 }
 
 fn request_report(py: Python<'_>, request_value: LayoutRequest) -> PyResult<LoadReportPy> {
-    match request(py, request_value)? {
-        ControlResponse::LoadReport(report) => Ok(LoadReportPy { report }),
-        _ => Err(wrong_response()),
-    }
+    request(py, request_value)?
+        .into_load_report()
+        .map(|report| LoadReportPy { report })
+        .map_err(crate::errors::control)
 }
 
 fn layout_name(name: &str) -> PyResult<String> {
@@ -194,8 +192,4 @@ fn layout_path(path: &str) -> PyResult<String> {
         return Err(PyValueError::new_err("layout path must not be empty"));
     }
     Ok(path.to_owned())
-}
-
-fn wrong_response() -> PyErr {
-    PyRuntimeError::new_err("the DeLOG window answered with the wrong kind of result")
 }

@@ -4,8 +4,7 @@ use pyo3::types::{PyAny, PyDict, PyIterator, PyList};
 
 use super::{
     AnnotationFilter, AnnotationGeometry, AnnotationInfo, AnnotationKind, AnnotationRequest,
-    AnnotationStylePatch, ControlRequest, ControlResponse, PlotContext, call_immediate_detached,
-    control_call_error,
+    AnnotationStylePatch, ControlRequest, PlotContext, call_immediate_detached, control_call_error,
 };
 
 #[pyclass(unsendable, name = "AnnotationCollection", skip_from_py_object)]
@@ -48,13 +47,15 @@ impl AnnotationCollectionPy {
         };
         let response = call_immediate_detached(py, ControlRequest::Annotations(request))
             .map_err(control_call_error)?;
-        match response {
-            ControlResponse::Annotations(mut infos) if infos.len() == 1 => {
-                Ok(annotation_from_info(infos.remove(0)))
-            }
-            _ => Err(pyo3::exceptions::PyRuntimeError::new_err(
+        let mut infos = response
+            .into_annotations()
+            .map_err(crate::errors::control)?;
+        if infos.len() == 1 {
+            Ok(annotation_from_info(infos.remove(0)))
+        } else {
+            Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "the DeLOG window answered with the wrong kind of result",
-            )),
+            ))
         }
     }
 
@@ -338,8 +339,9 @@ impl AnnotationCollectionPy {
             filter,
         };
         call_immediate_detached(py, ControlRequest::Annotations(request))
-            .map(|_| ())
-            .map_err(control_call_error)
+            .map_err(control_call_error)?
+            .into_unit()
+            .map_err(crate::errors::control)
     }
 }
 
@@ -516,12 +518,7 @@ fn request_annotations(
         ControlRequest::Annotations(AnnotationRequest::List { target }),
     )
     .map_err(control_call_error)?;
-    match response {
-        ControlResponse::Annotations(infos) => Ok(infos),
-        _ => Err(pyo3::exceptions::PyRuntimeError::new_err(
-            "the DeLOG window answered with the wrong kind of result",
-        )),
-    }
+    response.into_annotations().map_err(crate::errors::control)
 }
 
 fn annotation_from_info(info: AnnotationInfo) -> AnnotationPy {
@@ -714,8 +711,9 @@ impl AnnotationPy {
             style,
         };
         call_immediate_detached(py, ControlRequest::Annotations(request))
-            .map(|_| ())
-            .map_err(control_call_error)
+            .map_err(control_call_error)?
+            .into_unit()
+            .map_err(crate::errors::control)
     }
 }
 
@@ -772,6 +770,7 @@ fn submit_global_remove(
 ) -> PyResult<()> {
     let request = AnnotationRequest::Remove { target, filter };
     call_immediate_detached(py, ControlRequest::Annotations(request))
-        .map(|_| ())
-        .map_err(control_call_error)
+        .map_err(control_call_error)?
+        .into_unit()
+        .map_err(crate::errors::control)
 }
