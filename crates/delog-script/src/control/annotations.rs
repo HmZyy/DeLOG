@@ -105,10 +105,10 @@ impl AnnotationCollectionPy {
         font_px: Option<f32>,
         arrow: Option<bool>,
     ) -> PyResult<AnnotationPy> {
-        let at = parse_point(&at, "at")?;
+        let at = AnnotationGeometry::text(parse_point(&at, "at")?).map_err(crate::errors::value)?;
         self.submit(
             py,
-            AnnotationGeometry::Text { at },
+            at,
             label,
             color,
             stroke_px,
@@ -132,11 +132,12 @@ impl AnnotationCollectionPy {
         font_px: Option<f32>,
         arrow: Option<bool>,
     ) -> PyResult<AnnotationPy> {
-        let from = parse_point(&from, "from")?;
-        let to = parse_point(&to, "to")?;
+        let geometry =
+            AnnotationGeometry::segment(parse_point(&from, "from")?, parse_point(&to, "to")?)
+                .map_err(crate::errors::value)?;
         self.submit(
             py,
-            AnnotationGeometry::Segment { from, to },
+            geometry,
             label,
             color,
             stroke_px,
@@ -160,11 +161,11 @@ impl AnnotationCollectionPy {
         font_px: Option<f32>,
         arrow: Option<bool>,
     ) -> PyResult<AnnotationPy> {
-        let a = parse_point(&a, "a")?;
-        let b = parse_point(&b, "b")?;
+        let geometry = AnnotationGeometry::rect(parse_point(&a, "a")?, parse_point(&b, "b")?)
+            .map_err(crate::errors::value)?;
         self.submit(
             py,
-            AnnotationGeometry::Rect { a, b },
+            geometry,
             label,
             color,
             stroke_px,
@@ -188,11 +189,11 @@ impl AnnotationCollectionPy {
         font_px: Option<f32>,
         arrow: Option<bool>,
     ) -> PyResult<AnnotationPy> {
-        let a = parse_point(&a, "a")?;
-        let b = parse_point(&b, "b")?;
+        let geometry = AnnotationGeometry::ellipse(parse_point(&a, "a")?, parse_point(&b, "b")?)
+            .map_err(crate::errors::value)?;
         self.submit(
             py,
-            AnnotationGeometry::Ellipse { a, b },
+            geometry,
             label,
             color,
             stroke_px,
@@ -215,10 +216,10 @@ impl AnnotationCollectionPy {
         font_px: Option<f32>,
         arrow: Option<bool>,
     ) -> PyResult<AnnotationPy> {
-        let y = finite_f64(y, "y")?;
+        let geometry = AnnotationGeometry::hline(y).map_err(crate::errors::value)?;
         self.submit(
             py,
-            AnnotationGeometry::HLine { y },
+            geometry,
             label,
             color,
             stroke_px,
@@ -346,11 +347,7 @@ impl AnnotationCollectionPy {
 }
 
 fn parse_kind(name: &str) -> PyResult<AnnotationKind> {
-    AnnotationKind::parse(name).ok_or_else(|| {
-        pyo3::exceptions::PyValueError::new_err(format!(
-            "annotation kind must be 'text', 'segment', 'rect', 'ellipse', or 'hline', got {name:?}"
-        ))
-    })
+    AnnotationKind::parse(name).map_err(crate::errors::value)
 }
 
 fn geometry_for(
@@ -361,26 +358,26 @@ fn geometry_for(
     y: Option<f64>,
 ) -> PyResult<AnnotationGeometry> {
     match kind {
-        AnnotationKind::Text => Ok(AnnotationGeometry::Text {
-            at: parse_point(require(at, "at")?, "at")?,
-        }),
-        AnnotationKind::Segment => Ok(AnnotationGeometry::Segment {
-            from: parse_point(require(a, "a")?, "a")?,
-            to: parse_point(require(b, "b")?, "b")?,
-        }),
-        AnnotationKind::Rect => Ok(AnnotationGeometry::Rect {
-            a: parse_point(require(a, "a")?, "a")?,
-            b: parse_point(require(b, "b")?, "b")?,
-        }),
-        AnnotationKind::Ellipse => Ok(AnnotationGeometry::Ellipse {
-            a: parse_point(require(a, "a")?, "a")?,
-            b: parse_point(require(b, "b")?, "b")?,
-        }),
+        AnnotationKind::Text => AnnotationGeometry::text(parse_point(require(at, "at")?, "at")?)
+            .map_err(crate::errors::value),
+        AnnotationKind::Segment => AnnotationGeometry::segment(
+            parse_point(require(a, "a")?, "a")?,
+            parse_point(require(b, "b")?, "b")?,
+        )
+        .map_err(crate::errors::value),
+        AnnotationKind::Rect => AnnotationGeometry::rect(
+            parse_point(require(a, "a")?, "a")?,
+            parse_point(require(b, "b")?, "b")?,
+        )
+        .map_err(crate::errors::value),
+        AnnotationKind::Ellipse => AnnotationGeometry::ellipse(
+            parse_point(require(a, "a")?, "a")?,
+            parse_point(require(b, "b")?, "b")?,
+        )
+        .map_err(crate::errors::value),
         AnnotationKind::HLine => {
             let y = y.ok_or_else(|| pyo3::exceptions::PyValueError::new_err("hline needs y="))?;
-            Ok(AnnotationGeometry::HLine {
-                y: finite_f64(y, "y")?,
-            })
+            AnnotationGeometry::hline(y).map_err(crate::errors::value)
         }
     }
 }
@@ -399,17 +396,7 @@ fn parse_point(value: &Bound<'_, PyAny>, name: &str) -> PyResult<(i64, f64)> {
             "{name} must be a (t_us, y) pair of int and float"
         ))
     })?;
-    Ok((t_us, finite_f64(y, &format!("{name}.y"))?))
-}
-
-fn finite_f64(value: f64, name: &str) -> PyResult<f64> {
-    if value.is_finite() {
-        Ok(value)
-    } else {
-        Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "{name} must be finite"
-        )))
-    }
+    Ok((t_us, y))
 }
 
 fn dict_string(item: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<String>> {
@@ -456,25 +443,8 @@ fn build_style_patch(
         .map(parse_hex_color)
         .transpose()
         .map_err(crate::errors::value)?;
-    reject_non_finite(stroke_px, "stroke_px")?;
-    reject_non_finite(fill_opacity, "fill_opacity")?;
-    reject_non_finite(font_px, "font_px")?;
-    Ok(AnnotationStylePatch {
-        color,
-        stroke_px,
-        fill_opacity,
-        font_px,
-        arrow,
-    })
-}
-
-fn reject_non_finite(value: Option<f32>, name: &str) -> PyResult<()> {
-    match value {
-        Some(value) if !value.is_finite() => Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "{name} must be finite"
-        ))),
-        _ => Ok(()),
-    }
+    AnnotationStylePatch::new(color, stroke_px, fill_opacity, font_px, arrow)
+        .map_err(crate::errors::value)
 }
 
 fn resolve_removal_filter(
@@ -545,36 +515,6 @@ fn kind_name(kind: AnnotationKind) -> &'static str {
     }
 }
 
-fn moved_to(geometry: AnnotationGeometry, point: (i64, f64)) -> AnnotationGeometry {
-    let delta = |anchor: (i64, f64)| (point.0 - anchor.0, point.1 - anchor.1);
-    let shift = |p: (i64, f64), d: (i64, f64)| (p.0 + d.0, p.1 + d.1);
-    match geometry {
-        AnnotationGeometry::Text { .. } => AnnotationGeometry::Text { at: point },
-        AnnotationGeometry::Segment { from, to } => {
-            let d = delta(from);
-            AnnotationGeometry::Segment {
-                from: point,
-                to: shift(to, d),
-            }
-        }
-        AnnotationGeometry::Rect { a, b } => {
-            let d = delta(a);
-            AnnotationGeometry::Rect {
-                a: point,
-                b: shift(b, d),
-            }
-        }
-        AnnotationGeometry::Ellipse { a, b } => {
-            let d = delta(a);
-            AnnotationGeometry::Ellipse {
-                a: point,
-                b: shift(b, d),
-            }
-        }
-        AnnotationGeometry::HLine { y } => AnnotationGeometry::HLine { y },
-    }
-}
-
 #[pyclass(unsendable, name = "Annotation", skip_from_py_object)]
 #[derive(Clone)]
 pub struct AnnotationPy {
@@ -632,10 +572,8 @@ impl AnnotationPy {
     #[setter]
     fn set_color(&mut self, py: Python<'_>, color: String) -> PyResult<()> {
         let parsed = parse_hex_color(&color).map_err(crate::errors::value)?;
-        let style = AnnotationStylePatch {
-            color: Some(parsed),
-            ..Default::default()
-        };
+        let style = AnnotationStylePatch::new(Some(parsed), None, None, None, None)
+            .map_err(crate::errors::value)?;
         self.set(py, None, None, style)?;
         self.color = parsed;
         Ok(())
@@ -663,8 +601,7 @@ impl AnnotationPy {
                 "y can only be set on hline annotations",
             ));
         }
-        let y = finite_f64(y, "y")?;
-        let geometry = AnnotationGeometry::HLine { y };
+        let geometry = AnnotationGeometry::hline(y).map_err(crate::errors::value)?;
         self.set(
             py,
             None,
@@ -681,8 +618,11 @@ impl AnnotationPy {
                 "move_to cannot be used on hline annotations; set y instead",
             ));
         }
-        let point = parse_point(&point, "point")?;
-        let geometry = moved_to(self.geometry.clone(), point);
+        let geometry = self
+            .geometry
+            .clone()
+            .moved_to(parse_point(&point, "point")?)
+            .map_err(crate::errors::value)?;
         self.set(
             py,
             None,
