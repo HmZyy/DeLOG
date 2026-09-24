@@ -13,7 +13,13 @@ pub mod custom_parser;
 pub mod api;
 
 #[cfg(feature = "python")]
-pub mod params;
+mod context;
+
+#[cfg(feature = "python")]
+mod errors;
+
+#[cfg(feature = "python")]
+mod staging;
 
 #[cfg(feature = "python")]
 pub mod emit;
@@ -28,15 +34,10 @@ pub mod flow;
 pub mod live;
 
 #[cfg(feature = "python")]
-pub mod operations;
+pub mod control;
 
 #[cfg(feature = "python")]
-pub use api::PendingMarker;
-
-#[cfg(feature = "python")]
-pub use engine::{
-    LiveBatchInput, MarkerCommand, ParserEvent, ScriptCommand, ScriptEngine, ScriptEvent,
-};
+pub use engine::{LiveBatchInput, ParserEvent, ScriptCommand, ScriptEngine, ScriptEvent};
 
 #[cfg(feature = "python")]
 pub const SCRIPTING_PACKAGES: &[(&str, &str)] = &[

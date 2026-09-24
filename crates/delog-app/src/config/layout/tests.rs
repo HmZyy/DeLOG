@@ -167,6 +167,7 @@ fn vehicle_layout_helpers_round_trip_static_ned_vehicle() {
     let down = fields.remove("z").unwrap();
 
     let cfg = VehicleConfig {
+        runtime: crate::scene3d::vehicle::VehicleRuntime::unassigned(),
         source,
         label: "Vehicle".to_owned(),
         show: true,
@@ -215,6 +216,42 @@ fn vehicle_layout_helpers_round_trip_static_ned_vehicle() {
 }
 
 #[test]
+fn a_vehicle_owner_round_trips_by_name_and_restores_generation_zero() {
+    let snapshot = snapshot_with_topics(&[("log", "LOCAL_POSITION_NED", &["x", "y", "z"])]);
+    let source = snapshot.sources[0].entry.id;
+    let mut fields = snapshot.fields.iter().map(|field| field.id);
+    let mut config = VehicleConfig {
+        runtime: crate::scene3d::vehicle::VehicleRuntime::unassigned(),
+        source,
+        label: "Vehicle".to_owned(),
+        show: true,
+        show_path: true,
+        pos: PosMapping::Ned {
+            north: fields.next().unwrap(),
+            east: fields.next().unwrap(),
+            down: fields.next().unwrap(),
+            reference: None,
+        },
+        ori: OriMapping::Static,
+        model: ModelKind::Cone,
+        color: Color32::WHITE,
+        path_color: Color32::WHITE,
+        scale: 1.0,
+    };
+    config.runtime.owner = Some(crate::scene3d::vehicle::VehicleOwner {
+        name: "flight.py".to_owned(),
+        generation: 7,
+    });
+
+    let layout = vehicle_config_to_layout(&config, &snapshot).unwrap();
+    assert_eq!(layout.owner.as_deref(), Some("flight.py"));
+    let restored = vehicle_config_from_layout(&layout, &snapshot).unwrap();
+
+    assert_eq!(restored.runtime.id, 0);
+    assert_eq!(restored.runtime.owner.unwrap().generation, 0);
+}
+
+#[test]
 fn vehicle_config_from_layout_for_source_resolves_duplicate_topic_fields() {
     let snapshot = snapshot_with_topics(&[
         ("flight_a", "LOCAL_POSITION_NED", &["x", "y", "z"]),
@@ -227,6 +264,7 @@ fn vehicle_config_from_layout_for_source_resolves_duplicate_topic_fields() {
         .map(|source| source.entry.id)
         .expect("second source should exist");
     let layout = VehicleLayout {
+        owner: None,
         label: "Rover".to_owned(),
         show: true,
         show_path: true,
@@ -280,7 +318,8 @@ fn one_loaded_source_resolves_topic_field_without_source() {
         choices: &HashMap::new(),
         diagnostics: Vec::new(),
         ambiguities: BTreeMap::new(),
-        collect_ambiguities: true,
+        unresolved: BTreeSet::new(),
+        warnings: Vec::new(),
     };
 
     let got = resolver.resolve(&FieldRef {
@@ -301,7 +340,8 @@ fn duplicate_topic_field_across_sources_is_ambiguous() {
         choices: &HashMap::new(),
         diagnostics: Vec::new(),
         ambiguities: BTreeMap::new(),
-        collect_ambiguities: true,
+        unresolved: BTreeSet::new(),
+        warnings: Vec::new(),
     };
 
     let got = resolver.resolve(&FieldRef {
@@ -358,11 +398,63 @@ fn empty_doc(name: &str) -> LayoutDoc {
                 traces: Vec::new(),
                 show_legend: true,
                 show_tooltip: true,
+                annotations: Vec::new(),
             },
         },
         windows: Vec::new(),
         vehicles: Vec::new(),
     }
+}
+
+fn doc_with_annotation() -> LayoutDoc {
+    let mut doc = empty_doc("annotated");
+    doc.workspace.root = LayoutNode::Plot {
+        traces: Vec::new(),
+        show_legend: true,
+        show_tooltip: true,
+        annotations: vec![AnnotationLayout {
+            kind: "rect".into(),
+            points: vec![[0.0, -1.0], [1_000_000.0, 1.0]],
+            y: None,
+            label: "vibration burst".into(),
+            color: [1.0, 0.0, 0.0, 1.0],
+            stroke_px: 1.5,
+            fill_opacity: 0.2,
+            font_px: 11.0,
+            arrow: false,
+            owner: None,
+        }],
+    };
+    doc
+}
+
+#[test]
+fn annotations_survive_a_layout_round_trip() {
+    let doc = doc_with_annotation();
+    let json = doc_json(&doc).unwrap();
+    let back = decode_doc(&json).unwrap();
+    let LayoutNode::Plot { annotations, .. } = &back.workspace.root else {
+        panic!("expected a plot root");
+    };
+    assert_eq!(annotations.len(), 1);
+    assert_eq!(annotations[0].label, "vibration burst");
+    assert_eq!(annotations[0].kind, "rect");
+}
+
+#[test]
+fn a_layout_written_before_annotations_existed_still_decodes() {
+    let json = r#"{
+        "delog_layout": 2,
+        "name": "legacy",
+        "playback": { "speed": 1.0, "follow_live": false },
+        "workspace": { "root": { "plot": { "traces": [], "show_legend": true, "show_tooltip": true } } },
+        "vehicles": []
+    }"#;
+    let doc = decode_doc(json).expect("a v2 document without annotations must load");
+    let LayoutNode::Plot { annotations, .. } = &doc.workspace.root else {
+        panic!("expected a plot root");
+    };
+    assert!(annotations.is_empty());
 }
 
 fn scene_layout(tail: &str) -> TrailModeLayout {
@@ -472,6 +564,7 @@ fn extended_windows_round_trip_through_the_document() {
                 traces: Vec::new(),
                 show_legend: true,
                 show_tooltip: true,
+                annotations: Vec::new(),
             },
         },
         windows: vec![WindowLayout {
@@ -482,6 +575,7 @@ fn extended_windows_round_trip_through_the_document() {
                 traces: Vec::new(),
                 show_legend: true,
                 show_tooltip: true,
+                annotations: Vec::new(),
             },
         }],
         vehicles: Vec::new(),

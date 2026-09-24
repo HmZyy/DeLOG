@@ -7,6 +7,8 @@ use std::sync::{
 };
 use std::time::Instant;
 
+#[cfg(feature = "scripting")]
+use delog_api::control::{AnnotationInfo, PlotInfo};
 use delog_cache::CacheManager;
 use delog_core::identity::FieldId;
 use delog_core::snapshot::StoreSnapshot;
@@ -36,14 +38,14 @@ pub struct InspectorTrace {
     pub color: egui::Color32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
 pub enum Pane {
     Plot(PlotPane),
     Scene3D(Scene3dPane),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Scene3dPane {
     pub(crate) map_scope: MapScopeId,
     pub camera: OrbitCamera,
@@ -154,6 +156,7 @@ impl DropEdge {
     }
 }
 
+#[derive(Clone)]
 pub struct Workspace {
     pub tree: TileTree,
     pub focused: Option<egui_tiles::TileId>,
@@ -303,6 +306,8 @@ impl Workspace {
                             mode: ghost.mode,
                             visible: ghost.visible,
                             label_override: None,
+                            #[cfg(feature = "scripting")]
+                            owner: None,
                         });
                         apply_ghost_text_state(pane, &ghost, field);
                         resolved += 1;
@@ -391,8 +396,12 @@ impl Workspace {
         }
     }
 
-    pub fn split_plot(&mut self, tile_id: egui_tiles::TileId, direction: SplitDirection) {
-        self.split_plot_at(tile_id, direction, false);
+    pub fn split_plot(
+        &mut self,
+        tile_id: egui_tiles::TileId,
+        direction: SplitDirection,
+    ) -> Option<egui_tiles::TileId> {
+        self.split_plot_at(tile_id, direction, false)
     }
 
     pub fn split_plot_with_traces(
@@ -602,18 +611,26 @@ impl Workspace {
             .collect()
     }
 
-    fn plot_panes(&self) -> impl Iterator<Item = &PlotPane> + '_ {
+    pub(crate) fn plot_panes(&self) -> impl Iterator<Item = &PlotPane> + '_ {
         self.tree.tiles.tiles().filter_map(|tile| match tile {
             egui_tiles::Tile::Pane(Pane::Plot(pane)) => Some(pane),
             egui_tiles::Tile::Pane(Pane::Scene3D(_)) | egui_tiles::Tile::Container(_) => None,
         })
     }
 
-    fn plot_panes_mut(&mut self) -> impl Iterator<Item = &mut PlotPane> + '_ {
+    pub(crate) fn plot_panes_mut(&mut self) -> impl Iterator<Item = &mut PlotPane> + '_ {
         self.tree.tiles.tiles_mut().filter_map(|tile| match tile {
             egui_tiles::Tile::Pane(Pane::Plot(pane)) => Some(pane),
             egui_tiles::Tile::Pane(Pane::Scene3D(_)) | egui_tiles::Tile::Container(_) => None,
         })
+    }
+
+    #[cfg(feature = "scripting")]
+    pub(crate) fn plot_pane_mut(&mut self, tile: egui_tiles::TileId) -> Option<&mut PlotPane> {
+        match self.tree.tiles.get_mut(tile)? {
+            egui_tiles::Tile::Pane(Pane::Plot(pane)) => Some(pane),
+            egui_tiles::Tile::Pane(Pane::Scene3D(_)) | egui_tiles::Tile::Container(_) => None,
+        }
     }
 
     fn plot_tiles_in_order(&self) -> Vec<egui_tiles::TileId> {
@@ -627,6 +644,31 @@ impl Workspace {
             .collect();
         plots.sort_by_key(|id| id.0);
         plots
+    }
+
+    #[cfg(feature = "scripting")]
+    pub fn plot_infos(&self, window: u64) -> Vec<PlotInfo> {
+        self.plot_tiles_in_order()
+            .into_iter()
+            .enumerate()
+            .map(|(index, tile)| PlotInfo {
+                window,
+                tile: tile.0,
+                index,
+                label: format!("Plot {}", index + 1),
+            })
+            .collect()
+    }
+
+    #[cfg(feature = "scripting")]
+    pub fn annotation_infos(&self, window: u64) -> Vec<AnnotationInfo> {
+        let mut infos = Vec::new();
+        for tile in self.plot_tiles_in_order() {
+            if let Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) = self.tree.tiles.get(tile) {
+                infos.extend(annotation_infos_for_pane(window, tile.0, pane));
+            }
+        }
+        infos
     }
 
     pub fn annotation_rows(&self) -> Vec<crate::plotting::annotations::toolbar::AnnotationRow> {
@@ -738,6 +780,30 @@ impl Default for Workspace {
     fn default() -> Self {
         Self::new()
     }
+}
+
+#[cfg(feature = "scripting")]
+pub(crate) fn annotation_infos_for_pane(
+    window: u64,
+    tile: u64,
+    pane: &PlotPane,
+) -> Vec<AnnotationInfo> {
+    pane.annotations
+        .items()
+        .iter()
+        .enumerate()
+        .map(|(index, annotation)| AnnotationInfo {
+            window,
+            tile,
+            id: annotation.id,
+            index,
+            kind: annotation.geom.kind().to_script(),
+            geometry: annotation.geom.to_script(),
+            label: annotation.label.clone(),
+            color: annotation.style.color,
+            owner: annotation.owner.as_ref().map(|owner| owner.name.clone()),
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
