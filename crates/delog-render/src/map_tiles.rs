@@ -1,7 +1,9 @@
 //! Textured map tiles placed on arbitrary render-space quadrilaterals.
 
 use crate::RenderContext;
+use delog_core::metrics::MetricsRegistry;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 const TILE_SIZE: u32 = 256;
 pub const MAP_TILE_CAPACITY: usize = 128;
@@ -91,6 +93,7 @@ pub struct MapTilePipeline {
     free_layers: Vec<u32>,
     upload_count: u64,
     allocation_count: u64,
+    metrics: Option<Arc<MetricsRegistry>>,
 }
 
 impl MapTilePipeline {
@@ -268,7 +271,12 @@ impl MapTilePipeline {
             free_layers: (0..LAYER_COUNT).rev().collect(),
             upload_count: 0,
             allocation_count: 0,
+            metrics: None,
         }
+    }
+
+    pub fn set_metrics(&mut self, metrics: Arc<MetricsRegistry>) {
+        self.metrics = Some(metrics);
     }
 
     pub fn contains(&self, key: u64) -> bool {
@@ -292,6 +300,7 @@ impl MapTilePipeline {
             .or_else(|| self.free_layers.pop())
             .ok_or(MapTileError::Full)?;
         self.upload_count += 1;
+        let texture_timer = self.metrics.as_ref().map(|m| m.scope("tile_write_texture"));
         self.ctx.queue().write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.texture,
@@ -315,6 +324,7 @@ impl MapTilePipeline {
                 depth_or_array_layers: 1,
             },
         );
+        drop(texture_timer);
         let c = upload.corners;
         let vertices = [
             Vertex {
@@ -348,6 +358,7 @@ impl MapTilePipeline {
                 layer,
             },
         ];
+        let create_timer = self.metrics.as_ref().map(|m| m.scope("tile_create_buffer"));
         let buffer = self.ctx.device().create_buffer(&wgpu::BufferDescriptor {
             label: Some("delog-map-tile-vertices"),
             size: std::mem::size_of_val(&vertices) as u64,
@@ -355,9 +366,13 @@ impl MapTilePipeline {
             mapped_at_creation: false,
         });
         self.allocation_count += 1;
+        drop(create_timer);
+        let write_timer = self.metrics.as_ref().map(|m| m.scope("tile_write_buffer"));
         self.ctx
             .queue()
             .write_buffer(&buffer, 0, bytemuck::cast_slice(&vertices));
+        drop(write_timer);
+        let insert_timer = self.metrics.as_ref().map(|m| m.scope("tile_insert"));
         self.tiles.insert(
             upload.key,
             Tile {
@@ -365,6 +380,7 @@ impl MapTilePipeline {
                 vertices: buffer,
             },
         );
+        drop(insert_timer);
         Ok(())
     }
 
