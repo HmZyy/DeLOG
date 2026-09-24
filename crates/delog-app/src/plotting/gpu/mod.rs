@@ -613,6 +613,7 @@ impl GpuBridge {
         map_selection: MapTileSelection,
         ready_tiles: &[ReadyTile],
         vehicles: &[VehicleDraw],
+        metrics: &Arc<MetricsRegistry>,
     ) -> Option<egui::TextureId> {
         if !self.available {
             return None;
@@ -622,15 +623,22 @@ impl GpuBridge {
         let px_w = (rect.width() * ppp).round().max(1.0) as u32;
         let px_h = (rect.height() * ppp).round().max(1.0) as u32;
         let device = render_state.device.clone();
-        let mut renderer = render_state.renderer.write();
+        let mut renderer = {
+            let _t = metrics.scope("scene_lock");
+            render_state.renderer.write()
+        };
 
         // Clone the resolved view to end the resource borrow, so the
         // texture-registration below can borrow the renderer mutably.
         let (view, resized, existing) = {
             let res = renderer.callback_resources.get_mut::<SceneResources>()?;
             let resized = res.target.width() != px_w || res.target.height() != px_h;
-            res.target.resize(px_w, px_h);
+            if resized {
+                let _t = metrics.scope("scene_resize");
+                res.target.resize(px_w, px_h);
+            }
 
+            let uniform_timer = metrics.scope("scene_uniforms");
             // f64 inverse: f32 is ill-conditioned far from the origin and crawls the grid.
             let (vp, inv) = camera
                 .view_proj_and_inverse(px_w as f32 / px_h as f32, scene3d.resolved_far_clip_m());
@@ -663,7 +671,18 @@ impl GpuBridge {
                 res.sky
                     .set_uniform(&res.ctx, &SkyUniform::new(inv.to_cols_array_2d()));
             }
-            res.prepare_vehicles(vp_cols, camera.eye().to_array(), vehicles);
+            drop(uniform_timer);
+            {
+                let _t = metrics.scope("scene_veh_prep");
+                res.prepare_vehicles(vp_cols, camera.eye().to_array(), vehicles);
+            }
+            if res.metrics.is_none() {
+                res.metrics = Some(Arc::clone(metrics));
+                res.map_tiles.set_metrics(Arc::clone(metrics));
+            }
+            let uploads_before = res.map_tiles.upload_count();
+            let allocs_before = res.map_tiles.allocation_count();
+            let map_timer = metrics.scope("scene_map_prep");
             let visible_map_tiles = res.prepare_map_tiles(
                 MapTileUniform::new(
                     vp_cols,
@@ -674,7 +693,21 @@ impl GpuBridge {
                 &map_selection,
                 ready_tiles,
             );
+            drop(map_timer);
+            metrics.record(
+                "map_tile_uploads",
+                (res.map_tiles.upload_count() - uploads_before) as f32,
+            );
+            metrics.record(
+                "map_tile_allocs",
+                (res.map_tiles.allocation_count() - allocs_before) as f32,
+            );
+            metrics.record(
+                "map_tiles_resident",
+                res.map_tiles.resident_tile_count() as f32,
+            );
 
+            let encode_timer = metrics.scope("scene_encode");
             let clear = wgpu::Color {
                 r: f64::from(SCENE_CLEAR_RGB[0]),
                 g: f64::from(SCENE_CLEAR_RGB[1]),
@@ -702,10 +735,15 @@ impl GpuBridge {
                 }
                 res.draw_vehicles(&mut pass, vehicles);
             }
-            res.ctx.queue().submit([enc.finish()]);
+            drop(encode_timer);
+            {
+                let _t = metrics.scope("scene_submit");
+                res.ctx.queue().submit([enc.finish()]);
+            }
             (res.target.resolve_view().clone(), resized, res.texture_id)
         };
 
+        let texture_timer = metrics.scope("scene_texture");
         let id = match existing {
             Some(id) => {
                 if resized {
@@ -726,6 +764,7 @@ impl GpuBridge {
                 .get_mut::<SceneResources>()?
                 .texture_id = Some(id);
         }
+        drop(texture_timer);
         Some(id)
     }
 }
@@ -1133,6 +1172,7 @@ struct SceneResources {
     /// Vertical world Y-axis line (the up axis the ground grid can't draw).
     axis_gizmo: SceneTraj,
     texture_id: Option<egui::TextureId>,
+    metrics: Option<Arc<MetricsRegistry>>,
 }
 
 impl SceneResources {
@@ -1192,6 +1232,7 @@ impl SceneResources {
             vehicles: HashMap::new(),
             axis_gizmo,
             texture_id: None,
+            metrics: None,
         }
     }
 
@@ -1359,6 +1400,10 @@ impl SceneResources {
         selection: &MapTileSelection,
         ready: &[ReadyTile],
     ) -> MapTileDrawGroups {
+        let metrics = self.metrics.clone();
+        if let Some(metrics) = metrics.as_ref() {
+            metrics.record("map_ready_len", ready.len() as f32);
+        }
         self.map_tiles.set_uniform(&view);
         if self.map_tile_epoch != selection.epoch {
             self.map_tile_epoch = selection.epoch;
@@ -1388,6 +1433,7 @@ impl SceneResources {
         }
         self.map_tile_clock += 1;
         let clock = self.map_tile_clock;
+        let scan_timer = metrics.as_ref().map(|m| m.scope("map_scan"));
         let changed = {
             let cache = self.map_tile_cache.entry(selection.scope).or_default();
             let mut changed = std::collections::HashSet::new();
@@ -1422,7 +1468,9 @@ impl SceneResources {
             }
             changed
         };
+        drop(scan_timer);
         self.admit_map_tiles(&changed, Some(selection.scope));
+        let visible_timer = metrics.as_ref().map(|m| m.scope("map_visible"));
         let cache = &self.map_tile_cache[&selection.scope];
         let mut visible = MapTileDrawGroups::default();
         for (key, tile) in cache {
@@ -1437,6 +1485,7 @@ impl SceneResources {
         }
         visible.fallback.sort_unstable();
         visible.current.sort_unstable();
+        drop(visible_timer);
         visible
     }
 
@@ -1445,6 +1494,8 @@ impl SceneResources {
         changed: &std::collections::HashSet<u64>,
         active_scope: Option<MapScopeId>,
     ) {
+        let metrics = self.metrics.clone();
+        let order_timer = metrics.as_ref().map(|m| m.scope("map_order"));
         let mut scopes: Vec<_> = self.map_tile_selections.keys().copied().collect();
         scopes.sort_by_key(|scope| scope.0);
         // Above capacity, not every scope can own a slot. Keep the pane being
@@ -1471,10 +1522,18 @@ impl SceneResources {
         let caches = &self.map_tile_cache;
         self.map_tile_last_seen
             .retain(|key, _| caches.values().any(|cache| cache.contains_key(key)));
+        drop(order_timer);
 
+        let evict_timer = metrics.as_ref().map(|m| m.scope("map_evict"));
         self.map_tiles.retain(order.iter().copied());
         self.map_tile_resident_signatures
             .retain(|key, _| admitted.contains(key));
+        drop(evict_timer);
+
+        if let Some(metrics) = metrics.as_ref() {
+            metrics.record("map_order_len", order.len() as f32);
+        }
+        let upload_timer = metrics.as_ref().map(|m| m.scope("map_upload"));
         for key in order {
             let tile = self
                 .map_tile_cache
@@ -1495,6 +1554,7 @@ impl SceneResources {
                     .insert(key, map_tile_signature(tile));
             }
         }
+        drop(upload_timer);
     }
 }
 
