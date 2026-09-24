@@ -124,29 +124,15 @@ pub struct PlaybackPy;
 impl PlaybackPy {
     #[setter]
     fn set_speed(&self, py: Python<'_>, speed: f64) -> PyResult<()> {
-        if !speed.is_finite() {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "playback speed must be finite, got {speed}"
-            )));
-        }
-        self.request(
-            py,
-            PlaybackRequest::Set {
-                speed: Some(speed),
-                follow_live: None,
-            },
-        )
+        let request = PlaybackRequest::set(Some(speed), None).map_err(crate::errors::value)?;
+        self.request(py, request)
     }
 
     #[setter]
     fn set_follow_live(&self, py: Python<'_>, follow_live: bool) -> PyResult<()> {
-        self.request(
-            py,
-            PlaybackRequest::Set {
-                speed: None,
-                follow_live: Some(follow_live),
-            },
-        )
+        let request =
+            PlaybackRequest::set(None, Some(follow_live)).map_err(crate::errors::value)?;
+        self.request(py, request)
     }
 }
 
@@ -160,9 +146,5 @@ impl PlaybackPy {
 }
 
 fn parse_split_direction(name: &str) -> PyResult<SplitDirection> {
-    SplitDirection::parse(name).ok_or_else(|| {
-        pyo3::exceptions::PyValueError::new_err(format!(
-            "split direction must be 'horizontal' or 'vertical', got {name:?}"
-        ))
-    })
+    SplitDirection::parse(name).map_err(crate::errors::value)
 }
